@@ -1044,6 +1044,12 @@ romp-manager -f | grep romp-perf`; under launchd (macOS), `tail -f
 ~/.local/state/romp/manager.log | grep romp-perf`. Setting `ROMP_PERF=1` in the
 kernel's environment still turns it on at start.
 
+The counters describe a running kernel. To time the same builders offline, on
+a copy of a state directory and with no live kernel, `tools/perf-bench.py`
+loads a checkout's kernel in-process and reports each builder's cost on
+real-sized data; two checkouts can run against one copy for a before-and-after
+comparison. Its module docstring is the reference.
+
 ## Browser-side performance telemetry
 
 The counters above say what the kernel spent. What the browser spent on the
@@ -1171,6 +1177,12 @@ in progress in the same shape, plus a derived `p90_le` per type, `active`
 (the node test stand-ins) gets no telemetry and an unwrapped handler; every
 other browser API is behind a feature check, and nothing in the module throws
 into the pane.
+
+The telemetry describes what the panes did while people used them. To measure
+a pane change before and after on the same input, `tools/ui-bench.mjs` replays
+a recorded or synthetic frame stream into the real pane page in a headless
+Chromium and reports where the browser's time went; the "Measuring dashboard
+pane performance" section of CONTRIBUTING.md describes it.
 
 ## The API-health signal
 

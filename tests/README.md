@@ -1,6 +1,6 @@
 # tests/ — every suite in one place
 
-Every bug fix or feature change lands with a test (repo rule). Four suites:
+Every bug fix or feature change lands with a test (repo rule). Five suites:
 
 - **`test_*.py`** (pytest) — the Python pipeline: event model, judges, kernel,
   backends, postal. They load the sources by file path via `SourceFileLoader`
@@ -59,6 +59,14 @@ Every bug fix or feature change lands with a test (repo rule). Four suites:
 - **`manager-*.test.js`** — the node supervisor (`bin/romp-manager`): restart
   gating, the kernel registry, and the drain-poll handshake. Run:
   `node --test tests/manager-*.test.js`.
+- **`ui-bench.test.mjs`** — the dashboard pane bench (`tools/ui-bench.mjs`):
+  the classifier, synthesizer, temp-path guard, recording client, front
+  server, Handler-subprocess isolation, in-page instrument, profile fold, and
+  real headless replays of synthetic feed and timeline streams.
+  Run `node --test tests/ui-bench.test.mjs` from the repo root after
+  `cd vscode-extension && npm ci && npm run build`. The browser tests skip,
+  saying why, when no Chromium, `python3` or dist is present;
+  `ROMP_UI_BENCH_REQUIRE=1` (CI) turns that skip into a failure.
 
 **Temp files and git are hermetic, suite-wide.** Two mechanisms, one per half.
 `tests/__init__.py` wraps `tempfile.mkdtemp` so every directory the test process
