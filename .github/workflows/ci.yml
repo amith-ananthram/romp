@@ -161,3 +161,18 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
+      - name: Dashboard pane bench (node --test)
+        # tools/ui-bench.mjs replays a synthetic frame stream into the real feed and timeline pages in a
+        # headless Chrome (the runner image's Google Chrome through playwright's channel option, so no
+        # browser download), served by the kernel's own page route from the dist the Build step just
+        # wrote; python3 comes with the image. The test file lives at the repo root, hence the
+        # working-directory override of the job's vscode-extension/ default. On a contributor's machine
+        # the browser tests skip, and say why, when no browser, python3 or dist is present. Here
+        # ROMP_UI_BENCH_REQUIRE makes that skip a failure: this is the only CI run of the real pane
+        # bundles, and a runner image that drops Chrome from PATH must turn the job red rather than
+        # green with the coverage gone (the same stance as the cryptography install above, which exists
+        # so its tests RUN).
+        working-directory: ${{ github.workspace }}
+        env:
+          ROMP_UI_BENCH_REQUIRE: "1"
+        run: node --test tests/ui-bench.test.mjs

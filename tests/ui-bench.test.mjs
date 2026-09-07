@@ -949,6 +949,40 @@ const required = !!process.env.ROMP_UI_BENCH_REQUIRE;
 const gate = (why) => ({ skip: required ? false : why });
 const requireOrSkip = (why) => { if (why) assert.fail(`ROMP_UI_BENCH_REQUIRE is set and this test cannot run: ${why}`); };
 
+test("the replays have a browser when ROMP_UI_BENCH_REQUIRE is set, and the log says which", (t) => {
+  // CI's only browser is the runner image's Google Chrome, found by the PATH scan below; this line in the step's
+  // log is what says so, and under ROMP_UI_BENCH_REQUIRE a runner without one fails here, before the replays.
+  if (required) assert.ok(avail.ok, avail.why);
+  t.diagnostic(`browser: ${avail.ok ? avail.how + (avail.channel ? ` (channel ${avail.channel})` : "") : "none: " + avail.why}`);
+});
+
+test("browserAvailability finds a system Chrome or Chromium on PATH when playwright's browser is absent, and names its channel", () => {
+  // The module in a fresh process: playwright's browsers directory pointed at an empty one (so its own Chromium is
+  // absent, as on the CI runner), PATH holding one fake browser binary. No browser is launched.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "romp-ui-bench-path-"));
+  try {
+    const noBrowsers = path.join(tmp, "no-browsers");
+    const bin = path.join(tmp, "bin");
+    fs.mkdirSync(noBrowsers);
+    fs.mkdirSync(bin);
+    const probe = (PATH) => {
+      const r = spawnSync(process.execPath, ["--input-type=module", "-e", `import(${JSON.stringify(pathToFileURL(TOOL).href)}).then((m) => console.log(JSON.stringify(m.browserAvailability())))`],
+        { env: { HOME: os.homedir(), PATH, PLAYWRIGHT_BROWSERS_PATH: noBrowsers }, encoding: "utf8", timeout: 30_000 });
+      assert.equal(r.status, 0, r.stderr);
+      return JSON.parse(r.stdout.trim());
+    };
+    fs.writeFileSync(path.join(bin, "google-chrome"), "", { mode: 0o755 });
+    assert.deepEqual(probe(bin), { ok: true, how: "system google-chrome", exe: path.join(bin, "google-chrome"), channel: "chrome" });
+    fs.renameSync(path.join(bin, "google-chrome"), path.join(bin, "chromium"));
+    assert.deepEqual(probe(bin), { ok: true, how: "system chromium", exe: path.join(bin, "chromium"), channel: "chromium" });
+    const none = probe(path.join(tmp, "empty-path"));
+    assert.equal(none.ok, false);
+    assert.match(none.why, /npx playwright install chromium/, "the refusal says how to get a browser");
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("ROMP_UI_BENCH_REQUIRE turns the browser skip into a failure that names the reason", { timeout: 60_000 }, () => {
   const empty = fs.mkdtempSync(path.join(os.tmpdir(), "romp-ui-bench-nobrowser-"));
   try {
