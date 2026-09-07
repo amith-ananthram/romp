@@ -1,0 +1,789 @@
+#!/usr/bin/env python3
+"""tools/perf-bench.py against a SYNTHETIC state directory (invented sessions in the notes-api demo
+domain, placeholder uuids, no real data): it runs end to end and emits the JSON shape, its cold
+build_session row is a real cold parse, it refuses the live default state directory without the flag
+and mirrors it with the flag, and --compare prints deltas. The sessions' directory is a real git
+checkout with a fabricated GitHub origin, as every real state's is: the chat build's path-link git
+queries (rev-parse, ls-files) reach the tripwire's allow list, which a plain directory never
+exercised; the `remote get-url` pair the list also admits is checked in-process below. The tool is
+driven as a subprocess with the same env recipe a person would use, so nothing here loads romp code
+in-process; the tool module itself is loaded for direct checks of its fake client's frame labelling
+and of the tripwire's allow rule (its import pulls in only the standard library)."""
+import atexit
+import contextlib
+import copy
+import io
+import json
+import os
+import pwd
+import re
+import shutil
+from importlib.machinery import SourceFileLoader
+from types import SimpleNamespace
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+from unittest import mock
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+ROOT = os.path.dirname(HERE)
+TOOL = os.path.join(ROOT, "tools", "perf-bench.py")
+
+# Two effects. For the CHILD (the tool runs as a subprocess and sets its own state root before it loads
+# the kernel) this points the default state root at a temp dir, so the refusal tests' XDG_STATE_HOME /
+# ROMP_STATE_DIR overrides are the only "live" candidates the tool can see. It is also the ratchet's
+# preamble for the one in-process load below, the tool module, which loads no romp code at import. It
+# replaces conftest's suite-wide floor with another temp dir for the modules collected after this one,
+# which changes nothing for them. Every temp dir this module makes is removed when it is done with it
+# (this one at interpreter exit): a suite that leaves its directories behind fills /tmp over time.
+_XDG_TMP = tempfile.mkdtemp()
+os.environ["XDG_STATE_HOME"] = _XDG_TMP
+os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
+atexit.register(shutil.rmtree, _XDG_TMP, ignore_errors=True)
+
+SID_WEB = "11111111-2222-3333-4444-555555555555"
+SID_API = "22222222-3333-4444-5555-666666666666"
+SID_TESTS = "33333333-4444-5555-6666-777777777777"
+MANAGER_VARS = ("ROMP_MANAGER_PORT", "ROMP_SERVE_PORT", "ROMP_MANAGER_PID", "ROMP_SUPERVISED")
+WEB_TURNS = 400       # a transcript large enough that the cold row's full assembly shows in the counters
+EXPECTED_NEUTRALIZED = {
+    "km._refresh_remote_prices", "km._warm_fleet_bg", "km._system_notify", "km._push_notify", "km._push_forward",
+    "km._badge_push", "romp_kernel_perf_bench.subprocess", "romp_judge.subprocess", "romp_sdk_backend.subprocess",
+    "km._atomic_write (checked)", "pwd.getpwnam (counted)", "pwd.getpwuid (counted)"}
+# The caches the tool empties before each cold build_session sample, as this kernel has them. The tool
+# skips a name a revision lacks, so a rename here would silently leave that cache warm: this pins the
+# HEAD set, and a kernel change that renames or adds one must change it deliberately.
+EXPECTED_COLD_CACHES = {
+    "kernel": {"_parse_cache", "_built_chat", "_prev_chat_events", "_prev_chat_ledger", "_arch_tops_cache",
+               "_PATH_LINK_CACHE", "_states_notes_cache", "_state_ev_cache", "_bgtasks_cache", "_bgall_cache",
+               "_queued_parse_cache", "_wake_tail_cache", "_session_meta_cache", "_session_tok_cache",
+               "_machine_cut_cache", "_chat_fold"},
+    "event_model": {"_JSONL_CACHE", "_ASM_CACHE", "_TRAILING_CACHE"}}
+# What the builders and the push write into the copy on a normal run: the import-time repo-root
+# marker, the tab-order audit and the session order the push maintains. A new write path in a
+# builder must change this set deliberately.
+EXPECTED_WRITES = {"+ order-audit.jsonl", "+ repo-root", "+ session-order.json"}
+
+
+def _iso(t):
+    return datetime.fromtimestamp(t, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _transcript(path, sid, cwd, n_turns, t0):
+    """A synthetic Claude Code transcript: n_turns of prompt, one tool round, reply. One reply carries a
+    `~someone/...` path token, which the chat build's path-link pass hands to os.path.expanduser."""
+    n = [0]
+    parent = [None]
+    t = [t0]
+
+    def rec(typ, message, **extra):
+        n[0] += 1
+        t[0] += 3
+        u = "aaaaaaaa-0000-0000-0000-%012d" % n[0]
+        r = {"type": typ, "timestamp": _iso(t[0]), "uuid": u, "parentUuid": parent[0], "sessionId": sid,
+             "cwd": cwd, "version": "2.1.0", "gitBranch": "main", "message": message}
+        r.update(extra)
+        parent[0] = u
+        return r
+
+    with open(path, "w") as f:
+        for i in range(n_turns):
+            tid = "toolu_%06d" % i
+            reply = "Step %d done: the suite passes." % i
+            if i == 1:
+                reply += " Notes are in `~someone/notes/index.md` for later."
+            rows = [
+                rec("user", {"role": "user", "content": "step %d: tighten the search index and rerun the suite" % i},
+                    promptSource="typed"),
+                rec("assistant", {"role": "assistant", "model": "claude-sonnet-4", "stop_reason": "tool_use",
+                                  "content": [{"type": "text", "text": "Round %d: adjusting `search.py`." % i},
+                                              {"type": "tool_use", "id": tid, "name": "Bash",
+                                               "input": {"command": "uv run pytest -q tests/test_search.py"}}]}),
+                rec("user", {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid, "content": "ok\n"}]},
+                    toolUseResult={"stdout": "ok"}),
+                rec("assistant", {"role": "assistant", "model": "claude-sonnet-4", "stop_reason": "end_turn",
+                                  "content": [{"type": "text", "text": reply}]}),
+            ]
+            for r in rows:
+                f.write(json.dumps(r) + "\n")
+
+
+ORIGIN = "https://github.com/example-org/notes-api.git"   # fabricated; `remote get-url` reads config, no network
+
+
+def _git(*args, cwd):
+    """A fixture git call that reads no global or system config (a developer's commit signing or
+    url.insteadOf must not bend the fixture) and commits as a synthetic author."""
+    env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    subprocess.run(["git", "-c", "user.email=t@TESTHOST", "-c", "user.name=t", "-c", "commit.gpgsign=false"] + list(args),
+                   cwd=str(cwd), check=True, capture_output=True, env=env)
+
+
+def build_synthetic(root, web_turns=WEB_TURNS, age_api_days=0):
+    """A state directory at root/romp (named `romp` so XDG_STATE_HOME=root resolves it as the default)
+    plus a Claude config dir at root/claude holding the transcripts. Returns (state, claude_dir). The
+    state carries the two credential-shaped files a real one has (synthetic contents) and a placeholder
+    sdkvenv, all of which the mirror must leave behind. The web and tests sessions' cwd is a one-commit
+    checkout with a GitHub origin, so the kernel's read-only git queries run for real and the tripwire's
+    allow list is exercised; the api session's cwd is a plain directory, where the kernel cannot cache
+    the ls-files answer and re-runs the query on every build. `age_api_days` moves the api transcript's
+    mtime that many days into the past, outside discovery's window."""
+    root = Path(root)
+    state = root / "romp"
+    cwd = root / "notes-api"
+    cwd.mkdir(parents=True)
+    _git("init", "-q", "-b", "main", cwd=cwd)
+    (cwd / "README.md").write_text("# notes-api\n")
+    _git("add", "README.md", cwd=cwd)
+    _git("commit", "-q", "-m", "seed", cwd=cwd)
+    _git("remote", "add", "origin", ORIGIN, cwd=cwd)
+    plain = root / "notes-api-docs"
+    plain.mkdir()
+    for d in ("names", "sdk", "states", "goals", "sdkvenv/bin"):
+        (state / d).mkdir(parents=True)
+    (state / "serve-token").write_text("synthetic-serve-token-not-real\n")
+    (state / "push-vapid.json").write_text(json.dumps({"synthetic": True}))
+    (state / "sdkvenv" / "bin" / "python").write_text("placeholder: not an interpreter\n")
+    claude = root / "claude"
+    now = int(time.time())
+    for sid, name, color, alive, turns, wd in ((SID_WEB, "web", "#4a7bd0", True, web_turns, cwd),
+                                               (SID_API, "api", "#d07b4a", True, 3, plain),
+                                               (SID_TESTS, "tests", "#4ad07b", False, 1, cwd)):
+        proj = claude / "projects" / re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(str(wd)))
+        proj.mkdir(parents=True, exist_ok=True)
+        (state / "names" / sid).write_text("%s\t%s\t%s\t#ffffff\n" % (name, wd, color))
+        (state / "sdk" / (sid + ".json")).write_text(json.dumps(
+            {"sid": sid, "name": name, "cwd": str(wd), "mode": "acceptEdits", "effort": "medium",
+             "lastSid": "", "alive": alive}))
+        with open(state / "states" / (sid + ".jsonl"), "w") as f:
+            f.write(json.dumps({"t": now - 3600, "state": "waiting"}) + "\n")
+            f.write(json.dumps({"t": now - 60, "state": "working" if name == "web" else "waiting"}) + "\n")
+        _transcript(proj / (sid + ".jsonl"), sid, str(wd), turns, now - 3 * turns * 4 - 60)
+        if sid == SID_API and age_api_days:
+            old = now - age_api_days * 86400
+            os.utime(proj / (sid + ".jsonl"), (old, old))
+    (state / "goals" / (SID_WEB + ".json")).write_text(json.dumps(
+        {"rompUuid": SID_WEB, "seq": 1, "rev": 1, "placementsV": 11,
+         "nodes": {"g1": {"parentId": None, "t": now - 500, "text": "wire the notes search index"}},
+         "status": {"g1": "working"}, "lastNode": "g1", "placements": {}}))
+    return str(state), str(claude)
+
+
+def run_tool(args, env_extra=None, timeout=300):
+    env = {k: v for k, v in os.environ.items() if k not in MANAGER_VARS}
+    env.update(env_extra or {})
+    return subprocess.run([sys.executable, TOOL] + list(args), capture_output=True, text=True, env=env, timeout=timeout)
+
+
+class PerfBench(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp(prefix="perf-bench-test-")
+        cls.state, cls.claude = build_synthetic(cls.root)
+        cls.json_path = os.path.join(cls.root, "out.json")
+        cls.transcript = os.path.join(cls.claude, "projects",
+                                      re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(os.path.join(cls.root, "notes-api"))),
+                                      SID_WEB + ".jsonl")
+        cls.transcript_mtime = os.stat(cls.transcript).st_mtime_ns
+        # a planted API-key variable (not a key), which the tool must drop before the import
+        cls.main = run_tool(["--state", cls.state, "--claude-dir", cls.claude, "--repo", ROOT, "--iters", "2",
+                             "--sessions", "2", "--profile", "--json", cls.json_path],
+                            env_extra={"ANTHROPIC_API_KEY": "not-a-key"})
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def _scratch_root(self, prefix):
+        root = tempfile.mkdtemp(prefix=prefix)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        return root
+
+    def _ok(self, r):
+        self.assertEqual(r.returncode, 0, "rc=%d\nstdout:\n%s\nstderr:\n%s" % (r.returncode, r.stdout[-4000:], r.stderr[-4000:]))
+
+    def _out(self):
+        self._ok(self.main)
+        with open(self.json_path) as f:
+            return json.load(f)
+
+    def test_runs_and_reports_every_builder(self):
+        out = self._out()
+        self.assertEqual(out["schema"], 2)
+        self.assertEqual(os.path.realpath(out["state"]), os.path.realpath(self.state))
+        b = out["benchmarks"]
+        for name in ("liveness_snapshot", "names_snapshot", "discover_cold", "discover_warm", "build_feed",
+                     "build_feed_noparse", "build_timeline_bars", "build_timeline_skel", "warm_all_parses",
+                     "build_session_cold:11111111", "build_session_emwarm:11111111", "build_session_warm:11111111",
+                     "build_session_cold:22222222", "load_goals:11111111", "push_cold_cycle", "push_steady",
+                     "push_connect:chat", "push_connect:feed", "push_connect:timeline"):
+            self.assertIn(name, b, "missing benchmark %s in %s" % (name, sorted(b)))
+            self.assertIsInstance(b[name]["median"], (int, float), name)
+        self.assertNotIn("build_session_cold:33333333", b, "a closed reg (alive=false) is not a live session")
+        self.assertEqual(b["warm_all_parses"]["sessions"], 2, "one parse per live session")
+        self.assertEqual(out["liveness"]["live"], 2)
+        self.assertEqual(out["liveness"]["closed_regs"], 1)
+        self.assertEqual(out["liveness"]["states"], {"11111111": "working", "22222222": "waiting"},
+                         "each row's state is the last states/ record, not the dormant mapping")
+        self.assertEqual(out["live_transcripts"]["count"], 2)
+        self.assertEqual(out["live_transcripts"]["no_transcript"], [])
+        self.assertEqual(out["discover_cache_cleared"], 3, "the cold discover row empties the cache before the warm-up and each of the 2 samples")
+        self.assertEqual(out["repo_head"], subprocess.run(["git", "-C", ROOT, "rev-parse", "HEAD"], capture_output=True, text=True,
+                                                          check=True).stdout.strip()[:12], "the checkout's HEAD, read from the git files")
+        self.assertIn("unset ANTHROPIC_API_KEY", out["env_changes"], "the planted key variable was dropped before the import")
+        self.assertIn("set ROMP_MANAGER_PORT", out["env_changes"], "the manager port is set to a dead port, not left absent")
+        self.assertEqual(out["thread_starts"], 0, "no builder started a thread (the parse-warming thread is a recorder)")
+        self.assertGreaterEqual(out["warm_calls_suppressed"], 1, "build_feed's cold-parse branch asked for the background warm, which the recorder took")
+        web = next(s for s in out["benched_sessions"] if s["sid8"] == "11111111")
+        self.assertGreater(web["events"], 0, "the chat build saw the synthetic transcript's events")
+        self.assertEqual(out["benched_sessions"][0]["sid8"], "11111111", "largest transcript first")
+        self.assertEqual(out["goal_stores"][0]["nodes"], 1)
+        self.assertEqual(out["spawn_attempts"], [], "no builder spawned a process")
+        self.assertEqual(out["threads_new"], [], "no builder left a thread running")
+        self.assertEqual(set(out["neutralized"]), EXPECTED_NEUTRALIZED)
+        self.assertEqual(os.stat(self.transcript).st_mtime_ns, self.transcript_mtime, "transcripts are read-only")
+        self.assertEqual(set(out["writes"]["sample"]), EXPECTED_WRITES)
+        self.assertEqual(out["writes"]["removed"], 0)
+        prof = out["profiles"]
+        for name in ("build_feed", "build_timeline_bars", "build_session_cold:11111111", "load_goals:11111111", "push_steady"):
+            self.assertIn(name, prof)
+            self.assertLessEqual(len(prof[name]["cumulative"]), 25)
+            self.assertLessEqual(len(prof[name]["tottime"]), 25)
+            self.assertEqual(set(prof[name]["cumulative"][0]), {"func", "file", "line", "ncalls", "tottime_ms", "cumtime_ms"})
+        self.assertIn("build_feed", self.main.stdout)
+        self.assertIn("top 25 by cumulative time", self.main.stdout)
+
+    def test_cold_build_is_a_full_parse(self):
+        b = self._out()["benchmarks"]
+        cold, em = b["build_session_cold:11111111"], b["build_session_emwarm:11111111"]
+        self.assertEqual(cold["asm"].get("full", 0), cold["n"], "every kept cold sample ran exactly one full assembly")
+        self.assertEqual(cold["asm"].get("serve", 0), 0, "a single-session transcript is assembled once per cold build")
+        self.assertEqual(cold["asm"].get("fold", 0), 0, "nothing grows between reads in a static fixture")
+        self.assertEqual(em["asm"].get("full", 0), 0, "the em-warm row never re-parses")
+        self.assertIn("git_per_build", cold)
+        self.assertEqual({k: set(v) for k, v in self._out()["cold_caches"].items()}, EXPECTED_COLD_CACHES)
+
+    def test_path_token_lookups_are_counted(self):
+        out = self._out()
+        self.assertGreaterEqual(out["nss_lookups"].get("getpwnam", 0), 1,
+                                "the `~someone/...` token reached pwd.getpwnam through os.path.expanduser")
+
+    def test_the_checkout_git_queries_pass_the_tripwire_and_are_counted(self):
+        # the sessions' cwd is a checkout, so the chat build's path-link pass runs `git rev-parse` and
+        # `git ls-files` there; the tripwire admits exactly those and counts them (a refusal would have
+        # aborted the run — spawn_attempts stays empty and every row is present). The `remote get-url`
+        # pair is the file-link route's query, which no benched builder reaches: the Tripwire class
+        # below checks its admission in-process.
+        out = self._out()
+        g = out["git_queries"]
+        self.assertFalse(g["answered_as_failure"])
+        self.assertGreaterEqual(g["calls"].get("rev-parse", 0), 1, g)
+        self.assertGreaterEqual(g["calls"].get("ls-files", 0), 1, g)
+        self.assertEqual(out["spawn_attempts"], [])
+        self.assertIn("rev-parse=", self.main.stdout, "the report names each query it counted")
+        self.assertIn("ls-files=", self.main.stdout)
+        # Per build, beside the rows: the api session's cwd is a plain directory, where the kernel cannot cache
+        # the ls-files answer on the index and tree mtimes, so every build of it runs the query once; the web
+        # session's cwd is a checkout, whose answers the warm-up cached, so its kept samples run none.
+        b = out["benchmarks"]
+        for row in ("build_session_cold:22222222", "build_session_emwarm:22222222", "build_session_warm:22222222"):
+            self.assertEqual(b[row]["git_per_build"], {"ls-files": 1.0}, row)
+        self.assertEqual(b["build_session_cold:11111111"]["git_per_build"], {})
+
+    def test_push_rows_report_bytes_and_rebuild_flags(self):
+        b = self._out()["benchmarks"]
+        chat = b["push_cold_cycle"]["bytes"]["chat"]["slots"]
+        self.assertIn("chat:11111111", chat, "the fake chat client received the active tab's session frame")
+        self.assertGreater(chat["chat:11111111"], 0)
+        self.assertIn("feed", b["push_cold_cycle"]["bytes"]["feed"]["slots"])
+        self.assertIn("chat:11111111", b["push_connect:chat"]["bytes"]["slots"], "a fresh chat client gets the full session")
+        self.assertIn("feed", b["push_connect:feed"]["bytes"]["slots"])
+        self.assertIn("timeline", b["push_connect:timeline"]["bytes"]["slots"])
+        # a connect sample is a FRESH client with empty dedup state, so it receives what the cold cycle's fresh
+        # client did: the same frame count per app, and for the chat the same bytes (the session frame does not
+        # depend on the parse caches; the cold cycle's feed and timeline were built before any parse, so their
+        # sizes differ from the warm ones). A client reused across samples accumulates frames instead.
+        for app in ("chat", "feed", "timeline"):
+            self.assertEqual(b["push_connect:" + app]["bytes"]["frames"], b["push_cold_cycle"]["bytes"][app]["frames"], app)
+        self.assertEqual(b["push_connect:chat"]["bytes"], b["push_cold_cycle"]["bytes"]["chat"])
+        self.assertGreaterEqual(b["push_cold_cycle"]["asm"].get("full", 0), 2, "the cold cycle parsed both live transcripts inside itself")
+        st = b["push_steady"]
+        self.assertGreaterEqual(len(st["samples"]), st["n"])
+        self.assertEqual(st["n"], 2, "the loop ran until two quiet samples existed")
+        for s in st["samples"]:
+            self.assertEqual(set(s), {"ms", "rebuilt_feed", "rebuilt_timeline", "bytes"})
+        quiet = [s for s in st["samples"] if not (s["rebuilt_feed"] or s["rebuilt_timeline"])]
+        self.assertEqual(len(quiet), st["n"])
+        self.assertEqual(st["rebuild_samples"], len(st["samples"]) - len(quiet))
+        for name, row in b.items():
+            if name.startswith("push") and row.get("bytes"):
+                self.assertNotIn("unknown", json.dumps(row["bytes"]), "%s: every frame the fake clients got was labelled" % name)
+
+    def test_fake_client_labels_direct_delta_frames_by_their_slot(self):
+        # the static fixture never changes between pushes, so no delta frame reaches a fake client in the
+        # run above; this drives the client's send() directly with the three frame shapes it can see
+        pb = SourceFileLoader("perf_bench_under_test", TOOL).load_module()
+        c = pb.fake_client(SimpleNamespace(), "timeline")      # no _perf_slot: a keyed label is str(key)
+        delta = '{"type": "delta", "slot": "bars", "base": 3, "rev": 4, "coll": {}}'
+        c["send"](delta)                                        # _send_slot_delta: send() directly, no curSlot
+        c["curSlot"] = ("timeline",)                            # what _client_send sets around its call
+        full = '{"type": "timeline", "sessions": []}'
+        c["send"](full)
+        del c["curSlot"]
+        other = '{"type": "warn", "text": "not a slot frame"}'
+        c["send"](other)
+        self.assertEqual(c["bytes"], {"bars-delta": len(delta), "('timeline',)": len(full), "warn": len(other)})
+        self.assertEqual(c["frames"], 3)
+
+    def test_refuses_the_live_default_dir_without_the_flag(self):
+        root = self._scratch_root("perf-bench-live-")
+        state, claude = build_synthetic(root, web_turns=3)
+        r = run_tool(["--state", state, "--claude-dir", claude, "--repo", ROOT, "--iters", "1"],
+                     env_extra={"XDG_STATE_HOME": root})
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("--i-know-this-is-live", r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(state, "repo-root")), "the kernel was never imported against it")
+        r = run_tool(["--state", state, "--claude-dir", claude, "--repo", ROOT, "--iters", "1"],
+                     env_extra={"ROMP_STATE_DIR": state})
+        self.assertEqual(r.returncode, 2, "ROMP_STATE_DIR names the live dir too")
+
+    def test_live_flag_benches_a_mirror_and_leaves_the_original_alone(self):
+        root = self._scratch_root("perf-bench-live-")
+        state, claude = build_synthetic(root, web_turns=3)
+        before = {p: os.stat(p).st_mtime_ns for p in Path(state).rglob("*") if p.is_file()}
+        out_json = os.path.join(root, "out.json")
+        r = run_tool(["--state", state, "--claude-dir", claude, "--repo", ROOT, "--iters", "1", "--sessions", "1",
+                      "--clients", "", "--i-know-this-is-live", "--keep-mirror", "--json", out_json],
+                     env_extra={"XDG_STATE_HOME": root})
+        self._ok(r)
+        self.assertIn("mirrored", r.stderr)
+        self.assertIn("mirror kept at", r.stderr)
+        after = {p: os.stat(p).st_mtime_ns for p in Path(state).rglob("*") if p.is_file()}
+        self.assertEqual(before, after, "the live directory is only read")
+        with open(out_json) as f:
+            out = json.load(f)
+        self.assertEqual(os.path.realpath(out["state_mirror_of"]), os.path.realpath(state))
+        mirror = out["state"]
+        self.assertNotEqual(os.path.realpath(mirror), os.path.realpath(state))
+        self.assertTrue(os.path.isdir(os.path.join(mirror, "sdk")), "the mirror is a state directory")
+        for name in ("serve-token", "push-vapid.json", "sdkvenv"):
+            self.assertFalse(os.path.exists(os.path.join(mirror, name)), "%s is not copied into the mirror" % name)
+        self.assertIn("build_feed", out["benchmarks"])
+        self.assertNotIn("push_steady", out["benchmarks"], "--clients '' skips the push benchmarks")
+        self.assertEqual(len([k for k in out["benchmarks"] if k.startswith("build_session_cold:")]), 1,
+                         "--sessions 1 benches one transcript (the two live ones are the same size here)")
+        self.assertEqual([k for k in out["benchmarks"] if k.startswith("load_goals:")], ["load_goals:11111111"])
+        mirror_root = os.path.dirname(os.path.realpath(mirror))      # the tool's mkdtemp dir; the mirror is its romp/
+        self.assertTrue(os.path.basename(mirror_root).startswith("romp-perf-live-mirror-"), mirror_root)
+        shutil.rmtree(mirror_root, ignore_errors=True)                # kept for the assertions above, not beyond
+        # without --keep-mirror the mirror is removed
+        r = run_tool(["--state", state, "--claude-dir", claude, "--repo", ROOT, "--iters", "1", "--sessions", "1",
+                      "--clients", "", "--i-know-this-is-live", "--json", out_json], env_extra={"XDG_STATE_HOME": root})
+        self._ok(r)
+        self.assertIn("mirror removed", r.stderr)
+        with open(out_json) as f:
+            self.assertFalse(os.path.exists(json.load(f)["state"]))
+
+    def test_compare_prints_per_benchmark_deltas(self):
+        out = self._out()
+        b = copy.deepcopy(out)
+        feed = out["benchmarks"]["build_feed"]["median"]
+        b["benchmarks"]["build_feed"]["median"] = feed * 2
+        del b["benchmarks"]["discover_warm"]
+        b["benchmarks"]["invented_row"] = {"n": 1, "median": 1.0}
+        b["iters"] = 9
+        b_path = os.path.join(self.root, "b.json")
+        with open(b_path, "w") as f:
+            json.dump(b, f)
+        r = run_tool(["--compare", self.json_path, b_path])
+        self._ok(r)
+        lines = r.stdout.splitlines()
+        feed_line = next(l for l in lines if l.startswith("build_feed "))
+        self.assertEqual(feed_line.split(), ["build_feed", "%.2f" % feed, "%.2f" % (feed * 2), "%+.2f" % feed, "+100.0%"])
+        self.assertIn("only in A: discover_warm", r.stdout)
+        self.assertIn("only in B: invented_row", r.stdout)
+        self.assertIn("MISMATCH", r.stdout, "a differing iters count is flagged before the table")
+        self.assertIn("push_cold_cycle bytes chat", r.stdout)
+        r = run_tool(["--compare", self.json_path, self.json_path])
+        self._ok(r)
+        self.assertNotIn("MISMATCH", r.stdout)
+
+    def test_requires_a_state_dir(self):
+        r = run_tool([])
+        self.assertEqual(r.returncode, 2)
+        r = run_tool(["--state", os.path.join(self.root, "not-a-state-dir")])
+        self.assertEqual(r.returncode, 2)
+
+    def test_a_transcript_outside_the_discovery_window_is_backfilled(self):
+        # the api transcript's mtime is four days old, outside discovery's 48 h window, while its registry
+        # entry is alive: the tool resolves it through the long backfill window, as _alive_sessions does for
+        # the builders, so the pick list and the builders see one world and the session gets its cold row
+        root = self._scratch_root("perf-bench-backfill-")
+        state, claude = build_synthetic(root, web_turns=3, age_api_days=4)
+        out_json = os.path.join(root, "out.json")
+        r = run_tool(["--state", state, "--claude-dir", claude, "--repo", ROOT, "--iters", "1", "--sessions", "2",
+                      "--clients", "", "--json", out_json])
+        self._ok(r)
+        with open(out_json) as f:
+            out = json.load(f)
+        self.assertEqual(out["live_transcripts"]["count"], 2)
+        self.assertEqual(out["live_transcripts"]["in_window"], 1)
+        self.assertEqual(out["live_transcripts"]["backfilled"], 1)
+        self.assertEqual(out["live_transcripts"]["no_transcript"], [])
+        self.assertIn("build_session_cold:22222222", out["benchmarks"])
+        self.assertIn("1 backfilled", r.stdout)
+
+    def test_a_kernel_lacking_a_builder_is_refused(self):
+        # --repo selects the kernel; one without the symbols the harness drives is refused with a message
+        # naming the first missing one, and the partial JSON records which checkout was tried
+        scratch = self._scratch_root("perf-bench-norepo-")
+        os.makedirs(os.path.join(scratch, "kernel"))
+        with open(os.path.join(scratch, "kernel", "kernel.py"), "w") as f:
+            f.write("x = 1\n")
+        open(os.path.join(scratch, "kernel", "sdk_backend.py"), "w").close()
+        out_json = os.path.join(scratch, "out.json")
+        r = run_tool(["--state", self.state, "--claude-dir", self.claude, "--repo", scratch, "--iters", "1", "--json", out_json])
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("this kernel lacks _live_scope", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        with open(out_json) as f:
+            out = json.load(f)
+        self.assertEqual(out["repo"], os.path.realpath(scratch))
+        self.assertNotIn("benchmarks", out)
+        self.assertEqual(out["error"], "this kernel lacks _live_scope; the harness does not know how to drive it")
+
+
+class Tripwire(unittest.TestCase):
+    """The tripwire's allow rule, in-process: exactly the kernel's read-only git queries pass —
+    `rev-parse`, `ls-files`, and the pair `remote get-url` — and everything else raises. `git remote`
+    is not read-only as a whole (add / set-url / remove rewrite config), so only the get-url pair is
+    admitted, by both words."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pb = SourceFileLoader("perf_bench_tripwire_under_test", TOOL).load_module()
+        cls.root = tempfile.mkdtemp(prefix="perf-bench-tripwire-")
+        cls.repo = os.path.join(cls.root, "notes-api")
+        os.makedirs(cls.repo)
+        _git("init", "-q", "-b", "main", cwd=cls.repo)
+        _git("remote", "add", "origin", ORIGIN, cwd=cls.repo)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def _tw(self, no_git=False):
+        log = []
+        return self.pb.SubprocessTripwire(subprocess, log, no_git=no_git), log
+
+    def test_the_allow_rule_names_exactly_three_queries(self):
+        q = self.pb.SubprocessTripwire._git_query
+        self.assertEqual(q(["git", "-C", "/x", "rev-parse", "--show-toplevel"]), "rev-parse")
+        self.assertEqual(q(["git", "ls-files", "-co", "--exclude-standard"]), "ls-files")
+        self.assertEqual(q(["git", "-C", "/x", "remote", "get-url", "origin"]), "remote get-url")
+        for argv in (["git", "-C", "/x", "remote", "set-url", "origin", "u"],
+                     ["git", "-C", "/x", "remote", "add", "origin", "u"],
+                     ["git", "-C", "/x", "remote", "remove", "origin"],
+                     ["git", "-C", "/x", "remote"],
+                     ["git", "-C", "/x", "fetch", "origin"],
+                     ["git", "-C", "/x", "push"],
+                     ["git"], ["gh", "pr", "view", "1"], "git rev-parse HEAD", None):
+            self.assertIsNone(q(argv), argv)
+
+    def test_the_repo_query_runs_and_is_counted_by_its_pair(self):
+        tw, log = self._tw()
+        r = tw.run(["git", "-C", self.repo, "remote", "get-url", "origin"], capture_output=True, text=True, timeout=5)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.strip(), ORIGIN)
+        self.assertEqual(tw.git_calls, {"remote get-url": 1})
+        self.assertEqual(log, [])
+
+    def test_a_writing_remote_form_trips(self):
+        tw, log = self._tw()
+        with self.assertRaises(self.pb.BenchError):
+            tw.run(["git", "-C", self.repo, "remote", "set-url", "origin", "https://github.com/other-org/x.git"],
+                   capture_output=True, text=True)
+        self.assertEqual(len(log), 1)
+        self.assertIn("remote', 'set-url'", log[0])
+        self.assertEqual(tw.git_calls, {})
+        with self.assertRaises(self.pb.BenchError):
+            tw.run(["git", "-C", self.repo, "remote"], capture_output=True, text=True)
+        r = subprocess.run(["git", "-C", self.repo, "remote", "get-url", "origin"], capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip(), ORIGIN, "the refused set-url never ran")
+
+    def test_no_git_answers_the_repo_query_as_a_failure(self):
+        tw, log = self._tw(no_git=True)
+        r = tw.run(["git", "-C", self.repo, "remote", "get-url", "origin"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout, "")
+        self.assertEqual(tw.git_calls, {"remote get-url": 1}, "counted even when answered as a failure")
+        self.assertEqual(log, [])
+
+
+class Recorders(unittest.TestCase):
+    """install_guards' recorders, in-process, called the way kernel/kernel.py calls the functions they
+    replace. The kernel passes _push_notify keywords the recorder never reads (kind=, card_id=, quiet=,
+    host=), and a recorder that refused them would not fail the run: _push catches every exception in
+    its build, writes `push build: <traceback>` to stderr and returns, so that cycle was timed with its
+    frames dropped and the notification count came up short while the tool exited 0. A safety target
+    the kernel lacks is still an error, since the real function would otherwise stay in place."""
+
+    def setUp(self):
+        self.pb = SourceFileLoader("perf_bench_recorders_under_test", TOOL).load_module()
+        saved = pwd.getpwnam, pwd.getpwuid                 # install_guards counts these process-wide
+        self.addCleanup(lambda: (setattr(pwd, "getpwnam", saved[0]), setattr(pwd, "getpwuid", saved[1])))
+        saved_start = threading.Thread.start               # and wraps this
+        self.addCleanup(setattr, threading.Thread, "start", saved_start)
+        self.state = tempfile.mkdtemp(prefix="perf-bench-recorders-")
+        self.addCleanup(shutil.rmtree, self.state, ignore_errors=True)
+        self.writes = []
+
+    def _kernel(self):
+        return SimpleNamespace(jd=SimpleNamespace(STATE=self.state),
+                               _atomic_write=lambda path, text, mode=None: self.writes.append((path, text)),
+                               _refresh_remote_prices=None, _warm_fleet_bg=None, _system_notify=None,
+                               _push_notify=None, _push_forward=None, _badge_push=None)
+
+    def test_the_recorders_take_every_shape_the_kernel_calls_with(self):
+        km = self._kernel()
+        names, rec = self.pb.install_guards(km, None)
+        self.assertEqual(set(names), {n for n in EXPECTED_NEUTRALIZED if not n.endswith(".subprocess")},
+                         "a namespace without a subprocess attribute gets no tripwire; everything else is guarded")
+        # _cached_feed's two card pushes (quiet when the turn push already buzzed), the turn tick's push
+        # without a badge, the federation handler's with a host, and a keyword this tree does not have
+        km._push_notify("api: done", "body", SID_API, 2, kind="card", card_id="g7", quiet=True)
+        km._push_notify("api: done", "body", SID_API, 2, kind="card", card_id="g7")
+        km._push_notify("web finished a turn", "body", SID_WEB, kind="turn")
+        km._push_notify("tests: done", "body", SID_TESTS, kind="card", card_id="g1", host="TESTHOST")
+        km._push_notify("later", "body", SID_WEB, kind="card", card_id="g1", later_keyword=1)
+        km._system_notify("romp: api", "body")
+        km._push_forward([{"title": "api: done", "body": "body", "sid": SID_API, "kind": "card", "cardId": "g7"}])
+        km._badge_push(3)
+        self.assertIsNone(km._refresh_remote_prices(time.time()))
+        self.assertIsNone(km._warm_fleet_bg(time.time()))
+        self.assertEqual(rec["notifications"],
+                         [("push", "api: done"), ("push", "api: done"), ("push", "web finished a turn"), ("push", "tests: done"),
+                          ("push", "later"), ("system", "romp: api"), ("forward", 1), ("badge", 3)])
+        self.assertEqual(len(rec["warm_calls"]), 1, "the background-parse call is counted, not run")
+        # threads started after the guards are counted (the real _warm_fleet_bg would start one per call)
+        self.assertEqual(rec["thread_starts"], 0)
+        t = threading.Thread(target=lambda: None)
+        t.start()
+        t.join()
+        self.assertEqual(rec["thread_starts"], 1)
+
+    def test_atomic_writes_outside_the_copy_are_refused(self):
+        km = self._kernel()
+        _names, rec = self.pb.install_guards(km, None)
+        km._atomic_write(os.path.join(self.state, "sub", "x.json"), "{}")
+        self.assertEqual([os.path.basename(p) for p, _t in self.writes], ["x.json"], "a write under the copy goes through")
+        self.assertEqual(rec["atomic_writes"], ["sub/x.json"], "and is recorded relative to the copy")
+        elsewhere = tempfile.mkdtemp(prefix="perf-bench-elsewhere-")
+        self.addCleanup(shutil.rmtree, elsewhere, ignore_errors=True)
+        with self.assertRaises(self.pb.BenchError) as cm:
+            km._atomic_write(os.path.join(elsewhere, "y.json"), "{}")
+        self.assertIn("outside the state copy", str(cm.exception))
+        self.assertEqual(len(self.writes), 1, "the refused write never reached the kernel's function")
+        self.assertEqual(rec["atomic_writes"], ["sub/x.json"])
+
+    def test_a_missing_safety_target_is_an_error(self):
+        km = self._kernel()
+        del km._push_notify
+        with self.assertRaises(self.pb.BenchError) as cm:
+            self.pb.install_guards(km, None)
+        self.assertIn("_push_notify", str(cm.exception))
+
+
+class InProcessChecks(unittest.TestCase):
+    """The tool's factored guards and folds, called directly: the two proofs a cold build_session sample
+    must pass, the liveness row count, the environment rewrite, the constructor-free backend's liveness
+    rows, the steady-push bucketing, the partial output a late BenchError leaves, and the mirror copy's
+    tolerance for vanished files. Each is a function of the tool module (loaded from its path; the import
+    pulls in only the standard library), so no kernel runs here."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pb = SourceFileLoader("perf_bench_checks_under_test", TOOL).load_module()
+
+    def _tmp(self, prefix):
+        d = tempfile.mkdtemp(prefix=prefix)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    # ── check_cold_sample ────────────────────────────────────────────────────────────────────────
+    def _em(self, **stats):
+        return SimpleNamespace(_ASM_STATS=dict(stats), _ASM_CACHE={}, _ASM_LOCK=threading.Lock())
+
+    def test_a_cold_sample_that_ran_no_full_assembly_is_an_error(self):
+        em = self._em(full=3, serve=10)
+        before = dict(em._ASM_STATS)
+        em._ASM_STATS["serve"] += 1                          # served from a cache: not a cold parse
+        with self.assertRaises(self.pb.BenchError) as cm:
+            self.pb.check_cold_sample(em, "11111111", "/x/t.jsonl", before)
+        self.assertIn("ran no full assembly", str(cm.exception))
+        self.assertIn("'serve': 1", str(cm.exception), "the message carries the counters that did move")
+
+    def test_a_cold_sample_whose_own_transcript_is_not_in_the_assembly_cache_is_an_error(self):
+        em = self._em(full=3)
+        before = dict(em._ASM_STATS)
+        em._ASM_STATS["full"] += 1
+        em._ASM_CACHE[("/x/other.jsonl", 7)] = object()      # a peer's transcript assembled, not this session's
+        with self.assertRaises(self.pb.BenchError) as cm:
+            self.pb.check_cold_sample(em, "11111111", "/x/t.jsonl", before)
+        self.assertIn("never assembled its own transcript", str(cm.exception))
+        self.assertIn("t.jsonl", str(cm.exception))
+
+    def test_a_cold_sample_with_a_full_assembly_of_its_own_transcript_passes(self):
+        em = self._em(full=3)
+        before = dict(em._ASM_STATS)
+        em._ASM_STATS["full"] += 1
+        em._ASM_CACHE[("/x/t.jsonl", 7)] = object()
+        self.assertEqual(self.pb.check_cold_sample(em, "11111111", "/x/t.jsonl", before), {"full": 1})
+
+    # ── check_snapshot_rows ──────────────────────────────────────────────────────────────────────
+    REGS = [{"sid": SID_WEB, "alive": True}, {"sid": SID_API, "alive": True}, {"sid": SID_TESTS, "alive": False},
+            {"sid": "44444444-5555-6666-7777-888888888888", "alive": True, "threadOf": SID_WEB}]
+
+    def test_a_snapshot_with_fewer_rows_than_qualifying_regs_is_an_error(self):
+        with self.assertRaises(self.pb.BenchError) as cm:
+            self.pb.check_snapshot_rows({SID_WEB: {}}, self.REGS, False)
+        self.assertIn("1 rows but 2 registry entries", str(cm.exception))
+        self.assertEqual(self.pb.check_snapshot_rows({SID_WEB: {}, SID_API: {}}, self.REGS, False), 2)
+        self.assertEqual(self.pb.check_snapshot_rows({SID_WEB: {}, SID_API: {}, SID_TESTS: {}}, self.REGS, True), 3,
+                         "--all-regs-live counts the closed reg too, never the comment thread")
+        with self.assertRaises(self.pb.BenchError):
+            self.pb.check_snapshot_rows({SID_WEB: {}, SID_API: {}}, self.REGS, True)
+
+    # ── prepare_env ──────────────────────────────────────────────────────────────────────────────
+    def test_prepare_env_drops_the_keys_and_floors_every_seam_before_the_import(self):
+        root = self._tmp("perf-bench-env-")
+        state, claude, private, other = (os.path.join(root, d) for d in ("romp", "claude", "private", "other"))
+        for d in (state, claude, private, other):
+            os.makedirs(d)
+        planted = {"ANTHROPIC_API_KEY": "not-a-key", "ANTHROPIC_BASE_URL": "http://127.0.0.1:1", "ROMP_MANAGER_PORT": "7432",
+                   "ROMP_MANAGER_PID": "1", "ROMP_STATE_DIR": other, "TMUX": "planted", "ROMP_MODEL_CATALOG": "on"}
+        with mock.patch.dict(os.environ, planted):
+            changes = self.pb.prepare_env(state, claude, private)
+            env = dict(os.environ)
+        self.assertFalse([k for k in env if k.startswith("ANTHROPIC_")], "every ANTHROPIC_* variable is gone")
+        self.assertEqual(env["ROMP_MANAGER_PORT"], "1", "a dead port, not an absent variable (absent maps to the live default)")
+        self.assertNotIn("ROMP_MANAGER_PID", env)
+        self.assertNotIn("TMUX", env)
+        self.assertEqual(env["ROMP_STATE_DIR"], state)
+        self.assertEqual(env["XDG_STATE_HOME"], os.path.dirname(state))
+        self.assertEqual(env["ROMP_MODEL_CATALOG"], "off")
+        self.assertEqual(env["ROMP_CLI_SCOPE"], "0")
+        self.assertEqual(env["ROMP_CLAUDE_BIN"], "/bin/false")
+        self.assertEqual(env["ROMP_TMUX_AVAILABLE"], "0")
+        self.assertEqual(env["ROMP_KERNEL_NO_OPEN"], "1")
+        self.assertEqual(env["CLAUDE_CONFIG_DIR"], claude)
+        self.assertTrue(env["TMUX_TMPDIR"].startswith(private + os.sep) and os.path.isdir(env["TMUX_TMPDIR"])
+                        and os.listdir(env["TMUX_TMPDIR"]) == [], "tmux is pointed at an existing, empty, private socket directory")
+        self.assertTrue(env["ROMP_SERVICE_ENV_FILE"].startswith(private + os.sep) and not os.path.exists(env["ROMP_SERVICE_ENV_FILE"]))
+        self.assertEqual(env["ROMP_SERVICE_ENV"], env["ROMP_SERVICE_ENV_FILE"])
+        for c in ("unset ANTHROPIC_API_KEY", "unset ANTHROPIC_BASE_URL", "unset ROMP_MANAGER_PID", "unset TMUX", "unset ROMP_STATE_DIR",
+                  "set ROMP_MANAGER_PORT", "set ROMP_MODEL_CATALOG", "set ROMP_CLI_SCOPE", "set ROMP_CLAUDE_BIN", "set ROMP_TMUX_AVAILABLE",
+                  "set TMUX_TMPDIR", "set ROMP_SERVICE_ENV_FILE", "set ROMP_STATE_DIR", "set XDG_STATE_HOME", "set CLAUDE_CONFIG_DIR"):
+            self.assertIn(c, changes)
+
+    # ── make_backend ─────────────────────────────────────────────────────────────────────────────
+    def _sbmod(self):
+        class FakeSdkBackend:
+            def _live_row(self, reg, sid):
+                return {"sid": sid, "state": "waiting", "connected": False}
+        regs = [{"sid": SID_WEB, "alive": True}, {"sid": SID_API, "alive": True}, {"sid": SID_TESTS, "alive": False},
+                {"sid": "44444444-5555-6666-7777-888888888888", "alive": True, "threadOf": SID_WEB}]
+        return SimpleNamespace(SdkBackend=FakeSdkBackend, list_regs=lambda d: regs,
+                               last_state_value=lambda d, sid: "working" if sid == SID_WEB else "")
+
+    def test_the_bench_backend_lists_alive_regs_with_their_last_state_and_skips_threads(self):
+        be = self.pb.make_backend(self._sbmod(), "/x/state", dormant_rows=False, all_regs=False)
+        rows = be.live_sessions()
+        self.assertEqual(set(rows), {SID_WEB, SID_API}, "alive regs only; the closed reg and the comment thread are out")
+        self.assertEqual(rows[SID_WEB]["state"], "working", "the last states/ record wins over the dormant mapping")
+        self.assertIs(rows[SID_WEB]["connected"], True, "and the row reads as connected, as a running session reports")
+        self.assertEqual(rows[SID_API]["state"], "waiting", "an empty last state leaves _live_row's value")
+        self.assertEqual(be._owns_memo, {}, "the slot owns() memoizes on")
+        with self.assertRaises(self.pb.BenchError) as cm:
+            be.no_such_attribute
+        self.assertIn("no_such_attribute", str(cm.exception))
+
+    def test_dormant_rows_and_all_regs_live_change_the_bench_backend_rows(self):
+        dormant = self.pb.make_backend(self._sbmod(), "/x/state", dormant_rows=True, all_regs=False).live_sessions()
+        self.assertEqual(dormant[SID_WEB], {"sid": SID_WEB, "state": "waiting", "connected": False}, "--dormant-rows keeps _live_row's row verbatim")
+        every = self.pb.make_backend(self._sbmod(), "/x/state", dormant_rows=False, all_regs=True).live_sessions()
+        self.assertEqual(set(every), {SID_WEB, SID_API, SID_TESTS}, "--all-regs-live includes the closed reg, still not the thread")
+
+    # ── the steady push's buckets ────────────────────────────────────────────────────────────────
+    def test_push_steady_reports_the_quiet_samples_and_sets_the_rebuilds_aside(self):
+        # The subprocess fixture cannot force a rebuild (it depends on the 5 s view-signature bucket rolling
+        # REBUILD_MIN_S after the previous build, wall-clock alignment), so its assertions hold with zero
+        # rebuild samples; this drives the bucketing with samples of both kinds.
+        mk = lambda ms, feed=False, tl=False: {"ms": ms, "rebuilt_feed": feed, "rebuilt_timeline": tl, "bytes": 100}
+        samples = [mk(10), mk(3000, feed=True), mk(12), mk(2800, tl=True), mk(11)]
+        quiet, rebuilt = self.pb.bucket_steady_samples(samples)
+        self.assertEqual([q["ms"] for q in quiet], [10, 12, 11])
+        self.assertEqual([r["ms"] for r in rebuilt], [3000, 2800])
+        st, st2 = self.pb.steady_rows(samples, ["chat"])
+        self.assertEqual((st["n"], st["median"], st["rebuild_samples"], len(st["samples"])), (3, 11, 2, 5))
+        self.assertEqual((st2["n"], st2["median"]), (2, 2900))
+        self.assertEqual(self.pb.steady_rows(samples[:1], ["chat"])[1], None, "no rebuild row without a rebuild sample")
+
+    # ── a late BenchError keeps what was measured ────────────────────────────────────────────────
+    def test_a_late_bench_error_still_prints_the_rows_and_writes_the_partial_json(self):
+        state = self._tmp("perf-bench-partial-")
+        for d in ("sdk", "names"):
+            os.mkdir(os.path.join(state, d))
+        out_json = os.path.join(state, "out.json")
+
+        def fake_run(args, st, mirror_of, out, private):
+            out["repo"], out["repo_head"], out["state"], out["state_mirror_of"] = "/x/repo", "abc", st, mirror_of
+            out["benchmarks"] = {"build_feed": {"n": 1, "min": 1.0, "median": 1.0, "max": 1.0}}
+            raise self.pb.BenchError("late guard")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(self.pb, "run", fake_run), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            rc = self.pb.main(["--state", state, "--json", out_json])
+        self.assertEqual(rc, 1)
+        with open(out_json) as f:
+            out = json.load(f)
+        self.assertEqual(out["error"], "late guard")
+        self.assertIn("build_feed", out["benchmarks"])
+        self.assertIn("build_feed", stdout.getvalue(), "the rows measured before the error are printed")
+        self.assertIn("(partial: the run stopped on an error)", stdout.getvalue())
+        self.assertIn("perf-bench: late guard", stderr.getvalue())
+
+    # ── mirror_state ─────────────────────────────────────────────────────────────────────────────
+    def test_the_mirror_tolerates_files_that_vanished_during_the_copy_and_nothing_else(self):
+        src = self._tmp("perf-bench-mirror-src-")
+        real_mkdtemp, made = tempfile.mkdtemp, []
+
+        def tracking_mkdtemp(*a, **k):
+            made.append(real_mkdtemp(*a, **k))
+            return made[-1]
+        self.addCleanup(lambda: [shutil.rmtree(d, ignore_errors=True) for d in made])
+        vanished = shutil.Error([(os.path.join(src, "tmp"), "/x/tmp", "[Errno 2] No such file or directory: 'tmp'")])
+        stderr = io.StringIO()
+        with mock.patch.object(self.pb.tempfile, "mkdtemp", tracking_mkdtemp):
+            with mock.patch.object(self.pb.shutil, "copytree", side_effect=vanished), contextlib.redirect_stderr(stderr):
+                root, dst = self.pb.mirror_state(src)
+            self.assertEqual((root, dst), (made[-1], os.path.join(made[-1], "romp")))
+            self.assertIn("1 file(s) vanished during the mirror copy", stderr.getvalue())
+            denied = shutil.Error([(os.path.join(src, "a"), "/x/a", "[Errno 13] Permission denied: 'a'")])
+            with mock.patch.object(self.pb.shutil, "copytree", side_effect=denied):
+                with self.assertRaises(shutil.Error):
+                    self.pb.mirror_state(src)
+            self.assertFalse(os.path.exists(made[-1]), "a copy that failed for another reason leaves no half-made mirror")
+            mixed = shutil.Error([(os.path.join(src, "tmp"), "/x/tmp", "[Errno 2] No such file or directory: 'tmp'"),
+                                  (os.path.join(src, "a"), "/x/a", "[Errno 13] Permission denied: 'a'")])
+            with mock.patch.object(self.pb.shutil, "copytree", side_effect=mixed):
+                with self.assertRaises(shutil.Error):
+                    self.pb.mirror_state(src)
+
+
+if __name__ == "__main__":
+    unittest.main()
