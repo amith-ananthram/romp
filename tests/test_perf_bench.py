@@ -54,20 +54,39 @@ WEB_TURNS = 400       # a transcript large enough that the cold row's full assem
 EXPECTED_NEUTRALIZED = {
     "km._refresh_remote_prices", "km._warm_fleet_bg", "km._system_notify", "km._push_notify", "km._push_forward",
     "km._badge_push", "romp_kernel_perf_bench.subprocess", "romp_judge.subprocess", "romp_sdk_backend.subprocess",
+    "romp_keysource.subprocess",   # loaded by sdk_backend; its key command is a subprocess (review find, 2026-09-08)
     "km._atomic_write (checked)", "pwd.getpwnam (counted)", "pwd.getpwuid (counted)"}
-# The caches the tool empties before each cold build_session sample, as this kernel has them. The tool
-# skips a name a revision lacks, so a rename here would silently leave that cache warm: this pins the
-# HEAD set, and a kernel change that renames or adds one must change it deliberately.
-EXPECTED_COLD_CACHES = {
-    "kernel": {"_parse_cache", "_built_chat", "_prev_chat_events", "_prev_chat_ledger", "_arch_tops_cache",
-               "_PATH_LINK_CACHE", "_states_notes_cache", "_state_ev_cache", "_bgtasks_cache", "_bgall_cache",
-               "_queued_parse_cache", "_wake_tail_cache", "_session_meta_cache", "_session_tok_cache",
-               "_machine_cut_cache", "_chat_fold"},
-    "event_model": {"_JSONL_CACHE", "_ASM_CACHE", "_TRAILING_CACHE"}}
-# What the builders and the push write into the copy on a normal run: the import-time repo-root
-# marker, the tab-order audit and the session order the push maintains. A new write path in a
-# builder must change this set deliberately.
+# The caches whose emptiness the cold rows' PROOF rests on: the event model's parse-layer caches (the
+# per-sample assembly check reads _ASM_CACHE and the counters) and the kernel's parse cache (the
+# build_feed_noparse row empties it too). The tool skips a name a revision lacks and reports what it did
+# empty, and the per-sample assembly check is what proves a sample cold, so the rest of the tool's list is
+# checked only to be drawn from that list: the first form pinned every kernel-private cache name at HEAD,
+# which an unrelated kernel rename would have broken with the proof intact (review find, 2026-09-08).
+EXPECTED_COLD_CACHES = {"kernel": {"_parse_cache"}, "event_model": {"_JSONL_CACHE", "_ASM_CACHE"}}
+# The writes a normal run is known to make into the copy: the import-time repo-root marker, the
+# tab-order audit and the session order the push maintains. The test asks that these appear, that every
+# write landed under the copy (the guard's own record) and that nothing was removed; it does not pin the
+# set exactly, so a kernel that adds a write path reports it in the tool's output without failing the
+# tool's test (the first form pinned the exact set; review find, 2026-09-08).
 EXPECTED_WRITES = {"+ order-audit.jsonl", "+ repo-root", "+ session-order.json"}
+
+
+def _module_constants(path, names):
+    """Module-level `NAME = <string or tuple of strings and NAMEs>` assignments, read from the source with
+    ast and resolved against each other, so a kernel constant is pinned without loading any romp module
+    in this process."""
+    import ast
+    found = {}
+    for node in ast.parse(open(path).read()).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and node.targets[0].id in names:
+            v = node.value
+            if isinstance(v, ast.Tuple):
+                found[node.targets[0].id] = tuple(e.value if isinstance(e, ast.Constant) else found[e.id] for e in v.elts)
+            elif isinstance(v, ast.Constant):
+                found[node.targets[0].id] = v.value
+    missing = set(names) - set(found)
+    assert not missing, "not found at module level in %s: %s" % (path, sorted(missing))
+    return found
 
 
 def _iso(t):
@@ -127,8 +146,9 @@ def _git(*args, cwd):
 def build_synthetic(root, web_turns=WEB_TURNS, age_api_days=0):
     """A state directory at root/romp (named `romp` so XDG_STATE_HOME=root resolves it as the default)
     plus a Claude config dir at root/claude holding the transcripts. Returns (state, claude_dir). The
-    state carries the two credential-shaped files a real one has (synthetic contents) and a placeholder
-    sdkvenv, all of which the mirror must leave behind. The web and tests sessions' cwd is a one-commit
+    state carries the credential-shaped files a real one has (synthetic contents: the serve token, the Web
+    Push key and subscriptions, the remote kernels' tokens) and a placeholder sdkvenv, all of which the
+    mirror must leave behind. The web and tests sessions' cwd is a one-commit
     checkout with a GitHub origin, so the kernel's read-only git queries run for real and the tripwire's
     allow list is exercised; the api session's cwd is a plain directory, where the kernel cannot cache
     the ls-files answer and re-runs the query on every build. `age_api_days` moves the api transcript's
@@ -148,6 +168,8 @@ def build_synthetic(root, web_turns=WEB_TURNS, age_api_days=0):
         (state / d).mkdir(parents=True)
     (state / "serve-token").write_text("synthetic-serve-token-not-real\n")
     (state / "push-vapid.json").write_text(json.dumps({"synthetic": True}))
+    (state / "push-subscriptions.json").write_text(json.dumps({"synthetic-endpoint": {"auth": "not-a-secret"}}))
+    (state / "remotes.json").write_text(json.dumps([{"host": "TESTHOST", "token": "synthetic-remote-token-not-real"}]))
     (state / "sdkvenv" / "bin" / "python").write_text("placeholder: not an interpreter\n")
     claude = root / "claude"
     now = int(time.time())
@@ -247,8 +269,12 @@ class PerfBench(unittest.TestCase):
         self.assertEqual(out["threads_new"], [], "no builder left a thread running")
         self.assertEqual(set(out["neutralized"]), EXPECTED_NEUTRALIZED)
         self.assertEqual(os.stat(self.transcript).st_mtime_ns, self.transcript_mtime, "transcripts are read-only")
-        self.assertEqual(set(out["writes"]["sample"]), EXPECTED_WRITES)
+        self.assertTrue(EXPECTED_WRITES <= set(out["writes"]["sample"]), out["writes"])
+        self.assertFalse([w for w in out["writes"]["sample"] if w.startswith("- ")], "nothing removed from the copy")
         self.assertEqual(out["writes"]["removed"], 0)
+        self.assertEqual(out["refused_writes"], [], "every _atomic_write landed under the copy")
+        for rel in out["writes"]["atomic_writes"]:
+            self.assertFalse(os.path.isabs(rel) or rel.startswith(".."), "recorded relative to the copy: %s" % rel)
         prof = out["profiles"]
         for name in ("build_feed", "build_timeline_bars", "build_session_cold:11111111", "load_goals:11111111", "push_steady"):
             self.assertIn(name, prof)
@@ -266,7 +292,12 @@ class PerfBench(unittest.TestCase):
         self.assertEqual(cold["asm"].get("fold", 0), 0, "nothing grows between reads in a static fixture")
         self.assertEqual(em["asm"].get("full", 0), 0, "the em-warm row never re-parses")
         self.assertIn("git_per_build", cold)
-        self.assertEqual({k: set(v) for k, v in self._out()["cold_caches"].items()}, EXPECTED_COLD_CACHES)
+        cc = {k: set(v) for k, v in self._out()["cold_caches"].items()}
+        for layer, need in EXPECTED_COLD_CACHES.items():
+            self.assertTrue(need <= cc[layer], "%s: %s emptied before each cold sample (emptied: %s)" % (layer, sorted(need), sorted(cc[layer])))
+        pb = SourceFileLoader("perf_bench_caches_under_test", TOOL).load_module()
+        self.assertTrue(cc["kernel"] <= set(pb.COLD_KERNEL_CACHES) | {"_chat_fold"}, "every kernel cache emptied is one the tool names")
+        self.assertTrue(cc["event_model"] <= {n for n, _lock in pb.COLD_EM_CACHES})
 
     def test_path_token_lookups_are_counted(self):
         out = self._out()
@@ -290,10 +321,15 @@ class PerfBench(unittest.TestCase):
         # Per build, beside the rows: the api session's cwd is a plain directory, where the kernel cannot cache
         # the ls-files answer on the index and tree mtimes, so every build of it runs the query once; the web
         # session's cwd is a checkout, whose answers the warm-up cached, so its kept samples run none.
+        # The figures are the kernel's caching policy, not this tool's, so they are asserted as the relation just
+        # described (at least one query per build in the plain directory, fewer in the checkout), never as exact
+        # counts an unrelated kernel change would move (review find, 2026-09-08).
         b = out["benchmarks"]
         for row in ("build_session_cold:22222222", "build_session_emwarm:22222222", "build_session_warm:22222222"):
-            self.assertEqual(b[row]["git_per_build"], {"ls-files": 1.0}, row)
-        self.assertEqual(b["build_session_cold:11111111"]["git_per_build"], {})
+            self.assertGreaterEqual(b[row]["git_per_build"].get("ls-files", 0), 1.0, "%s: %s" % (row, b[row]["git_per_build"]))
+            self.assertEqual(set(b[row]["git_per_build"]) - {"rev-parse", "ls-files"}, set(), "only admitted queries ran")
+        checkout, plain = b["build_session_cold:11111111"]["git_per_build"], b["build_session_cold:22222222"]["git_per_build"]
+        self.assertLess(sum(checkout.values()), sum(plain.values()), "the checkout's answers are cached across the kept samples: %s vs %s" % (checkout, plain))
 
     def test_push_rows_report_bytes_and_rebuild_flags(self):
         b = self._out()["benchmarks"]
@@ -371,8 +407,9 @@ class PerfBench(unittest.TestCase):
         mirror = out["state"]
         self.assertNotEqual(os.path.realpath(mirror), os.path.realpath(state))
         self.assertTrue(os.path.isdir(os.path.join(mirror, "sdk")), "the mirror is a state directory")
-        for name in ("serve-token", "push-vapid.json", "sdkvenv"):
+        for name in ("serve-token", "push-vapid.json", "push-subscriptions.json", "remotes.json", "sdkvenv"):
             self.assertFalse(os.path.exists(os.path.join(mirror, name)), "%s is not copied into the mirror" % name)
+        self.assertEqual(set(self.pb_mirror_ignore()), {"serve-token", "push-vapid.json", "push-subscriptions.json", "remotes.json", "sdkvenv"})
         self.assertIn("build_feed", out["benchmarks"])
         self.assertNotIn("push_steady", out["benchmarks"], "--clients '' skips the push benchmarks")
         self.assertEqual(len([k for k in out["benchmarks"] if k.startswith("build_session_cold:")]), 1,
@@ -412,6 +449,15 @@ class PerfBench(unittest.TestCase):
         r = run_tool(["--compare", self.json_path, self.json_path])
         self._ok(r)
         self.assertNotIn("MISMATCH", r.stdout)
+        # a run that stopped on a guard is not a world to diff against: its `error` is flagged first
+        c = copy.deepcopy(out)
+        c["error"] = "a guard tripped"
+        c_path = os.path.join(self.root, "c.json")
+        with open(c_path, "w") as f:
+            json.dump(c, f)
+        r = run_tool(["--compare", self.json_path, c_path])
+        self._ok(r)
+        self.assertRegex(r.stdout, r"run error\s+A=None\s+B=a guard tripped\s+MISMATCH")
 
     def test_requires_a_state_dir(self):
         r = run_tool([])
@@ -456,6 +502,76 @@ class PerfBench(unittest.TestCase):
         self.assertEqual(out["repo"], os.path.realpath(scratch))
         self.assertNotIn("benchmarks", out)
         self.assertEqual(out["error"], "this kernel lacks _live_scope; the harness does not know how to drive it")
+
+    def pb_mirror_ignore(self):
+        return SourceFileLoader("perf_bench_mirror_under_test", TOOL).load_module().MIRROR_IGNORE
+
+    def _planted_kernel(self, plant):
+        """A copy of this checkout's kernel/ with one line planted inside _push's try block, right after its
+        tab-order audit: the one place on the benched paths where the kernel catches every exception of its
+        own build and carries on."""
+        # The scratch path spells the tool's name on purpose: the tripwire's frame filter must exclude the tool's
+        # own file, not every path that contains "perf-bench" (its first form did, and the spawn record's `via`
+        # came out empty for a kernel living under such a directory).
+        scratch = self._scratch_root("perf-bench-planted-")
+        shutil.copytree(os.path.join(ROOT, "kernel"), os.path.join(scratch, "kernel"), ignore=shutil.ignore_patterns("__pycache__"))
+        kp = os.path.join(scratch, "kernel", "kernel.py")
+        with open(kp) as f:
+            src = f.read()
+        anchor = '        _order_audit("push", _last_tab_order, tab_order, only_permuted=True)\n'
+        self.assertEqual(src.count(anchor), 1, "the plant's anchor line inside _push's try block")
+        with open(kp, "w") as f:
+            f.write(src.replace(anchor, anchor + "        " + plant + "\n"))
+        return scratch
+
+    def test_a_guard_tripped_inside_push_fails_the_run_naming_the_guard(self):
+        # The tripwire raises inside _push, which catches every exception of its build (writes `push build:` to
+        # stderr and returns), so the first form timed the aborted cycle as a number and exited 0 with no error
+        # in the JSON and the refusal visible only as a count (review find, 2026-09-08). Now the run ends the way
+        # any other tripped guard ends it: rows so far kept, JSON marked partial, exit 1, the guard named.
+        root = self._scratch_root("perf-bench-tripped-")
+        state, claude = build_synthetic(root, web_turns=3)
+        out_json = os.path.join(root, "out.json")
+        scratch = self._planted_kernel('subprocess.run(["date"], capture_output=True)')
+        r = run_tool(["--state", state, "--claude-dir", claude, "--repo", scratch, "--iters", "1", "--sessions", "1", "--json", out_json])
+        self.assertEqual(r.returncode, 1, "rc=%d\nstdout:\n%s\nstderr:\n%s" % (r.returncode, r.stdout[-3000:], r.stderr[-3000:]))
+        self.assertIn("perf-bench: a guard tripped inside a call the kernel catches", r.stderr)
+        self.assertIn("subprocess tripwire: ", r.stderr)
+        self.assertIn("refused spawn", r.stderr)
+        self.assertIn("push build:", r.stderr, "the kernel's own report of the exception it swallowed")
+        self.assertIn("(partial: the run stopped on an error)", r.stdout)
+        with open(out_json) as f:
+            out = json.load(f)
+        self.assertIn("subprocess tripwire", out["error"])
+        self.assertTrue(out["spawn_attempts"], "the refused spawns are listed")
+        for attempt in out["spawn_attempts"]:
+            self.assertIn("['date']", attempt)
+            self.assertIn("_push", attempt)
+        self.assertEqual(out["refused_writes"], [])
+        self.assertIn("push_cold_cycle", out["benchmarks"], "the rows measured before the check are kept")
+        self.assertEqual(out["benchmarks"]["push_cold_cycle"]["bytes"]["feed"]["frames"], 0, "and show the aborted cycle for what it was")
+
+    def test_an_out_of_copy_write_inside_push_fails_the_run_and_is_recorded(self):
+        # The write guard raised before recording anything, so a refused write inside _push left no trace in the
+        # JSON or the text report (only the kernel's stderr traceback) while the tool exited 0. The refusal is now
+        # on record before the raise, and the run fails on it (review find, 2026-09-08).
+        root = self._scratch_root("perf-bench-tripped-write-")
+        state, claude = build_synthetic(root, web_turns=3)
+        elsewhere = os.path.join(os.path.realpath(root), "elsewhere", "y.json")
+        out_json = os.path.join(root, "out.json")
+        scratch = self._planted_kernel('_atomic_write(%r, "{}")' % elsewhere)
+        r = run_tool(["--state", state, "--claude-dir", claude, "--repo", scratch, "--iters", "1", "--sessions", "1", "--json", out_json])
+        self.assertEqual(r.returncode, 1, "rc=%d\nstdout:\n%s\nstderr:\n%s" % (r.returncode, r.stdout[-3000:], r.stderr[-3000:]))
+        self.assertIn("_atomic_write guard: ", r.stderr)
+        self.assertIn(elsewhere, r.stderr, "the refused path is named")
+        self.assertIn("refused writes: ", r.stdout, "the text report counts them")
+        with open(out_json) as f:
+            out = json.load(f)
+        self.assertIn("_atomic_write guard", out["error"])
+        self.assertTrue(out["refused_writes"])
+        self.assertEqual(set(out["refused_writes"]), {elsewhere})
+        self.assertEqual(out["spawn_attempts"], [])
+        self.assertFalse(os.path.exists(elsewhere), "the refused write never happened")
 
 
 class Tripwire(unittest.TestCase):
@@ -590,6 +706,8 @@ class Recorders(unittest.TestCase):
         self.assertIn("outside the state copy", str(cm.exception))
         self.assertEqual(len(self.writes), 1, "the refused write never reached the kernel's function")
         self.assertEqual(rec["atomic_writes"], ["sub/x.json"])
+        self.assertEqual(rec["refused_writes"], [os.path.realpath(os.path.join(elsewhere, "y.json"))],
+                         "on record before the raise, so a caller that swallows the exception cannot hide it")
 
     def test_a_missing_safety_target_is_an_error(self):
         km = self._kernel()
@@ -665,12 +783,20 @@ class InProcessChecks(unittest.TestCase):
         state, claude, private, other = (os.path.join(root, d) for d in ("romp", "claude", "private", "other"))
         for d in (state, claude, private, other):
             os.makedirs(d)
-        planted = {"ANTHROPIC_API_KEY": "not-a-key", "ANTHROPIC_BASE_URL": "http://127.0.0.1:1", "ROMP_MANAGER_PORT": "7432",
-                   "ROMP_MANAGER_PID": "1", "ROMP_STATE_DIR": other, "TMUX": "planted", "ROMP_MODEL_CATALOG": "on"}
+        # every key-source and credential name conftest pops, planted with synthetic values (the first form planted
+        # ANTHROPIC_* only, so a key command, an OAuth token or 1Password's names would have reached the kernel
+        # import; review find, 2026-09-08)
+        keys = {k: "planted-" + k.lower() for k in self.pb.KEY_SOURCE_ENV}
+        keys["OP_SESSION_testaccount"] = "planted-op-session"
+        planted = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1", "ROMP_MANAGER_PORT": "7432",
+                   "ROMP_MANAGER_PID": "1", "ROMP_STATE_DIR": other, "TMUX": "planted", "ROMP_MODEL_CATALOG": "on", **keys}
         with mock.patch.dict(os.environ, planted):
             changes = self.pb.prepare_env(state, claude, private)
             env = dict(os.environ)
-        self.assertFalse([k for k in env if k.startswith("ANTHROPIC_")], "every ANTHROPIC_* variable is gone")
+        self.assertFalse([k for k in env if k.startswith("ANTHROPIC_") or k.startswith("OP_SESSION_")], "every ANTHROPIC_* and OP_SESSION_* variable is gone")
+        for k in keys:
+            self.assertNotIn(k, env, k)
+            self.assertIn("unset " + k, changes)
         self.assertEqual(env["ROMP_MANAGER_PORT"], "1", "a dead port, not an absent variable (absent maps to the live default)")
         self.assertNotIn("ROMP_MANAGER_PID", env)
         self.assertNotIn("TMUX", env)
@@ -690,6 +816,29 @@ class InProcessChecks(unittest.TestCase):
                   "set ROMP_MANAGER_PORT", "set ROMP_MODEL_CATALOG", "set ROMP_CLI_SCOPE", "set ROMP_CLAUDE_BIN", "set ROMP_TMUX_AVAILABLE",
                   "set TMUX_TMPDIR", "set ROMP_SERVICE_ENV_FILE", "set ROMP_STATE_DIR", "set XDG_STATE_HOME", "set CLAUDE_CONFIG_DIR"):
             self.assertIn(c, changes)
+
+    def test_the_key_source_list_is_the_kernels_own(self):
+        # The names come from the code's constants, the way tests/conftest.py's floor is pinned on main: a
+        # provider that adds a credential name adds it there, and this fails until the tool drops it too. Read
+        # from the source text, so no romp module loads in this process.
+        ks = _module_constants(os.path.join(ROOT, "kernel", "keysource.py"), ("KEY_VAR", "REF_VAR", "CMD_VAR", "SOURCE_VARS", "OP_ENV_NAMES", "OP_ENV_PREFIX"))
+        sb = _module_constants(os.path.join(ROOT, "kernel", "sdk_backend.py"), ("AUTH_ENV_NAMES",))
+        expected = set(ks["SOURCE_VARS"]) | set(sb["AUTH_ENV_NAMES"]) | set(ks["OP_ENV_NAMES"]) | {"ROMP_EXPECTED_AUTH"}
+        self.assertEqual(set(self.pb.KEY_SOURCE_ENV), expected)
+        self.assertEqual(set(self.pb.KEY_SOURCE_ENV_PREFIXES), {"ANTHROPIC_", ks["OP_ENV_PREFIX"]})
+
+    # ── check_guards_held ────────────────────────────────────────────────────────────────────────
+    def test_a_refusal_still_on_record_at_the_end_of_the_run_is_an_error_naming_the_guard(self):
+        clean = {"spawns": [], "refused_writes": []}
+        self.assertIsNone(self.pb.check_guards_held(clean))
+        with self.assertRaises(self.pb.BenchError) as cm:
+            self.pb.check_guards_held({"spawns": ["subprocess.run ['date'] via kernel.py:1 _push"], "refused_writes": []})
+        self.assertIn("subprocess tripwire: 1 refused spawn(s): subprocess.run ['date']", str(cm.exception))
+        self.assertIn("push build:", str(cm.exception), "says where the swallowed traceback went")
+        with self.assertRaises(self.pb.BenchError) as cm:
+            self.pb.check_guards_held({"spawns": [], "refused_writes": ["/x/y.json"] * 5})
+        self.assertIn("_atomic_write guard: 5 refused write(s) outside the copy: /x/y.json, /x/y.json, /x/y.json, ...", str(cm.exception))
+        self.assertNotIn("tripwire", str(cm.exception))
 
     # ── make_backend ─────────────────────────────────────────────────────────────────────────────
     def _sbmod(self):

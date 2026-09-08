@@ -93,8 +93,11 @@ not.
 The numbers come from the real pages: the kernel's own HTTP handler serves the
 HTML, the shim, and the bundles from a `python3` subprocess under an isolated
 environment, the pattern of `tests/test_color_route.py` with the floors
-`tests/conftest.py` applies (the manager variables and the API-key variables
-are removed, the manager's key file and the boot model-catalog fetch are
+`tests/conftest.py` applies (the manager variables are removed and the manager
+port set to a dead one; every credential and key-source name conftest pops is
+removed, the API keys, the key reference and command, the token credentials,
+the auth declaration and 1Password's names; the manager's key file and the
+boot model-catalog fetch are
 pointed away, the Claude binary is `/bin/false`, the CLI scope is off, the
 postal peer bus is off, the serve token is minted for the run, and the
 subprocess exits when the bench does). Run state, the browser's profile
@@ -115,9 +118,17 @@ built by `build_session` and is too rich to fake, so record it.
 `tests/ui-bench.test.mjs` (`node --test tests/ui-bench.test.mjs`) covers the
 tool, including the recording client against a local WebSocket server and the
 Handler subprocess's isolation, and replays synthetic feed and timeline streams
-in a real browser. The browser tests skip, saying why, when no Chromium, no
-`python3` or no built `dist/` is available; with `ROMP_UI_BENCH_REQUIRE=1` in
-the environment (CI sets it) that skip is a failure instead.
+in a real browser. The browser tests skip, saying why, when no Chromium (either
+playwright's own, `cd vscode-extension && npx playwright install chromium`,
+which CI installs so the required check never rides the runner image's
+browser, or a system Google Chrome), no `python3` or no built `dist/` is
+available; with `ROMP_UI_BENCH_REQUIRE=1` in the environment (CI sets it) that
+skip is a failure instead. The replays assert
+what holds under any scheduling (frame totals, ordering, the handoff's
+accounting); the timing relations the bench measures (a settle margin, a render
+outweighing a parse, the CPU throttle's slowdown) are assertions only with
+`ROMP_UI_BENCH_TIMING=1`, which a loaded machine can fail and CI does not set;
+without it a relation that did not hold is a diagnostic line in the output.
 
 ## Test environment
 

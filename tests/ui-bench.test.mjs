@@ -10,7 +10,8 @@
 // feed and bars slots, contiguous delta revisions, a byte-stable stream), the --record client against a local
 // WebSocket server (the query, the cookie and Origin credential form, the ready handshake and nothing
 // else, the JSONL shape, the early-close and refusal errors), and the CPU-profile fold over a
-// synthetic .cpuprofile, and the per-user run directory with its dead-owner sweep. With python3 and a
+// synthetic .cpuprofile, the per-user run directory with its dead-owner sweep, and the CLI's argument
+// parsing with its browser-free commands. With python3 and a
 // built dist: the Handler subprocess's environment (seen through a stub interpreter that echoes it)
 // and its exit when the node process that started it is SIGKILLed. With a browser as well: a synthetic
 // feed stream replayed at a fixed gap (so most frames reach the bundle as their own delivery) and a
@@ -20,7 +21,10 @@
 // shim's own), and no console error, uncaught exception or failed resource load; the feed run also writes
 // a CPU profile whose windows are the deliveries. Those tests skip, naming
 // the reason, when a prerequisite is missing, unless ROMP_UI_BENCH_REQUIRE is set (CI sets it), when
-// the skip becomes a failure so a runner image that lost its browser cannot pass silently.
+// the skip becomes a failure so a runner image that lost its browser cannot pass silently. The replays
+// assert only what holds under any scheduling (totals, ordering, presence, the handoff's accounting
+// identity); the timing relations the bench exists to measure are assertions only under
+// ROMP_UI_BENCH_TIMING=1 and diagnostics otherwise (see TIMING below).
 //
 // Everything here is synthetic: the notes-api demo domain, placeholder uuids, a fixed clock.
 // Run: node --test tests/ui-bench.test.mjs
@@ -34,8 +38,8 @@ import { createRequire } from "node:module";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  APPS, DELTA_SEP, INIT_SCRIPT, REPO, STRIPPED_ENV, WHOLE_STATE_KINDS, aggregateProfile, assertTmpPath, attributeDeliveries, barsKeys, benchRoot, browserAvailability,
-  buildReport, classifyFrame, compareReports, deliveredKind, feedKeys, frameKey, launchBrowser, loadFrames, mergeAggregates, mergeWindows, percentile,
+  APPS, DELTA_SEP, INIT_SCRIPT, REPO, STRIPPED_ENV, STRIPPED_KEY_ENV, STRIPPED_KEY_ENV_PREFIXES, WHOLE_STATE_KINDS, aggregateProfile, assertTmpPath, attributeDeliveries, barsKeys, benchRoot, browserAvailability,
+  buildReport, classifyFrame, compareReports, deliveredKind, feedKeys, frameKey, launchBrowser, loadFrames, mergeAggregates, mergeWindows, parseArgs, percentile,
   rankProfile, recordFrames, refineAlignment, renderCompare, renderProfile, renderReport, replay, sourceLocator, startFront, startPageServer, streamSummary,
   stripProfileQueries, summarize, sweepDeadRuns, synthesizeFrames, writeFrames,
 } from "../tools/ui-bench.mjs";
@@ -180,6 +184,32 @@ test("buildReport folds runs per frame type with percentiles, attribution and en
   assert.match(text, /entry point .*not the bundle function/);
   assert.doesNotMatch(text, /warning:/);
   assert.doesNotMatch(text, /secret-looking/, "no query string from a page URL reaches the report");
+});
+
+test("attribution never files a row under the instrument's own file: its wrappers are labelled for what runs inside them, its other entry points as its own bookkeeping", () => {
+  // The instrument's settle stamp (a requestAnimationFrame callback reading the clock), its long-animation-frame
+  // observer callback and its end-of-run collector appear as entries only when a descheduled main thread stretches
+  // one past the threshold; the first two were each seen once on a loaded box, and the first form filed them as
+  // `ui-bench-instrument.js:(anonymous)`, as if the instrument had done pane work (review find, 2026-09-08).
+  const run = fakeRun({
+    handoff: "handler", deliveries: 1,
+    perFrame: [pf(0, "feed", 5000, 40, 90, "delivered", 38, 0)],
+    loaf: [
+      { start: 0, duration: 120, blocking: 70, scripts: [{ url: "ui-bench-instrument.js", fn: "rompBenchOnMessage", invoker: "DOMWebSocket.onmessage", duration: 100 }] },
+      { start: 200, duration: 60, blocking: 10, scripts: [{ url: "ui-bench-instrument.js", fn: "", invoker: "FrameRequestCallback", duration: 55 }] },
+      { start: 300, duration: 58, blocking: 8, scripts: [{ url: "ui-bench-instrument.js", fn: "", invoker: "PerformanceObserverCallback", duration: 52 }] },
+      { start: 400, duration: 51, blocking: 1, scripts: [{ url: "ui-bench-instrument.js", fn: "collect", invoker: "?", duration: 50 }] },
+    ],
+  });
+  const r = buildReport({ app: "feed", framesFile: "f", cpuThrottle: 1, fast: true, iters: 1, browser: "t", runs: [run] });
+  const keys = r.loaf.topScripts.map((s) => s.key);
+  assert.ok(!keys.some((k) => /ui-bench-instrument/.test(k)), `no row under the instrument's file: ${keys.join(" | ")}`);
+  assert.deepEqual(keys, [
+    "message handler (shim + bundle) <DOMWebSocket.onmessage>",
+    "instrument bookkeeping (the settle stamp's requestAnimationFrame; no pane work) <FrameRequestCallback>",
+    "instrument bookkeeping (the long-animation-frame observer's callback; no pane work) <PerformanceObserverCallback>",
+    "instrument bookkeeping (collect; no pane work) <?>",
+  ]);
 });
 
 test("buildReport keeps the shim's handler and the bundle's delivery apart when the shim hands frames over in its flush task, and counts the frames the queue coalesced", () => {
@@ -934,6 +964,74 @@ test("aggregateProfile on an empty or window-less profile yields nothing rather 
   assert.equal(aggregateProfile(SYNTH_PROFILE, [5000, 6000]).samples, 0);
 });
 
+// ── the CLI ──────────────────────────────────────────────────────────────────────────────────────
+
+test("parseArgs takes --key value pairs and the two bare flags, keeps positionals, and refuses a flag without its value", () => {
+  assert.deepEqual(parseArgs(["--replay", "feed", "--frames", "/tmp/f.jsonl", "--gap", "100", "--json", "/tmp/o.json"]),
+    { _: [], replay: "feed", frames: "/tmp/f.jsonl", gap: "100", json: "/tmp/o.json" });
+  assert.deepEqual(parseArgs(["--replay", "timeline", "--frames", "f", "--fast", "--cpu-throttle", "4", "--iters", "2", "--cpu-profile", "p"]),
+    { _: [], replay: "timeline", frames: "f", fast: true, "cpu-throttle": "4", iters: "2", "cpu-profile": "p" });
+  assert.deepEqual(parseArgs(["--compare", "a.json", "b.json"]), { _: ["b.json"], compare: "a.json" }, "the second report is a positional");
+  assert.deepEqual(parseArgs(["--help"]), { _: [], help: true });
+  assert.deepEqual(parseArgs([]), { _: [] });
+  assert.throws(() => parseArgs(["--replay"]), /--replay needs a value/);
+  assert.throws(() => parseArgs(["--gap", "--fast"]), /--gap needs a value/, "the next flag is not a value");
+});
+
+test("the CLI: --synthesize writes a frames file the tool reads back, --compare prints the deltas, no arguments print the usage, and a malformed command exits 1 naming the problem", { timeout: 60_000 }, () => {
+  // CONTRIBUTING documents these flags; this drives the entry point as a subprocess with the commands that need
+  // neither a browser nor python3 (review find, 2026-09-08: the CLI had no test of its own).
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "romp-ui-bench-cli-"));
+  const run = (...args) => spawnSync(process.execPath, [TOOL, ...args], { encoding: "utf8", timeout: 50_000 });
+  try {
+    const out = path.join(tmp, "synth", "feed.jsonl");
+    const r = run("--synthesize", "feed", "--cards", "12", "--out", out, "--seed", "3");
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /ui-bench: wrote \d+ synthetic frames \([\d.]+ [KM]?B\) for app=feed/);
+    const { meta, frames } = loadFrames(out);
+    assert.deepEqual(meta, { tool: "ui-bench", mode: "synthesize", app: "feed", cards: 12, seed: 3, synthetic: true });
+    assert.deepEqual(frames, synthesizeFrames("feed", 12, { seed: 3 }), "the file holds the synthesizer's stream for those arguments");
+    if (process.platform !== "win32") { assert.equal(mode(out), 0o600); assert.equal(mode(path.dirname(out)), 0o700); }
+    // --compare over two report files: the header names both pacings, the first-frame line carries the deltas
+    const mk = (settle) => ({
+      app: "feed", cpuThrottle: 1, fast: false, gapMs: 100, frames: { replayMs: 1000 }, handoff: { mode: "flush" },
+      first: { type: "feed", bytes: 5000, handlerMs: 1, bundleMs: settle / 2, settleMs: settle },
+      types: { feed: { count: 1, delivered: 1, bytes: 5000, handlerMs: { p50: 1, p90: 1, max: 1 }, bundleMs: { p50: settle / 2, p90: settle / 2, max: settle / 2 }, settleMs: { p50: settle, p90: settle, max: settle } } },
+      loaf: { count: 0, durationMs: 0, blockingMs: 0, maxMs: 0 }, end: { heapUsed: 1000, domElements: 100, layoutCount: 5, scriptMs: 50, taskMs: 80 }, console: { errors: [] },
+    });
+    const a = path.join(tmp, "a.json"), b = path.join(tmp, "b.json");
+    fs.writeFileSync(a, JSON.stringify(mk(200)));
+    fs.writeFileSync(b, JSON.stringify(mk(100)));
+    const c = run("--compare", a, b);
+    assert.equal(c.status, 0, c.stderr);
+    assert.match(c.stdout, /^compare: feed \(cpu x1, 100 ms gaps\) → feed \(cpu x1, 100 ms gaps\)/);
+    assert.match(c.stdout, /first content frame: .*settled 200 → 100 ms \(-100, -50%\)/);
+    const usage = run();
+    assert.equal(usage.status, 0);
+    assert.match(usage.stdout, /^usage:\n  node tools\/ui-bench\.mjs --record/);
+    assert.equal(run("--help").status, 0);
+    const nothing = run("--seed", "1");
+    assert.equal(nothing.status, 2, "flags without a command print the usage and exit 2");
+    assert.match(nothing.stdout, /^usage:/);
+    // each refusal is one line on stderr, exit 1, before anything is launched
+    for (const [args, why] of [
+      [["--replay", "feed"], "--replay needs --frames FILE"],
+      [["--replay", "feed", "--frames", out, "--fast", "--gap", "5"], "--fast and --gap are two pacings; give one"],
+      [["--record", "feed"], "--record needs --out"],
+      [["--compare", a], "--compare needs two report files"],
+      [["--synthesize", "chat", "--out", path.join(tmp, "chat.jsonl")], "chat frames are not synthesized"],
+      [["--synthesize", "feed", "--out"], "--out needs a value"],
+    ]) {
+      const bad = run(...args);
+      assert.equal(bad.status, 1, `${args.join(" ")}: ${bad.stdout}${bad.stderr}`);
+      assert.ok(bad.stderr.startsWith(`ui-bench: ${why}`), `${args.join(" ")} -> ${bad.stderr}`);
+    }
+    assert.ok(!fs.existsSync(path.join(tmp, "chat.jsonl")));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 // ── a real replay, when a browser is at hand ─────────────────────────────────────────────────────
 
 const avail = browserAvailability();
@@ -948,10 +1046,29 @@ const skipReplay = !avail.ok ? `no browser: ${avail.why}` : skipServer;
 const required = !!process.env.ROMP_UI_BENCH_REQUIRE;
 const gate = (why) => ({ skip: required ? false : why });
 const requireOrSkip = (why) => { if (why) assert.fail(`ROMP_UI_BENCH_REQUIRE is set and this test cannot run: ${why}`); };
+// The timing RELATIONS the replays measure (a settle margin's floor, a render outweighing a parse, the share
+// of profiler samples inside their windows, the CPU throttle's slowdown, a delta reaching the bundle on its
+// own at a given gap) hold on a quiet machine and are what the bench is for, but every one is a function of
+// the scheduler: a shared CI runner that deschedules the renderer's main thread across two frames coalesces
+// a delta, stretches a handler past a render, or starves the sampler. The upstream run of this file's first
+// form went red on exactly that (a 50 ms-gap replay asserting that no delta ever coalesces, 22 !== 23, while
+// the same sha passed elsewhere; review find, 2026-09-08). So the required CI step asserts only what must
+// hold under ANY scheduling: totals, ordering, presence, and the handoff's accounting identity (delivered +
+// coalesced + shim + queued = count). A relation is an assertion only under ROMP_UI_BENCH_TIMING=1 (a quiet
+// developer machine; CI never sets it); otherwise one that did not hold is a diagnostic line in the log,
+// never a failure.
+const TIMING = !!process.env.ROMP_UI_BENCH_TIMING;
+const timingCheck = (t) => (cond, msg) => {
+  if (TIMING) assert.ok(cond, msg);
+  else if (!cond) t.diagnostic(`timing relation not held on this run (informational; ROMP_UI_BENCH_TIMING=1 asserts it): ${msg}`);
+};
 
 test("the replays have a browser when ROMP_UI_BENCH_REQUIRE is set, and the log says which", (t) => {
-  // CI's only browser is the runner image's Google Chrome, found by the PATH scan below; this line in the step's
-  // log is what says so, and under ROMP_UI_BENCH_REQUIRE a runner without one fails here, before the replays.
+  // CI installs playwright's own Chromium (the build package-lock's playwright pins) before this step, so the
+  // required check never rides the runner image's Google Chrome (unpinned, auto-updated; review find,
+  // 2026-09-08); a developer's machine may have only a system Chrome, found by the PATH scan below. This line
+  // in the step's log says which one ran, and under ROMP_UI_BENCH_REQUIRE a runner without any fails here,
+  // before the replays.
   if (required) assert.ok(avail.ok, avail.why);
   t.diagnostic(`browser: ${avail.ok ? avail.how + (avail.channel ? ` (channel ${avail.channel})` : "") : "none: " + avail.why}`);
 });
@@ -1003,7 +1120,7 @@ test("ROMP_UI_BENCH_REQUIRE turns the browser skip into a failure that names the
 
 // ── the Handler subprocess ───────────────────────────────────────────────────────────────────────
 
-test("startPageServer hands the Handler an isolated environment: a minted token, no manager, no API keys, no key reference, no CLI scope, no postal peers", { timeout: 30_000 }, async () => {
+test("startPageServer hands the Handler an isolated environment: a minted token, a dead manager port, no key source or credential conftest pops, no CLI scope, no postal peers", { timeout: 30_000 }, async () => {
   // A stub interpreter stands in for python3: it echoes its environment, announces a port, and blocks on
   // stdin the way the Handler's watcher thread does. So this needs neither python nor the kernel.
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "romp-ui-bench-env-"));
@@ -1015,9 +1132,18 @@ test("startPageServer hands the Handler an isolated environment: a minted token,
     // the manager's, the live kernel's ports and state root, the perf switch and tmux's.
     const NEVER = ["ROMP_MANAGER_PORT", "ROMP_MANAGER_PID", "ROMP_SUPERVISED", "ROMP_STATE_DIR", "ROMP_SERVE_PORT", "ROMP_KERNEL_PORT", "ROMP_PERF", "TMUX"];
     assert.deepEqual([...STRIPPED_ENV].sort(), [...NEVER].sort(), "the tool's list is exactly this one");
-    const planted = { UI_BENCH_STUB_ENV_OUT: envOut, ANTHROPIC_PROBE_FOR_THE_TEST: "must-not-cross", ROMP_CLAUDE_BIN: "/nonexistent/claude", ROMP_POSTAL_PEERS: "1",
-      ROMP_SERVICE_ENV_FILE: path.join(tmp, "planted-service.env"), ROMP_MODEL_CATALOG: "on", ROMP_API_KEY_REF: "planted-reference", ROMP_CLI_SCOPE: "1",
-      ...Object.fromEntries(NEVER.map((k) => [k, k === "TMUX" ? "/tmp/tmux-0/default,1,0" : k === "ROMP_STATE_DIR" ? path.join(tmp, "planted-state") : "1"])) };
+    // Every key-source and credential name tests/conftest.py pops before any test (its KEY_SOURCE_ENV_NAMES and
+    // KEY_SOURCE_ENV_PREFIXES, plus the ANTHROPIC_ prefix): a replay run from inside a romp session inherits all
+    // of them from the manager. The first form of this test planted ANTHROPIC_* and the key reference only, so a
+    // Handler holding the key command, the OAuth token and 1Password's names passed it (review find, 2026-09-08).
+    const NEVER_KEYS = ["ANTHROPIC_API_KEY", "ROMP_API_KEY_REF", "ROMP_API_KEY_CMD", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ROMP_EXPECTED_AUTH",
+      "OP_SERVICE_ACCOUNT_TOKEN", "OP_CONNECT_HOST", "OP_CONNECT_TOKEN", "OP_ACCOUNT"];
+    assert.deepEqual([...STRIPPED_KEY_ENV].sort(), [...NEVER_KEYS].sort(), "the tool's key-source list is exactly conftest's");
+    assert.deepEqual([...STRIPPED_KEY_ENV_PREFIXES].sort(), ["ANTHROPIC_", "OP_SESSION_"]);
+    const plantedKeys = { ...Object.fromEntries(NEVER_KEYS.map((k) => [k, `planted-${k.toLowerCase()}`])), OP_SESSION_testaccount: "planted-op-session", ANTHROPIC_PROBE_FOR_THE_TEST: "must-not-cross" };
+    const planted = { UI_BENCH_STUB_ENV_OUT: envOut, ...plantedKeys, ROMP_CLAUDE_BIN: "/nonexistent/claude", ROMP_POSTAL_PEERS: "1",
+      ROMP_SERVICE_ENV_FILE: path.join(tmp, "planted-service.env"), ROMP_MODEL_CATALOG: "on", ROMP_CLI_SCOPE: "1",
+      ...Object.fromEntries(NEVER.map((k) => [k, k === "TMUX" ? "/tmp/tmux-0/default,1,0" : k === "ROMP_STATE_DIR" ? path.join(tmp, "planted-state") : k === "ROMP_MANAGER_PORT" ? "7432" : "1"])) };
     const srv = await withEnv(planted, () => startPageServer({ dist, python: stub }));
     try {
       assert.equal(srv.port, 1);
@@ -1034,7 +1160,7 @@ test("startPageServer hands the Handler an isolated environment: a minted token,
       assert.equal(env.ROMP_MODEL_CATALOG, "off", "no boot fetch of the Models API");
       assert.equal(env.ROMP_CLAUDE_BIN, "/bin/false", "a binary that runs nothing; removing the variable would resolve the real CLI");
       assert.equal(env.ROMP_CLI_SCOPE, "0", "no route that constructs the SDK backend probes systemd-run");
-      assert.equal(env.ROMP_API_KEY_REF, undefined, "an inherited key reference never reaches the Handler");
+      for (const k of Object.keys(plantedKeys)) assert.equal(env[k], undefined, `${k} was planted and must not reach the Handler (a key source or credential conftest pops)`);
       assert.equal(path.dirname(srv.tmp), srv.root, "the run directory sits under the per-user parent");
       assert.equal(path.basename(srv.root), `romp-ui-bench-${UID}`);
       assert.equal(fs.readFileSync(path.join(srv.tmp, "owner.pid"), "utf8").trim(), String(process.pid), "the run records its owner for the dead-owner sweep");
@@ -1043,8 +1169,11 @@ test("startPageServer hands the Handler an isolated environment: a minted token,
       assert.ok(env.XDG_STATE_HOME.startsWith(srv.tmp + path.sep), "a private state root");
       assert.ok(env.TMUX_TMPDIR.startsWith(srv.tmp + path.sep));
       assert.ok(fs.readFileSync(envOut, "utf8").includes(`\nTMPARG ${srv.tmp}\n`), "the subprocess is told its directory so it can remove it");
-      for (const k of Object.keys(env)) assert.ok(!k.startsWith("ANTHROPIC_"), `${k} must not reach the Handler`);
-      for (const k of NEVER) assert.equal(env[k], undefined, `${k} was planted and must not reach the Handler`);
+      for (const k of Object.keys(env)) assert.ok(!k.startsWith("ANTHROPIC_") && !k.startsWith("OP_SESSION_"), `${k} must not reach the Handler`);
+      for (const k of NEVER) if (k !== "ROMP_MANAGER_PORT") assert.equal(env[k], undefined, `${k} was planted and must not reach the Handler`);
+      // conftest's form of the manager floor: a DEAD port, never an absent variable (one kernel consumer maps an
+      // absent port to the default, live, one), so the planted 7432 comes out as 1, not as nothing.
+      assert.equal(env.ROMP_MANAGER_PORT, "1", "the manager port is a dead one, not absent");
       assert.equal(env.UI_BENCH_STUB_ENV_OUT, envOut, "unrelated variables pass through");
       // a second run mints its own token: the Handler is the kernel's whole route surface on a loopback port
       const other = await startPageServer({ dist, python: stub });
@@ -1165,6 +1294,7 @@ test("the front server's /ws admits the page's own origin only, and no other pat
   });
   try {
     assert.deepEqual(await attempt("/ws?app=feed", "http://evil.example"), { status: 403 }, "a foreign Origin is refused");
+    assert.deepEqual(await attempt("/ws?app=feed"), { status: 403 }, "and so is a client that sends no Origin at all: a browser page always sends one, so that is some other local process, and the frames it would receive may be a recording of real session data (review find, 2026-09-08)");
     assert.deepEqual(await attempt("/other", `http://127.0.0.1:${front.port}`), { status: 403 }, "no path but /ws upgrades");
     assert.deepEqual(reached, [], "neither reached the replay's socket handler");
     assert.deepEqual(await attempt("/ws?app=feed", `http://127.0.0.1:${front.port}`), { message: "front /ws" }, "the page's own origin upgrades");
@@ -1274,8 +1404,9 @@ const REPLAY_PACING = { feed: { gapMs: 100 }, timeline: { fast: true } };
 
 for (const app of ["feed", "timeline"]) {
   test(`replay: a synthetic ${app} stream renders in headless Chromium, every frame type measured and accounted for by the handoff, no console errors`,
-    { ...gate(skipReplay), timeout: 180_000 }, async () => {
+    { ...gate(skipReplay), timeout: 180_000 }, async (t) => {
       requireOrSkip(skipReplay);
+      const timing = timingCheck(t);
       const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "romp-ui-bench-replay-"));
       try {
         const frames = synthesizeFrames(app, 40);
@@ -1337,26 +1468,28 @@ for (const app of ["feed", "timeline"]) {
         assert.equal(report.handoff.unattributed, 0, "no delivery the frames do not explain (federation re-dispatches every frame inside its inbound; that is one delivery, not two)");
         assert.deepEqual(report.handoff.deliverySeams, { inbound: report.handoff.deliveries }, "every delivery came through federation's published inbound, none through the MessageEvent fallback");
         // The columns are measurements, not constants: the shim's parse of the first content frame is measurable at
-        // performance.now() resolution and cheaper than the bundle's render of it; the settle of a keepalive, which the
-        // shim answers with no render, is the two animation frames after receipt, at least one frame interval.
+        // performance.now() resolution. How the measurements RELATE (the parse cheaper than the render, a settle
+        // margin of two animation frames, a keepalive's settle at least one frame interval, how many deltas reach the
+        // bundle on their own at this gap, the forced collection freeing garbage) is the scheduler's to decide on a
+        // loaded runner, so those are timing() relations: asserted under ROMP_UI_BENCH_TIMING, diagnostics otherwise.
         assert.ok(report.first.handlerMs > 0, `the first frame's handler time is a measurement: ${report.first.handlerMs}`);
         assert.ok(report.types[report.first.type].handlerMs.max > 0);
         if (report.first.handoff === "delivered") {
-          assert.ok(report.first.handlerMs < report.first.bundleMs, `the shim's parse is cheaper than the bundle's render: ${JSON.stringify(report.first)}`);
-          assert.ok(report.first.settleMs - report.first.bundleMs - report.first.handlerMs >= 5, `settle waits for the main thread after the delivery: ${JSON.stringify(report.first)}`);
+          timing(report.first.handlerMs < report.first.bundleMs, `the shim's parse is cheaper than the bundle's render: ${JSON.stringify(report.first)}`);
+          timing(report.first.settleMs - report.first.bundleMs - report.first.handlerMs >= 5, `settle waits for the main thread after the delivery: ${JSON.stringify(report.first)}`);
         }
-        assert.ok(report.types.ka.settleMs.p50 >= 10, `a keepalive settles two animation frames after receipt, not when its handler returns: ${JSON.stringify(report.types.ka.settleMs)}`);
+        timing(report.types.ka.settleMs.p50 >= 10, `a keepalive settles two animation frames after receipt, not when its handler returns: ${JSON.stringify(report.types.ka.settleMs)}`);
         const content = frames.length - report.types.ka.count;
         if (pacing.fast) {
-          assert.ok(report.handoff.coalesced >= 1, `back-to-back, frames queue together and the whole-state kinds coalesce: ${JSON.stringify(report.handoff)}`);
-          assert.ok(report.handoff.delivered < content, "so fewer deliveries than content frames");
+          timing(report.handoff.coalesced >= 1, `back-to-back, frames queue together and the whole-state kinds coalesce: ${JSON.stringify(report.handoff)}`);
+          timing(report.handoff.delivered < content, "so fewer deliveries than content frames");
         } else {
           assert.equal(report.types.feed.delivered + report.types.feed.coalesced, 1);
-          assert.ok(report.types["delta:feed"].delivered >= report.types["delta:feed"].count / 2, `at ${pacing.gapMs} ms gaps most deltas reach the bundle on their own: ${JSON.stringify(report.types["delta:feed"])}`);
-          assert.ok(report.types["delta:feed"].bundleMs.p50 < report.types.feed.settleMs.max, "a delta's render is cheaper than the whole board's settle");
+          timing(report.types["delta:feed"].delivered >= report.types["delta:feed"].count / 2, `at ${pacing.gapMs} ms gaps most deltas reach the bundle on their own: ${JSON.stringify(report.types["delta:feed"])}`);
+          timing(report.types["delta:feed"].bundleMs.p50 < report.types.feed.settleMs.max, "a delta's render is cheaper than the whole board's settle");
         }
         assert.equal(report.end.afterGc, true);
-        if (app === "feed") assert.ok(report.end.heapUsed < report.end.heapBeforeGc, `the forced collection freed the replay's garbage: ${report.end.heapBeforeGc} before, ${report.end.heapUsed} after`);
+        if (app === "feed") timing(report.end.heapUsed < report.end.heapBeforeGc, `the forced collection freed the replay's garbage: ${report.end.heapBeforeGc} before, ${report.end.heapUsed} after`);
         assert.equal(report.first.type, app === "feed" ? "feed" : "data");
         assert.ok(report.first.bytes > 1000);
         assert.ok(["delivered", "coalesced"].includes(report.first.handoff), `the first content frame reached the bundle: ${JSON.stringify(report.first)}`);
@@ -1396,13 +1529,16 @@ for (const app of ["feed", "timeline"]) {
           assert.deepEqual(cp.files, [cpuProfile]);
           const raw = JSON.parse(fs.readFileSync(cpuProfile, "utf8"));
           for (const k of ["nodes", "startTime", "endTime", "samples", "timeDeltas"]) assert.ok(k in raw, `.cpuprofile has ${k}`);
-          assert.ok(raw.samples.length > 100, `enough samples (${raw.samples.length})`);
+          assert.ok(raw.samples.length > 0, "the profile holds samples");
+          // The sampler is a thread of its own: how densely it sampled, and whether its clock could be refined against
+          // the wrappers' windows, are the scheduler's on a loaded runner (timing relations, like the ones above).
+          timing(raw.samples.length > 100, `enough samples (${raw.samples.length})`);
           assert.equal(cp.samplingIntervalUs, 500);
           const deltas = raw.timeDeltas.slice().sort((a, b) => a - b);
-          assert.ok(deltas[deltas.length >> 1] < 750, `the profiler sampled at the requested 500 us, not V8's default millisecond (median delta ${deltas[deltas.length >> 1]} us)`);
-          assert.equal(cp.alignRefined, true, "the wrappers' samples refined the clock alignment");
+          timing(deltas[deltas.length >> 1] < 750, `the profiler sampled at the requested 500 us, not V8's default millisecond (median delta ${deltas[deltas.length >> 1]} us)`);
+          timing(cp.alignRefined === true, "the wrappers' samples refined the clock alignment");
           assert.ok(cp.alignMs > 0 && cp.alignMs <= cp.alignBoundMs, `the refined uncertainty (${cp.alignMs} ms) is within the bracketing bound (${cp.alignBoundMs} ms)`);
-          assert.ok(cp.wrapperSamplesInWindows >= 0.9, `the wrappers' samples fall inside the handler, flush and delivery windows (${cp.wrapperSamplesInWindows})`);
+          timing(cp.wrapperSamplesInWindows >= 0.9, `the wrappers' samples fall inside the handler, flush and delivery windows (${cp.wrapperSamplesInWindows})`);
           assert.equal(cp.sourceMaps, true);
           assert.deepEqual(cp.sourceMapsMissing, [], "every profiled bundle had its map beside it");
           assert.ok(cp.sourceMapsLoaded.includes("feed.js"), cp.sourceMapsLoaded.join(", "));
@@ -1420,10 +1556,10 @@ for (const app of ["feed", "timeline"]) {
           const first = cp.windows.find((w) => w.label.split(" + ").includes("first content frame"));
           assert.equal(first.type, "feed");
           assert.equal(first.window, "delivery", "the window is the delivery that carried the frame, where the bundle's render runs");
-          assert.ok(first.windowMs > first.handlerMs, `the delivery (${first.windowMs} ms) outweighs the shim's handler (${first.handlerMs} ms)`);
-          assert.ok(first.samples > 0 && first.topSelf.length > 0, "the first frame's delivery window has samples");
-          assert.ok(Math.abs(first.sampledMs - first.windowMs) <= Math.max(5, first.windowMs * 0.25), `the window's sampled time (${first.sampledMs}) tracks the delivery's time (${first.windowMs})`);
-          assert.ok(first.topSelf.some((f) => /^feed\.js:/.test(f.key)), `the bundle's functions are what the window holds: ${first.topSelf.slice(0, 3).map((f) => f.key).join(", ")}`);
+          timing(first.windowMs > first.handlerMs, `the delivery (${first.windowMs} ms) outweighs the shim's handler (${first.handlerMs} ms)`);
+          timing(first.samples > 0 && first.topSelf.length > 0, "the first frame's delivery window has samples");
+          timing(Math.abs(first.sampledMs - first.windowMs) <= Math.max(5, first.windowMs * 0.25), `the window's sampled time (${first.sampledMs}) tracks the delivery's time (${first.windowMs})`);
+          if (first.samples > 0) assert.ok(first.topSelf.some((f) => /^feed\.js:/.test(f.key)), `the bundle's functions are what the window holds: ${first.topSelf.slice(0, 3).map((f) => f.key).join(", ")}`);
           assert.match(text, /cpu profile: \d+ samples over/);
           assert.match(text, /window: first content frame[^\n]*\(feed, [^\n]*: delivery [\d.]+ ms, shim handler [\d.]+ ms/);
         } else {
@@ -1489,8 +1625,9 @@ test("replay: a delta the shim refuses stays the shim's, and a frame the pane th
   }
 });
 
-test("replay: --iters pools runs and --cpu-throttle slows the page", { ...gate(skipReplay), timeout: 180_000 }, async () => {
+test("replay: --iters pools runs and --cpu-throttle slows the page", { ...gate(skipReplay), timeout: 180_000 }, async (t) => {
   requireOrSkip(skipReplay);
+  const timing = timingCheck(t);
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "romp-ui-bench-replay-iters-"));
   try {
     const frames = synthesizeFrames("timeline", 40);
@@ -1505,12 +1642,14 @@ test("replay: --iters pools runs and --cpu-throttle slows the page", { ...gate(s
     assert.equal(pooled.types.data.settleMs.n, 8);
     assert.match(renderReport(pooled), /^ui-bench timeline: 36 frames, [\d.]+ KB, replay [\d.]+ ms \(back-to-back\), cpu x1, 2 iterations/);
     // Chromium's CPU throttle is a deterministic emulation (the renderer's main thread runs a quarter of the time),
-    // so the cumulative script time of the same replay grows by about the rate; the floor is half of it, wide enough
-    // for a loaded runner that inflates the unthrottled run (measured 2.3 to 4.2 here).
+    // so the cumulative script time of the same replay grows by about the rate; the floor is half of it. Measured
+    // 1.7 to 6.2 under load: a host that already deschedules the thread shrinks the wall-clock ratio, so the floor
+    // is a timing relation, asserted under ROMP_UI_BENCH_TIMING and a diagnostic otherwise (review find, 2026-09-08).
     const slow = await replay({ app: "timeline", framesFile: file, fast: true, iters: 1, cpuThrottle: 4, log: () => {} });
     assert.equal(slow.cpuThrottle, 4);
     assert.match(renderReport(slow), /cpu x4, 1 iteration,/);
-    assert.ok(slow.end.scriptMs >= 1.5 * pooled.end.scriptMs, `script time under a 4x throttle (${slow.end.scriptMs} ms) against unthrottled (${pooled.end.scriptMs} ms)`);
+    assert.ok(slow.end.scriptMs > 0 && pooled.end.scriptMs > 0, "script time was measured in both runs");
+    timing(slow.end.scriptMs >= 1.5 * pooled.end.scriptMs, `script time under a 4x throttle (${slow.end.scriptMs} ms) against unthrottled (${pooled.end.scriptMs} ms)`);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

@@ -66,7 +66,9 @@ Every bug fix or feature change lands with a test (repo rule). Five suites:
   Run `node --test tests/ui-bench.test.mjs` from the repo root after
   `cd vscode-extension && npm ci && npm run build`. The browser tests skip,
   saying why, when no Chromium, `python3` or dist is present;
-  `ROMP_UI_BENCH_REQUIRE=1` (CI) turns that skip into a failure.
+  `ROMP_UI_BENCH_REQUIRE=1` (CI) turns that skip into a failure, and
+  `ROMP_UI_BENCH_TIMING=1` (a quiet machine, never CI) also asserts the timing
+  relations the replays otherwise report as diagnostics.
 
 **Temp files and git are hermetic, suite-wide.** Two mechanisms, one per half.
 `tests/__init__.py` wraps `tempfile.mkdtemp` so every directory the test process

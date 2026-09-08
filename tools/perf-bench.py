@@ -10,9 +10,11 @@ same copy and `--compare` prints the per-benchmark deltas.
 
 Usage (every path below is an example; the copy lives OUTSIDE any repo):
 
-    # 1. copy the state directory, leaving out the SDK venv (hundreds of MB, not data) and the two
-    #    credential files the bench never needs
+    # 1. copy the state directory, leaving out the SDK venv (hundreds of MB, not data) and the
+    #    credential files the bench never needs (MIRROR_IGNORE below: the serve token, the Web Push key
+    #    and subscriptions, the remote kernels' tokens)
     rsync -a --exclude sdkvenv --exclude serve-token --exclude push-vapid.json \\
+        --exclude push-subscriptions.json --exclude remotes.json \\
         ~/.local/state/romp/ /tmp/romp-state-copy/
     #    transcripts are read from Claude's own directory; for a strict A/B (an active session's
     #    transcript grows between runs) copy that too and pass --claude-dir:
@@ -27,7 +29,7 @@ Usage (every path below is an example; the copy lives OUTSIDE any repo):
 
 The tool REFUSES the live default state directory ($ROMP_STATE_DIR, $XDG_STATE_HOME/romp, or
 ~/.local/state/romp) unless `--i-know-this-is-live` is passed — and even then it never runs the
-kernel against that directory: it mirrors the directory to a fresh temp copy (sdkvenv and the two
+kernel against that directory: it mirrors the directory to a fresh temp copy (sdkvenv and the
 credential files excluded) and benches the mirror, so the live directory is only ever read. The
 mirror is removed afterwards unless `--keep-mirror`.
 
@@ -108,7 +110,9 @@ error, never a silent skip):
     is set to a dead port rather than unset — an ABSENT value maps to the default, live, port in
     one consumer; see tests/conftest.py), so nothing this process does can reach the live manager.
   * ROMP_MODEL_CATALOG=off, ROMP_CLI_SCOPE=0, ROMP_CLAUDE_BIN=/bin/false, the service env file
-    pointed at a missing path, every ANTHROPIC_* variable removed.
+    pointed at a missing path, and every key-source and credential name tests/conftest.py pops removed
+    (KEY_SOURCE_ENV below: the API keys, the key reference and command, the token credentials, the auth
+    declaration and 1Password's names, plus every ANTHROPIC_* and OP_SESSION_* name).
   * Functions that would start a network fetch, a background parse thread, a desktop notification,
     a Web Push or a badge push are replaced with recorders (they are not builders; the push path
     reaches them from _cached_feed and the pricing table).
@@ -116,6 +120,9 @@ error, never a silent skip):
     except the kernel's read-only local git queries: `git rev-parse` and `git ls-files` (the chat
     build's path-link pass) and the pair `git remote get-url` (the file-link route; the pair only —
     `git remote` also has writing subcommands, and those trip). Those run and are counted per build.
+    "Every loaded romp module" is the kernel, the judge, the event model, the SDK backend, and every
+    sibling kernel/ module one of them loaded (keysource among them); the report's `neutralized` list
+    names each one.
     The kernel caches their answers only for a cwd inside a git checkout (on the index and tree
     mtimes, and the config file's mtime for the remote); for any other cwd it re-runs `git ls-files`
     on EVERY build, so the per-build count beside the build_session rows says how much of a sample is
@@ -125,6 +132,10 @@ error, never a silent skip):
     glibc consult the name service — AF_UNIX connects to nscd and systemd-userdb, local, not network.
   * Every kernel _atomic_write is checked to land under the state copy; the copy's files are
     fingerprinted before and after so the output lists exactly what the run wrote.
+  * A guard that trips inside a call the kernel CATCHES is still an error: _push wraps its whole build in
+    `except Exception` and returns, so a refused spawn or write during the push rows would otherwise be
+    timed as an aborted cycle and the run would exit 0. Every refusal is recorded before it raises, and a
+    run that ends with one on record fails naming the guard (check_guards_held).
 
 Verification: run once under `strace -f -e trace=execve,connect`. Expected: the interpreter's own
 execve, plus (without `--no-git`) one execve of git per counted git query and nothing else; connect()
@@ -155,8 +166,14 @@ from pathlib import Path
 
 SCHEMA = 2
 DEFAULT_CLIENTS = "chat,feed,timeline"
+_TOOL_FILE = os.path.realpath(__file__)          # the tripwire's frame filter excludes this file, by path
 PROFILE_TOP = 25
-MIRROR_IGNORE = ("sdkvenv", "serve-token", "push-vapid.json")
+# What a mirror of the live directory (and the rsync recipe above) leaves out: the SDK venv, and every file the
+# kernel writes 0600 because it holds a credential: the serve token, the Web Push VAPID key, the Web Push
+# subscriptions (each carries a browser's auth secret) and the remote kernels' serve tokens. The bench reads
+# none of them (the notification functions are recorders; remotes are re-attached only at kernel boot); the
+# first form of this list copied the last two into every mirror (review find, 2026-09-08).
+MIRROR_IGNORE = ("sdkvenv", "serve-token", "push-vapid.json", "push-subscriptions.json", "remotes.json")
 # The kernel-side caches a freshly started kernel lacks and build_session reads (all plain dicts, no
 # lock). Missing names are skipped: older revisions lack some, and the assembly-counter check below
 # is what proves a sample cold, not this list.
@@ -166,11 +183,23 @@ COLD_KERNEL_CACHES = ("_parse_cache", "_built_chat", "_prev_chat_events", "_prev
                       "_machine_cut_cache")
 # (cache, its lock) in the event model: the parse layer under _parse. Missing names are skipped here too
 # (the trailing-record cache is newer than the assembly counters this tool requires); cold_caches in the
-# report says which of both lists were emptied, and the test pins that list at HEAD.
+# report says which of both lists were emptied, and tests/test_perf_bench.py checks the ones the cold
+# proof rests on.
 COLD_EM_CACHES = (("_JSONL_CACHE", "_JSONL_CACHE_LOCK"), ("_ASM_CACHE", "_ASM_LOCK"), ("_TRAILING_CACHE", "_TRAILING_LOCK"))
 WORLD_KEYS = (("liveness.live", "live rows"), ("live_transcripts.count", "transcripts"), ("iters", "iters"),
               ("sessions_requested", "sessions"), ("git_queries.answered_as_failure", "no-git"),
-              ("push_rebuilds", "push_steady rebuild samples"))
+              ("push_rebuilds", "push_steady rebuild samples"),
+              ("error", "run error"))      # a run that stopped on a guard is flagged before its rows are diffed
+# Every key-source and credential name tests/conftest.py pops before any test runs (its KEY_SOURCE_ENV_NAMES
+# and KEY_SOURCE_ENV_PREFIXES: keysource.SOURCE_VARS, sdk_backend.AUTH_ENV_NAMES, the auth declaration,
+# keysource.OP_ENV_NAMES and OP_ENV_PREFIX), removed here before the import for the same reason: every shell
+# under a romp-managed session inherits the manager's credentials, and keysource selects a key COMMAND or
+# REFERENCE straight from the environment when the isolated env file is absent. The first form dropped
+# ANTHROPIC_* only (review find, 2026-09-08); tests/test_perf_bench.py pins this list against the kernel's
+# own constants.
+KEY_SOURCE_ENV = ("ANTHROPIC_API_KEY", "ROMP_API_KEY_REF", "ROMP_API_KEY_CMD", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+                  "ROMP_EXPECTED_AUTH", "OP_SERVICE_ACCOUNT_TOKEN", "OP_CONNECT_HOST", "OP_CONNECT_TOKEN", "OP_ACCOUNT")
+KEY_SOURCE_ENV_PREFIXES = ("ANTHROPIC_", "OP_SESSION_")
 
 
 class BenchError(Exception):
@@ -239,7 +268,7 @@ def prepare_env(state, claude_dir, private_dir):
         if k in os.environ:
             os.environ.pop(k)
             changes.append("unset " + k)
-    for k in [k for k in os.environ if k.startswith("ANTHROPIC_")]:
+    for k in [k for k in os.environ if k in KEY_SOURCE_ENV or k.startswith(KEY_SOURCE_ENV_PREFIXES)]:
         os.environ.pop(k)
         changes.append("unset " + k)
     tmux_dir = os.path.join(private_dir, "tmux")
@@ -311,7 +340,10 @@ class SubprocessTripwire:
                     if self._no_git:
                         return self._real.CompletedProcess(argv, 1, "" if k.get("text") else b"", "" if k.get("text") else b"")
                     return self._real.run(*a, **k)
-                where = [fr for fr in traceback.extract_stack()[:-1] if "perf-bench" not in fr.filename][-4:]
+                # the caller's frames, this file's own excluded by identity: a substring match on the tool's name
+                # emptied the attribution for any checkout or state path that spelled it (found by the test whose
+                # scratch kernel lives under a perf-bench-* directory, 2026-09-08)
+                where = [fr for fr in traceback.extract_stack()[:-1] if os.path.realpath(fr.filename) != _TOOL_FILE][-4:]
                 via = " <- ".join("%s:%d %s" % (os.path.basename(fr.filename), fr.lineno, fr.name) for fr in reversed(where))
                 self._log.append("subprocess.%s %r via %s" % (name, argv, via))
                 raise BenchError("perf-bench tripwire: subprocess.%s called (argv %r) via %s" % (name, argv, via))
@@ -323,8 +355,8 @@ def install_guards(km, sbmod, no_git=False):
     """Neutralize the non-builder side effects the push path can reach; return (names, recorder).
     A safety target the kernel revision lacks is an error: a renamed notification function would
     otherwise leave the real one in place (Web Push to every subscription in the copy's store)."""
-    rec = {"spawns": [], "notifications": [], "atomic_writes": [], "tripwires": [], "nss": {}, "warm_calls": [],
-           "thread_starts": 0}
+    rec = {"spawns": [], "notifications": [], "atomic_writes": [], "refused_writes": [], "tripwires": [], "nss": {},
+           "warm_calls": [], "thread_starts": 0}
     names = []
 
     def stub(attr, fn):
@@ -343,8 +375,19 @@ def install_guards(km, sbmod, no_git=False):
     stub("_push_notify", lambda t, b, *a, **k: rec["notifications"].append(("push", t)))
     stub("_push_forward", lambda evs, *a, **k: rec["notifications"].append(("forward", len(evs))))
     stub("_badge_push", lambda n, *a, **k: rec["notifications"].append(("badge", n)))
-    for mod in (km, getattr(km, "jd", None), getattr(km, "em", None), sbmod):
-        if mod is not None and getattr(mod, "subprocess", None) is not None:
+    # Every loaded romp module: the four the harness drives, plus every sibling of kernel.py that one of them
+    # loaded (sdk_backend loads keysource, whose key command is a subprocess). The first form guarded the four
+    # only, while the docstring promised every loaded module (review find, 2026-09-08).
+    mods = [km, getattr(km, "jd", None), getattr(km, "em", None), sbmod]
+    kfile = getattr(km, "__file__", None)
+    if isinstance(kfile, str):
+        kdir = os.path.dirname(os.path.realpath(kfile))
+        for m in list(sys.modules.values()):
+            f = getattr(m, "__file__", None)
+            if isinstance(f, str) and os.path.dirname(os.path.realpath(f)) == kdir and not any(m is x for x in mods):
+                mods.append(m)
+    for mod in mods:
+        if mod is not None and isinstance(getattr(mod, "subprocess", None), type(sys)):
             tw = SubprocessTripwire(_real_subprocess, rec["spawns"], no_git=no_git)
             mod.subprocess = tw
             rec["tripwires"].append(tw)
@@ -355,6 +398,7 @@ def install_guards(km, sbmod, no_git=False):
     def guarded(path, text, mode=None):
         p = Path(path).resolve()
         if state not in p.parents and p != state:
+            rec["refused_writes"].append(str(p))      # on record BEFORE the raise: _push swallows the exception
             raise BenchError("perf-bench: _atomic_write outside the state copy: %s" % p)
         rec["atomic_writes"].append(str(p.relative_to(state)))
         return real_aw(path, text, mode) if mode is not None else real_aw(path, text)
@@ -378,6 +422,26 @@ def install_guards(km, sbmod, no_git=False):
         return real_start(self, *a, **k)
     threading.Thread.start = counted_start
     return names, rec
+
+
+def check_guards_held(rec):
+    """A guard that tripped is an error even when the kernel caught it. The tripwire and the write guard raise
+    BenchError, but _push wraps its whole build in `except Exception` (it writes `push build: <traceback>` to
+    stderr and returns), so a spawn or an out-of-copy write attempted during the push rows was refused and the
+    cycle went on, timed with its frames dropped, while the run exited 0 with no `error` in the JSON (review
+    find, 2026-09-08). Every refusal is recorded before its raise, so an entry still on record at the end of
+    the run means a caller swallowed it; the run then ends the way any other tripped guard ends it (the rows
+    so far print, the JSON carries `error`, the exit status is 1), naming the guard."""
+    spawns, writes = rec["spawns"], rec["refused_writes"]
+    if not spawns and not writes:
+        return
+    what = []
+    if spawns:
+        what.append("subprocess tripwire: %d refused spawn(s): %s" % (len(spawns), "; ".join(spawns[:3]) + ("; ..." if len(spawns) > 3 else "")))
+    if writes:
+        what.append("_atomic_write guard: %d refused write(s) outside the copy: %s" % (len(writes), ", ".join(writes[:3]) + (", ..." if len(writes) > 3 else "")))
+    raise BenchError("a guard tripped inside a call the kernel catches (its traceback is on stderr under `push build:`), so the "
+                     "push rows timed an aborted cycle; " + "; ".join(what))
 
 
 def git_calls_total(rec):
@@ -1035,6 +1099,8 @@ def run(args, state, mirror_of, out, private):
     out["git_queries"] = {"answered_as_failure": bool(args.no_git), "calls": git_calls_total(rec)}
     out["nss_lookups"] = dict(rec["nss"])
     out["threads_new"] = sorted({t.name for t in threading.enumerate()} - threads_before)
+    out["refused_writes"] = list(rec["refused_writes"])
+    check_guards_held(rec)
     return out
 
 
@@ -1107,9 +1173,9 @@ def render_text(out, profile):
     if cc:
         L.append("caches emptied before each cold build_session sample: kernel %s; event model %s"
                  % (", ".join(cc.get("kernel") or []) or "none", ", ".join(cc.get("event_model") or []) or "none"))
-    L.append("notifications suppressed: %d; background parses suppressed: %d; refused spawns: %d; threads started: %d; new threads: %s"
+    L.append("notifications suppressed: %d; background parses suppressed: %d; refused spawns: %d; refused writes: %d; threads started: %d; new threads: %s"
              % (out.get("notifications_suppressed", 0), out.get("warm_calls_suppressed", 0), len(out.get("spawn_attempts", [])),
-                out.get("thread_starts", 0), out.get("threads_new") or "none"))
+                len(out.get("refused_writes", [])), out.get("thread_starts", 0), out.get("threads_new") or "none"))
     if profile and out.get("profiles"):
         for name, p in out["profiles"].items():
             L.append("")

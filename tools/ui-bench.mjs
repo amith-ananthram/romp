@@ -39,8 +39,10 @@
 //
 //      Serving design: the REAL kernel HTTP Handler runs in a python3 subprocess under an isolated
 //      environment, the pattern of tests/test_color_route.py with the floors tests/conftest.py applies:
-//      private XDG_STATE_HOME and TMUX_TMPDIR; the manager variables, the API-key variables and the key
-//      reference removed; the manager's key FILE and the boot model-catalog fetch pointed away (the
+//      private XDG_STATE_HOME and TMUX_TMPDIR; the manager variables removed (the manager port set to a
+//      dead one, as conftest does) and every key-source name conftest pops removed too (the API keys,
+//      the key reference and command, the token credentials, the auth declaration and 1Password's
+//      names; STRIPPED_KEY_ENV below); the manager's key FILE and the boot model-catalog fetch pointed away (the
 //      kernel would otherwise read ~/.config/romp/service.env and carry its key to the Models API); the
 //      Claude binary floored to /bin/false; the CLI scope off (ROMP_CLI_SCOPE=0, so nothing probes
 //      systemd-run); the postal peer bus off; ROMP_KERNEL_NO_OPEN=1; a serve token minted for the run.
@@ -607,6 +609,17 @@ srv.serve_forever()
  *  and Claude binary a spawned session would run with (nothing the bench needs reads them). */
 export const STRIPPED_ENV = ["ROMP_MANAGER_PORT", "ROMP_MANAGER_PID", "ROMP_SUPERVISED", "ROMP_STATE_DIR", "ROMP_SERVE_PORT", "ROMP_KERNEL_PORT", "ROMP_PERF", "TMUX"];
 
+/** The key-source names tests/conftest.py pops before any test runs (its KEY_SOURCE_ENV_NAMES and
+ *  KEY_SOURCE_ENV_PREFIXES: keysource.SOURCE_VARS, sdk_backend.AUTH_ENV_NAMES, the auth declaration
+ *  and 1Password's names), stripped here for the same reason: every shell under a romp-managed session
+ *  inherits the manager's credentials, and keysource selects a key COMMAND or REFERENCE straight from
+ *  the environment when the isolated env file is absent, so a replay run from inside a session would
+ *  otherwise start a kernel Handler holding the operator's key command, OAuth token and op token. The
+ *  first form of this list stripped ANTHROPIC_* and the key reference only (review find, 2026-09-08). */
+export const STRIPPED_KEY_ENV = ["ANTHROPIC_API_KEY", "ROMP_API_KEY_REF", "ROMP_API_KEY_CMD", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+  "ROMP_EXPECTED_AUTH", "OP_SERVICE_ACCOUNT_TOKEN", "OP_CONNECT_HOST", "OP_CONNECT_TOKEN", "OP_ACCOUNT"];
+export const STRIPPED_KEY_ENV_PREFIXES = ["ANTHROPIC_", "OP_SESSION_"];
+
 /** The parent every run of this tool on this machine keeps its state under: <tmp>/romp-ui-bench-<uid>,
  *  private to the user and refused when something else holds the name. Each run gets a subdirectory
  *  holding owner.pid, the Handler's XDG_STATE_HOME and TMUX_TMPDIR and, through TMPDIR at launch, the
@@ -660,7 +673,10 @@ export async function startPageServer({ dist, python = "python3", log = () => {}
   fs.writeFileSync(path.join(tmp, "owner.pid"), `${process.pid}\n`);
   const token = crypto.randomBytes(18).toString("base64url");
   const env = { ...process.env };
-  for (const k of Object.keys(env)) if (k.startsWith("ANTHROPIC_") || STRIPPED_ENV.includes(k)) delete env[k];
+  for (const k of Object.keys(env)) if (STRIPPED_KEY_ENV_PREFIXES.some((p) => k.startsWith(p)) || STRIPPED_ENV.includes(k) || STRIPPED_KEY_ENV.includes(k)) delete env[k];
+  // conftest's form of the manager-port floor, not a bare removal: one kernel consumer maps an ABSENT port
+  // to the default, live, one, so a dead value is the state that is safe against every consumer.
+  env.ROMP_MANAGER_PORT = "1";
   env.XDG_STATE_HOME = path.join(tmp, "state");
   env.TMUX_TMPDIR = path.join(tmp, "tmux");
   fs.mkdirSync(env.XDG_STATE_HOME, { recursive: true });
@@ -675,11 +691,10 @@ export async function startPageServer({ dist, python = "python3", log = () => {}
   env.ROMP_SERVICE_ENV_FILE = env.ROMP_SERVICE_ENV = path.join(tmp, "no-service.env");   // never created
   env.ROMP_MODEL_CATALOG = "off";
   env.ROMP_CLAUDE_BIN = "/bin/false";
-  // Two more of conftest's floors: a route that constructs the SDK backend decides whether to wrap CLIs in
-  // systemd-run scopes (on by default under a supervised kernel, probing the user manager), and keysource
-  // resolves an inherited key REFERENCE through its provider when the env file is absent.
+  // One more of conftest's floors: a route that constructs the SDK backend decides whether to wrap CLIs in
+  // systemd-run scopes (on by default under a supervised kernel, probing the user manager). The key
+  // reference and command keysource would resolve through their providers went with STRIPPED_KEY_ENV above.
   env.ROMP_CLI_SCOPE = "0";
-  delete env.ROMP_API_KEY_REF;
   env.ROMP_SERVE_TOKEN = token;
   env.ROMP_DIST_DIR = distDir;
   const child = spawn(python, ["-c", PAGE_SERVER_PY, REPO, tmp], { env, stdio: ["pipe", "pipe", "pipe"] });
@@ -728,7 +743,10 @@ export async function startFront({ pagePort }) {
   server.on("upgrade", (req, socket, head) => {
     const u = new URL(req.url, "http://127.0.0.1");
     const selfOrigin = `http://127.0.0.1:${server.address().port}`;
-    if (u.pathname !== "/ws" || (req.headers.origin && req.headers.origin !== selfOrigin)) {
+    // The page's own origin, REQUIRED: a browser page always sends Origin on a WebSocket upgrade, so a client
+    // without one is some other local process on this loopback port, and the frames it would be handed may be a
+    // recording of real session data. The first form let an Origin-less upgrade through (review find, 2026-09-08).
+    if (u.pathname !== "/ws" || req.headers.origin !== selfOrigin) {
       socket.write("HTTP/1.1 403 Forbidden\r\n\r\n"); socket.destroy(); return;
     }
     wss.handleUpgrade(req, socket, head, (ws) => { if (onSocket) onSocket(ws, u); else ws.close(); });
@@ -1108,12 +1126,22 @@ function attributeLoaf(loaf, handoff = "none") {
       // the bench's own onmessage wrapper, and for every flush of the shim's queue its flush wrapper, so
       // those rows are labelled for what runs inside them rather than for the instrument's file: the shim's
       // handler (plus the bundle's render, on a shim that hands frames over inside the handler), and the
-      // flush task with the bundle's renders it carries.
+      // flush task with the bundle's renders it carries. The instrument's OTHER entry points are its own
+      // bookkeeping: the settle stamp (the requestAnimationFrame callback that reads the clock), the
+      // long-animation-frame observer's callback (which records the entries) and the collector the bench
+      // evaluates at the end. No pane work runs inside any of them, and one appears here only when a
+      // descheduled main thread stretched it past the entry threshold (the settle stamp once on a run pinned
+      // to one CPU, the observer's callback once on a loaded box; review find, 2026-09-08), so its row says
+      // what it is instead of naming the file as if the instrument had done work.
       let key;
       if (url !== "ui-bench-instrument.js") key = `${url}:${s.fn || "(anonymous)"} <${invoker}>`;
       else if (s.fn === "rompBenchFlush" || /MessagePort/.test(inv)) key = `bundle handoff (shim flush + bundle) <${invoker}>`;
       else if (s.fn === "rompBenchOnMessage" || /WebSocket/.test(inv)) key = `message handler (${handoff === "flush" ? "shim" : "shim + bundle"}) <${invoker}>`;
-      else key = `${url}:${s.fn || "(anonymous)"} <${invoker}>`;
+      else {
+        const what = /FrameRequestCallback/.test(inv) ? "the settle stamp's requestAnimationFrame"
+          : /PerformanceObserver/.test(inv) ? "the long-animation-frame observer's callback" : s.fn || "(anonymous)";
+        key = `instrument bookkeeping (${what}; no pane work) <${invoker}>`;
+      }
       const row = by.get(key) || { key, count: 0, durationMs: 0 };
       row.count++; row.durationMs += s.duration || 0;
       by.set(key, row);
