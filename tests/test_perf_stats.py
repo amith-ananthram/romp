@@ -117,7 +117,7 @@ class Collector(unittest.TestCase):
         # the three identity memos' readers land here (review find, 2026-09-08: they had no consumer)
         self.assertEqual(set(snap["memos"]), {"pass", "shared", "chain", "nudgeGate", "cleared", "courierSkip", "backref", "captions", "goalArchive", "plannerSkip",
                                               "bgTops", "liftGate", "intrMarks", "statesOverlay", "lanes",
-                                              "chatMergeSets", "chatPostal", "chatLedger"})   # the chat build's fixed-cost memos (2026-09-09)
+                                              "chatMergeSets", "chatPostal", "chatLedger", "chatFoldTasks"})   # the chat build's fixed-cost memos (2026-09-09)
         self.assertEqual(set(snap["memos"]["bgTops"]), {"hit", "miss", "resolve", "walk", "walk_neg", "idx_build", "entries"},
                          "the placed-launch memo (_bg_placed_tops): counters plus its occupancy")
         for k, v in snap["memos"]["bgTops"].items():
@@ -143,6 +143,7 @@ class Collector(unittest.TestCase):
         self.assertEqual(set(snap["memos"]["chatMergeSets"]), {"hit", "miss", "entries"})
         self.assertEqual(set(snap["memos"]["chatPostal"]), {"gate", "hit", "commit_new"})
         self.assertEqual(set(snap["memos"]["chatLedger"]), {"hit", "miss", "bypass_live", "bypass_hold", "bypass_empty", "evict", "entries"})
+        self.assertEqual(set(snap["memos"]["chatFoldTasks"]), {"hit", "miss", "entries"})
         self.assertEqual(set(snap["memos"]["plannerSkip"]), {"skipped", "planned", "recorded"})
         self.assertEqual(set(snap["memos"]["captions"]), {"served", "parsed"})
         self.assertEqual(set(snap["memos"]["goalArchive"]), {"served", "loaded"})

@@ -1078,7 +1078,7 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   gauge `entries`; `segs_hit` and `segs_miss` count the segments served and
   derived. `dead_serve`, `dead_miss` and `dead_failed_serve` are the dead-lane
   memo's outcomes on the same block, so one block carries every lane.
-  Three memos cover the chat build's per-build fixed costs, each keyed on the
+  Four memos cover the chat build's per-build fixed costs, each keyed on the
   inputs it reads and evicted by the pusher with the tab set (a comment thread
   built this cycle is kept, like its fold prefix). `chatMergeSets` is the
   live-tail merge's memo of the sets it derives from a parsed transcript (the
@@ -1104,7 +1104,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   live atoms: the last turn's segments differ from the parse's),
   `bypass_hold` (an armed rewind hold filters a store copy per build),
   `bypass_empty` (a store with no nodes), `evict` (entries dropped for tabs
-  no longer shown) and the gauge `entries`.
+  no longer shown) and the gauge `entries`. `chatFoldTasks` is the per-turn
+  memo of the transcript's task fold, keyed per session on each turn's atoms
+  list and fingerprint: `hit` and `miss` count turns served from the memo
+  against turns scanned, so a build of a working session with one moved turn
+  is one miss, plus the gauge `entries` (sessions held).
 - `judge`: `passes`, `ms_sum`, `ms_last`, `ms_mean` (wall time; a pass waits
   on model calls), `cpu_ms_sum` (CPU time of the judge tier threads and every
   per-session worker they run; the workers' share is `cpu_ms_workers`).

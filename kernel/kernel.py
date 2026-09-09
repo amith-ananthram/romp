@@ -244,7 +244,9 @@ class _PerfStats:
                                    at fold commits, each once); chatLedger (build_session's goal-tree
                                    walk and live roots per sid, see _ledger_memo) -> hit / miss,
                                    bypass_live (live atoms merged), bypass_hold (a rewind hold armed),
-                                   bypass_empty (a store with no nodes), evict, and the gauge entries
+                                   bypass_empty (a store with no nodes), evict, and the gauge entries;
+                                   chatFoldTasks (the per-turn task fold, see _fold_tasks) -> hit /
+                                   miss counted per TURN and the gauge entries (sids held)
       judge                        passes (one per _producer pass), ms_sum / ms_last / ms_mean (wall:
                                    a pass is a join over the tier threads, so this is mostly model
                                    latency), cpu_ms_sum (CPU: the two tier threads' own time, from
@@ -458,9 +460,9 @@ class _PerfStats:
                           ("intrMarks", _intr_marks_memo_report), ("statesOverlay", _states_overlay_report),
                           ("lanes", _lanes_memo_report),   # the timeline's per-lane segment memo, live lanes; the dead lanes beside
                           # the chat build's fixed-cost memos (2026-09-09): the live merge's transcript-side
-                          # sets, the fold's sealed postal cards, the ledger's goal-tree walk
+                          # sets, the fold's sealed postal cards, the ledger's goal-tree walk, the task fold
                           ("chatMergeSets", _merge_sets_report), ("chatPostal", _chat_postal_report),
-                          ("chatLedger", _ledger_memo_report)):
+                          ("chatLedger", _ledger_memo_report), ("chatFoldTasks", _task_fold_report)):
             try:
                 memos[key] = read()
             except Exception:
@@ -26342,69 +26344,114 @@ def _read_task_store(fsid, fold=None):
     return [dict(t) for t in out]
 
 
-def _fold_tasks(session):
+_task_fold_memo = {}                             # sid → {id(turn atoms): (atoms, fp, partial)}: see _fold_tasks
+_task_fold_stats = {"hit": 0, "miss": 0}         # /perf memos.chatFoldTasks, per TURN: served from the memo vs scanned
+
+
+def _task_fold_report():
+    """/perf memos.chatFoldTasks: hit / miss count TURNS (served from the memo vs scanned; a build of an N-turn
+    session with one moved turn is N-1 hits and 1 miss) and the gauge entries (sids held)."""
+    return dict(_task_fold_stats, entries=len(_task_fold_memo))
+
+
+def _fold_tasks_turn(atoms):
+    """One turn's share of _fold_tasks, pure over its atoms: (results, rejected, ops). results: tool_use_id →
+    the content of the turn's tool_result blocks (a TaskCreate's carries 'Task #N'); rejected: the
+    tool_use_ids whose result came back is_error (the CLI refused the call: nothing created, nothing moved);
+    ops: the turn's TaskCreate and TaskUpdate tool_use blocks in order, as (name, input, tool_use_id)."""
+    results, rejected, ops = {}, set(), []
+    for a in atoms:
+        if a.get("type") == "user":
+            for b in (a.get("message") or {}).get("content", []) or []:
+                if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id"):
+                    results[b["tool_use_id"]] = b.get("content")
+                    if b.get("is_error"):
+                        rejected.add(b["tool_use_id"])
+        elif a.get("type") == "assistant":
+            for b in (a.get("message") or {}).get("content", []) or []:
+                if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in ("TaskCreate", "TaskUpdate"):
+                    ops.append((b["name"], b.get("input") or {}, b.get("id")))
+    return results, rejected, ops
+
+
+def _fold_tasks(session, sid=None):
     """Fold a session's TaskCreate/TaskUpdate tool calls into ONE checklist — the FALLBACK for _read_task_store
     when a session has no live task store (mirrors the old TS transcript.foldTasks the Python rewrite dropped).
     Task id = the number in TaskCreate's RESULT text ('Task #N created…'); status rides each TaskUpdate
     {taskId,status} the CLI accepted. NOTE this is lossy — it can't see a completion a subagent wrote only to the store (see
     _read_task_store). Returns the tasks in creation
     order, or None if there were none. The webview renders this as a todo card (kind:'todo') and hides the
-    raw Task* calls (ACK_TOOLS) — so the kernel emits the folded card and skips the raw tool events."""
-    out = {}                                              # tool_use_id → result content (a TaskCreate's carries 'Task #N')
-    rejected = set()                                      # tool_use_ids whose result came back is_error
+    raw Task* calls (ACK_TOOLS), so the kernel emits the folded card and skips the raw tool events.
+
+    PER-TURN MEMO (2026-09-09). The scan over a turn's atoms is pure over those atoms (_fold_tasks_turn), so
+    each turn's partial is kept per `sid` keyed on its atoms list's identity (held) plus _chat_turn_fp, the
+    fingerprint the chat fold trusts for a turn's atoms; the fingerprint guards an in-place change to a held
+    list. A parse of any kind mints new turn dicts and atoms lists, so the memo serves the builds over the
+    parse cache's object and the live merge's copy of it, which carries a new atoms list for its last turn
+    only: a build of a long working transcript scans one turn instead of every turn, which every build used
+    to do. The combine over the partials (the result join, the ops replay) runs in full on every call and
+    returns a fresh list, so a caller may keep or alter the result without reaching the memo. No sid: no
+    memo (a direct call)."""
+    prev = _task_fold_memo.get(sid) if sid is not None else None
+    cur, parts = {}, []
     for turn in session["turns"]:
-        for a in turn["atoms"]:
-            if a.get("type") != "user":
-                continue
-            for b in (a.get("message") or {}).get("content", []) or []:
-                if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id"):
-                    out[b["tool_use_id"]] = b.get("content")
-                    if b.get("is_error"):
-                        rejected.add(b["tool_use_id"])
+        atoms = turn["atoms"]
+        fp = _chat_turn_fp(turn)
+        ent = prev.get(id(atoms)) if prev else None
+        if ent is not None and ent[0] is atoms and ent[1] == fp:
+            _chat_memo_bump(_task_fold_stats, "hit")
+            part = ent[2]
+        else:
+            _chat_memo_bump(_task_fold_stats, "miss")
+            part = _fold_tasks_turn(atoms)
+        if sid is not None:
+            cur[id(atoms)] = (atoms, fp, part)
+        parts.append(part)
+    if sid is not None:
+        _task_fold_memo[sid] = cur                   # only this session's current turns: the memo shrinks with a rewrite
+    out = {}                                          # tool_use_id → result content (a TaskCreate's carries 'Task #N')
+    rejected = set()                                  # tool_use_ids whose result came back is_error
+    for results, rej, _ops in parts:
+        out.update(results)
+        rejected |= rej
     tasks, order = {}, 0
-    for turn in session["turns"]:
-        for a in turn["atoms"]:
-            if a.get("type") != "assistant":
-                continue
-            for b in (a.get("message") or {}).get("content", []) or []:
-                if not isinstance(b, dict) or b.get("type") != "tool_use":
+    for _results, _rejected, ops in parts:
+        for name, inp, bid in ops:
+            if name == "TaskCreate":
+                # A TaskCreate the CLI REJECTED is not a checklist item. A malformed call — no `subject`
+                # ({agent_hint, prompt}), or a {tasks: [...]} batch — draws a paired tool_result with
+                # is_error set and an InputValidationError naming the missing field: nothing was created,
+                # nothing launched, and nothing renders it (the chat skips every raw TaskCreate row).
+                # Folded as a pending task it gave a session whose only TaskCreate was rejected a phantom
+                # open item, which tripped the card's "can't read the task store" error the moment the
+                # store was unresolvable. The skip keys on the result's is_error — the event that says no
+                # task exists — not on the input's key names, which would miss every other rejected
+                # shape. A create whose result has not landed yet still folds under its creation-order
+                # id, as before.
+                if bid in rejected:
                     continue
-                inp = b.get("input") or {}
-                if b.get("name") == "TaskCreate":
-                    # A TaskCreate the CLI REJECTED is not a checklist item. A malformed call — no `subject`
-                    # ({agent_hint, prompt}), or a {tasks: [...]} batch — draws a paired tool_result with
-                    # is_error set and an InputValidationError naming the missing field: nothing was created,
-                    # nothing launched, and nothing renders it (the chat skips every raw TaskCreate row).
-                    # Folded as a pending task it gave a session whose only TaskCreate was rejected a phantom
-                    # open item, which tripped the card's "can't read the task store" error the moment the
-                    # store was unresolvable. The skip keys on the result's is_error — the event that says no
-                    # task exists — not on the input's key names, which would miss every other rejected
-                    # shape. A create whose result has not landed yet still folds under its creation-order
-                    # id, as before.
-                    if b.get("id") in rejected:
-                        continue
-                    # Only a TaskCreate's result is ever read, so only it is encoded, here, to the same text
-                    # the regex saw when every result was encoded up front. Encoding every Bash and Read
-                    # output (list-shaped ones, image blocks) for a value nothing read was 0.3% of the pusher
-                    # (cProfile of the push thread on a loaded kernel, 2026-09-06).
-                    r = out.get(b.get("id"), "")
-                    m = re.search(r"Task #(\d+)", (r if isinstance(r, str) else json.dumps(r)) or "")
-                    tid = m.group(1) if m else "c%d" % order
-                    af = inp.get("activeForm")
-                    tasks[tid] = {"_order": order, "id": tid, "subject": str(inp.get("subject") or ""),
-                                  "activeForm": str(af) if af else None, "status": "pending"}
-                    order += 1
-                elif b.get("name") == "TaskUpdate":
-                    # A TaskUpdate the CLI REJECTED — its paired tool_result carries is_error (a status value
-                    # outside its set, a transition it refused) — wrote nothing to the store, so it moves no
-                    # checklist item; applied, the refused status stood in for the store's. Keyed on the
-                    # result's is_error like the TaskCreate skip above, so this fold and event_model's
-                    # declared_plan stay identical. An update whose result has not landed still applies.
-                    if b.get("id") in rejected:
-                        continue
-                    t = tasks.get(str(inp.get("taskId", "")))
-                    if t:
-                        t["status"] = str(inp.get("status") or t["status"])
+                # Only a TaskCreate's result is ever read, so only it is encoded, here, to the same text
+                # the regex saw when every result was encoded up front. Encoding every Bash and Read
+                # output (list-shaped ones, image blocks) for a value nothing read was 0.3% of the pusher
+                # (cProfile of the push thread on a loaded kernel, 2026-09-06).
+                r = out.get(bid, "")
+                m = re.search(r"Task #(\d+)", (r if isinstance(r, str) else json.dumps(r)) or "")
+                tid = m.group(1) if m else "c%d" % order
+                af = inp.get("activeForm")
+                tasks[tid] = {"_order": order, "id": tid, "subject": str(inp.get("subject") or ""),
+                              "activeForm": str(af) if af else None, "status": "pending"}
+                order += 1
+            else:                                     # TaskUpdate
+                # A TaskUpdate the CLI REJECTED — its paired tool_result carries is_error (a status value
+                # outside its set, a transition it refused) — wrote nothing to the store, so it moves no
+                # checklist item; applied, the refused status stood in for the store's. Keyed on the
+                # result's is_error like the TaskCreate skip above, so this fold and event_model's
+                # declared_plan stay identical. An update whose result has not landed still applies.
+                if bid in rejected:
+                    continue
+                t = tasks.get(str(inp.get("taskId", "")))
+                if t:
+                    t["status"] = str(inp.get("status") or t["status"])
     if not tasks:
         return None
     ordered = sorted(tasks.values(), key=lambda t: t["_order"])
@@ -31479,7 +31526,7 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
     # error worth alarming on. Only while work is OUTSTANDING does a card show at all — a fully
     # completed/cancelled list isn't a live to-do (the user 2026-06-10).
     _fsid = os.path.basename(sess["path"]).rsplit(".", 1)[0] if sess.get("path") else ""
-    fold = _fold_tasks(session)                       # the transcript's own task record — feeds the store
+    fold = _fold_tasks(session, sid)                  # the transcript's own task record: feeds the store
     todo = _read_task_store(_fsid, fold)              # content join for team-named interactive stores
     if todo is None:                                  # authoritative store unreadable — never silently fold
         if fold and any(t["status"] not in ("completed", "cancelled") for t in fold):
@@ -41346,13 +41393,16 @@ def _push(targets, connect=False, tmux=None):
                     if sid not in keep:
                         _chat_fold.pop(sid, None)
             # …and the chat build's fixed-cost memos on the same keep set (2026-09-09), outside the lock the
-            # bumps take: the ledger walk of a tab no longer shown (a thread this cycle built stays, like its
-            # fold prefix), and the live-merge sets of a sid neither kept nor alive (the feed and timeline
-            # merge every alive session, tab or not)
+            # bumps take: the ledger walk and the task fold of a tab no longer shown (a thread this cycle built
+            # stays, like its fold prefix), and the live-merge sets of a sid neither kept nor alive (the feed
+            # and timeline merge every alive session, tab or not)
             for sid in list(_ledger_memo):
                 if sid not in keep:
                     _ledger_memo.pop(sid, None)
                     _chat_memo_bump(_ledger_memo_stats, "evict")
+            for sid in list(_task_fold_memo):
+                if sid not in keep:
+                    _task_fold_memo.pop(sid, None)
             for sid in list(_merge_sets_memo):
                 if sid not in keep and sid not in tmux:
                     _merge_sets_memo.pop(sid, None)

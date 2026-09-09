@@ -143,6 +143,7 @@ class Collector(unittest.TestCase):
         self.assertEqual(set(snap["chatMergeSets"]), {"hit", "miss", "entries"})
         self.assertEqual(set(snap["chatPostal"]), {"gate", "hit", "commit_new"})
         self.assertEqual(set(snap["chatLedger"]), {"hit", "miss", "bypass_live", "bypass_hold", "bypass_empty", "evict", "entries"})
+        self.assertEqual(set(snap["chatFoldTasks"]), {"hit", "miss", "entries"})
 
 
 class MemoBump(unittest.TestCase):
@@ -323,6 +324,22 @@ class TwoTabAttribution(unittest.TestCase):
         finally:
             for sid in (stray, thread, SID_B):
                 km._ledger_memo.pop(sid, None)
+
+    def test_the_sweep_drops_the_task_fold_memo_on_the_same_keep_set(self):
+        stray = "66666666-7777-8888-9999-aaaaaaaaaaa9"
+        thread = "66666666-7777-8888-9999-aaaaaaaaaaa7"
+        for sid in (stray, thread, SID_B):
+            km._task_fold_memo[sid] = {}
+        km._thread_fold_keep[1].add(thread)
+        try:
+            km._push([self.chat, self.tl])
+            self.assertNotIn(stray, km._task_fold_memo, "the task fold memo of a tab no longer shown is evicted")
+            self.assertIn(SID_B, km._task_fold_memo, "a shown tab's entry stays")
+            self.assertIn(thread, km._task_fold_memo, "this cycle's thread stays")
+            self.assertEqual(km._task_fold_report()["entries"], len(km._task_fold_memo))
+        finally:
+            for sid in (stray, thread, SID_B):
+                km._task_fold_memo.pop(sid, None)
 
 
 # ── the live merge's transcript-side sets ────────────────────────────────────────────────────────
@@ -1188,6 +1205,125 @@ class LedgerMemo(unittest.TestCase):
         self.assertEqual((m["ledger"]["tree"], m["ledger"]["recent"], m["ledger"]["current"]), ([], [], None))
         self.assertEqual(self._delta(s), {"hit": 1}, "the mute is applied after the memo, live")
         self.assertEqual(len(km._ledger_memo[SID_A][3]), 3, "the memo keeps the walk for an unmute")
+
+
+class TaskFold(unittest.TestCase):
+    """_fold_tasks' per-turn partials, memoized per sid on each turn's atoms list identity and fingerprint:
+    a build over the parse cache's object rescans only the turn the live merge replaced."""
+
+    T = 1781100000
+
+    def setUp(self):
+        self._saved = (dict(km._task_fold_memo), dict(km._task_fold_stats), os.environ.get("CLAUDE_CONFIG_DIR"))
+        km._task_fold_memo.clear()
+        for k in km._task_fold_stats:
+            km._task_fold_stats[k] = 0
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        os.environ["CLAUDE_CONFIG_DIR"] = td.name              # no real task store is read
+
+    def tearDown(self):
+        km._task_fold_memo.clear(); km._task_fold_memo.update(self._saved[0])
+        km._task_fold_stats.clear(); km._task_fold_stats.update(self._saved[1])
+        if self._saved[2] is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = self._saved[2]
+
+    def _turn(self, i, create=None, update=None, rejected=False):
+        T = self.T + 100 * i
+        atoms = [{"type": "user", "uuid": "u%d" % i, "t": T, "author": "human",
+                  "message": {"role": "user", "content": [{"type": "text", "text": "step %d" % i}]}}]
+        content, results = [], []
+        if create:
+            content.append({"type": "tool_use", "id": "tu_c%d" % i, "name": "TaskCreate",
+                            "input": {"subject": create[0], "activeForm": create[1]}})
+            results.append({"type": "tool_result", "tool_use_id": "tu_c%d" % i,
+                            "content": "InputValidationError: subject is required" if rejected else "Task #%d created" % (i + 1),
+                            **({"is_error": True} if rejected else {})})
+        if update:
+            content.append({"type": "tool_use", "id": "tu_u%d" % i, "name": "TaskUpdate",
+                            "input": {"taskId": update[0], "status": update[1]}})
+        content.append({"type": "tool_use", "id": "tu_b%d" % i, "name": "Bash", "input": {"command": "uv run pytest -q"}})
+        results.append({"type": "tool_result", "tool_use_id": "tu_b%d" % i, "content": "ok"})
+        atoms.append({"type": "assistant", "uuid": "a%d" % i, "t": T + 10, "message": {"role": "assistant", "content": content}})
+        atoms.append({"type": "user", "uuid": "r%d" % i, "t": T + 20, "message": {"role": "user", "content": results}})
+        return {"id": "t%d" % i, "trigger": "u%d" % i, "t": T, "end": T + 20, "ended": True, "atoms": atoms}
+
+    def _session(self):
+        return {"turns": [self._turn(0, create=("write the tests", "Writing the tests")),
+                          self._turn(1, create=("run the suite", "Running the suite")),
+                          self._turn(2, update=("1", "completed"))]}
+
+    EXPECTED = [{"id": "1", "subject": "write the tests", "activeForm": "Writing the tests", "status": "completed"},
+                {"id": "2", "subject": "run the suite", "activeForm": "Running the suite", "status": "pending"}]
+
+    def test_identity_hits_a_new_parse_misses_and_a_live_merge_misses_the_last_turn_only(self):
+        sess = self._session()
+        self.assertEqual(km._fold_tasks(sess), self.EXPECTED, "no sid: the unmemoized fold")
+        self.assertEqual(km._task_fold_stats, {"hit": 0, "miss": 3}, "a direct call scans and memoizes nothing")
+        self.assertEqual(km._task_fold_report()["entries"], 0)
+        got = km._fold_tasks(sess, SID_A)
+        self.assertEqual(got, self.EXPECTED)
+        self.assertEqual(km._task_fold_stats, {"hit": 0, "miss": 6})
+        got2 = km._fold_tasks(sess, SID_A)
+        self.assertEqual(got2, self.EXPECTED)
+        self.assertIsNot(got2, got, "a fresh list per call")
+        self.assertEqual(km._task_fold_stats, {"hit": 3, "miss": 6}, "the same turns: every turn served")
+        merged = dict(sess, turns=[dict(t) for t in sess["turns"]])       # _merge_live_atoms' shape
+        merged["turns"][-1]["atoms"] = list(merged["turns"][-1]["atoms"]) + [
+            {"type": "assistant", "uuid": "live", "t": self.T + 999,
+             "message": {"role": "assistant", "content": [{"type": "text", "text": "streaming"}]}}]
+        self.assertEqual(km._fold_tasks(merged, SID_A), self.EXPECTED)
+        self.assertEqual(km._task_fold_stats, {"hit": 5, "miss": 7}, "a live merge: the last turn scanned, the rest served")
+        fresh = json.loads(json.dumps(sess))                              # a re-parse: new atom lists
+        self.assertEqual(km._fold_tasks(fresh, SID_A), self.EXPECTED)
+        self.assertEqual(km._task_fold_stats, {"hit": 5, "miss": 10})
+        self.assertEqual(km._task_fold_report(), {"hit": 5, "miss": 10, "entries": 1})
+        self.assertIsNone(km._fold_tasks({"turns": []}, SID_A), "no turns: no checklist")
+
+    def test_a_turn_that_grew_in_place_is_rescanned(self):
+        sess = self._session()
+        km._fold_tasks(sess, SID_A)
+        sess["turns"][1]["atoms"].append({"type": "assistant", "uuid": "a1b", "t": self.T + 150, "message": {
+            "role": "assistant", "content": [{"type": "tool_use", "id": "tu_u1b", "name": "TaskUpdate",
+                                              "input": {"taskId": "2", "status": "in_progress"}}]}})
+        got = km._fold_tasks(sess, SID_A)
+        self.assertEqual(got[1]["status"], "in_progress", "the appended update is folded")
+        self.assertEqual(km._task_fold_stats, {"hit": 2, "miss": 4}, "the grown turn's fingerprint moved")
+
+    def test_a_rejected_create_and_a_result_in_a_later_turn_fold_as_before(self):
+        # the combine runs over every turn's partial in order, so a result that lands in a later turn than its
+        # call still names the task, and a rejected create is still no item (the unmemoized rules)
+        sess = {"turns": [self._turn(0, create=("write the tests", "Writing the tests")),
+                          self._turn(1, create=("a malformed create", None), rejected=True),
+                          self._turn(2, update=("1", "in_progress"))]}
+        self.assertEqual(km._fold_tasks(sess, SID_A), km._fold_tasks(sess),
+                         "memoized and direct folds agree")
+        self.assertEqual([t["id"] for t in km._fold_tasks(sess, SID_A)], ["1"], "the rejected create is no item")
+        self.assertEqual(km._fold_tasks(sess, SID_A)[0]["status"], "in_progress")
+
+    def test_the_result_is_not_the_memo_and_the_store_reader_leaves_it_unchanged(self):
+        sess = self._session()
+        got = km._fold_tasks(sess, SID_A)
+        before = json.dumps(got)
+        self.assertIsNone(km._read_task_store("no-such-fsid-" + SID_A[:8], got), "no store dir: the loud None")
+        self.assertEqual(json.dumps(got), before, "the reader alters nothing")
+        got[0]["status"] = "cancelled"                                    # a caller altering its copy
+        self.assertEqual(km._fold_tasks(sess, SID_A)[0]["status"], "completed", "the memo is untouched")
+
+    def test_build_session_hands_its_sid_to_the_fold(self):
+        w = World(SID_A)
+        seen = []
+        real = km._fold_tasks
+        km._fold_tasks = lambda session, sid=None: (seen.append(sid) or None)
+        try:
+            w.append(w.turn(0))
+            w.build()
+        finally:
+            km._fold_tasks = real
+            w.close()
+        self.assertEqual(seen, [SID_A], "the memo is keyed on the session the build is for")
 
 
 if __name__ == "__main__":
