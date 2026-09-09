@@ -975,8 +975,8 @@ class ReadyStripSource(_Wire):
     """The tab strip a chat page receives at `ready` comes from the connect push alone: _push lists
     _chat_tab_sessions (every living session plus the dead ones the user reopened read-only) through the
     ("taborder",) dedup slot. The ready arm used to send a second strip of its own, built from a second
-    liveness read of _ordered_alive (living sessions only). The client tears down every tab a later frame
-    omits unless that frame affirms it live (render.ts applyTabOrder, tab-order.ts), so the second strip
+    liveness read (living sessions only). The client tears down every tab a later frame omits unless that
+    frame affirms it live (render.ts applyTabOrder, tab-order.ts), so the second strip
     closed every kept-open tab the first had just listed, at every ready. And once that second strip went
     through the same slot, a renderer whose socket was served a strip before its listener existed (the
     pusher fires from accept) received NO strip at `ready` while the strip was unchanged: the connect push's
@@ -990,13 +990,13 @@ class ReadyStripSource(_Wire):
         super().setUp()
         self.client["app"] = "chat"                  # _push sends the strip to chat clients only
         self.seed()                                  # a stamped store: every frame's views blob carries a seq
-        # the reads the ready arm made for a strip of its own: pinned, so should that strip return these tests
-        # fail the same way with or without tmux on this machine
-        saved = (km._tmux_sessions, km._ordered_alive)
+        # the liveness reads a strip built at ready would make: pinned, so should such a strip return, these
+        # tests fail the same way with or without tmux on this machine
+        saved = (km._tmux_sessions, km._alive_sessions)
         km._tmux_sessions = lambda: {self.LIVE: {}}
-        km._ordered_alive = lambda now, tmux: [{"sid": self.LIVE, "name": "web", "path": "/nonexistent/live.jsonl"}]
+        km._alive_sessions = lambda now, tmux: [{"sid": self.LIVE, "name": "web", "path": "/nonexistent/live.jsonl"}]
         self.addCleanup(lambda: setattr(km, "_tmux_sessions", saved[0]))
-        self.addCleanup(lambda: setattr(km, "_ordered_alive", saved[1]))
+        self.addCleanup(lambda: setattr(km, "_alive_sessions", saved[1]))
 
     def _connect_push(self, order):
         """The connect push's strip for `order`, the shape _push builds: the listed tabs' meta, LIVE affirmed."""
