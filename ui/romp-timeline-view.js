@@ -511,14 +511,19 @@ const MAX_INTERP_AHEAD = 150;  // seconds the edge may glide past the last data.
                                // the kernel's 60 s repost of an unchanged frame (a quiet board sends nothing
                                // sooner, since 2026-09-04 the skeleton dedups too), so a healthy kernel never
                                // stalls the edge; a dead one is announced by the socket, not by this cap
-// The live edge advances in whole-pixel steps: the loop looks once the edge could have moved this far at the
-// current zoom (see _liveWaitMs, 100-2000 ms between looks) and moves the plot then — one translate on the
-// plot group plus a width per live-edge rider (_tickTranslate), where a look used to rebuild the whole SVG.
-// Before the pacing it was 0.15 px on every animation frame: a full rebuild about twice a second at a one-hour
-// window, on the main thread every pane shares, which is what a chat tab click waited behind (measured
-// 2026-09-04). A smoother glide is now a pacing choice (a smaller step, a shorter sleep), not a rebuild cost;
-// the pacing stays at a whole pixel.
+// Two guards pace the live edge (see _tickLive). LIVE_MIN_PX paces the look that must REBUILD: a build that left
+// the tick no plot group to translate (a glyph rides the live edge) looks again once the edge could have moved a
+// whole pixel at the current zoom (_liveWaitMs, 100-2000 ms between looks) and redraws then. Before the pacing it
+// was 0.15 px on every animation frame: a full rebuild about twice a second at a one-hour window, on the main
+// thread every pane shares, which is what a chat tab click waited behind (measured 2026-09-04).
 const LIVE_MIN_PX = 1;
+// TICK_MIN_PX paces the TRANSLATE (_tickTranslate: one transform write on the plot group the build left, plus a
+// width per live-edge rider): the loop looks again once the edge could have moved this far (_tickWaitMs), which at
+// a narrow window is the next animation frame and at a wide one a short sleep, and the look writes the frame once
+// the edge has moved at least this far. Small, so the glide is smooth at high zoom (a move every frame); above zero,
+// so a zoomed-out edge sleeps between the moves (at a one-hour window, a move about once or twice a second). A glide
+// is a smaller step and a shorter sleep, not a rebuild cost; the rebuild keeps its whole pixel.
+const TICK_MIN_PX = 0.15;
 function perfNow() { return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); }
 function interpNow(baseSec, baseMs, nowMs, live, maxAheadSec) {
   if (!live || baseMs == null) return baseSec;
@@ -1891,10 +1896,11 @@ class TimelinePanel {
   // node (no offsetParent) so the loop doesn't spin for an invisible pane. False-negative just degrades
   // to per-poll redraw (no interpolation), never breaks.
   _isVisible() {
-    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return false;
+    if (this._tabHidden()) return false;
     const w = this.wrap;
     return !!(w && w.offsetParent !== null);
   }
+  _tabHidden() { return typeof document !== 'undefined' && document.visibilityState === 'hidden'; }
   // Out of sight, for the PAINT hold in update()/applyBars() (2026-09-07)? Says "hidden" only for a reason
   // whose RELEASE event is wired: the tab's visibilityState always (visibilitychange); the pane's own layout
   // (offsetParent null — a display:none iframe, a hidden Obsidian leaf) only where the IntersectionObserver
@@ -1943,13 +1949,15 @@ class TimelinePanel {
   // Arm the rAF loop (no-op if already running or not currently live+visible). Re-armed each poll by
   // update(), so even after the loop self-stops it returns within one poll once we're live again. NOT
   // called from draw() — draw() runs inside the tick, and re-arming there would double the loop.
-  // The live-follow loop: a look (a translate if the edge moved LIVE_MIN_PX, a draw where a translate cannot
-  // express the frame; see _tickLive), then a sleep sized to the edge's speed, then the next look on an
-  // animation frame. Restarted by update()/applyBars() (each frame re-paces it: a pending sleep computed for
-  // the old zoom or data is dropped), by gestures, and by the pointer release when a look was skipped under a
-  // held pointer. Hidden pane: the loop STOPS (its old 2 s sleep re-entered _isVisible()'s forced offsetParent
-  // layout every wake, for a pane nobody could see — 2026-09-07) and the paint hold's release
-  // (_releasePaintHold) re-arms it; not live-following: it stops until a gesture pins the edge again.
+  // The live-follow loop: a look (a translate if the edge moved TICK_MIN_PX, a draw where a translate cannot
+  // express the frame; see _tickLive), then a sleep sized to the edge's speed, then the next look on an animation
+  // frame: TICK_MIN_PX's worth while the build left a plot group to translate (_tickWaitMs, within a frame at a
+  // narrow window), a whole pixel's when the look had to rebuild and got no handle (_liveWaitMs). Restarted by
+  // update()/applyBars() (each frame re-paces it: a pending sleep computed for the old zoom or data is dropped), by
+  // gestures, and by the pointer release when a look was skipped under a held pointer. Hidden pane: the loop STOPS
+  // (its old 2 s sleep re-entered _isVisible()'s forced offsetParent layout every wake, for a pane nobody could
+  // see, 2026-09-07) and the paint hold's release (_releasePaintHold) re-arms it; not live-following: it stops
+  // until a gesture pins the edge again.
   _startLiveTick() {
     if (!this._liveFollowing() || !this._isVisible()) return;
     if (this._liveRAF != null) return;                                        // a look is already imminent
@@ -1959,29 +1967,49 @@ class TimelinePanel {
   _sleep(ms) {
     this._liveTO = setTimeout(() => { this._liveTO = null; this._liveRAF = requestAnimationFrame(() => this._tickLive()); }, ms);
   }
-  // How long until the live edge has moved LIVE_MIN_PX at the current zoom — the loop sleeps exactly that
-  // long between looks instead of waking every animation frame. A look is a translate now (_tickTranslate; it
-  // was a full redraw) and the pacing is unchanged: at a one-hour window over a few hundred px that is a look
-  // every several seconds, not two a second; and the sleeping loop touches no layout (the old per-frame
-  // _isVisible() read forced one — measured 2026-09-04: ~40% of the main thread on an idle four-pane
-  // dashboard, on the thread the chat pane's clicks share).
+  // How long until the live edge has moved LIVE_MIN_PX at the current zoom: the loop sleeps exactly that long
+  // between looks that must REBUILD (the build left no plot group to translate; see _tickLive) instead of
+  // rebuilding on every animation frame. At a one-hour window over a few hundred px that is a rebuild every
+  // several seconds, not two a second; and the sleeping loop touches no layout (the old per-frame _isVisible()
+  // read forced one, measured 2026-09-04: ~40% of the main thread on an idle four-pane dashboard, on the thread
+  // the chat pane's clicks share). A look with a plot group is a translate, paced by _tickWaitMs.
   _liveWaitMs() {
     const g = this._geom;
     if (!g || !g.winSec || !g.plotW) return 1000;
     const pxPerSec = g.plotW / g.winSec;
     return Math.max(100, Math.min(2000, Math.round(LIVE_MIN_PX / Math.max(pxPerSec, 1e-6) * 1000)));
   }
+  // How long until the live edge has moved TICK_MIN_PX at the current zoom: the sleep between translate looks, a
+  // smaller step and a shorter sleep than the rebuild's, with nothing touched in between. Under a frame at a narrow
+  // window (a one-minute window over 1300 px: 7 ms), so the look lands on the next animation frame and the edge
+  // glides every frame; about 70 ms at ten minutes over that width; about 0.4 s at an hour. Where the edge does not
+  // move on screen the rebuild's wait applies: inside a collapsed trailing gap, and once the clock has reached the
+  // interpolation cap (MAX_INTERP_AHEAD: a kernel quiet that long has stopped the edge until the next frame, which
+  // re-anchors the clock and re-paces the loop), so a stopped edge is not looked at every frame.
+  _tickWaitMs() {
+    const g = this._geom, tp = this._tickPlot;
+    if (!g || !g.winSec || !g.plotW || (tp && tp.trailing)) return this._liveWaitMs();
+    if (this._nowBaseMs != null && perfNow() - this._nowBaseMs >= MAX_INTERP_AHEAD * 1000) return this._liveWaitMs();
+    return Math.min(2000, Math.round(TICK_MIN_PX / Math.max(g.plotW / g.winSec, 1e-6) * 1000));
+  }
   _tickLive() {
     this._liveRAF = null; this._liveTO = null;
     if (!this._liveFollowing() || !this.data) return;          // gate closed → stop; a gesture or a frame re-arms
-    if (!this._isVisible()) return;                             // hidden pane: stop; _releasePaintHold re-arms when it shows (no 2 s layout poll)
+    // Can the pane be seen? Once the wrap's IntersectionObserver has spoken, its last word (_paneIntersecting) and
+    // the tab's state answer without a layout read: a translate look can run on every animation frame, and
+    // _isVisible()'s offsetParent read forces a style recalc or a layout whenever the tree is dirty (a lane's
+    // working pulse dirties style every frame). A pane out of view stops the loop as a hidden one always did, and
+    // the observer's next word re-arms it (_releasePaintHold). Without the observer, or before its first word, the
+    // read the loop always made.
+    if (this._paneIntersecting !== null) { if (!this._paneIntersecting || this._tabHidden()) return; }
+    else if (!this._isVisible()) return;                        // hidden pane: stop; _releasePaintHold re-arms when it shows (no 2 s layout poll)
     // Click-safe: don't rebuild the SVG under a pressed pointer (a click in progress). The release event
     // (_release) restarts the loop — no polling for it. See the constructor.
     if (this._pointerHeld) { this._liveResume = true; return; }
     const g = this._geom, nowS = this._liveNow();
     // The look MOVES the view, it does not rebuild it: the last full build left a plot group and its live-edge
     // riders (draw(), `_tickPlot`), and advancing the edge is one transform write on that group plus a width write
-    // per rider — _tickTranslate, which also owns the LIVE_MIN_PX guard, in COMPRESSED movement (inside a
+    // per rider: _tickTranslate, which also owns the sub-pixel guard (TICK_MIN_PX), in COMPRESSED movement (inside a
     // collapsed trailing gap the edge does not move on screen at all, where a real-seconds guard redrew for
     // nothing). The full draw() stays for what a translate cannot express — no build yet, a glyph riding the live
     // edge, the next gridline entering the window, a drift into the gutter, never for the clock's advance. A
@@ -1994,10 +2022,14 @@ class TimelinePanel {
     if (!g || this._lastLiveNow == null) this.draw();
     else if (!tp || !tp.g || !tp.g.parentNode) { if ((nowS - this._lastLiveNow) / g.winSec * g.plotW >= LIVE_MIN_PX) this.draw(); }
     else if (!this._tickTranslate(nowS)) this.draw();
-    this._sleep(this._liveWaitMs());
+    // The next look, after a sleep sized to the edge's speed. With a plot group to translate: TICK_MIN_PX's worth
+    // (_tickWaitMs; within a frame at a narrow window, so the edge glides every frame there). With none (a glyph
+    // rides the live edge, so the next look must rebuild too): a whole pixel's (_liveWaitMs), so a rebuild never
+    // runs on every frame.
+    this._sleep(this._tickPlot ? this._tickWaitMs() : this._liveWaitMs());
   }
   // Advance the live edge to `nowS` by moving the plot group (see draw()'s plot group and `_tickPlot`). Returns
-  // true when the frame is expressed — including the no-op of a sub-LIVE_MIN_PX move, or no movement in
+  // true when the frame is expressed, including the no-op of a sub-TICK_MIN_PX move, or no movement in
   // compressed time (a collapsed trailing gap) — and false when only a full draw() can: no handle (the loader, or
   // a glyph riding the live edge was drawn); the clock has reached the next axis gridline (`nextTick`: nothing is
   // pre-drawn outside the window, so an entering gridline and its clock ARE a rebuild, and the build dated the
@@ -2005,8 +2037,8 @@ class TimelinePanel {
   // it every 60 s, so a quiet board would otherwise show a stale axis for up to a minute); or the drift since the
   // build has reached the gutter gap (no frame has rebuilt since — a quiet or disconnected kernel). The window
   // geometry the handlers read (_geom's cT0/t0/t1, the held right edge) follows the move, so a pan or a focus
-  // jump begun between builds starts from what is on screen, and the hover re-arms as after a rebuild: the
-  // content moved under a pointer that did not.
+  // jump begun between builds starts from what is on screen, and the hover re-arms once per whole pixel of drift,
+  // as after a rebuild: the content moved under a pointer that did not.
   _tickTranslate(nowS) {
     const tp = this._tickPlot, g = this._geom;
     if (!tp || !g || !tp.g || !tp.g.parentNode) return false;
@@ -2015,7 +2047,8 @@ class TimelinePanel {
     const px = dc * tp.k;
     if (px < 0 || px >= tp.maxDrift) return false;
     this._lastLiveNow = nowS;
-    if (Math.abs(px - tp.applied) < LIVE_MIN_PX) return true;   // the sub-pixel guard: nothing visible to write yet
+    if (Math.abs(px - tp.applied) < TICK_MIN_PX) return true;   // the sub-pixel guard: nothing visible to write yet
+    const prev = tp.applied;
     tp.applied = px;
     tp.g.setAttribute('transform', 'translate(' + (-px) + ' 0)');
     for (const r of tp.riders) { if (r.fn) r.fn(px); else r.el.setAttribute(r.attr, Math.max(r.min || 0, r.base + px)); }   // the build's floor applies to the grown extent, so the frame matches a full draw
@@ -2025,7 +2058,9 @@ class TimelinePanel {
     }
     g.cT0 = tp.cT0 + dc; g.t0 = g.decompress(g.cT0); g.t1 = g.decompress(g.cT0 + g.winSec);
     this._holdReal = g.t1;
-    this._rehover();
+    // The hover re-arm is a hit test (elementFromPoint, a forced layout right after the writes above): once per
+    // whole pixel of drift, the rate the paced look had, not once per frame at a narrow window.
+    if (Math.floor(px) !== Math.floor(prev)) this._rehover();
     return true;
   }
   _stopLiveTick() {
