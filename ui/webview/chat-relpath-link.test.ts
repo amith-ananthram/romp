@@ -4,35 +4,40 @@
 // relative link posts the ACTIVE session id so the kernel resolves it against that session's cwd (the repo the
 // agent runs in), not the kernel's launch cwd. Slash-less BARE filenames (`power2_watts.pdf`) link too, but
 // ONLY inside inline <code> and only with a KNOWN extension (the user 2026-07-17) — so backticked dotted
-// identifiers (`np.array`) stay prose. render.ts has no jsdom harness → source pins + executed replicas.
+// identifiers (`np.array`) stay prose. The matcher lives in path-links.ts (lifted out of render.ts, which binds
+// the click per span); no jsdom harness → source pins + executed replicas (the walk runs in path-links.test.ts).
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
+const LINKS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "path-links.ts"), "utf8");   // the matcher, lifted out of render.ts
 
 test("the linkifier matches file:// URIs AND bare paths, and gates each token kind", () => {
   // one finder covers the file: scheme, the slashed-path alternative, and the bare-filename alternative
-  assert.ok(RENDER.includes("const CLICKABLE_PATH_RE = /file:"), "regex still handles file:// URIs");
-  assert.ok(RENDER.includes("[~.\\w\\-]"), "regex has the slashed-path alternative");
-  assert.match(RENDER, /if \(!isUri && !looksLikeFilePath\(tok\) && !\(inCode && looksLikeBareFileName\(tok\)\)\) continue;/);
+  assert.ok(LINKS.includes("const CLICKABLE_PATH_RE = /file:"), "regex still handles file:// URIs");
+  assert.ok(LINKS.includes("[~.\\w\\-]"), "regex has the slashed-path alternative");
+  assert.match(LINKS, /if \(!isUri && !looksLikeFilePath\(tok\) && !\(inCode && looksLikeBareFileName\(tok\)\)\) continue;/);
   // the kernel's pathLinks verdict then narrows further, and its value is the OPEN target — pinned
   // in chat-path-links.test.ts; here we pin that the link opens `open`, whatever chose it
-  assert.match(RENDER, /const link = isUri \? fileUriLink\(tok\) : openPathLink\(tok, open, true\);/);
-  assert.match(RENDER, /frag\.appendChild\(link\);/);
+  assert.match(LINKS, /const link = isUri \? fileUriLink\(tok\) : openPathLink\(tok, open, true\);/);
+  assert.match(LINKS, /frag\.appendChild\(link\);/);
 });
 
 test("a relative path click carries the active session id so whoever resolves it uses that cwd", () => {
-  assert.match(RENDER, /function openPathLink\(raw: string, open: string, relative = false\)/);
+  assert.match(LINKS, /function openPathLink\(raw: string, open: string, relative = false\)/);
+  assert.match(LINKS, /if \(relative\) a\.dataset\.rel = "1";/, "the span says it was a bare path (the module binds nothing)");
   // relative → send the session id; absolute/file:// → none needed. Both go through openPath, which
-  // picks the host (VS Code editor vs the feed pane's viewer) — see the openPath test below.
+  // picks the host (VS Code editor vs the feed pane's viewer) — see the openPath test below. render.ts
+  // reads the span's data and binds the click (bindPathLink).
+  assert.match(RENDER, /const open = a\.dataset\.path \|\| "", relative = a\.dataset\.rel === "1";/);
   assert.match(RENDER, /openPath\(open, relative \? activeId : null, e\);/);   // + the click itself: a modified click on a PDF takes a browser tab (pdf-new-tab.test.ts)
 });
 
 test("the cheap pre-filter keys on a slash — or, inside inline code, a dot", () => {
-  assert.match(RENDER, /if \(!text\.includes\("\/"\) && !\(inCode && text\.includes\("\."\)\)\) continue;/);
-  assert.match(RENDER, /const inCode = !!tn\.parentElement\?\.closest\("code"\);/);
+  assert.match(LINKS, /if \(!text\.includes\("\/"\) && !\(inCode && text\.includes\("\."\)\)\) continue;/);
+  assert.match(LINKS, /const inCode = !!tn\.parentElement\?\.closest\("code"\);/);
 });
 
 // executed: mirror looksLikeFilePath EXACTLY to guard its precision (accept real paths, reject prose)
@@ -56,8 +61,8 @@ test("looksLikeFilePath accepts real paths and rejects prose fractions/idioms", 
 
 // executed: mirror looksLikeBareFileName — a slash-less filename links only with a KNOWN extension
 test("looksLikeBareFileName accepts real filenames and rejects identifiers/versions", () => {
-  assert.match(RENDER, /function looksLikeBareFileName\(tok: string\): boolean/);
-  assert.match(RENDER, /BARE_FILE_EXTS\.has\(tok\.slice\(dot \+ 1\)\.toLowerCase\(\)\)/);
+  assert.match(LINKS, /function looksLikeBareFileName\(tok: string\): boolean/);
+  assert.match(LINKS, /BARE_FILE_EXTS\.has\(tok\.slice\(dot \+ 1\)\.toLowerCase\(\)\)/);
   const EXTS = new Set(["md", "py", "pdf", "csv", "png", "ts", "json", "sh"]);   // subset of BARE_FILE_EXTS
   const bare = (tok: string): boolean => {
     if (tok.includes("/") || tok.includes(":")) return false;
@@ -74,7 +79,7 @@ test("looksLikeBareFileName accepts real filenames and rejects identifiers/versi
     assert.equal(bare(p), false, p);
   }
   // the real BARE_FILE_EXTS covers the screenshot's extensions
-  const exts = RENDER.slice(RENDER.indexOf("const BARE_FILE_EXTS"), RENDER.indexOf("function looksLikeBareFileName"));
+  const exts = LINKS.slice(LINKS.indexOf("const BARE_FILE_EXTS"), LINKS.indexOf("function looksLikeBareFileName"));
   for (const e of ['"pdf"', '"csv"', '"py"', '"md"', '"png"']) assert.ok(exts.includes(e), e);
 });
 
