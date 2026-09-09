@@ -610,12 +610,13 @@ srv.serve_forever()
 export const STRIPPED_ENV = ["ROMP_MANAGER_PORT", "ROMP_MANAGER_PID", "ROMP_SUPERVISED", "ROMP_STATE_DIR", "ROMP_SERVE_PORT", "ROMP_KERNEL_PORT", "ROMP_PERF", "TMUX"];
 
 /** The key-source names tests/conftest.py pops before any test runs (its KEY_SOURCE_ENV_NAMES and
- *  KEY_SOURCE_ENV_PREFIXES: keysource.SOURCE_VARS, sdk_backend.AUTH_ENV_NAMES, the auth declaration
- *  and 1Password's names), stripped here for the same reason: every shell under a romp-managed session
- *  inherits the manager's credentials, and keysource selects a key COMMAND or REFERENCE straight from
- *  the environment when the isolated env file is absent, so a replay run from inside a session would
- *  otherwise start a kernel Handler holding the operator's key command, OAuth token and op token. The
- *  first form of this list stripped ANTHROPIC_* and the key reference only (review find, 2026-09-08). */
+ *  KEY_SOURCE_ENV_PREFIXES: credentials.FLOOR_ENV_NAMES, which is the retired provider names, the login
+ *  tokens, the auth declaration and 1Password's names, plus sdk_backend.AUTH_ENV_NAMES), stripped here
+ *  for the same reason: every shell under a romp-managed session inherits the manager's credentials, a
+ *  retired provider name in the kernel's environment is a boot failure (credentials.check_boot_environment)
+ *  and the login tokens would be claimed for a launch, so a replay run from inside a session would
+ *  otherwise start a kernel Handler holding the operator's OAuth token and op token, or refuse to start.
+ *  The first form of this list stripped ANTHROPIC_* and the key reference only (review find, 2026-09-08). */
 export const STRIPPED_KEY_ENV = ["ANTHROPIC_API_KEY", "ROMP_API_KEY_REF", "ROMP_API_KEY_CMD", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
   "ROMP_EXPECTED_AUTH", "OP_SERVICE_ACCOUNT_TOKEN", "OP_CONNECT_HOST", "OP_CONNECT_TOKEN", "OP_ACCOUNT"];
 export const STRIPPED_KEY_ENV_PREFIXES = ["ANTHROPIC_", "OP_SESSION_"];
@@ -683,17 +684,17 @@ export async function startPageServer({ dist, python = "python3", log = () => {}
   fs.mkdirSync(env.TMUX_TMPDIR, { recursive: true });
   env.ROMP_KERNEL_NO_OPEN = "1";
   env.ROMP_POSTAL_PEERS = "0";   // the feed page polls /tunnels, which otherwise asks the LIVE postal bus for its peers
-  // The floors tests/conftest.py applies, for the same reasons. The kernel's live API key is the manager's
-  // env FILE (kernel/keysource.py falls back to ~/.config/romp/service.env when these two are unset), the
-  // boot model-catalog fetch would carry that key to the Models API from the first /sessions request a
-  // pane makes, and a missing ROMP_CLAUDE_BIN resolves to the real CLI, so it is set to a binary that runs
-  // nothing rather than removed.
+  // The floors tests/conftest.py applies, for the same reasons. The kernel's boot check reads the manager's
+  // env FILE for retired provider lines (kernel/credentials.py falls back to ~/.config/romp/service.env
+  // when these two are unset), the boot model-catalog fetch would run the operator's apiKeyHelper and
+  // carry its key to the Models API from the first /sessions request a pane makes, and a missing
+  // ROMP_CLAUDE_BIN resolves to the real CLI, so it is set to a binary that runs nothing rather than removed.
   env.ROMP_SERVICE_ENV_FILE = env.ROMP_SERVICE_ENV = path.join(tmp, "no-service.env");   // never created
   env.ROMP_MODEL_CATALOG = "off";
   env.ROMP_CLAUDE_BIN = "/bin/false";
   // One more of conftest's floors: a route that constructs the SDK backend decides whether to wrap CLIs in
-  // systemd-run scopes (on by default under a supervised kernel, probing the user manager). The key
-  // reference and command keysource would resolve through their providers went with STRIPPED_KEY_ENV above.
+  // systemd-run scopes (on by default under a supervised kernel, probing the user manager). The retired
+  // key reference and command names the boot check refuses went with STRIPPED_KEY_ENV above.
   env.ROMP_CLI_SCOPE = "0";
   env.ROMP_SERVE_TOKEN = token;
   env.ROMP_DIST_DIR = distDir;

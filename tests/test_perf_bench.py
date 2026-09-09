@@ -58,7 +58,7 @@ WEB_TURNS = 400       # a transcript large enough that the cold row's full assem
 EXPECTED_NEUTRALIZED = {
     "km._refresh_remote_prices", "km._warm_fleet_bg", "km._system_notify", "km._push_notify", "km._push_forward",
     "km._badge_push", "romp_kernel_perf_bench.subprocess", "romp_judge.subprocess", "romp_sdk_backend.subprocess",
-    "romp_keysource.subprocess",   # loaded by sdk_backend; its key command is a subprocess (review find, 2026-09-08)
+    "romp_credentials.subprocess",   # loaded by sdk_backend; its credential helper runs as a subprocess (review find, 2026-09-08)
     "km._atomic_write (shadowed)", "km._read_state_json (shadow overlay)", "km._order_audit_path (shadowed)",
     "pwd.getpwnam (counted)", "pwd.getpwuid (counted)"}
 # The caches whose emptiness the cold rows' PROOF rests on: the event model's parse-layer caches (the
@@ -116,18 +116,34 @@ def _redact_cwds(state, root):
 
 
 def _module_constants(path, names):
-    """Module-level `NAME = <string or tuple of strings and NAMEs>` assignments, read from the source with
-    ast and resolved against each other, so a kernel constant is pinned without loading any romp module
-    in this process."""
+    """Module-level `NAME = <string, tuple of strings and NAMEs, or a `+` chain of those tuples>`
+    assignments, read from the source with ast and resolved against each other, so a kernel constant is
+    pinned without loading any romp module in this process. Every NAME a wanted constant refers to is
+    resolved too, whether or not it was asked for."""
     import ast
     found = {}
+
+    def resolve(v):
+        if isinstance(v, ast.Constant):
+            return v.value
+        if isinstance(v, ast.Name):
+            return found[v.id]
+        if isinstance(v, ast.Tuple):
+            return tuple(resolve(e) for e in v.elts)
+        if isinstance(v, ast.BinOp) and isinstance(v.op, ast.Add):     # credentials.FLOOR_ENV_NAMES is a tuple sum
+            return resolve(v.left) + resolve(v.right)
+        raise AssertionError("unsupported constant form in %s: %s" % (path, ast.dump(v)))
+
     for node in ast.parse(open(path).read()).body:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and node.targets[0].id in names:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             v = node.value
-            if isinstance(v, ast.Tuple):
-                found[node.targets[0].id] = tuple(e.value if isinstance(e, ast.Constant) else found[e.id] for e in v.elts)
-            elif isinstance(v, ast.Constant):
-                found[node.targets[0].id] = v.value
+            if isinstance(v, (ast.Constant, ast.Tuple, ast.BinOp)):
+                try:
+                    found[node.targets[0].id] = resolve(v)
+                except (KeyError, AssertionError):
+                    if node.targets[0].id in names:
+                        raise
+    found = {k: v for k, v in found.items() if k in names}
     missing = set(names) - set(found)
     assert not missing, "not found at module level in %s: %s" % (path, sorted(missing))
     return found
@@ -1081,11 +1097,11 @@ class InProcessChecks(unittest.TestCase):
         # The names come from the code's constants, the way tests/conftest.py's floor is pinned on main: a
         # provider that adds a credential name adds it there, and this fails until the tool drops it too. Read
         # from the source text, so no romp module loads in this process.
-        ks = _module_constants(os.path.join(ROOT, "kernel", "keysource.py"), ("KEY_VAR", "REF_VAR", "CMD_VAR", "SOURCE_VARS", "OP_ENV_NAMES", "OP_ENV_PREFIX"))
+        cr = _module_constants(os.path.join(ROOT, "kernel", "credentials.py"), ("FLOOR_ENV_NAMES", "FLOOR_ENV_PREFIXES"))
         sb = _module_constants(os.path.join(ROOT, "kernel", "sdk_backend.py"), ("AUTH_ENV_NAMES",))
-        expected = set(ks["SOURCE_VARS"]) | set(sb["AUTH_ENV_NAMES"]) | set(ks["OP_ENV_NAMES"]) | {"ROMP_EXPECTED_AUTH"}
+        expected = set(cr["FLOOR_ENV_NAMES"]) | set(sb["AUTH_ENV_NAMES"])
         self.assertEqual(set(self.pb.KEY_SOURCE_ENV), expected)
-        self.assertEqual(set(self.pb.KEY_SOURCE_ENV_PREFIXES), {"ANTHROPIC_", ks["OP_ENV_PREFIX"]})
+        self.assertEqual(set(self.pb.KEY_SOURCE_ENV_PREFIXES), {"ANTHROPIC_"} | set(cr["FLOOR_ENV_PREFIXES"]))
 
     # ── check_guards_held ────────────────────────────────────────────────────────────────────────
     def test_a_refusal_still_on_record_at_the_end_of_the_run_is_an_error_naming_the_guard(self):

@@ -149,7 +149,7 @@ error, never a silent skip):
     build's path-link pass) and the pair `git remote get-url` (the file-link route; the pair only —
     `git remote` also has writing subcommands, and those trip). Those run and are counted per build.
     "Every loaded romp module" is the kernel, the judge, the event model, the SDK backend, and every
-    sibling kernel/ module one of them loaded (keysource among them); the report's `neutralized` list
+    sibling kernel/ module one of them loaded (credentials among them); the report's `neutralized` list
     names each one.
     The kernel caches their answers only for a cwd inside a git checkout (on the index and tree
     mtimes, and the config file's mtime for the remote); for any other cwd it re-runs `git ls-files`
@@ -232,12 +232,13 @@ WORLD_KEYS = (("liveness.live", "live rows"), ("live_transcripts.count", "transc
               ("push_rebuilds", "push_steady rebuild samples"),
               ("error", "run error"))      # a run that stopped on a guard is flagged before its rows are diffed
 # Every key-source and credential name tests/conftest.py pops before any test runs (its KEY_SOURCE_ENV_NAMES
-# and KEY_SOURCE_ENV_PREFIXES: keysource.SOURCE_VARS, sdk_backend.AUTH_ENV_NAMES, the auth declaration,
-# keysource.OP_ENV_NAMES and OP_ENV_PREFIX), removed here before the import for the same reason: every shell
-# under a romp-managed session inherits the manager's credentials, and keysource selects a key COMMAND or
-# REFERENCE straight from the environment when the isolated env file is absent. The first form dropped
-# ANTHROPIC_* only (review find, 2026-09-08); tests/test_perf_bench.py pins this list against the kernel's
-# own constants.
+# and KEY_SOURCE_ENV_PREFIXES: credentials.FLOOR_ENV_NAMES, which is the retired provider names, the login
+# tokens, the auth declaration and 1Password's names, plus credentials.FLOOR_ENV_PREFIXES and
+# sdk_backend.AUTH_ENV_NAMES), removed here before the import for the same reason: every shell under a
+# romp-managed session inherits the manager's credentials, a retired provider name in the kernel's
+# environment is a boot failure (credentials.check_boot_environment), and the login tokens would be claimed
+# for a launch. The first form dropped ANTHROPIC_* only (review find, 2026-09-08); tests/test_perf_bench.py
+# pins this list against the kernel's own constants.
 KEY_SOURCE_ENV = ("ANTHROPIC_API_KEY", "ROMP_API_KEY_REF", "ROMP_API_KEY_CMD", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
                   "ROMP_EXPECTED_AUTH", "OP_SERVICE_ACCOUNT_TOKEN", "OP_CONNECT_HOST", "OP_CONNECT_TOKEN", "OP_ACCOUNT")
 KEY_SOURCE_ENV_PREFIXES = ("ANTHROPIC_", "OP_SESSION_")
@@ -521,7 +522,7 @@ def install_guards(km, sbmod, shadow, rec, no_git=False):
     stub("_push_forward", lambda evs, *a, **k: rec["notifications"].append(("forward", len(evs))))
     stub("_badge_push", lambda n, *a, **k: rec["notifications"].append(("badge", n)))
     # Every loaded romp module: the four the harness drives, plus every sibling of kernel.py that one of them
-    # loaded (sdk_backend loads keysource, whose key command is a subprocess). The first form guarded the four
+    # loaded (sdk_backend loads credentials, whose apiKeyHelper runs as a subprocess). The first form guarded the four
     # only, while the docstring promised every loaded module (review find, 2026-09-08).
     mods = [km, getattr(km, "jd", None), getattr(km, "em", None), sbmod]
     kfile = getattr(km, "__file__", None)
