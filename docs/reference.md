@@ -1021,12 +1021,20 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `plannerSkip` counts the sessions the outer gate let through, not every
   planner skip: an idle session stops at the outer gate and appears in neither
   `skipped` nor `planned`. Outside a pass frame (`romp-judge --plan`) the
-  outer gate stamps nothing, and the inner gate does the skipping. The
-  compaction sweep after each judge pass evicts from `pass` and `shared` the
-  entries of stores no session in the discover window owns, so both stay
-  bounded by the live board; the courier's and the planner's change-gate
-  tables are pruned to the sessions each pass discovers, and the evidence
-  gate's stamps are cleared at a fixed cap.
+  outer gate stamps nothing, and the inner gate does the skipping. `bgTops`
+  is the placed-launch memo behind the awaiting lift and the feed's
+  background-task classification, keyed on the parse object and the store
+  object: `hit` and `miss` (calls answered from the per-version map against
+  looked up), `resolve` (launch ids looked up on a miss, placed or not),
+  `walk` and `walk_neg` (transcript walks, and the walks that left a launch
+  unresolved: an upper bound on what a negative walk cache would save),
+  `idx_build` (placement indexes built, one per store object asked, a
+  writer's private copy included) and the gauge `entries` (sessions holding
+  a map). The compaction sweep after each judge pass evicts from `pass` and
+  `shared` the entries of stores no session in the discover window owns, so
+  both stay bounded by the live board; the courier's and the planner's
+  change-gate tables are pruned to the sessions each pass discovers, and the
+  evidence gate's stamps are cleared at a fixed cap.
 - `judge`: `passes`, `ms_sum`, `ms_last`, `ms_mean` (wall time; a pass waits
   on model calls), `cpu_ms_sum` (CPU time of the judge tier threads and every
   per-session worker they run; the workers' share is `cpu_ms_workers`).

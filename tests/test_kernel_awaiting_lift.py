@@ -71,6 +71,15 @@ def _monitor(tid, t, timeout_ms=300000):
                 {"type": "tool_use", "id": tid, "name": "Monitor", "input": {"timeout_ms": timeout_ms}}]}}
 
 
+def _clear_placement_memos():
+    """The launch-placement memos key on (sid, tool_use id) and on object identity; the sid and the ids
+    repeat across tests, so a positive learned from one test's transcript must not answer the next. The
+    shared read-only cache is keyed per store path (a fresh tempdir each test) and compares bytes, so it
+    cannot serve a stale store; cleared anyway, with its off switch lifted, so no test starts poisoned."""
+    km._task_seg_cache.clear(); km._BG_TOPS_CACHE.clear(); km._PLACEMENT_IDX.clear()
+    km.jd._shared_clear()
+
+
 class AwaitingLift(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
@@ -84,15 +93,18 @@ class AwaitingLift(unittest.TestCase):
         km._alive_sessions = lambda now, tmux: [{"sid": SID, "path": self.path}]
         km._mark_views_dirty = lambda *a, **k: None
         km._SESSION_STAMP_CACHE.clear()
+        km._lift_seen.clear()          # stores are re-seeded in place under recycled tempdir inodes
         km._bgall_cache.clear()
         km._bgtasks_cache.clear()
+        _clear_placement_memos()
         self.gid = SID + ":g1"
 
     def tearDown(self):
         for k, v in self.saved.items():
             setattr(km, k, v)
         km.jd.STATE, km.jd.GOALDIR = self.saved_jd
-        km._SESSION_STAMP_CACHE.clear(); km._bgall_cache.clear(); km._bgtasks_cache.clear()
+        km._SESSION_STAMP_CACHE.clear(); km._lift_seen.clear(); km._bgall_cache.clear(); km._bgtasks_cache.clear()
+        _clear_placement_memos()
         self.td.cleanup()
 
     def _transcript(self, recs):

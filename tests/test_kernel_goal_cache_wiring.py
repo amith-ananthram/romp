@@ -62,12 +62,12 @@ def _tm():
 # (load_goals_shared_or_fault), so one session's unreadable store costs that session's goal-derived data
 # and files one row per fault episode, never the frame.
 WIRED = {"_open_top_goal": 1, "_deferral_sweep_tick": 1, "_session_stamp_read": 1, "_owned_yield_why": 1,
-         "_msg_sum_scan_session": 1}
+         "_msg_sum_scan_session": 1,
+         "_bg_placed_tops": 1}   # the placed-launch memo: the shared view, or the store the caller hands in
 WIRED_BOUNDARY = {"build_feed": 1, "build_session": 2, "build_timeline": 1}
-# NOT wired, on purpose: the awaiting-lift job and the background-placement reader do a probe-then-write
-# two-phase read, and the feed's pass snapshot has its own memo (_feed_goals stays on the writer's loader,
-# bare or behind load_goals_or_fault).
-UNWIRED = ("_lift_spent_awaiting", "_bg_placed_tops", "_feed_goals")
+# NOT wired, on purpose: the awaiting-lift job does a probe-then-write two-phase read, and the feed's pass
+# snapshot has its own memo (_feed_goals stays on the writer's loader, bare or behind load_goals_or_fault).
+UNWIRED = ("_lift_spent_awaiting", "_feed_goals")
 
 
 class WiringPins(unittest.TestCase):
@@ -90,6 +90,15 @@ class WiringPins(unittest.TestCase):
                              "%s: not wired" % name)
             self.assertGreaterEqual(src.count("jd.load_goals(") + src.count("jd.load_goals_or_fault("), 1,
                                     "%s: still the writer's loader, bare or behind the boundary" % name)
+
+    def test_bg_placed_tops_keys_on_objects_not_on_a_stat(self):
+        # the per-version map is keyed on the parse and store OBJECTS in hand (a stat taken after the
+        # read can describe a version the read did not see); no stat is taken here. The one presence
+        # check (os.path.exists on the store file, an absent store answering nothing without a parse or
+        # a load) is not a key and is allowed.
+        src = inspect.getsource(km._bg_placed_tops)
+        self.assertEqual(src.count(".stat()"), 0)
+        self.assertEqual(src.count("os.stat("), 0)
 
     def test_the_compaction_sweep_evicts_the_caches_absent_paths(self):
         src = inspect.getsource(km._compact_goal_stores)
