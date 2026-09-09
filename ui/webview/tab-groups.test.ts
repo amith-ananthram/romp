@@ -1747,3 +1747,16 @@ test("the guide states the every-tag rule (T264b)", () => {
   assert.match(GUIDE, /A session with several tags appears under each of them; every copy is the same\s+session/);
   assert.doesNotMatch(GUIDE, /sits under the first of them in your tag order/, "the retired home-tag sentence is gone");
 });
+
+test("the guide lists the header's parts in the built order: the tag's color and name, then the chevron and the count (T284)", () => {
+  assert.match(GUIDE, /Each header shows the tag's color and name, then a chevron and a\s+member count\./);
+  assert.doesNotMatch(GUIDE, /Each header shows a chevron, the tag's color/, "the pre-T284 caret-first sentence is gone");
+  // The guide names the parts in the order the builder appends them (the structure pin above), and that is
+  // the order the reader sees only while the header's flex row keeps DOM order: no rule on the header or on
+  // one of its parts may reorder them (order, flex-direction, a margin-left: auto push).
+  const rules = [...CSS.matchAll(/(?:^|\n)([^{}\n]*\.tab-group-(?:head|caret|chip|count|pip)[^{}\n]*)\{([^}]*)\}/g)];
+  assert.ok(rules.length >= 5, "the header's rules are read: " + rules.length);
+  for (const [, sel, body] of rules) {
+    assert.doesNotMatch(body, /(?:^|[\s;])order\s*:|flex-direction\s*:|margin-left\s*:\s*auto/, "no rule reorders the header: " + sel.trim());
+  }
+});
