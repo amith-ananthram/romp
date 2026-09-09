@@ -407,7 +407,8 @@ class _PerfStats:
                           ("backref", jd.backref_memo_stats), ("captions", jd.captions_memo_stats),
                           ("goalArchive", jd.goal_archive_memo_stats), ("plannerSkip", jd.planner_skip_stats),
                           ("liftGate", _lift_gate_report), ("bgTops", _bg_tops_report),
-                          ("intrMarks", _intr_marks_memo_report), ("statesOverlay", _states_overlay_report)):
+                          ("intrMarks", _intr_marks_memo_report), ("statesOverlay", _states_overlay_report),
+                          ("lanes", _lanes_memo_report)):   # the timeline's per-lane segment memo, live lanes; the dead lanes beside
             try:
                 memos[key] = read()
             except Exception:
@@ -36428,6 +36429,260 @@ def _dead_lane_marks(marks, t0):
     return [{k: v for k, v in m.items() if k != "_h"} for m in marks if m.get("_h", 0) >= t0]
 
 
+# ── the LIVE-lane memo: a live lane's SEGMENT part (its bars, segment ends, work end, compaction markers and its
+# judging marks, unfiltered) is derived once and served while every input it read stands. The dead-lane memo
+# above serves the dead lanes; the live lanes still walked every turn of every lane on every bars build, although
+# between two builds most live lanes had not changed either (a board of dozens of lanes has one or two writing).
+# Everything else on the lane (the chip, the awaiting overlay, the intervals, the flags, comments, episodes, the
+# branch endpoint) is derived per build as before. The inputs, each in the key:
+#   session   the object after _parse and _merge_live_atoms, by IDENTITY, held in the entry so the identity cannot
+#             be recycled (_parse returns the cached object for an unchanged transcript and states file; the merge
+#             returns it unchanged when there is no live tail). The loop reads its turns (t, end, ended, trigger,
+#             atoms). A live tail (the merge returned a new object) is derived and not held, since it is a new
+#             object every build (live_tail).
+#   goals     the store the loop reads seams from (_segs_seam) and nodes from (_derive_judging_marks): a FrozenStore
+#             by identity (load_goals_shared serves one per file version, so a publish or a journal append is a new
+#             object); a store with neither seams nor nodes, or None after a fault, as "empty", since the two
+#             fields read are empty whatever its identity; any other private store is not held (unshared_skip: a
+#             mutable store could change under the entry).
+#   captions  _stat_key of captions/<sid>.jsonl, taken by build_timeline BEFORE _captions reads the file (_captions
+#             builds a new dict per call, so the file is the input). Stat before read: a row appended between the
+#             two is read by this build and held under the OLD key, so the next build's stat misses and derives
+#             again; a stat after the read would hold the old rows under the new key and serve them stale until
+#             another input moved. No file and no rows as "empty"; rows read with no file to stat (it appeared
+#             between the two) are derived and not held.
+#   live      an open bar needs a live lane (turn_open). True on every call (a dead lane never reaches this memo);
+#             kept in the key as the derivation's input.
+#   bft       the branch clip, the fork time while the parent's lane is in the build and None otherwise
+#             (build_timeline's branch_of); it drops the copied pre-branch segments and boundaries.
+#   downtime  tuple(_downtime): _awake_spans excises the host's suspensions and _suspended_after closes a turn
+#             stranded before one. The tuple, not the length: a different nap of the same count re-cuts the bars
+#             (the dead-lane key carries the same tuple).
+#   archive   jd._file_key of STATE/archive/<sid>.json (the archiver mark's file), taken BEFORE the derivation
+#             reads it; a sentinel (the stat failed) matches nothing and nothing is stored under it.
+#   sid       the entry's key; the bars and marks carry it.
+# NOT inputs: the clock. The horizon (now - TL_HORIZON) and JUDGE_CAP_LIMIT are applied per build by
+# _judging_assemble, and nothing else in the segment part reads a time. A lane whose parse failed, or whose seams
+# or marks stage complained (the derivation's own try/excepts), is derived and not held (complain_skip). The held
+# bars are shared by identity into every later build's turns[sid], the bars wire cache and the delta parts, none
+# of which writes to them (_bind_message_execs mutates the messages only; _timeline_skeleton copies the frame),
+# and the held marks into `semantic`, which _run_judging only reads. Entries are dropped for lanes outside a full
+# build's lane set (_lanes_forget) and past _LANES_MEMO_MAX, the least recently served first; an entry whose parse
+# object is no longer the build's is dropped when seen, since it cannot hit again and it holds that parse; the
+# dead-lane populate pops a lane's entry when the lane dies (the entry holds the parse the populate releases). One
+# lock around get, put, evict and the counters; the derivation runs unlocked, so two threads deriving one lane both
+# store an exact entry and the last wins.
+_lanes_memo = {}          # sid -> (session, goals_obj, caps_key, key, value, prompts); value = _lane_segments' tuple,
+#                           prompts its full_prompts map (T278b)
+_LANES_MEMO_MAX = 256
+_lanes_stats = {"hit": 0, "miss": 0, "live_tail": 0, "complain_skip": 0, "unshared_skip": 0, "evict": 0,
+                "segs_hit": 0, "segs_miss": 0,
+                # the DEAD lanes of a bars build, counted by build_timeline (this memo never sees one): served from
+                # _dead_lane_memo (dead_serve), derived through _lane_segments (dead_miss: cached after, unless the
+                # store faulted, the transcript could not be stat'd or a stage complained), or served as the empty
+                # lane a failed parse was cached as (dead_failed_serve). Disjoint: their sum is the dead lanes of
+                # every bars build.
+                "dead_serve": 0, "dead_miss": 0, "dead_failed_serve": 0}
+_LANES_LOCK = threading.Lock()
+
+
+def _lanes_memo_report():
+    """The memo's counters plus its occupancy, for /perf (memos.lanes). hit, miss, live_tail, complain_skip,
+    unshared_skip, evict, entries, segs_hit and segs_miss are the LIVE lanes'; dead_serve, dead_miss and
+    dead_failed_serve are the dead lanes' (build_timeline counts them here, so one block carries every lane)."""
+    with _LANES_LOCK:
+        out = dict(_lanes_stats)
+        out["entries"] = len(_lanes_memo)
+    return out
+
+
+def _lanes_forget(keep):
+    """Drop the entries for lanes outside `keep`, a full build's lane set (the sids build_timeline drew).
+    Iterates a key snapshot under the lock; a connect-push build on another thread may insert concurrently."""
+    with _LANES_LOCK:
+        gone = [k for k in _lanes_memo if k not in keep]
+        for k in gone:
+            _lanes_memo.pop(k, None)
+        if gone:
+            _lanes_stats["evict"] += len(gone)
+
+
+def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None):
+    """The SEGMENT part of one timeline lane: the turn loop build_timeline ran inline, moved here so the per-lane
+    memo (_lane_memo; the comment above _lanes_memo names every input) can hold its result: (bars, seg_ends,
+    last_t, compactions, cap_marks, other_marks, nsegs, complained). bars are the lane's wire bars in turn order
+    (the compact shape below, every default omitted); seg_ends maps a segment's start t to its work-END t; last_t
+    is the lane's last awake activity (its `since` when the liveness snapshot has none); compactions are the
+    compact_boundary markers; cap_marks and other_marks are this lane's judging marks, unfiltered
+    (_derive_judging_marks); nsegs counts the segments visited (the cost a memo hit saves); complained is True
+    when the seams or the marks stage failed, or a mark carries a time the assembly could not compare, and
+    _bars_complain said so; such a lane is not memoized. No clock is read here. `full_prompts`, when given,
+    receives each segment's WHOLE prompt under its bar id (T278b): the bar carries the wire form (_wire_prompt,
+    the first line capped) and _bind_message_execs's sender heuristic reads the whole text through this map; a
+    memo that serves the bars serves the map beside them."""
+    if full_prompts is None:
+        full_prompts = {}
+    st_turns = session["turns"]
+    bars, last_t, seg_ends, nsegs, complained = [], None, {}, 0, False   # seg_ends: seg-start t → work-END t (for completion marks)
+    for ti, turn in enumerate(st_turns):
+        turn_open = (live and ti == len(st_turns) - 1 and not turn["ended"]
+                     and not any(x["type"] == "idle" for x in turn["atoms"])
+                     and not _suspended_after(turn["end"]))   # dead lane (live False) or pre-sleep freeze → not an open bar
+        try:
+            segs = _segs_seam(turn, goals)
+        except Exception as e:
+            # a malformed goals row must cost the SEAMS, not the lane's bars (2026-08-18: any
+            # exception here used to abort the whole bars frame after the skeleton had shipped)
+            _bars_complain(sid, "seams", e)
+            complained = True
+            try:
+                segs = em.segments(turn)
+            except Exception:
+                segs = []
+        for si, seg in enumerate(segs):
+            if bft and (seg.get("end") or seg["t"]) <= bft:
+                continue                                       # copied pre-branch history — the parent's lane owns it
+            nsegs += 1
+            # A bar must not span a host sleep. EXCISE every suspension inside the segment → one bar per
+            # awake stretch, so work done AFTER the lid reopened isn't erased (the user 2026-06-22). The
+            # asleep gaps between pieces read as idle (and collapse under 'collapse gaps'). The segment's
+            # atom times go in too: an awake stretch with NO activity in it is a dark-wake sliver, not
+            # work, and drawing it redrew this segment's summary all night long (the user 2026-07-23).
+            spans = _awake_spans(seg["t"], seg["end"], [a.get("t") for a in seg["atoms"]])
+            last_t = max(last_t or 0, spans[-1][1])            # the true work END (last awake activity) — drives the lane `since`
+            seg_ends[seg["t"]] = spans[-1][1]                  # a completion mark lands at its segment's END (after the work)
+            cap = _seg_work_caption(caps, seg["id"])       # WORK caption (the bar) — drift-safe
+            msg_cap = _seg_caption(caps, seg["id"])    # MESSAGE caption (the dot) — gist of the ask, ready early; drift-safe
+            work_uuid, reply_uuid = _seg_anchors(seg["atoms"])
+            full_prompts[seg["id"]] = full_prompt = _seg_prompt(seg)
+            trig = next((x for x in seg["atoms"] if x.get("uuid") == seg.get("trigger")), None)
+            author = (trig or {}).get("author")
+            src = "queued" if isinstance(author, dict) else "typed"
+            for sj, (bstart, bend) in enumerate(spans):
+                # THE WIRE BAR (T278c): three long keys the delta path, the federation merge and the
+                # kernel's own readers need by name (id, start, end), then the rest under one-letter keys
+                # with every default OMITTED (a false flag, an empty list or caption, the "typed" source):
+                # 8,577 bars carried 1.1 MB of key names and 0.9 MB of defaults in a 12 MB frame. The view
+                # expands a bar once at its boundary (expandBars in ui/romp-timeline-view.js, the twin of
+                # _BAR_WIRE below, drift-guarded by tests) so every reader keeps its long names.
+                # promptId = the prompt atom (the DOT), workId = the first work atom (the BAR) — so a chat
+                # message-hover lights only the dot and a work-hover only the bar (dotLit/barLit in the view).
+                # The wire prompt (T278b): the first line, capped; the tip shows 90 chars of it and nothing
+                # else reads it. tid (= the lane key), uuid (= promptId) and workUuid (= workId) left the
+                # wire in T278b: the view reads the lane key, promptId and workId instead.
+                bar = {"id": seg["id"], "start": bstart, "end": bend}
+                if seg.get("trigger"):
+                    bar["p"] = seg.get("trigger")
+                if work_uuid:
+                    bar["w"] = work_uuid
+                if reply_uuid:
+                    bar["r"] = reply_uuid
+                q = _wire_prompt(full_prompt)
+                if q:
+                    bar["q"] = q
+                if cap:
+                    bar["c"] = cap
+                if msg_cap:
+                    bar["m"] = msg_cap
+                if src != "typed":
+                    bar["s"] = src
+                mids = _seg_mids(seg)
+                if mids:
+                    bar["d"] = mids
+                if turn_open and si == len(segs) - 1 and sj == len(spans) - 1 and bend == seg["end"]:
+                    bar["u"] = True                        # open: the live turn's last piece
+                if sj > 0:
+                    bar["t"] = True                        # a post-sleep continuation piece: NO new prompt dot
+                if (trig or {}).get("rompAuto"):
+                    bar["a"] = True                        # an AUTO-nudge specifically → the tip captions it 'romp · nudge'
+                if author == "romp":
+                    # ANY romp-authored prompt (auto-nudge, Nudge button, auto-retry — author 'romp' via
+                    # ROMP_INJECT_RE) wears the romp logo on its dot (the user 2026-07-16: an auto-retry
+                    # whose dot had drawn as a human prompt instead of wearing the logo), mirroring the chat's 2026-07-05 rule
+                    bar["o"] = True
+                bars.append(bar)
+    try:
+        cap_marks, other_marks = _derive_judging_marks(sid, caps, goals, seg_ends) if goals is not None else ([], [])
+        # The horizon comparisons run in _judging_assemble, per build, outside this lane's guard; the one-pass form
+        # compared every time here and a malformed time (a string t on a captions row, a non-numeric groupOp.t,
+        # ev_t, distilledMt, briefedMt or archive t) cost this lane its marks. The same here, before the lane can
+        # be memoized: a time the assembly could not compare is a failed marks stage, not a frame lost on every
+        # build until the data changes.
+        if (any(not isinstance(m["t"], (int, float)) for m in cap_marks)
+                or any(not isinstance(ft, (int, float)) for ft, _m in other_marks)):
+            raise TypeError("a judging mark carries a non-numeric time")
+    except Exception as e:
+        _bars_complain(sid, "judging-marks", e)   # this lane loses its marks, the frame ships
+        complained = True
+        cap_marks, other_marks = [], []
+    compactions = [{"t": a["t"]} for turn in st_turns for a in turn["atoms"]
+                   if a.get("type") == "system" and a.get("subtype") == "compact_boundary" and a.get("t")
+                   and not (bft and a["t"] <= bft)]           # copied boundaries stay on the parent's lane
+    return bars, seg_ends, last_t, compactions, cap_marks, other_marks, nsegs, complained
+
+
+def _lane_memo(sid, parsed, session, goals, caps, cap_key, live, bft, parse_ok=True, full_prompts=None):
+    """_lane_segments through the per-lane memo (the comment above _lanes_memo names every input): the six
+    pieces build_timeline reads, bars, seg_ends, last_t, compactions, cap_marks and other_marks, served from the
+    lane's entry when its inputs are the previous build's and derived otherwise. LIVE lanes only: build_timeline
+    serves a dead lane from the dead-lane memo and derives a dead miss with _lane_segments directly, so `live` is
+    True on every call here. `parsed` is the _parse object and `session` the one after _merge_live_atoms, the
+    same object unless a live tail was merged; `cap_key` is the captions file's _stat_key taken before _captions
+    read it (None when the file could not be stat'd); `parse_ok` is False when the parse failed and `session` is the
+    empty stand-in. `full_prompts` (T278b) receives the lane's whole prompts by bar id, on a hit from the entry and on
+    a miss from the derivation, so the binder reads them either way."""
+    if isinstance(goals, jd.FrozenStore):
+        gobj, gtag = goals, "shared"
+    elif goals is None or (not goals.get("seams") and not goals.get("nodes")):
+        gobj, gtag = None, "empty"   # None: the store FAULTED (build_timeline complained); no seams, no marks
+    else:
+        gobj, gtag = None, None
+    if cap_key is not None:
+        ckey = cap_key
+    elif not caps:
+        ckey = "empty"
+    else:
+        ckey = None                  # rows read with no file to stat: this build's rows have no key, not held
+    arch_key = jd._file_key(str(jd.STATE / "archive" / (sid + ".json")))   # BEFORE the derivation reads it
+    key = (live, bft, tuple(_downtime), gtag, arch_key)
+    if not parse_ok:
+        skip = "complain_skip"
+    elif session is not parsed:
+        skip = "live_tail"
+    elif gtag is None:
+        skip = "unshared_skip"
+    else:
+        skip = None
+    with _LANES_LOCK:
+        ent = _lanes_memo.get(sid)
+        if ent is not None:
+            if skip is None and ent[0] is session and ent[1] is gobj and ent[2] == ckey and ent[3] == key:
+                _lanes_memo.pop(sid, None)                    # a served entry is a USED entry (LRU reinsert)
+                _lanes_memo[sid] = ent
+                _lanes_stats["hit"] += 1
+                _lanes_stats["segs_hit"] += ent[4][6]
+                if full_prompts is not None:
+                    full_prompts.update(ent[5])            # the memoized lane's full prompts, for the binder (T278b)
+                return ent[4][:6]
+            if ent[0] is not parsed:
+                _lanes_memo.pop(sid, None)                    # its parse object is no longer the build's: it cannot hit again
+    lane_prompts = {}
+    value = _lane_segments(sid, session, goals, caps, live, bft, lane_prompts)
+    if full_prompts is not None:
+        full_prompts.update(lane_prompts)
+    outcome = skip or ("complain_skip" if value[7] else "miss")
+    with _LANES_LOCK:
+        _lanes_stats[outcome] += 1
+        _lanes_stats["segs_miss"] += value[6]
+        if outcome == "miss" and ckey is not None and (arch_key is None or isinstance(arch_key, tuple)):
+            _lanes_memo.pop(sid, None)
+            while len(_lanes_memo) >= _LANES_MEMO_MAX:
+                _lanes_memo.pop(next(iter(_lanes_memo)))      # the least recently served goes first, never the whole memo
+                _lanes_stats["evict"] += 1
+            _lanes_memo[sid] = (session, gobj, ckey, key, value, lane_prompts)
+    return value[:6]
+
+
 _session_tok_cache = {}   # transcript path -> ((mtime, size), [(t, in, out, cache_w, cache_r, model), ...]): one
 #                           token row per API RESPONSE (message.id) in THAT file. The main transcript and each
 #                           subagent transcript cache separately, so a file that moved re-parses itself alone
@@ -37036,6 +37291,7 @@ def build_timeline(now, tmux=None, with_bars=True, live_only=False):
         goals, gfault = jd.load_goals_shared_or_fault(sid)   # read-only view (seams + judging marks); a FAULT (row
         if gfault is not None:                       # filed) → None: this lane renders without goal-derived data
             _bars_complain(sid, "goals", gfault)     # (blocked state, seams, marks) and the frame ships for every other lane
+        parse_ok = True                              # False below when the parse raised (the live-lane memo does not hold such a lane)
         # a DEAD lane's parse-derived parts are served from the memo while every input they read stands
         # (see _dead_lane_memo); a goals fault is never cached (the lane's marks are missing, loudly)
         lane_key = _dead_lane_key(sid, s["path"], branch_of.get(sid)) if (with_bars and not live and gfault is None) else None
@@ -37046,12 +37302,17 @@ def build_timeline(now, tmux=None, with_bars=True, live_only=False):
             cached = lane_hit[1]
             session = None; caps = {}; st_turns = []; open_now = False
             _VIEW_STATS["laneServe"] = _VIEW_STATS.get("laneServe", 0) + 1
+            with _LANES_LOCK:                             # the dead lanes' outcomes ride memos.lanes beside the live lanes' (_lanes_stats)
+                _lanes_stats["dead_failed_serve" if cached.get("failed") else "dead_serve"] += 1
+            full_prompts.update(cached.get("prompts") or {})   # the memoized lane's full prompts, for the binder (T278b)
         elif with_bars:
             try:
                 session = _parse(s["path"], sid, now)
             except Exception as e:
                 _bars_complain(sid, "parse", e)           # a lane with zero bars must SAY why
                 session = {"turns": []}
+                parse_ok = False
+            parsed = session                              # the parse object, the live-lane memo's key (_lane_memo)
             if live:
                 # Merge the LIVE TAIL like the chat does (the user 2026-07-02): a /model change streams the
                 # CLI's confirmation as a live command atom, but the CLI persists no transcript record until
@@ -37063,6 +37324,7 @@ def build_timeline(now, tmux=None, with_bars=True, live_only=False):
                     session = _merge_live_atoms(session, sid)
                 except Exception as e:
                     _bars_complain(sid, "live-merge", e)  # disk-only bars from here — say so
+            cap_key = _stat_key(jd.CAPDIR / (sid + ".jsonl")) if live else None   # the memo's captions key, BEFORE the read (_lanes_memo's comment)
             caps = _captions(sid)
             st_turns = session["turns"]
             open_now = _session_working(st_turns)         # WORKING from the event model — the one shared signal
@@ -37114,130 +37376,71 @@ def build_timeline(now, tmux=None, with_bars=True, live_only=False):
                        and not _session_flag(sid, "hideFromFeed"))
             state = "needsInput" if blocked else "idle"   # muted → no awaiting/background-task badge on the lane
             aw_open = open_now                          # unused (awaitingBg is None for a dead lane) — kept defined
-        bars, last_t, seg_ends = [], None, {}            # seg_ends: seg-start t → work-END t (for completion marks)
-        if lane_hit is not None:
-            bars, last_t = cached["bars"], cached["last_t"]
-            full_prompts.update(cached.get("prompts") or {})   # the memoized lane's full prompts, for the binder (T278b)
-        for ti, turn in enumerate(st_turns):
-            turn_open = (live and ti == len(st_turns) - 1 and not turn["ended"]
-                         and not any(x["type"] == "idle" for x in turn["atoms"])
-                         and not _suspended_after(turn["end"]))   # dead lane (live False) or pre-sleep freeze → not an open bar
-            try:
-                segs = _segs_seam(turn, goals)
-            except Exception as e:
-                # a malformed goals row must cost the SEAMS, not the lane's bars (2026-08-18: any
-                # exception here used to abort the whole bars frame after the skeleton had shipped)
-                _bars_complain(sid, "seams", e)
-                try:
-                    segs = em.segments(turn)
-                except Exception:
-                    segs = []
-            _bft = (branch_of.get(sid) or {}).get("t")
-            for si, seg in enumerate(segs):
-                if _bft and (seg.get("end") or seg["t"]) <= _bft:
-                    continue                                       # copied pre-branch history — the parent's lane owns it
-                # A bar must not span a host sleep. EXCISE every suspension inside the segment → one bar per
-                # awake stretch, so work done AFTER the lid reopened isn't erased (the user 2026-06-22). The
-                # asleep gaps between pieces read as idle (and collapse under 'collapse gaps'). The segment's
-                # atom times go in too: an awake stretch with NO activity in it is a dark-wake sliver, not
-                # work, and drawing it redrew this segment's summary all night long (the user 2026-07-23).
-                spans = _awake_spans(seg["t"], seg["end"], [a.get("t") for a in seg["atoms"]])
-                last_t = max(last_t or 0, spans[-1][1])            # the true work END (last awake activity) — drives the lane `since`
-                seg_ends[seg["t"]] = spans[-1][1]                  # a completion mark lands at its segment's END (after the work)
-                if not with_bars:
-                    continue                                       # SKELETON: lane `since` needs last_t, but not the bar dicts/captions
-                cap = _seg_work_caption(caps, seg["id"])       # WORK caption (the bar) — drift-safe
-                msg_cap = _seg_caption(caps, seg["id"])    # MESSAGE caption (the dot) — gist of the ask, ready early; drift-safe
-                work_uuid, reply_uuid = _seg_anchors(seg["atoms"])
-                full_prompts[seg["id"]] = full_prompt = _seg_prompt(seg)
-                trig = next((x for x in seg["atoms"] if x.get("uuid") == seg.get("trigger")), None)
-                author = (trig or {}).get("author")
-                src = "queued" if isinstance(author, dict) else "typed"
-                for sj, (bstart, bend) in enumerate(spans):
-                    # THE WIRE BAR (T278c): three long keys the delta path, the federation merge and the
-                    # kernel's own readers need by name (id, start, end), then the rest under one-letter keys
-                    # with every default OMITTED (a false flag, an empty list or caption, the "typed" source):
-                    # 8,577 bars carried 1.1 MB of key names and 0.9 MB of defaults in a 12 MB frame. The view
-                    # expands a bar once at its boundary (expandBars in ui/romp-timeline-view.js, the twin of
-                    # _BAR_WIRE below, drift-guarded by tests) so every reader keeps its long names.
-                    # promptId = the prompt atom (the DOT), workId = the first work atom (the BAR) — so a chat
-                    # message-hover lights only the dot and a work-hover only the bar (dotLit/barLit in the view).
-                    # The wire prompt (T278b): the first line, capped; the tip shows 90 chars of it and nothing
-                    # else reads it. tid (= the lane key), uuid (= promptId) and workUuid (= workId) left the
-                    # wire in T278b: the view reads the lane key, promptId and workId instead.
-                    bar = {"id": seg["id"], "start": bstart, "end": bend}
-                    if seg.get("trigger"):
-                        bar["p"] = seg.get("trigger")
-                    if work_uuid:
-                        bar["w"] = work_uuid
-                    if reply_uuid:
-                        bar["r"] = reply_uuid
-                    q = _wire_prompt(full_prompt)
-                    if q:
-                        bar["q"] = q
-                    if cap:
-                        bar["c"] = cap
-                    if msg_cap:
-                        bar["m"] = msg_cap
-                    if src != "typed":
-                        bar["s"] = src
-                    mids = _seg_mids(seg)
-                    if mids:
-                        bar["d"] = mids
-                    if turn_open and si == len(segs) - 1 and sj == len(spans) - 1 and bend == seg["end"]:
-                        bar["u"] = True                        # open: the live turn's last piece
-                    if sj > 0:
-                        bar["t"] = True                        # a post-sleep continuation piece: NO new prompt dot
-                    if (trig or {}).get("rompAuto"):
-                        bar["a"] = True                        # an AUTO-nudge specifically → the tip captions it 'romp · nudge'
-                    if author == "romp":
-                        # ANY romp-authored prompt (auto-nudge, Nudge button, auto-retry — author 'romp' via
-                        # ROMP_INJECT_RE) wears the romp logo on its dot (the user 2026-07-16: an auto-retry
-                        # whose dot had drawn as a human prompt instead of wearing the logo), mirroring the chat's 2026-07-05 rule
-                        bar["o"] = True
-                    bars.append(bar)
-        if not with_bars and last_t is None:
-            try:
-                last_t = os.stat(s["path"]).st_mtime     # lane `since` ≈ the transcript's last write (last activity), no parse
-            except OSError:
-                pass
         _bft = (branch_of.get(sid) or {}).get("t")
         if lane_hit is not None:
+            # served from the DEAD-LANE memo (above): the segment part is the cached one, byte for byte, and the marks
+            # are filtered per build on their stamped compare value (_dead_lane_marks)
+            bars, last_t, compactions = cached["bars"], cached["last_t"], cached["compactions"]
             turns[sid] = bars
             semantic.extend(_dead_lane_marks(cached["marks"], now - TL_HORIZON))
-            compactions = cached["compactions"]
-        elif with_bars:
+        elif not with_bars:
+            # SKELETON: no bars, no marks, no memo (a cold live-first connect, and a connect over a stale cache;
+            # neither reads nor evicts here). The lane's `since` falls back to the transcript's last write (last
+            # activity), with no parse.
+            compactions = []
+            try:
+                last_t = os.stat(s["path"]).st_mtime
+            except OSError:
+                last_t = None
+        else:
+            # The SEGMENT part of the lane: the turn loop that makes the bars, seg_ends, last_t and the compaction
+            # markers, plus this lane's judging marks (_lane_segments). A LIVE lane's comes through the per-lane memo
+            # (_lane_memo; _lanes_memo's comment names every input in the key): a lane whose inputs are the previous
+            # build's objects costs a lookup. A DEAD lane's is derived here directly (a dead MISS: the dead-lane memo
+            # above did not serve it) and cached there under its stat key below, so the per-lane memo never stores an
+            # entry the populate would pop at once and never counts a dead lane as its miss. The badge row below is
+            # per build.
+            if live:
+                bars, seg_ends, last_t, compactions, cap_marks, other_marks = _lane_memo(
+                    sid, parsed, session, goals, caps, cap_key, live, _bft, parse_ok, full_prompts)
+            else:
+                value = _lane_segments(sid, session, goals, caps, live, _bft, full_prompts)
+                bars, seg_ends, last_t, compactions, cap_marks, other_marks = value[:6]
+                with _LANES_LOCK:
+                    _lanes_stats["dead_miss"] += 1
+                if value[7]:
+                    lane_key = None                        # a lane whose seams or marks stage complained is derived
+                    #                                          every build and never cached (as one whose marks failed was)
             turns[sid] = bars
             marks = []
             try:
-                if goals is not None:
-                    # a dead lane's marks are derived ONCE at horizon 0 and stamped, so the memo can filter
+                if lane_key is not None:
+                    # a dead lane's marks are assembled ONCE at horizon 0 and stamped, so the dead-lane memo can filter
                     # them per build on exactly the value this call would have compared (_dead_lane_marks)
-                    if lane_key is not None:
-                        _derive_judging(sid, caps, goals, 0, marks, seg_ends, stamp=True)
-                        semantic.extend(_dead_lane_marks(marks, now - TL_HORIZON))
-                    else:
-                        _derive_judging(sid, caps, goals, now - TL_HORIZON, semantic, seg_ends)
+                    _judging_assemble(cap_marks, other_marks, 0, marks, stamp=True)
+                    semantic.extend(_dead_lane_marks(marks, now - TL_HORIZON))
+                else:
+                    _judging_assemble(cap_marks, other_marks, now - TL_HORIZON, semantic)   # the horizon is the build's
             except Exception as e:
                 _bars_complain(sid, "judging-marks", e)   # this lane loses its marks, the frame ships
                 lane_key = None                            # never cache a lane whose marks failed
-            compactions = [{"t": a["t"]} for turn in st_turns for a in turn["atoms"]
-                           if a.get("type") == "system" and a.get("subtype") == "compact_boundary" and a.get("t")
-                           and not (_bft and a["t"] <= _bft)]       # copied boundaries stay on the parent's lane
             if lane_key is not None:
                 if len(_dead_lane_memo) > _DEAD_LANE_MEMO_MAX:      # bounded by the lane window; evict oldest-inserted
                     _dead_lane_memo.pop(next(iter(_dead_lane_memo)))
                 _dead_lane_memo[sid] = (lane_key, {"bars": bars, "compactions": compactions, "last_t": last_t, "marks": marks,
+                                                   # a parse that raised is cached as the empty lane it drew (a dead
+                                                   # transcript has no writer); the flag keeps its serves apart on /perf
+                                                   "failed": not parse_ok,
                                                    # the lane's full prompts (T278b): the binder's sender heuristic reads
                                                    # them, and a lane can die within an hour of a message it received
                                                    "prompts": {b["id"]: full_prompts[b["id"]] for b in bars if b["id"] in full_prompts}})
                 # the parse has done its work for this dead lane: drop it (the RSS lever); a lane that moves
-                # re-parses once, and a session that revives is parsed by its chat build as before
+                # re-parses once, and a session that revives is parsed by its chat build as before. The live-lane
+                # memo's entry from the lane's live days goes with it: its key is that parse object, so it cannot
+                # hit again and would hold the parse the pop just released
                 _parse_cache.pop(s["path"], None)
-        else:
-            compactions = [{"t": a["t"]} for turn in st_turns for a in turn["atoms"]
-                           if a.get("type") == "system" and a.get("subtype") == "compact_boundary" and a.get("t")
-                           and not (_bft and a["t"] <= _bft)]       # copied boundaries stay on the parent's lane
+                with _LANES_LOCK:
+                    _lanes_memo.pop(sid, None)
         # Idle fade: the SAME rule the chat tab uses (ready + idle > 1h — see the `faded` beside the chat
         # chip), keyed on the DERIVED chip `state` computed above, not the raw tmux state. The old form read
         # tmux's vocabulary and counted "waiting" as active — but "waiting" IS the post-turn idle state, so
@@ -37294,6 +37497,11 @@ def build_timeline(now, tmux=None, with_bars=True, live_only=False):
             "hideFromFeed": _session_flag(sid, "hideFromFeed"),    # lane checkbox → mute from feed (timeline-only)
             "postalServiceOff": _session_flag(sid, "postalServiceOff") or _session_flag(sid, "postalOff"),  # lane mailbox → isolate from the Romp Postal Service (bin/romp-postal-service)
             "notify": _notify_session_effective(sid)})   # lane bell, EFFECTIVE (override, else the master default) → OS notification when this session's work blocks on you / completes (the user 2026-07-28)
+    if with_bars and not live_only:
+        # the live-lane memo releases the lanes that left the timeline here: a full build's lane set (live sessions
+        # plus the dead lanes inside the 12 h window, dismissed dead lanes dropped) is the set this build read. A
+        # skeleton or live-only build reads a subset of the lanes and so must not evict on it.
+        _lanes_forget(set(id2name))
     if with_bars:
         # Each with_bars-only stage is guarded ALONE (2026-08-18): the pusher sends the cheap lane
         # SKELETON before this heavy build, and its shared try used to abort the WHOLE bars frame on

@@ -116,7 +116,7 @@ class Collector(unittest.TestCase):
         self.assertEqual(set(snap["goals"]), {"loads", "saves", "writes"}, "read through jd.goal_io_stats")
         # the three identity memos' readers land here (review find, 2026-09-08: they had no consumer)
         self.assertEqual(set(snap["memos"]), {"pass", "shared", "chain", "nudgeGate", "cleared", "courierSkip", "backref", "captions", "goalArchive", "plannerSkip",
-                                              "bgTops", "liftGate", "intrMarks", "statesOverlay"})
+                                              "bgTops", "liftGate", "intrMarks", "statesOverlay", "lanes"})
         self.assertEqual(set(snap["memos"]["bgTops"]), {"hit", "miss", "resolve", "walk", "walk_neg", "idx_build", "entries"},
                          "the placed-launch memo (_bg_placed_tops): counters plus its occupancy")
         for k, v in snap["memos"]["bgTops"].items():
@@ -135,6 +135,10 @@ class Collector(unittest.TestCase):
         for blk in ("intrMarks", "statesOverlay"):
             for k, v in snap["memos"][blk].items():
                 self.assertIsInstance(v, int, "%s.%s" % (blk, k))
+        self.assertEqual(set(snap["memos"]["lanes"]), {"hit", "miss", "live_tail", "complain_skip", "unshared_skip", "evict", "entries",
+                                                     "segs_hit", "segs_miss", "dead_serve", "dead_miss", "dead_failed_serve"},
+                         "the timeline's per-lane segment memo: one outcome per live lane per bars build, the dead lanes beside")
+        self.assertTrue(all(type(v) is int for v in snap["memos"]["lanes"].values()))
         self.assertEqual(set(snap["memos"]["plannerSkip"]), {"skipped", "planned", "recorded"})
         self.assertEqual(set(snap["memos"]["captions"]), {"served", "parsed"})
         self.assertEqual(set(snap["memos"]["goalArchive"]), {"served", "loaded"})
