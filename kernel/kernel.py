@@ -42687,10 +42687,11 @@ def _consume_pending_reveal(client):
 
 def _cached_timeline(now, tmux, sig, connect=False):
     e = _built_timeline
-    if e[1] is not None and (connect or _timeline_cache_fresh(sig)):
+    built = e[1]                # one read: the pusher assigns _built_timeline[:] on its thread while a connect reads here
+    if built is not None and (connect or _timeline_cache_fresh(sig)):
         _VIEW_STATS["tlServe"] += 1
         _PERF_STATS.build("timeline", True)
-        return e[1]
+        return built
     _VIEW_STATS["tlBuild"] += 1
     started = time.time()
     _t0 = time.monotonic()

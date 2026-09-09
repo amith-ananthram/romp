@@ -615,6 +615,34 @@ class PusherRecords(unittest.TestCase):
         self.assertEqual(after["push"], before["push"])
         self.assertGreaterEqual(after["jobs"], before["jobs"])
 
+    def test_a_connect_serves_the_build_it_tested_when_the_cache_is_replaced_between_its_reads(self):
+        # _cached_timeline tested the cached payload and returned it as two reads of the shared list while the
+        # pusher thread assigns _built_timeline[:] on a rebuild; a connect on the handler thread whose two reads
+        # straddled that assignment returned the replacement build, not the one its freshness test saw. One read.
+        class Swapped(list):
+            """_built_timeline with the pusher's `_built_timeline[:] = [...]` landing between two reads of the
+            payload slot: the first read answers the build, every later one the replacement."""
+            def __init__(self, entry, later):
+                super().__init__(entry)
+                self.reads, self.later = 0, later
+
+            def __getitem__(self, i):
+                if i == 1:
+                    self.reads += 1
+                    if self.reads > 1:
+                        return self.later
+                return list.__getitem__(self, i)
+        built = {"type": "timeline", "now": 1.0, "turns": {}, "judging": {}, "messages": []}
+        replacement = {"type": "timeline", "now": 2.0, "turns": {}, "judging": {}, "messages": []}
+        real = km._built_timeline
+        km._built_timeline = Swapped(["sig-a", built, 5.0, 4.0], replacement)   # the pusher replaced the build between the two reads
+        self.addCleanup(setattr, km, "_built_timeline", real)
+        km.build_timeline = lambda *a, **k: (_ for _ in ()).throw(AssertionError("a connect never rebuilds"))
+        served = km._VIEW_STATS["tlServe"]
+        self.assertIs(km._cached_timeline(int(time.time()), {}, "sig-b", connect=True), built,
+                      "the connect gets the build its freshness test saw, not the replacement that landed under it")
+        self.assertEqual(km._VIEW_STATS["tlServe"], served + 1)
+
     def test_feed_and_timeline_builds_count_cached_and_rebuilt(self):
         km.build_feed = lambda now, tmux: {"working": [], "items": []}
         km.build_timeline = lambda now, tmux, **kw: {"turns": [], "judging": [], "messages": [], "now": now}
