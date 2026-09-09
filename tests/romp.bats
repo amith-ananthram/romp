@@ -993,8 +993,10 @@ _stale_server_globals() {
     [[ "$output" == *"ANTHROPIC_API_KEY"* ]]
     [[ "$output" == *"apiKeyHelper"* ]]
     [[ "$output" != *"synthetic-stale-key"* ]]
-    ! grep -q 'new-session' "$MOCK_LOG"
-    ! grep -q 'set-environment' "$MOCK_LOG"
+    run grep -q 'new-session' "$MOCK_LOG"     # `run` + status, not a bare `! grep`: `!` is exempt from set -e mid-test
+    [ "$status" -ne 0 ]
+    run grep -q 'set-environment' "$MOCK_LOG"
+    [ "$status" -ne 0 ]
 }
 
 @test "new -t: clean server globals (op's names, a login token) start the session and touch nothing" {
