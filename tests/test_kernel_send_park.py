@@ -398,7 +398,7 @@ class SendPathsPark(unittest.TestCase):
     def test_ws_drive_paths_use_the_parks(self):
         with open(os.path.join(BIN, "romp-kernel")) as f:
             src = f.read()
-        self.assertIn('_send_or_park(be, sid, str(msg["text"]), echo="human")', src,
+        self.assertIn('_send_or_park(be, sid, str(msg["text"]), echo="human", qid=_client_qid(msg, sid, be))', src,
                       "the composer send parks mid-compaction")
         self.assertIn("_send_or_park(be, sid, body,", src, "the follow-up/nudge send parks mid-compaction")
         self.assertIn("_send_or_park(be, sid, cmd)", src, "the timeline sendCommand parks mid-compaction")
@@ -424,8 +424,8 @@ class QueuedBubble(unittest.TestCase):
         import inspect
         src = inspect.getsource(km._drive)
         self.assertIn('t == "cancelQueued" and msg.get("park") is not None', src)
-        self.assertIn('_cancel_parked(sid, int(msg["park"]), str(msg.get("md") or ""))', src)
-        self.assertIn('_cancel_backend_queued(be, sid, int(msg["idx"]), str(msg.get("md") or ""))', src,
+        self.assertIn('_cancel_parked(sid, int(msg["park"]), str(msg.get("md") or ""), qid=_wire_qid(msg))', src)
+        self.assertIn('_cancel_backend_queued(be, sid, int(msg["idx"]), str(msg.get("md") or ""), qid=_wire_qid(msg))', src,
                       "the backend-queue cancel goes through the drift guard now")
 
     def test_a_body_only_cancel_that_finds_nothing_is_logged(self):

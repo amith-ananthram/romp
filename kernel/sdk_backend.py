@@ -4204,7 +4204,7 @@ class SdkSession:
         with self._lock:
             return list(self._inflight_texts)
 
-    def unqueue(self, idx: int, expect: str | None = None) -> str | None:
+    def unqueue(self, idx: int, expect: str | None = None, qid: str | None = None) -> str | None:
         """Remove the queued turn at position `idx` (the chat's queued list is this same _pending order)
         and return its raw text, or None if it's gone. Lets the user CANCEL a message they queued
         behind a busy turn — click it in the chat to pull it back out and re-edit (the user 2026-06-27).
@@ -4212,9 +4212,15 @@ class SdkSession:
         the CLI there is no recall (the control protocol has no queue-remove), so a miss here is the
         caller's cue to say so loudly. `expect` is the exact text the click meant: verified (and, on a
         shifted index, re-located) UNDER the lock, so the input generator consuming entries between the
-        caller's snapshot and this pop can never cancel the wrong message."""
+        caller's snapshot and this pop can never cancel the wrong message. `qid` names the copy by its
+        identity (the id it was queued under: minted by the client at the press, or by send()) and wins
+        over both: located under the lock, so of two same-text copies the one named leaves, and an id no
+        copy wears is a miss, never the index's or the text's neighbour."""
         with self._lock:
-            if expect is not None and not (0 <= idx < len(self._pending) and self._pending[idx] == expect):
+            if qid:
+                idx = next((i for i, m in enumerate(self._pending_meta)
+                            if isinstance(m, dict) and m.get("qid") == qid and i < len(self._pending)), -1)
+            elif expect is not None and not (0 <= idx < len(self._pending) and self._pending[idx] == expect):
                 idx = next((i for i, q in enumerate(self._pending) if q == expect), -1)
             item = self._q_pop(idx)[0] if 0 <= idx < len(self._pending) else None
         if item is not None:
@@ -9376,30 +9382,37 @@ class SdkBackend:
             return []
         return [t for t in q if isinstance(t, str) and t] if isinstance(q, list) else []
 
-    def unqueue(self, sid: str, idx: int, expect: str | None = None) -> str | None:
+    def unqueue(self, sid: str, idx: int, expect: str | None = None, qid: str | None = None) -> str | None:
         """Cancel the queued turn at `idx` for an SDK session (the kernel's cancelQueued route). Returns
         its text, or None on a MISS — the message already left the queue (handed to the CLI, no recall
         exists), and the caller must surface that loudly rather than show a fake delete (the user
         2026-07-20). tmux has no equivalent (its queue lives in Claude Code), so only SDK sessions
         expose this — the kernel gates the chat's cancel affordance on the backend having `unqueue`.
-        `expect` (the exact queued text the click meant) is re-verified under the session lock.
+        `expect` (the exact queued text the click meant) is re-verified under the session lock; `qid`
+        (the copy's identity) names the entry exactly and wins over both (SdkSession.unqueue).
 
         ALSO drops the message's optimistic echo from the live tail: send() adds a blue 'you' bubble that
         normally prunes when the real user atom lands in the transcript — but a CANCELED message never
         lands, so without this the echo lingered and the canceled message kept rendering as 'sent' even
-        though it wasn't (the user 2026-06-27)."""
+        though it wasn't (the user 2026-06-27). The echo is keyed by the copy's id (send() mints one key
+        for both), so a cancel by id drops the cancelled copy's own echo and no other: an echo already gone
+        (retired ahead of its copy) leaves the text match unrun, since by text the first echo wearing the
+        words may be another same-text copy's, and that copy then read as never sent."""
         with self._lock:
             s = self.sessions.get(sid)
         if not s:
             return None
-        text = s.unqueue(idx, expect)
+        text = s.unqueue(idx, expect, qid=qid)
         if text is not None:
             with self._live_lock:                          # find + pop + the sid-level pop, one step
                 live = self._live.get(sid) or {}
-                for k, a in list(live.items()):
-                    if a.get("_echo_text") == text:
-                        live.pop(k, None)                  # one echo per canceled message
-                        break
+                if qid:
+                    live.pop(qid, None)                    # the cancelled copy's own echo, by the shared key; already gone: nothing else
+                else:
+                    for k, a in list(live.items()):
+                        if a.get("_echo_text") == text:
+                            live.pop(k, None)              # one echo per canceled message
+                            break
                 if not live and self._live.get(sid) is live:
                     self._live.pop(sid, None)
             self._persist_echoes(sid)                      # the canceled echo leaves the restart mirror too
