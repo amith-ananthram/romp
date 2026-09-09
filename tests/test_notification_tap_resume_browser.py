@@ -39,8 +39,25 @@ reveal via 'offer' and retires the record. Headless Chromium refuses showNotific
 and the record must already be there. Against b8d2a90b this fails on the outcome: no chip, no record, the
 tab still `web`.
 
+THE THIRD SCENARIO (2026-09-09, later still — the PARTITIONED worker): the fingerprints answered the second round's
+question, and the answer was neither hypothesis. On the phone the worker the page registered was current and wrote its
+record fine (every tap-resume row read swMatchesPage:true), yet across a push and a tap on it the page read
+lastPushAgeS:-1, lastClickAgeS:-1, clicks:0, no tap, no shown record, no worker message, and came forward without
+navigating. The worker instance that FIELDS a push and its tap on iOS writes where the Home Screen app's page cannot
+read, and lists no client of the app: every hand-off through storage or a client is invisible on the receiving side.
+Both sides reach the kernel. Every session-addressed push now carries a `pid` the kernel issued for that device and
+files a ledger row; the worker acks 'shown' (before the show) and 'clicked' (the first thing the click handler does) by
+pid alone; the page asks GET /push/pending for its own subscription when it comes forward and lands a clicked push via
+'ack'. Here: the hermetic kernel subscribes a device and sends it a test push addressed to `api` (the push service
+refuses — the row is filed before the send); INSIDE the worker its Cache Storage is replaced by one the page cannot see
+and iOS's client behaviour is installed; the REAL push handler and the REAL click handler run on the kernel's payload;
+the page comes forward. The tap must land: ONE /reveal via 'ack', the tab on `api`, the row landed, the kernel log
+carrying [push] ack stage=shown, [push] ack stage=clicked, [reveal] ack and [push] landed, and the page's tap-resume row
+reading exactly the phone's fingerprints (its own build, no push, no click). Against d5653088 this fails on the outcome:
+the worker has no ack, the kernel no ledger, the page's store is empty, and the tab stays on `web`.
+
 Skips LOUDLY without the extension deps or a playwright browser (CI installs none). All fixtures
-synthetic. Under ~30 s, no network.
+synthetic. Under ~45 s, no network.
 """
 import json
 import os
@@ -208,6 +225,84 @@ process.exit(0);
 """
 
 
+# the partitioned worker (2026-09-09, the third round): the REAL push and click handlers run in a worker whose Cache Storage
+# is not the page's and which lists no client of the app; the page comes forward and lands the tap through the kernel alone
+DRIVER_PARTITION = r"""
+import { createRequire } from "node:module";
+import fs from "node:fs";
+const require = createRequire(process.env.EXT_PKG);
+const { chromium } = require("playwright");
+const cfg = JSON.parse(fs.readFileSync(process.env.CFG, "utf8"));
+let browser;
+try { browser = await chromium.launch(); }
+catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
+const out = { reveals: [], ledger: [], pending: [] };
+const context = await browser.newContext({ viewport: { width: 1100, height: 720 } });
+await context.grantPermissions(["notifications"], { origin: cfg.origin });
+// this device's push subscription, as the page reads it (pushManager.getSubscription on its registration): headless
+// Chromium has no push service to subscribe with, so the registration answers with the endpoint the kernel has on file
+await context.addInitScript((endpoint) => {
+  Object.defineProperty(ServiceWorkerRegistration.prototype, "pushManager", { configurable: true,
+    get() { return { getSubscription: () => Promise.resolve({ endpoint }) }; } });
+}, cfg.endpoint);
+const page = await context.newPage();
+page.on("request", (r) => { const u = r.url();
+  if (r.method() === "POST" && /\/reveal$/.test(u)) out.reveals.push(JSON.parse(r.postData() || "{}"));
+  if (r.method() === "POST" && /\/push\/(landed|dismissed)$/.test(u)) out.ledger.push([u.replace(/^.*\/push\//, ""), JSON.parse(r.postData() || "{}")]);
+  if (/\/push\/pending\?/.test(u)) out.pending.push(decodeURIComponent(u.replace(/^.*endpoint=/, ""))); });
+await page.goto(cfg.landing);
+const chat = await (async () => { for (let i = 0; i < 200; i++) { const f = page.frames().find((f) => /\/chat/.test(f.url())); if (f) return f; await page.waitForTimeout(50); } return null; })();
+if (!chat) { console.error("no chat iframe in the shell"); process.exit(1); }
+await chat.waitForSelector('#tabs .tab[data-id="' + cfg.sidB + '"]', { timeout: 20000 });
+await chat.evaluate((sid) => { const t = document.querySelector('#tabs .tab[data-id="' + sid + '"]'); if (t) t.click(); }, cfg.sidA);
+await chat.waitForFunction((sid) => (document.querySelector("#tabs .tab.active") || {}).dataset?.id === sid, cfg.sidA, { timeout: 10000 });
+const active = () => chat.evaluate(() => (document.querySelector("#tabs .tab.active") || { dataset: {} }).dataset.id || null);
+out.before = await active();
+const swWait = context.waitForEvent("serviceworker", { timeout: 20000 }).catch(() => null);
+await page.evaluate(() => navigator.serviceWorker.register("/sw.js"));
+const sw = context.serviceWorkers()[0] || await swWait;
+if (!sw) { console.error("no service worker registered"); process.exit(1); }
+await page.evaluate(() => navigator.serviceWorker.ready.then(() => navigator.serviceWorker.controller ? null
+  : new Promise((r) => navigator.serviceWorker.addEventListener("controllerchange", () => r(), { once: true }))));
+out.controlled = await page.evaluate(() => !!navigator.serviceWorker.controller);
+out.reveals_before_push = out.reveals.length;
+// THE PARTITION, as iOS runs it: the worker instance that fields the push sees a Cache Storage of its own (nothing it
+// writes reaches the page's), lists no client of the app, and its openWindow brings the page forward without a load.
+// Then the REAL push handler on the kernel's payload, and the REAL click handler on the notification it described
+out.worker = await sw.evaluate(async (payload) => {
+  const mem = new Map();
+  const own = { put: (k, r) => { mem.set(String(k), r); return Promise.resolve(); },
+                match: (k) => Promise.resolve(mem.has(String(k)) ? mem.get(String(k)).clone() : undefined),
+                delete: (k) => Promise.resolve(mem.delete(String(k))) };
+  self.caches.open = () => Promise.resolve(own);   // the worker holds the CacheStorage object; its open() is looked up per call
+  self.clients.matchAll = () => Promise.resolve([]);
+  self.clients.openWindow = (u) => { self.__opened = u; return Promise.resolve(null); };
+  const waited = [];
+  const push = new Event("push"); push.data = { json: () => payload }; push.waitUntil = (p) => waited.push(p);
+  self.dispatchEvent(push);
+  const pushOutcomes = (await Promise.allSettled(waited)).map((s) => s.status);   // the show rejects in headless Chromium; the rest settle
+  waited.length = 0;
+  const click = new Event("notificationclick"); click.notification = { close() {}, data: payload.data }; click.waitUntil = (p) => waited.push(p);
+  self.dispatchEvent(click);
+  await Promise.all(waited);
+  self.pending = null;   // the worker iOS ended keeps nothing for a replay
+  return { pushWaited: pushOutcomes.length, clickWaited: waited.length, opened: self.__opened || null, ownKeys: [...mem.keys()].sort() };
+}, cfg.payload);
+// the page's side of the partition: none of the worker's writes are visible here
+out.pageStore = await page.evaluate(() => caches.open("romp-tap").then((c) => Promise.all([c.match("/__romp/tap"), c.match("/__romp/shown")])).then((rs) => rs.map((r) => !!r)));
+out.reveals_before_foreground = out.reveals.length;
+// the app comes forward: the events a resumed page produces, and nothing else
+await page.evaluate(() => { window.dispatchEvent(new Event("focus")); window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })); });
+out.landed = await chat.waitForFunction((sid) => (document.querySelector("#tabs .tab.active") || {}).dataset?.id === sid, cfg.sidB, { timeout: 8000 }).then(() => true).catch(() => false);
+out.after = await active();
+for (let i = 0; i < 40 && !out.ledger.length; i++) await page.waitForTimeout(50);   // the settle rides after the /reveal; bounded
+out.chipHidden = await page.evaluate(() => { const e = document.getElementById("tap-offer"); return !e || e.hidden; });
+fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
+await browser.close();
+process.exit(0);
+"""
+
+
 def _transcript(sid, prompt, reply):
     return (json.dumps({"type": "user", "uuid": "11111111-2222-3333-4444-" + sid[:12], "parentUuid": None,
                         "timestamp": "2026-09-09T00:00:00.000Z", "sessionId": sid,
@@ -284,12 +379,12 @@ class ServedTapResume(unittest.TestCase):
     PAYLOAD_B = {"title": "api", "body": "Two migrations could go first; which one do you want?", "sid": SID_B,
                  "tag": "romp:" + SID_B, "data": DATA_B}
 
-    def _drive(self, driver_src=DRIVER):
+    def _drive(self, driver_src=DRIVER, **extra):
         base = "http://127.0.0.1:%d" % self.port
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
-            json.dump({"origin": base, "landing": base + "/?token=" + self.token, "sidA": SID_A, "sidB": SID_B,
-                       "data": self.DATA_B, "payload": self.PAYLOAD_B}, f)
+            json.dump(dict({"origin": base, "landing": base + "/?token=" + self.token, "sidA": SID_A, "sidB": SID_B,
+                            "data": self.DATA_B, "payload": self.PAYLOAD_B}, **extra), f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(driver_src)
@@ -424,6 +519,103 @@ class ServedTapResume(unittest.TestCase):
         for r in offers + fps:
             for k in (r.get("data") or {}):
                 self.assertNotIn("sid", k.lower(), "structure only, never the session id: %r" % r)
+
+    def _kernel(self, method, path, body=None):
+        """one call to the hermetic kernel with the serve token: (status, parsed JSON or the text)"""
+        import urllib.request, urllib.error
+        req = urllib.request.Request("http://127.0.0.1:%d%s" % (self.port, path), method=method,
+                                     data=json.dumps(body).encode() if body is not None else None,
+                                     headers={"X-Romp-Token": self.token, "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                code, raw = r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            code, raw = e.code, e.read().decode()
+        try:
+            return code, json.loads(raw)
+        except ValueError:
+            return code, raw
+
+    def test_a_worker_partitioned_from_the_page_lands_its_tap_through_the_kernel(self):
+        try:
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric import ec
+        except ImportError:
+            raise unittest.SkipTest("python 'cryptography' absent here — the device's subscription needs a real P-256 key")
+        import base64
+        from urllib.parse import quote
+        b64u = lambda b: base64.urlsafe_b64encode(b).decode().rstrip("=")
+        priv = ec.generate_private_key(ec.SECP256R1())
+        p256dh = b64u(priv.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint))
+        # THE DEVICE: subscribed at an endpoint no push service answers. The push's delivery is not what this scenario is
+        # about — the kernel files the ledger row BEFORE it sends, and a refused send keeps it (only 404/410 prune)
+        ep = "https://127.0.0.1:%d/push/partitioned-device" % _free_port()
+        code, res = self._kernel("POST", "/push/subscribe", {"endpoint": ep, "keys": {"p256dh": p256dh, "auth": b64u(os.urandom(16))}})
+        self.assertEqual(code, 200, res)
+        code, res = self._kernel("POST", "/push/test", {"endpoint": ep, "sid": SID_B, "host": ""})
+        self.assertEqual(code, 200, res)
+        self.assertEqual(res.get("sid"), SID_B, "the test push is addressed to api: %r" % res)
+        code, pend = self._kernel("GET", "/push/pending?endpoint=" + quote(ep, safe=""))
+        # against d5653088 there is no such route: the scenario then runs with a pid nothing issued and fails on the
+        # OUTCOME below — the page never lands — exactly as the phone did
+        pid = pend.get("pid") if (code == 200 and isinstance(pend, dict)) else ""
+        if pid:
+            self.assertEqual((pend["sid"], pend["name"], pend["kind"], pend["stage"]), (SID_B, "api", "test", "sent"), "%r" % pend)
+        payload = {"title": "romp", "body": "Test notification — tap to come back to api.", "sid": SID_B, "tag": "romp:" + SID_B,
+                   "data": {"sid": SID_B, "host": "", "kind": "test", "cardId": "", "url": "/?push-reveal=" + SID_B, "name": "api",
+                            "pid": pid or "unissued-pid-0000000000"}}
+        out = self._drive(DRIVER_PARTITION, endpoint=ep, payload=payload)
+        self.assertEqual(out["before"], SID_A, "web is the session in front: %r" % out)
+        self.assertTrue(out["controlled"], "the registered worker controls the page: %r" % out)
+        w = out["worker"]
+        self.assertEqual(w["opened"], "/?push-reveal=" + SID_B, "no client listed → the worker took the openWindow road, as on the phone: %r" % w)
+        self.assertEqual(out["pageStore"], [False, False], "THE PARTITION HELD: nothing the worker wrote reaches the page's Cache Storage: %r" % out["pageStore"])
+        self.assertEqual(out["reveals_before_foreground"], 0, "nothing landed while the app was in the background")
+        # THE OUTCOME the user sees, first: the app comes forward and the chat pane is on the session that buzzed — with
+        # no tap in the store, no shown record, no message and no link, through the kernel alone
+        self.assertTrue(out["landed"], "the chat pane's active tab must become the session that buzzed; it is %r, the page posted %d /reveal(s), the kernel knew pid=%r\n  kernel: %s\n  reveals: %r\n  pending asked: %r"
+                        % (out["after"], len(out["reveals"]), bool(pid), self._reveal_lines(), out["reveals"], out["pending"]))
+        self.assertEqual(out["after"], SID_B)
+        # …and how: the page asked the kernel for its own endpoint, heard 'clicked', landed once via 'ack', settled the row
+        self.assertTrue(pid, "the kernel issued the pid the page landed on")
+        self.assertEqual(out["pending"][:1], [ep], "asked for THIS device's subscription: %r" % out["pending"])
+        self.assertEqual(len(out["reveals"]), 1, "exactly one /reveal: %r" % out["reveals"])
+        rv = out["reveals"][0]
+        self.assertEqual((rv["sid"], rv["via"], rv.get("boot")), (SID_B, "ack", None), "%r" % rv)
+        self.assertTrue(rv.get("wid"), "aimed at this dashboard's wid: %r" % rv)
+        self.assertEqual(out["ledger"], [["landed", {"pid": pid}]], "the row is settled once landed")
+        self.assertTrue(out["chipHidden"], "a tap is a jump, never an offer")
+        # the kernel's own trail, end to end: the worker's two acks (by pid alone), the reveal by the ack road, the settle
+        ep_host = "127.0.0.1:" + ep.rsplit(":", 1)[1].split("/", 1)[0]
+        klog = open(self.klog_path, encoding="utf-8", errors="replace").read()
+        for line in (r"\[push\] ack stage=shown sid=%s endpoint=%s" % (re.escape(SID_B[:8]), re.escape(ep_host)),
+                     r"\[push\] ack stage=clicked sid=%s endpoint=%s" % (re.escape(SID_B[:8]), re.escape(ep_host)),
+                     r"\[reveal\] ack sid=%s wid=\S+: delivered" % re.escape(SID_B[:8]),
+                     r"\[push\] landed sid=%s endpoint=%s" % (re.escape(SID_B[:8]), re.escape(ep_host))):
+            self.assertRegex(klog, line, "the kernel logged it: %s" % klog[-2000:])
+        self.assertLess(klog.index("[push] ack stage=shown"), klog.index("[push] ack stage=clicked"))
+        self.assertLess(klog.index("[push] ack stage=clicked"), klog.index("[reveal] ack "))
+        for _ in range(50):   # the settle lands after the reveal; bounded
+            code, after = self._kernel("GET", "/push/pending?endpoint=" + quote(ep, safe=""))
+            if after == {}:
+                break
+            time.sleep(0.1)
+        self.assertEqual(after, {}, "nothing pending for this device once the tap landed: %r" % after)
+        # the shell's trail: the check ran, heard 'clicked' for this session (clipped), landed it; and its tap-resume row
+        # reads exactly the phone's fingerprints — the page's own build wrote the store, and that store saw no push and no click
+        rows = self._diag_rows("tap-pending")
+        heard = [r for r in rows if (r.get("data") or {}).get("stage") == "clicked"]
+        self.assertTrue(heard, "a tap-pending row heard 'clicked': %r" % rows)
+        self.assertEqual((heard[0]["data"]["sub"], heard[0]["data"]["sid"], heard[0]["surface"]), (True, SID_B[:8], "shell"))
+        self.assertIn(heard[0]["data"]["via"], ("focus", "pageshow"))
+        lands = self._diag_rows("tap-pending-land")
+        self.assertTrue([r for r in lands if (r.get("data") or {}).get("dup") is False], "…and landed it: %r" % lands)
+        v = self._served_version()
+        fps = [r["data"] for r in self._diag_rows("tap-resume") if (r.get("data") or {}).get("swVersion") == v]
+        self.assertTrue(fps, "the tap-resume rows carry the page's own worker's fingerprint")
+        self.assertEqual({k: fps[-1][k] for k in ("found", "swMatchesPage", "lastPushAgeS", "lastClickAgeS", "clicks")},
+                         {"found": False, "swMatchesPage": True, "lastPushAgeS": -1, "lastClickAgeS": -1, "clicks": 0},
+                         "the live evidence, reproduced: a current worker that saw neither the push nor the tap: %r" % fps[-1])
 
 
 if __name__ == "__main__":

@@ -16,6 +16,12 @@ Covers the four layers separately, so a failure names its layer:
     NOTHING more, prunes on the dead-subscription signal, and stands down silently when no
     device ever subscribed.
 
+  * the ledger (2026-09-09, the partition round) — every session-addressed push files a row per device with
+    an unguessable pid the payload carries; the worker acks 'shown' and 'clicked' by pid alone (POST
+    /push/ack, no token: the worker that fields a push on iOS runs in a storage partition without the
+    cookie), the page asks GET /push/pending for its own endpoint and settles the row (/push/landed,
+    /push/dismissed); rows are read from disk on every op, so a restart loses nothing.
+
 The cryptography package is required here (CI installs it; the kernel treats it as a soft
 dependency and fails loudly without it — test_subscribe_without_crypto_is_a_loud_500).
 """
@@ -98,7 +104,7 @@ def _serve_get(path, headers=None):
 
 
 def _clear_push_state():
-    for name in ("push-subscriptions.json", "push-vapid.json"):
+    for name in ("push-subscriptions.json", "push-vapid.json", "push-ledger.json"):
         try:
             (jd.STATE / name).unlink()
         except OSError:
@@ -118,7 +124,10 @@ class ServiceWorkerRoute(unittest.TestCase):
         # which assumes the network serves every load (plans/ios-app.md)
         self.assertNotIn("'fetch'", js)
         self.assertNotIn("respondWith", js)
-        self.assertNotIn("fetch(", js)
+        # the ONE outbound fetch is the kernel ack (2026-09-09, the partition round): POST /push/ack by pid — a call the
+        # worker MAKES, never a request it intercepts; nothing else in the worker fetches
+        self.assertEqual(js.count("fetch("), js.count("fetch('/push/ack'"), "no fetch but the ack")
+        self.assertGreater(js.count("fetch('/push/ack'"), 0)
         # the Cache API appears since 2026-09-09, but as a one-slot STORE for the last tap (the 'romp-tap'
         # cache, written by the worker and read by the page), never as a cache of anything the page loads:
         # the global is aliased once, and every use opens that one named cache
@@ -181,7 +190,12 @@ const LOG = [];          // every call the worker makes, in order
 const META = [];         // per posted message: the tap id and the worker's diag block (2026-09-08), kept apart
                          // from LOG so the routing block still compares whole — the id is minted per tap
 function strip(m) { if (!m || typeof m !== 'object') return m; const c = Object.assign({}, m);
-  META.push({ id: c.id, diag: c.diag }); delete c.id; delete c.diag; return c; }
+  META.push({ id: c.id, diag: c.diag, pid: c.pid }); delete c.id; delete c.diag; delete c.pid; return c; }   // pid (2026-09-09): the kernel's handle, per push
+// the kernel ack (2026-09-09, the partition round): every fetch the worker makes, with its body and how far LOG had got —
+// so a test can say the ack was started BEFORE the show (push) and before the close (click)
+const FLOG = [];
+global.fetch = (path, init) => { FLOG.push([path, init && init.body ? JSON.parse(init.body) : null, LOG.length, !!(init && init.keepalive), (init && init.method) || 'GET']);
+  return Promise.resolve({ ok: true, status: 200 }); };
 global.self = {
   addEventListener: (k, f) => { H[k] = f; },
   skipWaiting: () => {},
@@ -397,6 +411,32 @@ async function tap(data, windows) {
   await ackMsg({ romp: 'tapLanded', id: 'N-2' });
   out.shownAckOwn = await shownRec();
   out.ackShownWaited = ackWaits.length;
+  // THE KERNEL ACK (2026-09-09, the partition round): a push whose routing block carries a pid is acked 'shown' to the
+  // kernel before the show is attempted, and a tap on it 'clicked' as the FIRST thing the click handler does; the pid
+  // rides the message, the stored tap and the shown record; a push or a tap without a pid acks nothing
+  const pidData = Object.assign({}, data, { pid: 'PID-test-000000001', name: 'web' });
+  STORE.clear(); FLOG.length = 0; LOG.length = 0; SLOG.length = 0;
+  H.push({ data: { json: () => ({ title: 'romp: web', body: 'Needs you: x', sid: 'S1', tag: 'romp:S1', data: pidData }) }, waitUntil: (p) => { pushWait = p; } });
+  out.ackPushSync = FLOG.slice();                    // before the handler yields: the ack is already on its way
+  out.ackPushSyncLog = LOG.map((x) => x[0]);
+  await pushWait;
+  out.ackPush = FLOG.slice();
+  out.ackShownRec = await shownRec();
+  FLOG.length = 0; META.length = 0;
+  out.ackClick = await tap(pidData, [win(true)]);
+  out.ackClickFetches = FLOG.slice();
+  out.ackClickMeta = META[0];
+  out.ackClickRec = await rec();
+  FLOG.length = 0; META.length = 0;
+  out.ackClickCold = await tap(pidData, []);          // the phone's road: no client, openWindow — the ack goes out first all the same
+  out.ackClickColdFetches = FLOG.slice();
+  FLOG.length = 0; META.length = 0;
+  await tap(data, [win(true)]);                       // no pid (an older kernel's push): nothing acked, the message carries an empty pid
+  out.noPidClickFetches = FLOG.slice();
+  out.noPidClickMeta = META[0];
+  H.push({ data: { json: () => ({ title: 't', body: 'b', sid: 'S9', data }) }, waitUntil: (p) => { pushWait = p; } });
+  await pushWait;
+  out.noPidPushFetches = FLOG.slice();
   console.log(JSON.stringify(out));
 })();
 """
@@ -632,6 +672,33 @@ class ServiceWorkerExecutes(unittest.TestCase):
         self.assertEqual(o["ackShownWaited"], 1, "one waitUntil carries both retirements")
 
 
+    def test_a_push_with_a_pid_is_acked_shown_before_the_show_and_its_tap_acked_clicked_first(self):
+        # 2026-09-09, the partition round: on iOS the worker instance that fields a push writes where the page cannot
+        # read and lists no client of the app — every storage road above is invisible there. The kernel is the meeting
+        # point: the push carries a pid the kernel issued for THIS device, and the worker tells the kernel what became of
+        # it, by that pid alone (the partition may hold no cookie), keepalive so a worker ended early still gets it out
+        o = self.out
+        self.assertEqual(o["ackPushSync"], [["/push/ack", {"pid": "PID-test-000000001", "stage": "shown", "v": "__ROMP_SWV__"}, 0, True, "POST"]],
+                         "the shown ack is started before the show is logged (LOG.length 0), keepalive, with the worker's build string")
+        self.assertEqual(o["ackPushSyncLog"], ["show"], "…and the show is still the synchronous act of the handler")
+        self.assertEqual(len(o["ackPush"]), 1, "one ack per push")
+        self.assertEqual(o["ackShownRec"]["pid"], "PID-test-000000001", "the shown record carries the pid, so the page can fold it with the kernel's row")
+        c = o["ackClickFetches"]
+        self.assertEqual(c, [["/push/ack", {"pid": "PID-test-000000001", "stage": "clicked", "v": "__ROMP_SWV__"}, 0, True, "POST"]],
+                         "the clicked ack is the FIRST thing the click handler does: before the close is logged")
+        self.assertEqual(o["ackClick"]["log"], [["close"], self.MATCH, ["focus"], ["post", self.MSG]], "the tap lands exactly as before")
+        self.assertEqual(o["ackClick"]["waited"], 1, "the ack rides the tap's one waitUntil")
+        self.assertEqual(o["ackClickMeta"]["pid"], "PID-test-000000001", "the message carries the pid")
+        self.assertEqual(o["ackClickRec"]["pid"], "PID-test-000000001", "…and so does the stored tap")
+        self.assertEqual(o["ackClickColdFetches"][0][1]["stage"], "clicked", "the phone's road (no client, openWindow): acked first all the same")
+        self.assertEqual(o["ackClickColdFetches"][0][2], 0)
+        self.assertEqual(o["ackClickCold"]["log"], [["close"], self.MATCH, ["openWindow", self.URL]])
+        # no pid — an older kernel's push: nothing to ack, and the message says so with an empty pid
+        self.assertEqual(o["noPidClickFetches"], [])
+        self.assertEqual(o["noPidClickMeta"]["pid"], "")
+        self.assertEqual(o["noPidPushFetches"], [])
+
+
 @unittest.skipUnless(HAVE_CRYPTO, "python 'cryptography' not installed")
 class VapidKeys(unittest.TestCase):
     def setUp(self):
@@ -853,7 +920,7 @@ class PushSink(unittest.TestCase):
         # E2E-encrypted. Every routing value is an id or a fixed word, never text.
         self.assertEqual(set(body), {"title", "body", "sid", "badge", "tag", "data"})
         self.assertEqual((body["title"], body["sid"], body["badge"]), ("romp: web", "SID-web", 3))
-        self.assertEqual(set(body["data"]), {"sid", "host", "kind", "cardId", "url", "name"})   # name (2026-09-09): the session's display name, for the offer chip
+        self.assertEqual(set(body["data"]), {"sid", "host", "kind", "cardId", "url", "name", "pid"})   # name (2026-09-09): the session's display name, for the offer chip; pid: the kernel's handle on this push to this device (PushLedger)
 
 
 class PushPayloadShape(unittest.TestCase):
@@ -865,7 +932,9 @@ class PushPayloadShape(unittest.TestCase):
                              card_id="SID-web:g3")
         self.assertEqual(d["data"], {"sid": "SID-web", "host": "", "kind": "card", "cardId": "SID-web:g3",
                                      "url": "/?push-reveal=SID-web&push-card=SID-web%3Ag3",
-                                     "name": "SID-web"})   # no registry entry here: the short id, as _push_test always fell back
+                                     "name": "SID-web",   # no registry entry here: the short id, as _push_test always fell back
+                                     "pid": ""})          # the builder carries the pid the caller minted per device (2026-09-09); none here
+        self.assertEqual(km._push_payload("romp: web", "b", "SID-web", pid="PID-x")["data"]["pid"], "PID-x")
         self.assertEqual(d["tag"], "romp:SID-web", "one notification per session")
         self.assertEqual(d["sid"], "SID-web", "…and flat, for a worker of the previous build")
         self.assertEqual(d["badge"], 2)
@@ -881,7 +950,7 @@ class PushPayloadShape(unittest.TestCase):
         # "test", no sid, so the tap can only ever focus or open romp — and every test collapses
         # into one notification rather than stacking on the lock screen
         d = km._push_payload("romp", "Test notification", kind="test")
-        self.assertEqual(d["data"], {"sid": "", "host": "", "kind": "test", "cardId": "", "url": "/", "name": ""})
+        self.assertEqual(d["data"], {"sid": "", "host": "", "kind": "test", "cardId": "", "url": "/", "name": "", "pid": ""})
         self.assertEqual(d["tag"], "romp:test")
 
     def test_the_payload_names_the_session_the_way_the_test_push_does(self):
@@ -917,6 +986,143 @@ class PushPayloadShape(unittest.TestCase):
             km._push_notify("romp: web", "Needs you")
         send.assert_not_called()
         self.assertIn("cryptography", err.getvalue(), "a starving phone is never silent")
+
+
+class PushLedger(unittest.TestCase):
+    """The kernel as the meeting point (2026-09-09, the PARTITION round; the ledger block above _push_ledger in the
+    kernel has the finding): every session-addressed push files a row per device — {pid, endpoint, sid, host, kind,
+    cardId, name, sentAt, shownAt, tappedAt, landedAt, dismissedAt, swVersion} — and the payload to that device
+    carries the row's pid. Rows are read from disk on every op (restart-proof), capped per endpoint, 0600, and go
+    with their endpoint's subscription. This is also the seed of the delivery ledger the backlog names."""
+    EP_A = "https://push.example.net/send/phone-a"
+    EP_B = "https://push.example.net/send/phone-b"
+    ROW_KEYS = {"pid", "endpoint", "sid", "host", "kind", "cardId", "name", "sentAt", "shownAt", "tappedAt", "landedAt", "dismissedAt", "swVersion"}
+
+    def setUp(self):
+        _clear_push_state()
+
+    def _subscribe(self, *eps):
+        km._save_push_subs({ep: {"endpoint": ep, "keys": {"p256dh": "k", "auth": "a"}} for ep in eps})
+
+    def test_every_session_addressed_push_files_a_row_per_device_and_the_payload_carries_that_devices_pid(self):
+        self._subscribe(self.EP_A, self.EP_B)
+        seen, done = {}, threading.Event()
+
+        def fake_send(sub, payload):
+            seen[sub["endpoint"]] = json.loads(payload.decode())
+            if len(seen) == 2:
+                done.set()
+            return True
+
+        with mock.patch.object(km, "_push_send_one", side_effect=fake_send), \
+             mock.patch.object(km, "_push_crypto", return_value=True):
+            km._push_notify("romp: web", "Needs you: pick one", "SID-web", 3, kind="card", card_id="SID-web:g1")
+            self.assertTrue(done.wait(5), "the send thread ran")
+        rows = km._push_ledger()
+        self.assertEqual(len(rows), 2, "one row per (push, device)")
+        by_ep = {r["endpoint"]: r for r in rows}
+        for ep in (self.EP_A, self.EP_B):
+            r = by_ep[ep]
+            self.assertEqual(set(r), self.ROW_KEYS)
+            self.assertEqual(seen[ep]["data"]["pid"], r["pid"], "the payload to each device carries THAT device's pid")
+            self.assertRegex(r["pid"], r"^[A-Za-z0-9_-]{22}$", "secrets.token_urlsafe(16)")
+            self.assertEqual({k: r[k] for k in ("sid", "host", "kind", "cardId", "name")},
+                             {"sid": "SID-web", "host": "", "kind": "card", "cardId": "SID-web:g1", "name": "SID-web"})
+            self.assertGreater(r["sentAt"], 0)
+            self.assertEqual((r["shownAt"], r["tappedAt"], r["landedAt"], r["dismissedAt"], r["swVersion"]), (0, 0, 0, 0, ""))
+        self.assertNotEqual(by_ep[self.EP_A]["pid"], by_ep[self.EP_B]["pid"])
+        self.assertEqual(oct(os.stat(km._push_ledger_path()).st_mode & 0o777), "0o600", "endpoints are capability URLs")
+        # the gist is untouched: title, body and the rest of the routing block are what they were
+        self.assertEqual((seen[self.EP_A]["title"], seen[self.EP_A]["body"], seen[self.EP_A]["data"]["url"]),
+                         ("romp: web", "Needs you: pick one", "/?push-reveal=SID-web&push-card=SID-web%3Ag1"))
+
+    def test_a_sidless_push_files_no_row_and_carries_no_pid(self):
+        self._subscribe(self.EP_A)
+        seen, done = [], threading.Event()
+
+        def fake_send(sub, payload):
+            seen.append(json.loads(payload.decode()))
+            done.set()
+            return True
+
+        with mock.patch.object(km, "_push_send_one", side_effect=fake_send), \
+             mock.patch.object(km, "_push_crypto", return_value=True):
+            km._push_notify("romp", "Test notification", "", kind="test")
+            self.assertTrue(done.wait(5))
+        self.assertEqual(km._push_ledger(), [], "nowhere to land, nothing to hand the page")
+        self.assertEqual(seen[0]["data"]["pid"], "")
+
+    def test_the_test_push_files_a_row_too(self):
+        self._subscribe(self.EP_A)
+        with mock.patch.object(km, "_push_post", return_value=(201, "Created")) as pp:
+            res = km._push_test(self.EP_A, "SID-web", "", "web")
+        self.assertTrue(res["ok"])
+        rows = km._push_ledger()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["endpoint"], rows[0]["sid"], rows[0]["kind"], rows[0]["name"]), (self.EP_A, "SID-web", "test", "web"))
+        payload = json.loads(pp.call_args[0][1].decode())
+        self.assertEqual(payload["data"]["pid"], rows[0]["pid"], "the pid rides the test push like any other")
+        with mock.patch.object(km, "_push_post", return_value=(201, "Created")) as pp:
+            km._push_test(self.EP_A)                     # the sid-less probe: no row
+        self.assertEqual(len(km._push_ledger()), 1)
+        self.assertEqual(json.loads(pp.call_args[0][1].decode())["data"]["pid"], "")
+
+    def test_the_cap_keeps_the_newest_rows_per_device(self):
+        pids_a = [km._push_ledger_add(self.EP_A, "SID-web", kind="turn") for _ in range(km.PUSH_LEDGER_CAP + 5)]
+        pids_b = [km._push_ledger_add(self.EP_B, "SID-web", kind="turn") for _ in range(3)]
+        rows = km._push_ledger()
+        self.assertEqual([r["pid"] for r in rows if r["endpoint"] == self.EP_A], pids_a[5:], "the newest CAP rows of the device, oldest first")
+        self.assertEqual([r["pid"] for r in rows if r["endpoint"] == self.EP_B], pids_b, "another device's rows are untouched")
+
+    def test_pending_is_the_newest_unsettled_row_and_names_its_stage(self):
+        self.assertEqual(km._push_pending(self.EP_A), {}, "nothing filed: nothing pending")
+        p1 = km._push_ledger_add(self.EP_A, "SID-web", kind="turn", name="web")
+        p2 = km._push_ledger_add(self.EP_A, "SID-api", kind="card", card_id="SID-api:g2", name="api")
+        km._push_ledger_add(self.EP_B, "SID-web", kind="turn", name="web")
+        p = km._push_pending(self.EP_A)
+        self.assertEqual(set(p), {"pid", "sid", "host", "kind", "cardId", "name", "stage", "ageS"}, "what the page reads")
+        self.assertEqual((p["pid"], p["sid"], p["kind"], p["cardId"], p["name"], p["stage"]), (p2, "SID-api", "card", "SID-api:g2", "api", "sent"),
+                         "the newest row; no ack at all is 'sent'")
+        self.assertGreaterEqual(p["ageS"], 0)
+        self.assertLessEqual(p["ageS"], 1)
+        self.assertIsNotNone(km._push_ledger_stamp(p2, "shown", "abc.123"))
+        self.assertEqual(km._push_pending(self.EP_A)["stage"], "shown")
+        self.assertIsNotNone(km._push_ledger_stamp(p2, "clicked"))
+        self.assertEqual(km._push_pending(self.EP_A)["stage"], "clicked")
+        row = [r for r in km._push_ledger() if r["pid"] == p2][0]
+        self.assertGreater(row["shownAt"], 0)
+        self.assertGreater(row["tappedAt"], 0)
+        self.assertEqual(row["swVersion"], "abc.123", "the acking worker's build, kept")
+        t0 = row["shownAt"]
+        km._push_ledger_stamp(p2, "shown")
+        self.assertEqual([r for r in km._push_ledger() if r["pid"] == p2][0]["shownAt"], t0, "the first stamp stands: a repeated ack is idempotent")
+        # landing the newest reveals the one before it; dismissing that leaves nothing
+        km._push_ledger_stamp(p2, "landed")
+        self.assertEqual(km._push_pending(self.EP_A)["pid"], p1, "settled rows are skipped")
+        km._push_ledger_stamp(p1, "dismissed")
+        self.assertEqual(km._push_pending(self.EP_A), {})
+        self.assertEqual(km._push_pending(self.EP_B)["sid"], "SID-web", "another device's rows are its own")
+        self.assertIsNone(km._push_ledger_stamp("never-issued-pid-0001", "shown"), "an unknown pid changes nothing")
+
+    def test_the_ledger_is_read_from_disk_every_time_so_a_restart_loses_nothing(self):
+        pid = km._push_ledger_add(self.EP_A, "SID-web", kind="turn", name="web")
+        # another process (the kernel before a restart) stamped the row: this one sees it without any cache to invalidate
+        d = json.loads(km._push_ledger_path().read_text())
+        for r in d["rows"]:
+            if r["pid"] == pid:
+                r["tappedAt"] = 1234
+        km._push_ledger_path().write_text(json.dumps(d))
+        self.assertEqual(km._push_pending(self.EP_A)["stage"], "clicked")
+        km._push_ledger_path().write_text("not json")
+        self.assertEqual(km._push_ledger(), [], "a damaged file reads as empty, never a throw")
+
+    def test_a_device_that_unsubscribes_or_is_pruned_takes_its_rows_with_it(self):
+        self._subscribe(self.EP_A, self.EP_B)
+        km._push_ledger_add(self.EP_A, "SID-web", kind="turn")
+        km._push_ledger_add(self.EP_B, "SID-web", kind="turn")
+        km._del_push_sub(self.EP_A)
+        self.assertEqual([r["endpoint"] for r in km._push_ledger()], [self.EP_B])
+        self.assertEqual(km._push_pending(self.EP_A), {})
 
 
 def _fake_ws_client(app, wid):
@@ -1136,7 +1342,124 @@ class RevealRoute(unittest.TestCase):
                                  "[reveal] offer sid=SID-v wid=W-v: parked",
                                  "[reveal] shell sid=SID-w wid=W-w: parked"])
         self.assertNotIn("forged", buf.getvalue())
-        self.assertEqual(km._REVEAL_ROADS, frozenset({"sw", "link", "store", "offer"}))
+        self.assertEqual(km._REVEAL_ROADS, frozenset({"sw", "link", "store", "offer", "ack"}))   # 'ack' (2026-09-09): the kernel's ledger said the worker acked a tap the page never saw otherwise
+
+
+class PushLedgerRoutes(unittest.TestCase):
+    """The ledger's four routes over the real handler. POST /push/ack is authenticated by the PID ALONE — no token,
+    no cookie: the worker that fields a push on iOS runs in a storage partition of its own, without the cookie the
+    page rides, which is the very reason the route exists (the ledger block above _push_ledger in the kernel). The
+    pid is 128 unguessable bits the kernel issued, good for two timestamps on one row and nothing else. The page's
+    routes — GET /push/pending, POST /push/landed, POST /push/dismissed — ride the token like every page fetch."""
+    EP = "https://push.example.net/send/phone-a"
+
+    @classmethod
+    def setUpClass(cls):
+        from http.server import ThreadingHTTPServer
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), km.Handler)
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def setUp(self):
+        _clear_push_state()
+
+    def _req(self, method, path, body=None, token=True, raw=None, headers=None):
+        import urllib.request, urllib.error
+        h = {"Content-Type": "application/json"}
+        if token:
+            h["X-Romp-Token"] = km.TOKEN
+        h.update(headers or {})
+        data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
+        req = urllib.request.Request("http://127.0.0.1:%d%s" % (self.port, path), method=method, data=data, headers=h)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+
+    def _row(self, pid):
+        return [r for r in km._push_ledger() if r["pid"] == pid][0]
+
+    def test_the_worker_acks_by_pid_alone_and_each_ack_leaves_a_line(self):
+        import contextlib
+        pid = km._push_ledger_add(self.EP, "SID-api", kind="turn", name="api")
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            code, body = self._req("POST", "/push/ack", {"pid": pid, "stage": "shown", "v": "abc.123"}, token=False)
+            self.assertEqual((code, json.loads(body)), (200, {"ok": True, "stage": "shown"}))
+            code, body = self._req("POST", "/push/ack", {"pid": pid, "stage": "clicked", "v": "abc.123"}, token=False)
+            self.assertEqual((code, json.loads(body)), (200, {"ok": True, "stage": "clicked"}))
+        r = self._row(pid)
+        self.assertGreater(r["shownAt"], 0)
+        self.assertGreater(r["tappedAt"], 0)
+        self.assertEqual(r["swVersion"], "abc.123")
+        self.assertEqual([l for l in buf.getvalue().splitlines() if l.startswith("[push]")],
+                         ["[push] ack stage=shown sid=SID-api endpoint=push.example.net",
+                          "[push] ack stage=clicked sid=SID-api endpoint=push.example.net"])
+        self.assertEqual(km._push_pending(self.EP)["stage"], "clicked")
+        # a cross-site Origin with no token is what the partition looks like from here: still the pid decides
+        code, _ = self._req("POST", "/push/ack", {"pid": pid, "stage": "shown", "v": "x"}, token=False, headers={"Origin": "https://evil.example"})
+        self.assertEqual(code, 200)
+
+    def test_an_unknown_pid_is_a_404_and_a_line_and_a_bad_ack_buys_nothing(self):
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            code, _ = self._req("POST", "/push/ack", {"pid": "never-issued-pid-0001", "stage": "shown", "v": ""}, token=False)
+        self.assertEqual(code, 404)
+        self.assertEqual([l for l in buf.getvalue().splitlines() if l.startswith("[push]")], ["[push] ack stage=shown: unknown pid"])
+        pid = km._push_ledger_add(self.EP, "SID-api", kind="turn")
+        for body in ({"pid": pid, "stage": "landed"}, {"pid": pid, "stage": ""}, {"pid": "short", "stage": "shown"},
+                     {"pid": pid + "\n[push] forged", "stage": "shown"}, {"stage": "shown"}, [pid]):
+            code, _ = self._req("POST", "/push/ack", body, token=False)
+            self.assertEqual(code, 400, repr(body))
+        code, _ = self._req("POST", "/push/ack", raw=b"nope", token=False)
+        self.assertEqual(code, 400)
+        code, _ = self._req("POST", "/push/ack", raw=b"{" + b" " * km._PUSH_ACK_MAX_BYTES + b"}", token=False)
+        self.assertEqual(code, 413, "capped far below the authenticated routes' limit: no token gates this read")
+        self.assertEqual((self._row(pid)["shownAt"], self._row(pid)["tappedAt"]), (0, 0), "nothing stamped")
+        self.assertEqual(len(km._push_ledger()), 1, "no row minted by a caller")
+
+    def test_the_pages_routes_ride_the_token(self):
+        pid = km._push_ledger_add(self.EP, "SID-api", kind="turn")
+        for method, path, body in (("GET", "/push/pending?endpoint=" + self.EP, None), ("POST", "/push/landed", {"pid": pid}), ("POST", "/push/dismissed", {"pid": pid})):
+            code, _ = self._req(method, path, body, token=False)
+            self.assertEqual(code, 403, path)
+        self.assertEqual((self._row(pid)["landedAt"], self._row(pid)["dismissedAt"]), (0, 0))
+        code, _ = self._req("GET", "/push/pending")
+        self.assertEqual(code, 400, "no endpoint named")
+
+    def test_pending_names_the_newest_unsettled_push_and_landed_or_dismissed_settle_it(self):
+        import contextlib, urllib.parse
+        p1 = km._push_ledger_add(self.EP, "SID-web", kind="turn", name="web")
+        p2 = km._push_ledger_add(self.EP, "SID-api", kind="card", card_id="SID-api:g2", name="api")
+        q = "/push/pending?endpoint=" + urllib.parse.quote(self.EP, safe="")
+        code, body = self._req("GET", q)
+        self.assertEqual(code, 200)
+        d = json.loads(body)
+        self.assertEqual((d["pid"], d["sid"], d["name"], d["kind"], d["cardId"], d["stage"]), (p2, "SID-api", "api", "card", "SID-api:g2", "sent"))
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            code, body = self._req("POST", "/push/landed", {"pid": p2})
+            self.assertEqual((code, json.loads(body)), (200, {"ok": True}))
+            code, body = self._req("GET", q)
+            self.assertEqual(json.loads(body)["pid"], p1, "the next unsettled row")
+            code, body = self._req("POST", "/push/dismissed", {"pid": p1})
+            self.assertEqual(code, 200)
+            code, _ = self._req("POST", "/push/landed", {"pid": "never-issued-pid-0001"})
+            self.assertEqual(code, 404)
+            code, _ = self._req("POST", "/push/landed", {"pid": "x"})
+            self.assertEqual(code, 400)
+        code, body = self._req("GET", q)
+        self.assertEqual(json.loads(body), {})
+        self.assertEqual([l for l in buf.getvalue().splitlines() if l.startswith("[push]")],
+                         ["[push] landed sid=SID-api endpoint=push.example.net",
+                          "[push] dismissed sid=SID-web endpoint=push.example.net",
+                          "[push] landed: unknown pid"])
 
 
 class Badge(unittest.TestCase):
@@ -1204,7 +1527,9 @@ class LandingRevealPins(unittest.TestCase):
         # 'delivered' to the previous page's socket
         js = km._LANDING_REVEAL_JS
         self.assertIn("if(m&&m.romp==='wsState'&&m.app==='chat'&&m.state==='up')chatUp=true;", js)
-        self.assertIn("boot=!!boot||!chatUp;", js)
+        # …or the pane's rendered tabs (2026-09-09, the served offer leg): the tabs come over that very socket, so an active
+        # tab in the chat iframe's DOM proves it was up even when its message beat this script (LandingRevealAsksTheLedger)
+        self.assertIn("boot=!!boot||!(chatUp||activeSid());", js)
         self.assertEqual(js.count("chatUp=false"), 1, "declared once, never reset: latched")
         self.assertIn('window.parent.postMessage({romp:"wsState",app:APP,state:s},"*")', km._shim("chat", 1))
 
@@ -1248,8 +1573,10 @@ class LandingRevealPins(unittest.TestCase):
 # a sid-less tap does nothing, a refused /reveal is loud.
 _REVEAL_HARNESS = r"""
 'use strict';
-const FETCHES = [], POSTED = [], NOTES = [], REPLACED = [], WIN = [], SW = [], DOC = [], PAGESHOW = [], FOCUS = [], CTRL = [], ACK = [], DIAG = [], UPD = [];
-let fetchOk = true;
+const FETCHES = [], POSTED = [], NOTES = [], REPLACED = [], WIN = [], SW = [], DOC = [], PAGESHOW = [], FOCUS = [], CTRL = [], ACK = [], DIAG = [], UPD = [], GETS = [];
+let fetchOk = true, fetchFail = false;
+// the kernel's ledger (2026-09-09, the partition round): what GET /push/pending answers, reassignable by a driver
+let PENDING = process.env.ROMP_TEST_PENDING ? JSON.parse(process.env.ROMP_TEST_PENDING) : {};
 const feedWin = { postMessage: (m) => POSTED.push(m) };
 global.window = global;
 // the offer chip's three stable shell elements (2026-09-09), as minimal nodes: hidden/disabled/textContent (a set
@@ -1271,7 +1598,9 @@ global.document = { getElementById: (id) => (id === 'f-feed' ? { contentWindow: 
 global.sessionStorage = { getItem: (k) => (k === 'romp:wid' ? 'W-test' : null) };
 global.addEventListener = (k, f) => { if (k === 'message') WIN.push(f); if (k === 'pageshow') PAGESHOW.push(f); if (k === 'focus') FOCUS.push(f); };
 // the registration the page asks to update() at boot and on every visible (2026-09-09); ROMP_TEST_NO_REG: none registered
-const REG = { update: () => { UPD.push(1); return Promise.resolve(); } };
+// …and its pushManager (2026-09-09): this page's own subscription, ROMP_TEST_ENDPOINT, or none (a device that never opted in)
+const REG = { update: () => { UPD.push(1); return Promise.resolve(); },
+              pushManager: { getSubscription: () => Promise.resolve(process.env.ROMP_TEST_ENDPOINT ? { endpoint: process.env.ROMP_TEST_ENDPOINT } : null) } };
 Object.defineProperty(global, 'navigator', { configurable: true,   // a getter-only global in node 22
   value: { serviceWorker: { addEventListener: (k, f) => { if (k === 'message') SW.push(f); },
                             getRegistration: () => Promise.resolve(process.env.ROMP_TEST_NO_REG ? undefined : REG),
@@ -1294,7 +1623,9 @@ function seed(tap) { STORE.set('/__romp/tap', new Response(JSON.stringify(tap)))
 function seedK(k, v) { STORE.set(k, new Response(JSON.stringify(v))); }   // any entry: the fingerprint, the shown record
 if (process.env.ROMP_TEST_TAP) seed(JSON.parse(process.env.ROMP_TEST_TAP));
 if (process.env.ROMP_TEST_SEED) { const s = JSON.parse(process.env.ROMP_TEST_SEED); for (const k in s) seedK(k, s[k]); }
-global.fetch = (path, init) => { FETCHES.push([path, JSON.parse(init.body)]);
+global.fetch = (path, init) => {
+  if (!init) { GETS.push(path); return fetchFail ? Promise.reject(new Error('down')) : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(PENDING) }); }   // the ledger's GET (2026-09-09): no init, an answer with a body
+  FETCHES.push([path, JSON.parse(init.body)]);
   return Promise.resolve(fetchOk ? { ok: true, status: 200 } : { ok: false, status: 400, text: () => Promise.resolve('missing sid') }); };
 global.__rompNotify = (kind, text) => NOTES.push([kind, text]);
 global.__rompShellDiag = (what, data) => DIAG.push([what, data]);   // _LANDING_MOBILE_JS's poster, stubbed: the rows this script files
@@ -1388,13 +1719,19 @@ def _fp(row, **fp):
     return d
 
 
-def _run_reveal(driver, href=None, tap=None, no_caches=False, seed=None, active=None, no_reg=False):
+def _run_reveal(driver, href=None, tap=None, no_caches=False, seed=None, active=None, no_reg=False, endpoint=None, pending=None):
     """node runs the harness + the shell's reveal script + `driver`, booting on `href` (default: the deep
     link) with `tap` already in the store (the worker wrote it before this page) — see the harness's env.
     `seed`: other entries already in the store ({key: record} — the fingerprint, the shown record); `active`:
-    the chat pane's active tab at boot; `no_reg`: no service worker registration to update."""
+    the chat pane's active tab at boot; `no_reg`: no service worker registration to update; `endpoint`: this
+    page's push subscription endpoint (none = a device that never opted in); `pending`: what the kernel's
+    GET /push/pending answers at boot (2026-09-09, the partition round)."""
     import subprocess, tempfile as _tf
     env = dict(os.environ)
+    if endpoint:
+        env["ROMP_TEST_ENDPOINT"] = endpoint
+    if pending is not None:
+        env["ROMP_TEST_PENDING"] = json.dumps(pending)
     if href:
         env["ROMP_TEST_HREF"] = href
     if tap is not None:
@@ -1475,7 +1812,9 @@ class LandingRevealExecutes(unittest.TestCase):
         self.assertEqual(sorted(json.dumps(x, sort_keys=True) for x in b["diagAfter"][1:]),
                          sorted(json.dumps(x, sort_keys=True) for x in [["reveal-post", {"status": 200, "via": "link", "boot": True}],
                                                                         ["tap-resume", _fp({"found": False, "via": "boot", "store": True})],
+                                                                        ["tap-pending", {"via": "boot", "sub": False, "stage": None, "ageS": -1}],   # the kernel's ledger, asked after the store (2026-09-09): no subscription on this device, said so, nothing fetched
                                                                         ["sw-update", {"ok": True, "reg": True}]]))
+        self.assertEqual(b.get("gets", []), [], "no subscription: the kernel is not asked")
         self.assertEqual(self.out["live"]["diag"],
                          [["sw-message", {"shape": "notificationClick", "hasSid": True, "kind": "card", "dup": False,
                                           "sw": {"clients": 3, "tops": 1, "road": "focus", "vis": "hidden"}}],
@@ -1536,8 +1875,8 @@ const swSrc = { postMessage: (m) => ACK.push(m) };
 const swMsg = (m) => SW.forEach((f) => f({ data: m, source: swSrc }));
 const winMsg = (m) => WIN.forEach((f) => f({ data: m }));
 const flip = async (state) => { global.document.visibilityState = state; DOC.forEach((f) => f()); await settle(); };
-const snap = () => ({ fetches: FETCHES.slice(), posted: POSTED.slice(), diag: DIAG.slice(), ack: ACK.slice(), ctrl: CTRL.slice(), keys: [...STORE.keys()], notes: NOTES.slice(), chip: chipState(), upd: UPD.length });
-const reset = () => { FETCHES.length = 0; POSTED.length = 0; DIAG.length = 0; ACK.length = 0; CTRL.length = 0; NOTES.length = 0; };
+const snap = () => ({ fetches: FETCHES.slice(), posted: POSTED.slice(), diag: DIAG.slice(), ack: ACK.slice(), ctrl: CTRL.slice(), keys: [...STORE.keys()], notes: NOTES.slice(), chip: chipState(), upd: UPD.length, gets: GETS.slice() });
+const reset = () => { FETCHES.length = 0; POSTED.length = 0; DIAG.length = 0; ACK.length = 0; CTRL.length = 0; NOTES.length = 0; GETS.length = 0; };
 """
 # a page that booted on the plain start URL with nothing stored, then came back with a tap in the store
 _RESUME_WARM_DRIVER = _RESUME_LIB + r"""
@@ -1707,16 +2046,16 @@ class LandingRevealOffers(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import time as _t
-        now = int(_t.time() * 1000)
+        now = lambda: int(_t.time() * 1000)   # read per spawn: four node runs in a row drift a 5 s age to 6 under load
         cls.out = _run_reveal(_OFFER_DRIVER, href="http://localhost:7777/",
-                              seed={"/__romp/shown": dict(cls.SHOWN, t=now - 5000), "/__romp/sw": dict(cls.FP, lastPushAt=now - 5000)})
+                              seed={"/__romp/shown": dict(cls.SHOWN, t=now() - 5000), "/__romp/sw": dict(cls.FP, lastPushAt=now() - 5000)})
         cls.link = _run_reveal(_BOOT_DRIVER, href="http://localhost:7777/?push-reveal=S1",
-                               seed={"/__romp/shown": dict(cls.SHOWN, t=now - 5000)})
+                               seed={"/__romp/shown": dict(cls.SHOWN, t=now() - 5000)})
         cls.no_reg = _run_reveal(_BOOT_DRIVER, href="http://localhost:7777/", no_reg=True)
         cls.active_at_boot = _run_reveal(_BOOT_DRIVER, href="http://localhost:7777/", active="S9",
-                                         seed={"/__romp/shown": dict(cls.SHOWN, t=now - 5000)})
+                                         seed={"/__romp/shown": dict(cls.SHOWN, t=now() - 5000)})
         cls.early = _run_reveal(_OFFER_EARLY_DRIVER, href="http://localhost:7777/",
-                                seed={"/__romp/shown": dict(cls.SHOWN, t=now - 5000)})
+                                seed={"/__romp/shown": dict(cls.SHOWN, t=now() - 5000)})
 
     @staticmethod
     def _rows(snap, what):
@@ -1955,6 +2294,257 @@ class LandingRevealResumesFromStore(unittest.TestCase):
         self.assertEqual(n["visible"]["fetches"], [])
         self.assertEqual(n["visible"]["ctrl"], [{"romp": "tapReplay"}], "the worker is still asked")
 
+
+# THE KERNEL'S LEDGER, from the page's side (2026-09-09, the partition round): a page with a push subscription asks GET
+# /push/pending on every check the store comes up empty for, and acts on the kernel's word — a clicked push lands (via
+# 'ack'), a shown or sent one is offered from the row, a settled row goes back as /push/landed or /push/dismissed
+_LEDGER_DRIVER = _RESUME_LIB + r"""
+(async () => {
+  const out = {};
+  await settle();
+  out.boot = snap();                                   // PENDING is {} at boot (env): asked, nothing pending
+  winMsg({ romp: 'ready', app: 'feed' });
+  winMsg({ romp: 'wsState', app: 'chat', state: 'up' });
+  reset();
+  // CLICKED: the worker acked a tap this page never saw by any other road — a jump, and the row is settled
+  PENDING = { pid: 'PID-clicked-000001', sid: 'S40', host: '', kind: 'card', cardId: 'S40:g1', name: 'api', stage: 'clicked', ageS: 4 };
+  await flip('visible');
+  out.clicked = snap();
+  reset();
+  await flip('visible');                               // the kernel still says clicked (the landed POST in flight): the same pid is a dup
+  out.clickedAgain = snap();
+  reset();
+  // SHOWN: an offer from the kernel's row, named from the ledger; taken → the offer road, and the row is landed
+  PENDING = { pid: 'PID-shown-00000001', sid: 'S41', host: '', kind: 'turn', cardId: '', name: 'tests', stage: 'shown', ageS: 30 };
+  await flip('visible');
+  out.shown = snap();
+  reset();
+  CHIP['tap-offer-go'].click();
+  await settle();
+  out.shownTaken = snap();
+  reset();
+  // SENT (no ack at all: iOS may show without the worker ever reaching the kernel): offered too; dismissed → the row is dismissed
+  PENDING = { pid: 'PID-sent-000000001', sid: 'S42', host: '', kind: 'turn', cardId: '', name: 'web', stage: 'sent', ageS: 120 };
+  PAGESHOW.forEach((f) => f()); await settle();
+  out.sent = snap();
+  reset();
+  CHIP['tap-offer-x'].click();
+  await settle();
+  out.sentDismissed = snap();
+  reset();
+  // the session already in front: no chip, and the row is landed — the push's purpose is met
+  PENDING = { pid: 'PID-active-00000001', sid: 'S43', host: '', kind: 'turn', cardId: '', name: 'api', stage: 'shown', ageS: 2 };
+  activeSid = 'S43';
+  FOCUS.forEach((f) => f()); await settle();
+  out.active = snap();
+  activeSid = '';
+  reset();
+  // a stored tap WINS the check that finds it (the kernel is not asked); its pid settles the row; the kernel's clicked row
+  // for the same push on the next check is a dup
+  PENDING = { pid: 'PID-store-000000001', sid: 'S44', host: '', kind: 'turn', cardId: '', name: 'web', stage: 'clicked', ageS: 1 };
+  seed({ id: 'T-44', pid: 'PID-store-000000001', sid: 'S44', host: '', kind: 'turn', cardId: '', url: '/?push-reveal=S44', t: Date.now() });
+  await flip('visible');
+  out.storeWins = snap();
+  reset();
+  await flip('visible');
+  out.storeThenLedger = snap();
+  reset();
+  // the worker's message carrying a pid settles the row too, and the ledger check never lands that push again
+  PENDING = { pid: 'PID-msg-0000000001', sid: 'S45', host: '', kind: 'turn', cardId: '', name: 'web', stage: 'clicked', ageS: 1 };
+  swMsg({ romp: 'notificationClick', sid: 'S45', host: '', kind: 'turn', cardId: '', id: 'T-45', pid: 'PID-msg-0000000001', diag: { clients: 0, tops: 0, road: 'open', vis: '' } });
+  await settle();
+  out.msg = snap();
+  reset();
+  await flip('visible');
+  out.msgThenLedger = snap();
+  reset();
+  // the worker's shown record AND the kernel's row for the SAME push: one offer; taking it retires both
+  PENDING = { pid: 'PID-both-000000001', sid: 'S46', host: '', kind: 'turn', cardId: '', name: 'api', stage: 'shown', ageS: 3 };
+  seedK('/__romp/shown', { id: 'N-46', pid: 'PID-both-000000001', sid: 'S46', host: '', kind: 'turn', cardId: '', url: '/?push-reveal=S46', name: 'api', t: Date.now() - 3000 });
+  await flip('visible');
+  out.both = snap();
+  reset();
+  CHIP['tap-offer-go'].click();
+  await settle();
+  out.bothTaken = snap();
+  reset();
+  // the worker's record names ANOTHER push than the kernel's newest: the kernel's is the newer word, the record is retired
+  PENDING = { pid: 'PID-newer-00000001', sid: 'S47', host: '', kind: 'turn', cardId: '', name: 'tests', stage: 'shown', ageS: 1 };
+  seedK('/__romp/shown', { id: 'N-old', pid: 'PID-older-00000001', sid: 'S46', host: '', kind: 'turn', cardId: '', url: '/?push-reveal=S46', name: 'api', t: Date.now() - 90000 });
+  await flip('visible');
+  out.newer = snap();
+  reset();
+  CHIP['tap-offer-x'].click(); await settle(); reset();
+  // nothing pending at the kernel: the worker's record decides, as before the ledger
+  PENDING = {};
+  seedK('/__romp/shown', { id: 'N-48', sid: 'S48', host: '', kind: 'turn', cardId: '', url: '/?push-reveal=S48', name: 'web', t: Date.now() - 1000 });
+  await flip('visible');
+  out.nonePending = snap();
+  reset();
+  CHIP['tap-offer-x'].click(); await settle(); reset();
+  // the kernel unreachable: said so, nothing lands, no throw
+  fetchFail = true;
+  PENDING = { pid: 'PID-err-0000000001', sid: 'S49', host: '', kind: 'turn', cardId: '', name: 'web', stage: 'clicked', ageS: 1 };
+  await flip('visible');
+  out.err = snap();
+  fetchFail = false;
+  console.log(JSON.stringify(out));
+})();
+"""
+# a page whose chat pane shows tabs but whose wsState message this script never saw (2026-09-09, the served offer leg):
+# the tabs prove the socket was up, so a landing is delivered live, not parked
+_TABS_DRIVER = _RESUME_LIB + r"""
+(async () => {
+  const out = {};
+  await settle();
+  reset();
+  swMsg({ romp: 'notificationClick', sid: 'S50', host: '', kind: 'turn', cardId: '', id: 'T-50' });   // no tabs yet, no wsState: booting
+  await settle();
+  out.noTabs = snap();
+  reset();
+  activeSid = 'S1';                                    // the pane rendered its tabs — over the socket this script heard nothing about
+  swMsg({ romp: 'notificationClick', sid: 'S51', host: '', kind: 'turn', cardId: '', id: 'T-51' });
+  await settle();
+  out.tabs = snap();
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+class LandingRevealAsksTheLedger(unittest.TestCase):
+    """2026-09-09, the PARTITION round. The fingerprints answered the warm-app question, and the answer was neither
+    hypothesis: the page's own worker was current and wrote its record fine (swMatchesPage:true on every row), yet
+    across a push and a tap on it the page read no push stamp, no click, no tap, no shown record, no message — and
+    the app came forward without navigating. The worker instance that fields a push on iOS writes where the Home
+    Screen app's page cannot read, and lists no client of the app: every hand-off through storage or a client is
+    invisible there. The kernel is the meeting point: the worker acks 'shown' and 'clicked' against the push's pid,
+    and this page asks GET /push/pending?endpoint=<its own subscription> on the same events as the store check.
+    'clicked' lands (via 'ack'); 'shown' or 'sent' is the offer chip, from the kernel's row; a settled row goes back
+    as /push/landed or /push/dismissed; the pid rides every other road too, so one push lands once."""
+    EP = "https://push.example.net/send/this-device"
+    LONG = "66666666-1111-2222-3333-444444444444"   # a uuid-shaped sid, so the clipped form differs from the whole
+
+    @classmethod
+    def setUpClass(cls):
+        cls.out = _run_reveal(_LEDGER_DRIVER, href="http://localhost:7777/", endpoint=cls.EP, pending={})
+        clicked = {"pid": "PID-boot-000000001", "sid": cls.LONG, "host": "", "kind": "card", "cardId": "S60:g1", "name": "api", "stage": "clicked", "ageS": 9}
+        cls.boot_clicked = _run_reveal(_BOOT_DRIVER, href="http://localhost:7777/", endpoint=cls.EP, pending=clicked)
+        cls.link_clicked = _run_reveal(_BOOT_DRIVER, href="http://localhost:7777/?push-reveal=" + cls.LONG + "&push-card=S60%3Ag1", endpoint=cls.EP, pending=clicked)
+        cls.link_other = _run_reveal(_BOOT_DRIVER, href="http://localhost:7777/?push-reveal=S1", endpoint=cls.EP, pending=clicked)
+        cls.no_caches = _run_reveal(_BOOT_DRIVER, href="http://localhost:7777/", endpoint=cls.EP, pending=clicked, no_caches=True)
+        cls.tabs = _run_reveal(_TABS_DRIVER, href="http://localhost:7777/")
+
+    @staticmethod
+    def _rows(snap, what):
+        return [d for w, d in snap["diag"] if w == what]
+
+    PENDING_GET = "/push/pending?endpoint=" + "https%3A%2F%2Fpush.example.net%2Fsend%2Fthis-device"
+
+    def test_the_page_asks_for_its_own_endpoint_on_every_check_and_says_what_it_heard(self):
+        b = self.out["boot"]
+        self.assertEqual(b["gets"], [self.PENDING_GET], "asked at boot, for THIS page's subscription")
+        self.assertEqual(self._rows(b, "tap-pending"), [{"via": "boot", "sub": True, "stage": None, "ageS": -1}], "nothing pending: said so")
+        self.assertEqual((b["fetches"], b["chip"]["hidden"]), ([], True))
+        c = self.out["clicked"]
+        self.assertEqual(c["gets"], [self.PENDING_GET], "…and on every coming-back")
+        rows = self._rows(self.boot_clicked["boot"], "tap-pending")
+        self.assertEqual([r["sid"] for r in rows], [self.LONG[:8]], "the session id is clipped to 8, never whole: %r" % rows)
+        self.assertNotIn(self.LONG, json.dumps(self.boot_clicked["boot"]["diag"]))
+
+    def test_a_clicked_push_lands_by_the_ack_road_once_and_settles_the_row(self):
+        c = self.out["clicked"]
+        self.assertEqual(c["fetches"], [["/reveal", {"sid": "S40", "wid": "W-test", "via": "ack"}], ["/push/landed", {"pid": "PID-clicked-000001"}]],
+                         "the user tapped: a jump by the same land() path, the road named; then the kernel's row is landed")
+        self.assertEqual(c["posted"], [{"romp": "revealCard", "itemId": "S40:g1", "sid": "S40"}], "a card kind scrolls the feed too")
+        self.assertEqual(self._rows(c, "tap-pending"), [{"via": "visible", "sub": True, "stage": "clicked", "ageS": 4, "sid": "S40"}])
+        self.assertEqual(self._rows(c, "tap-pending-land"), [{"ageS": 4, "dup": False, "dropped": False, "sameSid": None}])
+        self.assertIn(["reveal-post", {"status": 200, "via": "ack", "boot": False}], c["diag"])
+        self.assertTrue(c["chip"]["hidden"])
+        a = self.out["clickedAgain"]
+        self.assertEqual(a["fetches"], [], "the same pid again is a dup: no second /reveal, no second settle")
+        self.assertEqual(self._rows(a, "tap-pending-land"), [{"ageS": 4, "dup": True, "dropped": False, "sameSid": None}])
+
+    def test_a_shown_or_sent_push_is_offered_from_the_kernels_row(self):
+        s = self.out["shown"]
+        self.assertEqual(s["fetches"], [], "an offer, not a jump")
+        self.assertEqual(s["chip"], {"hidden": False, "text": "Open tests · from the notification", "acted": False, "disabled": False}, "named from the ledger")
+        self.assertEqual(self._rows(s, "tap-pending-offer"), [{"ageS": 30, "stage": "shown"}])
+        self.assertEqual(self._rows(s, "tap-offer"), [{"shown": True, "via": "visible", "ageS": 30, "why": ""}], "the chip's own row, as for a worker-sourced offer")
+        t = self.out["shownTaken"]
+        self.assertEqual(t["fetches"], [["/reveal", {"sid": "S41", "wid": "W-test", "via": "offer"}], ["/push/landed", {"pid": "PID-shown-00000001"}]], "taken: the offer road, and the row is landed")
+        self.assertIn(["tap-offer-click", {"ageS": 30}], t["diag"])
+        self.assertTrue(t["chip"]["hidden"])
+        n = self.out["sent"]
+        self.assertEqual(n["chip"], {"hidden": False, "text": "Open web · from the notification", "acted": False, "disabled": False}, "sent and never acked (iOS may show without the worker reaching the kernel): offered too")
+        self.assertEqual(self._rows(n, "tap-pending-offer"), [{"ageS": 120, "stage": "sent"}])
+        d = self.out["sentDismissed"]
+        self.assertEqual(d["fetches"], [["/push/dismissed", {"pid": "PID-sent-000000001"}]], "dismissed: nothing lands, the row is dismissed")
+        self.assertIn(["tap-offer-dismiss", {"ageS": 120}], d["diag"])
+        self.assertTrue(d["chip"]["hidden"])
+
+    def test_the_session_already_in_front_settles_the_row_without_a_chip(self):
+        a = self.out["active"]
+        self.assertEqual(a["fetches"], [["/push/landed", {"pid": "PID-active-00000001"}]], "the push's purpose is met: landed, no /reveal")
+        self.assertTrue(a["chip"]["hidden"])
+        self.assertEqual(self._rows(a, "tap-offer"), [{"shown": False, "via": "focus", "ageS": 2, "why": "active"}])
+
+    def test_the_other_roads_settle_the_row_by_pid_so_the_ledger_never_lands_a_push_twice(self):
+        w = self.out["storeWins"]
+        self.assertEqual(w["fetches"], [["/reveal", {"sid": "S44", "wid": "W-test", "via": "store"}], ["/push/landed", {"pid": "PID-store-000000001"}]], "the stored tap lands, and its pid settles the kernel's row")
+        self.assertEqual(w["gets"], [], "a check that found a tap does not ask the kernel")
+        self.assertEqual(self._rows(w, "tap-pending"), [])
+        a = self.out["storeThenLedger"]
+        self.assertEqual(a["fetches"], [], "the kernel's clicked row for that push is a dup by pid")
+        self.assertEqual(self._rows(a, "tap-pending-land"), [{"ageS": 1, "dup": True, "dropped": False, "sameSid": None}])
+        m = self.out["msg"]
+        self.assertEqual(m["fetches"], [["/reveal", {"sid": "S45", "wid": "W-test", "via": "sw"}], ["/push/landed", {"pid": "PID-msg-0000000001"}]], "the worker's message carries the pid: landed by the message, settled")
+        self.assertEqual(m["ack"], [{"romp": "tapLanded", "id": "T-45"}])
+        self.assertEqual(self.out["msgThenLedger"]["fetches"], [])
+        self.assertEqual(self._rows(self.out["msgThenLedger"], "tap-pending-land"), [{"ageS": 1, "dup": True, "dropped": False, "sameSid": None}])
+
+    def test_the_workers_record_and_the_kernels_row_for_one_push_are_one_offer(self):
+        b = self.out["both"]
+        self.assertEqual(b["chip"]["text"], "Open api · from the notification")
+        self.assertEqual(self._rows(b, "tap-offer"), [{"shown": True, "via": "visible", "ageS": 3, "why": ""}], "one offer, not two")
+        self.assertIn("/__romp/shown", b["keys"], "the worker's record for the SAME push stays until the offer is taken or dismissed")
+        t = self.out["bothTaken"]
+        self.assertEqual(t["fetches"], [["/reveal", {"sid": "S46", "wid": "W-test", "via": "offer"}], ["/push/landed", {"pid": "PID-both-000000001"}]])
+        self.assertIn({"romp": "tapLanded", "id": "N-46"}, t["ctrl"], "…and taking it retires the worker's record too")
+        self.assertNotIn("/__romp/shown", t["keys"])
+        n = self.out["newer"]
+        self.assertEqual(n["chip"]["text"], "Open tests · from the notification", "the kernel's newest is the newer word")
+        self.assertIn({"romp": "tapLanded", "id": "N-old"}, n["ctrl"], "the worker's record for another push is retired")
+        self.assertNotIn("/__romp/shown", n["keys"])
+        z = self.out["nonePending"]
+        self.assertEqual(z["chip"]["text"], "Open web · from the notification", "nothing pending at the kernel: the worker's record decides, as before")
+        self.assertEqual(self._rows(z, "tap-pending"), [{"via": "visible", "sub": True, "stage": None, "ageS": -1}])
+        e = self.out["err"]
+        self.assertEqual(e["fetches"], [], "the kernel unreachable: nothing lands, no throw")
+        self.assertEqual(self._rows(e, "tap-pending"), [{"via": "visible", "sub": True, "stage": None, "ageS": -1, "err": True}])
+
+    def test_a_boot_lands_a_clicked_push_as_a_boot_and_a_deep_link_boot_outranks_it(self):
+        b = self.boot_clicked["boot"]
+        self.assertEqual(b["fetches"], [["/reveal", {"sid": self.LONG, "wid": "W-test", "via": "ack", "boot": True}], ["/push/landed", {"pid": "PID-boot-000000001"}]],
+                         "a relaunch on the start URL: the kernel parks for this page's pane, as for a stored tap")
+        self.assertEqual(self._rows(b, "tap-pending"), [{"via": "boot", "sub": True, "stage": "clicked", "ageS": 9, "sid": self.LONG[:8]}])
+        l = self.link_clicked["boot"]
+        self.assertEqual(l["fetches"], [["/reveal", {"sid": self.LONG, "wid": "W-test", "via": "link", "boot": True}], ["/push/landed", {"pid": "PID-boot-000000001"}]],
+                         "the link is the newer word: landed by the link alone, the row settled")
+        self.assertEqual(self._rows(l, "tap-pending-land"), [{"ageS": 9, "dup": False, "dropped": True, "sameSid": True}])
+        o = self.link_other["boot"]
+        self.assertEqual(o["fetches"], [["/reveal", {"sid": "S1", "wid": "W-test", "via": "link", "boot": True}], ["/push/landed", {"pid": "PID-boot-000000001"}]])
+        self.assertEqual(self._rows(o, "tap-pending-land"), [{"ageS": 9, "dup": False, "dropped": True, "sameSid": False}])
+        n = self.no_caches["boot"]
+        self.assertEqual(n["fetches"], [["/reveal", {"sid": self.LONG, "wid": "W-test", "via": "ack", "boot": True}], ["/push/landed", {"pid": "PID-boot-000000001"}]],
+                         "no Cache API at all: the kernel's ledger is the road left, and it lands")
+        self.assertEqual(self._rows(n, "tap-resume"), [_fp({"found": False, "via": "boot", "store": False})])
+
+    def test_the_panes_rendered_tabs_prove_its_socket_up_when_its_message_was_missed(self):
+        # 2026-09-09, the served offer leg: the shell's parser yielded to the chat pane's wsState message before this script
+        # existed, so every landing said booting and parked for a ready that had already come. The tabs come over that very
+        # socket: an active tab in the pane's DOM is proof enough, and a landing is delivered live
+        self.assertEqual(self.tabs["noTabs"]["fetches"], [["/reveal", {"sid": "S50", "wid": "W-test", "via": "sw", "boot": True}]], "no tabs, no message: booting")
+        self.assertEqual(self.tabs["tabs"]["fetches"], [["/reveal", {"sid": "S51", "wid": "W-test", "via": "sw"}]], "tabs rendered: live, whatever this script heard")
 
 
 class RailBell(unittest.TestCase):
