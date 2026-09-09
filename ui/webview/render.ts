@@ -50,7 +50,7 @@ import { numberDiff, type DiffRow } from "./diff-lines";
 import { parseAgentNotif, notifHead, type AgentNotif } from "./agent-notif";
 import { injectedHead, type InjectedSource } from "./injected-source";
 import { subTabId, isSubId, subParts, subLabel, gistLines, stepLines, stepsNote, agentFoldLabel, subHeadParts, openIconSvg, pinIconSvg, type SubMeta, type AgentGist, type AgentGistRow, type GistLine } from "./subagent-view";
-import { previewKind, previewFull, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal, setLightboxNav, type LightboxNavEntry } from "./preview";
+import { previewKind, previewFull, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal, mdImgPostPass, setLightboxNav, type LightboxNavEntry } from "./preview";
 import { openFileClick } from "./file-view";                  // a clicked file WITH its gesture (pdf-new-tab.test.ts)
 // initFileView rides its OWN line: the import above is pinned verbatim by file-view.test.ts
 import { initFileView, setFileViewIdentity, hostStub } from "./file-view";
@@ -1175,6 +1175,7 @@ function md(src: string, repo: string | null = prRepoFor()): string {
     // the sanitizer's verdicts stand and a marked-autolinked GitHub URL is never wrapped twice.
     const clean = sanitizeMd(dirty);   // the sanitized <body>, its math rendered
     linkifyPrRefs(clean, repo);
+    mdImgPostPass(clean);   // a markdown image whose URL failed this page life is parked before the browser fetches it (T291c)
     return clean.innerHTML;
   } catch { const d = document.createElement("div"); d.textContent = src; return d.innerHTML; }
 }
@@ -1189,6 +1190,7 @@ function userMd(src: string, repo: string | null = prRepoFor()): string {
   try {
     const clean = sanitizeMd(userMdHtml(src));   // the sanitized <body>, its math rendered
     linkifyPrRefs(clean, repo);
+    mdImgPostPass(clean);   // a markdown image whose URL failed this page life is parked before the browser fetches it (T291c)
     return clean.innerHTML;
   } catch { const d = document.createElement("div"); d.textContent = src; return d.innerHTML; }
 }
@@ -1804,7 +1806,16 @@ function healPathImgs(): void {
 // the page shim fires romp:wsup when THIS pane's kernel socket reconnects (kernel.py ws.onopen) —
 // the same kernel-is-back event a hostUp is for a federated tunnel; heal everything on it
 window.addEventListener("romp:wsup", () => { retryFailedPreviews(); refreshSettledPreviews(); healPathImgs(); });
-installMdImgHeal();   // markdown-inline <img> failures register for the per-message heal (capture-phase, once)
+installMdImgHeal();   // markdown-inline <img> failures are PARKED (capture-phase, once) and heal on the reconnect-class events (T291c);
+//                       md() and userMd() run mdImgPostPass on their own output, so a re-render parks a known-failed image before it fetches
+// The page's own bundle build, filed once per page load (T291c, the user's 2026-09-09 report could not tell the
+// page's build from the kernel's): the ?v= the kernel stamped on the render.js script this page loaded (the
+// dist_ver it served then; a VS Code webview loads the bundle without one and files 0).
+(() => {
+  const tag = Array.from(document.scripts).map((sc) => sc.getAttribute("src") || "").find((u) => /\/dist\/render\.js(\?|$)/.test(u)) || "";
+  const m = /[?&]v=(\d+)/.exec(tag);
+  vscodeApi?.postMessage({ type: "clientDiag", surface: "chat", what: "pageload", data: { distVer: m ? Number(m[1]) : 0, path: location.pathname } });
+})();
 
 // One image of a user turn: the picture (or its hydration chip) plus, when the
 // on-disk path is known, a caption line — the full absolute path (click → open),
