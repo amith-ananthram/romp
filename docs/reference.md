@@ -1093,8 +1093,10 @@ The two rows, as the kernel writes them (`t` its clock, `wid` the dashboard id):
   the cap, with the worst of those; `heap_mb` is
   `performance.memory.usedJSHeapSize` and is absent outside Chrome; `dom` is
   the element count; `visible` is the document's visibility, `hidden_pane`
-  the zero-viewport test the pane shim uses for a pane the shell has set to
-  `display:none`; `ua` is `chrome-desktop`, `safari-ios` or `other`.
+  the pane shim's test for a pane the shell has set to `display:none`: its
+  zero-viewport probe, or the word the pane published as
+  `window.__rompPaneHidden` from its own visibility events; `ua` is
+  `chrome-desktop`, `safari-ios` or `other`.
 - `{"t", "wid", "surface": "perf", "what": "slowframe", "data": {app, type, ms,
   dom, loaf?: {ms, blocking_ms, top: [{k, ms, inv}]}}}`. `type` is the frame
   as received on the wire and `ms` its whole synchronous handling, the
