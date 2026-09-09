@@ -31758,6 +31758,11 @@ def _compact_goal_store(fsid):
         except Exception:
             closed = False
         jd.rollup_status(store, closed)
+        # the rollup builds a fresh status dict and REPLACES store["status"] (judge.py rollup_status); the copy
+        # below pops from the dict the store holds now, so the archive gets the re-sealed root's cleared, as it
+        # does when the clear lands on the live card, and the live store keeps no entry for a node it no longer
+        # holds (the pre-rollup dict gave the archive completed, which kept the top listed under Show completed)
+        status = store.get("status", {})
     with jd._GOAL_ARCH_LOCK:                            # the archive is a blind RMW — see the lock's note
         arch = jd.load_goal_archive(fsid)
         a_nodes = arch.setdefault("nodes", {})
