@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """tools/perf-bench.py against a SYNTHETIC state directory (invented sessions in the notes-api demo
 domain, placeholder uuids, no real data): it runs end to end and emits the JSON shape, its cold
-build_session row is a real cold parse, it refuses the live default state directory without the flag
-and mirrors it with the flag, and --compare prints deltas. The sessions' directory is a real git
+build_session row is a real cold parse, it leaves the copy byte-identical (every write the kernel
+aims at it lands in the tool's shadow, and the census says so on the error path too), it finds
+transcripts older than the discovery window through the backfill, --cwd-map resolves a redacted copy's
+registry cwds, it refuses the live default state directory without the flag and mirrors it with the
+flag, and --compare prints deltas. The sessions' directory is a real git
 checkout with a fabricated GitHub origin, as every real state's is: the chat build's path-link git
 queries (rev-parse, ls-files) reach the tripwire's allow list, which a plain directory never
 exercised; the `remote get-url` pair the list also admits is checked in-process below. The tool is
@@ -12,6 +15,7 @@ and of the tripwire's allow rule (its import pulls in only the standard library)
 import atexit
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import os
@@ -55,7 +59,8 @@ EXPECTED_NEUTRALIZED = {
     "km._refresh_remote_prices", "km._warm_fleet_bg", "km._system_notify", "km._push_notify", "km._push_forward",
     "km._badge_push", "romp_kernel_perf_bench.subprocess", "romp_judge.subprocess", "romp_sdk_backend.subprocess",
     "romp_keysource.subprocess",   # loaded by sdk_backend; its key command is a subprocess (review find, 2026-09-08)
-    "km._atomic_write (checked)", "pwd.getpwnam (counted)", "pwd.getpwuid (counted)"}
+    "km._atomic_write (shadowed)", "km._read_state_json (shadow overlay)", "km._order_audit_path (shadowed)",
+    "pwd.getpwnam (counted)", "pwd.getpwuid (counted)"}
 # The caches whose emptiness the cold rows' PROOF rests on: the event model's parse-layer caches (the
 # per-sample assembly check reads _ASM_CACHE and the counters) and the kernel's parse cache (the
 # build_feed_noparse row empties it too). The tool skips a name a revision lacks and reports what it did
@@ -63,12 +68,51 @@ EXPECTED_NEUTRALIZED = {
 # checked only to be drawn from that list: the first form pinned every kernel-private cache name at HEAD,
 # which an unrelated kernel rename would have broken with the proof intact (review find, 2026-09-08).
 EXPECTED_COLD_CACHES = {"kernel": {"_parse_cache"}, "event_model": {"_JSONL_CACHE", "_ASM_CACHE"}}
-# The writes a normal run is known to make into the copy: the import-time repo-root marker, the
-# tab-order audit and the session order the push maintains. The test asks that these appear, that every
-# write landed under the copy (the guard's own record) and that nothing was removed; it does not pin the
-# set exactly, so a kernel that adds a write path reports it in the tool's output without failing the
-# tool's test (the first form pinned the exact set; review find, 2026-09-08).
-EXPECTED_WRITES = {"+ order-audit.jsonl", "+ repo-root", "+ session-order.json"}
+# The writes a normal run is known to aim at the copy, every one of which the tool's shadow takes: the
+# import-time repo-root marker, the tab-order audit and the session order the push maintains. The test asks
+# that these appear among the shadowed paths and that the copy itself changed by nothing (the tree hash
+# below); it does not pin the shadowed set exactly, so a kernel that adds a write path reports it in the
+# tool's output without failing the tool's test (review find, 2026-09-08), while one that reaches the copy
+# fails the hash.
+EXPECTED_SHADOWED = {"order-audit.jsonl", "repo-root", "session-order.json"}
+REDACTED_PREFIX = "/XXXX/XXXXXX"     # what a redaction tool leaves where a home path stood
+
+
+def _tree_hash(root):
+    """Every directory, file and symlink under root, keyed by relative path: a directory as "dir", a
+    symlink as its target, a file as the sha256 of its bytes. Two equal maps mean a byte-identical tree
+    (mtimes aside, which a read may not touch either; the mirror test checks those)."""
+    out = {}
+    for dp, dns, fns in os.walk(root):
+        for d in dns:
+            out[os.path.relpath(os.path.join(dp, d), root) + "/"] = "dir"
+        for f in fns:
+            p = os.path.join(dp, f)
+            if os.path.islink(p):
+                out[os.path.relpath(p, root)] = "link:" + os.readlink(p)
+            else:
+                with open(p, "rb") as fh:
+                    out[os.path.relpath(p, root)] = hashlib.sha256(fh.read()).hexdigest()
+    return out
+
+
+def _age_transcripts(claude, days):
+    """Set every transcript's mtime `days` back: a copy taken from a machine whose sessions last wrote
+    that long ago, outside discovery's 48 h window and inside the 365-day backfill."""
+    t = time.time() - days * 86400
+    for p in Path(claude, "projects").rglob("*.jsonl"):
+        os.utime(p, (t, t))
+
+
+def _redact_cwds(state, root):
+    """Rewrite every registry cwd (names/ and sdk/) so the fixture's root reads as REDACTED_PREFIX, the
+    way a redaction tool replaces a home path, while the projects/ directory keeps its original name."""
+    for f in Path(state, "names").iterdir():
+        f.write_text(f.read_text().replace(str(root), REDACTED_PREFIX))
+    for f in Path(state, "sdk").glob("*.json"):
+        reg = json.loads(f.read_text())
+        reg["cwd"] = reg["cwd"].replace(str(root), REDACTED_PREFIX)
+        f.write_text(json.dumps(reg))
 
 
 def _module_constants(path, names):
@@ -212,10 +256,12 @@ class PerfBench(unittest.TestCase):
                                       re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(os.path.join(cls.root, "notes-api"))),
                                       SID_WEB + ".jsonl")
         cls.transcript_mtime = os.stat(cls.transcript).st_mtime_ns
+        cls.state_before, cls.claude_before = _tree_hash(cls.state), _tree_hash(cls.claude)
         # a planted API-key variable (not a key), which the tool must drop before the import
         cls.main = run_tool(["--state", cls.state, "--claude-dir", cls.claude, "--repo", ROOT, "--iters", "2",
                              "--sessions", "2", "--profile", "--json", cls.json_path],
                             env_extra={"ANTHROPIC_API_KEY": "not-a-key"})
+        cls.state_after, cls.claude_after = _tree_hash(cls.state), _tree_hash(cls.claude)
 
     @classmethod
     def tearDownClass(cls):
@@ -236,7 +282,7 @@ class PerfBench(unittest.TestCase):
 
     def test_runs_and_reports_every_builder(self):
         out = self._out()
-        self.assertEqual(out["schema"], 2)
+        self.assertEqual(out["schema"], 3)
         self.assertEqual(os.path.realpath(out["state"]), os.path.realpath(self.state))
         b = out["benchmarks"]
         for name in ("liveness_snapshot", "names_snapshot", "discover_cold", "discover_warm", "build_feed",
@@ -269,12 +315,13 @@ class PerfBench(unittest.TestCase):
         self.assertEqual(out["threads_new"], [], "no builder left a thread running")
         self.assertEqual(set(out["neutralized"]), EXPECTED_NEUTRALIZED)
         self.assertEqual(os.stat(self.transcript).st_mtime_ns, self.transcript_mtime, "transcripts are read-only")
-        self.assertTrue(EXPECTED_WRITES <= set(out["writes"]["sample"]), out["writes"])
-        self.assertFalse([w for w in out["writes"]["sample"] if w.startswith("- ")], "nothing removed from the copy")
-        self.assertEqual(out["writes"]["removed"], 0)
-        self.assertEqual(out["refused_writes"], [], "every _atomic_write landed under the copy")
-        for rel in out["writes"]["atomic_writes"]:
+        self.assertTrue(EXPECTED_SHADOWED <= set(out["writes"]["shadowed"]), out["writes"])
+        self.assertEqual((out["writes"]["changed"], out["writes"]["new"], out["writes"]["removed"]), (0, 0, 0), out["writes"])
+        self.assertEqual(out["refused_writes"], [], "every _atomic_write was aimed under the copy")
+        for rel in out["writes"]["shadowed"]:
             self.assertFalse(os.path.isabs(rel) or rel.startswith(".."), "recorded relative to the copy: %s" % rel)
+        self.assertEqual(out["live_transcripts"]["searched"], {"cwds": 2, "project_dirs": 2, "transcripts": 3})
+        self.assertEqual(out["cwd_map"], [])
         prof = out["profiles"]
         for name in ("build_feed", "build_timeline_bars", "build_session_cold:11111111", "load_goals:11111111", "push_steady"):
             self.assertIn(name, prof)
@@ -375,6 +422,171 @@ class PerfBench(unittest.TestCase):
         c["send"](other)
         self.assertEqual(c["bytes"], {"bars-delta": len(delta), "('timeline',)": len(full), "warn": len(other)})
         self.assertEqual(c["frames"], 3)
+
+    def test_the_copy_is_byte_identical_after_a_run(self):
+        # the files the kernel aims at the copy (EXPECTED_SHADOWED) landed in the tool's shadow, so the copy
+        # has the same directories, files and bytes it started with; without the shadow the run creates
+        # repo-root, session-order.json and order-audit.jsonl inside it
+        self._ok(self.main)
+        self.assertEqual(self.state_after, self.state_before, "the state copy is only read")
+        self.assertEqual(self.claude_after, self.claude_before, "the transcripts are only read")
+        self.assertIn("writes into the state copy: 0 changed, 0 new, 0 removed", self.main.stdout)
+        shadowed_line = next(l for l in self.main.stdout.splitlines() if l.startswith("writes shadowed (landed in the private dir, not the copy): "))
+        for name in EXPECTED_SHADOWED:
+            self.assertIn(name, shadowed_line)
+
+    def test_the_census_runs_on_the_error_path_and_names_what_was_searched(self):
+        # a claude dir with no projects/ at all: discovery finds nothing, the window and the backfill both
+        # count zero, and the run stops with the counts it worked from. The census still runs and prints,
+        # the JSON carries it beside the error, and the copy is untouched (the kernel WAS imported, so
+        # without the shadow repo-root would be in it)
+        root = self._scratch_root("perf-bench-nofind-")
+        state, claude = build_synthetic(root, web_turns=3)
+        empty_claude = os.path.join(root, "claude-empty")
+        os.makedirs(empty_claude)
+        before = _tree_hash(state)
+        out_json = os.path.join(root, "out.json")
+        r = run_tool(["--state", state, "--claude-dir", empty_claude, "--repo", ROOT, "--iters", "1", "--json", out_json])
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        # the two windows are the kernel's constants (jd.WINDOW, jd.DEATH_BACKFILL_WINDOW), so their values
+        # are not pinned here, only that the error names them with the counts
+        self.assertRegex(r.stderr, r"discovery found no transcript for any of the 2 live sessions: 0 in the \d+ h window, "
+                                   r"0 more in the \d+-day backfill; their 2 registry cwd\(s\) resolve to 0 existing project "
+                                   r"directories holding 0 transcript\(s\)")
+        self.assertIn("--cwd-map", r.stderr, "the error points at the redacted-copy remedy")
+        self.assertNotIn(root, r.stderr.split("perf-bench: discovery")[1], "the error names counts, not paths")
+        self.assertIn("writes into the state copy: 0 changed, 0 new, 0 removed", r.stdout)
+        self.assertIn("writes shadowed (landed in the private dir, not the copy): repo-root", r.stdout)
+        self.assertEqual(_tree_hash(state), before, "an error run leaves the copy byte-identical too")
+        with open(out_json) as f:
+            out = json.load(f)
+        self.assertIn("no transcript for any", out["error"])
+        self.assertEqual((out["writes"]["changed"], out["writes"]["new"], out["writes"]["removed"]), (0, 0, 0))
+        self.assertEqual(out["writes"]["shadowed"], ["repo-root"])
+        self.assertIn("(partial: the run stopped on an error)", r.stdout)
+
+    def test_transcripts_older_than_the_window_are_found_by_the_backfill(self):
+        # every transcript is 3 days old: outside discovery's 48 h window, inside the 365-day backfill. A
+        # no-transcript error raised before the backfill runs would stop this run; raised after it, the
+        # backfill finds both
+        root = self._scratch_root("perf-bench-old-")
+        state, claude = build_synthetic(root, web_turns=3)
+        _age_transcripts(claude, days=3)
+        out_json = os.path.join(root, "out.json")
+        r = run_tool(["--state", state, "--claude-dir", claude, "--repo", ROOT, "--iters", "1", "--sessions", "2",
+                      "--clients", "", "--json", out_json])
+        self._ok(r)
+        with open(out_json) as f:
+            out = json.load(f)
+        lt = out["live_transcripts"]
+        self.assertEqual((lt["in_window"], lt["backfilled"], lt["count"], lt["no_transcript"]), (0, 2, 2, []))
+        self.assertIn("build_session_cold:11111111", out["benchmarks"])
+        self.assertIn("build_session_cold:22222222", out["benchmarks"])
+        self.assertIn("2 live transcripts (0 in the discovery window, 2 backfilled, 0 without one)", r.stdout)
+
+    def test_cwd_map_resolves_a_redacted_copy(self):
+        # the registry cwds read /XXXX/XXXXXX/notes-api while the project directory is still named after
+        # the real path: without a map discovery resolves the cwd to a directory that does not exist and
+        # the run stops; with --cwd-map the same run finds both transcripts and reports the rule's hits
+        root = self._scratch_root("perf-bench-redacted-")
+        state, claude = build_synthetic(root, web_turns=3)
+        _redact_cwds(state, root)
+        before = _tree_hash(state)
+        out_json = os.path.join(root, "out.json")
+        base = ["--state", state, "--claude-dir", claude, "--repo", ROOT, "--iters", "1", "--clients", "", "--json", out_json]
+        maps = ["--cwd-map", "/nowhere/else=/nowhere", "--cwd-map", REDACTED_PREFIX + "=" + root]
+        r = run_tool(base + ["--sessions", "2"])
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("their 2 registry cwd(s) resolve to 0 existing project directories", r.stderr)
+        r = run_tool(base + ["--sessions", "2"] + maps)
+        self._ok(r)
+        with open(out_json) as f:
+            out = json.load(f)
+        self.assertEqual((out["live_transcripts"]["count"], out["live_transcripts"]["no_transcript"]), (2, []))
+        self.assertEqual(out["live_transcripts"]["searched"], {"cwds": 2, "project_dirs": 2, "transcripts": 3})
+        self.assertEqual([(m["from"], m["to"]) for m in out["cwd_map"]], [("/nowhere/else", "/nowhere"), (REDACTED_PREFIX, root)])
+        self.assertEqual(out["cwd_map"][0]["hits"], 0)
+        self.assertGreater(out["cwd_map"][1]["hits"], 0, "the matching rule counted its hits")
+        self.assertIn("build_session_cold:11111111", out["benchmarks"])
+        self.assertIn("cwd-map hits: rule 1=0, rule 2=%d" % out["cwd_map"][1]["hits"], r.stdout)
+        self.assertIn("jd._proj_dir (cwd-map)", out["neutralized"], "the report says the derivation is wrapped")
+        self.assertEqual(_tree_hash(state), before, "the map rewrites nothing in the copy")
+        self.assertEqual(out["spawn_attempts"], [], "the git queries against the redacted cwd failed quietly, no tripwire")
+        # the count is read when the run ends, so the builders' transcript-path derivations are in it: one
+        # more benched session is more hits, where a count taken at discovery (which does not depend on
+        # --sessions) would be the same for both runs
+        r = run_tool(base + ["--sessions", "1"] + maps)
+        self._ok(r)
+        with open(out_json) as f:
+            hits_one = json.load(f)["cwd_map"][1]["hits"]
+        self.assertGreater(hits_one, 0)
+        self.assertGreater(out["cwd_map"][1]["hits"], hits_one, "the hits cover the whole run, not the discovery stage alone")
+
+    def test_an_exception_out_of_the_candidate_kernel_still_prints_the_census(self):
+        # a --repo whose kernel raises at import (a broken candidate checkout) is not a BenchError. Left to
+        # propagate past main(), it would take the census run() had taken with it (no census line, no JSON,
+        # only the traceback). The census prints, the JSON carries the error beside it, the copy is
+        # byte-identical, and the traceback still follows
+        root = self._scratch_root("perf-bench-broken-")
+        state, claude = build_synthetic(root, web_turns=3)
+        repo = os.path.join(root, "broken-repo")
+        os.makedirs(os.path.join(repo, "kernel"))
+        Path(repo, "kernel", "kernel.py").write_text("raise RuntimeError('synthetic import failure')\n")
+        before = _tree_hash(state)
+        out_json = os.path.join(root, "out.json")
+        r = run_tool(["--state", state, "--claude-dir", claude, "--repo", repo, "--iters", "1", "--json", out_json])
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("writes into the state copy: 0 changed, 0 new, 0 removed", r.stdout)
+        self.assertIn("writes shadowed (landed in the private dir, not the copy): none", r.stdout)
+        self.assertIn("(partial: the run stopped on an error)", r.stdout)
+        self.assertIn("perf-bench: RuntimeError: synthetic import failure", r.stderr)
+        self.assertIn("Traceback", r.stderr, "the exception still leaves main() with its traceback")
+        self.assertEqual(_tree_hash(state), before)
+        with open(out_json) as f:
+            out = json.load(f)
+        self.assertEqual(out["error"], "RuntimeError: synthetic import failure")
+        self.assertEqual((out["writes"]["changed"], out["writes"]["new"], out["writes"]["removed"]), (0, 0, 0))
+        self.assertEqual(out["writes"]["shadowed"], [])
+
+    def test_fingerprint_sees_directories_and_symlink_targets(self):
+        # the census fingerprints directories and link targets too: a directory the kernel creates (its
+        # mkdir sites on STATE subdirectories) or a link it retargets is a write into the copy, and one
+        # that records files only would report it as 0 changed, 0 new, 0 removed
+        pb = SourceFileLoader("perf_bench_fingerprint_under_test", TOOL).load_module()
+        root = self._scratch_root("perf-bench-fp-")
+        os.makedirs(os.path.join(root, "sdk"))
+        Path(root, "sdk", "a.json").write_text("{}")
+        os.symlink("sdk", os.path.join(root, "alias"))
+        before = pb.fingerprint(root)
+        self.assertEqual(before["sdk/"], "dir")
+        self.assertEqual(before["alias/"], ("link", "sdk"))
+        os.makedirs(os.path.join(root, "goals"))
+        os.remove(os.path.join(root, "alias"))
+        os.symlink("goals", os.path.join(root, "alias"))
+        diff = pb.fingerprint_diff(before, pb.fingerprint(root))
+        self.assertEqual((diff["changed"], diff["new"], diff["removed"]), (1, 1, 0))
+        self.assertEqual(diff["sample"], ["~ alias/", "+ goals/"])
+
+    def test_install_cwd_map_wraps_nothing_without_rules(self):
+        # the default run pays no extra frame per _proj_dir call; with a rule the wrapper counts its hits
+        pb = SourceFileLoader("perf_bench_cwdmap_under_test", TOOL).load_module()
+        real = lambda d: "proj:" + str(d)
+        jd = SimpleNamespace(_proj_dir=real)
+        self.assertEqual(pb.install_cwd_map(jd, []), [])
+        self.assertIs(jd._proj_dir, real)
+        hits = pb.install_cwd_map(jd, [("/XXXX/XXXXXX", "/repo")])
+        self.assertIsNot(jd._proj_dir, real)
+        self.assertEqual(jd._proj_dir("/XXXX/XXXXXX/notes-api"), "proj:/repo/notes-api")
+        self.assertEqual(jd._proj_dir("/XXXX/XXXXXXX/other"), "proj:/XXXX/XXXXXXX/other", "whole-component match only")
+        self.assertEqual(hits, [1])
+
+    def test_cwd_map_refuses_a_malformed_rule(self):
+        r = run_tool(["--state", self.state, "--claude-dir", self.claude, "--repo", ROOT, "--cwd-map", "no-equals-sign"])
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("expected FROM=TO", r.stderr)
+        r = run_tool(["--state", self.state, "--claude-dir", self.claude, "--repo", ROOT, "--cwd-map", "=/somewhere"])
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("FROM is empty", r.stderr)
 
     def test_refuses_the_live_default_dir_without_the_flag(self):
         root = self._scratch_root("perf-bench-live-")
@@ -657,17 +869,35 @@ class Recorders(unittest.TestCase):
         self.addCleanup(setattr, threading.Thread, "start", saved_start)
         self.state = tempfile.mkdtemp(prefix="perf-bench-recorders-")
         self.addCleanup(shutil.rmtree, self.state, ignore_errors=True)
+        self.shadow_root = tempfile.mkdtemp(prefix="perf-bench-recorders-shadow-")
+        self.addCleanup(shutil.rmtree, self.shadow_root, ignore_errors=True)
         self.writes = []
 
+    def _fake_atomic_write(self, path, text, mode=None):
+        """The fake kernel's write door: records the call and publishes the file where it was told to, so the
+        shadow overlay's reads have a file to find."""
+        self.writes.append((path, text))
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(text)
+
     def _kernel(self):
-        return SimpleNamespace(jd=SimpleNamespace(STATE=self.state),
-                               _atomic_write=lambda path, text, mode=None: self.writes.append((path, text)),
+        return SimpleNamespace(jd=SimpleNamespace(STATE=Path(self.state)),
+                               _atomic_write=self._fake_atomic_write,
+                               _read_state_json=lambda path, st=None, expect=None: None,
+                               _order_audit_path=lambda: Path(self.state) / "order-audit.jsonl",
                                _refresh_remote_prices=None, _warm_fleet_bg=None, _system_notify=None,
                                _push_notify=None, _push_forward=None, _badge_push=None)
 
+    def _guards(self, km):
+        """install_guards the way run() calls it: a recorder and a shadow made before the kernel loads, so
+        the census can read them whichever way the run ends. Returns (names, rec, shadow)."""
+        rec = self.pb.new_recorder()
+        shadow = self.pb.StateShadow(self.state, self.shadow_root, rec["refused_writes"])
+        return self.pb.install_guards(km, None, shadow, rec), rec, shadow
+
     def test_the_recorders_take_every_shape_the_kernel_calls_with(self):
         km = self._kernel()
-        names, rec = self.pb.install_guards(km, None)
+        names, rec, _shadow = self._guards(km)
         self.assertEqual(set(names), {n for n in EXPECTED_NEUTRALIZED if not n.endswith(".subprocess")},
                          "a namespace without a subprocess attribute gets no tripwire; everything else is guarded")
         # _cached_feed's two card pushes (quiet when the turn push already buzzed), the turn tick's push
@@ -693,28 +923,58 @@ class Recorders(unittest.TestCase):
         t.join()
         self.assertEqual(rec["thread_starts"], 1)
 
-    def test_atomic_writes_outside_the_copy_are_refused(self):
+    def test_atomic_writes_aimed_at_the_copy_land_in_the_shadow_and_the_rest_are_refused(self):
         km = self._kernel()
-        _names, rec = self.pb.install_guards(km, None)
+        _names, rec, shadow = self._guards(km)
         km._atomic_write(os.path.join(self.state, "sub", "x.json"), "{}")
-        self.assertEqual([os.path.basename(p) for p, _t in self.writes], ["x.json"], "a write under the copy goes through")
-        self.assertEqual(rec["atomic_writes"], ["sub/x.json"], "and is recorded relative to the copy")
+        self.assertEqual([os.path.basename(p) for p, _t in self.writes], ["x.json"], "a write aimed under the copy goes through")
+        self.assertEqual(Path(self.writes[0][0]), Path(self.shadow_root) / "sub" / "x.json", "to the shadow, not the copy")
+        self.assertFalse(os.path.exists(os.path.join(self.state, "sub")), "the copy gained nothing")
+        self.assertEqual(shadow.written, ["sub/x.json"], "and is recorded relative to the copy")
         elsewhere = tempfile.mkdtemp(prefix="perf-bench-elsewhere-")
         self.addCleanup(shutil.rmtree, elsewhere, ignore_errors=True)
         with self.assertRaises(self.pb.BenchError) as cm:
             km._atomic_write(os.path.join(elsewhere, "y.json"), "{}")
         self.assertIn("outside the state copy", str(cm.exception))
         self.assertEqual(len(self.writes), 1, "the refused write never reached the kernel's function")
-        self.assertEqual(rec["atomic_writes"], ["sub/x.json"])
+        self.assertEqual(shadow.written, ["sub/x.json"])
         self.assertEqual(rec["refused_writes"], [os.path.realpath(os.path.join(elsewhere, "y.json"))],
                          "on record before the raise, so a caller that swallows the exception cannot hide it")
+        # the shadow's own files are written in place: the audit log's trim rewrites the shadowed log
+        km._atomic_write(os.path.join(self.shadow_root, "order-audit.jsonl"), "")
+        self.assertEqual(Path(self.writes[1][0]), Path(self.shadow_root) / "order-audit.jsonl")
+        self.assertEqual(shadow.written, ["sub/x.json"], "a write already inside the shadow is not a diverted one")
+
+    def test_the_kernels_state_reads_see_the_shadow_once_it_holds_the_file(self):
+        # the session order's read-modify-write: the push reads session-order.json, appends the new sids and
+        # writes it back. The write lands in the shadow, so a reader still pointed at the copy would find the
+        # file unchanged and every later build would append again (an audit record with a captured stack
+        # each time, inside the rows this tool times); the overlaid reader serves the shadowed file instead
+        km = self._kernel()
+        seen = []
+        km._read_state_json = lambda path, st=None, expect=None: seen.append((Path(path), st)) or None
+        _names, _rec, shadow = self._guards(km)
+        order = os.path.join(self.state, "session-order.json")
+        km._read_state_json(order, "a-stat", expect=list)
+        self.assertEqual(seen[-1], (Path(order), "a-stat"), "nothing shadowed yet: the copy's file, with the caller's stat")
+        km._atomic_write(order, "[]")
+        km._read_state_json(order, "a-stat", expect=list)
+        self.assertEqual(seen[-1], (Path(self.shadow_root) / "session-order.json", None),
+                         "the shadowed file, and the caller's stat of the copy's file is dropped")
+        self.assertEqual(km._order_audit_path(), Path(self.shadow_root) / "order-audit.jsonl")
+        self.assertEqual(shadow.written, ["session-order.json", "order-audit.jsonl"])
 
     def test_a_missing_safety_target_is_an_error(self):
         km = self._kernel()
         del km._push_notify
         with self.assertRaises(self.pb.BenchError) as cm:
-            self.pb.install_guards(km, None)
+            self._guards(km)
         self.assertIn("_push_notify", str(cm.exception))
+        km = self._kernel()
+        del km._read_state_json                     # a kernel whose state reads bypass the overlay would re-fire the order's append per build
+        with self.assertRaises(self.pb.BenchError) as cm:
+            self._guards(km)
+        self.assertIn("_read_state_json", str(cm.exception))
 
 
 class InProcessChecks(unittest.TestCase):
