@@ -15,6 +15,7 @@ import type { ParsedAsk } from "../ask-types";
 import { TABBAR_H_KEY, TABBAR_H_DEFAULT, clampTabbarH, parseTabbarH } from "./tabbar-resize";
 import { ctxFallbackColor, pickTone, readableRgb } from "./ctx-color";
 import { applyTheme } from "./theme";
+import { applyDenseChrome } from "./dense-chrome";
 import { SessionViews, viewVisible, viewsKey, revealIn, viewTagUnion, viewTags, type TagUnion, type SessionTag } from "./session-views";
 import { mintWriteId, ackOutcome, adoptViews, seqOf, capsAdopts, announcedSeq, announcedAfter, createInFlight, rederivePending, lensBlob, applyLensFields, type InflightWrite, type LensFields, type TagEditOp, type ViewsAck } from "./views-writes";
 import { lensVisible, surfaceLens } from "./tag-lens";
@@ -16311,6 +16312,10 @@ function applyChatScheme(s: RompSettings): void {
   // the overall theme (T113 promoted 2026-08-28): the shared applier toggles the strip-aesthetic
   // and light-theme classes from s.theme. Applies live — onExternalSettingsChange re-runs this.
   applyTheme(document, s);
+  // compact tabs and agents (the user 2026-09-08): a body class the strip's and the #bg-tasks panel's dense
+  // rules key on (styles.css body.dense-chrome). The same two moments as the scheme and the theme, so the
+  // gear's flip repaints both surfaces at once through the cascade; neither is rebuilt.
+  applyDenseChrome(document, s);
 }
 function setupSettings(): void {
   applyChatScheme(settings);   // the persisted pick applies at startup — it survives reloads
