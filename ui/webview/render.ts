@@ -56,7 +56,7 @@ import { openFileClick } from "./file-view";                  // a clicked file 
 import { initFileView, setFileViewIdentity, hostStub } from "./file-view";
 import { openUrlView } from "./file-view";                 // the URL mode of the same viewer (md-url-view.test.ts)
 import { isMarkdownUrl } from "./md-links";
-import { openPathLink, linkifyPathTokens } from "./path-links";   // the path matcher the chat's links are made from (a shared module)
+import { openPathLink, linkifyPathTokens, selectionOpenIn } from "./path-links";   // the path matcher the chat's links are made from (a shared module)
 import { initFileBrowse, openFileBrowse } from "./file-browse";   // the browser is pane-local here now (the user 2026-08-24)
 import { pastedFilePath } from "./paste-path";
 import { insertAtCaret } from "./composer-insert";
@@ -1301,6 +1301,14 @@ function preEl(text: string, scrollKey?: string): HTMLElement {
 document.addEventListener("click", (e) => {
   const a = (e.target as HTMLElement)?.closest?.("a[href]") as HTMLAnchorElement | null;
   if (!a) return;
+  // The click that ends a press-drag-release inside an anchor that is not draggable (the file viewer's URL anchors,
+  // which select like the text around them; file-view-links.ts): the drag selected text, and the selection is what
+  // the person gets, not the link. The viewer's own listener rules the same for its links, but this opener runs
+  // first, at the capture phase, and would open the tab as well. Read for a non-draggable anchor ONLY: a press on a
+  // draggable anchor (the chat's own, and a rendered document's web links) starts no selection and collapses none,
+  // so a selection left open around one by a triple-click on its paragraph is not a drag on it, and reading it
+  // would leave every click on that link dead until a click elsewhere.
+  if (!a.draggable && selectionOpenIn(a)) { e.preventDefault(); return; }
   const href = a.getAttribute("href") || "";
   if (href.startsWith("#")) {
     // An in-page anchor in a message (a footnote's back link, `[section](#install)` over the reply's own `<a name>`):

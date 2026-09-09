@@ -31,11 +31,29 @@ export function canPreview(): boolean {
 
 // Which click means "in a browser tab of its own"? The browser-wide idiom, so there is nothing new to
 // learn and no setting to find: a Cmd/Ctrl-click (the `click` event carries the modifier) or a
-// middle-button press (which arrives as `auxclick`, button 1). A plain click keeps a PDF inside the
-// dashboard exactly as an image opens (the user 2026-09-07, who wanted one opening rule for both); the
-// modifier is the one signal that the browser's own viewer, beside the dashboard, is what is wanted.
+// middle-button press (which arrives as `auxclick`, button 1). A plain click acts inside the dashboard
+// (the user 2026-09-07, who wanted one opening rule for every file: a plain click keeps a PDF inside the
+// dashboard exactly as an image opens; the modifier is the one signal that the browser's own tab, beside
+// the dashboard, is what is wanted). The PDF and folder gestures read this signal, and so do the links
+// inside a file the viewer shows (file-view.ts).
 export function wantsOwnTab(ev?: { metaKey?: boolean; ctrlKey?: boolean; button?: number } | null): boolean {
   return !!ev && (!!ev.metaKey || !!ev.ctrlKey || ev.button === 1);
+}
+
+// A file in the browser's OWN tab, on the gesture above: ONE window.open aimed at the kernel's /file URL, the
+// same-origin, cookie-authed route the viewer fetches from (a remote session's file relays exactly as the
+// viewer's fetch does), so the browser renders what the kernel serves: a PDF in its viewer, an image, a text
+// file as text. False when nothing opened, and the caller's in-app view takes over: the popup was blocked, or
+// this is the VS Code webview, whose sandbox has no tabs and no kernel origin (canPreview). The tab's opener is
+// severed on the handle: a link inside the opened file may navigate the tab to a foreign site, which must not
+// hold the dashboard. Not the `noopener` feature, which returns null even on success. The one opener behind
+// every own-tab gesture: the viewer's links hand it any file (file-view.ts), openPdfTab below hands it a PDF.
+export function openFileTab(path: string, sid?: string | null): boolean {
+  if (!canPreview()) return false;
+  const w = window.open(fileUrl(path, sid), "_blank");
+  if (!w) return false;                                   // blocked: the caller's in-app view takes over
+  try { w.opener = null; } catch { /* unreachable while the tab is our own initial page */ }
+  return true;
 }
 
 // LOADING CUE (the user 2026-07-31): a remote image's bytes arrive over the ssh tunnel, so for a
@@ -142,13 +160,11 @@ export function fileUrl(path: string, sid?: string | null): string {
 // there anyway (canPreview). The KIND check lives here, by extension — the only fact available inside
 // the gesture — so a caller passes any path and a non-PDF is simply "not mine" (false): the viewer's own
 // media branch keeps keying on the kernel's Content-Type verdict, never on an extension re-test
-// (file-view.test.ts pins that).
+// (file-view.test.ts pins that). The tab itself is openFileTab's (above): one window.open, one severed
+// opener, one blocked-popup verdict, shared with the viewer's links, which open any file that way.
 export function openPdfTab(path: string, sid?: string | null): boolean {
-  if (previewKind(path) !== "pdf" || !canPreview()) return false;
-  const w = window.open(fileUrl(path, sid), "_blank");
-  if (!w) return false;                                   // blocked: the caller's in-app view takes over
-  try { w.opener = null; } catch { /* unreachable while the tab is our own initial page */ }
-  return true;
+  if (previewKind(path) !== "pdf") return false;
+  return openFileTab(path, sid);
 }
 
 // The PDF card's click, with its gesture: a plain click opens the in-app lightbox, like an image; a

@@ -21,7 +21,7 @@ test("a bare file:// URL becomes a clickable .file-uri-link that opens the file 
   assert.match(LINKS, /function fileUriLink\(uri: string\): HTMLElement \{ return openPathLink\(uri, fileUriToPath\(uri\)\); \}/);
   assert.match(RENDER, /openPath\(open, relative \? activeId : null, e\);/);
   // the URL is turned into a real filesystem path: scheme stripped, percent-decoded
-  assert.match(LINKS, /\.replace\(\/\^file:/);
+  assert.match(LINKS, /const FILE_URI_RE = \/\^file:\\\/\\\/\(\?:localhost\)\?\(\?=\\\/\)\/i;/, "a LOCAL URI: an empty authority or localhost; file://host/x names another machine and stays prose");
   assert.match(LINKS, /decodeURIComponent\(p\)/);
 });
 
@@ -36,8 +36,9 @@ test("linkify runs on chat message bodies (assistant reply + user bubble + nudge
 
 test("linkify works inside INLINE backticks (agents backtick paths), skips only fenced code + existing links, trims trailing punctuation", () => {
   // inline <code> is NOT skipped — a `file://…` path in backticks still linkifies; only fenced <pre> + links are skipped
-  assert.match(LINKS, /closest\("a, \.file-uri-link, pre"\)/);
-  assert.doesNotMatch(LINKS, /closest\("a, \.file-uri-link, code, pre"\)/);
+  assert.match(LINKS, /export const DEAD_TEXT = "a, \.file-uri-link, svg";/);
+  assert.match(LINKS, /const skip = opts && opts\.inPre \? DEAD_TEXT : DEAD_TEXT \+ ", pre";/, "the chat skips a link, an inline SVG and a fenced block; never inline code");
+  assert.doesNotMatch(LINKS, /DEAD_TEXT \+ ", code/);
   assert.match(LINKS, /tok = tok\.slice\(0, tok\.length - trail\[0\]\.length\)/);
 });
 

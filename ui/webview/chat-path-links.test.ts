@@ -32,15 +32,15 @@ test("the chat event carries the kernel's pathLinks verdict on user and assistan
 
 test("membership in pathLinks gates the link, and the map's value is the OPEN target", () => {
   // every existing shape gate stays — the map only ever narrows, never widens
-  assert.match(LINKS, /if \(!isUri && !looksLikeFilePath\(tok\) && !\(inCode && looksLikeBareFileName\(tok\)\)\) continue;/);
+  assert.match(LINKS, /if \(!isUri && !looksLikeFilePath\(tok\) && !\(span\.inCode && looksLikeBareFileName\(tok\)\)\) continue;/);
   assert.match(LINKS, /const fixed = !isUri && pathLinks \? pathLinks\[tok\] : undefined;/);
   assert.match(LINKS, /if \(!isUri && pathLinks && typeof fixed !== "string"\) continue;/);
   // the fixed target is what opens (and openPathLink titles it, so hover shows where a fix points);
   // with NO pathLinks key on the event (old kernel, cached payload) the token opens as written
-  assert.match(LINKS, /const open = isUri \? fileUriToPath\(tok\) : \(fixed \?\? tok\);/);
-  assert.match(LINKS, /const link = isUri \? fileUriLink\(tok\) : openPathLink\(tok, open, true\);/);
-  assert.match(LINKS, /frag\.appendChild\(link\);/);
-  assert.match(LINKS, /a\.title = "Open " \+ open;/);
+  assert.match(LINKS, /const target = isUri \? fileUriToPath\(tok\) : \(fixed \?\? tok\);\n\s*const open = opts && opts\.resolve \? opts\.resolve\(target\) : target;/, "the chat passes no resolve: a URI\'s own path, the fixed target or the token, as before");
+  assert.match(LINKS, /const link = openPathLink\(tok, open, !isUri\);/, "a URI is not a relative path; everything else is");
+  assert.match(LINKS, /list\.push\(\{ start, end: last, el: link \}\);/);
+  assert.match(LINKS, /a\.setAttribute\("title", "Open " \+ open\);/);
   // …and the chat binds the click per span, off the span's own data (the walk marks; render.ts acts)
   assert.match(RENDER, /const open = a\.dataset\.path \|\| "", relative = a\.dataset\.rel === "1";/);
   assert.match(RENDER, /for \(const \{ el: link, open, verified \} of linkifyPathTokens\(root, pathLinks\)\) \{\n\s*bindPathLink\(link\);/);
@@ -48,7 +48,7 @@ test("membership in pathLinks gates the link, and the map's value is the OPEN ta
 
 test("file:// URIs are explicit absolute paths — never gated on the map", () => {
   // both guards above test !isUri first, so a file:// token can't be dropped by the map…
-  assert.match(LINKS, /const isUri = \/\^file:\\\/\\\/\/i\.test\(tok\);/);
+  assert.match(LINKS, /const isUri = isFileUri\(tok\);/);   // a LOCAL file:// URI (an empty authority or localhost); file://host/x is prose
   // …and the kernel never puts file:// tokens in it
   assert.ok(KERNEL.includes('if not t.lower().startswith("file://")'), "kernel skips file:// tokens");
 });

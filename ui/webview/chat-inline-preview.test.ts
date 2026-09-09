@@ -156,7 +156,7 @@ test("a verified relative path is previewable exactly like an absolute one — t
   // AND a bare filename both ride), previewKind is extension-only (relativity-blind), and both the
   // eager and the expanded render hand previewFull the SAME entry previewable carries — pin lookup
   // included, so a relative embed rides its own pin key ((pathPins || {})[p]).
-  assert.match(LINKS, /const open = isUri \? fileUriToPath\(tok\) : \(fixed \?\? tok\);/);   // the walk's open target (path-links.ts)…
+  assert.match(LINKS, /const target = isUri \? fileUriToPath\(tok\) : \(fixed \?\? tok\);\n\s*const open = opts && opts\.resolve \? opts\.resolve\(target\) : target;/);   // the walk's open target (path-links.ts; the chat passes no resolve)…
   assert.match(RENDER, /for \(const \{ el: link, open, verified \} of linkifyPathTokens\(root, pathLinks\)\) \{/);   // …is what the chat reads per hit
   assert.match(RENDER, /previewable\.push\(open\);/);
   assert.match(PREVIEW, /const ext = path\.slice\(path\.lastIndexOf\("\."\) \+ 1\)\.toLowerCase\(\);/);
