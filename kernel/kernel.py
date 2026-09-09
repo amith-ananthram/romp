@@ -17145,12 +17145,18 @@ def _note_recovery(r, st):
     timeout) mints one bump until a real silent poll or a status change re-arms it, so a request that keeps
     stalling on a healthy link cannot mint its own recovery, retry, stall, and mint again forever. A steady
     healthy row never bumps; a fresh boot starts at 0 (the counter describes THIS process, like the poll run
-    counters, and is not saved). Returns whether it bumped."""
+    counters, and is not saved). A Start in flight (`booting`, _start_remote's hold) owns the row's phase: the
+    pass skips its status write under the hold, so the row keeps reading "starting" however many polls answer
+    meanwhile, and every answered pass would count as a not-up row coming up and bump again (1, 2, 3, then
+    once more as the hold cleared). No pass under the hold bumps; the first answered pass after it clears
+    finds the row not up and bumps once, the one recovery of that Start. Returns whether it bumped."""
     answered = st == "up" and int(r.get("misses") or 0) == 0
     if not answered:
         if st != "up":
             r.pop("_demand_bumped", None)            # a status change re-arms the demand path
         return False
+    if r.get("booting"):
+        return False                                 # a Start hold: the pass after it clears bumps once (see above)
     real_miss = bool(r.pop("_poll_miss", False))
     demand_miss = bool(r.pop("_demand_miss", False))
     had_miss = real_miss or (demand_miss and not r.get("_demand_bumped"))
