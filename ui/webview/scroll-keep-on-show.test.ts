@@ -18,7 +18,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { followReader, landSpot, keepPlaceAcrossShow, type KeepView } from "./scroll-keep";
+import { followReader, landSpot, keepPlaceAcrossShow, reshowStick, type KeepView } from "./scroll-keep";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 
@@ -77,7 +77,7 @@ test("render.ts: the reshow decision counts a live durable seek for the tab as n
 });
 
 test("render.ts: the #content scroll listener keeps the active view's saved spot current (passive, no timer)", () => {
-  assert.match(RENDER, /import \{ followReader, keepPlaceAcrossShow, followTail, atBottomDist, followBoxBelow, followTailShrink \} from "\.\/scroll-keep";/);   // + followTail (T262: follow only on new content)
+  assert.match(RENDER, /import \{ followReader, keepPlaceAcrossShow, followTail, atBottomDist, followBoxBelow, followTailShrink, reshowStick \} from "\.\/scroll-keep";/);   // + followTail (T262: follow only on new content)
   // …and stands down while a deferred build is pending: the reveal's clamp fires a scroll event before the land
   assert.match(RENDER, /c\.addEventListener\("scroll", \(\) => \{\n\s*if \(c\.clientHeight <= 0\) return;\n\s*followReader\(activeId \? views\.get\(activeId\) : null, c\.scrollTop, atBottom\(c\), pendingBuildRaf != null\);\n(?:.*\n){0,5}?\s*\}, \{ passive: true \}\);/);
   // landActive's landing rule itself is unchanged — its INPUT is what the fix repairs
@@ -94,4 +94,30 @@ test("render.ts: showActive keeps the reader's place across a re-show of the vie
   assert.equal(restores.length, 2, "restored after landActive on the light path AND inside the deferred heavy build (through the window-aware keep, T262l)");
   // the big-view re-collapse to the tail is a SWITCH rule: a re-show of the view on screen must not snap it to the bottom
   assert.match(body, /if \(!reshow && !pendingAnchor && pendingAnchorT == null\n\s*&& v\.el\.querySelectorAll\("\.turn"\)\.length > WINDOW_CAP\)/);
+});
+
+// T262 (the user 2026-09-08/09): the chat snapped UP the moment they scrolled to the bottom, in every column.
+// The journal's rows for every such jump: writer `land-saved`, scrollTop + clientHeight == scrollHeight (the reader
+// at the true bottom), the recorded follow flag off — a wheel gesture that ended on the bottom while a deferred
+// build was pending was not recorded (the clamp rule above), so `stick` stayed false and `scrollTop` a screen
+// above, and the next full show landed there. At a re-show the DOM is the truth: a reader at the true bottom
+// follows it, whatever the flag last said.
+test("the journal's case: recorded follow off, the reader at the true bottom, a re-show lands at the bottom — never the stale spot", () => {
+  const v: KeepView = { scrollTop: 8483, stick: false, shown: true };   // the stale spot: 1110 px above the bottom the reader sat at
+  assert.equal(landSpot(v), 8483, "without the rule the full show lands on the stale spot (the snap)");
+  v.stick = reshowStick(v.stick, true);                                  // showActive, at the re-show, with atBottom(content) true
+  assert.equal(landSpot(v), "bottom");
+});
+
+test("reshowStick only ever turns following ON: off the bottom the recorded flag stands, so a scrolled-up reader keeps their place", () => {
+  assert.equal(reshowStick(false, true), true, "at the true bottom → follow, whatever was recorded");
+  assert.equal(reshowStick(true, true), true);
+  assert.equal(reshowStick(true, false), true, "a recorded follow is not revoked by a rebuild that grew the tail under the reader");
+  assert.equal(reshowStick(false, false), false, "scrolled up and not following → the saved spot / the anchor, as before");
+});
+
+test("render.ts: showActive re-derives follow mode from the true bottom at the re-show decision, before the rebuild", () => {
+  assert.match(RENDER, /const reshow = keepPlaceAcrossShow\(v, v\.el\.style\.display !== "none", content\.clientHeight > 0, navigating\);\n(?:\s*\/\/[^\n]*\n)*\s*if \(reshow\) v\.stick = reshowStick\(v\.stick, atBottom\(content\)\);\n\s*const keepAnchor = reshow \?/,
+    "the flag is re-derived between the reshow decision and the keep-anchor capture (which reads the same true bottom)");
+  assert.match(RENDER, /import \{[^}]*reshowStick[^}]*\} from "\.\/scroll-keep";/);
 });

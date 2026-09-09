@@ -68,7 +68,7 @@ import { hostNameNodes, hostPartsNodes, hostPrefix, hostOf, hostIsDown, hostDown
 import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionToken, insertMention, mentionKeyAction, mentionSegments } from "./composer-mention";   // the @-mention card's rules, pure; the DOM is setupComposer's mention block and markMentions
 import type { MentionCandidate, MentionQuery } from "./composer-mention";
 import { defaultCommentName, defaultBreakoutName, defaultForkName, nameToSend } from "./comment-name";
-import { followReader, keepPlaceAcrossShow, followTail, atBottomDist, followBoxBelow, followTailShrink } from "./scroll-keep";
+import { followReader, keepPlaceAcrossShow, followTail, atBottomDist, followBoxBelow, followTailShrink, reshowStick } from "./scroll-keep";
 import { retainLiveOmitted } from "./tab-order";
 import { userTurnShows } from "./user-turn-content";
 import { ScrollDiagBudget, classifyScroll, scrollWriteRow, tailChangeRow, tailLabel, spacerRow, readScrollDiagCap, summarizeTailMutations, tailMutRow, unitChangeRow, unitChanges, boxChanges, boxLabel, BOX_FROM_TAIL } from "./scroll-write";
@@ -11247,6 +11247,10 @@ function showActive(keep?: { uuid: string; y: number } | null) {
   // decision, and a restore over its landing would undo the jump the reader asked for (review find, 2026-09-08)
   const navigating = !!pendingAnchor || pendingAnchorT != null || (!!seek && seek.sid === activeId);
   const reshow = keepPlaceAcrossShow(v, v.el.style.display !== "none", content.clientHeight > 0, navigating);
+  // the true bottom decides follow mode at a re-show (T262): the recorded flag can lag the reader (a scroll
+  // that landed during a pending build is not recorded), and a stale `stick` sent a bottom reader to a saved
+  // spot a screen above on every full show — the snap-up the journal filed as `land-saved`
+  if (reshow) v.stick = reshowStick(v.stick, atBottom(content));
   const keepAnchor = reshow ? (keep !== undefined ? keep : (!atBottom(content) ? captureScrollAnchor(content, v) : null)) : null;   // follow mode: off the true bottom keeps its place
   // Bound the switch. A view the user scrolled to the top of has had its window expanded to the WHOLE
   // transcript (winStart crept to 0 via lazy-expand), and compact mode renders the whole folded stream —
