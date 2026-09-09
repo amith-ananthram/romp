@@ -10,7 +10,8 @@ lift's fill). Placements are read through a per-store index (_placement_index) t
 jd._placement_of's scan gives, for the four suffixes the walk tried. A store that is not the shared cache's
 FrozenStore (a writer's private copy, no file, the cache off) is computed on and never published. Entries
 are evicted when a session with no live ids asks after its transcript was re-parsed (the pinned parse is
-stale). SYNTHETIC fixtures only: placeholder sids, invented goal text and prompts."""
+stale) and when its sid leaves the alive set. SYNTHETIC fixtures only: placeholder sids, invented goal text
+and prompts."""
 import json
 import os
 import tempfile
@@ -330,6 +331,17 @@ class PlacedTops(unittest.TestCase):
         self.assertEqual(km._bg_placed_tops(SID, self.path, []), {})
         self.assertEqual((km._bg_tops_report()["entries"], SID in km._PLACEMENT_IDX), (0, False),
                          "no live launches and a stale pinned parse: the parse and index are released")
+
+    def test_the_lifts_end_of_tick_prune_evicts_a_sid_that_left_the_alive_set(self):
+        km._bg_placed_tops(SID, self.path, ["t1"])
+        self.assertEqual(km._bg_tops_report()["entries"], 1)
+        km._alive_sessions = lambda now, tmux: [{"sid": SID, "path": self.path}]
+        km._mark_views_dirty = lambda *a, **k: None
+        km._lift_spent_awaiting(NOW, {})                   # alive (dormant here): the entry stays
+        self.assertEqual(km._bg_tops_report()["entries"], 1)
+        km._alive_sessions = lambda now, tmux: []
+        km._lift_spent_awaiting(NOW, {})
+        self.assertEqual((km._bg_tops_report()["entries"], SID in km._PLACEMENT_IDX), (0, False))
 
     # ---- /perf ----
     def test_perf_reports_the_memo(self):

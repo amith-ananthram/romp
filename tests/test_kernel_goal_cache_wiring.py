@@ -65,9 +65,14 @@ WIRED = {"_open_top_goal": 1, "_deferral_sweep_tick": 1, "_session_stamp_read": 
          "_msg_sum_scan_session": 1,
          "_bg_placed_tops": 1}   # the placed-launch memo: the shared view, or the store the caller hands in
 WIRED_BOUNDARY = {"build_feed": 1, "build_session": 2, "build_timeline": 1}
-# NOT wired, on purpose: the awaiting-lift job does a probe-then-write two-phase read, and the feed's pass
-# snapshot has its own memo (_feed_goals stays on the writer's loader, bare or behind load_goals_or_fault).
-UNWIRED = ("_lift_spent_awaiting", "_feed_goals")
+# TWO-PHASE: the awaiting-lift job takes one shared PROBE (through the boundary: a fault forgets the gate so
+# the next tick retries) and one writer load only when the probe found a lift due (jd.load_goals_or_fault,
+# the same boundary around the writer's loader); the decision body (_lift_decisions) loads nothing and
+# writes nothing.
+TWO_PHASE = {"_lift_spent_awaiting": (1, 1)}
+# NOT wired, on purpose: the feed's pass snapshot has its own memo (_feed_goals stays on the writer's
+# loader, bare or behind load_goals_or_fault).
+UNWIRED = ("_feed_goals",)
 
 
 class WiringPins(unittest.TestCase):
@@ -83,13 +88,36 @@ class WiringPins(unittest.TestCase):
             self.assertEqual(src.count("jd.load_goals(") + src.count("jd.load_goals_or_fault("), 0,
                              "%s: the boundary reads the shared view, not the writer's loader" % name)
 
-    def test_the_writers_and_the_two_phase_readers_stay_on_load_goals(self):
+    def test_the_feeds_pass_snapshot_stays_on_load_goals(self):
         for name in UNWIRED:
             src = inspect.getsource(getattr(km, name))
             self.assertEqual(src.count("jd.load_goals_shared(") + src.count("jd.load_goals_shared_or_fault("), 0,
                              "%s: not wired" % name)
             self.assertGreaterEqual(src.count("jd.load_goals(") + src.count("jd.load_goals_or_fault("), 1,
                                     "%s: still the writer's loader, bare or behind the boundary" % name)
+
+    def test_the_awaiting_lift_probes_the_shared_view_and_loads_the_writers_copy_once(self):
+        for name, (shared, writer) in TWO_PHASE.items():
+            src = inspect.getsource(getattr(km, name))
+            self.assertEqual(src.count("jd.load_goals_shared_or_fault("), shared, "%s: the phase-1 probe" % name)
+            self.assertEqual(src.count("jd.load_goals_or_fault("), writer, "%s: the phase-2 writer load" % name)
+            self.assertEqual(src.count("jd.load_goals_shared(") + src.count("jd.load_goals("), 0,
+                             "%s: no bare load outside the boundary" % name)
+
+    def test_the_lifts_decision_body_loads_nothing_and_writes_nothing(self):
+        # every rule of the lift is decided here, on whichever store the caller hands in (the shared view
+        # in phase 1, the writer's copy in phase 2); the verdict gate is read through jd.may_apply only
+        src = inspect.getsource(km._lift_decisions)
+        for needle in ("jd.load_goals(", "jd.load_goals_shared(", "jd.load_goals_or_fault(",
+                       "jd.load_goals_shared_or_fault(", "record_verdict(", "save_goals(",
+                       "rollup_status(", "_drop_auto_nudge_rec("):
+            self.assertEqual(src.count(needle), 0, "_lift_decisions: %s" % needle)
+        self.assertEqual(src.count("jd.may_apply("), 4,
+                         "the read-only gate, once per arm: rolled-up, peer-superseded, empty-registry, cited-return")
+        # ...and it is the gate record_verdict consults before it appends, so a decision here is a
+        # record_verdict that would have returned True (LiftGate's floor cases run the two side by side)
+        self.assertIn("may_apply(", inspect.getsource(km.jd.record_verdict),
+                      "record_verdict asks may_apply: phase 1 decides through the gate phase 2 files through")
 
     def test_bg_placed_tops_keys_on_objects_not_on_a_stat(self):
         # the per-version map is keyed on the parse and store OBJECTS in hand (a stat taken after the
