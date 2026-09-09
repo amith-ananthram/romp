@@ -36266,20 +36266,35 @@ def _derive_judging(sid, caps, goals, t0, out, seg_ends=None, stamp=False):
     trailing AFTER it — reading as if the judge ran before the work (the user 2026-06-19). `seg_ends`
     maps each segment's start t → its work-END t; a completion mark resolves through it to land just
     after the bar, where the work actually finished. CREATION marks (mint/sub) + captions stay at the
-    start — a goal IS born when asked. Absent seg_ends (e.g. unit tests) → the old mt placement."""
-    # `stamp` (the dead-lane memo, 2026-09-08): every mark carries the value the horizon test compared
-    # under the private key "_h", so a lane cached once with t0 = 0 can be filtered later on exactly that
-    # value (the diary and distiller marks are COMPARED on their evidence time but EMITTED at the segment's
-    # work end, so a filter on the emitted `t` would not be the same set); _dead_lane_marks strips it.
-    def mark(h, m):
-        if stamp:
-            m["_h"] = h
-        out.append(m)
+    start — a goal IS born when asked. Absent seg_ends (e.g. unit tests) → the old mt placement.
+
+    Two halves: _derive_judging_marks derives every mark with no clock in hand, so the timeline's per-lane
+    memo can hold the result, and _judging_assemble applies the horizon t0 and the caption cap per build.
+    Together they emit exactly what this function emitted in one pass. `stamp` (the dead-lane memo,
+    2026-09-08): every mark carries the value the horizon test compared under the private key "_h", so a
+    lane cached once with t0 = 0 can be filtered later on exactly that value (the diary and distiller marks
+    are COMPARED on their evidence time but EMITTED at the segment's work end, so a filter on the emitted
+    `t` would not be the same set); _dead_lane_marks strips it."""
+    cap_marks, other_marks = _derive_judging_marks(sid, caps, goals, seg_ends)
+    _judging_assemble(cap_marks, other_marks, t0, out, stamp=stamp)
+
+
+def _derive_judging_marks(sid, caps, goals, seg_ends=None):
+    """This session's judging marks UNFILTERED by the timeline horizon: (cap_marks, other_marks). cap_marks
+    are the captioner's marks in caption-time order, one per caption row carrying a t (a row without one is
+    dropped here, as the one-pass form dropped it). other_marks are [(filter_t, mark)] pairs for every other
+    judge in the order the one-pass form emitted them (nodes in store order, the archiver last), each paired
+    with the time the horizon is compared against: the mark's own t for a mint, plant, group or index mark,
+    the diary event's ev_t for a done, block or close, distilledMt or briefedMt for the distiller's two
+    marks. That time differs from the mark's plotted t whenever seg_ends moved a completion to its
+    segment's work end, which is why the pair is kept rather than re-derived from the mark. A synth diary
+    row is dropped here (its skip never depended on the horizon). Reads caps, goals["nodes"] and
+    STATE/archive/<sid>.json, and no clock: the horizon and JUDGE_CAP_LIMIT belong to _judging_assemble."""
     endt = (lambda tt: seg_ends.get(tt, tt)) if seg_ends else (lambda tt: tt)   # completion → its segment's work-END
-    caps_in = sorted((c for c in caps.values() if c.get("t") and c["t"] >= t0), key=lambda c: c["t"])
-    for c in caps_in[-JUDGE_CAP_LIMIT:]:
-        mark(c["t"], {"judge": "captioner", "sid": sid, "t": c["t"],
-                      "kind": c.get("grain", "segment"), "text": c.get("caption", "")})
+    caps_in = sorted((c for c in caps.values() if c.get("t")), key=lambda c: c["t"])
+    cap_marks = [{"judge": "captioner", "sid": sid, "t": c["t"],
+                  "kind": c.get("grain", "segment"), "text": c.get("caption", "")} for c in caps_in]
+    out = []
     for n in goals.get("nodes", {}).values():
         t = n.get("t")
         if not t:
@@ -36287,57 +36302,75 @@ def _derive_judging(sid, caps, goals, t0, out, seg_ends=None, stamp=False):
         text = n.get("text", "")
         mt = n.get("mt") or t
         go = n.get("groupOp")
-        if isinstance(go, dict) and (go.get("t") or 0) >= t0:
+        if isinstance(go, dict):
             # the grouper's surviving housekeeping (T103): merge/split/retitle append no diary
             # events by design, so the lane keys on the apply-time structure stamp — additive
             # beside the node's own mint/plant mark (a merged survivor is both)
-            mark(go["t"], {"judge": "grouper", "sid": sid, "t": go["t"],
-                           "kind": go.get("kind") or "group", "text": text})
+            out.append((go.get("t") or 0, {"judge": "grouper", "sid": sid, "t": go.get("t"),
+                                           "kind": go.get("kind") or "group", "text": text}))
         if n.get("origin"):                                   # courier planted it from a peer's handoff
-            if t >= t0:
-                mark(t, {"judge": "courier", "sid": sid, "t": t, "kind": "plant", "text": text})
+            out.append((t, {"judge": "courier", "sid": sid, "t": t, "kind": "plant", "text": text}))
         elif n.get("umbrella"):                               # ARCHIVED-history rendering only (T101
             # retired every umbrella mint; live containers dissolve each rollup) — an archived
             # pre-T101 container still shows the grouper mark it earned
-            if mt >= t0:
-                mark(mt, {"judge": "grouper", "sid": sid, "t": mt, "kind": "group", "text": text})
-        elif t >= t0:                                         # planner placed it (top = mint, else a step)
-            mark(t, {"judge": "planner", "sid": sid, "t": t,
-                     "kind": ("mint" if not n.get("parentId") else "sub"), "text": text})
+            out.append((mt, {"judge": "grouper", "sid": sid, "t": mt, "kind": "group", "text": text}))
+        else:                                                 # planner placed it (top = mint, else a step)
+            out.append((t, {"judge": "planner", "sid": sid, "t": t,
+                            "kind": ("mint" if not n.get("parentId") else "sub"), "text": text}))
         # done/block attribution reads the DIARY now (P3.4 2026-07-07): the event's src field IS the
         # provenance (negComplete/negBlock flags retired), each verdict gets its own mark at its own
         # evidence time, and reconstructed (synth) history never fakes a judging mark.
         for _e in (n.get("log") or []):
-            if _e.get("synth") or (_e.get("ev_t") or 0) < t0:
+            if _e.get("synth"):
                 continue
             if _e.get("src") in ("planner", "closer") and _e.get("kind") in ("done", "block"):
-                mark(_e["ev_t"], {"judge": _e["src"] if _e["src"] == "planner" else "closer", "sid": sid,
-                                  "t": endt(_e["ev_t"]),
-                                  "kind": ("done" if _e["src"] == "planner" else "close") if _e["kind"] == "done" else "block",
-                                  "text": _e.get("why") or text})
+                out.append((_e.get("ev_t") or 0,
+                            {"judge": _e["src"] if _e["src"] == "planner" else "closer", "sid": sid,
+                             "t": endt(_e.get("ev_t")),
+                             "kind": ("done" if _e["src"] == "planner" else "close") if _e["kind"] == "done" else "block",
+                             "text": _e.get("why") or text}))
         # distiller — key takeaway on a completed top goal. distilledMt == the goal's completion mt (the
         # completing segment's START); endt() lands the mark at that segment's work-END, just after the bar.
         # (The distiller LLM runs a pass later; the mark shows the work it summarizes, aligned to that work's
         # finish, not the judge's wall-clock run. A first sweep over the backlog still back-dates to old
         # completions, expected — the user 2026-06-17.)
-        if n.get("distilledMt") and n["distilledMt"] >= t0:
-            mark(n["distilledMt"], {"judge": "distiller", "sid": sid, "t": endt(n["distilledMt"]), "kind": "distill",
-                                    "text": n.get("summary") or text})
+        if n.get("distilledMt"):
+            out.append((n["distilledMt"], {"judge": "distiller", "sid": sid, "t": endt(n["distilledMt"]),
+                                           "kind": "distill", "text": n.get("summary") or text}))
         # block-distiller — the DECISION BRIEF on a BLOCKED top (briefedMt), the done-distiller's twin run
         # in the same pass. Same distiller row, a distinct kind ("brief"). Without this the brief popped up
         # on the card but left NO mark on the timeline, so the distiller row read as dead whenever the
         # recent work was blocks rather than completions (the user 2026-06-18). Lands at the block segment's
         # work-END via endt(), like the other completion marks.
-        if n.get("briefedMt") and n["briefedMt"] >= t0:
-            mark(n["briefedMt"], {"judge": "distiller", "sid": sid, "t": endt(n["briefedMt"]), "kind": "brief",
-                                  "text": n.get("blockSummary") or text})
+        if n.get("briefedMt"):
+            out.append((n["briefedMt"], {"judge": "distiller", "sid": sid, "t": endt(n["briefedMt"]),
+                                         "kind": "brief", "text": n.get("blockSummary") or text}))
     try:                                                      # archiver — the headline/abstract refresh
         arch = json.loads((jd.STATE / "archive" / (sid + ".json")).read_text(errors="replace"))
-        if arch.get("t") and arch["t"] >= t0:
-            mark(arch["t"], {"judge": "archiver", "sid": sid, "t": arch["t"], "kind": "index",
-                             "text": arch.get("headline", "")})
+        if arch.get("t"):
+            out.append((arch["t"], {"judge": "archiver", "sid": sid, "t": arch["t"], "kind": "index",
+                                    "text": arch.get("headline", "")}))
     except (OSError, ValueError):
         pass
+    return cap_marks, out
+
+
+def _judging_assemble(cap_marks, other_marks, t0, out, stamp=False):
+    """Append the marks _derive_judging_marks derived, filtered on the horizon t0 as the one-pass form
+    filtered them: the captioner's marks at or after t0 and, of those, the newest JUDGE_CAP_LIMIT (the marks
+    are in t order, so the tail is the newest); then every other mark whose filter time is at or after t0,
+    in derivation order. Runs per build (the horizon moves with the clock; JUDGE_CAP_LIMIT is read here,
+    not at derivation), on a memo hit as on a miss. With `stamp` (the dead-lane memo, _derive_judging's
+    docstring) every appended mark is a COPY carrying its filter time under "_h": a copy, because the pairs
+    are the per-lane memo's, shared by identity into every unstamped build's `semantic`, and the stamp must
+    never reach the wire (_dead_lane_marks strips it)."""
+    kept = [m for m in cap_marks if m["t"] >= t0]
+    if stamp:
+        out.extend(dict(m, _h=m["t"]) for m in kept[-JUDGE_CAP_LIMIT:])
+        out.extend(dict(m, _h=ft) for ft, m in other_marks if ft >= t0)
+        return
+    out.extend(kept[-JUDGE_CAP_LIMIT:])
+    out.extend(m for ft, m in other_marks if ft >= t0)
 
 
 # ── the DEAD-LANE memo (2026-09-08): a timeline lane whose session is dead is re-derived only when an
