@@ -6,7 +6,8 @@ Updates & debug section ends with an "Open log" button that closes the modal and
 palette's log.open and the mobile bar's #merr are unchanged; the Log's own behaviour is untouched.
 
 Two guards: SourcePins runs everywhere; ServedOpener boots the hermetic kernel, loads the dashboard, and drives
-the gear's button in the feed iframe (skips loudly without the extension deps or a Playwright browser).
+the gear's button in the settings iframe, the /settings page that hosts the gear since 2026-09-10 (skips loudly
+without the extension deps or a Playwright browser).
 All fixtures synthetic.
 """
 import inspect
@@ -65,7 +66,8 @@ class SourcePins(unittest.TestCase):
         k = open(os.path.join(ROOT, "kernel", "kernel.py"), encoding="utf-8").read()
         g = open(os.path.join(ROOT, "ui", "webview", "gear.js"), encoding="utf-8").read()
         css = open(os.path.join(ROOT, "ui", "webview", "gear.css"), encoding="utf-8").read()
-        self.assertIn("tell(n);if(!back.hidden)renderList();}", k, "paint() tells the feed pane")
+        self.assertIn("tell(n);if(!back.hidden)renderList();}", k, "paint() tells the settings iframe")
+        self.assertIn("function tell(n){var f=document.getElementById('f-settings');", k, "…the document the gear lives in")
         self.assertIn("postMessage({romp:'logUnseen',n:(n===undefined?unseen():n)},'*')", k)
         self.assertIn("if(m&&m.romp==='logUnseenQuery')tell();", k, "…and answers the panel's query")
         self.assertIn("<button id=rs-log-open class=ra-openbtn hidden>Open log<span class=rs-log-n hidden></span></button>", g)
@@ -99,9 +101,11 @@ catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
 const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
 await page.goto(cfg.url);
 await page.waitForSelector("#rail-gear", { timeout: 20000 });
-const feed = page.frames().find((f) => f.url().includes("/feed"));
-if (!feed) { console.error("no feed frame"); process.exit(1); }
+const feed = page.frames().find((f) => f.url().includes("/settings"));   // the settings iframe hosts the gear (the feed page mounts none)
+if (!feed) { console.error("no settings frame"); process.exit(1); }
 await feed.waitForSelector(".rs-vermenu-btn", { state: "attached", timeout: 20000 });
+const feedPane = page.frames().find((f) => f.url().includes("/feed"));
+const feedGear = feedPane ? await feedPane.evaluate(() => !!document.getElementById("rsettings")) : null;
 const before = await page.evaluate(() => ({ railErrs: !!document.getElementById("rail-errs"), logHidden: document.getElementById("rerr-back").hidden,
   acts: Array.from(document.querySelectorAll(".rail-acts .rail-act")).map((e) => e.id) }));
 await feed.evaluate(() => window.postMessage({ romp: "openSettings" }, "*"));
@@ -111,7 +115,7 @@ await feed.click("#rs-log-open");
 await page.waitForFunction(() => !document.getElementById("rerr-back").hidden, null, { timeout: 8000 });
 const after = await page.evaluate(() => ({ logHidden: document.getElementById("rerr-back").hidden, settingsOpen: document.body.classList.contains("settings-open") }));
 const modal = await feed.evaluate(() => document.getElementById("rsettings").hidden);
-fs.writeSync(1, "RESULT:" + JSON.stringify({ before, btn, after, settingsHidden: modal }) + "\n");
+fs.writeSync(1, "RESULT:" + JSON.stringify({ before, btn, after, settingsHidden: modal, feedGear }) + "\n");
 await browser.close();
 process.exit(0);
 """
@@ -172,6 +176,7 @@ class ServedOpener(unittest.TestCase):
         self.assertTrue(r["before"]["logHidden"], "the panel starts closed")
         self.assertEqual(r["before"]["acts"], ["rail-refresh", "rail-net", "rail-bell", "rail-gear"], "the bar's action cluster keeps its few controls (the bell is present, hidden until it has something): %r" % r["before"]["acts"])
         self.assertEqual(r["btn"], {"present": True, "hidden": False}, "the gear shows Open log in the web shell")
+        self.assertIs(r["feedGear"], False, "the feed page mounts no gear of its own (it lives on /settings)")
         self.assertFalse(r["after"]["logHidden"], "the click opened the shell's Log panel")
         self.assertFalse(r["after"]["settingsOpen"], "the settings modal closed first: the panels never stack")
         self.assertTrue(r["settingsHidden"])

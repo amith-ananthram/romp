@@ -161,10 +161,11 @@ class Plumbing(unittest.TestCase):
         for page in (km._chat_page(), km._feed_page(), km._fleet_page(), km._timeline_page()):
             _has(self, "var NOSTALE=false;", page)
             _lacks(self, "var NOSTALE=true;", page)
-        # the one page that passes it; the other pane pages call the shim exactly as they did
+        # the pages that pass it: this one and the settings page (the gear alone, no pushed view either;
+        # tests/test_settings_page.py); the pane pages call the shim exactly as they did
         shims = re.findall(r'_shim\("(\w+)", v(?:, ([^)]*))?\)', SRC)
-        self.assertEqual([app for app, kw in shims if "no_stale=True" in (kw or "")], ["files"])
-        self.assertEqual(sorted(app for app, kw in shims), ["chat", "feed", "files", "fleet", "timeline"])
+        self.assertEqual([app for app, kw in shims if "no_stale=True" in (kw or "")], ["files", "settings"])
+        self.assertEqual(sorted(app for app, kw in shims), ["chat", "feed", "files", "fleet", "settings", "timeline"])
 
     def test_the_editor_chunk_derives_from_the_pages_own_bundle_tag(self):
         # file-view.ts loads its CodeMirror chunk from a URL rewritten off the page's running bundle

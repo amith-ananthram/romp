@@ -16,7 +16,8 @@
 //   the browser has its cookie, a webview's cross-origin fetch does not — so
 //   ku() appends ?token= when the host injected one (mirrors media.ts kernelUrl).
 // - Opening: a {romp:'openSettings'} window message (the web shell's rail gear
-//   posts it into the feed iframe; the VS Code host posts it into the webview).
+//   posts it into the settings iframe, the kernel's /settings page hosting this
+//   module on its own since 2026-09-10; the VS Code host posts it into the feed webview).
 // Model/effort <option>s come from GET /models at open (they were server-baked
 // into the HTML before — /models was already the single source of truth).
 
@@ -252,8 +253,12 @@ var GEAR_HTML =
 // Wire the whole gear into the current document. `post` is the feed bundle's
 // kernel channel (webview postMessage → host pipe → kernel WS, or the browser
 // shim's WS directly). Idempotent: a second init is a no-op.
-function initGear(post) {
+// opts.ownPage: this document IS the gear (the kernel's /settings page, settings-page.ts) — nothing sits
+// under the modal, so the lift never pins the body to a pane rect (setModalCls below) and the page stays
+// transparent under the dim. Absent for the feed hosts (VS Code's feed panel), whose content keeps painting.
+function initGear(post, opts) {
   if (document.getElementById('rsettings')) return;
+  var ownPage = !!(opts && opts.ownPage);
   document.body.insertAdjacentHTML('beforeend', GEAR_HTML);
 
   var g = document.getElementById('rgear'), p = document.getElementById('rsettings'),
@@ -1240,8 +1245,9 @@ function initGear(post) {
     repaintSelectPicks();   // fill() writes sel.value directly (no change event) — the closed rows follow
     var x = lv(); b.innerHTML = 'kernel ' + (v.kernel_sha || '?') + '\nserving v' + v.dist_ver + '\nthis tab v' + (x || '?');
   }).catch(function () { b.textContent = '(version unavailable)'; }); }
-  // The settings modal is full-WINDOW in the web shell — ask it to expand the
-  // feed iframe while open (no-op elsewhere: VS Code's feed panel IS the window).
+  // The settings modal is full-WINDOW in the web shell — ask it to lift the iframe hosting this modal
+  // (the shell's #f-settings since 2026-09-10; the feed iframe before) while open (no-op elsewhere:
+  // VS Code's feed panel IS the window).
   function feedFull(on) { try { if (window.parent !== window) window.parent.postMessage({ romp: 'settings', on: !!on }, '*'); } catch (e) {} }
   // While lifted, pin the BODY to the feed pane's old screen rect and keep painting (rs-lifted +
   // --pane-* vars), so the feed stays exactly where it was — live and visible under the dim like every
@@ -1266,7 +1272,7 @@ function initGear(post) {
     ['--pane-x', '--pane-y', '--pane-w', '--pane-h'].forEach(function (k) { st.removeProperty(k); }); }   // place the NEXT one (the user 2026-08-09)
   function setModalCls(on) { var de = document.documentElement, m = 'rs-modal-open';
     if (on) { de.classList.add(m); document.body.classList.add(m);
-      if (window.parent !== window) { document.body.classList.add('rs-lifted'); placeLifted(5); window.addEventListener('resize', onRsResize); } }
+      if (window.parent !== window && !ownPage) { document.body.classList.add('rs-lifted'); placeLifted(5); window.addEventListener('resize', onRsResize); } }
     else { de.classList.remove(m); document.body.classList.remove(m);
       document.body.classList.remove('rs-lifted'); document.body.classList.remove('rs-pane-gone');
       clearPaneVars();

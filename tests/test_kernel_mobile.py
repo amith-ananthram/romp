@@ -58,14 +58,14 @@ class LandingShell(unittest.TestCase):
         self.assertIn("data-act=net data-keycmd=net.open aria-label='Remote kernels'", html)
         self.assertIn("<rect x='1' y='3' width='9' height='4' rx='1' fill='currentColor'/>", html)   # the used-bar fill
         self.assertNotIn(">Gear</button>", html)
-        self.assertIn("{romp:'openSettings'}", km._LANDING_MOBILE_JS)   # same path as the desktop gear
+        self.assertIn("window.__rompOpenSettings&&window.__rompOpenSettings();", km._LANDING_MOBILE_JS)   # same path as the desktop gear: the settings iframe
         self.assertIn("__rompOpenNet", km._LANDING_MOBILE_JS)           # opens the shell's remotes panel
         self.assertIn("window.__rompOpenNet=open", km._LANDING_REMOTES_JS)
         self.assertIn("__rompUsagePanel", km._LANDING_MOBILE_JS)        # the tooltip's bars as a modal
         self.assertIn("window.__rompUsagePanel=function", km._LANDING_USAGE_JS)
         self.assertIn("#ru-tip.ru-modal", html)                         # centered placement for the panel
         # the lifted-fullscreen settings iframe must override the mobile display:none
-        self.assertIn("body.settings-open #f-feed{display:block;position:fixed", html)
+        self.assertIn("body.settings-open #f-settings{display:block;position:fixed", html)
 
     def test_mobile_restart_button_reuses_the_rail_refresh_kernel_restart(self):
         # the user 2026-07-22: there was no restart-kernel affordance on mobile (the rail's own ↻ is hidden

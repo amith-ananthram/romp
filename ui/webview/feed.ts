@@ -32,6 +32,7 @@ import { badgeNotices, clearBoundaryNotices, sdkProblemNotices, syncNotices,
 import { initStrip } from "./strip";
 import { installSettingsSync, loadSettings, onExternalSettingsChange } from "./settings";
 import { applyTheme } from "./theme";
+import { hostsGear, openGear } from "./gear-host";
 import { canPreview } from "./preview";
 import { initFileView, setFileViewIdentity, hostStub } from "./file-view";
 import { initFileBrowse, openFileBrowse } from "./file-browse";
@@ -482,13 +483,15 @@ function prRepoOfSender(frm: string | undefined, origin: string | undefined): st
   return senderPrRepo(sessionsMeta, frm || "", host);
 }
 
-// The settings gear (the ⛭ modal + analytics) is part of THIS bundle now —
-// gear.js builds its DOM here and rides our one kernel channel, so both hosts
-// (the kernel's /feed page and the VS Code feed panel) get the same modal.
-// Opened by a {romp:'openSettings'} window message (web shell rail / VS Code menu).
+// The settings gear (the ⛭ modal + analytics) rides THIS bundle for VS Code's feed panel: gear.js
+// builds its DOM here and rides our one kernel channel, opened by a {romp:'openSettings'} window
+// message (the VS Code menu). The kernel's dashboard serves the gear on its own /settings page
+// instead (settings-page.ts; the user 2026-09-10, so the Feed pane is no longer required for
+// settings) and flags its feed page so no second gear is mounted here — an opener in this document
+// (the login card below) then goes up to the shell, which forwards it there (gear-host.ts).
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { initGear } = require("./gear.js");
-initGear((m: Record<string, unknown>) => vscodeApi?.postMessage(m));
+if (hostsGear(window)) initGear((m: Record<string, unknown>) => vscodeApi?.postMessage(m));
 // the gesture clock the gear stamps its settings posts with — one module graph per document, so
 // the gear's learning (each store's stamp from /version on open) serves the banner below too
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -497,7 +500,7 @@ const gclock = require("./gesture-clock.js");
 // The romp strip (VS Code only — the host opts in via __rompShowStrip): usage
 // bars + the gear button, docked below #feed-foot. The gear raises the modal
 // in THIS document (the gear listener above).
-initStrip(() => window.postMessage({ romp: "openSettings" }, "*"),
+initStrip(() => openGear(window),
   (m: Record<string, unknown>) => vscodeApi?.postMessage(m));
 installSettingsSync();   // a gear save in ANOTHER VS Code pane lands here via the host
 // the overall theme applies to THIS document too (2026-08-28): at boot and on every settings
@@ -2300,7 +2303,7 @@ function updateAskCard(card: HTMLElement, it: AskItem) {
   loginBtn.style.display = (showApiErr && authErr) ? "" : "none";
   if (showApiErr && authErr) loginBtn.onclick = (ev: Event) => {
     ev.stopPropagation();
-    window.postMessage({ romp: "openSettings" }, "*");   // the login flow lives in the gear's Billing block
+    openGear(window);   // the login flow lives in the gear's Billing block (here, or on the shell's settings page)
   };
   // "Continue" shows on a LIVE needs-you card with no live ask attached: the gesture claims "you're not
   // waiting on me", which means nothing in Working/Completed, can't answer a real permission prompt or

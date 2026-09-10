@@ -275,7 +275,7 @@ class MobileScript(unittest.TestCase):
 _ARMS_HARNESS = r"""
 'use strict';
 const LISTENERS = [], TOGGLES = [], TABS = [];
-const POSTED = { 'f-files': [], 'f-feed': [], 'f-chat': [] };
+const POSTED = { 'f-files': [], 'f-feed': [], 'f-chat': [], 'f-settings': [] };
 let MOBILE = false, TAB = 'chat', FILES_READY = 'complete', FILES_LOADS = [];
 const frame = (id) => ({ contentWindow: { postMessage: (m) => POSTED[id].push(JSON.parse(JSON.stringify(m))) },
   contentDocument: { get readyState() { return id === 'f-files' ? FILES_READY : 'complete'; } },
@@ -304,7 +304,7 @@ global.Event = class { constructor(t) { this.type = t; } };
 _ARMS_DRIVER = r"""
 const send = (m) => LISTENERS.forEach((f) => f({ data: m }));
 const snap = () => ({ toggles: TOGGLES.slice(), tabs: TABS.slice(), files: POSTED['f-files'].slice(), feed: POSTED['f-feed'].slice(),
-  chat: POSTED['f-chat'].slice(), from: window.__rompFilesTabFrom === undefined ? 'undef' : window.__rompFilesTabFrom });
+  chat: POSTED['f-chat'].slice(), settings: POSTED['f-settings'].slice(), from: window.__rompFilesTabFrom === undefined ? 'undef' : window.__rompFilesTabFrom });
 const reset = () => { TOGGLES.length = 0; TABS.length = 0; for (const k in POSTED) POSTED[k].length = 0; delete window.__rompFilesTabFrom; };
 const SID = '__SID__';
 const identity = { name: 'web', color: { bg: '#123456', fg: '#ffffff' } };
@@ -343,6 +343,12 @@ FILES_LOADS.slice().forEach((f) => f());
 out.reloaded = { files: POSTED['f-files'].slice() }; reset();
 send({ type: 'editorSelection', text: 'the auth check', sid: SID, src: 'src/app.py:12' });
 out.seed = snap(); reset();
+// the gear: a pane's ask and the shell's own opener both land in the settings iframe, never the feed's
+out.opener = typeof window.__rompOpenSettings;
+send({ romp: 'openSettings' });
+out.gearAsk = snap(); reset();
+window.__rompOpenSettings();
+out.gearOpen = snap(); reset();
 console.log(JSON.stringify(out));
 """
 
@@ -412,6 +418,18 @@ class RelayArms(unittest.TestCase):
         self.assertEqual(l["files"][0]["path"], "/repo/notes-api/src/app.py")
         self.assertEqual(l["waiting"], 0, "and the listener is gone")
         self.assertEqual(len(self.out["reloaded"]["files"]), 1, "a later reload of the pane does not replay it")
+
+    def test_the_gear_opens_in_the_settings_iframe_never_in_the_feed(self):
+        # the gear lives on the /settings page (the user 2026-09-10): the shell's one opener posts into that
+        # iframe, and a pane asking for the gear (the feed's login card, gear-host.ts openGear) is forwarded
+        # there; the feed hears nothing and no pane is toggled (the settings iframe is not a pane)
+        self.assertEqual(self.out["opener"], "function", "__rompOpenSettings is the shell's one opener")
+        for k in ("gearAsk", "gearOpen"):
+            g = self.out[k]
+            self.assertEqual(g["settings"], [{"romp": "openSettings"}], k)
+            self.assertEqual(g["feed"], [], k + ": the feed page hosts no gear")
+            self.assertEqual(g["toggles"], [], k + ": no pane moves")
+            self.assertEqual(g["tabs"], [], k)
 
     def test_the_feeds_browse_relay_and_the_quote_seed_forward_are_untouched(self):
         b = self.out["browse"]
