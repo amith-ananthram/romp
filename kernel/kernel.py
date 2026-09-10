@@ -45002,8 +45002,9 @@ def _sw_js():
 
 # ── landing a push tap on the session that fired ─────────────────────────────────────────────────
 # The cold-start half of a tap: the app was closed, the page opened on the deep link (the worker's
-# openWindow, or iOS's own navigate), and the shell POSTs /reveal {sid, wid} at boot — necessarily
-# BEFORE its chat pane's WS exists, so the focus cannot be sent yet. It parks here and is delivered on the exact event it was waiting
+# openWindow, or iOS's own navigate), and the shell POSTs /reveal {sid, wid} at boot — usually BEFORE
+# its chat pane's WS exists (on a slow machine the pane's ready comes first, T312, and the reveal is
+# then delivered to it at once with a copy kept here). Otherwise it parks here and is delivered on the exact event it was waiting
 # for: that window's chat pane saying "ready" (matched by wid — the per-dashboard id the shell
 # mints and every same-window pane shares — so a second dashboard's reload cannot steal it). One
 # slot, latest wins: two taps before a boot completes should land on the newer notification.
@@ -45044,18 +45045,24 @@ def _reveal_request(sid, wid, boot=False, via=""):
     2026-09-06, whose tap on the phone did nothing — the phone is where sockets die without a
     close: a suspended app, a VPN link that dropped with the screen):
       boot  — the shell says the page is BOOTING (the deep-link arrival: iOS opens the installed
-              app's one window on the link, or the app comes back from a kill). Its own chat pane
-              cannot be connected yet, so a socket wearing its wid is the PREVIOUS page's
-              (sessionStorage keeps the wid across a reload) — dead, and the ping timeout has up to
-              WS_DEAD_S to say so. Park only; "delivering" there parked nothing and the new pane's
-              ready found nothing to consume.
+              app's one window on the link, or the app comes back from a kill). A socket wearing its
+              wid is usually the PREVIOUS page's (sessionStorage keeps the wid across a reload) —
+              dead, and the ping timeout has up to WS_DEAD_S to say so — but it can also be this
+              page's own chat pane, when the pane's ready beat the shell's fetch (T312: a slow
+              machine). So a boot reveal is delivered to every same-wid pane that has said READY and
+              kept parked too, the unproven rule below, never parked alone: 2026-09-06 to 2026-09-10 it
+              was park-only, and a pane already ready found it parked after its ready had passed, so
+              the tap never landed. A same-wid socket that has NOT said ready is no target on any
+              road: its bundle cannot hear a frame yet, and its ready would count as the answer that
+              retires the copy; the park stands for it and its ready consumes.
       unproven — a live tap, but the target has a ping on the wire nobody has answered (pingAt set:
               the peer is unproven since the last heartbeat). Deliver as before AND keep a copy
               parked, tagged with who it went to: the pong that proves that socket alive retires it
               (_note_ws_inbound — the focus frame is ordered behind the ping it answers); a dead
               socket never pongs, the pane redials, and its ready consumes the copy instead of
               finding nothing. A socket with no ping outstanding is proven: nothing parked, so a
-              later ready never replays a landed tap.
+              later ready never replays a landed tap — except on the boot road, where the copy is
+              kept whatever the ping state (above) and the pane's own answer retires it.
 
     One stderr line per tap, whatever became of it (2026-09-08: a phone's tap "did nothing" and
     nothing anywhere recorded whether it had even reached the kernel). `via` is the road the shell
@@ -45065,13 +45072,27 @@ def _reveal_request(sid, wid, boot=False, via=""):
     the pane's ready never came for that wid; consumed — the pane got it. Ids clipped: enough to
     match rows, not a transcript of anything."""
     with _clients_lock:
-        targets = [] if boot else [c for c in _clients if c["app"] == "chat" and (c.get("wid") or "") == wid]
+        # Only a pane that has said READY is a target (client["ready"], stamped by the ready handler): a
+        # same-wid chat socket exists from its handshake, but until its bundle posts ready it has no message
+        # listener, so a focus sent to it vanishes — and its ready message, counted as an answer by
+        # _note_ws_inbound, would retire the parked copy before the ready handler could consume it (the
+        # review find on T312). Such a socket is left alone: the park stands and its ready consumes.
+        targets = [c for c in _clients if c["app"] == "chat" and (c.get("wid") or "") == wid and c.get("ready")]
     delivered, sent = False, []
     for c in targets:
         try:
             c["send"](json.dumps(_reveal_msg(sid)))
             delivered = True
-            if c.get("pingAt") is not None:
+            # A booting page's same-wid ready socket may be the PREVIOUS page's (dead, its pong never coming) —
+            # or this very page's chat pane, whose ready beat the shell's fetch (T312, 2026-09-10: a slow machine
+            # put the pane's ready first, the boot reveal was parked after it with nothing left to consume it,
+            # and the tap landed on whichever session frame the pane adopted first). Both wear the same wid and
+            # nothing here can tell them apart, so a boot reveal is delivered like an unproven live tap: sent to
+            # every ready same-wid pane AND kept parked until one of them answers (its pong or next message
+            # retires the copy, _reveal_proven) or a new pane's ready consumes it. A dead socket's send lands
+            # in its queue and nobody reads it; a live pane lands the focus; the one thing that no longer
+            # happens is a park nobody consumes.
+            if boot or c.get("pingAt") is not None:
                 sent.append(c)
         except Exception:
             pass
@@ -45079,7 +45100,7 @@ def _reveal_request(sid, wid, boot=False, via=""):
         _PENDING_REVEAL[0] = {"sid": str(sid), "wid": str(wid or "")}
     elif sent:
         _PENDING_REVEAL[0] = {"sid": str(sid), "wid": str(wid or ""), "sent": sent}
-    outcome = ("delivered, copy parked (target unproven)" if sent else "delivered") if delivered else "parked"
+    outcome = ("delivered, copy parked (%s)" % ("booting page" if boot else "target unproven") if sent else "delivered") if delivered else "parked"
     print("[reveal] %s sid=%s wid=%s%s: %s" % (via or "shell", str(sid)[:8], str(wid or "")[:8],
                                              " boot" if boot else "", outcome), file=sys.stderr)
     return delivered
@@ -52249,9 +52270,11 @@ class Handler(BaseHTTPRequestHandler):
                 # The cold-start half of a push tap (see _PENDING_REVEAL): the freshly opened
                 # shell asks for the focus its ?push-reveal= URL named, aimed by its own wid so
                 # no other open dashboard gets dragged along (the 2026-07-29 rule).
-                # `boot` (2026-09-06): the deep-link arrival — the page is booting, so its own chat
-                # pane is not connected yet; the kernel parks for it and never counts a same-wid
-                # socket the previous page left behind as delivery (_reveal_request has the why).
+                # `boot` (2026-09-06, widened 2026-09-10 T312): the deep-link arrival — the page is
+                # booting; a same-wid chat socket that has said ready is told (it may be this page's own
+                # pane, whose ready beat this fetch) and a copy stays parked for the pane that is still
+                # to come, so the previous page's dead socket never counts as the only delivery
+                # (_reveal_request has the why).
                 try:
                     body = json.loads(raw_body or b"{}")
                     sid = str(body.get("sid") or "")
@@ -53480,6 +53503,12 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     views_seq = None
             _send_caps(client, views_seq=views_seq)
+            # From here the pane LISTENS and holds its frames (the push above): a tap that arrives now is sent
+            # to it directly (_reveal_request targets panes with this stamp only, T312: a socket registered at
+            # its handshake but still loading its bundle has no listener, and its own `ready` message counts
+            # as an answer to _note_ws_inbound, so a frame sent to it earlier was lost and its copy retired);
+            # one that arrived before this point parked, and is consumed right below.
+            client["ready"] = True
             # a push tap parked a reveal for this window's chat pane → deliver it now, AFTER the
             # ready push, so the tab it names already exists on the client (ordered socket)
             _consume_pending_reveal(client)
