@@ -583,7 +583,7 @@ class TurnFinishedPush(unittest.TestCase):
         (args, kw), = pushed
         self.assertEqual(args, ("Romp: web", "Done: the login flow now redirects to the notes list.", SID_WEB))
         self.assertNotIn("badge", kw, "the count rides its own push")
-        # the routing block's `name` (#1157: the shell's offer chip reads it off the payload) is the session name
+        # the routing block's `name` (the ledger row files it, so the kernel's lines can name the session) is the session name
         # the title was built from — NOT the title: "Romp: web" is not a session
         self.assertEqual(kw, {"kind": "turn", "name": "web"})
         self.assertEqual(fwd, [fired], "the same event travels to trusted peers, the bell-event way")

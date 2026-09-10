@@ -29,6 +29,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -1505,6 +1506,111 @@ def append_resume_fork(state_dir: Path, sid: str, from_fsid: str, to_fsid: str, 
         f.write(json.dumps(rec) + "\n")
 
 
+# ── The session-event ledger and the per-turn ledger (T304 stage 0 of the restart-surviving sessions
+# program, 2026-09-10; the row shape agreed with the lease work, T305, which writes its `lease.*` kinds
+# through the same helper). Two append-only files under the state directory, read by `romp restart-metrics`
+# (cli/restart_metrics.py), which reads FILES and the kernel's routes only, never the kernel log:
+#   session-events.jsonl  one row per thing that went wrong with a session's process, or per boot sweep:
+#                         {"t": epoch s (int), "pid": the writing kernel, "kind": "<writer>.<what>",
+#                          "sid": romp sid when about a session, "name": its name then, ...flat fields}.
+#                         Kinds this file writes: reconcile.boot (the sweep's summary, every boot, ledger only),
+#                         reconcile.orphan-reaped, reconcile.scope-stopped, reconcile.duplicate-cli, crash.heal,
+#                         crash.loop, drain.unjoined. Every kind that IS a problem also lands on the backend's
+#                         problem ring (the dashboard's bell and error center) as its prose, and on the kernel
+#                         log as `<prose> ;; problem-row {json}` so a log reader parses the same object with
+#                         `line.rsplit(PROBLEM_ROW_MARK, 1)[1]`.
+#   turns.jsonl           one row per settled turn (SdkSession._turn_ledger_row): the event stamps the latency
+#                         and redo-cost figures read. Every stamp is an EVENT's time: fedT is the feed pop
+#                         (the turn left the queue for the CLI's stdin), firstOutT the first streamed work atom,
+#                         resultT the ResultMessage; durationMs / apiMs are the CLI's own figures on that
+#                         result; usd and the token columns are what the spend fold recorded for the turn;
+#                         resumeNotice marks a turn whose fed text was a boot or crash continuation notice.
+# Both writers are best-effort and never raise: a ledger must not be able to break the thing it measures.
+SESSION_EVENTS_FILE = "session-events.jsonl"
+TURNS_FILE = "turns.jsonl"
+PROBLEM_ROW_MARK = " ;; problem-row "
+LEDGER_ROTATE_BYTES = 32 * 1024 * 1024   # a ledger past this size is rotated to <name>.1 (one predecessor kept),
+#                                          so the pair is bounded at twice this: at ~300 bytes a turn and a few
+#                                          thousand turns a day, turns.jsonl holds about a month; the reader reads both
+
+
+_LEDGER_LOCK = threading.Lock()   # one appender at a time across the ledgers: two threads crossing the
+#                                    rotation size together would rotate twice, moving a one-row file over the
+#                                    predecessor just made and losing its month of rows (review find, 2026-09-10)
+
+
+def _append_ledger_row(state_dir: Path, name: str, row: dict) -> None:
+    try:
+        p = Path(state_dir) / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with _LEDGER_LOCK:
+            try:
+                if p.stat().st_size >= LEDGER_ROTATE_BYTES:
+                    os.replace(p, p.with_name(p.name + ".1"))   # the older predecessor, if any, is dropped
+            except FileNotFoundError:
+                pass
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
+                f.flush()
+    except Exception:
+        pass
+
+
+def append_session_event(state_dir: Path, kind: str, *, sid=None, name=None, t=None, **fields) -> dict:
+    """One session-events.jsonl row (see the ledger note above). Fields are FLAT by contract: a scalar rides
+    as is, None is dropped, anything else is its str. Returns the row written (pid and t filled in)."""
+    row = {"t": int(time.time() if t is None else t), "pid": os.getpid(), "kind": str(kind)}
+    if sid:
+        row["sid"] = str(sid)
+    if name:
+        row["name"] = str(name)
+    for k, v in fields.items():
+        if v is None:
+            continue
+        row[k] = v if isinstance(v, (str, int, float, bool)) else str(v)
+    _append_ledger_row(state_dir, SESSION_EVENTS_FILE, row)
+    return row
+
+
+def problem_row(state_dir: Path, prose: str, kind: str, *, sid=None, name=None, log=None, ring=True,
+                **fields) -> str:
+    """A session problem said three ways at once: the ledger row (append_session_event, `text` = the
+    prose), the kernel-log line `<prose> ;; problem-row {json}` (returned; written when `log` is given), and
+    the prose alone on the problem ring when `ring` (SdkBackend._log's ring_text, so the error center stays
+    readable while the log line stays parseable). `log` is the backend's _log; a plainer callable gets the
+    line alone."""
+    row = append_session_event(state_dir, kind, sid=sid, name=name, text=str(prose), **fields)
+    line = str(prose) + PROBLEM_ROW_MARK + json.dumps(row)
+    if log is not None:
+        try:
+            log(line, problem=bool(ring), ring_text=str(prose))
+        except TypeError:
+            try:
+                log(line)
+            except Exception:
+                pass
+        except Exception:
+            pass
+    return line
+
+
+def parse_problem_row(line: str) -> "dict | None":
+    """The JSON object a `;; problem-row` log line carries, or None for any other line."""
+    if PROBLEM_ROW_MARK not in str(line):
+        return None
+    try:
+        obj = json.loads(str(line).rsplit(PROBLEM_ROW_MARK, 1)[1])
+    except Exception:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def append_turn_row(state_dir: Path, row: dict) -> None:
+    """One turns.jsonl row (SdkSession._turn_ledger_row builds it). Best-effort, never raises."""
+    if isinstance(row, dict) and row:
+        _append_ledger_row(state_dir, TURNS_FILE, row)
+
+
 def append_awaiting(state_dir: Path, sid: str, awaiting: bool, why: str = "") -> None:
     """Append an "awaiting" OVERLAY record to states/<sid>.jsonl (interleaved with the state
     records; the kernel reader scans for the latest line carrying an "awaiting" key). "Awaiting" =
@@ -2000,6 +2106,38 @@ def api_health_counts(events, now: float, window: int, uptime_s=None) -> dict:
             "rate5xx": None if r5xx is None else round(r5xx, 4)}
 
 
+def api_health_series(events, now: float, window: int, bin_s: int = 60) -> dict:
+    """Attempts per bin over (now - window, now], for the dashboard's graph (T301, the user 2026-09-10, who
+    wanted a storm visible at a glance instead of per-window percentages): `binS` seconds per bin, the last
+    bin ending at `now`, `from` the start of the first. Four parallel arrays, oldest first, one integer per
+    bin: `ok` (successful responses), `rateLimited` (429 attempts), `serverErrors` (529 and other 5xx attempts,
+    the rate5xx numerator), `noStatus` (connection-level failures: the offline class). Other-status errors
+    are counted in `other`. ADDITIVE to the payload (schema 1 unchanged): a reader that ignores it sees the
+    document it always saw. Pure: the same events at the same now give the same arrays."""
+    bin_s = max(1, int(bin_s))
+    n = max(1, int(-(-int(window) // bin_s)))       # ceil(window / bin_s) bins
+    start = now - n * bin_s
+    keys = ("ok", "rateLimited", "serverErrors", "noStatus", "other")
+    out = {k: [0] * n for k in keys}
+    for e in events:
+        if not (start < e.t <= now):
+            continue
+        i = min(n - 1, int((e.t - start) // bin_s))
+        if e.kind == "ok":
+            k = "ok"
+        elif e.cls == "429":
+            k = "rateLimited"
+        elif e.cls in ("529", "5xx"):
+            k = "serverErrors"
+        elif e.cls == "none":
+            k = "noStatus"
+        else:
+            k = "other"
+        out[k][i] += 1
+    out.update({"binS": bin_s, "from": round(start, 3)})
+    return out
+
+
 API_HEALTH_SEVERITY = {"unknown": 0, "healthy": 1, "recovering": 2, "degraded": 3, "thrashing": 4}
 API_HEALTH_RESTART_WHY = "kernel restarted: the event ring is empty"
 
@@ -2191,6 +2329,104 @@ def _pid_alive(pid: int) -> bool:
     except OSError:
         return True                                     # exists; not ours to signal
     return True
+
+
+TEST_ROOT_PREFIX = "romp-tests-"
+TEST_ROOT_OWNER_MARKER = "romp-tests-owner.json"    # tests/conftest.py writes it at mint time
+TEST_ROOT_TOMBSTONE = ".sweeping"                   # a root renamed to <name>.sweeping is ours to finish deleting
+TEST_ROOT_SWEEP_BUDGET_S = 30.0                     # per boot; the rest waits for the next boot's sweep
+
+
+def _rmtree_stubborn(root: str) -> None:
+    """rmtree that gets past a child with its permission bits cleared (a 000-mode directory some suite
+    tests create and restore only in a finally that an os._exit skipped): on the first failure at a
+    path, restore owner rwx on it and its parent and retry that step once. Raises on a second failure
+    so the caller can leave the tombstone standing and say so."""
+    def onexc(func, path, exc):
+        # `func` is whichever os call failed (3.12's fd-based rmtree hands over os.open, os.scandir,
+        # os.rmdir, os.unlink with their own signatures), so it is not called back: the subtree at
+        # `path` is removed again plainly after the chmod, and a second failure raises.
+        try:
+            os.chmod(os.path.dirname(path), 0o700)
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        elif os.path.lexists(path):
+            os.unlink(path)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(root, onexc=onexc)
+    else:                                               # pre-3.12 spelling: (func, path, exc_info)
+        shutil.rmtree(root, onerror=lambda func, path, ei: onexc(func, path, ei[1]))
+
+
+def sweep_dead_test_roots(tmpdir: str, log=None, budget_s: float = TEST_ROOT_SWEEP_BUDGET_S) -> int:
+    """Remove the test suite's `romp-tests-*` temp roots under `tmpdir` whose OWNER IS DEAD; return the
+    count removed. tests/conftest.py mints one root per run, redirects TMPDIR into it and removes it
+    at run end — but a run that dies without reaching that removal (pytest-timeout's os._exit, a kernel
+    restart cutting the tool shell, the cut-turn reaper's kill) leaves the whole root standing, and on
+    a shared machine those roots piled into millions of files that the next boot's /tmp cleanup spent
+    39 minutes deleting (2026-09-10). Nothing in the dead run can clean up, so the kernel does, from
+    boot reconcile — AFTER the session pass and on its own thread (a dead pile is minutes of rmtree;
+    the orphan-CLI reap and the cut-session resumes must not wait behind it), within `budget_s` per
+    boot: whatever is left waits for the next boot, and the count left is logged.
+    The marker inside the root names the owning pid. A root whose pid is ALIVE is a run in progress
+    and stays (a sibling test kernel booting inside a run's TMPDIR sees the run's own live root); a
+    root with NO marker, or one this code cannot read, stays too — the sweep cannot tell a foreign
+    directory or a pre-marker root from a leak, and refusing is the safe direction. Only a readable
+    marker naming a dead pid is a leak by construction.
+    Deleting is two steps so a partial failure can never strand a marker-less root the sweep would
+    then refuse forever: the root is first RENAMED to a tombstone (`<name>.sweeping`, which this sweep
+    owns outright and deletes on every boot regardless of marker), then removed; a child that resists
+    (a 000-mode directory) is chmod'ed and retried once, and a survivor is logged on EVERY boot, never
+    silently skipped. Never raises. Under the test suite the kernel's own tmpdir IS a run's root
+    (TMPDIR is redirected), so the sweep never reaches the real system temp dir from inside a test."""
+    swept = 0
+    deadline = time.monotonic() + max(0.0, float(budget_s))
+    try:
+        names = sorted(os.listdir(tmpdir))
+    except OSError:
+        return 0
+    todo = []                                           # (path, is_tombstone)
+    for name in names:
+        if not name.startswith(TEST_ROOT_PREFIX):
+            continue
+        root = os.path.join(tmpdir, name)
+        try:
+            if os.path.islink(root) or not os.path.isdir(root):
+                continue
+        except OSError:
+            continue
+        if name.endswith(TEST_ROOT_TOMBSTONE):
+            todo.append((root, True))                   # a previous sweep's unfinished delete
+            continue
+        try:
+            with open(os.path.join(root, TEST_ROOT_OWNER_MARKER), "r", encoding="utf-8") as fh:
+                pid = int(json.load(fh)["pid"])
+        except (OSError, ValueError, TypeError, KeyError):
+            continue                                    # no marker, or not one we wrote: not ours to remove
+        if pid == os.getpid() or _pid_alive(pid):
+            continue
+        todo.append((root, False))
+    left = 0
+    for i, (root, is_tomb) in enumerate(todo):
+        if time.monotonic() > deadline:
+            left = len(todo) - i
+            break
+        tomb = root if is_tomb else root + TEST_ROOT_TOMBSTONE
+        try:
+            if not is_tomb:
+                os.rename(root, tomb)                   # claim it: from here on the marker no longer matters
+            _rmtree_stubborn(tomb)
+            swept += 1
+        except OSError as e:
+            if log:
+                log("boot reconcile: dead test root not removed (will retry next boot): %s: %s" % (tomb, e))
+    if left and log:
+        log("boot reconcile: test-root sweep budget (%.0fs) spent — %d dead root(s) left for the next boot"
+            % (budget_s, left))
+    return swept
 
 
 class ApiHealth:
@@ -2510,6 +2746,24 @@ class ApiHealth:
                 pass
 
     # ---- the read ----
+    def quiet(self, now: float | None = None) -> bool:
+        """No API event (attempt, response, give-up) inside the longest window ending at `now`: the rail's gray
+        dot (T301). A clock-derived answer, so the frame that carries it changes at the moment the last event
+        ages out of the window, which is an event of its own."""
+        now = time.time() if now is None else float(now)
+        with self._lock:
+            last = self._last_event_at
+        return last is None or (now - last) > max(api_health_config()["windows"])
+
+    def window_errors(self, now: float | None = None) -> int:
+        """Failed attempts (a retry or a give-up) inside the longest window ending at `now` (T301): the frame's
+        `errs`, so the rail's dot reads red for a storm the window still holds while no session waits, and clears
+        the cycle the last failure ages out. Clock-derived like quiet(): the frame that carries it changes then."""
+        now = time.time() if now is None else float(now)
+        lo = now - max(api_health_config()["windows"])
+        with self._lock:
+            return sum(1 for e in self._ring if e.kind != "ok" and lo < e.t <= now)
+
     def snapshot(self, now: float | None = None, uptime_s=None) -> dict:
         """The /api-health payload minus `bootId` (the kernel stamps that from /version's globals; `bootAt`
         is this aggregator's `boot_stamp`, the number every seeded stateSince and every restart row
@@ -2540,18 +2794,19 @@ class ApiHealth:
             auth, fam = (evs[0].auth, evs[0].family) if evs else (prev["auth"], prev["family"])
             st = api_health_state(evs, now, (prev["state"], prev["since"]) if prev else None, cfg)
             wins = {str(w): api_health_counts(evs, now, w, uptime_s) for w in cfg["windows"]}
+            series = api_health_series(evs, now, max(cfg["windows"]))   # the graph's per-minute bins (T301)
             last_err = None
             for e in reversed(evs):
                 if e.kind != "ok":
                     last_err = {"at": round(e.t, 3), "status": e.status, "category": e.category or None,
                                 "class": e.cls, "kind": e.kind}
                     break
-            derived.append((key, auth, fam, prev, st, wins, last_err))
+            derived.append((key, auth, fam, prev, st, wins, last_err, series))
         buckets = {}
         worst, worst_key = "unknown", None
         filed = False
         with self._lock:
-            for key, auth, fam, prev, st, wins, last_err in derived:
+            for key, auth, fam, prev, st, wins, last_err, series in derived:
                 cur = self._last_state.get(key)
                 if cur != prev:
                     rec = cur                    # a concurrent read filed this bucket first: its record stands
@@ -2569,7 +2824,7 @@ class ApiHealth:
                                 "state": rec["state"], "stateSince": round(rec["since"], 3),
                                 "evidence": rec["evidence"], "why": rec["why"],
                                 "transitions": list(self._by_bucket.get(key, ())),
-                                "lastError": last_err}
+                                "lastError": last_err, "series": series}
                 if API_HEALTH_SEVERITY[rec["state"]] > API_HEALTH_SEVERITY[worst] or worst_key is None:
                     worst, worst_key = rec["state"], key
             if filed:
@@ -3192,10 +3447,14 @@ def _is_kernel_cmd(cmd: str) -> bool:
     return False
 
 
-def find_orphan_clis(ps_lines: list[str], lastsids: list[str], own_pid: int) -> list[int]:
+def find_orphan_clis(ps_lines: list[str], lastsids: list[str], own_pid: int, leases: list[dict] | None = None,
+                     now: float | None = None, start=None, version: str = "") -> list[int]:
     """PIDs of ORPHANED SDK-driven `claude` CLIs holding one of OUR sessions (--resume/--session-id
-    in either flag spelling, + the stream-json mark — see _cli_carries_sid). Orphaned = its PARENT
-    is not a live romp kernel (absent from the listing, or a process that is not a kernel): a live
+    in either flag spelling, + the stream-json mark — see _cli_carries_sid). With `leases` (the
+    session leases on disk, list_leases) the verdict is lease_census's: a CLI with a VALID lease is
+    owned by its holder whatever its parent, and a CLI with no valid lease and no live kernel parent is
+    an orphan (T305; the rules and the anomaly rows are documented there). Without leases, the
+    parentage rule below stands alone. Orphaned = its PARENT is not a live romp kernel (absent from the listing, or a process that is not a kernel): a live
     SDK CLI is always a child of the kernel that spawned it, so only a dead kernel's leftover — a
     zombie writer that would fight the resume for the transcript — has any other parent. The parent
     check is load-bearing: matching on the command line alone let a duplicate backend's reconcile
@@ -3216,6 +3475,8 @@ def find_orphan_clis(ps_lines: list[str], lastsids: list[str], own_pid: int) -> 
     a full service restart, which empties the unit's cgroup (systemd's default KillMode=control-group),
     ever ended such a CLI. The definition now names the property the ppid-1 check approximated. Pure
     (takes PS_ARGV's `ps -axwwo pid=,ppid=,command=` lines) so tests need no live processes."""
+    if leases is not None:
+        return lease_census(ps_lines, lastsids, own_pid, leases, now=now, start=start, version=version)["orphans"]
     procs: dict[int, tuple[int, str]] = {}    # pid -> (ppid, command), in listing order
     for ln in ps_lines:
         parts = ln.strip().split(None, 2)
@@ -3234,6 +3495,247 @@ def find_orphan_clis(ps_lines: list[str], lastsids: list[str], own_pid: int) -> 
         out.append(pid)
     return out
 
+
+def cli_sid_of(cmd: str, sids) -> "str | None":
+    """The one of `sids` this CLI's argv names (_cli_carries_sid's match, returning the id), or None."""
+    for s in sids:
+        if not s:
+            continue
+        for flag in ("--resume", "--session-id"):
+            if (flag + " " + s) in cmd or (flag + "=" + s) in cmd:
+                return s
+    return None
+
+
+def duplicate_clis(ps_lines: list[str], lastsids: list[str]) -> dict[str, list[int]]:
+    """Conversation ids that MORE THAN ONE SDK-driven CLI in a PS_ARGV listing is holding, id -> pids in
+    listing order (T304: two writers for one transcript is the failure the boot reap exists to prevent, and
+    until now nothing recorded when it was found). Same match as find_orphan_clis (the stream-json mark plus
+    a --resume/--session-id spelling), whatever the parents are: an orphan beside this kernel's live child
+    counts, and so do two orphans. Pure."""
+    seen: dict[str, list[int]] = {}
+    for ln in ps_lines:
+        parts = ln.strip().split(None, 2)
+        if len(parts) < 3 or not parts[0].isdigit():
+            continue
+        cmd = parts[2]
+        if _SDK_CLI_MARK not in cmd:
+            continue
+        s = cli_sid_of(cmd, lastsids)
+        if s:
+            seen.setdefault(s, []).append(int(parts[0]))
+    return {s: pids for s, pids in seen.items() if len(pids) > 1}
+
+
+# ── SESSION OWNERSHIP LEASES (T305, stage 1 of sessions that survive a kernel restart) ─────────────
+# Who owns a running CLI used to be answered by parentage: a live SDK CLI was a child of the kernel that
+# spawned it, so "parent is a live romp kernel" meant owned and anything else meant an orphan to reap.
+# That fact is wrong the moment a CLI is re-parented on purpose — a wrapper or a debugger between the
+# kernel and the CLI, or (stage 4 of the same program) a per-session host process that outlives the
+# kernel — and the reaper then kills a live session at the next boot. Ownership is now a LEASE: one file
+# per session under STATE/leases/, written by whoever holds the CLI (this kernel, in this stage; the host
+# in stage 4) the moment it knows the CLI's pid, refreshed on a heartbeat, and removed when the holder
+# ends the CLI on purpose. A lease is VALID when its heartbeat is fresh, its holder is alive and its CLI
+# is alive — each process named by pid AND start time, never pid alone (a pid is reused; a start time is
+# not). A CLI with a valid lease is owned by whoever holds it, whatever its parent is; a CLI with no
+# valid lease and no live kernel parent is an orphan. The precedent is the deploy-drain hold below
+# (refresh_drain_hold / DRAIN_HOLD_TTL): a lease the holder refreshes and a fresh boot reads, never a
+# latch. Its cadence is that hold's, exactly: the manager's parked poll refreshes the drain hold every
+# ~3 s and the hold lasts 12 s (four beats), so it outlives a missed beat and not a dead holder; the
+# lease beats every LEASE_HEARTBEAT_S and is fresh for LEASE_TTL_S, the same two numbers. Holder
+# identity is the primary check (a crashed kernel's leases are invalid at the next boot because their
+# holder is gone, so its CLIs are reaped exactly as before and the transcript keeps one writer); the
+# heartbeat is the second line, against a holder that is alive but wedged.
+LEASE_DIR = "leases"
+LEASE_HEARTBEAT_S = 3.0      # the drain hold's poll cadence
+LEASE_TTL_S = 12.0           # DRAIN_HOLD_TTL: four beats, outlives a missed beat, not a dead holder
+
+LEASE_ANOMALIES = ("lease.cli-without-lease",   # an SDK CLI of ours with no valid lease, kept because a live kernel parents it
+                   "lease.no-live-process",     # a lease whose pid is gone, or now names another process
+                   "lease.holder-gone",         # a live CLI whose lease holder is gone (a crashed kernel): reaped
+                   "lease.stale-heartbeat",     # a live CLI whose holder lives but stopped beating: reaped
+                   "lease.version-skew")        # a valid lease written by another code version (owned, reported)
+# Every anomaly is a PROBLEM ROW through problem_row above (the T304 helper): prose on the ring, prose plus the
+# JSON object on the kernel-log line, one JSON line in session-events.jsonl. Two CLIs on one conversation are
+# the boot sweep's own row (reconcile.duplicate-cli, duplicate_clis), filed once, not again here.
+
+
+def proc_start(pid: int, run=None) -> str | None:
+    """The process's start-time identity as text: /proc/<pid>/stat field 22 (clock ticks since boot)
+    where there is a procfs, else `ps -o lstart=` (macOS). None when the pid is gone. Writer and reader
+    run on the same box, so the two forms never meet; a fake pid above pid_max reads None on both."""
+    if os.path.isdir("/proc"):
+        t = _read_starttime(pid)
+        return None if t is None else str(t)
+    run = run or subprocess.run
+    try:
+        out = run(["ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return None
+    out = (out or "").strip()
+    return out or None
+
+
+def lease_path(state_dir, sid: str) -> Path:
+    return Path(state_dir) / LEASE_DIR / (str(sid) + ".json")
+
+
+def write_lease(state_dir, lease: dict) -> None:
+    """Write one session's lease atomically (writer-unique temp + os.replace, as write_reg does: the
+    outgoing and the incoming kernel may touch one sid's files at a restart)."""
+    p = lease_path(state_dir, lease["sid"])
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name("%s.%d.%s.tmp" % (p.name, os.getpid(), uuid.uuid4().hex[:8]))
+    try:
+        tmp.write_text(json.dumps(lease, sort_keys=True))
+        os.replace(tmp, p)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def read_lease(state_dir, sid: str) -> dict | None:
+    """The session's lease as written, or None when there is none (or it does not parse)."""
+    try:
+        d = json.loads(lease_path(state_dir, sid).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict) or not d.get("sid"):
+        return None
+    return d
+
+
+def remove_lease(state_dir, sid: str) -> bool:
+    """Drop the session's lease; True when a file was removed."""
+    try:
+        os.unlink(lease_path(state_dir, sid))
+        return True
+    except OSError:
+        return False
+
+
+def list_leases(state_dir) -> list[dict]:
+    """Every parseable lease under STATE/leases/, in name order. A file that does not parse is skipped
+    (a half-written temp is never a `.json`; a corrupt one is nobody's claim)."""
+    d = Path(state_dir) / LEASE_DIR
+    out = []
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return out
+    for n in names:
+        if not n.endswith(".json"):
+            continue
+        lease = read_lease(state_dir, n[:-len(".json")])
+        if lease is not None:
+            out.append(lease)
+    return out
+
+
+def lease_state(lease: dict, now: float, start=None) -> str:
+    """Why a lease does or does not hold: 'valid', or the first failing check in the order a reader
+    should report it — 'no-live-process' (its CLI pid is gone or now names another process),
+    'holder-gone' (the holder's pid is gone or reused), 'stale-heartbeat' (the holder lives but has
+    not beaten within LEASE_TTL_S). Identity is pid plus start time on both processes; `start` is the
+    identity reader (proc_start), a seam for tests with fake pids. A lease missing a field fails the
+    check that needs it."""
+    start = start or proc_start
+    try:
+        pid, pstart = int(lease.get("pid")), str(lease.get("start") or "")
+    except (TypeError, ValueError):
+        return "no-live-process"
+    if not pstart or start(pid) != pstart:
+        return "no-live-process"
+    holder = lease.get("holder") if isinstance(lease.get("holder"), dict) else {}
+    try:
+        hpid, hstart = int(holder.get("pid")), str(holder.get("start") or "")
+    except (TypeError, ValueError):
+        return "holder-gone"
+    if not hstart or start(hpid) != hstart:
+        return "holder-gone"
+    try:
+        beat = float(lease.get("t") or 0)
+    except (TypeError, ValueError):
+        beat = 0.0
+    if now - beat > LEASE_TTL_S:
+        return "stale-heartbeat"
+    return "valid"
+
+
+def lease_census(ps_lines: list[str], lastsids: list[str], own_pid: int, leases: list[dict],
+                 now: float | None = None, start=None, version: str = "") -> dict:
+    """The ownership verdict over a PS_ARGV listing and the leases on disk. Returns
+    {"orphans": [pid…], "owned": {pid: reason}, "dead_leases": [sid…], "problems": [row…]} where a
+    problem row is a flat dict with `kind` (LEASE_ANOMALIES), `cliPid`, `fsid`, `sid`, `text`, ready for
+    problem_row. Rules, per SDK CLI carrying one of OUR conversation ids (the stream-json mark plus
+    _cli_carries_sid, as before):
+      * a VALID lease naming its pid (lease_state) → owned by that lease's holder, whoever it is; a
+        lease from another code `version` is owned and reported (the deploy-week skew the monitors count);
+      * else a direct child of `own_pid` → owned: the window between this kernel's spawn and its
+        connect-time lease write is by design, and not a row;
+      * else a child of a live romp kernel (_is_kernel_cmd) → owned and REPORTED (`cli-without-lease`):
+        the previous code version's kernel wrote no leases, and its sessions survive the upgrade boot
+        exactly as they did before leases existed;
+      * else an ORPHAN, reported with its lease's failing check when it has a lease (`holder-gone`,
+        `stale-heartbeat`, or `no-live-process` when the lease's identity no longer matches the pid).
+    A lease naming no live CLI at all is `no-live-process` and listed in `dead_leases` for removal. Two
+    CLIs on one conversation id are each judged by their own rule (the boot sweep files that event itself,
+    reconcile.duplicate-cli). Pure on its inputs."""
+    now = time.time() if now is None else now
+    start = start or proc_start
+    procs: dict[int, tuple[int, str]] = {}
+    for ln in ps_lines:
+        parts = ln.strip().split(None, 2)
+        if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        procs[int(parts[0])] = (int(parts[1]), parts[2])
+    clis = {pid: (ppid, cmd) for pid, (ppid, cmd) in procs.items()
+            if _SDK_CLI_MARK in cmd and _cli_carries_sid(cmd, lastsids)}
+    by_pid: dict[int, dict] = {}
+    for lease in leases:
+        try:
+            by_pid.setdefault(int(lease.get("pid")), lease)
+        except (TypeError, ValueError):
+            continue
+    states = {pid: lease_state(lease, now, start) for pid, lease in by_pid.items()}
+    problems: list[dict] = []
+    def row(kind, text, pid=None, lease=None, fsid=None):
+        problems.append({"kind": kind, "text": text, "cliPid": pid,
+                         "sid": (lease or {}).get("sid"), "fsid": fsid or (lease or {}).get("fsid")})
+    orphans: list[int] = []
+    owned: dict[int, str] = {}
+    for pid, (ppid, cmd) in clis.items():
+        lease = by_pid.get(pid)
+        fsid = cli_sid_of(cmd, lastsids)
+        if lease is not None and states.get(pid) == "valid":
+            owned[pid] = "lease"
+            if version and str(lease.get("version") or "") != version:
+                row("lease.version-skew", "lease of session %s (pid %d) was written by code version %s; this kernel runs %s"
+                    % (str(lease.get("sid") or "")[:8], pid, lease.get("version") or "unknown", version), pid, lease)
+            continue
+        if ppid == own_pid:
+            owned[pid] = "own-child"
+            continue
+        parent = procs.get(ppid)
+        if parent is not None and _is_kernel_cmd(parent[1]):
+            owned[pid] = "kernel-child"
+            row("lease.cli-without-lease", "CLI pid %d on conversation %s is a live kernel's child (pid %d) with no valid lease; kept, not reaped"
+                % (pid, (fsid or "")[:8], ppid), pid, lease, fsid)
+            continue
+        orphans.append(pid)
+        if lease is not None:
+            why = states.get(pid)
+            row("lease." + why, "CLI pid %d of session %s has a lease that does not hold (%s); reaped as an orphan"
+                % (pid, str(lease.get("sid") or "")[:8], why.replace("-", " ")), pid, lease, fsid)
+    for pid, lease in by_pid.items():
+        if pid in clis:
+            continue
+        row("lease.no-live-process", "lease of session %s names pid %d, which is not a live CLI of that session; lease dropped"
+            % (str(lease.get("sid") or "")[:8], pid), pid, lease)
+    dead = [str(lease.get("sid")) for pid, lease in by_pid.items() if pid not in clis]
+    return {"orphans": orphans, "owned": owned, "dead_leases": dead, "problems": problems}
 
 # ENDING A CUT TURN'S WHOLE TREE (T276, the user 2026-09-08). Reaping the orphaned CLI alone left its Bash
 # tool's processes alive: a stress harness's 32 busy loops and a benchmark's 11 (setsid'd from tool shells,
@@ -3342,13 +3844,30 @@ def _read_ppid(pid: int) -> int | None:
         return None
 
 
-def find_session_cli(ps_lines: list[str], sids: list[str], parent_pid: int) -> int | None:
-    """The LIVE CLI pid holding one of `sids` as a child of `parent_pid` (this kernel), or None.
+def find_session_cli(ps_lines: list[str], sids: list[str], parent_pid: int, lease: dict | None = None,
+                     start=None) -> int | None:
+    """The LIVE CLI pid holding one of `sids` as a child of `parent_pid` (this kernel), or None. With
+    the session's `lease` (T305), the lease's pid comes first: when the listing shows it as an SDK CLI
+    carrying one of `sids` and its start time still matches the lease (`start`, proc_start), that is the
+    session's CLI whatever its parent — a re-parented CLI is reachable by the escalation. Otherwise the
+    child scan below stands.
     The interrupt escalation's (and the drain reap's) target: same signature match as
     find_orphan_clis (_cli_carries_sid + the stream-json mark) but the OPPOSITE parent check — it
     may only signal our own child, never a tmux CLI (no mark), never another kernel's, never an
     orphan (a CLI whose parent is no live kernel — the reaper's territory). Pure (takes
     PS_ARGV's `ps -axwwo pid=,ppid=,command=` lines) so tests need no live processes."""
+    if lease:
+        start = start or proc_start
+        try:
+            lpid, lstart = int(lease.get("pid")), str(lease.get("start") or "")
+        except (TypeError, ValueError):
+            lpid, lstart = None, ""
+        for ln in ps_lines:
+            parts = ln.strip().split(None, 2)
+            if len(parts) < 3 or not parts[0].isdigit() or int(parts[0]) != lpid:
+                continue
+            if _SDK_CLI_MARK in parts[2] and _cli_carries_sid(parts[2], sids) and lstart and start(lpid) == lstart:
+                return lpid
     for ln in ps_lines:
         parts = ln.strip().split(None, 2)
         if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
@@ -4247,6 +4766,12 @@ class SdkSession:
         self._skill_tool_ids = set()   # Skill tool_use ids seen on THIS stream → classify their injected
         #                                instructions payload (parent_tool_use_id link) as a skillMd atom
         self.since = 0
+        self._first_out_t = None   # the turn's first streamed WORK atom (turns.jsonl firstOutT; reset per fresh feed)
+        self._turn_spend = None    # (delta usd, turn usage) the spend fold recorded for the turn in flight, read by the
+        #                            turn ledger row at the settle and spent with it
+        self._fed_t = None         # the fresh feed's pop at millisecond resolution (turns.jsonl fedT; `since` stays whole
+        #                            seconds for its other readers); both are spent at the settle, so a turn the CLI
+        #                            opens by itself never inherits the previous fed turn's stamps
         self.model = reg.get("liveModel") or ""   # seed from the last-known model so the badge/picker show on
         #                                           OPEN (even once eager-connected, before init/a turn reports)
         self._model_id = reg.get("liveModelId") or ""   # the RAW id behind that name (claude-fable-5-1), the
@@ -5389,6 +5914,8 @@ class SdkSession:
                     self.since = int(time.time())    # a new turn starts now (mid-turn forwards keep the turn's clock)
                     self._interrupted = False        # a fresh turn → clear any stale interrupt flag
                     self._intr_level = 0             #   ...and its escalation episode (a new stop starts polite)
+                    self._first_out_t = None         # the turn's first output is still to come (turns.jsonl)
+                    self._fed_t = time.time()        # the pop, at millisecond resolution (turns.jsonl fedT)
                 self._note_turn_opener(fed_text_opener(item), fresh)   # who this turn is for (the Stop hook stamps it)
                 if item.startswith(RENAME_PING_HEAD):
                     self._ping_feeding = True       # hold feeds until this turn's first streamed message
@@ -5442,6 +5969,7 @@ class SdkSession:
                     # create, the ready chip landing at 5-12s with the cycle).
                     self.backend._push_session(self.sid)
                     self._connected.set()   # the control channel exists from here (move() waits on this)
+                    self.backend._lease_open(self, client)   # ownership by lease (T305): pid + start time, heartbeat
                     self._seed_spend_watermarks()   # a fresh CLI process starts its cumulative counters at
                     #   zero, or at what it restores from the resumed transcript's cost-state record
                     # The CLI is demonstrably up, so any recorded launch failure is HISTORY — clear it
@@ -5528,6 +6056,10 @@ class SdkSession:
                     # silent by design. Without this the only trace is a kernel stderr line nobody reads.
                     self.backend._record_launch_error(self, e)
                 raise
+            finally:
+                # the client has closed (the SDK's own close ends the process), or never opened: the
+                # lease is dropped either way — only a kernel DEATH leaves one behind (T305)
+                self.backend._lease_close(self)
             if self.ended or not self._reconnect:
                 break        # drain ended on its own (process exit) or we're shutting down → done
 
@@ -5747,6 +6279,49 @@ class SdkSession:
         turn it is closing."""
         if fresh or opener == "human":
             self._turn_opener = opener
+
+    def _turn_ledger_row(self, msg, usd=None, turn_u=None, now=None) -> dict:
+        """The turns.jsonl row for the ResultMessage `msg` (see the ledger note by append_turn_row): the
+        turn's event stamps (fedT = since, the feed pop; firstOutT = the first streamed work atom; resultT =
+        now), the CLI's own duration_ms / duration_api_ms / num_turns / is_error when the result carries
+        them, the spend fold's usd and token counts when it ran (`usd`, `turn_u` as _turn_usage returns
+        it), who opened the turn, and resumeNotice: whether any text fed into this turn was the boot or the
+        crash continuation notice — the turn that REDOES cut work, the redo-cost marker. Pure over its
+        inputs; getattr throughout so a __new__-built test double works."""
+        now = time.time() if now is None else float(now)
+        fed = [x for x in (getattr(self, "_inflight_texts", None) or []) if isinstance(x, str)]
+        row = {"t": int(now), "sid": str(self.sid), "name": str(getattr(self, "name", "") or ""),
+               "resultT": round(now, 3),
+               "opener": str(getattr(self, "_turn_opener", None) or ""),
+               "resumeNotice": any(x.startswith((BOOT_RESUME_NUDGE, CRASH_RESUME_NUDGE)) for x in fed),
+               "fedTexts": len(fed)}
+        # fedT and firstOutT only for a turn THIS session fed and whose pop was stamped: a turn the CLI opened
+        # by itself (a channel message, a task notification, a scheduled prompt) or a mid-turn forward run as
+        # its own turn has no feed of its own, and the stamps still in memory would be the PREVIOUS fed
+        # turn's (review find, 2026-09-10: hours of feed-to-result, a duplicated first output). Absent, never
+        # wrong; the reader measures latency only where fedT is present.
+        ft = getattr(self, "_fed_t", None)
+        if fed and isinstance(ft, (int, float)) and ft:
+            row["fedT"] = round(float(ft), 3)
+            fo = getattr(self, "_first_out_t", None)
+            if isinstance(fo, (int, float)) and fo >= ft:
+                row["firstOutT"] = round(float(fo), 3)
+        for attr, key in (("duration_ms", "durationMs"), ("duration_api_ms", "apiMs"), ("num_turns", "numTurns")):
+            v = getattr(msg, attr, None)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                row[key] = int(v)
+        ie = getattr(msg, "is_error", None)
+        if isinstance(ie, bool):
+            row["isError"] = ie
+        if isinstance(usd, (int, float)) and not isinstance(usd, bool):
+            row["usd"] = round(float(usd), 6)
+        if isinstance(turn_u, dict):
+            for k, kk in (("input_tokens", "tokIn"), ("output_tokens", "tokOut"),
+                          ("cache_read_input_tokens", "tokCacheR"), ("cache_creation_input_tokens", "tokCacheW")):
+                v = turn_u.get(k)
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    row[kk] = int(v)
+        return row
 
     def _mark(self, state: str) -> None:
         """Persist a lifecycle STATE to states/<sid>.jsonl AND track whether the CLI is producing.
@@ -6353,6 +6928,7 @@ class SdkSession:
                     # the tokens: THIS turn's counts, from whichever result counter is a running total —
                     # the two are not the same kind (see _turn_usage; the flat `usage` is per-turn now)
                     turn_u = self._turn_usage(msg)
+                    self._turn_spend = (delta, turn_u)   # for the turn ledger row the finally writes (T304)
                     self.backend._record_spend(delta, turn_u, keyed=self.api_key_auth,
                                                sid=self.thread_of or self.sid)   # the rail's spend —
                     #   a comment THREAD bills its owning session (T144: whole-session truth for the
@@ -6373,6 +6949,19 @@ class SdkSession:
                                           "transcript than the connect-time seed (last_cost_state)."
                                           % (self.name, delta, SANE_TURN_USD, total), problem=False)
             finally:
+                # T304: one durable row per settled turn (turns.jsonl, see the ledger note by
+                # append_turn_row) — the event stamps the restart monitors read. In the finally, ahead of
+                # the settle, so a bookkeeping exception (a spend-fold fault: exactly the anomalous turn)
+                # still leaves its row (review find, 2026-09-10); guarded on its own, so a failing append
+                # costs the row alone and never the settle below.
+                try:
+                    _sp = getattr(self, "_turn_spend", None) or (None, None)   # the fold's figures, when it ran
+                    append_turn_row(self.backend.state_dir, self._turn_ledger_row(msg, _sp[0], _sp[1]))
+                except Exception as e:
+                    self.backend._log("turn ledger (%s): %s" % (self.name, e), problem=False)
+                self._turn_spend = None          # spent with the row, like the feed stamps below
+                self._fed_t = None               # the turn's feed stamps are spent (see _turn_ledger_row)
+                self._first_out_t = None
                 # THE SETTLE — everything that makes the turn over for the kernel — runs whatever the
                 # bookkeeping above did (the rewind flags, the live-tail sweep, the refreshes, the spend
                 # accounting last: any step may raise and stop the rest). The rule
@@ -7779,9 +8368,13 @@ class SdkBackend:
     def __init__(self, state_dir, claude_bin: str, notify, poke=None, push=None,
                  push_session=None,
                  mcp_config: str | None = None, append_prompt_path: str | None = None,
-                 log=None, reconcile: bool = False, boot_at=None):
+                 log=None, reconcile: bool = False, boot_at=None, code_version=None):
         self.state_dir = Path(state_dir)
         self.claude_bin = claude_bin
+        self.code_version = str(code_version or "")   # the kernel's git sha, stamped on every lease this kernel
+        #                                               writes (lease_census reports a skew as lease.version-skew)
+        self._leases: dict = {}            # sid -> (session, lease dict): the leases this kernel holds (T305)
+        self._lease_thread = None          # the heartbeat, started at the first lease, ends when none are held
         self.thread_wake_model = None      # kernel-installed: model_id -> replacement or None, consulted
         #                                    ONLY when a comment THREAD is explicitly woken (T223 rider) —
         #                                    the catalog lives in the kernel; the backend never imports it
@@ -8034,16 +8627,106 @@ class SdkBackend:
         except Exception as e:
             self._log("awaiting heal (%s): %s" % (sid[:8], e))
 
+    # ── session ownership leases (T305): see the module-level LEASE_* block ──────────────────────
+    def _lease_holder(self) -> dict:
+        """This kernel as a lease holder: its pid and start-time identity."""
+        return {"pid": os.getpid(), "start": proc_start(os.getpid()) or ""}
+
+    def _lease_open(self, sess, client) -> None:
+        """The SDK connect just handed us a CLI: write the session's lease and start the heartbeat if it
+        is not running. The CLI's pid is the SDK transport's subprocess (the one designed handle: the
+        SDK exposes no pid accessor, so the transport's process object is read directly, and a
+        transport that has none is said loudly — the session then runs unleased and the boot reaper
+        judges it by parentage, as before leases)."""
+        pid = None
+        try:
+            pid = client._transport._process.pid
+        except AttributeError:
+            pid = None
+        if not pid:
+            self._log("lease (%s): the SDK transport exposes no CLI pid; the session runs unleased and a boot "
+                      "judges it by parentage" % sess.name, problem=True)
+            return
+        start = proc_start(int(pid))
+        if start is None:
+            self._log("lease (%s): CLI pid %d has no readable start time; the session runs unleased" % (sess.name, pid),
+                      problem=True)
+            return
+        now = time.time()
+        lease = {"sid": str(sess.sid), "fsid": str(sess.resume_sid or sess.sid), "name": str(sess.name),
+                 "pid": int(pid), "start": start, "holder": self._lease_holder(), "version": self.code_version,
+                 "spawnedAt": int(now), "t": now}
+        with self._lock:
+            self._leases[str(sess.sid)] = (sess, lease)
+            if self._lease_thread is None or not self._lease_thread.is_alive():
+                # started UNDER the lock: an unstarted thread reads as not alive, so a second session
+                # connecting in the first's write window would otherwise adopt it too and both would call
+                # start() on one Thread (RuntimeError out of the connect; the review of T305, 2026-09-10)
+                self._lease_thread = threading.Thread(target=self._lease_beat_loop, name="sdk-lease-beat", daemon=True)
+                self._lease_thread.start()
+        try:
+            write_lease(self.state_dir, lease)
+        except Exception as e:
+            self._log("lease (%s): write failed: %s" % (sess.name, e), problem=True)
+
+    def _lease_close(self, sess) -> None:
+        """The CLI is gone or being ended on purpose (the session's client closed, a drain reap): drop
+        the lease. Idempotent; a session that never held one is a no-op."""
+        with self._lock:
+            self._leases.pop(str(sess.sid), None)
+        remove_lease(self.state_dir, sess.sid)
+
+    def _lease_beat_once(self, now: float | None = None) -> int:
+        """Refresh every held lease's heartbeat (and its conversation id, which a /clear or a fork
+        moves). Returns how many were held."""
+        now = time.time() if now is None else now
+        with self._lock:
+            items = list(self._leases.values())
+        for sess, lease in items:
+            err = None
+            with self._lock:
+                held = self._leases.get(str(sess.sid))
+                if held is None or held[1] is not lease:
+                    continue          # closed since the snapshot: its file is gone and must stay gone (a rewrite
+                #                       would file a false no-live-process row at the next boot; the T305 review)
+                lease["t"] = now
+                lease["fsid"] = str(sess.resume_sid or sess.sid)
+                try:                  # the write sits under the lock so a close can never slip between the
+                    write_lease(self.state_dir, lease)   # membership check and the file landing
+                except Exception as e:
+                    err = e
+            if err is not None:
+                self._log("lease (%s): heartbeat write failed: %s" % (sess.name, err), problem=True)
+        return len(items)
+
+    def _lease_beat_loop(self) -> None:
+        """The heartbeat thread: one beat every LEASE_HEARTBEAT_S while any lease is held; exits when
+        none is (the next _lease_open starts a new one)."""
+        while True:
+            time.sleep(LEASE_HEARTBEAT_S)
+            if self._lease_beat_once() == 0:
+                with self._lock:
+                    if not self._leases:
+                        self._lease_thread = None
+                        return
+
+    def _lease_problem(self, prob: dict, sid_of: dict) -> None:
+        """File one lease_census anomaly as a problem row (the ring, the kernel log, the ledger)."""
+        sid = prob.get("sid") or sid_of.get(str(prob.get("fsid") or ""))
+        problem_row(self.state_dir, prob.get("text") or prob.get("kind"), prob["kind"], sid=sid, log=self._log,
+                    cliPid=prob.get("cliPid"), fsid=prob.get("fsid"))
+
     def _session_cli_pid(self, session) -> int | None:
-        """The live CLI pid for `session` — a child of THIS kernel resuming its sid (or lastSid, the
-        fork-tracking twin) — for the interrupt escalation's signal. ps-scan through the pure
-        find_session_cli matcher, so the signal can only ever land on our own child. None (logged by
+        """The live CLI pid for `session` — its LEASED CLI when the lease's pid is still that process
+        (T305: a re-parented CLI is reachable), else a child of THIS kernel resuming its sid (or lastSid,
+        the fork-tracking twin) — for the interrupt escalation's signal. ps-scan through the pure
+        find_session_cli matcher, so the signal can only ever land on our own CLI. None (logged by
         the caller) when no such process exists."""
         try:
             ps = subprocess.run(PS_ARGV, capture_output=True, text=True, timeout=10)
             reg = read_reg(self.state_dir, session.sid) or {}
             sids = [session.sid, str(reg.get("lastSid") or "")]
-            return find_session_cli(ps.stdout.splitlines(), sids, os.getpid())
+            return find_session_cli(ps.stdout.splitlines(), sids, os.getpid(), lease=read_lease(self.state_dir, session.sid))
         except Exception as e:
             self._log("session cli pid (%s): %s" % (session.name, e))
             return None
@@ -8140,8 +8823,10 @@ class SdkBackend:
         forced = signal_all(signal.SIGKILL, True) if any(alive(p) for p in targets) else 0
         return {"scope": unit if stopped else None, "signaled": signaled, "forced": forced, "tree": len(targets) - 1}
 
-    def _stop_leftover_scopes(self, lastsids: list[str], run=None) -> int:
-        """Stop the session scopes of OUR sessions whose CLI is not a live child of this kernel (T276):
+    def _stop_leftover_scopes(self, lastsids: list[str], run=None, owned=()) -> int:
+        """Stop the session scopes of OUR sessions whose CLI is not OWNED — `owned` is lease_census's
+        set of owned pids (a valid lease, or a live kernel's child; T305) — and not a live child of this
+        kernel (T276):
         a scope outlives its CLI when a tool's setsid children keep running — exactly the loops the
         pid-only reap left behind once their shells had died and re-parented. Every process in the
         scope belongs to that session by construction. A unit whose pid is this kernel's own child
@@ -8158,11 +8843,18 @@ class SdkBackend:
         stopped = 0
         for unit in session_scope_units(listing.splitlines(), lastsids):
             sp = scope_pid(unit)
-            if sp is not None and (sp == os.getpid() or (self._pid_alive(sp) and _read_ppid(sp) == os.getpid())):
-                continue            # this kernel's live session
+            if sp is not None and (sp in owned or sp == os.getpid()
+                                   or (self._pid_alive(sp) and _read_ppid(sp) == os.getpid())):
+                continue            # an owned CLI's scope, or this kernel's live session
             try:
                 run(["systemctl", "--user", "stop", unit], capture_output=True, text=True, timeout=SCOPE_STOP_TIMEOUT)
                 stopped += 1
+                m = _SESSION_SCOPE_RE.match(unit)
+                problem_row(self.state_dir,
+                            "boot: stopped the leftover session scope %s (its CLI was gone; processes it left "
+                            "behind were still running)" % unit,
+                            "reconcile.scope-stopped", log=self._log, unit=unit,
+                            sid8=(m.group(1).lower() if m else ""), cliPid=sp)
             except Exception as e:
                 self._log("cut-turn reap: stopping leftover %s failed: %s" % (unit, e))
         return stopped
@@ -8191,25 +8883,74 @@ class SdkBackend:
                     self._log("boot reconcile: cwdPending heal for %s failed: %s"
                               % (r.get("sid"), traceback.format_exc()))
         try:
+            t_boot0 = time.time()
             alive = [r for r in regs if r.get("alive") and r.get("sid")]
             reaped = 0
             scopes_stopped = 0
             lastsids = [str(r.get("lastSid") or "") for r in alive if r.get("lastSid")]
+            by_fsid = {str(r.get("lastSid")): r for r in alive if r.get("lastSid")}   # conversation id -> its reg
             if lastsids:
                 try:
                     ps = subprocess.run(PS_ARGV, capture_output=True, text=True, timeout=10).stdout
                     ps_lines = ps.splitlines()
-                    for pid in find_orphan_clis(ps_lines, lastsids, os.getpid()):
+                    cmd_of: dict[int, str] = {}
+                    for ln in ps_lines:
+                        parts = ln.strip().split(None, 2)
+                        if len(parts) == 3 and parts[0].isdigit():
+                            cmd_of[int(parts[0])] = parts[2]
+                    # T304: two CLIs holding ONE conversation, as the listing stands before the reap — the
+                    # two-writers hazard itself, recorded even though the reap below usually resolves it
+                    for fsid, pids in duplicate_clis(ps_lines, lastsids).items():
+                        r0 = by_fsid.get(fsid) or {}
+                        problem_row(self.state_dir,
+                                    "boot: %d claude processes were holding session %s's conversation at once "
+                                    "(pids %s); the orphans are being ended" % (len(pids), r0.get("name") or fsid[:8],
+                                                                                 ", ".join(str(p) for p in pids)),
+                                    "reconcile.duplicate-cli", log=self._log, sid=r0.get("sid"), name=r0.get("name"),
+                                    fsid=fsid, pids=",".join(str(p) for p in pids), n=len(pids))
+                    # Ownership by lease (T305): a CLI with a valid lease is owned whatever its parent; every
+                    # anomaly is a problem row (lease_census documents the rules and the kinds)
+                    leases = list_leases(self.state_dir)
+                    census = lease_census(ps_lines, lastsids, os.getpid(), leases, version=self.code_version)
+                    sid_of = {str(r.get("lastSid")): str(r.get("sid")) for r in alive if r.get("lastSid")}
+                    for prob in census["problems"]:
+                        self._lease_problem(prob, sid_of)
+                    lease_by_pid = {}
+                    for lease in leases:
+                        try:
+                            lease_by_pid.setdefault(int(lease.get("pid")), lease)
+                        except (TypeError, ValueError):
+                            pass
+                    for pid in census["orphans"]:
                         if pid == os.getpid():
                             continue
                         # the CLI AND its tree (T276): its scope unit, then every process still under it
                         try:
-                            self._end_cli_tree(pid, ps_lines)
+                            res = self._end_cli_tree(pid, ps_lines)
                             reaped += 1
+                            fsid = cli_sid_of(cmd_of.get(pid, ""), lastsids) or ""
+                            r0 = by_fsid.get(fsid) or {}
+                            res = res if isinstance(res, dict) else {}
+                            problem_row(self.state_dir,
+                                        "boot: ended an orphaned claude process (pid %d) still holding session %s's "
+                                        "conversation from before the restart%s" % (
+                                            pid, r0.get("name") or fsid[:8] or "?",
+                                            ", with its scope %s" % res["scope"] if res.get("scope") else ""),
+                                        "reconcile.orphan-reaped", log=self._log, sid=r0.get("sid"), name=r0.get("name"),
+                                        cliPid=pid, fsid=fsid, scope=res.get("scope") or "",
+                                        signaled=res.get("signaled"), forced=res.get("forced"), tree=res.get("tree"))
                         except (ProcessLookupError, PermissionError):
                             pass
-                    # …and the scopes whose CLI already died but whose children live on
-                    scopes_stopped = self._stop_leftover_scopes(lastsids)
+                        if pid in lease_by_pid:            # the lease that did not hold goes with its CLI
+                            remove_lease(self.state_dir, lease_by_pid[pid]["sid"])
+                    for sid in census["dead_leases"]:      # a lease naming no live CLI is nobody's claim
+                        remove_lease(self.state_dir, sid)
+                    # …and the scopes whose CLI already died but whose children live on (an owned CLI's stays)
+                    scopes_stopped = self._stop_leftover_scopes(lastsids, owned=set(census["owned"]))
+                    if census["owned"] or census["problems"]:
+                        by_lease = sum(1 for why in census["owned"].values() if why == "lease")
+                        self._log("boot reconcile: %d CLI(s) owned (%d by lease), %d lease anomaly(ies) filed"
+                                  % (len(census["owned"]), by_lease, len(census["problems"])))
                 except Exception:
                     self._log("boot reconcile: orphan reap failed: %s" % traceback.format_exc())
             resumed, restored, notified = 0, 0, 0
@@ -8314,6 +9055,14 @@ class SdkBackend:
                           "process trees, stopped %d leftover session scope(s)"
                           % (resumed, restored, notified, reaped, scopes_stopped))
                 self._poke()
+            # T304: the sweep's summary row, every boot that had a session to reconcile (a boot that
+            # recovered nothing is the baseline the restart monitors compare against; a boot with no
+            # sessions at all measures nothing and writes nothing, so a read-only route's lazy backend
+            # build leaves the state directory untouched); `resumed` counts the continuation notices queued
+            if alive:
+                append_session_event(self.state_dir, "reconcile.boot", sessions=len(alive), resumed=resumed,
+                                     restored=restored, notified=notified, reaped=reaped, scopesStopped=scopes_stopped,
+                                     toStart=len(to_start), durationS=round(time.time() - t_boot0, 3))
             # STAGGERED spawn (see BOOT_RESUME_CONCURRENCY): every reg above is already fixed —
             # queues persisted, heals applied — so even a death mid-stagger loses nothing (the next
             # boot's sweep picks the rest up). Spawns hold a slot on the backend-wide _spawn_sem —
@@ -8344,6 +9093,21 @@ class SdkBackend:
                               % (sid, traceback.format_exc()))
         except Exception:
             self._log("boot reconcile failed: %s" % traceback.format_exc())
+        # Dead-owner test roots (see sweep_dead_test_roots) — LAST, and off this thread: the reap and
+        # the resumes above close the two-writers window and re-deliver cut sessions' queues, and a
+        # dead pile of roots is minutes of rmtree that must never sit in front of them. Budgeted per
+        # boot; the remainder waits for the next boot. Daemon: a kernel shutdown does not wait on it.
+        self._start_test_root_sweep()
+
+    def _start_test_root_sweep(self) -> None:
+        def run():
+            try:
+                n = sweep_dead_test_roots(tempfile.gettempdir(), self._log)
+                if n:
+                    self._log("boot reconcile: swept %d dead test root(s) from %s" % (n, tempfile.gettempdir()))
+            except Exception:
+                self._log("boot reconcile: test-root sweep failed: %s" % traceback.format_exc())
+        threading.Thread(target=run, name="test-root-sweep", daemon=True).start()
 
     def drive_idle_queue(self, cands, wait: bool = False) -> None:
         """Deliver wake signals stuck in a STUCK-regime session's CLI queue (the user 2026-08-18; the
@@ -8560,6 +9324,7 @@ class SdkBackend:
                 s.thread.join(max(0.05, deadline - time.time()))
         unjoined = [s for s in sessions if s.thread is not None and s.thread.is_alive()]
         reaped = []
+        reaped_sids = set()
         for s in unjoined:
             try:
                 pid = self._session_cli_pid(s)
@@ -8575,10 +9340,16 @@ class SdkBackend:
                 else:
                     kill(pid, signal.SIGKILL)            # a wedged CLI still never outlives us
                 reaped.append("%s(pid %d)" % (s.name, pid))
+                reaped_sids.add(s.sid)
+                self._lease_close(s)                     # ended on purpose: the lease goes with it
             except ProcessLookupError:
                 pass                                     # exited between the join and the reap — fine
             except Exception:
                 self._log("drain: reap failed for %s: %s" % (s.name, traceback.format_exc()))
+        for s in unjoined:   # T304: the sessions the bound left closing, one ledger row each (the cut row's
+            #                 `unjoined` is the count alone); the process is exiting, so the ring is not asked
+            append_session_event(self.state_dir, "drain.unjoined", sid=s.sid, name=s.name,
+                                 inflight=int(bool(getattr(s, "inflight", 0))), reaped=(s.sid in reaped_sids))
         if sessions:
             names = [s.name for s in unjoined]
             self._log("drain: stopped %d session(s), %d in-flight turn(s) interrupted%s%s"
@@ -9258,7 +10029,7 @@ class SdkBackend:
     # ---- logging / wakeups ----
     PROBLEM_RING = 100        # how many backend problems are kept for the dashboard (oldest dropped)
 
-    def _log(self, m, problem=None, key=None):
+    def _log(self, m, problem=None, key=None, ring_text=None):
         """Every backend line goes to the kernel log; the ones that report a FAILURE also land in a ring
         the dashboard's error center reads, so an SDK problem shows up where the user is looking instead
         of only in a file nobody tails (the user 2026-07-28, who could tell exceptions were happening and
@@ -9277,13 +10048,16 @@ class SdkBackend:
         key whose entry the ring has since dropped enters again as new."""
         if problem is None:
             problem = sys.exc_info()[0] is not None
+        # ring_text (T304): the ring's readable text when the LOG line carries more than prose — a
+        # `;; problem-row {json}` tail (problem_row) belongs in the log a reader parses, not in the bell
+        rt = str(m if ring_text is None else ring_text)
         if problem:
             with self._problem_lock:
                 hit = None
                 if key is not None:
-                    for row in reversed(self._problems):
-                        if row.get("key") == key:
-                            hit = row
+                    for entry in reversed(self._problems):
+                        if entry.get("key") == key:
+                            hit = entry
                             break
                 if hit is not None:
                     hit["count"] = int(hit.get("count") or 1) + 1
@@ -9293,9 +10067,9 @@ class SdkBackend:
                         hit.get("first", hit["text"]), reps, "" if reps == 1 else "s")
                 else:
                     self._problem_seq += 1
-                    row = {"seq": self._problem_seq, "t": time.time(), "text": str(m)}
+                    row = {"seq": self._problem_seq, "t": time.time(), "text": rt}
                     if key is not None:
-                        row.update(key=key, first=str(m), count=1)
+                        row.update(key=key, first=rt, count=1)
                     self._problems.append(row)
                     if len(self._problems) > self.PROBLEM_RING:
                         del self._problems[:-self.PROBLEM_RING]
@@ -10754,12 +11528,20 @@ class SdkBackend:
         return s._clearing
 
     def kill(self, sid: str) -> bool:
-        with self._reg_lock:                       # the alive flip must not lose to an RMW snapshot
-            reg = self._reg_for_flip(sid)
-            if reg:
-                reg["alive"] = False
-                write_reg(self.state_dir, sid, reg)
-        s = self.sessions.pop(sid, None)
+        # The flip and the pop run under _lock, the lock _ensure holds from its alive read through the
+        # insert and start, so a kill that lands mid-revive waits for the session being built and then
+        # pops THAT one. Outside it (review find, 2026-09-10), a kill arriving while _ensure was
+        # constructing popped nothing, and _ensure then inserted and started a CLI for a reg the flip
+        # had just marked dead: a running claude process with no tab, no listing and nothing left that
+        # could stop it (a cron-armed session the producer revives at the instant of a Kill). Lock
+        # order is _ensure's own, _lock → _reg_lock; shutdown runs outside the lock, conserve_close's shape.
+        with self._lock:
+            with self._reg_lock:                   # the alive flip must not lose to an RMW snapshot
+                reg = self._reg_for_flip(sid)
+                if reg:
+                    reg["alive"] = False
+                    write_reg(self.state_dir, sid, reg)
+            s = self.sessions.pop(sid, None)
         if s:
             s.shutdown()
         self._poke()
@@ -12034,6 +12816,9 @@ class SdkBackend:
         # queued in the CLI that started streaming after the previous turn's Result). Only on the
         # transition, so it never spams the log. This is what makes the signal self-heal without a count.
         if not atom.get("_echo_text") and not atom.get("command") and not atom.get("isApiError") \
+                and getattr(sess, "_first_out_t", None) is None and getattr(sess, "inflight", 0):
+            sess._first_out_t = time.time()   # the turn's FIRST streamed work atom — turns.jsonl's firstOutT (T304)
+        if not atom.get("_echo_text") and not atom.get("command") and not atom.get("isApiError") \
                 and not sess._cli_working:
             sess._mark("working")   # (an isApiError settle is the turn DYING, not producing — never 'working')
         self._wake_push()
@@ -12496,11 +13281,14 @@ class SdkBackend:
             attempts = self._heal_attempts.get(sid, 0)
             self._heal_attempts[sid] = attempts + 1
         if attempts >= 1:
-            self._log("session %s: claude process died mid-turn AGAIN before completing a turn — "
-                      "crash loop; NOT resuming again, turn left cut for the next kernel restart"
-                      % sess.name)
+            problem_row(self.state_dir,
+                        "session %s: claude process died mid-turn AGAIN before completing a turn — "
+                        "crash loop; NOT resuming again, turn left cut for the next kernel restart" % sess.name,
+                        "crash.loop", log=self._log, sid=sid, name=sess.name, attempt=attempts + 1)
             return
-        self._log("session %s: claude process died mid-turn — resuming with history intact" % sess.name)
+        problem_row(self.state_dir,
+                    "session %s: claude process died mid-turn — resuming with history intact" % sess.name,
+                    "crash.heal", log=self._log, sid=sid, name=sess.name, attempt=attempts + 1)
         try:
             with self._reg_lock:
                 reg = read_reg(self.state_dir, sid) or {"sid": sid}

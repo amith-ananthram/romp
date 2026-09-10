@@ -47,8 +47,11 @@ test("the chat pane names the peer: box in identity colour, pill with the colour
   assert.match(chip, /nm\.style\.color = chipPeers\[0\]\.color\.bg/);
   assert.ok(!/nm\.textContent = .*host/.test(chip), "no one-string concatenation of host and name");
   assert.match(chip, /chipPeers\.length \+ " peers"/, "several peers keep the one-line rule as a count");
-  assert.match(CSS, /\.chip-peer-name \{ background: rgba\(0, 0, 0, 0\.85\); color: #fff; border-radius: 7px;/,
+  // the backing is ONE rule shared with the transcript's mention chip since 2026-09-10 (the user, who wanted a
+  // typed @name to wear this chip's look); the peer name keeps its own #fff default beside it
+  assert.match(CSS, /^\.chip-peer-name, \.mention-chip \{ background: rgba\(0, 0, 0, 0\.85\); border-radius: 7px; padding: 0 5px; \}/m,
     "the ~85% black backing — any colour reads on it, the chip hue still glows around it");
+  assert.match(CSS, /^\.chip-peer-name \{ color: #fff;/m, "the no-identity name's default stays the peer chip's own");
   assert.ok(!/\.chip-peer-dot/.test(CSS), "the dot's CSS goes with it");
 });
 

@@ -178,7 +178,7 @@ class RailRendering(unittest.TestCase):
         # 2026-08-08, evening); each window then wears its ONE display name LEFT of its dollars+tokens
         # (the user 2026-08-09 — same words, font and position as the account bars); the spend bar
         # graphs are gone everywhere (2026-08-08, morning: they told you nothing)
-        self.assertIn("'<div class=ru-name>API</div>'", self.js)
+        self.assertIn("'<div class=ru-name>API</div><span class=ah-slot></span>'", self.js)   # T301: the API-health dot's slot follows the label
         self.assertNotIn("_tail", self.js)
         # pay-per-token wears calendar-ish windows (the user 2026-08-13): 1 day + 1 month on the cell
         # (1 week rides the hover); day||fiveHour keeps an older remote's spend visible (version skew)

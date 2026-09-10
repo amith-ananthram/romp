@@ -266,3 +266,30 @@ jobs:
         env:
           ROMP_UI_BENCH_REQUIRE: "1"
         run: node --test tests/ui-bench.test.mjs
+      - uses: actions/setup-python@v5
+        # For the served-page tests below: the image's python3 would do, but its pip refuses to install
+        # into the system interpreter, and pytest is not on the image.
+        with:
+          python-version: '3.12'
+      - name: Browser-backed served-page tests (pytest)
+        # tests/test_*_browser.py and tests/test_*_served.py boot a hermetic kernel and drive the real
+        # dashboard pages in the headless Chromium installed above; on the Python matrix runners (no
+        # node deps, no browser) they skip, and say why, so a served-page regression never turned CI
+        # red (the deep-link landing pin, 2026-09-10: red on main, CI green). This is the one job that
+        # has the browser and the built dist, so they run HERE, one pytest process, with
+        # ROMP_SERVED_TESTS_REQUIRE=1 turning any skip in those files into a failure that carries the
+        # skip's reason (tests/conftest.py; the same stance as ROMP_UI_BENCH_REQUIRE above): a runner
+        # without the browser, the deps or a serving kernel turns the job red rather than green with
+        # the coverage gone. cryptography is what the push tests' kernel needs, as in the Python jobs.
+        # ROMP_SERVED_TESTS_ENGINES names the one engine this job installs: the pane-hiding test drives
+        # Chromium, Firefox and WebKit, and its legs for engines a runner declares it does not have skip
+        # as "optional", which the switch leaves alone (WebKit's system libraries would need apt, which
+        # this step does not run; see the install step above). The matrix jobs are unchanged: still no
+        # browser, still skipping these.
+        working-directory: ${{ github.workspace }}
+        env:
+          ROMP_SERVED_TESTS_REQUIRE: "1"
+          ROMP_SERVED_TESTS_ENGINES: chromium
+        run: |
+          python -m pip install --upgrade pip pytest pytest-timeout cryptography
+          python -m pytest tests/test_*_browser.py tests/test_*_served.py -q -rs -p no:cacheprovider --durations=10 --timeout=600 --timeout-method=thread

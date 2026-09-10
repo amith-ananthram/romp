@@ -1049,8 +1049,12 @@ def local_agents(threads=False):
     `threads` (the user 2026-08-22): also include COMMENT-THREAD sessions — real forked sessions the
     kernel hides from tabs/lanes/cards until promotion. Opt-in per consumer so the default listing and
     every other reader stay exactly as they were: self-identity, recipient resolution, and the agents
-    listing pass True (a thread mails its parent under its OWN name and is addressable for replies);
-    everything else never sees them."""
+    listing pass True (a thread mails its parent under its OWN name and is addressable for replies),
+    and so does every reader that judges a MAILBOX live or dead — the heartbeat (2026-09-06), the
+    orphan sweep, the stuck-mail warning, the revive wake and the retry pass (2026-09-10: those four
+    read the default listing, so a live thread's box was dead to them — the sweep destroyed a parent's
+    reply to its own thread after ORPHAN_GRACE and told the sender the thread had exited, and the
+    retry and wake never delivered it). Readers that only count or show presence keep the default."""
     return _agent_rows(_kernel_sessions(threads=threads))
 
 
@@ -1647,7 +1651,7 @@ def _sweep_orphans():
     the grace still gets its mail. Run periodically by the bus monitor."""
     if not MAILROOT.is_dir():
         return
-    live = local_agents()
+    live = local_agents(threads=True)                 # a comment thread's box is live while its row is (2026-09-10)
     if not live:                                       # tmux hiccup, not "everyone died" — don't mass-bounce
         return
     live_ids = {a["id"] for a in live}
@@ -1741,7 +1745,7 @@ def _warn_stuck_mail():
     messages are pruned so WARNED stays bounded to currently-pending mail."""
     if not MAILROOT.is_dir():
         return
-    live = local_agents()
+    live = local_agents(threads=True)                 # thread rows too: an idle thread can be stuck like any session
     if not live:                                       # kernel hiccup, not "everyone's stuck" — don't warn
         return
     by_id = {a["id"]: a for a in live}
@@ -1874,11 +1878,14 @@ def _bounce_oversize(sid, m):
     a sender through _bounce_apply: the message leaves the recipient's box (the drain already claimed it)
     and a bus-authored note names the size and the limit, without echoing the body, which would make
     the note itself oversize. A message with no local sender to tell (a bus-authored note; relayed mail,
-    whose sender lives on another host and was acked at relay time) stays in new/ for the turn-end drain
-    and check_inbox, which have no size cap, and is named in the log once."""
+    whose sender lives on another host and was acked at relay time; a `--from <label>` script, whose
+    `ext:<label>` id names no mailbox: _safe_id has no ':', so deliver() to it raises ValueError, which
+    before 2026-09-10 escaped into _push's catch-all and stranded in cur/ every message the drain had
+    claimed) stays in new/ for the turn-end drain and check_inbox, which have no size cap, and is named
+    in the log once."""
     n = _deliver_body_bytes(sid, [m])
     mid, frm_id = m.get("id", ""), m.get("from_id", "")
-    if frm_id and not m.get("from_host") and frm_id != sid:
+    if frm_id and not m.get("from_host") and frm_id != sid and _safe_id(frm_id):
         to = _name_for_id(sid) or sid
         why = ("your message is %d bytes as delivered, over the %d-byte limit for delivery into a session"
                % (n, _PUSH_MAX_BYTES))
@@ -1994,7 +2001,7 @@ def _wake_when_ready(sid):
             newd = MAILROOT / sid / "new"
             if not (newd.is_dir() and any(newd.iterdir())):
                 return                                        # nothing pending (or already delivered)
-            agent = next((a for a in local_agents() if a["id"] == sid), None)
+            agent = next((a for a in local_agents(threads=True) if a["id"] == sid), None)   # a reviving thread is a live row
             if not agent:
                 return                                        # session died during load
             if _push(sid, agent):                             # injected (drain + submit → forces a turn) → done
@@ -2093,6 +2100,22 @@ class _RefusedBody(Exception):
     def __init__(self, status, error):
         super().__init__(error)
         self.status, self.error = status, error
+
+
+def _parked_note(phost, frm_id):
+    """The /send answer for a message parked for an unreachable host, read back by the sender from the
+    CLI or the tool. A session sender hears the two ways the park ends: delivery on reconnect, or the
+    peer's refusal returned to its mailbox as a note (_bounce_apply). A `--from <label>` sender mails
+    under `ext:<label>` (cli_send), an id _safe_id refuses, so it has no mailbox for that note: the
+    bounced row is written to messages.jsonl as for any sender, but /sent refuses the same id, so the
+    bus log is the only record of the refusal that sender can read, and the single text used to
+    promise it too that a refusal "bounces back to you" (2026-09-10). The session sender's text is
+    unchanged."""
+    if _safe_id(frm_id):
+        return "parked for %s (unreachable) — delivers on reconnect, or bounces back to you" % phost
+    return ("parked for %s (unreachable) — delivers on reconnect; if %s refuses it, the only record of the "
+            "refusal you can read is the mail service's log (%s): a --from sender has no mailbox for a note "
+            "to return to" % (phost, phost, LOG))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2304,7 +2327,8 @@ class Handler(BaseHTTPRequestHandler):
             if res["kind"] == "relay":
                 # Peer-bus relay: the name lives on a peer host → park in its outbox; the exchange
                 # (or the next reconnect) carries it, and a definitive refusal bounces back to the
-                # sender.
+                # sender as a note — to a session sender; a --from sender has no mailbox, so its
+                # refusal is recorded only (_bounce_apply, _parked_note).
                 phost, hit = res["host"], res["agent"]
                 # `tracked` deliberately does NOT ride the relay: the primary view lives on the
                 # SENDER's kernel, which the recipient's courier can never reach across hosts — a
@@ -2364,8 +2388,7 @@ class Handler(BaseHTTPRequestHandler):
                 #                                             re-dial the host's tunnel now instead of
                 #                                             waiting out its backoff (the user 2026-08-16)
                 return self._send({"ok": True, "id": mid, "parked": phost,
-                                   "note": ("parked for %s (unreachable) — delivers on reconnect, "
-                                            "or bounces back to you" % phost) + tnote})
+                                   "note": _parked_note(phost, frm_id) + tnote})
             a0 = res["agent"]
             try:
                 mid = deliver(a0["id"], frm, frm_id, body, kind=kind, tracked=tracked)
@@ -2556,7 +2579,7 @@ def _retry_pending():
             _mark_pending(sid)                 # stale marker -> clear it
             continue
         if live is None:
-            live = {a["id"]: a for a in local_agents()}
+            live = {a["id"]: a for a in local_agents(threads=True)}   # a thread's marker retries like any live session's
         if sid in live:
             try:
                 _push(sid, live[sid])          # re-attempt; the kernel defers again if still unsafe
@@ -3519,12 +3542,23 @@ def _bounce_apply(host, b):
     and the attempt repeats (a repeated terminal row is harmless — _sent_receipts keys by id).
 
     Any OTHER failure of the note is bounded the same way (review find, 2026-09-08): a mailbox that
-    cannot be made, a temp that cannot be written (ENOSPC lands here, before the row), an unsafe
-    sender id: each used to escape this function and abort the WHOLE exchange, and with the record
-    now kept until it is accounted the peer re-bounced it next exchange and the abort recurred
-    forever, every other relay, ack and receipt in that exchange lost with it. The record stays, the
-    exchange goes on, the next one retries the note; said once per message, on stderr and as a bell
-    row, since a fault that recurs on every exchange is one the user should see."""
+    cannot be made, a temp that cannot be written (ENOSPC lands here, before the row): each used to
+    escape this function and abort the WHOLE exchange, and with the record now kept until it is
+    accounted the peer re-bounced it next exchange and the abort recurred forever, every other
+    relay, ack and receipt in that exchange lost with it. The record stays, the exchange goes on,
+    the next one retries the note; said once per message, on stderr and as a bell row, since a
+    fault that recurs on every exchange is one the user should see.
+
+    A sender id that is NO mailbox gets no note and holds nothing up (2026-09-10): `romp mail send
+    --from <label>` mails under the synthetic id `ext:<label>` (cli_send), which _safe_id refuses
+    (no ':'), so deliver() to it raises ValueError — not a fault that clears next exchange but the
+    shape of the id. Counted as a fault above, the record stayed parked, the next exchange
+    re-relayed it, the peer re-bounced it, and every round wrote another `bounced` row and cost the
+    peer a listing, for as long as the two buses talked. The record retires on the bounced row, and
+    the log line is the one place a person can see the refusal: the row stands in messages.jsonl,
+    but no reader reaches it for such a sender (/sent refuses an id _safe_id refuses, cli_sent and
+    cli_recall read the session's own id, the dashboard's mail view needs a local lane). Whether
+    /sent should answer ext: ids is a separate decision, not taken here."""
     mid = (b or {}).get("mid") or ""
     msg = outbox_get(host, mid)
     if not msg:
@@ -3535,7 +3569,12 @@ def _bounce_apply(host, b):
                                           "to": msg.get("to") or "?", "host": host, "why": why}):
         _log("bounce for %s from %s: the terminal row did not land — the record stays parked" % (mid, host))
         return
-    if msg.get("frm_id"):
+    if msg.get("frm_id") and not _safe_id(msg["frm_id"]):
+        _log("bounce for %s from %s: no return note — the sender %s mailed under the id %s, which is no "
+             "mailbox (a --from label mails this way); the bounced row stands in the ledger and this line "
+             "is the one record of the refusal a person can read"
+             % (mid, host, msg.get("frm") or "?", str(msg["frm_id"])[:40]))
+    elif msg.get("frm_id"):
         note = "undeliverable to '%s' on %s: %s" % (msg.get("to") or "?", host, why)
         if not (b or {}).get("omitBody"):   # a SIZE bounce (_budget_relays) names the problem instead of repeating it
             note += "\n\n(your message follows)\n%s" % (msg.get("body") or "")
@@ -3669,9 +3708,21 @@ def _quarantine_put(origin, m, to_id, via="", wire_id=None):
         tmp = QUARANTINE / (mid + ".tmp")
         tmp.write_text(json.dumps(rec))
         tmp.rename(QUARANTINE / (mid + ".json"))      # atomic publish (the kernel may be reading the dir)
+        _refusal_over("quarantine")                   # a hold landed: the next refusal here is a new episode
         _log("quarantine: held %s from %s -> %s (directed)" % (mid, origin, rec["to"]))
         return True
-    except OSError:
+    except OSError as e:
+        # No card says this (the kernel only reads the dir), so the log says it on every refusal, and
+        # the USER hears it once per episode as a bell row, the way deliver() says a refused publish:
+        # the directed arm answers 'retry', so the sender re-relays the message every exchange while
+        # its receipt reads carried, and a store that stays unwritable would otherwise be a lasting
+        # fault with no surface anyone watches. Keyed on the one store; the next hold that lands re-arms it.
+        text = "quarantine %s from %s: the hold could not be written (%s) — nothing held" % (mid, origin, e)
+        if _REFUSAL_SAID.get("quarantine"):
+            _log(text)
+        else:
+            _REFUSAL_SAID["quarantine"] = True
+            _refused_notice(text + "; the sender holds the text and re-relays until the store can be written")
         return False
 
 def quarantine_list():
@@ -3865,9 +3916,19 @@ def _relay_in(host, m, token_proven=False):
                 _log("relay %s from %s: local delivery refused (%s) — the sender re-relays" % (mid, host, e))
                 return "retry", None
         elif trust == "directed":
-            _quarantine_put(origin, m, match[0]["id"], via=host, wire_id=to_id)   # HELD for human approve/deny/edit;
-            #                                                                        never injects; remembers whether
-            #                                                                        the wire chose a sid (approve is id-strict then)
+            # HELD for human approve/deny/edit; never injects; remembers whether the wire chose a sid
+            # (approve is id-strict then). The hold is a file named by the mid, so an id that cannot
+            # name one is refused for good: 'retry' would have the sender re-relay it every exchange.
+            if not _safe_id(mid):
+                return "bounce", {"mid": mid, "why": "the message id is malformed; it cannot be held for approval"}
+            if not _quarantine_put(origin, m, match[0]["id"], via=host, wire_id=to_id):
+                # the hold did not land (said by _quarantine_put, with the OSError's cause).
+                # Acking here told the sender 'delivered' for mail nothing holds, and marking the mid
+                # seen deduped its re-relay away: lost on both ends, no record. Silence instead, as
+                # the trusted arm's refused delivery: the sender's outbox keeps it parked and
+                # re-relays it next exchange, and the hold lands once the store writes again.
+                _log("relay %s from %s: the hold could not be written — the sender re-relays" % (mid, host))
+                return "retry", None
         # else isolated → drop: ack so the sender stops resending, but deliver nothing (no communication).
         # An isolated host normally never peers at all (the kernel forces its notify down), so this is a
         # defensive backstop for the checkin-peer path where the mobile dials our /peer-exchange.

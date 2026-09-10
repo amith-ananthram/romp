@@ -95,16 +95,19 @@ test("the popover keeps the chat renderer but sheds its transcript-coupled hover
     "no rail time-markers on gutterless popover turns");
 });
 
-test("an unread thread wears the needs-you RING on its mark and a shouting rail tick", () => {
+test("an unread thread wears ONE outline box around its whole passage and a shouting rail tick", () => {
   // the user 2026-08-23: the 45% unread tint alone was too subtle — a thread that replied while the
   // box was closed needs a visible element. That element was a yellow corner dot on the run's last
-  // segment until 2026-09-08, when the user asked for the tab strip's needs-you idiom instead: the
-  // SAME dashed ring a tab wears while its session waits on you (.tab.tab-awaiting, --st-awaiting-bg),
-  // scaled to a text run — one idiom for "this waits on you" across the surface. The dot pins below
-  // were rewritten deliberately for that; the ring's pins live in comment-mark.test.ts. The rail tick
-  // still grows and double-rings. Both clear with the unread flag on open.
-  assert.doesNotMatch(CSS, /mark\.cmt-hl\.unread\.hl-last::after/, "the corner dot is gone — the ring replaced it");
-  assert.match(CSS, /mark\.cmt-hl\.unread \{ outline: 1\.5px dashed var\(--st-awaiting-bg\); outline-offset: 1px; \}/);
+  // segment until 2026-09-08 (then the tab strip's dashed needs-you ring on the mark), and since
+  // 2026-09-10 it is ONE solid outline in the notch's yellow around the WHOLE highlighted area: the
+  // ring was an outline on the inline mark and painted once per line fragment, a dashed box per line.
+  // The box is a positioned child of the turn that render.ts measures from the marks (its pins live in
+  // comment-outline.test.ts). The rail tick still grows and double-rings. Both clear with the unread
+  // flag on open.
+  assert.doesNotMatch(CSS, /mark\.cmt-hl\.unread\.hl-last::after/, "the corner dot is gone");
+  assert.doesNotMatch(CSS, /mark\.cmt-hl\.unread \{ outline/, "no outline on the mark itself: it would paint per line fragment");
+  assert.match(CSS, /\.cmt-outline \{ position: absolute; pointer-events: none;[^}]*outline: 1\.5px solid var\(--cmt-hl-outline\);/s, "one box, the notch's ink");
+  assert.match(UI, /function paintCommentOutlines\(sid: string\): void \{/);
   assert.doesNotMatch(CSS, /mark\.cmt-hl \{[^}]*position: relative;/s, "nothing left for the mark to anchor");
   assert.match(CSS, /\.cmt-tick\.unread \{ width: 10px; height: 6px; right: 0; opacity: 1;/);
   // the clearing story is the existing machinery, untouched: optimistic on open + kernel watermark
@@ -803,4 +806,25 @@ test("a create the send has not heard back on is not re-posted, and one past the
   assert.deepEqual(lift.posted, [], "the retry waits for a transient nack, and gives up past the bound");
   assert.deepEqual(lift.dropped, ["a2"]);
   assert.equal(lift.toasts.length, 1);
+});
+
+// ── a thread that became its own session (the user 2026-09-10, with a screenshot) ─────────────────
+
+test("a promoted thread's popup is the quote, one line, and Open the session in the shared button dress", () => {
+  // the kernel ships a promoted thread with no messages or events, so the popup renders no list for it:
+  // an empty list only grew into the box's fixed height (the void under the quote)
+  assert.match(UI, /if \(th && th\.status !== "promoted"\) \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*const list = el\("div", "cmt-msgs"\);/);
+  const start = UI.indexOf("} else if (th) {\n    // a thread that became its own session");
+  assert.ok(start > 0, "the promoted branch of renderCommentPopover");
+  const branch = UI.slice(start, UI.indexOf("document.body.appendChild(pop);", start));
+  assert.match(branch, /const open = el\("button", "cmt-act"\) as HTMLButtonElement;/,
+               "the shared .cmt-act word-button, never the composer's send-glyph square");
+  assert.doesNotMatch(branch, /"cmt-send"/);
+  assert.match(branch, /open\.textContent = "Open the session";/);
+  assert.match(branch, /open\.dataset\.act = "cmtopensession";/);
+  assert.match(branch, /const row = el\("div", "cmt-actions"\);[\s\S]*row\.appendChild\(open\);\s*\n\s*pop\.appendChild\(row\);/, "inside .cmt-actions");
+  assert.match(branch, /const note = el\("div", "cmt-note"\);\s*\n\s*note\.textContent = "The discussion continues there\.";/,
+               "one line saying where the talk went");
+  // and the quote never flexes in this state, whatever size the box is (the .sized rule hands it the free room otherwise)
+  assert.match(CSS, /\.cmt-pop\.sized\[data-status="promoted"\] \.cmt-quote \{ flex: 0 0 auto; min-height: 0; \}/);
 });

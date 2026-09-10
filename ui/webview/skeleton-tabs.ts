@@ -6,8 +6,9 @@
 // module owns the client's copy of that set — which tabs are resting, what the kernel last said about each,
 // and which one to fetch next in idle — as a pure, DOM-free state machine (the prebuild.ts / tab-meta.ts
 // pattern: executable in node, so the policy is pinned by skeleton-tabs.test.ts while render.ts only wires it).
-// A redial declares itself only once the bundle's ready has left on a socket; before that, or with the ready
-// still queued for the open, the shim dials as a fresh page and the kernel sends everything whole (2026-09-10).
+// A redial declares itself only once the kernel's caps frame has answered the bundle's ready; before that, with
+// the ready still queued for the open, or after a socket that died before its caps frame came back, the shim dials
+// as a fresh page and the kernel sends everything whole (2026-09-10).
 //
 // The page HELD every session before the outage, and render.ts deliberately keeps those `sessions` entries
 // (the eventual full then takes upsert's append path, so the DOM and the reader's scroll survive). What a

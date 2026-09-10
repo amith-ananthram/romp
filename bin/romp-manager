@@ -266,6 +266,31 @@ function auditSigterm(spec, pid, reason, trigger) {
 // kernel's row names the same cause.
 function stopTrigger() { return downMarkerHeld() ? 'cli-down' : 'stop'; }
 
+// T304: the quiet window's OWN row in restart-audit.jsonl, written when the parked refresh APPLIES, so the
+// wait from parked to restart and the fifteen-minute backstop's firing are machine-readable (until now they
+// were the `applying deferred refresh … waited Ns` log line alone). A mechanism note like manager-sigterm,
+// never a request: the kernel's reason walk lists `quiet-window` in _NO_RESTART_ACTIONS and passes it over;
+// the restart it releases writes its own manager-sigterm note. `since` and `t` are epoch seconds; `reason`
+// is quietGate's verdict verbatim ('quiet', 'backstop cap', or the unreachable-kernel sentence), `backstop`
+// the one bit a reader wants most; the drain counts are the park's evidence (queueQuietRestart records them).
+function quietWindowRow(park, g, now) {
+  const p = park || {}; const since = Number(p.since) || now;
+  return { t: Math.floor(now / 1000), action: 'quiet-window', since: Math.floor(since / 1000),
+           waitedS: Math.max(0, Math.round((now - since) / 1000)), reason: String((g && g.reason) || ''),
+           backstop: !!(g && g.reason === 'backstop cap'), coalesced: p.count || 1, mode: String(p.mode || 'all'),
+           lastInflight: p.lastInflight === undefined ? null : p.lastInflight, misses: p.misses || 0,
+           drainRefusedCount: p.drainRefusedCount || 0, drainArmedCount: p.drainArmedCount || 0,
+           drainRefusedAfterArm: p.drainRefusedAfterArm || 0 };
+}
+function auditQuietWindow(park, g, now) {
+  const row = quietWindowRow(park, g, now || Date.now());
+  try {
+    fs.mkdirSync(STATE_ROOT, { recursive: true });
+    fs.appendFileSync(path.join(STATE_ROOT, 'restart-audit.jsonl'), JSON.stringify(row) + '\n');
+  } catch (e) { /* a lost note, not a lost restart */ }
+  return row;
+}
+
 // The exit handler's verdict (pure, exported for tests): what to log and whether to respawn. A
 // kernel we asked to stop is reaped; one we SIGTERMed for a restart keeps the plain respawn line;
 // one that exited with NEITHER on record (a signal from elsewhere, or a crash) says so, because
@@ -653,6 +678,7 @@ function queueQuietRestart(mode) {
           : p.drainRefusedAfterArm > 0
             ? ` — the drain hold armed and was then LOST for this park (refused ${p.drainRefusedAfterArm} time(s) after arming, ${p.drainRefusedCount - p.drainRefusedAfterArm} before), so turns started after the loss may be cut`
             : ` — the drain hold was refused ${p.drainRefusedCount} time(s) before arming for this park, so turns started before it armed may be cut`;
+      auditQuietWindow(p, g, Date.now());   // the row before the restart it releases (T304: the wait, measured)
       log(`applying deferred refresh — ${g.reason}${cause} (${p.count} request(s) coalesced, waited ${Math.round((Date.now() - p.since) / 1000)}s)`);
       if (p.mode === 'all') restartAllOrSelf(); else restartKernel(p.mode);
     },
@@ -1041,6 +1067,7 @@ module.exports = { restartGate, quietGate, quietTick, loadSpecs, specEnv, fileSt
                    placementFromCgroup, tmuxServerPlacement, bareEnsuredLine, TMUX_SERVER_PID_ARGV,
                    withoutOpCredentials, retiredCredentialNames, retiredCredentialMessage, exitLine, auditSigterm,
                    ensureDecision, downMarkerHeld, clearDownMarker, DOWN_MARKER,
+                   quietWindowRow, auditQuietWindow,
                    // the SIGTERM wiring, for tests that seed `kernels` with a stand-in child or point
                    // ROMP_SERVE_BIN at a stand-in launcher
                    restartKernel, restartAll, restartAllOrSelf, stopKernel, shutdownAll, stopTrigger, spawnKernel, kernels };

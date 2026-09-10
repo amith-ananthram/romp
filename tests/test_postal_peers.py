@@ -1243,12 +1243,18 @@ class OneBadRelayNeverAbortsTheExchange(_LoudBus):
     until it is accounted, a deliver() exception other than a refusal escaped the handler and aborted
     the WHOLE exchange; the peer re-bounced the still-parked record next exchange, so the abort
     recurred forever and every other relay, ack and receipt in those exchanges was lost with it.
-    Mutant: the generic except removed (RuntimeError escapes peer_exchange_handle)."""
+    Mutant: the generic except removed (RuntimeError escapes peer_exchange_handle).
 
-    def _exchange(self):
+    And a sender with no mailbox gets no note (2026-09-10): a `--from <label>` script mails under the
+    synthetic id `ext:<label>`, which _safe_id refuses, so the note's deliver() raises ValueError — the
+    shape of the id, not a fault the next exchange clears. Counted as a fault, the record stayed parked
+    and the peer re-bounced it every exchange, a `bounced` row per round. Mutant: the _safe_id gate on
+    the sender id removed."""
+
+    def _exchange(self, bounce="n1"):
         return pm.peer_exchange_handle({"host": "srv", "proto": pm.PEER_PROTO, "epoch": 1, "busId": "b" * 32,
                                         "presence": [], "holds": [], "relays": [], "acks": ["n2"],
-                                        "bounces": [{"mid": "n1", "why": "no live session named 'beta'"}],
+                                        "bounces": [{"mid": bounce, "why": "no live session named 'beta'"}],
                                         "reads": [], "readAcks": []})
 
     def test_a_note_that_raises_keeps_the_record_says_once_and_the_exchange_completes(self):
@@ -1277,6 +1283,23 @@ class OneBadRelayNeverAbortsTheExchange(_LoudBus):
         self._exchange()                                               # the note lands
         self.assertIsNone(pm.outbox_get("srv", "n1"), "and the record leaves once the note is delivered")
         self.assertEqual(len(pm.read_box(_SND, consume=False)), 1)
+
+    def test_a_bounce_to_a_from_label_sender_retires_on_its_row_instead_of_re_relaying(self):
+        pm.outbox_put("srv", {"mid": "e1", "to": "beta", "frm": "cron", "frm_id": "ext:cron",
+                              "body": "nightly report attached", "kind": "", "t": 1})
+        payload, status = self._exchange(bounce="e1")                  # the peer refuses it: no live 'beta'
+        self.assertEqual(status, 200, "the exchange completes")
+        self.assertIsNone(pm.outbox_get("srv", "e1"),
+                          "there is no mailbox to note, so the record retires on its bounced row at once")
+        self._exchange(bounce="e1")                                    # the peer bounces the same mid again
+        self.assertEqual([r["ev"] for r in self._rows() if r.get("id") == "e1"], ["bounced"],
+                         "one terminal row for the message, not one per exchange")
+        said = [m for m in self.logged if "e1" in m and "no mailbox" in m]
+        self.assertEqual(len(said), 1, "said once, in the log")
+        self.assertIn("cron", said[0], "the line names the sender's label")
+        self.assertIn("ext:cron", said[0], "and the id that is no mailbox")
+        self.assertEqual(self._notices(), [], "not a fault: nothing to fix, so no bell row")
+        self.assertFalse((pm.MAILROOT / "ext:cron").exists(), "and no mailbox was made for the label")
 
 
 class NewFalseReturnsAreHonoured(_LoudBus):

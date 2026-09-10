@@ -50,8 +50,10 @@ test("the hand-off happens at the buffer line, with the crossed marker hidden", 
 
 test("scroll drives it (passive, rAF-coalesced) and a resize re-measures it", () => {
   assert.match(SRC, /function scheduleRailSticky\(\): void \{[^}]*railStickyPending[^}]*requestAnimationFrame/s);
-  assert.match(SRC, /addEventListener\("scroll", scheduleRailSticky, \{ passive: true \}\)/,
-    "passive: it measures, never blocks the scroll it annotates");
+  // passive: it measures, never blocks the scroll it annotates; CAPTURE (T310): a scroll inside the pane — a notice body
+  // at its max height, a wide formula — does not bubble, and the unread comment boxes on this scheduler must follow it
+  assert.match(SRC, /addEventListener\("scroll", scheduleRailSticky, \{ passive: true, capture: true \}\)/,
+    "passive: it measures, never blocks the scroll it annotates; capture: inner scrolls reach it too");
   assert.match(SRC, /window\.addEventListener\("resize", scheduleRailSticky\)/);
   // one scheduler, not two: with the spacing pass gone there is nothing to re-run on render but the sticky
   assert.doesNotMatch(SRC, /scheduleRestamp/, "the old restamp scheduler is gone");

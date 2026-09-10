@@ -131,9 +131,12 @@ def _heal(name, since0, now):
 
 def sweep():
     """One pass. Sets ⚪ on any READY romp session quiet > STALE_AFTER_SECS, only
-    where it differs (no needless churn). Returns False when there are NO romp
-    sessions, so the daemon loop can exit; True otherwise (incl. tmux hiccups —
-    don't exit on a transient error)."""
+    where it differs (no needless churn). Returns the pair `(alive, compacting)`
+    the daemon loop unpacks: alive is False only when there are NO romp sessions,
+    so the loop can exit; compacting picks the fast cadence while a session
+    compacts. A tmux hiccup (list-sessions past its timeout, a spawn that raises)
+    returns (True, False): the daemon keeps its normal cadence and retries on the
+    next sweep instead of dying on a transient error."""
     now = int(time.time())
     try:
         p = subprocess.run(
@@ -141,7 +144,7 @@ def sweep():
              "#{@romp}|#{session_name}|#{@claude-state}|#{@claude-state-since}|#{@romp-emoji}|#{pane_in_mode}"],
             capture_output=True, text=True, timeout=5)
     except Exception:
-        return True
+        return True, False       # alive, not compacting: the caller unpacks a pair
     any_romp = changed = compacting = False
     for line in (p.stdout or "").splitlines():
         f = line.split("|")

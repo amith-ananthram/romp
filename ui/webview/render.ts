@@ -3009,7 +3009,7 @@ let railStickyPending = false;
 function scheduleRailSticky(): void {
   if (railStickyPending) return;
   railStickyPending = true;
-  requestAnimationFrame(() => { railStickyPending = false; paintRailSticky(); paintScrollMarks(); updateCommentRail(); });
+  requestAnimationFrame(() => { railStickyPending = false; paintRailSticky(); paintScrollMarks(); updateCommentRail(); if (activeId && hasUnreadOpenThread(activeId)) paintCommentOutlines(activeId); });
 }
 
 function renderEventInner(ev: ChatEvent): HTMLElement {
@@ -4844,6 +4844,12 @@ function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>)
   const kind = kindLabel(intent ? intent.cls : null);
   let meta: HTMLElement | undefined;
   if (kind && intent) { meta = el("span", "postal-kind postal-kind-" + intent.cls); meta.textContent = kind; }
+  // the delivery state, read once here: it decides the meta below and the icon + dress after the card is built
+  const delivery = deliveryOf(ev);
+  // no recognised kind (a legacy row with neither a declared kind nor a leading token) but a delivery state to show:
+  // an EMPTY meta slot, so the icon always rides in the meta (T313 review find) — one geometry for every card, and
+  // the CSS needs no second path for an icon appended straight to the head
+  if (!meta && delivery) meta = el("span", "postal-meta-empty");
   // Gist: ALWAYS a one-line summary, the incoming caption, else the first line of the message CLIPPED (gist.ts
   // postalHead), with the full message one click deeper whenever the gist does not carry all of it (the user
   // 2026-06-16; T294, the user 2026-09-10, whose one-paragraph sent card had no fold at all). KEYED (the user
@@ -4861,9 +4867,11 @@ function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>)
   // relay, or parked for an unreachable host) — the SAME provisional dress the user's own pending send wears
   // (the queued bubble's class and tokens, the T302 amendment): solid again once the receipt says delivered,
   // relayed or read; bounced keeps its red mark. Incoming: only a parked clock (it waited while you were offline).
-  const delivery = deliveryOf(ev);
   if (delivery) {
-    turn.querySelector(".notice-head")?.appendChild(deliveryIcon(delivery));
+    // the icon rides INSIDE the meta slot, after the kind word (T313): the meta grows to the head's right edge, so the
+    // icon still sits at that edge, and on a phone-width head the kind word and the icon wrap as ONE unit (an icon
+    // alone on a line of its own was the alternative); the meta always exists when there is an icon (above)
+    turn.querySelector(".notice-meta")?.appendChild(deliveryIcon(delivery));
     if (ev.direction === "out" && (delivery.state === "sent" || delivery.state === "parked")) {
       turn.querySelector(".notice")?.classList.add("queued-bubble");
       turn.classList.add("postal-provisional");   // the bubble's border + padding move the head line: the rail dot follows
@@ -8378,7 +8386,7 @@ function applyCommentMarks(sid: string): void {
   // the rail cue clears first (idempotent re-apply): a thread viewed, resolved, or removed must
   // drop its turn's tint on this very pass, not linger until the next anchor match
   for (const t of Array.from(v.el.querySelectorAll(".turn.cmt-rail-unread"))) t.classList.remove("cmt-rail-unread");
-  if (!threads.length) { if (sid === activeId) updateReplyChips(); return; }   // no threads → no chips (the last one resolved/deleted)
+  if (!threads.length) { paintCommentOutlines(sid); if (sid === activeId) updateReplyChips(); return; }   // no threads → no boxes, no chips (the last one resolved/deleted)
   for (const [uuid, list] of threadsByAnchor(threads)) {
     const turn = v.el.querySelector(`.turn[data-uuid="${cssEscape(uuid)}"]`) as HTMLElement | null;
     if (!turn) continue;                       // windowed out — the mark returns when the turn does
@@ -8389,9 +8397,82 @@ function applyCommentMarks(sid: string): void {
     // openCommentPopover drops the unread flag and re-runs this pass.
     turn.classList.toggle("cmt-rail-unread", list.some((t) => !!t.unread && t.status === "open"));
   }
+  paintCommentOutlines(sid);                   // the unread boxes follow the marks this pass just placed (or unwrapped)
   // the reply chips MEASURE the marks (above/below the viewport), so they recount after this pass has the
   // highlights back in the DOM — this is the comments frame's and every transcript rebuild's hook for them
   if (sid === activeId) updateReplyChips();
+}
+
+/** ONE outline around the WHOLE highlighted passage of an unread open thread (the user 2026-09-10), in the scroll
+ *  notch's yellow (var(--cmt-hl)) — in place of the dashed ring each line fragment wore (an outline on the inline
+ *  mark paints per fragment, so a wrapped passage read as a stack of dashed boxes). CSS cannot merge the fragments,
+ *  so the box is an absolutely positioned child of the TURN (.cmt-outline, one per thread), sized to the union of the
+ *  thread's mark fragments' client rects, turn-relative: it scrolls with the text and needs no repaint on scroll.
+ *  Each fragment is first cut to every scrolling ancestor between its mark and the turn (a notice body, a wide formula):
+ *  the box sits outside those containers, so an unclipped fragment scrolled out of one would draw over the content
+ *  below. Repainted where the geometry can move — after every marks pass (each transcript rebuild and comments frame),
+ *  on the rail's rAF scheduler (a re-render, the view's resize observer, every scroll in the pane, inner containers'
+ *  included through the capture-phase listener) and on window resize — those two only while the session has an unread
+ *  open thread (hasUnreadOpenThread: a store read, so a scroll frame with nothing to move walks no DOM); the same measure-then-write
+ *  pass either way, writing only what changed. pointer-events: none, so hover and click land on the marks beneath.
+ *  A box goes with its unread bit (styleCommentMark drops the class when the popover opens or the thread resolves)
+ *  and with its marks (a windowed-out turn, a deleted thread); a hidden view has no boxes to measure and keeps none. */
+/** The cheap gate for the geometry hooks (the rail scheduler fires on every scroll frame, the resize listener on every
+ *  resize): a session with no unread open thread has no box to move, so those paths never walk its DOM (review find,
+ *  T310). Read from the thread store, no DOM. The marks pass calls the painter unconditionally: it is the removal path
+ *  (the last unread thread read, resolved or deleted takes its box with it on that pass). */
+function hasUnreadOpenThread(sid: string): boolean {
+  return (commentThreads.get(sid) || []).some((t) => !!t.unread && t.status === "open");
+}
+
+function paintCommentOutlines(sid: string): void {
+  const v = views.get(sid);
+  if (!v) return;
+  const want = new Map<string, HTMLElement[]>();          // tid -> its unread fragments, document order
+  if (v.el.style.display !== "none") {
+    for (const m of Array.from(v.el.querySelectorAll("mark.cmt-hl.unread")) as HTMLElement[]) {
+      const tid = m.dataset.tid || "";
+      const list = want.get(tid);
+      if (list) list.push(m); else want.set(tid, [m]);
+    }
+  }
+  for (const box of Array.from(v.el.querySelectorAll(".cmt-outline")) as HTMLElement[]) {
+    const tid = box.dataset.tid || "";
+    const marks = want.get(tid);
+    // a box whose thread is no longer unread, or that sits on a turn its marks have left, goes
+    if (!marks || marks[0].closest(".turn") !== box.parentElement) box.remove();
+  }
+  const PAD = 1;                                          // the box sits 1px clear of the glyphs (outline-offset's role)
+  for (const [tid, marks] of want) {
+    const turn = marks[0].closest(".turn") as HTMLElement | null;
+    if (!turn) continue;
+    let l = Infinity, t = Infinity, r = -Infinity, b = -Infinity;
+    for (const m of marks) {
+      // a fragment counts only where it can be SEEN: the box lives on the turn, outside any scrolling container between
+      // the mark and the turn (a notice body at its max height, a wide formula), whose clip the fragment's own rect
+      // ignores — so each fragment is cut to every such ancestor first, and a fragment scrolled out of view adds nothing
+      // (review find, T310). The union of what remains is the box; nothing left → no box.
+      let cl = -Infinity, ct = -Infinity, cr = Infinity, cb = Infinity;
+      for (let a = m.parentElement; a && a !== turn; a = a.parentElement) {
+        const cs = getComputedStyle(a);
+        if (cs.overflowX === "visible" && cs.overflowY === "visible") continue;
+        const ar = a.getBoundingClientRect();
+        cl = Math.max(cl, ar.left); ct = Math.max(ct, ar.top); cr = Math.min(cr, ar.right); cb = Math.min(cb, ar.bottom);
+      }
+      for (const q of Array.from(m.getClientRects())) {
+        if (!q.width && !q.height) continue;
+        const ql = Math.max(q.left, cl), qt = Math.max(q.top, ct), qr = Math.min(q.right, cr), qb = Math.min(q.bottom, cb);
+        if (qr <= ql || qb <= qt) continue;              // clipped away by a scrolling ancestor
+        l = Math.min(l, ql); t = Math.min(t, qt); r = Math.max(r, qr); b = Math.max(b, qb);
+      }
+    }
+    let box = turn.querySelector(`:scope > .cmt-outline[data-tid="${cssEscape(tid)}"]`) as HTMLElement | null;
+    if (!isFinite(l)) { box?.remove(); continue; }        // no visible fragment (a display:none ancestor, or all scrolled out)
+    if (!box) { box = el("div", "cmt-outline"); box.dataset.tid = tid; turn.appendChild(box); }
+    const tr = turn.getBoundingClientRect();
+    const css = { left: (l - tr.left - PAD) + "px", top: (t - tr.top - PAD) + "px", width: (r - l + 2 * PAD) + "px", height: (b - t + 2 * PAD) + "px" };
+    for (const k of ["left", "top", "width", "height"] as const) if (box.style[k] !== css[k]) box.style[k] = css[k];
+  }
 }
 
 /** The parent side of a branch (the user 2026-08-13): a small "↳ <name>" chip on the turn a fork
@@ -8531,7 +8612,7 @@ function updateCommentRail(): void {
     return tick;
   }));
 }
-window.addEventListener("resize", () => updateCommentRail());
+window.addEventListener("resize", () => { updateCommentRail(); if (activeId && hasUnreadOpenThread(activeId)) paintCommentOutlines(activeId); });
 
 // (The per-turn count badge is GONE — the user 2026-08-17: the highlight does the speaking, and
 // the scroll-rail tick already covers a thread whose rendered text drifted beyond re-matching.)
@@ -9180,7 +9261,9 @@ function renderCommentPopover(): void {
     quote.title = "the highlighted passage this thread is about";
     pop.appendChild(quote);
   }
-  if (th) {
+  if (th && th.status !== "promoted") {
+    // (a promoted thread gets no list: the kernel ships it with no messages or events — see the
+    // promoted branch below — and an empty list only grew into the box's fixed height)
     const list = el("div", "cmt-msgs");
     fillCommentMsgs(list, th, sid);
     pop.appendChild(list);
@@ -9394,10 +9477,22 @@ function renderCommentPopover(): void {
     }
     pop.appendChild(row);
   } else if (th) {
+    // a thread that became its own session (the user 2026-09-10, with a screenshot): the kernel
+    // ships it with no messages or events — the talk lives in the session now — so this view is the
+    // quote, one line saying where the talk went, and the one action, stacked from the top; nothing
+    // here grows into the box's fixed height (the empty list and the .sized quote used to split the
+    // free room between them: a one-line quote ran hundreds of pixels tall over a void, the action
+    // pinned under it). The action wears the shared .cmt-act word-button dress like every other
+    // action in this popover — it wore the composer's send-glyph square (.cmt-send: ~36px wide,
+    // 16px, no border), so "Open the session" wrapped one word per line in an oversized font.
+    const note = el("div", "cmt-note");
+    note.textContent = "The discussion continues there.";
+    pop.appendChild(note);
     const row = el("div", "cmt-actions");
-    const open = el("button", "cmt-send") as HTMLButtonElement;
+    const open = el("button", "cmt-act") as HTMLButtonElement;
     open.type = "button";
     open.textContent = "Open the session";
+    open.title = "Switch to that session";
     open.dataset.act = "cmtopensession";
     open.dataset.tid = th.tid;
     row.appendChild(open);
@@ -11578,10 +11673,13 @@ if (typeof ResizeObserver === "function") {
   const c = document.getElementById("content");
   if (c) ro.observe(c);
 }
-// the sticky rail stamp tracks the scroll it annotates (passive: it only measures, never blocks the scroll)
+// the sticky rail stamp tracks the scroll it annotates (passive: it only measures, never blocks the scroll). CAPTURE,
+// so a scroll INSIDE the pane reaches it too — a notice body at its max height, a wide formula: scroll events do not
+// bubble, and the unread comment boxes (paintCommentOutlines, on this same scheduler) must follow marks that move
+// inside such a container and be cut to it (review find, T310). The other painters here are signature-guarded.
 {
   const c = document.getElementById("content");
-  if (c) c.addEventListener("scroll", scheduleRailSticky, { passive: true });
+  if (c) c.addEventListener("scroll", scheduleRailSticky, { passive: true, capture: true });
 }
 // ── jump to newest (the user 2026-08-31) ─────────────────────────────────────────────────────────
 // Scrolled-up reading leaves follow mode, and the send gate keeps it that way — this chip is the
@@ -16328,13 +16426,15 @@ function mentionRosterChanged(): void {
   if (fresh) remarkMentions();
 }
 
-// A chip's dress from the session it names: the identity color and, as its title, the name and the state.
-// The chip is keyed by the session's id (data-sid) and re-dressed on every roster change, so a rename or a
-// state change reaches a chip rendered long before (the sent text itself stays as typed). A session gone
-// reads Closed and keeps its last color, so the reader still sees who was meant.
+// A chip's dress from the session it names: the identity colour as the NAME's own colour (--chip-bg, the
+// tab label's foreground idiom; the sheet paints it on the awaiting chip's dark backing, .chip-peer-name's
+// declarations) and, as its title, the name and the state. The chip is keyed by the session's id (data-sid)
+// and re-dressed on every roster change, so a rename or a state change reaches a chip rendered long before
+// (the chip's text stays the name as typed). A session gone reads Closed and keeps its last colour, so the
+// reader still sees who was meant.
 function dressMentionChip(chip: HTMLElement, s: Session | null): void {
-  if (!s) { chip.title = (chip.textContent || "").replace(/^@/, "") + " · " + CHIP_LABEL.closed; return; }
-  if (s.color) { chip.style.setProperty("--chip-bg", s.color.bg); chip.style.setProperty("--chip-fg", s.color.fg); }
+  if (!s) { chip.title = (chip.textContent || "") + " · " + CHIP_LABEL.closed; return; }
+  if (s.color) chip.style.setProperty("--chip-bg", s.color.bg);
   chip.title = s.name + " · " + (CHIP_LABEL[s.status.state] || s.status.state);
 }
 function refreshMentionChips(): void {
@@ -16349,7 +16449,7 @@ function refreshMentionChips(): void {
       // is not the test: a closed session stays in it until its tab is dismissed, and a chip keyed on that would
       // read "Closed" beside a live namesake, then flip when the tab went, with nothing new about the mention.
       if (!s || s.status.state === "closed") {
-        const again = byName.get((chip.textContent || "").replace(/^@/, ""));
+        const again = byName.get(chip.textContent || "");   // the chip's text is the bare name (the token as typed rides data-token)
         if (again) { chip.dataset.sid = again.id; s = again; }
       }
       dressMentionChip(chip, s);
@@ -16363,9 +16463,12 @@ function remarkMentions(): void {
   for (const v of views.values()) for (const b of Array.from(v.el.querySelectorAll<HTMLElement>("[data-mentions]"))) markMentions(b);
 }
 
-// A typed "@name" that names a live session wears that session's identity color (the user 2026-09-07):
-// the reader sees who was meant, and a hover says how that session is doing. A quiet chip, the tab's
-// own dress, with no link behavior; a word that names nothing stays plain text. Text nodes only, never
+// A typed "@name" that names a live session becomes a chip reading the bare NAME in that session's
+// identity colour (the user 2026-09-07; the @ dropped and the awaiting chip's dress adopted 2026-09-10,
+// the user, who wanted the two chips to look the same: the name in its colour on a dark backing, no
+// fill): the reader sees who was meant, and a hover says how that session is doing. The token as typed
+// rides data-token, so what was SENT is still on the element; a word that names nothing stays plain
+// text, and the chip carries no link behaviour. Text nodes only, never
 // inside code, a fenced block, a link or a chip already made, so a path or an email address is left
 // alone. The same boundary rule as the composer's trigger (composer-mention.ts mentionSegments). Exact
 // names only: postal's direct match is exact, so a hand-typed "@API" for the session "api" is not a name
@@ -16390,7 +16493,11 @@ function markMentions(root: HTMLElement): void {
     for (const sg of segs) {
       if (!sg.hit) { frag.appendChild(document.createTextNode(sg.text)); continue; }
       const chip = el("span", "mention-chip");
-      chip.textContent = sg.text;
+      // the name without its "@", through the house session-reference renderer, as the awaiting chip
+      // names its peer: a remote "host:" prefix wears .host-prefix (quiet, italic) and only the NAME
+      // takes the identity colour; textContent still reads the whole "host:name" the roster keys by
+      chip.replaceChildren(...hostNameNodes(sg.text.slice(1), sg.hit.id));
+      chip.dataset.token = sg.text;          // the mention as typed and sent, for anyone reading the element
       chip.dataset.sid = sg.hit.id;
       dressMentionChip(chip, sg.hit);
       frag.appendChild(chip);
