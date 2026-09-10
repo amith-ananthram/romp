@@ -129,6 +129,18 @@ test("drift pins: the inlined chip is the shared tagChip's pill up to the colour
   const shared = /chip\.setAttribute\("style", "([^"]+)"\s*\n\s*\+ "border-radius:9px;" \+ \(opts && opts\.inheritSize \? "" : "font-size:0\.82em;"\)\s*\n\s*\+ "border:1px solid "/.exec(MENU);
   assert.ok(shared, "the shared tagChip's style is where the pin expects it");
   assert.equal(chipStyle, shared![1] + "border-radius:9px;font-size:0.82em;border:1px solid ", "the pill, byte for byte up to the colour");
+  assert.match(SRC, /TAG_CHIP_STYLE \+ col \+ ';color:' \+ col \+ ';background:transparent;white-space:nowrap;font-weight:400;letter-spacing:normal;'/,
+    "…and the tail after the colour carries the shared weight and tracking (T321: never bold)");
+  assert.match(MENU, /\+ "font-weight:400;letter-spacing:normal;"/, "the shared pill's own tail, the same bytes");
+  // the dialog's two other tag pills (its own signatures: the drag cell's pill, the per-pane filter pills): never bold either (T321)
+  assert.match(SRC, /'border-radius:10px;border:1px solid ' \+ tc \+ ';color:' \+ tc \+ ';background:transparent;font-weight:400;'/, "the tag row's pill");
+  assert.match(SRC, /'cursor:pointer;padding:1px 8px;border-radius:9px;font-size:0.82em;font-weight:400;'/, "the filter pills");
+  assert.match(SRC, /\(selected \? 'background:' \+ SEL_BG \+ ';opacity:1;' : 'background:transparent;opacity:0\.6;'\)/, "selected is the wash and the full opacity, not a weight");
+  assert.doesNotMatch(SRC, /font-weight:650;'\s*\n?[^\n]*(tc|c2)\b/, "no bold left on a tag-coloured pill");
+  // the view's other inlined chips carry the same tail: the dialog rows' lane chips, the [+] join options, the corner filter chips
+  assert.match(SRC, /'color:' \+ tc \+ ';border:1px solid ' \+ tc \+ ';background:transparent;font-weight:400;letter-spacing:normal;'\);\s+\/\/ the one tag chip \(T321\)\n/, "the lane chips");
+  assert.match(SRC, /'display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:9px;font-size:0\.82em;cursor:pointer;white-space:nowrap;'\s*\n\s*\+ 'color:' \+ tc \+ ';border:1px solid ' \+ tc \+ ';background:transparent;font-weight:400;letter-spacing:normal;'\);\s+\/\/ the one tag chip \(T321\): the join option/, "the join options, the chip's shape");
+  assert.match(SRC, /\.romp-tl-chip\{display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:9px;'\s*\n\s*\+ 'font-size:0\.82em;border:1px solid;background:transparent;white-space:nowrap;font-weight:400;letter-spacing:normal\}/, "the corner filter chips");
   assert.match(SRC, /const TAG_CHIP_OFF_OPACITY = '0\.45';/);
   assert.match(SRC, /const TAG_CHIP_OFF_CLASS = 'tag-chip-off';/);
   // the shared menu's own constants and chip row (T283, on main): each pin fails LOUDLY when its anchor moves,

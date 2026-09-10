@@ -9,6 +9,7 @@ root, synthetic ledger, the notes-api demo sessions (web/api/tests), placeholder
 import inspect
 import json
 import os
+import re
 import tempfile
 import time
 import unittest
@@ -625,6 +626,16 @@ class SpendDetail(unittest.TestCase):
         self.assertIn(".rsp-tbl thead th{position:sticky;top:0;background:#252526;z-index:1}", js)
         self.assertIn("body.theme-light .rsp-tbl thead th{background:#FFFFFF}", js)
         self.assertIn('<span class="tab-label colored" style="--chip-bg:\'+spColor(s)+\'">', js, "a row's title wears the tab strip's classes")
+        # a merge-by-tag row names its TAG as the one tag chip (T321): tagChip's pill inlined, never the title's bold
+        self.assertIn("(s.kind==='tag'?(spTagChip(s)+", js, "the tag row's name is the chip, not the session title")
+        self.assertEqual(js.count('<span class="tab-label colored"'), 1, "the session-title markup stays the title's alone (spTitle)")
+        menu = open(os.path.join(os.path.dirname(HERE), "ui", "webview", "tag-menu.ts")).read()
+        shared = re.search(r'chip\.setAttribute\("style", "([^"]+)"\s*\n\s*\+ "border-radius:9px;"', menu)
+        self.assertTrue(shared, "the shared tagChip's style is where the pin expects it")
+        twin = re.search(r"function spTagChip\(s\)\{var c=spColor\(s\);return '<span class=rsp-tag-chip style=\"([^\"]+)\"", js)
+        self.assertTrue(twin, "the landing page inlines the chip")
+        self.assertTrue(twin.group(1).startswith(shared.group(1) + "border-radius:9px;border:1px solid "), "the pill, byte for byte up to the colour (the row's size: no font-size)")
+        self.assertIn(";background:transparent;white-space:nowrap;font-weight:400;letter-spacing:normal;", twin.group(1), "the tail after the colour: the shared weight and tracking")
         # T247f: the order chips beside the measure chips; the choice persists with the other toggles
         self.assertIn('data-act=order:spend>by spend</button>', js)
         self.assertIn('data-act=order:yours>your order</button>', js)

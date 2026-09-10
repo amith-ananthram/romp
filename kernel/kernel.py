@@ -47291,6 +47291,10 @@ function spMany(d){return spHosts(d).length>1;}
 // .tab-label with the identity color as --chip-bg (styles.css keys the color and weight on the SAME
 // rule the strip uses, so the two cannot drift) and the quiet .host-prefix — no swatch
 function spTitle(s,many){return '<span class="tab-label colored" style="--chip-bg:'+spColor(s)+'">'+(many&&s.host?'<span class=host-prefix>'+esc(s.host)+':</span>':'')+esc(spName(s))+'</span>';}
+// a merge-by-tag row names its TAG, and a tag is the one tag chip everywhere (T321): the landing page loads no module,
+// so this is tagChip's pill inlined (ui/webview/tag-menu.ts; the row's size, weight 400, normal tracking), never the
+// session title's bold. tests/test_spend_detail.py pins it against the renderer.
+function spTagChip(s){var c=spColor(s);return '<span class=rsp-tag-chip style="display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:9px;border:1px solid '+c+';color:'+c+';background:transparent;white-space:nowrap;font-weight:400;letter-spacing:normal;">'+esc(s.name)+'</span>';}
 // ── T247g (the user 2026-09-08): three ranges, and "merge by tag"
 // the series for the range: "1 day" is the hourly series' last 24 buckets and "7 days" its last 168 (T293, the
 // user 2026-09-09; the ledger holds 192 hours, a day of slack past the view, and 90 days; a range is a slice of
@@ -47377,7 +47381,7 @@ var h='<table class=rsp-tbl><thead><tr><th>session</th><th class=n>dollars</th>'
 var many=spMany(d);
 var model=spRows(d);
 model.rows.forEach(function(s){h+='<tr data-sid="'+esc(s.sid||'')+'"'+(s.live?' class=rsp-live':' class=rsp-dead')+(s.kind==='tag'?' data-tag="'+esc(s.name)+'"':'')+'>'
-+'<td class=rsp-name>'+(s.kind==='tag'?('<span class="tab-label colored" style="--chip-bg:'+spColor(s)+'">'+esc(s.name)+'</span><span class=ru-tip-reset> \u00b7 '+s.members.length+' session'+(s.members.length===1?'':'s')+'</span>'):spTitle(s.s,many))+(s.live?'':'<span class=ru-tip-reset> \u00b7 not running</span>')+'</td>'
++'<td class=rsp-name>'+(s.kind==='tag'?(spTagChip(s)+'<span class=ru-tip-reset> \u00b7 '+s.members.length+' session'+(s.members.length===1?'':'s')+'</span>'):spTitle(s.s,many))+(s.live?'':'<span class=ru-tip-reset> \u00b7 not running</span>')+'</td>'
 +'<td class=n>'+fmtUsd(s.usd)+'</td>'+(keyCol?'<td class=n>'+(s.key?fmtUsd(s.key.usd):'\u2014')+'</td>':'')
 +'<td class=n>'+(s.turns||0)+'</td><td class=n>'+fmtTok(s.tok||0)+'</td></tr>';});
 // spend recorded before per-session attribution existed (T100, 2026-08-24), or the part of a bucket no

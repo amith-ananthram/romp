@@ -194,12 +194,23 @@ export const TAG_BTN_WASH = "rgba(156,210,255,0.12)";     // the feed .on's fain
  *  paints it on a sheet-less host, the two equal by construction. */
 export const TAG_CHIP_OFF_CLASS = "tag-chip-off";
 export const TAG_CHIP_OFF_OPACITY = "0.45";   // pinned equal to .tag-chip-off in styles.css / feed.css
+/** THE ONE TAG CHIP (T321, the user 2026-09-10: tags render the same everywhere, and never in bold, which is the
+ *  session names' weight). Every surface that shows a tag builds it here: the tab strip's group rows and its filter
+ *  chips, the feed's and the outline's filter chips, the tag-lens menu's rows, the tab menu's Tags flyout, the feed's
+ *  session dialog, the new-session picker's Tags row; the two documents that load no module, the landing page's spend
+ *  panel (kernel.py spTagChip) and the Obsidian timeline view, inline the same bytes under drift pins. The standard: a
+ *  thin 1px border and the text in the tag's own
+ *  colour on a transparent ground, weight 400 and normal tracking (inline, so a bold or letter-spaced host cannot
+ *  restyle it), one size per context (the chip's own 0.82em, or the host's with `inheritSize` where a row sizes it),
+ *  and off = the faded chip (`off`: TAG_CHIP_OFF_CLASS at TAG_CHIP_OFF_OPACITY). A host adds layout (flex, margins)
+ *  and state cues the chip never sets inline (a filter, an underline), never a weight, size, border or colour. */
 export function tagChip(label: string, color?: string | null, opts?: { inheritSize?: boolean; off?: boolean }): HTMLElement {
   const col = color || ("var(--dim, " + TAG_BTN_GRAY + ")");
   const chip = document.createElement("span");
   chip.setAttribute("style", "display:inline-flex;align-items:center;gap:5px;padding:2px 7px;"
     + "border-radius:9px;" + (opts && opts.inheritSize ? "" : "font-size:0.82em;")
     + "border:1px solid " + col + ";color:" + col + ";background:transparent;white-space:nowrap;"
+    + "font-weight:400;letter-spacing:normal;"
     + (opts && opts.off ? "opacity:" + TAG_CHIP_OFF_OPACITY + ";" : ""));
   if (opts && opts.off) chip.setAttribute("class", TAG_CHIP_OFF_CLASS);
   chip.appendChild(document.createTextNode(label));

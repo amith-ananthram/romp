@@ -417,7 +417,8 @@ let MENU_STYLE = null, MENU_CHECK_STYLE = null;   // set by applyPal() below (da
 // THE TAG CHIP in the views menu (T283b, the user 2026-09-09: menus wear one vocabulary): the shared tag-lens
 // menu renders each tag as the tag chip itself acting as a toggle (ui/webview/tag-menu.ts tagChip + T283's
 // loop); this pane inlines the RESOLVED twin, since it may live in a foreign document that loads no module.
-// TAG_CHIP_STYLE is tagChip's pill byte for byte up to the colour (a drift test compares); the fade is the
+// TAG_CHIP_STYLE is tagChip's pill byte for byte up to the colour (a drift test compares), and the tail after the
+// colour carries tagChip's weight 400 and normal tracking (T321: a tag is never bold, on any surface); the fade is the
 // shared TAG_CHIP_OFF_OPACITY, and the class names the state for a host that does load the sheets.
 const TAG_CHIP_STYLE = 'display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:9px;font-size:0.82em;border:1px solid ';
 const TAG_CHIP_OFF_OPACITY = '0.45';
@@ -1271,7 +1272,7 @@ class TimelinePanel {
           + '.romp-tl-cbtn:hover{border-color:var(--accent,#9cd2ff);color:var(--accent,#9cd2ff);background:rgba(156,210,255,0.12)}'
           + '.romp-tl-cbtn.on{color:var(--accent,#9cd2ff);border-color:var(--accent,#9cd2ff);background:rgba(156,210,255,0.12);opacity:1}'
           + '.romp-tl-chip{display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:9px;'
-          + 'font-size:0.82em;border:1px solid;background:transparent;white-space:nowrap}'
+          + 'font-size:0.82em;border:1px solid;background:transparent;white-space:nowrap;font-weight:400;letter-spacing:normal}'
           + '.romp-tl-chipx{cursor:pointer;opacity:0.75;color:#9aa0a6;font-size:0.9em}'
           + '.romp-tl-ctail{color:#9aa0a6;opacity:0.7;font-size:12px;cursor:pointer;user-select:none;white-space:nowrap}'
           // LIGHT theme re-skin, scoped so the sheet is theme-flip-safe without re-injection: muted ink,
@@ -3524,7 +3525,7 @@ class TimelinePanel {
       const ch = box.createSpan();
       ch.setAttribute('style', 'display:inline-flex;align-items:center;gap:5px;'
         + 'padding:2px 7px;border-radius:9px;font-size:0.82em;cursor:pointer;white-space:nowrap;'
-        + 'color:' + tc + ';border:1px solid ' + tc + ';background:transparent;');
+        + 'color:' + tc + ';border:1px solid ' + tc + ';background:transparent;font-weight:400;letter-spacing:normal;');   // the one tag chip (T321)
       ch.addEventListener('mouseenter', () => { ch.style.background = HOVER_BG; });
       ch.addEventListener('mouseleave', () => { ch.style.background = 'transparent'; });
       ch.createSpan({ text: g.name });
@@ -3567,8 +3568,8 @@ class TimelinePanel {
       if (!rowIds.some((id) => g.members.indexOf(id) < 0)) continue;
       const tc = g.color || MENU_FG;
       const opt = box.createSpan({ text: g.name });
-      opt.setAttribute('style', 'padding:1px 8px;border-radius:9px;font-size:0.82em;cursor:pointer;'
-        + 'color:' + tc + ';border:1px solid ' + tc + ';background:transparent;');
+      opt.setAttribute('style', 'display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:9px;font-size:0.82em;cursor:pointer;white-space:nowrap;'
+        + 'color:' + tc + ';border:1px solid ' + tc + ';background:transparent;font-weight:400;letter-spacing:normal;');   // the one tag chip (T321): the join option is the tag
       opt.addEventListener('mouseenter', () => { opt.style.background = HOVER_BG; });
       opt.addEventListener('mouseleave', () => { opt.style.background = 'transparent'; });
       opt.addEventListener('click', () => {
@@ -4233,7 +4234,7 @@ class TimelinePanel {
       row.setAttribute('style', TAG_CHIP_ROW_STYLE);
       const col = color || MODEL_FG;
       const chip = row.createSpan({ text: name });
-      chip.setAttribute('style', TAG_CHIP_STYLE + col + ';color:' + col + ';background:transparent;white-space:nowrap;'
+      chip.setAttribute('style', TAG_CHIP_STYLE + col + ';color:' + col + ';background:transparent;white-space:nowrap;font-weight:400;letter-spacing:normal;'
         + (on ? '' : 'opacity:' + TAG_CHIP_OFF_OPACITY + ';'));
       if (!on) chip.classList.add(TAG_CHIP_OFF_CLASS);
       chip.setAttribute('role', 'button');
@@ -4654,7 +4655,7 @@ class TimelinePanel {
           } else {
             const pill = pillCell.createSpan({ text: tg.name });
             pill.setAttribute('style', 'display:inline-flex;align-items:center;padding:2px 9px;'
-              + 'border-radius:10px;border:1px solid ' + tc + ';color:' + tc + ';background:transparent;font-weight:650;'
+              + 'border-radius:10px;border:1px solid ' + tc + ';color:' + tc + ';background:transparent;font-weight:400;'   // a tag is never bold (T321)
               + (gid && tg.ids.indexOf(gid) >= 0 ? 'outline:1px solid ' + OUTLINE_FG + ';outline-offset:2px;' : ''));
             // tag federation v2: a queued edit for an unreachable home is VISIBLE, never
             // gone-but-not-gone — the kernel stamps the cached remote entry with `pending`
@@ -4871,9 +4872,9 @@ class TimelinePanel {
             const pill = (text, selected, color, apply) => {
               const c2 = color || MODEL_FG;
               const s2 = cell.createSpan({ text });
-              s2.setAttribute('style', 'cursor:pointer;padding:1px 8px;border-radius:9px;font-size:0.82em;'
+              s2.setAttribute('style', 'cursor:pointer;padding:1px 8px;border-radius:9px;font-size:0.82em;font-weight:400;'   // a tag is never bold (T321): selected is the wash and the full opacity
                 + 'border:1px solid ' + c2 + ';color:' + c2 + ';'
-                + (selected ? 'background:' + SEL_BG + ';opacity:1;font-weight:650;' : 'background:transparent;opacity:0.6;'));
+                + (selected ? 'background:' + SEL_BG + ';opacity:1;' : 'background:transparent;opacity:0.6;'));
               s2.addEventListener('mouseenter', () => { s2.style.opacity = '1'; });
               s2.addEventListener('mouseleave', () => { if (!selected) s2.style.opacity = '0.6'; });
               s2.addEventListener('click', apply);

@@ -1045,7 +1045,7 @@ test("executed: the folded summary names only tags that exist; a lens left with 
   // open, the matrix shows the same: no chip for zeta, alpha selected on Chat, nothing selected on Sessions
   caption(panel)._listeners.click();
   const open = paneLines(panel);
-  const sel = (k: string) => open[k].children[1].children.filter((c: any) => styleOf(c).includes("font-weight:650;")).map((c: any) => c.textContent);
+  const sel = (k: string) => open[k].children[1].children.filter((c: any) => styleOf(c).includes("opacity:1;")).map((c: any) => c.textContent);   // selected = the wash and full opacity, never a weight (T321)
   assert.deepEqual(sel("Chat"), ["alpha"]);
   assert.deepEqual(sel("Sessions"), [], "nothing selected: the same emptiness the folded line reports");
   assert.ok(!walk(panel._viewsDialog).some((n) => n.textContent === "zeta"), "no chip anywhere for the gone name");
