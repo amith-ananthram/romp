@@ -23,10 +23,13 @@ test("renderAsk reads the kernel's structured askAnswer, falling back to the raw
 test("the turn flips to the blue 'answered' box only once an answer is recorded", () => {
   // answered = at least one block has a non-empty chosen (pending = empty chosen → plain card)
   assert.match(RENDER, /const answered = blocks\.some\(\(b\) => b\.chosen && b\.chosen\.length > 0\)/);
-  assert.match(RENDER, /"turn turn-ask" \+ \(answered \? " answered" : ""\)/);
-  assert.match(RENDER, /"ask-card" \+ \(answered \? " ask-answered" : ""\)/);
+  // 2026-09-08 (the notice-vocabulary pass): PENDING is a slim QUESTION notice (the one builder); ANSWERED keeps
+  // the blue "your reply" box — the two branches split on `answered` up front
+  assert.match(RENDER, /if \(!answered\) \{[\s\S]{0,900}?return notice\(\{ src: "question", glyph: "question", gist: qs\.length > 1 \? `\$\{qs\.length\} questions` : \(qs\[0\] \|\| "Question"\),/);
+  assert.match(RENDER, /const turn = el\("div", "turn turn-ask answered"\);/);
+  assert.match(RENDER, /el\("div", "ask-card ask-answered"\)/);
   // a blue user dot matches the box when answered; a neutral ring while pending
-  assert.match(RENDER, /dot\(answered \? "user" : "ring"\)/);
+  assert.match(RENDER, /turn\.appendChild\(dot\("user"\)\);   \/\/ the blue user dot, matching the box/);
   // the marker line names it as the user's reply to Claude
   assert.match(RENDER, /ask-answered-tag/);
   assert.match(RENDER, /answered Claude/);
@@ -44,7 +47,9 @@ test("a PENDING question renders COMPACT — head + title only, no options (the 
   assert.ok(body.indexOf("qel.appendChild(qt);") < body.indexOf("if (answered) {"),
     "the title must be emitted outside/before the answered-only option block");
   // and the pending head chip ("Question" / "N questions") is unchanged
-  assert.match(RENDER, /head\.textContent = blocks\.length > 1 \? `\$\{blocks\.length\} questions` : "Question"/);
+  // 2026-09-08: the pending head is the question itself (or "N questions", the list folded beneath)
+  assert.match(RENDER, /const qs = blocks\.map\(\(b\) => b\.question \|\| b\.header \|\| ""\)\.filter\(Boolean\);/);
+  assert.doesNotMatch(RENDER, /el\("div", "ask-head"\)/);
 });
 
 test("a free-text answer matching no option renders as an 'Other' row with the verbatim text", () => {

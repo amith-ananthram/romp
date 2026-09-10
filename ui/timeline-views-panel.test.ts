@@ -298,16 +298,25 @@ test("the dialog sizes to the screen: 90% ceiling both axes, padded edges, wrap 
   // the card declarations come AFTER MENU_STYLE: the menu spec opens with ITS padding (4px), and
   // in one style string the later declaration wins — stated first, the dialog's padding had been
   // silently 4px all along (found by headless computed-style measurement, 2026-08-25)
-  assert.match(SRC, /MENU_STYLE \+ 'box-sizing:border-box;width:min\(1200px,90vw\);max-height:90vh;'\s*\n\s*\+ 'overflow:hidden;display:flex;flex-direction:column;padding:22px 26px;font-size:13px;'/,
+  // re-aimed 2026-09-09 (the many-tags change's review): the card scrolls as a whole, never clips,
+  // when a page is shorter than its sections' floors (a phone held sideways clipped the search box)
+  assert.match(SRC, /MENU_STYLE \+ 'box-sizing:border-box;width:min\(1200px,90vw\);max-height:90vh;'\s*\n\s*\+ 'overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;padding:22px 26px;font-size:13px;'/,
     "the card's screen-sized border-box footprint + edge padding, declared after the menu spec");
   // wrap stays GRACEFUL, not needless: the wide card lays the rows out on their lines; these
-  // containers wrap only when the window genuinely narrows
-  assert.match(SRC, /row\.setAttribute\('style', 'display:flex;align-items:center;gap:6px;margin:2px 0;flex-wrap:wrap;'\);/,
-    "the five filter rows fold only under real pressure");
+  // containers wrap only when the window genuinely narrows. Re-aimed 2026-09-09 (the many-tags
+  // change): the filter chips wrap inside their own cell, so a long row's second line starts under
+  // the first chip rather than under the pane label; the row itself no longer wraps
+  assert.match(SRC, /cell\.setAttribute\('style', 'display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:1 1 auto;min-width:0;'\);/,
+    "the five filter rows' chips wrap within their own cell");
   assert.match(SRC, /chips\.setAttribute\('style', 'display:flex;gap:5px;flex-wrap:wrap;align-items:center;min-width:0;'\);/,
     "membership chip cells ditto");
-  assert.match(SRC, /gridBox\.setAttribute\('style', 'flex:1 1 auto;min-height:0;overflow-y:auto;'\);/,
-    "only the session rows pan when height runs out — the card itself never scrolls whole");
+  // re-aimed 2026-09-09 (the many-tags change's review): the sessions box gives way first when height
+  // runs out (the thousandfold flex-shrink) and never below its floor, min(live, 4) rows at the rendered
+  // row height (a fixed 96px left blank over one live session); past that floor the tag table and the
+  // open matrix give way, and past THEIR floors the card scrolls rather than clip (timeline-tags-scale)
+  assert.match(SRC, /const gridStyle = \(floor\) => 'flex:1 1000 auto;min-height:' \+ floor \+ 'px;overflow-y:auto;';/,
+    "the session rows pan within their box, which keeps a floor under its rows");
+  assert.match(SRC, /const k = Math\.min\(liveN, 4\);/, "…four rows at most, by the live count");
 });
 
 test("federation, NAME-KEYED (user ruling 2026-08-24): one name = one row/label/union — kernels are plumbing", () => {
@@ -425,7 +434,9 @@ test("executed: tagEditFailed reverts the optimistic copy and keeps the reason f
 test("federation v1+ruling source pins: header/chips route through the UNION dispatcher, loudly on failure", () => {
   // rename/recolor/delete fan out to EVERY home; chip ✕ removes everywhere; add prefers local
   assert.match(SRC, /this\._editTagUnion\(tg, \{ rename: nv2 \}\);/);
-  assert.match(SRC, /this\._editTagUnion\(tg, \{ color: c \}\); build\(\);/);
+  // the recolor rides the colour popover since 2026-09-09 (the many-tags change), which re-resolves the
+  // tag at pick time (`now`) and repaints through the dialog's build closure; the dispatcher is the same
+  assert.match(SRC, /this\._editTagUnion\(now, \{ color: c \}\);\n\s*if \(this\._viewsDialogBuild\) this\._viewsDialogBuild\(\);/);
   assert.match(SRC, /this\._editTagUnion\(tg, \{ delete: true \}\);/);
   assert.match(SRC, /this\._editTagUnion\(g, \{ remove: \[s\.id\] \}\); rebuild\(\);/);
   assert.match(SRC, /this\._editTagUnion\(g, \{ add: rowIds\.filter\(\(id\) => g\.members\.indexOf\(id\) < 0\) \}\); rebuild\(\);/);
@@ -613,8 +624,9 @@ test("a gesture the host cannot honour is DISABLED with the reason as its toolti
     "the disabled action: dim, no pointer, the reason as tooltip, no listeners");
   assert.match(SRC, /action\(del, 'delete', [^\n]*, held\);\n\s*if \(!held\) \{/, "delete's hover and click ride only when not held");
   assert.match(SRC, /action\(ren, 'rename', 'rename this tag \(everywhere it is defined\)', held\);\n\s*if \(!held\) \{/, "rename's too");
-  assert.match(SRC, /if \(held\) \{ colCell\.setAttribute\('title', held\); colCell\.setAttribute\('aria-disabled', 'true'\); \}/, "the swatch cell says why");
-  assert.match(SRC, /if \(!held\) sw\.addEventListener\('click', \(\) => \{ this\._editTagUnion\(tg, \{ color: c \}\); build\(\); \}\);/, "…and its swatches take no click");
+  // re-aimed 2026-09-09 (the many-tags change): the inline swatches became one colour dot that opens a
+  // popover; a held dot wears the reason and takes no click (its listeners ride the else branch)
+  assert.match(SRC, /if \(held\) \{ dot\.setAttribute\('title', held\); dot\.setAttribute\('aria-disabled', 'true'\); \}\n\s*else \{/, "the colour dot says why, and opens nothing");
   // the chip: a ✕ that would remove the pair from a remote half no bridge can reach is not drawn; the tooltip says why
   assert.match(SRC, /const homesHolding = \(g\.remotes \|\| \[\]\)\.filter\(\(rt\) => \(rt\.members \|\| \[\]\)\.indexOf\(s\.id\) >= 0\)\.map\(\(rt\) => rt\.host\);\n\s*if \(homesHolding\.length && !this\._remoteBridge\(\)\) \{/);
   assert.match(SRC, /ch\.setAttribute\('title', 'tagged "' \+ g\.name \+ '": ' \+ this\._unreachableText\(homesHolding, localHolds\)\);\n\s*ch\.setAttribute\('aria-disabled', 'true'\);\n\s*continue;/);
@@ -761,7 +773,7 @@ test("the corner grew two icon buttons and the menus split (the user 2026-08-25)
   assert.match(SRC, /item\('Configure tags…', \{ dim: true \}\)/, "one management entry");
   assert.ok(!/item\('New tag…', \{ dim: true \}\)/.test(SRC), "New tag left the menu…");
   assert.match(SRC, /text: '\+ New tag'/,
-    "…and lives in the tag TABLE's final row (the 18:17 revision — the bulk-bar copy died)");
+    "…and lives in the row under the tag table, outside its scroll (the 18:17 revision put it in the table's final row; the bulk-bar copy died)");
   assert.match(SRC, /apply\(lensToggle\(lens, \{ tag: g\.name \}\), false\)/,
     "tag rows TOGGLE and the menu stays open (repaint in place)");
   assert.match(SRC, /apply\(\{ all: true \}, true\)/, "All is a plain pick and closes");
@@ -779,8 +791,9 @@ test("dialog polish + reachable tag management (the user 2026-08-25)", () => {
   // the dialog reads at the page's 13px form scale (the menu 12px was the too-small complaint)
   assert.match(SRC, /padding:22px 26px;font-size:13px;'/,
     "the 13px form scale rides the card's own declarations (after MENU_STYLE, whose 4px padding they beat)");
-  // the session table scrolls WITHIN the modal — chrome stays put
-  assert.match(SRC, /gridBox\.setAttribute\('style', 'flex:1 1 auto;min-height:0;overflow-y:auto;'\)/);
+  // the session table scrolls WITHIN the modal; chrome stays put (its floor since 2026-09-09: up to four rows, measured)
+  assert.match(SRC, /gridBox\.setAttribute\('style', gridStyle\(0\)\);/);
+  assert.match(SRC, /gridBox\.setAttribute\('style', gridStyle\(k && sessRowH \? Math\.round\(\(k \* sessRowH \+ \(k - 1\) \* 3\) \* 100\) \/ 100 : 0\)\);/);
   // [+] is a rounded RECTANGLE in its own column between name and tags
   assert.match(SRC, /padding:1px 7px;'\n\s*\+ 'border-radius:5px;/, "the standard button anatomy, not a circle");
   assert.ok(!/width:17px;height:17px;'\n?\s*\+ 'border-radius:50%/.test(SRC), "the circle plus is gone");
@@ -790,21 +803,23 @@ test("dialog polish + reachable tag management (the user 2026-08-25)", () => {
   // tag management reachable from EVERY open: rows with rename/recolor/delete via the union dispatcher
   assert.match(SRC, /text: 'the tags'/);
   assert.match(SRC, /this\._editTagUnion\(tg, \{ delete: true \}\);\n\s*build\(\);/, "delete without a tag-scoped open");
-  assert.match(SRC, /this\._editTagUnion\(tg, \{ color: c \}\); build\(\);/, "the identity-palette recolor");
+  assert.match(SRC, /this\._editTagUnion\(now, \{ color: c \}\);/, "the identity-palette recolor (from the colour popover since 2026-09-09)");
 });
 
 test("the dialog redesign: tag TABLE with delete/rename/color actions, five filter rows (the user 2026-08-25, revised same day)", () => {
   // TAGS: a TABLE (the user's revision of the chip cloud) — each row the tag pill at normal size
-  // with NO ✕ on it, then delete | rename | color swatches as their own columns; delete wears the
-  // destructive convention (dim at rest, red on hover); [+ New tag] is the table's FINAL row
+  // with NO ✕ on it, then delete | rename | the colour dot as their own columns (the dot opens the
+  // palette as a popover since 2026-09-09, timeline-tags-scale.test.ts); delete wears the
+  // destructive convention (dim at rest, red on hover); [+ New tag] is the row UNDER the table (its own
+  // flex child since 2026-09-09, so the table's fold never hides it)
   assert.match(SRC, /grid-template-columns:max-content max-content max-content 1fr;/, "the tag table's four columns");
   assert.match(SRC, /the tag itself: the normal pill, NO ✕ — actions live beside it, never on it/);
   assert.match(SRC, /this\._tagEditorFor = this\._tagEditorFor === unionKey\(tg\) \? null : unionKey\(tg\);/,
     "rename toggles the pill into an input — keyed by the union's stable id, which survives the rename it makes");
   assert.match(SRC, /d\.style\.color = '#F85B5A'/, "delete goes red on hover — destructive, unlike membership ✕");
   assert.match(SRC, /DELETE the tag/, "the hover says what delete does");
-  assert.match(SRC, /text: '\+ New tag'/, "creation is the table's final row");
-  assert.match(SRC, /grid-column:1 \/ -1;/, "…spanning the table's full width");
+  assert.match(SRC, /text: '\+ New tag'/, "creation is the row under the table");
+  assert.match(SRC, /const ntRow = card\.createDiv\(\);/, "…its own flex child, outside the table's scroll");
   // FILTERS: five rows — All surfaces / Chat / Sessions / Outline / Feed (the pane names), each
   // the full lens vocabulary as pills editing ONLY its surface; All-surfaces fans to all four
   assert.match(SRC, /\[\['All surfaces', '\*'\], \['Chat', 'chat'\], \['Sessions', 'timeline'\], \['Outline', 'outline'\], \['Feed', 'feed'\]\]/);

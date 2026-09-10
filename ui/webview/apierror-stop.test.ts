@@ -12,8 +12,9 @@ const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "
 
 test("the API-error card has a global Stop/Resume retry button that pauses retrying globally", () => {
   assert.match(R, /let globalRetryPaused = false/);
-  assert.match(R, /const stop = el\("button", "apierror-stop"\)/);
-  assert.match(R, /stop\.textContent = paused \? "Resume all auto-retries" : "Stop all auto-retries"/);
+  // 2026-09-08 (the notice-vocabulary pass): a word button on the notice vocabulary, acting through the body delegate
+  assert.match(R, /const stop = noticeAct\(paused \? "Resume all auto-retries" : "Stop all auto-retries", "stopAllRetries",/);
+  assert.match(R, /stopAllRetries: \(\) => \{/);
   // clicking toggles the pause globally
   assert.match(R, /globalRetryPaused = !globalRetryPaused/);
   assert.match(R, /vscodeApi\.postMessage\(\{ type: "setGlobalRetryPaused", value: globalRetryPaused \}\)/);
@@ -27,6 +28,9 @@ test("the retry tick SKIPS all retries when paused globally", () => {
   assert.match(R, /return "auto-retry off \(global\)";/);   // a manual pause (no reset ETA) keeps the plain label
 });
 
-test("Stop retrying reads as a NEUTRAL action, not the red Retry alarm", () => {
-  assert.match(CSS, /\.apierror-stop \{[^}]*color: var\(--dim\)/);
+test("Stop retrying reads as a NEUTRAL action on the one notice button dress, never red", () => {
+  // 2026-09-08: every notice action is .notice-act — dim rest, accent (pattern A) hover; no red buttons in the vocabulary
+  assert.match(CSS, /\.notice-act \{[^}]*color: var\(--dim\)/);
+  assert.match(CSS, /\.notice-act:hover:not\(:disabled\) \{ border-color: var\(--accent\); color: var\(--accent\); background: var\(--accent-wash\); \}/);
+  assert.doesNotMatch(CSS, /\.apierror-stop|\.apierror-retry/);
 });

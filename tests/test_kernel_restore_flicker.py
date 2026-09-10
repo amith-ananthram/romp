@@ -126,6 +126,7 @@ class RestoreReplyFlicker(unittest.TestCase):
     def test_a_failed_replay_does_not_burn_the_punch(self):
         # The punch marked itself done BEFORE replaying; one exception served the pre-gesture card
         # for the rest of the pass. Done is stamped on success only — the next read retries.
+        # The retry lands on a fresh copy: the object the failed read served is a fixed value.
         self._seed_archived_completed()
         kern._undo_clear()                             # live restore (completed on the board)
         kern._begin_goals_pass()
@@ -147,6 +148,9 @@ class RestoreReplyFlicker(unittest.TestCase):
             second = kern._feed_goals(SID)
             self.assertEqual(second["status"].get(GID), "working",
                              "the mark was not burned — the very next read retries and punches")
+            self.assertIsNot(second, first, "the retry replays onto a fresh copy, not onto the served one")
+            self.assertEqual(first["status"].get(GID), "completed",
+                             "what the failed read served has not changed under its holder")
         finally:
             jd._replay_overrides = real
 

@@ -15,6 +15,7 @@
 // kernel gates every request on the serve token (loopback included), and a
 // webview's cross-origin fetch carries no cookie.
 import { kernelUrl } from "./media";
+import { durLabel } from "./duration";
 
 export type UsageWindow = {
   key: string;
@@ -49,13 +50,12 @@ export function fmtAgo(ep: number, nowS: number): string {
   return ((d ? `${d}d ` : "") + (h || d ? `${h}h ` : "") + `${m}m`).trim() + " ago";
 }
 
+// "soon" at rollover, else the ONE duration format (duration.ts durLabel) — this used to be its own
+// d/h/m formatter with no seconds, one of six span formats the 2026-09-08 audit found across the panes
 export function fmtReset(resetsAt: number, nowS: number): string {
   const dt = resetsAt - nowS;
   if (dt <= 0) return "soon";
-  const d = Math.floor(dt / 86400);
-  const h = Math.floor((dt % 86400) / 3600);
-  const m = Math.floor((dt % 3600) / 60);
-  return (d ? `${d}d ` : "") + (h || d ? `${h}h ` : "") + `${m}m`;
+  return durLabel(dt);
 }
 
 // /usage payload → the windows worth drawing (unreported windows drop out).

@@ -32,7 +32,10 @@ from pathlib import Path
 
 HOME     = Path.home()
 STATE    = Path(os.environ.get("ROMP_STATE_DIR")   # per-kernel state root override (plans/multi-kernel.md)
-                or Path(os.environ.get("XDG_STATE_HOME", str(HOME / ".local/state"))) / "romp")
+                or Path(os.environ.get("XDG_STATE_HOME") or str(HOME / ".local/state")) / "romp")
+# `or`, not a .get default: an EMPTY XDG_STATE_HOME is unset (the XDG spec, and every shell reader's
+# ${XDG_STATE_HOME:-...}). A .get default kept the empty string and made the root the RELATIVE path
+# romp under the process cwd, so the kernel and the shell surfaces used different roots.
 PROJECTS = Path(os.environ.get("CLAUDE_CONFIG_DIR") or str(HOME / ".claude")) / "projects"   # per-kernel Claude root (plans/multi-kernel.md phase 2)
 NAMES    = STATE / "names"
 STATES_DIR   = STATE / "states"
@@ -254,12 +257,22 @@ _RESULT_CAP = 16000
 # notification can never arrive (the CLI died with the monitor out, and the transcript never learns).
 # Consumers apply this with THEIR now — baking it into the scan would freeze inside the mtime caches,
 # which an idle transcript never busts. The grace absorbs kill/notify latency.
-def _bg_expired(task, now, grace=120.0):
+def _bg_expiry_t(task, grace=120.0):
+    """The instant a scan row starts reading as expired: deadline + grace, or None for a row with no
+    deadline (it never expires by the clock). One definition for the predicate below and for the judge
+    gate's clock input (judge._settle_not_before), so the two cannot drift."""
     dl = (task or {}).get("deadline")
+    if not dl:
+        return None
     if (task or {}).get("deadlineSrc") == "hook":
         grace = 5.0   # a hook-recorded deadline is the harness's own kill moment (Monitor's
         #               required timeout_ms, journaled at launch) — exact, so only clock skew
-    return bool(dl) and now > dl + grace
+    return dl + grace
+
+
+def _bg_expired(task, now, grace=120.0):
+    x = _bg_expiry_t(task, grace)
+    return x is not None and now > x
 
 
 # The detail an agent/workflow row expands to (the Agent prompt / the Workflow script) is clipped:
@@ -3003,6 +3016,37 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
             "landedTextUuids": sorted(landed)}
 
 
+def task_store_dir(fsid):
+    """Claude Code's task store for one transcript stem: <CLAUDE_CONFIG_DIR or ~/.claude>/tasks/<fsid>,
+    resolved at call time (the env var, as task_store_plan reads it)."""
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or str(HOME / ".claude")) / "tasks" / str(fsid)
+
+
+def task_store_fp(fsid):
+    """The task store's identity for the judge gate: None when the stem has no store dir (task_store_plan
+    returns None too, and the caller folds the transcript instead), else the sorted (name, mtime_ns, size)
+    of its item files. An item created, deleted or flipped in place moves it. A dir that exists but cannot
+    be listed raises OSError, as task_store_plan does: the gate then runs the stage and stamps nothing,
+    and the stage surfaces the failure loudly. Item files are stat'd by name, never read: a stat is all
+    identity needs."""
+    if not fsid:
+        return None
+    d = task_store_dir(fsid)
+    if not d.is_dir():
+        return None
+    out = []
+    with os.scandir(d) as it:                              # raises OSError → the caller's bypass
+        for e in it:
+            if not e.name.endswith(".json"):
+                continue
+            try:
+                st = e.stat()
+            except FileNotFoundError:
+                continue                                   # deleted between the listing and the stat
+            out.append((e.name, st.st_mtime_ns, st.st_size))
+    return tuple(sorted(out))
+
+
 def task_store_plan(fsid):
     """The agent's to-do list read from Claude Code's LIVE task store (<config>/tasks/<fsid>/<N>.json,
     honoring $CLAUDE_CONFIG_DIR) — the AUTHORITATIVE state TaskList/TaskGet read, updated by EVERY
@@ -3017,7 +3061,7 @@ def task_store_plan(fsid):
     it loudly, never silently fold (repo policy). A single corrupt item file is skipped."""
     if not fsid:
         return None
-    d = Path(os.environ.get("CLAUDE_CONFIG_DIR") or str(HOME / ".claude")) / "tasks" / fsid
+    d = task_store_dir(fsid)
     if not d.is_dir():
         return None
     items = []

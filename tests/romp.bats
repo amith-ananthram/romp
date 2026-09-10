@@ -1281,6 +1281,44 @@ _stale_server_globals() {
     [[ "$output" == *"unknown option: -x"* ]]
 }
 
+@test "names map: the record writer publishes atomically, so a reader racing the rename hook never sees an empty record" {
+    # _romp_record (a launch, the after-rename hook, the title-freeing rewrite) fills a temp in the names
+    # directory and moves it into place. The kernel's names writers read the record while the hook
+    # rewrites it and publish their edit over what they read, so a writer that truncated before it wrote
+    # cost the session its name and cwd. A reader polling the record while the hook rewrites it forty
+    # times must never find it empty; the rename must land with the dir and colors intact, and every hook
+    # run must reach the writer (the mock tmux answers the sid and logs the send-keys that follows the
+    # write), so a hook that never writes cannot pass by leaving the seed alone. The temp is dot-prefixed:
+    # the `*` glob _romp_free_title walks the directory with must never see it, and none may be left behind.
+    cat > "$MOCK_DIR/tmux" << 'MOCK'
+#!/usr/bin/env bash
+echo "tmux $*" >> "$MOCK_LOG"
+if [[ "$1" == "show" && "$5" == "@romp-session-id" ]]; then echo aaaa1111-bbbb-2222-cccc-333333333333; fi
+exit 0
+MOCK
+    chmod +x "$MOCK_DIR/tmux"
+    ndir="$XDG_STATE_HOME/romp/names"
+    mkdir -p "$ndir"
+    f="$ndir/aaaa1111-bbbb-2222-cccc-333333333333"
+    printf 'stale\t%s\t#1EA1EB\twhite\n' "$WORK_DIR" > "$f"
+    # the writer: the rename hook, 40 times over; the reader: as many looks as fit meanwhile
+    ( for i in $(seq 1 40); do "$ROMP_SCRIPT" _renamed exp-web >/dev/null 2>&1; done ) &
+    wpid=$!
+    empty=0; reads=0; seen=0
+    while kill -0 "$wpid" 2>/dev/null; do
+        reads=$((reads + 1))
+        [ -s "$f" ] || empty=$((empty + 1))
+        for e in "$ndir"/*; do [ "$e" = "$f" ] || seen=$((seen + 1)); done   # the glob _romp_free_title walks
+    done
+    wait "$wpid"
+    [ "$reads" -gt 100 ]
+    [ "$empty" -eq 0 ]
+    [ "$seen" -eq 0 ]                                                      # the temp never shows to that glob
+    [ "$(grep -c '^tmux send-keys' "$MOCK_LOG")" -eq 40 ]                   # every hook run got past the writer
+    [ "$(cat "$f")" = "$(printf 'exp-web\t%s\t#1EA1EB\twhite' "$WORK_DIR")" ]   # the rename landed; dir and colors intact
+    [ "$(ls -A "$ndir" | grep -vc '^aaaa1111-bbbb-2222-cccc-333333333333$')" -eq 0 ]   # no temp left behind
+}
+
 @test "old-kernel spawn shape (--detach <name>) still works, silently" {
     # A kernel on pre-round-3 code spawns dashboard tmux sessions as `romp
     # --detach <name>` with stderr swallowed — the shape must keep working.

@@ -42,6 +42,103 @@ class TunnelStatus(unittest.TestCase):
         self.assertEqual(km._tunnel_status(False, False, False), "down")
 
 
+class RecoveryCounter(unittest.TestCase):
+    """T291b (the user 2026-09-09): a row's recovery counter bumps ONLY when a pass that ANSWERED finds the row
+    had missed polls (or was not up), never on a steady answered poll and never on a silent pass — the event a
+    dashboard turns into hostUp for the previews parked on a link whose status never left "up". A miss a data
+    path preloaded mints one bump until a real silent poll or a status change re-arms it (the review's find: a
+    request that keeps stalling must not mint its own recovery, retry, stall and mint again forever)."""
+
+    def _pass(self, r, answered, st="up"):
+        """One supervisor pass's bookkeeping in the ssh branch's order: the poll, then the recovery."""
+        km._note_poll(r, answered)
+        return km._note_recovery(r, st)
+
+    def test_a_steady_up_row_never_bumps(self):
+        r = {"host": "TESTHOST", "status": "up", "misses": 0}
+        for _ in range(5):
+            self.assertFalse(self._pass(r, answered=True))
+        self.assertEqual(int(r.get("upSeq") or 0), 0)
+
+    def test_a_real_miss_then_an_answer_bumps_once(self):
+        r = {"host": "TESTHOST", "status": "up", "misses": 0}
+        self.assertFalse(self._pass(r, answered=False), "a silent pass is not a recovery")   # misses 1, the row keeps "up"
+        self.assertFalse(self._pass(r, answered=False), "a SECOND silent pass under the stale bound is not one either")
+        self.assertNotIn("upSeq", r)
+        self.assertTrue(self._pass(r, answered=True), "the poll answered again: the recovery")
+        self.assertEqual(r["upSeq"], 1)
+        self.assertFalse(self._pass(r, answered=True), "the following steady pass does not bump again")
+        self.assertEqual(r["upSeq"], 1)
+
+    def test_a_demand_preload_bumps_once_until_a_real_miss_or_a_status_change_rearms_it(self):
+        # the relay's timed-out request preloads misses (_demand_redial "timeout"); the woken pass answers
+        r = {"host": "TESTHOST", "status": "up", "misses": 0}
+        r["misses"], r["_demand_miss"] = km.STALE_MISSES - 1, True
+        self.assertTrue(self._pass(r, answered=True))
+        self.assertEqual(r["upSeq"], 1)
+        # the same request stalls again on a link whose polls never missed: no second bump, no retry loop
+        r["misses"], r["_demand_miss"] = km.STALE_MISSES - 1, True
+        self.assertFalse(self._pass(r, answered=True), "a demand preload mints one bump until the link shows a real miss")
+        self.assertEqual(r["upSeq"], 1)
+        # a REAL silent poll re-arms it
+        self.assertFalse(self._pass(r, answered=False))
+        self.assertTrue(self._pass(r, answered=True))
+        self.assertEqual(r["upSeq"], 2)
+        r["misses"], r["_demand_miss"] = km.STALE_MISSES - 1, True
+        self.assertTrue(self._pass(r, answered=True), "re-armed: the next demand preload bumps again")
+        self.assertEqual(r["upSeq"], 3)
+        # …and so does a status change
+        r["misses"], r["_demand_miss"] = km.STALE_MISSES - 1, True
+        self.assertFalse(self._pass(r, answered=True))
+        km._note_recovery(r, "down")                           # the pass saw the link down
+        r["status"] = "down"
+        self.assertTrue(self._pass(r, answered=True), "back up: a recovery")
+        self.assertEqual(r["upSeq"], 4)
+
+    def test_a_not_up_row_coming_up_bumps_even_with_no_misses(self):
+        r = {"host": "TESTHOST", "status": "down", "misses": 0}   # a torn-down, redialed row: misses reset by the teardown
+        self.assertTrue(self._pass(r, answered=True))
+        self.assertEqual(r["upSeq"], 1)
+
+    def test_a_row_that_is_not_up_never_bumps(self):
+        r = {"host": "TESTHOST", "status": "up", "misses": 0}
+        km._note_poll(r, False)
+        for st in ("no-kernel", "down", "starting", "restarting"):
+            self.assertFalse(km._note_recovery(r, st), st)
+        self.assertNotIn("upSeq", r)
+
+    def test_a_checked_in_peers_timeout_preloads_the_miss_too(self):
+        saved = dict(km._remotes)
+        try:
+            km._remotes.clear()
+            km._remotes["TESTHOST"] = {"host": "TESTHOST", "checkin_peer": True, "proc": None, "status": "up", "misses": 0}
+            km._tunnel_wake.clear()
+            km._demand_redial("TESTHOST", "timeout")
+            r = km._remotes["TESTHOST"]
+            self.assertEqual(r["misses"], km.STALE_MISSES - 1, "the same evidence an ssh row's timeout files")
+            self.assertTrue(r.get("_demand_miss"))
+            self.assertTrue(km._tunnel_wake.is_set(), "the supervisor is woken to decide now")
+            # the checkin branch's bookkeeping: an answered poll, then the recovery
+            km._note_poll(r, True)
+            self.assertTrue(km._note_recovery(r, "up"))
+            self.assertEqual(r["upSeq"], 1)
+        finally:
+            km._remotes.clear(); km._remotes.update(saved); km._tunnel_wake.clear()
+
+    def test_the_tunnels_row_serves_it_and_the_store_never_saves_it(self):
+        for k in ("upSeq", "_poll_miss", "_demand_miss", "_demand_bumped"):
+            self.assertIn(k, km._NOT_SAVED, k + ": a per-process mark, like the poll run counters")
+        src = open(os.path.join(BIN, "romp-kernel"), encoding="utf-8").read()
+        self.assertIn('"upSeq": int(r.get("upSeq") or 0)}', src, "_remote_public serves the counter beside lastOk")
+        # the supervisor pass notes the recovery once st is final, against the PREVIOUS status
+        call = "_note_recovery(r, st)   # an answered pass after misses"   # the pass's call site, not the def
+        self.assertIn(call, src)
+        self.assertLess(src.index(call), src.index('r["status"] = st                   # keep a richer spawn-error label'),
+                        "noted before the pass overwrites the status")
+        self.assertIn('r["_poll_miss"] = True', src, "a real silent poll leaves its mark")
+        self.assertEqual(src.count('r["_demand_miss"] = True'), 2, "both the ssh row's and the checked-in peer's timeout preload")
+
+
 class ExpectedRestart(unittest.TestCase):
     """T238: a restart the DIALING side caused (its p2p update) must read as 'restarting after update',
     never as a dead far kernel — no red no-kernel, no terminated ssh, no backoff step — until the event

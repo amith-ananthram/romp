@@ -98,6 +98,9 @@ test("executed: dragging a tag pill writes tagOrder + re-sorts the local array; 
   assert.deepEqual(cells.map((c) => c._tname), ["alpha", "beta", "gamma", "remotepool"], "table renders the union order");
   // seat each cell at a distinct y so the drop math has real geometry
   cells.forEach((c, i) => { c._rect = { top: i * 30, bottom: i * 30 + 28, left: 0, right: 200, width: 200, height: 28 }; });
+  // ...inside the table's own box: since 2026-09-09 only rows inside it take the cue and the drop (the table
+  // scrolls with many tags; timeline-tags-scale.test.ts covers a drag past its edge)
+  cells[0].parentNode._rect = { top: 0, bottom: 200, left: 0, right: 800, width: 800, height: 200 };
   // grab REMOTEPOOL (index 3) and drop it between alpha and beta (index 1)
   const grab = cells[3];
   grab._listeners.pointerdown({ preventDefault() {}, pointerId: 7 });

@@ -171,6 +171,24 @@ class AutoPauseOnLimit(unittest.TestCase):
         km._auto_pause_on_limit()
         self.assertTrue(km._retry_paused_on(), "a real 5h/7d limit still engages the pause")
 
+    def test_the_pause_latches_reason_limit_at_the_event(self):
+        # the bottom bar's API health cell names the pause from the file's reason, never from _retry_resume_at's
+        # clock comparison (which would flip the word at the reset instant with no event)
+        fut = int(time.time()) + 3600
+        km._usage = lambda: {"limited": {"fiveHour": True, "sevenDay": False, "fable": False},
+                             "fiveHour": {"pct": 100, "resetsAt": fut}}
+        km._auto_pause_on_limit()
+        self.assertTrue(km._retry_paused_on())
+        self.assertEqual(km._retry_pause_reason(), "limit")
+        self.assertEqual(km._retry_resume_at(), fut, "the card's countdown is unchanged by the latched reason")
+        self.assertGreater(km._retry_pause_ts(), 0, "the pause's own t is the frame's `since`")
+
+    def test_an_already_paused_flag_keeps_its_reason(self):
+        km._set_retry_paused(True, reason="spend")
+        km._usage = lambda: {"limited": {"fiveHour": True, "sevenDay": False, "fable": False}}
+        km._auto_pause_on_limit()
+        self.assertEqual(km._retry_pause_reason(), "spend", "idempotent: the first cause stays on record")
+
 
 class AutoPauseOnSpendLimit(unittest.TestCase):
     """A monthly SPEND cap auto-engages the global retry-pause — the SPEND twin of AutoPauseOnLimit (the
