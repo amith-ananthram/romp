@@ -195,8 +195,8 @@ def fig_restart_timing(cp, fr, out):
     pal = _palette(cp, fr["labels"])
     f, axs = cp.fig(rows=1, cols=2, w=16, h=max(3.5, 0.5 * len(rows) + 1.5))
     f.subplots_adjust(wspace=0.3)
-    _dots_with_p90(cp, axs[0], rows, "outageP50", "outageP90", pal, "Exit to first serve (s): dot p50, line to p90 — shorter better")
-    _dots_with_p90(cp, axs[1], rows, "settleP50", "settleP90", pal, "Reconcile settle (s): dot p50, line to p90 — shorter better")
+    _dots_with_p90(cp, axs[0], rows, "outageP50", "outageP90", pal, "Exit to first serve (s) — shorter better\ndot p50, line to p90")
+    _dots_with_p90(cp, axs[1], rows, "settleP50", "settleP90", pal, "Reconcile settle (s) — shorter better\ndot p50, line to p90")
     axs[1].set_yticklabels([""] * len(rows))
     return _save(f, out, "restart_timing.png")
 
