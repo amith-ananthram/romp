@@ -42,7 +42,10 @@ nothing): while a `romp refresh --quiet` waits for the sessions to finish their
 turns, that hold keeps every session from starting a new turn, a side effect no
 subresource load may trigger. A token presented explicitly, as `?token=` or
 `X-Romp-Token`, is accepted from any Origin: federated (cross-machine) calls
-need it, and a cross-site page cannot obtain it.
+need it, and a cross-site page cannot obtain it: the dashboard drops `?token=`
+from its address as it loads, and every page the kernel serves carries
+`Referrer-Policy: same-origin`, so the token never reaches another origin in a
+`Referer`.
 The token-exempt routes are the no-side-effect liveness probes (`/healthz`,
 `/version` and `/busy` on the kernel, `/ping` on the bus) and the install files:
 `/manifest.webmanifest` and the three home-screen icons under `/media/`
