@@ -91,11 +91,13 @@ completed); the feed just paints columns. (Reflected in `docs/judges.md`.)
   for a reload or a tab the browser discarded; a `resent: true` copy of the
   `return` row means the kept socket proved dead and the row was re-filed onto
   the redial.
-  A redial declares itself (`reconnect=1` on the `/ws` URL); the kernel then
-  sends the active tab in full and lists every other session as a `skeleton` on
-  the tab strip with one small `status` frame each, and the chat pane loads a
-  skeleton on click or one at a time in idle, never while the tab is hidden; one
-  `skeleton` client-diag row (count, active) records the regime.
+  A redial declares itself (`reconnect=1` on the `/ws` URL) once the bundle's
+  ready has left on a socket; before that, or with the ready still queued, it
+  dials as a fresh page. The kernel then sends the active tab in full and lists
+  every other session as a `skeleton` on the tab strip with one small `status`
+  frame each, and the chat pane loads a skeleton on click or one at a time in
+  idle, never while the tab is hidden; one `skeleton` client-diag row (count,
+  active) records the regime.
 - **The Outline pane's ages run on the kernel's clock.** Its timestamps are the
   kernel's, so the pane never reads the browser's clock against them: it anchors
   on the frame's `now` paired with the moment that frame arrived from the wire
