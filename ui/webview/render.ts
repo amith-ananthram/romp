@@ -15,6 +15,7 @@ import type { ParsedAsk } from "../ask-types";
 import { TABBAR_H_KEY, TABBAR_H_DEFAULT, clampTabbarH, parseTabbarH } from "./tabbar-resize";
 import { ctxFallbackColor, pickTone, readableRgb } from "./ctx-color";
 import { applyTheme } from "./theme";
+import { applyDenseChrome } from "./dense-chrome";
 import { SessionViews, viewVisible, viewsKey, revealIn, viewTagUnion, viewTags, type TagUnion, type SessionTag } from "./session-views";
 import { mintWriteId, ackOutcome, adoptViews, seqOf, capsAdopts, announcedSeq, announcedAfter, createInFlight, rederivePending, lensBlob, applyLensFields, type InflightWrite, type LensFields, type TagEditOp, type ViewsAck } from "./views-writes";
 import { lensVisible, surfaceLens } from "./tag-lens";
@@ -26,6 +27,7 @@ import { senderKind, SenderKind } from "./sender-identity";
 import { loadSettings, onExternalSettingsChange, installSettingsSync, type RompSettings } from "./settings";
 import { backendLabel, effectiveDefaultBackend } from "./backend-names";
 import { delegate } from "./actions";
+import { flash } from "./actions";   // its own line: the import above is pinned verbatim by click-safe.test.ts (the file-view precedent)
 import { awaitWord, awaitBreakdown, groupRows, GROUP_TITLE, workingFor, type AwaitRow } from "./spin-caption";
 import { isClearCmd, openTopTitles, clearConfirmDetail, endConfirmDetail } from "./clear-confirm";
 import { prebuildPlan, type ViewState } from "./prebuild";
@@ -38,22 +40,24 @@ import { tabStateClass, tabDotClass, sectionPip, sectionPipMembers, sectionPipTi
 import { titleWithKey, chordOf, effectiveChord, loadOverrides } from "./keybindings";
 import { DEFAULT_CHORDS } from "./commands";
 import { NavHistory } from "./nav-history";
-import { StagedStack } from "./staged-messages";
-import { type PendingSend, type TailEvent, OPT_PREFIX, isOptimisticUuid, newPending, reconcilePending, queuedCopyToHide, dropPending, bareGroupLabel, sentAtLabel } from "./send-pending";
+import { StagedStack, quoteReplyBody, stagedPosts } from "./staged-messages";
+import { type PendingSend, type TailEvent, OPT_PREFIX, isOptimisticUuid, newPending, mintQid, reconcilePending, queuedCopyToHide, dropPending, bareGroupLabel, sentAtLabel, pendingBody } from "./send-pending";
 import { reconcileHeld, heldAsQueued, type HeldCopy, type HeldQueued, type HeldMemory } from "./queued-held";
 import { reloadHoldReason } from "./reload-hold";
+import { liveNotices, keepReloadNotices, takeReloadNotices } from "./reload-notices";
 import { mintProvisionalId, isProvisionalId, provisionalName, adoptsProvisional, focusResolvesProvisional } from "./provisional";
 import { onlyTag, matchesOnly } from "./only-filter";
 import { numberDiff, type DiffRow } from "./diff-lines";
 import { parseAgentNotif, notifHead, type AgentNotif } from "./agent-notif";
 import { injectedHead, type InjectedSource } from "./injected-source";
 import { subTabId, isSubId, subParts, subLabel, gistLines, stepLines, stepsNote, agentFoldLabel, subHeadParts, openIconSvg, pinIconSvg, type SubMeta, type AgentGist, type AgentGistRow, type GistLine } from "./subagent-view";
-import { previewKind, previewFull, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal, setLightboxNav, type LightboxNavEntry } from "./preview";
+import { previewKind, previewFull, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal, mdImgPostPass, setLightboxNav, type LightboxNavEntry } from "./preview";
 import { openFileClick } from "./file-view";                  // a clicked file WITH its gesture (pdf-new-tab.test.ts)
 // initFileView rides its OWN line: the import above is pinned verbatim by file-view.test.ts
 import { initFileView, setFileViewIdentity, hostStub } from "./file-view";
 import { openUrlView } from "./file-view";                 // the URL mode of the same viewer (md-url-view.test.ts)
 import { isMarkdownUrl } from "./md-links";
+import { openPathLink, linkifyPathTokens, selectionOpenIn } from "./path-links";   // the path matcher the chat's links are made from (a shared module)
 import { initFileBrowse, openFileBrowse } from "./file-browse";   // the browser is pane-local here now (the user 2026-08-24)
 import { pastedFilePath } from "./paste-path";
 import { insertAtCaret } from "./composer-insert";
@@ -69,17 +73,23 @@ import { activeTabToReannounce } from "./relay-active";
 import { dirStatusHint, nextDirActive, createDirPrompt, type DirStatus } from "./dir-complete";
 import { mediaSrc, kernelUrl } from "./media";
 import { initStrip, fmtReset } from "./strip";
+import { durLabel } from "./duration";
 import { apiErrorReason } from "./api-error-reason";
 import { chatMdExtensions, userMdHtml } from "./chat-md";
 import { setTip, pruneTip } from "./tip";
-import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAnchorRange, sliceRanges, prunePending, type CommentThread } from "./comments";
+import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAnchorRange, sliceRanges, prunePending, newCommentCreate, commentCreateFrame,
+         type CommentThread, type CommentCreate } from "./comments";
+import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, chipLabel, chipTip, chipAria, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
 import { dragSlotIndex } from "./dragslot";
 import { perfFrameHandler } from "./perf-telemetry";
 import { linkifyPrRefs, senderPrRepo, postalSenderHost } from "./pr-links";
 import { listenForFrames } from "./frame-listener";
 import { highlightHtml } from "./highlight-cache";
+import { wrapCodeLines, addCopyBtn } from "./code-block";   // a fence's per-line rows and Copy button, shared with the file viewer
 import { turnWorkedSecs as workedSecsOf, workedFooterPlan } from "./worked-footer";
 import { reconcileRewindPass, type RewindEvent } from "./rewind-reconcile";
+import { watchChatVisibility, browserChatVisibilityDeps } from "./chat-visibility";
+import type { PaneHiddenHost } from "./paint-gate";
 
 for (const [name, lang] of Object.entries({
   bash, sh: bash, shell: bash, python, py: python, javascript, js: javascript,
@@ -112,7 +122,9 @@ type ChatEvent = (
   // source/preamble: a harness-INJECTED record (kernel injected_source — a background agent's completion, a
   // system notice, a peer's message) and the CLI's note-to-the-model paragraph lifted out of its text; the
   // event renders as a labelled notice (renderInjected), never the user's bubble (the user 2026-09-07)
-  | { kind: "user"; md: string; uuid?: string; ts?: string; reminders?: string[]; taskOutputs?: TaskOutputs; human?: boolean; romp?: boolean; rompAuto?: boolean; rompSystem?: boolean; followUp?: boolean; goal?: string; fuCtx?: string; canned?: string; tag?: string; mid?: string; mids?: string[]; images?: { src: string; path?: string }[]; undelivered?: boolean; echoT?: number; absorbed?: boolean; sentAt?: number; hiddenByPending?: boolean; source?: InjectedSource; preamble?: string; spacePaths?: string[]; pathLinks?: Record<string, string>; pathPins?: Record<string, string> }
+  // gist: a romp SYSTEM notice's USER-facing head, lifted by the kernel from the notice's <!-- romp-gist -->
+  // marker (2026-09-08) — the body is written to the agent and never doubles as the head
+  | { kind: "user"; md: string; uuid?: string; ts?: string; reminders?: string[]; taskOutputs?: TaskOutputs; human?: boolean; romp?: boolean; rompAuto?: boolean; rompSystem?: boolean; gist?: string; followUp?: boolean; goal?: string; fuCtx?: string; canned?: string; tag?: string; mid?: string; mids?: string[]; images?: { src: string; path?: string }[]; undelivered?: boolean; echoT?: number; absorbed?: boolean; sentAt?: number; hiddenByPending?: boolean; source?: InjectedSource; preamble?: string; spacePaths?: string[]; pathLinks?: Record<string, string>; pathPins?: Record<string, string> }
   | { kind: "assistant"; md: string; uuid?: string; ts?: string; spacePaths?: string[]; pathLinks?: Record<string, string>; pathPins?: Record<string, string> }   // spacePaths: backticked filenames WITH spaces the kernel verified exist (build_session _space_paths) → whole-span links. pathLinks: path-shaped tokens the kernel verified against the filesystem, token → real open target (build_session _path_links) — the linkifier's gate
   | { kind: "thinking"; text: string; encrypted: boolean; uuid?: string; ts?: string }
   | {
@@ -190,7 +202,7 @@ type ChatEvent = (
   // `held` DOES come from the kernel (_limit_hold): the queue is stuck on the ACCOUNT rather than on this
   // session — a usage limit or a monthly spend cap holds every send — so the head names what it is waiting
   // for, and how long is left when the API reported a reset (the user 2026-07-24).
-  | { kind: "queued"; texts: { md: string; followUp?: boolean; goal?: string; fuCtx?: string; idx?: number; park?: number; cancelable?: boolean; optimistic?: boolean; romp?: boolean; rompSystem?: boolean; rompAuto?: boolean; imgPaths?: string[]; lost?: string; qts?: number; qid?: string; hiddenByPending?: boolean; landing?: boolean }[]; ts?: string; uuid?: string; bare?: boolean; held?: { reason: string; resetsAt?: number | null; what: string; detail?: string } }   // imgPaths: an optimistic echo's dragged-image attachments → thumbnails, the landed form's own renderer (the user 2026-08-25); lost: client-only, the connection dropped after this unconfirmed send; qts: on OUR optimistic copy the pending entry's identity (its press time) so the ✕ removes ITS entry, on a kernel copy its enqueue stamp (T252c); qid: a kernel copy's identity, the ✕ drops the send that owns it (send-pending.ts)
+  | { kind: "queued"; texts: { md: string; followUp?: boolean; goal?: string; fuCtx?: string; idx?: number; park?: number; cancelable?: boolean; optimistic?: boolean; romp?: boolean; rompSystem?: boolean; rompAuto?: boolean; gist?: string; imgPaths?: string[]; lost?: string; qts?: number; qid?: string; hiddenByPending?: boolean; landing?: boolean }[]; ts?: string; uuid?: string; bare?: boolean; held?: { reason: string; resetsAt?: number | null; what: string; detail?: string } }   // imgPaths: an optimistic echo's dragged-image attachments → thumbnails, the landed form's own renderer (the user 2026-08-25); lost: client-only, the connection dropped after this unconfirmed send; qts: on OUR optimistic copy the pending entry's identity (its press time) so the ✕ removes ITS entry, on a kernel copy its enqueue stamp (T252c); qid: the copy's identity (T252c): minted at the press on OUR copy and posted with the send, so the kernel's copy wears the same one; the ✕ names it on both (send-pending.ts)
   // The turn stopped on an API error (event-based: transcript isApiErrorMessage). The session is BLOCKED
   // until retried — a red-dot card at the bottom with a Retry button (the user 2026-06-16).
   | { kind: "apiError"; text: string; status?: number; ts?: string; uuid?: string }
@@ -320,7 +332,8 @@ initStrip(() => window.postMessage({ romp: "openSettings" }, "*"),
 installSettingsSync();   // a gear save in ANOTHER VS Code pane lands here via the host
 
 let settings: RompSettings = loadSettings();   // global webview settings (compact mode, …) — see settings.ts
-const expandedGroups = new Set<string>();      // compact mode: tool-group keys the user clicked open
+// (compact mode's expanded tool/notice runs are keyed in openFolds — "tg:<uuid>" / "ng:<uuid>" — the ONE fold
+// store since 2026-09-08; this had its own expandedGroups set)
 
 const sessions = new Map<string, Session>();
 const order: string[] = [];           // positional tab order (for cycling)
@@ -432,7 +445,10 @@ function reconcileOptimisticInner(s: Session): void {
   // `lost` rides along so the bubble can say "not confirmed" after a connection drop (markPendingLost).
   // `qts` is the entry's identity: the ✕ removes THAT entry, never the first with the same text (two
   // identical sends can sit in different states — one lost, one received).
-  const mk = (p: PendingSend) => ({ md: p.text, optimistic: true, cancelable: true, imgPaths: p.imgPaths, lost: p.lost, qts: p.ts });
+  // `qid` is the copy's identity on the kernel's side too (the id the press minted, posted with the send): the
+  // ✕ names it, so the kernel cancels exactly this copy, wherever the send landed and whatever else wears the
+  // same words.
+  const mk = (p: PendingSend) => ({ md: p.text, optimistic: true, cancelable: true, imgPaths: p.imgPaths, lost: p.lost, qts: p.ts, qid: p.qid });
   // ONE BARE dashed group at the TAIL, the sends in send order (T252d): below every event the kernel has
   // shown, where the model will read them; the landed atom, placed at its landing time, takes that same
   // position. No "N queued messages" header to claim what we can't back. A copy hidden out of a HELD kernel
@@ -534,10 +550,13 @@ function hideQueuedCopy(s: Session, p: PendingSend): { held?: Extract<ChatEvent,
   return { held: q.held || undefined };
 }
 
-// Record a composer send as in-flight and show its optimistic bubble NOW (before any kernel push).
-function registerOptimistic(id: string, text: string, imgPaths?: string[]): void {
+// Record a composer send as in-flight and show its optimistic bubble NOW (before any kernel push). `qid` is the
+// copy's id the caller minted at the press (mintQid) and posted with the send, so the kernel queues or parks the
+// copy under the id this bubble wears and the bubble, the kernel's chip and the ✕ agree from the press; a caller
+// that posts nothing (a provisional tab's send, held until the session exists) lets the entry mint its own.
+function registerOptimistic(id: string, text: string, imgPaths?: string[], qid?: string): void {
   const arr = pendingSent.get(id) || [];
-  const p = newPending(text, imgPaths);
+  const p = newPending(text, imgPaths, Date.now(), qid);
   arr.push(p);   // the anchor (`at`) is stamped by the reconcile just below
   pendingSent.set(id, arr);
   const s = sessions.get(id);
@@ -1167,6 +1186,7 @@ function md(src: string, repo: string | null = prRepoFor()): string {
     // the sanitizer's verdicts stand and a marked-autolinked GitHub URL is never wrapped twice.
     const clean = sanitizeMd(dirty);   // the sanitized <body>, its math rendered
     linkifyPrRefs(clean, repo);
+    mdImgPostPass(clean);   // a markdown image whose URL failed this page life is parked before the browser fetches it (T291c)
     return clean.innerHTML;
   } catch { const d = document.createElement("div"); d.textContent = src; return d.innerHTML; }
 }
@@ -1181,6 +1201,7 @@ function userMd(src: string, repo: string | null = prRepoFor()): string {
   try {
     const clean = sanitizeMd(userMdHtml(src));   // the sanitized <body>, its math rendered
     linkifyPrRefs(clean, repo);
+    mdImgPostPass(clean);   // a markdown image whose URL failed this page life is parked before the browser fetches it (T291c)
     return clean.innerHTML;
   } catch { const d = document.createElement("div"); d.textContent = src; return d.innerHTML; }
 }
@@ -1226,62 +1247,6 @@ function highlight(container: HTMLElement, lineNos = true) {
     const pre = code.parentElement;
     if (pre && pre.tagName === "PRE") addCopyBtn(pre as HTMLElement, raw);   // an automatic "Copy" button per block
   });
-}
-
-// Copy text to the clipboard, falling back to a hidden-textarea execCommand when the async Clipboard API
-// is unavailable (it needs a secure context — localhost counts, but stay safe). Returns whether it copied.
-function copyText(text: string): Promise<boolean> {
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    return navigator.clipboard.writeText(text).then(() => true, () => fallbackCopy(text));
-  }
-  return Promise.resolve(fallbackCopy(text));
-}
-function fallbackCopy(text: string): boolean {
-  try {
-    const ta = document.createElement("textarea");
-    ta.value = text; ta.style.position = "fixed"; ta.style.top = "-9999px"; ta.style.opacity = "0";
-    document.body.appendChild(ta); ta.focus(); ta.select();
-    const ok = document.execCommand("copy");
-    document.body.removeChild(ta);
-    return ok;
-  } catch { return false; }
-}
-
-// An automatic "Copy" button parked top-right of every rendered code block (the user 2026-06-22). The RAW
-// source is captured at highlight time and closed over — the on-screen markup adds a line-number gutter and
-// drops the newline joins, so copying its textContent would be wrong. Faint until the block is hovered;
-// flips to a green "Copied" for ~1.2s on success. Idempotent (highlight can re-run on a re-render).
-function addCopyBtn(pre: HTMLElement, raw: string) {
-  if (pre.querySelector(":scope > .code-copy")) return;
-  pre.classList.add("has-copy");
-  const btn = el("button", "code-copy") as HTMLButtonElement;
-  btn.type = "button"; btn.textContent = "Copy"; btn.title = "copy this code block";
-  btn.addEventListener("click", (ev) => {
-    ev.preventDefault(); ev.stopPropagation();
-    copyText(raw).then((ok) => {
-      btn.textContent = ok ? "Copied" : "Copy failed";
-      btn.classList.toggle("copied", ok);
-      window.setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("copied"); }, 1200);
-    });
-  });
-  pre.appendChild(btn);
-}
-
-// Wrap each logical line of (hljs-highlighted) code in <span class=cl><span class=ct>…</span></span>,
-// re-opening any hljs span that straddles a newline so the markup stays valid. A CSS counter on .cl
-// draws the subtle line numbers; .ct holds the wrapping content (the user 2026-06-16).
-function wrapCodeLines(code: HTMLElement) {
-  const lines = code.innerHTML.split("\n");
-  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();   // a trailing newline isn't a blank line
-  let open: string[] = [];
-  code.innerHTML = lines.map((ln) => {
-    const prefix = open.join("");
-    const re = /<span[^>]*>|<\/span>/g; let m; const stack = open.slice();
-    while ((m = re.exec(ln))) { if (m[0] === "</span>") stack.pop(); else stack.push(m[0]); }
-    const suffix = "</span>".repeat(Math.max(0, stack.length));
-    open = stack;
-    return `<span class="cl"><span class="ct">${prefix}${ln}${suffix}</span></span>`;
-  }).join("");
 }
 
 function dot(kind: "green" | "ring" | "user" | "red" | "romp" | "working" | "tag"): HTMLElement { return el("span", "dot " + kind); }
@@ -1348,6 +1313,14 @@ function preEl(text: string, scrollKey?: string): HTMLElement {
 document.addEventListener("click", (e) => {
   const a = (e.target as HTMLElement)?.closest?.("a[href]") as HTMLAnchorElement | null;
   if (!a) return;
+  // The click that ends a press-drag-release inside an anchor that is not draggable (the file viewer's URL anchors,
+  // which select like the text around them; file-view-links.ts): the drag selected text, and the selection is what
+  // the person gets, not the link. The viewer's own listener rules the same for its links, but this opener runs
+  // first, at the capture phase, and would open the tab as well. Read for a non-draggable anchor ONLY: a press on a
+  // draggable anchor (the chat's own, and a rendered document's web links) starts no selection and collapses none,
+  // so a selection left open around one by a triple-click on its paragraph is not a drag on it, and reading it
+  // would leave every click on that link dead until a click elsewhere.
+  if (!a.draggable && selectionOpenIn(a)) { e.preventDefault(); return; }
   const href = a.getAttribute("href") || "";
   if (href.startsWith("#")) {
     // An in-page anchor in a message (a footnote's back link, `[section](#install)` over the reply's own `<a name>`):
@@ -1489,7 +1462,7 @@ function inlineFold(head: HTMLElement, turn: HTMLElement, label: string, content
 // event — either way a DOM-only `.open` silently resets whatever the user had opened (e.g. they expand
 // the system-context card, type a message, hit ⏎, and it snaps shut). So we persist open-state in a Set
 // keyed by a stable id (the turn uuid, or the session id for the pinned system card) and reapply it on
-// rebuild — the same trick `expandedGroups` uses for collapsed tool runs. A keyless fold (no stable id)
+// rebuild — the compact-mode tool/notice runs key here too ("tg:" / "ng:"). A keyless fold (no stable id)
 // is just transient, exactly as before. Same-uuid sibling folds share a key → they expand together on
 // rebuild; benign (shows more, never less) and rare.
 const openFolds = new Set<string>();
@@ -1516,57 +1489,179 @@ function foldable(label: string, content: HTMLElement, key?: string): HTMLElemen
   return wrap;
 }
 
-// THE shared "notice card" — informational transcript notices (a backgrounded agent's report, a romp
-// system notice, folded system-reminders) each get their OWN boxed card with a type CHIP, a one-line gist
-// head, and a keyed collapse→expand body. One family, inspired by the postal/teammate cards but distinct:
-// each `variant` carries its own color (agent = accent blue, romp = the swirl + faded-accent, reminder =
-// muted). Distinct from postal (per-peer color) and teammate (dashed neutral). Collapse is KEYED (survives
-// the chat's re-renders via openFolds), unlike the postal/teammate hand-rolled toggle (the user 2026-07-06).
-// `nested` (the user 2026-07-06): the AGENT/REMINDER notices are appended INSIDE the parent user turn that
-// carried the <task-notification>/reminder, so they must NOT bring their own .turn (rail + dot) — a turn
-// nested in a turn drew a SECOND rail + dot, indented another 24px, so the card floated off to the right
-// detached from the timeline. Nested → return the bare card; it sits in the parent turn's rail column under
-// its single dot (connected, like any in-turn card). A standalone notice (romp system) IS its own top-level
-// turn, so it keeps the .turn wrapper + dot.
-type NoticeVariant = "agent" | "romp" | "reminder" | "compact" | "clear" | "peer" | "refusal";
-function noticeCard(o: { variant: NoticeVariant; chip: string; logo?: boolean;
-                        head: string; body: HTMLElement; collapsible?: boolean; key?: string;
-                        nested?: boolean }): HTMLElement {
-  const card = el("div", "notice-card notice-card-" + o.variant + (o.nested ? " notice-nested" : ""));
-  const collapsible = o.collapsible !== false;
-
-  const headEl = el("div", "notice-head");
-  const caret = collapsible ? el("span", "notice-caret") : null;
-  if (caret) headEl.appendChild(caret);
-  const chip = el("span", "notice-chip notice-chip-" + o.variant);
-  if (o.logo) {   // the romp swirl marks a romp notice as "from romp", the way the postal card does
-    const logo = el("img", "notice-chip-logo") as HTMLImageElement;
-    logo.src = mediaSrc("romp-swirl-glyph.svg"); logo.alt = ""; logo.onerror = () => logo.remove();
-    chip.appendChild(logo);
-  }
-  chip.appendChild(document.createTextNode(o.chip));
-  headEl.appendChild(chip);
-  if (o.head) { const h = el("span", "notice-head-text"); h.textContent = o.head; headEl.appendChild(h); }
-  card.appendChild(headEl);
-
-  const hasBody = o.body.childNodes.length > 0;   // gist-only notice → skip the wrapper, render flat
-  if (hasBody) { const bodyEl = el("div", "notice-body"); bodyEl.appendChild(o.body); card.appendChild(bodyEl); }
-
-  if (collapsible && hasBody) {
+// ═══ THE notice — ONE builder for everything that HAPPENED in a session (2026-09-08) ═════════════════
+// The transcript has two shapes. BUBBLES are things SAID into the session (your prompt, a romp nudge or
+// follow-up, the Continue gesture, a queued message): the 14px right-hand family, out of scope here.
+// NOTICES are things that happened — a background agent's report, a compaction, an API error, a peer's
+// mail, a reload, a system reminder — and every one of them is built HERE, by notice(spec); the ~20 bespoke
+// renderers the 2026-09-08 audit found (noticeCard and its siblings: eight head sizes, seven radii, six
+// chip dresses, four fold stores, eleven per-node click listeners) are each a ≤10-line adapter now.
+//   head  = [caret] glyph SOURCE · gist [· meta] [actions], one baseline row; the gist is always a
+//           USER-facing sentence fragment (never the agent-facing body of a romp notice — the kernel
+//           ships `gist` beside it), the meta is counts / durations / exit codes, never a clock (time
+//           stays on the left rail — the user 2026-09-08, decision 1);
+//   body  = folded by default (progressive disclosure), state in openFolds keyed "notice:<key>", toggled
+//           by data-act="noticetoggle" through the document.body delegate — no listener on the node, so
+//           the tail rebuild can never eat a mid-press click (CLAUDE.md click-safety);
+//   density is MECHANICAL: a body or actions → a card; head-only → .notice-slim (the rail-line density);
+//   severity = the rail + the rail dot + the glyph, in the existing status tokens; text is --fg/--dim.
+type NoticeSev = "info" | "romp" | "warn" | "err" | "compact" | "retry" | "needs";
+type NoticeGlyphKind = "romp" | "agent" | "command" | "system" | "peer" | "teammate" | "api" | "compaction"
+  | "clear" | "session" | "power" | "question" | "todo" | "retry" | "branch";
+interface NoticeSpec {
+  src: string | HTMLElement;          // the SOURCE label: "romp" · "background agent" · "system" · a session chip …
+  glyph: NoticeGlyphKind | HTMLElement;   // a named line icon, or a live element for the slot (loader dots, the compacting bar)
+  gist: string | HTMLElement;         // the one-line, user-facing version
+  meta?: string | HTMLElement | null; // counts, durations, exit codes, token wins (tabular) — never a clock
+  acts?: HTMLElement[];               // word buttons (.notice-act, data-act only — the delegate acts, flash() acknowledges)
+  body?: HTMLElement | null;          // the folded detail; an empty body renders flat (gist == body, as before)
+  sev?: NoticeSev;                    // default "info"
+  key?: string;                       // fold key (uuid or a stable id) → openFolds "notice:<key>"
+  open?: boolean;                     // open by DEFAULT (the human is the bottleneck, or nothing is hidden): seeded once, then the user's fold wins
+  nested?: boolean;                   // bare card inside a carrying turn / bubble — no own .turn + rail dot
+  dot?: boolean;                      // false → an off-rail turn (the branch divider); default true
+  rail?: string;                      // an inline rail/dot colour (a peer's identity colour) over the severity's token
+  tip?: string;                       // the head's "why", through the ONE tooltip (setTip), never a native title
+  cls?: string;                       // extra classes on the turn (or the bare card), for CSS hooks a kind still needs
+  live?: boolean;                     // an in-flight row (compacting / clearing / reloading / retrying)
+  group?: { key: string; open: boolean };   // a compact-mode RUN head: the caret + data-gkey toggle rebuilds the view (toggleToolGroup)
+}
+const noticeSeeded = new Set<string>();   // default-OPEN keys already seeded into openFolds (seed once; the user's fold wins after)
+function notice(spec: NoticeSpec): HTMLElement {
+  const sev: NoticeSev = spec.sev || "info";
+  const card = el("div", "notice" + (spec.live ? " notice-live" : "") + (spec.nested ? " notice-nested" : ""));
+  const head = el("div", "notice-head");
+  const body = spec.body && spec.body.childNodes.length ? spec.body : null;
+  const acts = spec.acts || [];
+  const collapsible = !!body;
+  if (spec.group) {
+    // a run's head: the caret reads the run's open state; the delegate rebuilds the view (the expansion
+    // changes which units exist, not a class on this node)
+    const caret = el("span", "notice-caret"); caret.textContent = spec.group.open ? "▾" : "▸";
+    head.appendChild(caret);
+    head.dataset.act = "noticetoggle"; head.dataset.gkey = spec.group.key;
     card.classList.add("notice-collapsible");
-    applyFold(card, "notice-open", o.key);                 // keyed: an expanded card stays open across pushes
-    if (caret) caret.textContent = card.classList.contains("notice-open") ? "▾" : "▸";
-    headEl.addEventListener("click", () => {
-      rememberFold(card, "notice-open", o.key);
-      if (caret) caret.textContent = card.classList.contains("notice-open") ? "▾" : "▸";
-    });
   }
-  if (o.nested) return card;                               // sits inside the parent turn — no own rail/dot
-  const turn = el("div", "turn turn-notice notice-" + o.variant);
-  const d = dot("ring"); d.classList.add("notice-dot", "notice-dot-" + o.variant);
-  turn.appendChild(d);
+  if (collapsible) {
+    const caret = el("span", "notice-caret");
+    head.appendChild(caret);
+    head.dataset.act = "noticetoggle";
+    const fkey = spec.key ? "notice:" + spec.key : undefined;
+    if (fkey) head.dataset.nkey = fkey;
+    if (spec.open && fkey && !noticeSeeded.has(fkey)) { noticeSeeded.add(fkey); openFolds.add(fkey); }
+    applyFold(card, "notice-open", fkey);
+    if (spec.open && !fkey) card.classList.add("notice-open");
+    caret.textContent = card.classList.contains("notice-open") ? "▾" : "▸";
+    card.classList.add("notice-collapsible");
+  }
+  head.appendChild(typeof spec.glyph === "string" ? noticeGlyph(spec.glyph) : spec.glyph);
+  const src = el("span", "notice-src");
+  if (typeof spec.src === "string") src.textContent = spec.src; else src.appendChild(spec.src);
+  head.appendChild(src);
+  const gist = typeof spec.gist === "string" ? el("span", "notice-gist") : spec.gist;
+  if (typeof spec.gist === "string") gist.textContent = spec.gist; else gist.classList.add("notice-gist");
+  head.appendChild(gist);
+  if (spec.meta) {
+    const meta = typeof spec.meta === "string" ? el("span", "notice-meta") : spec.meta;
+    if (typeof spec.meta === "string") meta.textContent = spec.meta; else meta.classList.add("notice-meta");
+    head.appendChild(meta);
+  }
+  if (acts.length) { const box = el("span", "notice-acts"); for (const a of acts) box.appendChild(a); head.appendChild(box); }
+  if (spec.tip) setTip(head, spec.tip);
+  card.appendChild(head);
+  if (body) { const wrap = el("div", "notice-body"); wrap.appendChild(body); card.appendChild(wrap); }
+  const boxed = collapsible || acts.length > 0;   // the density rule: a body or actions → a card; head-only → slim (a run head is slim)
+  if (!boxed) card.classList.add("notice-slim");
+  if (spec.nested) {
+    card.classList.add("notice-sev-" + sev);
+    if (spec.rail) { card.style.setProperty("--notice-rail", spec.rail); card.style.setProperty("--notice-dot", spec.rail); }
+    if (spec.cls) card.classList.add(...spec.cls.split(" ").filter(Boolean));
+    return card;
+  }
+  const turn = el("div", "turn turn-notice notice-sev-" + sev + (boxed ? " notice-boxed" : "") + (spec.cls ? " " + spec.cls : ""));
+  if (spec.rail) { turn.style.setProperty("--notice-rail", spec.rail); turn.style.setProperty("--notice-dot", spec.rail); }
+  if (spec.dot !== false) {
+    // the rail dot wears the severity: the swirl for romp (the timeline's own mark for a romp event), the
+    // severity colour otherwise (.turn-notice > .dot.notice-dot reads --notice-dot)
+    const d = sev === "romp" ? dot("romp") : dot("ring");
+    if (sev !== "romp") d.classList.add("notice-dot");
+    turn.appendChild(d);
+  }
   turn.appendChild(card);
   return turn;
+}
+
+// A word button for a notice's action slot: data-act only (the document.body delegate acts and flash()es),
+// no listener on the node; the caller sets the data-* the handler reads.
+function noticeAct(label: string, act: string, tip?: string): HTMLButtonElement {
+  const b = el("button", "notice-act") as HTMLButtonElement;
+  b.type = "button";
+  b.textContent = label;
+  b.dataset.act = act;
+  if (tip) setTip(b, tip);
+  return b;
+}
+
+// The notice glyphs: 16-unit line icons in the ctxIcon style (stroke currentColor 1.4), 12×12, coloured by
+// the rail. One glyph per SOURCE, so a notice's kind is readable without its colour: romp = the swirl (the
+// brand mark, the one non-stroke glyph) · background agent = a fork (one node → two) · background command =
+// a prompt ">_" · system = a gear · peer = an envelope (ctxIcon's) · teammate = two heads · API = a plug ·
+// compaction = chevrons inward · clear / branch = chevrons apart · session = the stop square · power = the
+// reload/effort mark · question = ? in a circle · to-do = a checkbox · retry = a circular arrow.
+const NOTICE_GLYPHS: Record<Exclude<NoticeGlyphKind, "romp">, string> = {
+  agent: '<path d="M8 2.2 V6.6"/><path d="M8 6.6 L4.2 10.2 V13.8"/><path d="M8 6.6 L11.8 10.2 V13.8"/><circle cx="8" cy="2.2" r="1"/>',
+  command: '<path d="M3 4.2 L7 8 L3 11.8"/><path d="M8.6 12 H13.4"/>',
+  system: '<circle cx="8" cy="8" r="2.3"/><circle cx="8" cy="8" r="5"/><path d="M8 1.6 V3 M8 13 V14.4 M1.6 8 H3 M13 8 H14.4 M3.5 3.5 L4.5 4.5 M11.5 11.5 L12.5 12.5 M3.5 12.5 L4.5 11.5 M11.5 4.5 L12.5 3.5"/>',
+  peer: '<rect x="2" y="4" width="12" height="8" rx="1.5"/><path d="M2.5 5 L8 9 L13.5 5"/>',
+  teammate: '<circle cx="5.6" cy="5.8" r="2.2"/><path d="M1.8 13.2 C1.8 10.6 3.4 9.3 5.6 9.3 C6.5 9.3 7.2 9.5 7.8 9.9"/><circle cx="10.9" cy="6.3" r="1.9"/><path d="M8.5 13.2 C8.5 11 9.5 9.8 10.9 9.8 C12.8 9.8 14.2 11 14.2 13.2"/>',
+  api: '<path d="M5.2 2 V5.4 M10.8 2 V5.4"/><path d="M3.4 5.4 H12.6 V7.6 A4.6 4.6 0 0 1 3.4 7.6 Z"/><path d="M8 12.2 V14.4"/>',
+  compaction: '<path d="M2.6 4 L6.2 8 L2.6 12"/><path d="M13.4 4 L9.8 8 L13.4 12"/>',
+  clear: '<path d="M6.4 4 L2.8 8 L6.4 12"/><path d="M9.6 4 L13.2 8 L9.6 12"/>',
+  branch: '<path d="M6.4 4 L2.8 8 L6.4 12"/><path d="M9.6 4 L13.2 8 L9.6 12"/>',
+  session: '<rect x="4" y="4" width="8" height="8" rx="1.3"/>',
+  power: '<path d="M8 2.4 V8"/><path d="M4.7 4.9 A4.8 4.8 0 1 0 11.3 4.9"/>',
+  question: '<circle cx="8" cy="8" r="6"/><path d="M6.1 6.3 A1.9 1.9 0 1 1 8.7 8.1 C8.1 8.4 8 8.9 8 9.5"/><path d="M8 11.6 V11.8"/>',
+  todo: '<rect x="2.5" y="2.5" width="11" height="11" rx="1.6"/><path d="M5 8.2 L7.2 10.4 L11.2 5.8"/>',
+  retry: '<path d="M13 8 A5 5 0 1 1 11.5 4.4"/><path d="M11.9 1.7 L11.6 4.6 L8.7 4.3"/>',
+};
+function noticeGlyph(kind: NoticeGlyphKind): HTMLElement {
+  const span = el("span", "notice-glyph notice-glyph-" + kind);
+  if (kind === "romp") {
+    const logo = el("img") as HTMLImageElement;
+    logo.src = mediaSrc("romp-swirl-glyph.svg"); logo.alt = ""; logo.onerror = () => logo.remove();
+    span.appendChild(logo);
+    return span;
+  }
+  span.innerHTML = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" '
+    + 'stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">' + NOTICE_GLYPHS[kind] + "</svg>";
+  return span;
+}
+
+// A live element for the glyph slot (the loader dots, the compacting bar): wide, so the slot fits it.
+function noticeLiveGlyph(inner: HTMLElement): HTMLElement {
+  const span = el("span", "notice-glyph notice-glyph-wide");
+  span.appendChild(inner);
+  return span;
+}
+
+// The first meaningful line of a message, clipped for a head (the gist rule every text-derived head shares).
+function gistOf(text: string, max = 90): string {
+  const lines = text.split("\n").map((l) => l.trim());
+  const first = lines.find((l) => l && !l.startsWith(">")) || lines.find((l) => l) || text.trim();
+  return first.length > max ? first.slice(0, max - 2).replace(/\s+\S*$/, "") + "…" : first;
+}
+
+// The fold toggle's tail work when a notice opens: the /clear boundary's body lazy-loads the cleared
+// conversation on FIRST expand (one request per boundary, deduped by the pending map; re-renders hit
+// the cache). Runs from the delegate, so it needs nothing from render time but the data-* on the body.
+function noticeOpened(card: HTMLElement, open: boolean): void {
+  if (!open) return;
+  const cb = card.querySelector(".clear-body") as HTMLElement | null;
+  if (!cb) return;
+  const key = cb.dataset.clearKey || "", sid = cb.dataset.clearSid || "";
+  if (!key || !sid || episodeCache.has(key) || episodePendingKey.get(sid) === key) return;
+  episodePendingKey.set(sid, key);
+  vscodeApi?.postMessage({ type: "loadEpisode", id: sid });
 }
 
 // A backgrounded task's completion (<task-notification>) → an accent-blue notice card. The HEAD is a
@@ -1580,8 +1675,6 @@ function noticeCard(o: { variant: NoticeVariant; chip: string; logo?: boolean;
 // honest, and no dead-end. The pure parse lives in agent-notif.ts (testable); this owns the DOM.
 function renderAgentNotif(a: AgentNotif, outputs?: TaskOutputs, key?: string,
                           opts: { nested?: boolean; preamble?: string } = {}): HTMLElement {
-  const chip = a.kind === "agent" ? "agent" : "task";       // a Bash command is a task, not an "agent"
-  const head = notifHead(a);                                // "Background agent finished · <description>" (the user 2026-09-07)
   const body = el("div", "notice-md md");
   const extra = a.toolUseId && outputs ? outputs[a.toolUseId] : undefined;
   let hasBody = false;
@@ -1593,10 +1686,16 @@ function renderAgentNotif(a: AgentNotif, outputs?: TaskOutputs, key?: string,
     hasBody = true;
   }
   if (opts.preamble) { appendHarnessNote(body, opts.preamble); hasBody = true; }
-  // nested (the default) inside a carrying HUMAN turn — a prompt that arrived with a notification attached;
-  // on its OWN rail (nested: false) when the record was nothing but the notification (renderInjected)
-  return noticeCard({ variant: "agent", chip, head, body, key,
-                      collapsible: hasBody, nested: opts.nested !== false });   // flat when the gist is all there is
+  // the head in the notice grammar: SOURCE = background agent / background command (a Bash command is not an
+  // "agent"), gist = "<name> · finished", meta = the exit code; a failed exit reads in the error severity.
+  // Nested (the default) inside a carrying HUMAN turn — a prompt that arrived with a notification attached
+  // — the card stretches to the column with its own rail dot (no stair-step); on its OWN rail (nested: false)
+  // when the record was nothing but the notification (renderInjected). Flat when the gist is all there is.
+  const failed = /^exit [1-9]/.test(a.detail) || /^(failed|killed|timed out)/i.test(a.status || "");
+  return notice({ src: a.kind === "agent" ? "background agent" : "background command",
+                  glyph: a.kind === "agent" ? "agent" : "command",
+                  gist: notifHead(a), meta: /^exit \d+$/.test(a.detail) ? a.detail : undefined,
+                  sev: failed ? "err" : "info", body: hasBody ? body : null, key, nested: opts.nested !== false });
 }
 
 // The CLI's note-to-the-model paragraph ("[SYSTEM NOTIFICATION - NOT USER INPUT] …"), kept one click away
@@ -1632,7 +1731,10 @@ function renderInjected(ev: Extract<ChatEvent, { kind: "user" }>): HTMLElement {
   for (const { a, i } of notifs) body.appendChild(renderAgentNotif(a, ev.taskOutputs, ev.uuid ? "agn:" + ev.uuid + ":" + i : undefined));
   for (const r of plain) body.appendChild(preEl(r));
   if (ev.preamble) appendHarnessNote(body, ev.preamble);
-  return noticeCard({ variant: h.variant, chip: h.chip, head: h.head, body, key, collapsible: body.childNodes.length > 0 });
+  // the source rows of the vocabulary: background agent / system / a peer's name (injected-source.ts names
+  // the head; the glyph and label follow the source kind)
+  const { label, glyph } = injectedSrc(src);
+  return notice({ src: label, glyph, gist: h.head, body, key });
 }
 
 // ---- path-source pasted images ----
@@ -1723,7 +1825,16 @@ function healPathImgs(): void {
 // the page shim fires romp:wsup when THIS pane's kernel socket reconnects (kernel.py ws.onopen) —
 // the same kernel-is-back event a hostUp is for a federated tunnel; heal everything on it
 window.addEventListener("romp:wsup", () => { retryFailedPreviews(); refreshSettledPreviews(); healPathImgs(); });
-installMdImgHeal();   // markdown-inline <img> failures register for the per-message heal (capture-phase, once)
+installMdImgHeal();   // markdown-inline <img> failures are PARKED (capture-phase, once) and heal on the reconnect-class events (T291c);
+//                       md() and userMd() run mdImgPostPass on their own output, so a re-render parks a known-failed image before it fetches
+// The page's own bundle build, filed once per page load (T291c, the user's 2026-09-09 report could not tell the
+// page's build from the kernel's): the ?v= the kernel stamped on the render.js script this page loaded (the
+// dist_ver it served then; a VS Code webview loads the bundle without one and files 0).
+(() => {
+  const tag = Array.from(document.scripts).map((sc) => sc.getAttribute("src") || "").find((u) => /\/dist\/render\.js(\?|$)/.test(u)) || "";
+  const m = /[?&]v=(\d+)/.exec(tag);
+  vscodeApi?.postMessage({ type: "clientDiag", surface: "chat", what: "pageload", data: { distVer: m ? Number(m[1]) : 0, path: location.pathname } });
+})();
 
 // One image of a user turn: the picture (or its hydration chip) plus, when the
 // on-disk path is known, a caption line — the full absolute path (click → open),
@@ -1822,22 +1933,18 @@ function linkifyImgPaths(root: HTMLElement, paths: string[]): void {
   }
 }
 
-// A file:// URI → its local filesystem path: strip the scheme, percent-decode. file:///a/b → /a/b.
-function fileUriToPath(uri: string): string {
-  let p = uri.replace(/^file:\/\//i, "");   // file:///Users/… → /Users/… (host is empty for file:///)
-  try { p = decodeURIComponent(p); } catch { /* malformed %-escape — use verbatim */ }
-  return p;
-}
-// A clickable, VERBATIM file link — the SAME open-the-file path the caption/image links use (openPath:
-// the editor in VS Code, the feed pane's viewer on the web). `raw` is shown as written; `open` is what
-// gets opened. A bare file:// can't be followed by the browser from the http dashboard (blocked scheme)
-// and a VS Code editor won't render a PDF, so it's routed rather than navigated. `relative` bare paths
-// carry the active session id so whoever resolves them uses THAT session's cwd — a relative
-// `design/foo.md` is relative to the repo the agent runs in, not the kernel's cwd (the user 2026-07-06).
-function openPathLink(raw: string, open: string, relative = false): HTMLElement {
-  const a = el("span", "file-uri-link");
-  a.textContent = raw;                       // shown exactly as written, selectable/copyable in place
-  a.title = "Open " + open;
+// The path-token matcher (the regex, its shape gates, the trailing-punctuation trim and the span it emits)
+// lives in path-links.ts, a module any surface can import; this file exports nothing. That module marks and
+// binds nothing: every span it emits carries data-path (what a click opens) and, for a bare path rather than
+// a file:// URI, data-rel, and the hosting document decides what a click does. Here that is openPath, the
+// editor in VS Code and the viewer on the web, bound per span exactly as the chat always did, the middle
+// button included (onMiddleClick): a `relative` bare path (data-rel) carries the active session id so
+// whoever resolves it uses THAT session's cwd (a relative `design/foo.md` is relative to the repo the agent
+// runs in, not the kernel's cwd; the user 2026-07-06), and a file:// URI names an absolute path and sends
+// none. stopPropagation as before: a path inside a fold head or a card must open the file, not toggle its
+// container.
+function bindPathLink(a: HTMLElement): HTMLElement {
+  const open = a.dataset.path || "", relative = a.dataset.rel === "1";
   a.addEventListener("click", (e) => {
     e.stopPropagation();
     openPath(open, relative ? activeId : null, e);
@@ -1845,45 +1952,17 @@ function openPathLink(raw: string, open: string, relative = false): HTMLElement 
   onMiddleClick(a, (e) => openPath(open, relative ? activeId : null, e));
   return a;
 }
-function fileUriLink(uri: string): HTMLElement { return openPathLink(uri, fileUriToPath(uri)); }
-// Is this bare token (trailing punctuation already stripped) a file path worth linkifying? Requires a slash
-// and EITHER an absolute/anchored start (/, ~/, ./, ../) OR a file extension on the final segment — so
-// "and/or", "TCP/IP", "24/7", "read/write" stay as prose. URL-ish tokens (a ':' or '//') are rejected;
-// http(s) links are already <a> (skipped) — this just guards a rare un-autolinked one.
-function looksLikeFilePath(tok: string): boolean {
-  if (tok.includes(":") || tok.includes("//") || !tok.includes("/")) return false;
-  if (/^(?:~\/|\.{1,2}\/|\/)/.test(tok)) return true;                        // absolute or anchored (/, ~/, ./, ../)
-  return /\.[A-Za-z0-9]{1,8}$/.test(tok.slice(tok.lastIndexOf("/") + 1));    // relative → the last segment has an extension
-}
-// A BARE filename (no slash — `power2_watts.pdf`) is linkified ONLY inside inline <code> (the user
-// 2026-07-17: a reply listing its output files wasn't clickable). Backticks are where agents put
-// filenames, and the KNOWN-extension gate keeps backticked dotted identifiers (`np.array`, `s.color`,
-// `romp.kernelPort`) and version numbers (`0.4.293`) reading as prose — an unknown extension stays text.
-const BARE_FILE_EXTS = new Set([
-  "md", "txt", "rst", "py", "ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "jsonl", "csv", "tsv",
-  "pdf", "png", "jpg", "jpeg", "gif", "svg", "webp", "html", "htm", "css", "scss", "sh", "bash", "zsh",
-  "bats", "yaml", "yml", "toml", "ini", "cfg", "conf", "xml", "ipynb", "rs", "go", "java", "c", "h",
-  "cpp", "hpp", "cc", "rb", "php", "sql", "log", "lock", "tex", "bib", "zip", "tar", "gz", "tgz",
-  "mp4", "mov", "mp3", "wav", "vsix", "plist", "diff", "patch",
-]);
-function looksLikeBareFileName(tok: string): boolean {
-  if (tok.includes("/") || tok.includes(":")) return false;
-  const dot = tok.lastIndexOf(".");
-  if (dot <= 0) return false;                                                // needs a name before the extension
-  return BARE_FILE_EXTS.has(tok.slice(dot + 1).toLowerCase());
-}
 // Make bare file:// URLs AND bare file paths inside a rendered CHAT message clickable (assistant replies +
 // your own bubbles) — a relative `design/foo.md` opens too, resolved against the session's cwd (the user
 // 2026-07-06). marked doesn't autolink these and DOMPurify strips the file: scheme, so without this they read
-// as dead text. Deliberately NOT applied to tool-use summaries. Linkifies inside INLINE <code> too — agents
-// routinely wrap a path in backticks; only FENCED <pre> blocks and text already inside a link are skipped.
-// Trailing sentence punctuation is left out, not swallowed.
-const CLICKABLE_PATH_RE = /file:\/\/\/?[^\s<>"'`)]+|[~.\w\-]*\/[~.\w\-/]*[\w\-]|[\w\-][\w\-.]*\.[A-Za-z0-9]{1,8}/gi;
+// as dead text. Deliberately NOT applied to tool-use summaries. The token walk itself is path-links.ts's
+// (linkifyPathTokens); what follows here is chat-only: the code-span URL pass, the kernel-verified spaced
+// spans, the click binding, and the figure previews.
 // `skipThumbs`: paths this turn ALREADY renders as full in-bubble images (a pasted screenshot's
 // ev.images) — they stay clickable links but are excluded from the mentioned-path thumbnail strip,
 // otherwise the same picture renders twice (the user 2026-07-10).
 // `spacePaths` (the user 2026-08-04): backticked filenames WITH SPACES that the KERNEL verified exist
-// (build_session's _space_paths — resolved like a click, existence-checked). The token regex below can
+// (build_session's _space_paths — resolved like a click, existence-checked). The token regex can
 // never span a space — in prose that boundary is what keeps ordinary text unlinked — so a note titled
 // `Moving from correlation to causal components.md` linkified only its last word. For exactly these
 // verified spans, the whole inline-code content becomes ONE link; the filesystem is the authority, so a
@@ -1892,9 +1971,10 @@ const CLICKABLE_PATH_RE = /file:\/\/\/?[^\s<>"'`)]+|[~.\w\-]*\/[~.\w\-/]*[\w\-]|
 // _path_links — tier 1 exact stat, tiers 2/3 a unique repo-list match that FIXES a shortened mention
 // to its real file). When the key is present, a token links ONLY if it's in the map, and it opens the
 // map's value — so `render.js` in prose stops 404ing, and hover shows the real target. Every shape
-// gate below still applies; the map only ever narrows. An event with NO pathLinks key at all (an old
+// gate still applies; the map only ever narrows. An event with NO pathLinks key at all (an old
 // kernel, a cached payload) keeps today's shape-only linking rather than unlinking history.
-// file:// URIs are explicit absolute paths — never gated on the map.
+// file:// URIs are explicit absolute paths — never gated on the map. (The gates and the map walk are
+// path-links.ts's; the map is threaded through to it.)
 function linkifyFileUris(root: HTMLElement, skipThumbs?: string[], spacePaths?: string[],
     pathLinks?: Record<string, string>, pathPins?: Record<string, string>): void {
   // A whole-backtick http(s) URL becomes a TAPPABLE link that still looks like code (the user
@@ -1923,7 +2003,7 @@ function linkifyFileUris(root: HTMLElement, skipThumbs?: string[], spacePaths?: 
       if (code.closest("a, .file-uri-link, pre")) continue;    // already linked, or a fenced block
       const tok = (code.textContent || "").trim();
       if (!verified.has(tok)) continue;
-      const link = openPathLink(tok, tok, true);
+      const link = bindPathLink(openPathLink(tok, tok, true));
       code.replaceChildren(link);                              // the <code> chrome stays; its content is the link
       kernelVerified.add(tok);
       if (previewKind(tok) && !previewable.includes(tok) && !(skipThumbs && skipThumbs.includes(tok))) {
@@ -1932,43 +2012,16 @@ function linkifyFileUris(root: HTMLElement, skipThumbs?: string[], spacePaths?: 
       }
     }
   }
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  const nodes: Text[] = [];
-  let n: Node | null;
-  while ((n = walker.nextNode())) nodes.push(n as Text);
-  for (const tn of nodes) {
-    if (tn.parentElement?.closest("a, .file-uri-link, pre")) continue;   // already a link, or a fenced code block
-    const inCode = !!tn.parentElement?.closest("code");                  // inline code — where bare filenames may link
-    const text = tn.data;
-    if (!text.includes("/") && !(inCode && text.includes("."))) continue;   // cheap pre-filter: no slash (and, in code, no dot) → nothing here
-    const re = new RegExp(CLICKABLE_PATH_RE.source, "gi");
-    const frag = document.createDocumentFragment();
-    let last = 0, any = false, m: RegExpExecArray | null;
-    while ((m = re.exec(text))) {
-      let tok = m[0];
-      const trail = tok.match(/[.,;:!?)\]}>"'`]+$/);   // don't grab a sentence's closing punctuation
-      if (trail) tok = tok.slice(0, tok.length - trail[0].length);
-      if (!tok) continue;
-      const isUri = /^file:\/\//i.test(tok);
-      if (!isUri && !looksLikeFilePath(tok) && !(inCode && looksLikeBareFileName(tok))) continue;   // "and/or", `np.array` etc. — leave as prose
-      const fixed = !isUri && pathLinks ? pathLinks[tok] : undefined;   // the kernel's verdict, when it rendered one
-      if (!isUri && pathLinks && typeof fixed !== "string") continue;   // checked against the filesystem: no such file (or several) → prose
-      if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
-      const open = isUri ? fileUriToPath(tok) : (fixed ?? tok);
-      const link = isUri ? fileUriLink(tok) : openPathLink(tok, open, true);
-      frag.appendChild(link);
-      if (!isUri && typeof fixed === "string") kernelVerified.add(open);   // the kernel stat'd it this build
-      if (previewKind(open) && !previewable.includes(open) && !(skipThumbs && skipThumbs.includes(open))) {
-        previewable.push(open);
-        mentionAt.set(open, link);
-      }
-      last = m.index + tok.length;
-      re.lastIndex = last;
-      any = true;
+  // The token walk is the shared one (path-links.ts linkifyPathTokens): it marks every path-shaped token, the
+  // kernel's pathLinks verdict narrowing it when the event carries one, and hands back the hits in document
+  // order; this document binds each click and reads the hits for the figure pass below.
+  for (const { el: link, open, verified } of linkifyPathTokens(root, pathLinks)) {
+    bindPathLink(link);
+    if (verified) kernelVerified.add(open);   // the kernel stat'd it this build
+    if (previewKind(open) && !previewable.includes(open) && !(skipThumbs && skipThumbs.includes(open))) {
+      previewable.push(open);
+      mentionAt.set(open, link);
     }
-    if (!any) continue;
-    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
-    tn.replaceWith(frag);
   }
   // A mentioned image/PDF renders FULL-SIZE at its MENTION — the figure lands right after the
   // paragraph/list item that names it, like figures in a document (the user 2026-08-15, whose four
@@ -2012,6 +2065,33 @@ function linkifyFileUris(root: HTMLElement, skipThumbs?: string[], spacePaths?: 
     };
     for (const p of previewable) renderFig(p);
   }
+}
+
+// The gist strings a notice and its compact-mode group head share (noticeBrief), so a fold never says
+// something its members would not.
+function interruptGist(cause?: string): string {
+  return cause === "restart" ? "interrupted — kernel restart" : cause === "crash" ? "interrupted — process died" : "interrupted";
+}
+const SETTLE_GIST = "turn settled with no response";
+function retriedGist(n: number): string { return `recovered after ${n} ${n === 1 ? "retry" : "retries"}`; }
+function reconnectingGist(effort?: string): string { return effort ? `Reloading session — applying ${effort} effort…` : "Reloading session…"; }
+// the one-line version of a safeguards model swap (renderModelFallback's gist and the compact run's brief agree):
+// whose safeguards flagged the message, the refusal category when the API named one, which model answered
+// (T279); a 'local' scope swapped only that reply, not the session's model
+function modelFallbackGist(ev: { from?: string; to?: string; category?: string; scope?: string }): string {
+  const from = ev.from ? prettyModel(ev.from) : "";
+  const to = ev.to ? prettyModel(ev.to) : "a fallback model";
+  const cat = (ev.category || "").trim();
+  const local = ev.scope === "local";
+  return `${from || "The model"}'s safeguards flagged this message${cat ? ` (${cat})` : ""} · `
+    + (local ? `this reply came from ${to}` : `switched to ${to}`);
+}
+// the source label + glyph a harness-injected record wears (renderInjected and the group head agree)
+function injectedSrc(src: InjectedSource): { label: string; glyph: NoticeGlyphKind } {
+  if (src.kind === "peer") return { label: src.subagent ? "background agent" : (src.name || "peer"), glyph: "peer" };
+  if (src.kind === "subagent") return { label: "background agent", glyph: "agent" };
+  if (src.kind === "task") return { label: "background command", glyph: "command" };
+  return { label: "system", glyph: "system" };
 }
 
 function renderEvent(ev: ChatEvent, prevEpoch?: number | null, worked?: number | null): HTMLElement {
@@ -2061,16 +2141,8 @@ function renderEvent(ev: ChatEvent, prevEpoch?: number | null, worked?: number |
   return turn;
 }
 
-// Format a worked-duration (seconds) the same way the live work-timer formats its
-// elapsed (elapsedMs): "45s" / "2m 14s" / "1h 03m". Units distinguish it from the
-// HH:MM rail time-markers.
-function durLabel(secs: number): string {
-  secs = Math.max(0, Math.floor(secs));
-  if (secs < 60) return `${secs}s`;
-  const m = Math.floor(secs / 60);
-  if (m < 60) return `${m}m ${secs % 60}s`;
-  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
-}
+// (durLabel — the ONE duration format for the worked footer, the work timer and every notice's meta or
+// countdown — lives in duration.ts since 2026-09-08; strip.ts's fmtReset rides it too.)
 
 function elapsedFooter(secs: number): HTMLElement {
   const f = el("div", "turn-elapsed");
@@ -2561,7 +2633,7 @@ function eventUnitIndex(s: Session): Int32Array {
   const items = displayItems(s);
   for (let u = 0; u < items.length; u++) {
     const it = items[u];
-    if (it.kind === "toolgroup" || it.kind === "retrygroup") { for (const i of it.indices) map[i] = u; }
+    if (it.kind === "toolgroup" || it.kind === "noticegroup") { for (const i of it.indices) map[i] = u; }
     else map[it.index] = u;
   }
   return map;
@@ -2881,41 +2953,32 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
     // The CLI's stop record is an EVENT, not a message (the user 2026-07-02): render it as a slim rail
     // marker in the compact-divider's language — never a person-blue bubble that reads like typed input.
     if ((ev as any).interruptMarker) {
-      const turn = el("div", "turn turn-interrupt");
-      turn.appendChild(dot("ring"));
-      const line = el("div", "interrupt-line");
-      line.appendChild(el("span", "interrupt-square"));   // the stop button's own glyph, tying cause to effect
       // The seam says WHY when the transcript does (kernel interruptCause, from the resume notice romp
       // itself injected): a kernel-restart/crash cut is not the user pressing stop, and the old blanket
-      // "you stopped this turn" title blamed them for every deploy (the user 2026-07-09).
+      // "you stopped this turn" tip blamed them for every deploy (the user 2026-07-09). A slim SESSION
+      // notice with the stop square as its glyph — cause tied to effect, no italic (the audit's row 12).
       const cause = (ev as any).interruptCause;
-      if (cause === "restart") {
-        line.appendChild(document.createTextNode("interrupted — kernel restart"));
-        line.title = "a romp kernel restart cut this turn; the session was resumed automatically";
-      } else if (cause === "crash") {
-        line.appendChild(document.createTextNode("interrupted — process died"));
-        line.title = "this session's claude process died mid-turn; the session was resumed automatically";
-      } else {
-        line.appendChild(document.createTextNode("interrupted"));
-        line.title = "you stopped this turn here (the stop button / Ctrl+C)";
-      }
-      turn.appendChild(line);
-      return turn;
+      return notice({ src: "session", glyph: "session", gist: interruptGist(cause), cls: "turn-interrupt",
+                      tip: cause === "restart" ? "a romp kernel restart cut this turn; the session was resumed automatically"
+                        : cause === "crash" ? "this session's claude process died mid-turn; the session was resumed automatically"
+                        : "you stopped this turn here (the stop button / Ctrl+C)" });
     }
     // A romp SYSTEM notice (kernel restart/resume, Retry) — flagged server-side (ev.rompSystem) so it's
     // separable from a feed NUDGE, which shares the same author (the user 2026-07-06). It gets its OWN romp
     // notice card (swirl chip + faded-accent box), NOT the gray nudge bubble: it's status, not a prompt.
     if ((ev as any).rompSystem && ev.md) {
-      // strip the invisible <!-- romp-* --> markers, then the leading "[romp]" (the chip already says who it's from)
+      // strip the invisible <!-- romp-* --> markers, then the leading "[romp]" (the source label already says who it's from)
       const text = ev.md.replace(/<!--[\s\S]*?-->/g, "").replace(/^\s*\[romp\]\s*/i, "").trim();
-      const firstLine = (text.split("\n").find((l) => l.trim()) || text).trim();
-      const gist = firstLine.length > 90 ? firstLine.slice(0, 88).replace(/\s+\S*$/, "") + "…" : firstLine;
+      // The head is the kernel's USER-facing gist (ev.gist, lifted from the notice's <!-- romp-gist --> marker —
+      // the user 2026-09-08: the agent-facing body's first sentence, "…Check whether it is still running before
+      // relaunching…", is written to the agent and read wrong as a head); the first line is the fallback for a
+      // notice recorded before the kernel shipped gists. The agent-facing text is the folded body.
+      const gist = (ev as any).gist ? String((ev as any).gist) : gistOf(text);
       const body = el("div", "notice-md md");
       const more = collapseWs(text) !== collapseWs(gist);
       if (more) body.innerHTML = md(text);   // a one-line notice IS its gist — no body repeating the head (T243)
-      return noticeCard({ variant: "romp", chip: "romp", logo: true, head: gist, body,
-                          collapsible: more,
-                          key: ev.uuid ? "rsys:" + ev.uuid : undefined });
+      return notice({ src: "romp", glyph: "romp", sev: "romp", gist, body,
+                      key: ev.uuid ? "rsys:" + ev.uuid : undefined });
     }
     // A harness-INJECTED record the kernel could NAME (ev.source: a background agent's completion, a system
     // notice, a peer's message) → its labelled notice card, never a bubble of any color (the user 2026-09-07).
@@ -2975,10 +3038,11 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
       }
       if (tagged) {
         const tchip = el("div", "romp-tag");
-        tchip.appendChild(document.createTextNode("⚙ " + ev.tag));
+        tchip.appendChild(noticeGlyph("system"));   // the gear line icon at the source-label size (was a ⚙ text glyph)
+        tchip.appendChild(document.createTextNode(ev.tag || ""));
         turn.appendChild(tchip);
       }
-      const bubble = el("div", (romp ? "romp-bubble" : tagged ? "romp-bubble tag-bubble" : injected ? "user-note" : "user-bubble") + " md");
+      const bubble = el("div", (romp ? "romp-bubble" : tagged ? "romp-bubble tag-bubble" : injected ? "notice-md" : "user-bubble") + " md");
       // a mid-turn send sits where the model READ it (T252d): the hover says when it was SENT, once the two differ
       // by more than a minute (both kernel stamps: the atom's landing `ts` and its `sentAt`)
       const sentTip = sentAtLabel(ev.ts, ev.sentAt);
@@ -3099,7 +3163,16 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
         const mdText = ev.md || "";   // a path present here is already a link in the bubble → drop the caption's repeat
         for (const im of ev.images) bubble.appendChild(userImage(im, !!(im.path && mdText.includes(im.path))));
       }
-      turn.appendChild(bubble);
+      if (injected) {
+        // a harness-injected line the kernel could not name (a compact summary, a /command's stdout): a
+        // SYSTEM notice — gist = its first line, the rest folded — nested in the turn on its own rail dot,
+        // never the old full-width dim box (.user-note, retired 2026-09-08)
+        const plain = (ev.md || "").replace(/<!--[\s\S]*?-->/g, "").trim();
+        const gist = gistOf(plain) || (hasImgs ? "attachment" : "harness note");
+        const more = collapseWs(plain) !== collapseWs(gist) || hasImgs;
+        turn.appendChild(notice({ src: "system", glyph: "system", gist, body: more ? bubble : null, nested: true,
+                                  key: ev.uuid ? "hn:" + ev.uuid : undefined }));
+      } else turn.appendChild(bubble);
       // NEVER-DELIVERED send (kernel ev.undelivered, from the backend's dropped-echo marking): the
       // session's process died holding this message, so it was never seen — say so instead of letting
       // it pose as history (the user 2026-07-29: a two-day-old lost send kept resurfacing mid-chat as
@@ -3117,24 +3190,16 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
         // echo settles dropped when the session simply moved past it — a keystroke the pane dropped, or
         // a delivery the transcript recorded under different text. Say what is KNOWN (it never made the
         // conversation), not a cause that is only sometimes true.
-        note.title = "This message never made it into the conversation: the session moved on without recording it (a dropped keystroke, a process that died holding it, or a delivery recorded under different text).";
+        setTip(note, "This message never made it into the conversation: the session moved on without recording it (a dropped keystroke, a process that died holding it, or a delivery recorded under different text).");
         const label = el("span", "undelivered-label");
         label.textContent = "never delivered";
         note.appendChild(label);
         if (!romp && !injected && ev.md) {   // restore only the user's own words, not a romp injection's
-          const re = el("button", "undelivered-act") as HTMLButtonElement;
-          re.type = "button";
-          re.textContent = "copy to composer";
-          re.title = "Put the text back in the composer to review and send again";
-          re.dataset.act = "echorestore";
+          const re = noticeAct("copy to composer", "echorestore", "Put the text back in the composer to review and send again");
           (re as any)._etext = ev.md;
           note.appendChild(re);
         }
-        const dx = el("button", "undelivered-act") as HTMLButtonElement;
-        dx.type = "button";
-        dx.textContent = "dismiss";
-        dx.title = "Remove this never-delivered message";
-        dx.dataset.act = "echodismiss";
+        const dx = noticeAct("dismiss", "echodismiss", "Remove this never-delivered message");
         if (ev.uuid) dx.dataset.euuid = ev.uuid;
         if (ev.echoT) dx.dataset.et = String(ev.echoT);
         note.appendChild(dx);
@@ -3211,8 +3276,8 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
         const body = el("div", "reminder-body");
         for (const r of plain) body.appendChild(preEl(r));
         const n = plain.length;
-        turn.appendChild(noticeCard({ variant: "reminder", chip: "system",
-          head: `${n} reminder${n > 1 ? "s" : ""}`, body, nested: true,   // rendered inside the carrying user turn
+        turn.appendChild(notice({ src: "system", glyph: "system", gist: `${n} reminder${n > 1 ? "s" : ""}`, body,
+          nested: true,   // rendered inside the carrying user turn, on its own rail dot
           key: ev.uuid ? "rem:" + ev.uuid : undefined }));
       }
     }
@@ -3224,13 +3289,8 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
     // interrupt marker's own language instead of a full assistant bubble (the user 2026-07-09: every
     // kernel-restart cut minted one of these bubbles per session).
     if ((ev as any).interruptSettle) {
-      const turn = el("div", "turn turn-interrupt");
-      turn.appendChild(dot("ring"));
-      const line = el("div", "interrupt-line");
-      line.appendChild(document.createTextNode("no response — turn settled"));
-      line.title = "the model closed the interrupted turn with nothing to add; the real work resumes below";
-      turn.appendChild(line);
-      return turn;
+      return notice({ src: "session", glyph: "session", gist: SETTLE_GIST, cls: "turn-interrupt",
+                      tip: "the model closed the interrupted turn with nothing to add; the real work resumes below" });
     }
     const turn = el("div", "turn turn-assistant");
     turn.appendChild(dot("ring"));
@@ -3275,19 +3335,15 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
   if (ev.kind === "branch") {
     // the branch divider: everything above is history shared with the parent session; the label
     // deep-links to the parent AT the branch point (data-uuid there is the cut record itself)
-    const turn = el("div", "turn turn-branchmark");
-    const line = el("div", "branch-divider");
-    const label = el("button", "branch-label") as HTMLButtonElement;
-    label.type = "button";
+    // a slim BRANCH notice whose gist is the jump link (data-act=branchjump, off the rail: no dot, no stamp —
+    // the split is a fact about the history, not a moment in it); the accent hairlines are retired
+    const label = el("span", "notice-gist");
     label.dataset.act = "branchjump";
     if (ev.fromSid) label.dataset.sid = ev.fromSid;
     if (ev.cut) label.dataset.cut = ev.cut;
-    label.textContent = "Branched from " + (ev.fromName || "another session")
-      + " · the conversation above is shared";
-    label.title = "Open " + (ev.fromName || "the parent session") + " at the branch point";
-    line.appendChild(label);
-    turn.appendChild(line);
-    return turn;
+    label.textContent = "Branched from " + (ev.fromName || "another session") + " · the conversation above is shared";
+    setTip(label, "Open " + (ev.fromName || "the parent session") + " at the branch point");
+    return notice({ src: "branch", glyph: "branch", sev: "romp", gist: label, dot: false, cls: "turn-branchmark" });
   }
   if (ev.kind === "reconnecting") return renderReconnecting(ev);
   if (ev.kind === "retrying") return renderRetrying(ev);
@@ -3358,24 +3414,13 @@ function folderIcon(): HTMLElement {
 function renderSystem(ev: Extract<ChatEvent, { kind: "system" }>): HTMLElement {
   const turn = el("div", "turn turn-system");
   const key = renderingSid ? "sysctx:" + renderingSid : undefined;
-  const card = el("div", "sys-card");
-  applyFold(card, "open", key);
-
-  const head = el("div", "sys-card-head");
-  const gear = el("span", "sys-gear"); gear.textContent = "⚙"; head.appendChild(gear);
-  const title = el("span", "sys-title"); title.textContent = "System context"; head.appendChild(title);
   const n = (ev.claudemd || []).length;
   const bits: string[] = [];
   if (ev.model) bits.push(prettyModel(ev.model));
-  if (ev.cwd) bits.push("📁 " + (ev.cwd.replace(/\/+$/, "").split("/").pop() || ev.cwd));   // dir basename, glanceable; full path in the row below
+  if (ev.cwd) bits.push(ev.cwd.replace(/\/+$/, "").split("/").pop() || ev.cwd);   // dir basename, glanceable; full path in the row below
   if (n) bits.push(`${n} CLAUDE.md`);
-  const sub = el("span", "sys-sub"); sub.textContent = bits.join(" · "); head.appendChild(sub);
-  const caret = el("span", "sys-caret"); caret.textContent = "▸"; head.appendChild(caret);
-  head.title = "the CLAUDE.md instructions + config this session is running under";
-  head.addEventListener("click", () => rememberFold(card, "open", key));
-  card.appendChild(head);
 
-  const body = el("div", "sys-card-body");
+  const body = el("div");
   const rows: [string, string][] = [];
   if (ev.model) rows.push(["Model", ev.model]);
   if (ev.mode) rows.push(["Permission mode", ev.mode]);
@@ -3412,9 +3457,11 @@ function renderSystem(ev: Extract<ChatEvent, { kind: "system" }>): HTMLElement {
   const note = el("div", "sys-note");
   note.textContent = "Claude Code’s base harness prompt isn’t recorded in the transcript, so it isn’t shown here — this is the CLAUDE.md instructions and session config that were in effect.";
   body.appendChild(note);
-  card.appendChild(body);
-
-  turn.appendChild(card);
+  // the SYSTEM notice at the top of the transcript: gist "System context", meta = model · dir · N CLAUDE.md,
+  // the config grid + CLAUDE.md sub-boxes folded beneath, keyed per session so a send never snaps it shut.
+  // Nested: it is meta, not a conversational turn — it sits OFF the rail (no dot; .turn-system hides the line).
+  turn.appendChild(notice({ src: "system", glyph: "system", gist: "System context", meta: bits.join(" · ") || undefined,
+                            body, key, nested: true, tip: "the CLAUDE.md instructions + config this session is running under" }));
   return turn;
 }
 
@@ -3430,18 +3477,23 @@ function renderAsk(ev: Extract<ChatEvent, { kind: "tool" }>): HTMLElement | null
   // answered = at least one question has a recorded answer (chosen text). Empty chosen = still pending.
   const answered = blocks.some((b) => b.chosen && b.chosen.length > 0);
 
-  const turn = el("div", "turn turn-ask" + (answered ? " answered" : ""));
-  turn.appendChild(dot(answered ? "user" : "ring"));   // answered → the blue user dot, matching the box
-  const card = el("div", "ask-card" + (answered ? " ask-answered" : ""));
-  if (answered) {
-    const tag = el("div", "ask-answered-tag");
-    tag.textContent = "↳ You answered Claude’s question";
-    card.appendChild(tag);
-  } else {
-    const head = el("div", "ask-head");
-    head.textContent = blocks.length > 1 ? `${blocks.length} questions` : "Question";
-    card.appendChild(head);
+  if (!answered) {
+    // PENDING: a slim QUESTION notice — the question itself is the gist (the options live in the red picker
+    // below, renderLiveAsk); several questions fold their list beneath a "N questions" gist
+    const qs = blocks.map((b) => b.question || b.header || "").filter(Boolean);
+    const body = el("div", "notice-md");
+    if (qs.length > 1) for (const q of qs) { const qt = el("div", "ask-qtext"); qt.textContent = q; body.appendChild(qt); }
+    return notice({ src: "question", glyph: "question", gist: qs.length > 1 ? `${qs.length} questions` : (qs[0] || "Question"),
+                    body, key: ev.uuid ? "ask:" + ev.uuid : undefined, cls: "turn-ask",
+                    tip: "the session is waiting on your answer — the picker below takes it" });
   }
+  // ANSWERED: the blue "you answered Claude's question" box — a reply to a popup, dressed as yours
+  const turn = el("div", "turn turn-ask answered");
+  turn.appendChild(dot("user"));   // the blue user dot, matching the box
+  const card = el("div", "ask-card ask-answered");
+  const tag = el("div", "ask-answered-tag");
+  tag.textContent = "↳ You answered Claude’s question";
+  card.appendChild(tag);
   for (const b of blocks) {
     const qel = el("div", "ask-q");
     const qt = el("div", "ask-qtext"); qt.textContent = b.question || b.header || ""; qel.appendChild(qt);
@@ -3522,23 +3574,17 @@ function parseAskRaw(ev: Extract<ChatEvent, { kind: "tool" }>): AskAnswerBlock[]
 // Claude Code's Task to-do list — a compact live checklist mirroring the terminal:
 // ○ pending / ◐ in_progress / ✓ completed (done is struck through).
 function renderTodo(ev: Extract<ChatEvent, { kind: "todo" }>): HTMLElement {
-  const turn = el("div", "turn turn-todo");
-  turn.appendChild(dot("ring"));
-  const card = el("div", "todo-card");
+  const key = "todo:" + (renderingSid || "");
   // FAIL LOUDLY (the user 2026-07-03): the kernel couldn't read Claude's authoritative task store, so it
-  // surfaces THIS instead of quietly showing a lossy transcript-folded list that could be wrong.
+  // surfaces THIS instead of quietly showing a lossy transcript-folded list that could be wrong. The error
+  // severity rides the rail and dot; the reason reads in the body's own text colour.
   if (ev.error) {
-    card.classList.add("todo-card-error");
-    const head = el("div", "todo-head"); head.textContent = "To-do · unavailable";
-    card.appendChild(head);
-    const msg = el("div", "todo-error-msg"); msg.textContent = ev.error;
-    card.appendChild(msg);
-    turn.appendChild(card);
-    return turn;
+    const body = el("div", "notice-md"); body.textContent = ev.error;
+    return notice({ src: "to-do", glyph: "todo", sev: "err", gist: "unavailable", body, key, open: true, cls: "turn-todo",
+                    tip: "the task store could not be read, so no list is shown — nothing here is guessed" });
   }
   const done = ev.tasks.filter((t) => t.status === "completed").length;
-  const head = el("div", "todo-head"); head.textContent = `To-do · ${done}/${ev.tasks.length}`;
-  card.appendChild(head);
+  const body = el("div", "todo-list");
   const row = (t: (typeof ev.tasks)[number]) => {
     const r = el("div", "todo-item todo-" + t.status);
     const mark = el("span", "todo-mark");
@@ -3556,8 +3602,8 @@ function renderTodo(ev: Extract<ChatEvent, { kind: "todo" }>): HTMLElement {
   // click to expand and click again to re-fold, nothing lost. The fold sits WHERE the bulk lives
   // (finished work precedes current work in the list), keyed per session so the state survives the
   // per-push re-renders (the openFolds idiom); a list with ≤ 2 finished rows stays inline — a fold
-  // hiding two rows costs a click for nothing. The label flip + rows appearing ARE the click's
-  // acknowledgement, immediate and local (no round-trip).
+  // hiding two rows costs a click for nothing. The toggle rides the body delegate (data-act=todofold):
+  // the label flip + rows appearing ARE the click's acknowledgement, immediate and local.
   const onDeck = ev.tasks.filter((t) => t.status === "in_progress" || t.status === "pending");
   const finished = ev.tasks.filter((t) => t.status !== "in_progress" && t.status !== "pending");
   if (finished.length >= 3) {
@@ -3567,23 +3613,20 @@ function renderTodo(ev: Extract<ChatEvent, { kind: "todo" }>): HTMLElement {
     applyFold(doneBox, "todo-open", foldKey);
     const tog = el("button", "todo-fold") as HTMLButtonElement;
     tog.type = "button";
-    const label = () => {
-      const open = doneBox.classList.contains("todo-open");
-      tog.textContent = open ? `hide ${finished.length} completed` : `+ ${finished.length} more completed`;
-      tog.title = open ? "collapse the completed items" : "show the completed items";
-    };
-    label();
-    tog.addEventListener("click", (e) => {
-      e.stopPropagation();
-      rememberFold(doneBox, "todo-open", foldKey);
-      label();
-    });
-    card.appendChild(tog);
-    card.appendChild(doneBox);
-  } else for (const t of finished) card.appendChild(row(t));
-  for (const t of onDeck) card.appendChild(row(t));
-  turn.appendChild(card);
-  return turn;
+    tog.dataset.act = "todofold"; tog.dataset.nkey = foldKey; tog.dataset.n = String(finished.length);
+    todoFoldLabel(tog, doneBox.classList.contains("todo-open"), finished.length);
+    body.appendChild(tog);
+    body.appendChild(doneBox);
+  } else for (const t of finished) body.appendChild(row(t));
+  for (const t of onDeck) body.appendChild(row(t));
+  // OPEN by default (glanceable state, still foldable): the checklist is the point of the card
+  return notice({ src: "to-do", glyph: "todo", gist: `${done} of ${ev.tasks.length} done`, body, key, open: true, cls: "turn-todo" });
+}
+
+// the completed-bulk fold's label + tip, shared by the render and the delegate's flip
+function todoFoldLabel(tog: HTMLElement, open: boolean, n: number): void {
+  tog.textContent = open ? `hide ${n} completed` : `+ ${n} more completed`;
+  setTip(tog, open ? "collapse the completed items" : "show the completed items");
 }
 
 // A context compaction → one clean teal rail marker (the user 2026-06-14): replaces the raw /compact
@@ -3606,13 +3649,14 @@ function renderCompact(ev: Extract<ChatEvent, { kind: "compact" }>): HTMLElement
   if (ev.trigger === "auto") bits.push("auto");
   else if (ev.trigger === "manual") bits.push("manual");
   if (ev.preTokens) bits.push(ev.postTokens ? `${compactTokens(ev.preTokens)} → ${compactTokens(ev.postTokens)}` : `${compactTokens(ev.preTokens)} freed`);
-  const head = "Context compacted" + (bits.length ? " · " + bits.join(" · ") : "");
   const body = el("div", "notice-md md");
   if (summary) { body.innerHTML = md(summary); highlight(body); }
-  else { const p = el("div", "notice-plain"); p.textContent = "No summary was captured for this compaction."; body.appendChild(p); }
-  // collapsible only when there's a summary to reveal; the "compacted" chip carries identity (no ✦ glyph)
-  return noticeCard({ variant: "compact", chip: "compacted", head, body,
-                      collapsible: !!summary, key: uuid ? "compact:" + uuid : undefined });
+  // a body only when there's a summary to reveal (a boundary with none renders flat — nothing hidden);
+  // the gist says what happened, the meta says why and how much (trigger · token win)
+  return notice({ src: "compaction", glyph: "compaction", sev: "compact", gist: "Context compacted",
+                  meta: bits.join(" · ") || undefined, body: summary ? body : null,
+                  key: uuid ? "compact:" + uuid : undefined,
+                  tip: summary ? undefined : "no summary was captured for this compaction" });
 }
 
 // The /clear boundary card (the user 2026-07-27): the fresh episode opens with a collapsed "Conversation
@@ -3661,10 +3705,9 @@ function renderClear(ev: Extract<ChatEvent, { kind: "clear" }>): HTMLElement {
   // the boundary settle's own record rides the event: the head counts the dropped cards, hover
   // names them — the drop is visible in the chat too, never only in the feed (the user 2026-07-27)
   const dropped = ev.dropped || [];
-  const head = "Conversation cleared — a fresh one starts here"
-    + (dropped.length ? " · " + dropped.length + " open card" + (dropped.length === 1 ? "" : "s") + " dropped with it" : "");
   const body = el("div", "clear-body");
   body.dataset.clearKey = key;
+  body.dataset.clearSid = sid;   // the fold toggle (noticeOpened, off the delegate) posts loadEpisode for this session
   const cached = episodeCache.get(key);
   if (cached) fillClearBody(body, cached);
   else {
@@ -3675,19 +3718,11 @@ function renderClear(ev: Extract<ChatEvent, { kind: "clear" }>): HTMLElement {
     p.appendChild(document.createTextNode(" Loading the cleared conversation…"));
     body.appendChild(p);
   }
-  const turn = noticeCard({ variant: "clear", chip: "cleared", head, body, collapsible: true, key });
-  if (dropped.length) turn.querySelector(".notice-head")?.setAttribute("title", "dropped: " + dropped.join(", "));
-  // Fetch on FIRST expand (ride the same head click that toggles the fold — noticeCard owns the toggle):
-  // one request per boundary, deduped by the pending map; re-renders hit the cache instead.
-  const headEl = turn.querySelector(".notice-head");
-  headEl?.addEventListener("click", () => {
-    const card = turn.querySelector(".notice-card") || turn;
-    if (!card.classList.contains("notice-open")) return;                  // just collapsed — nothing to load
-    if (episodeCache.has(key) || episodePendingKey.get(sid) === key) return;
-    episodePendingKey.set(sid, key);
-    vscodeApi?.postMessage({ type: "loadEpisode", id: sid });
-  });
-  return turn;
+  // the fetch on FIRST expand rides the same delegated head click that toggles the fold (noticeOpened) —
+  // one request per boundary, deduped by the pending map; re-renders hit the cache instead
+  return notice({ src: "session", glyph: "clear", gist: "Conversation cleared — a fresh one starts here",
+                  meta: dropped.length ? dropped.length + " card" + (dropped.length === 1 ? "" : "s") + " dropped" : undefined,
+                  body, key, tip: dropped.length ? "dropped: " + dropped.join(", ") : undefined });
 }
 
 // chatEpisode: the kernel's one-shot reply to loadEpisode — cache it under the key the expand recorded,
@@ -3723,16 +3758,10 @@ function chatEpisode(m: any): void {
 // clearing bracket; it vanishes the instant the fork lands, when the "Conversation cleared" boundary card
 // (renderClear) takes over as the durable record.
 function renderClearing(): HTMLElement {
-  const turn = el("div", "turn turn-clearing");
-  turn.appendChild(dot("ring"));
-  const line = el("div", "clearing-line");
-  line.appendChild(metaDots());   // the pulsing accent-blue dots — "it's romp, working"
-  const txt = el("span", "clearing-text");
-  txt.textContent = "Clearing conversation…";
-  line.appendChild(txt);
-  line.title = "starting a fresh conversation — the cleared one stays one click away, behind the divider that lands here";
-  turn.appendChild(line);
-  return turn;
+  // the pulsing accent dots in the glyph slot — "it's romp, working"; a slim live SESSION notice
+  return notice({ src: "session", glyph: noticeLiveGlyph(metaDots()), sev: "romp", gist: "Clearing conversation…", live: true,
+                  cls: "turn-clearing",
+                  tip: "starting a fresh conversation — the cleared one stays one click away, behind the divider that lands here" });
 }
 
 // LIVE compaction in progress (the user 2026-07-06): an animated inline element in the chat flow while the
@@ -3742,9 +3771,6 @@ function renderClearing(): HTMLElement {
 // The kernel appends kind:"compacting" BEFORE kind:"queued", so a message sent mid-compaction stacks BELOW
 // this instead of clobbering it. Event-based: it vanishes the instant the session stops compacting.
 function renderCompacting(): HTMLElement {
-  const turn = el("div", "turn turn-compacting");
-  turn.appendChild(dot("ring"));
-  const line = el("div", "compacting-inline");
   const bar = el("span", "compacting-bar");
   const fill = el("span", "compacting-bar-fill");
   // Sweep through the SAME context colormap the statusline/tab compacting bars use (the user 2026-07-07:
@@ -3753,13 +3779,11 @@ function renderCompacting(): HTMLElement {
   // to the wall clock so it resumes seamlessly across the chat's per-push rebuilds (fresh element each time).
   applyCompactSweep(fill, 3200);   // duration MUST match the .compacting-bar-fill @keyframes (ctx-compress 3.2s)
   bar.appendChild(fill);
-  line.appendChild(bar);
-  const txt = el("span", "compacting-text");
-  txt.textContent = "Compacting context…";
-  line.appendChild(txt);
-  line.title = "compacting — compressing the conversation to free up context; any queued message sends once it finishes";
-  turn.appendChild(line);
-  return turn;
+  // the bar rides the glyph slot of a slim live COMPACTION notice; the text is plain --fg (the teal is the
+  // rail + dot + bar, never the words — 1.96:1 as text on cream)
+  return notice({ src: "compaction", glyph: noticeLiveGlyph(bar), sev: "compact", gist: "Compacting context…", live: true,
+                  cls: "turn-compacting",
+                  tip: "compacting — compressing the conversation to free up context; any queued message sends once it finishes" });
 }
 
 // LIVE session reconnect (the user 2026-07-06): an /effort switch has no SDK runtime control, so romp applies
@@ -3769,16 +3793,9 @@ function renderCompacting(): HTMLElement {
 // narrates; it clears the instant the new client connects (kernel drops effortPending). Sibling of the
 // compacting element; appended before the queued bubble.
 function renderReconnecting(ev: Extract<ChatEvent, { kind: "reconnecting" }>): HTMLElement {
-  const turn = el("div", "turn turn-reconnecting");
-  turn.appendChild(dot("ring"));
-  const line = el("div", "reconnecting-line");
-  line.appendChild(metaDots());   // the same pulsing accent-blue dots as the switching-dots badge — "it's romp, working"
-  const txt = el("span", "reconnecting-text");
-  txt.textContent = ev.effort ? `Reloading session — applying ${ev.effort} effort…` : "Reloading session…";
-  line.appendChild(txt);
-  line.title = "applying the effort change — reloading the session (it re-reads the transcript); any message you send lands once it's back";
-  turn.appendChild(line);
-  return turn;
+  return notice({ src: "session", glyph: noticeLiveGlyph(metaDots()), sev: "romp", gist: reconnectingGist(ev.effort), live: true,
+                  cls: "turn-reconnecting",
+                  tip: "applying the effort change — reloading the session (it re-reads the transcript); any message you send lands once it's back" });
 }
 
 // LIVE api_retry (the user 2026-07-08): the API returned a retryable error (rate-limit / overload) and the
@@ -3789,27 +3806,19 @@ function renderReconnecting(ev: Extract<ChatEvent, { kind: "reconnecting" }>): H
 // reconnecting elements; event-based, it clears the instant output resumes (then the "Recovered after N
 // retries" note lands above). Appended before the queued bubble.
 function renderRetrying(ev: Extract<ChatEvent, { kind: "retrying" }>): HTMLElement {
-  const turn = el("div", "turn turn-retrying");
-  turn.appendChild(dot("ring"));
-  const line = el("div", "retrying-line");
-  line.appendChild(metaDots());
-  const txt = el("span", "retrying-text");
   const info = ev.info || {};
   const n = info.attempt || ev.retries || 0;
-  let head = n > 1 ? `API retrying — attempt ${n}` : "API retrying";
-  if (n > 1 && info.max) head += ` of ${info.max}`;
-  txt.textContent = head;
-  line.appendChild(txt);
-  // LIVE countdown to the next attempt (the user 2026-07-24). It used to re-derive only on re-render, so it
-  // sat frozen at "next try in ~3s" for the whole backoff — a number that never moves reads as broken, and
-  // says nothing about whether anything is still happening. Now the epoch rides a data attr and
-  // retryingTick() rewrites this span every second, exactly like the API-error card's countdown. `~` is
-  // dropped: a ticking number is precise enough to speak plainly.
+  // meta = the attempt count and the LIVE countdown to the next try (the user 2026-07-24: it used to re-derive
+  // only on re-render, so it sat frozen at "~3s" for the whole backoff). The epoch rides a data attr and
+  // retryingTick() rewrites the span every second, exactly like the API-error card's countdown.
+  const meta = el("span", "notice-meta");
+  if (n > 1) meta.appendChild(document.createTextNode(`attempt ${n}` + (info.max ? ` of ${info.max}` : "")));
   if (info.retryAt) {
+    if (meta.childNodes.length) meta.appendChild(document.createTextNode(" · "));
     const cd = el("span", "retrying-countdown");
     cd.dataset.retryAt = String(info.retryAt);
     cd.textContent = retryingCountdownText(info.retryAt);
-    line.appendChild(cd);
+    meta.appendChild(cd);
   }
   // Stop control (the user 2026-07-24, who wanted the API-error card's stop/resume reach here too). The
   // storm lives INSIDE the CLI's own backoff — the SDK exposes no API to abort or accelerate it (verified
@@ -3818,28 +3827,24 @@ function renderRetrying(ev: Extract<ChatEvent, { kind: "retrying" }>): HTMLEleme
   // AND marks the thread retry-suppressed, so romp's own auto-retry loop won't relapse into the storm
   // afterwards. Once stopped the session lands blocked/interrupted, where the existing card's "Retry now" +
   // resume controls take over — so stop → manual retry → resume is a closed loop across the two states.
-  // Delegated via data-act (never a per-render listener): the transcript tail rebuilds on every kernel push,
-  // and a rebuilt node eats a mid-press click — the "had to click it several times" bug (CLAUDE.md).
-  const stop = el("button", "retrying-stop") as HTMLButtonElement;
-  stop.dataset.act = "stopRetrying";
-  stop.textContent = "Stop retrying";
-  stop.title = "interrupt this stalled turn and stop the backoff — romp's auto-retry stays off for this session until you send a message";
-  line.appendChild(stop);
-  line.title = "the API returned a retryable error (rate-limit / overload); the CLI is backing off and retrying — any message you send lands once it recovers";
-  turn.appendChild(line);
-  // The error behind the backoff, when the payload names it — status code and/or message on its own muted
-  // line (same size as the retrying text: one size per information type), full message in the tooltip.
+  const stop = noticeAct("Stop retrying", "stopRetrying",
+    "interrupt this stalled turn and stop the backoff — romp's auto-retry stays off for this session until you send a message");
+  // The error behind the backoff, when the payload names it — status code and/or message, folded; the request
+  // id belongs in the tooltip, not the line: it is the one thing worth quoting to support and the one thing
+  // nobody reads at a glance (progressive disclosure — gist on the line, mechanics a hover away).
+  let body: HTMLElement | null = null;
   if (info.status || info.error || info.networkDown) {
-    const err = el("div", "retrying-err");
+    body = el("div", "notice-md");
     const status = info.status ? `HTTP ${info.status}` : "";
     const msg = (info.error || "").trim();
-    err.textContent = [status, msg, apiErrorReason(info)].filter(Boolean).join(" — ");
-    // The request id belongs in the tooltip, not the line: it is the one thing worth quoting to support and
-    // the one thing nobody reads at a glance (progressive disclosure — gist on the line, mechanics a hover away).
-    err.title = [msg, info.requestId ? `request ${info.requestId}` : ""].filter(Boolean).join("\n") || "";
-    turn.appendChild(err);
+    body.textContent = [status, msg, apiErrorReason(info)].filter(Boolean).join(" — ");
+    const tipText = [msg, info.requestId ? `request ${info.requestId}` : ""].filter(Boolean).join("\n");
+    if (tipText) setTip(body, tipText);
   }
-  return turn;
+  // the loader dots ride the glyph slot in the RETRYING amber (the state the tab ring shows); the action makes it a card
+  return notice({ src: "API", glyph: noticeLiveGlyph(metaDots()), sev: "retry", gist: "retrying", meta, acts: [stop], body, live: true,
+                  key: ev.uuid ? "retrying:" + ev.uuid : undefined, cls: "turn-retrying",
+                  tip: "the API returned a retryable error (rate-limit / overload); the CLI is backing off and retrying — any message you send lands once it recovers" });
 }
 
 
@@ -3848,7 +3853,7 @@ function renderRetrying(ev: Extract<ChatEvent, { kind: "retrying" }>): HTMLEleme
 // dots beside it already say something is in flight.
 function retryingCountdownText(retryAt: number): string {
   const s = Math.ceil(retryAt - Date.now() / 1000);
-  return s > 0 ? `— next try in ${s}s…` : "— retrying now…";
+  return s > 0 ? `next try in ${durLabel(s)}` : "retrying now…";   // ONE duration format (duration.ts)
 }
 
 // Tick every .retrying-countdown once a second (driven by the same 1s interval as the API-error countdown —
@@ -3867,33 +3872,20 @@ function retryingTick(): void {
 // output, a muted, rail-anchored "Recovered after N retries" note is left where the recovery happened, so the
 // history records that the turn weathered an API storm. Static (no animation, no expand) — a one-line marker.
 function renderRetried(ev: Extract<ChatEvent, { kind: "retried" }>): HTMLElement {
-  const turn = el("div", "turn turn-retried");
-  turn.appendChild(dot("ring"));
-  const line = el("div", "retried-line");
-  const n = ev.retries || 0;
-  const txt = el("span", "retried-text");
-  txt.textContent = `Recovered after ${n} ${n === 1 ? "retry" : "retries"}`;
-  line.appendChild(txt);
-  line.title = "the API returned a retryable error (rate-limit / overload); the CLI backed off and retried, then output resumed";
-  turn.appendChild(line);
-  return turn;
+  return notice({ src: "API", glyph: "retry", gist: retriedGist(ev.retries || 0), cls: "turn-retried",
+                  tip: "the API returned a retryable error (rate-limit / overload); the CLI backed off and retried, then output resumed" });
 }
 
 // The FAILED counterpart of renderRetried (the user 2026-07-25): the CLI exhausted its retry attempts and
 // the turn died. Same slim rail-anchored shape, but in the blocked/red voice — this storm produced nothing,
 // and the note must never read like a recovery. The error text itself follows as the apiErrorNote card.
 function renderRetryGaveUp(ev: Extract<ChatEvent, { kind: "retryGaveUp" }>): HTMLElement {
-  const turn = el("div", "turn turn-retried turn-gaveup");
-  turn.appendChild(dot("red"));
-  const line = el("div", "retried-line");
   const n = ev.retries || 0;
-  const txt = el("span", "retried-text gaveup-text");
-  txt.textContent = `API errors — gave up after ${n} ${n === 1 ? "retry" : "retries"}`;
-  line.appendChild(txt);
-  line.title = "the API kept returning retryable errors" + (ev.errorKind ? ` (${ev.errorKind})` : "")
-    + "; the CLI backed off and retried until its attempts ran out, then ended the turn with no output";
-  turn.appendChild(line);
-  return turn;
+  // the error severity is the rail + red dot; the words stay --fg (a storm that produced nothing must never
+  // read like a recovery, and red TEXT sat at 3.08:1 on cream)
+  return notice({ src: "API", glyph: "api", sev: "err", gist: `gave up after ${n} ${n === 1 ? "retry" : "retries"}`, cls: "turn-retried turn-gaveup",
+                  tip: "the API kept returning retryable errors" + (ev.errorKind ? ` (${ev.errorKind})` : "")
+                    + "; the CLI backed off and retried until its attempts ran out, then ended the turn with no output" });
 }
 
 // The durable red card for a turn that DIED on an API error — the transcript's own error record, worn as
@@ -3902,20 +3894,13 @@ function renderRetryGaveUp(ev: Extract<ChatEvent, { kind: "retryGaveUp" }>): HTM
 // LIVE card (renderApiError, swapped in by the kernel while this record still blocks the session) owns
 // Retry/auto-retry, and once the session has moved on there is nothing left to retry here.
 function renderApiErrorNote(ev: Extract<ChatEvent, { kind: "apiErrorNote" }>): HTMLElement {
-  const turn = el("div", "turn turn-apierror");
-  turn.appendChild(dot("red"));
-  const card = el("div", "apierror-card apierror-note");
-  const head = el("div", "apierror-head");
-  const badge = el("span", "apierror-badge");
-  badge.textContent = ev.status ? `API error · ${ev.status}` : "API error";
-  head.appendChild(badge);
-  card.appendChild(head);
-  const body = el("div", "apierror-body");
+  const body = el("div", "notice-md");
   body.textContent = ev.md || "The turn stopped on an API error.";
-  card.appendChild(body);
-  turn.title = "this turn died on an API error — whatever it was going to say was never produced";
-  turn.appendChild(card);
-  return turn;
+  // the same API card as the live error (renderApiError), without its actions: the LIVE card owns Retry /
+  // auto-retry while the record still blocks the session; once it has moved on there is nothing left to retry
+  return notice({ src: "API", glyph: "api", sev: "err", gist: ev.status ? `error ${ev.status}` : "error", body,
+                  key: ev.uuid ? "apin:" + ev.uuid : undefined, cls: "turn-apierror",
+                  tip: "this turn died on an API error — whatever it was going to say was never produced" });
 }
 
 // A durable, rail-anchored "effort set to X" note at the moment an /effort change took effect (the user
@@ -3923,15 +3908,8 @@ function renderApiErrorNote(ev: Extract<ChatEvent, { kind: "apiErrorNote" }>): H
 // only lasting record of when reasoning effort changed (the synthesized /effort chip self-destructs on the
 // next message). Kernel writes it at the reconnect landing, so its timestamp IS the apply moment.
 function renderEffortApplied(ev: Extract<ChatEvent, { kind: "effortApplied" }>): HTMLElement {
-  const turn = el("div", "turn turn-effort");
-  turn.appendChild(dot("ring"));
-  const line = el("div", "effort-line");
-  const txt = el("span", "effort-text");
-  txt.textContent = `effort set to ${ev.effort}`;
-  line.appendChild(txt);
-  line.title = "reasoning effort is a connect-time setting; the session reconnected to apply it, and this marks when the new level took effect";
-  turn.appendChild(line);
-  return turn;
+  return notice({ src: "session", glyph: "power", gist: `effort set to ${ev.effort}`, cls: "turn-effort",
+                  tip: "reasoning effort is a connect-time setting; the session reconnected to apply it, and this marks when the new level took effect" });
 }
 
 // The durable COMMAND-GESTURE row (the user 2026-08-14): wears the SAME dress as a live command turn —
@@ -3950,31 +3928,29 @@ function renderCmdGesture(ev: Extract<ChatEvent, { kind: "cmdGesture" }>): HTMLE
 
 function renderModelFallback(ev: Extract<ChatEvent, { kind: "modelFallback" }>): HTMLElement {
   // A safeguards refusal the CLI retried on a fallback model: the swap must be visible where it happened
-  // (the user 2026-08-03), as a SOURCED notice in the shared notice-card grammar (T279). The head is the
-  // gist: whose safeguards flagged the message, the refusal category when the API named one, and which
-  // model answered instead. The fold holds the API's explanation (when it sent one) and the CLI's own
-  // line, verbatim. 'local' scope: only that reply (a subagent's or a side question's) came from the
-  // fallback model and the session's model is unchanged, so the head says so instead of "switched".
-  const from = ev.from ? prettyModel(ev.from) : "";
+  // (the user 2026-08-03), as THE notice (T279 filed it as a sourced card; the 2026-09-08 vocabulary pass
+  // builds it through notice()). SOURCE = safeguards, in the WARN severity (rail + dot: a warning about
+  // provenance, never the red API-error dress). The gist is main's head: whose safeguards flagged the
+  // message, the refusal category when the API named one, and which model answered instead — 'local'
+  // scope means only that reply (a subagent's or a side question's) came from the fallback model and the
+  // session's model is unchanged, so it says so instead of "switched". The fold holds the API's
+  // explanation (when it sent one) and the CLI's own line, verbatim, keyed by the record's uuid so the
+  // fold survives re-renders. The full head rides the ONE tooltip (setTip, never a native title): a narrow
+  // pane ellipsizes the gist from the right, which cuts exactly the swap and the category the notice exists
+  // to surface, so the fold's FIRST line restates them too — a compact view never dead-ends.
+  const gist = modelFallbackGist(ev);
+  const from = ev.from ? prettyModel(ev.from) : "the model";
   const to = ev.to ? prettyModel(ev.to) : "a fallback model";
   const cat = (ev.category || "").trim();
-  const local = ev.scope === "local";
-  const head = `${from || "The model"}'s safeguards flagged this message${cat ? ` (${cat})` : ""} · ` +
-    (local ? `this reply came from ${to}` : `switched to ${to}`);
   const body = el("div", "refusal-notice");
-  // the fold's first line restates the swap and the category: a narrow pane ellipsizes the head from the
-  // right, which cuts exactly these two facts, and a compact view must never dead-end (the full head is
-  // the hover too)
   const swapLine = el("div", "refusal-swap");
-  swapLine.textContent = `${from || "the model"} → ${to}${cat ? " · " + cat : ""}`;
+  swapLine.textContent = `${from} → ${to}${cat ? " · " + cat : ""}`;
   body.appendChild(swapLine);
   const expl = (ev.explanation || "").trim();
-  if (expl) { const p = el("div", "refusal-explanation"); p.textContent = expl; body.appendChild(p); }
-  if (ev.md) { const p = el("div", "refusal-cli-line"); p.textContent = ev.md; body.appendChild(p); }
-  const turn = noticeCard({ variant: "refusal", chip: "safeguards", head, body,
-                            collapsible: body.childNodes.length > 0, key: ev.uuid ? "mswap:" + ev.uuid : undefined });
-  turn.querySelector(".notice-head-text")?.setAttribute("title", head);
-  return turn;
+  if (expl) { const p = el("div", "refusal-explanation notice-prose"); p.textContent = expl; body.appendChild(p); }
+  if (ev.md) { const p = el("div", "refusal-cli-line notice-prose"); p.textContent = ev.md; body.appendChild(p); }
+  return notice({ src: "safeguards", glyph: "api", sev: "warn", gist, body, tip: gist,
+                  key: ev.uuid ? "mswap:" + ev.uuid : undefined });
 }
 
 // Compact a token count for the compaction divider: 795232 → "795k", 6514 → "6.5k", 900 → "900".
@@ -3990,16 +3966,13 @@ function compactTokens(n: number): string {
 // When the event carries the stripped quote (ctx), the header is CLICK-EXPANDABLE (the user 2026-07-01): a
 // ▸ disclosure toggles a muted block showing exactly the goal context that rode along with the message — the
 // strip is display-only, and this is where the hidden part can be audited. Expansion survives the chat's
-// re-renders via fuExpanded (keyed by the turn's uuid / queue slot), NOT DOM state that a rebuild would lose.
-const fuExpanded = new Set<string>();
+// re-renders via openFolds (keyed "fu:" + the turn's uuid / queue slot — the ONE fold store since 2026-09-08;
+// this had its own fuExpanded set), NOT DOM state that a rebuild would lose. The toggle rides the body
+// delegate (data-act=futoggle), never a per-node onclick the tail rebuild destroys mid-press.
 function followUpHeader(goal?: string, ctx?: string, key?: string): HTMLElement {
   const h = el("div", "followup-tag");
   const k = key || "";
-  if (ctx && k) {
-    const tri = el("span", "followup-tri");
-    tri.textContent = fuExpanded.has(k) ? "▾" : "▸";
-    h.appendChild(tri);
-  }
+  if (ctx && k) h.appendChild(el("span", "followup-tri"));   // glyph via CSS (▸/▾ follows the wrap's .expanded)
   const lbl = el("span", "followup-lbl"); lbl.textContent = "↩ Follow-up"; h.appendChild(lbl);
   if (goal) { const g = el("span", "followup-goal"); g.textContent = goal; h.appendChild(g); }
   if (!ctx || !k) return h;
@@ -4007,16 +3980,12 @@ function followUpHeader(goal?: string, ctx?: string, key?: string): HTMLElement 
   wrap.appendChild(h);
   const box = el("div", "followup-ctx");
   box.textContent = ctx;
-  box.style.display = fuExpanded.has(k) ? "" : "none";
   wrap.appendChild(box);
   h.classList.add("followup-expandable");
-  h.title = "show the goal context romp sent along with this message";
-  h.onclick = () => {
-    const open = !fuExpanded.has(k);
-    if (open) fuExpanded.add(k); else fuExpanded.delete(k);
-    box.style.display = open ? "" : "none";
-    const tri = h.querySelector(".followup-tri"); if (tri) tri.textContent = open ? "▾" : "▸";
-  };
+  h.dataset.act = "futoggle";
+  h.dataset.nkey = "fu:" + k;
+  applyFold(wrap, "expanded", "fu:" + k);
+  setTip(h, "show the goal context romp sent along with this message");
   return wrap;
 }
 
@@ -4234,13 +4203,12 @@ function renderQueued(ev: Extract<ChatEvent, { kind: "queued" }>): HTMLElement {
     let xHost: HTMLElement = bubble;   // where the ✕ lives: the nudge's own bubble corner, else the wrapper
     if (t.rompSystem) {
       const text = t.md.replace(/<!--[\s\S]*?-->/g, "").replace(/^\s*\[romp\]\s*/i, "").trim();
-      const firstLine = (text.split("\n").find((l) => l.trim()) || text).trim();
-      const gist = firstLine.length > 90 ? firstLine.slice(0, 88).replace(/\s+\S*$/, "") + "…" : firstLine;
+      const gist = t.gist ? String(t.gist) : gistOf(text);   // the kernel's user-facing gist, as the landed card wears it
       const more = collapseWs(text) !== collapseWs(gist);
       const nb = el("div", "notice-md md");
       if (more) nb.innerHTML = md(text);   // a one-line notice IS its gist — no body repeating the head
-      bubble.appendChild(noticeCard({ variant: "romp", chip: "romp", logo: true, head: gist, body: nb,
-                                      collapsible: more, key: "qromp:" + qkey + ":" + gist.slice(0, 24), nested: true }));
+      bubble.appendChild(notice({ src: "romp", glyph: "romp", sev: "romp", gist, body: nb,
+                                  key: "qromp:" + qkey + ":" + gist.slice(0, 24), nested: true }));
     } else if (t.romp) {
       const tag = el("div", "romp-tag");
       const logo = el("img", "romp-tag-logo") as HTMLImageElement;
@@ -4300,10 +4268,29 @@ function renderQueued(ev: Extract<ChatEvent, { kind: "queued" }>): HTMLElement {
       if (t.park !== undefined) x.dataset.qpark = String(t.park);
       if (t.optimistic) x.dataset.qopt = "1";   // ✕ before confirmation → cancel-by-body (no park/idx yet)
       if (t.optimistic && t.qts !== undefined) x.dataset.qts = String(t.qts);   // OUR entry's identity: the ✕ removes this bubble's entry, not the first with its text
-      if (t.qid) x.dataset.qid = t.qid;   // the kernel's copy names its id (T252c): the ✕ drops the send that owns it (a kernel copy's own qts is its enqueue stamp, not an entry)
+      if (t.qid) x.dataset.qid = t.qid;   // the copy's id (T252c): on a kernel copy the ✕ drops the send that owns it (a kernel copy's own qts is its enqueue stamp, not an entry); on ours it rides the cancel, so the kernel removes exactly this copy
       if (isCmd) x.dataset.qcmd = "1";
       (x as any)._qmd = t.md;   // the bubble's body — the kernel's drift guard + the composer restore read it
       xHost.appendChild(x);
+    }
+    // EDITABLE — a ✎ beside the ✕ (the user 2026-09-08): a message that has not reached the session is
+    // still the user's to change. The same three stages the ✕ covers (backend queue, parked, optimistic),
+    // and the same recall gate (cancelable); romp's own words and slash commands are not edited — a
+    // command is cancelled and typed again, and romp's notices are not the user's to reword. Delegated
+    // like the ✕ (data-act="qedit"); the composer takes the text under an editing pill (beginQueuedEdit),
+    // and send replaces the message where it sits — see the editQueued path in sendComposer.
+    if (t.cancelable && !t.romp && !isCmd && (t.idx !== undefined || t.park !== undefined || t.optimistic)) {
+      bubble.classList.add("editable");
+      const ed = el("button", "queued-edit");
+      ed.textContent = "✎";
+      ed.title = "edit this queued message — it keeps its place in the queue";
+      ed.dataset.act = "qedit";
+      if (t.idx !== undefined) ed.dataset.qidx = String(t.idx);
+      if (t.park !== undefined) ed.dataset.qpark = String(t.park);
+      if (t.optimistic) ed.dataset.qopt = "1";
+      if (t.optimistic && t.qts !== undefined) ed.dataset.qts = String(t.qts);   // OUR entry's identity, as on the ✕: a kernel copy's qts is its enqueue stamp, not an entry (T252c)
+      (ed as any)._qmd = t.md;
+      xHost.appendChild(ed);
     }
     turn.appendChild(bubble);
   }
@@ -4333,21 +4320,26 @@ const pendingCancelRestores = new Map<string, { before: string; after: string }>
 // per-second re-assert both read it, so the card and the tick can never drift into different words.
 const REFUSAL_REMEDY = "the model's safeguards refused this prompt — rewrite it or drop this thread";
 
+// Every API card's Stop/Resume-all button and countdown re-read the global pause at once (a click here, or
+// the kernel's globalRetryPaused push) — one function, so the two callers can never drift into different words.
+function relabelStopAll(): void {
+  for (const btn of Array.from(document.querySelectorAll(".api-stopall"))) {
+    btn.textContent = globalRetryPaused ? "Resume all auto-retries" : "Stop all auto-retries";
+    setTip(btn as HTMLElement, globalRetryPaused ? "resume auto-retrying globally" : "stop the auto-retry loop for all errors globally");
+  }
+  for (const cd of Array.from(document.querySelectorAll(".api-countdown"))) {
+    cd.textContent = globalRetryPaused ? retryPausedText() : "retrying soon…";
+  }
+}
+
 // The turn stopped on an API error — the session is BLOCKED until retried. A red-dot card at the bottom
 // (so it stands out, the user 2026-06-16) carrying the error text + a red "API error" badge and a Retry
 // button that pastes "retry" into the session to resume the stalled turn.
 function renderApiError(ev: Extract<ChatEvent, { kind: "apiError" }>): HTMLElement {
-  const turn = el("div", "turn turn-apierror");
-  turn.appendChild(dot("red"));
-  const card = el("div", "apierror-card");
-  const head = el("div", "apierror-head");
-  const badge = el("span", "apierror-badge");
-  badge.textContent = ev.status ? `API error · ${ev.status}` : "API error";
-  head.appendChild(badge);
-  // Live countdown to the next AUTO-retry — apiRetryTick() (below) updates this text every second.
-  const countdown = el("span", "apierror-countdown");
+  // Live countdown to the next AUTO-retry — apiRetryTick() (below) updates this text every second; it is the
+  // head's META slot (counts and countdowns live there, never a clock).
+  const countdown = el("span", "notice-meta api-countdown");
   countdown.textContent = "retrying soon…";
-  head.appendChild(countdown);
   // A SPEND-CAP block gets no Retry (the user 2026-07-16, mirroring the feed card's 2026-07-14 call):
   // retrying can't lift a billing cap, and on a tmux session it's worse than useless — the CLI is parked
   // on an interactive menu that eats the injected "retry" as navigation keystrokes. There the real
@@ -4364,35 +4356,15 @@ function renderApiError(ev: Extract<ChatEvent, { kind: "apiError" }>): HTMLEleme
   // names the real fix (rewrite the ask, or drop this thread).
   const refusal = !!st?.apiRefusal;
   const spendCap = !!st?.apiSpendLimit || !!st?.apiModelLimit || !!st?.apiAuthErr || refusal;
+  const acts: HTMLElement[] = [];
+  // every action is a data-act word button on the button vocabulary; the document.body delegate acts
+  // (apiRetryNow / dismissDialog / stopAllRetries) and acknowledges at once — the tail rebuilds on every
+  // push, and the per-node listeners this replaced ate mid-press clicks (CLAUDE.md click-safety)
   if (!spendCap) {
-    const retry = el("button", "apierror-retry") as HTMLButtonElement;
-    retry.textContent = "Retry now";
-    retry.title = "send “retry” into this session right now (also resets the auto-retry countdown)";
-    retry.addEventListener("click", () => {
-      // manual:true → an explicit override that fires even when auto-retry is paused/suppressed for this thread
-      // (the kernel gate is for the auto-loop only); without it "Retry now" was a dead no-op on a suppressed
-      // session (the user 2026-07-06). Acknowledge the click AT ONCE — disable + "Retrying…" — so it never
-      // reads as unresponsive; the next render (a fresh error card, or the turn resuming) restores it.
-      const own = owningSidOf(retry);
-      if (vscodeApi) vscodeApi.postMessage({ type: "apiRetry", id: own, manual: true });
-      if (own) apiRetryNext.set(own, Date.now() + API_RETRY_MS);   // restart the countdown
-      retry.disabled = true;
-      retry.textContent = "Retrying…";
-      setTimeout(() => { if (retry.isConnected) { retry.disabled = false; retry.textContent = "Retry now"; } }, 2500);
-    });
-    head.appendChild(retry);
+    acts.push(noticeAct("Retry now", "apiRetryNow", "send “retry” into this session right now (also resets the auto-retry countdown)"));
   } else if (st?.backend === "tmux" && !refusal) {
-    // (a refusal parks no menu — the Esc-sender below is for the CLI's spend-limit dialog only)
-    const dismiss = el("button", "apierror-retry") as HTMLButtonElement;   // same button chrome, different verb
-    dismiss.textContent = "Dismiss dialog";
-    dismiss.title = "the terminal is showing the spend-limit menu — send Esc to close it (cancels; changes no billing setting)";
-    dismiss.addEventListener("click", () => {
-      if (vscodeApi) vscodeApi.postMessage({ type: "dismissDialog", id: owningSidOf(dismiss) });
-      dismiss.disabled = true;
-      dismiss.textContent = "Dismissing…";
-      setTimeout(() => { if (dismiss.isConnected) { dismiss.disabled = false; dismiss.textContent = "Dismiss dialog"; } }, 2500);
-    });
-    head.appendChild(dismiss);
+    // (a refusal parks no menu — the Esc-sender is for the CLI's spend-limit dialog only)
+    acts.push(noticeAct("Dismiss dialog", "dismissDialog", "the terminal is showing the spend-limit menu — send Esc to close it (cancels; changes no billing setting)"));
   }
   // Global auto-retry pause (the user 2026-06-30) — no per-session off-switch. "Retry now" + sending a message still work.
   const paused = globalRetryPaused;
@@ -4403,29 +4375,16 @@ function renderApiError(ev: Extract<ChatEvent, { kind: "apiError" }>): HTMLEleme
   else if (spendCap) countdown.textContent = "spend limit reached — raise it at claude.ai/settings/usage";   // never "retrying soon…": the tick skips spend-capped threads
   else if (paused) countdown.textContent = retryPausedText();   // a usage-limit pause counts down to the window reset
   else if (suppressed) countdown.textContent = "auto-retry stopped for this session — send a message to resume";
-  const stop = el("button", "apierror-stop") as HTMLButtonElement;
-  stop.textContent = paused ? "Resume all auto-retries" : "Stop all auto-retries";
-  stop.title = paused ? "resume auto-retrying globally" : "stop the auto-retry loop for all errors globally";
-  stop.addEventListener("click", () => {
-    globalRetryPaused = !globalRetryPaused;
-    if (vscodeApi) vscodeApi.postMessage({ type: "setGlobalRetryPaused", value: globalRetryPaused });
-    
-    // Update visuals immediately on all errors
-    for (const btn of Array.from(document.querySelectorAll(".apierror-stop"))) {
-      btn.textContent = globalRetryPaused ? "Resume all auto-retries" : "Stop all auto-retries";
-      (btn as HTMLElement).title = globalRetryPaused ? "resume auto-retrying globally" : "stop the auto-retry loop for all errors globally";
-    }
-    for (const cd of Array.from(document.querySelectorAll(".apierror-countdown"))) {
-      cd.textContent = globalRetryPaused ? retryPausedText() : "retrying soon…";
-    }
-  });
-  head.appendChild(stop);
-  card.appendChild(head);
-  const body = el("div", "apierror-body");
+  const stop = noticeAct(paused ? "Resume all auto-retries" : "Stop all auto-retries", "stopAllRetries",
+    paused ? "resume auto-retrying globally" : "stop the auto-retry loop for all errors globally");
+  stop.classList.add("api-stopall");
+  acts.push(stop);
+  const body = el("div", "notice-md");
   body.textContent = ev.text || "The session stopped on an API error.";
-  card.appendChild(body);
-  turn.appendChild(card);
-  return turn;
+  // OPEN by default: the session is BLOCKED and the actions must show (the human is the bottleneck); the
+  // error severity is the rail + red dot + 6% wash — the words stay --fg (red text sat at 3.08:1 on cream)
+  return notice({ src: "API", glyph: "api", sev: "err", gist: ev.status ? `error ${ev.status}` : "error", meta: countdown, acts, body,
+                  open: true, key: "apierr:" + (ev.uuid || (activeId || "")), cls: "turn-apierror" });
 }
 
 // ── API-error auto-retry ──────────────────────────────────────────────────────────────────────────
@@ -4489,7 +4448,7 @@ function apiRetryTick(): void {
   // live countdown on the NEWEST error card (the live one — older cards in the transcript are settled
   // history and stay static): "retrying in Ns", or during a usage-limit pause the reset-time countdown
   // (the user 2026-07-13). Ticks every second even while paused, so the paused line stays live.
-  const cds = document.querySelectorAll(".apierror-countdown");
+  const cds = document.querySelectorAll(".api-countdown");
   const cd = cds.length ? (cds[cds.length - 1] as HTMLElement) : null;
   if (cd) {
     const active = activeId ? liveSession(activeId) : null;
@@ -4508,10 +4467,9 @@ function apiRetryTick(): void {
       const tries = active?.status.retryTries || 0;
       if (!at) { cd.textContent = "retrying soon…"; } else {
         const left = Math.max(0, Math.ceil((at - now) / 1000));
-        // "in 1750s" is not a readable wait; past a minute it reads in minutes, and the attempt count
-        // explains why the gap has grown (each failure steps the backoff up) rather than looking stuck
-        const when = left >= 90 ? `${Math.round(left / 60)}m` : `${left}s`;
-        cd.textContent = `retrying in ${when}` + (tries > 1 ? ` · ${tries} tries so far` : "");
+        // the ONE duration format (duration.ts): "2m 30s", never "150s"; the attempt count explains why the
+        // gap has grown (each failure steps the backoff up) rather than looking stuck
+        cd.textContent = `retrying in ${durLabel(left)}` + (tries > 1 ? ` · ${tries} tries so far` : "");
       }
     }
   }
@@ -4727,7 +4685,7 @@ function setPeerDot(peerEl: HTMLElement, on: boolean) {
   else if (!on && has) prev!.remove();
 }
 function refreshPostalDots() {
-  document.querySelectorAll(".postal-service-peer").forEach((p) => setPeerDot(p as HTMLElement, workingSet.has((p.textContent || "").trim())));
+  document.querySelectorAll(".notice-src-chip").forEach((p) => setPeerDot(p as HTMLElement, workingSet.has((p.textContent || "").trim())));
 }
 
 // A Romp Postal Service message, as a compact identity-coloured card.
@@ -4764,97 +4722,39 @@ function postalServiceIntent(body: string | undefined): { label: string; cls: st
 }
 
 function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>): HTMLElement {
-  const turn = el("div", "turn turn-postal-service postal-service-" + ev.direction);
-  if (ev.mid) turn.dataset.mid = ev.mid;   // joins feed-modal handoff hovers to this card
-  const d = dot("ring");
-  d.classList.add("mail");
-  if (ev.color) d.style.background = ev.color.bg;
-  turn.appendChild(d);
-
-  const card = el("div", "postal-service-card");
-  if (ev.color) {
-    card.style.setProperty("--peer-bg", ev.color.bg);
-    card.style.setProperty("--peer-fg", ev.color.fg);
-  }
-
-  const head = el("div", "postal-service-head");
-  const arrow = el("span", "postal-service-arrow");
-  arrow.textContent = ev.direction === "in" ? "↙" : "↗";
-  const verb = el("span", "postal-service-dir");
-  verb.textContent = ev.direction === "in" ? "from" : "to";
-  const peer = el("span", "postal-service-peer");
-  peer.textContent = ev.peer;
-  makeSessionChip(peer, ev.peer); // click the sender/recipient name → go to that session's tab
-  // the romp swirl marks this as a romp-postal-service message (the user 2026-06-23: postal is from romp too)
-  const rlogo = el("img", "postal-service-romp-logo") as HTMLImageElement;
-  rlogo.src = mediaSrc("romp-swirl-glyph.svg"); rlogo.alt = ""; rlogo.title = "Romp Postal Service message"; rlogo.onerror = () => rlogo.remove();
-  head.appendChild(rlogo);
-  head.appendChild(arrow);
-  head.appendChild(verb);
-  head.appendChild(peer);
-  setPeerDot(peer, workingSet.has(ev.peer));   // working dot before the peer name if that session is working
-
-  // interaction-type chip (delegation / coordination / question). Prefer the sender's DECLARED kind
-  // (send_message's `kind` param, surfaced by the kernel) — the old leading-token parse of the body is
-  // only a legacy fallback now that the kind rides as an explicit field, not a "DELEGATE:" prefix.
+  // SOURCE = "from"/"to" + the house session chip naming the peer (the ONE coloured element in the notice
+  // vocabulary — the peer's identity colour, as the tab wears it); click the name → that session's tab
+  const chip = el("span", "notice-src-chip");
+  chip.textContent = ev.peer;
+  if (ev.color) { chip.style.setProperty("--peer-bg", ev.color.bg); chip.style.setProperty("--peer-fg", ev.color.fg); }
+  makeSessionChip(chip, ev.peer);
+  setPeerDot(chip, workingSet.has(ev.peer));   // working dot before the peer name if that session is working
+  const src = el("span");
+  src.appendChild(document.createTextNode(ev.direction === "in" ? "from " : "to "));
+  src.appendChild(chip);
+  // interaction type (delegation / coordination / question) + delivery state, as META text — prefer the
+  // sender's DECLARED kind (send_message's `kind` param, surfaced by the kernel); the old leading-token
+  // parse of the body is only a legacy fallback now that the kind rides as an explicit field
   const intent = (ev.intent && POSTAL_INTENTS[ev.intent.toUpperCase()]) || postalServiceIntent(ev.body);
-  if (intent) {
-    const ib = el("span", "postal-service-intent postal-service-intent-" + intent.cls);
-    ib.textContent = intent.label;
-    ib.title = "interaction type";
-    head.appendChild(ib);
-  }
-
-  if (ev.park || ev.status === "parked") {
-    const b = el("span", "postal-service-badge parked");
-    b.textContent = "⏸ parked";
-    head.appendChild(b);
-  } else if (ev.status === "delivered") {
-    const b = el("span", "postal-service-badge delivered");
-    b.textContent = "✓ delivered";
-    head.appendChild(b);
-  }
-
-  // (no in-card time — the rail time-marker to the left of the dot carries it, like every
-  // other event; see renderEvent's rail time-stamp.)
-  card.appendChild(head);
-
-  // Body: ALWAYS lead with a one-line summary — the incoming Haiku caption, or (sent mail / no caption)
-  // the first line of the message — and let a click expand the box to the full message inline (the user
-  // 2026-06-16). Both directions read the same now: a summary that opens on demand, instead of a hover
-  // tooltip (incoming) vs. the whole body always (outgoing).
-  const body = el("div", "postal-service-body md");
+  const meta: string[] = [];
+  if (intent) meta.push(intent.label);
+  if (ev.park || ev.status === "parked") meta.push("parked");
+  else if (ev.status === "delivered") meta.push("delivered");
+  // Gist: ALWAYS a one-line summary — the incoming caption, or (sent mail / no caption) the first line of the
+  // message — with the full message one click deeper (the user 2026-06-16). KEYED (the user 2026-07-25:
+  // "it expands for like a second and then collapses again" — a DOM-only toggle died with every push).
   const fullText = (ev.body || "").trim();
-  const summaryText = postalServiceSummary(ev);
-  const expandable = !!summaryText && !!fullText && collapseWs(fullText) !== collapseWs(summaryText);
-  if (expandable) {
-    const sum = el("div", "postal-service-summary");
-    const caret = el("span", "postal-service-expand-caret"); caret.textContent = "▸"; sum.appendChild(caret);
-    const sumText = el("span", "postal-service-summary-text"); sumText.textContent = summaryText; sum.appendChild(sumText);
-    const full = el("div", "postal-service-full md"); full.innerHTML = md(ev.body, postalRepoFor(ev)); highlight(full);
-    // KEYED expand (the user 2026-07-25: "it expands for like a second and then collapses again") —
-    // the old hand-rolled classList.toggle lived only on this DOM node, and the next kernel push
-    // rebuilds the card, silently closing it. Same openFolds mechanism as every other keyed fold;
-    // keyed by message id when the log resolved one, else the carrying atom.
-    const pkey = "postal:" + (ev.mid || ev.uuid || "");
-    const dress = () => {
-      const open = body.classList.contains("expanded");
-      caret.textContent = open ? "▾" : "▸";
-      sum.title = open ? "click to collapse" : "click to expand the full message";
-    };
-    applyFold(body, "expanded", pkey);
-    dress();
-    sum.addEventListener("click", () => { rememberFold(body, "expanded", pkey); dress(); });
-    body.classList.add("postal-service-expandable");
-    body.appendChild(sum);
-    body.appendChild(full);
-  } else {
-    body.innerHTML = md(ev.body, postalRepoFor(ev));
-    highlight(body);
-  }
-  card.appendChild(body);
-
-  turn.appendChild(card);
+  const summaryText = postalServiceSummary(ev) || gistOf(fullText);
+  const expandable = !!fullText && collapseWs(fullText) !== collapseWs(summaryText);
+  let body: HTMLElement | null = null;
+  if (expandable) { body = el("div", "notice-md md"); body.innerHTML = md(ev.body, postalRepoFor(ev)); highlight(body); }
+  // an incoming QUESTION opens by default: a reply is owed, and the whole ask is what you need to read
+  const owed = !!intent && intent.cls === "question" && ev.direction === "in";
+  const turn = notice({ src, glyph: "peer", gist: summaryText, meta: meta.join(" · ") || undefined, body, open: owed,
+                        key: "postal:" + (ev.mid || ev.uuid || ""), rail: ev.color ? ev.color.bg : undefined,
+                        cls: "turn-postal-service postal-service-" + ev.direction + " notice-peer",
+                        tip: intent ? "interaction type: " + intent.label : undefined });
+  if (ev.mid) turn.dataset.mid = ev.mid;   // joins feed-modal handoff hovers to this card
   return turn;
 }
 
@@ -4864,67 +4764,29 @@ function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>)
 // tellable apart from a romp-postal message at a glance while sharing the same collapse affordance (the
 // user 2026-07-05). Before this, these rendered as a blue "you typed this" bubble full of coordination JSON.
 function renderTeammate(ev: Extract<ChatEvent, { kind: "teammate" }>): HTMLElement {
-  const turn = el("div", "turn turn-teammate");
-  const d = dot("ring");
-  d.classList.add("teammate");
-  turn.appendChild(d);
-
-  const card = el("div", "teammate-card");
-
-  const head = el("div", "teammate-head");
-  const tag = el("span", "teammate-tag");
   // the kernel's source (origin-stamped deliveries, CLI 2.1.263): one of THIS session's background agents
   // messaging its parent is labelled so, not as a "teammate" from elsewhere (the user 2026-09-07)
   const fromSub = !!(ev.source && ev.source.subagent);
-  tag.textContent = fromSub ? "background agent" : "teammate";
-  tag.title = fromSub ? "a message from one of this session's background agents — not from you"
-    : "a message from another Claude agent — not from you, not the romp postal service";
-  head.appendChild(tag);
-  // the sending agent name(s) as PLAIN text — no colored session chip (that's the postal card's language)
   const ids = (ev.blocks || []).map((b) => b.id).filter(Boolean);
   if (!ids.length && ev.source && ev.source.name) ids.push(ev.source.name);
-  if (ids.length) {
-    const names = el("span", "teammate-names");
-    names.textContent = ids.length <= 3 ? ids.join(", ") : ids.slice(0, 2).join(", ") + ", +" + (ids.length - 2);
-    names.title = ids.join(", ");
-    head.appendChild(names);
-  }
-  card.appendChild(head);
-
-  // Collapsed summary line → click to expand the full body/bodies (same affordance as the postal card).
-  // Summary = the first block's summary attr, else "N messages" for a multi-agent batch, else the first
-  // non-empty line of the single body.
-  const body = el("div", "teammate-body md");
+  const names = ids.length <= 3 ? ids.join(", ") : ids.slice(0, 2).join(", ") + ", +" + (ids.length - 2);
+  const src = (fromSub ? "background agent" : "teammate") + (names ? " " + names : "");
+  // Gist = the first block's summary attr, else "N messages" for a multi-agent batch, else the first
+  // non-empty line of the single body; the full body/bodies fold beneath — KEYED (the teammate card's
+  // unkeyed classList.toggle was the exact 2026-07-25 postal bug, still live until this)
   const blocks = ev.blocks || [];
   const fullText = blocks.map((b) => b.body || "").join("\n\n").trim();
   const firstSummary = (blocks.find((b) => b.summary && b.summary.trim()) || {}).summary || "";
   let summaryText = firstSummary.trim();
-  if (!summaryText) {
-    summaryText = blocks.length > 1 ? blocks.length + " messages" : (fullText.split("\n").find((l) => l.trim()) || "").slice(0, 140);
-  }
+  if (!summaryText) summaryText = blocks.length > 1 ? blocks.length + " messages" : gistOf(fullText, 140);
   const fullMd = blocks.map((b) => (b.id ? "**" + b.id + "**\n\n" : "") + (b.body || "")).join("\n\n---\n\n");
   const expandable = !!summaryText && !!fullText && collapseWs(fullText) !== collapseWs(summaryText);
-  if (expandable) {
-    const sum = el("div", "teammate-summary");
-    const caret = el("span", "teammate-expand-caret"); caret.textContent = "▸"; sum.appendChild(caret);
-    const sumText = el("span", "teammate-summary-text"); sumText.textContent = summaryText; sum.appendChild(sumText);
-    const full = el("div", "teammate-full md"); full.innerHTML = md(fullMd); highlight(full);
-    sum.title = "click to expand the full message";
-    sum.addEventListener("click", () => {
-      const open = body.classList.toggle("expanded");
-      caret.textContent = open ? "▾" : "▸";
-    });
-    body.classList.add("teammate-expandable");
-    body.appendChild(sum);
-    body.appendChild(full);
-  } else {
-    body.innerHTML = md(fullText || summaryText);
-    highlight(body);
-  }
-  card.appendChild(body);
-
-  turn.appendChild(card);
-  return turn;
+  let body: HTMLElement | null = null;
+  if (expandable) { body = el("div", "notice-md md"); body.innerHTML = md(fullMd); highlight(body); }
+  return notice({ src, glyph: "teammate", gist: summaryText || fullText, body,
+                  key: "tm:" + (ev.uuid || ev.ts || ""), cls: "turn-teammate",
+                  tip: fromSub ? "a message from one of this session's background agents — not from you"
+                    : "a message from another Claude agent — not from you, not the romp postal service" });
 }
 
 // (statusline chips removed — working state shows the spinner, other states show
@@ -5349,7 +5211,9 @@ function releaseTabStrip(): void {
 // unplanned; and the header holding the active tab is a labeled group, not a button — it takes no
 // action and no focus, and "button, expanded" promised both.
 function makeGroupHead(sec: TabSection, collapsed: boolean, holdsActive: boolean, hidden: readonly string[]): HTMLElement {
-  if (sec.name === null) return makeRowBreak(true);
+  // the untagged trail (unlabeled by the user's ruling): a row of its own under the one-group-per-row
+  // setting, else behind a divider
+  if (sec.name === null) return settings.stripGroupRows ? makeRowBreak(true) : makeTrailSep();
   const name = sec.name;
   const head = el("div", "tab-group-head" + (collapsed ? " collapsed" : "") + (holdsActive ? " holds-active" : ""));
   head.dataset.group = name;
@@ -5445,14 +5309,26 @@ function makeGroupHead(sec: TabSection, collapsed: boolean, holdsActive: boolean
  *  untagged trail's break also wears .tab-group-sep, the boundary sectionHeadOf reads (the trail
  *  stays unlabeled by the user's ruling — its own line, with no chip, says "in no tag"). Breaks are
  *  layout only: no drop, no hover, not a row for paintTabRowLines, and in the tab drag's virtual
- *  layout the box AFTER a break starts a row (`br`) so the simulation wraps where the strip does. */
+ *  layout the box AFTER a break starts a row (`br`) so the simulation wraps where the strip does.
+ *  Breaks are emitted only under the `stripGroupRows` setting (the gear's "One tag group per row in
+ *  the tab strip", on by default): with it off the groups follow one another and wrap as they need,
+ *  and the trail stands behind makeTrailSep's divider. */
 function makeRowBreak(untagged: boolean): HTMLElement {
   const brk = el("div", "tab-group-break" + (untagged ? " tab-group-sep" : ""));
   brk.setAttribute("aria-hidden", "true");
   return brk;
 }
+/** The untagged trail's DIVIDER with the one-group-per-row setting off: a visible 13px item, a 1px line
+ *  between 6px gutters, so the last group's tabs and the loose ones never read as one run. It wears
+ *  .tab-group-sep (the boundary sectionHeadOf reads, and the drop's group edge) and takes its width
+ *  in the layout (padding, not margin), so the tab drag's virtual layout measures it. */
+function makeTrailSep(): HTMLElement {
+  const sep = el("div", "tab-group-sep");
+  sep.title = "sessions in no tag";
+  return sep;
+}
 /** The section header a strip node belongs to: itself for a header, else the nearest header before
- *  it; null past the untagged boundary (the trail's row break) or on a flat strip. */
+ *  it; null past the untagged boundary (the trail's row break, or its divider) or on a flat strip. */
 function sectionHeadOf(node: HTMLElement): HTMLElement | null {
   let n: Element | null = node;
   while (n) {
@@ -5790,14 +5666,15 @@ function renderTabs() {
   // tag-lens menu's "Group tabs by tag") and some tag holding a visible tab, the strip renders one
   // header per tag in tagOrder holding a visible tab, each tab under EVERY tag it carries (T264b, the
   // user 2026-09-08: tags are equivalent — a session under N tags has a copy in N groups), then that
-  // section's tabs, and the untagged trail — the sessions in no tag — on its own line
-  // (tab-groups.ts owns the rule). A folded section renders its header alone, with the count and
-  // a pip when a member is working or blocked, so the gist survives the fold (progressive
-  // disclosure). The ACTIVE tab's section never renders folded — keyboard focus must never land
-  // on a hidden node — and visibleOrder() drops the folded ids so ←/→ skip them. DESKTOP ONLY: on
-  // the phone layout (phoneLayout — the kernel page's own media rule) the plan is the flat strip,
-  // since the phone's session list is scraped from every rendered tab and has no header to unfold.
-  // A create in flight (the provisional tab) sections under the tags its request named.
+  // section's tabs, and the untagged trail (the sessions in no tag) on its own line, or behind a
+  // divider with the one-group-per-row setting off (tab-groups.ts owns the rule). A folded section
+  // renders its header alone, with the count and a pip when a member is working or blocked, so the
+  // gist survives the fold (progressive disclosure). The ACTIVE tab's section never renders folded —
+  // keyboard focus must never land on a hidden node — and visibleOrder() drops the folded ids so ←/→
+  // skip them. DESKTOP ONLY: on the phone layout (phoneLayout — the kernel page's own media rule) the
+  // plan is the flat strip, since the phone's session list is scraped from every rendered tab and has
+  // no header to unfold. A create in flight (the provisional tab) sections under the tags its request
+  // named.
   const unions = viewTagUnion(effViews());
   const plan = planStrip(visibleIds, unions, readTabGroups(unions), activeId, phoneLayout(),
                          provisionalId ? { id: provisionalId, tags: provisionalTags } : null);
@@ -5808,7 +5685,8 @@ function renderTabs() {
   // it is folded or holds the active tab, and the members its folded header stands in for (the header's
   // chip, count and pip read those; the pip's state and names come from the per-id records) — and per
   // visible id either a placeholder's meta or the session's name, color, state and its tab class, faded,
-  // context and its tint, viewer flag, host-down mark and note; plus the context-gauge setting, the theme
+  // context and its tint, viewer flag, host-down mark and note; plus the context-gauge setting, the
+  // one-group-per-row setting (the row breaks and the trail's boundary read it), the theme
   // and the colormap (the gauge's tone and fallback read the theme — pickTone, ctxFallbackColor — and the
   // compacting sweep's gradient the colormap, so a settings change repaints through this signature), the +
   // tab's key hint, and the tag lens and unions the filter chips render. Equal string, same DOM: the guards
@@ -5821,7 +5699,7 @@ function renderTabs() {
   // input missing here is a repaint that never happens.
   const stripSig = JSON.stringify([
     activeId, peekId, ids, visibleIds, activeId ? tabInView(activeId) : null, plan.items,
-    settings.tabCtx, settings.theme, settings.colormap, titleWithKey("Open a session", "session.new"),
+    settings.tabCtx, settings.stripGroupRows, settings.theme, settings.colormap, titleWithKey("Open a session", "session.new"),
     surfaceLens(effViews(), "chat"), unions,
     visibleIds.map((id) => {
       const s = sessions.get(id), down = hostIsDown(id), note = down ? hostDownNote(id) : "";
@@ -5861,9 +5739,11 @@ function renderTabs() {
   let copyGroup: string | null | undefined;
   for (const item of plan.items) {
     if ("head" in item) {
-      // every group on its own line (T264): a row break ahead of each header — except the strip's
-      // first item, which already opens the first row; the untagged trail's header IS a break
-      if (item.head.name !== null && bar.childElementCount) bar.appendChild(makeRowBreak(false));
+      // every group on its own line (T264), under the one-group-per-row setting: a row break ahead of
+      // each header except the strip's first item, which already opens the first row; the untagged
+      // trail's header IS a break. With the setting off, heads and tabs follow one another and wrap
+      // as they need, and the trail stands behind its divider (makeGroupHead).
+      if (settings.stripGroupRows && item.head.name !== null && bar.childElementCount) bar.appendChild(makeRowBreak(false));
       bar.appendChild(makeGroupHead(item.head, item.folded, item.active, item.hidden));
       copyGroup = item.head.name;
       continue;
@@ -7025,8 +6905,9 @@ function adoptProvisional(realId: string): void {
   if (draft) drafts.set(realId, draft);    // set BEFORE the switch — setActive fills the box from drafts
   setActive(realId);
   for (const text of queued) {
-    vscodeApi?.postMessage({ type: "sendMessage", id: realId, text });
-    registerOptimistic(realId, text);      // …and the bubble carries over to the tab that now owns it
+    const qid = mintQid();                                  // the copy's id, minted here: the real send carries it…
+    vscodeApi?.postMessage({ type: "sendMessage", id: realId, text, qid });
+    registerOptimistic(realId, text, undefined, qid);       // …and the bubble carries over to the tab that now owns it, under the same id
   }
   if (draft) { persistDrafts(); const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null; if (ta) growComposer(ta); }
 }
@@ -8179,8 +8060,11 @@ function cmtLatchReleased(t: CommentThread, base: CmtLatch): boolean {
 // send; a TRANSIENT nack keeps the optimistic mark + latch alive and the create RE-POSTS when the
 // next session frame for the sid arrives (frames are built from the kernel's parse — a new frame IS
 // the parse catching up). Bounded by attempts, not time; a real refusal or the ack drops the hold.
-const cmtCreateInFlight = new Map<string, { sid: string; uuid: string; exact: string; text: string;
-  name: string; model: string; effort: string; fast: string; color: string; tries: number }>();
+// Keyed by the anchor: one create at a time per passage on this viewer. The held create carries the id
+// the send gesture minted, and every re-post sends it again (commentCreateFrame): the kernel answers a
+// repeat of a create it completed with the same thread, and tells a repeat from a fresh comment in the
+// same words by that id.
+const cmtCreateInFlight = new Map<string, CommentCreate>();
 const CMT_CREATE_MAX_TRIES = 12;
 
 function retryCmtCreates(sid: string): void {
@@ -8193,8 +8077,7 @@ function retryCmtCreates(sid: string): void {
       continue;
     }
     c.tries++;
-    vscodeApi?.postMessage({ type: "commentCreate", id: c.sid, uuid: c.uuid, exact: c.exact,
-      text: c.text, name: c.name, model: c.model, effort: c.effort, fast: c.fast, color: c.color });
+    vscodeApi?.postMessage(commentCreateFrame(c));         // the same gesture again: the same id
   }
 }
 
@@ -8296,7 +8179,7 @@ function applyCommentMarks(sid: string): void {
   // the rail cue clears first (idempotent re-apply): a thread viewed, resolved, or removed must
   // drop its turn's tint on this very pass, not linger until the next anchor match
   for (const t of Array.from(v.el.querySelectorAll(".turn.cmt-rail-unread"))) t.classList.remove("cmt-rail-unread");
-  if (!threads.length) return;
+  if (!threads.length) { if (sid === activeId) updateReplyChips(); return; }   // no threads → no chips (the last one resolved/deleted)
   for (const [uuid, list] of threadsByAnchor(threads)) {
     const turn = v.el.querySelector(`.turn[data-uuid="${cssEscape(uuid)}"]`) as HTMLElement | null;
     if (!turn) continue;                       // windowed out — the mark returns when the turn does
@@ -8307,6 +8190,9 @@ function applyCommentMarks(sid: string): void {
     // openCommentPopover drops the unread flag and re-runs this pass.
     turn.classList.toggle("cmt-rail-unread", list.some((t) => !!t.unread && t.status === "open"));
   }
+  // the reply chips MEASURE the marks (above/below the viewport), so they recount after this pass has the
+  // highlights back in the DOM — this is the comments frame's and every transcript rebuild's hook for them
+  if (sid === activeId) updateReplyChips();
 }
 
 /** The parent side of a branch (the user 2026-08-13): a small "↳ <name>" chip on the turn a fork
@@ -8680,11 +8566,11 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
     // the SAME display units the chat renders (the user 2026-08-24, leg C: the popover ignored the
     // compact/hide-thinking setting — thinking blocks and raw tool runs showed regardless of the
     // gear): thinking dropped, consecutive tools folded to the chat's own renderToolGroup line,
-    // expansion keyed by the SHARED expandedGroups store so a toggle survives refills. The group
+    // expansion keyed by the SHARED openFolds store so a toggle survives refills. The group
     // toggle and a settings flip both refill the open popover live (toggleToolGroup / setupSettings
     // → refillOpenCommentPop).
     const items: DisplayItem[] = settings.compact
-      ? compactDisplay(evs.map((e) => e.kind), evs.map((e) => e.kind === "tool" ? e.name : undefined))
+      ? compactDisplay(evs.map((e) => e.kind), evs.map((e) => e.kind === "tool" ? e.name : undefined), evs.map(isFoldableNotice))
       : evs.map((_, i) => ({ kind: "event", index: i } as DisplayItem));
     const thWorking = threadBusy(th.state);
     let relayNoted = !th.relayedT;   // T145: drop the sent-back marker at its place in time, once
@@ -8700,13 +8586,13 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
         const dv = dayDividerFor(dayOpen, prev);
         if (dv) list.appendChild(dv);
       }
-      if (it.kind === "toolgroup" || it.kind === "retrygroup") {
+      if (it.kind === "toolgroup" || it.kind === "noticegroup") {
         const run = it.indices.map((ix) => evs[ix]);
-        const key = it.kind === "toolgroup" ? toolGroupKey(run[0]) : retryGroupKey(run[0]);
-        const open = expandedGroups.has(key);
+        const key = it.kind === "toolgroup" ? toolGroupKey(run[0]) : noticeGroupKey(run[0]);
+        const open = openFolds.has(key);
         list.appendChild(it.kind === "toolgroup"
           ? renderToolGroup(run as Extract<ChatEvent, { kind: "tool" }>[], prev, key, open)
-          : renderRetryGroup(run as Extract<ChatEvent, { kind: "retried" }>[], prev, key, open));
+          : renderNoticeGroup(run, prev, key, open));
         if (open) {
           it.indices.forEach((ix, j) => {   // the run's own members — it.indices already excludes thinking
             const child = renderEvent(evs[ix], prev, turnWorkedSecs(evs, ix, thWorking));
@@ -8940,12 +8826,10 @@ function commentSendFromPop(pop: HTMLElement): void {
     commentThreads.set(create.sid, [...cur0.filter((t) => t.tid !== synth.tid), synth]);
     cmtAwaitBase.set(synth.tid, { ...CMT_LATCH_ZERO });   // the SEND gesture latches the pulse — before any kernel round-trip (T102); released once a frame acknowledges the send (T237)
     applyCommentMarks(create.sid);
-    vscodeApi.postMessage({ type: "commentCreate", id: create.sid, uuid: create.uuid, exact: create.exact,
-      text, name: nm, model: create.model || "", effort: create.effort || "",
-      fast: create.fast || "", color: create.color || "" });
-    cmtCreateInFlight.set(create.uuid, { sid: create.sid, uuid: create.uuid, exact: create.exact,
-      text, name: nm, model: create.model || "", effort: create.effort || "",
-      fast: create.fast || "", color: create.color || "", tries: 0 });
+    // the gesture is stamped once, here; the hold re-posts the same frame while a transient nack stands
+    const held = newCommentCreate(create, text, nm);
+    vscodeApi.postMessage(commentCreateFrame(held));
+    cmtCreateInFlight.set(create.uuid, held);
     return;
   }
   const cur = openCommentThread();
@@ -9828,7 +9712,7 @@ function scrollToAnchor(uuid: string): boolean {
                                        || (((e as { settleUuids?: string[] }).settleUuids || []).includes(uuid))) : -1;
     if (s && idx >= 0) {
       const items = displayItems(s);
-      let u = items.findIndex((it) => it.kind === "toolgroup" || it.kind === "retrygroup" ? it.indices.includes(idx) : it.index === idx);
+      let u = items.findIndex((it) => it.kind === "toolgroup" || it.kind === "noticegroup" ? it.indices.includes(idx) : it.index === idx);
       if (u < 0) u = Math.max(0, items.findIndex((it) => itemFirstEvent(it) >= idx));
       // The anchor can live INSIDE a collapsed tool run: the folded line carries only the run's FIRST
       // uuid, so the re-render below could never surface a mid-run member — the click honest-failed
@@ -9837,9 +9721,9 @@ function scrollToAnchor(uuid: string): boolean {
       // SEE that message: expand the run, so the re-render gives the member its own turn to land on.
       const hit = items[u];
       if (hit && hit.kind === "toolgroup" && hit.indices.includes(idx))
-        expandedGroups.add(toolGroupKey(s.events[hit.indices[0]]));
-      if (hit && hit.kind === "retrygroup" && hit.indices.includes(idx))
-        expandedGroups.add(retryGroupKey(s.events[hit.indices[0]]));
+        openFolds.add(toolGroupKey(s.events[hit.indices[0]]));
+      if (hit && hit.kind === "noticegroup" && hit.indices.includes(idx))
+        openFolds.add(noticeGroupKey(s.events[hit.indices[0]]));
       const working = s.status.state === "working" || s.status.state === "compacting";
       renderWindowItems(v, s, items, Math.max(0, u - WINDOW_RADIUS), Math.min(items.length, u + WINDOW_RADIUS), working);
       // Re-query with the SAME three selectors the first lookup used. data-mids was missing here, so an
@@ -9926,7 +9810,7 @@ function landNearestMoment(t: number): boolean {
   if (best < 0) return false;
   const uuid = (s.events[best] as { uuid?: string }).uuid || "";
   const items = displayItems(s);
-  let u = items.findIndex((it) => it.kind === "toolgroup" || it.kind === "retrygroup" ? it.indices.includes(best) : it.index === best);
+  let u = items.findIndex((it) => it.kind === "toolgroup" || it.kind === "noticegroup" ? it.indices.includes(best) : it.index === best);
   if (u < 0) u = Math.max(0, items.findIndex((it) => itemFirstEvent(it) >= best));
   const working = s.status.state === "working" || s.status.state === "compacting";
   renderWindowItems(v, s, items, Math.max(0, u - WINDOW_RADIUS), Math.min(items.length, u + WINDOW_RADIUS), working);
@@ -10040,7 +9924,7 @@ function landToast(msg: string) {
 // acknowledgement). The Escape listener never stops propagation: clearing a toast is
 // additive noise-removal, not a key the rest of the UI loses — and overlay consumers
 // that capture Escape (the lightbox, the viewer) still peel first by construction.
-function warnToast(msg: string) {
+function warnToast(msg: string): HTMLElement {
   let box = document.getElementById("warn-toasts");
   if (!box) {
     box = el("div", "");
@@ -10065,7 +9949,23 @@ function warnToast(msg: string) {
   box.appendChild(t);
   setTimeout(() => t.classList.add("fade"), 11000);
   setTimeout(() => t.remove(), 12000);
+  return t;   // the toast, for a caller that marks it (ephemeralWarnToast)
 }
+// A toast the page that follows a reload must not repeat: a refusal that reports a STATE rather than an event. The
+// staged sends' "Can't send yet" says the session's host is unreachable (hostIsDown, a remote host's tunnel) or its tab
+// is still being created (isProvisionalId); the staging refusals (stageComposer) say a picker is waiting on the
+// composer, an edit is in progress (to a past message, or to a queued one) or attachments are on the composer; the
+// branch jump's refusal (branchjump) says the session is not on this dashboard. The fresh page shows each state for
+// itself (the host mark and the staged strip; the picker, the attachments and the roster come back from the kernel and
+// the persisted drafts) or no longer has it (a provisional tab does not survive a reload; composerEdits and queuedEdits
+// are in memory alone, so no edit is in progress on a fresh page), so kept by persistNoticesForReload and shown again by
+// the page that follows, it would be redundant at best and false at worst. The mark keeps it out of the replay
+// (reload-notices.ts liveNotices reads only the toasts without it).
+// Toasts that report what HAPPENED to a send or a file stay unmarked, since what they say is as true after the reload
+// as before: the nack (the attachment was not saved, the held message not sent), the dismissal and the other-tab ack
+// (the held message not sent), the refusal on a disconnected host (this message was not sent and is still in the
+// composer).
+function ephemeralWarnToast(msg: string): void { warnToast(msg).dataset.ephemeral = "1"; }
 
 // Tail-windowing (see the View comment): a fresh/rewound view renders only the
 // last WINDOW_TAIL events; scrolling within EXPAND_TRIGGER_PX of the top reveals
@@ -10390,9 +10290,9 @@ function displayItems(s: Session): DisplayItem[] {
     for (let i = 0; i < s.events.length; i++) out.push({ kind: "event", index: i });
     return out;
   }
-  return compactDisplay(s.events.map((e) => e.kind), s.events.map((e) => e.kind === "tool" ? e.name : undefined));
+  return compactDisplay(s.events.map((e) => e.kind), s.events.map((e) => e.kind === "tool" ? e.name : undefined), s.events.map(isFoldableNotice));
 }
-function itemFirstEvent(it: DisplayItem): number { return it.kind === "toolgroup" || it.kind === "retrygroup" ? it.indices[0] : it.index; }
+function itemFirstEvent(it: DisplayItem): number { return it.kind === "toolgroup" || it.kind === "noticegroup" ? it.indices[0] : it.index; }
 
 // The display-unit index of the most recent compaction boundary in the loaded events, or 0 if none. The
 // default render window opens at (never below) this unit so pre-compaction history is scrubbed from the
@@ -10424,7 +10324,7 @@ function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEp
     const first = s.events[it.indices[0]];
     const key = toolGroupKey(first);
     const tools = it.indices.map((i) => s.events[i]) as Extract<ChatEvent, { kind: "tool" }>[];
-    const open = expandedGroups.has(key);
+    const open = openFolds.has(key);
     v.el.appendChild(tag(renderToolGroup(tools, prevEpoch, key, open)));
     adv(it.indices[0]);
     if (open) {   // expanded → the GROUPED TOOLS, each as its normal turn. Compact mode hides thinking
@@ -10437,11 +10337,11 @@ function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEp
         v.el.appendChild(tag(child)); adv(i);
       });
     }
-  } else if (it.kind === "retrygroup") {
-    const notes = it.indices.map((i) => s.events[i]) as Extract<ChatEvent, { kind: "retried" }>[];
-    const key = retryGroupKey(notes[0]);
-    const open = expandedGroups.has(key);
-    v.el.appendChild(tag(renderRetryGroup(notes, prevEpoch, key, open)));
+  } else if (it.kind === "noticegroup") {
+    const notes = it.indices.map((i) => s.events[i]);
+    const key = noticeGroupKey(notes[0]);
+    const open = openFolds.has(key);
+    v.el.appendChild(tag(renderNoticeGroup(notes, prevEpoch, key, open)));
     adv(it.indices[0]);
     if (open) {
       it.indices.forEach((i, j) => {
@@ -10542,7 +10442,10 @@ function renderToolGroup(tools: Extract<ChatEvent, { kind: "tool" }>[], prevEpoc
   if (anyErr) d.classList.add("err");
   turn.appendChild(d);
   const line = el("div", "toolgroup-line");
-  line.title = open ? "click to collapse" : "click to expand";
+  // the toggle rides the document.body delegate (data-act=noticetoggle + data-gkey → toggleToolGroup), never
+  // a per-node listener: the tail rebuilds every push, and a rebuilt line ate a mid-press click
+  line.dataset.act = "noticetoggle"; line.dataset.gkey = key;
+  setTip(line, open ? "click to collapse" : "click to expand");
   const caret = el("span", "toolgroup-caret"); caret.textContent = open ? "▾" : "▸"; line.appendChild(caret);
   if (!open) {   // collapsed → the "3 Edits, 2 Reads" summary; expanded → just the open arrow (the cards say it)
     toolCounts(tools.map((t) => t.name)).forEach((c, i) => {
@@ -10550,7 +10453,6 @@ function renderToolGroup(tools: Extract<ChatEvent, { kind: "tool" }>[], prevEpoc
       const w = el("span", "toolgroup-tool"); w.textContent = c.label; line.appendChild(w);   // bold, like .tool-name
     });
   }
-  line.addEventListener("click", (e) => { e.stopPropagation(); toggleToolGroup(key); });
   turn.appendChild(line);
   const epoch = eventEpoch(tools[0]);
   const anchorUuid = tools[0].uuid ?? null;
@@ -10562,37 +10464,57 @@ function renderToolGroup(tools: Extract<ChatEvent, { kind: "tool" }>[], prevEpoc
   return turn;
 }
 
-// A collapsed run of consecutive retry-recovery notes (T131 follow-up; the user 2026-08-27,
-// seventeen consecutive rows) → one rail line in the same fold grammar as the tool runs: caret +
-// "Recovered after retries ×N", expanding to the individual notes. Key rides expandedGroups like
-// a toolgroup, so the same toggle, persistence-across-rebuilds, and popover-flip machinery apply.
-function retryGroupKey(first: ChatEvent): string { return "rg:" + (first.uuid || String(eventEpoch(first) ?? "")); }
-function renderRetryGroup(notes: Extract<ChatEvent, { kind: "retried" }>[], prevEpoch: number | null, key: string, open: boolean): HTMLElement {
-  const turn = el("div", "turn turn-toolgroup turn-retrygroup" + (open ? " expanded" : ""));
-  turn.appendChild(dot("ring"));
-  const line = el("div", "toolgroup-line");
-  line.title = open ? "click to collapse" : "click to expand";
-  const caret = el("span", "toolgroup-caret"); caret.textContent = open ? "▾" : "▸"; line.appendChild(caret);
-  if (!open) {
-    const w = el("span", "retried-text");
-    w.textContent = ` Recovered after retries ×${notes.length}`;
-    line.appendChild(w);
+// A collapsed run of ≥2 consecutive LOW-STAKES notices (compact.ts noticegroup, 2026-09-08 — generalising
+// the T131 retry-run fold, seventeen consecutive recovery rows): one slim notice head in the vocabulary,
+// "▸ <glyph of the first> <SOURCE> · N notices · <first gist>", expanding to the individual notices. The
+// key rides openFolds like a toolgroup, so the same toggle, persistence-across-rebuilds and popover-flip
+// machinery apply. Which kinds fold is compact.ts's call (isFoldableNotice feeds it).
+function noticeGroupKey(first: ChatEvent): string { return "ng:" + (first.uuid || String(eventEpoch(first) ?? "")); }
+// true for the kinds compact mode may sweep into a noticegroup — the low-stakes, self-similar rows (a
+// recovery, an effort change, a model swap, a reload, an interrupt + its settle, a background report, a
+// system reminder, a romp notice); peers, API errors, compaction/clear boundaries, asks, to-dos and every
+// bubble stay standalone (they are either owed a reply or mark a boundary)
+function isFoldableNotice(ev: ChatEvent): boolean {
+  if (ev.kind === "retried" || ev.kind === "effortApplied" || ev.kind === "modelFallback" || ev.kind === "reconnecting") return true;
+  if (ev.kind === "user") return !!((ev as any).interruptMarker || ((ev as any).rompSystem && ev.md) || (ev.source && !ev.human && !ev.undelivered));
+  if (ev.kind === "assistant") return !!(ev as any).interruptSettle;
+  return false;
+}
+// the head words of a foldable notice, as its own renderer would show them (the gist helpers are shared)
+function noticeBrief(ev: ChatEvent): { src: string; glyph: NoticeGlyphKind; gist: string } {
+  if (ev.kind === "retried") return { src: "API", glyph: "retry", gist: retriedGist(ev.retries || 0) };
+  if (ev.kind === "effortApplied") return { src: "session", glyph: "power", gist: `effort set to ${ev.effort}` };
+  if (ev.kind === "modelFallback") return { src: "safeguards", glyph: "api", gist: modelFallbackGist(ev) };
+  if (ev.kind === "reconnecting") return { src: "session", glyph: "power", gist: reconnectingGist(ev.effort) };
+  if (ev.kind === "assistant") return { src: "session", glyph: "session", gist: SETTLE_GIST };
+  if (ev.kind === "user") {
+    if ((ev as any).interruptMarker) return { src: "session", glyph: "session", gist: interruptGist((ev as any).interruptCause) };
+    if ((ev as any).rompSystem) {
+      const text = (ev.md || "").replace(/<!--[\s\S]*?-->/g, "").replace(/^\s*\[romp\]\s*/i, "").trim();
+      return { src: "romp", glyph: "romp", gist: ev.gist ? String(ev.gist) : gistOf(text) };
+    }
+    if (ev.source) { const { label, glyph } = injectedSrc(ev.source as InjectedSource); return { src: label, glyph, gist: injectedHead(ev.source as InjectedSource).head }; }
   }
-  line.addEventListener("click", (e) => { e.stopPropagation(); toggleToolGroup(key); });
-  turn.appendChild(line);
-  const epoch = eventEpoch(notes[0]);
-  const anchorUuid = notes[0].uuid ?? null;
+  return { src: "session", glyph: "session", gist: "" };
+}
+function renderNoticeGroup(evs: ChatEvent[], prevEpoch: number | null, key: string, open: boolean): HTMLElement {
+  const b = noticeBrief(evs[0]);
+  const turn = notice({ src: b.src, glyph: b.glyph, gist: `${evs.length} notices`, meta: open ? undefined : b.gist,
+                        group: { key, open }, cls: "turn-toolgroup turn-noticegroup" + (open ? " expanded" : ""),
+                        tip: open ? "click to collapse" : "click to expand" });
+  const epoch = eventEpoch(evs[0]);
+  const anchorUuid = evs[0].uuid ?? null;
   if (anchorUuid) turn.dataset.uuid = anchorUuid;
   if (epoch != null) turn.dataset.t = String(epoch);
   if (epoch != null) turn.insertBefore(timeMarker(epoch, prevEpoch ?? null), turn.firstChild);
   const railDot = turn.querySelector(".dot") as HTMLElement | null;
-  if (anchorUuid || epoch != null) wireTurnHover(turn, railDot, anchorUuid, epoch ?? 0, notes[0].tlId ?? null);
+  if (anchorUuid || epoch != null) wireTurnHover(turn, railDot, anchorUuid, epoch ?? 0, evs[0].tlId ?? null);
   return turn;
 }
 
 // Toggle a collapsed tool run open/closed and repaint the active view in place (scroll preserved).
 function toggleToolGroup(key: string): void {
-  if (expandedGroups.has(key)) expandedGroups.delete(key); else expandedGroups.add(key);
+  if (openFolds.has(key)) openFolds.delete(key); else openFolds.add(key);
   const content = document.getElementById("content");
   const top = content ? content.scrollTop : 0;
   // the expand/collapse changes the DOM without changing the event set, so mark the view stale to force
@@ -10695,10 +10617,13 @@ function schedulePrebuild(): void {
 function cancelPrebuild(): void {
   if (prebuildHandle != null) { cancelIdle(prebuildHandle); prebuildHandle = null; }
 }
-// The pane iframe is display:none (the phone shell parks off-screen panes that way) — the shim's own test,
-// mirrored, so the skeleton prefetch below never spends bytes on a pane nobody can see.
+// The pane iframe is display:none (the phone shell parks off-screen panes that way): the shim's own test, mirrored,
+// so the skeleton prefetch below never spends bytes on a pane nobody can see. Two witnesses, read as their union
+// (paint-gate.ts states the rule): the zero-viewport probe sees a pane hidden since load, and the word this page
+// publishes (window.__rompPaneHidden, chat-visibility.ts) sees one hidden after a first show, which in Chromium
+// keeps its size.
 function paneHidden(): boolean {
-  try { return window.parent !== window && (window.innerWidth === 0 || window.innerHeight === 0); } catch { return false; }
+  try { return (window.parent !== window && (window.innerWidth === 0 || window.innerHeight === 0)) || (window as PaneHiddenHost).__rompPaneHidden === true; } catch { return false; }
 }
 // The prefetch never runs while the browser tab is hidden (nextPrefetch); coming back is the event that re-arms
 // it. (A display:none pane has no event for its CSS flip — it re-arms on the next upsert / click instead.)
@@ -11065,7 +10990,21 @@ function persistScrollForReload(): void {
   const rec = reloadScrollRecord(activeId, content.scrollTop, stick, stick ? null : captureScrollAnchor(content, v));
   try { if (rec) sessionStorage.setItem(RELOAD_SCROLL_KEY, JSON.stringify(rec)); } catch { /* ignore */ }
 }
-(window as any).__rompPersistForReload = persistScrollForReload;
+// The warning toasts on screen when the CORE reloads the page. A toast is DOM only and lives 12 s, and the core's restart
+// reload follows the last pending ship's retirement on the next task (it held for the ship: __rompPaneBusy's 'upload' or
+// 'held-send', ended by endReloadHoldIfIdle), so the nack saying an attachment was not saved and the held message not
+// sent, or the dismissal of the last pending chip or the ack landing on another tab, each saying the message was not
+// sent, was appended one task before the page went and the fresh page's loss toast had nothing to say (shipsInFlight
+// was already empty). Their texts ride THIS tab's sessionStorage (reload-notices.ts; per tab for the scroll record's
+// reason) and the fresh page shows them again once,
+// after the loss toast. The core's synchronous hook alone writes them: a navigation of the user's own (pagehide) says
+// nothing twice, the way the loss toast fires once and not on every load (tests/test_ship_reship.py ReloadLossToast),
+// while the scroll record rides both as before.
+function persistNoticesForReload(): void {
+  try { keepReloadNotices(sessionStorage, liveNotices(document.getElementById("warn-toasts"))); } catch { /* ignore */ }
+}
+function persistForReload(): void { persistScrollForReload(); persistNoticesForReload(); }   // the core's hook: both records
+(window as any).__rompPersistForReload = persistForReload;
 window.addEventListener("pagehide", persistScrollForReload);
 
 function captureScrollAnchor(content: HTMLElement, v: View): { uuid: string; y: number } | null {
@@ -11111,12 +11050,16 @@ function syncHostOfflineFoot(): void {
   if (!activeId || !hostIsDown(activeId)) { existing?.remove(); return; }
   const host = String(activeId).slice(0, String(activeId).indexOf(":"));
   const text = host + " is disconnected — this is the last romp got from it. Reconnecting.";
-  if (existing) { if (existing.textContent !== text) existing.textContent = text; return; }
-  const note = el("div", "tx-hostoff");
-  note.id = "host-offline-foot";
-  note.textContent = text;
-  note.title = hostDownNote(activeId);   // the one place that note is worded — host-prefix.ts
-  content.appendChild(note);
+  if (existing && existing.dataset.text === text) return;
+  existing?.remove();
+  // a slim SESSION notice in the warn severity at the transcript's tail (the audit's row 35 — it was a
+  // centred italic line, the one row outside the vocabulary); off the rail, so the prose-column indent
+  const foot = el("div", "notice-foot");
+  foot.id = "host-offline-foot";
+  foot.dataset.text = text;
+  foot.appendChild(notice({ src: "session", glyph: "api", sev: "warn", gist: text, nested: true,
+                            tip: hostDownNote(activeId) }));   // the one place that note is worded — host-prefix.ts
+  content.appendChild(foot);
 }
 
 function appendActive() {
@@ -11191,6 +11134,7 @@ function updateJumpBtn(): void {
   const off = c.scrollHeight > c.clientHeight + 2 && !atBottom(c);   // the chip: shown the moment the reader leaves the true bottom
   jumpBtn.hidden = !off;
   if (off) jumpBtn.style.bottom = (Math.max(0, window.innerHeight - c.getBoundingClientRect().bottom) + 8) + "px";
+  updateReplyChips();   // the reply chips stack on this chip's slot and count against this scroll position — same events, same measure
 }
 jumpBtn.onclick = () => {
   const c = document.getElementById("content");
@@ -11209,6 +11153,112 @@ jumpBtn.onclick = () => {
   }
 }
 window.addEventListener("resize", updateJumpBtn);
+// ── replies ready (the user 2026-09-08) ──────────────────────────────────────────────────────────
+// A reply lands on a comment you scrolled away from, and you forget to come back: the mark's ring and the
+// rail tick say so only where you happen to be looking. Two chips stacked ABOVE the jump chip — "↑ 2 replies
+// unread" / "↓ 1 reply unread" — count the unread landed replies (the kernel's unread bit on an open thread,
+// isReplyReady: the mark's own .unread rule) whose marks sit wholly above / below the viewport; a mark on
+// screen counts in neither. Each chip exists only while its count is > 0. Click = land the NEAREST one in
+// that direction through the chat's own scroll-to-uuid route (scrollToAnchor → landOn's one flash, the rail
+// tick's and the notch's route) and pulse the mark itself — and NOT mark it read: opening the thread does,
+// as today. Same dress and home as #jump-bottom (body-level, fixed, bottom-left, the menu-card vocabulary),
+// placed by measurement over the jump chip's slot so the three never overlap. The box is created once and
+// its two chips update IN PLACE (label, tip, data-tid/uuid), so a re-render can never eat a click (the
+// delegate rides the stable box). Every input is an event the chat already listens for: the jump chip's
+// own update (scroll, resize, the content ResizeObserver, tab switch, append — updateJumpBtn's tail), the
+// comments frame and every transcript rebuild (applyCommentMarks' tail), plus the pane's own size (a pane
+// measuring 0 drops the chips like the jump chip). No timers, no polling; a signature skips unchanged paints.
+const replyChips = el("div", "reply-chips");
+replyChips.id = "reply-chips";
+replyChips.hidden = true;
+const replyChevron = (dir: Dir): string => '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"'
+  + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="'
+  + (dir === "above" ? "6 14.5 12 8.5 18 14.5" : "6 9.5 12 15.5 18 9.5") + '"/></svg>';   // the jump chip's stemless chevron, up or down
+const replyChip = (dir: Dir): HTMLButtonElement => {
+  const b = el("button", "reply-chip") as HTMLButtonElement;
+  b.type = "button";
+  b.id = "reply-" + dir;
+  b.dataset.act = "replyjump";
+  b.dataset.dir = dir;
+  b.hidden = true;
+  b.innerHTML = replyChevron(dir) + '<span class="reply-chip-label"></span>';
+  replyChips.appendChild(b);
+  return b;
+};
+const replyAbove = replyChip("above");
+const replyBelow = replyChip("below");
+let replyChipSig = "";
+function dressReplyChip(b: HTMLButtonElement, dir: Dir, chip: ReadyChip | null): void {
+  b.hidden = !chip;
+  if (!chip) return;
+  (b.querySelector(".reply-chip-label") as HTMLElement).textContent = chipLabel(chip.count);
+  b.dataset.tid = chip.nearest.tid;
+  b.dataset.uuid = chip.nearest.uuid;
+  b.setAttribute("aria-label", chipAria(dir, chip.count));
+  setTip(b, chipTip(dir, chip.count, chip.nearest.line));   // the one styled tip; the text swaps per update, wired once
+}
+function updateReplyChips(): void {
+  const c = document.getElementById("content");
+  const s = activeId ? liveSession(activeId) : null;   // a skeleton tab's stale session shows no chips (skeleton-tabs-wiring.test.ts)
+  const v = activeId ? views.get(activeId) : null;
+  const H = c ? c.clientHeight : 0;
+  const ready = activeId ? (commentThreads.get(activeId) || []).filter(isReplyReady) : [];
+  // no pane to measure, the read-only subagent viewer (no threads can live there), or nothing unread → no chips
+  if (!c || !s || !v || H <= 0 || s.sub || !ready.length) { replyChips.hidden = true; replyChipSig = ""; return; }
+  const cr = c.getBoundingClientRect();
+  const marks: ReadyMark[] = [];
+  let evUnit: Int32Array | null = null;
+  for (const th of ready) {
+    const turn = v.el.querySelector(`.turn[data-uuid="${cssEscape(th.anchorUuid)}"]`) as HTMLElement | null;
+    const line = replyLine(th);
+    if (turn) {
+      // the mark's own box; the turn's when the rendered text drifted past re-matching (the tick's fallback too)
+      const node = (turn.querySelector(`mark.cmt-hl[data-tid="${cssEscape(th.tid)}"]`) as HTMLElement | null) || turn;
+      const r = node.getBoundingClientRect();
+      marks.push({ tid: th.tid, uuid: th.anchorUuid, line, ...placeMark(r.top - cr.top, r.bottom - cr.top, H) });
+    } else {
+      // windowed out: which side of the rendered window the anchor lies on IS its direction (event order,
+      // translated to display units like the notches), a tier farther than any rendered mark
+      const idx = s.events.findIndex((e) => e.uuid === th.anchorUuid);
+      if (!evUnit) evUnit = eventUnitIndex(s);
+      marks.push({ tid: th.tid, uuid: th.anchorUuid, line,
+        ...placeWindowed(idx >= 0 ? evUnit[idx] : -1, v.winStart, v.winEnd ?? v.winStart) });
+    }
+  }
+  const { above, below } = readyChips(marks);
+  // the slot: the jump chip's own bottom measure, lifted over the jump chip while it shows (its real height —
+  // the coarse-pointer media query makes it taller — plus the stack gap)
+  const bottom = Math.max(0, window.innerHeight - cr.bottom) + 8 + (jumpBtn.hidden ? 0 : jumpBtn.offsetHeight + 6);
+  const sig = activeId + "|" + (above ? above.count + ":" + above.nearest.tid : "") + "|" + (below ? below.count + ":" + below.nearest.tid : "") + "|" + bottom;
+  if (sig === replyChipSig) return;
+  replyChipSig = sig;
+  dressReplyChip(replyAbove, "above", above);
+  dressReplyChip(replyBelow, "below", below);
+  replyChips.hidden = !above && !below;
+  replyChips.style.bottom = bottom + "px";
+}
+{
+  const c = document.getElementById("content");
+  if (c) {
+    document.body.appendChild(replyChips);
+    // the click is delegated on the stable box (click-safe by construction), keyed off data-act; the press
+    // pulse is the delegate's own
+    delegate(replyChips, {
+      replyjump: (elx) => {
+        const tid = elx.dataset.tid, uuid = elx.dataset.uuid;
+        if (!tid || !uuid || !activeId) return;
+        flashedAnchor = null;                  // fresh navigation → landOn's one flash on the turn
+        if (scrollToAnchor(uuid)) {
+          applyCommentMarks(activeId);         // a re-windowed anchor turn gets its highlight back before the pulse
+          const m = views.get(activeId)?.el.querySelector(`mark.cmt-hl[data-tid="${cssEscape(tid)}"]`) as HTMLElement | null;
+          if (m) flash(m);                     // …and the mark itself pulses once (.romp-acted) — the thing you came for
+        }
+        // deliberately NO commentSeen here: the chip brings you to the reply; reading it is opening the thread
+      },
+    });
+    if (typeof ResizeObserver === "function") new ResizeObserver(updateReplyChips).observe(c);   // a pane measuring 0 drops the chips
+  }
+}
 // The per-view saved spot FOLLOWS the reader (T249, the user 2026-09-07). landActive lands every show no
 // anchor scrolled on `v.stick ? bottom : v.scrollTop`, and until now those were written only by a tab
 // switch (the tab being LEFT), the jump button, the box-resize compensation and the nav trail — never by
@@ -11688,8 +11738,8 @@ function renderLedger() {
 // re-render (keyed by session id / row id — renderBgTasks never writes them, so the idle↔working flip
 // cannot close an open box); every toggle is DELEGATED to the stable #bg-tasks container so a rebuild
 // mid-click never drops it. textContent only (command/output are untrusted).
-const bgExpanded = new Set<string>();   // row ids whose details are open
-const bgFoldOpen = new Set<string>();   // session ids whose list is expanded
+// the box's fold + each row's detail fold key into openFolds ("bgfold:<sid>" / "bgrow:<id>") — the ONE fold
+// store since 2026-09-08 (these had their own bgFoldOpen / bgExpanded sets)
 const BG_RANK: Record<string, number> = { failed: 3, running: 2, completed: 1 };
 const BG_LEFTOVER_TITLE = "Also running";   // tracked tasks the wait does not name (a dev server the session keeps around)
 // ── SUBAGENT VIEWER (plans/subagent-transcripts.md, 2026-09-05) ─────────────────────────────────
@@ -11848,7 +11898,7 @@ function renderBgTasks() {
   // keeps its own meaning (yellow = the row is running)
   const awaited = new Set<string>(s.status.awaitingTaskIds || []);
   host.classList.toggle("bg-awaited", !!why || tasks.some((t) => awaited.has(t.id)));
-  const open = bgFoldOpen.has(sid);
+  const open = openFolds.has("bgfold:" + sid);
   const groups = groupRows(items);
   const awPeers = s.status.awaitingPeers || [];
   const itemIds = new Set<string>(items.map((it) => it.id || "").filter(Boolean));
@@ -11989,7 +12039,7 @@ function awaitRowSpec(it: AwaitRow, tracked: BgTask | undefined, peerByName: Map
 }
 
 function bgRow(t: BgRowSpec, sid: string): HTMLElement {
-  const tOpen = bgExpanded.has(t.id);
+  const tOpen = openFolds.has("bgrow:" + t.id);
   const foldable = !!(t.command || t.output);
   const row = el("div", "bg-task bg-" + (t.status || "running") + (t.awaited ? " bg-awaited" : "") + (tOpen && foldable ? " open" : ""));
   const rh = el("div", "bg-head" + (foldable ? "" : " bg-flat"));
@@ -12536,11 +12586,7 @@ function sendTextLiveAsk(text: string) {
 // Animated Claude-Code-style "working" line (sparkle + rotating gerund).
 function elapsedMs(sinceMs: number | null): string {
   if (!sinceMs) return "";
-  const s = Math.max(0, Math.floor((Date.now() - sinceMs) / 1000));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${s % 60}s`;
-  return `${Math.floor(m / 60)}h ${m % 60}m`;
+  return durLabel((Date.now() - sinceMs) / 1000);   // the ONE duration format (duration.ts) — was its own "1h 3m"
 }
 
 // Right side of the status line: "Opus 4.8 xhigh" (model + effort) — the context %
@@ -12567,6 +12613,13 @@ const EFFORT_CHOICES: { label: string; value: string; color?: number[] | null }[
 // run: an empty model menu beats offering another vendor's models (docs/codex.md).
 const CODEX_MODEL_CHOICES: { label: string; value: string; color?: number[] | null }[] = [];
 const CODEX_EFFORT_CHOICES: { label: string; value: string; color?: number[] | null }[] = [];
+// Why the Codex list is empty, when it is: the payload's `codex.error` (the app-server client not up yet,
+// a failed model list, no live Codex session). A Codex menu with no list shows it in place of a
+// blank menu. "" while a list is held or the field is absent.
+let CODEX_MODELS_ERROR = "";
+// Set by an open menu that found its list empty: called once per applied /models read so the menu can
+// rebuild with the list that just landed, or show the fresh reason. Cleared with the menu (closeMetaMenu).
+let onModelChoicesLoaded: (() => void) | null = null;
 // Loaded at page load and RE-LOADED on the kernel's {type:"models"} frame — the pick memory moved (a
 // version pinned, a family un-pinned by Latest, a refused pin dropped; from this tab, another dashboard,
 // or the kernel itself) or the catalog grew. A family's `default` is what its row SENDS, so a list
@@ -12579,14 +12632,24 @@ const CODEX_EFFORT_CHOICES: { label: string; value: string; color?: number[] | n
 // until the next change. A payload without a rev (an older kernel) always applies.
 let modelChoicesRev = -1;
 function loadModelChoices(): void {
-  fetch(kernelUrl("/models"), { cache: "no-store" }).then((r) => r.json()).then((d) => {
+  // a non-2xx (a 403 from a token the kernel refused, a 500) answers with an empty or text body, and
+  // .json() on it read as a bare parse message ("Unexpected end of JSON input"); name the status instead
+  fetch(kernelUrl("/models"), { cache: "no-store" }).then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }).then((d) => {
     if (typeof d.rev === "number") { if (d.rev < modelChoicesRev) return; modelChoicesRev = d.rev; }
     if (Array.isArray(d.models)) { MODEL_CHOICES.length = 0; MODEL_CHOICES.push(...d.models, { label: "Default", value: "default" }); }
     if (Array.isArray(d.efforts)) { EFFORT_CHOICES.length = 0; EFFORT_CHOICES.push(...d.efforts); }
     if (d.codex && Array.isArray(d.codex.models)) { CODEX_MODEL_CHOICES.length = 0; CODEX_MODEL_CHOICES.push(...d.codex.models); }
     if (d.codex && Array.isArray(d.codex.efforts)) { CODEX_EFFORT_CHOICES.length = 0; CODEX_EFFORT_CHOICES.push(...d.codex.efforts); }
+    if (d.codex) CODEX_MODELS_ERROR = typeof d.codex.error === "string" ? d.codex.error : "";
     if (d.commentDefaults) adoptCommentDefaults(d.commentDefaults);
-  }).catch(() => { /* picker stays as it was until it lands */ });
+    if (onModelChoicesLoaded) onModelChoicesLoaded();   // once per APPLIED read: a response the rev check dropped never fires it
+  }).catch((e) => {
+    // A menu waiting on this read hears that it failed: its row would otherwise keep promising an answer
+    // that was never coming. With no menu waiting, the picker stays as it was until a read lands.
+    if (!onModelChoicesLoaded) return;
+    CODEX_MODELS_ERROR = "could not read the model list: " + (e instanceof Error ? e.message : String(e));
+    onModelChoicesLoaded();
+  });
 }
 loadModelChoices();
 // The kernel's default-comment settings, RAW ("session" = same as the session — the user 2026-08-29):
@@ -12778,6 +12841,7 @@ function metaDots(): HTMLElement {
 function metaButton(kind: MetaKind, text: string, forSid?: string | null): HTMLElement {
   const btn = el("span", "meta-btn");
   btn.dataset.kind = kind;
+  if (forSid) btn.dataset.sid = forSid;   // a popover's badges name their thread; the chat's carry no session (metaAnchor)
   if (kind === "mode") {   // the permission glyph, always beside its text (never instead of it)
     const ico = el("span", "meta-ico mode-ico");
     ico.innerHTML = modeIconSvg(text);   // refreshed by the sync loop below from st.mode
@@ -12871,6 +12935,20 @@ function closeMetaMenu() {
   document.querySelectorAll(".meta-sub").forEach((n) => n.remove());   // an open version submenu goes with its menu
   metaMenuEl?.remove();
   metaMenuEl = null;
+  onModelChoicesLoaded = null;   // the rebuild hook belongs to the menu it was set for
+}
+// The badge a menu anchors to, as it stands NOW: `btn` while it is still in the document, else the connected
+// badge of the same kind for the same session (a popover's by data-sid; the chat's carry none) that the last
+// statusline rebuild put in its place, else null. updateStatusline builds a fresh spinner-meta on every
+// kernel push, so a button captured at open is often detached by the time a deferred rebuild wants it, and
+// a menu placed from a detached element's rect (all zeros) lands off-screen. A null says: leave the menu
+// closed; the next open builds against a live badge.
+function metaAnchor(kind: MetaKind, forSid: string | null | undefined, btn: HTMLElement): HTMLElement | null {
+  if (btn.isConnected) return btn;
+  const want = forSid || "";
+  const found = (Array.from(document.querySelectorAll(".meta-btn")) as HTMLElement[])
+    .find((b) => b.dataset.kind === kind && (b.dataset.sid || "") === want && b.isConnected);
+  return found || null;
 }
 function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null) {
   const wasOpen = metaMenuEl?.dataset.kind === kind;
@@ -12908,7 +12986,43 @@ function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null
   // An sdkOnly entry is dropped on tmux rather than shown-and-refused: the backend cannot apply it,
   // and a menu that lists a mode you can't have is worse than one that doesn't. Codex sessions read
   // their own vocabulary via metaChoices (docs/codex.md) before the same filter.
-  for (const c of metaChoices(kind, s.status).filter((c) => !c.sdkOnly || s.status.backend === "sdk")) {
+  const rows = metaChoices(kind, s.status).filter((c) => !c.sdkOnly || s.status.backend === "sdk");
+  if (!rows.length && s.status.backend === "codex" && (kind === "model" || kind === "effort")) {
+    // A Codex menu with no list says why instead of opening blank: the badge above it shows the
+    // session's default while the list under it is empty. The reason is the kernel's `codex.error`. The
+    // open itself re-reads the list (one fetch): a held reason may be stale, and a dashboard loaded before
+    // the first Codex session holds none; the row waits with the dots only while no reason is held. When
+    // the read lands the menu rebuilds with the list, or the row shows the fresh reason. A statement, not
+    // a choice: it takes no click and no focus.
+    const empty = el("div", "meta-item meta-empty");
+    const head = el("div");
+    head.textContent = kind === "model" ? "No model list from Codex" : "No effort list from Codex";
+    const sub = el("div", "meta-item-sub");
+    sub.textContent = CODEX_MODELS_ERROR || "asking for the list now";
+    if (!CODEX_MODELS_ERROR) sub.appendChild(metaDots());   // a wait wears the loader's dots
+    empty.append(head, sub);
+    menu.appendChild(empty);
+    onModelChoicesLoaded = () => {
+      if (metaMenuEl !== menu) return;
+      // The chat's badges carry no session, so a menu opened on a tab that dismissSession has since removed
+      // (activeId moves to the most recent survivor there, without setActive's closeMetaMenu) cannot be told
+      // from the survivor's menu by its badge: it would re-anchor on the survivor's badge of the same kind,
+      // or write the stale reason row over the survivor's tab. Close it instead; a thread's popover names
+      // its own sid and is never the active tab, so its rebuild below is unchanged.
+      if (!forThread && activeId !== opSid) { closeMetaMenu(); return; }
+      const now = metaChoices(kind, s.status).filter((c) => !c.sdkOnly || s.status.backend === "sdk");
+      if (!now.length) { sub.textContent = CODEX_MODELS_ERROR || (kind === "model" ? "no model list yet" : "no effort list yet"); return; }   // textContent drops the dots
+      // The list landed: rebuild against the badge as it stands now, not the one captured at open. The spawn
+      // that makes the list readable also pushes, and every push rebuilds the statusline, so the captured
+      // button is often detached by the time the re-read lands; with no live badge for this kind and session
+      // (the popover closed, the statusline emptied) the menu stays closed and the next open reads the list.
+      closeMetaMenu();
+      const anchor = metaAnchor(kind, forSid, btn);
+      if (anchor) toggleMetaMenu(kind, anchor, forSid);
+    };
+    loadModelChoices();
+  }
+  for (const c of rows) {
     const item = el("div", "meta-item" + (isCurrentMeta(kind, s.status, c.value) ? " current" : ""));
     item.tabIndex = 0;
     const rowIco = kind === "mode" ? el("span", "meta-ico mode-ico") : null;
@@ -13554,27 +13668,43 @@ try {
     }
   }
 } catch { /* ignore */ }
+// The notices the last page was showing when the reload core took it (persistNoticesForReload): shown again once, after
+// the loss toast above, and the record taken out of sessionStorage in the same call so a later load says nothing (one
+// reload, one replay: the scroll record's idiom).
+try { for (const text of takeReloadNotices(sessionStorage)) warnToast(text); } catch { /* ignore */ }
 
 // Composer EDIT mode (per session): set when the user clicks a bubble's edit affordance — the composer
 // then sends a rewindSend (branch from just before that message) instead of a plain message. The chip
 // strip shows an "Editing message" pill whose ✕ (or Esc in the box) cancels back to normal sending.
 const composerEdits = new Map<string, { uuid: string; orig: string }>();
 
-// STAGED messages (the user 2026-08-15): compose against a highlight, ⌘/Ctrl+⏎ to HOLD it — citation
-// chips and all — clear the box and keep reading; repeat. Nothing sends until the next plain send
-// (the stack flushes first, in stage order, the typed message last) or the strip's Send now.
-// Deliberately NOT the queue and never called "queued": queued is romp's injection-side wait (sent,
-// pending injection); staged is user-side — unsent by choice, each message keeping the context it was
-// written against so the batch reads as quote → comment, quote → comment. Per-tab, persisted with the
-// drafts (a reload or tab switch never drops a stack). The pure stack rules live in staged-messages.ts,
-// executed by its test; this file owns the strip DOM and the send routing.
+// STAGED messages (the user 2026-08-15): compose against a highlight, ⌘/Ctrl+⏎ to HOLD it, citation
+// chips and all, clear the composer and keep reading; repeat. Nothing sends until the next plain send
+// or the strip's Send now, and the release is ONE message: the staged items in stage order, each as the
+// quote it was written against and then its comment, the typed message last, so the run reads
+// quote, comment, quote, comment, wrap-up, and the agent takes it in one turn (stagedPosts in
+// staged-messages.ts says which items still go on their own). Deliberately NOT the queue and never
+// called "queued": queued is romp's injection-side wait (sent, pending injection); staged is user-side,
+// unsent by choice. Per-tab, persisted with the drafts (a reload or tab switch never drops a stack).
+// The pure stack rules and the body live in staged-messages.ts, executed by its test; this file owns
+// the strip DOM and the send routing.
 const stagedMsgs = new StagedStack();
 const stagedOpen = new Set<string>();   // sid:index of staged chips expanded to their full text
+// The strip collapsed to its head line: a page-lifetime Set of session ids, empty (list shown) at load,
+// written by the head's caret or label click and cleared when the stack empties, so a collapse is the
+// user's and belongs to the stack they collapsed (the next stack starts shown, its first item in view),
+// and a reload shows the list again. The head keeps the count and Send now either way.
+const stagedCollapsed = new Set<string>();
+// The list's kept scroll offset, PER TAB: the strip holds one tab's list at a time, so the offset is
+// stored under the sid that built the list the strip holds (strip.dataset.sid) and reused only for
+// that sid. Read off whatever list was in the strip, it would carry the leaving tab's offset onto the
+// entering tab's list on a switch and hide that tab's first items.
+const stagedScroll = new Map<string, number>();
 try { stagedMsgs.restore(((vscodeApi?.getState?.() || {}) as any).staged); } catch { /* ignore */ }
 
-// One routing owner for a user message (the deliver path and the staged flush both speak it): a goal
-// chip rides askFollowUp, quote chips wrap client-side, a bare message is a plain send with the
-// optimistic bubble (chip sends have their own kernel-side echo).
+// One routing owner for a user message (deliver speaks it through flushStaged, once per post of the
+// release): a goal chip rides askFollowUp, quote chips wrap client-side, a bare message is a plain send
+// with the optimistic bubble (chip sends have their own kernel-side echo).
 function routeUserMessage(sid: string, text: string, cites: Citation[] | undefined, imgPaths?: string[]): void {
   if (!vscodeApi) return;
   const goalCite = cites?.find((c) => c.itemId);
@@ -13585,9 +13715,13 @@ function routeUserMessage(sid: string, text: string, cites: Citation[] | undefin
   // md (send-pending.ts): the quote branch echoes the COMPOSED body, which is byte-identical to what
   // lands (quoteReplyBody IS the send path); the follow-up echoes the typed words, which is what the
   // kernel ships as the landed event's md once it strips the goal wrapper (_split_followup).
-  if (goalCite?.itemId) { vscodeApi.postMessage({ type: "askFollowUp", itemId: goalCite.itemId, text, sid }); registerOptimistic(sid, text, imgPaths); }
-  else if (quoteCites.length) { const body = quoteReplyBody(quoteCites, text); vscodeApi.postMessage({ type: "sendMessage", id: sid, text: body }); registerOptimistic(sid, body, imgPaths); }
-  else { vscodeApi.postMessage({ type: "sendMessage", id: sid, text }); registerOptimistic(sid, text, imgPaths); }
+  // The copy's id is minted at the press and rides the post (`qid`), and the entry registered right after wears
+  // the same one: the kernel queues or parks the copy under it, so the two never have to be paired by text
+  // (send-pending.ts). The post still goes first: the paint that follows can never cost the send.
+  const qid = mintQid();
+  if (goalCite?.itemId) { vscodeApi.postMessage({ type: "askFollowUp", itemId: goalCite.itemId, text, sid, qid }); registerOptimistic(sid, text, imgPaths, qid); }
+  else if (quoteCites.length) { const body = quoteReplyBody(quoteCites, text); vscodeApi.postMessage({ type: "sendMessage", id: sid, text: body, qid }); registerOptimistic(sid, body, imgPaths, qid); }
+  else { vscodeApi.postMessage({ type: "sendMessage", id: sid, text, qid }); registerOptimistic(sid, text, imgPaths, qid); }
   // One breadcrumb per composer send (client-diag.jsonl): sid, when, how long, which route — never the
   // text. A send that "vanished" can then be traced from the press through the kernel's own logs
   // instead of reconstructed from memory.
@@ -13595,40 +13729,81 @@ function routeUserMessage(sid: string, text: string, cites: Citation[] | undefin
     data: { sid, ts: Date.now(), len: text.length, route: goalCite?.itemId ? "followup" : quoteCites.length ? "quote" : "plain" } });
 }
 
-/** Release the tab's staged stack (deliver's guards — host down, provisional — run before this in the
- *  send path; Send now re-checks reachability itself). Returns how many went. */
-function flushStaged(sid: string): number {
-  const batch = stagedMsgs.takeAll(sid);
-  for (const s of batch) routeUserMessage(sid, s.text, s.cites as Citation[]);
-  if (batch.length) { persistDrafts(); renderStagedStrip(sid); }
-  return batch.length;
+/** Release the tab's staged stack as ONE message: stagedPosts (staged-messages.ts, executed by its test)
+ *  composes the staged items in stage order and then the typed message, when the send carries one, into
+ *  a single body, so one post makes one bubble and one turn. Two kinds of item still go on their own, at
+ *  their place in stage order: an item citing a GOAL (the kernel wraps one goal per message, askFollowUp;
+ *  a typed goal follow-up carries the run inside its text and the goal wraps the lot) and a SLASH
+ *  COMMAND, staged or typed (the kernel fires a command only at the head of its own text: after another
+ *  section a typed /clear would be prose the agent read, and ahead of one a staged /compact would take
+ *  the comments after it as its argument). With nothing staged the typed message routes exactly as
+ *  before. Deliver's guards (host down, provisional) run before this in the send path; Send now
+ *  re-checks reachability itself. Returns how many staged items went. */
+function flushStaged(sid: string, typed?: { text: string; cites?: Citation[]; imgPaths?: string[] }): number {
+  const run = stagedMsgs.takeAll(sid);
+  for (const p of stagedPosts(run, typed)) routeUserMessage(sid, p.text, p.cites as Citation[] | undefined, p.imgPaths);
+  if (run.length) { persistDrafts(); renderStagedStrip(sid); }
+  return run.length;
 }
 
-function renderStagedStrip(id: string | null): void {
+function renderStagedStrip(id: string | null, opts?: { reveal?: "last" }): void {
   const strip = document.getElementById("composer-staged");
   if (!strip) return;
+  // the list's scroll position survives the rebuild: expanding or discarding an item re-renders the
+  // strip, and a fresh list would start at the top, away from the item just clicked. The offset is kept
+  // under the tab that built the list it is read from (stagedScroll), so a switch never carries one tab's
+  // place onto another's list and a tab comes back to its own; an emptied list forgets it. The STAGE path
+  // passes reveal: "last" instead and the new item scrolls into view: with only the kept offset, every
+  // item staged past the fourth would land below the list's edge, out of sight.
+  const prev = strip.querySelector(".staged-list");
+  if (prev && strip.dataset.sid) stagedScroll.set(strip.dataset.sid, prev.scrollTop);
   strip.replaceChildren();
-  const list = id ? stagedMsgs.list(id) : [];
-  if (!id || !list.length) { strip.style.display = "none"; return; }
+  const items = id ? stagedMsgs.list(id) : [];
+  if (!id || !items.length) { if (id) { stagedScroll.delete(id); stagedCollapsed.delete(id); } delete strip.dataset.sid; strip.style.display = "none"; return; }
+  strip.dataset.sid = id;
   strip.style.display = "flex";
+  const collapsed = stagedCollapsed.has(id);
   const head = el("div", "staged-head");
-  const lbl = el("span");
-  lbl.textContent = list.length + " staged — sends with your next message";
+  // the caret: the head line alone when collapsed, the count still on it; a real button so the keyboard
+  // reaches it, and its state is spoken (aria-expanded) as well as drawn
+  const caret = el("button", "staged-caret") as HTMLButtonElement;
+  caret.textContent = collapsed ? "▸" : "▾";
+  caret.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  caret.setAttribute("aria-label", collapsed ? "Show the staged messages" : "Hide the staged messages");
+  const lbl = el("span", "staged-lbl");
+  lbl.textContent = items.length + " staged — sends with your next message";
   lbl.title = "⌘⏎ (or Ctrl+⏎) stages what you've typed, quote chips and all, without sending. "
-    + "A plain send releases them in order with your new message last — or Send now releases them alone.";
+    + "A plain send releases them as one message, in order, with your new message last; a card follow-up or a slash command goes on its own, in its place. "
+    + "Send now releases them alone.";
+  const toggleCollapse = (ev: Event) => {
+    ev.stopPropagation();
+    if (stagedCollapsed.has(id)) stagedCollapsed.delete(id); else stagedCollapsed.add(id);
+    // the rebuild destroys the caret that had focus, so the keyboard user stays on the new one (dropped
+    // to body, the next Enter would be the bare-area Enter that focuses the composer)
+    const had = document.activeElement === caret;
+    renderStagedStrip(id);
+    if (had) (strip.querySelector(".staged-caret") as HTMLElement | null)?.focus();
+  };
+  caret.addEventListener("click", toggleCollapse);
+  lbl.addEventListener("click", toggleCollapse);
   const go = el("button", "staged-go");
   go.textContent = "Send now";
   go.addEventListener("click", () => {
     if (!id) return;
     if (hostIsDown(id) || isProvisionalId(id)) {
-      warnToast("Can't send yet — the session isn't reachable. They stay staged.");
+      ephemeralWarnToast("Can't send yet — the session isn't reachable. They stay staged.");
       return;
     }
     flushStaged(id);
   });
-  head.append(lbl, go);
+  head.append(caret, lbl, go);
   strip.appendChild(head);
-  list.forEach((s, i) => {
+  if (collapsed) return;
+  // the items sit in their own scrolling list UNDER the head: about four items show and the rest scroll
+  // (.staged-list in styles.css), the head with its count and Send now stays outside the scroll, and the
+  // composer below keeps its place. An expanded item grows inside the scroll.
+  const list = el("div", "staged-list");
+  items.forEach((s, i) => {
     const chip = el("div", "staged-chip");
     // each staged reply keeps the CONTEXT it was written against visible inside its own dotted box
     // (the user 2026-08-15): one small context chip per quote, independently expandable — clicking
@@ -13676,11 +13851,91 @@ function renderStagedStrip(id: string | null): void {
     x.addEventListener("click", (ev) => { ev.stopPropagation(); stagedMsgs.removeAt(id, i); persistDrafts(); renderStagedStrip(id); });
     row.append(mark, label, hint, x);
     chip.appendChild(row);
-    strip.appendChild(chip);
+    list.appendChild(chip);
   });
+  strip.appendChild(list);
+  list.scrollTop = opts?.reveal === "last" ? list.scrollHeight : (stagedScroll.get(id) || 0);
+}
+
+// ---- editing a QUEUED message (the user 2026-09-08) --------------------------------------------------
+// A message that has not reached the session yet — parked in romp's FIFO, held in the SDK backend's own
+// queue, or still at the optimistic "sending…" stage — is the user's to change until it goes. The ✎ on its
+// bubble loads the text into the composer under an EDITING pill (the rewind edit's grammar, one level
+// deeper: "Editing queued message"), and send REPLACES it in place: same queue slot, same follow-up
+// context, only the words. The kernel verifies the entry by body (editQueued's md — the ✕'s drift guard)
+// and answers editResult; ok:false means the message left the queue meanwhile, so the typed words go
+// back to the composer and the queue repaints from the kernel — nothing is lost, nothing is sent twice.
+type QueuedEditRef = { md: string; idx?: number; park?: number; qts?: number; optimistic?: boolean };
+const queuedEdits = new Map<string, QueuedEditRef>();
+// the typed text + the entry it replaced, keyed sid + " " + old body, so a failed edit can give the words
+// back and undo the optimistic repaint (one-shot, ok or not — pendingCancelRestores' twin)
+const pendingEditRestores = new Map<string, { typed: string; ref: QueuedEditRef }>();
+// the in-progress draft the ✎ displaced, per session, handed back when the edit ends (cancelled or sent) so
+// correcting a queued message never costs a half-typed one (review find, 2026-09-08)
+const queuedEditHeld = new Map<string, string>();
+
+function beginQueuedEdit(sid: string, ref: QueuedEditRef): void {
+  if (composerEdits.has(sid)) cancelComposerEdit(sid);   // one edit at a time: a rewind edit yields to this one
+  queuedEdits.set(sid, ref);
+  composerCitations.delete(sid);   // the queued text carries its own context (a follow-up keeps it kernel-side)
+  if (sid !== activeId) return;
+  const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
+  if (ta) {
+    if (ta.value.trim()) queuedEditHeld.set(sid, ta.value);   // hold the draft this edit displaces
+    ta.value = ref.md; growComposer(ta); ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+  }
+  renderComposerChips(sid);
+}
+
+function cancelQueuedEdit(sid: string): void {
+  if (!queuedEdits.delete(sid)) return;
+  restoreHeldDraft(sid);
+}
+
+// The queued edit is over (cancelled, or sent): the box goes back to the draft the ✎ displaced, or empties,
+// and the pill goes with it. The draft store follows either way, so a tab switch or a reload sees the same.
+function restoreHeldDraft(sid: string): void {
+  const held = queuedEditHeld.get(sid) || "";
+  queuedEditHeld.delete(sid);
+  if (held) drafts.set(sid, held); else { drafts.delete(sid); draftStartedAt.delete(sid); }
+  persistDrafts();
+  if (sid !== activeId) return;
+  const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
+  if (ta) { ta.value = held; composerManualH = null; ta.style.height = ""; if (held) growComposer(ta); }
+  renderComposerChips(sid);
+}
+
+// The optimistic half of an edit: the queued bubble shows the NEW words at once (the acknowledge-the-click
+// rule) — in the client's copy of the kernel events and in our own pending-send entry, so neither the next
+// re-render nor the pending reconcile paints the old text back before the kernel's push confirms. `back`
+// reverses it (editResult ok:false: the session has the old words).
+function applyQueuedEditLocally(sid: string, ref: QueuedEditRef, text: string, back = false): void {
+  const from = back ? text : ref.md, to = back ? ref.md : text;
+  for (const p of pendingSent.get(sid) || []) {
+    if (p.text === from && (ref.qts === undefined || p.ts === ref.qts)) { p.text = to; p.body = pendingBody(to, p.imgPaths); }
+  }
+  const s = sessions.get(sid);
+  if (s) {
+    for (let i = s.events.length - 1, n = 0; i >= 0 && n < 10; i--, n++) {   // a queued group only ever sits at the tail
+      const e = s.events[i];
+      if (e.kind !== "queued") continue;
+      for (const t of e.texts) {
+        if (t.md !== from) continue;
+        if (ref.idx !== undefined && t.idx !== undefined && t.idx !== ref.idx) continue;
+        if (ref.park !== undefined && t.park !== undefined && t.park !== ref.park) continue;
+        t.md = to;
+      }
+    }
+  }
+  // the held-copy memory follows too (T262i): reconcileHeld keys an id-less copy by TEXT, so a previous-push copy
+  // left with the old words would read as vanished on the next push and be held as a phantom of them
+  const mem = heldQueued.get(sid);
+  if (mem) for (const c of mem.prev) if (c.md === from) c.md = to;
+  if (sid === activeId) { const v = views.get(sid); if (v) { v.stale = true; appendActive(); } }
 }
 
 function beginComposerEdit(sid: string, uuid: string, orig: string): void {
+  if (queuedEdits.has(sid)) cancelQueuedEdit(sid);   // …and a queued edit yields to a rewind edit
   composerEdits.set(sid, { uuid, orig });
   composerCitations.delete(sid);   // an edit replaces the message wholesale — mixed goal/quote context would mislead
   if (sid !== activeId) return;
@@ -13731,6 +13986,22 @@ function renderComposerChips(id: string | null): void {
     chip.appendChild(label);
     const x = el("button", "composer-chip-x"); x.setAttribute("aria-label", "Cancel edit"); x.textContent = "✕";
     x.addEventListener("click", (e) => { e.stopPropagation(); cancelComposerEdit(id); });
+    chip.appendChild(x);
+    strip.appendChild(chip);
+    return;
+  }
+  // the QUEUED edit's pill (the user 2026-09-08): the rewind pill's grammar, saying what send does instead
+  const qedit = id ? queuedEdits.get(id) : undefined;
+  if (qedit && id) {
+    strip.style.display = "flex";
+    const chip = el("div", "composer-chip composer-chip-edit");
+    chip.title = "the message keeps its place in the queue and goes as edited — ✕ (or Esc) leaves it as it was";
+    const mark = el("span", "composer-chip-mark"); mark.textContent = "✎"; chip.appendChild(mark);
+    const label = el("span", "composer-chip-label");
+    label.textContent = "Editing queued message — send replaces it in the queue";
+    chip.appendChild(label);
+    const x = el("button", "composer-chip-x"); x.setAttribute("aria-label", "Cancel edit"); x.textContent = "✕";
+    x.addEventListener("click", (e) => { e.stopPropagation(); cancelQueuedEdit(id); });
     chip.appendChild(x);
     strip.appendChild(chip);
     return;
@@ -13970,20 +14241,8 @@ function setCitation(id: string, cite: Citation): void {
   if (id === activeId) { renderComposerChips(id); focusComposer(); }
 }
 
-// The outgoing body for QUOTE citations (the user 2026-07-13): the highlighted text rides ahead of the
-// typed message as a markdown quote block, so the agent knows exactly which part is being replied to.
-// Also what the chip's audit preview shows — one function, no drift. Stacked chips (the user 2026-08-04)
-// become one section each, in the order they sit in the strip. `src` (the VS Code editor flavor,
-// 2026-07-13) names where a highlight came from — a workspace-relative file:lines — so that section's
-// lead-in points the agent at the code, not the conversation.
-function quoteReplyBody(cites: { quote?: string; src?: string | null }[], text: string): string {
-  const sections = cites.map((c) => {
-    const q = (c.quote || "").split("\n").map((l) => "> " + l).join("\n");
-    const lead = c.src ? "Replying to this highlighted code (" + c.src + "):" : "Replying to this part of the conversation:";
-    return lead + "\n" + q;
-  });
-  return text ? sections.join("\n\n") + "\n\n" + text : sections.join("\n\n");
-}
+// quoteReplyBody, the outgoing body for QUOTE citations, lives in staged-messages.ts: the live send, the
+// staged release and the chip's audit preview compose from that one function, and its test executes it.
 
 // HIGHLIGHT-TO-REPLY (the user 2026-07-13): selecting text in the chat transcript seeds the composer chip
 // as reply context, exactly like a distilled-summary click — but quote-flavored. Event-based on
@@ -14790,9 +15049,9 @@ function renderComposerNote(sid: string, why: DismissWhy, name: string): void {
   }
   const x = el("button", "composer-chip-x");
   x.setAttribute("aria-label", "Dismiss");
-  x.title = "dismiss";
+  setTip(x, "dismiss");
   x.textContent = "✕";
-  x.addEventListener("click", () => clearComposerNote());
+  x.dataset.act = "composerNoteX";   // the document.body delegate clears the note (click-safe, no per-node listener)
   note.append(msg, x);
   box.insertBefore(note, box.firstChild);
   composerNoteSid = sid;
@@ -14841,6 +15100,7 @@ function dismissSession(id: string, why: DismissWhy, doomed?: ReadonlySet<string
     // closed session was ACTIVE: the shared chip strip above the composer still shows its chip until
     // someone repaints it, and that stale chip's ✕ targets the dead id (whose map entry is gone), so the
     // click early-returns and the chip can't even be dismissed — hence the repaint below.
+    queuedEdits.delete(id); queuedEditHeld.delete(id);   // a queued edit goes with the rewind edit's pill (review find, 2026-09-08)
     drafts.delete(id); composerCitations.delete(id); composerEdits.delete(id); composerFiles.delete(id); persistDrafts();
   } else {
     persistDrafts();   // a host drop / omission KEEPS it all (see DismissWhy) — the stash above may have updated the copy
@@ -14931,13 +15191,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     // limit-driven pause → the usage window's reset epoch (seconds); manual pause / unknown → null
     globalRetryResumeAt = typeof m.resumeAt === "number" ? m.resumeAt : null;
     globalRetryReason = typeof m.reason === "string" ? m.reason : "";   // "spend" → raise-your-cap text, no countdown
-    for (const btn of Array.from(document.querySelectorAll(".apierror-stop"))) {
-      btn.textContent = globalRetryPaused ? "Resume all auto-retries" : "Stop all auto-retries";
-      (btn as HTMLElement).title = globalRetryPaused ? "resume auto-retrying globally" : "stop the auto-retry loop for all errors globally";
-    }
-    for (const cd of Array.from(document.querySelectorAll(".apierror-countdown"))) {
-      cd.textContent = globalRetryPaused ? retryPausedText() : "retrying soon…";
-    }
+    relabelStopAll();
   }
   else if (m.type === "chatTail") chatTail(m);
   else if (m.type === "chatHead") chatHead(m);
@@ -15067,6 +15321,31 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
       // message is still going through — and the kernel's build never changed, so its next delta carries no
       // repaint and the optimistic delete would stand. That reads as "cancelled" while the session answers it
       // anyway, contradicting the toast we just raised. Repaint from the kernel's events, which still hold it.
+      const rv = m.id === activeId && activeId ? views.get(activeId) : null;
+      if (rv) { rv.stale = true; appendActive(); }
+    }
+  }
+  // The kernel's verdict on an editQueued (the user 2026-09-08) — cancelResult's twin. ok:false: the message
+  // left the queue before the edit reached it (or the chip was never a message), so the optimistic repaint is
+  // reversed, the typed words go back to the composer (never lost, never sent twice), and the queue repaints
+  // from the kernel's events, which hold what the session actually has.
+  else if (m.type === "editResult" && typeof m.id === "string") {
+    const key = m.id + " " + (typeof m.md === "string" ? m.md : "");
+    const stash = pendingEditRestores.get(key);
+    pendingEditRestores.delete(key);
+    if (!m.ok) {
+      if (typeof m.text === "string" && m.text) warnToast(m.text);
+      if (stash) {
+        applyQueuedEditLocally(m.id, stash.ref, stash.typed, true);
+        if (m.id === activeId) restoreToComposer(stash.typed);
+        else {
+          // the tab changed mid-round-trip (review find, 2026-09-08): the words land in THAT session's draft,
+          // which setActive puts back in the box on the next switch to it, as the paste-verify restore does
+          const d = drafts.get(m.id);
+          drafts.set(m.id, d && d.trim() ? d.replace(/\s*$/, "") + "\n" + stash.typed : stash.typed);
+          persistDrafts();
+        }
+      }
       const rv = m.id === activeId && activeId ? views.get(activeId) : null;
       if (rv) { rv.stale = true; appendActive(); }
     }
@@ -15422,22 +15701,25 @@ function setupComposer() {
   // ⌘/Ctrl+⏎ — STAGE the box instead of sending (the user 2026-08-15): the text and its citation
   // chips move to the staged strip, the box clears, focus stays for the next highlight-and-comment.
   // The states that already own the box refuse loudly rather than staging a lie: a picker answer
-  // answers NOW or sends normally; an edit replaces a past message; attachments ride a normal send.
+  // answers NOW or sends normally; an edit replaces a past message, or a queued one; attachments ride a
+  // normal send.
+  // Each refusal reports a state, not an event, so it does not ride a reload (ephemeralWarnToast).
   const stageComposer = () => {
     if (!activeId) return;
     const typed = ta.value.trim();
     // context stages ALONE (the user 2026-08-23): select a passage, ⌘⏎ with an empty box, repeat —
     // then one typed message flushes the whole run. Nothing at all → nothing to stage.
     if (!typed && !(composerCitations.get(activeId) || []).some((c) => c.quote)) return;
-    if (composerAnswersAsk()) { warnToast("A picker is waiting on this box — answer it, or send normally."); return; }
-    if (composerEdits.has(activeId)) { warnToast("An edit replaces a past message — send it normally."); return; }
-    if ((composerFiles.get(activeId) || []).length) { warnToast("Attachments can't be staged — send them with a normal message."); return; }
+    if (composerAnswersAsk()) { ephemeralWarnToast("A picker is waiting on this box — answer it, or send normally."); return; }
+    if (composerEdits.has(activeId)) { ephemeralWarnToast("An edit replaces a past message — send it normally."); return; }
+    if (queuedEdits.has(activeId)) { ephemeralWarnToast("This edit replaces a queued message. Send it normally."); return; }   // staged, the words would go as a NEW message behind the unchanged original (review find, 2026-09-08)
+    if ((composerFiles.get(activeId) || []).length) { ephemeralWarnToast("Attachments can't be staged — send them with a normal message."); return; }
     stagedMsgs.push(activeId, { text: typed, cites: (composerCitations.get(activeId) || []).slice() });
     composerCitations.delete(activeId); renderComposerChips(activeId);   // the chips now live on the staged item
     drafts.delete(activeId); draftStartedAt.delete(activeId);
     ta.value = ""; composerManualH = null; ta.style.height = "";
     persistDrafts();
-    renderStagedStrip(activeId);
+    renderStagedStrip(activeId, { reveal: "last" });   // the new item is the one event that moves the list: show it
   };
   const sendComposer = (opts?: { pastShipGate?: boolean }) => {
     const typed = ta.value.trim();
@@ -15445,7 +15727,7 @@ function setupComposer() {
     // an empty plain send with a staged stack = "go": release what's held, nothing new to add
     if (!typed && !(composerFiles.get(activeId) || []).length && stagedMsgs.count(activeId)) {
       if (hostIsDown(activeId) || isProvisionalId(activeId)) {
-        warnToast("Can't send yet — the session isn't reachable. They stay staged.");
+        ephemeralWarnToast("Can't send yet — the session isn't reachable. They stay staged.");
         return;
       }
       flushStaged(activeId);
@@ -15510,6 +15792,36 @@ function setupComposer() {
       ta.value = ""; composerManualH = null; ta.style.height = "";
       return;
     }
+    // A QUEUED-message edit → editQueued: the entry is replaced in place, kernel-side. No registerOptimistic
+    // (nothing new is sent — the bubble already exists and only changes words; applyQueuedEditLocally shows
+    // them now). The kernel's push confirms; editResult ok:false (the message left the queue meanwhile)
+    // hands the typed words back to the composer. Attachments wait for the next normal send, as for an edit.
+    const qedit = queuedEdits.get(activeId);
+    if (qedit) {
+      if (!typed) return;   // an empty edit is not a send — to drop the message, use its ✕
+      // Two refusals that leave the box exactly as it is (review finds, 2026-09-08). A down host DROPS the
+      // frame (federation posts nothing to a closed socket) and no editResult ever comes back to hand the
+      // words over, so the plain send's deliver() guard applies here, BEFORE the box is cleared; a provisional
+      // tab has no session behind it and nothing queued. And a slash command cannot be edited INTO a queued
+      // message: the kernel would deliver it as text, skipping the routing every typed command gets (the
+      // fire-alone park, the /model and /effort setters, the /clear confirm below), so the kernel refuses it
+      // too; this mirror keeps the words in the box instead of round-tripping them.
+      if (hostIsDown(activeId) || isProvisionalId(activeId)) {
+        if (hostIsDown(activeId)) vscodeApi?.postMessage({ type: "redial", host: String(activeId).slice(0, String(activeId).indexOf(":")) });
+        warnToast("Can't reach the session right now, so the edit wasn't sent. It's still in the box: send again when the link is back.");
+        return;
+      }
+      if (SLASH_CMD_RE.test(typed)) { warnToast("A queued message cannot become a command. Cancel it with its ✕ and type the command."); return; }
+      const qmsg: Record<string, unknown> = { type: "editQueued", id: activeId, md: qedit.md, text: typed };
+      if (qedit.idx !== undefined) qmsg.idx = qedit.idx;
+      if (qedit.park !== undefined) qmsg.park = qedit.park;
+      vscodeApi?.postMessage(qmsg);
+      pendingEditRestores.set(activeId + " " + qedit.md, { typed, ref: qedit });
+      queuedEdits.delete(activeId);
+      applyQueuedEditLocally(activeId, qedit, typed);
+      restoreHeldDraft(activeId);   // the pill goes; the box gets back the draft the ✎ displaced, or empties
+      return;
+    }
     const sid = activeId;   // the session this send (and any confirm below) was armed for
     const deliver = () => {
       if (activeId !== sid) return;   // a confirm outlived a tab switch — never send into the wrong session
@@ -15547,17 +15859,18 @@ function setupComposer() {
         return;
       }
       lastSent.set(activeId, text);   // remembered for a possible Ctrl+C restore
-      // STAGED first (the user 2026-08-15): the held run releases in stage order, each message with the
-      // context it was written against, and the message being typed right now lands LAST — the reading
-      // the user composed: quote → comment, quote → comment, then the wrap-up. The guards above (host
-      // down, provisional) have already passed, so nothing staged can be half-lost here.
-      flushStaged(sid);
+      // The STAGED run and this message go together (the user 2026-08-15): the held items in stage order,
+      // each with the context it was written against, and the message being typed right now last, the
+      // reading the user composed: quote, comment, quote, comment, then the wrap-up. flushStaged composes
+      // them into one message (stagedPosts says which items still go alone) and routes every post through
+      // routeUserMessage; with nothing staged that is this message as itself. The guards above (host down,
+      // provisional) have already passed, so nothing staged can be half-lost here.
       // A pending citation chip → send as a FOLLOW-UP on that goal (the user 2026-07-01): askFollowUp wraps the
       // text with the goal's context + the romp-goal-id marker (kernel side), so the goal reopens (done→working,
       // unless cleared) and the chat renders the ↩ Follow-up header — the same path the Follow-up button uses,
       // just seeded by the click. A QUOTE chip (highlighted transcript text, the user 2026-07-13) has no goal:
       // it wraps client-side (quoteReplyBody) into a plain message. No chip → plain sendMessage. The three
-      // branches live in routeUserMessage — ONE routing owner, shared with the staged flush above.
+      // branches live in routeUserMessage, the ONE routing owner.
       // Inside it, `sid` is what ROUTES this to the owning kernel in a federated dashboard (the user
       // 2026-07-29): federation keys routing off `id`/`sid` only, and an `itemId` ("‹sid›:‹goal›") can't
       // be one — its own colon would read the session uuid as a host. Without the sid a follow-up on a
@@ -15565,7 +15878,7 @@ function setupComposer() {
       // uuid — nothing sent, no error, the card flashing to Working and back. The kernel keeps deriving
       // its sid from itemId, so this is inert locally; every other card op carries the sid the same way.
       const cites = composerCitations.get(activeId);
-      routeUserMessage(activeId, text, cites, attached.filter((p) => previewKind(p) === "img"));
+      flushStaged(sid, { text, cites, imgPaths: attached.filter((p) => previewKind(p) === "img") });
       // (a citation follow-up/quote has its own kernel-side echo path; the optimistic bubble covers the plain send)
       if (cites) { composerCitations.delete(activeId); renderComposerChips(activeId); }   // consumed on send
       sendOnShip.delete(sid);                       // a send happened — any held one is superseded
@@ -15909,6 +16222,7 @@ function setupComposer() {
       // for "tab mode" — focus the active tab so ←/→ switch sessions (the user 2026-06-25). Enter on a
       // tab drops back in (onTabKey). Any draft text stays in the box, untouched.
       e.preventDefault();
+      if (activeId && queuedEdits.has(activeId)) { cancelQueuedEdit(activeId); return; }
       if (activeId && composerEdits.has(activeId)) { cancelComposerEdit(activeId); return; }
       focusActiveTab();
       return;
@@ -16156,6 +16470,10 @@ function applyChatScheme(s: RompSettings): void {
   // the overall theme (T113 promoted 2026-08-28): the shared applier toggles the strip-aesthetic
   // and light-theme classes from s.theme. Applies live — onExternalSettingsChange re-runs this.
   applyTheme(document, s);
+  // compact tabs and agents (the user 2026-09-08): a body class the strip's and the #bg-tasks panel's dense
+  // rules key on (styles.css body.dense-chrome). The same two moments as the scheme and the theme, so the
+  // gear's flip repaints both surfaces at once through the cascade; neither is rebuilt.
+  applyDenseChrome(document, s);
 }
 function setupSettings(): void {
   applyChatScheme(settings);   // the persisted pick applies at startup — it survives reloads
@@ -16202,12 +16520,12 @@ setupSettings();
   delegate(host, {
     "bg-fold": (el) => {   // the count header → show/hide the task list
       const id = el.dataset.id; if (!id) return;
-      if (bgFoldOpen.has(id)) bgFoldOpen.delete(id); else bgFoldOpen.add(id);
+      if (openFolds.has("bgfold:" + id)) openFolds.delete("bgfold:" + id); else openFolds.add("bgfold:" + id);
       renderBgTasks();
     },
     "bg-toggle": (el) => {   // a task row → show/hide its command + output
       const id = el.dataset.id; if (!id) return;
-      if (bgExpanded.has(id)) bgExpanded.delete(id); else bgExpanded.add(id);
+      if (openFolds.has("bgrow:" + id)) openFolds.delete("bgrow:" + id); else openFolds.add("bgrow:" + id);
       renderBgTasks();
     },
     "bg-stop": (el) => {   // stop this ONE task; the row disappears on its terminal lifecycle event
@@ -16233,7 +16551,7 @@ setupSettings();
   delegate(sl, {
     "awaitingChip": () => {
       if (!activeId) return;
-      bgFoldOpen.add(activeId);   // the box's own fold state — the chip and the header toggle share it
+      openFolds.add("bgfold:" + activeId);   // the box's own fold state — the chip and the header toggle share it
       renderBgTasks();
       document.getElementById("bg-tasks")?.scrollIntoView({ block: "nearest" });
     },
@@ -16346,6 +16664,7 @@ setupSettings();
       const provisional = isProvisionalId(sidQ);
       if (provisional && qmd) forgetProvisionalSend(qmd);
       const msg: Record<string, unknown> = { type: "cancelQueued", id: sidQ, md: qmd };
+      if (el.dataset.qid) msg.qid = el.dataset.qid;   // the copy's id: the kernel cancels exactly this copy, in whichever queue it sits, never a same-words neighbour by index or body
       if (qmd && el.dataset.qopt !== "1") noteCancelledQueued(sidQ, qmd, el.dataset.qid || undefined);   // a kernel copy: never held once it vanishes (T262i)
       if (el.dataset.qidx !== undefined) msg.idx = Number(el.dataset.qidx);
       if (el.dataset.qpark !== undefined) msg.park = Number(el.dataset.qpark);
@@ -16372,6 +16691,23 @@ setupSettings();
       bub?.remove();
       if (grp) reflowQueuedGroup(grp);
       if (contentX && wasAtBottom) writeScroll(contentX, contentX.scrollHeight, "queued-x", true);
+    },
+    // ✎ on a queued bubble (the user 2026-09-08): edit the message while it is still romp's to change.
+    // Delegated like the ✕ (the tail rebuilds every push). The edit rides the ACTIVE composer, so a bubble
+    // owned by another session (a comment thread's popover) is declined with a pointer rather than edited
+    // in the wrong box. The acknowledgement is the composer filling + the editing pill, at once.
+    qedit: (el) => {
+      if (!activeId) return;
+      const qmd = (el as any)._qmd as string | undefined;
+      if (!qmd) return;
+      const sidQ = owningSidOf(el) || activeId;
+      if (sidQ !== activeId) { warnToast("open that session's chat to edit its queued message"); return; }
+      const ref: QueuedEditRef = { md: qmd };
+      if (el.dataset.qidx !== undefined) ref.idx = Number(el.dataset.qidx);
+      if (el.dataset.qpark !== undefined) ref.park = Number(el.dataset.qpark);
+      if (el.dataset.qts !== undefined) ref.qts = Number(el.dataset.qts);
+      if (el.dataset.qopt === "1") ref.optimistic = true;
+      beginQueuedEdit(sidQ, ref);
     },
     // a comment highlight or its turn badge (the user 2026-08-13): open the thread's popover at the
     // click. Delegated — marks and badges are re-created on every transcript rebuild — and so is
@@ -16453,11 +16789,12 @@ setupSettings();
       if (tid) setActive(tid);
     },
     // a branch divider (child side) or branch chip (parent side): jump to the other end of the
-    // branch, landing on the branch-point turn via the deep-link anchor machinery
+    // branch, landing on the branch-point turn via the deep-link anchor machinery. The refusal
+    // reports a state (the roster), not an event, so it does not ride a reload (ephemeralWarnToast).
     branchjump: (elx) => {
       const sid = elx.dataset.sid;
       if (!sid) return;
-      if (!sessions.get(sid)) { warnToast("That session isn't on this dashboard right now."); return; }
+      if (!sessions.get(sid)) { ephemeralWarnToast("That session isn't on this dashboard right now."); return; }
       setActive(sid, elx.dataset.cut || undefined);
     },
     // a below-response fork spot: the row carries its own cut ("" = whole conversation)
@@ -16489,6 +16826,63 @@ setupSettings();
     nudgetoggle: (el) => {
       rememberFold(el, "expanded", el.dataset.nkey || undefined);
       (el as HTMLElement).title = el.classList.contains("expanded") ? "click to collapse" : "click to expand";
+    },
+    // THE notice fold (notice(), 2026-09-08): every notice head — agent report, romp notice, compaction,
+    // clear, postal, teammate, API error, model swap, system context, a compact-mode run — toggles here,
+    // keyed through openFolds (data-nkey) so the state survives the tail rebuild; the eleven per-node
+    // listeners this replaced each died with the node they were hung on (CLAUDE.md click-safety). A
+    // compact-mode RUN (data-gkey: a tool / retry / notice group) rebuilds the view instead — its expansion
+    // changes which units exist, not just a class.
+    // the live API card's actions (renderApiError). Retry now: manual:true → an explicit override that fires
+    // even when auto-retry is paused/suppressed for this thread (the kernel gate is for the auto-loop only);
+    // without it "Retry now" was a dead no-op on a suppressed session (the user 2026-07-06). Acknowledge the
+    // click AT ONCE — disable + "Retrying…" — so it never reads as unresponsive; the next render (a fresh
+    // error card, or the turn resuming) restores it.
+    apiRetryNow: (el) => {
+      const b = el as HTMLButtonElement;
+      const own = owningSidOf(b);
+      if (vscodeApi) vscodeApi.postMessage({ type: "apiRetry", id: own, manual: true });
+      if (own) apiRetryNext.set(own, Date.now() + API_RETRY_MS);   // restart the countdown
+      b.disabled = true;
+      b.textContent = "Retrying…";
+      setTimeout(() => { if (b.isConnected) { b.disabled = false; b.textContent = "Retry now"; } }, 2500);
+    },
+    dismissDialog: (el) => {
+      const b = el as HTMLButtonElement;
+      if (vscodeApi) vscodeApi.postMessage({ type: "dismissDialog", id: owningSidOf(b) });
+      b.disabled = true;
+      b.textContent = "Dismissing…";
+      setTimeout(() => { if (b.isConnected) { b.disabled = false; b.textContent = "Dismiss dialog"; } }, 2500);
+    },
+    stopAllRetries: () => {
+      globalRetryPaused = !globalRetryPaused;
+      if (vscodeApi) vscodeApi.postMessage({ type: "setGlobalRetryPaused", value: globalRetryPaused });
+      relabelStopAll();   // update visuals immediately on every error card
+    },
+    // the to-do card's completed-bulk fold (renderTodo): flip the box, keep the state in openFolds, relabel
+    todofold: (el) => {
+      const box = el.parentElement?.querySelector(".todo-done") as HTMLElement | null;
+      if (!box) return;
+      rememberFold(box, "todo-open", el.dataset.nkey || undefined);
+      todoFoldLabel(el, box.classList.contains("todo-open"), Number(el.dataset.n) || 0);
+    },
+    // the follow-up header's goal-context disclosure (followUpHeader): keyed in openFolds like every fold
+    futoggle: (el) => {
+      const wrap = el.closest(".followup-wrap") as HTMLElement | null;
+      if (wrap) rememberFold(wrap, "expanded", el.dataset.nkey || undefined);
+    },
+    // the composer hand-over note's ✕ (renderComposerNote) — delegated, like every ✕ on a rebuilt surface
+    composerNoteX: () => clearComposerNote(),
+    noticetoggle: (el) => {
+      const gkey = el.dataset.gkey;
+      if (gkey) { toggleToolGroup(gkey); return; }
+      const card = el.closest(".notice") as HTMLElement | null;
+      if (!card) return;
+      rememberFold(card, "notice-open", el.dataset.nkey || undefined);
+      const open = card.classList.contains("notice-open");
+      const caret = el.querySelector(".notice-caret");
+      if (caret) caret.textContent = open ? "▾" : "▸";
+      noticeOpened(card, open);
     },
   });
 })();
@@ -16588,11 +16982,13 @@ setupSettings();
     // the virtual layout: the OTHER tabs in current DOM order, widths from the dragstart snapshot —
     // boundaries that cannot move in response to the insert they cause (dragslot.ts owns the math)
     // …plus the section headers (tab groups): they take width in the real layout, so they join the
-    // virtual one as boxes — the simulated wrap then matches the strip's. One group per line (T264):
-    // a header preceded by a row break OPENS a row in the simulation (`br`), as does the untagged
-    // trail's break itself — a zero-width row opener, so the slot past a group's last tab (the end
-    // of its row) and the slot before the trail's first tab (the head of the next row) stay two
-    // distinct slots, as they were when the trail stood behind a visible separator. A drop changes
+    // virtual one as boxes — the simulated wrap then matches the strip's. One group per line (T264,
+    // under the one-group-per-row setting): a header preceded by a row break OPENS a row in the
+    // simulation (`br`), as does the untagged trail's break itself, a zero-width row opener, so the
+    // slot past a group's last tab (the end of its row) and the slot before the trail's first tab
+    // (the head of the next row) stay two distinct slots, as they were when the trail stood behind a
+    // visible separator. With the setting off the trail's divider is a real 13px box and no break
+    // exists, so the boxes below measure it as they did before T264. A drop changes
     // no membership (the tab re-sections on the next render); "Move to" in the tab menu is the
     // membership path.
     const others = Array.from(tabs.querySelectorAll<HTMLElement>(".tab[data-id], .tab-group-head, .tab-group-sep")).filter((t) => t !== dragged);
@@ -16635,11 +17031,12 @@ setupSettings();
     // the neighbours are TABS IN THE DRAGGED COPY'S OWN GROUP first (T264b): a drop at a group's head
     // used to anchor on the group above's last tab — a tab whose place in the global order says
     // nothing about the group dragged in — so the drop landed elsewhere and the session's other copy
-    // jumped. The walk stops at a header or a row break; only a group holding no other tab falls back
+    // jumped. The walk stops at a header, a row break or the trail's divider (.tab-group-sep, its
+    // boundary with the one-group-per-row setting off); only a group holding no other tab falls back
     // to the nearest tab across groups (the flat strip has no edges, so it walks as it always did).
     // Never the dragged SESSION's own copy: reorderTo against itself would move nothing.
     const own = (n: Element | null) => !!n && (n as HTMLElement).dataset?.id === draggedId;
-    const edge = (n: Element) => n.classList.contains("tab-group-head") || n.classList.contains("tab-group-break");
+    const edge = (n: Element) => n.classList.contains("tab-group-head") || n.classList.contains("tab-group-break") || n.classList.contains("tab-group-sep");
     const walk = (n: Element | null, step: (x: Element) => Element | null, inGroup: boolean): HTMLElement | null => {
       while (n && (!(n as HTMLElement).dataset?.id || own(n))) { if (inGroup && edge(n)) return null; n = step(n); }
       return n as HTMLElement | null;
@@ -16656,6 +17053,9 @@ setupSettings();
     else if (next?.dataset?.id) { reorderTo(draggedId, next.dataset.id, false); tabDragCommitted = true; }
   });
 })();
+// The chat page's hidden word for the kernel's pane shim (chat-visibility.ts): the chat gates no paint, so this
+// is the one place it measures its own visibility. Once, at top level, over the page's body.
+watchChatVisibility(document.body, browserChatVisibilityDeps());
 // right-click a selection in the transcript → Reply (quote it) / Copy
 document.getElementById("content")?.addEventListener("contextmenu", showSelectionMenu);
 // The chat document hosts the viewer itself (openPath), so it boots the viewer's listener with the

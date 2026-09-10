@@ -44,26 +44,30 @@ test("render.ts routes a sourced non-human event to renderInjected BEFORE the se
   const fn = RENDER.slice(start, RENDER.indexOf("\n}\n", start));   // the function body alone
   assert.ok(start > 0 && start < RENDER.indexOf("function renderEventInner("), "renderInjected is defined before the event renderer");
   assert.doesNotMatch(fn, /user-bubble|romp-bubble|user-note/, "no bubble class of any color");
-  assert.match(fn, /noticeCard\(\{ variant: h\.variant, chip: h\.chip, head: h\.head, body, key/, "the notice-card family");
+  // 2026-09-08 (the notice-vocabulary pass): the ONE builder; the source kind maps to the vocabulary's label + glyph
+  // (injectedSrc), the head stays injected-source.ts's words
+  assert.match(fn, /const \{ label, glyph \} = injectedSrc\(src\);\s*\n\s*return notice\(\{ src: label, glyph, gist: h\.head, body, key \}\);/, "the notice family");
   assert.match(fn, /renderAgentNotif\(notifs\[0\]\.a, ev\.taskOutputs, key, \{ nested: false, preamble: ev\.preamble \}\)/,
                "one notification alone → the agent card on its own rail, preamble in its fold");
   assert.match(fn, /appendHarnessNote\(body, ev\.preamble\)/, "the CLI's preamble is one click away, never the message");
 });
 
 test("the agent card's head is in the user's terms and can stand on its own rail", () => {
-  assert.match(RENDER, /const head = notifHead\(a\);/);
+  assert.match(RENDER, /gist: notifHead\(a\),/);   // the head is the builder's gist slot (2026-09-08)
   assert.match(RENDER, /nested: opts\.nested !== false/);
   // a typed prompt that arrived WITH a notification keeps the nested card under its bubble (default nested)
   assert.match(RENDER, /if \(a\) turn\.appendChild\(renderAgentNotif\(a, ev\.taskOutputs, ev\.uuid \? "agn:" \+ ev\.uuid \+ ":" \+ i : undefined\)\);/);
 });
 
 test("the teammate card labels a background subagent's message as such", () => {
-  assert.match(RENDER, /tag\.textContent = fromSub \? "background agent" : "teammate";/);
+  assert.match(RENDER, /const src = \(fromSub \? "background agent" : "teammate"\) \+ \(names \? " " \+ names : ""\);/);   // the notice SOURCE label (2026-09-08)
   assert.match(RENDER, /if \(!ids\.length && ev\.source && ev\.source\.name\) ids\.push\(ev\.source\.name\);/);
 });
 
-test("styles define the peer notice variant in the teammate card's neutral dashed language", () => {
-  assert.match(CSS, /\.notice-card-peer \{ border-left-color: var\(--dim\); border-style: dashed; \}/);
-  assert.match(CSS, /\.notice-chip-peer \{/);
-  assert.match(CSS, /\.notice-dot-peer \{/);
+test("a peer's record wears the peer source (envelope glyph, its name as the label) — no dashed variant (2026-09-08)", () => {
+  // the notice-vocabulary pass: one skin; the source label + glyph carry the kind (injectedSrc)
+  assert.match(RENDER, /if \(src\.kind === "peer"\) return \{ label: src\.subagent \? "background agent" : \(src\.name \|\| "peer"\), glyph: "peer" \};/);
+  assert.match(RENDER, /if \(src\.kind === "subagent"\) return \{ label: "background agent", glyph: "agent" \};/);
+  assert.match(RENDER, /if \(src\.kind === "task"\) return \{ label: "background command", glyph: "command" \};/);
+  assert.doesNotMatch(CSS, /\.notice-card-peer|\.notice-chip-peer|\.notice-dot-peer/);
 });

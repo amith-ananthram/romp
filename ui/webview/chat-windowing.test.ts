@@ -116,7 +116,7 @@ test("an oversized view (window grew past the cap) re-collapses to the tail on s
 });
 
 test("a deep-link off the current window renders a fresh window AROUND the target unit, then lands", () => {
-  assert.match(RENDER, /let u = items\.findIndex\(\(it\) => it\.kind === "toolgroup" \|\| it\.kind === "retrygroup" \? it\.indices\.includes\(idx\) : it\.index === idx\);/);
+  assert.match(RENDER, /let u = items\.findIndex\(\(it\) => it\.kind === "toolgroup" \|\| it\.kind === "noticegroup" \? it\.indices\.includes\(idx\) : it\.index === idx\);/);   // noticegroup since 2026-09-08
   assert.match(RENDER, /renderWindowItems\(v, s, items, Math\.max\(0, u - WINDOW_RADIUS\), Math\.min\(items\.length, u \+ WINDOW_RADIUS\), working\);/);
 });
 

@@ -23,20 +23,21 @@ test("the compacting dispatch is checked BEFORE the done 'compact' divider (a li
   assert.ok(live < done, "the live compacting case must precede the compact-boundary case");
 });
 
-test("renderCompacting draws an animated teal element that rhymes with the compacted divider", () => {
+test("renderCompacting is a slim live COMPACTION notice with the animated bar in its glyph slot", () => {
+  // 2026-09-08 (the notice-vocabulary pass): the bar keeps its motion; the row is the ONE notice, teal on the
+  // rail + dot + bar and the words in --fg (teal TEXT sat at 1.96:1 on cream)
   assert.match(RENDER, /function renderCompacting\(\): HTMLElement/);
-  assert.match(RENDER, /el\("div", "turn turn-compacting"\)/);
-  assert.match(RENDER, /el\("div", "compacting-inline"\)/);
   assert.match(RENDER, /el\("span", "compacting-bar"\)/);
   assert.match(RENDER, /el\("span", "compacting-bar-fill"\)/);   // the animated compressing bar
-  assert.match(RENDER, /Compacting context…/);
+  assert.match(RENDER, /notice\(\{ src: "compaction", glyph: noticeLiveGlyph\(bar\), sev: "compact", gist: "Compacting context…", live: true,/);
+  assert.match(RENDER, /cls: "turn-compacting",/);
 });
 
 test("the animated bar reuses the statusline ctx-compress motion, in the compacting teal", () => {
-  // the fill runs the SAME keyframe as the ctx-bar scan, so the two surfaces read as one motion
   assert.match(CSS, /\.compacting-bar-fill \{[^}]*animation: ctx-compress/);
-  assert.match(CSS, /\.compacting-inline \{[^}]*color: var\(--st-compacting-bg/);
-  assert.match(CSS, /\.turn-compacting \.dot \{[^}]*background: var\(--st-compacting-bg/);
+  // 2026-09-08: the teal is the severity (rail + dot), never the text
+  assert.match(CSS, /\.notice-sev-compact \{ --notice-rail: var\(--st-compacting-bg\)/);
+  assert.doesNotMatch(CSS, /\.compacting-inline|\.compacting-text/);
   assert.match(CSS, /@keyframes ctx-compress/);   // the reused keyframe still exists
 });
 
@@ -52,22 +53,21 @@ test("the compact ChatEvent carries the model's summary text", () => {
   assert.match(RENDER, /kind: "compact";[^}]*summary\?: string/);
 });
 
-test("renderCompact routes the summary through the shared 'compact' notice card as its collapsible body", () => {
-  const body = RENDER.slice(RENDER.indexOf("function renderCompact("), RENDER.indexOf("function renderCompacting"));
+test("renderCompact routes the summary through the ONE notice builder as its folded body", () => {
+  const body = RENDER.split("function renderCompact(")[1].split("\nfunction ")[0];
   assert.match(body, /const summary = \(ev\.summary \|\| ""\)\.trim\(\)/);
   assert.match(body, /body\.innerHTML = md\(summary\)/);                            // the summary, markdown-rendered
-  assert.match(body, /noticeCard\(\{ variant: "compact", chip: "compacted", head, body,/);
-  // collapsible ONLY when there's a summary; keyed by the boundary uuid so open state survives re-renders
-  assert.match(body, /collapsible: !!summary, key: uuid \? "compact:" \+ uuid : undefined/);
+  // 2026-09-08: notice(spec) — a body only when there is a summary to reveal (flat otherwise), keyed by the boundary
+  assert.match(body, /notice\(\{ src: "compaction", glyph: "compaction", sev: "compact", gist: "Context compacted",/);
+  assert.match(body, /body: summary \? body : null,\s*\n\s*key: uuid \? "compact:" \+ uuid : undefined/);
 });
 
 test("the card is DEFAULT COLLAPSED via the shared keyed fold — the bespoke Set + toggle are gone", () => {
-  // noticeCard applies the open class only if the key was remembered open (applyFold → openFolds) → collapsed
-  // by default; the head click toggles + persists. No per-uuid compactExpanded Set, no toggleCompact.
   assert.doesNotMatch(RENDER, /compactExpanded/, "the bespoke open-state Set was replaced by the shared fold");
   assert.doesNotMatch(RENDER, /function toggleCompact/, "no bespoke toggle — the notice head IS the toggle");
-  const nc = RENDER.slice(RENDER.indexOf("function noticeCard("), RENDER.indexOf("function noticeCard(") + 1500);
-  assert.match(nc, /applyFold\(card, "notice-open", o\.key\)/, "collapsed unless the key is remembered open");
+  // 2026-09-08: the ONE builder folds every notice through openFolds ("notice:<key>"), collapsed unless remembered open
+  const nc = RENDER.split("function notice(spec: NoticeSpec)")[1].split("\nfunction ")[0];
+  assert.match(nc, /applyFold\(card, "notice-open", fkey\)/, "collapsed unless the key is remembered open");
 });
 
 test("the default window opens at the last compaction boundary (pre-compaction history scrubbed)", () => {
@@ -75,7 +75,8 @@ test("the default window opens at the last compaction boundary (pre-compaction h
   assert.match(RENDER, /if \(s\.events\[i\]\.kind === "compact"\) \{ evIdx = i; break; \}/);
 });
 
-test("the card wears the compaction TEAL as its notice-card variant accent — a system event, not a bespoke rail line", () => {
-  assert.match(CSS, /\.notice-card-compact \{[^}]*border-left-color: var\(--st-compacting-bg/);
-  assert.match(CSS, /\.notice-chip-compact \{[^}]*color: var\(--st-compacting-bg/);
+test("the card wears the compaction TEAL as its severity — a system event in the one notice family", () => {
+  // 2026-09-08: severity = rail + dot; the retired chip/variant rules are gone
+  assert.match(CSS, /\.notice-sev-compact \{ --notice-rail: var\(--st-compacting-bg\); --notice-dot: var\(--st-compacting-bg\); \}/);
+  assert.doesNotMatch(CSS, /\.notice-card-compact|\.notice-chip-compact/);
 });

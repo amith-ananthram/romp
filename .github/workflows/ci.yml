@@ -161,3 +161,39 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
+      - name: Cache Playwright's browsers
+        # Keyed on the lockfile, so the download below runs once per playwright version.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('vscode-extension/package-lock.json') }}
+      - name: Install the pinned Playwright Chromium
+        # The pane bench below needs a browser. It is playwright's own download for the version
+        # package-lock pins (1.62.x fetches its matching Chromium build, about 150 MB, cached above), NOT
+        # the runner image's Google Chrome: the image's browser is unpinned and auto-updated, so a Chrome
+        # release the pinned driver cannot speak, or an image without one, would have turned this REQUIRED
+        # check red with no change in the repo (review find, 2026-09-08). The same stance as the node pin
+        # above: the step never rides whatever the image has. No --with-deps: that runs apt, which the bats
+        # step stopped trusting after a mirror outage, and the shared libraries Chromium needs come with
+        # the image. tools/ui-bench.mjs prefers this browser to any system Chrome, and the step's log says
+        # which one ran ("browser: playwright chromium").
+        timeout-minutes: 5
+        run: npx playwright install chromium
+      - name: Dashboard pane bench (node --test)
+        # tools/ui-bench.mjs replays a synthetic frame stream into the real feed and timeline pages in the
+        # headless Chromium installed above, served by the kernel's own page route from the dist the Build
+        # step just wrote; python3 comes with the image (every Ubuntu image ships one inside the kernel's
+        # 3.10 to 3.13 range, which the Python cells above cover). The test file lives at the repo root,
+        # hence the working-directory override of the job's vscode-extension/ default. On a contributor's
+        # machine the browser tests skip, and say why, when no browser, python3 or dist is present. Here
+        # ROMP_UI_BENCH_REQUIRE makes that skip a failure: this is the only CI run of the real pane
+        # bundles, and a runner without the browser or python3 must turn the job red rather than green
+        # with the coverage gone (the same stance as the cryptography install above, which exists so its
+        # tests RUN). The replays assert only what holds under any scheduling (totals, ordering, the
+        # handoff's accounting); the timing relations are assertions only under ROMP_UI_BENCH_TIMING,
+        # which this step deliberately leaves unset: a shared runner's scheduler is not what the required
+        # check measures (review find, 2026-09-08).
+        working-directory: ${{ github.workspace }}
+        env:
+          ROMP_UI_BENCH_REQUIRE: "1"
+        run: node --test tests/ui-bench.test.mjs

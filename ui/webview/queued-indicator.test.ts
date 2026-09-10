@@ -13,7 +13,7 @@ const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "
 test("a queued ChatEvent carries the pending messages (backend-agnostic, per-message md)", () => {
   // idx = backend-queue position (SDK); park = _pending_ops position (compaction/model parking, any backend)
   // `optimistic` (romp's own unconfirmed echo) rides along at the end — see optimistic-send.test.ts
-  assert.match(RENDER, /kind: "queued"; texts: \{ md: string; followUp\?: boolean; goal\?: string; fuCtx\?: string; idx\?: number; park\?: number; cancelable\?: boolean; optimistic\?: boolean; romp\?: boolean; rompSystem\?: boolean; rompAuto\?: boolean; imgPaths\?: string\[\]; lost\?: string; qts\?: number; qid\?: string; hiddenByPending\?: boolean; landing\?: boolean \}\[\]/);   // imgPaths: the echo's dragged-image thumbnails (2026-08-25); romp flags: T243; lost + qts: the pending entry's connection-drop state and its identity for the ✕ (2026-09-06)
+  assert.match(RENDER, /kind: "queued"; texts: \{ md: string; followUp\?: boolean; goal\?: string; fuCtx\?: string; idx\?: number; park\?: number; cancelable\?: boolean; optimistic\?: boolean; romp\?: boolean; rompSystem\?: boolean; rompAuto\?: boolean; gist\?: string; imgPaths\?: string\[\]; lost\?: string; qts\?: number; qid\?: string; hiddenByPending\?: boolean; landing\?: boolean \}\[\]/);   // gist: a queued romp SYSTEM notice's user-facing head (2026-09-08); imgPaths: the echo's dragged-image thumbnails (2026-08-25); romp flags: T243; lost + qts: the pending entry's connection-drop state and its identity for the ✕ (2026-09-06)
 });
 
 test("renderQueued draws a wireframe-hourglass header (singular/plural) + one markdown bubble per queued message", () => {
@@ -96,8 +96,8 @@ test("the kernel answers every cancelQueued with an authoritative cancelResult f
 test("the ✕ only renders while a recall can still win (queue_recallable gates cancelable)", () => {
   assert.match(KERNEL, /cancelable = hasattr\(_cbe, "unqueue"\) and _queue_recallable\(_cbe, sid\)/);
   assert.match(SDKBE, /def queue_recallable\(self, sid: str\) -> bool:/);
-  assert.match(SDKBE, /def unqueue\(self, idx: int, expect: str \| None = None\)/,
-    "the pop re-verifies the exact text under the session lock — never a wrong-message cancel");
+  assert.match(SDKBE, /def unqueue\(self, idx: int, expect: str \| None = None, qid: str \| None = None\)/,
+    "the pop re-verifies the exact text, or locates the copy by its id, under the session lock: never a wrong-message cancel");
 });
 
 test("a queued bubble with no ✕ says where the message actually is", () => {
@@ -247,11 +247,12 @@ test("the kernel flags a romp-injected queued entry from the same markers as a l
 });
 
 test("what romp itself queued wears the LANDED romp grammar, split as landed: notice card vs gray romp bubble (T243)", () => {
-  assert.match(RENDER, /romp\?: boolean; rompSystem\?: boolean; rompAuto\?: boolean; imgPaths\?: string\[\]; lost\?: string; qts\?: number; qid\?: string; hiddenByPending\?: boolean; landing\?: boolean \}\[\]/, "the queued text shape carries the flags");
+  assert.match(RENDER, /romp\?: boolean; rompSystem\?: boolean; rompAuto\?: boolean; gist\?: string; imgPaths\?: string\[\]; lost\?: string; qts\?: number; qid\?: string; hiddenByPending\?: boolean; landing\?: boolean \}\[\]/, "the queued text shape carries the flags (+ the gist, 2026-09-08)");
   const body = RENDER.split("function renderQueued(")[1].split("\nfunction ")[0];
   assert.match(body, /const bubble = el\("div", "queued-bubble md" \+ \(t\.cancelable \? " cancelable" : ""\)\s*\n\s*\+ \(t\.romp \? " queued-romp" : ""\) \+ \(t\.rompSystem \? " queued-sys" : ""\)\);/);
   // a SYSTEM notice → the landed card's own builder, nested; a one-line notice gets no body repeating its head
-  assert.match(body, /if \(t\.rompSystem\) \{[\s\S]*?if \(more\) nb\.innerHTML = md\(text\);[\s\S]*?noticeCard\(\{ variant: "romp", chip: "romp", logo: true, head: gist, body: nb,[\s\S]*?collapsible: more, key: "qromp:" \+ qkey \+ ":" \+ gist\.slice\(0, 24\), nested: true/);
+  // 2026-09-08 (the notice-vocabulary pass): the landed card's ONE builder, nested; the kernel's gist is the head
+  assert.match(body, /if \(t\.rompSystem\) \{[\s\S]*?const gist = t\.gist \? String\(t\.gist\) : gistOf\(text\);[\s\S]*?if \(more\) nb\.innerHTML = md\(text\);[\s\S]*?notice\(\{ src: "romp", glyph: "romp", sev: "romp", gist, body: nb,[\s\S]*?key: "qromp:" \+ qkey \+ ":" \+ gist\.slice\(0, 24\), nested: true/);
   // any other romp message → the gray romp bubble with the landed gist rule (follow-up · goal / nudged for a status update · goal / first line)
   assert.match(body, /\} else if \(t\.romp\) \{[\s\S]*?el\("div", "romp-tag"\)[\s\S]*?const rb = el\("div", "romp-bubble md"\);[\s\S]*?const gist = t\.followUp \? "follow-up" \+ \(t\.goal \? " · " \+ t\.goal : ""\)\s*\n\s*: t\.rompAuto \? "nudged for a status update" \+ \(t\.goal \? " · " \+ t\.goal : ""\)/);
   assert.match(body, /rb\.dataset\.act = "nudgetoggle";[\s\S]*?const nkey = "qnudge:" \+ qkey \+ ":" \+ gist\.slice\(0, 24\);/);
@@ -276,9 +277,9 @@ test("what romp itself queued wears the LANDED romp grammar, split as landed: no
   assert.match(RENDER, /if \(qmd && el\.dataset\.qcmd !== "1" && el\.dataset\.qromp !== "1"\)/);
   // the gray tone replaces the dashed blue on the romp variants; the ✕ room is reserved only when there is a ✕
   assert.match(CSS, /\.queued-bubble\.queued-romp \{[^}]*background: transparent;[^}]*border: 0;/);
-  assert.match(CSS, /\.queued-bubble\.queued-romp\.cancelable > \.notice-card,\s*\n\s*\.queued-bubble\.queued-romp\.cancelable > \.romp-bubble \{ padding-right: 30px; \}/);
+  assert.match(CSS, /\.queued-bubble\.queued-romp\.cancelable > \.notice,\s*\n\s*\.queued-bubble\.queued-romp\.cancelable > \.romp-bubble \{ padding-right: 30px; \}/);   // .notice since 2026-09-08
   // the landed system notice shares the one-liner rule: no body repeating a one-line head
-  assert.match(RENDER, /if \(more\) body\.innerHTML = md\(text\);[\s\S]{0,200}?collapsible: more,\s*\n\s*key: ev\.uuid \? "rsys:" \+ ev\.uuid : undefined/);
+  assert.match(RENDER, /if \(more\) body\.innerHTML = md\(text\);[\s\S]{0,200}?key: ev\.uuid \? "rsys:" \+ ev\.uuid : undefined/);
 });
 
 test("the header noun counts romp's own entries honestly (T243)", () => {

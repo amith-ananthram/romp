@@ -111,6 +111,14 @@ os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel exports this to its sess
 # not reach a test either) before any test module loads, and re-asserted per test below so a
 # module-level pop or write in one test file cannot erase it for the run. A test that needs its own
 # Claude root sets the variable in setUp, after the fixture, exactly as the ones that do already do.
+# The location the run was handed is saved FIRST, before the floor replaces it: the one opt-in live
+# test that borrows the operator's apiKeyHelper command from their own settings
+# (tests/test_session_move_live.py) reads it through ROMP_TESTS_REAL_CLAUDE_CONFIG_DIR. Captured
+# after the floor it would name the run's empty temp dir, and that test would skip as "no auth"
+# while its skip message still named the borrow. setdefault, so an xdist worker keeps the
+# controller's value rather than re-reading an environment the controller has already floored.
+os.environ.setdefault("ROMP_TESTS_REAL_CLAUDE_CONFIG_DIR",
+                      os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"))
 _CLAUDE_CONFIG = tempfile.mkdtemp(prefix="romp-tests-claude-")
 os.environ["CLAUDE_CONFIG_DIR"] = _CLAUDE_CONFIG
 
@@ -451,6 +459,9 @@ _ENV_VALUE_PATH_NAMES = frozenset((
     "PWD", "OLDPWD", "HOME", "PATH", "TMPDIR", "SHELL", "VIRTUAL_ENV", "PYTHONPATH", "LS_COLORS",
     "ROMP_SERVICE_ENV_FILE", "ROMP_SERVICE_ENV", "ROMP_DIR", "ROMP_STATE_DIR", "ROMP_CLAUDE_BIN",
     "ROMP_SYSTEMD_DIR", "ROMP_LAUNCHD_DIR", "CLAUDE_CONFIG_DIR", "TMUX_TMPDIR", "ROMP_TESTS_SYSTEM_TMPDIR",
+    # the Claude settings dir conftest saved ahead of its CLAUDE_CONFIG_DIR floor (above), for the live
+    # move test: a path a failure report may quote, like CLAUDE_CONFIG_DIR beside it
+    "ROMP_TESTS_REAL_CLAUDE_CONFIG_DIR",
     # GitHub Actions: the runner's workspace and tool cache, and the interpreter prefix setup-python
     # exports under six names (every stdlib and site-packages frame of a CI traceback is under it)
     "GITHUB_WORKSPACE", "RUNNER_WORKSPACE", "RUNNER_TEMP", "RUNNER_TOOL_CACHE", "pythonLocation",

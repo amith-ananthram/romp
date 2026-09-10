@@ -163,9 +163,11 @@ within a beat it reverts with a toast, never silently.
 5. Every verdict goes through `record_verdict`. A reopen carries `unblock`
    events for blocked descendants and ancestors; every unblock is an
    event.
-6. Reopens un-resolve only auto-rolled (`rolledUp`) children;
-   genuinely-done leaves keep their state. Re-completions re-summarize
-   only the new stretch (`deltaSince`).
+6. Reopens un-resolve only auto-rolled (`rolledUp`) children, and so
+   does the dissolution of a container above them (the marker mirrors a
+   resolved ancestor and is dropped once none remains); genuinely-done
+   leaves keep their state. Re-completions re-summarize only the new
+   stretch (`deltaSince`).
 7. Identity: identical prompts in different turns are different work
    (twins); same-second identical bursts plan once; any seg-id-derivation
    change ships a placements migration (`placementsV`, currently v12);

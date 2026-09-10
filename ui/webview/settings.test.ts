@@ -33,6 +33,17 @@ test("Compact transcript defaults ON (the user 2026-07-14): fresh installs read 
   assert.equal(DEFAULT_SETTINGS.compact, true);
 });
 
+// The tab strip's one-group-per-row layout (T264) is the default and a per-device pick: an explicit false
+// lets the groups follow one another across the strip and wrap as they need (render.ts renderTabs).
+test("stripGroupRows defaults ON: every tag group on its own row; an explicit false round-trips, and a store from before the key reads as on", () => {
+  assert.equal(DEFAULT_SETTINGS.stripGroupRows, true);
+  store["romp:settings"] = JSON.stringify({ stripGroupRows: false });
+  assert.equal(loadSettings().stripGroupRows, false, "the opt-out round-trips");
+  store["romp:settings"] = JSON.stringify({});
+  assert.equal(loadSettings().stripGroupRows, true, "a store from before the key reads as on");
+  delete store["romp:settings"];
+});
+
 // The settings change signal must cover every way a change can happen: another
 // same-origin tab (storage event), THIS document (the gear now lives in the same
 // page — same-document writes never fire storage), and another VS Code webview
@@ -80,4 +91,19 @@ test("an unknown key in storage is ignored, known keys still merge", () => {
   const s = loadSettings();
   assert.equal(s.compact, true);
   assert.equal((s as any).future, 42, "merge is shallow — extra keys pass through harmlessly");
+});
+
+// Compact tabs and agents (the user 2026-09-08: on a phone, the tab strip and the background-work panel
+// left about three lines of transcript in view): OFF by default, so the strip and the panel render exactly
+// as before the setting existed until the gear opts in. Distinct from `compact`, the transcript's own
+// tidy-up (tool runs collapsed, thinking hidden). The class it drives is dense-chrome.test.ts's subject.
+test("Compact tabs and agents defaults OFF (the user 2026-09-08); the opt-in round-trips, and a store from before the key reads as off", () => {
+  assert.equal(DEFAULT_SETTINGS.denseChrome, false);
+  delete store["romp:settings"];
+  assert.equal(loadSettings().denseChrome, false, "a fresh install reads off");
+  saveSettings({ denseChrome: true });
+  assert.equal(loadSettings().denseChrome, true, "the opt-in survives a reload (localStorage)");
+  store["romp:settings"] = JSON.stringify({ compact: true });
+  assert.equal(loadSettings().denseChrome, false, "a store written before the key reads as off");
+  delete store["romp:settings"];
 });

@@ -8,7 +8,8 @@ Measured on the maintainer's box (py-spy, the judge tier thread): the three capt
 file three times per session per index pass (19% of the thread), the archive loader decoded per call (11%).
 Pins: parsed once then served; the derived readers equal the direct derivations; an append re-derives, including
 one the file clock cannot see; a write landing during the read is served no further than that call; an absent
-file is empty and never cached; a malformed line is skipped; the memos are bounded; the archive's writers get a
+file is empty and never cached, and so is an existing archive that cannot be read or parsed (the read marked the
+running stage incomplete); a malformed line is skipped; the memos are bounded; the archive's writers get a
 fresh object; the switched callers; a rebound root forgets; the counters; two fills at the cap on two
 threads neither raise nor overflow it.
 
@@ -227,6 +228,49 @@ class GoalArchiveMemo(_Memo):
         self.assertEqual((a["nodes"], a["status"]), ({}, {}))
         self.assertNotIn(SID, jd._GOALARCH_MEMO)
         self.assertEqual(jd._GOALARCH_STATS, {"served": 0, "loaded": 1})
+
+    def _error_rows(self, err):
+        try:
+            rows = [json.loads(l) for l in jd.ERRORS.read_text().splitlines() if l.strip()]
+        except FileNotFoundError:
+            return []
+        return [r for r in rows if r.get("err") == err]
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a mode-000 file")
+    def test_an_unreadable_archive_is_the_empty_shape_and_never_cached(self):
+        # the evidence gate's rule: a read that failed marked the running stage incomplete, and a permission fix
+        # moves no file key, so a cached failure would be served after the file reads again. Every call reads.
+        self._write({SID + ":g1": self._node(SID + ":g1", "Ship the banner")})
+        os.chmod(self.arch, 0)
+        try:
+            reads = self.counting()
+            jd._judge_ctx.stage_incomplete = False
+            a = jd.load_goal_archive_shared(SID)
+            self.assertEqual((a["nodes"], a["status"]), ({}, {}))
+            self.assertTrue(jd._judge_ctx.stage_incomplete, "the failed read marks the running stage incomplete")
+            self.assertNotIn(SID, jd._GOALARCH_MEMO)
+            b = jd.load_goal_archive_shared(SID)
+            self.assertEqual((b["nodes"], b["status"]), ({}, {}))
+            self.assertNotIn(SID, jd._GOALARCH_MEMO)
+            self.assertEqual(reads, [SID + ".json", SID + ".json"], "each call reads the file again")
+            self.assertEqual(jd._GOALARCH_STATS, {"served": 0, "loaded": 2})
+            self.assertEqual(len(self._error_rows("archive-unreadable")), 1, "one row per failure episode")
+        finally:
+            os.chmod(self.arch, 0o644)
+        c = jd.load_goal_archive_shared(SID)
+        self.assertEqual(set(c["nodes"]), {SID + ":g1"}, "readable again with the same key: read, and cached now")
+        self.assertIs(jd.load_goal_archive_shared(SID), c)
+        self.assertEqual(jd._GOALARCH_STATS, {"served": 1, "loaded": 3})
+        self.assertEqual(len(self._error_rows("archive-unreadable")), 1)
+
+    def test_an_archive_that_does_not_parse_is_the_empty_shape_and_never_cached(self):
+        self.arch.write_text("{not json")
+        a = jd.load_goal_archive_shared(SID)
+        self.assertEqual((a["nodes"], a["status"]), ({}, {}))
+        self.assertNotIn(SID, jd._GOALARCH_MEMO)
+        jd.load_goal_archive_shared(SID)
+        self.assertEqual(jd._GOALARCH_STATS, {"served": 0, "loaded": 2})
+        self.assertEqual(len(self._error_rows("archive-unreadable")), 1)
 
     def test_the_readers_take_the_shared_loader_and_the_archivers_keep_the_fresh_one(self):
         src = open(os.path.join(BIN, "romp-judge")).read()

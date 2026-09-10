@@ -873,14 +873,87 @@ test("a session header's name nodes are minted only when what they show changes:
   assert.equal((body.querySelector(`.feed-sess-head[data-fsid="${WEB}"]`) as any)._name.textContent, "web-2");
 });
 
-test("a header's data-fsid is written only when it differs", async () => {
+test("a header's data-fsid and data-fcol are written only when they differ", async () => {
   const heads = () => body.querySelectorAll(".feed-sess-head").filter((h) => !h.classList.contains("sess-exit"));
   const same = frame([{ ...g1, name: "web-2" }, card("g2")._it, card("g3")._it]);   // the objects the cards were painted from
   await dispatch(same);
-  const before = heads().map((h) => [h.getAttribute("data-fsid"), h.ac]);
+  const stamps = () => heads().map((h) => [h.getAttribute("data-fsid"), h.getAttribute("data-fcol"), h.ac]);
+  const before = stamps();
   assert.equal(before.length, 3);
+  assert.deepEqual(before.map((s) => s[1]), heads().map((h) => h.parentNode!.id.replace(/^col-|-list$/g, "")), "each header is stamped with the column it heads");
   await dispatch(same); await dispatch(same);
-  assert.deepEqual(heads().map((h) => [h.getAttribute("data-fsid"), h.ac]), before, "an unchanged sid is compared and not re-set");
+  assert.deepEqual(stamps(), before, "an unchanged sid or column is compared and not re-set");
+});
+
+test("a hovered session header is one (column, session) row: the same session's header in another column keeps its in-row badge and the floating hint sits under the hovered row", async () => {
+  // grouped mode keys a header per (column, session), so a session with cards in two columns has two header
+  // rows, both stamped with its sid. The hover-freeze painter found the hovered row by sid alone, so the twin in
+  // the other column took the hovered branch too: its in-row badge was stripped, and the one floating hint was
+  // re-placed under it (the last twin in document order), away from the row the pointer is on.
+  const g1b = cardOf("g1b", WEB, "web", "#3366cc", "Check the notes-api health route", "needs_input");
+  const g1c = cardOf("g1c", WEB, "web", "#3366cc", "Ship the notes-api health route", "completed");
+  const four = [g1, g1b, card("g2")._it, card("g3")._it];
+  await dispatch(frame(four));
+  const heads = () => body.querySelectorAll(`.feed-sess-head[data-fsid="${WEB}"]`).filter((h) => !h.classList.contains("sess-exit"));
+  assert.deepEqual(heads().map((h) => h.parentNode!.id), ["col-asks-list", "col-needsInput-list"], "web heads a run in Working and one in Blocked");
+  const [hw, hb] = heads();
+  const badged = (h: El) => h.children.some((c) => c.classList.contains("freeze-badge"));
+  // the stand-in's rects derive from the parent list's id, so the two rows sit at different rights; the hint's
+  // position says which row it was placed under
+  const rightOf = (h: El) => (win.innerWidth - h.getBoundingClientRect().right) + "px";
+  assert.notEqual(rightOf(hw), rightOf(hb));
+  hw.dispatchEvent(new Event("mouseenter"));                     // the pointer rests on the Working row
+  await dispatch(frame([...four, g1c]));                         // a push while it is held: one more web card, in Completed
+  try {
+    assert.equal(card("g1c"), null, "the payload is queued, not rendered");
+    assert.ok(badged(hb), "the same session's Blocked header carries its in-row badge");
+    assert.ok(!badged(hw), "never inside the hovered row");
+    const note = body.byId("freeze-headnote");
+    assert.ok(note, "the hovered row's hint floats");
+    assert.equal(note!.style.right, rightOf(hw), "right-aligned under the hovered row, not under its twin");
+  } finally {
+    hw.dispatchEvent(new Event("mouseleave"));                   // release: the queued payload applies (on a failure too,
+    await settle();                                              // so the next test never inherits a held gate)
+  }
+  assert.ok(card("g1c"), "the queued frame applied on release");
+  assert.equal(body.byId("freeze-headnote"), null, "nothing pending: the hint comes off with the badges");
+  await dispatch(frame([g1, card("g2")._it, card("g3")._it]));   // the three-card world back
+  mock.timers.tick(700);                                          // the Blocked and Completed headers finish their exit
+});
+
+test("a hovered header's gate releases through its ghost: a Clear that takes the row out from under the pointer re-keys it, and the ghost's mouseleave still applies the queued frame", async () => {
+  // a Clear on a run's last card starts the header's exit in the same click, with no render in between: the
+  // element is re-keyed to a tombstone (x:N) while the pointer is still on it, and no render heal has run.
+  // Its mouseleave must compute the key its mouseenter stored, or the gate stays held until a later local
+  // render or a window blur. The stamps the key is read from survive the re-key; the data-key does not.
+  const ha = body.querySelector(`.feed-sess-head[data-fsid="${API}"]`)!;   // api heads one run: its one card, g2
+  assert.ok(!ha.classList.contains("sess-exit"));
+  const stamps = () => [ha.getAttribute("data-fcol"), ha.getAttribute("data-fsid")];
+  const before = stamps();
+  assert.equal(before[0], ha.parentNode!.id.replace(/^col-|-list$/g, ""), "stamped with the column it heads");
+  const g2it = card("g2")._it;                                   // the object g2 was painted from (its column too)
+  const g1d = cardOf("g1d", WEB, "web", "#3366cc", "Document the notes-api health route", "working");
+  ha.dispatchEvent(new Event("mouseenter"));                     // the pointer rests on api's header row
+  try {
+    await dispatch(frame([g1, g2it, card("g3")._it, g1d]));      // a push while it is held: one more web card
+    assert.equal(card("g1d"), null, "the payload is queued");
+    card("g2")._clr.onclick(ev);                                 // Clear api's last card: its header leaves with it
+    assert.ok(ha.classList.contains("sess-exit"), "the header ghosts in the same click");
+    assert.match(ha.dataset.key!, /^x:\d+$/, "re-keyed to a tombstone while still under the pointer");
+    assert.deepEqual(stamps(), before, "the stamps stay");
+    assert.equal(card("g1d"), null, "the clear itself is not a release");
+    ha.dispatchEvent(new Event("mouseleave"));                   // the pointer leaves the ghost
+    await settle();
+    assert.ok(card("g1d"), "the ghost's mouseleave released the gate: the queued frame applied");
+  } finally {                                                    // on a failure too, so the next test inherits neither
+    win.dispatchEvent(new Event("blur"));                        // a held gate (the backstop release) nor a cleared g2
+    await settle();
+    mock.timers.tick(700);                                        // the cleared card's collapse and the ghost's exit end
+    await dispatch(frame([g1, card("g3")._it]));                  // the kernel confirms the clear (g2 absent)
+    await dispatch(frame([g1, g2it, card("g3")._it]));            // g2 back where it was, under a fresh api header
+  }
+  assert.equal(body.querySelectorAll(".sess-exit").length, 0);
+  assert.ok(card("g2"));
 });
 
 test("a header re-mints its name nodes when its host's link goes down or comes back, and only then", async () => {

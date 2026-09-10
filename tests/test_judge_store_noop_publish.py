@@ -100,6 +100,33 @@ class NoOpPublish(unittest.TestCase):
         jd.save_goals(SID, raw)
         self.assertGreater(jd._disk_rev(SID), rev)
 
+    def test_a_store_built_without_load_goals_stays_unconditional_across_saves(self):
+        """The post-publish re-stamp of `_baseRev` (2026-09-06) is for stores that carried a base: a save
+        stamps none on a hand-built store, so its second save is still published unconditionally, not
+        no-op-checked against a base it never had."""
+        self._seed()
+        raw = json.loads(self._file().read_text())      # hand-built store, never through load_goals
+        jd.save_goals(SID, raw)
+        rev = jd._disk_rev(SID)
+        self.assertNotIn("_baseRev", raw, "a save stamps no base on a store that never carried one")
+        jd.save_goals(SID, raw)                          # no change at all
+        self.assertEqual(jd._disk_rev(SID), rev + 1,
+                         "a hand-built store is still published unconditionally, not no-op-checked")
+
+    def test_a_second_unchanged_save_of_the_same_object_is_a_no_op(self):
+        """A loaded store keeps its base across saves (2026-09-06), so the holder's later saves reach the
+        no-op check: the planner's rollup-and-save at the end of a pass that changed nothing after its
+        earlier save rewrites no bytes."""
+        self._seed()
+        s = jd.load_goals(SID)
+        gid = "%s:g1" % SID
+        jd.record_verdict(s, s["nodes"][gid], "planner", "done", T0 + 30, why="shipped")
+        jd.save_goals(SID, s)                            # a real publish
+        rev, mt = jd._disk_rev(SID), os.stat(self._file()).st_mtime_ns
+        jd.save_goals(SID, s)                            # the same object, unchanged since
+        self.assertEqual(jd._disk_rev(SID), rev, "the second save is a no-op: no revision")
+        self.assertEqual(os.stat(self._file()).st_mtime_ns, mt, "...and the file is untouched")
+
     def test_a_no_op_save_cannot_clobber_a_concurrent_writer(self):
         """Pass A loads and changes nothing; writer B publishes a real event meanwhile. The skip compares
         against DISK, and disk has moved, so A does NOT skip here — it takes the rebase path and folds B's

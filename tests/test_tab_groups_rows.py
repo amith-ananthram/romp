@@ -4,6 +4,11 @@ the tag chip at the left edge, its tabs after it (wrapping onto further rows as 
 on a fresh line; the untagged trail opens its own line too, with no chip and no separator; a folded group
 is its header row alone.
 
+That layout is the gear's "One tag group per row in the tab strip" (`stripGroupRows`, on by default). The first
+test drives the page as shipped (nothing written to the settings store) and checks T264's geometry; the second
+writes the setting off before the page loads and checks the inline layout: no break element at all, each
+group's header followed by its tabs with nothing between, and the untagged trail behind a visible 13px divider.
+
 The served guard drives the real /chat page from a hermetic kernel: eight sessions under three tags of
 mixed sizes (one tag wide enough to wrap at the viewport) plus one untagged, one group folded by a header
 click. In the browser it reads the strip's geometry: every header is the first item of its row; the groups
@@ -67,6 +72,9 @@ let browser;
 try { browser = await chromium.launch(); }
 catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
 const page = await browser.newPage({ viewport: { width: 640, height: 480 }, deviceScaleFactor: 2 });
+// the inline drive turns the one-group-per-row setting off before any page script runs, so the first paint reads
+// it; the default drive writes nothing and exercises the shipped default
+if (cfg.rows === false) await page.addInitScript(() => { try { localStorage.setItem("romp:settings", JSON.stringify({ stripGroupRows: false })); } catch (e) {} });
 await page.goto(cfg.chat);
 await page.waitForSelector("#tabs .tab[data-id]", { timeout: 20000 });
 try { await page.waitForSelector("#tabs .tab-group-head", { timeout: 20000 }); }
@@ -187,10 +195,12 @@ class ServedGroupsOnOwnLines(unittest.TestCase):
             cls.kernel.wait()
         shutil.rmtree(getattr(cls, "lab", ""), ignore_errors=True)
 
-    def _drive(self, script, name):
+    def _drive(self, script, name, rows=True):
+        """rows: True drives the shipped default (nothing written to the settings store); False writes the
+        one-group-per-row setting off before the page loads."""
         cfg = os.path.join(self.lab, name + ".json")
         with open(cfg, "w") as f:
-            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token),
+            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "rows": rows,
                        "visible": len([s for s in SESSIONS if s[2] != "archived"]) + 1,   # web-search has two copies
                        "twoTag": next(sid for (n, sid, _t) in SESSIONS if n == "web-search"),
                        "shots": os.environ.get("TABROWS_SHOTS", "")}, f)
@@ -216,7 +226,7 @@ class ServedGroupsOnOwnLines(unittest.TestCase):
             if "tab-group-head" in cls:
                 cur = (it["group"], it, [])
                 out.append(cur)
-            elif "tab-group-break" in cls and "tab-group-sep" in cls:
+            elif "tab-group-sep" in cls:   # the trail's boundary: the break under the setting, the divider with it off
                 cur = (None, None, [])
                 out.append(cur)
             elif "tab" in cls and it["id"] and cur is not None:
@@ -252,6 +262,7 @@ class ServedGroupsOnOwnLines(unittest.TestCase):
         return secs
 
     def test_every_group_starts_on_its_own_line_and_a_fold_leaves_the_header_row_alone(self):
+        # the shipped default: nothing written to the settings store, so this is what a fresh browser shows
         r = self._drive(DRIVER, "rows")
         o, clicked, l = r["open"], r["clicked"], r["light"]
         # the world: eight visible tabs (the archived group starts folded, its one member hidden), three headers,
@@ -298,6 +309,29 @@ class ServedGroupsOnOwnLines(unittest.TestCase):
         # LIGHT theme: the same geometry
         self.assertIn("theme-light", l["theme"])
         self._check_rows(l, "light")
+
+    def test_with_the_setting_off_the_strip_flows_inline_no_breaks_and_the_trail_behind_its_divider(self):
+        # the gear's "One tag group per row in the tab strip" turned off (written to the settings store before the
+        # page loads): the strip emits no row break, a group's header is followed by its tabs with nothing between,
+        # and the untagged trail stands behind a visible 13px divider
+        o = self._drive(DRIVER, "inline", rows=False)["open"]
+        self.assertEqual(o["breaks"], 0, "no row break with the setting off: %r" % [i["cls"] for i in o["items"]])
+        self.assertEqual(len(o["seps"]), 1, "one trail boundary: %r" % o["seps"])
+        self.assertEqual(round(o["seps"][0]["w"]), 13, "the divider is a 13px box: %r" % o["seps"])
+        self.assertGreater(o["seps"][0]["h"], 0, "…and visible: %r" % o["seps"])
+        secs = self._sections(o["items"])
+        self.assertEqual([g for g, _h, _t in secs], ["web", "infra", "archived", None], "three groups in tag order, then the trail: %r" % secs)
+        by_name = {n: sid for (n, sid, _t) in SESSIONS}
+        want = {"web": ["web-frontend", "web-backend", "web-gateway", "web-search", "web-billing"],
+                "infra": ["web-search", "infra-ci", "infra-deploy"], "archived": [], None: ["scratch"]}
+        for g, _h, tabs in secs:
+            # membership, not order: within a group the strip orders tabs by the user's order and recency, and
+            # _sections already proves contiguity (every tab between this header and the next belongs here)
+            self.assertCountEqual([t["id"] for t in tabs], [by_name[n] for n in want[g]], "%r: its tabs, contiguous after its header, nothing else between: %r" % (g, tabs))
+        # nothing of zero height sits in the strip besides the T134 hairlines (a break spans the row at zero height):
+        # every item is a header, a tab or the divider
+        zero = [i for i in o["items"] if i["h"] == 0 and "tab-row-line" not in i["cls"].split()]
+        self.assertEqual(zero, [], "no zero-height item (a break) with the setting off: %r" % zero)
 
 
 if __name__ == "__main__":

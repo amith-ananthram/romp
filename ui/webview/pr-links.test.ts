@@ -815,7 +815,7 @@ test("the chat links inside md(): the sanitized tree is walked before it seriali
   assert.match(RENDER, /function md\(src: string, repo: string \| null = prRepoFor\(\)\): string \{/);
   const mdFn = RENDER.match(/function md\(src: string[^\n]*?\): string \{[\s\S]*?\n\}/)?.[0] || "";
   // sanitizeMd (md-sanitize.ts) hands back the sanitized <body>; the walk runs on it before our own serialization
-  assert.match(mdFn, /const clean = sanitizeMd\(dirty\);[^\n]*\n\s*linkifyPrRefs\(clean, repo\);\s*\n\s*return clean\.innerHTML;/,
+  assert.match(mdFn, /const clean = sanitizeMd\(dirty\);[^\n]*\n\s*linkifyPrRefs\(clean, repo\);\s*\n\s*mdImgPostPass\(clean\);[^\n]*\n\s*return clean\.innerHTML;/,
     "the sanitizer's own serialization is replaced by ours, after the walk: the sanitizer's verdicts stand");
   assert.match(RENDER, /const id = sid \?\? renderingOwnerSid \?\? renderingSid \?\? activeId;/, "the owning session, as relative paths resolve");
   assert.doesNotMatch(RENDER, /installPrLinkOpener/, "the chat's own a[href] delegate already opens every absolute-scheme anchor");
@@ -827,7 +827,7 @@ test("the session frame's githubRepo rides the Session and survives a chatTail d
 });
 
 test("postal bodies link against the SENDER's frame-known repo only: outbound = the writer's own, inbound = senderPrRepo over the session map by the card's host and name, never the reader's as a fallback", () => {
-  assert.match(RENDER, /full\.innerHTML = md\(ev\.body, postalRepoFor\(ev\)\)/);
+  // 2026-09-08 (the notice-vocabulary pass): ONE render path — the full message is the notice body (the summary is the head)
   assert.match(RENDER, /body\.innerHTML = md\(ev\.body, postalRepoFor\(ev\)\);/);
   const fn = RENDER.match(/function postalRepoFor\([\s\S]*?\n\}/)?.[0] || "";
   assert.match(fn, /if \(ev\.direction === "out"\) return prRepoFor\(\);/);

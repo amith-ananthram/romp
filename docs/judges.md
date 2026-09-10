@@ -463,6 +463,29 @@ permission/API-error floors: one interrupt at a time, the present event first.
   read fresh each pass; empty = `ROMP_JUDGE_CONCURRENCY` as read at load,
   else 6). Every pool reads it at call time (`_conc`, or `_judge_concurrency()`
   directly); `DEATH_DRAIN_PER_PASS` alone stays on the load-time value.
+- Skips: the six triage tiers (planner, closer, unblocker, grouper,
+  consolidator, distiller) run behind an evidence gate. Before a session is
+  submitted, the runner takes the tier's signature: the identity (inode,
+  mtime, size) of every file the tier's decision path reads, the store with
+  its journal and archive among them, and for the planner, closer and
+  unblocker the pass's pinned parse pair. A session whose signature equals
+  the one the tier stamped after its last complete run is skipped, and its
+  pass watermark is stamped as for a pass that found nothing to do. A run
+  stamps only when it returned normally and set no completeness bit; a
+  deferral without a write, an empty reply, a failed call, a raise, or a side
+  file that exists and did not read leaves no stamp, and the session runs
+  again next pass. The stamps are process state, so the first pass after a
+  restart is a full walk. The planner has a second gate inside
+  `_plan_session`: a session whose inputs have not moved since a pass that
+  placed nothing, left the store's key where it was and ran to completion
+  returns before the store read. The evidence gate keys on the same inputs
+  (the reg by its `spawnedAt` and backend values rather than by identity) and
+  on `cleared.jsonl`, the death marker and the stall records besides, so an
+  idle session stops at the evidence gate; the inner gate's counters
+  (`memos.plannerSkip` on `GET /perf`, see `docs/reference.md`) count only
+  the sessions the evidence gate ran. Outside
+  a pass frame (`romp-judge --plan`) the evidence gate stamps nothing, and
+  the inner gate does the skipping.
 - Logs: `STATE/judge-usage.jsonl` (per-call cost, one name per prompt),
   `STATE/judge-errors.jsonl` (the row contract above; kinds are parse,
   call, give-up, sweep-cut, cite-miss, rate-limited, task-store, history-unreadable,
@@ -472,8 +495,17 @@ permission/API-error floors: one interrupt at a time, the present event first.
   store-unwritable: a goals file whose publish failed under a user gesture,
   store-quarantined: a goals file whose bytes did not parse, moved aside,
   frozen-store-write: a read-only site wrote to the shared store view, naming
-  the site, after which the shared cache is off for the process, and
-  frozen-store-save: a shared store view was handed to `save_goals`, refused).
+  the site, after which the shared cache is off for the process,
+  frozen-store-save: a shared store view was handed to `save_goals`, refused,
+  unroll-heal: a top left rolled up with settle rows and no done in its
+  diary, given one reopen row so it can be judged again, gate-stamp: the
+  evidence gate could not write a tier's stamp after a complete run, so the
+  session stays due, and the seven `*-unreadable` kinds of the gate's side
+  files, states-unreadable, cleared-unreadable, stall-unreadable,
+  captions-unreadable, episodes-unreadable, marker-unreadable and
+  archive-unreadable: a file the gate stat'd into a tier's signature exists
+  and could not be read or parsed by the stage, so the run is marked
+  incomplete and stamps nothing, one row per failure episode).
   A file that does not parse is never deleted: it is moved beside its path as
   `<file>.corrupt-<utc stamp>` (a `-n` suffix when two land in the same second)
   before a fresh one is written, so the bytes survive for inspection, and the

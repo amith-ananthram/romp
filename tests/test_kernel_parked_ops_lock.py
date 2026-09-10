@@ -400,6 +400,63 @@ class OneLockAroundEveryMutation(_Drain):
         self.assertEqual(self.be.calls, [("send", "first")])
         self.assertNotIn(SID, km._pending_ops)
 
+    def test_an_edit_during_an_in_flight_send_is_too_late_and_the_original_is_delivered(self):
+        # the ✎'s reachable race (review find, 2026-09-08): the drain pops a send run under the lock and
+        # delivers it with the lock released, so a ✎ landing in that window finds the send gone from the FIFO.
+        # It is refused as too late (the words the session gets are the ORIGINAL ones), and the op behind
+        # the in-flight send is untouched: never a rewrite of the wrong op
+        self.be.open = False
+        in_send, release = threading.Event(), threading.Event()
+
+        def send(sid, text):
+            self.be.calls.append(("send", text))
+            in_send.set()
+            release.wait(5)
+            self.be.open = True
+            return True
+        self.be.send = send
+        first, behind = ("send", "first", "human"), ("model", "opus")
+        km._pending_ops[SID] = [first, behind]
+        walker = threading.Thread(target=km._apply_pending_ops, name="drain-under-test", daemon=True)
+        with redirect_stderr(io.StringIO()):
+            walker.start()
+            self.assertTrue(in_send.wait(5))               # the send is popped and with the backend; the lock is free
+            err = km._edit_parked(SID, 0, "first", "first, edited")
+            self.assertEqual(km._pending_ops.get(SID), [behind], "the edit touched nothing still queued")
+            release.set()
+            walker.join(5)
+        self.assertEqual(err, km._edit_miss_text("first"), "too late, honestly")
+        self.assertEqual(self.be.calls, [("send", "first")], "the ORIGINAL words were delivered, once")
+
+    def test_an_edit_before_the_drain_reaches_the_send_wins_and_the_edited_words_go(self):
+        # the other side of the race: while the drain is inside the backend call for the HEAD (a model pick,
+        # recorded in flight), a ✎ on the send queued behind it lands under the lock, and the drain's next
+        # step delivers the EDITED words. The in-flight head itself is refused as too late, as the ✕ does
+        self.be.open = False
+        entered, release = threading.Event(), threading.Event()
+
+        def set_model(sid, value):
+            self.be.calls.append(("model", value))
+            entered.set()
+            release.wait(5)
+            return True
+        self.be.set_model = set_model
+        head, msg = ("model", "opus"), ("send", "hello", "human")
+        km._pending_ops[SID] = [head, msg]
+        walker = threading.Thread(target=km._apply_pending_ops, name="drain-under-test", daemon=True)
+        with redirect_stderr(io.StringIO()):
+            walker.start()
+            self.assertTrue(entered.wait(5))
+            self.assertIs(km._inflight_ops.get(SID), head)
+            err_head = km._edit_parked(SID, 0, "/model opus", "x")
+            err_msg = km._edit_parked(SID, 1, "hello", "hello, edited")
+            release.set()
+            walker.join(5)
+        self.assertEqual(err_head, km._edit_miss_text("/model opus"), "the head the backend holds is too late")
+        self.assertIsNone(err_msg, "the send behind it is still the user's to change")
+        self.assertEqual(self.be.calls, [("model", "opus"), ("send", "hello, edited")])
+        self.assertNotIn(SID, km._pending_ops)
+
     def test_the_drain_yields_to_a_handler_holding_the_lock_and_the_push_still_runs(self):
         # the drain is the first job of every cycle; its top-of-walk acquire is non-blocking, so a cycle
         # that finds a handler holding the lock skips the drain rather than stalling every session's push;

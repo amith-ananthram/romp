@@ -13,14 +13,14 @@ const R = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "re
 
 test("the null settle-reply renders as a seam marker, never an assistant bubble", () => {
   assert.match(R, /if \(\(ev as any\)\.interruptSettle\) \{/);
-  assert.match(R, /no response — turn settled/);
+  // 2026-09-08 (the notice-vocabulary pass): a slim SESSION notice; the words drop the italic and read as a fact
+  assert.match(R, /const SETTLE_GIST = "turn settled with no response";/);
   assert.match(R, /the model closed the interrupted turn with nothing to add; the real work resumes below/);
   // it reuses the interrupt marker's own chrome (turn-interrupt + interrupt-line), minus the stop-square
   // glyph — the square means a stop happened HERE; the settle line is its echo, not a second stop
   const settle = R.slice(R.indexOf("interruptSettle"), R.indexOf("interruptSettle") + 600);
-  assert.match(settle, /turn turn-interrupt/);
-  assert.match(settle, /interrupt-line/);
-  assert.doesNotMatch(settle, /interrupt-square/);
+  assert.match(settle, /notice\(\{ src: "session", glyph: "session", gist: SETTLE_GIST, cls: "turn-interrupt",/);
+  assert.doesNotMatch(settle, /interrupt-line|interrupt-square/);
 });
 
 test("the interrupt marker names the cause when the kernel stamped one", () => {

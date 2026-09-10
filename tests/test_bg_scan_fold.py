@@ -405,7 +405,7 @@ class FoldTailSafety(unittest.TestCase):
         em._read_jsonl_incremental(self.p)                                    # B advances the shared entry
         real, calls = em._read_jsonl_incremental, []
 
-        def stale_once(path):                                                 # A's first read is the stale one…
+        def stale_once(path, on_fail=None):                                   # A's first read is the stale one…
             calls.append(path)
             return recs_a if len(calls) == 1 else real(path)
         with mock.patch.object(em, "_read_jsonl_incremental", stale_once):
@@ -413,7 +413,7 @@ class FoldTailSafety(unittest.TestCase):
                              "the lost pin re-read: 2 for good and 3 provisionally — never 3 folded onto 1")
         self.assertEqual(len(calls), 2, "…and one re-read pinned cleanly")
         self.assertEqual(cache[self.p][0], 2, "3 waits for its newline before it enters the cache")
-        with mock.patch.object(em, "_read_jsonl_incremental", lambda path: recs_a):   # lost twice (a stale reader)
+        with mock.patch.object(em, "_read_jsonl_incremental", lambda path, on_fail=None: recs_a):   # lost twice (a stale reader)
             self.assertEqual(em.fold_records(cache, self.p, list, self._step), [1],
                              "no pin at all: the fold answers its own records without a tail, not with the wrong one")
 
@@ -494,7 +494,7 @@ class FoldTailSafety(unittest.TestCase):
         _bump(self.p)
         real, calls = em._read_jsonl_incremental, []
 
-        def evicted_once(path):
+        def evicted_once(path, on_fail=None):
             recs = real(path)
             calls.append(path)
             if len(calls) == 1:

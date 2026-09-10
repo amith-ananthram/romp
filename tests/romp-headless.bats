@@ -75,7 +75,8 @@ PY
     start_fake_kernel '{"ok": true}'
     ROMP_SID="11111111-2222-3333-4444-555555555555" run "$ROMP_SCRIPT" end self --now
     [ "$status" -eq 0 ]
-    ! grep -q '"when"' "$TEST_DIR/req"
+    run grep -q '"when"' "$TEST_DIR/req"
+    [ "$status" -ne 0 ]
     ROMP_SID="" run "$ROMP_SCRIPT" end self
     [ "$status" -eq 2 ]
     [[ "$output" == *"only works from inside a romp SDK session"* ]]
