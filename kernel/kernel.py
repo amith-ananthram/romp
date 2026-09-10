@@ -312,6 +312,10 @@ class _PerfStats:
                                         "bg_miss": {k: 0 for k in self.CHAT_MISS}})   # see build_chat
             self.sends = {k: {} for k in self.SEND_KINDS}
             self.judge = {"passes": 0, "ms_sum": 0.0, "ms_last": 0.0, "cpu_ms_sum": 0.0}
+            # cold event-model parses this kernel ran (T323 stage 1): the kernel's own _parse misses, per session
+            # (sid8) and in total, plus the bytes of the files parsed; the judges' misses ride the snapshot from
+            # jd.parse_misses(). The acceptance number of the lazy-transcript work: a boot with no client parses zero.
+            self.parses = {"total": 0, "bytes": 0, "bySid": {}}
             self.http = {}
 
     # ── writers (hot paths) ──
@@ -353,6 +357,16 @@ class _PerfStats:
     def stage(self, name, dt):
         with self.lock:
             self.stages[name] = self.stages.get(name, 0.0) + dt * 1000.0
+
+    def parse(self, sid, nbytes=0):
+        """One COLD parse by the kernel's _parse (a cache miss that ran em.parse_session)."""
+        with self.lock:
+            p = self.parses
+            p["total"] += 1
+            p["bytes"] += int(nbytes or 0)
+            k = str(sid or "")[:8]
+            if len(p["bySid"]) < 1024 or k in p["bySid"]:
+                p["bySid"][k] = p["bySid"].get(k, 0) + 1
 
     def build(self, kind, cached, dt=0.0):
         with self.lock:
@@ -452,6 +466,7 @@ class _PerfStats:
             stages = dict(self.stages)
             builds = {k: dict(v) for k, v in self.builds.items()}
             builds["chat"]["bg_miss"] = dict(self.builds["chat"]["bg_miss"])   # the nested map: a copy too
+            parses = {"total": self.parses["total"], "bytes": self.parses["bytes"], "bySid": dict(self.parses["bySid"])}
             sends = {k: {sl: {"count": e[0], "bytes": e[1]} for sl, e in d.items()}
                      for k, d in self.sends.items()}
             judge = dict(self.judge)
@@ -498,7 +513,8 @@ class _PerfStats:
         now = time.time()
         return {"now": now, "since": since, "uptime_s": now - _STARTED, "log": _PERF,
                 "process": _process_stats(), "pusher": pusher, "stages_ms": stages,
-                "builds": builds, "sends": sends, "goals": goals, "memos": memos, "judge": judge, "http": http}
+                "builds": builds, "sends": sends, "goals": goals, "memos": memos, "judge": judge, "http": http,
+                "parses": dict(parses, judge=int(getattr(jd, "parse_misses", lambda: 0)()))}   # T323: cold parses
 
 
 _PERF_STATS = _PerfStats()
@@ -8892,6 +8908,60 @@ def _intr_block_stands(sid, gid):
     return bool(nd and nd.get("blocked"))
 
 
+_PARSE_WARM_STATES = ("working", "compacting", "retrying")   # a session the feed warm still parses when it did not move
+
+
+def _session_files_stat(s):
+    """(mtime, size) of the transcript, the state log and the session's goal store, zeros for a missing file: the
+    three inputs every event-keyed tick job reads. A change in any of them is the only event that can change the
+    job's answer; the store is in the tuple because a judge can clear or complete the goal a marker points at with
+    no transcript change at all, and the interrupt tick must re-block on exactly that (its docstring's stale-marker
+    rule; tests/test_kernel_interrupt_machine_cut.py pins it)."""
+    sid = str(s.get("sid") or "")
+    out = []
+    for p in (s.get("path") or "", str(jd.STATE / "states" / (sid + ".jsonl")), str(jd.GOALDIR / (sid + ".json"))):
+        try:
+            st = os.stat(p)
+            out += [st.st_mtime, st.st_size]
+        except OSError:
+            out += [0.0, 0]
+    return tuple(out)
+
+
+def _session_moved_since_boot(s):
+    """Whether the session's transcript or state log was written after THIS kernel started (_STARTED)."""
+    st = _session_files_stat(s)
+    return st[0] > _STARTED or st[2] > _STARTED or st[4] > _STARTED
+
+
+_TICK_SEEN: dict = {}          # (job, sid) -> the files' stat tuple at the job's last evaluation (T323 stage 1)
+_TICK_SEEN_LOCK = threading.Lock()
+
+
+def _tick_job_skips(job, s):
+    """T323 stage 1: an event-keyed tick job (one whose answer is a pure function of the session's transcript,
+    state log and the goal store, never of the wall clock) skips a session whose transcript and state log are
+    UNCHANGED since the job's last evaluation, and, at its first evaluation in this kernel life, unchanged since
+    this kernel BOOTED. Why the boot baseline: before this, every such job parsed every alive session on the
+    first cycle after a restart to re-derive what the previous kernel had already filed in the store (the
+    interrupt block marker, the working note), a full parse per session for nothing new (T311: 388 chats' worth
+    of parses in five minutes). A session that moved under the previous kernel's death is evaluated; one that
+    did not keeps the store's verdict, which is what the card reads. Records the stat tuple and returns True
+    to skip, False to evaluate; a job with a wall-clock leg (the nudge's timers) must not use this."""
+    st = _session_files_stat(s)
+    key = (job, str(s.get("sid") or ""))
+    with _TICK_SEEN_LOCK:
+        prev = _TICK_SEEN.get(key)
+        if prev is None:
+            unchanged = not (st[0] > _STARTED or st[2] > _STARTED or st[4] > _STARTED)
+        else:
+            unchanged = st == prev
+        _TICK_SEEN[key] = st
+        if len(_TICK_SEEN) > 4096:            # bounded by jobs × sessions; never unbounded
+            _TICK_SEEN.clear()
+    return unchanged
+
+
 def _interrupt_block_tick(now, tmux):
     """Interrupt → Blocked, INDEPENDENT of the auto-nudge switch (the user 2026-07-14). A session the
     user genuinely STOPPED mid-turn is waiting on their next instruction: its focus goal needs THEM, so
@@ -8930,6 +9000,8 @@ def _interrupt_block_tick(now, tmux):
             continue                                     # awaiting you / compacting → a different needs-you path owns it
         if _api_error(s["path"]):                        # stopped on an API error → not a user stop
             continue
+        if _tick_job_skips("interrupt-block", s):        # nothing appended since the last look (or since boot): the
+            continue                                     # store already carries the verdict this tick would re-derive
         try:
             turns = jd.parsed_session(sid, [s["path"]], now)["turns"]
         except Exception:
@@ -12075,6 +12147,8 @@ def _clear_done_working_notes(now, tmux):
             continue
         if (tmux.get(sid) or {}).get("state", "") in ("working", "compacting", "permission", "picker", "retrying"):
             continue                                     # actively progressing / awaiting input per tmux → keep (cheap pre-gate, no parse)
+        if _tick_job_skips("working-notes", s):          # nothing appended since the last look (or since boot) → the
+            continue                                     # note's fate was settled by the previous evaluation
         try:
             turns = jd.parsed_session(sid, [s["path"]], now)["turns"]
         except Exception:
@@ -28379,6 +28453,10 @@ def _parse(path, sid, now):
     # parse it just made, so a racing parse of the same path can only make it MORE conservative
     # (a "full" read where a "fold" happened) — never less.
     _parse_mode[path] = _mode[-1] if _mode else "full"
+    try:
+        _PERF_STATS.parse(sid, key[1] if key is not None else 0)   # a cold parse ran (T323: /perf parses)
+    except Exception:
+        pass
     if key is not None:
         if len(_parse_cache) > 256:              # backstop: bounded by fleet size, but never unbounded
             _parse_cache.clear()
@@ -28909,10 +28987,13 @@ def _has_parsing_client():
 
 
 def _warm_fleet_bg(now):
-    """Parse every LIVING session into the kernel parse cache in the background, then drop the feed cache and
-    re-push — so a FEED-ONLY window (no chat/timeline to warm the cache for it) still gets its working-dots +
-    anchors a beat after the cards. A no-op when nobody's connected, or when a chat/timeline client IS (it
-    warms the cache itself); and it bails mid-sweep the instant one connects, so it never competes."""
+    """Parse the living sessions that MOVED since this kernel booted, or are working now, into the kernel parse
+    cache in the background, then drop the feed cache and re-push — so a FEED-ONLY window (no chat/timeline to
+    warm the cache for it) still gets its working-dots + anchors a beat after the cards for the sessions whose
+    dots can differ. Until T323 stage 1 (2026-09-10) it parsed EVERY living session, O(file bytes) each, for dots
+    that an untouched session's card would not change; those now fill the cache on demand. A no-op when nobody's
+    connected, or when a chat/timeline client IS (it warms the cache itself); and it bails mid-sweep the instant
+    one connects, so it never competes."""
     with _clients_lock:
         if not _clients:
             return
@@ -28929,6 +29010,11 @@ def _warm_fleet_bg(now):
             for s in _alive_sessions(now, tmux):         # live sessions first
                 if _has_parsing_client():                 # a chat/timeline tab just opened → it'll warm the rest
                     break
+                # T323 stage 1: only a session that MOVED since this kernel booted (its transcript or state log
+                # appended) or is working right now is worth a cold parse here; the rest cost O(file bytes)
+                # each for working dots nobody's card will show differently, and the cache fills on demand
+                if not (_session_moved_since_boot(s) or (tmux.get(s["sid"]) or {}).get("state", "") in _PARSE_WARM_STATES):
+                    continue
                 _parse(s["path"], s["sid"], now)          # warm the kernel parse cache
             _built_feed[1] = None                         # force the next build to use the now-warm parses
             _push_soon()   # ack-fast (the 2026-08-30 wedge: inline fleet builds piled 53 POST handlers; the pusher coalesces)
@@ -28941,27 +29027,25 @@ def _warm_fleet_bg(now):
 
 
 def _boot_warm():
-    """Warm the live fleet's parse cache at kernel STARTUP (the user 2026-07-03: after `romp refresh`, local
-    sessions take a long time to load while remote ones — served by their own still-warm kernel over federation
-    — appear at once). A fresh kernel has EMPTY caches, so the first connect pays the full cold serial parse
-    (~2-4s: build_timeline bars + every chat tab). But between the restart and that connect there's a 1-2s gap
-    while the browser notices the socket dropped, reconnects, and reloads — during which the kernel is IDLE.
-    Spend it: pre-parse the living sessions into _parse_cache so the first connect finds them WARM. Best-effort;
-    bails the instant a chat/timeline client connects (that connect warms what it needs — no GIL contention),
-    warms discover() first (its own cache, shared by every builder), and never throws. Safe: this only
-    PRE-COMPUTES the same (mtime,size)-keyed cache the connect would build — no new state, no staleness."""
+    """Warm the shared discover() cache at kernel STARTUP, and nothing else. Until T323 stage 1 (2026-09-10) this
+    parsed every living session into the kernel parse cache so a reconnecting dashboard found its frames warm (the
+    user 2026-07-03: after `romp refresh` local sessions loaded slowly while federated ones, served by a warm remote
+    kernel, appeared at once); that cost a full read and parse of every transcript on every boot, for nobody, and
+    the redial road has since made it moot: a reconnecting dashboard gets its ACTIVE tab whole and every other tab
+    as a skeleton, so the one parse it needs is the one its own connect push runs. See go() below for the rest of
+    the reasoning."""
     def go():
         try:
             now = int(time.time())
             jd.discover(now)                              # warm the shared discover cache (every builder needs it)
-            tmux = _tmux_sessions()
-            for s in _alive_sessions(now, tmux):
-                if _has_parsing_client():                 # the browser reconnected → it warms the rest; stand down
-                    return
-                try:
-                    _parse(s["path"], s["sid"], now)      # warm the kernel parse cache (build_timeline/-session reuse it)
-                except Exception:
-                    pass
+            # T323 stage 1 (the user 2026-09-10, who wants nothing read at boot that nobody asked for): the warm
+            # PARSES NOTHING any more. It used to parse every living session, O(file bytes) per session per boot,
+            # 15 GB read and 6.6 GB resident within minutes on a 47-session box (T311), for a first frame that
+            # parses its own tab anyway: the redial road ships the ACTIVE tab whole and every other tab as a
+            # skeleton (_client_reset_chat_base, the ?reconnect=1 path), so the only parse a reconnecting
+            # dashboard needs is the one its connect push runs. No tab strip is persisted in the kernel (tabs are
+            # every living session; the active tab is the client's fact, sent after it reconnects), so there is
+            # nothing to pre-parse selectively either. Per boot per session: O(file) → 0.
         except Exception:
             sys.stderr.write("boot-warm: %s\n" % traceback.format_exc())
     threading.Thread(target=go, daemon=True, name="boot-warm").start()

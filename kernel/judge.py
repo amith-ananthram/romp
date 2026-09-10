@@ -3196,6 +3196,7 @@ def parsed_session(fsid, files, now):
     if key is not None:
         if len(_PARSE_CACHE) > 256:        # bounded by fleet size; a wholesale clear on overflow is fine
             _PARSE_CACHE.clear()
+        _PARSE_MISSES[0] += 1                              # a cold parse (T323: /perf parses.judge)
         _PARSE_CACHE[fsid] = (key, session)
     if fr is not None:                     # pin under the frame the KEY went into (never a re-read _frame: a
         with _frame_lock:                  #  parse spanning a pass boundary must not land keyless in the next
@@ -7804,6 +7805,32 @@ def _discover_fingerprint():
     return tuple(fp)
 
 
+_PARSE_MISSES = [0]          # cold parses parsed_session ran this process (T323: /perf parses.judge)
+
+
+def parse_misses():
+    """How many cold event-model parses the judges' parsed_session ran in this process."""
+    return int(_PARSE_MISSES[0])
+
+
+def by_recency(fleet):
+    """discover()'s rows ordered by transcript mtime, newest first (T323 stage 1): a pass reaches the sessions
+    someone is using now before the ones that have sat for a day, so the first pass after a boot spends its
+    parses where they show. A stat failure sorts last; the input list is left as it was."""
+    def key(row):
+        try:
+            return -os.stat(str(row[1])).st_mtime
+        except (OSError, IndexError, TypeError):
+            return 0.0
+    return sorted(fleet, key=key)
+
+
+def yield_between_sessions():
+    """Let the pusher and the session threads run between two sessions of a pass (T323 stage 1): a whole-fleet
+    pass holds the interpreter for its parses; one zero sleep per session hands the lock over."""
+    time.sleep(0)
+
+
 def discover(now, window=None, forks=True):
     """[(fsid, path, anchor_sid, name)] for every transcript of a romp session touched within `window`
     seconds (default WINDOW, 48h) —
@@ -7956,10 +7983,11 @@ def run_index(now=None, budget=BUDGET, fairness=FAIRNESS, concurrency=None, verb
 def _run_index(now=None, budget=BUDGET, fairness=FAIRNESS, concurrency=None, verbose=False):
     if now is None:
         now = int(time.time())
-    fleet = discover(now)
+    fleet = by_recency(discover(now))          # newest transcripts first (T323 stage 1)
     # ── captioner: one entry per undone caption task (a model call), newest-first ──
     pending = []
     for fsid, path, anchor, name in fleet:
+        yield_between_sessions()
         done = captioned_ids(fsid)
         live_n = _live_natoms(fsid)                       # the open segment's last live-caption sizes (cadence gate)
         for task in tasks_for(fsid, str(path), [str(path)], now):
@@ -10545,7 +10573,7 @@ def run_plan(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=Fal
     time-order is the courier's need; the planner's tree is per-session.)"""
     if now is None:
         now = int(time.time())
-    fleet = [s for s in discover(now) if not _hidden_from_feed(s[0])][:sessions_cap]   # muted sessions are out of task tracking
+    fleet = [s for s in by_recency(discover(now)) if not _hidden_from_feed(s[0])][:sessions_cap]   # muted sessions are out of task tracking
     for _gone in [f for f in _PLANNER_SEEN if f not in {s[0] for s in fleet}]:
         _PLANNER_SEEN.pop(_gone, None)                # the planner gate, bounded by the sessions this pass discovered
     placed = 0
@@ -11241,7 +11269,7 @@ def run_group(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=Fa
     session's open-top set changed. Per-session sequential, sessions concurrent. Returns total relinks."""
     if now is None:
         now = int(time.time())
-    fleet = discover(now)[:sessions_cap]
+    fleet = by_recency(discover(now))[:sessions_cap]
     n = 0
     with ThreadPoolExecutor(max_workers=_conc(concurrency)) as ex:
         futs = {}
@@ -11345,7 +11373,7 @@ def run_consolidate(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verb
     of sessions whose completed column changed."""
     if now is None:
         now = int(time.time())
-    fleet = discover(now)[:sessions_cap]
+    fleet = by_recency(discover(now))[:sessions_cap]
     n = 0
     with ThreadPoolExecutor(max_workers=_conc(concurrency)) as ex:
         futs = {}
@@ -12916,7 +12944,7 @@ def run_close(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=Fa
     upgrade still gets its finalize (the promised backfill; the re-critique's population fix)."""
     if now is None:
         now = int(time.time())
-    fleet = [s for s in discover(now) if not _hidden_from_feed(s[0])][:sessions_cap]   # muted sessions are out of task tracking
+    fleet = [s for s in by_recency(discover(now)) if not _hidden_from_feed(s[0])][:sessions_cap]   # muted sessions are out of task tracking
     fleet_sids = {f[0] for f in fleet}
     pending = _death_pending(exclude=fleet_sids)
     if pending:
@@ -13272,7 +13300,7 @@ def _ab_close(sessions_cap=PLAN_SESSIONS):
     positive+negative completed-top-goal counts, the goals (b) newly completes, and a sample of the
     turn-end sweeps so the false-completion rate can be eyeballed before flipping the default."""
     now = int(time.time())
-    fleet = discover(now)[:sessions_cap]
+    fleet = by_recency(discover(now))[:sessions_cap]
     tot_a = tot_b = 0
     all_new, all_samples = [], []
     # Parallel ACROSS sessions (each session sweeps its own turns sequentially for clean attribution).
@@ -13333,7 +13361,7 @@ def _ab_classify(sessions_cap=PLAN_SESSIONS, concurrency=None):
     the live status, WITHOUT mutating goal state. The question: do the soft blocks hold under
     thinking/opus, or were they over-blocks the bigger model corrects?"""
     now = int(time.time())
-    fleet = discover(now)[:sessions_cap]
+    fleet = by_recency(discover(now))[:sessions_cap]
     jobs = []
     for fsid, path, anchor, name in fleet:
         try:
@@ -15176,7 +15204,7 @@ def run_distill(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=
     undiagnosable shape of the T110 report. Returns goals distilled."""
     if now is None:
         now = int(time.time())
-    fleet = discover(now)[:sessions_cap]
+    fleet = by_recency(discover(now))[:sessions_cap]
     n = 0
     with ThreadPoolExecutor(max_workers=_conc(concurrency)) as ex:
         futs = {}
@@ -16499,7 +16527,7 @@ def run_courier(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=
     refinement.)"""
     if now is None:
         now = int(time.time())
-    fleet = discover(now)[:sessions_cap]
+    fleet = by_recency(discover(now))[:sessions_cap]
     id2name = {f: nm for f, p, a, nm in fleet}          # recipient id → name, for the sender's tracking-node label
     paths_map = {f: str(p) for f, p, a, nm in fleet}    # sid → transcript, for the mint-time chain trace
     pending, closed = [], {}                           # pending: (seg_t, fsid, seg_id, text, mid, sender)
