@@ -54,11 +54,15 @@ class DeadTty:
 
 
 class LiveDrain:
-    """A backend with one session in flight: drain() records that it ran and names the turn it cut."""
+    """A backend with one session in flight: drain() records that it ran and names the turn it cut. It says
+    so through the kernel's backend log wire before returning, as SdkBackend.drain does after its work: a
+    wire that raised there carried the finished drain's result away (an empty cutTurns row, a drainError
+    naming the stderr fault), so the dead-stderr cases below drive that line too."""
     called = False
 
     def drain(self, timeout):
         self.called = True
+        km._backend_log("drain: stopped 1 session(s), 1 in-flight turn(s) interrupted")
         return {"cutTurns": [{"sid": SID, "name": "web"}], "stopped": 1}
 
 
@@ -225,6 +229,26 @@ class CutRow(unittest.TestCase):
         self.assertIn("audit_reason=reason", block)
         self.assertIn("if not _EXIT_ONCE.acquire(blocking=False):", block,
                       "a second SIGTERM mid-drain must not nest a second drain and a second cut row")
+
+    def test_the_backends_log_wire_is_best_effort(self):
+        # SdkBackend.drain logs its summary after every session is shut down, joined and reaped, right
+        # before its return, through the kernel's `log=` callback. Wired as a bare sys.stderr.write, a dead
+        # stderr raised there out of be.drain with the work done, and _drain_and_exit filed an empty
+        # cutTurns row with a drainError naming the stderr fault: the misfiled row the exit path's own
+        # _exit_log guards close, reopened by the one line they did not cover. The wire is _backend_log,
+        # _exit_log with the backend's prefix; the LiveDrain fake logs through it, so the two
+        # test_a_raising_stderr_does_not_skip_the_drain cases drive this line through the handlers
+        src = open(os.path.join(os.path.dirname(HERE), "kernel", "kernel.py")).read()
+        self.assertIn("log=_backend_log,", src, "the backend is wired to the best-effort line")
+        self.assertNotIn('log=lambda m: sys.stderr.write("sdk-backend', src,
+                         "never the bare write: it raised out of be.drain under a dead stderr")
+        line = "drain: stopped 1 session(s), 0 in-flight turn(s) interrupted"
+        with mock.patch.object(km.sys, "stderr", DeadTty()):
+            km._backend_log(line)                    # no raise: the line is lost, the caller's result is not
+        with mock.patch.object(km.sys, "stderr", new_callable=io.StringIO) as err:
+            km._backend_log(line)
+        self.assertEqual(err.getvalue(), "sdk-backend: %s\n" % line,
+                         "with a healthy stderr the line is the one the kernel log always carried")
 
 
 class UnrequestedSignal(unittest.TestCase):

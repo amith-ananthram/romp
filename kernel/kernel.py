@@ -14707,7 +14707,8 @@ def _sdk_locked():
                 push_session=_push_session_now,   # targeted one-session push for per-session chip events (connect)
                 mcp_config=(str(_SDK_MCP) if _SDK_MCP.exists() else None),
                 append_prompt_path=(str(_SDK_PROMPT) if _SDK_PROMPT.exists() else None),
-                log=lambda m: sys.stderr.write("sdk-backend: %s\n" % m),
+                log=_backend_log,   # best-effort, through _exit_log: SdkBackend.drain logs its summary after
+                #                     its work is done, and a stderr that raises there must not carry the result away
                 reconcile=True,   # boot reconcile: reap orphaned CLIs, resume cut turns, deliver persisted queues
                 # the API-health aggregator's boot clock: this kernel's own _STARTED, which the aggregator
                 # truncates to the millisecond (the precision of every stamp in the payload) and serves as
@@ -53547,7 +53548,8 @@ _TERMINATING = [False]   # set the moment an exit path takes the lock: the watch
 
 
 def _exit_log(text):
-    """One stderr line on the exit path, best-effort. The kernel writes on the stdio bin/romp-manager
+    """One stderr line on the exit path, best-effort, and every line the SDK backend logs, for the kernel's
+    whole life (_backend_log below). The kernel writes on the stdio bin/romp-manager
     spawned it with (stdio inherit), so a supervisor closing its own stderr does not close this
     descriptor, but a reset journal stream, a closed tty or a full log disk makes the write raise, and
     nothing said here is worth skipping the drain, filing the fault as the drain's, or skipping the exit."""
@@ -53555,6 +53557,17 @@ def _exit_log(text):
         sys.stderr.write(text)
     except Exception:
         pass
+
+
+def _backend_log(m):
+    """The SDK backend's log callback (the `log=` wire in _sdk_locked): one `sdk-backend:` stderr line,
+    best-effort through _exit_log. SdkBackend.drain logs its summary AFTER every session is shut down,
+    joined and reaped, immediately before its return, so as a bare sys.stderr.write this line was the one
+    the exit path's guards did not cover: under a dead stderr it raised out of be.drain with the work done,
+    and _drain_and_exit filed an empty cutTurns row with a drainError naming the stderr fault, the misfiled
+    row those guards exist to close. The guard covers the backend's whole life, not the exit alone: no
+    backend line is worth a raise out of the path that logged it. Pinned in tests/test_restart_cuts.py."""
+    _exit_log("sdk-backend: %s\n" % m)
 
 
 def _parent_watch():
@@ -53623,8 +53636,9 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
     never names a later, anonymous cut too); empty with a `signum` means the signal reached this pid
     with no request on record, which is worth a row of its own plus a cut reason that says so
     (_unrequested_signal_reason: an empty reason used to be all restart-cuts.jsonl had for such a restart).
-    Every stderr line here goes through _exit_log, so a stderr that raises can neither skip the drain, be
-    recorded as the drain's error, nor skip the exit."""
+    Every stderr line here goes through _exit_log, and so does every line the backend logs during the drain
+    (_backend_log; its summary line follows the drain's work), so a stderr that raises can neither skip the
+    drain, be recorded as the drain's error, nor skip the exit."""
     res = {}
     err = ""
     reason_err = ""
