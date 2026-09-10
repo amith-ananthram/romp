@@ -725,9 +725,14 @@ The Python kernel (`kernel/kernel.py`) closes it.
   the cookie, and `X-Romp-Token` (CLI/hooks/daemons, read from the file). The
   token is baked into how the kernel launches (env/autostart), never a manual
   per-launch flag; a bare browser open of `/` gets a paste-the-token login page
-  (bare `romp` prints the link + opens a browser). Only the no-side-effect liveness
-  probes are exempt (`/healthz`, `/version`, `/busy`; bus `/ping`) so liveness
-  never breaks token-less monitors. `tailscale serve` traffic needs the token
+  (bare `romp` prints the link + opens a browser). Two kinds of route are exempt:
+  the no-side-effect liveness probes (`/healthz`, `/version`, `/busy`; bus
+  `/ping`) so liveness never breaks token-less monitors, and the install files
+  (`/manifest.webmanifest`, plus three icon names under `/media/`, an allowlist
+  rather than a prefix) because a browser fetches a manifest and its icons with
+  credentials omitted, so a gated manifest 403s the moment "Add to Home Screen"
+  consults it. The install files are static (a JSON literal, three PNG files)
+  and read no session state. `tailscale serve` traffic needs the token
   once per device like any browser — and funnel (public internet through the
   same proxy) must still never be enabled for this port, since the token would
   then be the only gate with no device identity in front of it.

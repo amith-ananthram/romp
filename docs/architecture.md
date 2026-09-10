@@ -64,10 +64,14 @@ only prints the line for you to add.
 
 **What it does not touch.** It installs nothing into your Python, system or
 user: the kernel and the CLI are standard library only, which is why the SDK's
-dependency gets that separate venv, built against the newest Python 3.10+ on the
-machine and rebuilt when that Python changes. It reads your Claude Code
-transcripts where they already are and never copies them. Every step has an
-opt-out; see [Install-time switches](reference.md#install-time-switches).
+dependency gets that separate venv, built on one Python 3.10+ and rebuilt by
+`bin/romp-sdk-setup` only when you move romp to another Python by setting
+`ROMP_PYTHON`, when the interpreter it was built with is gone and no other of
+its version and build remains, or when an interrupted build left it without
+pip; the kernel runs `ROMP_PYTHON` if set, else the interpreter the venv's
+`pyvenv.cfg` records. It reads your Claude Code transcripts where they already
+are and never copies them. Every step has an opt-out; see
+[Install-time switches](reference.md#install-time-switches).
 
 **Undoing it.** `romp-service uninstall` removes the login service. After that,
 deleting the clone and the `~/.claude` symlinks that point into it leaves the

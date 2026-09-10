@@ -396,6 +396,30 @@ EOF
     [ "$status" -ne 0 ]
 }
 
+@test "romp-sdk-setup: a uv-built venv (home plus version_info, no executable) is followed and kept, not rebuilt" {
+    # uv writes `version_info =` (X.Y for one of its managed interpreters, X.Y.Z for a system python) and
+    # neither `version =` nor `executable =`. Both readers in the script must take that key, and its X.Y
+    # prefix from either shape (this cfg carries the longer one): pick_python, to follow the venv's
+    # interpreter, and venv_built_for, to read the tag it was built for; with either reading nothing, the
+    # run rebuilds a venv that already matches. The venv has no lib directory on purpose: with one,
+    # venv_built_for takes the tag from lib/python3.X and this case would hold with the cfg read gone.
+    VENV="$TEST_DIR/state/sdkvenv"; mkdir -p "$VENV/bin"
+    write_stub_py "$TEST_DIR/uvhome/python3.12" 3.12          # the venv's interpreter, off PATH
+    ln -s "$TEST_DIR/uvhome/python3.12" "$VENV/bin/python"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$VENV/bin/pip"; chmod +x "$VENV/bin/pip"
+    printf 'home = %s\nimplementation = CPython\nuv = 0.8.0\nversion_info = 3.12.3\ninclude-system-site-packages = false\n' \
+        "$TEST_DIR/uvhome" > "$VENV/pyvenv.cfg"
+    write_stub_py "$STUB/python3.14" 3.14                    # a newer python, first on PATH
+
+    PATH="$(bare_path)" run "$ROMP_DIR/bin/romp-sdk-setup"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"REBUILDING"* ]]
+    [[ "$output" != *"picking the newest python"* ]]         # pick_python followed the venv
+    run grep -q "venv-build" "$CALL_LOG"                     # last, and armed (see the twin above)
+    [ "$status" -ne 0 ]
+}
+
 @test "romp-sdk-setup: ROMP_PYTHON naming a missing interpreter is refused as such, not called a too-old python" {
     # The pin the docs recommend for service.env, after an OS upgrade removed what it named. The old
     # diagnosis was "best python found is <pin> (?) but claude-agent-sdk needs >= 3.10", and its remedy
@@ -415,9 +439,10 @@ EOF
 
 # A stub python that claims one X.Y (and, with a third argument `t`, a free-threaded build): answers
 # pick_python's minor check for that X.Y only, the >= 3.10 gate, the version and tag prints and the
-# ensurepip probe, and stands in for `python -m venv` by laying down a pip and a python that read stdin
-# and exit 0, plus the tagged lib/python3.X{t} directory a real venv has, logging which python built
-# which venv.
+# ensurepip probe, and stands in for `python -m venv` by laying down a pip and a python that exit 0
+# (the python's cat reads /dev/null, never the caller's stdin: romp-codex-setup runs it once with no
+# heredoc, and a bats run from a terminal would otherwise hang there until that stdin closed), plus the
+# tagged lib/python3.X{t} directory a real venv has, logging which python built which venv.
 write_stub_py() {   # $1 path, $2 the X.Y it claims, [$3 abi suffix: t]
     mkdir -p "$(dirname "$1")"
     cat > "$1" <<EOF
@@ -426,7 +451,7 @@ if [ "\${1:-}" = "-m" ] && [ "\${2:-}" = "venv" ]; then
   echo "venv-build $2${3:-} \$3" >> "\$CALL_LOG"
   mkdir -p "\$3/bin" "\$3/lib/python$2${3:-}/site-packages"
   printf '#!/usr/bin/env bash\nexit 0\n' > "\$3/bin/pip"
-  printf '#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n' > "\$3/bin/python"
+  printf '#!/usr/bin/env bash\ncat >/dev/null </dev/null\nexit 0\n' > "\$3/bin/python"
   chmod +x "\$3/bin/pip" "\$3/bin/python"
   printf 'version = $2.0\nexecutable = $1\n' > "\$3/pyvenv.cfg"
   exit 0
