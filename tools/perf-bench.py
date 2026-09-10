@@ -189,6 +189,7 @@ directory."""
 import argparse
 import cProfile
 import gc
+import importlib.util
 import json
 import os
 import pstats
@@ -721,10 +722,19 @@ def load_kernel(repo, shadow=None):
     performs against the state copy lands in the shadow instead (the kernel writes its repo-root
     marker at import, before any guard can be installed on the module); the diversion is removed
     once the import returns, and the guards install_guards puts on the named write doors take over."""
-    from importlib.machinery import SourceFileLoader
     kpath = os.path.join(repo, "kernel", "kernel.py")
     if not os.path.isfile(kpath):
         raise BenchError("no kernel at %s" % kpath)
+    # The loader is the project's load_source (kernel/loadsource.py: a file-path import with the sys.modules
+    # semantics of SourceFileLoader.load_module(), without the deprecated call). It comes from THIS tool's
+    # checkout, not from --repo: it is stdlib glue independent of the revision under measurement, so a
+    # candidate checkout without the module is still benchable, and it is bootstrapped here rather than at
+    # module level because the tool loads no romp code at import.
+    _ls_spec = importlib.util.spec_from_file_location(
+        "romp_loadsource", os.path.join(os.path.dirname(os.path.dirname(_TOOL_FILE)), "kernel", "loadsource.py"))
+    _ls_mod = importlib.util.module_from_spec(_ls_spec)
+    _ls_spec.loader.exec_module(_ls_mod)
+    load_source = _ls_mod.load_source
     real_write_text = Path.write_text
 
     def diverted_write_text(self, data, *a, **k):
@@ -733,10 +743,12 @@ def load_kernel(repo, shadow=None):
     if shadow is not None:
         Path.write_text = diverted_write_text
     try:
-        km = SourceFileLoader("romp_kernel_perf_bench", kpath).load_module()
+        km = load_source("romp_kernel_perf_bench", kpath)
+        # a backend already loaded under this name (by the kernel's import, or earlier in this process) is
+        # reused: load_source executes a name already in sys.modules again, in place
         sbmod = sys.modules.get("romp_sdk_backend")
         if sbmod is None:
-            sbmod = SourceFileLoader("romp_sdk_backend", os.path.join(repo, "kernel", "sdk_backend.py")).load_module()
+            sbmod = load_source("romp_sdk_backend", os.path.join(repo, "kernel", "sdk_backend.py"))
     finally:
         Path.write_text = real_write_text
     for sym in ("_live_scope", "Sessions", "build_session", "build_feed", "build_timeline", "_push",

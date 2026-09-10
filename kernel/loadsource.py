@@ -22,7 +22,8 @@ An explicit SourceFileLoader is required: the bin/ names carry no `.py` suffix, 
 `spec_from_file_location` without a loader returns None for a path it cannot map to one.
 
 Loaded by path itself (`spec_from_file_location`, `module_from_spec` and `exec_module` in each
-module that needs it); tests reach it through tests/romp_load.py.
+module that needs it); tests reach it through tests/romp_load.py, and tools/perf-bench.py loads it
+from its own checkout, so a candidate checkout without this module can still be measured.
 """
 import importlib.util
 import sys
