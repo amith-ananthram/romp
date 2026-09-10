@@ -44,7 +44,7 @@ import tempfile
 import threading
 import time
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 # Hermetic state BEFORE the loads: they resolve their state root at import time, and only pytest runs
 # conftest's floor (a bare unittest or script run otherwise writes REAL state).
@@ -55,8 +55,8 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
 EXT = os.path.join(os.path.dirname(HERE), "vscode-extension")
-km = SourceFileLoader("romp_kernel_apih_hover_browser", os.path.join(BIN, "romp-kernel")).load_module()
-sb = SourceFileLoader("romp_sdk_backend_apih_hover_browser", os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py")).load_module()
+km = load_source("romp_kernel_apih_hover_browser", os.path.join(BIN, "romp-kernel"))
+sb = load_source("romp_sdk_backend_apih_hover_browser", os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py"))
 
 NOW = int(time.time())
 BOOT = NOW - 600

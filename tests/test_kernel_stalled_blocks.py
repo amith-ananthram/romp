@@ -10,7 +10,7 @@ import os
 import tempfile
 import time
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -18,7 +18,7 @@ _STATE_TMP = tempfile.mkdtemp()
 os.environ["XDG_STATE_HOME"] = _STATE_TMP
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
-kern = SourceFileLoader("romp_kernel_stalledblk", os.path.join(BIN, "romp-kernel")).load_module()
+kern = load_source("romp_kernel_stalledblk", os.path.join(BIN, "romp-kernel"))
 jd = kern.jd
 
 # A SID of this file's own: the judge module is process-shared across every kernel test copy (its

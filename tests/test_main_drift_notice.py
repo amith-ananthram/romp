@@ -8,7 +8,7 @@ import inspect
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -19,9 +19,9 @@ os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XD
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "test-token-DO-NOT-USE")
 os.environ["ROMP_MANAGER_PORT"] = "1"   # dead port: an unstubbed converge dials nothing real
-SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
-km = SourceFileLoader("romp_kernel_drift", os.path.join(BIN, "romp-kernel")).load_module()
+load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+load_source("romp_judge", os.path.join(BIN, "romp-judge"))
+km = load_source("romp_kernel_drift", os.path.join(BIN, "romp-kernel"))
 
 
 class ReleaseRemote(unittest.TestCase):

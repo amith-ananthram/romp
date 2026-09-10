@@ -15,14 +15,14 @@ import os
 import tempfile
 import time
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
 
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-pm = SourceFileLoader("romp_postal_viadedupe", os.path.join(BIN, "romp-postal-service")).load_module()
+pm = load_source("romp_postal_viadedupe", os.path.join(BIN, "romp-postal-service"))
 
 WEB_ID = "11111111-1111-1111-1111-111111111111"
 HUB_ID = "22222222-2222-2222-2222-222222222222"

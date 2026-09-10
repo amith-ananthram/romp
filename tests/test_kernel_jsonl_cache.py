@@ -19,15 +19,15 @@ import tempfile
 import threading
 import time
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
 # Hermetic state BEFORE the load — the module resolves its state root at import time.
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
-em = SourceFileLoader("romp_event_model_jsonl_cache",
-                      os.path.join(BIN, "romp-event-model")).load_module()
+em = load_source("romp_event_model_jsonl_cache",
+                      os.path.join(BIN, "romp-event-model"))
 
 
 def _write_jsonl(path, n, start=0):

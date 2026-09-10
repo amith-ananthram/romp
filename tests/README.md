@@ -4,10 +4,20 @@ Every bug fix or feature change lands with a test (repo rule). Five suites:
 
 - **`test_*.py`** (pytest) — the Python pipeline: event model, judges, kernel,
   backends, postal. They load the sources by file path through the stable
-  `bin/` names and isolate state with `XDG_STATE_HOME`. The loader is
-  `from romp_load import load_source` (`tests/romp_load.py`, which reaches
-  `kernel/loadsource.py`); the older `SourceFileLoader(...).load_module()` form
-  still loads but is deprecated, with removal documented for Python 3.15.
+  `bin/` names with `from romp_load import load_source` (`tests/romp_load.py`,
+  which reaches `kernel/loadsource.py`) and isolate state with `XDG_STATE_HOME`.
+  The older `SourceFileLoader(...).load_module()` form is deprecated, with
+  removal documented for Python 3.15: `tools/loadsource-sweep.py` rewrites a
+  module still written that way (idempotent; `--check` reports without writing),
+  and `test_state_isolation_order.py` refuses the call by file and line, naming
+  that command. Both read the AST, so the idiom inside a string handed to a
+  child process is a hand edit; so is the `sys.path` line a module needs before
+  `from romp_load import load_source` when another test executes it by file
+  path from outside this directory (`smoke_codex_live.py` carries one). Name
+  every module `test_<stem>.py`: pytest also collects `<stem>_test.py`, but
+  unittest's discovery (`test*.py`), the state-isolation check and the fixture
+  scan in `test_postal_marker_form.py` take the `test_` prefix only, and
+  `test_state_isolation_order.py` pins that.
   Golden transcript fixtures: `test_romp_events_golden.py` + `fixtures/`.
   Run: `python3 -m pytest tests/ -q` (~20s; a stalled run is a hang, not slow).
   The `_HAVE_SDK`-gated classes in `test_sdk_backend.py` (OptionsAssembly, the

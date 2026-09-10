@@ -19,7 +19,7 @@ import json
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -29,7 +29,7 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-jd = SourceFileLoader("romp_judge_audit", os.path.join(BIN, "romp-judge")).load_module()
+jd = load_source("romp_judge_audit", os.path.join(BIN, "romp-judge"))
 
 SID = "11111111-2222-3333-4444-555555555555"
 PEER = "66666666-7777-8888-9999-aaaaaaaaaaaa"

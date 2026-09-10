@@ -517,6 +517,51 @@ Run `romp-service install` again after changing one. The service unit bakes in
 whatever is set at install time, so a renumbered port that only lives in your
 shell leaves the supervised manager on the old one, and the two collide.
 
+### The kernel's Python
+
+The kernel and its Agent SDK venv (`sdkvenv` under the state directory) must
+run the same Python: the venv's compiled extensions import into the kernel
+process. The match is on the tag venv names its `lib` directory with (`3.14`,
+or `3.14t` for a free-threaded build), not on the version alone, so a
+free-threaded build's venv matches that build and no other. `bin/romp-serve`
+picks the interpreter in this order: `ROMP_PYTHON` if set, refused with one
+line when it is not an executable interpreter (a pin naming a removed path
+used to reach the exec and crash-loop the manager); otherwise the interpreter
+the venv's `pyvenv.cfg` records, if it still runs and still reports the venv's
+tag, the recorded X.Y plus the build its `lib` directory names (an upgrade
+that repoints `python3` leaves the recorded path runnable while the venv is
+stale); otherwise another interpreter of that same minor and the same build on
+`PATH` or in `~/.local/bin`, which the venv still matches, with a line saying
+so (`python3.14t` and then `python3.14` for a free-threaded venv; the build is
+read from `sys.abiflags`, not from the file name, because uv's free-threaded
+install links `python3.14` to `python3.14t`); otherwise the newest `pythonX.Y`
+on `PATH` or in `~/.local/bin`, the rule for a machine with no venv yet, with a
+line saying the venv must be rebuilt for it. So installing a newer Python does
+not change what the kernel runs at its next restart. On a machine that runs
+romp as a service, pin it anyway: `ROMP_PYTHON=/usr/bin/python3.12` in
+`service.env` makes the choice explicit and holds if the venv is deleted or
+rebuilt. Pin the versioned path, not `python3`, which an upgrade repoints.
+
+Moving romp to another Python, whether another version or the free-threaded
+build of the same one, takes four steps, and skipping any one of them leaves a
+kernel that cannot start sessions: set `ROMP_PYTHON` to the new interpreter in
+`service.env`, run `bin/romp-sdk-setup` with the same value, run the test
+suite on that interpreter, then restart the manager. The setup script compares
+the venv's record (the version `pyvenv.cfg` holds plus the tag of its
+`lib/python3.X` directory, never the venv's own `bin/python`, a symlink that
+follows a repointed base interpreter) against the new interpreter's tag,
+rebuilds on any difference and says from what to what. A kernel that does come
+up on a Python the venv was not built for logs one line naming both tags, and
+each SDK session reports the mismatch and the remedy that fits: the
+`ROMP_PYTHON` pin when the venv's recorded interpreter still runs (the kernel
+checks by running it), the rebuild when it does not. `romp new` and the
+browser's create refuse with the same verdict, read from the disk at the moment
+of the request, so a venv rebuilt while the kernel runs is reported on both
+surfaces as set up after romp started, with the restart as the remedy. The
+Codex venv (`codexvenv`, built by `bin/romp-codex-setup`) follows the same
+pick and the same rebuild check, and the kernel adds only the site-packages
+built for its own tag from it as well.
+
 ### Service environment and credentials
 
 The manager runs as a login service (launchd on macOS, systemd --user on

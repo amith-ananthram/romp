@@ -12,7 +12,7 @@ getting auto-nudged) instead of BLOCKED. Two paired fixes guarded here:
 import os
 import re
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -25,9 +25,9 @@ BIN = os.path.join(ROOT, "bin")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-jd = SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
-km = SourceFileLoader("romp_kernel_nudge", os.path.join(BIN, "romp-kernel")).load_module()
+load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+jd = load_source("romp_judge", os.path.join(BIN, "romp-judge"))
+km = load_source("romp_kernel_nudge", os.path.join(BIN, "romp-kernel"))
 
 FEED_TS = os.path.join(ROOT, "ui", "webview", "feed.ts")
 OLD_BARE_STATUS = "What is the status of the above goal?"

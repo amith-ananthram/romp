@@ -26,7 +26,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from datetime import datetime, timezone
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -35,10 +35,10 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 # conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-em = SourceFileLoader("romp_event_model_sov", os.path.join(BIN, "romp-event-model")).load_module()
-SourceFileLoader("romp_judge_sov", os.path.join(BIN, "romp-judge")).load_module()
+em = load_source("romp_event_model_sov", os.path.join(BIN, "romp-event-model"))
+load_source("romp_judge_sov", os.path.join(BIN, "romp-judge"))
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
-km = SourceFileLoader("romp_kernel_sov", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_sov", os.path.join(BIN, "romp-kernel"))
 jd = km.jd
 
 # Sids of this module's own (the goal-store fixtures rule): the override journal is per sid and shared by

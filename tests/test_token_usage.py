@@ -10,15 +10,15 @@ import pathlib
 import tempfile
 import unittest
 from datetime import datetime, timezone
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 BIN = os.path.join(os.path.dirname(__file__), "..", "bin")
 # Hermetic state BEFORE the loads — they resolve their state root at import time, and only
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-jd = SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
-km = SourceFileLoader("romp_kernel", os.path.join(BIN, "romp-kernel")).load_module()
+jd = load_source("romp_judge", os.path.join(BIN, "romp-judge"))
+km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
 
 NOW = 1781100000
 

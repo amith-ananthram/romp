@@ -46,7 +46,7 @@ import tempfile
 import threading
 import time
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -56,9 +56,9 @@ os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "test-token-DO-NOT-USE")
-SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
-km = SourceFileLoader("romp_kernel", os.path.join(BIN, "romp-kernel")).load_module()
+load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+load_source("romp_judge", os.path.join(BIN, "romp-judge"))
+km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
 
 
 def _mode(p):
@@ -582,9 +582,10 @@ class ImportRefusalIsLoud(unittest.TestCase):
         loads = [("romp_event_model", os.path.join(BIN, "romp-event-model")),
                  ("romp_judge", os.path.join(BIN, "romp-judge")),
                  ("romp_kernel", os.path.join(BIN, "romp-kernel"))]   # the same three loads as this module's own
-        code = ("from importlib.machinery import SourceFileLoader\n"
+        code = ("import sys; sys.path.insert(0, %r)\n"          # the tests dir, where romp_load lives
+                "from romp_load import load_source\n"
                 "for name, path in %r:\n"
-                "    SourceFileLoader(name, path).load_module()\n" % (loads,))
+                "    load_source(name, path)\n" % (HERE, loads))
         r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=120)
         self.assertNotEqual(r.returncode, 0, "the import refuses to start the kernel; stderr:\n%s" % r.stderr[-2000:])
         self.assertIn("did NOT replace the serve token", r.stderr, "and says so, in the loader's own words")

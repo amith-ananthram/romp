@@ -28,7 +28,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -38,7 +38,7 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-sb = SourceFileLoader("romp_sdk_backend_env", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+sb = load_source("romp_sdk_backend_env", os.path.join(BIN, "romp_sdk_backend.py"))
 
 PARENT = "11111111-2222-3333-4444-555555555555"
 CHILD = "66666666-7777-8888-9999-aaaaaaaaaaaa"
@@ -444,8 +444,8 @@ class ValidatorLockstep(unittest.TestCase):
         # the kernel imports its deps by these exact module names (the test_new_route_prefs pattern)
         for name, fn in (("romp_event_model", "romp-event-model"), ("romp_judge", "romp-judge")):
             if name not in sys.modules:
-                SourceFileLoader(name, os.path.join(BIN, fn)).load_module()
-        return SourceFileLoader("romp_kernel", os.path.join(BIN, "romp-kernel")).load_module()
+                load_source(name, os.path.join(BIN, fn))
+        return load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
 
     def test_the_two_validator_copies_agree_verdict_for_verdict(self):
         km = self._kernel()
@@ -547,7 +547,7 @@ class EnvSecretsStayPrivate(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(p2).st_mode), 0o600, "a rewrite keeps it private")
 
     def test_the_parked_chip_names_the_vars_but_never_their_values(self):
-        km = SourceFileLoader("romp_kernel", os.path.join(BIN, "romp-kernel")).load_module()
+        km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
         md = km._parked_md(("env", {"B_TOKEN": "s3cret", "A_FLAG": "1"}))
         self.assertEqual(md, "/env A_FLAG B_TOKEN", "sorted names, no values")
         self.assertNotIn("s3cret", md)

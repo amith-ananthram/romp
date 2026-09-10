@@ -15,7 +15,7 @@ import json
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -24,9 +24,9 @@ os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "test-token-DO-NOT-USE")
-SourceFileLoader("romp_event_model_ack", os.path.join(BIN, "romp-event-model")).load_module()
-SourceFileLoader("romp_judge_ack", os.path.join(BIN, "romp-judge")).load_module()
-km = SourceFileLoader("romp_kernel_ack", os.path.join(BIN, "romp-kernel")).load_module()
+load_source("romp_event_model_ack", os.path.join(BIN, "romp-event-model"))
+load_source("romp_judge_ack", os.path.join(BIN, "romp-judge"))
+km = load_source("romp_kernel_ack", os.path.join(BIN, "romp-kernel"))
 # The kernel's OWN judge module, not a second copy of it. Loading another instance here gives it a
 # different jd.STATE, so a store this test wrote would be invisible to the handler under test — which
 # passes when the file runs alone and fails inside the full suite, where module identity differs.

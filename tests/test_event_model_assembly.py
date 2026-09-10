@@ -21,7 +21,7 @@ import json
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -32,10 +32,10 @@ SCRIPTS = os.path.join(os.path.dirname(HERE), "bin")
 # it re-points XDG_STATE_HOME to its own tempdir, which our loads then inherit: still hermetic.
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
-G = SourceFileLoader("em_golden_scenarios",
-                     os.path.join(HERE, "test_event_model_golden.py")).load_module()
-emi = SourceFileLoader("em_incremental", os.path.join(SCRIPTS, "romp-event-model")).load_module()
-emr = SourceFileLoader("em_reference", os.path.join(SCRIPTS, "romp-event-model")).load_module()
+G = load_source("em_golden_scenarios",
+                     os.path.join(HERE, "test_event_model_golden.py"))
+emi = load_source("em_incremental", os.path.join(SCRIPTS, "romp-event-model"))
+emr = load_source("em_reference", os.path.join(SCRIPTS, "romp-event-model"))
 
 SID, NOW, T0 = G.SID, G.NOW, G.T0
 iso = G.iso
