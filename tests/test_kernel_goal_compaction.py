@@ -498,6 +498,75 @@ class ClearedLedgerIsAuthoritativeAcrossTheCompaction(unittest.TestCase):
         self.assertTrue(st["nodes"][g].get("cleared"), "the next load re-seals the card")
         self.assertEqual(self._user_seals(st, sid, "g15"), ["clear", "reopen", "clear"], "the re-clear is re-recorded once")
 
+    def test_a_stale_pass_save_that_collapses_the_re_clear_leaves_the_top_completed(self):
+        # the pass's copy is taken after the FIRST clear this time, and the user undoes, re-clears and undoes
+        # again before it publishes. The rebase keeps the disk rows the copy lacks by (ev_t, src, kind): the
+        # re-clear is a twin of the copy's clear and collapses, and both undo-reopens are kept, so the
+        # published log holds clear, reopen, reopen. The last gesture is an undo, so the card is live
+        # and uncleared, as it should be; but the second reopen finds no clear to restore, and _fold_node must
+        # leave the completed top completed rather than open it into Working. The replay cannot heal it:
+        # every row's word is in the log already, so nothing is re-recorded on the next load
+        sid, g = self.SEAL_SID, "%s:%s" % (self.SEAL_SID, "g16")
+        self._completed_top("g16", sid=sid)
+        with mock.patch("time.time", return_value=1_000_000.0):          # one second for all four gestures
+            km._clear_all([g])
+            stale = jd.load_goals(sid)                                  # the pass's copy: the first clear only
+            km._undo_clear()
+            km._clear_all([g])
+            km._undo_clear()
+        self.assertEqual([op for op, _ in self._seal_rows(sid, "g16")], ["clear", "unclear", "clear", "unclear"],
+                         "premise: four rows, journal order")
+        self.assertEqual(self._user_seals(stale, sid, "g16"), ["clear"], "premise: the copy holds the first clear only")
+        live = json.loads((jd.GOALDIR / (sid + ".json")).read_text())
+        self.assertFalse(live["nodes"][g].get("cleared"), "premise: the live store reads the card undone")
+        self.assertEqual(live["status"].get(g), "completed", "premise: ...and the top completed")
+        jd.save_goals(sid, stale)                                       # the pass publishes: the revision moved, so it rebases
+        raw = json.loads((jd.GOALDIR / (sid + ".json")).read_text())
+        self.assertEqual(self._user_seals(raw, sid, "g16"), ["clear", "reopen", "reopen"],
+                         "premise: the rebase collapsed the re-clear into the first clear and kept both undos")
+        self.assertFalse(raw["nodes"][g].get("cleared"), "the last gesture is an undo: the card is live")
+        self.assertEqual(raw["status"].get(g), "completed",
+                         "the second undo has nothing to restore and leaves the completed top completed")
+        jd._shared_clear()
+        st = jd.load_goals(sid)
+        self.assertFalse(st["nodes"][g].get("cleared"))
+        self.assertEqual(st["status"].get(g), "completed", "the next load reads it completed too")
+        self.assertEqual(self._user_seals(st, sid, "g16"), ["clear", "reopen", "reopen"],
+                         "the replay re-records nothing: every row's word is in the log")
+        jd.save_goals(sid, st)
+        jd._shared_clear()
+        again = jd.load_goals(sid)
+        self.assertEqual(again["status"].get(g), "completed")
+        self.assertEqual(self._user_seals(again, sid, "g16"), ["clear", "reopen", "reopen"],
+                         "a further save and load add no row")
+
+    def test_an_undo_over_a_snapshot_taken_before_its_clear_leaves_the_top_completed(self):
+        # a clear and its undo a second apart, both lost to a pass save from a snapshot taken before either.
+        # The journal's last word is the undo, so the clear row never replays; the unclear row re-records its
+        # reopen, which then stands with no clear before it. Nothing to restore: the completed top must stay
+        # completed and uncleared, not come back Working
+        sid, g = self.SEAL_SID, "%s:%s" % (self.SEAL_SID, "g17")
+        self._completed_top("g17", sid=sid)
+        snapshot = json.loads((jd.GOALDIR / (sid + ".json")).read_text())
+        with mock.patch("time.time", return_value=1_000_000.0):
+            km._clear_all([g])
+        with mock.patch("time.time", return_value=1_000_001.0):
+            km._undo_clear()
+        self.assertEqual(self._seal_rows(sid, "g17"), [("clear", 1_000_000), ("unclear", 1_000_001)])
+        self.assertEqual(self._user_seals(snapshot, sid, "g17"), [], "premise: the snapshot predates both gestures")
+        self.assertEqual(snapshot["status"].get(g), "completed", "premise: a completed top")
+        self._clobber_with(snapshot, sid=sid)
+        st = jd.load_goals(sid)
+        self.assertFalse(st["nodes"][g].get("cleared"), "the last row, an undo, wins")
+        self.assertEqual(self._user_seals(st, sid, "g17"), ["reopen"],
+                         "the clear never replays; the undo's reopen is re-recorded on its own")
+        self.assertEqual(st["status"].get(g), "completed", "the card comes back to Completed, not Working")
+        jd.save_goals(sid, st)
+        jd._shared_clear()
+        again = jd.load_goals(sid)
+        self.assertEqual(again["status"].get(g), "completed")
+        self.assertEqual(self._user_seals(again, sid, "g17"), ["reopen"], "a further save and load add no row")
+
     def test_the_feed_payload_carries_the_ledgers_foreign_ids_for_the_merged_board(self):
         # the viewer's ledger over remote rows (review find, 2026-09-09): ids the local ledger clears whose
         # session has no store and no archive here ride the payload, bare, for the client merge to apply

@@ -9090,7 +9090,8 @@ def _fold_node(nd):
     #                                       verdict: "that reply wasn't about this goal") restores it
     clear_snap = None                     # symmetric snapshot at `clear`: an undo-reopen restores the state
     #                                       the cross-off displaced (a cleared COMPLETED card comes back
-    #                                       completed, never "open"), instead of blindly opening
+    #                                       completed, never "open"), instead of blindly opening; an undo
+    #                                       with nothing to restore leaves the state as it stands
     for e in sorted(nd.get("log") or [], key=lambda e: (e.get("ev_t") or 0, e.get("at") or 0)):
         src, kind, t = e.get("src"), e.get("kind"), e.get("ev_t") or 0
         if kind == "reopen":
@@ -9105,9 +9106,17 @@ def _fold_node(nd):
                 # assert's own `t >= floor` equality-lands rule below: within one turn the reopen is the
                 # trigger, the wait is how the turn ENDED.
                 awaiting_why = awaiting_at = awaiting_kind = awaiting_peers = None
-            if e.get("undo") and clear_snap is not None:
-                state, cur_settle, prev_settle = clear_snap      # restore what the cross-off displaced
-                clear_snap = None
+            if e.get("undo"):
+                if clear_snap is not None:
+                    state, cur_settle, prev_settle = clear_snap  # restore what the cross-off displaced
+                    clear_snap = None
+                # An undo-reopen with NO clear before it has nothing to restore and is a state no-op: it
+                # asserts nothing about doneness, so a completed top stays done and its settle stands. Two
+                # shapes reach here (2026-09-10): a second undo row for one clear, when a same-second re-clear
+                # collapsed into the first clear as a rebase twin while both undo-reopens were kept; and an
+                # undo whose clear never landed, when a clear and its undo were both lost to a pass save and
+                # only the undo replays (the journal's last word). Both used to fall through to "open" like a
+                # plain reopen, and the completed top came back Working. The user's floor still advances.
                 if src == "user":
                     floor = max(floor, t)
                 continue
@@ -9116,8 +9125,7 @@ def _fold_node(nd):
             state = "open"
             if src == "user":
                 floor = max(floor, t)
-                if not e.get("undo"):     # an undo-clear restores; it asserts nothing about doneness
-                    held = True
+                held = True               # a user's plain reopen; an undo-clear left the loop body above
             if e.get("msg"):
                 pending = True
             if cur_settle is not None:    # this reopen ends a settled episode → its settle becomes the
