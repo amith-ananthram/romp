@@ -102,6 +102,7 @@ function liftChat(over: Partial<ChatHooks> = {}): { H: ChatHooks; api: ChatApi }
     window.parent = H.framed ? { postMessage: (m, origin) => { H.up.push([m, origin]); } } : window;
     const settings = H.settings;
     let panesOn = H.panes;
+    let panesAvail = H.avail || {};   // the Files control's setting as the shell last told it (T317); absent = available
     let activeId = H.activeId;
     const sessions = new Map([[${JSON.stringify(SID)}, { id: ${JSON.stringify(SID)}, name: "web", color: ${JSON.stringify(COLOR)} }]]);
     const tabMeta = new Map([[${JSON.stringify(SID_TAB)}, { name: "api", color: null }]]);
@@ -109,7 +110,7 @@ function liftChat(over: Partial<ChatHooks> = {}): { H: ChatHooks; api: ChatApi }
     const openFileBrowse = (p, sid) => { H.here.push([p, sid]); };
     const initFileBrowse = (poster, host) => { H.poster = poster; H.host = host; };
   `;
-  const epilogue = "return { openBrowse, browseRouteNow, setPanes: (on) => { panesOn = on; } };";
+  const epilogue = "return { openBrowse, browseRouteNow, setPanes: (on) => { panesOn = on; }, setAvail: (a) => { panesAvail = a; } };";
   const api = (new Function("HOOKS", "browseRoute", prelude + code + epilogue) as (h: ChatHooks, r: typeof browseRoute) => ChatApi)(H, browseRoute);
   return { H, api };
 }

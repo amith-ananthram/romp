@@ -2459,7 +2459,24 @@ def _segment_id(rompuuid, seg_t, atoms, trigger_uuid):
     Text-BEARING segments keep the content hash: it is drift-invariant across the SDK optimistic echo
     (send time) and the real transcript atom (process time), which share text but NOT uuid — so an
     atom-uuid key there would MISS its own echo. Hash the content, or — only when there is none — the
-    anchor atom's identity."""
+    anchor atom's identity.
+
+    A segment opened by a MACHINE-WRITTEN trigger is keyed by its anchor atom's uuid too (T318, 2026-09-10):
+    anything romp injected itself (the romp-injected marker: a kernel restart or crash notice, an auto-nudge,
+    the retry message, the compaction suggestion, a Nudge-button follow-up), the CLI's own stop record
+    ('[Request interrupted by user…]', is_interrupt_record), and a SCHEDULED task's fired prompt (origin
+    subkind scheduled-trigger, or its preamble on an unstamped record: the CLI fires the stored prompt
+    verbatim every interval, with no time or task id interpolated). Most of these are worded identically every time,
+    so a content hash gave every such segment in a session the same hash and the timestamp-invariant _seg_key
+    aliased them all (one session held 19 restart-notice segments and 25 stop records under three keys): a
+    card whose recorded segments held one such segment resolved to whichever the parse saw last, and its
+    summary click landed hours away from the work it described. Keying them by uuid is safe on the echo
+    axis for a different reason than for typed prompts: every recorded key (a placement, a trail, a seam, a
+    caption) is written by the judge from the TRANSCRIPT parse and the kernel only looks up, and a romp
+    send's optimistic echo is hidden the moment its record lands, so the echo-time id and the landed id
+    never coexist in anything recorded. A follow-up the USER typed into a card carries no romp-injected
+    marker (only the Nudge button's does) and keeps its content hash, since its echo and its record must
+    share a key while both are on screen."""
     text = ""
     anchor = None
     if trigger_uuid:
@@ -2470,7 +2487,12 @@ def _segment_id(rompuuid, seg_t, atoms, trigger_uuid):
     if not text and atoms:
         anchor = anchor or atoms[0]
         text = _text_of(_content(atoms[0].get("message")))
-    basis = text or (anchor or {}).get("uuid") \
+    origin = (anchor or {}).get("origin")
+    machine_written = bool(text) and bool(
+        ROMP_INJECT_RE.search(text) or SCHEDULED_PREAMBLE_RE.match(text)
+        or (isinstance(origin, dict) and origin.get("kind") == "task-notification" and origin.get("subkind") == "scheduled-trigger")
+        or (anchor is not None and is_interrupt_record(anchor)))
+    basis = (text if not machine_written else "") or (anchor or {}).get("uuid") \
         or next((a.get("uuid") for a in atoms if a.get("uuid")), "")   # first uuid-bearing atom if the anchor has none
     h = hashlib.sha1(basis.encode("utf-8", "replace")).hexdigest()[:8]
     return "%s:%d:%s" % (rompuuid, seg_t, h)
