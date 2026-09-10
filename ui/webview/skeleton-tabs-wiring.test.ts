@@ -44,7 +44,7 @@ test("the tabOrder frame applies the skeleton list BEFORE applyTabOrder, so its 
   assert.match(note, /const changed = applyTabOrderSkeleton\(skeletonTabs, m\.skeleton, kernelOrder\);/);
   // one client-diag row per reconnect that produced a set: armed by the socket opening, spent by the first strip
   assert.match(note, /if \(skeletonDiagArmed && Array\.isArray\(m\.skeleton\) && skeletonTabs\.ids\.size\) \{\s*\n\s*skeletonDiagArmed = false;\s*\n\s*vscodeApi\?\.postMessage\(\{ type: "clientDiag", surface: "chat", what: "skeleton", data: \{ n: skeletonTabs\.ids\.size, active: activeId \} \}\);/);
-  assert.match(RENDER, /else if \(m\.type === "wsup"\) \{ onSocketUp\(skeletonTabs\); skeletonDiagArmed = true; \}/,
+  assert.match(RENDER, /else if \(m\.type === "wsup"\) \{ onSocketUp\(skeletonTabs\); skeletonDiagArmed = true; reholdQueuedEditors\(\); \}/,
     "a new socket forgets which fulls the dead one delivered and re-arms the row");
   // the tab we are ON became a skeleton (a click in the redial gap, a stale active hint) → re-show, keyed on change
   assert.match(note, /if \(changed && activeId && skeletonTabs\.ids\.has\(activeId\)\) showActive\(\);/);
