@@ -1,7 +1,9 @@
 #!/usr/bin/env bats
 
-# tests/git-hermetic.bash: after git_hermetic, git reads no global or system config and every
-# commit has an identity, whatever the box is configured with.
+# tests/git-hermetic.bash: after git_hermetic, git reads none of the developer's global or system
+# config, every commit has an identity, whatever the machine is configured with, and neither a
+# commit nor a push's receive-pack runs the background maintenance that could still be writing
+# under .git when a teardown removes the repo.
 #
 # Skips on git < 2.32 with the same message as tests/test_tempdir_hygiene.GitFloor: GIT_CONFIG_GLOBAL
 # and GIT_CONFIG_SYSTEM arrived in 2.32, so on an older git the config half of the floor is inert
@@ -28,7 +30,7 @@ setup() {
     chmod +x "$TEST_DIR/hooks/pre-commit"
     printf '[core]\n\thooksPath = %s\n[user]\n\tname = Global Person\n\temail = global@example.invalid\n' \
         "$TEST_DIR/hooks" > "$HOME/.gitconfig"
-    unset GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM XDG_CONFIG_HOME
+    unset GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT XDG_CONFIG_HOME
     unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
     REPO="$TEST_DIR/repo"
     git init -q "$REPO"
@@ -84,4 +86,64 @@ teardown() { rm -rf "${TEST_DIR:-}"; }
     # particular author exports its own GIT_AUTHOR_* / GIT_COMMITTER_* after git_hermetic.
     GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@e.invalid git -C "$REPO" commit -qm seed
     [ "$(git -C "$REPO" log -1 --format='%an <%ae>')" = "t <t@e.invalid>" ]
+}
+
+@test "with git_hermetic the no-background keys read back from the environment and the floor's global file, not from the repo" {
+    # The deterministic pin. Each key is configuration twice: from the floor's global config file
+    # (the `global` scope) and from the GIT_CONFIG_COUNT pairs (the `command` scope, the label -c
+    # reports too; -c itself still outranks them), and never from the repo's own config. Before the
+    # floor carried them, each --get exited 1 with nothing printed.
+    git_hermetic
+    local kv
+    for kv in maintenance.auto=false maintenance.autoDetach=false gc.auto=0 gc.autoDetach=false core.fsmonitor=false; do
+        [ "$(git -C "$REPO" config --show-scope --get-all "${kv%%=*}")" = "$(printf 'global\t%s\ncommand\t%s' "${kv#*=}" "${kv#*=}")" ]
+    done
+    [ "$GIT_CONFIG_COUNT" = 5 ]                                                    # these five pairs and no other
+    [ "$(git config --file "$GIT_CONFIG_GLOBAL" --list | wc -l | tr -d ' ')" = 5 ]   # and the file carries the same five
+    run git -C "$REPO" config --local --get maintenance.auto
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    # Precedence: the pairs beat a value the repo's own config sets, and a test's -c beats the pairs.
+    git -C "$REPO" config maintenance.auto true
+    [ "$(git -C "$REPO" config --get maintenance.auto)" = "false" ]
+    [ "$(git -C "$REPO" -c maintenance.auto=true config --get maintenance.auto)" = "true" ]
+}
+
+@test "with git_hermetic a commit spawns no maintenance or gc child" {
+    # A smoke check on the git running the suite, read off git's own trace the way
+    # tests/test_git_fixture.py reads it (the same substrings: a bare `maintenance` also catches
+    # the --detach argument recent git appends); the config pin above is the deterministic half.
+    # Without the keys, `git commit` spawns `git maintenance run --auto`, the child that can still
+    # be writing under .git when a teardown's rm -rf runs.
+    git_hermetic
+    GIT_TRACE="$TEST_DIR/trace" git -C "$REPO" commit -qm seed
+    [ -s "$TEST_DIR/trace" ]
+    grep -q 'built-in: git commit' "$TEST_DIR/trace"
+    run grep 'maintenance' "$TEST_DIR/trace"
+    [ "$status" -ne 0 ]
+    run grep 'run_command: git gc' "$TEST_DIR/trace"
+    [ "$status" -ne 0 ]
+}
+
+@test "with git_hermetic a push's receive-pack reads the no-background keys in the receiving repository" {
+    # A push over a local path starts receive-pack with GIT_CONFIG_COUNT stripped, so the pairs
+    # alone would leave the receiving side to its own auto gc or maintenance in a repo the teardown
+    # removes; the floor's global config file is what reaches it. Read from inside receive-pack's
+    # environment through --receive-pack: a stand-in records two keys as it sees them, untraced, and
+    # then runs the real receive-pack. Before the floor wrote the file, both reads exited 1 with
+    # nothing printed. The trace check is the smoke half: a git whose receive-pack spawns
+    # `gc --auto` directly rather than through maintenance shows that child either way, and
+    # gc.auto=0 has it exit without work.
+    git_hermetic
+    git -C "$REPO" commit -qm seed
+    git init -q --bare "$TEST_DIR/remote.git"
+    printf '#!/bin/sh\n{ GIT_TRACE=0 git -C "$1" config --get maintenance.auto; GIT_TRACE=0 git -C "$1" config --get gc.auto; } > "%s" 2>&1\nexec git receive-pack "$@"\n' \
+        "$TEST_DIR/remote-saw" > "$TEST_DIR/receive-pack"
+    chmod +x "$TEST_DIR/receive-pack"
+    GIT_TRACE="$TEST_DIR/trace" git -C "$REPO" push -q --receive-pack="$TEST_DIR/receive-pack" "$TEST_DIR/remote.git" HEAD:refs/heads/main
+    [ "$(git -C "$TEST_DIR/remote.git" rev-parse refs/heads/main)" = "$(git -C "$REPO" rev-parse HEAD)" ]
+    [ "$(cat "$TEST_DIR/remote-saw")" = "$(printf 'false\n0')" ]
+    grep -q 'built-in: git receive-pack' "$TEST_DIR/trace"
+    run grep 'maintenance' "$TEST_DIR/trace"
+    [ "$status" -ne 0 ]
 }

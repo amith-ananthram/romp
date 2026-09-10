@@ -155,5 +155,70 @@ class DrainLease(unittest.TestCase):
                       "the manager's PARKED poll is the lease's refresher")
 
 
+class GoingDownHold(unittest.TestCase):
+    """`romp down`'s quiesce rides the same lease: quiesce(ttl) extends the hold to cover the wait plus
+    the stop that follows and flags the create doors closed (quiescing); a deploy poll landing inside it
+    must never SHORTEN it; the cancel releases and wakes; and it stays a lease: no stop, and the kernel
+    carries on by itself."""
+
+    def test_a_fresh_backend_is_not_quiescing(self):
+        self.assertFalse(_backend().quiescing())
+        self.assertEqual(_backend().inflight_names(), [])
+
+    def test_quiesce_arms_both_the_turn_hold_and_the_create_gate_for_the_ttl(self):
+        be = _backend()
+        be.quiesce(0.3)
+        self.assertTrue(be.drain_holding(), "new turn starts hold: the same gate inputs() consults")
+        self.assertTrue(be.quiescing(), "and the create doors read closed")
+        time.sleep(0.45)
+        self.assertFalse(be.quiescing(), "a lease, not a latch: with no stop the kernel carries on")
+        self.assertFalse(be.drain_holding())
+
+    def test_a_deploy_poll_inside_a_quiesce_never_shortens_the_hold(self):
+        be = _backend()
+        be.DRAIN_HOLD_TTL = 0.1
+        be.quiesce(5)
+        be.refresh_drain_hold()
+        try:
+            self.assertGreater(be._drain_hold_until, time.time() + 4,
+                               "the 12s lease refresh extends a hold, it never cuts a longer one back")
+        finally:
+            be._drain_wake_timer.cancel()
+
+    def test_a_deploy_poll_inside_a_quiesce_does_not_ring_a_stale_clock(self):
+        # refresh_drain_hold's "still parked" escalation clocks from _drain_hold_since; a quiesce that
+        # opened the episode must start that clock, or the first deploy poll inside it reads a 0.0
+        # stamp as a hold minutes old and rings the problems ring for nothing
+        logs = []
+        be = sb.SdkBackend(tempfile.mkdtemp(), "/bin/true", lambda *a, **k: None, log=logs.append)
+        be.quiesce(5)
+        be.refresh_drain_hold()
+        try:
+            self.assertFalse(any("still parked" in str(l) for l in logs), logs)
+        finally:
+            be._drain_wake_timer.cancel()
+
+    def test_cancel_releases_at_once_and_wakes_the_held_inputs(self):
+        be = _backend()
+        woken = []
+        be._wake_all_inputs = lambda: woken.append(1)
+        be.quiesce(30)
+        be.cancel_quiesce()
+        self.assertFalse(be.quiescing())
+        self.assertFalse(be.drain_holding())
+        self.assertTrue(woken, "held fresh turns start now, not at the lapsed lease's timer")
+
+    def test_arming_and_canceling_are_visible(self):
+        logs = []
+        be = sb.SdkBackend(tempfile.mkdtemp(), "/bin/true", lambda *a, **k: None, log=logs.append)
+        be.quiesce(3)
+        self.assertTrue(any("going down" in str(l) for l in logs), logs)
+        be.cancel_quiesce()
+        self.assertTrue(any("canceled" in str(l) for l in logs), logs)
+        n = len(logs)
+        be.cancel_quiesce()
+        self.assertEqual(len(logs), n, "a cancel with nothing to cancel says nothing")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -41,7 +41,7 @@ test("the swirl LOGO is on EVERY romp bubble, next to the 'romp' tag (the user 2
 test("a postal notice wears the peer's envelope glyph; the swirl is romp's OWN source glyph (2026-09-08)", () => {
   // the notice-vocabulary pass: one glyph per SOURCE — a peer's mail is from the peer (envelope + its session chip),
   // a romp notice is from romp (the swirl, the one non-stroke glyph)
-  assert.match(RENDER, /notice\(\{ src, glyph: "peer", gist: summaryText, meta: meta\.join\(" · "\) \|\| undefined, body, open: owed,/);
+  assert.match(RENDER, /notice\(\{ src, glyph: "peer", gist: summaryText, meta, body, open: owed,/);   // T302: the meta is the kind's coloured text element
   assert.match(RENDER, /if \(kind === "romp"\) \{\s*\n\s*const logo = el\("img"\) as HTMLImageElement;\s*\n\s*logo\.src = mediaSrc\("romp-swirl-glyph\.svg"\)/);
   assert.doesNotMatch(CSS, /\.postal-service-romp-logo/);
 });

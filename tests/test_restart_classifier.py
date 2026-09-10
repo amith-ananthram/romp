@@ -204,17 +204,19 @@ class RealDiffShapes(unittest.TestCase):
         # Pinned at the source and by behaviour: git's own trace names every child it runs, and a commit
         # through the helper spawns none.
         for k, v in GIT_NO_BACKGROUND.items():
-            self.assertEqual(_git(self.repo, "config", "--local", "--get", k), v, "the repo's config carries " + k)
+            # --default: a missing key reaches this assertion and its message, not the runner's exit check
+            self.assertEqual(_git(self.repo, "config", "--local", "--get", "--default", "", k), v, "the repo's config carries " + k)
             self.assertIn("%s=%s" % (k, v), GIT_C, "…and so does every runner invocation")
         self._reset()
         (self.repo / "docs/a.md").write_text("# docs, traced\n")
         with tempfile.NamedTemporaryFile("r", suffix=".log") as trace:
             env = dict(os.environ, GIT_TRACE=trace.name)
             _git(self.repo, "add", "-A", env=env)
-            _git(self.repo, "commit", "-qm", "traced", env=env)
+            _git(self.repo, "commit", "-qm", "maintenance-traced", env=env)
             t = trace.read()
         self.assertIn("built-in: git commit", t, "the trace is on")
-        self.assertNotIn("maintenance", t, "no auto-maintenance child is spawned:\n" + t)
+        self.assertIn("maintenance-traced", t, "the trace names the commit's argv: the pin below cannot be a bare substring")
+        self.assertNotIn("run_command: git maintenance", t, "no auto-maintenance child is spawned:\n" + t)
         self.assertNotIn("run_command: git gc", t, "no gc child is spawned")
 
     def test_unknown_shas_and_git_failure_restart(self):

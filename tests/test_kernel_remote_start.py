@@ -169,6 +169,91 @@ class StartRemote(unittest.TestCase):
                          "Start on %s failed unexpectedly (RuntimeError): %s" % (HOST, "x" * 160))
 
 
+class StartRemoteKernelRespectsRompDown(unittest.TestCase):
+    """The bare boot (`nohup romp-serve` over ssh: attach's bootstrap and the popover's Start after an
+    up-to-date update) is the last door that could put a kernel on a host stopped by `romp down`: it
+    would serve under a marker that says down, owned by no manager. The remote script checks the
+    marker right before the boot and answers DOWN; the caller fails loudly and names `romp up` on
+    that host."""
+
+    def setUp(self):
+        self._run = km.subprocess.run
+
+    def tearDown(self):
+        km.subprocess.run = self._run
+
+    def _ssh(self, out):
+        seen = []
+        def fake(argv, **kw):
+            seen.append(argv)
+            class R: stdout, stderr, returncode = out, "", 0
+            return R()
+        km.subprocess.run = fake
+        return seen
+
+    def test_a_marker_on_the_host_means_no_boot_and_a_named_way_out(self):
+        seen = self._ssh("DOWN")
+        started, detail = km._start_remote_kernel(HOST)
+        self.assertFalse(started)
+        self.assertEqual(detail, "romp is stopped on TESTHOST by romp down; not starting it (romp up there starts it)")
+        cmd = seen[0][-1]
+        marker = 'if [ -f "$LOGDIR/down-by-romp" ]; then echo DOWN; exit 0; fi'
+        self.assertIn(marker, cmd)
+        self.assertLess(cmd.index('LOGDIR="${ROMP_STATE_DIR:-'), cmd.index(marker), "the state root is resolved first")
+        self.assertLess(cmd.index(marker), cmd.index('nohup "$S"'), "the check sits right before the boot")
+
+    def test_a_host_with_no_marker_boots_as_before(self):
+        self._ssh("STARTED:/home/u/romp/bin/romp-serve")
+        started, detail = km._start_remote_kernel(HOST)
+        self.assertTrue(started)
+        self.assertEqual(detail, "/home/u/romp/bin/romp-serve")
+
+    def test_the_popover_start_surfaces_the_stop_instead_of_booting_bare(self):
+        # `_start_remote` on an up-to-date host falls through to the bare boot; with the marker there
+        # the click ends in a loud, specific failure rather than an unsupervised kernel
+        saved = (km._update_remote, km._remote_kernel_up, km._start_remote_kernel, km._remotes)
+        km._remotes = {HOST: {"host": HOST, "kernel_port": 29855, "local_port": 8801, "token": "t",
+                              "proc": None, "status": "no-kernel", "detail": "", "sids": []}}
+        km._update_remote = lambda h: (True, "already up to date (abc1234)")
+        km._remote_kernel_up = lambda h, p: False
+        km._start_remote_kernel = lambda h: (False, "romp is stopped on %s by romp down; not starting it (romp up there starts it)" % h)
+        try:
+            ok, detail = km._start_remote(HOST)
+            self.assertFalse(ok)
+            self.assertIn("stopped on TESTHOST by romp down", detail)
+            self.assertEqual(km._remotes[HOST]["status"], "no-kernel")
+            self.assertEqual(km._remotes[HOST]["detail"], detail, "the row carries the reason for the popover")
+        finally:
+            km._update_remote, km._remote_kernel_up, km._start_remote_kernel, km._remotes = saved
+
+    def test_an_attach_that_fetched_a_token_still_carries_the_reason(self):
+        # a host attached before it was stopped still has its serve-token file, so the attach's
+        # fetch returns one; the bootstrap then asks for the boot and is refused. The reason must
+        # ride the row whenever the boot was declined, not only on the no-token path, so the
+        # popover shows the stop and the way out instead of the generic no-kernel hint.
+        class _Proc:
+            pid = 4242
+            def poll(self):
+                return None
+        saved = (km._fetch_remote_token, km._remote_kernel_up, km._start_remote_kernel, km._spawn_tunnel,
+                 km._known_note, km._remotes_save, km._remotes)
+        km._remotes = {}
+        km._fetch_remote_token = lambda h: "tok-cached"
+        km._remote_kernel_up = lambda h, p: False
+        km._start_remote_kernel = lambda h: (False, "romp is stopped on %s by romp down; not starting it (romp up there starts it)" % h)
+        km._spawn_tunnel = lambda r: r.update(proc=_Proc(), status="starting", detail="")
+        km._known_note = lambda *a, **k: None
+        km._remotes_save = lambda: None
+        try:
+            pub = km.attach_remote(HOST)
+            self.assertEqual(pub["detail"], "romp is stopped on TESTHOST by romp down; not starting it (romp up there starts it)")
+            self.assertEqual(km._remotes[HOST]["detail"], pub["detail"], "the row carries the reason for the popover")
+            self.assertEqual(km._remotes[HOST]["token"], "tok-cached", "the token is kept and the tunnel dials as before")
+        finally:
+            (km._fetch_remote_token, km._remote_kernel_up, km._start_remote_kernel, km._spawn_tunnel,
+             km._known_note, km._remotes_save, km._remotes) = saved
+
+
 class SupervisorRespectsBoot(unittest.TestCase):
     def test_supervisor_defers_to_an_in_flight_start(self):
         # the poll still sees no-kernel until the boot lands; without the `booting` guard the row

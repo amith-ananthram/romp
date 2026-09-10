@@ -79,8 +79,8 @@ test("render.ts builds the postal card's head through postalHead and the shared 
 
 test("the head's meta never shrinks to a letter, and a head-only postal line wraps instead of truncating", () => {
   const CSS = read("ui", "webview", "styles.css");
-  assert.match(CSS, /\.turn-postal-service \.notice-head \{ container-type: inline-size; \}\n\.turn-postal-service \.notice-meta \{ flex: 0 0 auto; \}\n@container \(max-width: 360px\) \{\n  \.turn-postal-service \.notice-meta \{ flex: 0 1 auto; min-width: min\(100%, 6ch\); \}\n\}/,
-               "the postal meta is rigid, and on a phone-width head (under 360px) it yields to a floor of its own inside the card");
+  assert.match(CSS, /\.turn-postal-service \.notice-head \{ container-type: inline-size; \}\n\.turn-postal-service \.notice-meta \{ flex: 0 0 auto; \}\n@container \(max-width: 360px\) \{\n  \.turn-postal-service \.notice-gist \{ min-width: min\(100%, 4ch\); \}\n\}/,
+               "the head is the size container and the postal meta is rigid at every width; under 360px the GIST yields to a smaller floor, never the kind word (T302)");
   // scoped to the postal card: every other notice head's meta still yields (an API-error meta is a sentence, a compact
   // group head's meta is a whole gist, and both sit beside actions that must stay on the pane)
   assert.match(CSS, /\n\.notice-meta \{ flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;/);
@@ -95,8 +95,8 @@ test("the head's meta never shrinks to a letter, and a head-only postal line wra
   // phone-width pane
   assert.match(CSS, /\n\.notice-gist \{ flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;/);
   assert.match(CSS, /\n\.notice-head\[data-gkey\] \.notice-gist, \.turn-postal-service \.notice-gist \{ min-width: min\(100%, 10ch\); \}/);
-  assert.match(CSS, /\.turn-postal-service \.notice-slim \.notice-gist \{ white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; \}/,
+  assert.match(CSS, /\.turn-postal-service \.notice:not\(\.notice-collapsible\) \.notice-gist \{ white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; \}/,
                "a bare link (no space to break at) wraps too instead of running off the head");
   // the wrapped head keeps its glyph on the first line: a centred glyph sank to the middle of a three-line block
-  assert.match(CSS, /\.turn-postal-service \.notice-slim \.notice-glyph \{ align-self: flex-start; margin-top: 4px; \}/);
+  assert.match(CSS, /\.turn-postal-service \.notice:not\(\.notice-collapsible\) \.notice-glyph \{ align-self: flex-start; margin-top: 4px; \}/);   // keyed on the fold since T302 (a boxed incoming one-liner wraps too)
 });

@@ -11,9 +11,11 @@ pane content can ("esc to interrupt" = genuinely busy; idle composer ❯ = heal)
 Run:  python3 tests/test_romp_idle_dots.py
 """
 import os
+import subprocess
 import sys
 import unittest
 from romp_load import load_source
+from unittest import mock
 import tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -105,6 +107,35 @@ class TestCompactPct(unittest.TestCase):
         first ~50% (the user). Guards against regressing INTERVAL back up."""
         self.assertLessEqual(dots.INTERVAL, 10, "sweep cadence must catch a compaction's start")
         self.assertLessEqual(dots.COMPACT_INTERVAL, dots.INTERVAL, "fast-poll while compacting")
+
+
+class TestSweepReturnShape(unittest.TestCase):
+    """sweep() returns the pair `(alive, compacting)` on EVERY path, the except arm included.
+
+    The daemon loop unpacks that pair (`alive, compacting = sweep()`). When `tmux list-sessions`
+    stalls past its 5 s timeout on a loaded box (subprocess.TimeoutExpired), or subprocess.run
+    raises for any other reason, the except arm used to return a bare True from the older
+    truthy-loop shape: the unpack raised TypeError, daemon() exited, its finally unlinked the pid
+    file, and the detached daemon (stderr on /dev/null) died silently until the next --ensure:
+    no idle dot faded, no Esc-stranded working state healed, no compaction percentage published.
+    These unpack exactly as the daemon does, so a bare bool fails here the way it failed there."""
+
+    def _sweep_with_run_raising(self, exc):
+        with mock.patch.object(dots.subprocess, "run", side_effect=exc) as run:
+            alive, compacting = dots.sweep()          # daemon()'s own unpack
+        self.assertEqual(run.call_count, 1, "the hiccup ends the sweep at list-sessions")
+        return alive, compacting
+
+    def test_list_sessions_timeout_keeps_the_daemon_alive_at_normal_cadence(self):
+        alive, compacting = self._sweep_with_run_raising(
+            subprocess.TimeoutExpired(cmd="tmux", timeout=5))
+        self.assertIs(alive, True)
+        self.assertIs(compacting, False)
+
+    def test_any_spawn_failure_keeps_the_daemon_alive_at_normal_cadence(self):
+        alive, compacting = self._sweep_with_run_raising(FileNotFoundError("tmux"))
+        self.assertIs(alive, True)
+        self.assertIs(compacting, False)
 
 
 if __name__ == "__main__":
