@@ -18,7 +18,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { followReader, landSpot, keepPlaceAcrossShow, reshowStick, type KeepView } from "./scroll-keep";
+import { followReader, landSpot, keepPlaceAcrossShow, reshowStick, atBottomDist, followTailShrink, followBoxBelow, type KeepView } from "./scroll-keep";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 
@@ -69,7 +69,7 @@ test("render.ts: the reshow decision counts a live durable seek for the tab as n
   const ra = RENDER.match(/^function rerenderAll\(\): void \{([\s\S]*?)\n\}/m);
   assert.ok(ra, "rerenderAll");
   const body = ra![1];
-  const cap = body.indexOf("captureScrollAnchor(content, av)");
+  const cap = body.indexOf("captureScrollAnchor(content!, av!)");
   const clear = body.indexOf("v.el.removeChild(v.el.firstChild)");
   const show = body.indexOf("showActive(keep);");
   assert.ok(cap >= 0 && clear >= 0 && show >= 0, "capture, clear and show are all there");
@@ -117,7 +117,54 @@ test("reshowStick only ever turns following ON: off the bottom the recorded flag
 });
 
 test("render.ts: showActive re-derives follow mode from the true bottom at the re-show decision, before the rebuild", () => {
-  assert.match(RENDER, /const reshow = keepPlaceAcrossShow\(v, v\.el\.style\.display !== "none", content\.clientHeight > 0, navigating\);\n(?:\s*\/\/[^\n]*\n)*\s*if \(reshow\) v\.stick = reshowStick\(v\.stick, atBottom\(content\)\);\n\s*const keepAnchor = reshow \?/,
-    "the flag is re-derived between the reshow decision and the keep-anchor capture (which reads the same true bottom)");
+  assert.match(RENDER, /const reshow = keepPlaceAcrossShow\(v, v\.el\.style\.display !== "none", content\.clientHeight > 0, navigating\);\n(?:\s*\/\/[^\n]*\n)*\s*if \(reshow && keep === undefined\) v\.stick = reshowStick\(v\.stick, atBottom\(content\)\);\n\s*const keepAnchor = reshow \?/,
+    "the flag is re-derived between the reshow decision and the keep-anchor capture (which reads the same true bottom), for a caller that left the DOM in place");
   assert.match(RENDER, /import \{[^}]*reshowStick[^}]*\} from "\.\/scroll-keep";/);
+});
+
+// Review find on the rule above (2026-09-10): rerenderAll (a settings change) EMPTIES every view before it calls
+// showActive, and an emptied scroller reads as the bottom: reading scrollHeight forces layout, the browser clamps
+// scrollTop to the new maximum (0 once what is left of #content fits), so the distance to the bottom is 0. Read
+// there, the rule put a scrolled-up reader into follow mode, and the same frame's observers (the view's tail-shrink
+// rule when the rebuilt transcript is shorter, a compact toggle; the boxes-below rule when a box under the scroller
+// changed height, the dense-chrome toggle) wrote them to the bottom over the anchor the re-show had just restored:
+// the snap the T249 fix removed, back on the settings-change path. So rerenderAll reads the true bottom BEFORE the
+// clear, where it already reads it for the anchor, and showActive leaves the flag alone for a caller that handed
+// the keep in. The scroller is the replica at-bottom.test.ts uses (no jsdom for the chat renderer).
+type Box = { scrollHeight: number; clientHeight: number; scrollTop: number };
+const atBottom = (c: Box) => atBottomDist(c.scrollHeight - c.scrollTop - c.clientHeight);   // render.ts atBottom
+function emptyViews(c: Box): void {                                                       // rerenderAll's removeChild loop, as the browser sees it
+  c.scrollHeight = c.clientHeight;                                                          // what is left of #content fits
+  c.scrollTop = Math.min(c.scrollTop, Math.max(0, c.scrollHeight - c.clientHeight));        // the clamp to the new maximum
+}
+
+test("the emptied scroller reads as the bottom: a scrolled-up reader keeps follow mode OFF only when the rule reads the DOM before the clear", () => {
+  const c: Box = { scrollHeight: 12000, clientHeight: 800, scrollTop: 8483 };   // 2717 px above the bottom, reading
+  const v: KeepView = { scrollTop: 8483, stick: false, shown: true };
+  const before = reshowStick(v.stick, atBottom(c));                              // rerenderAll, before the clear
+  assert.equal(before, false, "off the bottom the recorded flag stands");
+  emptyViews(c);                                                                  // every view emptied; the browser clamps
+  assert.equal(atBottom(c), true, "the emptied scroller is at its bottom, wherever the reader was");
+  assert.equal(reshowStick(v.stick, atBottom(c)), true, "read after the clear, the rule puts the scrolled-up reader into follow mode");
+  // what that flag feeds in the same frame, before any scroll event can correct it:
+  assert.equal(followTailShrink(true, 9800 - 12000), true, "a shorter rebuilt transcript writes them to the bottom");
+  assert.equal(followBoxBelow(true, 36), true, "a box below the scroller changing height writes them to the bottom");
+  v.stick = before;                                                               // the flag as rerenderAll now records it
+  assert.equal(followTailShrink(v.stick, 9800 - 12000), false, "read before the clear: the observers leave the reader alone");
+  assert.equal(followBoxBelow(v.stick, 36), false);
+  assert.equal(landSpot(v), 8483, "and the land goes to the saved spot the anchor restore then refines");
+});
+
+test("render.ts: rerenderAll re-derives follow mode from the true bottom BEFORE the clear, and showActive leaves the flag alone for a caller that handed the keep in", () => {
+  const ra = RENDER.match(/^function rerenderAll\(\): void \{([\s\S]*?)\n\}/m);
+  assert.ok(ra, "rerenderAll");
+  const body = ra![1];
+  assert.match(body, /const bottom = live && atBottom\(content!\);\n(?:\s*\/\/[^\n]*\n)*\s*if \(live\) av!\.stick = reshowStick\(av!\.stick, bottom\);\n\s*const keep = live && !bottom \? captureScrollAnchor\(content!, av!\) : null;/,
+    "one read of the true bottom drives both the follow flag and the keep");
+  const stick = body.indexOf("av!.stick = reshowStick(");
+  const clearAt = body.indexOf("v.el.removeChild(v.el.firstChild)");
+  assert.ok(stick >= 0 && clearAt >= 0 && stick < clearAt, "the flag is re-derived before the DOM is emptied");
+  assert.match(RENDER, /if \(reshow && keep === undefined\) v\.stick = reshowStick\(v\.stick, atBottom\(content\)\);/,
+    "showActive reads the DOM only when no caller emptied it first (the keepAnchor ternary's own gate)");
+  assert.doesNotMatch(RENDER, /if \(reshow\) v\.stick = reshowStick\(/, "the ungated read saw the emptied scroller as the bottom");
 });
