@@ -101,6 +101,11 @@ function lift(): (hooks: Hooks) => Api {
     const auditTabOrder = () => {}; const onlyTag = () => H.only; const matchesOnly = (name, only) => name.includes(only);
     const tabInView = (id) => id === peekId || !H.hidden.has(id);
     const setActive = () => {}; const setTimeout = () => 0;
+    // the section-at-a-glance view's readers on the strip, inert: the plan the view reads (lastStripItems), the
+    // section the pane shows (snapView, null: no view open, so stripAftermath's follow does nothing), and the
+    // view's own painter and focus probe (never reached while snapView is null)
+    let lastStripItems = [], snapView = null;
+    const renderSnapshot = () => false; const snapshotHoldsFocus = () => false; const showActive = () => {};
     const titleWithKey = () => H.keyHint; const surfaceLens = () => H.lens; const effViews = () => null; const viewTagUnion = () => H.unions;
     const hostIsDown = (id) => H.down.has(id); const hostDownNote = (id) => H.notes[id] ?? "";
     function makePlaceholderTab(id) { const t = el("div", "tab tab-placeholder"); t.dataset.id = id; H.placeholders++; return t; }

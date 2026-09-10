@@ -47,6 +47,7 @@ test("every input the strip renders is in the signature", () => {
     "activeId", "peekId", "ids", "visibleIds", "tabInView(activeId)", "plan.items",
     "settings.tabCtx", "settings.stripGroupRows", "settings.theme", "settings.colormap", 'titleWithKey("Open a session", "session.new")',
     'surfaceLens(effViews(), "chat")', "unions",
+    "snapView",   // the section the pane shows at a glance: a header's mark, its way-back act and its words derive from it
     "m?.name", "m?.color?.bg", "m?.color?.fg",
     "s.name", "s.color?.bg", "s.color?.fg", "st.state", "tabStateClass(st)", "!!st.faded",
     "st.ctx", "st.ctxColor", "st.ctxTone", "!!s.sub", "hostIsDown(id)", "hostDownNote(id)",

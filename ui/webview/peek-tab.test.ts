@@ -18,8 +18,10 @@ test("peek OPEN: every activation routes the peek decision — setActive derives
   // nav-history's apply all land here), before its already-active early-return
   // the window between the derivation and the early return widened on 2026-09-05: the subagent viewer's
   // two lines sit there (pruneSubViews — an activation is the event that closes an unpinned viewer — and the
-  // reopen of a viewer id whose tab is gone), both BEFORE the return by design, see plans/subagent-transcripts.md
-  assert.match(RENDER, /function setActive\(id: string[\s\S]{0,500}?assertPeekFor\(id\);[\s\S]{0,900}?if \(activeId === id && anchor == null && anchorT == null\) return;/);
+  // reopen of a viewer id whose tab is gone), both BEFORE the return by design, see plans/subagent-transcripts.md;
+  // the section-at-a-glance view's clear and the folded-away tab's unfold sit there too, and the early return
+  // grew a body (a pick of the tab already active puts its transcript back over the view: tab-snapshot-pane.test.ts)
+  assert.match(RENDER, /function setActive\(id: string[\s\S]{0,500}?assertPeekFor\(id\);[\s\S]{0,900}?if \(activeId === id && anchor == null && anchorT == null\) \{/);
   // the derivation: in-view → no peek; out-of-view → THIS session is the peek
   assert.match(RENDER, /const next = chatVisible\(id\) \? null : id;\s*\n\s*if \(next !== peekId\) \{ peekId = next; renderTabs\(\); \}/);
 });

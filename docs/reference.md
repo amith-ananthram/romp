@@ -1076,7 +1076,7 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `gone`, `tasks`, `cut`, `live`, `row`, `clock`, `backend`, `ops`, `limit`,
   `retry`, `bg`, `watch`, `stamp`, `anchors`, `downtime`, `names`, `flags`,
   `ncards`, `colormap`, `acct`, `cleared`, `host`, `cwd`, `claudemd`, `fork`,
-  `taskout`, `pathlink`, `postal`, plus `cold` for a tab with no cached
+  `note`, `needs`, `taskout`, `pathlink`, `postal`, plus `cold` for a tab with no cached
   build and `nosig` for one whose signature could not be taken) to the
   background rebuilds it caused. A rebuild with several moved components
   counts under each, so the map's sum can exceed `bg_built`. One session's
