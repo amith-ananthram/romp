@@ -37,9 +37,8 @@ Implementation notes that amend this sketch:
 - 2026-09-10, the finding read right: the worker's acks DO reach the kernel, but a live Home Screen app
   gets NEITHER `notificationclick` NOR `notificationclose` from iOS (a killed app gets the click and the
   deep link), so nothing the worker or the screen could say was ever the tap — a gone notification
-  cannot tell a tap from a swipe-dismiss. Every road that inferred one (the stored tap, the replay,
-  the fingerprint, the vanished notification) is removed; the user wants no guessing. The tap is now
-  the OS's own callback: an Apple endpoint (`web.push.apple.com`) is sent a Declarative Web Push
+  cannot tell a tap from a swipe-dismiss. The stored tap, the replay and the fingerprint are removed.
+  For a KILLED app the tap is the OS's own callback: an Apple endpoint (`web.push.apple.com`) is sent a Declarative Web Push
   message — `{"web_push": 8030, "notification": {title, body, navigate, tag, data[, silent]},
   "mutable": true[, "app_badge": n]}` (`_push_declarative`; members verified against the W3C Push API
   draft and WebKit's `NotificationJSONParser.cpp`) — whose `navigate` is the deep link made absolute
@@ -50,8 +49,20 @@ Implementation notes that amend this sketch:
   and does not show again. Non-Apple endpoints keep the imperative payload and the worker's
   `notificationclick` (`via: 'sw'`, or the kernel's clicked row via `GET /push/pending` — `via: 'ack'`).
   The kernel push LEDGER stays (`STATE/push-ledger.json`: `pid` per push per device; `shown`/`clicked`
-  acks by pid; `landed` by the page); `closed`, `superseded` and `dropped` went with the guesswork.
-  `tests/test_notification_tap_resume_browser.py` runs the surviving roads in a real browser.
+  acks by pid; `landed` by the page). `tests/test_notification_tap_resume_browser.py` runs the roads
+  in a real browser.
+- 2026-09-10, later, the vanish road BACK by the user's call: on the device the declarative message
+  landed a tap only for a KILLED app; a LIVE app (background or foreground) is merely foregrounded —
+  no navigation, no click, no event of any kind. So the shell again holds the kernel's unsettled
+  `shown` rows against `registration.getNotifications()` on boot/visible/pageshow/focus: exactly one
+  shown push whose notification is gone lands (`via: 'vanish'`), silently; two or more gone are
+  settled without landing (`POST /push/dropped`); a newer same-session notification on the screen
+  supersedes an older row (`POST /push/superseded`, and the kernel does the same at the `shown` ack);
+  all displayed, sent-only, or an unreadable screen decide nothing. No chip, no prompt, no `closed`
+  stage (iOS never reports one), no timers. THE ACCEPTED TRADE-OFF: a swiped-away notification leaves
+  the same evidence as a tapped one and lands on the next foregrounding; the user weighed that and
+  decided a working background tap is worth an occasional wrong landing after a swipe. The foreground
+  case stays non-switching (no wake event); a killed app still uses the native `navigate`.
 - The shell background is `#1e1e1e`, not the `#101418` guessed below (that is the login page);
   the manifest and theme-color use `#1e1e1e`.
 - The manifest and the three icon PNGs are served auth-EXEMPT: browsers fetch a manifest (and

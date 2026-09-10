@@ -3,15 +3,18 @@
 
 THE FINDING, on a real iPhone (2026-09-09/10): a Home Screen web app that is ALIVE gets no `notificationclick` from
 iOS (a killed app gets the click and the deep link) and no `notificationclose` either (zero 'closed' acks, ever), so a
-notification gone from the screen cannot tell a tap from a swipe-dismiss. Every road of the days before that inferred
-the tap from what was missing — the stored tap, the replay, the fingerprint, the vanished notification — is removed;
-the user wants no guessing. The tap is now the OS's own callback: an Apple endpoint is sent a Declarative Web Push
-message whose `navigate` is the deep link, iOS displays it and navigates the app there on a tap, and the page lands
-the link. A browser that dispatches `notificationclick` (Chrome, every non-Apple endpoint) lands the tap the way it
-always did: the worker acks, focuses and posts, and the page lands the message.
+notification gone from the screen cannot tell a tap from a swipe-dismiss. The stored tap, the replay and the
+fingerprint are removed. For a KILLED app the tap is the OS's own callback: an Apple endpoint is sent a Declarative
+Web Push message whose `navigate` is the deep link, iOS displays it and navigates the app there on a tap, and the page
+lands the link. A browser that dispatches `notificationclick` (Chrome, every non-Apple endpoint) lands the tap the way
+it always did: the worker acks, focuses and posts, and the page lands the message. For a LIVE app (background or
+foreground) iOS only foregrounds it — no navigation, no click, no event of any kind — so the one thing the page can
+read is the screen: registration.getNotifications() lists what is still displayed, and a shown push whose notification
+is GONE is read as tapped (the vanish road). A swiped-away notification reads the same and lands on the next
+foregrounding; the user weighed that on 2026-09-10 and accepted it in exchange for background taps working.
 
-Two scenarios against the REAL shell, the REAL worker and the REAL kernel (hermetic; two synthetic sessions `web`
-and `api`), so the user is not the test device (the user 2026-09-09, tired of being exactly that):
+Three scenarios against the REAL shell, the REAL worker and the REAL kernel (hermetic; four synthetic sessions `web`,
+`api`, `tests`, `docs`), so the user is not the test device (the user 2026-09-09, tired of being exactly that):
 
   1. THE CLICK ROAD (Chrome): the worker is registered the way the bell does and takes control of the page; a
      subscribed device's test push for `api` is filed at the kernel (the row and its pid; the push service refuses
@@ -30,6 +33,13 @@ and `api`), so the user is not the test device (the user 2026-09-09, tired of be
      becomes `api`), /push/landed for the pid, the params stripped from the URL, the 'deeplink' row on file. Then the
      open page GAINS the params without a load (history.pushState + pageshow, the window iOS navigates in place)
      for a second push: landed live via 'link' (no boot flag), settled, stripped.
+  3. THE VANISH ROAD (what a LIVE iOS app leaves): three test pushes (`api`, `tests`, `docs`) filed at the kernel and
+     acked shown by pid, as the phone's worker acks them; the page stubs getNotifications by data.pid and comes forward
+     three times. Two of three displayed → exactly the missing one lands: ONE /reveal via 'vanish', the tab on `api`,
+     /push/landed for that pid, [reveal] vanish in the kernel log, NO chip element anywhere. All three displayed →
+     nothing. One displayed → two vanished → nothing lands, nothing shows, and both rows are settled (/push/dropped)
+     so they never inflate a later count. Against the tip before it (fe460d0f) this fails on the outcome: /push/pending
+     lists no shown row, and nothing lands.
 
 Skips LOUDLY without the extension deps or a playwright browser (CI installs none). All fixtures synthetic. No network.
 """
@@ -53,6 +63,8 @@ EXT = os.path.join(ROOT, "vscode-extension")
 
 SID_A = "aaaaaaaa-1111-2222-3333-444444444444"   # web: the session in front when the phone buzzes
 SID_B = "bbbbbbbb-1111-2222-3333-444444444444"   # api: the session that buzzed — where the tap must land
+SID_C = "cccccccc-1111-2222-3333-444444444444"   # tests: buzzed too (the vanish scenario), its notification still on the screen
+SID_D = "dddddddd-1111-2222-3333-444444444444"   # docs: likewise
 
 
 def _free_port():
@@ -169,6 +181,76 @@ await browser.close();
 process.exit(0);
 """
 
+# the vanish road (what a LIVE iOS app leaves): three pushes the worker acked shown; the page reads the screen through a
+# stubbed getNotifications and comes forward three times — two of three displayed, all three, one of three
+DRIVER_VANISH = r"""
+import { createRequire } from "node:module";
+import fs from "node:fs";
+const require = createRequire(process.env.EXT_PKG);
+const { chromium } = require("playwright");
+const cfg = JSON.parse(fs.readFileSync(process.env.CFG, "utf8"));
+let browser;
+try { browser = await chromium.launch(); }
+catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
+const out = { reveals: [], ledger: [], pending: 0, passes: [] };
+const context = await browser.newContext({ viewport: { width: 1100, height: 720 } });
+await context.grantPermissions(["notifications"], { origin: cfg.origin });
+// this device's subscription (headless Chromium has no push service: the registration answers with the endpoint the kernel
+// has on file), and THE SCREEN: getNotifications() lists a notification per pid in window.__displayed — every push's at
+// first (nothing has vanished), then whatever each pass sets. The real method would list nothing here anyway: headless
+// Chromium refuses showNotification, and no push is dispatched at the worker in this scenario
+await context.addInitScript((c) => {
+  Object.defineProperty(ServiceWorkerRegistration.prototype, "pushManager", { configurable: true,
+    get() { return { getSubscription: () => Promise.resolve({ endpoint: c.endpoint }) }; } });
+  window.__displayed = c.pids.slice();
+  ServiceWorkerRegistration.prototype.getNotifications = function () { return Promise.resolve((window.__displayed || []).map((pid) => ({ data: { pid } }))); };
+}, { endpoint: cfg.endpoint, pids: cfg.pids });
+const page = await context.newPage();
+page.on("request", (r) => { const u = r.url();
+  if (r.method() === "POST" && /\/reveal$/.test(u)) out.reveals.push(JSON.parse(r.postData() || "{}"));
+  if (r.method() === "POST" && /\/push\/(landed|superseded|dropped|dismissed)$/.test(u)) out.ledger.push([u.replace(/^.*\/push\//, ""), JSON.parse(r.postData() || "{}")]);
+  if (/\/push\/pending\?/.test(u)) out.pending++; });
+await page.goto(cfg.landing);
+const chat = await (async () => { for (let i = 0; i < 200; i++) { const f = page.frames().find((f) => /\/chat/.test(f.url())); if (f) return f; await page.waitForTimeout(50); } return null; })();
+if (!chat) { console.error("no chat iframe in the shell"); process.exit(1); }
+await chat.waitForSelector('#tabs .tab[data-id="' + cfg.sidB + '"]', { timeout: 20000 });
+await chat.evaluate((sid) => { const t = document.querySelector('#tabs .tab[data-id="' + sid + '"]'); if (t) t.click(); }, cfg.sidA);
+await chat.waitForFunction((sid) => (document.querySelector("#tabs .tab.active") || {}).dataset?.id === sid, cfg.sidA, { timeout: 10000 });
+const active = () => chat.evaluate(() => (document.querySelector("#tabs .tab.active") || { dataset: {} }).dataset.id || null);
+out.before = await active();
+const swWait = context.waitForEvent("serviceworker", { timeout: 20000 }).catch(() => null);
+await page.evaluate(() => navigator.serviceWorker.register("/sw.js"));
+const sw = context.serviceWorkers()[0] || await swWait;
+if (!sw) { console.error("no service worker registered"); process.exit(1); }
+await page.evaluate(() => navigator.serviceWorker.ready.then(() => navigator.serviceWorker.controller ? null
+  : new Promise((r) => navigator.serviceWorker.addEventListener("controllerchange", () => r(), { once: true }))));
+out.controlled = await page.evaluate(() => !!navigator.serviceWorker.controller);
+// the shell's diag poster, wrapped: a pass waits for its two checks (focus + pageshow) to file their tap-pending rows — the
+// decision is made by the time a row is filed — never for a timer
+await page.evaluate(() => { window.__tp = []; const o = window.__rompShellDiag; window.__rompShellDiag = (w, d) => { if (w === "tap-pending") window.__tp.push(d); return o ? o(w, d) : undefined; }; });
+const chipAbsent = () => page.evaluate(() => document.getElementById("tap-offer") === null);
+out.chipAbsentBefore = await chipAbsent();
+out.reveals_before = out.reveals.length;
+async function pass(name, displayed, landsOn, settles) {
+  const tp0 = await page.evaluate(() => window.__tp.length);
+  const reveals0 = out.reveals.length, ledger0 = out.ledger.length;
+  await page.evaluate((d) => { window.__displayed = d; }, displayed);
+  // the app comes forward: the events a resumed page produces, and nothing else
+  await page.evaluate(() => { window.dispatchEvent(new Event("focus")); window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })); });
+  const decided = await page.waitForFunction((n) => window.__tp.length >= n + 2, tp0, { timeout: 8000 }).then(() => true).catch(() => false);
+  const landed = landsOn ? await chat.waitForFunction((sid) => (document.querySelector("#tabs .tab.active") || {}).dataset?.id === sid, landsOn, { timeout: 8000 }).then(() => true).catch(() => false) : null;
+  for (let i = 0; i < 40 && out.ledger.length < ledger0 + settles; i++) await page.waitForTimeout(50);   // the settles ride after the decision; bounded
+  out.passes.push({ name, decided, landed, after: await active(), reveals: out.reveals.slice(reveals0), ledger: out.ledger.slice(ledger0),
+                    rows: await page.evaluate((n) => window.__tp.slice(n), tp0), chipAbsent: await chipAbsent() });
+}
+await pass("twoOfThree", [cfg.pids[1], cfg.pids[2]], cfg.sidB, 1);   // api's notification is gone: the one tap — it lands
+await pass("allThree", cfg.pids.slice(), null, 0);                    // everything on the screen: nothing
+await pass("oneOfThree", [cfg.pids[0]], null, 2);                     // tests' and docs' gone at once: nothing lands, both rows dropped
+fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
+await browser.close();
+process.exit(0);
+"""
+
 
 def _transcript(sid, prompt, reply):
     return (json.dumps({"type": "user", "uuid": "11111111-2222-3333-4444-" + sid[:12], "parentUuid": None,
@@ -204,7 +286,9 @@ class ServedTapLanding(unittest.TestCase):
         os.makedirs(proj, exist_ok=True)
         for sid, name, prompt, reply in (
                 (SID_A, "web", "Where do we stand on the login flow?", "The login flow is done and every test passes."),
-                (SID_B, "api", "Add the notes table migration.", "Two migrations could go first; which one do you want?")):
+                (SID_B, "api", "Add the notes table migration.", "Two migrations could go first; which one do you want?"),
+                (SID_C, "tests", "Cover the notes endpoint.", "Three cases are covered; the pagination one needs a fixture I cannot invent."),
+                (SID_D, "docs", "Write the notes API page.", "The page is drafted; which auth flow should the examples assume?")):
             Path(cls.state, "names", sid).write_text("%s\t%s\t\t\n" % (name, cwd))
             Path(cls.state, "sdk", sid + ".json").write_text(json.dumps(
                 {"sid": sid, "name": name, "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": sid,
@@ -429,6 +513,90 @@ class ServedTapLanding(unittest.TestCase):
         self.assertEqual([(r["via"], r["hasPid"], r["dup"]) for r in rows], [("boot", True, False), ("pageshow", True, False)], "%r" % rows)
         for r in self._diag_rows("deeplink"):
             self.assertNotIn("sid", r.get("data") or {}, "structure only: %r" % r)
+
+    def _pending_rows(self, ep):
+        from urllib.parse import quote
+        code, pend = self._kernel("GET", "/push/pending?endpoint=" + quote(ep, safe=""))
+        self.assertEqual(code, 200, pend)
+        return pend.get("rows") if isinstance(pend, dict) and isinstance(pend.get("rows"), list) else []
+
+    def _pending_empty(self, ep, tries=50):
+        """GET /push/pending for `ep` until it lists nothing (the settles land after the reveal; bounded); the last answer"""
+        after = None
+        for _ in range(tries):
+            after = self._pending_rows(ep)
+            if after == []:
+                break
+            time.sleep(0.1)
+        return after
+
+    def test_a_vanished_notification_lands_when_the_app_comes_forward_and_nothing_else_ever_shows(self):
+        # the vanish road (the module docstring, 3): three shown notifications, and the one gone from the screen is the tap
+        ep, pid_b = self._subscribe_and_test_push("vanish-device")
+        for sid in (SID_C, SID_D):   # three buzzes, three sessions (the per-session tag would collapse three for one)
+            code, res = self._kernel("POST", "/push/test", {"endpoint": ep, "sid": sid, "host": ""})
+            self.assertEqual(code, 200, res)
+            self.assertEqual(res.get("sid"), sid)
+        rows = self._pending_rows(ep)   # against fe460d0f this lists nothing (only clicked rows were listed): the scenario runs on and fails on the OUTCOME below
+        pid_of = {r["sid"]: r["pid"] for r in rows}
+        for pid in pid_of.values():   # the worker's word, as the phone's worker gives it a second after the send: shown
+            code, res = self._kernel("POST", "/push/ack", {"pid": pid, "stage": "shown", "v": "browser-test"})
+            self.assertEqual(code, 200, res)
+        pids = [pid_of.get(sid) or "unissued-pid-000000000%d" % i for i, sid in enumerate((SID_B, SID_C, SID_D))]
+        out = self._drive(DRIVER_VANISH, endpoint=ep, pids=pids)
+        self.assertEqual(out["before"], SID_A, "web is the session in front: %r" % out)
+        self.assertTrue(out["controlled"], "the registered worker controls the page: %r" % out)
+        self.assertEqual(out["reveals_before"], 0, "nothing landed on the way in: every notification was still on the screen")
+        p1, p2, p3 = out["passes"]
+        # THE OUTCOME the user sees, first: the app comes forward with api's notification gone from the screen, and the chat
+        # pane is on api — no chip, no prompt, nothing to take. Against fe460d0f: the tab stays on web and no /reveal leaves
+        self.assertTrue(p1["landed"], "the chat pane's active tab must become the session whose notification vanished; it is %r, the page posted %d /reveal(s), the kernel listed %d row(s)\n  kernel: %s\n  pass: %r"
+                        % (p1["after"], len(p1["reveals"]), len(pid_of), self._reveal_lines(), p1))
+        self.assertEqual(p1["after"], SID_B)
+        self.assertTrue(out["chipAbsentBefore"] and all(p["chipAbsent"] for p in out["passes"]), "no offer element exists in the shell, ever: %r" % out["passes"])
+        # …and how: three rows the kernel filed and the worker acked shown; the page asked for its own subscription, read the
+        # screen, found exactly one gone, and landed it via 'vanish' — once across the two checks a coming-forward fires
+        self.assertEqual(sorted(pid_of), sorted([SID_B, SID_C, SID_D]), "three rows, one per session: %r" % rows)
+        self.assertEqual(pid_of[SID_B], pid_b)
+        self.assertGreaterEqual(out["pending"], 2, "asked on the coming-forward events: %r" % out["pending"])
+        self.assertEqual(len(p1["reveals"]), 1, "exactly one /reveal: %r" % p1["reveals"])
+        rv = p1["reveals"][0]
+        self.assertEqual((rv["sid"], rv["via"], rv.get("boot")), (SID_B, "vanish", None), "%r" % rv)
+        self.assertTrue(rv.get("wid"), "aimed at this dashboard's wid: %r" % rv)
+        self.assertEqual(p1["ledger"], [["landed", {"pid": pids[0]}]], "the vanished row is landed; the displayed ones are untouched")
+        self.assertTrue(p1["decided"], "both checks filed their tap-pending row: %r" % p1["rows"])
+        self.assertEqual(sorted(r["vanished"] for r in p1["rows"]), [0, 1], "the first check found the one gone; the second saw it already landed: %r" % p1["rows"])
+        for r in p1["rows"]:
+            self.assertEqual((r["sub"], r["rows"], r["getNotifications"], r["displayed"]), (True, 3, True, 2), "%r" % r)
+            self.assertIn(r["via"], ("focus", "pageshow"))
+        # everything displayed: nothing — no reveal, no settle, the tab where the user left it
+        self.assertEqual((p2["reveals"], p2["ledger"], p2["after"]), ([], [], SID_B), "%r" % p2)
+        self.assertTrue(all(r["vanished"] == 0 and r["displayed"] == 3 for r in p2["rows"]), "%r" % p2["rows"])
+        # two gone at once: the tap could have been on either — nothing lands, nothing shows; both rows are dropped
+        self.assertEqual((p3["reveals"], p3["after"]), ([], SID_B), "%r" % p3)
+        self.assertEqual(sorted(json.dumps(x) for x in p3["ledger"]), sorted(json.dumps(x) for x in [["dropped", {"pid": pids[1]}], ["dropped", {"pid": pids[2]}]]), "%r" % p3["ledger"])
+        self.assertEqual(sorted(r["vanished"] for r in p3["rows"]), [0, 2], "%r" % p3["rows"])
+        self.assertEqual(self._pending_empty(ep), [], "every row settled: nothing left to inflate a later check")
+        # the kernel's own trail: three shown acks, the vanish reveal, the landing, the two drops; no offer road, no dismissal
+        ep_host = "push.example.net"
+        klog = self._klog()
+        for line in ([r"\[push\] ack stage=shown sid=%s endpoint=%s" % (re.escape(sid[:8]), ep_host) for sid in (SID_B, SID_C, SID_D)] +
+                     [r"\[reveal\] vanish sid=%s wid=\S+: delivered" % re.escape(SID_B[:8]),
+                      r"\[push\] landed sid=%s endpoint=%s" % (re.escape(SID_B[:8]), ep_host),
+                      r"\[push\] dropped sid=%s endpoint=%s" % (re.escape(SID_C[:8]), ep_host),
+                      r"\[push\] dropped sid=%s endpoint=%s" % (re.escape(SID_D[:8]), ep_host)]):
+            self.assertRegex(klog, line, "the kernel logged it: %s" % klog[-2500:])
+        self.assertNotIn("[reveal] offer", klog)
+        self.assertNotIn("[push] dismissed", klog)
+        self.assertEqual(klog.count("[reveal] vanish"), 1, "landed once across the two checks: %s" % klog[-2500:])
+        # the shell's trail: the landing's own row names the session clipped; no offer row of any kind is on file
+        lands = self._diag_rows("tap-vanish-land")
+        self.assertTrue(lands, "one tap-vanish-land row is on file")
+        self.assertEqual([r["data"]["sid8"] for r in lands], [SID_B[:8]], "one tap-vanish-land row, clipped: %r" % lands)
+        self.assertEqual(lands[0]["surface"], "shell")
+        self.assertEqual(self._diag_rows("tap-offer", deadline_s=0.0), [], "no offer row: the chip is gone")
+        for r in self._diag_rows("tap-pending") + lands:
+            self.assertNotIn(SID_B, json.dumps(r), "structure and clipped ids only, never the session id whole: %r" % r)
 
 
 if __name__ == "__main__":
