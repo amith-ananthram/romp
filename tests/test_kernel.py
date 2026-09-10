@@ -4734,6 +4734,18 @@ class ViewBuilder(unittest.TestCase):
         self.assertIn("showBranch: false", _gear_src())               # load() default OFF, both branches
         self.assertNotIn("showBranch: true", _gear_src())             # the old default must not linger
 
+    def test_gear_has_compact_tabs_and_agents_toggle(self):
+        # the user 2026-09-08: a "Compact tabs and agents" checkbox in the Chat section shrinks the tab strip's
+        # tabs and group headers and tightens the rows of the background-work panel (one body class, styles.css
+        # body.dense-chrome, applied by dense-chrome.ts from render.ts). OFF by default: an explicit stored true
+        # opts in. It mirrors render.ts' loadSettings().denseChrome read, persisted in romp:settings.
+        self.assertIn("id=rs-dense", _gear_src())
+        self.assertIn("Compact tabs and agents", _gear_src())
+        self.assertIn("s.denseChrome = dn.checked", _gear_src())          # change → persist
+        self.assertIn("dn.checked = s.denseChrome === true", _gear_src())  # open → reflect (default OFF)
+        self.assertIn("denseChrome: false", _gear_src())              # load() default OFF (dense-chrome.test.ts counts both branches)
+        self.assertNotIn("denseChrome: true", _gear_src())
+
     def test_chat_body_has_an_explicit_send_button(self):
         # The web-dashboard composer (kernel _chat_body, a SECOND copy of vscode-extension/src/page-skeleton.chatBody)
         # carries an explicit send button beside 📎, so ⏎ isn't the only way to send (the user 2026-06-17).

@@ -182,6 +182,13 @@ not loaded yet.
 ![Clicking a skeleton tab puts up the loader until its transcript arrives](assets/guide/reconnect-skeleton-click.png){ width="32%" }
 ![The clicked tab, loaded](assets/guide/reconnect-skeleton-loaded.png){ width="32%" }
 
+**On a small screen.** To keep more of the transcript in view, turn on the gear's
+**Compact tabs and agents** setting. It tightens the rows in the background-work panel above the
+composer (the one headed **Awaiting** or **In the background**) and shows about four of its rows,
+scrolling for the rest; the cap lifts while a row's details are open. Where the tab strip is showing,
+it also shrinks the tabs and group headers; on a phone the session picker stands in for the strip, so
+there the setting tightens the panel alone. Like the other chat settings, it is per browser.
+
 ### The feed
 
 The feed is Romp's task-management layer: a card for each task. Romp's
