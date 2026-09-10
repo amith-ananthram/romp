@@ -166,6 +166,8 @@ def _rebind_state(path):
     MESSAGES, ERRORS, USAGE = STATE / "timeline" / "messages.jsonl", STATE / "judge-errors.jsonl", STATE / "judge-usage.jsonl"
     global JUDGE_LIMIT
     JUDGE_LIMIT = STATE / "judge-limit.json"
+    global FAST_REFUSED
+    FAST_REFUSED = STATE / "fast-refused.json"   # the judges' per-tier fast refusal record (T300) rebinds with the rest
     SDKDIR = STATE / "sdk"
     CODEXDIR = STATE / "codex"
     EPIDIR = STATE / "episodes"
@@ -243,8 +245,30 @@ def _index_effort():  return _state_str("index-effort", "")
 def _judge_engine():  return _state_str("judge-engine", "claude")   # "claude" | "codex" — which model
 #   harness runs the judges (docs/codex.md §judges). "codex" lets a machine with no Claude login keep
 #   the board thinking: every judge becomes a one-shot `codex exec` billing the machine's codex login.
-def _judge_fast():    return _state_str("judge-fast", "off") == "on"   # the gear's Fast mode box (Triage model row): the CLI's fast-mode
-#   opt-in rides every judge call whose model is Opus (_judge_cmd); off by default. Read per call, like the tiers.
+def _judge_fast():    return _state_str("judge-fast", "off") == "on"   # the gear's Fast mode box beside the TRIAGE model
+#   (T300, the user 2026-09-10: one flag per tier, since one box for every tier ticked three at once and sat greyed
+#   where it could not act). STATE/judge-fast is the triage tier's flag (it was the one flag of the first cut;
+#   _migrate_judge_fast_tiers in the kernel carries an existing "on" over once), distill-fast and index-fast the
+#   other two. Read per call, like the tiers' models.
+def _distill_fast():  return _state_str("distill-fast", "off") == "on"
+def _index_fast():    return _state_str("index-fast", "off") == "on"
+_TIER_FAST = {"triage": _judge_fast, "distill": _distill_fast, "index": _index_fast}
+
+
+def fast_capable(model):
+    """Whether the CLI would run fast mode on `model`: the opus family, by the bare alias or a pinned version id
+    (fast mode is an Opus-only research preview). One rule for the judges, the gear's per-tier gate and the
+    kernel's migration, so the three never disagree about a model."""
+    return _model_family_version(model)[0] == "opus"
+
+
+def _tier_fast(tier, model):
+    """Whether THIS call asks for fast mode: the tier's flag is on AND the model the call runs on can run it. The
+    model is the RESOLVED one (a fallback onto a non-Opus model never asks); an unknown tier reads the triage flag,
+    the long-standing default tier. A flag left on for a tier whose model cannot run fast is kept, not cleared
+    (the gear greys its box and says why): it simply asks nothing until the tier is back on a model that can."""
+    on = _TIER_FAST.get(tier or "triage", _judge_fast)()
+    return bool(on and fast_capable(model))
 INDEX_EFFORT_DEFAULT = "low"   # the index tier's cost lever on models that take --effort (2026-09-01; see _judge_env)
 
 
@@ -841,7 +865,7 @@ UNTRUSTED_SYS = (
     "prompt and from text outside the marked sections.")
 
 
-def _judge_cmd(model, sys_prompt, effort=None, auth=None):
+def _judge_cmd(model, sys_prompt, effort=None, auth=None, tier="triage"):
     """The `claude -p` argv for ONE judge call, isolated so the model sees ONLY its own prompt. Three
     flags do it (verified by token count: a probe call drops 8334 -> ~165 input tokens):
       --system-prompt (REPLACE, not --append) — drops Claude Code's static base prompt (~6k tokens);
@@ -860,13 +884,14 @@ def _judge_cmd(model, sys_prompt, effort=None, auth=None):
     # call needs rides one overlay; --safe-mode drops only the auto-discovered settings, an explicit
     # --settings still loads. Two keys can ride it:
     overlay = {}
-    if _judge_fast() and _model_family_version(model)[0] == "opus":
-        # Fast mode for the judges (the gear's box beside the Triage model picker, off by default): the CLI refuses fast mode to a
-        # non-interactive client unless the flag-settings layer carries this exact key, the same opt-in a
-        # fast-picked session's launch uses (sdk_backend.flag_settings_path), and fast mode is an Opus-only
-        # preview, so the key rides only a call whose model reads as the opus family: the bare alias or a
-        # pinned version id (a tier pinned to a version id reaches here with that id). Whether fast then
-        # engaged is the CLI's answer, per account: the envelope's fast_mode_state, kept on the usage row.
+    if _tier_fast(tier, model):
+        # Fast mode for this call's TIER (the gear's box beside the tier's model picker, off by default): the CLI
+        # refuses fast mode to a non-interactive client unless the flag-settings layer carries this exact key, the
+        # same opt-in a fast-picked session's launch uses (sdk_backend.flag_settings_path), and fast mode is an
+        # Opus-only preview, so the key rides only a call whose model reads as the opus family: the bare alias or
+        # a pinned version id (a tier pinned to a version id reaches here with that id). Whether fast then
+        # engaged is the CLI's answer, per account: the envelope's fast_mode_state, kept on the usage row and
+        # read back by _note_fast_readback.
         overlay["fastMode"] = True
     if auth == "login":
         # A login-billed call must not bill the key (2026-09-08): in the CLI's precedence apiKeyHelper outranks
@@ -1482,7 +1507,7 @@ def _prune_usage_log():
         pass
 
 
-def _log_judge_usage(judge, tier, model, fsid, wrap, sent=None, recv=None):
+def _log_judge_usage(judge, tier, model, fsid, wrap, sent=None, recv=None, err=False):
     """Append ONE per-call usage line to USAGE for the kernel/UI cost rollup (judge_ui 2026-06-17).
     `wrap` is the claude -p JSON envelope. `sent`/`recv` are the LITERAL wall-clock floats bracketing the
     actual API call — when the judge's prompt went out and when its response came back (the user
@@ -1502,9 +1527,104 @@ def _log_judge_usage(judge, tier, model, fsid, wrap, sent=None, recv=None):
                                 "cache_r": u.get("cache_read_input_tokens"),
                                 "fast": wrap.get("fast_mode_state"),   # the CLI's word on whether fast mode engaged
                                 #   ("on" | "off" | "cooldown"; null when the envelope carries none): the judges' fast-mode readback
+                                "fastReason": wrap.get("fast_mode_disabled_reason"),   # why not, when the CLI says
+                                **({"err": True} if err else {}),   # an error envelope's row: kept for its readback,
+                                #   zero cost, skipped by the cost rollup's call and cost counts
                                 "cost": wrap.get("total_cost_usd")}) + "\n")
     except Exception:
         pass
+
+
+FAST_REFUSED = STATE / "fast-refused.json"   # tier -> {"reason", "model", "t"}: the CLI's last refusal of a fast
+#   ask, per tier; absent or empty when the last fast call engaged. /version lifts it so the gear's box says why.
+
+
+def _fast_refused():
+    """The per-tier refusal record, {} when none stands. Read fresh: the judges write it, the kernel reads it."""
+    try:
+        d = json.loads(FAST_REFUSED.read_text())
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+_FAST_REFUSED_LOCK = threading.Lock()   # the record is one file written from every judge pool's threads
+
+
+def _note_fast_readback(tier, model, wrap, judge, fsid):
+    """After a call that ASKED for fast: the envelope's fast_mode_state is the CLI's answer. "on" clears the tier's
+    refusal record (the box's hint goes with it on the gear's next read); a refusal records itself under the tier
+    with the CLI's reason and writes ONE judge-errors row per reason change (the fast-refused kind), so a refused
+    pick is loud where every judge fault is, and never once per call. Two answers are NOT refusals: an envelope
+    without the field says nothing (the sessions' rule for the same field: never fabricate a verdict), and
+    "cooldown" means fast is allowed and rate-limited for now (the statusline's third state), so neither records
+    nor clears. Any refusal drops the org-check memo, so the next key-billed fast call asks the paying account
+    again (the event that says the earlier answer may have been wrong). The read-check-write holds a lock: the
+    index and triage pools refuse on parallel threads. Best-effort, never raises."""
+    try:
+        if not isinstance(wrap, dict) or "fast_mode_state" not in wrap:
+            return
+        state = wrap.get("fast_mode_state")
+        if state == "cooldown":
+            return
+        reason = wrap.get("fast_mode_disabled_reason") or ("the CLI reported %r" % state)
+        tier = tier or "triage"
+        with _FAST_REFUSED_LOCK:
+            rec = _fast_refused()
+            if state == "on":
+                if tier in rec:
+                    del rec[tier]
+                    _atomic_write_json(FAST_REFUSED, rec)
+                return
+            _FAST_ORG_MEMO["env"] = None
+            if (rec.get(tier) or {}).get("reason") == reason:
+                return                               # the same refusal standing: said already
+            rec[tier] = {"reason": reason, "model": str(model), "t": int(time.time())}
+            _atomic_write_json(FAST_REFUSED, rec)
+        _log_judge_error(judge, fsid, "fast-refused",
+                         note="%s tier asked for fast mode on %s; the CLI ran it %s: %s" % (tier, model, state or "without saying", reason))
+    except Exception:
+        pass
+
+
+def _atomic_write_json(path, obj):
+    tmp = Path("%s.%d.%x.tmp" % (path, os.getpid(), threading.get_ident()))   # per writer: two threads never share one
+    tmp.write_text(json.dumps(obj))
+    os.replace(tmp, path)
+
+
+_FAST_ORG_MEMO = {"env": None}   # the org-check env for key-billed fast calls: None = not asked; a dict (maybe {})
+#                                  = asked. Filled once per process under _FAST_ORG_LOCK; dropped by any refusal the
+#                                  CLI reports (_note_fast_readback), never re-asked per call
+_FAST_ORG_LOCK = threading.Lock()
+
+
+def _fast_org_env():
+    """The sessions' rule for a KEY-billed fast call (sdk_backend.helper_fast_org_env): the CLI's fast-mode
+    availability probe asks the saved claude.ai login even when the call bills the key, so the kernel asks the
+    paying account (the configured apiKeyHelper's key) and hands the CLI its own switch. Asked once per process,
+    since a judge call is not a connect (hundreds an hour) and the helper may cost the operator a prompt: the
+    first caller asks under a lock and the pool's other callers wait for its answer instead of each running the
+    helper. An answer with nothing to say ({}: no helper, or the probe unreachable) is kept too, so a dead network
+    does not cost a probe per call; the CLI's next refusal of a fast ask, whatever its reason, drops the memo and
+    the next call asks again."""
+    env = _FAST_ORG_MEMO["env"]
+    if env is not None:
+        return env
+    with _FAST_ORG_LOCK:
+        env = _FAST_ORG_MEMO["env"]
+        if env is not None:
+            return env                               # another caller asked first
+        try:
+            sb = sys.modules.get("romp_sdk_backend") or load_source("romp_sdk_backend", HERE / "sdk_backend.py")
+            def log(msg, problem=False):
+                sys.stderr.write("judges: %s\n" % msg)
+            env = dict(sb.helper_fast_org_env(log, None) or {})
+        except Exception as e:
+            sys.stderr.write("judges: fast-mode org check failed (%s); the CLI's own check stands\n" % e)
+            env = {}
+        _FAST_ORG_MEMO["env"] = env
+        return env
 
 
 _LOGIN_AUTH_ENV_FN = None      # login tokens claimed out of the manager's ambient environment: the kernel
@@ -1784,6 +1904,10 @@ def _judge_env(tier, auth="login", model=None):
     env = dict(os.environ)
     for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
         env.pop(k, None)                             # billing is an explicit choice per call
+    for k in ("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK", "CLAUDE_CODE_DISABLE_FAST_MODE"):
+        env.pop(k, None)                             # the fast-mode org verdict is per call too (_fast_org_env for a
+        #                                              key-billed ask; a session's own verdict in this process's
+        #                                              environment says nothing about the judge's account)
     for k in list(env):                              # the 1Password CLI's own names never ride a judge child
         if k in _cred.OP_ENV_NAMES or k.startswith(_cred.OP_ENV_PREFIX):
             env.pop(k, None)
@@ -2071,7 +2195,10 @@ def _judge_run_impl(model, sys_prompt, user, effort=None, judge=None, tier="tria
             _judge_ctx.paused = True
             return ""
         try:
-            p = subprocess.run(_judge_cmd(model, sys_prompt, effort, auth=auth), input=user,
+            fast_asked = _tier_fast(tier, model)
+            if fast_asked and auth != "login":
+                env = dict(env, **_fast_org_env())    # permission follows billing (the sessions' rule, T300)
+            p = subprocess.run(_judge_cmd(model, sys_prompt, effort, auth=auth, tier=tier), input=user,
                                capture_output=True, text=True, cwd=JUDGE_SCRATCH, env=env,
                                timeout=CALL_ALARM_S + 5)
         except Exception as e:
@@ -2106,6 +2233,11 @@ def _judge_run_impl(model, sys_prompt, user, effort=None, judge=None, tier="tria
                     _mark_call_failed(model, msg[:160])
                 _log_judge_error(judge or tier, fsid, "call",
                                  note="error envelope: %r" % msg[:160])
+                if fast_asked and "fast_mode_state" in wrap:
+                    # the call asked for fast and the CLI's refusal envelope still says whether fast engaged: keep
+                    # that readback (a zero-cost row marked err, which the cost rollup skips) and judge it below
+                    _log_judge_usage(judge or tier, tier, model, fsid, dict(wrap, total_cost_usd=0), sent, recv, err=True)
+                    _note_fast_readback(tier, model, wrap, judge or tier, fsid)
                 if _LIMIT_ENVELOPE_RE.search(msg):
                     # a limit-shaped envelope is the EVENT that says usage.json is stale (get_usage
                     # rides turn ends; an idle fleet refreshes nothing): latch the loud banner NOW
@@ -2130,6 +2262,8 @@ def _judge_run_impl(model, sys_prompt, user, effort=None, judge=None, tier="tria
             if isinstance(wrap, dict) and isinstance(wrap.get("result"), str):
                 _judge_ctx.last["reply"] = _mid_elide(wrap["result"])
                 _log_judge_usage(judge or tier, tier, model, fsid, wrap, sent, recv)
+                if fast_asked and "fast_mode_state" in wrap:   # no answer is no information (never a fabricated refusal)
+                    _note_fast_readback(tier, model, wrap, judge or tier, fsid)
                 _note_served_model(model, wrap)       # the envelope names the model a bare alias resolved to;
                                                       # the alias table is checked against it (one line per drift)
                 _auth_down_clear(fsid)                # billing works → unlatch (cheap no-op when unlatched)

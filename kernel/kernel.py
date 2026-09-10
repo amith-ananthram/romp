@@ -1137,7 +1137,9 @@ def _version_info():
             "commentEffort": jd._state_str("comment-effort", "session"),
             "commentFast": jd._state_str("comment-fast", "session"),
             "tmuxBackend": jd._state_str("tmux-backend", "off"),   # T288: "on" offers Claude Code (tmux) in the picker and the gear
-            "judgeFast": jd._state_str("judge-fast", "off"),   # RAW "on" | "off": the judges' Fast mode box, the fast-mode opt-in on Opus judge calls
+            "judgeFast": jd._state_str("judge-fast", "off"),   # RAW "on" | "off": the TRIAGE tier's Fast mode box (T300: one per tier)
+            "distillFast": jd._state_str("distill-fast", "off"), "indexFast": jd._state_str("index-fast", "off"),
+            "fastRefused": jd._fast_refused(),   # tier -> {reason, model, t}: the CLI declined a fast ask; the gear's box says why
             # One dict with every kernel-side setting, lifted by a PEER kernel's /version poll onto its
             # /tunnels row so its gear can mark controls where machines disagree (the user 2026-08-14).
             # The top-level fields above stay: this tab's own gear and older kernels read those.
@@ -1158,7 +1160,8 @@ def _version_info():
                          "commentEffort": jd._state_str("comment-effort", "session"),
                          "commentFast": jd._state_str("comment-fast", "session"),
                          "tmuxBackend": jd._state_str("tmux-backend", "off"),
-                         "judgeFast": jd._state_str("judge-fast", "off")},
+                         "judgeFast": jd._state_str("judge-fast", "off"),
+                         "distillFast": jd._state_str("distill-fast", "off"), "indexFast": jd._state_str("index-fast", "off")},
             # every gt-gated store's last-applied gesture stamp (epoch-ms ints, nothing path-shaped):
             # the gear stamps its next gesture above these instead of trusting the device clock.
             # Top-level, not lifted into /tunnels rows — a remote's newer stamp reaches the dashboard
@@ -38215,8 +38218,8 @@ def _judge_usage(t0):
         return {"calls": 0, "in": 0, "out": 0, "cost": 0.0, "ms": 0}
     total, by_judge, by_tier = blank(), {}, {}
     for o in _judge_usage_rows():
-        if (o.get("t") or 0) < t0:
-            continue
+        if (o.get("t") or 0) < t0 or o.get("err"):     # err: an error envelope's row, kept for its fast readback
+            continue                                    # only (zero cost, no model call to count)
         for b in (total, by_judge.setdefault(o.get("judge") or "?", blank()),
                   by_tier.setdefault(o.get("tier") or "?", blank())):
             b["calls"] += 1
@@ -40570,6 +40573,40 @@ def _set_tmux_backend(v, gt=None):   return _set_judge_state("tmux-backend", v, 
 # default. Fast mode bills Opus at a premium and draws on fast mode's own rate limits, so it is a deliberate
 # pick. Rides the judge-knob machinery: validated, stamped, propagated to every linked kernel.
 def _set_judge_fast(v, gt=None):     return _set_judge_state("judge-fast", v, {"on", "off"}, gt=gt)
+# One flag per tier (T300, the user 2026-09-10): judge-fast above is the TRIAGE tier's, these two the distilling and
+# indexing tiers'. A box beside each tier's model picker in the gear, greyed with the reason when the tier's effective
+# model cannot run fast (jd.fast_capable); the value is kept then, and the judges simply ask nothing (jd._tier_fast).
+def _set_distill_fast(v, gt=None):   return _set_judge_state("distill-fast", v, {"on", "off"}, gt=gt)
+def _set_index_fast(v, gt=None):     return _set_judge_state("index-fast", v, {"on", "off"}, gt=gt)
+_JUDGE_FAST_TIERS = (("judgeFast", "judge-fast", "triage", _set_judge_fast, lambda: jd._triage_model()),
+                     ("distillFast", "distill-fast", "distilling", _set_distill_fast, lambda: jd._distill_model()),   # EFFECTIVE:
+                     ("indexFast", "index-fast", "indexing", _set_index_fast, lambda: jd._index_model()))           # follow resolves
+
+
+def _migrate_judge_fast_tiers():
+    """One-time carry-over from the single fast-mode flag (STATE/judge-fast alone, which ran every Opus call fast
+    whichever tier) to a flag per tier. On the first boot on this code, the boot that finds NEITHER new file, both
+    are written: when judge-fast is "on", each new tier gets "on" where its effective model can run fast and "off"
+    where it cannot, so an existing on keeps the behaviour it had; otherwise both get "off", the default they
+    already read as. The two files' existence is the done marker, so a Triage box ticked later never spreads to
+    the other tiers at the next restart (a review finding on the first cut, whose marker was the carried value).
+    The writes carry stamp 1, a value older than any gesture: a pick made on any machine, before or after this
+    boot, outranks them (a peer's propagated on/off is never stood down by a migration default)."""
+    try:
+        if (jd.STATE / "distill-fast").exists() or (jd.STATE / "index-fast").exists():
+            return 0
+        carry = jd._state_str("judge-fast", "off") == "on"
+        n = 0
+        for field, fname, word, setter, model_of in _JUDGE_FAST_TIERS[1:]:
+            v = "on" if carry and jd.fast_capable(model_of()) else "off"
+            if setter(v, gt=1) is not None:
+                n += 1
+                if carry:
+                    sys.stderr.write("judges: fast mode carried over to the %s tier as %s (its model: %s)\n" % (word, v, model_of()))
+        return n
+    except Exception:
+        sys.stderr.write("judge-fast migration: %s\n" % traceback.format_exc())
+        return 0
 
 
 # The four judge-tier settings PROPAGATE: a pick made here follows to every linked kernel (the user
@@ -40595,7 +40632,8 @@ _JUDGE_SETTING_FIELDS = (("judgeModel", _set_judge_model), ("indexModel", _set_i
                          ("commentModel", _set_comment_model), ("commentEffort", _set_comment_effort),
                          ("commentFast", _set_comment_fast),
                          ("tmuxBackend", _set_tmux_backend),   # T288: the tmux backend's offer, "on" | "off"
-                         ("judgeFast", _set_judge_fast))       # the judges' Fast mode, "on" | "off"
+                         ("judgeFast", _set_judge_fast),       # fast mode per tier, "on" | "off" (T300)
+                         ("distillFast", _set_distill_fast), ("indexFast", _set_index_fast))
 
 # The per-field PICK STAMPS this leg carried from 2026-08-30 (each field's STATE-file mtime in a
 # body "stamps" dict, preserved by utime at the receiver — the distill-pick stomp fix) are
@@ -40648,7 +40686,8 @@ def _apply_judge_settings(body):
             "commentEffort": jd._state_str("comment-effort", "session"),
             "commentFast": jd._state_str("comment-fast", "session"),
             "tmuxBackend": jd._state_str("tmux-backend", "off"),
-            "judgeFast": jd._state_str("judge-fast", "off")}
+            "judgeFast": jd._state_str("judge-fast", "off"),
+            "distillFast": jd._state_str("distill-fast", "off"), "indexFast": jd._state_str("index-fast", "off")}
 
 
 def _propagate_judge_settings(body):
@@ -40859,7 +40898,7 @@ def _adopt_peer_settings(host, rver):
 _GT_STORES = ("auto-nudge", "compact-suggest", "file-editing", "update-mode", "thinking-summaries",
               "judge-model", "index-model", "judge-effort", "index-effort", "judge-concurrency",
               "distill-model", "distill-effort", "comment-model", "comment-effort", "comment-fast",
-              "tmux-backend", "judge-fast")
+              "tmux-backend", "judge-fast", "distill-fast", "index-fast")
 
 
 def _setting_stored_gt(name):
@@ -53744,19 +53783,22 @@ class Handler(BaseHTTPRequestHandler):
                                  args=({"tmuxBackend": _tbv, "gt": _jgt},), daemon=True).start()
             else:
                 _tell_stale_gesture(client, msg)
-        elif msg and msg.get("type") == "setJudgeFast" and msg.get("enabled") is not None:
-            # the gear's Fast mode box on the Triage model row: a checkbox, stored as on/off and read by the judges per call (jd._judge_fast).
-            # The boolean is checked like its siblings' (_as_bool), and a malformed frame is refused with a
-            # warn, unwritten; an applied pick fans out to every linked kernel under its gesture stamp.
+        elif msg and msg.get("type") in ("setJudgeFast", "setDistillFast", "setIndexFast") and msg.get("enabled") is not None:
+            # the gear's Fast mode box beside a tier's model picker (T300: one per tier): a checkbox, stored as on/off
+            # and read by the judges per call (jd._tier_fast). The boolean is checked like its siblings' (_as_bool),
+            # and a malformed frame is refused with a warn, unwritten; an applied pick fans out to every linked
+            # kernel under its gesture stamp.
+            _ffield, _fset = {"setJudgeFast": ("judgeFast", _set_judge_fast), "setDistillFast": ("distillFast", _set_distill_fast),
+                              "setIndexFast": ("indexFast", _set_index_fast)}[msg["type"]]
             _jfe, ferr = _as_bool(msg.get("enabled"), "enabled")
             if ferr:
                 _refuse_ws_flag(client, msg["type"], ferr, "enabled", msg.get("enabled"))
                 return
             _jfv = "on" if _jfe else "off"
-            _jgt = _set_judge_fast(_jfv, gt=_gesture_ms(msg))
+            _jgt = _fset(_jfv, gt=_gesture_ms(msg))
             if _jgt is not None:
                 threading.Thread(target=_propagate_judge_settings,
-                                 args=({"judgeFast": _jfv, "gt": _jgt},), daemon=True).start()
+                                 args=({_ffield: _jfv, "gt": _jgt},), daemon=True).start()
             else:
                 _tell_stale_gesture(client, msg)
         else:
@@ -54377,6 +54419,7 @@ def main():
         _n = jd.migrate_all_stores()                          # goal store/archive BEFORE any judge pass runs —
         if _n:                                                # the hot paths carry no migration logic anymore
             sys.stderr.write("romp-kernel: diary sweep migrated %d store file(s)\n" % _n)
+        _migrate_judge_fast_tiers()                           # the one fast-mode flag -> one per tier (T300), once
     except Exception:
         sys.stderr.write("diary sweep: %s\n" % traceback.format_exc())
     try:                                                      # judge scratch transcripts are one-shot junk
