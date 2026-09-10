@@ -1049,8 +1049,12 @@ def local_agents(threads=False):
     `threads` (the user 2026-08-22): also include COMMENT-THREAD sessions — real forked sessions the
     kernel hides from tabs/lanes/cards until promotion. Opt-in per consumer so the default listing and
     every other reader stay exactly as they were: self-identity, recipient resolution, and the agents
-    listing pass True (a thread mails its parent under its OWN name and is addressable for replies);
-    everything else never sees them."""
+    listing pass True (a thread mails its parent under its OWN name and is addressable for replies),
+    and so does every reader that judges a MAILBOX live or dead — the heartbeat (2026-09-06), the
+    orphan sweep, the stuck-mail warning, the revive wake and the retry pass (2026-09-10: those four
+    read the default listing, so a live thread's box was dead to them — the sweep destroyed a parent's
+    reply to its own thread after ORPHAN_GRACE and told the sender the thread had exited, and the
+    retry and wake never delivered it). Readers that only count or show presence keep the default."""
     return _agent_rows(_kernel_sessions(threads=threads))
 
 
@@ -1647,7 +1651,7 @@ def _sweep_orphans():
     the grace still gets its mail. Run periodically by the bus monitor."""
     if not MAILROOT.is_dir():
         return
-    live = local_agents()
+    live = local_agents(threads=True)                 # a comment thread's box is live while its row is (2026-09-10)
     if not live:                                       # tmux hiccup, not "everyone died" — don't mass-bounce
         return
     live_ids = {a["id"] for a in live}
@@ -1741,7 +1745,7 @@ def _warn_stuck_mail():
     messages are pruned so WARNED stays bounded to currently-pending mail."""
     if not MAILROOT.is_dir():
         return
-    live = local_agents()
+    live = local_agents(threads=True)                 # thread rows too: an idle thread can be stuck like any session
     if not live:                                       # kernel hiccup, not "everyone's stuck" — don't warn
         return
     by_id = {a["id"]: a for a in live}
@@ -1994,7 +1998,7 @@ def _wake_when_ready(sid):
             newd = MAILROOT / sid / "new"
             if not (newd.is_dir() and any(newd.iterdir())):
                 return                                        # nothing pending (or already delivered)
-            agent = next((a for a in local_agents() if a["id"] == sid), None)
+            agent = next((a for a in local_agents(threads=True) if a["id"] == sid), None)   # a reviving thread is a live row
             if not agent:
                 return                                        # session died during load
             if _push(sid, agent):                             # injected (drain + submit → forces a turn) → done
@@ -2556,7 +2560,7 @@ def _retry_pending():
             _mark_pending(sid)                 # stale marker -> clear it
             continue
         if live is None:
-            live = {a["id"]: a for a in local_agents()}
+            live = {a["id"]: a for a in local_agents(threads=True)}   # a thread's marker retries like any live session's
         if sid in live:
             try:
                 _push(sid, live[sid])          # re-attempt; the kernel defers again if still unsafe
