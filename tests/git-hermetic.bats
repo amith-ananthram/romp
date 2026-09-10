@@ -21,7 +21,10 @@ git_at_least_2_32() {
 
 setup() {
     git_at_least_2_32 || skip "GIT_CONFIG_GLOBAL needs git >= 2.32"
-    TEST_DIR="$(mktemp -d)"
+    # The scratch root's name carries `maintenance` on purpose: every fixture path then does, so the
+    # push test's trace pin below goes red if it ever matches a path instead of a spawn line (a
+    # commit's trace names no path; that test carries the word in its commit message instead).
+    TEST_DIR="$(mktemp -d "${BATS_TEST_TMPDIR:?}/maintenance-XXXXXX")"
     # A stand-in for the developer's global config: a hooks directory whose pre-commit refuses
     # every commit and leaves a marker, wired in through core.hooksPath.
     export HOME="$TEST_DIR/home"
@@ -111,15 +114,18 @@ teardown() { rm -rf "${TEST_DIR:-}"; }
 
 @test "with git_hermetic a commit spawns no maintenance or gc child" {
     # A smoke check on the git running the suite, read off git's own trace the way
-    # tests/test_git_fixture.py reads it (the same substrings: a bare `maintenance` also catches
-    # the --detach argument recent git appends); the config pin above is the deterministic half.
-    # Without the keys, `git commit` spawns `git maintenance run --auto`, the child that can still
-    # be writing under .git when a teardown's rm -rf runs.
+    # tests/test_git_fixture.py reads it: the spawn lines `run_command: git maintenance` and
+    # `run_command: git gc` (the --detach or --no-detach argument recent git appends rides the same
+    # line, so the prefix catches it). The config pin above is the deterministic half. Without the
+    # keys, `git commit` spawns `git maintenance run --auto`, the child that can still be writing
+    # under .git when a teardown's rm -rf runs.
     git_hermetic
-    GIT_TRACE="$TEST_DIR/trace" git -C "$REPO" commit -qm seed
+    GIT_TRACE="$TEST_DIR/trace" git -C "$REPO" commit -qm maintenance-traced
     [ -s "$TEST_DIR/trace" ]
     grep -q 'built-in: git commit' "$TEST_DIR/trace"
-    run grep 'maintenance' "$TEST_DIR/trace"
+    # The trace names the commit's argv, so the pin below cannot be a bare `maintenance`.
+    grep -q 'maintenance-traced' "$TEST_DIR/trace"
+    run grep 'run_command: git maintenance' "$TEST_DIR/trace"
     [ "$status" -ne 0 ]
     run grep 'run_command: git gc' "$TEST_DIR/trace"
     [ "$status" -ne 0 ]
@@ -144,6 +150,10 @@ teardown() { rm -rf "${TEST_DIR:-}"; }
     [ "$(git -C "$TEST_DIR/remote.git" rev-parse refs/heads/main)" = "$(git -C "$REPO" rev-parse HEAD)" ]
     [ "$(cat "$TEST_DIR/remote-saw")" = "$(printf 'false\n0')" ]
     grep -q 'built-in: git receive-pack' "$TEST_DIR/trace"
-    run grep 'maintenance' "$TEST_DIR/trace"
+    # The trace names the fixture paths on several lines (the push's argv, the stand-in's command
+    # line, receive-pack's own line and its quarantine object directory), and every one carries the
+    # scratch root's `maintenance-` prefix, so the pin below is the spawn line, not a bare word.
+    grep -q 'maintenance-' "$TEST_DIR/trace"
+    run grep 'run_command: git maintenance' "$TEST_DIR/trace"
     [ "$status" -ne 0 ]
 }

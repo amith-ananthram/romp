@@ -9180,7 +9180,9 @@ function renderCommentPopover(): void {
     quote.title = "the highlighted passage this thread is about";
     pop.appendChild(quote);
   }
-  if (th) {
+  if (th && th.status !== "promoted") {
+    // (a promoted thread gets no list: the kernel ships it with no messages or events — see the
+    // promoted branch below — and an empty list only grew into the box's fixed height)
     const list = el("div", "cmt-msgs");
     fillCommentMsgs(list, th, sid);
     pop.appendChild(list);
@@ -9394,10 +9396,22 @@ function renderCommentPopover(): void {
     }
     pop.appendChild(row);
   } else if (th) {
+    // a thread that became its own session (the user 2026-09-10, with a screenshot): the kernel
+    // ships it with no messages or events — the talk lives in the session now — so this view is the
+    // quote, one line saying where the talk went, and the one action, stacked from the top; nothing
+    // here grows into the box's fixed height (the empty list and the .sized quote used to split the
+    // free room between them: a one-line quote ran hundreds of pixels tall over a void, the action
+    // pinned under it). The action wears the shared .cmt-act word-button dress like every other
+    // action in this popover — it wore the composer's send-glyph square (.cmt-send: ~36px wide,
+    // 16px, no border), so "Open the session" wrapped one word per line in an oversized font.
+    const note = el("div", "cmt-note");
+    note.textContent = "The discussion continues there.";
+    pop.appendChild(note);
     const row = el("div", "cmt-actions");
-    const open = el("button", "cmt-send") as HTMLButtonElement;
+    const open = el("button", "cmt-act") as HTMLButtonElement;
     open.type = "button";
     open.textContent = "Open the session";
+    open.title = "Switch to that session";
     open.dataset.act = "cmtopensession";
     open.dataset.tid = th.tid;
     row.appendChild(open);

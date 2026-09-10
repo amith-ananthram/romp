@@ -30,6 +30,7 @@ import tempfile
 import time
 import unittest
 import uuid
+import json
 from pathlib import Path
 from unittest import mock
 from romp_load import load_source
@@ -60,6 +61,12 @@ CLI, TOOL, LOOP, BYSTANDER, MANAGER, KERNEL, TMUX, LIVE = (P + 42, P + 50, P + 6
 
 def _backend(d=None):
     return sb.SdkBackend(d or tempfile.mkdtemp(), "/bin/true", lambda *a, **k: None)
+
+
+class _Sess:
+    """The two attributes _session_cli_pid reads."""
+    def __init__(self, sid):
+        self.sid, self.name = sid, "s-" + sid[:4]
 
 
 def _reg(d, sid, **extra):
@@ -237,6 +244,57 @@ class BootReconcileEndsTheTree(unittest.TestCase):
         self.assertIn(["systemctl", "--user", "stop", "romp-session-11111111-%d-1757374800.scope" % CLI], runs,
                       "the dead CLI's scope is stopped: its children live on in the cgroup even after the CLI is gone")
 
+    def test_a_reparented_cli_with_a_valid_lease_survives_the_boot_and_a_stale_one_is_reaped(self):
+        """Ownership by lease (T305): three orphan-SHAPED CLIs (parent pid 1, no kernel), each a different case.
+        LEASED holds a valid lease (holder alive by pid and start time, fresh beat): it survives, its scope is
+        left alone, its lease stays. STALE's lease names a holder that is gone (a crashed kernel): its tree is
+        ended, its scope stopped, its lease dropped, and a holder-gone row is filed. A lease naming DEAD, a pid
+        no process wears, is dropped with a no-live-process row. The start-time reader is the seam: fake pids
+        above pid_max have no /proc entry, so identity comes from the fixture."""
+        LEASED, STALE, DEAD, HOLDER = P + 70, P + 71, P + 72, P + 80
+        d = tempfile.mkdtemp(); be = _backend(d)
+        for sid in (SID, OTHER):
+            _reg(d, sid)
+        now = time.time()
+        sb.write_lease(d, {"sid": SID, "fsid": SID, "pid": LEASED, "start": "1000", "holder": {"pid": HOLDER, "start": "500"},
+                           "version": "", "t": now})
+        sb.write_lease(d, {"sid": OTHER, "fsid": OTHER, "pid": STALE, "start": "1001", "holder": {"pid": P + 81, "start": "1"},
+                           "version": "", "t": now})
+        DEADSID = "33333333-cccc-0000-0000-00000000c305"
+        _reg(d, DEADSID)
+        sb.write_lease(d, {"sid": DEADSID, "fsid": DEADSID, "pid": DEAD, "start": "7", "holder": {"pid": HOLDER, "start": "500"},
+                           "version": "", "t": now})
+        starts = {LEASED: "1000", STALE: "1001", HOLDER: "500"}
+        ps = ("  %d 1 /x/claude --output-format stream-json --resume %s --input-format stream-json\n"
+              "  %d 1 /x/claude --output-format stream-json --resume %s --input-format stream-json\n"
+              ) % (LEASED, SID, STALE, OTHER)
+        listing = ("romp-session-%s-%d-1757374800.scope loaded active running claude\n"
+                   "romp-session-%s-%d-1757374801.scope loaded active running claude\n") % (SID[:8], LEASED, OTHER[:8], STALE)
+        killed, runs = [], []
+        def run(argv, **kw):
+            runs.append(list(argv)); return mock.Mock(stdout=ps if argv == sb.PS_ARGV else (listing if argv == sb.SCOPE_LIST_ARGV else ""), returncode=0)
+        regs = [sb.read_reg(Path(d), s) for s in (SID, OTHER, DEADSID)]
+        with mock.patch.object(sb.subprocess, "run", side_effect=run), \
+             mock.patch.object(sb.os, "kill", side_effect=lambda p, s: killed.append((p, s))), \
+             mock.patch.object(sb, "proc_start", lambda p, run=None: starts.get(p)), \
+             mock.patch.object(sb.SdkBackend, "_pid_alive", lambda self, p: False):
+            be._boot_reconcile(regs)
+        self.assertEqual([p for p, _ in killed], [STALE], "only the CLI whose lease did not hold is signaled")
+        stops = [a[-1] for a in runs if a[:3] == ["systemctl", "--user", "stop"]]
+        self.assertEqual(stops, ["romp-session-%s-%d-1757374801.scope" % (OTHER[:8], STALE)], "the leased CLI's scope is spared")
+        self.assertIsNotNone(sb.read_lease(d, SID), "the valid lease stays")
+        self.assertIsNone(sb.read_lease(d, OTHER), "the lease that did not hold went with its CLI")
+        self.assertIsNone(sb.read_lease(d, DEADSID), "a lease naming no live CLI is dropped")
+        # the lease rows among the ledger's (the boot sweep files rows of its own there: reconcile.*)
+        rows = [r for r in (json.loads(l) for l in (Path(d) / sb.SESSION_EVENTS_FILE).read_text().splitlines())
+                if r["kind"].startswith("lease.")]
+        self.assertEqual(sorted(r["kind"] for r in rows), ["lease.holder-gone", "lease.no-live-process"])
+        self.assertEqual({r["sid"] for r in rows}, {OTHER, DEADSID})
+        self.assertEqual({r["cliPid"] for r in rows}, {STALE, DEAD})
+        self.assertTrue(all(r["pid"] == os.getpid() for r in rows), "pid is the writing kernel's")
+        self.assertTrue({r["text"] for r in rows} <= {p["text"] for p in be.problems()}, "the ring carries the prose alone")
+        self.assertTrue(all(sb.PROBLEM_ROW_MARK not in p["text"] for p in be.problems()))
+
 
 @unittest.skipUnless(LINUX, "real processes on Linux with procfs")
 class RealProcessTree(unittest.TestCase):
@@ -301,6 +359,77 @@ class RealProcessTree(unittest.TestCase):
         self.assertIsNotNone(cli.poll(), "the CLI is gone")
         self.assertIsNone(by.poll(), "the bystander outside the tree was never signaled")
         self.assertGreaterEqual(out["tree"], 1)
+
+    def _fake_cli(self, sid):
+        """A process that LOOKS like an SDK CLI of ours to the ps scan (the stream-json mark and the sid in its argv)
+        and is a true ORPHAN shape: started by an intermediate shell that prints its pid and exits, so the fake CLI
+        re-parents to the subreaper (the user manager, or pid 1), never to this test — a child of the tester would be
+        the census's own-child case. Two commands in the fake CLI, so bash does not exec into the sleep and lose the
+        argv; the sleep is its descendant. The intermediate leads a new process group that the fake CLI and its
+        sleep inherit, so one killpg at cleanup ends whatever the reaper left. Returns (pid, pgid)."""
+        inter = subprocess.Popen(["bash", "-c", 'bash -c "sleep 300; :" romp-t305-fake-cli --input-format stream-json --resume "$1" '
+                                  '</dev/null >/dev/null 2>&1 & echo $!', "x", sid],
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True)
+        out, _ = inter.communicate(timeout=10)
+        pid = int(out.strip())
+        def sweep():
+            try:
+                os.killpg(inter.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self.addCleanup(sweep)
+        return pid, inter.pid
+
+    @staticmethod
+    def _alive(pid):
+        return os.path.exists("/proc/%d" % pid) and "zombie" not in open("/proc/%d/status" % pid).read().split("State:")[1][:20]
+
+    def test_real_processes_a_leased_reparented_cli_survives_the_boot_and_a_stale_leased_one_is_reaped(self):
+        """The acceptance shape of T305 with real processes: two orphan-shaped CLIs; the one whose lease this test
+        HOLDS (the test process is the holder, alive by pid and start time) survives the boot reconcile, the one
+        whose lease names a holder that is gone is ended. The cgroup seam is pinned empty (the fake CLIs inherit
+        the tester's own scope, which the reaper would refuse anyway), the scope listing is empty, and every
+        process this test starts is killed by it."""
+        d = tempfile.mkdtemp(); be = _backend(d)
+        # sids minted per run: the census is box-wide, so two checkouts running this test at once must never
+        # see each other's fake CLIs as theirs (the T305 review)
+        sid_a, sid_b = str(uuid.uuid4()), str(uuid.uuid4())
+        for sid in (sid_a, sid_b):
+            _reg(d, sid)
+        (live, live_pg), (stale, stale_pg) = self._fake_cli(sid_a), self._fake_cli(sid_b)
+        now = time.time()
+        sb.write_lease(d, {"sid": sid_a, "fsid": sid_a, "pid": live, "start": sb.proc_start(live),
+                           "holder": {"pid": os.getpid(), "start": sb.proc_start(os.getpid())}, "version": "", "t": now})
+        sb.write_lease(d, {"sid": sid_b, "fsid": sid_b, "pid": stale, "start": sb.proc_start(stale),
+                           "holder": {"pid": P + 80, "start": "1"}, "version": "", "t": now})
+        real_run = subprocess.run
+        def run(argv, **kw):
+            return mock.Mock(stdout="", returncode=0) if argv == sb.SCOPE_LIST_ARGV else real_run(argv, **kw)
+        # the ps scan must see both before the census reads it
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            ps = real_run(sb.PS_ARGV, capture_output=True, text=True, timeout=10).stdout.splitlines()
+            if set(sb.find_orphan_clis(ps, [sid_a, sid_b], os.getpid())) >= {live, stale}:
+                break
+            time.sleep(0.05)
+        self.assertEqual(set(sb.find_orphan_clis(ps, [sid_a, sid_b], os.getpid())), {live, stale},
+                         "by parentage alone both are orphans")
+        with mock.patch.object(sb.subprocess, "run", side_effect=run), \
+             mock.patch.object(sb, "_read_cgroup", lambda p: ""):
+            be._boot_reconcile([sb.read_reg(Path(d), s) for s in (sid_a, sid_b)])
+        deadline = time.time() + 5
+        while time.time() < deadline and self._alive(stale):
+            time.sleep(0.05)
+        self.assertFalse(self._alive(stale), "the CLI whose lease did not hold is gone")
+        self.assertTrue(self._alive(live), "the leased CLI survived the boot")
+        self.assertIsNotNone(sb.read_lease(d, sid_a))
+        self.assertIsNone(sb.read_lease(d, sid_b))
+        rows = [r for r in (json.loads(l) for l in (Path(d) / sb.SESSION_EVENTS_FILE).read_text().splitlines())
+                if r["kind"].startswith("lease.")]
+        self.assertEqual([(r["kind"], r["sid"], r["cliPid"]) for r in rows], [("lease.holder-gone", sid_b, stale)])
+        # the escalation reaches the surviving, re-parented CLI through its lease
+        self.assertEqual(be._session_cli_pid(_Sess(sid_a)), live)
+        os.killpg(live_pg, signal.SIGKILL)
 
 
 if __name__ == "__main__":
