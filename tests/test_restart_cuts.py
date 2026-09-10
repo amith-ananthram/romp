@@ -573,6 +573,34 @@ class UnrequestedSignal(unittest.TestCase):
         self.assertEqual(cuts[0]["auditT"], t, "the park is consumed by the kernel the manager noted before killing it")
         self.assertEqual(km._parked_quiet_deploy("1111111", now=t), 0, "and nothing is parked any more")
 
+    def test_the_stale_manager_self_bounce_delivers_a_quiet_park_too(self):
+        # a variant of the delivery test: the note is the stale-manager self-bounce's, reason `stop`
+        # with trigger `refresh` (bin/romp-manager restartAllOrSelf: a supervised manager whose binary changed
+        # since it started stops every kernel so the supervisor respawns it on the new code, and the quiet
+        # apply goes through the same path). shutdownAll clears the manager's park before it notes and kills,
+        # so this stop note is the park's delivery like a restart note is, and the cut row consumes the park.
+        # Pinned at the handler because the `stop` member of the predicate's reasons had no case of its own:
+        # dropping it turned nothing red, and the exit then took the unrequested path (a `signal` row with
+        # managerStopped, the park left on record for a manager that no longer holds it). The trigger is what
+        # keeps this note a delivery: a stop note with trigger `stop` is the one _graceful_term reads as none.
+        # Distinct seconds, so the auditT stamp says which row was consumed (_consumed_audit_t keys on t
+        # alone); the process start is pinned so the park sits inside this kernel's lifetime
+        t = int(time.time())
+        park = {"t": t - 5, "action": "main-converge", "tag": "restart", "when": "quiet", "sha": "1111111"}
+        note = {"t": t, "action": "manager-sigterm", "kernel": "main", "pid": os.getpid(),
+                "reason": "stop", "trigger": "refresh"}
+        self.AUDIT.write_text(json.dumps(park) + "\n" + json.dumps(note) + "\n")
+        with mock.patch.object(km, "_STARTED", t - 10), \
+             mock.patch.dict(os.environ, {"ROMP_MANAGER_PID": str(os.getpid())}):
+            self._fire()
+            self.assertEqual([r["action"] for r in self._rows(self.AUDIT)], ["main-converge", "manager-sigterm"],
+                             "delivered: no signal row")
+            cuts = self._rows(km.RESTART_CUTS_FILE)
+            self.assertEqual(len(cuts), 1)
+            self.assertEqual(cuts[0]["reason"], "main-converge")
+            self.assertEqual(cuts[0]["auditT"], t - 5, "the park is consumed, not the note")
+            self.assertEqual(km._parked_quiet_deploy("1111111", now=t), 0, "and nothing is parked any more")
+
     def test_the_managers_restart_of_this_kernel_alone_delivers_a_quiet_park_too(self):
         # the park filed by this kernel, then the manager's `restart` note for this pid with trigger `restart`
         # (POST /restart naming one kernel, bin/romp-manager restartKernel). Every restart the manager sends
