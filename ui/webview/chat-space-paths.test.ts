@@ -48,9 +48,9 @@ test("linkifyFileUris whole-links a verified span's entire inline-code content",
 test("the whole-span pass runs BEFORE the token walk, so the new link is skipped by it", () => {
   const fn = RENDER.slice(RENDER.indexOf("function linkifyFileUris("), RENDER.indexOf("function renderEvent("));
   const spanPass = fn.indexOf('root.querySelectorAll("code")');
-  const walk = fn.indexOf("createTreeWalker");
+  const walk = fn.indexOf("linkifyPathTokens(");   // the shared walk (path-links.ts), which skips text already inside a link
   assert.ok(spanPass >= 0 && walk >= 0 && spanPass < walk,
-    "code-span links land first; the token walker's closest('a') guard then leaves them alone");
+    "code-span links land first; the token walk's closest('a, .file-uri-link') guard then leaves them alone");
 });
 
 test("every message render threads its event's spacePaths through", () => {

@@ -60,8 +60,8 @@ test("sending with a GOAL citation routes as an askFollowUp (reopen) and consume
   // routes every post of the release through it with sid (the active session) as the sid
   assert.match(RENDER, /const cites = composerCitations\.get\(activeId\);/);
   assert.match(RENDER, /flushStaged\(sid, \{ text, cites, imgPaths: attached\.filter\(\(p\) => previewKind\(p\) === "img"\) \}\);/);   // + the echo's thumbnail paths (2026-08-25)
-  assert.match(RENDER, /if \(goalCite\?\.itemId\) \{ vscodeApi\.postMessage\(\{ type: "askFollowUp", itemId: goalCite\.itemId, text, sid \}\); registerOptimistic\(sid, text, imgPaths\); \}/);
-  assert.match(RENDER, /else \{ vscodeApi\.postMessage\(\{ type: "sendMessage", id: sid, text \}\); registerOptimistic\(sid, text, imgPaths\); \}/);
+  assert.match(RENDER, /if \(goalCite\?\.itemId\) \{ vscodeApi\.postMessage\(\{ type: "askFollowUp", itemId: goalCite\.itemId, text, sid, qid \}\); registerOptimistic\(sid, text, imgPaths, qid\); \}/);
+  assert.match(RENDER, /else \{ vscodeApi\.postMessage\(\{ type: "sendMessage", id: sid, text, qid \}\); registerOptimistic\(sid, text, imgPaths, qid\); \}/);
   assert.match(RENDER, /if \(cites\) \{ composerCitations\.delete\(activeId\); renderComposerChips\(activeId\); \}/);
 });
 
@@ -73,7 +73,7 @@ test("a citation follow-up carries its SID, so a reply to a REMOTE card reaches 
   // sid from the itemId, owns no such session, and hands it to tmux by uuid — dropped in silence. The card
   // still flashed to Working (the kernel's cardPredict fires before any of that) and snapped back on the
   // ok:false ack, so the only visible trace was a bounce.
-  assert.match(RENDER, /if \(goalCite\?\.itemId\) \{ vscodeApi\.postMessage\(\{ type: "askFollowUp", itemId: goalCite\.itemId, text, sid \}\); registerOptimistic\(sid, text, imgPaths\); \}/);
+  assert.match(RENDER, /if \(goalCite\?\.itemId\) \{ vscodeApi\.postMessage\(\{ type: "askFollowUp", itemId: goalCite\.itemId, text, sid, qid \}\); registerOptimistic\(sid, text, imgPaths, qid\); \}/);
   assert.match(RENDER, /const sid = activeId;   \/\/ the session this send \(and any confirm below\) was armed for/);   // deliver's sid IS the active session
   assert.match(RENDER, /flushStaged\(sid, \{ text, cites, imgPaths: attached\.filter\(\(p\) => previewKind\(p\) === "img"\) \}\);/);
   // every OTHER card-addressed op already routes this way — the citation follow-up was the lone omission
@@ -207,11 +207,11 @@ test("closing a session clears its composer reply context — chip, draft, and e
 });
 
 test("quote chips send a plain message wrapped by quoteReplyBody — never askFollowUp (no goal to reopen)", () => {
-  assert.match(RENDER, /if \(goalCite\?\.itemId\) \{ vscodeApi\.postMessage\(\{ type: "askFollowUp", itemId: goalCite\.itemId, text, sid \}\); registerOptimistic\(sid, text, imgPaths\); \}/);
+  assert.match(RENDER, /if \(goalCite\?\.itemId\) \{ vscodeApi\.postMessage\(\{ type: "askFollowUp", itemId: goalCite\.itemId, text, sid, qid \}\); registerOptimistic\(sid, text, imgPaths, qid\); \}/);
   // the quote branch echoes the COMPOSED body — byte-identical to what lands, so the reconcile's
   // includes() match is exact (the user 2026-08-23, whose quoted sends painted nothing until the
   // kernel round-tripped while plain sends painted instantly)
-  assert.match(RENDER, /else if \(quoteCites\.length\) \{ const body = quoteReplyBody\(quoteCites, text\); vscodeApi\.postMessage\(\{ type: "sendMessage", id: sid, text: body \}\); registerOptimistic\(sid, body, imgPaths\); \}/);
+  assert.match(RENDER, /else if \(quoteCites\.length\) \{ const body = quoteReplyBody\(quoteCites, text\); vscodeApi\.postMessage\(\{ type: "sendMessage", id: sid, text: body, qid \}\); registerOptimistic\(sid, body, imgPaths, qid\); \}/);
   // the wrap: one section per stacked chip (lead-in + the highlighted text as a markdown quote block), in
   // strip order, then the typed message — a single chip composes byte-identically to the pre-stack form
   // a context-only body (staged with an empty box) carries no dangling blank tail. The function lives in

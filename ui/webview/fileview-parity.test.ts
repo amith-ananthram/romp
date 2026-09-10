@@ -57,6 +57,9 @@ const RULES = [
   // clipped and unreachable, so they have to hold in both documents
   ":where(.fileview-md) svg, :where(.fileview-md) canvas, :where(.fileview-md) video {",
   ':where(.fileview-md :is(svg, canvas)[width]:not([width$="%"])) {',
+  // links inside a shown file (file-view-links.ts): the light dress on a URL anchor and a path link, the Markdown link that names a file, a dead link
+  ".fileview-body .file-uri-link, .fileview-body .fv-url {", ".fileview-body .file-uri-link:hover, .fileview-body .fv-url:hover {",
+  ".fileview-md a.file-uri-link {", ".fileview-md a.file-uri-link:hover {", ".fileview-md a.fv-dead {",
 ];
 
 /** Every rule whose selector opens a line as `head`, in sheet order; at least one, or the head is missing. */

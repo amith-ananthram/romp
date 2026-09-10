@@ -6,6 +6,7 @@ parked message rendering BEFORE the model change parked ahead of it). A repeated
 replaces its earlier parked op in place. Same event-corroborated _compacting_now gate as ever; a parked
 send stamps its optimistic echo only when it actually fires (an early echo killed the compacting cue).
 SYNTHETIC fixtures only."""
+import json
 import os
 import unittest
 from importlib.machinery import SourceFileLoader
@@ -34,6 +35,7 @@ km._limit_hold = lambda sid: None
 km._TMUX_PROMPT_HOLD_S = 0.0
 
 SID = "11111111-2222-3333-4444-555555555555"
+THEIRS = "99999999-8888-7777-6666-555555555555"   # a session another machine's kernel owns
 
 
 class _FakeBackend:
@@ -398,7 +400,7 @@ class SendPathsPark(unittest.TestCase):
     def test_ws_drive_paths_use_the_parks(self):
         with open(os.path.join(BIN, "romp-kernel")) as f:
             src = f.read()
-        self.assertIn('_send_or_park(be, sid, str(msg["text"]), echo="human")', src,
+        self.assertIn('_send_or_park(be, sid, str(msg["text"]), echo="human", qid=_client_qid(msg, sid, be))', src,
                       "the composer send parks mid-compaction")
         self.assertIn("_send_or_park(be, sid, body,", src, "the follow-up/nudge send parks mid-compaction")
         self.assertIn("_send_or_park(be, sid, cmd)", src, "the timeline sendCommand parks mid-compaction")
@@ -406,6 +408,232 @@ class SendPathsPark(unittest.TestCase):
                       "the setEffort drive op parks mid-compaction (the user 2026-07-02: it slipped through)")
         self.assertIn("_set_effort_or_park(be, sid, value)    # mid-compaction → parked as a queued command", src,
                       "the timeline's and the composer's /effort park mid-compaction (_route_meta_command)")
+
+
+class _EditableQueueBackend:
+    """A backend that owns its queue and can re-word an entry (SdkBackend.edit_queued's contract): `expect`
+    re-verified at swap time, the OLD text returned, None on a miss that touches nothing. Shared by the
+    _edit_backend_queued tests and the executing _drive harness below (review find, 2026-09-08)."""
+
+    def __init__(self, pending=None):
+        self.q = list(pending or [])
+        self.edits = []                       # every edit_queued call, so a refusal can prove it never reached the backend
+
+    def pending_queued(self, sid):
+        return list(self.q)
+
+    def edit_queued(self, sid, idx, text, expect=None):
+        self.edits.append((idx, text, expect))
+        if not (0 <= idx < len(self.q)) or self.q[idx] != expect:
+            return None
+        old, self.q[idx] = self.q[idx], text
+        return old
+
+
+class QueuedEdit(unittest.TestCase):
+    """The queued bubble's ✎ (the user 2026-09-08): a message that has not reached the session is still the
+    user's to change. Same slot, same follow-up context, only the words; refused with the ✕'s honesty when
+    the entry is gone or is with the backend this instant. SYNTHETIC fixtures only."""
+
+    def setUp(self):
+        km._pending_ops.clear()
+        km._inflight_ops.clear()
+
+    def tearDown(self):
+        km._pending_ops.clear()
+        km._inflight_ops.clear()
+        try:
+            os.unlink(km._PENDING_OPS_FILE)
+        except OSError:
+            pass
+
+    def test_edit_parked_replaces_the_send_in_place(self):
+        km._pending_ops[SID] = [("model", "opus"), ("send", "draft one", "human"), ("send", "another", "human")]
+        self.assertIsNone(km._edit_parked(SID, 1, "draft one", "draft two"))
+        self.assertEqual(km._pending_ops[SID], [("model", "opus"), ("send", "draft two", "human"), ("send", "another", "human")],
+                         "same slot, same echo author, new words")
+        self.assertEqual(km._parked_md(km._pending_ops[SID][1]), "draft two", "the bubble shows the new body")
+
+    def test_edit_parked_relocates_by_body_and_refuses_the_gone_and_the_in_flight(self):
+        km._pending_ops[SID] = [("send", "a", "human"), ("send", "b", "human")]
+        self.assertIsNone(km._edit_parked(SID, 0, "b", "b2"), "a stale index re-locates by body")
+        self.assertEqual([op[1] for op in km._pending_ops[SID]], ["a", "b2"])
+        self.assertEqual(km._edit_parked(SID, 5, "gone", "x"), km._edit_miss_text("gone"))
+        km._inflight_ops[SID] = km._pending_ops[SID][0]
+        self.assertEqual(km._edit_parked(SID, 0, "a", "a2"), km._edit_miss_text("a"),
+                         "the head the backend holds this instant is too late, never a wrong-op rewrite")
+        self.assertEqual(km._pending_ops[SID][0][1], "a")
+
+    def test_edit_parked_refuses_a_command_chip_and_an_empty_body(self):
+        km._pending_ops[SID] = [("compact",), ("command", "/model opus", "human"), ("send", "words", "human")]
+        self.assertIn("only a queued message can be edited", km._edit_parked(SID, 0, "/compact", "x"))
+        self.assertIn("only a queued message can be edited", km._edit_parked(SID, 1, "/model opus", "x"))
+        self.assertIn("nothing to send", km._edit_parked(SID, 2, "words", "   "))
+        self.assertEqual(km._pending_ops[SID][2][1], "words", "a refusal changes nothing")
+
+    def test_a_follow_up_keeps_its_goal_quote_and_markers(self):
+        fu = ("> Ship the notes API\n> its goal context\n\nfirst words\n\n"
+              "<!-- romp-note: the HTML comments below are part of an external tracking system --><!-- romp-goal-id: g7 -->")
+        new = km._replace_followup_body(fu, "second words")
+        goal, body, is_fu, ctx = km._split_followup(new)
+        self.assertEqual((goal, body, is_fu), ("Ship the notes API", "second words", True))
+        self.assertEqual(ctx, "Ship the notes API\nits goal context")
+        self.assertIn("<!-- romp-goal-id: g7 -->", new, "the judge still files the edited follow-up under its goal")
+        self.assertTrue(new.startswith("> Ship the notes API\n> its goal context\n\nsecond words"))
+        self.assertEqual(km._replace_followup_body("plain", "edited"), "edited", "a plain send IS its body")
+        km._pending_ops[SID] = [("send", fu, "human")]
+        self.assertIsNone(km._edit_parked(SID, 0, "first words", "second words"), "the ✎ hands the BODY the bubble showed; the kernel keeps the wrapper")
+        self.assertEqual(km._split_followup(km._pending_ops[SID][0][1])[1], "second words")
+
+    def test_edit_backend_queued_uses_the_drift_guard_and_keeps_a_followups_wrapper(self):
+        be = _EditableQueueBackend(["alpha", "> goal\n\nbody\n\n<!-- romp-goal-id: g1 -->"])
+        self.assertIsNone(km._edit_backend_queued(be, SID, 5, "body", "new body"), "a stale index re-locates by body")
+        self.assertEqual(km._split_followup(be.q[1])[1], "new body")
+        self.assertIn("<!-- romp-goal-id: g1 -->", be.q[1])
+        self.assertEqual(km._edit_backend_queued(be, SID, 0, "gone", "x"), km._edit_miss_text("gone"))
+        self.assertEqual(be.q[0], "alpha", "a miss rewrites nothing")
+
+    def test_an_edit_cannot_turn_a_message_into_a_slash_command(self):
+        # review find (2026-09-08): both arms replaced the body without _is_slash_command, so "/model opus" typed
+        # into the edit stayed a ("send", ...) op and reached the model as TEXT, skipping the fire-alone parking
+        # and the kernel-side setters every typed command gets. Both arms refuse, and nothing changes.
+        km._pending_ops[SID] = [("send", "words", "human")]
+        self.assertIn("cannot become a command", km._edit_parked(SID, 0, "words", "/model opus"))
+        self.assertEqual(km._pending_ops[SID], [("send", "words", "human")], "a refusal changes nothing")
+        be = _EditableQueueBackend(["alpha"])
+        self.assertIn("cannot become a command", km._edit_backend_queued(be, SID, 0, "alpha", "/compact"))
+        self.assertEqual((be.q, be.edits), (["alpha"], []), "the refusal never reaches the backend")
+        # a PATH is not a command (_is_slash_command's own rule): "/tmp/x is broken" still edits
+        self.assertIsNone(km._edit_parked(SID, 0, "words", "/tmp/x is broken"))
+        self.assertEqual(km._pending_ops[SID][0][1], "/tmp/x is broken")
+
+    def test_an_edited_continue_lands_as_the_users_words_not_the_canned_gesture(self):
+        # review find (2026-09-08): the Continue button's body carries <!-- romp-canned: continue -->, which
+        # describes the canned WORDS, and _replace_followup_body kept every trailing comment as wrapper, so the
+        # typed replacement went out still marked canned and the chat drew it as the Continue gesture row.
+        # Only romp's WRAPPER markers (note, injected, auto, goal-id) survive an edit.
+        fu = km._followup_body(SID + ":g7", "Ship the notes API", km.CONTINUE_TEXT + "\n\n<!-- romp-canned: continue -->")
+        self.assertIn("<!-- romp-canned: continue -->", fu, "the fixture is the button's real composition")
+        new = km._replace_followup_body(fu, "also add the tests first")
+        self.assertNotIn("romp-canned", new)
+        self.assertIn("<!-- romp-goal-id: " + SID + ":g7 -->", new, "the judge still files it under its goal")
+        self.assertIn("<!-- romp-note:", new)
+        self.assertEqual(km._split_followup(new)[1], "also add the tests first")
+        self.assertTrue(new.startswith("> Ship the notes API\n\nalso add the tests first\n\n<!-- romp-note:"), new)
+
+    def test_a_comment_inside_the_old_body_is_not_part_of_the_marker_tail(self):
+        # review find (2026-09-08): the tail regex ran with re.S and matched ANY comment, so a body holding an
+        # inline <!-- x --> anchored it there and the old words after the comment came back behind the NEW
+        # body. The docstring's inverse holds: _split_followup(_replace_followup_body(t, b))[1] == b.strip().
+        fu = "> goal\n\nsee <!-- x --> then more\n\n<!-- romp-goal-id: g -->"
+        self.assertEqual(km._replace_followup_body(fu, "new"), "> goal\n\nnew\n\n<!-- romp-goal-id: g -->")
+        fu2 = ("> Ship the notes API\n\nsee <!-- a --> then words\n\n"
+               "<!-- romp-note: the HTML comments below are part of an external tracking system --><!-- romp-goal-id: g7 -->")
+        new2 = km._replace_followup_body(fu2, "second words")
+        self.assertEqual(km._split_followup(new2)[1], "second words")
+        self.assertTrue(new2.endswith("<!-- romp-note: the HTML comments below are part of an external tracking system --><!-- romp-goal-id: g7 -->"))
+        self.assertNotIn("then words", new2)
+
+    def test_drive_routes_the_three_edit_arms_and_answers_editResult(self):
+        import inspect
+        src = inspect.getsource(km._drive)
+        self.assertIn('t == "editQueued" and msg.get("park") is not None', src)
+        self.assertIn('_edit_parked(sid, int(msg["park"]), str(msg.get("md") or ""), str(msg.get("text") or ""))', src)
+        self.assertIn('t == "editQueued" and msg.get("idx") is not None and hasattr(be, "edit_queued")', src)
+        self.assertIn('_edit_backend_queued(be, sid, int(msg["idx"]), str(msg.get("md") or ""), str(msg.get("text") or ""))', src)
+        self.assertIn('elif t == "editQueued" and msg.get("md"):', src,
+                      "the optimistic stage: locate by body, the FIFO first, then the backend queue")
+        self.assertEqual(src.count('"type": "editResult"'), 3, "every arm answers with an authoritative frame")
+        ksrc = open(os.path.join(BIN, "romp-kernel")).read()
+        self.assertIn('"apiRetry", "editQueued"', ksrc, "the op routes to the owning kernel across linked machines (ID_OPS)")
+
+
+class QueuedEditDrive(unittest.TestCase):
+    """editQueued driven through _drive with a capturing client (tests/test_drive_foreign_sid.py's harness): the
+    three arms EXECUTE, and the editResult frame the client keys its restore on (id + md, ok, text) is asserted,
+    not the handler's source text (review find, 2026-09-08). SYNTHETIC sids only."""
+
+    def setUp(self):
+        self.sent = []
+        self.client = {"send": lambda s: self.sent.append(json.loads(s))}
+        self.be = _EditableQueueBackend()
+        self._saved = (km._name_of, km._sdk, km.Sessions.backend_for, km._push_soon)
+        km._name_of = lambda sid: "web" if sid == SID else None
+        km._sdk = lambda: None
+        km.Sessions.backend_for = staticmethod(lambda sid: self.be)
+        km._push_soon = lambda *a, **k: None
+        km._pending_ops.clear()
+        km._inflight_ops.clear()
+
+    def tearDown(self):
+        km._name_of, km._sdk, backend_for, km._push_soon = self._saved
+        km.Sessions.backend_for = staticmethod(backend_for)
+        km._pending_ops.clear()
+        km._inflight_ops.clear()
+        try:
+            os.unlink(km._PENDING_OPS_FILE)
+        except OSError:
+            pass
+
+    def _edit(self, **fields):
+        msg = {"type": "editQueued", "id": SID}
+        msg.update(fields)
+        self.assertTrue(km._drive(msg, self.client), "a drive op is consumed")
+        self.assertEqual(len(self.sent), 1, "exactly one answer frame")
+        return self.sent[0]
+
+    def test_the_park_arm_replaces_the_fifo_send_and_answers_ok(self):
+        km._pending_ops[SID] = [("send", "a", "human")]
+        self.assertEqual(self._edit(park=0, md="a", text="b"),
+                         {"type": "editResult", "ok": True, "id": SID, "md": "a", "text": ""})
+        self.assertEqual(km._pending_ops[SID], [("send", "b", "human")])
+
+    def test_the_park_arm_answers_ok_false_with_the_reason_when_the_chip_is_not_a_message(self):
+        km._pending_ops[SID] = [("compact",)]
+        frame = self._edit(park=0, md="/compact", text="x")
+        self.assertEqual((frame["ok"], frame["md"]), (False, "/compact"))
+        self.assertIn("only a queued message can be edited", frame["text"])
+        self.assertEqual(km._pending_ops[SID], [("compact",)])
+
+    def test_the_idx_arm_rewords_the_backend_queue_under_its_drift_guard(self):
+        self.be.q = ["alpha", "beta"]
+        self.assertEqual(self._edit(idx=1, md="beta", text="beta 2"),
+                         {"type": "editResult", "ok": True, "id": SID, "md": "beta", "text": ""})
+        self.assertEqual(self.be.q, ["alpha", "beta 2"])
+        self.assertEqual(self.be.edits, [(1, "beta 2", "beta")], "the swap carried the exact old text")
+
+    def test_the_optimistic_arm_tries_the_fifo_then_the_backend_queue(self):
+        km._pending_ops[SID] = [("send", "p", "human")]
+        self.assertTrue(self._edit(md="p", text="p 2")["ok"], "the FIFO holds it")
+        self.assertEqual((km._pending_ops[SID][0][1], self.be.edits), ("p 2", []))
+        self.sent.clear()
+        self.be.q = ["alpha"]
+        frame = self._edit(md="alpha", text="alpha 2")          # the FIFO misses, the backend holds it
+        self.assertEqual(frame, {"type": "editResult", "ok": True, "id": SID, "md": "alpha", "text": ""},
+                         "the second locate WINS and the frame says so")
+        self.assertEqual(self.be.q, ["alpha 2"])
+
+    def test_the_optimistic_arm_misses_everywhere_with_the_too_late_text(self):
+        frame = self._edit(md="gone", text="x")
+        self.assertEqual((frame["ok"], frame["md"], frame["text"]), (False, "gone", km._edit_miss_text("gone")))
+
+    def test_a_slash_command_is_refused_at_every_arm(self):
+        km._pending_ops[SID] = [("send", "a", "human")]
+        self.be.q = ["alpha"]
+        for fields in ({"park": 0, "md": "a"}, {"idx": 0, "md": "alpha"}, {"md": "a"}):
+            self.sent.clear()
+            frame = self._edit(text="/model opus", **fields)
+            self.assertFalse(frame["ok"], fields)
+            self.assertIn("cannot become a command", frame["text"], fields)
+        self.assertEqual((km._pending_ops[SID][0][1], self.be.q, self.be.edits), ("a", ["alpha"], []))
+
+    def test_a_foreign_sid_is_refused_and_nothing_is_edited(self):
+        km._pending_ops[SID] = [("send", "a", "human")]
+        self.be.q = ["alpha"]
+        self.assertTrue(km._drive({"type": "editQueued", "id": THEIRS, "park": 0, "md": "a", "text": "b"}, self.client))
+        self.assertEqual(self.sent[0]["type"], "err", "refused loudly, in the pane that fired it")
+        self.assertEqual(self.sent[0]["copy"], "b", "the typed words ride back")
+        self.assertEqual((km._pending_ops[SID][0][1], self.be.q), ("a", ["alpha"]))
 
 
 class QueuedBubble(unittest.TestCase):
@@ -424,8 +652,8 @@ class QueuedBubble(unittest.TestCase):
         import inspect
         src = inspect.getsource(km._drive)
         self.assertIn('t == "cancelQueued" and msg.get("park") is not None', src)
-        self.assertIn('_cancel_parked(sid, int(msg["park"]), str(msg.get("md") or ""))', src)
-        self.assertIn('_cancel_backend_queued(be, sid, int(msg["idx"]), str(msg.get("md") or ""))', src,
+        self.assertIn('_cancel_parked(sid, int(msg["park"]), str(msg.get("md") or ""), qid=_wire_qid(msg))', src)
+        self.assertIn('_cancel_backend_queued(be, sid, int(msg["idx"]), str(msg.get("md") or ""), qid=_wire_qid(msg))', src,
                       "the backend-queue cancel goes through the drift guard now")
 
     def test_a_body_only_cancel_that_finds_nothing_is_logged(self):
