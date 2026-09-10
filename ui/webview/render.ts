@@ -67,7 +67,7 @@ import { openPathLink, linkifyPathTokens, selectionOpenIn } from "./path-links";
 import { initFileBrowse, openFileBrowse } from "./file-browse";   // the browser is pane-local here now (the user 2026-08-24)
 import { pastedFilePath } from "./paste-path";
 import { insertAtCaret } from "./composer-insert";
-import { hostNameNodes, hostPartsNodes, hostPrefix, hostOf, hostIsDown, hostDownNote } from "./host-prefix";
+import { hostNameNodes, hostPartsNodes, hostPrefix, hostOf, hostIsDown, hostIsDialing, hostDownNote } from "./host-prefix";
 import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionToken, insertMention, mentionKeyAction, mentionSegments } from "./composer-mention";   // the @-mention card's rules, pure; the DOM is setupComposer's mention block and markMentions
 import type { MentionCandidate, MentionQuery } from "./composer-mention";
 import { defaultCommentName, defaultBreakoutName, defaultForkName, nameToSend } from "./comment-name";
@@ -6693,6 +6693,9 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
 // this only when the reachable set actually CHANGES (its own /tunnels poll is the event), so this is a
 // repaint per connect/drop, not per poll (the user 2026-07-29).
 window.addEventListener("romp-hosts", () => { renderTabs(); });
+// a dial attempt to a remote host began or ended (federation.ts dialEvent): the host-down foot's swirl
+// spins while one is in flight, as of the last /tunnels poll, so it repaints on this event and on nothing else
+window.addEventListener("romp:hostDial", () => { syncHostOfflineFoot(); });
 window.addEventListener("mousedown", (e) => { if (ctxMenuEl && !ctxMenuEl.contains(e.target as Node)) dismissTabMenu(); }, true);
 // an Escape that closed the menu says so on the event (preventDefault), so the section view's own Escape
 // (installSnapshotEscape, armed at this same capture phase, later in the listener order) yields to it
@@ -11744,15 +11747,35 @@ function syncHostOfflineFoot(): void {
   if (!activeId || !hostIsDown(activeId)) { existing?.remove(); return; }
   const host = String(activeId).slice(0, String(activeId).indexOf(":"));
   const text = host + " is disconnected — this is the last romp got from it. Reconnecting.";
-  if (existing && existing.dataset.text === text) return;
+  // The swirl after "Reconnecting" spins only while romp is actually trying to reach the host (the user
+  // 2026-09-10, who wanted it dynamic and honest: trying right now, not a spinner because something is wrong).
+  // hostIsDialing reads what federation publishes (host-prefix.ts hostDialLive): the kernel's /tunnels row
+  // saying `dialing` (an ssh dial spawned and unconfirmed, or its health request to the host in flight;
+  // the browser never dials a host the kernel reports down, so the kernel's word is the one that matters
+  // here) or this page's relay socket in its CONNECTING state. Federation's romp:hostDial event, on the
+  // row's change and on the socket's dial, open and close, is what repaints this foot; between attempts
+  // (the kernel waiting out its backoff) the swirl sits still. It sits AFTER the sentence as the gist's flex
+  // SIBLING in the head (the postal delivery icon's convention), never inside the gist: that span ellipsizes
+  // on a narrow pane and would clip the swirl first, the one dynamic cue. The rebuild is keyed on the state
+  // too, so a repaint with nothing changed leaves the DOM alone.
+  const dialing = hostIsDialing(activeId);
+  const key = text + (dialing ? " |dialing" : "");
+  if (existing && existing.dataset.text === key) return;
   existing?.remove();
   // a slim SESSION notice in the warn severity at the transcript's tail (the audit's row 35 — it was a
   // centred italic line, the one row outside the vocabulary); off the rail, so the prose-column indent
   const foot = el("div", "notice-foot");
   foot.id = "host-offline-foot";
-  foot.dataset.text = text;
-  foot.appendChild(notice({ src: "session", glyph: "api", sev: "warn", gist: text, nested: true,
-                            tip: hostDownNote(activeId) }));   // the one place that note is worded — host-prefix.ts
+  foot.dataset.text = key;
+  const card = notice({ src: "session", glyph: "api", sev: "warn", gist: text, nested: true, live: dialing,
+                        tip: hostDownNote(activeId) });   // the one place that note is worded — host-prefix.ts
+  if (dialing) {
+    const swirl = el("img", "host-dial-swirl") as HTMLImageElement;   // the romp-loader motif (the placeholder tab's mini swirl)
+    swirl.src = mediaSrc("romp-swirl-glyph.svg"); swirl.alt = ""; swirl.onerror = () => swirl.remove();
+    const gistEl = card.querySelector(".notice-head .notice-gist");
+    if (gistEl) gistEl.after(swirl); else card.querySelector(".notice-head")?.appendChild(swirl);
+  }
+  foot.appendChild(card);
   content.appendChild(foot);
 }
 

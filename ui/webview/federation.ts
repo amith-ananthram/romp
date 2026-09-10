@@ -14,7 +14,7 @@
 import { adoptArrivals, applyViewOrder, applyViewOrderTo, churnSwaps, healOrder, pruneViewOrder,
          readViewOrder, writeViewOrder, VIEW_ORDER_KEY, VIEW_ORDER_EVENT } from "./view-order";
 import { adoptViews, capsAdopts, announcedSeq, announcedAfter } from "./views-writes";
-import { hostOf, bareId } from "./host-prefix";
+import { hostOf, bareId, hostDialLive } from "./host-prefix";
 import { installPerfTelemetry, classifyFrame, type RompPerf } from "./perf-telemetry";
 
 export const SEP = ":";
@@ -877,6 +877,7 @@ export class FederationManager {
   private perHostTlBars: Record<string, any> = {}; // last timeline {type:"bars"} detail per host
   private hostSeq: string[] = [LOCAL]; // local first, then attach order — fixes the group order in the strip
   private downHosts = new Set<string>(); // attached, but its tunnel isn't up: what's on screen is a memory
+  private dialingHosts = new Set<string>(); // the kernel is dialing or health-checking these right now (the row's `dialing`)
   // each host's recovery counter as last seen (/tunnels upSeq, T291b): the kernel bumps it when a row that had
   // missed polls answers again, so a link that failed a request while its status never left "up" still has a
   // recovery event; a change is treated as that host coming back (hostUp). A first observation is not a bump.
@@ -953,6 +954,10 @@ export class FederationManager {
       // panel says "loading sessions…" from the same set
       pending: () => this.pendingFor(),
       lastSeen: (h: string) => this.lastSeen[h] || 0,
+      // is a dial attempt to this host in flight right now? The host-down notice's swirl spins on exactly
+      // this (host-prefix.ts hostDialLive: the socket's CONNECTING state), and romp:hostDial below says
+      // when it changes — on the dial, the open and the close, never on a timer
+      dialing: (h: string) => { const c = this.conns.get(h); return hostDialLive(this.dialingHosts.has(h), c && c.ws ? c.ws.readyState : null); },
     };
     // A drag in ANY pane rewrites the arrangement; every other pane hears it through `storage` (which fires
     // only in other same-origin contexts) and this one through the writer's own CustomEvent. Both land here,
@@ -1048,6 +1053,7 @@ export class FederationManager {
         dead.onopen = dead.onmessage = dead.onclose = dead.onerror = null;
         try { dead.close(); } catch (e) { /* already dying */ }
         c.ws = null;
+        this.dialEvent(c.host, false);   // its onclose is detached above, so the attempt's end is said HERE (the swirl must not spin on a dead dial)
         this.connect(c);   // settings queued on the conn meanwhile ride the fresh socket's open (flushPending)
       } else if (v === "redial") {
         this.connect(c);
@@ -1528,6 +1534,12 @@ export class FederationManager {
     if (recovered.length) window.dispatchEvent(new MessageEvent("message", { data: { type: "hostUp", hosts: recovered } }));
     this.downHosts = down;
     if (changed) window.dispatchEvent(new Event("romp-hosts"));   // panes repaint their disconnected marks
+    // …and whether the kernel is TRYING right now (the row's `dialing`, kernel.py _row_dialing): the host-down
+    // notice's swirl spins on it. Published on a change only, through the same event the relay socket's own
+    // dial transitions use, so one listener sees every reason the state can move
+    const dialing = new Set([...want.keys()].filter((h) => want.get(h).dialing === true));
+    for (const h of new Set([...dialing, ...this.dialingHosts])) if (dialing.has(h) !== this.dialingHosts.has(h)) this.dialEvent(h, dialing.has(h));
+    this.dialingHosts = dialing;
   }
 
   private openRemote(host: string, live: boolean): void {
@@ -1574,7 +1586,9 @@ export class FederationManager {
       return;
     }
     conn.ws = ws;
+    this.dialEvent(conn.host, true);   // a dial attempt is in flight: the host-down notice's swirl spins
     ws.onopen = () => {
+      this.dialEvent(conn.host, false);
       // settings queued while the socket was down go out FIRST — on the open event itself, never a
       // timer — so nothing sent after the reconnect can overtake them (see flushPending). That is
       // also why the relay-up dispatch below comes AFTER the flush: the chat's upload re-ship rides
@@ -1605,6 +1619,7 @@ export class FederationManager {
       this.inbound(conn.host, msg);
     };
     ws.onclose = (ev: CloseEvent) => {
+      this.dialEvent(conn.host, false);   // the attempt ended (refused, or the socket dropped): still until the redial
       this.diag("hostconn", { host: conn.host, ev: "close", code: ev.code, clean: ev.wasClean, detached: conn.closed });
       if (!conn.closed) setTimeout(() => this.connect(conn), 2000); // reconnect a dropped remote
     };
@@ -1613,6 +1628,17 @@ export class FederationManager {
         ws.close();
       } catch (e) {}
     };
+  }
+
+  /** One host's dial state changed: its relay socket's dial began (CONNECTING) or ended (open, closed, or
+   *  abandoned by the watchdog), or the kernel's /tunnels poll reported its `dialing` flipping. The chat's
+   *  host-down notice repaints its swirl on this event alone (render.ts syncHostOfflineFoot); the state
+   *  itself is read back through __rompFed.dialing, so a listener that missed an event still paints the
+   *  truth. Dispatch must never break the relay. */
+  private dialEvent(host: string, dialing: boolean): void {
+    try {
+      window.dispatchEvent(new CustomEvent("romp:hostDial", { detail: { host, dialing } }));
+    } catch (e) { /* nothing to do */ }
   }
 
   private closeRemote(host: string): void {

@@ -585,6 +585,13 @@ body.tabbar-resizing { cursor: ns-resize; user-select: none; }
 .tab-ph-swirl { width: 12px; height: 12px; border-radius: 2px; flex: none;
   animation: tab-ph-swirl-spin 7s linear infinite; }   /* .tab is flex with its own gap, so no margin needed */
 @keyframes tab-ph-swirl-spin { to { transform: rotate(-360deg); } }
+/* the host-down foot's swirl, after "Reconnecting": present only while a dial to the host is in flight as of
+   the last /tunnels poll (render.ts syncHostOfflineFoot), so the spin follows the state; the same motif as the
+   placeholder tab's. A flex item of the head right after the gist (the postal delivery icon's convention), so an
+   ellipsized sentence on a phone-wide pane clips its own tail and never the swirl, the one dynamic cue */
+.notice-head .host-dial-swirl { width: 12px; height: 12px; border-radius: 2px; flex: 0 0 auto; align-self: center;
+  margin-left: -2px; animation: tab-ph-swirl-spin 7s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .notice-head .host-dial-swirl { animation: none; } }
 /* CLASSIC (the default; T113, tightened by T115, tuned by T118 — the user 2026-08-27): the tab
    strip is the PRE-720 strip — verified by pixel-diffing a real pre-720 build — modulo exactly
    four sanctioned deltas: typography (the strip inherits the global Inter/type ladder), the 1px
