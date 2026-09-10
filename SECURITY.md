@@ -50,8 +50,8 @@ The token-exempt routes are the no-side-effect liveness probes (`/healthz`,
 of names, not a path prefix). A browser fetches those with credentials omitted
 when the dashboard is added to a home screen, so a token gate there would break
 the install. They are static and read no session state: the manifest is a
-fixed JSON literal (app name, colors, start URL and icon list) and the icons
-are three PNG files.
+fixed JSON literal (app name and short name, display mode, colors, start URL
+and icon list) and the icons are three PNG files.
 
 The practical consequence: another local user on a **shared machine** cannot
 reach your kernel or bus — `/send` (which injects text into a live Claude
