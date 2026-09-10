@@ -55,8 +55,29 @@ LOAD_CALLS = {"SourceFileLoader", "spec_from_file_location", "exec_module", "imp
               "__import__"}
 
 
+# The ports the suite floors poison to a dead value (never popped: to every reader an absent variable
+# means the live default), in tests/conftest.py for pytest and tests/__init__.py for unittest runs.
+DEAD_PORTS = ("ROMP_MANAGER_PORT", "ROMP_KERNEL_PORT", "ROMP_SERVE_PORT")
+
+
 def _is_environ_attr(node):
     return isinstance(node, ast.Attribute) and node.attr == "environ"
+
+
+def _sets_env_to(stmt, name, value):
+    """Is `stmt` the statement os.environ[name] = value? (Set, not setdefault.)"""
+    if not (isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Constant) and stmt.value.value == value):
+        return False
+    return any(isinstance(t, ast.Subscript) and _is_environ_attr(t.value)
+               and isinstance(t.slice, ast.Constant) and t.slice.value == name for t in stmt.targets)
+
+
+def _is_autouse_fixture(fn):
+    """Is `fn` decorated @pytest.fixture(autouse=True)?"""
+    return any(isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute) and d.func.attr == "fixture"
+               and any(kw.arg == "autouse" and isinstance(kw.value, ast.Constant) and kw.value.value is True
+                       for kw in d.keywords)
+               for d in fn.decorator_list)
 
 
 def _environ_key(node):
@@ -129,13 +150,65 @@ class StateIsolationOrder(unittest.TestCase):
     def test_the_suite_wide_floors_stay_in_place(self):
         # The suspenders: conftest.py (pytest) and __init__.py (unittest package runs) each set the
         # XDG floor and drop an inherited ROMP_STATE_DIR override. Pin them so neither is silently
-        # deleted or loses the pop.
+        # deleted or loses the pop. The same two files poison the manager's control port and the
+        # kernel's port (both spellings) to a dead value: to every reader an ABSENT variable means the
+        # live default (bin/romp-manager's control port; kernel.py's PORT, postal_service.py's
+        # KERNEL_BASE, bin/romp's per-subcommand port and hooks/romp-wake.sh all default to 29855), so
+        # a pop is not safe and only a set value is. Pinned on the source, as the floors above are:
+        # every module is collected before any test runs, and several set the same values at import,
+        # so a run-time read cannot tell the import-time floor from a module's own set. conftest.py's
+        # two halves are pinned apart, as tests/test_cli_scope_floor.py pins the cli-scope floor: the
+        # module-level statement covers collection, and the autouse fixture's re-assert covers the run
+        # phase against a module-level write in a test file (which also executes at collection).
+        bodies = {}
         for fn in ("conftest.py", "__init__.py"):
             src = open(os.path.join(HERE, fn)).read()
             self.assertIn('os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp', src,
                           "%s must keep the temp XDG_STATE_HOME floor" % fn)
             self.assertIn('os.environ.pop("ROMP_STATE_DIR", None)', src,
                           "%s must keep dropping an inherited ROMP_STATE_DIR override" % fn)
+            bodies[fn] = ast.parse(src, filename=fn).body
+            for var in DEAD_PORTS:
+                self.assertTrue(any(_sets_env_to(stmt, var, "1") for stmt in bodies[fn]),
+                                '%s must set os.environ["%s"] = "1" at module level: absent means the live default'
+                                % (fn, var))
+        fixtures = [node for node in bodies["conftest.py"]
+                    if isinstance(node, ast.FunctionDef) and _is_autouse_fixture(node)]
+        self.assertTrue(fixtures, "conftest.py has no autouse fixtures at all")
+        for var in DEAD_PORTS:
+            self.assertTrue(any(any(_sets_env_to(stmt, var, "1") for stmt in fx.body) for fx in fixtures),
+                            'no autouse fixture in conftest.py re-asserts os.environ["%s"] = "1": one test '
+                            "module's import-time write would otherwise hold for every test after it" % var)
+
+
+class DeadPortsHoldPerTest(unittest.TestCase):
+    """The run-time half of the port floor, under pytest only: conftest.py's autouse fixture writes the
+    three dead ports before every test, so a value a test file writes at module or class level cannot
+    outlive collection or class setup. setUpClass writes a second dead port; pytest sets a class up
+    before its function-scoped fixtures run, so the fixture's re-assert lands between that write and the
+    read below, which therefore tells the fixture from any module's own import-time set (the source pins
+    above cannot). A bare unittest run has no fixture and nothing to check, so the test skips there."""
+    OTHER_DEAD_PORT = "2"   # any value but the floor's shows the re-assert; a dead one dials nothing if it is missing
+
+    @classmethod
+    def setUpClass(cls):
+        cls._saved = {var: os.environ.get(var) for var in DEAD_PORTS}
+        for var in DEAD_PORTS:
+            os.environ[var] = cls.OTHER_DEAD_PORT
+
+    @classmethod
+    def tearDownClass(cls):
+        for var, val in cls._saved.items():
+            if val is None:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = val
+
+    def test_the_dead_ports_hold_while_this_test_runs(self):
+        if "PYTEST_CURRENT_TEST" not in os.environ:
+            self.skipTest("conftest.py's per-test re-assert exists under pytest only")
+        for var in DEAD_PORTS:
+            self.assertEqual(os.environ.get(var), "1", "%s is not re-asserted per test" % var)
 
 
 if __name__ == "__main__":
