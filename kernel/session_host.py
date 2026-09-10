@@ -7,11 +7,13 @@ every turn. The host takes the parent's place. It spawns the CLI from a SPAWN SP
 writes (`spawn.json`: the plain-data fields of the SDK's ClaudeAgentOptions), through the SDK's own
 SubprocessCLITransport when the SDK is importable (so the command line and the environment are the
 SDK's, byte for byte), reads the CLI's stdout WITHOUT PAUSE and appends every message to an append-only
-JOURNAL, serves one Unix socket the kernel attaches to, holds the stage 1 LEASE as the holder, PARKS
-control requests (permissions, hook callbacks) while no kernel is attached and answers a parked hook
-itself before the CLI's own deadline, relays stderr, and ends the CLI by closing its stdin and waiting.
-A kernel that attaches after a restart replays the journal from the offset it last acknowledged and
-sends its own initialize, which the CLI accepts as a replacement of its hook table (the T303 probe).
+JOURNAL (through a writer task, so a slow disk never pauses the reader), serves one Unix socket the kernel
+attaches to, holds the stage 1 LEASE as the holder, tracks every OPEN control request (a permission, a hook
+callback) until a kernel's answer, the CLI's cancel or, for a hook parked with no kernel attached, its own
+neutral answer before the CLI's deadline, relays stderr, and ends the CLI by closing its stdin and waiting.
+A kernel that attaches after a restart replays the journal from the offset it last acknowledged, receives
+every still-open request again, and sends its own initialize, which the CLI accepts as a replacement of its
+hook table (the T303 probe).
 
 The socket protocol is newline-delimited JSON frames, field `t` naming the frame:
   kernel → host: attach {kernel:{pid,start,version}, ack:N}, in {data}, ack {offset}, signal {sig},
@@ -24,9 +26,8 @@ One kernel is attached at a time. Connection loss without `detach` is a kernel d
 Secrets: the spec carries the environment overlay (a key helper command, PATH additions), so nothing
 from the spec or any environment value is ever written to host.log, the journal or a frame.
 
-No romp module is imported at module level except through the launcher's sys.path (bin/romp-session-host
-puts the repo's kernel directory and, when present, the SDK venv on the path); the lease helpers come
-from sdk_backend, which imports without the SDK and runs nothing at import.
+Sibling modules are reached the kernel's way (kernel/loadsource.py under stable names); the lease
+helpers come from sdk_backend, which imports without the SDK and runs nothing at import.
 """
 from __future__ import annotations
 import asyncio
@@ -47,9 +48,10 @@ END_GRACE_DEFAULT_S = 120.0      # `end` without a grace: the long bound (conser
 END_GRACE_KILL_S = 5.0           # the kernel's kill: `end` with this bound
 UNATTACHED_GRACE_DEFAULT_S = 900.0   # an idle CLI with no kernel attached for this long is ended (a setting)
 JOURNAL_SEGMENT_BYTES = 64 * 1024 * 1024
-READER_BEHIND_RECORDS = 5000
-READER_BEHIND_BYTES = 200 * 1024 * 1024
+READER_BEHIND_RECORDS = 5000     # records read but not yet on disk before the host says so
 ACK_NONE = -1
+EXIT_FLUSH_S = 2.0               # how long the exiting host waits for an attached kernel to take its last frames
+GAP_TYPE = "romp-journal-gap"     # a record the journal could not write: a marker keeps the numbering, readers skip it
 
 # The neutral answer the host gives a parked hook callback when no kernel returned in time, PER EVENT
 # KIND: the empty output, which is what romp's own hook callbacks return when they have nothing to say
@@ -77,7 +79,10 @@ SPEC_FIELDS = ("cli_path", "cwd", "env", "permission_mode", "permission_prompt_t
                "max_turns", "continue_conversation", "fallback_model")
 # Spec keys that are the host's own, not option fields
 SPEC_HOST_KEYS = ("sid", "name", "version", "hook_timeout_s", "hook_self_answer_s", "unattached_grace_s",
-                  "state_dir", "protocol")
+                  "state_dir", "protocol", "reader_behind_records")
+# Testing seams the spec may carry (never set by the kernel): a delay per journal write, an offset whose
+# write raises. They exist so the reader-behind fault and the journal-fault path can be driven in a test.
+SPEC_TEST_KEYS = ("_test_journal_delay_s", "_test_journal_fault_at")
 
 
 def encode_frame(obj: dict) -> bytes:
@@ -115,13 +120,24 @@ class FrameReader:
 
 
 # ── the journal ─────────────────────────────────────────────────────────────────────────────────
+def _segment_first(name: str):
+    """The first offset a segment file name carries (`journal-<firstoffset>.jsonl`), or None."""
+    stem = name[:-len(".jsonl")] if name.endswith(".jsonl") else name
+    if not stem.startswith("journal-"):
+        return None
+    tail = stem[len("journal-"):]
+    return int(tail) if tail.isdigit() else None
+
+
 class Journal:
-    """Append-only record of every message the CLI emitted, one JSON object per line, in SEGMENTS
-    (`journal-<n>.jsonl`) under the host directory. A record's OFFSET is its ordinal since the CLI
-    started, global across segments; the in-memory index maps an offset to (segment, byte position)
-    so a reader can start anywhere. A new segment starts at a turn boundary (a `result` record) once
-    the current one exceeds `segment_bytes`; a segment whose last record has been ACKNOWLEDGED and
-    that is not the current one is deleted at the next turn boundary."""
+    """Append-only record of every message the CLI emitted, one JSON object per line, in SEGMENTS named by
+    the offset of their FIRST record (`journal-<firstoffset>.jsonl`) under the host directory. A record's
+    OFFSET is its ordinal since the CLI started, global across segments; the file names carry the
+    numbering, so a reader that finds only later segments (earlier ones acknowledged and deleted) still
+    numbers every record right. The in-memory index maps an offset to (segment, byte position) so a reader
+    can start anywhere. A new segment starts at a turn boundary (a `result` record) once the current one
+    exceeds `segment_bytes`; a segment whose last record has been ACKNOWLEDGED and that is not the current
+    one is deleted at the next turn boundary."""
 
     def __init__(self, directory, segment_bytes=JOURNAL_SEGMENT_BYTES):
         self.dir = Path(directory)
@@ -129,9 +145,8 @@ class Journal:
         self.segment_bytes = int(segment_bytes)
         self.next_offset = 0
         self.acked = ACK_NONE
-        self._index: list[tuple[int, int]] = []       # offset -> (segment, byte position)
-        self._seg_first: dict[int, int] = {}          # segment -> first offset in it
-        self._seg_last: dict[int, int] = {}           # segment -> last offset in it
+        self._index: list[tuple[int, int]] = []       # offset -> (segment first offset, byte position)
+        self._seg_last: dict[int, int] = {}           # segment first offset -> last offset in it
         self._seg = 0
         self._fh = None
         self._pos = 0
@@ -140,23 +155,22 @@ class Journal:
     def _path(self, seg: int) -> Path:
         return self.dir / ("journal-%d.jsonl" % seg)
 
-    def _open_segment(self, seg: int) -> None:
+    def _open_segment(self, first: int) -> None:
         if self._fh is not None:
             self._fh.close()
-        self._seg = seg
-        self._fh = open(self._path(seg), "ab")
+        self._seg = first
+        self._fh = open(self._path(first), "ab")
         self._pos = self._fh.tell()
-        self._seg_first.setdefault(seg, self.next_offset)
 
     def append(self, record: dict) -> int:
         """Append one record; returns its offset. Flushed to the OS on every append (a kernel that
-        attaches reads the file the host writes)."""
+        attaches reads the file the host writes). Raises on a write failure: the caller decides."""
         line = (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8")
         off = self.next_offset
-        self._index.append((self._seg, self._pos))
-        self._seg_last[self._seg] = off
         self._fh.write(line)
         self._fh.flush()
+        self._index.append((self._seg, self._pos))
+        self._seg_last[self._seg] = off
         self._pos += len(line)
         self.next_offset = off + 1
         if record.get("type") == "result":
@@ -166,17 +180,15 @@ class Journal:
     def _turn_boundary(self) -> None:
         # rotate when the current segment is past its size; drop segments the kernel has fully acknowledged
         if self._pos >= self.segment_bytes:
-            self._open_segment(self._seg + 1)
-        for seg in sorted(self._seg_first):
+            self._open_segment(self.next_offset)
+        for seg in sorted(self._seg_last):
             if seg == self._seg:
                 continue
-            last = self._seg_last.get(seg)
-            if last is not None and last <= self.acked:
+            if self._seg_last[seg] <= self.acked:
                 try:
                     os.unlink(self._path(seg))
                 except OSError:
                     pass
-                self._seg_first.pop(seg, None)
                 self._seg_last.pop(seg, None)
 
     def ack(self, offset: int) -> None:
@@ -184,15 +196,17 @@ class Journal:
             self.acked = min(int(offset), self.next_offset - 1)
 
     def segments(self) -> list[int]:
-        return sorted(self._seg_first)
+        """The first offsets of the segments still on disk, in order (the current one included, records or not)."""
+        return sorted(set(self._seg_last) | {self._seg})
 
-    def read_from(self, offset: int):
-        """Yield (offset, record) for every record from `offset` to the end, from the files. A record
-        whose segment was deleted (acknowledged long ago) is skipped: the caller asked for less than it
-        acknowledged, which only a wrong ack can produce, and the kernel's derived state is rebuilt
-        from the transcript anyway."""
+    def read_from(self, offset: int, end: int | None = None):
+        """Yield (offset, record) from `offset` up to but excluding `end` (default: the current end), from the
+        files. `end` bounds a replay to the records that existed when the attach began: what arrives during
+        the replay follows from the live backlog, so no record is sent twice. A record whose segment was
+        deleted (acknowledged long ago) is skipped: the caller asked for less than it acknowledged."""
         offset = max(0, int(offset))
-        while offset < self.next_offset:
+        stop = self.next_offset if end is None else min(int(end), self.next_offset)
+        while offset < stop:
             seg, pos = self._index[offset]
             p = self._path(seg)
             if not p.exists():
@@ -201,16 +215,16 @@ class Journal:
             with open(p, "rb") as fh:
                 fh.seek(pos)
                 for line in fh:
-                    if offset >= self.next_offset:
+                    if offset >= stop:
                         return
                     try:
                         rec = json.loads(line)
                     except ValueError:
                         rec = None
-                    if rec is not None:
+                    if rec is not None and rec.get("type") != GAP_TYPE:
                         yield offset, rec
                     offset += 1
-                    if offset < self.next_offset and self._index[offset][0] != seg:
+                    if offset < stop and self._index[offset][0] != seg:
                         break
 
     def close(self) -> None:
@@ -221,46 +235,57 @@ class Journal:
 
 def read_journal_dir(directory, offset: int = 0):
     """Read an ORPHAN journal (its host is gone) from `offset` to the end without an index: segments in
-    number order, counting records. The kernel's replay-only transport uses this. Pure on the files."""
+    first-offset order, each record numbered from its segment's first offset, so acknowledged-and-deleted
+    early segments cost nothing but the records they held. Pure on the files."""
     d = Path(directory)
-    segs = sorted(int(p.stem.split("-", 1)[1]) for p in d.glob("journal-*.jsonl") if p.stem.split("-", 1)[1].isdigit())
-    # a deleted early segment shifts nothing: offsets are ordinals of the records that still exist only
-    # when no segment was dropped; the host drops only fully-acknowledged segments, so counting from the
-    # first present segment's first offset is exact when the caller's offset lies in a present segment
-    n = 0
-    for seg in segs:
-        with open(d / ("journal-%d.jsonl" % seg), "rb") as fh:
+    segs = sorted((f, p) for p in d.glob("journal-*.jsonl") for f in [_segment_first(p.name)] if f is not None)
+    for first, p in segs:
+        n = first
+        with open(p, "rb") as fh:
             for line in fh:
                 if n >= offset:
                     try:
                         rec = json.loads(line)
                     except ValueError:
                         rec = None
-                    if rec is not None:
+                    if rec is not None and rec.get("type") != GAP_TYPE:
                         yield n, rec
                 n += 1
 
 
-# ── parked control requests ─────────────────────────────────────────────────────────────────────
+# ── open control requests ───────────────────────────────────────────────────────────────────────
 class Parked:
-    """Control requests the CLI sent that no kernel has answered yet: parked while unattached, listed in
-    `hello` on attach, dropped on the CLI's own cancel, and (hooks only) answered by the host itself
-    after `self_answer_s` of parking. `answered` records ids the host or a kernel has answered, so a late
-    duplicate answer is dropped."""
+    """EVERY control request the CLI sent that nobody has answered yet, attached or not: a kernel's
+    control_response retires it, the CLI's cancel drops it, and a hook parked while no kernel is attached
+    is answered by the host itself after `self_answer_s`. On attach the open ids ride `hello` and their
+    records are sent again (whatever the acknowledged offset says: a request delivered live to a kernel that
+    then died was received, never answered). `answered` remembers ids already answered, so a late duplicate
+    answer is dropped. `unattached_since` marks when a request began waiting with no kernel."""
 
     def __init__(self, self_answer_s=HOOK_SELF_ANSWER_S):
         self.self_answer_s = float(self_answer_s)
-        self.open: dict[str, dict] = {}        # request id -> {kind, offset, t, callback_id, event}
+        self.open: dict[str, dict] = {}        # request id -> {kind, offset, t, callback_id, event, record, unattached_since}
         self.answered: set[str] = set()
 
-    def park(self, request: dict, offset: int, now: float) -> None:
+    def park(self, request: dict, offset: int, now: float, attached: bool) -> None:
         rid = str(request.get("request_id") or "")
         req = request.get("request") if isinstance(request.get("request"), dict) else {}
         if not rid or rid in self.answered:
             return
         self.open[rid] = {"kind": str(req.get("subtype") or ""), "offset": offset, "t": now,
                           "callback_id": req.get("callback_id"), "tool_use_id": req.get("tool_use_id"),
-                          "event": _hook_event_of(req)}
+                          "event": _hook_event_of(req), "record": request,
+                          "unattached_since": None if attached else now}
+
+    def detached(self, now: float) -> None:
+        """The kernel left: every open request starts its unattended clock now (if not already running)."""
+        for v in self.open.values():
+            if v.get("unattached_since") is None:
+                v["unattached_since"] = now
+
+    def attached(self) -> None:
+        for v in self.open.values():
+            v["unattached_since"] = None
 
     def cancel(self, rid: str) -> bool:
         return self.open.pop(str(rid), None) is not None
@@ -269,20 +294,25 @@ class Parked:
         """A response reached the CLI for `rid`: True when it was open (first answer), False when it was
         already answered or never parked (a dead kernel's leftover, dropped by the caller)."""
         rid = str(rid)
-        was = self.open.pop(rid, None) is not None
+        self.open.pop(rid, None)
         if rid in self.answered:
             return False
         self.answered.add(rid)
         return True
 
     def due_hooks(self, now: float) -> list[str]:
-        """The parked hook callbacks that have waited `self_answer_s` or longer, oldest first."""
-        due = [(v["t"], rid) for rid, v in self.open.items()
-               if v["kind"] == "hook_callback" and now - v["t"] >= self.self_answer_s]
+        """The hook callbacks that have waited `self_answer_s` or longer with no kernel attached, oldest first."""
+        due = [(v["unattached_since"], rid) for rid, v in self.open.items()
+               if v["kind"] == "hook_callback" and v.get("unattached_since") is not None
+               and now - v["unattached_since"] >= self.self_answer_s]
         return [rid for _, rid in sorted(due)]
 
     def ids(self) -> list[str]:
         return sorted(self.open, key=lambda r: self.open[r]["offset"])
+
+    def records(self) -> list[tuple[int, dict]]:
+        """The open requests' journal offsets and records, in offset order (re-sent on attach)."""
+        return sorted(((v["offset"], v["record"]) for v in self.open.values()), key=lambda x: x[0])
 
 
 def _hook_event_of(req: dict) -> str:
@@ -300,7 +330,7 @@ def neutral_hook_response(request_id: str, event: str) -> dict:
 # ── the spawn specification ─────────────────────────────────────────────────────────────────────
 def spec_to_options(spec: dict, stderr_cb):
     """A ClaudeAgentOptions from the spec's plain-data fields, plus the host's stderr relay. Only the
-    SDK's fields; the host's own keys (SPEC_HOST_KEYS) are left out. Requires the SDK."""
+    SDK's fields; the host's own keys (SPEC_HOST_KEYS, SPEC_TEST_KEYS) are left out. Requires the SDK."""
     from claude_agent_sdk import ClaudeAgentOptions
     kw = {k: spec[k] for k in SPEC_FIELDS if k in spec and spec[k] is not None}
     kw["stderr"] = stderr_cb
@@ -405,6 +435,13 @@ def sdk_importable() -> bool:
     return importlib.util.find_spec("claude_agent_sdk") is not None
 
 
+def _cli_alive(transport) -> bool:
+    """Whether the transport's CLI process is still running (None when unknown)."""
+    proc = getattr(transport, "_process", None) or getattr(transport, "proc", None)
+    rc = getattr(proc, "returncode", None) if proc is not None else None
+    return proc is not None and rc is None
+
+
 # ── the host ────────────────────────────────────────────────────────────────────────────────────
 class SessionHost:
     """One host process: see the module docstring. Constructed from the spec path; `run()` is the
@@ -423,6 +460,7 @@ class SessionHost:
         self.journal = Journal(self.dir)
         self.parked = Parked(float(self.spec.get("hook_self_answer_s") or HOOK_SELF_ANSWER_S))
         self.grace_s = float(self.spec.get("unattached_grace_s") or UNATTACHED_GRACE_DEFAULT_S)
+        self.reader_behind_records = int(self.spec.get("reader_behind_records") or READER_BEHIND_RECORDS)
         self.version = str(self.spec.get("version") or "")
         self.now = now or time.time
         self.lease_api = lease_api or _lease_api()
@@ -430,19 +468,22 @@ class SessionHost:
         self.cli_pid = None
         self.cli_start = None
         self.fsid = str(self.spec.get("resume") or self.spec.get("session_id") or "")
-        self.attached = None            # the attached kernel's writer + identity, or None
+        self.attached = None            # the attached kernel's writer, or None
         self.kernel = None
         self.inflight = 0               # user messages fed minus results seen (the idle judgement)
         self.idle_since = self.now()
         self.exit_info = None
         self.ending = None              # (deadline, cause) once `end` was requested
         self._replaying = False
+        self._replay_end = 0
         self._live_backlog: list[tuple[int, dict]] = []
         self._server = None
         self._stop = None
-        self._kernel_requests: set[str] = set()   # control_request ids the attached kernel(s) sent
+        self._read_count = 0            # records read off the CLI (the writer task journals them in order)
+        self._journal_q: asyncio.Queue | None = None
+        self._journal_faults = 0
         self._reader_behind_noted = False
-        self._read_count = 0
+        self._stdin_q: asyncio.Queue | None = None   # the kernel's `in` lines, written by their own task
 
     # ── host.log: never a spec field, never an environment value ──
     def log(self, kind: str, **fields) -> None:
@@ -456,6 +497,12 @@ class SessionHost:
                 f.write(json.dumps(row, separators=(",", ":")) + "\n")
         except Exception:
             pass
+
+    @staticmethod
+    def _where(e: BaseException) -> str:
+        """The failing frame of an exception, never its text (it could carry a line of the CLI's output)."""
+        tb = traceback.extract_tb(e.__traceback__)
+        return "%s:%d:%s" % (os.path.basename(tb[-1].filename), tb[-1].lineno, tb[-1].name) if tb else "?"
 
     # ── lease ──
     def _write_lease(self) -> None:
@@ -500,40 +547,80 @@ class SessionHost:
         self._write_lease()
 
     async def _read_cli(self) -> None:
-        cause = "died"
+        """The stdout reader: never pauses for the disk (the writer task journals), never dies on one
+        record's handling (a fault is a host.log row, the reading goes on). The stream's end is the CLI's
+        exit; nothing else is."""
         try:
             async for msg in self.transport.read_messages():
-                self._read_count += 1
-                off = self.journal.append(msg)
-                self._track(msg, off)
-                if self._read_count - self.journal.next_offset > READER_BEHIND_RECORDS and not self._reader_behind_noted:
-                    self._reader_behind_noted = True
-                    self.log("reader-behind", read=self._read_count, journaled=self.journal.next_offset)
+                off = self._read_count
+                self._read_count = off + 1
+                try:
+                    self._journal_q.put_nowait((off, msg))
+                    self._track(msg, off)
+                    if self._read_count - self.journal.next_offset > self.reader_behind_records and not self._reader_behind_noted:
+                        self._reader_behind_noted = True
+                        self.log("reader-behind", read=self._read_count, journaled=self.journal.next_offset)
+                        if self.attached is not None:
+                            self._send(self.attached, {"t": "fault", "kind": "reader-behind", "text": "the journal lags the CLI's output"})
                     if self.attached is not None:
-                        self._send(self.attached, {"t": "fault", "kind": "reader-behind", "text": "the journal lags the CLI's output"})
-                if self.attached is not None and not self._replaying:
-                    self._send(self.attached, {"t": "out", "offset": off, "data": msg})
-                elif self.attached is not None:
-                    self._live_backlog.append((off, msg))
+                        if self._replaying and off >= self._replay_end:
+                            self._live_backlog.append((off, msg))
+                        elif not self._replaying:
+                            self._send(self.attached, {"t": "out", "offset": off, "data": msg})
+                except Exception as e:
+                    self.log("record-handling-failed", offset=off, error=type(e).__name__, at=self._where(e))
         except Exception as e:
-            # the failing frame, never the exception's text (it could carry a line of the CLI's output)
-            tb = traceback.extract_tb(e.__traceback__)
-            where = "%s:%d:%s" % (os.path.basename(tb[-1].filename), tb[-1].lineno, tb[-1].name) if tb else "?"
-            self.log("cli-stream-ended", error=type(e).__name__, at=where)
-        if self.ending is not None:
-            cause = self.ending[1]
+            self.log("cli-stream-ended", error=type(e).__name__, at=self._where(e))
+        cause = self.ending[1] if self.ending is not None else "died"
         code = getattr(getattr(self.transport, "_process", None), "returncode", None)
         if code is None:
             code = getattr(self.transport, "returncode", None)
+        await self._journal_q.put(None)           # the writer drains what it has, then stops
         self.exit_info = {"t": "exit", "code": code, "signal": None, "cause": cause}
         self.log("cli-exited", code=code, cause=cause)
-        if self.attached is not None:
-            self._send(self.attached, self.exit_info)
         if self._stop is not None:
             self._stop.set()
 
+    async def _journal_writer(self) -> None:
+        """The one writer of the journal, off the reader's path. A write that raises (a full disk, a bad
+        descriptor) is a `journal-write-failed` row and a fault frame, and the reading and the live
+        forwarding go on: a journal fault is never the CLI's death."""
+        delay = float(self.spec.get("_test_journal_delay_s") or 0)
+        fault_at = self.spec.get("_test_journal_fault_at")
+        while True:
+            item = await self._journal_q.get()
+            if item is None:
+                return
+            off, msg = item
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                if fault_at is not None and int(fault_at) == off:
+                    raise OSError(28, "test: no space left on device")
+                got = self.journal.append(msg)
+                if got != off:
+                    self.log("journal-offset-drift", expected=off, got=got)
+            except Exception as e:
+                self._journal_faults += 1
+                self.log("journal-write-failed", offset=off, error=type(e).__name__, at=self._where(e))
+                if self.attached is not None:
+                    self._send(self.attached, {"t": "fault", "kind": "journal-write-failed", "text": type(e).__name__})
+                # keep the numbering with a gap marker (readers skip it): the record is lost to replay, the live
+                # kernel already has it; a marker that fails too leaves the count advanced and says so
+                try:
+                    self.journal.append({"type": GAP_TYPE, "offset": off, "error": type(e).__name__})
+                except Exception as e2:
+                    self.log("journal-gap-unrecorded", offset=off, error=type(e2).__name__)
+                    self.journal.next_offset = max(self.journal.next_offset, off + 1)
+
+    async def _journal_settled(self, upto: int, timeout: float = 5.0) -> None:
+        """Wait (bounded) until the writer has journaled every record read before `upto`."""
+        deadline = time.time() + timeout
+        while self.journal.next_offset < upto and time.time() < deadline:   # loop-ok: bounded, on the writer's progress
+            await asyncio.sleep(0.01)
+
     def _track(self, msg: dict, off: int) -> None:
-        """Bookkeeping per message: the fsid from the init, the turn count, parked requests."""
+        """Bookkeeping per message: the fsid from the init, the turn count, open requests."""
         mt = msg.get("type")
         if mt == "system" and msg.get("subtype") == "init" and msg.get("session_id"):
             if str(msg["session_id"]) != self.fsid:
@@ -544,13 +631,12 @@ class SessionHost:
             if self.inflight == 0:
                 self.idle_since = self.now()
         elif mt == "control_request":
-            if self.attached is None:
-                self.parked.park(msg, off, self.now())
-                self.log("parked", requestId=str(msg.get("request_id") or ""),
-                         subtype=str((msg.get("request") or {}).get("subtype") or ""))
+            self.parked.park(msg, off, self.now(), attached=self.attached is not None)
+            self.log("request-open", requestId=str(msg.get("request_id") or ""),
+                     subtype=str((msg.get("request") or {}).get("subtype") or ""), attached=self.attached is not None)
         elif mt == "control_cancel_request":
             if self.parked.cancel(str(msg.get("request_id") or "")):
-                self.log("parked-cancelled", requestId=str(msg.get("request_id") or ""))
+                self.log("request-cancelled", requestId=str(msg.get("request_id") or ""))
 
     async def _self_answer_loop(self) -> None:
         while self.exit_info is None:
@@ -566,9 +652,10 @@ class SessionHost:
                 except Exception as e:
                     self.log("self-answer-failed", requestId=rid, error=type(e).__name__)
                     continue
+                since = entry.get("unattached_since") or self.now()
                 self.parked.answer(rid)
                 self.log("hook-self-answered", requestId=rid, event=event, callbackId=str(entry.get("callback_id") or ""),
-                         toolUseId=str(entry.get("tool_use_id") or ""), parkedS=round(self.now() - float(entry.get("t") or self.now()), 1))
+                         toolUseId=str(entry.get("tool_use_id") or ""), parkedS=round(self.now() - float(since), 1))
 
     async def _grace_loop(self) -> None:
         while self.exit_info is None:
@@ -588,9 +675,15 @@ class SessionHost:
                 await self._end(END_GRACE_DEFAULT_S, "eof-grace")
 
     async def _end(self, grace: float, cause: str) -> None:
+        """Close the CLI's stdin and wait up to `grace`; a second `end` with a SHORTER grace pulls the
+        deadline in (the minimum wins), a longer one changes nothing."""
+        deadline = self.now() + float(grace)
         if self.ending is not None:
+            if deadline < self.ending[0]:
+                self.ending = (deadline, self.ending[1])
+                self.log("end-grace-shortened", graceS=float(grace))
             return
-        self.ending = (self.now() + float(grace), cause)
+        self.ending = (deadline, cause)
         self.log("end-requested", cause=cause, graceS=float(grace))
         try:
             await self.transport.end_input()
@@ -604,7 +697,17 @@ class SessionHost:
         except Exception:
             pass
 
+    async def _flush(self, writer, timeout: float = EXIT_FLUSH_S) -> None:
+        """Bounded drain of a writer: the tail of `out` frames and the exit frame must reach a slow kernel."""
+        try:
+            await asyncio.wait_for(writer.drain(), timeout=timeout)
+        except Exception:
+            pass
+
     async def _on_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """One kernel connection. Frames are dispatched as they arrive; `in` lines go to the stdin pump
+        (their own task), so a `signal` or an `end` behind a large `in` is acted on at once even when the
+        CLI's stdin pipe is full."""
         fr = FrameReader()
         attached_here = False
         try:
@@ -625,7 +728,7 @@ class SessionHost:
                     elif not attached_here:
                         self._send(writer, {"t": "fault", "kind": "not-attached", "text": "attach first"})
                     elif t == "in":
-                        await self._forward_in(str(frame.get("data") or ""))
+                        self._queue_in(str(frame.get("data") or ""))
                     elif t == "ack":
                         try:
                             self.journal.ack(int(frame.get("offset")))
@@ -662,6 +765,7 @@ class SessionHost:
         if self.attached is writer:
             self.attached = None
             self.kernel = None
+            self.parked.detached(self.now())
             self.idle_since = self.now() if self.inflight == 0 else self.idle_since
 
     async def _attach(self, writer, frame: dict) -> None:
@@ -670,22 +774,31 @@ class SessionHost:
             ack = int(frame.get("ack", ACK_NONE))
         except (TypeError, ValueError):
             ack = ACK_NONE
+        # the replay covers exactly the records read before this moment; what arrives meanwhile queues in the
+        # live backlog and follows in order, so a drain that yields cannot send a record twice
+        await self._journal_settled(self._read_count)
+        self._replay_end = self._read_count
         self.attached = writer
         self._replaying = True
         self._live_backlog = []
-        self.log("attached", kernelPid=self.kernel.get("pid"), ack=ack, next=self.journal.next_offset)
+        self.parked.attached()
+        self.log("attached", kernelPid=self.kernel.get("pid"), ack=ack, next=self._replay_end)
         self._send(writer, {"t": "hello", "protocol": PROTOCOL_VERSION,
                             "host": {"pid": os.getpid(), "start": self.lease_api["proc_start"](os.getpid()) or "", "version": self.version},
                             "cli": {"pid": self.cli_pid, "start": self.cli_start, "fsid": self.fsid},
-                            "journal": {"next": self.journal.next_offset}, "parked": self.parked.ids(),
+                            "journal": {"next": self._replay_end}, "parked": self.parked.ids(),
                             "exited": self.exit_info is not None})
-        # replay from the acknowledged offset; records that arrive meanwhile queue and follow in order
         n = 0
-        for off, rec in self.journal.read_from(ack + 1):
+        for off, rec in self.journal.read_from(ack + 1, self._replay_end):
             self._send(writer, {"t": "out", "offset": off, "data": rec})
             n += 1
             if n % 200 == 0:
                 await writer.drain()
+        # every request still open is sent again, whatever the acknowledged offset says: a kernel that received
+        # it and died never answered, and the new kernel's Query must see it to answer it
+        for off, rec in self.parked.records():
+            if off <= ack:
+                self._send(writer, {"t": "out", "offset": off, "data": rec})
         for off, rec in self._live_backlog:
             self._send(writer, {"t": "out", "offset": off, "data": rec})
         self._live_backlog = []
@@ -694,10 +807,9 @@ class SessionHost:
             self._send(writer, self.exit_info)
         await writer.drain()
 
-    async def _forward_in(self, data: str) -> None:
-        """One line from the kernel for the CLI's stdin: forwarded at once (an initialize is answered
-        without waiting behind a replay). Bookkeeping: a user message opens a turn; a control_response
-        for a request the host already answered, or one nobody parked and nobody issued, is dropped."""
+    def _queue_in(self, data: str) -> None:
+        """One line from the kernel for the CLI's stdin: bookkeeping now, the write on the stdin pump. A user
+        message opens a turn; a control_response for a request already answered is dropped."""
         try:
             obj = json.loads(data)
         except ValueError:
@@ -705,24 +817,32 @@ class SessionHost:
         if isinstance(obj, dict):
             if obj.get("type") == "user":
                 self.inflight += 1
-            elif obj.get("type") == "control_request":
-                self._kernel_requests.add(str(obj.get("request_id") or ""))
             elif obj.get("type") == "control_response":
                 rid = str(((obj.get("response") or {}).get("request_id")) or "")
                 if rid in self.parked.answered:
                     self.log("late-answer-dropped", requestId=rid)
                     return
                 self.parked.answer(rid)
-        try:
-            await self.transport.write(data if data.endswith("\n") else data + "\n")
-        except Exception as e:
-            self.log("write-failed", error=type(e).__name__)
-            if self.attached is not None:
-                self._send(self.attached, {"t": "fault", "kind": "write-failed", "text": type(e).__name__})
+        self._stdin_q.put_nowait(data if data.endswith("\n") else data + "\n")
+
+    async def _stdin_pump(self) -> None:
+        """The one writer of the CLI's stdin: a full pipe blocks this task alone, never the socket reader."""
+        while True:
+            data = await self._stdin_q.get()
+            if data is None:
+                return
+            try:
+                await self.transport.write(data)
+            except Exception as e:
+                self.log("write-failed", error=type(e).__name__)
+                if self.attached is not None:
+                    self._send(self.attached, {"t": "fault", "kind": "write-failed", "text": type(e).__name__})
 
     # ── life ──
     async def run(self) -> int:
         self._stop = asyncio.Event()
+        self._journal_q = asyncio.Queue()
+        self._stdin_q = asyncio.Queue()
         self.log("host-started", hostPid=os.getpid())
         # the CLI first, the socket second: a kernel that finds the socket finds a CLI behind it (an attach
         # before the spawn would report no CLI pid and fail its first write)
@@ -740,14 +860,19 @@ class SessionHost:
         self._server = await asyncio.start_unix_server(self._on_client, path=str(self.sock_path))
         os.chmod(self.sock_path, 0o600)
         self.log("socket-ready", sock=str(self.sock_path.name))
-        tasks = [asyncio.ensure_future(self._read_cli()), asyncio.ensure_future(self._beat()),
-                 asyncio.ensure_future(self._self_answer_loop()), asyncio.ensure_future(self._grace_loop())]
+        tasks = [asyncio.ensure_future(self._journal_writer()), asyncio.ensure_future(self._read_cli()),
+                 asyncio.ensure_future(self._beat()), asyncio.ensure_future(self._self_answer_loop()),
+                 asyncio.ensure_future(self._grace_loop()), asyncio.ensure_future(self._stdin_pump())]
         await self._stop.wait()
-        # the CLI is gone: give an attached kernel a moment to read the exit, then leave
-        for _ in range(20):
-            if self.attached is None:
-                break
-            await asyncio.sleep(0.05)
+        # the CLI is gone: the writer drains, then an attached kernel gets the tail and the exit frame, drained
+        try:
+            await asyncio.wait_for(tasks[0], timeout=EXIT_FLUSH_S)
+        except Exception:
+            pass
+        if self.attached is not None:
+            self._send(self.attached, self.exit_info)
+            await self._flush(self.attached)
+        await self._stdin_q.put(None)
         for t in tasks:
             t.cancel()
         try:
