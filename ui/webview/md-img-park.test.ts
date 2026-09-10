@@ -8,7 +8,9 @@
 // the per-message path, and that budget rides the URL, so a turn re-rendered on every push while it streams still gets
 // its three probes, a second img with the URL failing midway starts nothing over, a load clears the budget with the
 // memory (the URL failing again later starts afresh), and a heal that lands while a probe is pending is not undone by
-// that probe's failure; the reconnect-class heal probes every remembered URL, on the page or not (a turn evicted from
+// that probe's failure, nor does that probe's failure, arriving after the URL has failed AGAIN, shorten or delete
+// the fresh budget or clear a newer probe's in-flight mark (a failure counts only for the probe whose token
+// is current); the reconnect-class heal probes every remembered URL, on the page or not (a turn evicted from
 // the rendered window, a closed tab); and the chat's post-pass parks a re-rendered img with a remembered URL before the
 // browser fetches it. The module remembers failed URLs for the page life, so fresh() heals every remembered URL off
 // the DOM through the public reconnect path before each test: every test starts with an empty memory.
@@ -224,6 +226,81 @@ test("a reconnect heal that lands while a per-message probe is pending stands: t
   assert.equal(probes.length, 2, "the stale failure re-armed no attempt for a healed URL: the next pushes probe nothing");
   P.refreshSettledPreviews();
   assert.equal(probes.length, 2, "…and the reconnect heal has forgotten it");
+});
+
+// The stale-failure race (the review's find on the budget change): a reconnect heal loads the URL while a per-message
+// probe is pending, the URL fails AGAIN before that probe's error arrives (the file moved away, a relay blipped), and
+// the listener arms three attempts afresh. The stale error then belongs to a probe a load already retired: it must spend
+// none of the fresh attempts and clear no newer probe's in-flight mark. Its `left` is the OLD budget's, so applying it
+// deleted the fresh budget outright (one attempt left at fire time) or cut it to two (three left), and its delete of the
+// in-flight mark let the next push fire a second probe for a URL whose newer probe was still pending.
+
+test("a stale failure from a probe fired with the last attempt does not delete the budget the URL's re-fail armed afresh", async () => {
+  const P = await fresh();
+  const url = servedUrl("heatmap.png");
+  const s = mdImg(url, "Heatmap");
+  fail(s);
+  P.retryFailedPreviews(); probes[0].onerror();      // attempt one spent
+  P.retryFailedPreviews(); probes[1].onerror();      // attempt two spent
+  P.retryFailedPreviews();                           // the last attempt's probe is in flight
+  assert.equal(probes.length, 3);
+  P.refreshSettledPreviews();                        // the socket came back meanwhile
+  assert.equal(probes.length, 4, "the reconnect heal probes the URL too");
+  (probes[3] as any).onload();                       // the reconnect probe answers first: healed, the picture lands
+  assert.equal(s.src, url);
+  fail(s);                                           // the URL fails again: three attempts afresh
+  assert.equal(s.hasAttribute("src"), false, "parked again");
+  probes[2].onerror();                               // the older per-message probe's failure arrives only now
+  P.retryFailedPreviews();
+  assert.equal(probes.length, 5, "the fresh budget survives the stale failure: the next push probes");
+  probes[4].onerror();
+  P.retryFailedPreviews(); probes[5].onerror();
+  P.retryFailedPreviews(); probes[6].onerror();
+  P.retryFailedPreviews(); P.retryFailedPreviews();
+  assert.equal(probes.length, 7, "the fresh budget was a full three: the stale failure spent none of them");
+});
+
+test("a stale failure from a probe fired with three attempts does not shorten the budget the URL's re-fail armed afresh", async () => {
+  const P = await fresh();
+  const url = servedUrl("flamegraph.png");
+  const s = mdImg(url, "Flame graph");
+  fail(s);
+  P.retryFailedPreviews();                           // the first probe is in flight with all three attempts
+  assert.equal(probes.length, 1);
+  P.refreshSettledPreviews();
+  (probes[1] as any).onload();                       // the reconnect probe answers first: healed
+  assert.equal(s.src, url);
+  fail(s);                                           // the URL fails again: three attempts afresh
+  probes[0].onerror();                               // the older per-message probe's failure arrives only now
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    P.retryFailedPreviews();
+    assert.equal(probes.length, 2 + attempt, "push " + attempt + " after the re-fail: one probe, the fresh budget intact");
+    probes[probes.length - 1].onerror();
+  }
+  P.retryFailedPreviews(); P.retryFailedPreviews();
+  assert.equal(probes.length, 5, "three attempts after the re-fail, then spent");
+});
+
+test("a stale failure does not clear a newer probe's in-flight mark: no two probes for one URL overlap", async () => {
+  const P = await fresh();
+  const url = servedUrl("waterfall.png");
+  const s = mdImg(url, "Waterfall");
+  fail(s);
+  P.retryFailedPreviews();                           // the first probe is in flight
+  P.refreshSettledPreviews();
+  (probes[1] as any).onload();                       // the reconnect probe answers first: healed
+  assert.equal(s.src, url);
+  fail(s);                                           // the URL fails again: three attempts afresh
+  P.retryFailedPreviews();                           // the fresh budget's first probe is in flight
+  assert.equal(probes.length, 3);
+  probes[0].onerror();                               // the older probe's failure arrives while the newer one is pending
+  P.retryFailedPreviews(); P.retryFailedPreviews();
+  assert.equal(probes.length, 3, "a push while the newer probe is pending fires no second probe for the URL");
+  probes[2].onerror();                               // the newer probe fails: one fresh attempt spent
+  P.retryFailedPreviews(); probes[3].onerror();
+  P.retryFailedPreviews(); probes[4].onerror();
+  P.retryFailedPreviews(); P.retryFailedPreviews();
+  assert.equal(probes.length, 5, "the fresh budget ran its three attempts, one probe at a time");
 });
 
 test("the reconnect-class heal probes a remembered URL whose turn is outside the rendered window", async () => {
