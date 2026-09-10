@@ -25,7 +25,7 @@ test("a ✕ on a provisional-tab bubble forgets the send from provisionalQueue a
   assert.match(qx, /if \(provisional && qmd\) forgetProvisionalSend\(qmd\);/, "the text must not come back through adoption");
   assert.match(qx, /if \(!provisional\) vscodeApi\.postMessage\(msg\);/, "nothing at the kernel to cancel for a session that does not exist yet");
   // the restore to the composer stays — the message never left the client; no cancelResult will come, so no stash is kept
-  assert.match(qx, /restoreToComposer\(qmd\);/);
+  assert.match(qx, /restoreToComposer\(edx && edx\.open && edx\.text\.trim\(\) \? edx\.text : qmd\);/);   // the edited words when a field was open (T306)
   assert.match(qx, /if \(!provisional\) pendingCancelRestores\.set\(activeId \+ " " \+ qmd,/);
   // adoption re-sends only what remains in the queue (unchanged: it reads provisionalQueue via dropProvisional)
   assert.match(RENDER, /for \(const text of queued\) \{\s*\n\s*const qid = mintQid\(\);[^\n]*\n\s*vscodeApi\?\.postMessage\(\{ type: "sendMessage", id: realId, text, qid \}\);\s*\n\s*registerOptimistic\(realId, text, undefined, qid\);/);

@@ -163,7 +163,9 @@ function pageWorld(state: { ask?: "custom" | "text" | null; edit?: boolean; queu
     activeId, ta: { value: "what did the tests say", style: {} as Record<string, string> },
     composerCitations: new Map<string, { quote?: string }[]>(), ask: state.ask ?? null,
     composerEdits: new Map<string, { uuid: string; orig: string }>(state.edit ? [[activeId, { uuid: "e1", orig: "the old text" }]] : []),
-    queuedEdits: new Map<string, { md: string }>(state.queuedEdit ? [[activeId, { md: "the queued text" }]] : []),
+    // T306: a queued message's edit is an in-place editor on its bubble, keyed by the entry; the fixture's holds one open
+    queuedEditors: new Map<string, unknown>(state.queuedEdit ? [["k", { eid: 1, sid: activeId, key: "k", ref: { md: "the queued text" },
+                                                                        text: "the queued text, edited", sel: null, focused: true, open: true, note: "" }]] : []),
     composerFiles: new Map<string, string[]>(state.files ? [[activeId, state.files]] : []),
     staged: [] as [string, unknown][], persists: 0,
     sessions: new Map<string, { id: string; name: string }>(roster),
@@ -175,7 +177,7 @@ function pageWorld(state: { ask?: "custom" | "text" | null; edit?: boolean; queu
 }
 type World = ReturnType<typeof pageWorld>;
 type Lifted = { stageComposer: () => void; branchjump: (elx: { dataset: Record<string, string> }) => void; warnToast: (msg: string) => FakeEl;
-                deliver: (sid: string, text: string, attached: string[]) => void; queuedEditSend: (typed: string) => void };
+                deliver: (sid: string, text: string, attached: string[]) => void; saveQueuedEdit: () => void };
 
 /** warnToast and ephemeralWarnToast; stageComposer (the composer's staging, whose refusals say a picker is waiting on
  *  the composer, an edit is in progress to a past or a queued message, attachments are on the composer); the branch
@@ -183,14 +185,14 @@ type Lifted = { stageComposer: () => void; branchjump: (elx: { dataset: Record<s
  *  deliver (the disconnected-host branch, whose refusal says the host is disconnected and asks for a re-dial, and the
  *  provisional branch, whose refusal says the tab's session never started), through the first step of a send that
  *  passed both guards (lastSent remembers the text), so a refusal that fell through would show as a remembered send;
- *  and the send's queued-edit branch (whose refusal says the session cannot be reached, so the edit was not sent),
+ *  and the queued message's in-place Save (whose refusal says the session cannot be reached, so the edit was not saved),
  *  lifted from render.ts and run over the world. */
 function liftToastSites(): (w: World) => Lifted {
   const toasts = liftBetween("function warnToast(msg: string): HTMLElement {", "// Tail-windowing (see the View comment)");
   const stage = liftBetween("const stageComposer = () => {", "const sendComposer = (");
   const jump = liftBetween("branchjump: (elx) => {", "// a below-response fork spot", (ts) => "const handlers = {\n" + ts + "};");
   const send = liftBetween("if (hostIsDown(sid)) {", "// The STAGED run and this message go together", (ts) => "const deliver = (sid, text, attached) => {\n" + ts + "};");
-  const qsend = liftBetween("const qedit = queuedEdits.get(activeId);", "const sid = activeId;   // the session this send", (ts) => "const queuedEditSend = (typed) => {\n" + ts + "};");
+  const qsave = liftBetween("function saveQueuedEditor(ed: QueuedEditor): void {", "// the field the bubble wears while its editor is open");
   const prelude = `
     const W = WORLD;
     const document = W.document;
@@ -201,7 +203,7 @@ function liftToastSites(): (w: World) => Lifted {
     const composerCitations = W.composerCitations;
     const composerAnswersAsk = () => W.ask;
     const composerEdits = W.composerEdits;
-    const queuedEdits = W.queuedEdits;
+    const queuedEditors = W.queuedEditors;
     const composerFiles = W.composerFiles;
     const stagedMsgs = { push: (id, s) => { W.staged.push([id, s]); } };
     const renderComposerChips = () => {};
@@ -221,10 +223,10 @@ function liftToastSites(): (w: World) => Lifted {
     const SLASH_CMD_RE = /^[/][A-Za-z]/;   // a template literal: the real regex's escaped slash would not survive it
     const pendingEditRestores = new Map();
     const applyQueuedEditLocally = () => { W.editsApplied++; };
-    const restoreHeldDraft = () => {};
   `;
-  return new Function("WORLD", prelude + toasts + stage + jump + send + qsend
-    + "\nreturn { stageComposer, branchjump: handlers.branchjump, warnToast, deliver, queuedEditSend };") as (w: World) => Lifted;
+  return new Function("WORLD", prelude + toasts + stage + jump + send + qsave
+    + "\nconst saveQueuedEdit = () => saveQueuedEditor(queuedEditors.values().next().value);"
+    + "\nreturn { stageComposer, branchjump: handlers.branchjump, warnToast, deliver, saveQueuedEdit };") as (w: World) => Lifted;
 }
 
 function page(state: Parameters<typeof pageWorld>[0]) {
@@ -260,8 +262,6 @@ const STATE_REFUSALS: { name: string; state: Parameters<typeof pageWorld>[0]; ra
     text: "A picker is waiting on this box", refused: (p) => assert.deepEqual(p.W.staged, [], "nothing staged") },
   { name: "staging while an edit is in progress", state: { edit: true }, raise: (p) => p.stageComposer(),
     text: "An edit replaces a past message", refused: (p) => assert.deepEqual(p.W.staged, [], "nothing staged") },
-  { name: "staging while an edit to a queued message is in progress", state: { queuedEdit: true }, raise: (p) => p.stageComposer(),
-    text: "This edit replaces a queued message", refused: (p) => assert.deepEqual(p.W.staged, [], "nothing staged") },
   { name: "staging with attachments on the composer", state: { files: ["notes.md"] }, raise: (p) => p.stageComposer(),
     text: "Attachments can't be staged", refused: (p) => assert.deepEqual(p.W.staged, [], "nothing staged") },
   { name: "a branch jump to a session not on this dashboard", state: { sessions: ["web"] }, raise: (p) => p.branchjump({ dataset: { sid: "api" } }),
@@ -277,16 +277,16 @@ const STATE_REFUSALS: { name: string; state: Parameters<typeof pageWorld>[0]; ra
       assert.deepEqual(p.W.provisionalQueue, [], "nothing queued");
       assert.equal(p.W.lastSent.size, 0, "nothing was remembered as sent");
     } },
-  { name: "a queued edit sent while the session's host is unreachable", state: { queuedEdit: true, hostDown: true }, raise: (p) => p.queuedEditSend(p.W.ta.value),
-    text: "Can't reach the session right now, so the edit wasn't sent.", refused: (p) => {
+  { name: "a queued message's edit saved while the session's host is unreachable", state: { queuedEdit: true, hostDown: true }, raise: (p) => p.saveQueuedEdit(),
+    text: "Can't reach the session right now, so the edit wasn't saved.", refused: (p) => {
       assert.deepEqual(p.W.posted.map((m) => m.type), ["redial"], "a re-dial is asked for and no edit is posted");
-      assert.ok(p.W.queuedEdits.has(p.W.activeId), "the edit is still in progress");
+      assert.equal(p.W.queuedEditors.size, 1, "the field stays open with the words (T306: the edit lives on the bubble, not in the composer)");
       assert.equal(p.W.editsApplied, 0, "the queued bubble keeps its words");
     } },
-  { name: "a queued edit sent on a tab still being created", state: { queuedEdit: true, tab: "pending" }, raise: (p) => p.queuedEditSend(p.W.ta.value),
-    text: "Can't reach the session right now, so the edit wasn't sent.", refused: (p) => {
+  { name: "a queued message's edit saved on a tab still being created", state: { queuedEdit: true, tab: "pending" }, raise: (p) => p.saveQueuedEdit(),
+    text: "Can't reach the session right now, so the edit wasn't saved.", refused: (p) => {
       assert.deepEqual(p.W.posted, [], "nothing is posted: there is no kernel session to re-dial or to edit");
-      assert.ok(p.W.queuedEdits.has(p.W.activeId), "the edit is still in progress");
+      assert.equal(p.W.queuedEditors.size, 1, "the field stays open with the words");
       assert.equal(p.W.editsApplied, 0, "the queued bubble keeps its words");
     } },
 ];
@@ -323,13 +323,13 @@ test("render.ts: warnToast hands back its toast, and the refusals about a state 
   // the staging refusals (stageComposer) and the branch jump's: states the fresh page shows for itself or no longer has
   assert.match(RENDER, /if \(composerAnswersAsk\(\)\) \{ ephemeralWarnToast\("A picker is waiting on this box/);
   assert.match(RENDER, /if \(composerEdits\.has\(activeId\)\) \{ ephemeralWarnToast\("An edit replaces a past message/);
-  assert.match(RENDER, /if \(queuedEdits\.has\(activeId\)\) \{ ephemeralWarnToast\("This edit replaces a queued message\. Send it normally\."\); return; \}/);
   assert.match(RENDER, /if \(\(composerFiles\.get\(activeId\) \|\| \[\]\)\.length\) \{ ephemeralWarnToast\("Attachments can't be staged/);
   assert.match(RENDER, /if \(!sessions\.get\(sid\)\) \{ ephemeralWarnToast\("That session isn't on this dashboard right now\."\); return; \}/);
   // the send into a tab whose create failed (a provisional tab does not survive a reload) and the queued edit's send on
   // a session that cannot be reached (the edit lives in memory alone): states the fresh page no longer has
   assert.match(RENDER, /if \(sid !== provisionalId\) \{\n\s*ephemeralWarnToast\("“" \+ \(sessions\.get\(sid\)\?\.name \|\| "this session"\) \+ "” never started, so there's "/);
-  assert.match(RENDER, /if \(hostIsDown\(activeId\) \|\| isProvisionalId\(activeId\)\) \{\n\s*if \(hostIsDown\(activeId\)\) vscodeApi\?\.postMessage\(\{ type: "redial"[^\n]*\n\s*ephemeralWarnToast\("Can't reach the session right now, so the edit wasn't sent\./);
+  assert.match(RENDER, /if \(hostIsDown\(ed\.sid\) \|\| isProvisionalId\(ed\.sid\)\) \{\n\s*if \(hostIsDown\(ed\.sid\)\) vscodeApi\?\.postMessage\(\{ type: "redial"[^\n]*\n\s*ephemeralWarnToast\("Can't reach the session right now, so the edit wasn't saved\./,
+    "the in-place Save's guard (T306): the field keeps the words, a re-dial is asked for, and the refusal is ephemeral (the edit lives in memory alone)");
   // the plain send's refusal on a disconnected host: the host's reach is a state the fresh page reads from the kernel's
   // tunnel health (the tab mark, the transcript foot), and the re-dial that makes "re-dialing now" true is posted by
   // the gesture, never by a replay
