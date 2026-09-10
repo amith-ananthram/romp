@@ -29,6 +29,7 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
+from git_fixture import git, init_repo
 km = load_source("romp_kernel_github", os.path.join(BIN, "romp-kernel"))
 
 
@@ -38,12 +39,18 @@ km = load_source("romp_kernel_github", os.path.join(BIN, "romp-kernel"))
 # process environment's git, as in production — and the tests whose kernel call reaches origin pin
 # THAT environment the same way (_WithOrigin below). GIT_CONFIG_GLOBAL is honoured by git >= 2.32.
 _GIT_ENV = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+_IDENT = ("t@testhost", "t")
+
+
+def _git_env():
+    return dict(_GIT_ENV, GIT_SSH_COMMAND=os.environ.get("GIT_SSH_COMMAND", "ssh"))
 
 
 def _git(*args, cwd):
-    subprocess.run(["git", "-c", "user.email=t@testhost", "-c", "user.name=t"] + list(args),
-                   cwd=cwd, check=True, capture_output=True,
-                   env=dict(_GIT_ENV, GIT_SSH_COMMAND=os.environ.get("GIT_SSH_COMMAND", "ssh")))
+    # Through the shared runner: `git commit`, fetch and merge spawn a detached `git maintenance run --auto`
+    # that can still be writing into .git while the fixture tempdir is removed (the CI flake "Directory not
+    # empty: '.git'", 2026-09-10); git_fixture forbids that work on every call and in every repo init_repo makes.
+    git(cwd, *args, ident=_IDENT, env=_git_env(), text=False)
 
 
 def _local_origin(repo):
@@ -55,8 +62,8 @@ def _local_origin(repo):
     so origin starts with that branch. Returns the root; the caller owns restoring GIT_SSH_COMMAND."""
     root = tempfile.mkdtemp()
     bare = os.path.join(root, "TESTORG", "notes-api.git")
-    os.makedirs(os.path.dirname(bare))
-    _git("init", "-q", "--bare", bare, cwd=root)
+    os.makedirs(bare)
+    init_repo(bare, "-q", "--bare", ident=_IDENT, env=_git_env())
     sh = os.path.join(root, "stand-in-ssh")
     with open(sh, "w") as f:
         f.write('#!/bin/sh\nfor a in "$@"; do cmd=$a; done\ncd "%s" && eval "$cmd"\n' % root)
@@ -96,7 +103,7 @@ def _git_version():
 class _Repo(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
-        _git("init", "-q", "-b", "main", cwd=self.tmp)
+        init_repo(self.tmp, "-q", "-b", "main", ident=_IDENT, env=_git_env())
         os.makedirs(os.path.join(self.tmp, "src", "deep dir"))
         self.fp = os.path.join(self.tmp, "src", "app.py")
         with open(self.fp, "w") as f:
@@ -173,8 +180,7 @@ class GitHubUrl(_Repo):
 
     def test_a_detached_head_links_the_sha(self):
         _git("remote", "add", "origin", "git@github.com:TESTORG/notes-api.git", cwd=self.tmp)
-        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.tmp,
-                             capture_output=True, text=True).stdout.strip()
+        sha = git(self.tmp, "rev-parse", "HEAD", check=False).stdout.strip()
         _git("checkout", "-q", sha, cwd=self.tmp)
         self.assertEqual(km._file_github_url(self.fp, None),
                          "https://github.com/TESTORG/notes-api/blob/%s/src/app.py" % sha)
@@ -250,7 +256,7 @@ class GitHubUrl(_Repo):
     def test_a_file_staged_on_no_commit_is_not_committed(self):
         # an unborn branch: ls-files sees the index entry, but HEAD names nothing to link
         fresh = tempfile.mkdtemp()
-        _git("init", "-q", "-b", "main", cwd=fresh)
+        init_repo(fresh, "-q", "-b", "main", ident=_IDENT, env=_git_env())
         _git("remote", "add", "origin", "git@github.com:TESTORG/notes-api.git", cwd=fresh)
         fp = os.path.join(fresh, "new.py")
         with open(fp, "w") as f:
@@ -310,8 +316,7 @@ class GitHubUrl(_Repo):
         os.environ["PATH"] = old + os.pathsep + os.environ["PATH"]
         self.assertEqual(km._file_github_url(self.fp, None),
                          "https://github.com/TESTORG/notes-api/blob/main/src/app.py")
-        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.tmp,
-                             capture_output=True, text=True).stdout.strip()
+        sha = git(self.tmp, "rev-parse", "HEAD", check=False).stdout.strip()
         _git("checkout", "-q", sha, cwd=self.tmp)
         self.assertEqual(km._file_github_url(self.fp, None),
                          "https://github.com/TESTORG/notes-api/blob/%s/src/app.py" % sha,
@@ -426,8 +431,7 @@ class BranchOnOrigin(_WithOrigin):
         self.assertEqual(calls["communicate"], 2, "…and the dead group is reaped")
 
     def test_a_detached_sha_is_never_checked(self):
-        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.tmp,
-                             capture_output=True, text=True).stdout.strip()
+        sha = git(self.tmp, "rev-parse", "HEAD", check=False).stdout.strip()
         _git("checkout", "-q", sha, cwd=self.tmp)
         os.environ["GIT_SSH_COMMAND"] = "false"
         self.assertEqual(km._file_github_link(self.fp, None), (self.URL % sha, ""))
@@ -632,8 +636,8 @@ class NoPromptOnOrigin(_WithOrigin):
         _git("remote", "set-url", "origin", "http://127.0.0.1:%d/TESTORG/notes-api.git" % srv.server_address[1],
              cwd=self.tmp)
         _git("checkout", "-q", "-b", "wip", cwd=self.tmp)
-        subprocess.run(["git", "-C", self.tmp, "ls-remote", "--heads", "origin", "refs/heads/wip"],
-                       env=dict(os.environ, GIT_TERMINAL_PROMPT="0"), capture_output=True, timeout=30)
+        git(self.tmp, "ls-remote", "--heads", "origin", "refs/heads/wip",
+            env=dict(os.environ, GIT_TERMINAL_PROMPT="0"), timeout=30, check=False, text=False)
         self.assertTrue(os.path.exists(marker), "control: under GIT_TERMINAL_PROMPT=0 alone git runs the askpass")
         os.remove(marker)
         self.assertIsNone(km._origin_has_branch(self.tmp, "wip"), "a credential-wanting origin reads as unchecked")
@@ -678,6 +682,17 @@ class GitLinkWire(_WithOrigin):
         r = self.send_and_wait({"type": "fileGitLink", "path": self.fp, "reqId": 8})
         self.assertEqual(r["url"], "https://github.com/TESTORG/notes-api/blob/wip/src/app.py")
         self.assertEqual(r["reason"], "branch wip is not on origin")
+
+
+class FixtureReposForbidBackgroundGitWork(_WithOrigin):
+    """The kernel runs its own git against these repos (rev-parse, ls-files, ls-remote through the stand-in
+    ssh into the bare origin), so the no-background keys must sit in each repo's LOCAL config, not only ride
+    the fixture runner's -c flags."""
+
+    def test_the_fixture_repos_forbid_background_git_work(self):
+        for repo in (self.tmp, os.path.join(self.root, "TESTORG", "notes-api.git")):
+            self.assertEqual(git(repo, "config", "--local", "--get", "maintenance.auto").stdout.strip(),
+                             "false", repo)
 
 
 if __name__ == "__main__":

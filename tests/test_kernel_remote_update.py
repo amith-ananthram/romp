@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import unittest
 from romp_load import load_source
+from git_fixture import git, init_repo
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -504,12 +505,15 @@ class ApplyHonesty(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.home, True)
         self.repo = os.path.join(self.home, "romp")
         env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1", HOME=self.home)
+        # every git here rides the shared runner (T299): `git commit` spawns a detached `git maintenance run
+        # --auto` that can still be writing into .git while the temp dir is removed (the CI flake "Directory
+        # not empty: '.git'", tests/test_restart_classifier.py, 2026-09-10); the runner forbids that work on
+        # every invocation, and init_repo writes the same keys into the repo the apply's own git runs against
         def g(*a, **kw):
-            return subprocess.run(["git", "-C", self.repo] + list(a), capture_output=True, text=True,
-                                  env=env, check=True, **kw).stdout.strip()
+            return git(self.repo, *a, env=env, **kw).stdout.strip()
         self.g = g
         os.makedirs(self.repo)
-        subprocess.run(["git", "init", "-q", "-b", "main", self.repo], check=True, env=env)
+        init_repo(self.repo, "-q", "-b", "main", env=env)
         self.f = os.path.join(self.repo, "f")
         def commit(text, msg):
             with open(self.f, "w") as fh:
@@ -559,8 +563,7 @@ class ApplyHonesty(unittest.TestCase):
         return ok, detail, calls
 
     def _scratch(self):
-        r = subprocess.run(["git", "-C", self.repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + km._P2P_REF],
-                           capture_output=True, text=True)
+        r = git(self.repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + km._P2P_REF, check=False)
         return r.stdout.strip()
 
     def _sibling_push_at_the_apply(self, dirty=False):
@@ -586,6 +589,11 @@ class ApplyHonesty(unittest.TestCase):
                      'exec env -i HOME="%s" PATH="%s:/usr/bin:/bin" ROMP_REPO_ROOT="%s" bash -c "$last"\n'
                      % (self.home, shim_dir, self.repo))
         return lambda: open(marker, "w").close()
+
+    def test_the_fixture_repos_forbid_background_git_work(self):
+        # the probe and the apply run git against this repo through the ssh stub, under `env -i` and the
+        # kernel's own subprocess, so the no-background keys must sit in the repo's own config (T299)
+        self.assertEqual(git(self.repo, "config", "--local", "--get", "maintenance.auto").stdout.strip(), "false")
 
     def test_an_edit_landing_after_the_probe_is_refused_and_survives(self):
         # the probe saw a clean tree; an edit lands before the apply; the apply must see it itself

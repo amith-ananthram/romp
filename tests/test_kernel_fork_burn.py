@@ -18,7 +18,6 @@ per session per pass:
 
 Real git repos in temp dirs; fork counts observed by wrapping subprocess.run. SYNTHETIC only."""
 import os
-import subprocess
 import tempfile
 import unittest
 from romp_load import load_source
@@ -30,19 +29,23 @@ os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "test-token-DO-NOT-USE")
+from git_fixture import git, init_repo, forbid_background
 load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
 load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
 
 
 def _git(*args, cwd):
-    subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=10, check=True)
+    # Through the shared runner: `git commit` spawns `git maintenance run --auto`, which detaches and can still
+    # be writing into .git while the TemporaryDirectory removes the repo (the CI flake "Directory not empty:
+    # '.git'", tests/test_restart_classifier.py, 2026-09-10); the runner forbids that work on every call.
+    git(cwd, *args, timeout=10)
 
 
 def _mk_repo(td):
     repo = Path(td) / "repo"
     repo.mkdir()
-    _git("init", "-q", "-b", "main", cwd=repo)
+    init_repo(repo, "-q", "-b", "main", timeout=10)
     _git("config", "user.email", "t@TESTHOST", cwd=repo)
     _git("config", "user.name", "t", cwd=repo)
     (repo / "a.txt").write_text("a\n")
@@ -73,6 +76,7 @@ class WorktreeBranchCache(unittest.TestCase):
             repo = _mk_repo(td)
             wt = Path(td) / "wt"
             _git("worktree", "add", "-q", "-b", "feature", str(wt), "HEAD", cwd=repo)
+            forbid_background(wt)
             km._branch_cache.clear(); km._head_path_cache.clear()
             with ForkCounter() as fc:
                 self.assertEqual(km._git_branch(str(wt)), "feature")
@@ -100,6 +104,7 @@ class WorktreeBranchCache(unittest.TestCase):
             repo = _mk_repo(td)
             wt = Path(td) / "wt2"
             _git("worktree", "add", "-q", "-b", "wtb", str(wt), "HEAD", cwd=repo)
+            forbid_background(wt)
             km._head_path_cache.clear()
             self.assertTrue(km._git_head_file(str(repo)).endswith("/.git/HEAD"))
             hp = km._git_head_file(str(wt))
@@ -136,6 +141,20 @@ class HeadTtlOutlastsThePoll(unittest.TestCase):
         src = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertIn('if now - _HEAD_CACHE["ts"] > 15:', src,
                       "the /tunnels poll is 4s; a shorter TTL re-forks git on every poll")
+
+
+class FixtureReposForbidBackgroundGitWork(unittest.TestCase):
+    def test_the_fixture_repos_forbid_background_git_work(self):
+        # The kernel runs its OWN git against these repos (rev-parse, ls-files), which the runner's -c flags
+        # cannot reach: the repo's local config is what keeps a detached maintenance child out of the
+        # TemporaryDirectory teardown. The worktree shares the main repo's config.
+        with tempfile.TemporaryDirectory() as td:
+            repo = _mk_repo(td)
+            wt = Path(td) / "wt"
+            _git("worktree", "add", "-q", "-b", "feature", str(wt), "HEAD", cwd=repo)
+            forbid_background(wt)
+            for r in (repo, wt):
+                self.assertEqual(git(r, "config", "--local", "--get", "maintenance.auto").stdout.strip(), "false")
 
 
 if __name__ == "__main__":

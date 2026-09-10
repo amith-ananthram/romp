@@ -19,6 +19,11 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
+# Fixture git goes through the shared runner: `git commit` spawns `git maintenance run --auto`, which on recent
+# git detaches from its parent and can still be writing into .git while the fixture's directory is removed (the
+# CI flake "Directory not empty: '.git'", tests/test_restart_classifier.py, 2026-09-10); the runner forbids that
+# background work on every invocation and in every repo it inits.
+from git_fixture import git, init_repo
 
 
 class FakeBackend:
@@ -529,29 +534,42 @@ class SdkMetadataParity(unittest.TestCase):
         self.assertEqual(km._git_branch(tempfile.mkdtemp()), "", "not a repo → ''")
         self.assertEqual(km._git_branch(""), "", "no dir → ''")
 
-    def test_git_branch_is_empty_on_a_detached_head(self):
-        """Detached HEAD → '' is the CONTRACT (kernel _git_branch docstring), not an accident. Pinned on a
-        purpose-built repo so it holds regardless of how the checkout running these tests is shaped."""
-        import subprocess, tempfile
+    # -c identity so this never depends on (or is polluted by) the machine's global git config.
+    IDENT = ("romp-test@example.invalid", "romp test")
+
+    def _committed_repo(self):
+        """A purpose-built repo with one commit on a branch: the fixture the kernel's own `git rev-parse`
+        (_git_branch) runs against."""
+        import tempfile
         d = tempfile.mkdtemp()
-        # -c identity so this never depends on (or is polluted by) the machine's global git config.
-        git = ["git", "-C", d, "-c", "user.email=romp-test@example.invalid", "-c", "user.name=romp test"]
         # --template= (empty): a machine-global init.templateDir would otherwise copy its hooks into
         # this repo — a maintainer's gitleaks pre-commit hook failed the commit below whenever the
         # scanner wasn't on the test shell's PATH (2026-08-10). The test is about branch derivation;
         # no machine hook belongs in it.
-        subprocess.run(["git", "init", "-q", "--template=", d], check=True, capture_output=True)
+        init_repo(d, "-q", "--template=", ident=self.IDENT)
         open(os.path.join(d, "f"), "w").write("x")
-        subprocess.run(git + ["add", "f"], check=True, capture_output=True)
-        subprocess.run(git + ["commit", "-qm", "c"], check=True, capture_output=True)
+        git(d, "add", "f", ident=self.IDENT, text=False)
+        git(d, "commit", "-qm", "c", ident=self.IDENT, text=False)
+        return d
+
+    def test_git_branch_is_empty_on_a_detached_head(self):
+        """Detached HEAD → '' is the CONTRACT (kernel _git_branch docstring), not an accident. Pinned on a
+        purpose-built repo so it holds regardless of how the checkout running these tests is shaped."""
+        d = self._committed_repo()
         # _git_branch caches per cwd keyed on .git/HEAD's mtime. Both calls here land in the same test, so
         # on a coarse-granularity filesystem the two HEAD writes could share an mtime and serve a stale hit.
         # Clear between calls: this test is about the branch derivation, not the cache.
         km._branch_cache.clear()
         self.assertNotEqual(km._git_branch(d), "", "attached: a real branch name")
-        subprocess.run(git + ["checkout", "-q", "--detach"], check=True, capture_output=True)
+        git(d, "checkout", "-q", "--detach", ident=self.IDENT, text=False)
         km._branch_cache.clear()
         self.assertEqual(km._git_branch(d), "", "detached HEAD is not a branch name")
+
+    def test_the_fixture_repos_forbid_background_git_work(self):
+        # the kernel forks its own `git rev-parse` at this repo (_git_branch), outside the fixture runner's
+        # -c flags, so the no-background keys have to sit in the repo's own config
+        d = self._committed_repo()
+        self.assertEqual(git(d, "config", "--local", "--get", "maintenance.auto").stdout.strip(), "false")
 
     def test_open_eager_connects_sdk_branch_fallback_and_ctx_passthrough(self):
         with open(os.path.join(BIN, "romp-kernel")) as f:

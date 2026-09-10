@@ -24,6 +24,7 @@ em = load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
 jd = load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
+from git_fixture import git, init_repo
 
 SID = "11111111-2222-3333-4444-999999999901"     # private synthetic sid: this module owns its states file
 NOW = 1781100000
@@ -72,6 +73,18 @@ def _append_rows(path, rows):
     with open(path, "a") as f:
         for r in rows:
             f.write(json.dumps(r) + "\n")
+
+
+def _repo_on_main():
+    """A throwaway repository with one commit on `main`, the shape test_d3 reads a branch from. Built through
+    the shared runner (tests/git_fixture.py): `git commit` spawns `git maintenance run --auto`, which on
+    recent git detaches and can still be writing into .git while the temp dir is removed (the CI flake
+    "Directory not empty: '.git'", 2026-09-10); init_repo also writes the no-background keys into the repo's
+    own config, so the git the KERNEL forks against it (the branch memo) obeys them too."""
+    repo = tempfile.mkdtemp()
+    init_repo(repo, "-q", "-b", "main")
+    git(repo, "commit", "-q", "--allow-empty", "-m", "init", ident=("t@example.invalid", "t"))   # main is born: the branch resolves
+    return repo
 
 
 class _OpenCounter:
@@ -490,11 +503,7 @@ class EveryTabIsServedOnTheCompleteKey(_StateSandbox):
     def test_d3_the_branch_of_a_subdirectory_cwd_is_keyed(self):
         """build_session reads the branch of the registered cwd's tree (and of the last edited file's tree);
         the key carries them by value through the branch memo, which is keyed on the tree's HEAD."""
-        import subprocess
-        repo = tempfile.mkdtemp()
-        subprocess.run(["git", "init", "-q", "-b", "main", repo], check=True)
-        subprocess.run(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
-                        "commit", "-q", "--allow-empty", "-m", "init"], check=True)   # main is born: the branch resolves
+        repo = _repo_on_main()
         sub = os.path.join(repo, "pkg"); os.makedirs(sub)
         saved_cwd = km._cwd_of
         km._cwd_of = lambda sid: sub                       # a cwd INSIDE the repo, not its top
@@ -502,12 +511,19 @@ class EveryTabIsServedOnTheCompleteKey(_StateSandbox):
             s1 = self.sig()
             cwd_i = km._CHAT_SIG_LABELS.index("cwd")
             self.assertEqual(s1[cwd_i][1], "main", "the repo's branch is read for a subdirectory cwd: %r" % (s1[cwd_i],))
-            subprocess.run(["git", "-C", repo, "checkout", "-q", "-b", "feature"], check=True)
+            git(repo, "checkout", "-q", "-b", "feature")
             s2 = self.sig()
             self.assertNotEqual(s1, s2, "a branch switch moves the key")
             self.assertEqual(s2[cwd_i][1], "feature")
         finally:
             km._cwd_of = saved_cwd
+
+    def test_the_fixture_repos_forbid_background_git_work(self):
+        """The kernel runs git against test_d3's repo through its own subprocess (_git_out, the branch memo),
+        so the no-background keys must sit in the repo's own config, not only on the fixture runner's
+        command line."""
+        repo = _repo_on_main()
+        self.assertEqual(git(repo, "config", "--local", "--get", "maintenance.auto").stdout.strip(), "false", repo)
 
     def test_e_the_backend_leg_and_the_watches_move_the_key(self):
         """A stub backend stands in for the SDK: the live-tail revision, the send queue and the brackets each
