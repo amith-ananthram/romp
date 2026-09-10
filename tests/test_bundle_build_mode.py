@@ -118,5 +118,31 @@ class BundleBuildMode(unittest.TestCase):
                       "the staleness scan must watch the plain-JS modules the bundles require()")
 
 
+class FailureLineTail(unittest.TestCase):
+    """A guard on a pair of constants neither side reads from the other. The kernel's _rebuild_dist keeps
+    the last N characters of the script's stderr for the notice that says the served UI is stale, and
+    esbuild.js's failureSummary cuts its last line to N from the END (N minus three, then an ellipsis) so
+    that tail is the line's head: what failed and what is unchanged. Should the kernel's tail shrink alone, it
+    shows the end of the line's last clause and drops its head; should the script's cut shrink alone, the line
+    loses its location for nothing. Neither drift fails any other test."""
+
+    def test_the_scripts_cut_is_the_kernels_tail(self):
+        kernel = re.search(r"def _rebuild_dist\(\):.*?(?=\n\S)", _read(KERNEL), re.S)   # to the next top-level line
+        self.assertIsNotNone(kernel, "_rebuild_dist not found")
+        tail = re.search(r"\.strip\(\)\[-(\d+):\]", kernel.group(0))
+        self.assertIsNotNone(tail, "_rebuild_dist keeps a tail of the script's stderr")
+        n = int(tail.group(1))
+        fit = re.search(r"const fit = \(s\) => s\.length > (\d+)\s*\?\s*s\.slice\(0,\s*(\d+)\)", _read(ESBUILD))
+        self.assertIsNotNone(fit, "failureSummary's fit cuts the line")
+        self.assertEqual(int(fit.group(1)), n, "the script cuts its line where the kernel cuts its stderr")
+        self.assertEqual(int(fit.group(2)), n - len("..."), "the cut keeps room for the ellipsis")
+        # the node tests stand in for the kernel's tail with a constant of their own; it follows the kernel too
+        for name in ("esbuild-build.test.ts", "esbuild-failure-cap.test.ts"):
+            ts = _read(os.path.join(ROOT, "vscode-extension", "src", name))
+            k = re.search(r"^const KERNEL_TAIL = (\d+);$", ts, re.M)
+            self.assertIsNotNone(k, name + " names the kernel's tail")
+            self.assertEqual(int(k.group(1)), n, name)
+
+
 if __name__ == "__main__":
     unittest.main()

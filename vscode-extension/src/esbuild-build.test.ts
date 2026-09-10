@@ -149,6 +149,16 @@ test("failureSummary: without the output-dir clause (watch and test modes), and 
   assert.equal(failureSummary(new Error("boom")), "esbuild.js: build failed: boom");
 });
 
+test("failureSummary: an error whose errors list is empty gets the message line, not a read of a first error it has not got", () => {
+  // esbuild's API never yields a BuildFailure with no errors. An error object shaped so (a bug here, another
+  // library's error that carries an `errors` array) reached the per-error branch, which read errors[0].location
+  // and threw inside main().catch: the process died on that TypeError and its stack was the kernel's tail.
+  const e = Object.assign(new Error("Build failed with 0 errors"), { errors: [], warnings: [] });
+  let line = "";
+  assert.doesNotThrow(() => { line = failureSummary(e, "dist/"); });
+  assert.equal(line, "esbuild.js: build failed: Build failed with 0 errors");
+});
+
 test("failureSummary stays within the kernel's 300-character tail: long specifiers are shortened, a long list is counted", () => {
   const failure = (specs: string[]) => Object.assign(new Error("Build failed"), {
     errors: specs.map((s) => ({ text: `Could not resolve "${s}"`, location: null })), warnings: [] });
@@ -277,5 +287,36 @@ test("node esbuild.js, with and without --production: a webview failure after th
     assert.ok(fs.readdirSync(cwd).every((n) => !n.startsWith(".")), "nothing staged beside it: " + fs.readdirSync(cwd).join(","));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("node esbuild.js: an error whose errors list is empty is no esbuild report; its stack is printed and the line closes stderr", () => {
+  // esbuild's API never yields a BuildFailure with no errors, so a stub esbuild stands in: a preload replaces
+  // the package with one whose build() rejects with such an object. Before, failureSummary read errors[0] of
+  // it and threw inside main().catch: the process died on that TypeError with no summary line, and the tail
+  // the kernel shows was the TypeError's stack. The stack that IS wanted is the error's own, printed as for any
+  // non-esbuild error, since esbuild printed nothing for it.
+  const d = scratch();
+  try {
+    const preload = path.join(d, "stub-esbuild.js");
+    fs.writeFileSync(preload, [
+      'const Module = require("module");',
+      "const load = Module._load;",
+      "Module._load = function (request, ...rest) {",
+      '  if (request !== "esbuild") return load.call(this, request, ...rest);',
+      '  const e = Object.assign(new Error("Build failed with 0 errors"), { errors: [], warnings: [] });',
+      "  return { build: () => Promise.reject(e) };",
+      "};",
+      "",
+    ].join("\n"));
+    const r = spawnSync(process.execPath, ["-r", preload, ESBUILD_JS], { cwd: d, encoding: "utf8" });
+    assert.equal(r.status, 1, "exit status (signal " + r.signal + "); stderr: " + r.stderr);
+    assert.ok(!r.stderr.includes("TypeError"), "no TypeError: " + r.stderr);
+    assert.ok(/Build failed with 0 errors\n\s+at /.test(r.stderr), "the error's own stack is printed: " + r.stderr);
+    const lines = r.stderr.trim().split("\n");
+    assert.equal(lines[lines.length - 1], "esbuild.js: build failed: Build failed with 0 errors");
+    assert.deepEqual(fs.readdirSync(d), [path.basename(preload)], "nothing written");
+  } finally {
+    fs.rmSync(d, { recursive: true, force: true });
   }
 });
