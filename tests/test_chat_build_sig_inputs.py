@@ -30,6 +30,7 @@ import ast
 import contextlib
 import inspect
 import io
+import itertools
 import json
 import os
 import re
@@ -1097,7 +1098,12 @@ class RecordedDependencies(unittest.TestCase):
     _read_task_output, _subagent_meta_map, _subagent_file and _agent_steps), a fold hit carries the sealed
     prefix's outputs into the record, a raw postal event flags the log as a dependency, and the pusher
     consumes the record and leaves none on its thread. Synthetic session under a hermetic state root;
-    records stamped against the real clock, which discovery keys on."""
+    records stamped against the real clock, which discovery keys on. Message ids are salted per test
+    instance and tearDown clears the sid's per-message caches (_PATH_LINK_CACHE, _SPACE_PATH_CACHE, the pin
+    sidecar's memo): a verdict cached under (sid, uuid) is served without re-reading the text, so an id
+    reused across tests would hand one test's verdict to another's message."""
+
+    _salt = itertools.count()                    # one value per test instance, read in setUp
 
     STUBS = ("_tmux_sessions", "_live_names", "_chat_tab_sessions", "_cached_feed", "_cached_timeline",
              "build_timeline", "_fleet_view_sig", "_comments_frame", "_retry_parked_creates", "_sdk", "_msg_summaries")
@@ -1143,6 +1149,7 @@ class RecordedDependencies(unittest.TestCase):
         km._parse_cache.clear(); km._task_out_cache.clear(); km._chat_fold.pop(SID_R, None)
         if isinstance(jd._discover_cache, dict):
             jd._discover_cache.clear()
+        self.salt = next(self._salt)
         self.n = 0
         self.last = None
         self.chat = {"app": "chat", "alive": True, "sent": {}, "active": None, "send": lambda s: None}
@@ -1165,6 +1172,10 @@ class RecordedDependencies(unittest.TestCase):
         km._thread_fold_keep[0], km._thread_fold_keep[1] = keep
         km._tmux_echo.pop(SID_R, None); km._tmux_echo_rev.pop(SID_R, None)
         km._chat_fold.pop(SID_R, None); km._parse_cache.clear(); km._task_out_cache.clear()
+        for cache in (km._PATH_LINK_CACHE, km._SPACE_PATH_CACHE):
+            for k in [k for k in cache if k[0] == SID_R]:
+                cache.pop(k, None)
+        km._PIN_ASSOC_MEMO.pop(SID_R, None)
         km._chat_dep_scope.deps = None
         if isinstance(jd._discover_cache, dict):
             jd._discover_cache.clear()
@@ -1172,7 +1183,7 @@ class RecordedDependencies(unittest.TestCase):
     # ── the transcript ──
     def uid(self):
         self.n += 1
-        return "cccccccc-0000-0000-0000-%012d" % self.n
+        return "cccccccc-0000-0000-%04x-%012d" % (self.salt, self.n)
 
     def tick(self, dt=5):
         self.t += dt
@@ -1373,6 +1384,24 @@ class RecordedDependencies(unittest.TestCase):
                 km._clients[:] = [c for c in km._clients if c is not self.chat]
         self.assertTrue(self.chat["sent"], "the session reached the client")
         self.assertIsNone(getattr(km._chat_dep_scope, "deps", None))
+
+    def test_a_fresh_worlds_message_under_a_reused_id_is_verified_on_its_own_text(self):
+        """The path-link verdict is cached per (sid, uuid) and a hit is served without re-reading the text
+        (_path_links), so a message id one test minted and a later test reused would carry the earlier
+        message's verdict into the later test. The hazard is cross-test by construction, so this test runs
+        two worlds itself, through the fixture's own hooks: the first caches a verdict for a token-free line,
+        the second names a real file from the same counter position and must be verified on its own text."""
+        self.append(self.turn(1))                           # the first world's user line: no path token
+        km._push([self.chat])
+        self.tearDown()
+        self.setUp()                                        # the next test's world (a second temp dir cleanup is registered; both run when the test ends)
+        (self.cdir / "notes").mkdir()
+        (self.cdir / "notes" / "report.md").write_text("42\n")
+        u, a = self.uid(), self.uid()                       # the first world's counter position again: the same id but for the salt
+        self.append([_uline(self.tick(), "see notes/report.md", u, None), _aline(self.tick(), "Read it.", a, u)])
+        km._push([self.chat])
+        ev = next(e for e in km._built_chat[SID_R][1]["events"] if e.get("uuid") == u)
+        self.assertIn("notes/report.md", ev.get("pathLinks") or {}, "verified on its own text, not a prior message's")
 
 
 if __name__ == "__main__":
