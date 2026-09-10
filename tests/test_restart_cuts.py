@@ -9,6 +9,7 @@ watch primitive is the fix), and un-write the CLI's own interrupted-by-user tran
 (romp never rewrites CLI transcripts; romp's own records already distinguish machine cuts).
 Hermetic state; synthetic sids only."""
 import errno
+import io
 import json
 import os
 import signal
@@ -39,6 +40,30 @@ STATE_ROOT = km.RESTART_CUTS_FILE.parent
 
 # bin/romp's `romp refresh` row: caller attribution with no action field, as the CLI writes it.
 REFRESH_CLI_ROW = {"ppid": 4242, "parent": "bash", "sid": "", "name": "", "tty": "/dev/pts/0", "tmux": ""}
+
+
+class DeadTty:
+    """A stderr whose every write raises: the kernel writes on the stdio the manager spawned it with, and
+    a pty whose master closed answers EIO (a reset journal stream answers EPIPE the same way)."""
+
+    def write(self, s):
+        raise OSError(errno.EIO, "Input/output error")
+
+    def flush(self):
+        pass
+
+
+class LiveDrain:
+    """A backend with one session in flight: drain() records that it ran and names the turn it cut. It says
+    so through the kernel's backend log wire before returning, as SdkBackend.drain does after its work: a
+    wire that raised there carried the finished drain's result away (an empty cutTurns row, a drainError
+    naming the stderr fault), so the dead-stderr cases below drive that line too."""
+    called = False
+
+    def drain(self, timeout):
+        self.called = True
+        km._backend_log("drain: stopped 1 session(s), 1 in-flight turn(s) interrupted")
+        return {"cutTurns": [{"sid": SID, "name": "web"}], "stopped": 1}
 
 
 def _own_state_root(case):
@@ -205,6 +230,26 @@ class CutRow(unittest.TestCase):
         self.assertIn("if not _EXIT_ONCE.acquire(blocking=False):", block,
                       "a second SIGTERM mid-drain must not nest a second drain and a second cut row")
 
+    def test_the_backends_log_wire_is_best_effort(self):
+        # SdkBackend.drain logs its summary after every session is shut down, joined and reaped, right
+        # before its return, through the kernel's `log=` callback. Wired as a bare sys.stderr.write, a dead
+        # stderr raised there out of be.drain with the work done, and _drain_and_exit filed an empty
+        # cutTurns row with a drainError naming the stderr fault: the misfiled row the exit path's own
+        # _exit_log guards close, reopened by the one line they did not cover. The wire is _backend_log,
+        # _exit_log with the backend's prefix; the LiveDrain fake logs through it, so the two
+        # test_a_raising_stderr_does_not_skip_the_drain cases drive this line through the handlers
+        src = open(os.path.join(os.path.dirname(HERE), "kernel", "kernel.py")).read()
+        self.assertIn("log=_backend_log,", src, "the backend is wired to the best-effort line")
+        self.assertNotIn('log=lambda m: sys.stderr.write("sdk-backend', src,
+                         "never the bare write: it raised out of be.drain under a dead stderr")
+        line = "drain: stopped 1 session(s), 0 in-flight turn(s) interrupted"
+        with mock.patch.object(km.sys, "stderr", DeadTty()):
+            km._backend_log(line)                    # no raise: the line is lost, the caller's result is not
+        with mock.patch.object(km.sys, "stderr", new_callable=io.StringIO) as err:
+            km._backend_log(line)
+        self.assertEqual(err.getvalue(), "sdk-backend: %s\n" % line,
+                         "with a healthy stderr the line is the one the kernel log always carried")
+
 
 class UnrequestedSignal(unittest.TestCase):
     """A SIGTERM nobody asked the manager for (a stray kill, a test that fired a real restart, a
@@ -308,17 +353,45 @@ class UnrequestedSignal(unittest.TestCase):
         self.assertEqual(cuts[0]["reason"], "signal, not requested through the manager",
                          "the cut row used to say nothing at all here")
         self.assertEqual(cuts[0]["cutTurns"], [])
+        self.assertNotIn("drainError", cuts[0], "a clean exit's row carries neither fault field")
+        self.assertNotIn("reasonError", cuts[0], "(each appears only when its fault did)")
 
     def test_a_raising_reason_helper_still_leaves_the_cut_row(self):
         # the helper reads ROMP_MANAGER_PID (a pid too large for os.kill raises OverflowError out of
         # _pid_alive) and writes to a stderr the dying supervisor may have closed; a raise there used
-        # to skip the cut row this exit exists to leave. The row lands with the plain verdict instead.
-        with mock.patch.object(km, "_unrequested_signal_reason", side_effect=OverflowError("pid")):
+        # to skip the cut row this exit exists to leave. The row lands with the plain verdict instead,
+        # and names the fault: the helper died before it filed the `signal` row, so the cut row is the
+        # only record of this exit, and without the field it read as a healthy unrequested one
+        with mock.patch.object(km, "_unrequested_signal_reason", side_effect=OverflowError("pid")), \
+             mock.patch.object(km.sys, "stderr", new_callable=io.StringIO) as err:
             self._fire()
         cuts = self._rows(km.RESTART_CUTS_FILE)
         self.assertEqual(len(cuts), 1, "the cut row is written whether or not the reason helper survives")
         self.assertEqual(cuts[0]["reason"], km.SIGNAL_REASON_UNREQUESTED)
         self.assertEqual(cuts[0]["cutTurns"], [])
+        self.assertEqual(cuts[0]["reasonError"], "OverflowError: pid",
+                         "the row names the fault the helper died of, as drainError names a drain's")
+        self.assertNotIn("drainError", cuts[0], "the drain itself ran clean; the fault is the helper's")
+        self.assertEqual(self._rows(self.AUDIT), [], "no `signal` row on this path: the cut row is the only record")
+        self.assertIn("reasonError", err.getvalue(), "and the fault is said on stderr")
+
+    def test_a_raising_reason_helper_under_a_dead_stderr_still_leaves_the_cut_row(self):
+        # the two faults arrive together in practice: a ROMP_MANAGER_PID the kernel cannot use, on a
+        # stream that is gone. The line that names the helper's fault is best-effort like every other on
+        # the exit path; were it not, its raise would leave the inner except for the outer one, which
+        # writes no row, and the cut row this exit exists to leave would be lost. The stderr is a closed
+        # file object (its write raises ValueError), so the exit path's guard is pinned for any exception,
+        # not one errno, as the helper's own guard is (test_a_closed_stderr_... below)
+        closed = io.StringIO()
+        closed.close()
+        with mock.patch.object(km, "_unrequested_signal_reason", side_effect=OverflowError("pid")), \
+             mock.patch.object(km.sys, "stderr", closed):
+            self._fire()
+        cuts = self._rows(km.RESTART_CUTS_FILE)
+        self.assertEqual(len(cuts), 1, "the cut row lands under a dead stderr and a dead helper")
+        self.assertEqual(cuts[0]["reason"], km.SIGNAL_REASON_UNREQUESTED)
+        self.assertEqual(cuts[0]["reasonError"], "OverflowError: pid")
+        self.assertEqual(self._rows(self.AUDIT), [])
 
     def test_an_unlabeled_row_is_neither_the_request_nor_consumed(self):
         # the CLI's actionless refresh row alone, fresh, and the SIGTERM arrives (the manager's note never
@@ -408,9 +481,8 @@ class UnrequestedSignal(unittest.TestCase):
         # row, logs a line, and returns the reason; the line is best-effort. Were it not, the raise would
         # leave _drain_and_exit its fallback, the plain unrequested verdict, on a cut row whose `signal`
         # row says the manager was stopped: two records of one exit disagreeing. So the manager pid here
-        # is a reaped child's (stopped), and the cut row must carry the verdict the row does. The cut row
-        # also carries a drainError (the drain's own stderr writes raise under the same stream); that is
-        # not asserted
+        # is a reaped child's (stopped), and the cut row must carry the verdict the row does. The exit
+        # path's own stderr lines are best-effort too, so the row carries no drainError (the cases below)
         class Gone:
             def write(self, s):
                 raise OSError(errno.EPIPE, "Broken pipe")
@@ -432,6 +504,32 @@ class UnrequestedSignal(unittest.TestCase):
              mock.patch("sys.stderr", Gone()):
             self.assertEqual(km._unrequested_signal_reason(signal.SIGTERM, wait=0), km.SIGNAL_REASON_MANAGER_STOPPED,
                              "the reason comes back with the log line lost, not the other way round")
+
+    def test_a_raising_stderr_does_not_skip_the_drain(self):
+        # the drain announcement was the first statement of the drain's try, so a stderr that raises (a
+        # closed tty on a kernel that outlived the hangup, a reset journal stream, a full log disk) jumped
+        # to the except before be.drain ran: no session was drained, their claude children orphaned with
+        # in-flight turns uninterrupted, and the row read as a clean drain whose drainError named the
+        # stderr fault. Every stderr line on the exit path is best-effort: the drain runs, and drainError
+        # names a fault of the drain alone
+        be = LiveDrain()
+        with mock.patch.object(km.sys, "stderr", DeadTty()):
+            self._fire(backend=be)
+        self.assertTrue(be.called, "the drain runs whatever stderr does")
+        cuts = self._rows(km.RESTART_CUTS_FILE)
+        self.assertEqual(len(cuts), 1)
+        self.assertEqual(cuts[0]["cutTurns"], [{"sid": SID, "name": "web"}])
+        self.assertNotIn("drainError", cuts[0], "drainError is the drain's fault, never stderr's")
+
+    def test_a_raising_stderr_when_the_cut_row_fails_still_exits(self):
+        # a row builder that raises reaches the outer except, whose stderr line stood before os._exit(0)
+        # unguarded: with stderr dead the line raised out of the handler and the exit never ran. From
+        # _graceful_term that ended the interpreter with no row; from _parent_watch it ended that thread
+        # alone, and the kernel lived on with the exit lock held, so every later SIGTERM returned at once
+        with mock.patch.object(km.sys, "stderr", DeadTty()), \
+             mock.patch.object(km, "_restart_cut_row", side_effect=RuntimeError("row")):
+            self._fire()                             # asserts os._exit(0) was reached, once
+        self.assertEqual(self._rows(km.RESTART_CUTS_FILE), [], "no row to write; the exit still ran")
 
     def test_a_stray_sigterm_with_a_quiet_park_on_record_does_not_spend_the_park(self):
         # a quiet converge parked with the manager (the row _run_main_update writes), then a SIGTERM the
@@ -507,6 +605,26 @@ class UnrequestedSignal(unittest.TestCase):
         self.assertEqual(row["action"], "signal")
         self.assertIs(row["managerStopped"], True)
         self.assertIs(row["managerRequested"], False, "still not a request: nobody asked the manager")
+
+    def test_a_closed_stderr_does_not_undo_the_service_stop_verdict(self):
+        # the helper's own log line comes AFTER the `signal` row lands and BEFORE the return, so a stderr
+        # that raises there must not carry the verdict away with it: _drain_and_exit would take its
+        # fallback, the plain wording, and the cut row would contradict the row already on disk. The
+        # case above drives a broken pipe (an OSError) through _graceful_term and then calls the helper
+        # alone asserting the return only; this one's stderr is a closed file object, whose write raises
+        # ValueError (the guard is for any exception, not one errno: a supervisor that reset the stream
+        # leaves that kind behind), and it asserts on the direct call that the audit row's managerStopped
+        # and reason agree with the verdict returned
+        closed = io.StringIO()
+        closed.close()
+        with mock.patch.dict(os.environ, {"ROMP_MANAGER_PID": str(self._dead_pid())}), \
+             mock.patch.object(km.sys, "stderr", closed):
+            reason = km._unrequested_signal_reason(signal.SIGTERM, wait=0, now=1000)
+        self.assertEqual(reason, km.SIGNAL_REASON_MANAGER_STOPPED)
+        rows = self._rows(self.AUDIT)
+        self.assertEqual(len(rows), 1)
+        self.assertIs(rows[0]["managerStopped"], True)
+        self.assertEqual(rows[0]["reason"], reason, "the verdict returned is the one the row carries")
 
     def test_the_managers_stop_note_landing_after_our_signal_is_the_service_stop_wording(self):
         # the manager writes its note BEFORE it kills, so a note that lands AFTER our signal did not
@@ -933,6 +1051,27 @@ class ParentGone(unittest.TestCase):
         cuts = self._rows(km.RESTART_CUTS_FILE)
         self.assertEqual(len(cuts), 1)
         self.assertEqual(cuts[0]["reason"], "parent-gone: the manager exited; the kernel followed it")
+
+    def test_a_raising_stderr_does_not_skip_the_drain(self):
+        # the exit a closed tty reaches: a manager running in its own session with the tty on its stderr
+        # dies of its own write fault when the tty goes, and this watchdog notices with the kernel's stderr,
+        # the same descriptor, dead too. The drain still runs and both rows land
+        p = subprocess.Popen(["true"])
+        p.wait()
+        be = LiveDrain()
+        with mock.patch.dict(os.environ, {"ROMP_MANAGER_PID": str(p.pid)}), \
+             mock.patch.object(km, "_sdk_backend", be), \
+             mock.patch.object(km.sys, "stderr", DeadTty()), \
+             mock.patch.object(km.os, "_exit", side_effect=SystemExit) as ex:
+            with self.assertRaises(SystemExit):
+                km._parent_watch()
+        ex.assert_called_once_with(0)
+        self.assertTrue(be.called, "the drain runs whatever stderr does")
+        self.assertEqual([r["action"] for r in self._rows(self.AUDIT)], ["parent-gone"])
+        cuts = self._rows(km.RESTART_CUTS_FILE)
+        self.assertEqual(len(cuts), 1)
+        self.assertEqual(cuts[0]["cutTurns"], [{"sid": SID, "name": "web"}])
+        self.assertNotIn("drainError", cuts[0])
 
     def test_standalone_kernel_has_no_parent_to_watch(self):
         env = {k: v for k, v in os.environ.items() if k != "ROMP_MANAGER_PID"}

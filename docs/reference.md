@@ -1780,7 +1780,11 @@ receive it. A kernel whose manager disappears writes a row with action
 `parent-gone` before it exits. `restart-cuts.jsonl` gets one row per exit
 naming the turns the drain cut and the reason: the audit row's `action:
 reason`, the `signal` row's reason, or `parent-gone: the manager exited; the
-kernel followed it`. A second SIGTERM during the drain is ignored; the first
+kernel followed it`. When the helper that files the `signal` row fails (a
+`ROMP_MANAGER_PID` the kernel cannot use as a pid), no `signal` row is written,
+and the cut row carries the plain `signal, not requested through the manager`
+verdict plus a `reasonError` naming the fault, so the missing row is explained
+on disk. A second SIGTERM during the drain is ignored; the first
 writes the row. The manager's log says `exited without a restart request
 (signal or crash); respawning` when a kernel exits that it did not ask to stop
 or restart.
