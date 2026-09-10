@@ -585,6 +585,13 @@ body.tabbar-resizing { cursor: ns-resize; user-select: none; }
 .tab-ph-swirl { width: 12px; height: 12px; border-radius: 2px; flex: none;
   animation: tab-ph-swirl-spin 7s linear infinite; }   /* .tab is flex with its own gap, so no margin needed */
 @keyframes tab-ph-swirl-spin { to { transform: rotate(-360deg); } }
+/* the host-down foot's swirl, after "Reconnecting": present only while a dial to the host is in flight as of
+   the last /tunnels poll (render.ts syncHostOfflineFoot), so the spin follows the state; the same motif as the
+   placeholder tab's. A flex item of the head right after the gist (the postal delivery icon's convention), so an
+   ellipsized sentence on a phone-wide pane clips its own tail and never the swirl, the one dynamic cue */
+.notice-head .host-dial-swirl { width: 12px; height: 12px; border-radius: 2px; flex: 0 0 auto; align-self: center;
+  margin-left: -2px; animation: tab-ph-swirl-spin 7s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .notice-head .host-dial-swirl { animation: none; } }
 /* CLASSIC (the default; T113, tightened by T115, tuned by T118 — the user 2026-08-27): the tab
    strip is the PRE-720 strip — verified by pixel-diffing a real pre-720 build — modulo exactly
    four sanctioned deltas: typography (the strip inherits the global Inter/type ladder), the 1px
@@ -1983,6 +1990,25 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   color: var(--dim); background: transparent; border: 0; border-radius: 6px; padding: 0;
 }
 .queued-edit:hover { color: var(--accent); background: rgba(255, 255, 255, 0.08); }
+/* EDITING IN PLACE (T306, the user 2026-09-10): the ✎ turns the bubble's text into a field where it sits — the same
+   width, the dashed provisional look kept, the ✕ still in its corner — with Save and Cancel under the text. The field
+   inherits the bubble's type; the buttons and the labels wear the queued header's 0.82em. A bubble another client is
+   editing reads "editing" beside its text; a refused edit says why on its own line. */
+.queued-bubble.editing { opacity: 1; border-color: var(--accent); padding-right: 52px; box-sizing: border-box; }   /* the width set from the measured bubble is its border box; the idle padding kept, so the words keep their wrap (the ✎'s room stays empty) */
+.queued-editor { display: flex; flex-direction: column; gap: 6px; }
+.queued-editbox {
+  width: 100%; box-sizing: border-box; display: block; resize: none; overflow: hidden;
+  font: inherit; line-height: inherit; color: var(--fg); background: transparent; border: 0; padding: 0; margin: 0; outline: none;
+}
+.queued-editbtns { display: flex; justify-content: flex-end; gap: 6px; }
+.queued-editbtn {
+  font: inherit; font-size: 0.82em; line-height: 1.4; cursor: pointer; padding: 2px 9px; border-radius: 6px;
+  color: var(--fg); background: transparent; border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent);
+}
+.queued-editbtn:hover { border-color: var(--accent); }
+.queued-editbtn.save { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+.queued-held-label { font-size: 0.82em; color: var(--dim); margin-left: 8px; font-style: italic; }
+.queued-editnote { font-size: 0.82em; color: var(--vscode-errorForeground, #f48771); margin-top: 4px; }
 /* A notice romp itself queued (T243) wears the LANDED romp notice card nested inside the queued bubble: the
    dashed "you" dress comes off the wrapper (the card brings its own gray tone), and the ✕ moves inside the
    card's corner so it reads as the card's control. */
@@ -2401,12 +2427,24 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    itself and never the word beside it down to a letter (T294, the user 2026-09-10, whose card's "question" had
    become "q…"). Scoped to the postal card: an API-error head carries a sentence-long meta and a compact notice-group
    head carries a whole gist there, and those must still yield to the actions beside them on a narrow pane. The head is
-   the size container: on a phone-width one (under 360px) even the short words do not fit beside the gist's floor, and
-   there the GIST yields further, to a smaller floor, and the kind word stays whole (T302: the kind never truncates). */
-.turn-postal-service .notice-head { container-type: inline-size; }
-.turn-postal-service .notice-meta { flex: 0 0 auto; }
+   the size container: on a phone-width one (under 360px) the two ends, the kind word and the icon leave the gist no
+   room on their line, and a floor there only squeezed it into a column two to four letters wide beside them while the
+   kind word ran off a boxed card (T313, the user 2026-09-10, who reads over the tailnet at phone width). So at that
+   width the head WRAPS: the ends keep the first line, the kind word and the delivery icon stay on it when they fit and
+   otherwise move to the next line as ONE unit (they share the meta slot), and the gist takes its own full-width line
+   last, breaking word-wise (overflow-wrap only for an unbroken token, a bare link), every card, boxed or slim; the kind
+   word never truncates (T302) and now never leaves the card either. The CARD is the size
+   container, not the head: a container query resolves against an element's ANCESTORS, so a rule on the head could
+   never query the head's own size (the head-as-container of T302 served only the gist, its child). */
+.turn-postal-service .notice { container-type: inline-size; }
+/* the postal meta never shrinks, and it GROWS to the head's right edge: it holds the kind word and, after it, the
+   delivery icon (margin-left auto inside it), so the icon sits at the edge as before and, when a phone-width head
+   wraps, the kind word and the icon move to the next line as ONE unit (T313) */
+.turn-postal-service .notice-meta { flex: 1 0 auto; display: inline-flex; align-items: baseline; gap: 7px; min-width: 0; }
 @container (max-width: 360px) {
-  .turn-postal-service .notice-gist { min-width: min(100%, 4ch); }
+  .turn-postal-service .notice-head { flex-wrap: wrap; }
+  .turn-postal-service .notice-head > .notice-gist { flex: 1 0 100%; order: 1; min-width: 0;
+    white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: break-word; }
 }
 /* T302 (the user 2026-09-10): the interaction KIND is coloured TEXT in the meta slot — a chip reads as a tag now — in
    the colours the old chips wore: delegation violet, coordination teal, question the working amber. */
@@ -2435,8 +2473,8 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 /* and its glyph sits on the FIRST line of the wrapped head (the centred glyph of a one-line head drifts to the
    middle of a three-line block otherwise); 4px is the centred offset within the head's own line */
 .turn-postal-service .notice:not(.notice-collapsible) .notice-glyph { align-self: flex-start; margin-top: 4px; }
-/* …and so does the delivery icon at the right edge: on the first line, not centred over the wrapped block */
-.turn-postal-service .notice:not(.notice-collapsible) .postal-delivery { align-self: flex-start; margin-top: 4px; }
+/* (the delivery icon needs no such rule since T313: it rides inside the meta slot, a one-line flex box the head
+   aligns by baseline, so it sits on the kind word's line, the first, however the gist wraps) */
 /* a sent card in the provisional dress wears the bubble's border + padding: its rail dot and time marker sit where a
    boxed card's do (T302 review) */
 .turn-postal-service.postal-provisional > .dot, .turn-postal-service.postal-provisional > .time-marker { top: 18px; }
@@ -3010,6 +3048,9 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 }
 .warn-toast-x:hover { color: var(--fg); background: rgba(255, 255, 255, 0.08); }
 .warn-toast.fade { opacity: 0; }
+.warn-toast.sticky { border-color: var(--accent); }
+.warn-toast-copy { font: inherit; font-size: 0.82em; cursor: pointer; padding: 1px 8px; border-radius: 6px; color: var(--fg); background: transparent; border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent); margin-left: 6px; }
+.warn-toast-copy:hover { border-color: var(--accent); }
 
 /* INTERRUPTING… chip (the user 2026-07-02): the stop is in flight — busy-yellow like working (it still
    is, briefly) but dimmed and static (no pulse, no timer); clears to READY on its own when the stop lands. */
@@ -3410,13 +3451,24 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
    from open until the thread's REAL render (its events) is ready; a backstop falls back so it can
    never trap. Reuses the page's .rl-* pieces, centered in the list. */
 .cmt-boot { display: flex; align-items: center; justify-content: center; min-height: 90px; }
-.cmt-head .cmt-x { cursor: pointer; }
-.cmt-title { font-weight: 600; }
+.cmt-head .cmt-x, .cmt-head .cmt-max { cursor: pointer; }
+.cmt-title { font-weight: 600; user-select: none; }   /* a double-click here maximizes; it must select nothing */
 .cmt-x {
   margin-left: auto; padding: 0 4px; border: 0; background: none;
   color: inherit; opacity: 0.6; font-size: 14px; cursor: pointer;
 }
 .cmt-x:hover { opacity: 1; }
+/* maximize ⇄ restore (the user 2026-09-10): the line glyph right before the ×, so it takes the ×'s
+   push to the far right and the × loses its own. A transparent 1px border at rest holds the box, so
+   the hover's accent border + text + wash (the house button hover) shifts nothing — click-safe. */
+.cmt-max {
+  margin-left: auto; width: 20px; height: 20px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; border-radius: 4px; background: none;
+  color: inherit; opacity: 0.6; cursor: pointer;
+}
+.cmt-max:hover { opacity: 1; border-color: var(--accent); color: var(--accent); background: var(--accent-wash); }
+.cmt-max + .cmt-x { margin-left: 0; }
 .cmt-quote {
   padding: 4px 8px; border-left: 2px solid var(--cmt-hl); border-radius: 2px;
   background: rgba(255, 255, 255, 0.04);

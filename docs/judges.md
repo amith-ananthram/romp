@@ -459,9 +459,16 @@ permission/API-error floors: one interrupt at a time, the present event first.
 
 - Toggles: `CLOSER_ON`, `GROUPER_ON`, `DISTILLER_ON`, `CONSOLIDATE_ON`.
   Models: `STATE/judge-model` (triage), `STATE/index-model`.
-  Fast mode for the judges (the gear's Fast mode box beside the Triage model
-  picker): `STATE/judge-fast` (`on` | `off`, off by default; read per call, and
-  the fast-mode opt-in rides only a call whose model is Opus).
+  Fast mode per judge tier (the gear's Fast mode box beside each tier's model
+  picker): `STATE/judge-fast` (triage), `STATE/distill-fast`, `STATE/index-fast`
+  (`on` | `off`, off by default; read per call for the call's tier, and the
+  fast-mode opt-in rides only a call whose model is Opus: `_tier_fast`). A flag
+  on for a tier whose model cannot run fast is kept and asks nothing. The CLI's
+  refusal of a fast ask is recorded per tier in `STATE/fast-refused.json` (one
+  `fast-refused` judge-errors row per change of reason) and cleared by the next
+  fast call that engages; a key-billed fast call carries the sessions' org-check
+  env (`_fast_org_env`, asked once per process). The one-time carry-over from
+  the single flag is `_migrate_judge_fast_tiers` in the kernel's boot sweep.
   Pool width: `STATE/judge-concurrency` (the gear's Judge concurrency, 1..16,
   read fresh each pass; empty = `ROMP_JUDGE_CONCURRENCY` as read at load,
   else 6). Every pool reads it at call time (`_conc`, or `_judge_concurrency()`
@@ -489,8 +496,10 @@ permission/API-error floors: one interrupt at a time, the present event first.
   the sessions the evidence gate ran. Outside
   a pass frame (`romp-judge --plan`) the evidence gate stamps nothing, and
   the inner gate does the skipping.
-- Logs: `STATE/judge-usage.jsonl` (per-call cost, one name per prompt, and
-  the CLI's `fast_mode_state` as `fast`),
+- Logs: `STATE/judge-usage.jsonl` (per-call cost, one name per prompt, the
+  CLI's `fast_mode_state` as `fast` and its `fast_mode_disabled_reason` as
+  `fastReason`; an error envelope that carried the readback leaves a zero-cost
+  row marked `err`, which the cost rollup skips),
   `STATE/judge-errors.jsonl` (the row contract above; kinds are parse,
   call, give-up, sweep-cut, cite-miss, rate-limited, task-store, history-unreadable,
   task-key-collision (a duplicated to-do mirror key, reconciled per node

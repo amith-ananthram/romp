@@ -1137,7 +1137,9 @@ def _version_info():
             "commentEffort": jd._state_str("comment-effort", "session"),
             "commentFast": jd._state_str("comment-fast", "session"),
             "tmuxBackend": jd._state_str("tmux-backend", "off"),   # T288: "on" offers Claude Code (tmux) in the picker and the gear
-            "judgeFast": jd._state_str("judge-fast", "off"),   # RAW "on" | "off": the judges' Fast mode box, the fast-mode opt-in on Opus judge calls
+            "judgeFast": jd._state_str("judge-fast", "off"),   # RAW "on" | "off": the TRIAGE tier's Fast mode box (T300: one per tier)
+            "distillFast": jd._state_str("distill-fast", "off"), "indexFast": jd._state_str("index-fast", "off"),
+            "fastRefused": jd._fast_refused(),   # tier -> {reason, model, t}: the CLI declined a fast ask; the gear's box says why
             # One dict with every kernel-side setting, lifted by a PEER kernel's /version poll onto its
             # /tunnels row so its gear can mark controls where machines disagree (the user 2026-08-14).
             # The top-level fields above stay: this tab's own gear and older kernels read those.
@@ -1158,7 +1160,8 @@ def _version_info():
                          "commentEffort": jd._state_str("comment-effort", "session"),
                          "commentFast": jd._state_str("comment-fast", "session"),
                          "tmuxBackend": jd._state_str("tmux-backend", "off"),
-                         "judgeFast": jd._state_str("judge-fast", "off")},
+                         "judgeFast": jd._state_str("judge-fast", "off"),
+                         "distillFast": jd._state_str("distill-fast", "off"), "indexFast": jd._state_str("index-fast", "off")},
             # every gt-gated store's last-applied gesture stamp (epoch-ms ints, nothing path-shaped):
             # the gear stamps its next gesture above these instead of trusting the device clock.
             # Top-level, not lifted into /tunnels rows — a remote's newer stamp reaches the dashboard
@@ -15608,7 +15611,7 @@ def _drive(msg, client):
         return False
     t = msg.get("type")
     ID_OPS = ("sendMessage", "rewindSend", "rewindDelete", "interrupt", "compactSession", "dismissDialog", "answerAsk", "navAsk", "toggleAsk", "submitAsk",
-              "addCustomAsk", "cancelAsk", "askText", "cancelQueued", "dismissEcho", "apiRetry", "editQueued", "setModel", "setEffort", "setMode", "setFast",
+              "addCustomAsk", "cancelAsk", "askText", "cancelQueued", "dismissEcho", "apiRetry", "editQueued", "holdQueued", "setModel", "setEffort", "setMode", "setFast",
               "setAuth", "endSession", "renameSession", "moveSession", "stopTask", "rewindFiles", "mcpAction", "forkSession",
               "commentCreate", "commentReply", "commentResolve", "commentDelete", "commentSeen", "commentPromote",
               "commentMerge")
@@ -15835,15 +15838,20 @@ def _drive(msg, client):
         # follow-up context. The result frame is authoritative like the ✕'s: ok:false means the message
         # left the queue meanwhile (or the chip is not a message), and the client hands the typed words
         # back to the composer instead of leaving them nowhere.
-        err = _edit_parked(sid, int(msg["park"]), str(msg.get("md") or ""), str(msg.get("text") or ""))
-        client["send"](json.dumps({"type": "editResult", "ok": not err, "id": sid,
-                                   "md": str(msg.get("md") or ""), "text": err or ""}))
+        # another connection's open editor owns the entry (T306): its words are not this client's to replace
+        err = _parked_held_by_other(sid, int(msg["park"]), str(msg.get("md") or ""), str(client.get("cid") or "") or None, qid=_wire_qid(msg)) \
+            or _edit_parked(sid, int(msg["park"]), str(msg.get("md") or ""), str(msg.get("text") or ""))
+        if err:
+            _release_after_refusal(be, sid, msg, client)
+        client["send"](json.dumps(_edit_frame(sid, str(msg.get("md") or ""), err)))
         _push_soon()
     elif t == "editQueued" and msg.get("idx") is not None and hasattr(be, "edit_queued"):
         # ✎ on a backend-queue message: replaced under the backend's lock, drift-guarded by the body.
-        err = _edit_backend_queued(be, sid, int(msg["idx"]), str(msg.get("md") or ""), str(msg.get("text") or ""))
-        client["send"](json.dumps({"type": "editResult", "ok": not err, "id": sid,
-                                   "md": str(msg.get("md") or ""), "text": err or ""}))
+        err = _queued_held_by_other(be, sid, int(msg["idx"]), str(msg.get("md") or ""), str(client.get("cid") or "") or None) \
+            or _edit_backend_queued(be, sid, int(msg["idx"]), str(msg.get("md") or ""), str(msg.get("text") or ""))
+        if err:
+            _release_after_refusal(be, sid, msg, client)
+        client["send"](json.dumps(_edit_frame(sid, str(msg.get("md") or ""), err)))
         _push_soon()
     elif t == "editQueued" and msg.get("md"):
         # ✎ at the OPTIMISTIC stage: no park/idx has round-tripped yet, so locate the send by body wherever
@@ -15851,13 +15859,47 @@ def _drive(msg, client):
         # before this edit). Neither holding it means it already forwarded into the CLI: the honest refusal.
         md = str(msg["md"])
         new_text = str(msg.get("text") or "")
-        err = _edit_parked(sid, -1, md, new_text)
+        _own = str(client.get("cid") or "") or None
+        err = _parked_held_by_other(sid, -1, md, _own, qid=_wire_qid(msg)) or _edit_parked(sid, -1, md, new_text)
         if err and hasattr(be, "edit_queued"):
-            err2 = _edit_backend_queued(be, sid, -1, md, new_text)
+            err2 = _queued_held_by_other(be, sid, -1, md, _own) or _edit_backend_queued(be, sid, -1, md, new_text)
             if err2 is None:
                 err = None
-        client["send"](json.dumps({"type": "editResult", "ok": not err, "id": sid,
-                                   "md": md, "text": err or ""}))
+            elif "another client" in err2:
+                err = err2
+        if err:
+            _release_after_refusal(be, sid, msg, client)
+        client["send"](json.dumps(_edit_frame(sid, md, err)))
+        _push_soon()
+    elif t == "holdQueued":
+        # T306 (the user 2026-09-10): the queued bubble's editor opened (hold) or was cancelled (hold:false) — the
+        # entry must not be fed while its words are being changed. The hold is owned by the CONNECTION that opened
+        # the editor (client["cid"]), so its Save (editQueued), its Cancel (here) or its socket closing
+        # (_release_client_holds) is the release, and the drains skip a held entry and keep moving. Same three arms
+        # as the ✎ (park / idx / body only) and the same authoritative frame (editResult, op "hold" or "release"):
+        # ok:false means no queue holds the entry any more (fed already), with the existing too-late text, and the
+        # bubble says so instead of opening.
+        want = msg.get("hold", True) is not False
+        owner = str(client.get("cid") or "") or None
+        md = str(msg.get("md") or "")
+        qid = _wire_qid(msg)
+        if not owner:
+            err = "this connection can't hold a message for editing"   # every pane has an id; a stand-in without one holds nothing
+        elif msg.get("park") is not None:
+            err = _hold_parked(sid, int(msg["park"]), md, owner, qid=qid, hold=want)
+        elif msg.get("idx") is not None and hasattr(be, "hold_queued"):
+            err = _hold_backend_queued(be, sid, int(msg["idx"]), md, owner, qid=qid, hold=want)
+        else:
+            err = _hold_parked(sid, -1, md, owner, qid=qid, hold=want)
+            if err and hasattr(be, "hold_queued"):
+                err2 = _hold_backend_queued(be, sid, -1, md, owner, qid=qid, hold=want)
+                if err2 is None:
+                    err = None
+        _frame = {"type": "editResult", "ok": not err, "id": sid, "md": md, "text": err or "", "op": "hold" if want else "release"}
+        if qid:
+            _frame["qid"] = qid   # the copy the verdict is about: two same-words copies close only the refused one
+        client["send"](json.dumps(_frame))
+        _mark_views_dirty()
         _push_soon()
     elif t == "dismissEcho" and hasattr(be, "dismiss_echo"):
         # ✕ on a never-delivered bubble (a send whose CLI died holding it — the backend's dropped-echo
@@ -18911,6 +18953,35 @@ def _expected_restart_status(r, st, rsha, now):
     return st
 
 
+def _row_dialing(r):
+    """Is romp trying to reach this host RIGHT NOW? True while an ssh dial is spawned and not yet confirmed
+    (status "starting"; "connecting" is the checked-in row's birth state) or while the supervisor's health
+    request to the host is in flight (_dialing, set around the poll below). False while the row waits out
+    its backoff (status "down" until nextTry). The dashboard's host-down notice spins
+    its swirl on exactly this (the user 2026-09-10, who wanted a spinner that means romp is trying right
+    now, never one that spins whatever happens); federation reads it from the /tunnels row every few
+    seconds and repaints on a change. The mark is on for ANY polled row during its pass's requests, an up
+    row included (milliseconds against an answering host); the notice only ever shows for a down one."""
+    return bool(r.get("_dialing")) or (r.get("status") or "") in ("starting", "connecting")
+
+
+@contextlib.contextmanager
+def _dialing_mark(r):
+    """The row wears the in-flight mark (_dialing, read by _row_dialing) for the supervisor pass's health
+    requests to its host: on from the first round-trip until the last returns, HOWEVER the block ends. The
+    clear is the context manager's exit, a finally by construction, because a mark left on by an exception
+    (a socket the port check could not build) would read as dialing through the row's whole next backoff, the
+    one state the mark exists to distinguish (review find, 2026-09-10). The polls themselves stay inline in
+    _tunnel_supervisor, whose source a dozen tests pin line by line."""
+    with _remotes_lock:
+        r["_dialing"] = True
+    try:
+        yield
+    finally:
+        with _remotes_lock:
+            r["_dialing"] = False
+
+
 def _remote_public(r):
     """The API view of a remote row — everything the browser needs, minus the Popen and minus the remote's
     credential. The browser reaches a remote through /remote/<host>/ws, where _remote_ws injects that
@@ -18981,6 +19052,9 @@ def _remote_public(r):
             # forever-retry must never look identical to a healthy idle row, so the popover can say how
             # many dials have failed and when the next one lands.
             "fails": int(r.get("fails") or 0), "nextTry": int(r.get("next_try") or 0),
+            # a dial or health request to the host in flight at this moment (_row_dialing): the host-down
+            # notice's swirl spins on it as of the dashboard's last poll, sits still between attempts
+            "dialing": _row_dialing(r),
             # not live: everything above derived from kernel_sha / the peer's declared tier is a memory of
             # the last successful exchange. lastOk is when that was (0 = never seen up this process).
             "stale": stale, "lastOk": int(r.get("last_ok") or 0),
@@ -18993,6 +19067,8 @@ _remotes_saved_sig = None   # signature of the last blob written — lets the su
 
 
 _NOT_SAVED = ("proc",       # the live Popen
+              "_dialing",   # a health request to the host in flight right now (_row_dialing): this pass's
+              #               mark, meaningless to the next boot
               "usage",      # a remote's rate-limit snapshot: re-polled a minute after any boot, and
               "_usage_at",  # persisting it would rewrite this 0600 credential file every minute forever
               "_views_at",  # the /views poll's stamp, restamped once a minute per up host (REMOTE_VIEWS_EVERY):
@@ -22459,16 +22535,17 @@ def _tunnel_supervisor():
                         _mark_known_unreachable(r["host"])
                 if skip:
                     continue
-                up = _port_open(r["local_port"])              # outside the lock (socket round-trip)
-                rows = _poll_remote_sessions(r) if up else None   # its session rows: ids for the wake-router, names for notifications
-                sids = None if rows is None else [x.get("id") for x in rows]
-                rver = _poll_remote_version(r) if up else None   # the code the remote is running (drift check)
-                rsha = (rver or {}).get("sha")
-                # …and which Claude account it burns, so the rail can draw a second set of bars when it is
-                # a different one (self-rate-limited to a minute — these windows are hours wide)
-                ruse = _poll_remote_usage(r) if up else None
-                rviews = _poll_remote_views(r) if up else None   # tag federation v0: the read half
-                rapih = _poll_remote_api_health(r) if up else None   # its API-health frame, for the shell's per-host map (T301)
+                with _dialing_mark(r):   # the pass's health requests: the row reads dialing meanwhile (_row_dialing)
+                    up = _port_open(r["local_port"])              # outside the lock (socket round-trip)
+                    rows = _poll_remote_sessions(r) if up else None   # its session rows: ids for the wake-router, names for notifications
+                    sids = None if rows is None else [x.get("id") for x in rows]
+                    rver = _poll_remote_version(r) if up else None   # the code the remote is running (drift check)
+                    rsha = (rver or {}).get("sha")
+                    # …and which Claude account it burns, so the rail can draw a second set of bars when it is
+                    # a different one (self-rate-limited to a minute — these windows are hours wide)
+                    ruse = _poll_remote_usage(r) if up else None
+                    rviews = _poll_remote_views(r) if up else None   # tag federation v0: the read half
+                    rapih = _poll_remote_api_health(r) if up else None   # its API-health frame, for the shell's per-host map (T301)
                 with _remotes_lock:
                     if r["host"] not in _remotes:
                         continue
@@ -28156,15 +28233,15 @@ def _chat_build_sig(sess, tm=None, now=None, tmux=None, deps=None):
             _bc = None
         queued = tuple(be.pending_queued(sid))
         try:
-            _qmeta = tuple(((m or {}).get("qid"), (m or {}).get("qts")) for m in (be.pending_queued_meta(sid) or ())) \
-                if hasattr(be, "unqueue") and hasattr(be, "pending_queued_meta") else None
+            _qmeta = tuple(((m or {}).get("qid"), (m or {}).get("qts"), bool((m or {}).get("held"))) for m in (be.pending_queued_meta(sid) or ())) \
+                if hasattr(be, "unqueue") and hasattr(be, "pending_queued_meta") else None   # held (T306): an open editor's mark repaints "editing"
         except Exception:
             _qmeta = None
         sig.append((_bc, _clearing_now(sid), queued, _qmeta,
                     _queue_recallable(be, sid) if hasattr(be, "unqueue") else None, _launch_error(sid)))
         # ops: the ops parked for this session while it compacts or is held (the kernel FIFO), by value.
         ops = tuple(tuple(o) for o in (_pending_ops.get(sid) or ()))
-        sig.append(ops)
+        sig.append((ops, tuple(sorted((_park_holds.get(sid) or {}).items()))))   # + the parked holds (T306): a held send reads "editing"
         # limit: the account-level hold the queued bubble names (_limit_hold: usage windows and their reset
         # clock, the spend pause, a limit-shaped launch error), by value, read whenever the build can render
         # a queued bubble: something queued or parked, or on a tmux backend an input echo still in flight,
@@ -29515,6 +29592,231 @@ _TMUX_PROMPT_HOLD_S = 3.0        # the prompt hold's clock FALLBACK: after the d
                                  # (a paste tmux refused, a builtin that opens no prompt turn), until this many seconds
 _drain_hold: dict = {}           # sid -> (time.monotonic() deadline, until_busy); _apply_pending_ops skips the sid
                                  # while the hold is open (_drain_hold_open)
+# T306 (the user 2026-09-10): a parked SEND whose editor is open is HELD — sid -> {key: owner}, the key the copy's id
+# or, id-less, its body (_park_key), the owner the connection that opened the editor (client["cid"]). The walk takes
+# no held send (the rest of the queue keeps moving); the hold ends with the edit (_edit_parked), its cancel
+# (_hold_parked hold=False), the entry's ✕ (_cancel_parked) or the connection closing (_release_client_holds). In
+# memory only: a kernel restart drops every hold and the client re-holds when it reconnects.
+_park_holds: dict = {}
+
+
+def _park_key(op):
+    """The hold's key for a parked send: the copy's id, else the op object itself (holds live in memory, and the walk pops by
+    identity too), so two id-less sends of the same words hold and release apart (review find)."""
+    return _op_qid(op) or ("obj:%x" % id(op))
+
+
+def _parked_held(sid, op):
+    """Whether this parked op is a send whose editor is open (T306)."""
+    return op[0] == "send" and _park_key(op) in _park_holds.get(str(sid), {})
+
+
+def _inflight_slot(sid, ops):
+    """The slot of the op the drain is handing to the backend this instant, or -1. Scanned from the front for the
+    op's identity: with a held send ahead of it the in-flight op is not at slot 0 (T306), and the first identity hit
+    is the one taken (the drain takes the first unheld op; _compact_or_park's interned ("compact",) makes a SECOND
+    compact chip `is` the first, and that second chip's ✕ must stay a cancel — the front-most hit is the head's)."""
+    cur = _inflight_ops.get(str(sid))
+    if cur is None:
+        return -1
+    return next((j for j, o in enumerate(ops) if o is cur), -1)
+
+
+def _relocate_parked(sid, ops, md, skip=-1, prefer_held=True):
+    """The slot a drifted click means among the parked ops whose body is `md` (T306 review): the one an editor HOLDS when
+    prefer_held and exactly one is held (a Save or a check names the copy being edited), else the single candidate, else
+    -2 for several id-less twins nobody can tell apart (the caller refuses rather than guesses: by body alone the first
+    twin took an edit meant for the held one), -1 for none. `skip` is the slot with the backend this instant."""
+    cands = [j for j, op in enumerate(ops) if j != skip and op[0] == "send" and _parked_md(op) == md] if md else []
+    if not cands:
+        return -1
+    held = [j for j in cands if _parked_held(sid, ops[j])]
+    if prefer_held and len(held) == 1:
+        return held[0]
+    if not prefer_held:
+        free = [j for j in cands if not _parked_held(sid, ops[j])]
+        if len(free) == 1:
+            return free[0]
+    return cands[0] if len(cands) == 1 else -2
+
+
+_MOVED_TEXT = "the queue moved under this edit \u2014 open the message again"
+
+
+def _hold_parked(sid, park, md, owner, qid=None, hold=True):
+    """Mark (hold=True) or unmark ONE parked SEND as being edited (T306): _apply_pending_ops takes no held send, so
+    its words cannot leave while the editor is open. Located exactly as _edit_parked locates (the id, else the slot
+    verified by body, else the body); refused on a chip that is not a message, on the op the backend holds this
+    instant, and on a gone entry with the ✎'s too-late text. A release by a connection that did not place the hold
+    is refused too (two editors on one message: the last to open owns it). Returns None on success, else the text
+    for the client to show."""
+    sid = str(sid)
+    with _pending_ops_lock:
+        ops = _pending_ops.get(sid) or []
+        inflight_j = _inflight_slot(sid, ops)
+        if qid:
+            park = next((j for j, op in enumerate(ops) if _op_qid(op) == qid), -1)
+        elif not (0 <= park < len(ops)) or (md and _parked_md(ops[park]) != md):
+            park = _relocate_parked(sid, ops, md, inflight_j, prefer_held=not hold)   # a hold wants the free twin, a release the held one
+            if park == -2:
+                return _MOVED_TEXT
+        if park < 0 or park == inflight_j:
+            return _edit_miss_text(md)
+        op = ops[park]
+        if op[0] != "send":
+            return "only a queued message can be edited — cancel this %s and type it again" % (
+                "command" if op[0] in ("command", "compact") else "change")
+        key = _park_key(op)
+        holds = _park_holds.get(sid) or {}
+        if hold:
+            cur = holds.get(key)
+            if cur is not None and owner and cur not in ("", owner):
+                return "another client is editing this message"   # the first editor keeps it; the second gets the refusal on its bubble
+            holds[key] = owner or ""
+            _park_holds[sid] = holds
+        else:
+            cur = holds.get(key)
+            if cur is None:
+                return "this message is not being edited"
+            if owner and cur not in ("", owner):
+                return "another client is editing this message"
+            holds.pop(key, None)
+            if not holds:
+                _park_holds.pop(sid, None)
+    _mark_views_dirty()
+    if not hold:
+        _wake_kernel()                                    # the freed send goes on the next cycle
+    return None
+
+
+def _release_parked_holds_by(owner):
+    """Every parked hold `owner` placed is released (T306). Returns how many."""
+    n = 0
+    with _pending_ops_lock:
+        for sid in list(_park_holds):
+            holds = _park_holds[sid]
+            for key in [k for k, o in holds.items() if o == owner]:
+                holds.pop(key, None)
+                n += 1
+            if not holds:
+                _park_holds.pop(sid, None)
+    return n
+
+
+def _hold_backend_queued(be, sid, idx, md, owner, qid=None, hold=True):
+    """hold_queued / release_queued with _edit_backend_queued's DRIFT GUARD: re-locate the entry by body if the
+    backend queue moved between the push and the click, then mark it under the backend's lock (the exact text is
+    re-verified there). Returns None on success; on a MISS — the message already forwarded to the CLI — the
+    too-late text for the client to show instead of opening the editor."""
+    try:
+        pending = be.pending_queued(sid)
+    except Exception:
+        pending = []
+    if md:
+        if not (0 <= idx < len(pending)) or _split_followup(pending[idx])[1] != md:
+            idx = next((i for i, q in enumerate(pending) if _split_followup(q)[1] == md), -1)
+    if not (0 <= idx < len(pending)):
+        return _edit_miss_text(md)
+    if not hold:
+        return None if be.release_queued(sid, idx, pending[idx], owner, qid=qid) else _edit_miss_text(md)
+    holder = _queued_holder(be, sid, idx)
+    if holder and owner and holder != owner:
+        return "another client is editing this message"
+    if be.hold_queued(sid, idx, pending[idx], owner, qid=qid):
+        return None
+    try:
+        still = pending[idx] in (be.pending_queued(sid) or [])
+    except Exception:
+        still = False
+    # still queued but unholdable: no running session holds the copy (the persisted mirror lists it); gone: fed already
+    return "the session isn't running right now, so this message can't be edited yet" if still else _edit_miss_text(md)
+
+
+def _queued_holder(be, sid, idx):
+    """The connection holding the backend copy at `idx`, or None (pending_queued_meta's holder; a backend without it holds nothing)."""
+    try:
+        metas = be.pending_queued_meta(sid) if hasattr(be, "pending_queued_meta") else None
+        m = metas[idx] if isinstance(metas, list) and 0 <= idx < len(metas) else None
+        return (m or {}).get("holder") or None
+    except Exception:
+        return None
+
+
+def _queued_held_by_other(be, sid, idx, md, owner):
+    """The Save's ownership check (T306): the refusal text when another connection holds the backend copy the edit names,
+    located like _edit_backend_queued locates; None otherwise."""
+    try:
+        pending = be.pending_queued(sid)
+    except Exception:
+        pending = []
+    if md and (not (0 <= idx < len(pending)) or _split_followup(pending[idx])[1] != md):
+        idx = next((i for i, q in enumerate(pending) if _split_followup(q)[1] == md), -1)
+    holder = _queued_holder(be, sid, idx) if idx >= 0 else None
+    return "another client is editing this message" if holder and owner and holder != owner else None
+
+
+def _parked_held_by_other(sid, park, md, owner, qid=None):
+    """The same check for a parked send (located like _edit_parked locates)."""
+    sid = str(sid)
+    with _pending_ops_lock:
+        ops = _pending_ops.get(sid) or []
+        if qid:
+            park = next((j for j, op in enumerate(ops) if _op_qid(op) == qid), -1)
+        elif not (0 <= park < len(ops)) or (md and _parked_md(ops[park]) != md):
+            park = _relocate_parked(sid, ops, md)   # the held twin is the one an ownership check is about
+        if park < 0:
+            return None
+        cur = (_park_holds.get(sid) or {}).get(_park_key(ops[park]))
+    return "another client is editing this message" if cur is not None and owner and cur not in ("", owner) else None
+
+
+def _edit_frame(sid, md, err):
+    """The editResult frame for an editQueued arm: ok, the body the client keys its restore on, the refusal text, and
+    `gone` ONLY when the copy left every queue (the too-late refusal), so the client knows the words have no bubble to
+    return to and puts them in a toast that never fades (T306). An ok frame keeps its three-field shape."""
+    frame = {"type": "editResult", "ok": not err, "id": sid, "md": md, "text": err or ""}
+    if err and err == _edit_miss_text(md):
+        frame["gone"] = True
+    return frame
+
+
+def _release_after_refusal(be, sid, msg, client):
+    """A Save the kernel refused (T306): the client closed its field before the verdict, so its hold would outlive the
+    editor — release it, best effort, wherever the entry sits."""
+    owner = str((client or {}).get("cid") or "") or None
+    if not owner:
+        return
+    md = str(msg.get("md") or "")
+    qid = _wire_qid(msg)
+    try:
+        _hold_parked(sid, int(msg["park"]) if msg.get("park") is not None else -1, md, owner, qid=qid, hold=False)
+    except Exception:
+        pass
+    if hasattr(be, "release_queued"):
+        try:
+            _hold_backend_queued(be, sid, int(msg["idx"]) if msg.get("idx") is not None else -1, md, owner, qid=qid, hold=False)
+        except Exception:
+            pass
+
+
+def _release_client_holds(client):
+    """The connection that opened a queued message's editor is gone (T306): every hold it owns, in the parked FIFO
+    and in the SDK backend's queue, is released — the disconnect is the event, no timer. A client without an id (a
+    stand-in, an older pane) holds nothing. Returns how many were released."""
+    owner = str((client or {}).get("cid") or "")
+    if not owner:
+        return 0
+    n = _release_parked_holds_by(owner)
+    be = _sdk()
+    if be is not None and hasattr(be, "release_holds_by"):
+        try:
+            n += int(be.release_holds_by(owner) or 0)
+        except Exception:
+            sys.stderr.write("release holds (%s): %s\n" % (owner, traceback.format_exc()))
+    if n:
+        _mark_views_dirty()
+        _wake_kernel()
+    return n
 _refresh_parse_failures: dict = {}   # sid -> consecutive cycles its parked-parse refresh raised (_refresh_parked_parse)
 _inflight_ops: dict = {}         # sid -> the HEAD op the drain has handed to the backend, lock released, and not yet
                                  # popped (2026-09-05; never a cwd op — a move hands nothing over while its turn_seq
@@ -29740,19 +30042,23 @@ def _cancel_parked(sid, park, md, qid=None):
     sid = str(sid)
     with _pending_ops_lock:
         ops = _pending_ops.get(sid) or []
-        inflight_head = bool(ops) and ops[0] is _inflight_ops.get(sid)   # the head is with the backend this instant
+        inflight_j = _inflight_slot(sid, ops)  # the slot with the backend this instant (slot 0 unless a held send sits ahead, T306)
         if qid:
             park = next((j for j, op in enumerate(ops) if _op_qid(op) == qid), -1)
             if park < 0:
                 return _cancel_miss_text(md)      # the id names no parked op: gone, never a same-words neighbour
         elif not (0 <= park < len(ops)) or (md and _parked_md(ops[park]) != md):
             park = next((j for j, op in enumerate(ops)
-                         if _parked_md(op) == md and not (j == 0 and inflight_head)), -1) if md else -1
+                         if _parked_md(op) == md and j != inflight_j), -1) if md else -1
             if park < 0:
                 return _cancel_miss_text(md)
-        if park == 0 and inflight_head:
+        if park == inflight_j:
             return _cancel_miss_text(md)          # too late, not a wrong-op removal
         sys.stderr.write("parked-op cancel: %s %s\n" % (sid, ops[park][0]))
+        if sid in _park_holds:
+            _park_holds[sid].pop(_park_key(ops[park]), None)   # a cancelled entry leaves no hold behind (T306)
+            if not _park_holds[sid]:
+                _park_holds.pop(sid, None)
         ops.pop(park)
         if not ops:
             _pending_ops.pop(sid, None)
@@ -29842,13 +30148,14 @@ def _edit_parked(sid, park, md, text):
         return "a queued message cannot become a command: cancel it with its ✕ and type the command"
     with _pending_ops_lock:
         ops = _pending_ops.get(sid) or []
-        inflight_head = bool(ops) and ops[0] is _inflight_ops.get(sid)   # the head is with the backend this instant
+        inflight_j = _inflight_slot(sid, ops)  # the slot with the backend this instant (slot 0 unless a held send sits ahead, T306)
         if not (0 <= park < len(ops)) or (md and _parked_md(ops[park]) != md):
-            park = next((j for j, op in enumerate(ops)
-                         if _parked_md(op) == md and not (j == 0 and inflight_head)), -1) if md else -1
+            park = _relocate_parked(sid, ops, md, inflight_j)   # the held twin first: a Save is the editor's (T306 review)
+            if park == -2:
+                return _MOVED_TEXT                # id-less twins nobody can tell apart: refuse, never guess
             if park < 0:
                 return _edit_miss_text(md)
-        if park == 0 and inflight_head:
+        if park == inflight_j:
             return _edit_miss_text(md)            # too late, not a wrong-op rewrite
         op = ops[park]
         if op[0] != "send":
@@ -29856,6 +30163,10 @@ def _edit_parked(sid, park, md, text):
                 "command" if op[0] in ("command", "compact") else "change")
         sys.stderr.write("parked-op edit: %s send\n" % sid)
         ops[park] = ("send", _replace_followup_body(op[1], body)) + tuple(op[2:])
+        if sid in _park_holds:
+            _park_holds[sid].pop(_park_key(op), None)         # the Save is the hold's release (T306)
+            if not _park_holds[sid]:
+                _park_holds.pop(sid, None)
         _save_pending_ops()
     _mark_views_dirty()
     return None
@@ -30476,11 +30787,18 @@ def _apply_pending_ops(now=None):
                         ops = _pending_ops.get(sid) or [] # parent); every other kind stays the visible head, recorded
                         if not ops:                       # in flight, until the backend has it
                             break
-                        op = ops[0]
+                        # a send whose editor is open is HELD and keeps its slot (T306): the walk takes the first
+                        # unheld op, and a run of sends is the unheld ones from there
+                        k = next((j for j, o in enumerate(ops) if not _parked_held(sid, o)), -1)
+                        if k < 0:
+                            break                         # everything left is being edited: nothing to hand over
+                        if ops[k][0] != "send" and any(_parked_held(sid, o) for o in ops[:k]):
+                            break                         # a command, compaction or setting parked BEHIND a held send waits for it:
+                        op = ops[k]                       # only messages pass a message being edited (the shown order stays the run order otherwise)
                         if op[0] == "send":
-                            run = []                      # coalesce the leading run of sends → deliver them AT ONCE
-                            while ops and ops[0][0] == "send":
-                                run.append(ops.pop(0))
+                            run = []                      # coalesce the run of unheld sends → deliver them AT ONCE
+                            while k < len(ops) and ops[k][0] == "send" and not _parked_held(sid, ops[k]):
+                                run.append(ops.pop(k))
                         elif op[0] != "cwd":
                             _inflight_ops[sid] = op       # (a move hands nothing over below: not recorded)
                     if op[0] == "send":
@@ -30520,9 +30838,10 @@ def _apply_pending_ops(now=None):
                     with _pending_ops_lock:               # POP the head — only if it is still the op the backend got
                         _inflight_ops.pop(sid, None)      # (a no-op for a cwd op, which was never recorded)
                         ops = _pending_ops.get(sid) or []
-                        took = bool(ops) and ops[0] is op
+                        j2 = next((j for j, o in enumerate(ops) if o is op), -1)   # its slot: a held send ahead keeps slot 0 (T306)
+                        took = j2 >= 0
                         if took:
-                            ops.pop(0)
+                            ops.pop(j2)
                             changed = True
                     if op[0] == "cwd":
                         if not took:
@@ -30547,10 +30866,12 @@ def _apply_pending_ops(now=None):
                     _inflight_ops.pop(sid, None)
                     _pending_ops.pop(sid, None)           # a dead session's queue is dropped, never retried
                     _drain_hold.pop(sid, None)            # …and its hold with it
+                    _park_holds.pop(sid, None)            # …and the editors' holds: an obj: key must not outlive its op (T306 review)
                 changed = True
             with _pending_ops_lock:
                 if not _pending_ops.get(sid):
                     _pending_ops.pop(sid, None)
+                    _park_holds.pop(sid, None)
             if changed:
                 _save_pending_ops()           # every delivery/drop shrinks the disk mirror too
                 _mark_views_dirty()           # the queue shrank (in-memory): the chat signature's ops component carries
@@ -32702,6 +33023,8 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
                     m["qid"] = _metas[i]["qid"]
                 if isinstance(_metas[i].get("qts"), int) and not isinstance(_metas[i].get("qts"), bool):
                     m["qts"] = _metas[i]["qts"]
+                if _metas[i].get("held"):                          # an editor has its words open (T306)
+                    m["held"] = True
             if fu:
                 m["followUp"] = True
                 if goal:
@@ -32726,6 +33049,8 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
             # backend's queue (SdkBackend.send mints one there); the chat reads that copy by text meanwhile
             if _op_qid(op):
                 m["qid"] = _op_qid(op)
+            if _parked_held(sid, op):                              # an editor has its words open (T306)
+                m["held"] = True
             if op[0] == "send":
                 goal, _, fu, ctx = _split_followup(op[1])
                 if fu:
@@ -38465,8 +38790,8 @@ def _judge_usage(t0):
         return {"calls": 0, "in": 0, "out": 0, "cost": 0.0, "ms": 0}
     total, by_judge, by_tier = blank(), {}, {}
     for o in _judge_usage_rows():
-        if (o.get("t") or 0) < t0:
-            continue
+        if (o.get("t") or 0) < t0 or o.get("err"):     # err: an error envelope's row, kept for its fast readback
+            continue                                    # only (zero cost, no model call to count)
         for b in (total, by_judge.setdefault(o.get("judge") or "?", blank()),
                   by_tier.setdefault(o.get("tier") or "?", blank())):
             b["calls"] += 1
@@ -39264,6 +39589,7 @@ def _new_ws_client(app, wid, sock, lock=None, q=None, start_sender=True):
     lock = lock if lock is not None else threading.Lock()
     now = _ws_clock()
     client = {"app": app, "wid": wid, "alive": True, "qbytes": 0, "qlock": threading.Lock(),
+              "cid": uuid.uuid4().hex[:12],   # this connection's id: the owner of the queued-edit holds it opens (T306)
               "dlock": threading.RLock(),   # serializes _send_slot per client: the handler's connect push and the
               #                               pusher both send slots to one client (see _send_slot)
               "sock": sock, "since": now, "lastIn": now, "pingAt": None,
@@ -39981,7 +40307,7 @@ def _client_reset_chat_base(client):
 # a laptop sleep, a network change) redials, and the kernel used to serve the new socket as a client that
 # holds nothing: a full session frame for EVERY tab — 17 frames, ~9 MB on the measured board — for ONE tab on
 # screen. The page still holds every session it had; it only needs the one it shows. So the shim declares the
-# redial (?reconnect=1: its bundle's ready has left on a socket), and the kernel sends that client the tab strip
+# redial (?reconnect=1: the caps frame answered its ready), and the kernel sends that client the tab strip
 # with a `skeleton` list — every listed tab except the active one, cheapest transcript first — the active
 # tab's full session, and a small status frame per skeleton tab so its chip stays honest. A skeleton tab
 # loads on the user's click (activeTab / needFull) or on the client's idle prefetch (needFull), and any full
@@ -40430,7 +40756,9 @@ def _send_slot_delta(c, key, ftype, payload, pre, sig, parts=None):
 
 
 # What THIS kernel can do for a dashboard beyond the base protocol, announced on the socket in reply to
-# every `ready` (the page's own at load, and the shim's re-send on a reconnected socket) as
+# every `ready` (a pane's bundle posts one per renderer life through the shim, so a reconnected pane socket
+# carries one only when it queued across the drop; the shell page's own socket, shellWS, posts one at every
+# open, the one reconnected socket that learns the caps again) as
 # {type: "caps", caps: [...]} and listed on /version. Until 2026-09-05 nothing told a dashboard what its
 # kernel could take, and a dashboard newer than its kernel posted ops the kernel silently dropped. A
 # client uses a targeted op only when the cap is present and takes the pre-cap path otherwise.
@@ -40474,10 +40802,13 @@ def _views_seq_of(msg):
 
 def _send_caps(client, views_seq=None):
     """The caps frame, on the client's own socket: {type: "caps", caps, viewsSeq} (the comment on
-    KERNEL_WS_CAPS has the field). Sent AFTER the ready handler's pushes: the shim clears its stale banner
-    on the first non-keepalive frame after a reconnect, which must stay the resync frame itself and not
-    this one. `views_seq` is the seq of the views blob those pushes served, else the store's current seq
-    (the comment on KERNEL_WS_CAPS), None only with no store."""
+    KERNEL_WS_CAPS has the field). Sent by the ready handler alone, AFTER its pushes, and both matter: the pane
+    shim's redial gate latches on this frame (readyAcked in _shim) as the kernel's word that it processed the
+    bundle's ready and served the page whole ahead of it, so no other path may send it and nothing may send it
+    before the pushes; and the shim retires the stale prompt a reconnect arms on the first non-keepalive frame,
+    which must be a resync frame and not this one (a reconnected pane socket carries a ready, and so earns this
+    frame, only when the bundle's ready queued across the drop). `views_seq` is the seq of the views blob those
+    pushes served, else the store's current seq (the comment on KERNEL_WS_CAPS), None only with no store."""
     try:
         client["send"](json.dumps({"type": "caps", "caps": list(KERNEL_WS_CAPS),
                                    "viewsSeq": views_seq if isinstance(views_seq, int) else None}))
@@ -40820,6 +41151,51 @@ def _set_tmux_backend(v, gt=None):   return _set_judge_state("tmux-backend", v, 
 # default. Fast mode bills Opus at a premium and draws on fast mode's own rate limits, so it is a deliberate
 # pick. Rides the judge-knob machinery: validated, stamped, propagated to every linked kernel.
 def _set_judge_fast(v, gt=None):     return _set_judge_state("judge-fast", v, {"on", "off"}, gt=gt)
+# One flag per tier (T300, the user 2026-09-10): judge-fast above is the TRIAGE tier's, these two the distilling and
+# indexing tiers'. A box beside each tier's model picker in the gear, greyed with the reason when the tier's effective
+# model cannot run fast (jd.fast_capable); the value is kept then, and the judges simply ask nothing (jd._tier_fast).
+def _set_distill_fast(v, gt=None):   return _set_judge_state("distill-fast", v, {"on", "off"}, gt=gt)
+def _set_index_fast(v, gt=None):     return _set_judge_state("index-fast", v, {"on", "off"}, gt=gt)
+_JUDGE_FAST_TIERS = (("judgeFast", "judge-fast", "triage", _set_judge_fast, lambda: jd._triage_model()),
+                     ("distillFast", "distill-fast", "distilling", _set_distill_fast, lambda: jd._distill_model()),   # EFFECTIVE:
+                     ("indexFast", "index-fast", "indexing", _set_index_fast, lambda: jd._index_model()))           # follow resolves
+
+
+_JUDGE_FAST_MIGRATED = "judge-fast-tiers.migrated"   # STATE marker: the carry-over below ran to completion (epoch seconds)
+
+
+def _migrate_judge_fast_tiers():
+    """One-time carry-over from the single fast-mode flag (STATE/judge-fast alone, which ran every Opus call fast
+    whichever tier) to a flag per tier. On the first boot on this code, every new-tier file that is not yet written
+    gets a value: when judge-fast is "on", "on" where the tier's effective model can run fast and "off" where it
+    cannot, so an existing on keeps the behaviour it had; otherwise "off", the default it already read as. An
+    explicit marker (STATE/judge-fast-tiers.migrated) is written LAST and is the only done signal: a boot that
+    finds it does nothing, a boot that finds a file already written leaves that file alone and completes the rest
+    (a write that failed half-way completes on the next boot; a review finding on the add-on's first head, whose
+    marker was either file's existence, so a failed second write lost that tier's carry for good). A Triage box
+    ticked after the marker never spreads to the other tiers. The value writes carry stamp 1, older than any
+    gesture: a pick made on any machine, before or after this boot, outranks them."""
+    try:
+        marker = jd.STATE / _JUDGE_FAST_MIGRATED
+        if marker.exists():
+            return 0
+        carry = jd._state_str("judge-fast", "off") == "on"
+        n = 0
+        for field, fname, word, setter, model_of in _JUDGE_FAST_TIERS[1:]:
+            if (jd.STATE / fname).exists():
+                continue                             # written already (a half-applied earlier boot): left as it is
+            v = "on" if carry and jd.fast_capable(model_of()) else "off"
+            if setter(v, gt=1) is None:
+                return n                             # the write failed (said by the setter): no marker, the next boot completes
+            n += 1
+            if carry:
+                sys.stderr.write("judges: fast mode carried over to the %s tier as %s (its model: %s)\n" % (word, v, model_of()))
+        jd.STATE.mkdir(parents=True, exist_ok=True)
+        _atomic_write(marker, str(int(time.time())))
+        return n
+    except Exception:
+        sys.stderr.write("judge-fast migration: %s\n" % traceback.format_exc())
+        return 0
 
 
 # The four judge-tier settings PROPAGATE: a pick made here follows to every linked kernel (the user
@@ -40845,7 +41221,8 @@ _JUDGE_SETTING_FIELDS = (("judgeModel", _set_judge_model), ("indexModel", _set_i
                          ("commentModel", _set_comment_model), ("commentEffort", _set_comment_effort),
                          ("commentFast", _set_comment_fast),
                          ("tmuxBackend", _set_tmux_backend),   # T288: the tmux backend's offer, "on" | "off"
-                         ("judgeFast", _set_judge_fast))       # the judges' Fast mode, "on" | "off"
+                         ("judgeFast", _set_judge_fast),       # fast mode per tier, "on" | "off" (T300)
+                         ("distillFast", _set_distill_fast), ("indexFast", _set_index_fast))
 
 # The per-field PICK STAMPS this leg carried from 2026-08-30 (each field's STATE-file mtime in a
 # body "stamps" dict, preserved by utime at the receiver — the distill-pick stomp fix) are
@@ -40898,7 +41275,8 @@ def _apply_judge_settings(body):
             "commentEffort": jd._state_str("comment-effort", "session"),
             "commentFast": jd._state_str("comment-fast", "session"),
             "tmuxBackend": jd._state_str("tmux-backend", "off"),
-            "judgeFast": jd._state_str("judge-fast", "off")}
+            "judgeFast": jd._state_str("judge-fast", "off"),
+            "distillFast": jd._state_str("distill-fast", "off"), "indexFast": jd._state_str("index-fast", "off")}
 
 
 def _propagate_judge_settings(body):
@@ -41109,7 +41487,7 @@ def _adopt_peer_settings(host, rver):
 _GT_STORES = ("auto-nudge", "compact-suggest", "file-editing", "update-mode", "thinking-summaries",
               "judge-model", "index-model", "judge-effort", "index-effort", "judge-concurrency",
               "distill-model", "distill-effort", "comment-model", "comment-effort", "comment-fast",
-              "tmux-backend", "judge-fast")
+              "tmux-backend", "judge-fast", "distill-fast", "index-fast")
 
 
 def _setting_stored_gt(name):
@@ -44912,8 +45290,9 @@ def _sw_js():
 
 # ── landing a push tap on the session that fired ─────────────────────────────────────────────────
 # The cold-start half of a tap: the app was closed, the page opened on the deep link (the worker's
-# openWindow, or iOS's own navigate), and the shell POSTs /reveal {sid, wid} at boot — necessarily
-# BEFORE its chat pane's WS exists, so the focus cannot be sent yet. It parks here and is delivered on the exact event it was waiting
+# openWindow, or iOS's own navigate), and the shell POSTs /reveal {sid, wid} at boot — usually BEFORE
+# its chat pane's WS exists (on a slow machine the pane's ready comes first, T312, and the reveal is
+# then delivered to it at once with a copy kept here). Otherwise it parks here and is delivered on the exact event it was waiting
 # for: that window's chat pane saying "ready" (matched by wid — the per-dashboard id the shell
 # mints and every same-window pane shares — so a second dashboard's reload cannot steal it). One
 # slot, latest wins: two taps before a boot completes should land on the newer notification.
@@ -44954,18 +45333,24 @@ def _reveal_request(sid, wid, boot=False, via=""):
     2026-09-06, whose tap on the phone did nothing — the phone is where sockets die without a
     close: a suspended app, a VPN link that dropped with the screen):
       boot  — the shell says the page is BOOTING (the deep-link arrival: iOS opens the installed
-              app's one window on the link, or the app comes back from a kill). Its own chat pane
-              cannot be connected yet, so a socket wearing its wid is the PREVIOUS page's
-              (sessionStorage keeps the wid across a reload) — dead, and the ping timeout has up to
-              WS_DEAD_S to say so. Park only; "delivering" there parked nothing and the new pane's
-              ready found nothing to consume.
+              app's one window on the link, or the app comes back from a kill). A socket wearing its
+              wid is usually the PREVIOUS page's (sessionStorage keeps the wid across a reload) —
+              dead, and the ping timeout has up to WS_DEAD_S to say so — but it can also be this
+              page's own chat pane, when the pane's ready beat the shell's fetch (T312: a slow
+              machine). So a boot reveal is delivered to every same-wid pane that has said READY and
+              kept parked too, the unproven rule below, never parked alone: 2026-09-06 to 2026-09-10 it
+              was park-only, and a pane already ready found it parked after its ready had passed, so
+              the tap never landed. A same-wid socket that has NOT said ready is no target on any
+              road: its bundle cannot hear a frame yet, and its ready would count as the answer that
+              retires the copy; the park stands for it and its ready consumes.
       unproven — a live tap, but the target has a ping on the wire nobody has answered (pingAt set:
               the peer is unproven since the last heartbeat). Deliver as before AND keep a copy
               parked, tagged with who it went to: the pong that proves that socket alive retires it
               (_note_ws_inbound — the focus frame is ordered behind the ping it answers); a dead
               socket never pongs, the pane redials, and its ready consumes the copy instead of
               finding nothing. A socket with no ping outstanding is proven: nothing parked, so a
-              later ready never replays a landed tap.
+              later ready never replays a landed tap — except on the boot road, where the copy is
+              kept whatever the ping state (above) and the pane's own answer retires it.
 
     One stderr line per tap, whatever became of it (2026-09-08: a phone's tap "did nothing" and
     nothing anywhere recorded whether it had even reached the kernel). `via` is the road the shell
@@ -44975,13 +45360,27 @@ def _reveal_request(sid, wid, boot=False, via=""):
     the pane's ready never came for that wid; consumed — the pane got it. Ids clipped: enough to
     match rows, not a transcript of anything."""
     with _clients_lock:
-        targets = [] if boot else [c for c in _clients if c["app"] == "chat" and (c.get("wid") or "") == wid]
+        # Only a pane that has said READY is a target (client["ready"], stamped by the ready handler): a
+        # same-wid chat socket exists from its handshake, but until its bundle posts ready it has no message
+        # listener, so a focus sent to it vanishes — and its ready message, counted as an answer by
+        # _note_ws_inbound, would retire the parked copy before the ready handler could consume it (the
+        # review find on T312). Such a socket is left alone: the park stands and its ready consumes.
+        targets = [c for c in _clients if c["app"] == "chat" and (c.get("wid") or "") == wid and c.get("ready")]
     delivered, sent = False, []
     for c in targets:
         try:
             c["send"](json.dumps(_reveal_msg(sid)))
             delivered = True
-            if c.get("pingAt") is not None:
+            # A booting page's same-wid ready socket may be the PREVIOUS page's (dead, its pong never coming) —
+            # or this very page's chat pane, whose ready beat the shell's fetch (T312, 2026-09-10: a slow machine
+            # put the pane's ready first, the boot reveal was parked after it with nothing left to consume it,
+            # and the tap landed on whichever session frame the pane adopted first). Both wear the same wid and
+            # nothing here can tell them apart, so a boot reveal is delivered like an unproven live tap: sent to
+            # every ready same-wid pane AND kept parked until one of them answers (its pong or next message
+            # retires the copy, _reveal_proven) or a new pane's ready consumes it. A dead socket's send lands
+            # in its queue and nobody reads it; a live pane lands the focus; the one thing that no longer
+            # happens is a park nobody consumes.
+            if boot or c.get("pingAt") is not None:
                 sent.append(c)
         except Exception:
             pass
@@ -44989,7 +45388,7 @@ def _reveal_request(sid, wid, boot=False, via=""):
         _PENDING_REVEAL[0] = {"sid": str(sid), "wid": str(wid or "")}
     elif sent:
         _PENDING_REVEAL[0] = {"sid": str(sid), "wid": str(wid or ""), "sent": sent}
-    outcome = ("delivered, copy parked (target unproven)" if sent else "delivered") if delivered else "parked"
+    outcome = ("delivered, copy parked (%s)" % ("booting page" if boot else "target unproven") if sent else "delivered") if delivered else "parked"
     print("[reveal] %s sid=%s wid=%s%s: %s" % (via or "shell", str(sid)[:8], str(wid or "")[:8],
                                              " boot" if boot else "", outcome), file=sys.stderr)
     return delivered
@@ -45467,7 +45866,7 @@ def _shim(app, v=0, no_stale=False):
     return """
 %s
 (function(){/*shim-core*/var queue=[],ws=null,everConnected=false;
-var bundleReady=false,readyQueued=false;   // the BUNDLE's own {type:"ready"} has passed through send() on this page / is waiting in `queue` for an open (onopen clears it once the flush has carried it); the dial's reconnect term (connect) keys on both
+var bundleReady=false,readyQueued=false,readyAcked=false;   // the BUNDLE's own {type:"ready"} has passed through send() on this page / is waiting in `queue` for an open (onopen clears it once the flush has carried it) / has been ANSWERED: the kernel's caps frame has arrived on a socket of this page (onmessage), the ready arm's own statement (_send_caps, sent after that arm's pushes) that it processed the bundle's ready and served the page whole ahead of it; the dial's reconnect term (connect) keys on all three
 var queuedDiag=0,DIAG_QUEUE_MAX=20;   // clientDiag rows waiting in `queue` for a reconnect, capped (an outage must not pile up breadcrumbs); other queued messages are untouched
 var failedConnects=0,firstFailT=0;   // handshakes that never OPENED since the last open: reported as ONE wsconnfail row on the next open, never one wsclose per redial
 // This pane's DASHBOARD id. ?wid= when the host supplies one (the VS Code extension builds its own pane
@@ -45622,7 +46021,7 @@ function connect(){if(ws&&(ws.readyState===0||ws.readyState===1))return;   // on
 if(returnAt)returnRedialed=true;   // a dial inside a return window (whatever path led here) → the return-fresh row says so
 connT=Date.now();var proto=location.protocol==="https:"?"wss://":"ws://";
 var active="";try{var st0=JSON.parse(localStorage.getItem(SK)||"null");active=(st0&&st0.activeId)||"";}catch(e){}
-ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&!readyQueued)?"&reconnect=1":""));   // reconnect=1: this page has held a socket before AND its bundle has said ready AND that ready is not still waiting in the queue for this open, so it may already hold sessions; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own): both redials dial as a fresh page (2026-09-10)
+ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1":""));   // reconnect=1: this page has held a socket before AND its bundle has said ready AND the kernel's caps frame has answered that ready AND the ready is not still waiting in the queue for this open, so it holds the sessions the kernel served it; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own); a ready that left on an open socket the kernel never answered (the socket died before its caps frame came back) served the page nothing either: all three redials dial as a fresh page, the last for the page's life, since the bundle posts ready once and no later socket carries one for a caps frame to answer (2026-09-10)
 // onopen: flush the queue; a RECONNECT (after a drop) also PROMPTS a reload — the fresh socket resyncs live via
 // the kernel's next push, and the banner offers a full reload for anything a live push doesn't cover. This
 // replaced the old silent location.reload() (the user 2026-07-05: don't foist a reload; let me click). Narrowed by
@@ -45643,6 +46042,7 @@ if(!ann)armStale(pendingWhy||"reconnect");   // T217: an ANNOUNCED restart's rec
 pendingWhy="";freshPending=true;try{window.dispatchEvent(new Event("romp:wsup"));}catch(e){}
 enqueue({type:"wsup"});}};   // the flip as a FRAME too: frames of the dead socket may still be draining from the FIFO, and a bundle that scopes "loaded on this socket" must see the flip between them and the new socket's frames, not at onopen (review find 2026-09-07)
 ws.onmessage=function(ev){lastRecv=Date.now();resumeProvisional=0;if(returnAt)returnBytes+=(ev.data&&ev.data.length)||0;var msg;try{msg=JSON.parse(ev.data);}catch(e){return;}
+if(msg&&msg.type==="caps")readyAcked=true;   // the kernel's answer to a ready it processed: _send_caps, which the ready arm alone sends, after its own pushes. From here a redial may declare itself (the dial term in connect); the frame goes on to the bundle below like any other
 if(msg&&msg.type==="ka"){if(LOADEDV&&msg.dv&&msg.dv>LOADEDV)raiseBuild();
 if(stalePending&&++staleKa>=2){var sw=stalePending;stalePending="";raiseStale(sw);}   // the SECOND keepalive since the arm, no resync between: a full heartbeat period on THIS socket with the kernel alive, talking to it, and not resyncing it — the view IS stale. (One keepalive alone can be a beat queued at accept, ahead of the resync frame.)
 return;}   // keepalive: stamped lastRecv above and confirmed a resumed keep (resumeProvisional=0: any frame does); carries the build token (drift → reload banner); nothing for the bundle to render
@@ -52158,9 +52558,11 @@ class Handler(BaseHTTPRequestHandler):
                 # The cold-start half of a push tap (see _PENDING_REVEAL): the freshly opened
                 # shell asks for the focus its ?push-reveal= URL named, aimed by its own wid so
                 # no other open dashboard gets dragged along (the 2026-07-29 rule).
-                # `boot` (2026-09-06): the deep-link arrival — the page is booting, so its own chat
-                # pane is not connected yet; the kernel parks for it and never counts a same-wid
-                # socket the previous page left behind as delivery (_reveal_request has the why).
+                # `boot` (2026-09-06, widened 2026-09-10 T312): the deep-link arrival — the page is
+                # booting; a same-wid chat socket that has said ready is told (it may be this page's own
+                # pane, whose ready beat this fetch) and a copy stays parked for the pane that is still
+                # to come, so the previous page's dead socket never counts as the only delivery
+                # (_reveal_request has the why).
                 try:
                     body = json.loads(raw_body or b"{}")
                     sid = str(body.get("sid") or "")
@@ -53369,8 +53771,11 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 seqs, _VIEWS_SERVED.seqs = _VIEWS_SERVED.seqs, None
             # What this kernel can do for the page (KERNEL_WS_CAPS), after the pushes above and on every
-            # `ready` — so a reconnected socket learns them again, and a page whose views writes were
-            # in flight across the drop learns, by this frame, that their answers may never come. It
+            # `ready`: the shell's socket, which re-sends ready at every open, learns them again; a page
+            # whose views writes were in flight across a drop learns, when a ready reaches its socket and
+            # this frame answers it, that their answers may never come; and the pane shim reads the frame
+            # as the kernel's word that this ready was processed and the page served whole ahead of it, the
+            # latch of its redial gate (readyAcked in _shim): the frame goes last and from this arm alone. It
             # carries the seq of the views blob those pushes served (viewsSeq), read above — or, when
             # they served none (a chat page on a sentinel cycle gets no tabOrder frame), the STORE's
             # current seq, the seq the next push serves (the 2026-09-05 review: with null here nothing
@@ -53386,6 +53791,12 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     views_seq = None
             _send_caps(client, views_seq=views_seq)
+            # From here the pane LISTENS and holds its frames (the push above): a tap that arrives now is sent
+            # to it directly (_reveal_request targets panes with this stamp only, T312: a socket registered at
+            # its handshake but still loading its bundle has no listener, and its own `ready` message counts
+            # as an answer to _note_ws_inbound, so a frame sent to it earlier was lost and its copy retired);
+            # one that arrived before this point parked, and is consumed right below.
+            client["ready"] = True
             # a push tap parked a reveal for this window's chat pane → deliver it now, AFTER the
             # ready push, so the tab it names already exists on the client (ordered socket)
             _consume_pending_reveal(client)
@@ -54302,19 +54713,22 @@ class Handler(BaseHTTPRequestHandler):
                                  args=({"tmuxBackend": _tbv, "gt": _jgt},), daemon=True).start()
             else:
                 _tell_stale_gesture(client, msg)
-        elif msg and msg.get("type") == "setJudgeFast" and msg.get("enabled") is not None:
-            # the gear's Fast mode box on the Triage model row: a checkbox, stored as on/off and read by the judges per call (jd._judge_fast).
-            # The boolean is checked like its siblings' (_as_bool), and a malformed frame is refused with a
-            # warn, unwritten; an applied pick fans out to every linked kernel under its gesture stamp.
+        elif msg and msg.get("type") in ("setJudgeFast", "setDistillFast", "setIndexFast") and msg.get("enabled") is not None:
+            # the gear's Fast mode box beside a tier's model picker (T300: one per tier): a checkbox, stored as on/off
+            # and read by the judges per call (jd._tier_fast). The boolean is checked like its siblings' (_as_bool),
+            # and a malformed frame is refused with a warn, unwritten; an applied pick fans out to every linked
+            # kernel under its gesture stamp.
+            _ffield, _fset = {"setJudgeFast": ("judgeFast", _set_judge_fast), "setDistillFast": ("distillFast", _set_distill_fast),
+                              "setIndexFast": ("indexFast", _set_index_fast)}[msg["type"]]
             _jfe, ferr = _as_bool(msg.get("enabled"), "enabled")
             if ferr:
                 _refuse_ws_flag(client, msg["type"], ferr, "enabled", msg.get("enabled"))
                 return
             _jfv = "on" if _jfe else "off"
-            _jgt = _set_judge_fast(_jfv, gt=_gesture_ms(msg))
+            _jgt = _fset(_jfv, gt=_gesture_ms(msg))
             if _jgt is not None:
                 threading.Thread(target=_propagate_judge_settings,
-                                 args=({"judgeFast": _jfv, "gt": _jgt},), daemon=True).start()
+                                 args=({_ffield: _jfv, "gt": _jgt},), daemon=True).start()
             else:
                 _tell_stale_gesture(client, msg)
         else:
@@ -54356,10 +54770,15 @@ class Handler(BaseHTTPRequestHandler):
             # flag skeletons the tabs it is not looking at (_resolve_reconnect); a full push for one tab on
             # screen was 17 session frames / 9 MB on the measured board (2026-09-07).
             # The shim dials the term only once its bundle's ready has left on a socket with none still queued
-            # (everConnected&&bundleReady&&!readyQueued, 2026-09-10): a socket that died before the bundle said
-            # ready, or while its ready was queued, redials as a fresh page. What no shim bit sees: a ready that
-            # left on an open socket the kernel never processed, the socket dying before any frame came back,
-            # still redials with the term and is served skeletons that fill on click or the idle prefetch.
+            # AND the ready arm's caps frame has answered it (everConnected&&bundleReady&&readyAcked&&!readyQueued,
+            # 2026-09-10): a socket that died before the bundle said ready, while its ready was queued, or after
+            # the ready left but before the caps frame came back redials as a fresh page (_send_caps runs after the
+            # ready arm's pushes, so the frame is the kernel's word that the page was served whole). A caps frame
+            # that never arrives (the socket died between the pushes and the frame, the ready itself lost on a
+            # half-dead socket, or the ready arm raised into the dispatch loop's except below) leaves the page
+            # dialling fresh for its life: the bundle posts ready once, so no later socket carries one and no caps
+            # frame follows. Every redial of such a page is served whole, the cost before 2026-09-07, never a
+            # false skeleton.
             client["reconnect"] = True
         _register_ws_client(client)
         if client.get("reconnect"):
@@ -54397,6 +54816,7 @@ class Handler(BaseHTTPRequestHandler):
             with _clients_lock:
                 if client in _clients:
                     _clients.remove(client)
+            _release_client_holds(client)          # its open editors' holds go with it: the disconnect is the event (T306)
 
     def _remote_ws(self, host, query):
         """GET /remote/<host>/ws — relay a federated-dashboard WebSocket to an attached host's
@@ -54979,6 +55399,7 @@ def main():
         _n = jd.migrate_all_stores()                          # goal store/archive BEFORE any judge pass runs —
         if _n:                                                # the hot paths carry no migration logic anymore
             sys.stderr.write("romp-kernel: diary sweep migrated %d store file(s)\n" % _n)
+        _migrate_judge_fast_tiers()                           # the one fast-mode flag -> one per tier (T300), once
     except Exception:
         sys.stderr.write("diary sweep: %s\n" % traceback.format_exc())
     try:                                                      # judge scratch transcripts are one-shot junk
