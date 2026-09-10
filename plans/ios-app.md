@@ -34,18 +34,24 @@ Implementation notes that amend this sketch:
   · from the notification", sourced from a `/__romp/shown` record the push wrote — shipped the same
   day and was removed the same day: it named the wrong session, and the user wants no chip and no
   prompt, ever.)
-- Later still, the finding read right (2026-09-09, 23:30 UTC): the worker's acks DO reach the kernel;
-  what a live Home Screen app never gets is the `notificationclick` — a tap only foregrounds the app
-  (a killed app gets the click and the deep link). So the kernel keeps a push LEDGER (a `pid` per push
-  per device, in the payload's routing block; `STATE/push-ledger.json`): the worker acks `shown`,
-  `clicked` and `closed` by pid alone (`POST /push/ack`), and the page, on boot / visible / pageshow /
-  focus with no stored tap, asks `GET /push/pending?endpoint=` for EVERY unsettled row to its own
-  subscription and reads `registration.getNotifications()`. A `clicked` row lands (`via: 'ack'`);
-  EXACTLY ONE `shown` row whose notification is gone with no close on record lands (`via: 'vanish'`);
-  anything else — two or more gone, all displayed, sent-only, a screen it cannot read — shows nothing.
-  Rows go back as `/push/landed`, `/push/superseded` (a newer notification for the same session
-  displayed in its place; the kernel applies the same at the shown ack) or `/push/dropped` (spent
-  without a landing). `tests/test_notification_tap_resume_browser.py` runs it in a real browser.
+- 2026-09-10, the finding read right: the worker's acks DO reach the kernel, but a live Home Screen app
+  gets NEITHER `notificationclick` NOR `notificationclose` from iOS (a killed app gets the click and the
+  deep link), so nothing the worker or the screen could say was ever the tap — a gone notification
+  cannot tell a tap from a swipe-dismiss. Every road that inferred one (the stored tap, the replay,
+  the fingerprint, the vanished notification) is removed; the user wants no guessing. The tap is now
+  the OS's own callback: an Apple endpoint (`web.push.apple.com`) is sent a Declarative Web Push
+  message — `{"web_push": 8030, "notification": {title, body, navigate, tag, data[, silent]},
+  "mutable": true[, "app_badge": n]}` (`_push_declarative`; members verified against the W3C Push API
+  draft and WebKit's `NotificationJSONParser.cpp`) — whose `navigate` is the deep link made absolute
+  with the page origin the bell records at subscribe (`/?push-reveal=<sid>[&push-card=<id>]&push-pid=
+  <pid>`). iOS displays it and, on a tap, navigates the app there; the shell lands the link at boot AND
+  on pageshow/popstate (`via: 'link'`) and settles the row (`POST /push/landed`). `mutable` hands the
+  worker a `push` event carrying the parsed Notification (`event.notification`), which it acks `shown`
+  and does not show again. Non-Apple endpoints keep the imperative payload and the worker's
+  `notificationclick` (`via: 'sw'`, or the kernel's clicked row via `GET /push/pending` — `via: 'ack'`).
+  The kernel push LEDGER stays (`STATE/push-ledger.json`: `pid` per push per device; `shown`/`clicked`
+  acks by pid; `landed` by the page); `closed`, `superseded` and `dropped` went with the guesswork.
+  `tests/test_notification_tap_resume_browser.py` runs the surviving roads in a real browser.
 - The shell background is `#1e1e1e`, not the `#101418` guessed below (that is the login page);
   the manifest and theme-color use `#1e1e1e`.
 - The manifest and the three icon PNGs are served auth-EXEMPT: browsers fetch a manifest (and
