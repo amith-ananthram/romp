@@ -587,6 +587,24 @@ class Differential(_World):
         km._model_switch_pending[SID] = {"target": "other", "until": time.time() + 60}
         self.assertEqual(self.moved(s3, self.sig(now=NOW + 4, tm=tm)), ("clock",), "a model switch in flight")
         km._model_switch_pending.pop(SID, None)
+        # the interrupt stamp, on the transcript path (a tmux row has no interrupting flag): the stop is in
+        # flight until the CLI's stop record lands or 120 s pass, and the signature's own read pops the
+        # stamp at the cap exactly as the build's would. Read at or after NOW + 2, where faded already holds.
+        km._interrupt_clicked[SID] = NOW - 118
+        s5 = self.sig(now=NOW + 2, tm=tm)                    # 120 s: the stop is in flight
+        self.assertEqual(self.moved(s3, s5), ("clock",), "a stop dispatched: interrupting")
+        self.assertEqual(self.sig(now=NOW + 2, tm=tm), s5, "a repeat read holds")
+        self.assertEqual(self.sig(now=NOW + 3, tm=tm), s3, "121 s: the cap ran out, back to the clicked-nothing key")
+        self.assertNotIn(SID, km._interrupt_clicked, "the signature's read popped the stamp, as the build's own would")
+        # the same stamp with an SDK row, whose own flag is the settle: the row component strips the flag
+        # and the snapshot stamp, so the clock component alone carries it
+        km._interrupt_clicked[SID] = NOW - 118
+        sdk = dict(tm, interrupting=True, snapT=NOW + 2)     # a snapshot taken after the click
+        s6 = self.sig(now=NOW + 2, tm=sdk)
+        self.assertEqual(self.moved(s3, s6), ("clock",), "the backend's own in-flight flag, under clock alone")
+        sdk["interrupting"] = False
+        self.assertEqual(self.sig(now=NOW + 2, tm=sdk), s3, "the flag's settle: back to the clicked-nothing key")
+        self.assertNotIn(SID, km._interrupt_clicked)
 
     def test_parked_ops_miss_under_ops_and_the_limit_hold_is_read_only_while_something_is_queued(self):
         a = self.sig()
