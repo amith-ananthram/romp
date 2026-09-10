@@ -415,8 +415,9 @@ class _World(unittest.TestCase):
         state.mkdir()
         self.saved = (jd.STATE, jd.PROJECTS, km.NAMES, km.WORKING_DIR, km._GLOBAL_CLAUDE_MD, km._tmux_sessions, km._sdk,
                       os.environ.get("CLAUDE_CONFIG_DIR"), os.environ.get("ROMP_HOST_NAME"),
-                      len(km._downtime), km._claude_account_label, km._auth_avail_status)
+                      len(km._downtime), km._claude_account_label, km._auth_avail_status, km._MENTION_PINS)
         jd._rebind_state(state)                       # every STATE-derived dir (goals, states, episodes, gone, sdk, ...)
+        km._MENTION_PINS = None                       # the pin dir latches at first use (_pin_dir): this world's root, not a prior one's
         jd.PROJECTS = proj
         jd.NAMES.mkdir()
         (jd.NAMES / SID).write_text("web\t%s\t#1EA1EB\twhite\n" % self.cdir)
@@ -435,11 +436,12 @@ class _World(unittest.TestCase):
         self.sess = {"sid": SID, "name": "web", "path": str(self.tpath), "anchor": SID}
 
     def tearDown(self):
-        (state, proj, names, wdir, gmd, tmux, sdk, cfg, host, ndown, acct, avail) = self.saved
+        (state, proj, names, wdir, gmd, tmux, sdk, cfg, host, ndown, acct, avail, pins) = self.saved
         jd._rebind_state(state)
         jd.PROJECTS = proj
         km.NAMES, km.WORKING_DIR, km._GLOBAL_CLAUDE_MD, km._tmux_sessions, km._sdk = names, wdir, gmd, tmux, sdk
         km._claude_account_label, km._auth_avail_status = acct, avail
+        km._MENTION_PINS = pins
         for k, v in (("CLAUDE_CONFIG_DIR", cfg), ("ROMP_HOST_NAME", host)):
             if v is None:
                 os.environ.pop(k, None)
@@ -817,16 +819,38 @@ class Differential(_World):
         self.sig(deps=pending())                            # the first world: the resolve loads SID's sidecar, which is empty
         self.tearDown()
         self.setUp()                                        # the next test's world (its temp dir is cleaned by the final tearDown)
-        saved = km._MENTION_PINS
-        km._MENTION_PINS = None                             # the pin dir latches at first use: point it at this world's root
-        try:
-            with open(km._pin_assoc_dir() / (SID + ".jsonl"), "w", encoding="utf-8") as f:
-                f.write(json.dumps({"u": "u9", "t": "notes/report.md", "p": "pin1"}) + "\n")
-            s = self.sig(deps=pending())
-        finally:
-            km._MENTION_PINS = saved
+        with open(km._pin_assoc_dir() / (SID + ".jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"u": "u9", "t": "notes/report.md", "p": "pin1"}) + "\n")
+        s = self.sig(deps=pending())
         self.assertEqual(s[km._CHAT_SIG_LABELS.index("pathlink")][0][2], {"notes/report.md": "pin1"},
                          "pinned from this world's sidecar, not a prior world's memo")
+
+    def test_each_world_latches_its_own_pin_directory(self):
+        """The pin directory latches at first use (_pin_dir) and the sidecar's memo is cleared per sid at
+        tearDown, so a later world's first resolve reloads the sidecar through _pin_assoc_dir, which
+        mkdirs under the latched path. Left alone, that path is a torn-down world's: the fixture resets
+        the latch per world and restores it at tearDown, so each resolve lands under its own state root
+        and nothing is recreated under a removed one. Two worlds through the fixture's own hooks, as the
+        sidecar test above. Between them the latch must no longer point at the first world, and is then
+        set back to it, the value a fixture that never reset would inherit, so the second setUp has to
+        reset it rather than find it clear."""
+        def pending():
+            km._PATH_LINK_CACHE[(SID, "u9")] = ({}, ("notes/report.md",), {})
+            (self.cdir / "notes").mkdir()
+            (self.cdir / "notes" / "report.md").write_text("42\n")
+            return {"task_outs": [], "pl_pending": [("u9", "see notes/report.md for the numbers")],
+                    "pl_at": (("u9", None, None),), "pl_check": None, "postal_any": False, "postal_cards": []}
+        self.sig(deps=pending())                            # the first world resolves: the pin dir latches
+        first = Path(self.td.name)
+        self.tearDown()
+        self.assertNotEqual(km._MENTION_PINS, first / "state" / "mention-pins",
+                            "the latch does not point at the torn-down world")
+        self.addCleanup(setattr, km, "_MENTION_PINS", km._MENTION_PINS)   # the final tearDown restores the stale value set below; put back the one before it
+        km._MENTION_PINS = first / "state" / "mention-pins"   # a stale latch on the removed world: setUp resets it rather than inheriting it
+        self.setUp()                                        # the next test's world (its temp dir is cleaned by the final tearDown)
+        self.sig(deps=pending())                            # the memo was popped, so the resolve reloads through _pin_assoc_dir
+        self.assertEqual(km._MENTION_PINS, jd.STATE / "mention-pins", "the pin directory is this world's")
+        self.assertFalse(first.exists(), "nothing is recreated under the torn-down first world")
 
     def test_a_postal_dependency_misses_under_postal_when_the_log_moves_or_a_caption_changes(self):
         caps = {}
@@ -1130,7 +1154,9 @@ class RecordedDependencies(unittest.TestCase):
     records stamped against the real clock, which discovery keys on. Message ids are salted per test
     instance and tearDown clears the sid's per-message caches (_PATH_LINK_CACHE, _SPACE_PATH_CACHE, the pin
     sidecar's memo): a verdict cached under (sid, uuid) is served without re-reading the text, so an id
-    reused across tests would hand one test's verdict to another's message."""
+    reused across tests would hand one test's verdict to another's message. The pin directory's latch
+    (_MENTION_PINS) is reset per world and restored at tearDown, as in _World, so a resolve never mkdirs
+    under a torn-down world's state root."""
 
     _salt = itertools.count()                    # one value per test instance, read in setUp
 
@@ -1153,8 +1179,10 @@ class RecordedDependencies(unittest.TestCase):
         self.saved = {nm: getattr(km, nm) for nm in self.STUBS}
         self.saved_state = (jd.STATE, jd.PROJECTS, km.NAMES, km._GLOBAL_CLAUDE_MD, os.environ.get("CLAUDE_CONFIG_DIR"),
                             dict(km._built_chat), dict(km._prev_chat_events), dict(km._prev_chat_ledger),
-                            list(km._last_tab_order), [set(km._thread_fold_keep[0]), set(km._thread_fold_keep[1])])
+                            list(km._last_tab_order), [set(km._thread_fold_keep[0]), set(km._thread_fold_keep[1])],
+                            km._MENTION_PINS)
         jd._rebind_state(td / "state")
+        km._MENTION_PINS = None                       # the pin dir latches at first use (_pin_dir): this world's root, as _World
         jd.PROJECTS = proj
         jd.NAMES.mkdir(parents=True, exist_ok=True)
         (jd.NAMES / SID_R).write_text("web\t%s\t#1EA1EB\twhite\n" % self.cdir)
@@ -1186,10 +1214,11 @@ class RecordedDependencies(unittest.TestCase):
     def tearDown(self):
         for nm, v in self.saved.items():
             setattr(km, nm, v)
-        st, proj, names, gmd, cfg, bc, pe, pl, lo, keep = self.saved_state
+        st, proj, names, gmd, cfg, bc, pe, pl, lo, keep, pins = self.saved_state
         jd._rebind_state(st)
         jd.PROJECTS = proj
         km.NAMES, km._GLOBAL_CLAUDE_MD = names, gmd
+        km._MENTION_PINS = pins
         if cfg is None:
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
         else:
