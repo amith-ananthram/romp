@@ -1533,18 +1533,24 @@ LEDGER_ROTATE_BYTES = 32 * 1024 * 1024   # a ledger past this size is rotated to
 #                                          thousand turns a day, turns.jsonl holds about a month; the reader reads both
 
 
+_LEDGER_LOCK = threading.Lock()   # one appender at a time across the ledgers: two threads crossing the
+#                                    rotation size together would rotate twice, moving a one-row file over the
+#                                    predecessor just made and losing its month of rows (review find, 2026-09-10)
+
+
 def _append_ledger_row(state_dir: Path, name: str, row: dict) -> None:
     try:
         p = Path(state_dir) / name
         p.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            if p.stat().st_size >= LEDGER_ROTATE_BYTES:
-                os.replace(p, p.with_name(p.name + ".1"))   # the older predecessor, if any, is dropped
-        except FileNotFoundError:
-            pass
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row) + "\n")
-            f.flush()
+        with _LEDGER_LOCK:
+            try:
+                if p.stat().st_size >= LEDGER_ROTATE_BYTES:
+                    os.replace(p, p.with_name(p.name + ".1"))   # the older predecessor, if any, is dropped
+            except FileNotFoundError:
+                pass
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
+                f.flush()
     except Exception:
         pass
 
@@ -4378,6 +4384,9 @@ class SdkSession:
         #                                instructions payload (parent_tool_use_id link) as a skillMd atom
         self.since = 0
         self._first_out_t = None   # the turn's first streamed WORK atom (turns.jsonl firstOutT; reset per fresh feed)
+        self._fed_t = None         # the fresh feed's pop at millisecond resolution (turns.jsonl fedT; `since` stays whole
+        #                            seconds for its other readers); both are spent at the settle, so a turn the CLI
+        #                            opens by itself never inherits the previous fed turn's stamps
         self.model = reg.get("liveModel") or ""   # seed from the last-known model so the badge/picker show on
         #                                           OPEN (even once eager-connected, before init/a turn reports)
         self._model_id = reg.get("liveModelId") or ""   # the RAW id behind that name (claude-fable-5-1), the
@@ -5521,6 +5530,7 @@ class SdkSession:
                     self._interrupted = False        # a fresh turn → clear any stale interrupt flag
                     self._intr_level = 0             #   ...and its escalation episode (a new stop starts polite)
                     self._first_out_t = None         # the turn's first output is still to come (turns.jsonl)
+                    self._fed_t = time.time()        # the pop, at millisecond resolution (turns.jsonl fedT)
                 self._note_turn_opener(fed_text_opener(item), fresh)   # who this turn is for (the Stop hook stamps it)
                 if item.startswith(RENAME_PING_HEAD):
                     self._ping_feeding = True       # hold feeds until this turn's first streamed message
@@ -5891,13 +5901,21 @@ class SdkSession:
         now = time.time() if now is None else float(now)
         fed = [x for x in (getattr(self, "_inflight_texts", None) or []) if isinstance(x, str)]
         row = {"t": int(now), "sid": str(self.sid), "name": str(getattr(self, "name", "") or ""),
-               "fedT": int(getattr(self, "since", 0) or 0), "resultT": round(now, 3),
+               "resultT": round(now, 3),
                "opener": str(getattr(self, "_turn_opener", None) or ""),
                "resumeNotice": any(x.startswith((BOOT_RESUME_NUDGE, CRASH_RESUME_NUDGE)) for x in fed),
                "fedTexts": len(fed)}
-        fo = getattr(self, "_first_out_t", None)
-        if isinstance(fo, (int, float)) and fo:
-            row["firstOutT"] = round(float(fo), 3)
+        # fedT and firstOutT only for a turn THIS session fed and whose pop was stamped: a turn the CLI opened
+        # by itself (a channel message, a task notification, a scheduled prompt) or a mid-turn forward run as
+        # its own turn has no feed of its own, and the stamps still in memory would be the PREVIOUS fed
+        # turn's (review find, 2026-09-10: hours of feed-to-result, a duplicated first output). Absent, never
+        # wrong; the reader measures latency only where fedT is present.
+        ft = getattr(self, "_fed_t", None)
+        if fed and isinstance(ft, (int, float)) and ft:
+            row["fedT"] = round(float(ft), 3)
+            fo = getattr(self, "_first_out_t", None)
+            if isinstance(fo, (int, float)) and fo >= ft:
+                row["firstOutT"] = round(float(fo), 3)
         for attr, key in (("duration_ms", "durationMs"), ("duration_api_ms", "apiMs"), ("num_turns", "numTurns")):
             v = getattr(msg, attr, None)
             if isinstance(v, (int, float)) and not isinstance(v, bool):
@@ -6463,6 +6481,7 @@ class SdkSession:
         elif isinstance(msg, ResultMessage) and self._consume_move_settle(msg):
             pass   # the accepted move's turn-less result — nothing ended, so nothing settles (see the def)
         elif isinstance(msg, ResultMessage):
+            delta = turn_u = None            # the spend fold's figures for the turn ledger row (set when the fold ran)
             try:
                 # (This try is the whole branch: its body is the result's BOOKKEEPING, its finally is
                 # THE SETTLE — the finally's comment has the rule. The spend accounting runs LAST in the
@@ -6511,7 +6530,6 @@ class SdkSession:
                 # session-so-far cost and the spend readout compounds into fiction (the user 2026-08-08). A
                 # total below the last seen means a counter we didn't watch reset — fold it whole, never negative.
                 # (The scheduled refreshes above cannot run before this synchronous step: nothing yields.)
-                delta = turn_u = None            # (read by the turn ledger row below; set when the fold ran)
                 total = getattr(msg, "total_cost_usd", None)
                 if isinstance(total, (int, float)) and total > 0:
                     delta = total - self._last_cost_total if total >= self._last_cost_total else total
@@ -6540,14 +6558,18 @@ class SdkSession:
                                           "would be wrong only if a CLI that restores cost history read a different "
                                           "transcript than the connect-time seed (last_cost_state)."
                                           % (self.name, delta, SANE_TURN_USD, total), problem=False)
+            finally:
                 # T304: one durable row per settled turn (turns.jsonl, see the ledger note by
-                # append_turn_row) — the event stamps the restart monitors read. Guarded on its own and
-                # LAST: a failing append costs the row, never the settle below or the spend fold above.
+                # append_turn_row) — the event stamps the restart monitors read. In the finally, ahead of
+                # the settle, so a bookkeeping exception (a spend-fold fault: exactly the anomalous turn)
+                # still leaves its row (review find, 2026-09-10); guarded on its own, so a failing append
+                # costs the row alone and never the settle below.
                 try:
                     append_turn_row(self.backend.state_dir, self._turn_ledger_row(msg, delta, turn_u))
                 except Exception as e:
                     self.backend._log("turn ledger (%s): %s" % (self.name, e), problem=False)
-            finally:
+                self._fed_t = None               # the turn's feed stamps are spent (see _turn_ledger_row)
+                self._first_out_t = None
                 # THE SETTLE — everything that makes the turn over for the kernel — runs whatever the
                 # bookkeeping above did (the rewind flags, the live-tail sweep, the refreshes, the spend
                 # accounting last: any step may raise and stop the rest). The rule

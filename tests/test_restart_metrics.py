@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -140,6 +141,16 @@ class Parsers(unittest.TestCase):
         self.assertEqual([x["feedToResultS"] for x in sl], [30.0, 37.0],
                          "working→waiting pairs; an interrupt's by-marked settle and an idle close are not turns")
         self.assertEqual(cuts, {"restart": 1, "crash": 1})
+
+    def test_state_log_pair_breaks_at_a_machine_cut(self):
+        """Review find (2026-09-10): a cut turn's `working` row was closed by the RESUMED turn's `waiting`, so
+        the interval spanned the outage and the redo. A machineCut row ends the open pair unmeasured."""
+        lines = [json.dumps(r) for r in (
+            {"t": 1000, "state": "working"}, {"t": 1300.5, "machineCut": "restart"},
+            {"t": 1400, "state": "working"}, {"t": 1410, "state": "waiting"})]
+        sl, cuts = rm.state_log_turns(lines)
+        self.assertEqual([(x["fedT"], x["feedToResultS"]) for x in sl], [(1400, 10.0)])
+        self.assertEqual(cuts, {"restart": 1})
         self.assertEqual(rm.spend_by_day(json.loads((self.state / "spend.json").read_text())), {"2026-09-10": 12.5, "2026-09-12": 3.0})
 
 
@@ -165,6 +176,16 @@ class BootJoin(unittest.TestCase):
 
 
 class Windows(unittest.TestCase):
+    def test_week_bounds_follow_local_midnight_across_a_daylight_saving_change(self):
+        """Review find (2026-09-10): seven times 86400 seconds from the anchor drifted an hour off local
+        midnight after a clock change; weeks are counted in local dates."""
+        la = "America/Los_Angeles"          # clocks fall back on 2026-11-01
+        s, e = rm.bucket_bounds("week of 2026-10-29", "week", la)
+        self.assertEqual(e - s, 7 * 86400 + 3600, "the week holds the extra hour and still ends at local midnight")
+        self.assertEqual(rm.local_date(e, la), "2026-11-05")
+        self.assertEqual(rm.bucket_key(rm.day_start("2026-11-04", la) + 12 * 3600, "week", "2026-10-29", la), "week of 2026-10-29")
+        self.assertEqual(rm.bucket_key(rm.day_start("2026-11-05", la) + 60, "week", "2026-10-29", la), "week of 2026-11-05")
+
     def test_bucket_keys_days_and_weeks(self):
         self.assertEqual(rm.bucket_key(D0 + 10, "day", "2026-09-10", TZ), "2026-09-10")
         self.assertEqual(rm.bucket_key(D0 + 86400 * 6 + 10, "week", "2026-09-10", TZ), "week of 2026-09-10")
@@ -199,7 +220,8 @@ class Document(unittest.TestCase):
         (b,) = doc["buckets"]
         self.assertEqual(b["key"], "week of 2026-09-10")
         self.assertEqual((b["restarts"], b["cutTurns"], b["cleanRestarts"], b["restartsWithoutCutRow"]), (3, 3, 0, 1))
-        self.assertEqual(b["cutTurnsPerRestart"], 1.0)
+        self.assertEqual(b["measuredRestarts"], 2, "a boot with no cut row cut an unknown number of turns, not zero")
+        self.assertEqual(b["cutTurnsPerRestart"], 1.5, "3 cut turns over the 2 MEASURED restarts (review find)")
         self.assertEqual(b["cutSessions"], {"web": 2, "api": 1})
         self.assertEqual(b["reasons"], {"manager-sigterm": 1, "p2p-update": 1, "(no cut row)": 1})
         self.assertEqual((b["outageS"]["n"], b["outageS"]["max"]), (2, 4.0))
@@ -243,7 +265,8 @@ class Document(unittest.TestCase):
         text = rm.summary(doc)
         self.assertIn("restart metrics: TESTHOST, week windows", text)
         self.assertIn("week of 2026-09-10", text)
-        self.assertIn("restarts 3 · turns cut 3 (1.0 per restart) · clean restarts 0 · boots with no cut row 1", text)
+        self.assertIn("restarts 3 · turns cut 3 (1.5 per measured restart) · clean restarts 0 · boots with no cut row 1", text)
+        self.assertIn("dates in UTC time", text)
         self.assertIn("quiet windows 2 · wait n=2 p50 297 s p90 900 s max 900 s · backstop fired 1", text)
         self.assertIn("orphans reaped 1 · scopes stopped 1 · duplicate CLIs 1 · crash heals 1 · crash loops 1 · drain left closing 1", text)
         self.assertIn("continuation notices 3 · redo turns 1 · redo cost $0.50 of $15.50 in the window · redo tokens 3,700", text)
@@ -273,21 +296,31 @@ class Document(unittest.TestCase):
         labelled = rm.collect(self.state, kind="week", anchor="2026-09-10", tz=TZ, live=False, label="web box")
         self.assertIn("restart metrics: web box,", rm.summary(labelled))
 
-    def test_no_em_dash_in_any_output_string_of_the_reader_or_the_report(self):
-        """Every non-docstring string literal of the two modules (the summary lines, the figure labels, the
-        notes) is free of em-dashes, by AST, so a new label cannot bring one back."""
+    def test_no_em_dash_in_any_string_of_the_reader_or_the_report(self):
+        """Every string literal of the two modules, docstrings included (--help prints the module docstring's
+        first paragraph), is free of em-dashes, by AST, so a new label cannot bring one back."""
         import ast
         for path in (os.path.join(BIN, "romp-restart-metrics"), os.path.join(os.path.dirname(HERE), "scripts", "restart_metrics_report.py")):
             tree = ast.parse(open(path, encoding="utf-8").read())
-            docstrings = set()
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    body = node.body
-                    if body and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], "value", None), ast.Constant):
-                        docstrings.add(id(body[0].value))
-            offenders = [(n.lineno, n.value) for n in ast.walk(tree)
-                         if isinstance(n, ast.Constant) and isinstance(n.value, str) and "\u2014" in n.value and id(n) not in docstrings]
-            self.assertEqual(offenders, [], "%s carries an em-dash in an output string" % os.path.basename(path))
+            offenders = [(n.lineno, n.value[:60]) for n in ast.walk(tree)
+                         if isinstance(n, ast.Constant) and isinstance(n.value, str) and "\u2014" in n.value]
+            self.assertEqual(offenders, [], "%s carries an em-dash in a string" % os.path.basename(path))
+        out = io.StringIO()
+        with redirect_stdout(out), self.assertRaises(SystemExit):
+            rm.main(["--help"])
+        self.assertNotIn("\u2014", out.getvalue())
+
+    def test_summary_dates_follow_the_documents_zone(self):
+        """Review find (2026-09-10): the window bounds were rendered in the machine's zone, ignoring --tz. A
+        zone fourteen hours ahead of UTC puts the anchor's local midnight on the previous UTC day."""
+        far = "Pacific/Kiritimati"
+        doc = rm.collect(self.state, kind="day", tz=far, live=False, since=rm.day_start("2026-09-10", far),
+                         until=rm.day_start("2026-09-11", far))
+        text = rm.summary(doc)
+        self.assertIn("2026-09-10  (2026-09-10 to 2026-09-10)", text, "the machine's UTC clock would have said 2026-09-09")
+
+    def test_bad_anchor_is_refused_like_the_other_dates(self):
+        self.assertEqual(rm.main(["--anchor", "yesterday", "--no-live", "--state", str(self.state)]), 2)
 
     def test_missing_ledgers_are_said(self):
         empty = Path(tempfile.mkdtemp())
@@ -348,8 +381,9 @@ class LiveHelpers(unittest.TestCase):
     def test_kernel_live_unreachable_is_said(self):
         state = Path(tempfile.mkdtemp())
         (state / "serve-port").write_text("1\n")          # nothing listens on port 1
-        os.environ.pop("ROMP_KERNEL_PORT", None)
-        k = rm.kernel_live(state)
+        with mock.patch.dict(os.environ):                 # the suite's dead-port floor comes back after (review find)
+            os.environ.pop("ROMP_KERNEL_PORT", None)
+            k = rm.kernel_live(state)
         self.assertEqual(k["port"], 1)
         self.assertIn("not reachable", k["error"])
 

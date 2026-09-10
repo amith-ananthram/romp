@@ -2034,13 +2034,16 @@ split on the marker. `GET /session-events?since=<epoch s>&limit=<n>`
 kernel's boot; at most 1000), each with `host`, and `count`, this kernel's
 problems since its boot, never a sum across kernels. `turns.jsonl` gets one
 row per settled turn: `t`, `sid`, `name`, `fedT` (the feed pop, when the text
-left the queue for the CLI's stdin), `firstOutT` (the first streamed work
-atom), `resultT` (the ResultMessage), the CLI's own `durationMs`, `apiMs`,
+left the queue for the CLI's stdin, at millisecond resolution), `firstOutT`
+(the first streamed work atom), `resultT` (the ResultMessage), the CLI's own `durationMs`, `apiMs`,
 `numTurns` and `isError`, the spend fold's `usd` and token columns (`tokIn`,
 `tokOut`, `tokCacheR`, `tokCacheW`), `opener` (`human` or `injected`),
 `fedTexts`, and `resumeNotice`, true when a text fed into the turn was the
 boot or crash continuation notice, the turn that redoes cut work. Every stamp
-is an event's time. Both files rotate at 32 MB to `<name>.1`, one predecessor
+is an event's time, and `fedT` and `firstOutT` are present only for a turn
+this kernel fed: a turn the CLI opened by itself (a channel message, a
+background task's notification, a scheduled prompt) has no feed, so its row
+carries neither rather than the previous turn's stamps. Both files rotate at 32 MB to `<name>.1`, one predecessor
 kept, so each pair stays under 64 MB; the reader reads both. The restart rows
 of `restart-cuts.jsonl` carry the kernel process's own `rssKb` and `cpuS`,
 sampled at its exit (the cut row) and at its settled boot (the boot row), so
@@ -2085,7 +2088,9 @@ state directory's ledgers (`restart-cuts.jsonl`, `restart-audit.jsonl`,
 `spend.json` for the day's total dollars) and from the running kernel's
 `GET /version` and `GET /perf`; it loads no kernel module and writes nothing.
 The text form prints one screen per window: restarts and the turns they cut
-(with the clean restarts and the boots that had no cut row, a crash respawn),
+(with the clean restarts and the boots that had no cut row, a crash respawn,
+whose cut count is unknown; the per-restart rate divides by the measured
+restarts alone),
 the reasons, the outage from exit to first serve and the reconcile settle (from
 the `bootSettled` rows), the quiet windows' waits and backstop firings (from
 the manager's `quiet-window` rows), the boot sweeps' orphans reaped, scopes
@@ -2097,14 +2102,16 @@ so), turn latency from the feed pop to the result and to the first output (from
 `turns.jsonl`, at millisecond resolution) beside the same interval from the
 state log's `working` and `waiting` rows (one-second resolution, the only
 latency available for turns before `turns.jsonl` existed), the machine cuts by
-cause, and the kernel process's resident memory and CPU at its exits. The live
+cause (a state-log pair broken by a machine cut is not a turn), and the kernel
+process's resident memory and CPU at its exits. The live
 block reads each `romp-session-*` scope's `memory.current` and `cpu.stat` on
 Linux (a `ps` tree walk where there is no cgroup), the kernel's pid, uptime,
 CPU, resident size and the pusher's idle-cycle share, and lists any
 conversation two Claude Code processes hold right now. Windows are days or
 weeks (`--window`), weeks anchored on `--anchor` (default the first restart's
 day in range), bounded by `--since` and `--until`, in the machine's local time
-unless `--tz` names a zone. The header names the machine `this machine`
+unless `--tz` names a zone; weeks are counted in local dates, so a clock change
+inside a week moves no boundary off local midnight. The header names the machine `this machine`
 unless `--label` says otherwise, so no hostname reaches the text by default. A
 missing ledger is named at the top, never a silent zero. `--json` prints the whole document (`schema` 1): `restarts`
 (each cut row joined to the boot that followed it), `quietWindows` (each

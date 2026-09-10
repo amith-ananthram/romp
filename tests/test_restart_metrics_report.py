@@ -46,7 +46,9 @@ class Frames(unittest.TestCase):
         self.assertEqual(fr["labels"], ["baseline", "after"])
         self.assertEqual([r["label"] for r in fr["windows"]], ["baseline", "after"])
         w = fr["windows"][0]
-        self.assertEqual((w["window"], w["restarts"], w["cutTurns"], w["cutTurnsPerRestart"]), ("week of 2026-09-10", 3, 3, 1.0))
+        self.assertEqual((w["window"], w["restarts"], w["cutTurns"], w["cutTurnsPerRestart"]), ("week of 2026-09-10", 3, 3, 1.5))
+        self.assertEqual((w["measuredRestarts"], w["unmeasuredRestarts"]), (2, 1))
+        self.assertEqual(rep.SMALL_N, 5)
         self.assertEqual((w["outageP50"], w["outageP90"], w["quietP50"], w["backstopFires"]), (2.5, 4.0, 297.0, 1))
         self.assertEqual(w["events"]["orphansReaped"], 1)
         self.assertEqual((w["resumedTurns"], w["redoTurns"], w["redoUsd"], w["spendUsd"]), (3, 1, 0.5, 15.5))

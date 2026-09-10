@@ -253,6 +253,23 @@ class DrainRows(unittest.TestCase):
 
 
 class LedgerRotation(unittest.TestCase):
+    def test_the_rotate_step_runs_under_the_ledger_lock(self):
+        """Review find (2026-09-10): two appenders crossing the size together would rotate twice and lose the
+        predecessor; the stat, the rename and the append share one lock."""
+        d = Path(tempfile.mkdtemp())
+        held = []
+        class Probe:
+            def __enter__(self_):
+                held.append("in")
+            def __exit__(self_, *a):
+                held.append("out")
+        with mock.patch.object(sb, "_LEDGER_LOCK", Probe()), mock.patch.object(sb, "LEDGER_ROTATE_BYTES", 10):
+            sb.append_turn_row(d, {"t": 1, "sid": SID})
+            sb.append_turn_row(d, {"t": 2, "sid": SID})       # rotates
+        self.assertEqual(held, ["in", "out", "in", "out"])
+        self.assertTrue((d / (sb.TURNS_FILE + ".1")).exists())
+        self.assertIsInstance(sb._LEDGER_LOCK, type(sb.threading.Lock()))
+
     def test_a_full_ledger_rotates_to_one_predecessor(self):
         d = Path(tempfile.mkdtemp())
         with mock.patch.object(sb, "LEDGER_ROTATE_BYTES", 60):
@@ -266,16 +283,51 @@ class LedgerRotation(unittest.TestCase):
 
 
 class TurnLedgerRow(unittest.TestCase):
-    def _sess(self, fed, first_out=None):
+    def _sess(self, fed, first_out=None, fed_t=1700000000.125):
         s = object.__new__(sb.SdkSession)
         s.sid, s.name, s.since = SID, "web", 1700000000
         s._inflight_texts = list(fed)
         s._turn_opener = "human"
         s._first_out_t = first_out
+        s._fed_t = fed_t
         return s
 
+    def test_a_turn_the_cli_opened_itself_carries_no_feed_stamps(self):
+        """Review find (2026-09-10): a self-opened turn (a channel message, a task notification, a scheduled
+        prompt) has nothing fed, and the stamps still in memory belong to the PREVIOUS fed turn, so the row
+        must carry neither fedT nor firstOutT rather than hours of feed-to-result."""
+        s = self._sess([], first_out=1700000004.25)
+        row = s._turn_ledger_row(types.SimpleNamespace(), now=1700003600)
+        self.assertNotIn("fedT", row)
+        self.assertNotIn("firstOutT", row)
+        self.assertEqual(row["fedTexts"], 0)
+        # a fed turn whose pop stamp was spent (a mid-turn forward run as its own turn) is unknown too
+        s2 = self._sess(["forwarded"], first_out=1700000004.25, fed_t=None)
+        self.assertNotIn("fedT", s2._turn_ledger_row(types.SimpleNamespace(), now=1700000010))
+
+    def test_fed_stamp_is_the_pop_at_millisecond_resolution(self):
+        s = self._sess(["x"], first_out=1700000004.25, fed_t=1700000000.125)
+        row = s._turn_ledger_row(types.SimpleNamespace(), now=1700000012.5)
+        self.assertEqual(row["fedT"], 1700000000.125, "the pop's own stamp, not `since` truncated to the second")
+        s.since = 1700000000   # `since` stays whole seconds for its other readers and is not what the row reads
+        self.assertEqual(s._turn_ledger_row(types.SimpleNamespace(), now=1700000012.5)["fedT"], 1700000000.125)
+
+    def test_feed_stamps_are_spent_at_the_settle(self):
+        """The ResultMessage branch resets _fed_t and _first_out_t right after the row, in the finally, ahead of
+        the settle; and the row is written from the finally, so a bookkeeping fault (a spend-fold exception)
+        still leaves it. Pinned on the source, which is where the ordering lives."""
+        import inspect
+        src = inspect.getsource(sb.SdkSession._on_message)
+        i_fin = src.index("finally:\n                # T304: one durable row per settled turn")
+        i_row = src.index("append_turn_row(self.backend.state_dir, self._turn_ledger_row(msg, delta, turn_u))")
+        i_reset = src.index("self._fed_t = None               # the turn's feed stamps are spent")
+        i_settle = src.index("everything that makes the turn over for the kernel")   # the finally's own comment
+        self.assertTrue(i_fin < i_row < i_reset < i_settle, "row, then the reset, then the settle, all inside the finally")
+        self.assertIn("elif isinstance(msg, ResultMessage):\n            delta = turn_u = None", src,
+                      "the fold's names exist before the branch's try, so the finally can always read them")
+
     def test_row_fields_and_stamps(self):
-        s = self._sess(["do the thing"], first_out=1700000004.25)
+        s = self._sess(["do the thing"], first_out=1700000004.25, fed_t=1700000000)
         msg = types.SimpleNamespace(duration_ms=12345, duration_api_ms=9000, num_turns=3, is_error=False)
         row = s._turn_ledger_row(msg, 0.1234567, {"input_tokens": 10, "output_tokens": 20,
                                                    "cache_read_input_tokens": 30, "cache_creation_input_tokens": 40},
@@ -290,7 +342,7 @@ class TurnLedgerRow(unittest.TestCase):
         self.assertEqual((row["opener"], row["resumeNotice"], row["fedTexts"]), ("human", False, 1))
 
     def test_resume_notice_marks_the_redo_turn(self):
-        s = self._sess([sb.BOOT_RESUME_NUDGE, "and my queued question"])
+        s = self._sess([sb.BOOT_RESUME_NUDGE, "and my queued question"], fed_t=1700000000.5)
         row = s._turn_ledger_row(types.SimpleNamespace(), None, None, now=1700000001)
         self.assertTrue(row["resumeNotice"])
         self.assertEqual(row["fedTexts"], 2)

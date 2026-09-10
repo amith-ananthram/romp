@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""romp-restart-metrics — what kernel restarts do to the sessions, measured. `romp restart-metrics`.
+"""romp-restart-metrics: what kernel restarts do to the sessions, measured. `romp restart-metrics`.
 
 Stage 0 of the restart-surviving sessions program (part of #1317): before any restart behaviour changes,
 the monitors exist, a baseline is recorded, and the same reader keeps running after the change. This is
@@ -22,7 +22,7 @@ Sources, and what each stamp is (every stamp is an EVENT's time, never the clock
                          atom), resultT (the ResultMessage), the CLI's own durationMs / apiMs, the spend
                          fold's usd and tokens, resumeNotice (a turn redoing cut work)
   states/<sid>.jsonl     the state log: working (written at the feed pop) to waiting (the ResultMessage),
-                         one-second resolution — the latency the baseline has for turns before turns.jsonl
+                         one-second resolution, the latency the baseline has for turns before turns.jsonl
                          existed; machineCut rows count romp's own cuts by cause
   spend.json             hour and day buckets per session (no per-turn rows: redo cost cannot come from it,
                          and this says so); the day's total dollars, for the redo ratio
@@ -129,20 +129,31 @@ def day_start(date_str: str, tz=None) -> float:
     return d.timestamp()
 
 
+def _date(s: str):
+    from datetime import date
+    y, m, d = (int(x) for x in s.split("-"))
+    return date(y, m, d)
+
+
 def bucket_key(t, kind: str, anchor: str, tz=None) -> str:
     """The window a stamp falls in: the day's date, or for weeks the anchor date plus a whole number of
-    weeks ("week of YYYY-MM-DD"); days before the anchor bucket backwards the same way."""
+    weeks ("week of YYYY-MM-DD"); days before the anchor bucket backwards the same way. Weeks are counted
+    in LOCAL DATES, not multiples of 604800 seconds, so a daylight-saving change inside a week moves no
+    boundary off local midnight (review find, 2026-09-10)."""
     if kind == "day":
         return local_date(t, tz)
-    a = day_start(anchor, tz)
-    n = int((float(t) - a) // (7 * 86400))
-    return "week of " + local_date(a + n * 7 * 86400 + 3600, tz)
+    days = (_date(local_date(t, tz)) - _date(anchor)).days
+    n = days // 7
+    return "week of " + (_date(anchor) + timedelta(days=7 * n)).isoformat()
 
 
 def bucket_bounds(key: str, kind: str, tz=None) -> tuple[float, float]:
+    """[start, end) of a bucket in epoch seconds: local midnight of its first day to local midnight of the
+    day after its last (a week's end is the SEVENTH local midnight, whatever the clocks did in between)."""
     date = key.replace("week of ", "")
     s = day_start(date, tz)
-    return s, s + (7 * 86400 if kind == "week" else 86400)
+    e = day_start((_date(date) + timedelta(days=7 if kind == "week" else 1)).isoformat(), tz)
+    return s, e
 
 
 # ── the ledgers, parsed ─────────────────────────────────────────────────────────────────────────────────
@@ -267,7 +278,7 @@ def parse_turns(rows: list[dict]) -> list[dict]:
 def state_log_turns(lines: list[str]) -> tuple[list[dict], dict]:
     """(turns, machine cuts) from one states/<sid>.jsonl: each `working` row followed by a `waiting` row
     (not romp's own `by`-marked settle, an interrupt) is a turn with feedToResultS at one-second
-    resolution — the feed pop and the ResultMessage are what those two writes ARE. machineCut rows count
+    resolution; the feed pop and the ResultMessage are what those two writes ARE. machineCut rows count
     romp's cuts by cause. Pure."""
     turns, cuts = [], {}
     open_t = None
@@ -281,6 +292,8 @@ def state_log_turns(lines: list[str]) -> tuple[list[dict], dict]:
         if "machineCut" in r:
             c = str(r["machineCut"])
             cuts[c] = cuts.get(c, 0) + 1
+            open_t = None      # the cut turn never gets its result: the resumed turn's `waiting` is not its end
+            #                    (review find, 2026-09-10: the pair spanned the outage and the redo)
             continue
         st = r.get("state")
         t = r.get("t")
@@ -435,7 +448,9 @@ def build_buckets(restarts, quiet, events, turns, statelog_turns, machine_cuts, 
         b["stateLogLatencyS"] = stats(b.pop("_sl"))
         b["kernelAtExit"] = {"rssMb": stats(b.pop("_k_rss")), "cpuS": stats(b.pop("_k_cpu"))}
         b["redo"]["usd"] = round(b["redo"]["usd"], 4)
-        b["cutTurnsPerRestart"] = round(b["cutTurns"] / b["restarts"], 2) if b["restarts"] else None
+        b["measuredRestarts"] = b["restarts"] - b["restartsWithoutCutRow"]   # a boot with no cut row cut an UNKNOWN
+        #                                                                        number of turns, not zero (review find)
+        b["cutTurnsPerRestart"] = round(b["cutTurns"] / b["measuredRestarts"], 2) if b["measuredRestarts"] else None
         out.append(b)
     return out
 
@@ -697,8 +712,10 @@ def collect(state: Path, kind="day", anchor=None, tz=None, since=None, until=Non
                      "reader's kernel change landed; the spend ledger (spend.json) has hour and day buckets per "
                      "session and no per-turn rows, so it cannot attribute a turn's cost.",
                      "Turn latency: turns.jsonl stamps are event stamps at millisecond resolution (feed pop, "
-                     "first work atom, ResultMessage); stateLogLatencyS is the same feed-to-result interval "
-                     "from the state log at one-second resolution, available for turns before turns.jsonl."]}
+                     "first work atom, ResultMessage), present only for turns this kernel fed (a turn the CLI "
+                     "opened by itself has no feed and is not a latency sample); stateLogLatencyS is the same "
+                     "feed-to-result interval from the state log at one-second resolution, available for turns "
+                     "before turns.jsonl, and a pair broken by a machine cut is not a turn."]}
     doc["live"] = live_snapshot(state) if live else {"skipped": True}
     return doc
 
@@ -741,7 +758,7 @@ def summary(doc: dict) -> str:
     """The one-screen text per window."""
     w = doc["window"]
     src = doc["sources"]
-    lines = ["restart metrics: %s, %s windows, anchor %s, times %s"
+    lines = ["restart metrics: %s, %s windows, anchor %s, dates in %s time"
              % (doc.get("label") or DEFAULT_LABEL, w["kind"], w["anchor"], w["tz"])]
     missing = [k for k in ("restartCuts", "restartAudit", "sessionEvents", "turns") if not (src.get(k) or {}).get("present")]
     if missing:
@@ -750,9 +767,9 @@ def summary(doc: dict) -> str:
         lines.append("  no rows in range")
     for b in doc["buckets"]:
         lines.append("")
-        lines.append("%s  (%s to %s)" % (b["key"], time.strftime("%Y-%m-%d", time.localtime(b["start"])),
-                                          time.strftime("%Y-%m-%d", time.localtime(b["end"] - 1))))
-        per = (" (%s per restart)" % b["cutTurnsPerRestart"]) if b["cutTurnsPerRestart"] is not None else ""
+        tz = None if w.get("tz") in (None, "local") else w["tz"]
+        lines.append("%s  (%s to %s)" % (b["key"], local_date(b["start"], tz), local_date(b["end"] - 1, tz)))
+        per = (" (%s per measured restart)" % b["cutTurnsPerRestart"]) if b["cutTurnsPerRestart"] is not None else ""
         lines.append("  restarts %d · turns cut %d%s · clean restarts %d · boots with no cut row %d"
                      % (b["restarts"], b["cutTurns"], per, b["cleanRestarts"], b["restartsWithoutCutRow"]))
         if b["reasons"]:
@@ -821,6 +838,8 @@ def main(argv=None) -> int:
     try:
         since = day_start(a.since, a.tz) if a.since else None
         until = day_start(a.until, a.tz) if a.until else None
+        if a.anchor:
+            day_start(a.anchor, a.tz)
     except ValueError as e:
         sys.stderr.write("romp restart-metrics: bad date: %s\n" % e)
         return 2

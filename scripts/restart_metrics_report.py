@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""restart_metrics_report — the before-versus-after figures for the restart monitors (T304, stage 0 of the
+"""restart_metrics_report: the before-versus-after figures for the restart monitors (T304, stage 0 of the
 restart-surviving sessions program, part of #1317).
 
 Reads one or more documents `romp restart-metrics --json` wrote (a baseline snapshot and a later one, or
@@ -46,6 +46,7 @@ def anonymize_default(out) -> bool:
         return not Path(out).resolve().is_relative_to(STATE_ROOT.resolve())
     except (OSError, ValueError):
         return True
+SMALL_N = 5   # below this many turns a window's latency is drawn as its points, not a box (the small-n ruling)
 EVENT_COLUMNS = (("orphansReaped", "Orphans reaped at boot"), ("scopesStopped", "Leftover scopes stopped"),
                  ("duplicateClis", "Two CLIs on one conversation"), ("crashHeals", "Crash heals"),
                  ("crashLoops", "Crash loops"), ("drainLeftClosing", "Drain left closing"),
@@ -86,6 +87,8 @@ def frames(docs, anonymize=True) -> dict:
             rows.append({
                 "label": label, "window": b["key"], "restarts": b.get("restarts", 0), "cutTurns": b.get("cutTurns", 0),
                 "cutTurnsPerRestart": b.get("cutTurnsPerRestart"), "cleanRestarts": b.get("cleanRestarts", 0),
+                "measuredRestarts": b.get("measuredRestarts", b.get("restarts", 0) - b.get("restartsWithoutCutRow", 0)),
+                "unmeasuredRestarts": b.get("restartsWithoutCutRow", 0),
                 "outageP50": out.get("p50"), "outageP90": out.get("p90"), "outageN": out.get("n", 0),
                 "settleP50": set_.get("p50"), "settleP90": set_.get("p90"),
                 "quietWindows": b.get("quietWindows", 0), "quietP50": qw.get("p50"), "quietP90": qw.get("p90"),
@@ -171,7 +174,8 @@ def fig_cut_turns(cp, fr, out):
     vals = [r["cutTurns"] for r in rows]
     ax1.barh(ys, vals, color=[pal[r["label"]] for r in rows], legend=False)
     for y, r in zip(ys, rows):
-        ax1.annotate("%d of %d restarts cut" % (r["restarts"] - r["cleanRestarts"], r["restarts"]),
+        unm = (", %d unmeasured" % r["unmeasuredRestarts"]) if r["unmeasuredRestarts"] else ""
+        ax1.annotate("%d of %d measured restarts cut%s" % (r["measuredRestarts"] - r["cleanRestarts"], r["measuredRestarts"], unm),
                      (r["cutTurns"], y), xytext=(4, 0), textcoords="offset points", va="center", fontsize=11)
     ax1.set_yticks(ys)
     ax1.set_yticklabels(_ylabels(rows))
@@ -286,7 +290,10 @@ def fig_turn_latency(cp, fr, out):
     ax = axs[0] if have_first else axs
     positions = list(range(len(series)))
     for pos, (r, s, ev) in zip(positions, series):
-        ax.box([s], positions=[pos], showfliers=False, color=pal[r["label"]], legend=False, widths=0.6, vert=False)
+        if len(s) < SMALL_N:
+            ax.scatter(s, [pos] * len(s), color=pal[r["label"]], legend=False, s=50)
+        else:
+            ax.box([s], positions=[pos], showfliers=False, color=pal[r["label"]], legend=False, widths=0.6, vert=False)
         ax.annotate("n=%d%s" % (len(s), "" if ev else ", state log (1 s)"), (1.0, pos), xycoords=("axes fraction", "data"),
                     xytext=(6, 0), textcoords="offset points", va="center", fontsize=10)   # past the axis, clear of the whiskers
     ax.set_yticks(positions)
@@ -297,7 +304,10 @@ def fig_turn_latency(cp, fr, out):
         ax2 = axs[1]
         pos2 = list(range(len(have_first)))
         for pos, (r, s) in zip(pos2, have_first):
-            ax2.box([s], positions=[pos], showfliers=False, color=pal[r["label"]], legend=False, widths=0.6, vert=False)
+            if len(s) < SMALL_N:
+                ax2.scatter(s, [pos] * len(s), color=pal[r["label"]], legend=False, s=50)
+            else:
+                ax2.box([s], positions=[pos], showfliers=False, color=pal[r["label"]], legend=False, widths=0.6, vert=False)
         ax2.set_yticks(pos2)
         same_rows = [(r["label"], r["window"]) for r, _ in have_first] == [(r["label"], r["window"]) for r, _, _ in series]
         ax2.set_yticklabels([""] * len(pos2) if same_rows else ["%s · %s" % (r["label"], r["window"]) for r, _ in have_first])
