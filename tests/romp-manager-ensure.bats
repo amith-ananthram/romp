@@ -327,3 +327,47 @@ PYEOF
     [ "$(grep -c spawn "$SPAWNS")" -eq 2 ]                    # the work ended → the quiet event applies
     curl -fsS -X POST "http://127.0.0.1:$CPORT/stop" >/dev/null 2>&1 || true
 }
+
+@test "ensure: a romp down marker holds the auto-start: no manager comes up, exit 0, the reason said" {
+    command -v node >/dev/null 2>&1 || skip "node not available"
+    command -v curl >/dev/null 2>&1 || skip "curl not available"
+    # setup's free_port pair, like every other test here: a literal pair once collided with another
+    # suite's control port, where a concurrent run's manager answered the probe and ensure said nothing
+    local state="$TEST_DIR/state" SPAWNS="$TEST_DIR/spawns" FAKEK="$TEST_DIR/fake-serve-recording"
+    # a launcher that records each spawn: whether ensure started a manager is read off the record
+    # that manager's kernel would leave, never off a clock
+    printf '#!/usr/bin/env bash\necho spawn >> "%s"\nexec sleep 30\n' "$SPAWNS" > "$FAKEK"
+    chmod +x "$FAKEK"
+    mkdir -p "$state"
+    printf '{"t": %s, "cmd": "romp down"}\n' "$(date +%s)" > "$state/down-by-romp"
+    run env ROMP_STATE_DIR="$state" ROMP_MANAGER_PORT=$CPORT ROMP_SERVE_PORT=$MPORT ROMP_SERVE_BIN="$FAKEK" node "$MGR" ensure
+    local ensure_status=$status ensure_output=$output marker_kept=0
+    [ -f "$state/down-by-romp" ] && marker_kept=1
+    # the deliberate `up` starts BEFORE the assertions on ensure: it takes the control port, so a
+    # manager an ensure that ignored the marker spawned detached either finds the port taken and
+    # exits, or holds it and is what teardown's /stop reaps. Asserting first would leave that stray
+    # to come up after a failed test ended, with nothing left to stop it (it happened: its launcher
+    # gone with the test dir, its respawn fell through to the machine's own romp-serve).
+    env ROMP_STATE_DIR="$state" ROMP_MANAGER_PORT=$CPORT ROMP_SERVE_PORT=$MPORT ROMP_SERVE_BIN="$FAKEK" node "$MGR" up >"$TEST_DIR/up.log" 2>&1 &
+    MGR_PID=$!
+    [ "$ensure_status" -eq 0 ]                # the far-host update or restart is not failing: the kernel is down on purpose
+    [[ "$ensure_output" == *"stopped by \`romp down\`"* ]]
+    [[ "$ensure_output" == *"romp up"* ]]
+    [ "$marker_kept" -eq 1 ]                  # ensure never clears it; only a deliberate start does
+
+    # ...and the deliberate `up` clears the marker and comes up, the ONE manager this test starts:
+    # its kernel is the one spawn on the record. A manager ensure had started would have recorded a
+    # spawn of its own (and cleared the marker itself), so a count of one says ensure spawned nothing.
+    local i
+    for i in $(seq 1 40); do
+        curl -fsS "http://127.0.0.1:$CPORT/status" >/dev/null 2>&1 && [ -s "$SPAWNS" ] && break
+        sleep 0.1
+    done
+    run curl -fsS "http://127.0.0.1:$CPORT/status"
+    [ "$status" -eq 0 ]
+    [ ! -e "$state/down-by-romp" ]
+    grep -q 'cleared the `romp down` marker' "$TEST_DIR/up.log"
+    [ "$(grep -c spawn "$SPAWNS")" -eq 1 ]
+    curl -fsS -X POST "http://127.0.0.1:$CPORT/stop" >/dev/null 2>&1 || true
+    for i in $(seq 1 60); do kill -0 "$MGR_PID" 2>/dev/null || break; sleep 0.1; done
+}

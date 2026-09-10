@@ -19,10 +19,11 @@ update` starts a session called "update".
 | `romp new -d <dir> <name>` | Start it in `<dir>` instead of the current folder |
 | `romp new -t <name>` | Start it as a terminal (tmux) session and attach; add `--detach` to leave it running |
 | `romp resume` | Resume a past conversation, chosen from a full-screen picker |
-| `romp status` | Manager and kernel status |
+| `romp status` | Manager and kernel status; a kernel stopped by `romp down` says so |
 | `romp refresh` | Restart the postal bus and every kernel immediately, picking up new code (cut turns resume with their history) |
-| `romp update [host…]` | Push this machine's committed Romp to attached remotes and restart them at once (every deploy restart is immediate; boot reconcile resumes the cut turns with their history) |
-| `romp up` | Run the kernel manager in the foreground; rare, since the login service runs it |
+| `romp update [host…]` | Push this machine's committed Romp to attached remotes and restart them at once (every deploy restart is immediate; boot reconcile resumes the cut turns with their history); a remote stopped by `romp down` is synced and left stopped |
+| `romp up` | Start the kernel: through the login service when one is installed, in the foreground otherwise. Clears a `romp down` marker |
+| `romp down` | Stop the kernel and keep it stopped until `romp up`. Turns in flight get 5 seconds to finish first; sessions resume with their history at the next start. See [Stopping the kernel on purpose](#stopping-the-kernel-on-purpose) |
 | `romp version` | Version report across the moving parts |
 | `romp help` | The same list, from the terminal |
 
@@ -35,6 +36,7 @@ These are for scripting and for agents rather than daily use:
 | `romp perf [--interval <s>] [--json]`, `romp perf log on\|off` | The kernel's performance counters as rates over two snapshots (below); `--json` prints one raw snapshot; `log on\|off` turns the `romp-perf` stderr log on or off without a restart |
 | `romp perf client [--minutes <n>] [--json]` | What the open dashboards' browsers spent on the frames they received (below): handler milliseconds per minute by frame type with window p50/p90/p99 and max, the worst minute's main-thread-free p90, long animation frames and their attributed callbacks, the worst minute, heap and DOM, the slowest frames, per dashboard and pane over the last `<n>` minutes (default 10) |
 | `romp api-health` | The API-health signal as JSON (see [The API-health signal](#the-api-health-signal)): per-credential, per-model-family retry and give-up rates over rolling windows, with a derived state |
+| `romp restart-metrics [--json] [--window day\|week] [--anchor D] [--since D] [--until D] [--tz Z] [--no-live]` | What kernel restarts do to the sessions (see [Restart metrics](#restart-metrics)): turns cut per restart and per window, outage and reconcile times, quiet-window waits, orphans and reaps, crash heals, redo cost, turn latency, per-session and kernel memory and CPU; a text summary per window, or the whole document as JSON |
 | `romp mail …` | The postal service from the shell (below) |
 | `romp send <session> [--tag <label>] <text>` | Hand a session a message, on either backend. Anything a script, cron job, or launcher composes SHOULD carry a tag (one word, letters/digits/dashes, up to 24 chars): the chat then renders it as machine-sent under that label instead of as the user's typed words. Raw POST /send callers pass it as the JSON `tag` field (`{name, text, tag}`; a malformed tag fails the whole send, loudly); `--tag` is the CLI's equivalent. Both resolve to the `<!-- romp-tag: <label> -->` marker in the delivered text |
 | `romp new --env NAME=VALUE <name>` | A per-session env var for the SDK session, repeatable; a re-run against a running `<name>` replaces the whole set; vars not re-named are dropped |
@@ -51,6 +53,8 @@ These are for scripting and for agents rather than daily use:
 | `romp debug [on\|off\|status]` | Judge debug mode, where rejection rows carry the full input and reply |
 | `romp resume <id> [--name <n>] [--detach]` | Resume one exact conversation by UUID |
 | `romp refresh --quiet` | Refresh at the next quiet window instead — waits for sessions to finish their turns (15-min backstop). The ONLY door to the quiet window: a deploy (a peer's `romp update`, a release self-update, an automatic converge) restarts immediately, by the user's 2026-09-08 decision |
+| `romp down --wait <s>`, `romp down --now` | How long `romp down` waits for turns in flight to finish (0 to 600 seconds; default 5), or no wait at all |
+| `romp up --foreground` | Run the manager in this terminal even with a login service installed (its log in front of you); the manager refuses to start beside a running one |
 
 Raw `POST` callers, anything that talks to the kernel's routes directly rather
 than through `romp`, follow one body contract, and the postal bus's own routes
@@ -763,12 +767,159 @@ vault item, and does nothing else. Remote kernels each read their own
 machine's Claude Code settings, so a key shared across machines rotates once,
 in the vault, and everywhere within the TTL.
 
+### Stopping the kernel on purpose
+
+`romp down` stops the kernel and keeps it stopped until `romp up`. The manager
+is supervised (`Restart=always` under systemd, `KeepAlive` under launchd), so a
+kernel or manager that merely exits is back within seconds, and Ctrl+C is not
+available to a manager the service runs. `romp down` instead stops the login
+service itself (`systemctl --user stop romp-manager.service`; on macOS
+`launchctl bootout` of the agent), which nothing respawns, and then probes the
+processes themselves rather than trusting the exit code of `romp-service stop`.
+
+Before stopping, `romp down` gives the turns in flight `--wait` seconds
+(default 5, up to 600) to reach a turn boundary. It asks the kernel to quiesce
+(`POST /down`), which holds new turn starts and new session creation, and then
+reports whether the kernel went quiet or which sessions are still mid-turn and
+about to be cut. The wait ends on the event the in-flight count reaches zero;
+`--wait` is only its bound. `--now` skips the wait, not the request: when a
+kernel answers on the port, the same `POST /down` goes out with a wait of 0 and
+nothing is reported about it, so the token check below still comes first; the
+hold it arms is the grace the kernel keeps after any wait, and the kernel probe
+re-arms it right before the signal. A `romp new` or a dashboard create during
+the hold is refused with one line saying the kernel is being stopped on purpose
+and no new session can start; the line names no command, because inside a
+session its reader is an agent, and an agent told to run `romp up` would undo
+the stop. If the stop never lands, the kernel carries on by itself: the hold is
+a lease, and it lapses 30 seconds after the wait. The stop then cuts what a
+`romp refresh` cuts, and it comes back the same way (see
+[What survives a restart](#what-survives-a-restart)).
+
+`romp down` signals only a kernel it has confirmed as its own: one that
+accepted this romp's serve token on `POST /down` and named the pid that
+`GET /version` also reports. A kernel that rejects the token (HTTP 401 or 403)
+is another romp's or another program's. When the quiesce request is rejected,
+`romp down` prints `romp down: the kernel on :<port> is not the one this romp
+manages (it rejected the serve token); not touching it. Check
+ROMP_KERNEL_PORT and the state dir` and exits 1, before the marker is written
+or anything is stopped. Under `--now` the same request goes out with a wait of
+0 whenever a kernel answers on the port, so a rejected token ends the command
+at the same point; the kernel probe asks again right before the signal, and a
+rejection there removes the marker.
+
+The exit code of `romp-service stop` decides the first step; the probes after
+it run every time:
+
+- Exit 0 (the unit or agent stopped), 3 (no login service installed) or 4
+  (installed but not running): on to the probes. After a 3 or a 4, any manager
+  running is outside the service (a foreground `romp up`, a hand
+  `romp-manager up`).
+- Any other exit: the service refused to stop, and the kernel is most likely
+  still up. `romp down` releases the quiesce hold, removes its marker, prints
+  `romp down: the login service did not stop` and exits 1.
+- The manager probe: `romp-manager status` on the control port (`:7432` by
+  default). A manager that answers is stopped through its own control endpoint
+  (`romp-manager down`, a `POST /stop`) and polled until it leaves; the poll's
+  bound is seven seconds, the manager's own five-second grace for its kernels
+  (it sends SIGKILL to one still there) plus its exit. One still answering
+  after that: `romp down` releases the hold, removes the marker, prints
+  `romp down: a manager is still running on :<port> (pid <pid>)`, which says
+  to stop it by hand and run `romp down` again, and exits 1.
+- The kernel probe: `GET /healthz` on the kernel port (`:29855` by default). A
+  kernel the earlier steps already asked to stop is polled for up to three
+  seconds first, the bound on its own drain. One still answering (it ran with
+  no manager, or outlived the manager's SIGTERM) must first be confirmed as
+  this romp's: `POST /down` with a wait of 0 under the serve token must answer
+  200 naming a pid, and `GET /version` must name the same pid. That pid is
+  sent the manager's own stop signal (SIGTERM) and polled for up to six
+  seconds to leave. Any other answer (a rejected token, a 200 without a pid, a
+  pid `GET /version` disagrees with, another HTTP code, no answer) leaves the
+  kernel alone: `romp down` releases the hold, removes the marker, appends a
+  superseding `down-failed` row to `restart-audit.jsonl`, prints
+  `romp down: the kernel on :<port> was not confirmed as the one this romp
+  manages (<why>); not touching it. Check ROMP_KERNEL_PORT and the state dir`
+  (a rejected token gets the rejected-token line instead) and exits 1. One
+  still answering six seconds after the signal gets the same release and
+  `down-failed` row, then
+  `romp down: the kernel on :<port> (pid <pid>) is still running after being
+  asked to stop`, which says to stop it by hand and run `romp down` again,
+  and exits 1.
+- Nothing left answering: a `[romp] down` line that says what stopped (the
+  service, a manager outside it, a kernel the probe found, or a kernel that
+  answered the quiesce and has since gone) and names `romp up`, or
+  `[romp] nothing was running` when neither the service nor a manager was up
+  (the auto-start stays held until `romp up`), and exit 0.
+
+With a login service installed, the unit stays enabled, so it comes back at
+`romp up` or when the service manager next starts it. On Linux that is the
+next boot, not the next login: `romp-service install` enables linger, so your
+`systemd --user` instance outlives your logins and a stopped unit stays
+stopped through them (where the linger call failed, the instance ends at
+logout and the next login starts the unit again). On macOS the booted-out
+agent loads again at the next login.
+
+The stop leaves a marker, `down-by-romp` under the state directory (with the
+time and the command), so the stopped kernel reads as stopped on purpose. While
+the marker exists and no manager answers, `romp status` prints
+`down (romp down at HH:MM; romp up to start)` and exits 0 instead of the
+manager's not-running error; a marker from an earlier day shows its date
+(`down (romp down at 2026-09-04 17:12; romp up to start)`), and one with no
+readable time drops it (`down (romp down; romp up to start)`). A manager that
+does answer outranks the marker: `romp status` prints its usual report and
+exits 0. `romp-service status` reports the marker too, as
+`stopped by romp down at HH:MM (romp up to start)`.
+
+The marker also blocks romp's other ways of bringing the kernel back.
+`romp-manager ensure` refuses to bring the manager back. `ensure` is the
+supervised start that `romp update <host>` and the dashboard's remote restart
+run on the far host, so a remote stopped by `romp down` is left stopped:
+`romp update` syncs its code, restarts nothing, and says so, and `romp up`
+there boots the new code. The dashboard's Start button and an attach's
+bootstrap, which boot a bare kernel on a host with no manager, decline the same
+way and name `romp up` on that host. `romp up` clears the marker and starts the
+service; a manager started any other deliberate way (the login service at the
+next boot, a hand `systemctl --user start`) clears it too.
+
+`romp down` also appends a row to `restart-audit.jsonl` that names the action,
+so the kernel's restart-cut ledger records the cut as a `down`, not an
+anonymous SIGTERM; a `romp down` whose stop did not land appends a superseding
+`down-failed` row, so a later cut of the kernel it left running is never
+blamed on it.
+
+Sessions come back at the next `romp up` from what is already on disk: the
+kernel's boot reconcile reads each session's registry entry and state tail and
+needs nothing written at shutdown. A session whose turn had ended before the
+stop is revived on demand, with its history, the next time something reaches
+it; a session cut mid-turn is resumed at boot and told its turn was cut. When
+the stop was a `romp down` (the newest `restart-audit.jsonl` request row is a
+`down`, and the cut turn started at or before its time), the notice also gives
+the stop time, the start time and the gap, so a model resumed hours later
+re-checks what it was running before relying on it.
+
+Terminal (tmux) sessions survive the stop where they survive a service restart
+(see [What survives a restart](#what-survives-a-restart)): on Linux
+`systemctl --user stop` kills everything in the service's cgroup, so the tmux
+server and its sessions live on only when the manager started it in its own
+transient scope (the default under the service; off with `ROMP_CLI_SCOPE=0`,
+and not true of a tmux server that predates the scopes). On macOS there is no
+cgroup kill, and the tmux server survives the stop.
+
+Only `romp refresh` stops the postal bus on purpose; `romp down` leaves it
+alone, but on Linux a bus the kernel started dies with the service anyway: the
+kernel runs `romp-postal-service ensure` at boot, which spawns the bus in a
+process session of its own but inside the service's cgroup, and the service
+stop kills that cgroup. A bus started from a session's postal MCP server lives
+in that session's scope and keeps running. Either way the next kernel boot runs
+`ensure` again, so at worst mail parks until `romp up`.
+
 ### What survives a restart
 
 A kernel restart ends every session's CLI. On `romp refresh`, the manager's
-restart-all or a service stop, the kernel receives SIGTERM and drains: it
+restart-all, `romp down` or a service stop, the kernel receives SIGTERM and drains: it
 closes each CLI, and a CLI still running when the drain's bound expires gets
-SIGTERM, then SIGKILL. A crash respawn has no drain: the kernel died without
+SIGTERM, then SIGKILL. The manager does the same to the kernel: one still
+running five seconds after the manager's SIGTERM, on a restart as on a stop,
+gets SIGKILL, so no kernel outlives the stop that was meant for it. A crash respawn has no drain: the kernel died without
 running one, its CLIs are orphaned, and the next kernel's boot reaper
 terminates them (see below). The CLI's harness background tasks do not all end
 with it. Its timers and monitors live inside the CLI process and end when it
@@ -799,6 +950,33 @@ session has no stream-json channel. `tests/test_cli_control_protocol_probe.py`
 re-checks the two facts that need no model call (the second initialize, the
 `--bg` refusal) when run with `ROMP_CLI_PROBE_LIVE=1` and a `claude` on PATH; it
 skips otherwise, as every test that would reach the live CLI must.
+
+Who owns a running CLI is a lease, not its parent process. The kernel writes
+`leases/<sid>.json` under the state directory the moment the SDK connect hands
+it a CLI: the CLI's pid and start time, the kernel's own pid and start time as
+the holder, the kernel's code version, and a heartbeat the kernel refreshes
+every three seconds while the CLI runs; the lease holds for twelve seconds past
+its last beat (the deploy drain hold's cadence: four beats, so it outlives a
+missed beat and not a dead holder). The lease is removed when the CLI's client
+closes, so only a kernel death leaves one behind. A lease is valid when its beat
+is fresh, its holder is alive and its CLI is alive, each identified by pid and
+start time together, never pid alone. The boot reaper reads the leases: a CLI
+with a valid lease is owned by its holder whatever its parent, so a CLI
+re-parented by a wrapper or a debugger (and, later, one kept by a per-session
+host) survives the boot; a CLI parented to a live kernel without a lease is kept
+and reported, so the sessions of a kernel from before leases survive the upgrade
+boot; every other CLI of ours is an orphan and is ended with its tree. Since the
+kernel is the holder, a crashed kernel's leases are invalid at the next boot and
+its CLIs are reaped as before, keeping one writer per transcript. The scope sweep
+spares an owned CLI's scope, and the interrupt escalation signals the leased CLI
+first, so a re-parented CLI is still stoppable. Every anomaly the census meets (a
+CLI without a lease, a lease without a live process or holder, a stale
+heartbeat, a lease from another code version) is a problem row: prose in the
+error center, the same prose with a JSON object on the kernel log line, and one
+JSON line in `session-events.jsonl` under the state directory, the shape the
+restart monitors read. Two CLIs on one conversation is the boot sweep's own row
+there. The CLI takes no lock on a transcript it resumes, so the one writer per
+conversation is entirely the lease's to keep.
 
 A message the kernel cannot handle does not end the session's CLI. The kernel
 handles each streamed message on its own: when a handler raises, it logs the
@@ -1574,6 +1752,54 @@ own model and are exact.
   (the counter it landed in); `kind` (`retry` or `gaveup`). There is no text
   field, by design: the wire carries none today, and the transcript's 429 text
   names the organisation and the model.
+- `series`: attempts per minute over the longest window, for a graph: `binS`
+  (60), `from` (the start of the first bin; the last bin ends at `asOf`), and
+  five arrays of one integer per bin, oldest first: `ok`, `rateLimited` (429),
+  `serverErrors` (529 and other 5xx, the `rate5xx` numerator), `noStatus`
+  (connection-level failures) and `other`. Additive: the field arrived after
+  the document's other fields and `schema` stayed `1`; a reader that ignores it
+  sees the document it always saw.
+
+### On the dashboard
+
+The shell's rail carries one dot for the signal, placed after the `API` label
+of the spend readout: the accent colour when every connected kernel is fine,
+red when errors are being met anywhere (a 429 storm, 5xx failures, a machine
+offline, auto-retry paused), and the label gray when no kernel has API traffic
+in the windows. The hover and the pinned detail read the document in plain
+words rather than the state machine's vocabulary: traffic with no errors reads
+as what happened ("4 requests in the last 15 min, all succeeded"), with "too
+few requests to call a trend" as a sub-line while the machine still says
+`unknown`; errors read as the failures counted; no traffic reads as quiet. The
+word `unknown` stays in the document and appears nowhere on the dashboard. The
+graph is attempts per minute from `series`, 429 attempts in red and 5xx in
+orange, and one sentence explains the codes.
+
+The signal covers every connected kernel, not only the one serving the page.
+Each kernel serves its own last shell frame at `GET /api-health/frame` (its
+local half only, never its view of its peers), and the tunnel supervisor polls
+every attached host's frame (once per supervisor pass, about every 15 s; kept on
+a blip; kept and marked with a `fault` when the read is refused, a 403 from a
+rotated token or a 500; cleared when the host answers that it has none) and
+carries them in the shell frame under `hosts`, a map keyed by host name with
+each machine's `state`, class, headline, waiting count, since, pause reason,
+its `quiet` and `errs` flags when that kernel sends them, and a `stale` mark
+when that tunnel is not up or the read was refused (the frame's own `type`,
+`sessions` and `seq` stay on their kernel). The frame's `quiet` says that
+kernel saw no API event in its longest window and `errs` counts the attempts
+that failed in it; both come from the aggregator every cycle, so the frame
+changes, and is pushed, the moment the last failure ages out. The dot follows
+the frames alone: red when any reachable machine's frame is degraded, paused or
+holds a failed attempt (`errs`), gray when every reachable machine's frame says
+quiet, the accent otherwise; a machine whose tunnel is down or whose frame
+could not be read is named in the popup and has no say. The hover's history
+reads each attached host's document through `GET
+/remote/<host>/api-health`, a read relay beside the `/ws` and `/file` relays:
+the local token gates it, the remote's own token goes in the forwarded request,
+its document passes through as answered (404 for an unknown host, 502 when the
+tunnel is down). The merge happens in the browser and follows the federation
+rule: per-host maps in, one line per machine out, the worst state wins for the
+dot, and no count or clock is ever added to or compared with another kernel's.
 
 ### Derived state
 
@@ -1669,9 +1895,10 @@ logged, and never keeps the SDK backend from starting.
 
 ### The bottom bar's indicator
 
-The dashboard's bottom bar carries an API cell (a dot and a word beside the
-usage readout) that is computed independently of this signal, from two things
-the kernel owns directly:
+The dashboard's bottom bar carries an API cell (one small dot, placed inside
+the spend readout right after its `API` label; see "On the dashboard" above
+for its colours and its reading) whose frame is computed independently of this
+signal, from two things the kernel owns directly:
 
 - Each alive session's newest transcript API-error record, latched until the
   session produces assistant output again (a user prompt does not clear it,
@@ -1703,9 +1930,12 @@ again to a shell that sends `ready`:
 {"type": "apiHealth", "state": "ok | degraded | paused",
  "cls": "429 | 529 | offline | errors | ''", "reason": "'' | limit | spend | manual",
  "text": "<the rail's words>", "waiting": 0, "retrying": 0, "blocked": 0,
- "since": 0, "tmux": 0, "seq": 0,
+ "since": 0, "tmux": 0, "seq": 0, "quiet": false, "errs": 0,
  "sessions": [{"sid": "", "name": "", "color": null, "kind": "retrying | blocked",
-               "cls": "", "status": null, "since": 0, "suppressed": false}]}
+               "cls": "", "status": null, "since": 0, "suppressed": false}],
+ "hosts": {"<host>": {"state": "ok | degraded | paused", "cls": "", "text": "", "waiting": 0,
+                      "retrying": 0, "blocked": 0, "since": 0, "reason": "", "tmux": 0, "quiet": false,
+                      "errs": 0, "stale": false, "fault": "HTTP 403 (only when the last read was refused)"}}}
 ```
 
 `seq` counts the retry-pause file's writes since the kernel started. A press
@@ -1721,33 +1951,45 @@ session's event (a record's timestamp, or the retrying turn's start), else 0.
 transcripts only. Every timestamp is an event's time, never the clock, so an
 unchanged world sends nothing. On-you failures (a too-long prompt, a spent
 model allowance, a dead credential, a refusal) are not counted; a spend cap is,
-and engages the `spend` pause in the same cycle.
+and engages the `spend` pause in the same cycle. `quiet` is true when this
+kernel's API-health aggregator saw no event in its longest window (or the
+kernel has no SDK backend), the fact behind the dot's gray before any history
+is read. `hosts` is every attached
+machine's own frame as the tunnel supervisor last heard it (the fields above
+minus `sessions` and `seq`, which stay on their kernel), keyed by host name,
+with `stale` true while that tunnel is not up; a kernel with no attached
+machines sends an empty map, and a kernel serving `GET /api-health/frame` to
+a peer sends its own frame without this map, so two kernels attached to each
+other never nest each other's view.
 
 The cell's hover and its click detail carry a **History** section read from
-this signal: the shell fetches `GET /api-health` when the hover or the detail
-opens, and again when a frame lands on an open one, authenticating with the
-dashboard's own cookie the way its other reads do. Nothing polls; the frame
-carries no history and is unchanged. The section shows `overall.state` with
-the worst bucket's `stateSince` and `why` (naming the bucket and the bucket
-count when there is more than one; a bucket the boot seeded is `unknown`
-since `bootAt`: the boot time or, when an older kernel's last row overlaps
-it, one millisecond past that row, because the backend seeds its `stateSince`
-with the stamp it serves as `bootAt`, the one the tail uses for the boot),
-one row per window from `config.windows` (`requests` plus `noStatus` as the
-attempts, saying how many of them had no status when there are any, `rate429`
-and `rate5xx` as percentages over the attempts with a status, `gaveUp`, and
-`sessionsRetrying` as the sessions that retried in the window; a window
-reads `no attempts` only when every one of those is zero; a window whose
-`complete` is false says how long the kernel has been up), up to six rows
-of `transitions` newest first with the state entered and how long it held
-(until the same bucket's next transition, `so far` for the current one; a
-hold from before `bootAt` ends at the boot, since every bucket comes back
-`unknown` at a restart), and the payload's `asOf`. A row the boot filed
+this signal: the shell fetches `GET /api-health` for this machine and `GET
+/remote/<host>/api-health` for every host in the frame's `hosts` when the
+hover or the detail opens, and again when a frame lands on an open one,
+authenticating with the dashboard's own cookie the way its other reads do.
+Nothing polls; the frame carries no history and is unchanged. Each machine's
+document is read in the plain words of "On the dashboard" above: over the
+longest window of `config.windows`, `requests` plus `noStatus` are the
+attempts, `rateLimited`, `serverErrors` (with `overloaded`), `otherErrors`
+and `noStatus` the failures, and `gaveUp` the turns that gave up; traffic with
+no failures reads as the successes counted, failures read counted in the
+machine's phrase (`thrashing` as a rate-limit storm, `degraded` as the API
+failing), and no attempts read as quiet; the state machine's word itself is
+never shown. Under each machine's reading sits the graph from `series`, then
+one legend sentence for the codes, and this machine's State changes: up to
+four rows of `transitions` newest first with the state entered in plain words
+(`rate-limit storm`, `API failing`, `recovering`, `fine`, `quiet`) and how
+long it held (until the same bucket's next transition, `so far` for the
+current one; a hold from before `bootAt` ends at the boot, since every bucket
+comes back `unknown` at a restart; a bucket the boot seeded is `unknown` since
+`bootAt`: the boot time or, when an older kernel's last row overlaps it, one
+millisecond past that row, because the backend seeds its `stateSince` with the
+stamp it serves as `bootAt`), and the payload's `asOf`. A row the boot filed
 (`<state> -> unknown`, its `why` the restart reason) reads `kernel
 restarted`; where the tail crosses `bootAt` without such a row (the bucket
 was already `unknown` when the previous kernel stopped, so the boot filed
 nothing), a `kernel restarted` divider is inserted, and it takes none of the
-six slots. A read that fails (a non-2xx, no answer, or an answer without
+four slots. A read that fails (a non-2xx, no answer, or an answer without
 the signal's shape) shows one line saying so in place of the rows,
 never the previous numbers.
 
@@ -1798,11 +2040,12 @@ the automatic pass sends nothing whose record could not land, and the file
 keeps what it holds.
 
 Two files there record restarts. `restart-audit.jsonl` gets a row from
-whatever asks for one: `romp refresh`, the dashboard's restart button, the
-kernel's own update, and the manager before each SIGTERM it sends (action
-`manager-sigterm`, with a `trigger` naming what set it off: `restart`,
-`restart-all`, `refresh` for the stale-manager self-bounce, `stop` for any
-other). When a SIGTERM arrives, the kernel reads the last two hundred rows,
+whatever asks for one: `romp refresh`, `romp down`, the dashboard's restart
+button, the kernel's own update, and the manager before each SIGTERM it sends
+(action `manager-sigterm`, with a `trigger` naming what set it off: `restart`,
+`restart-all`, `refresh` for the stale-manager self-bounce, `cli-down` for a
+stop while `romp down`'s marker is on disk, `stop` for any other). When a
+SIGTERM arrives, the kernel reads the last two hundred rows,
 newest first, for a request within the last 90 seconds (20 minutes for a
 request that asked to wait for a quiet window) and no older than its own
 start: a request that predates the process was delivered to the kernel before
@@ -1810,24 +2053,27 @@ it, so the walk ends there, except for a quiet-window request, which the
 manager parks and delivers to whichever kernel is running when the window
 opens. A row with an action names the request. The kernel's own `signal` and
 `parent-gone` rows are verdicts a previous kernel filed on its exit, never a
-request, and are passed over. The manager's `manager-sigterm` row is a note
-that the manager sent the signal, not a request: it answers only when no
+request, and are passed over. A `down-failed` row (written when a `romp down`
+did not stop the kernel) cancels the `down` written before it: neither names a
+later signal, and both are passed over. The manager's `manager-sigterm` row is
+a note that the manager sent the signal, not a request: it answers only when no
 request row written before it lies within the window and this kernel's
-lifetime, with `manager-sigterm: <trigger>` as the reason, and a note aimed at
-another kernel's pid is ignored. Verdicts and notes are passed over wherever
-they sit, an aged one included: one older than the window or older than this
-kernel never ends the walk, so a quiet-window request beneath it is still
-read. A row with no action (the `romp refresh` row) is skipped, and the
-manager's `restart-all` note written after it is what names the refresh; a
-`romp refresh --quiet` row is the parked deploy that holds the automatic
-converge until the window opens, and the note written at the window names its
-delivery the same way. A SIGTERM that reaches a kernel with a quiet-window
-request parked and no manager note for its pid (a note naming no pid counts as
-its own) is not that request's delivery: the kernel files a `signal` row and
-leaves the request on record for the kernel the window will restart. The
-manager's stop of one kernel (a `stop` note with trigger `stop`, which leaves
-the manager's parked request armed; a stop of every kernel writes the same
-note) is not the delivery either: that cut is named by the note,
+lifetime, with `manager-sigterm: <trigger>` as the reason, so a `down` followed
+by the manager's `cli-down` note still reads as the `down`, and a note aimed at
+another kernel's pid is ignored. Verdicts, notes and the two `down` rows are
+passed over wherever they sit, an aged one included: one older than the window
+or older than this kernel never ends the walk, so a quiet-window request
+beneath it is still read. A row with no action (the `romp refresh` row) is
+skipped, and the manager's `restart-all` note written after it is what names
+the refresh; a `romp refresh --quiet` row is the parked deploy that holds the
+automatic converge until the window opens, and the note written at the window
+names its delivery the same way. A SIGTERM that reaches a kernel with a
+quiet-window request parked and no manager note for its pid (a note naming no
+pid counts as its own) is not that request's delivery: the kernel files a
+`signal` row and leaves the request on record for the kernel the window will
+restart. The manager's stop of one kernel (a `stop` note with trigger `stop`,
+which leaves the manager's parked request armed; a stop of every kernel writes
+the same note) is not the delivery either: that cut is named by the note,
 `manager-sigterm: stop`, and the request stays on record. A restart note, or
 the self-bounce's `refresh` note, is the delivery: the cut row names the
 request and consumes it.
@@ -1857,6 +2103,48 @@ writes the row. The manager's log says `exited without a restart request
 (signal or crash); respawning` when a kernel exits that it did not ask to stop
 or restart.
 
+Two more ledgers there record what restarts do to the sessions, appended by
+the SDK backend and read by `romp restart-metrics` (below). `session-events.jsonl`
+gets one flat row per thing that went wrong with a session's process and one
+per boot sweep: `{"t": <epoch s>, "pid": <the writing kernel>, "kind":
+"<writer>.<what>", "sid": <the session, when about one>, "name": <its name
+then>, ...fields, "text": <the prose>}`. The kinds: `reconcile.boot` (the
+sweep summary of every boot that had a session to reconcile: `sessions`, `resumed` continuation notices queued,
+`restored`, `notified`, `reaped`, `scopesStopped`, `toStart`, `durationS`),
+`reconcile.orphan-reaped` (`cliPid`, `fsid`, `scope`, `signaled`, `forced`,
+`tree`), `reconcile.scope-stopped` (`unit`, `sid8`, `cliPid`),
+`reconcile.duplicate-cli` (two Claude Code processes holding one conversation
+as the boot's process listing stood: `fsid`, `pids`, `n`), `crash.heal` and
+`crash.loop` (`attempt`), `drain.unjoined` (a session the drain's bound left
+closing: `inflight`, `reaped`), and the lease work's `lease.*` kinds. Every kind
+but the boot summary is also a problem-ring entry (the bell and error center
+show its prose) and a kernel-log line of the form `<prose> ;; problem-row
+{json}`, the same object after the marker, so a log reader parses it with a
+split on the marker. `GET /session-events?since=<epoch s>&limit=<n>`
+(token-gated) returns the rows newest first since the stamp (default this
+kernel's boot; at most 1000), each with `host`, and `count`, this kernel's
+problems since its boot, never a sum across kernels. `turns.jsonl` gets one
+row per settled turn: `t`, `sid`, `name`, `fedT` (the feed pop, when the text
+left the queue for the CLI's stdin, at millisecond resolution), `firstOutT`
+(the first streamed work atom), `resultT` (the ResultMessage), the CLI's own `durationMs`, `apiMs`,
+`numTurns` and `isError`, the spend fold's `usd` and token columns (`tokIn`,
+`tokOut`, `tokCacheR`, `tokCacheW`), `opener` (`human` or `injected`),
+`fedTexts`, and `resumeNotice`, true when a text fed into the turn was the
+boot or crash continuation notice, the turn that redoes cut work. Every stamp
+is an event's time, and `fedT` and `firstOutT` are present only for a turn
+this kernel fed: a turn the CLI opened by itself (a channel message, a
+background task's notification, a scheduled prompt) has no feed, so its row
+carries neither rather than the previous turn's stamps. Both files rotate at 32 MB to `<name>.1`, one predecessor
+kept, so each pair stays under 64 MB; the reader reads both. The restart rows
+of `restart-cuts.jsonl` carry the kernel process's own `rssKb` and `cpuS`,
+sampled at its exit (the cut row) and at its settled boot (the boot row), so
+the kernel's growth between restarts is a series without a sampler of its own.
+And the manager writes a `quiet-window` row to `restart-audit.jsonl` when a
+parked deploy refresh applies (`since`, `waitedS`, `reason` as the gate's
+verdict, `backstop` when the fifteen-minute cap fired, `coalesced`, `mode`,
+`lastInflight`, `misses`, and the park's drain-hold counts); it is a note, not
+a request, and the kernel's restart-reason walk passes it over.
+
 The two host registries there, `remotes.json` (attached and checked-in
 machines, each row with that machine's serve token) and `remotes-known.json`
 (machines remembered for re-attach, with the mail tier you set for each), are
@@ -1882,6 +2170,68 @@ kind. At start the bus removes the temporary files a crash left behind (a
 message written but never placed, a store record never finished), closes each
 one's receipt as refused, and says so once. The sidecars are yours to inspect
 or delete.
+
+## Restart metrics
+
+`romp restart-metrics` reads what kernel restarts do to the sessions, from the
+state directory's ledgers (`restart-cuts.jsonl`, `restart-audit.jsonl`,
+`session-events.jsonl`, `turns.jsonl`, the state logs under `states/`, and
+`spend.json` for the day's total dollars) and from the running kernel's
+`GET /version` and `GET /perf`; it loads no kernel module and writes nothing.
+The text form prints one screen per window: restarts and the turns they cut
+(with the clean restarts and the boots that had no cut row, a crash respawn,
+whose cut count is unknown; the per-restart rate divides by the measured
+restarts alone),
+the reasons, the outage from exit to first serve and the reconcile settle (from
+the `bootSettled` rows), the quiet windows' waits and backstop firings (from
+the manager's `quiet-window` rows), the boot sweeps' orphans reaped, scopes
+stopped, duplicate processes, crash heals and loops, sessions the drain left
+closing, and lease problems (from `session-events.jsonl`), the continuation
+notices and the redo turns with their dollars and tokens (from `turns.jsonl`;
+the spend ledger's buckets cannot attribute a turn's cost, and the summary says
+so), turn latency from the feed pop to the result and to the first output (from
+`turns.jsonl`, at millisecond resolution) beside the same interval from the
+state log's `working` and `waiting` rows (one-second resolution, the only
+latency available for turns before `turns.jsonl` existed), the machine cuts by
+cause (a state-log pair broken by a machine cut is not a turn), and the kernel
+process's resident memory and CPU at its exits. The live
+block reads each `romp-session-*` scope's `memory.current` and `cpu.stat` on
+Linux (a `ps` tree walk where there is no cgroup), the kernel's pid, uptime,
+CPU, resident size and the pusher's idle-cycle share, and lists any
+conversation two Claude Code processes hold right now. Windows are days or
+weeks (`--window`), weeks anchored on `--anchor` (default the first restart's
+day in range), bounded by `--since` and `--until`, in the machine's local time
+unless `--tz` names a zone; weeks are counted in local dates, so a clock change
+inside a week moves no boundary off local midnight. The header names the machine `this machine`
+unless `--label` says otherwise, so no hostname reaches the text by default. A
+missing ledger is named at the top, never a silent zero. `--json` prints the whole document (`schema` 1): `restarts`
+(each cut row joined to the boot that followed it), `quietWindows` (each
+joined to the restart it released), `kernelSeries`, `events`, `buckets` (every
+metric above per window, with capped latency samples for the distribution
+figure), `sources`, and `live`.
+
+`scripts/restart_metrics_report.py` draws the before-versus-after figures from
+two or more of those JSON documents with cleanplots, which is not a romp
+dependency, so it runs under uv:
+
+```
+uvx --with cleanplots --with matplotlib --with pandas python \
+    scripts/restart_metrics_report.py --doc baseline=baseline.json --doc after=after.json --out DIR
+```
+
+The figures land in `--out` (default
+`~/.local/state/romp-research/restart-metrics/`): turns cut per window and per
+restart, outage and settle times, quiet-window waits, sessions gone wrong per
+window, continuation notices and redo dollars, the turn-latency distribution,
+resident memory per session scope and the kernel's own, and the kernel's
+resident memory at each exit and boot over the days of each document; beside
+them `figures.json` carries the numbers drawn and `summary.txt` the reader's
+text per document. Session names are hidden by default (`session 1..N` by
+memory rank; the kernel's own bar keeps its name and its own colour) for any
+output directory outside your state root, because real session names are
+private and must not reach a repository, an issue or a pull request; `--named`
+shows them, and inside your own state root they show by default. Without
+cleanplots the script says so and draws nothing.
 
 ## Switches
 

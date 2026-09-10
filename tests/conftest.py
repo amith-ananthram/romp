@@ -6,11 +6,13 @@ test module, so this is a suite-wide floor; per-class _rebind_state/tempdir isol
 top exactly as before."""
 import atexit
 import importlib.util
+import json
 import os
 import re
 import shutil
 import sys
 import tempfile
+import time
 
 import pytest
 from _pytest._code.code import ReprExceptionInfo, ReprFileLocation, ReprTracebackNative
@@ -47,6 +49,32 @@ _TMP_ROOT = tempfile.mkdtemp(prefix="romp-tests-")
 tempfile.tempdir = _TMP_ROOT
 os.environ["TMPDIR"] = _TMP_ROOT
 _PACKAGE_STATE_DIR = getattr(sys.modules.get("tests"), "STATE_DIR", None)
+
+# Owner marker (2026-09-10): a run that dies without reaching any removal below — pytest-timeout's
+# os._exit, a kernel restart cutting the tool shell, the cut-turn reaper's kill — leaves its root
+# standing, and on a shared machine those roots piled into millions of files that the next boot's
+# /tmp cleanup spent 39 minutes deleting. Nothing in this process can run after such a death, so the
+# removal has to come from outside: the kernel's boot reconcile sweeps `romp-tests-*` roots under the
+# system temp dir whose owner is dead (sdk_backend.sweep_dead_test_roots). This marker is what it
+# reads — the owning pid, written at mint time so it is there for the whole life of the root. A root
+# WITHOUT a marker is not touched (the sweep cannot tell a foreign directory from a pre-marker one).
+# The package state dir sits beside the root, not inside it, so it carries its own copy.
+TEST_ROOT_OWNER_MARKER = "romp-tests-owner.json"
+
+
+def _write_owner_marker(d):
+    if not d:
+        return
+    try:
+        with open(os.path.join(d, TEST_ROOT_OWNER_MARKER), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"pid": os.getpid(), "started": time.time(),
+                                 "argv": [os.path.basename(a) for a in sys.argv[:3]]}))
+    except OSError:
+        pass                                 # a root we cannot write into is one we cannot leak into either
+
+
+_write_owner_marker(_TMP_ROOT)
+_write_owner_marker(_PACKAGE_STATE_DIR)
 
 
 def _remove_run_dirs(report=False):
@@ -712,8 +740,14 @@ def _redact_report(rep) -> None:
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
+    # ONE implementation per hook per module: a second `def` of this name would silently replace this one
+    # (it did, for an afternoon on 2026-09-10, and every report printed its values again). Anything else
+    # that shapes a test report joins here: the served-tests switch first (its message quotes the skip's
+    # reason), the redaction last, so whatever any step wrote is read for values before it is printed.
     outcome = yield
-    _redact_report(outcome.get_result())
+    rep = outcome.get_result()
+    _require_served_test_ran(item, rep)
+    _redact_report(rep)
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -759,3 +793,38 @@ def wait_for_census(before, timeout=5.0):
         if not extra or time.monotonic() >= deadline:                              # kind already present is a leftover
             return extra
         time.sleep(0.02)
+
+
+# Browser-backed served-page tests fail loudly where they must run (T308, 2026-09-10). tests/test_*_browser.py and
+# tests/test_*_served.py boot a hermetic kernel and drive the real dashboard pages in playwright's Chromium; on a machine
+# without the extension's node deps or a browser they skip, and say why. CI's Python matrix jobs are such machines, so a
+# served-page regression never turned them red (the deep-link landing pin, T307, red on main while CI stayed green). The
+# extension job installs that browser and runs these files with ROMP_SERVED_TESTS_REQUIRE=1: any skip in them (a class
+# setUp that finds no deps, a driver that exits 3 for a missing browser, a kernel that never served) is reported as a
+# FAILURE carrying the skip's own reason, the stance the pane bench takes with ROMP_UI_BENCH_REQUIRE. One exception a
+# test can claim for itself: a skip whose reason begins with "optional:" stays a skip, for a leg the runner has declared
+# it does not carry (the pane-hiding test drives three engines and CI installs one; ROMP_SERVED_TESTS_ENGINES names the
+# installed ones, and that test says "optional:" for the others). Off (the default) nothing changes: contributors and
+# the Python matrix jobs skip as before. Pinned by tests/test_served_tests_require.py.
+_SERVED_TESTS_REQUIRE = os.environ.get("ROMP_SERVED_TESTS_REQUIRE") == "1"
+
+
+def _is_served_test_file(item) -> bool:
+    name = os.path.basename(str(getattr(item, "path", None) or item.fspath))
+    return name.startswith("test_") and (name.endswith("_browser.py") or name.endswith("_served.py"))
+
+
+def _require_served_test_ran(item, rep) -> None:
+    """Under ROMP_SERVED_TESTS_REQUIRE=1, a skip in a browser-backed served-page test file is reported as a
+    failure carrying the skip's own reason; an `optional:` skip stays a skip. Called from the one
+    pytest_runtest_makereport above. No-op with the switch off."""
+    if not _SERVED_TESTS_REQUIRE:
+        return
+    if rep.skipped and _is_served_test_file(item):
+        lr = rep.longrepr
+        reason = lr[2] if isinstance(lr, tuple) and len(lr) == 3 else str(lr)
+        if re.match(r"^(Skipped: )?optional:", reason):
+            return
+        rep.outcome = "failed"
+        rep.longrepr = ("ROMP_SERVED_TESTS_REQUIRE=1: a browser-backed test skipped (at %s) where it must run: %s"
+                        % (rep.when, reason))

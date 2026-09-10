@@ -141,6 +141,18 @@ say "releasing $tag (VERSION currently reads $current)."
 
 # ── 2. the tree must be releasable ────────────────────────────────────
 [ -z "$(git status --porcelain)" ] || die "working tree is dirty — commit or stash first."
+# And checked out on $REF: the tag goes on whatever HEAD is, bootstrap.sh installs the newest
+# v* tag, so a tag cut anywhere else ships a commit that is not on $REF. The way to be here
+# off $REF is a bump run that died with its version PR unmerged — the PR could not be opened,
+# or the wait for it ran out — still on release-X.Y.Z, where VERSION already reads the target,
+# so the advertised re-run would skip the bump and tag that branch. Checked once, here: the
+# bump path below either ends back on $REF or dies, so it still holds at the tag step, and
+# refusing now spends no suite run and no macOS wait on a release that cannot be cut. A detached
+# HEAD is named as such: `symbolic-ref` prints nothing for it (and exits 1, hence `|| true`
+# under set -e), where `rev-parse --abbrev-ref` would have blamed a branch called HEAD.
+on_branch="$(git symbolic-ref -q --short HEAD || true)"
+[ -n "$on_branch" ] || die "detached HEAD, not on $REF — a release is cut from $REF only; switch to it and pull first."
+[ "$on_branch" = "$REF" ] || die "on branch $on_branch, not $REF — the version PR may still be open; switch to $REF and pull once it lands."
 
 # ── 3. land the version bump, if there is one ─────────────────────────
 # Skipped entirely when VERSION already carries the target, which is the normal case when a
@@ -155,8 +167,10 @@ if [ "$current" != "$target" ]; then
     if [ "$dry_run" -eq 1 ]; then
         say "[dry-run] would branch, commit VERSION=$target, open a PR, and auto-merge it."
     else
-        printf '%s\n' "$target" > VERSION
+        # Branch FIRST, then write: a branch that already exists dies here, and main is left as it
+        # was rather than holding a modified VERSION nobody asked for.
         git switch -c "$branch" >/dev/null 2>&1 || die "could not create branch $branch."
+        printf '%s\n' "$target" > VERSION
         git add VERSION
         git commit -qm "VERSION $target" || die "nothing to commit for the version bump."
         git push -q -u "$publish" "$branch" || die "could not push $branch to $publish."
@@ -198,7 +212,9 @@ if [ "$current" != "$target" ]; then
             if [ "$POLL" = "0" ]; then break; fi
             sleep "$POLL"
         done
-        [ "$state" = "MERGED" ] || die "the version PR did not merge — check $UPSTREAM."
+        # Still on the release branch here, so the way forward is spelled out: local $REF is behind
+        # the merge until it is pulled, and a re-run on this branch is refused (step 2).
+        [ "$state" = "MERGED" ] || die "the version PR did not merge — check $UPSTREAM; once it lands, switch to $REF and pull, then re-run."
         git switch "$REF" >/dev/null 2>&1 || die "could not switch back to $REF."
         # The merge landed on the CANONICAL repo. With a fork layout that is `upstream`, not
         # `origin`: reading `origin/main` there would fast-forward onto the fork's stale main

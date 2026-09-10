@@ -20,7 +20,10 @@
 //   romp on        → `up`          run the manager in the foreground (Ctrl+C stops it + its kernels)
 //   romp refresh   → `restart-all` restart EVERY kernel the manager owns (loops the registry)
 //   romp status    → `status`      print the manager + kernel status
-// (`restart [kernel]` (single) and `down`/`/stop` also exist for front ends / SIGINT — no romp verb.)
+//   romp down      → `down`        stop every kernel and exit: the UNSUPERVISED half of `romp down`
+//                                  (under the login service bin/romp stops the service instead, or
+//                                  Restart=always / KeepAlive would respawn us within seconds)
+// (`restart [kernel]` (single) also exists for front ends: no romp verb.)
 
 const http = require('http');
 const { spawn, execFileSync } = require('child_process');
@@ -42,6 +45,16 @@ const KERNEL_PORT = Number(process.env.ROMP_SERVE_PORT) || Number(process.env.RO
 const STATE_ROOT = process.env.ROMP_STATE_DIR ||
   path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local', 'state'), 'romp');
 const KERNELS_FILE = path.join(STATE_ROOT, 'kernels.json');
+// `romp down` leaves this marker (bin/romp writes {t, cmd}) so a stopped kernel reads as stopped on
+// purpose. Two consumers here: `ensure` (the supervised start that `romp update <host>` and the remote
+// restart run on a far host) refuses to bring the manager back while it exists, since a remote update
+// must not silently undo a deliberate stop, and `up` (a deliberate start: `romp up`, the login service,
+// a hand `systemctl start`) clears it.
+const DOWN_MARKER = path.join(STATE_ROOT, 'down-by-romp');
+function downMarkerHeld(file = DOWN_MARKER) { try { return fs.existsSync(file); } catch (e) { return false; } }
+function clearDownMarker(file = DOWN_MARKER) {
+  try { fs.unlinkSync(file); return true; } catch (e) { return false; }   // absent = nothing to clear
+}
 
 // $TMUX scrub (2026-07-20): a manager launched by hand from INSIDE a tmux session leaks $TMUX to
 // its kernels and their SDK-session children — whose tmux-status hooks then resolve `#S` to
@@ -52,7 +65,10 @@ const KERNELS_FILE = path.join(STATE_ROOT, 'kernels.json');
 delete process.env.TMUX;
 delete process.env.TMUX_PANE;
 
-function log(msg) { process.stderr.write('[romp-manager] ' + msg + '\n'); }
+// log(msg, cb): cb runs once the line is written. A caller about to process.exit() passes its exit as
+// the callback, or the line can be lost: stderr on a pipe is asynchronous on macOS (the far-host
+// update script reads ensure's output through one), and exit() does not wait for pending writes.
+function log(msg, cb) { process.stderr.write('[romp-manager] ' + msg + '\n', cb); }
 
 // romp-serve is the kernel launcher (rebuilds dist if stale, then execs node on it). Resolve it the
 // same way the other consumers do: $ROMP_SERVE_BIN → $ROMP_DIR/bin → next to this script → the
@@ -229,6 +245,7 @@ const QUIET_MAX_DEFER_MS = Number(process.env.ROMP_QUIET_MAX_DEFER_MS) || 15 * 6
 //   restart      one kernel, POST /restart (the dashboard button, `romp-manager restart`)
 //   restart-all  every kernel, POST /restart-all (`romp refresh`), at once or at the quiet window
 //   refresh      the stale-manager self-bounce: kernels stopped so the supervisor respawns the new manager
+//   cli-down     a stop while `romp down`'s marker (DOWN_MARKER) is on disk: the CLI asked for it
 //   stop         any other stop: a service stop by hand, Ctrl+C on the foreground manager, POST /stop
 // `reason` stays what the manager does next: `restart` (respawn) or `stop` (reap).
 function auditSigterm(spec, pid, reason, trigger) {
@@ -242,10 +259,37 @@ function auditSigterm(spec, pid, reason, trigger) {
   return t;
 }
 
-// The trigger of a stop nobody labeled (SIGINT/SIGTERM to the manager, POST /stop): a service stop
-// by hand, Ctrl+C, a front end's stop. Decided at stop time, once per shutdown, so every kernel's
-// row names the same cause.
-function stopTrigger() { return 'stop'; }
+// The trigger of a stop nobody labeled (SIGINT/SIGTERM to the manager, POST /stop). A stop that finds
+// `romp down`'s marker (DOWN_MARKER above; bin/romp writes it before it stops the service) was the
+// CLI's, not a hand on systemctl or a Ctrl+C; anything else is `stop`. Read at stop time, never
+// cached (the marker appears seconds before the SIGTERM does), and once per shutdown, so every
+// kernel's row names the same cause.
+function stopTrigger() { return downMarkerHeld() ? 'cli-down' : 'stop'; }
+
+// T304: the quiet window's OWN row in restart-audit.jsonl, written when the parked refresh APPLIES, so the
+// wait from parked to restart and the fifteen-minute backstop's firing are machine-readable (until now they
+// were the `applying deferred refresh … waited Ns` log line alone). A mechanism note like manager-sigterm,
+// never a request: the kernel's reason walk lists `quiet-window` in _NO_RESTART_ACTIONS and passes it over;
+// the restart it releases writes its own manager-sigterm note. `since` and `t` are epoch seconds; `reason`
+// is quietGate's verdict verbatim ('quiet', 'backstop cap', or the unreachable-kernel sentence), `backstop`
+// the one bit a reader wants most; the drain counts are the park's evidence (queueQuietRestart records them).
+function quietWindowRow(park, g, now) {
+  const p = park || {}; const since = Number(p.since) || now;
+  return { t: Math.floor(now / 1000), action: 'quiet-window', since: Math.floor(since / 1000),
+           waitedS: Math.max(0, Math.round((now - since) / 1000)), reason: String((g && g.reason) || ''),
+           backstop: !!(g && g.reason === 'backstop cap'), coalesced: p.count || 1, mode: String(p.mode || 'all'),
+           lastInflight: p.lastInflight === undefined ? null : p.lastInflight, misses: p.misses || 0,
+           drainRefusedCount: p.drainRefusedCount || 0, drainArmedCount: p.drainArmedCount || 0,
+           drainRefusedAfterArm: p.drainRefusedAfterArm || 0 };
+}
+function auditQuietWindow(park, g, now) {
+  const row = quietWindowRow(park, g, now || Date.now());
+  try {
+    fs.mkdirSync(STATE_ROOT, { recursive: true });
+    fs.appendFileSync(path.join(STATE_ROOT, 'restart-audit.jsonl'), JSON.stringify(row) + '\n');
+  } catch (e) { /* a lost note, not a lost restart */ }
+  return row;
+}
 
 // The exit handler's verdict (pure, exported for tests): what to log and whether to respawn. A
 // kernel we asked to stop is reaped; one we SIGTERMed for a restart keeps the plain respawn line;
@@ -329,6 +373,29 @@ function restartGate(st, now, opts) {
 const STORM_OPTS = { coalesceMs: RESTART_COALESCE_MS, stormWindowMs: STORM_WINDOW_MS,
   stormMax: STORM_MAX, stormCooldownMs: STORM_COOLDOWN_MS };
 
+// How long a kernel gets to leave on SIGTERM before SIGKILL: a bound on the kernel's own drain (about
+// 2s, _graceful_term in kernel/kernel.py), so one still there at 5s is wedged. The manager used to
+// exit 800ms after one SIGTERM and escalate to nothing, so a kernel that ignored the signal outlived
+// it, keeping its port and its sessions under a `romp down` marker that said otherwise. The env seam
+// is for the unit tests, which cannot sit through 5s.
+const SHUTDOWN_GRACE_MS = Number(process.env.ROMP_SHUTDOWN_GRACE_MS) || 5000;
+
+// SIGTERM a kernel and, when it is still there once the grace has run out, SIGKILL it and say so.
+// Every stop and every restart goes through here: a kernel that ignores its SIGTERM under `romp
+// refresh`, the dashboard's restart or the quiet-window apply would otherwise never be respawned and
+// keep its port and its sessions on stale code, with nothing logged. The timer holds the child it
+// signaled, never the registry's current one: a kernel respawned in the meantime is not the one that
+// owes the exit. The exit handler does the rest (reap or respawn, per rec.stopping).
+function termThenKill(rec) {
+  const child = rec.child;
+  try { child.kill('SIGTERM'); } catch (e) { return; }
+  setTimeout(() => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    log(`kernel '${rec.spec.id}' (pid ${child.pid}) still running ${SHUTDOWN_GRACE_MS}ms after SIGTERM; sending SIGKILL`);
+    try { child.kill('SIGKILL'); } catch (e) { /* already gone */ }
+  }, SHUTDOWN_GRACE_MS);
+}
+
 function restartKernel(id, trigger = 'restart') {
   const rec = kernels.get(id);
   if (!rec) return false;
@@ -348,7 +415,7 @@ function restartKernel(id, trigger = 'restart') {
   rec.stopping = false;          // ensure the exit handler RESPAWNS rather than reaps
   rec.requested = Date.now();    // ...and knows this exit was asked for (exitLine)
   auditSigterm(rec.spec, rec.child.pid, 'restart', trigger);   // the row BEFORE the signal: the kernel reads it on SIGTERM
-  rec.child.kill('SIGTERM');     // the exit handler spawns a fresh one (romp-serve rebuilds if stale)
+  termThenKill(rec);             // the exit handler spawns a fresh one (romp-serve rebuilds if stale)
   return true;
 }
 
@@ -611,6 +678,7 @@ function queueQuietRestart(mode) {
           : p.drainRefusedAfterArm > 0
             ? ` — the drain hold armed and was then LOST for this park (refused ${p.drainRefusedAfterArm} time(s) after arming, ${p.drainRefusedCount - p.drainRefusedAfterArm} before), so turns started after the loss may be cut`
             : ` — the drain hold was refused ${p.drainRefusedCount} time(s) before arming for this park, so turns started before it armed may be cut`;
+      auditQuietWindow(p, g, Date.now());   // the row before the restart it releases (T304: the wait, measured)
       log(`applying deferred refresh — ${g.reason}${cause} (${p.count} request(s) coalesced, waited ${Math.round((Date.now() - p.since) / 1000)}s)`);
       if (p.mode === 'all') restartAllOrSelf(); else restartKernel(p.mode);
     },
@@ -624,7 +692,7 @@ function stopKernel(id, trigger) {
   if (!rec) return false;
   rec.stopping = true;
   auditSigterm(rec.spec, rec.child.pid, 'stop', trigger || stopTrigger());   // the row BEFORE the signal
-  rec.child.kill('SIGTERM');
+  termThenKill(rec);
   return true;
 }
 
@@ -635,9 +703,16 @@ function shutdownAll(exitCode, trigger) {
   clearPendingQuiet();           // never let a deferred refresh respawn what we're stopping
   const trig = trigger || stopTrigger();   // once, so every kernel's row names the same cause
   log(`shutting down: stopping all kernels (${trig})`);
-  for (const id of kernels.keys()) stopKernel(id, trig);
-  // give the kernels a moment to exit, then go regardless
-  setTimeout(() => process.exit(exitCode || 0), 800);
+  for (const id of kernels.keys()) stopKernel(id, trig);   // each: SIGTERM now, SIGKILL when the grace runs out
+  // exit as soon as every kernel has left, or once the grace and the SIGKILLs behind it have run:
+  // neither the manager nor a kernel outlives this stop
+  const t0 = Date.now();
+  const alive = () => [...kernels.values()].some((r) => r.child.exitCode === null && r.child.signalCode === null);
+  const tick = () => {
+    if (!alive() || Date.now() - t0 >= SHUTDOWN_GRACE_MS + 200) return process.exit(exitCode || 0);
+    setTimeout(tick, 100);
+  };
+  setTimeout(tick, 100);
 }
 
 // ── control endpoint (loopback only) ───────────────────────────────────────
@@ -858,7 +933,11 @@ function startTmuxServer() {
   } catch (e) { /* a server is already up, or tmux itself failed — nothing to do */ }
 }
 
+// startManager's first statement clears the `romp down` marker: a deliberate start brings the kernels
+// back, and a start the credential check below refuses still records that it was asked for, so
+// `romp status` does not call the kernel stopped on purpose.
 function startManager() {
+  if (clearDownMarker()) log('cleared the `romp down` marker; this start brings the kernels back');
   const retired = retiredCredentialNames(process.env);
   if (retired.length) {
     log(retiredCredentialMessage(retired));   // the supervisor restarts the manager on its backoff, so the line
@@ -954,14 +1033,27 @@ function control(method, pathname, kernel, params) {
   req.end();
 }
 
-// `romp-manager ensure` — idempotent, non-blocking auto-start: if a manager is already
-// up, do nothing; otherwise spawn `up` DETACHED and return immediately. The SessionStart
-// hook calls this so romp usage auto-starts the supervisor (and the kernel) — no `romp on`.
+// `romp-manager ensure`: idempotent, non-blocking auto-start. If a manager is already up, do
+// nothing; otherwise spawn `up` DETACHED and return immediately. `romp update <host>` and the
+// dashboard's remote restart run this on the far host so the supervisor (and the kernel) come up
+// there without a `romp up`.
 // Race-safe: the detached `up` re-probes and exits cleanly if another session won.
+// A `romp down` marker HOLDS it: auto-start is the one door that would bring a deliberately
+// stopped kernel back without anyone asking (a remote update), so it refuses, says why, and
+// exits 0: the caller is not failing, the kernel is down on purpose.
+// The pure decision is exported for the unit tests; the I/O stays here.
+function ensureDecision({ alive, held }) {
+  if (alive) return 'noop';
+  if (held) return 'held';
+  return 'spawn';
+}
 function ensureUp() {
   probeControl((alive) => {
-    if (alive) return process.exit(0);
-    spawn(process.execPath, [__filename, 'up'], { detached: true, stdio: 'ignore' }).unref();
+    const d = ensureDecision({ alive, held: downMarkerHeld() });
+    if (d === 'held') {   // the reason is the one thing this run says: exit only once it is written
+      return log('the kernel was stopped by `romp down`; not auto-starting it. `romp up` brings it back', () => process.exit(0));
+    }
+    if (d === 'spawn') spawn(process.execPath, [__filename, 'up'], { detached: true, stdio: 'ignore' }).unref();
     process.exit(0);
   });
 }
@@ -974,6 +1066,8 @@ module.exports = { restartGate, quietGate, quietTick, loadSpecs, specEnv, fileSt
                    tmuxStartArgv, scopedStartFailure, commandOnPath, TMUX_START_ARGV,
                    placementFromCgroup, tmuxServerPlacement, bareEnsuredLine, TMUX_SERVER_PID_ARGV,
                    withoutOpCredentials, retiredCredentialNames, retiredCredentialMessage, exitLine, auditSigterm,
+                   ensureDecision, downMarkerHeld, clearDownMarker, DOWN_MARKER,
+                   quietWindowRow, auditQuietWindow,
                    // the SIGTERM wiring, for tests that seed `kernels` with a stand-in child or point
                    // ROMP_SERVE_BIN at a stand-in launcher
                    restartKernel, restartAll, restartAllOrSelf, stopKernel, shutdownAll, stopTrigger, spawnKernel, kernels };

@@ -47,7 +47,7 @@ function bundle(): string {
 import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionToken, insertMention, mentionKeyAction, mentionSegments } from "./composer-mention";
 const CHIP_LABEL: any = { working: "Working", ready: "Ready", idle: "Idle", closed: "Closed", needsInput: "Blocked" };
 const el = (tag: string, cls?: string) => { const e = document.createElement(tag); if (cls) e.className = cls; return e; };
-const hostNameNodes = (name: string, _id: string) => [document.createTextNode(name)];
+import { hostNameNodes } from "./host-prefix";   // the real renderer: a remote chip's host must wear .host-prefix
 const isProvisionalId = (id: string) => id.startsWith("prov:");
 (window as any).__mention = {
   mount(ta: HTMLTextAreaElement, env: any) {
@@ -462,7 +462,7 @@ test("in Chromium: chips are exact-name only, keyed by session id, re-dressed on
     chips.markMentions(bubble);
     const snap = () => Array.from(bubble.querySelectorAll(".mention-chip")).map((c) => {
       const e = c as HTMLElement;
-      return { text: e.textContent, sid: e.dataset.sid, title: e.title, bg: e.style.getPropertyValue("--chip-bg") };
+      return { text: e.textContent, token: e.dataset.token, sid: e.dataset.sid, title: e.title, bg: e.style.getPropertyValue("--chip-bg") };
     });
     const out: any = {};
     out.first = snap(); out.marked = bubble.dataset.mentions;
@@ -504,30 +504,60 @@ test("in Chromium: chips are exact-name only, keyed by session id, re-dressed on
     sessions.set("new-2", { id: "new-2", name: "api", color: { bg: "#667788", fg: "#000000" }, status: { state: "ready" } });
     chips.mentionRosterChanged();
     out.afterNew = snap();
+    // a session on another kernel, as this viewer holds it ("host:name", "host:uuid"): the chip wears the house
+    // idiom the awaiting chip wears, the host as .host-prefix and only the NAME in the identity colour
+    sessions.set("TESTHOST:" + webId, { id: "TESTHOST:" + webId, name: "TESTHOST:web", color: { bg: "#8899aa", fg: "#000000" }, status: { state: "working" } });
+    const far = document.createElement("div"); far.className = "user-bubble md";
+    far.innerHTML = "<p>ping @TESTHOST:web</p>"; thread.appendChild(far);
+    chips.markMentions(far);
+    const fc = far.querySelector(".mention-chip") as HTMLElement;
+    const hp = fc.querySelector(".host-prefix");
+    out.remote = { text: fc.textContent, token: fc.dataset.token, sid: fc.dataset.sid, title: fc.title, bg: fc.style.getPropertyValue("--chip-bg"),
+                   host: hp ? hp.textContent : null, nameNode: fc.lastChild && fc.lastChild.nodeType === 3 ? fc.lastChild.textContent : null };
     return out;
   }, [SID(2), SID(3)]);
-  assert.deepEqual(r.first, [{ text: "@api", sid: SID(2), title: "api · Working", bg: "#d5643a" }],
-    "the exact name only: @API is not a name postal takes, @web names nothing yet (a viewer's description is not a name), the code span and the link are left alone");
+  assert.deepEqual(r.first, [{ text: "api", token: "@api", sid: SID(2), title: "api · Working", bg: "#d5643a" }],
+    "the exact name only: @API is not a name postal takes, @web names nothing yet (a viewer's description is not a name), the code span and the link are left alone; the chip reads the bare name, the token as typed rides data-token, the identity colour is the chip's --chip-bg (its text colour: the sheet paints it on the awaiting chip's dark backing)");
   assert.equal(r.marked, "1", "the bubble is marked for a later re-mark");
-  assert.deepEqual(r.afterWeb.map((c: any) => c.text), ["@web", "@api"], "web's chip arrived with its frame");
+  assert.deepEqual(r.afterWeb.map((c: any) => c.text), ["web", "api"], "web's chip arrived with its frame");
   assert.equal(r.nested, 0, "the existing chip was not wrapped again");
-  assert.equal(r.text, "ask @web and @api and @API, not @api or @api", "the text reads as typed");
+  assert.equal(r.text, "ask web and api and @API, not @api or @api", "the chips read the bare names (the user 2026-09-10); everything outside a chip reads as typed");
   assert.equal(r.refreshed1, 1, "the open card was re-ranked for the roster change");
   assert.equal(r.afterState[1].title, "api · Ready"); assert.equal(r.afterState[1].bg, "#112233");
-  assert.equal(r.afterRename[1].title, "api2 · Ready"); assert.equal(r.afterRename[1].text, "@api");
+  assert.equal(r.afterRename[1].title, "api2 · Ready"); assert.equal(r.afterRename[1].text, "api"); assert.equal(r.afterRename[1].token, "@api");
   assert.equal(r.idle, 0, "the same roster twice: nothing re-ranked");
-  assert.deepEqual(r.afterClosed[1], { text: "@api", sid: SID(2), title: "api2 · Closed", bg: "#112233" }, "closed, no namesake: the chip stays keyed to it");
+  assert.deepEqual(r.afterClosed[1], { text: "api", token: "@api", sid: SID(2), title: "api2 · Closed", bg: "#112233" }, "closed, no namesake: the chip stays keyed to it");
   assert.deepEqual(r.afterViewer, r.afterClosed, "a viewer named api is not a session: no re-key");
   assert.equal(r.closedStillHeld, true, "the closed session was still in the map when the namesake arrived");
-  assert.deepEqual(r.afterNamesake[1], { text: "@api", sid: "new-1", title: "api · Working", bg: "#445566" }, "re-keyed on the namesake going live, not on the closed tab's dismissal");
+  assert.deepEqual(r.afterNamesake[1], { text: "api", token: "@api", sid: "new-1", title: "api · Working", bg: "#445566" }, "re-keyed on the namesake going live, not on the closed tab's dismissal");
   assert.deepEqual(r.afterDismiss, r.afterNamesake, "the dismissal moved nothing");
   assert.equal(r.afterGone[1].title, "api · Closed"); assert.equal(r.afterGone[1].bg, "#445566"); assert.equal(r.afterGone[1].sid, "new-1");
   assert.equal(r.afterNew[1].sid, "new-2"); assert.equal(r.afterNew[1].title, "api · Ready"); assert.equal(r.afterNew[1].bg, "#667788");
+  assert.deepEqual(r.remote, { text: "TESTHOST:web", token: "@TESTHOST:web", sid: "TESTHOST:" + SID(3), title: "TESTHOST:web · Working", bg: "#8899aa", host: "TESTHOST:", nameNode: "web" },
+    "a remote session's chip: the host as .host-prefix (its own quiet colour), the bare name as the text node the identity colour paints, the whole host:name as textContent for the roster re-key");
   assert.deepEqual(h.errors, []);
   await h.page.close();
 });
 
 // ── source pins: the wiring the slices cannot carry ─────────────────────────────────────────────────────
+
+test("the mention chip wears the awaiting chip's dress: one shared rule for the dark backing, radius and padding, the identity colour as the name's own colour", () => {
+  // (the user 2026-09-10, who wanted the two chips to look the same: no colour fill, no @). The page above loads
+  // no sheet, so the look is pinned at the source: the shared selector list, and the mention chip's own rule
+  // setting none of the shared properties (a later same-specificity rule would otherwise win the cascade).
+  const STYLES = fs.readFileSync(path.join(UI, "styles.css"), "utf8");
+  const shared = STYLES.match(/^\.chip-peer-name, \.mention-chip \{([^}]*)\}/m);
+  assert.ok(shared, "the backing, radius and padding are declared once for both chips");
+  assert.match(shared![1], /background: rgba\(0, 0, 0, 0\.85\);/); assert.match(shared![1], /border-radius: 7px;/); assert.match(shared![1], /padding: 0 5px;/);
+  assert.doesNotMatch(shared![1], /\bcolor:/, "the colour is each chip's own: the peer name's #fff default, the mention chip's identity colour");
+  const own = STYLES.match(/^\.mention-chip \{([^}]*)\}/m);
+  assert.ok(own, "the mention chip's own rule");
+  assert.match(own![1], /color: var\(--chip-bg, #fff\);/, "the identity colour is the TEXT colour, from the inline --chip-bg");
+  assert.doesNotMatch(own![1], /background|border-radius|padding|box-shadow/, "no fill, no ring, nothing the shared rule owns");
+  assert.doesNotMatch(chipBlock(), /--chip-fg/, "the fill's text colour is gone with the fill");
+  assert.match(chipBlock(), /chip\.replaceChildren\(\.\.\.hostNameNodes\(sg\.text\.slice\(1\), sg\.hit\.id\)\)/,
+    "the name through the house session-reference renderer, as the awaiting chip names its peer: a remote host wears .host-prefix");
+});
 
 test("every clear of the composer goes through clearBox, which refreshes both menus; cancelComposerEdit clears through the module-level hook", () => {
   const stmts = RENDER.match(/^\s*ta\.value = "";/gm) || [];

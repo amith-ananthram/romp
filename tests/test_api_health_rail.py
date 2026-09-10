@@ -37,7 +37,7 @@ MDOT = "·"
 
 
 def _frame_keys():
-    return {"type", "state", "cls", "reason", "text", "waiting", "retrying", "blocked", "since", "tmux", "sessions", "seq"}
+    return {"type", "state", "cls", "reason", "text", "waiting", "retrying", "blocked", "since", "tmux", "sessions", "seq", "hosts", "quiet", "errs"}
 
 
 class Reference(unittest.TestCase):
@@ -84,10 +84,16 @@ class _Fixture(unittest.TestCase):
         km._send_to_app = lambda app, m: self.sent.append((app, m))
         km.Sessions.backend_for = staticmethod(lambda sid: km._TMUX if sid in self.tmux_sids else object())
         km._name_color = lambda sid: self.colors.get(sid)
+        # the frame's quiet and errs flags ask the SDK backend through km._sdk (T301): patched, so no test builds a
+        # real SdkBackend in-process (its boot reconcile thread and catalog fetch); `self.backend` is what it answers
+        self.backend, self.sdk_calls = None, []
+        self._sdk = km._sdk
+        km._sdk = lambda: (self.sdk_calls.append(1), self.backend)[1]
         km._APIH_LAST[0] = None
         km._retry_suppress_cache.clear()
 
     def tearDown(self):
+        km._sdk = self._sdk
         km.jd.STATE = self._state
         km._alive_sessions = self._alive
         km._api_last_failed = self._last
@@ -452,9 +458,13 @@ class Detail(unittest.TestCase):
         for s in ("Auto-retry and the judges are paused until your usage limit resets.",
                   "Auto-retry and the judges are paused: you have reached the monthly spend limit. Raise it at claude.ai/settings/usage.",
                   "Auto-retry and the judges are paused: you stopped them.",
-                  "No session is waiting on the API. Auto-retry and the judges are running.",
-                  "API %s this machine" % MDOT, "Sessions waiting", "since "):
+                  "API health", "Sessions waiting", "since "):
             self.assertIn(s, self.JS)
+        # T301: the head reads what happened across every connected kernel; the old one-machine label and the ok
+        # sentence are gone, and the state machine's word never reaches the user
+        self.assertNotIn("API %s this machine" % MDOT, self.JS)
+        self.assertNotIn("No session is waiting on the API.", self.JS)
+        self.assertIn("429 = the API told us to slow down (rate limit)", self.JS)
 
     def test_the_pause_button_is_the_chat_card_s_and_acknowledges_before_the_round_trip(self):
         self.assertIn("'Resume all auto-retries'", self.JS)
@@ -487,8 +497,11 @@ class Detail(unittest.TestCase):
         # the cell and the frame's reading render from the last frame only; the History section is the one fetch,
         # GET /api-health at show time, and there is still no timer anywhere (test_api_health_hover.py holds the
         # section's own pins)
-        self.assertEqual(self.JS.count("fetch("), 1, "one read: the history's")
-        self.assertIn("fetch('/api-health',{cache:'no-store'})", self.JS)
+        self.assertEqual(self.JS.count("fetch("), 1, "one read path: fetchDoc, the history's")
+        self.assertIn("fetchDoc(h?'/remote/'+encodeURIComponent(h)+'/api-health':'/api-health')", self.JS)
+        # T301: every attached host's document rides the same read, through the kernel's relay, kept per host
+        self.assertIn("names.forEach(function(h){fetchDoc(h?", self.JS)
+        self.assertIn("names.forEach(function(h){fetchDoc(h?'/remote/'+encodeURIComponent(h)+'/api-health':'/api-health')", self.JS)
         self.assertNotIn("setInterval", self.JS)
         self.assertNotIn("setTimeout", self.JS)
         self.assertIn("window.__rompApiHealth=function(m){", self.JS)
@@ -496,8 +509,12 @@ class Detail(unittest.TestCase):
 
     def test_the_cell_repaints_only_when_state_or_text_changed_and_shows_on_the_first_frame(self):
         self.assertIn("if(el.hidden)el.hidden=false;", self.JS)
-        self.assertIn("if(el.getAttribute('data-state')!==m.state||txt.textContent!==m.text){el.setAttribute('data-state',m.state);"
-                      "txt.textContent=m.text;el.setAttribute('aria-label','API '+m.text);}", self.JS)
+        # T301: the cell is a dot alone, painted from the MERGED view (every connected kernel); the DOM is touched only
+        # when the merged state or the description changed
+        self.assertIn("paintCell();", self.JS)
+        self.assertIn("if(el.getAttribute('data-dot')!==mg.dot)el.setAttribute('data-dot',mg.dot);", self.JS)
+        self.assertIn("var lab='API health: '+DOTWORD[mg.dot]+(mg.n>1?' across '+mg.n+' machines':'');if(el.getAttribute('aria-label')!==lab)el.setAttribute('aria-label',lab);", self.JS)
+        self.assertNotIn(".ah-text", self.JS)
         self.assertIn("if(tip.style.display!=='block')return;", self.JS)
         self.assertIn("if(held){dirty=true;return;}render();};", self.JS)
 
@@ -580,8 +597,8 @@ class Detail(unittest.TestCase):
 
     def test_the_cell_is_a_keyboard_button_and_the_detail_takes_and_returns_focus(self):
         self.assertIn("el.addEventListener('keydown',function(ev){if(ev.key==='Escape')", self.JS)
-        self.assertIn("if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();if(pinned)close();else open();}});", self.JS)
-        self.assertIn("el.setAttribute('aria-label','API '+m.text)", self.JS)
+        self.assertIn("if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();ev.stopPropagation();if(pinned)close();else open();}});", self.JS)
+        self.assertIn("el.setAttribute('aria-label',lab)", self.JS)   # T301: the merged description ("API health: fine|errors|no traffic")
         self.assertIn("tip.setAttribute('role','dialog')", self.JS)
         self.assertIn("focusBack=document.activeElement;", self.JS)
         self.assertIn("try{tip.focus();}catch(e){}", self.JS)
@@ -593,7 +610,7 @@ class Detail(unittest.TestCase):
 
     def test_actions_are_delegated_on_the_stable_tip_node(self):
         self.assertIn("var el=document.getElementById('rail-api');", self.JS)
-        self.assertIn("el.addEventListener('click',function(){if(pinned)close();else open();});", self.JS)
+        self.assertIn("el.addEventListener('click',function(ev){if(ev&&ev.stopPropagation)ev.stopPropagation();if(pinned)close();else open();});", self.JS)
         self.assertNotIn("el.innerHTML", self.JS, "the frame handler writes the cell's children, never the cell")
         self.assertIn("tip.addEventListener('click',function(ev){", self.JS)
         self.assertEqual(self.JS.count("addEventListener('click'"), 2, "one on #rail-api, one on #ah-tip; none per row")

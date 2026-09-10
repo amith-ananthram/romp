@@ -76,16 +76,17 @@ class NoBackgroundWork(unittest.TestCase):
                 self.assertEqual(git(td, "config", "--local", "--get", k).stdout.strip(), v, k)
             open(os.path.join(td, "a"), "w").write("a\n")
             git(td, "add", "a")
-            t = _traced(lambda env: git(td, "commit", "-qm", "traced", env=env))
+            t = _traced(lambda env: git(td, "commit", "-qm", "maintenance-traced", env=env))
         self.assertIn("built-in: git commit", t, "the trace is on")
-        self.assertNotIn("maintenance", t, "no auto-maintenance child:\n" + t)
+        self.assertIn("maintenance-traced", t, "the trace names the commit's argv: the pin below cannot be a bare substring")
+        self.assertNotIn("run_command: git maintenance", t, "no auto-maintenance child:\n" + t)
         self.assertNotIn("run_command: git gc", t, "no gc child")
 
     def test_a_clone_lacks_the_keys_until_forbid_background_and_then_a_fetch_spawns_no_child(self):
         # the kernel's update paths fetch and merge into clones the fixture did not init: forbid_background
         # is what covers a git the kernel runs there, and `fetch` is one of the commands that runs auto
         # maintenance afterwards
-        with tempfile.TemporaryDirectory() as td:
+        with tempfile.TemporaryDirectory(prefix="maintenance-") as td:
             src, clone = os.path.join(td, "src"), os.path.join(td, "clone")
             os.makedirs(src)
             init_repo(src, "-q", "-b", "main", ident=IDENT)
@@ -99,7 +100,8 @@ class NoBackgroundWork(unittest.TestCase):
             # a PLAIN git (no -c flags: the kernel's own subprocess) fetching in the clone, traced
             t = _traced(lambda env: subprocess.run(["git", "-C", clone, "fetch", "-q", "origin"], check=True, capture_output=True, env=env))
         self.assertIn("built-in: git fetch", t)
-        self.assertNotIn("maintenance", t, "the repo's config alone keeps a plain git from spawning maintenance:\n" + t)
+        self.assertIn("maintenance-", t, "the trace names the fetch source by path: the pin below cannot be a bare substring")
+        self.assertNotIn("run_command: git maintenance", t, "the repo's config alone keeps a plain git from spawning maintenance:\n" + t)
         self.assertNotIn("run_command: git gc", t)
 
 

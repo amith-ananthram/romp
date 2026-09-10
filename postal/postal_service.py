@@ -1049,8 +1049,12 @@ def local_agents(threads=False):
     `threads` (the user 2026-08-22): also include COMMENT-THREAD sessions — real forked sessions the
     kernel hides from tabs/lanes/cards until promotion. Opt-in per consumer so the default listing and
     every other reader stay exactly as they were: self-identity, recipient resolution, and the agents
-    listing pass True (a thread mails its parent under its OWN name and is addressable for replies);
-    everything else never sees them."""
+    listing pass True (a thread mails its parent under its OWN name and is addressable for replies),
+    and so does every reader that judges a MAILBOX live or dead — the heartbeat (2026-09-06), the
+    orphan sweep, the stuck-mail warning, the revive wake and the retry pass (2026-09-10: those four
+    read the default listing, so a live thread's box was dead to them — the sweep destroyed a parent's
+    reply to its own thread after ORPHAN_GRACE and told the sender the thread had exited, and the
+    retry and wake never delivered it). Readers that only count or show presence keep the default."""
     return _agent_rows(_kernel_sessions(threads=threads))
 
 
@@ -1647,7 +1651,7 @@ def _sweep_orphans():
     the grace still gets its mail. Run periodically by the bus monitor."""
     if not MAILROOT.is_dir():
         return
-    live = local_agents()
+    live = local_agents(threads=True)                 # a comment thread's box is live while its row is (2026-09-10)
     if not live:                                       # tmux hiccup, not "everyone died" — don't mass-bounce
         return
     live_ids = {a["id"] for a in live}
@@ -1741,7 +1745,7 @@ def _warn_stuck_mail():
     messages are pruned so WARNED stays bounded to currently-pending mail."""
     if not MAILROOT.is_dir():
         return
-    live = local_agents()
+    live = local_agents(threads=True)                 # thread rows too: an idle thread can be stuck like any session
     if not live:                                       # kernel hiccup, not "everyone's stuck" — don't warn
         return
     by_id = {a["id"]: a for a in live}
@@ -1997,7 +2001,7 @@ def _wake_when_ready(sid):
             newd = MAILROOT / sid / "new"
             if not (newd.is_dir() and any(newd.iterdir())):
                 return                                        # nothing pending (or already delivered)
-            agent = next((a for a in local_agents() if a["id"] == sid), None)
+            agent = next((a for a in local_agents(threads=True) if a["id"] == sid), None)   # a reviving thread is a live row
             if not agent:
                 return                                        # session died during load
             if _push(sid, agent):                             # injected (drain + submit → forces a turn) → done
@@ -2575,7 +2579,7 @@ def _retry_pending():
             _mark_pending(sid)                 # stale marker -> clear it
             continue
         if live is None:
-            live = {a["id"]: a for a in local_agents()}
+            live = {a["id"]: a for a in local_agents(threads=True)}   # a thread's marker retries like any live session's
         if sid in live:
             try:
                 _push(sid, live[sid])          # re-attempt; the kernel defers again if still unsafe
@@ -3704,9 +3708,21 @@ def _quarantine_put(origin, m, to_id, via="", wire_id=None):
         tmp = QUARANTINE / (mid + ".tmp")
         tmp.write_text(json.dumps(rec))
         tmp.rename(QUARANTINE / (mid + ".json"))      # atomic publish (the kernel may be reading the dir)
+        _refusal_over("quarantine")                   # a hold landed: the next refusal here is a new episode
         _log("quarantine: held %s from %s -> %s (directed)" % (mid, origin, rec["to"]))
         return True
-    except OSError:
+    except OSError as e:
+        # No card says this (the kernel only reads the dir), so the log says it on every refusal, and
+        # the USER hears it once per episode as a bell row, the way deliver() says a refused publish:
+        # the directed arm answers 'retry', so the sender re-relays the message every exchange while
+        # its receipt reads carried, and a store that stays unwritable would otherwise be a lasting
+        # fault with no surface anyone watches. Keyed on the one store; the next hold that lands re-arms it.
+        text = "quarantine %s from %s: the hold could not be written (%s) — nothing held" % (mid, origin, e)
+        if _REFUSAL_SAID.get("quarantine"):
+            _log(text)
+        else:
+            _REFUSAL_SAID["quarantine"] = True
+            _refused_notice(text + "; the sender holds the text and re-relays until the store can be written")
         return False
 
 def quarantine_list():
@@ -3900,9 +3916,19 @@ def _relay_in(host, m, token_proven=False):
                 _log("relay %s from %s: local delivery refused (%s) — the sender re-relays" % (mid, host, e))
                 return "retry", None
         elif trust == "directed":
-            _quarantine_put(origin, m, match[0]["id"], via=host, wire_id=to_id)   # HELD for human approve/deny/edit;
-            #                                                                        never injects; remembers whether
-            #                                                                        the wire chose a sid (approve is id-strict then)
+            # HELD for human approve/deny/edit; never injects; remembers whether the wire chose a sid
+            # (approve is id-strict then). The hold is a file named by the mid, so an id that cannot
+            # name one is refused for good: 'retry' would have the sender re-relay it every exchange.
+            if not _safe_id(mid):
+                return "bounce", {"mid": mid, "why": "the message id is malformed; it cannot be held for approval"}
+            if not _quarantine_put(origin, m, match[0]["id"], via=host, wire_id=to_id):
+                # the hold did not land (said by _quarantine_put, with the OSError's cause).
+                # Acking here told the sender 'delivered' for mail nothing holds, and marking the mid
+                # seen deduped its re-relay away: lost on both ends, no record. Silence instead, as
+                # the trusted arm's refused delivery: the sender's outbox keeps it parked and
+                # re-relays it next exchange, and the hold lands once the store writes again.
+                _log("relay %s from %s: the hold could not be written — the sender re-relays" % (mid, host))
+                return "retry", None
         # else isolated → drop: ack so the sender stops resending, but deliver nothing (no communication).
         # An isolated host normally never peers at all (the kernel forces its notify down), so this is a
         # defensive backstop for the checkin-peer path where the mobile dials our /peer-exchange.

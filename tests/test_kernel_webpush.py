@@ -24,9 +24,9 @@ Covers the four layers separately, so a failure names its layer:
   * the declarative message (2026-09-10) — an Apple endpoint is sent Declarative Web Push, the tap as the
     OS's own callback for a KILLED app: iOS navigates the app to `navigate`, and the page lands the deep
     link at boot and on pageshow/popstate. The worker acks the `push` event the mutable message dispatches
-    and shows nothing. The stored tap, the replay and the fingerprint stay gone and pinned gone here.
-  * the vanished notification (2026-09-10, back by the user's call) — a LIVE app gets no navigation, no
-    click and no close from iOS, so the page holds the shown rows against registration.getNotifications():
+    and shows nothing. The worker and the page infer nothing a tap did not say, pinned on their code lines here.
+  * the vanished notification (2026-09-10) — a LIVE app gets no event from iOS, only a foregrounding, so the
+    page holds the shown rows against registration.getNotifications():
     exactly one gone lands via 'vanish', silently; two or more gone are settled without landing
     (/push/dropped); a newer same-session notification on the screen supersedes an older row
     (/push/superseded, also at the kernel on the shown ack). A swipe-dismiss reads the same as a tap —
@@ -147,22 +147,20 @@ class ServiceWorkerRoute(unittest.TestCase):
         self.assertNotIn("setTimeout", js, "event-based end to end — no timers in the worker")
 
     def test_the_worker_infers_nothing_a_tap_did_not_say(self):
-        # 2026-09-10, the user: no guessing. The rounds of 2026-09-08/09 kept a tap in memory for a replay, wrote it
-        # to the Cache API for a page to find, fingerprinted the worker build, acked a swipe-dismiss so a page could
-        # read a GONE notification as a tap, and asked registration.update() on every push. iOS gives a live Home
-        # Screen app none of the events those roads stood on (no notificationclick, no notificationclose), so every
-        # one of them was a guess. Gone, and pinned gone: the worker acks what it SAW and lands the click it GOT
+        # 2026-09-10, the user: no guessing. The worker acks what it SAW and lands the click it GOT — nothing kept
+        # between events, nothing written for a page to find, no screen read, no close acked, no update asked. Pinned
+        # on the code lines (the prose may name what the worker does not do)
         code = "\n".join(l for l in km._SW_JS.splitlines() if not l.lstrip().startswith("//"))   # the prose may name what went
         for word in ("caches", "/__romp/", "tapReplay", "tapLanded", "getNotifications", "notificationclose", "'closed'",
                      "registration.update", "addEventListener('message'", "pending=", "stamp(", "keep(", "mint("):
             self.assertNotIn(word, code, word)
-        self.assertNotIn(".navigate(", km._SW_JS, "no reload road either (review find 2026-09-09)")
+        self.assertNotIn(".navigate(", km._SW_JS, "no reload road either: the worker never navigates a page")
 
     def test_sw_carries_this_builds_version_string(self):
         # the served worker bakes the kernel's build string into SWV and sends it in every ack (`v`), so the ledger
-        # row says WHICH worker build acked — the one piece of the 2026-09-09 fingerprint worth keeping: it costs a
-        # string, and the device trail reads it. The raw source keeps the placeholder inside a string literal, so the
-        # node harness runs it unbaked; the string is sha + dist token, so a deploy and a bundle rebuild both move it
+        # row says WHICH worker build acked: it costs a string, and the device trail reads it. The raw source keeps the
+        # placeholder inside a string literal, so the node harness runs it unbaked; the string is sha + dist token, so
+        # a deploy and a bundle rebuild both move it
         _, body = _serve_get("/sw.js", headers={"X-Romp-Token": km.TOKEN})
         js = body.decode()
         v = km._sw_version()
@@ -173,7 +171,7 @@ class ServiceWorkerRoute(unittest.TestCase):
         self.assertIn("SWV='%s'" % v, js)
         self.assertNotIn("__ROMP_SWV__", js)
         self.assertIn("SWV='__ROMP_SWV__'", km._SW_JS, "the raw source is valid JS with the placeholder in a literal")
-        self.assertNotIn("__ROMP_SWV__", km._landing(), "the page no longer compares builds (the fingerprint went, 2026-09-10)")
+        self.assertNotIn("__ROMP_SWV__", km._landing(), "the string is the worker's alone: the page compares no builds")
 
     def test_sw_click_lands_on_the_session_that_fired(self):
         # the user 2026-08-08: the first real push opened the app on a DIFFERENT session. The
@@ -250,7 +248,7 @@ function frame(tag, frameType) {
   return w;
 }
 // a top-level client with the state a real WindowClient reports: how visible it is after focus(), and a navigate
-// method that LOGS if the worker ever calls it (the reload road was removed 2026-09-09)
+// method that LOGS if the worker ever calls it (the worker never navigates a page)
 function stateful(o) {
   const w = { frameType: 'top-level', visibilityState: o.vis, url: o.url,
               focus: () => { LOG.push(['focus']); return Promise.resolve(w); },
@@ -383,7 +381,7 @@ class ServiceWorkerExecutes(unittest.TestCase):
         self.assertEqual(p["sync"]["fetches"], [self.SHOWN], "the ack is on its way with LOG still empty (before the show)")
         self.assertEqual(p["sync"]["log"], ["show"], "…and the show is the synchronous act of the handler")
         self.assertEqual(len(p["fetches"]), 1, "one ack per push")
-        self.assertEqual(p["log"], [p["log"][0]], "nothing after the show: no registration.update(), no store write")
+        self.assertEqual(p["log"], [p["log"][0]], "nothing after the show: the handler shows and acks, and that is all")
         r = self.out["refusedShow"]
         self.assertEqual(r["outcomes"], ["rejected"], "a show that fails still fails the push the way it always did")
         self.assertEqual(r["fetches"][0][1]["stage"], "shown", "…and the ack went out first all the same")
@@ -714,7 +712,7 @@ class PushSink(unittest.TestCase):
         # E2E-encrypted. Every routing value is an id or a fixed word, never text.
         self.assertEqual(set(body), {"title", "body", "sid", "badge", "tag", "data"})
         self.assertEqual((body["title"], body["sid"], body["badge"]), ("romp: web", "SID-web", 3))
-        self.assertEqual(set(body["data"]), {"sid", "host", "kind", "cardId", "url", "name", "pid"})   # name (2026-09-09): the session's display name, for the offer chip; pid: the kernel's handle on this push to this device (PushLedger)
+        self.assertEqual(set(body["data"]), {"sid", "host", "kind", "cardId", "url", "name", "pid"})   # name (2026-09-09): the session's display name, filed on the ledger row; pid: the kernel's handle on this push to this device (PushLedger)
 
 
 class PushPayloadShape(unittest.TestCase):
@@ -1067,8 +1065,8 @@ class PushLedger(unittest.TestCase):
     shownAt, tappedAt, landedAt, supersededAt, droppedAt, swVersion} — and the payload to that device carries the
     row's pid, in its routing block and in the deep link. Rows are read from disk on every op (restart-proof), capped
     per endpoint, 0600, and go with their endpoint's subscription. /push/pending lists EVERY unsettled row, newest
-    first, each wearing its stage (2026-09-10, the vanish road back by the user's call: the page holds the shown rows
-    against the screen and lands the one that is gone)."""
+    first, each wearing its stage (2026-09-10, the vanish road: the page holds the shown rows against the screen and
+    lands the one that is gone)."""
     EP_A = "https://push.example.net/send/phone-a"
     EP_B = "https://push.example.net/send/phone-b"
     ROW_KEYS = {"pid", "endpoint", "sid", "host", "kind", "cardId", "name", "sentAt", "shownAt", "tappedAt", "landedAt", "supersededAt", "droppedAt", "swVersion"}
@@ -1155,7 +1153,7 @@ class PushLedger(unittest.TestCase):
         return [(r["pid"], r["stage"]) for r in km._push_pending(ep)["rows"]]
 
     def test_pending_lists_every_unsettled_row_newest_first_and_names_each_stage(self):
-        # 2026-09-10, the vanish road back by the user's call: the page needs EVERY unsettled row to hold against the
+        # the vanish road (2026-09-10): the page needs EVERY unsettled row to hold against the
         # screen, newest first (2026-09-09: the newest row alone named a push for ANOTHER session, sent 40 s after the
         # one the user tapped) — a clicked row lands, a shown row is compared with the screen, a sent row is left alone
         self.assertEqual(km._push_pending(self.EP_A), {"rows": []}, "nothing filed: nothing pending")
@@ -1170,7 +1168,7 @@ class PushLedger(unittest.TestCase):
         self.assertEqual((r["sid"], r["kind"], r["cardId"], r["name"], r["stage"]), ("SID-api", "card", "SID-api:g2", "api", "sent"), "no ack at all is 'sent'")
         self.assertGreaterEqual(r["ageS"], 0)
         self.assertLessEqual(r["ageS"], 1)
-        # the stages, strongest word first: clicked over shown over sent — and no 'closed' (iOS never fires notificationclose)
+        # the stages, strongest word first: clicked over shown over sent
         km._push_ledger_stamp(p2, "shown", "abc.123")
         km._push_ledger_stamp(p1, "shown", "abc.123")
         self.assertEqual(self._pending(self.EP_A), [(p3, "sent"), (p2, "shown"), (p1, "shown")])
@@ -1197,7 +1195,7 @@ class PushLedger(unittest.TestCase):
         self.assertIsNone(km._push_ledger_stamp("never-issued-pid-0001", "shown"), "an unknown pid changes nothing")
         self.assertEqual(set(km._PUSH_STAGE_FIELD), set(km._PUSH_ACK_STAGES) | set(km._PUSH_SETTLE_STAGES), "every stage is an ack or a settle")
         self.assertEqual((km._PUSH_ACK_STAGES, km._PUSH_SETTLE_STAGES), (("shown", "clicked"), ("landed", "superseded", "dropped")),
-                         "no 'closed' (iOS never fires notificationclose, so a close is never on record), no 'dismissed' (no chip)")
+                         "the acks are what the worker saw, the settles what the page decided: no 'closed', no 'dismissed'")
         for gone in ("closed", "dismissed"):
             self.assertNotIn(gone, km._PUSH_STAGE_FIELD)
 
@@ -1448,9 +1446,7 @@ class RevealRoute(unittest.TestCase):
         # review find (2026-09-09, on #1127): `via` went from the request body straight into the stderr line, so a
         # body could write anything into the line-oriented journal, a forged line included. The route admits the
         # roads in _REVEAL_ROADS and logs any other word as 'other'; a shell of a build before the field sends none,
-        # and that stays the bare line. 'store' and 'offer' — the stored tap and the chip (2026-09-08/09) — are refused
-        # since they went: a stale shell naming one is logged as 'other' like any word. 'vanish' is back by name
-        # (2026-09-10, the user's call: the one road a live iOS app leaves for a background tap)
+        # and that stays the bare line. A word from a shell of another build ('store', 'offer' here) is 'other' too
         import contextlib, io
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
@@ -1551,9 +1547,9 @@ class PushLedgerRoutes(unittest.TestCase):
         self.assertEqual(code, 413, "capped far below the authenticated routes' limit: no token gates this read")
         self.assertEqual((self._row(pid)["shownAt"], self._row(pid)["tappedAt"]), (0, 0), "nothing stamped")
         self.assertEqual(len(km._push_ledger()), 1, "no row minted by a caller")
-        self.assertNotIn("closedAt", self._row(pid), "no 'closed' stage: iOS never fires notificationclose, so the worker never says it")
+        self.assertNotIn("closedAt", self._row(pid), "no 'closed' stage")
 
-    def test_the_pages_routes_ride_the_token_and_the_dismissal_is_gone(self):
+    def test_the_pages_routes_ride_the_token_and_the_three_settles_are_the_only_ones(self):
         pid = km._push_ledger_add(self.EP, "SID-api", kind="turn")
         for method, path, body in (("GET", "/push/pending?endpoint=" + self.EP, None), ("POST", "/push/landed", {"pid": pid}),
                                    ("POST", "/push/superseded", {"pid": pid}), ("POST", "/push/dropped", {"pid": pid})):
@@ -1563,7 +1559,7 @@ class PushLedgerRoutes(unittest.TestCase):
         code, _ = self._req("GET", "/push/pending")
         self.assertEqual(code, 400, "no endpoint named")
         code, _ = self._req("POST", "/push/dismissed", {"pid": pid})
-        self.assertNotEqual(code, 200, "no such route since the chip went (2026-09-09): nothing the page could dismiss")
+        self.assertNotEqual(code, 200, "no fourth settle: the page lands, supersedes or drops a row, nothing else")
         self.assertNotIn("dismissedAt", self._row(pid))
 
     def test_a_shown_ack_supersedes_the_older_rows_for_that_session_with_a_line_each(self):
@@ -1698,10 +1694,9 @@ class LandingRevealPins(unittest.TestCase):
         self.assertLess(js.index("if(swc&&swc.addEventListener)swc.addEventListener('message'"), js.index("window.addEventListener('pageshow'"))
         self.assertNotIn("if(swc&&swc.addEventListener){", js, "the link listeners are not gated on a worker")
 
-    def test_the_page_keeps_the_stored_tap_the_fingerprint_and_the_chip_gone(self):
-        # 2026-09-10. Pinned gone from the served shell and the script: the stored tap and its replay, the fingerprint and
-        # its rows, the offer chip, and the roads /reveal no longer admits. The vanished-notification road is NOT on this
-        # list: it is back by the user's call the same day (test_the_vanish_road_is_back_and_says_why)
+    def test_the_page_has_no_road_but_the_four_and_no_element_of_its_own(self):
+        # pinned absent from the script's code lines and the served shell: any store or replay, any build comparison, any
+        # element the script would own, any word for /reveal but the four roads, any timer
         import re
         code = lambda src: "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("//"))   # the prose may name what went; the code may not
         js = code(km._LANDING_REVEAL_JS)
@@ -1715,10 +1710,10 @@ class LandingRevealPins(unittest.TestCase):
         self.assertEqual(set(re.findall(r"getElementById\('([^']+)'\)", js)), {"f-feed", "f-chat"}, "the two pane iframes are all the script looks up: no element of its own")
         self.assertEqual(km._REVEAL_ROADS, frozenset({"sw", "link", "ack", "vanish"}))
 
-    def test_the_vanish_road_is_back_and_says_why(self):
+    def test_the_vanish_road_names_its_trade_off_at_the_landing_site(self):
         # the user's call (2026-09-10): a working background tap is worth an occasional wrong landing after a swipe. The
-        # code carries the road, and the comment at the landing site names the conflation, its cause and the decision, so
-        # nobody reads the road as an oversight and takes it out again
+        # comment at the landing site names the conflation, its cause and the decision, so nobody reads the road as an
+        # oversight and takes it out
         js = km._LANDING_REVEAL_JS
         self.assertIn("'vanish'", js)
         self.assertIn("function displayed()", js)
@@ -1952,8 +1947,8 @@ const R = (pid, sid, stage, ageS, extra) => Object.assign({ pid, sid, host: '', 
   await flip('hidden');
   out.hidden = snap();
   reset();
-  // ONE VANISHED: two shown rows, one still on the screen — the other is gone: tapped, as far as the page can tell (a live
-  // iOS app gets no click and no close). It lands, silently
+  // ONE VANISHED: two shown rows, one still on the screen — the other is gone: tapped, as far as the page can tell (the one
+  // road a live iOS app leaves). It lands, silently
   PENDING = { rows: [R('PID-shown-00000002', 'S42', 'shown', 30, { name: 'tests' }), R('PID-shown-00000001', 'S41', 'shown', 45, { kind: 'card', cardId: 'S41:g3', name: 'api' })] };
   DISPLAYED = ['PID-shown-00000002'];
   await flip('visible');
@@ -2145,8 +2140,8 @@ class LandingRevealExecutes(unittest.TestCase):
         self.assertEqual(self.out["testSid"]["posted"], [])
 
     def test_an_unknown_message_shape_is_not_a_tap(self):
-        # the pushReveal shape of a worker two builds back (before 2026-09-06) is no longer read: a phone's worker refreshes
-        # on the next navigation, and this shell lands what the current worker says, nothing inferred from an old shape
+        # a message of another shape (here the one a worker of an older build posted) is not a tap: the shell lands what
+        # the current worker says and infers nothing from an old shape
         self.assertEqual((self.out["legacy"]["fetches"], self.out["legacy"]["diag"]), ([], []))
 
     def test_a_refused_reveal_is_loud(self):
@@ -2208,14 +2203,14 @@ class LandingRevealReadsTheLinkLater(unittest.TestCase):
 
 
 class LandingRevealAsksTheLedger(unittest.TestCase):
-    """The ack road (2026-09-09) and the vanish road (2026-09-10, back by the user's call): a page with a push subscription
+    """The ack road (2026-09-09) and the vanish road (2026-09-10): a page with a push subscription
     asks GET /push/pending?endpoint=<its own> on boot / visible / pageshow / focus for EVERY unsettled push to this device,
     reads the screen (registration.getNotifications) and decides, per row: clicked → lands via 'ack', once by pid; shown
     and still displayed → untouched; shown and GONE → tapped, as far as the page can tell (iOS fires neither
     notificationclick nor notificationclose for a live app, so a swipe-dismiss reads the same — the trade-off the user
     accepted for a working background tap), and EXACTLY ONE such row lands via 'vanish', silently; two or more gone are
     dropped without landing; a newer same-session notification on the screen supersedes an older gone row; sent-only and a
-    screen it cannot read decide nothing. No chip, no prompt, no timer. Rows go back as /push/landed, /push/superseded or
+    screen it cannot read decide nothing. No prompt, no timer. Rows go back as /push/landed, /push/superseded or
     /push/dropped, so none is left to inflate a later count."""
     EP = "https://push.example.net/send/this-device"
     LONG = "66666666-1111-2222-3333-444444444444"   # a uuid-shaped sid, so the clipped form differs from the whole
@@ -2273,7 +2268,7 @@ class LandingRevealAsksTheLedger(unittest.TestCase):
         self.assertEqual(_rows(v, "tap-pending"), [{"via": "visible", "sub": True, "rows": 2, "getNotifications": True, "displayed": 1, "vanished": 1}])
         self.assertEqual(_rows(v, "tap-vanish-land"), [{"sid8": "S41", "ageS": 45}])
         self.assertIn(["reveal-post", {"status": 200, "via": "vanish", "boot": False}], v["diag"])
-        self.assertEqual(v["notes"], [], "nothing shown to the user but the landing itself: no chip, no prompt")
+        self.assertEqual(v["notes"], [], "nothing shown to the user but the landing itself")
         a = self.out["oneVanishedAgain"]
         self.assertEqual(a["fetches"], [], "the same pid again is seen: no second landing")
         self.assertEqual(_rows(a, "tap-pending"), [{"via": "visible", "sub": True, "rows": 2, "getNotifications": True, "displayed": 1, "vanished": 0}])
