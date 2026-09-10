@@ -19,25 +19,24 @@ test("the transient retrying + persistent retried events each have their own Cha
   assert.match(RENDER, /ev\.kind === "retried"\) return renderRetried\(ev\)/);
 });
 
-test("renderRetrying is an animated element (loader dots) with the live attempt count", () => {
-  const body = RENDER.slice(RENDER.indexOf("function renderRetrying("), RENDER.indexOf("function renderRetried("));
-  assert.match(body, /el\("div", "turn turn-retrying"\)/);
-  assert.match(body, /line\.appendChild\(metaDots\(\)\)/);                         // the loader dots (mid-operation)
-  // singular "API retrying" until attempt 2+, then the live count "API retrying — attempt N"
-  assert.match(body, /n > 1 \? `API retrying — attempt \$\{n\}` : "API retrying"/);
+test("renderRetrying is a live API notice: loader dots in the glyph slot, the attempt count as meta", () => {
+  // 2026-09-08 (the notice-vocabulary pass): the ONE builder; the amber is the retry severity (rail + dot + dots)
+  const body = RENDER.split("function renderRetrying(")[1].split("\nfunction ")[0];
+  assert.match(body, /glyph: noticeLiveGlyph\(metaDots\(\)\), sev: "retry", gist: "retrying", meta, acts: \[stop\], body, live: true,/);
+  assert.match(body, /cls: "turn-retrying",/);
+  assert.match(body, /`attempt \$\{n\}` \+ \(info\.max \? ` of \$\{info\.max\}` : ""\)/);
 });
 
 test("renderRetrying surfaces the api_retry payload's own detail (the user 2026-07-10)", () => {
-  const body = RENDER.slice(RENDER.indexOf("function renderRetrying("), RENDER.indexOf("// The next-attempt countdown's text"));
+  const body = RENDER.split("function renderRetrying(")[1].split("\nfunction ")[0];
   assert.ok(body, "the renderRetrying slice is anchored");
   assert.match(body, /info\.attempt \|\| ev\.retries/, "payload attempt number outranks the local count");
   assert.match(body, /` of \$\{info\.max\}`/, "the retry budget shows when the payload names it");
-  // the error behind the backoff on its own muted line, full message in the tooltip
-  assert.match(body, /el\("div", "retrying-err"\)/);
+  // 2026-09-08: the error behind the backoff is the notice's folded BODY; the request id rides the one tooltip
+  assert.match(body, /body = el\("div", "notice-md"\);/);
   assert.match(body, /`HTTP \$\{info\.status\}`/);
-  // the tooltip carries the message AND the request id since 2026-07-29 — the id is the one detail worth
-  // quoting to support and the one nobody reads at a glance, so it lives a hover away, not on the line
-  assert.match(body, /err\.title = \[msg, info\.requestId/);
+  assert.match(body, /const tipText = \[msg, info\.requestId \? `request \$\{info\.requestId\}` : ""\]/);
+  assert.match(body, /if \(tipText\) setTip\(body, tipText\);/);
 });
 
 test("the next-try countdown TICKS every second — it is not frozen at render time (the user 2026-07-24)", () => {
@@ -55,54 +54,55 @@ test("the next-try countdown TICKS every second — it is not frozen at render t
   assert.doesNotMatch(RENDER, /next try in ~\$\{waitS\}s/, "the frozen render-time countdown is gone");
 });
 
-test("a past-due countdown reads 'retrying now', never a stuck 0s or a negative", () => {
-  const fn = RENDER.slice(RENDER.indexOf("function retryingCountdownText("), RENDER.indexOf("function retryingTick("));
-  assert.match(fn, /s > 0 \? `— next try in \$\{s\}s…` : "— retrying now…"/);
+test("a past-due countdown reads 'retrying now', never a stuck 0s or a negative — in the ONE duration format", () => {
+  // 2026-09-08: "next try in 7s" through duration.ts durLabel (the audit found six span formats); no leading dash —
+  // the countdown is a META slot now, not a sentence fragment glued to the head
+  const fn = RENDER.split("function retryingCountdownText(")[1].split("\n}")[0];
+  assert.match(fn, /s > 0 \? `next try in \$\{durLabel\(s\)\}` : "retrying now…"/);
 });
 
 test("the card carries a Stop control that interrupts the stalled turn (the user 2026-07-24)", () => {
-  // the CLI owns the backoff and the SDK exposes no handle on it, so the honest stop is the same interrupt
-  // Ctrl+C sends — it cuts the turn AND leaves the thread retry-suppressed so romp's loop won't relapse.
-  const body = RENDER.slice(RENDER.indexOf("function renderRetrying("), RENDER.indexOf("// The next-attempt countdown's text"));
-  assert.match(body, /el\("button", "retrying-stop"\)/);
-  assert.match(body, /stop\.dataset\.act = "stopRetrying"/, "delegated by data-act, not a per-render listener");
-  assert.match(body, /stop\.textContent = "Stop retrying"/);
-  // the handler lives on the STABLE body root (the transcript tail rebuilds every push → a rebuilt node
-  // would eat a mid-press click), and acknowledges the click before any round-trip
+  const body = RENDER.split("function renderRetrying(")[1].split("\nfunction ")[0];
+  // 2026-09-08: a word button on the notice vocabulary (noticeAct: data-act only, no per-render listener)
+  assert.match(body, /const stop = noticeAct\("Stop retrying", "stopRetrying",/);
+  assert.match(RENDER, /function noticeAct\(label: string, act: string, tip\?: string\): HTMLButtonElement \{[\s\S]{0,300}?b\.dataset\.act = act;/);
   assert.match(RENDER, /stopRetrying: \(el\) => \{/);
   assert.match(RENDER, /b\.textContent = "Stopping…"/);
 });
 
-test("the stop control reuses the API-error card's control chrome, and the countdown uses tabular digits", () => {
-  // a control matches a control (one treatment per information type) — the two cards read as one family
-  assert.match(CSS, /\.retrying-stop \{[^}]*color: var\(--dim\)/);
-  assert.match(CSS, /\.retrying-stop \{[^}]*border: 1px solid var\(--rail\)/);
-  assert.match(CSS, /\.retrying-stop:disabled \{[^}]*cursor: default/);
-  // tabular so the ticking number never jitters the row
-  assert.match(CSS, /\.retrying-countdown \{[^}]*font-variant-numeric: tabular-nums/);
+test("the stop control wears the ONE notice button dress, and the countdown's meta slot uses tabular digits", () => {
+  // 2026-09-08: .notice-act = the button vocabulary (sm box, T141 rest, pattern-A hover); meta = tabular-nums
+  assert.match(CSS, /\.notice-act \{[^}]*color: var\(--dim\)/);
+  assert.match(CSS, /\.notice-act \{[^}]*border: 1px solid var\(--card-border\)/);
+  assert.match(CSS, /\.notice-act:disabled \{[^}]*cursor: default/);
+  assert.match(CSS, /\.notice-meta \{[^}]*font-variant-numeric: tabular-nums/);
+  assert.doesNotMatch(CSS, /\.retrying-stop|\.retrying-countdown \{/);
 });
 
-test("the error line wears the SAME 0.92em as the retrying line (one size per information type), muted", () => {
-  assert.match(CSS, /\.retrying-err \{[^}]*font-size: 0\.92em/);
-  assert.match(CSS, /\.retrying-err \{[^}]*color: color-mix\(in srgb, #e67e22 55%, var\(--dim\)\)/);
+test("the error detail is the notice BODY — the one 0.92em body rung, no amber text", () => {
+  // 2026-09-08: one size per role (notice-vocab.test.ts); the retrying hue lives ONLY in its token declaration
+  assert.match(CSS, /\.notice-body \{[^}]*font-size: 0\.92em/);
+  const noComments = CSS.replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.equal((noComments.match(/#e67e22/gi) || []).length, 1, "the amber appears once: --st-retrying-bg's dark value");
+  assert.doesNotMatch(CSS, /\.retrying-err/);
 });
 
-test("renderRetried is a static, muted 'Recovered after N retries' note (pluralized)", () => {
-  const body = RENDER.slice(RENDER.indexOf("function renderRetried("), RENDER.indexOf("// Compact a token count"));
-  assert.match(body, /el\("div", "turn turn-retried"\)/);
-  assert.match(body, /`Recovered after \$\{n\} \$\{n === 1 \? "retry" : "retries"\}`/);
+test("renderRetried is a slim API notice — 'recovered after N retries' (pluralized), static", () => {
+  const body = RENDER.split("function renderRetried(")[1].split("\nfunction ")[0];
+  // 2026-09-08: the gist string lives in retriedGist, shared with compact mode's group head (noticeBrief)
+  assert.match(body, /notice\(\{ src: "API", glyph: "retry", gist: retriedGist\(ev\.retries \|\| 0\), cls: "turn-retried",/);
+  assert.match(RENDER, /function retriedGist\(n: number\): string \{ return `recovered after \$\{n\} \$\{n === 1 \? "retry" : "retries"\}`; \}/);
   assert.doesNotMatch(body, /metaDots/, "the recovered note is static — no loader animation");
 });
 
-test("the retrying element is tinted the amber retrying STATUS color (#e67e22), matching the tab border", () => {
-  // it must read as the SAME state the amber tab outline shows (.tab.tab-retrying { --state: #e67e22 })
-  assert.match(CSS, /\.retrying-line \{[^}]*color: #e67e22/);
-  assert.match(CSS, /\.turn-retrying \.dot \{[^}]*background: #e67e22/);
-  assert.match(CSS, /\.turn-retrying \.meta-dots i \{[^}]*background: #e67e22/);   // loader dots amber, not the default accent blue
-  assert.match(CSS, /\.tab\.tab-retrying \{ --state: #e67e22/);                    // same status color as the border
+test("the retrying notice is tinted the retrying STATUS token on its rail, dot and dots — the tab ring's hue", () => {
+  // 2026-09-08: the hue is --st-retrying-bg (raw in seven rules before); severity is rail + dot + glyph, never text
+  assert.match(CSS, /\.notice-sev-retry\s+\{ --notice-rail: var\(--st-retrying-bg\);\s+--notice-dot: var\(--st-retrying-bg\); \}/);
+  assert.match(CSS, /\.notice-glyph \.meta-dots i \{ background: var\(--notice-rail, var\(--accent\)\); \}/);   // loader dots take the rail's colour
+  assert.match(CSS, /\.tab\.tab-retrying \{ --state: var\(--st-retrying-bg\); \}/);                    // same status token as the border
 });
 
-test("the recovered note is muted (dim), not amber — it's a resolved historical marker", () => {
-  // the effort note shares this rule now (grouped selector) — still muted, same treatment (2026-07-16)
-  assert.match(CSS, /\.retried-line, \.effort-line \{[^}]*color: var\(--dim\)/);
+test("the recovered note is the INFO severity (dim rail), not amber — a resolved historical marker", () => {
+  assert.match(CSS, /\.notice-sev-info\s+\{ --notice-rail: var\(--dim\);/);
+  assert.match(CSS, /\.notice-gist \{[^}]*color: var\(--fg\)/);
 });

@@ -580,10 +580,12 @@ test("stuck-green regression: a stalled or missing later frame can never park th
 test("the popover renders the chat's display units — thinking hidden, tool runs folded, per the gear", () => {
   const at = UI.indexOf("renderingIntoThread = true;");
   const block = UI.slice(at, at + 2800);   // widened past the T145 relay-note insert
-  assert.ok(block.includes("? compactDisplay(evs.map((e) => e.kind), evs.map((e) => e.kind === \"tool\" ? e.name : undefined))"),
+  // 2026-09-08 (the notice-vocabulary pass): the retry-run fold became the generic noticegroup, fed the same
+  // per-event foldability the chat computes (isFoldableNotice)
+  assert.ok(block.includes("? compactDisplay(evs.map((e) => e.kind), evs.map((e) => e.kind === \"tool\" ? e.name : undefined), evs.map(isFoldableNotice))"),
     "the SAME unit builder the chat uses, gated on the SAME settings.compact");
-  assert.ok(block.includes('const key = it.kind === "toolgroup" ? toolGroupKey(run[0]) : retryGroupKey(run[0]);'),
-    "the chat's group identities — tool runs AND retry runs (T131) — so expands survive refills");
+  assert.ok(block.includes('const key = it.kind === "toolgroup" ? toolGroupKey(run[0]) : noticeGroupKey(run[0]);'),
+    "the chat's group identities — tool runs AND notice runs — so expands survive refills");
   assert.ok(block.includes("? renderToolGroup(run as Extract<ChatEvent, { kind: \"tool\" }>[], prev, key, open)"),
     "the chat's own folded lines");
   assert.ok(block.includes('child.classList.add("tg-child");'), "expanded children wear the chat's classes");
@@ -652,7 +654,7 @@ test("the parity bundle (2026-08-26): dividers, owner-scoped in-turn controls, t
   assert.match(UI, /function owningSidOf\(el0: HTMLElement \| null\): string \| null \{/);
   assert.match(UI, /const sidQ = owningSidOf\(el\) \|\| activeId;/);   // resolved once — the optimistic arm reuses it
   assert.match(UI, /\{ type: "cancelQueued", id: sidQ, md: qmd \}/);
-  assert.match(UI, /\{ type: "dismissDialog", id: owningSidOf\(dismiss\) \}/);
+  assert.match(UI, /\{ type: "dismissDialog", id: owningSidOf\(b\) \}/);   // the delegate's handler (2026-09-08), still owner-scoped
 });
 
 test("the thread's running turn offers the chat's stop affordance, owner-scoped to the THREAD (T138)", () => {

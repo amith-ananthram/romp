@@ -75,7 +75,7 @@ test("marks translate EVENT indices to DISPLAY UNITS before asking the frame", (
   // one) and the mark silently vanished — worst exactly beside big tool runs, where replies to a
   // working session land. Both painters now translate through eventUnitIndex.
   assert.match(RENDER, /function eventUnitIndex\(s: Session\): Int32Array/);
-  assert.match(RENDER, /if \(it\.kind === "toolgroup" \|\| it\.kind === "retrygroup"\) \{ for \(const i of it\.indices\) map\[i\] = u; \}/);
+  assert.match(RENDER, /if \(it\.kind === "toolgroup" \|\| it\.kind === "noticegroup"\) \{ for \(const i of it\.indices\) map\[i\] = u; \}/);   // noticegroup since 2026-09-08
   assert.match(RENDER, /const evUnit = eventUnitIndex\(s\);/);
   assert.match(RENDER, /const u = evUnit\[i\];/);
   assert.match(RENDER, /const off = frame\.offsetOf\(u\);/, "notches ask the frame in unit space");

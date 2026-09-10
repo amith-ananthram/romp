@@ -338,7 +338,8 @@ test("the note retires on the exact events: an explicit switch, the session's re
   // the session frame: the torn-down session is back while the note still holds → back on it (setActive retires the note)
   assert.match(RENDER, /if \(composerNoteSid === msg\.id\) setActive\(msg\.id\);/);
   // its own ✕
-  assert.match(RENDER, /function renderComposerNote\(sid: string, why: DismissWhy, name: string\): void \{[\s\S]*?x\.addEventListener\("click", \(\) => clearComposerNote\(\)\);/);
+  assert.match(RENDER, /function renderComposerNote\(sid: string, why: DismissWhy, name: string\): void \{[\s\S]*?x\.dataset\.act = "composerNoteX";/);   // the ✕ rides the body delegate since 2026-09-08 (click-safe, no per-node listener)
+  assert.match(RENDER, /composerNoteX: \(\) => clearComposerNote\(\),/);
 });
 
 test("the `!activeId` adoption loads the adopted session's draft (once-per-page restore is not enough)", () => {

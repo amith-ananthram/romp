@@ -247,9 +247,12 @@ class ApiHealthCell(unittest.TestCase):
     def test_the_light_theme_keeps_the_ok_dot_visible_and_the_state_dots_their_colors(self):
         # the dark label gray at .55 blends into the light rail; the light label color keeps the glyph. Scoped to
         # the ok state: a bare `body.theme-light .ah-dot` (0,2,1) would outrank the detail's `.ah-dot[data-state=…]`
-        # rules (0,2,0), and the card's headline dot would lose its amber and red
-        self.assertTrue("body.theme-light #rail-api[data-state=ok] .ah-dot,body.theme-light .ah-dot[data-state=ok]{background:#5D574E}" in self.html,
-                        "the light override names the ok state")
+        # rules (0,2,0), and the card's headline dot would lose its amber and red. The History head shows the signal's
+        # quiet states (healthy, unknown) with the same glyph, so the rule names them too (the base gray falls to
+        # about 1.6:1 on the white tip)
+        self.assertTrue("body.theme-light #rail-api[data-state=ok] .ah-dot,body.theme-light .ah-dot[data-state=ok],"
+                        "body.theme-light .ah-dot[data-state=healthy],body.theme-light .ah-dot[data-state=unknown]{background:#5D574E}" in self.html,
+                        "the light override names the ok state and the History head's quiet states")
         self.assertNotIn("body.theme-light .ah-dot{", self.html, "no bare light rule on the dot")
         self.assertNotIn("body.theme-light .ah-dot[data-state=degraded]", self.html, "the state rules are not restated per theme")
 

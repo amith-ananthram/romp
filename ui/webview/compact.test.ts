@@ -88,7 +88,7 @@ test("every non-tool event owns exactly one display unit — the scroll-mark tra
   const items = compactDisplay(kinds, kinds.map((k) => (k === "tool" ? "Bash" : undefined)));
   const seen = new Map<number, number>();
   items.forEach((it, u) => {
-    if (it.kind === "toolgroup" || it.kind === "retrygroup") for (const i of it.indices) seen.set(i, u);
+    if (it.kind === "toolgroup" || it.kind === "noticegroup") for (const i of it.indices) seen.set(i, u);   // noticegroup since 2026-09-08
     else seen.set(it.index, u);
   });
   for (let i = 0; i < kinds.length; i++) {
@@ -103,29 +103,45 @@ test("every non-tool event owns exactly one display unit — the scroll-mark tra
 
 test("consecutive retry-recovery notes fold like a tool run — a lone one stays first-class (T131)", () => {
   // the user 2026-08-27: seventeen consecutive 'Recovered after N retries' rows are a flood; the
-  // collapsed-run idiom fits consecutive same-shape machine notices exactly.
+  // collapsed-run idiom fits consecutive same-shape machine notices exactly. 2026-09-08: the fold is the
+  // generic NOTICEGROUP (a bare "retried" run still folds when the caller passes no foldability array).
   const kinds = ["user", "retried", "retried", "retried", "assistant", "retried", "user"];
   const items = compactDisplay(kinds);
   assert.deepEqual(items, [
     { kind: "event", index: 0 },
-    { kind: "retrygroup", indices: [1, 2, 3] },
+    { kind: "noticegroup", indices: [1, 2, 3] },
     { kind: "event", index: 4 },
     { kind: "event", index: 5 },   // a lone recovery renders first-class, like a lone tool
     { kind: "event", index: 6 },
   ]);
 });
 
+test("the foldable set is the caller's (isFoldableNotice): effort/model-swap/reload/interrupt pairs fold; peers and boundaries never do (2026-09-08)", () => {
+  const kinds = ["user", "effortApplied", "modelFallback", "user", "assistant", "postal-service", "compact", "retried", "retried"];
+  const notices = [false, true, true, true /* an interrupt marker */, true /* its settle */, false, false, true, true];
+  assert.deepEqual(compactDisplay(kinds, undefined, notices), [
+    { kind: "event", index: 0 },
+    { kind: "noticegroup", indices: [1, 2, 3, 4] },
+    { kind: "event", index: 5 },   // a peer's mail stands alone — a reply may be owed
+    { kind: "event", index: 6 },   // a compaction boundary is a boundary
+    { kind: "noticegroup", indices: [7, 8] },
+  ]);
+  // with the array present, a "retried" NOT marked foldable is a plain event (the array is authoritative)
+  assert.deepEqual(compactDisplay(["retried", "retried"], undefined, [false, false]),
+    [{ kind: "event", index: 0 }, { kind: "event", index: 1 }]);
+});
+
 test("retry runs and tool runs break each other — two folds, never one mixed group", () => {
   const kinds = ["retried", "retried", "tool", "tool", "retried", "retried"];
   const items = compactDisplay(kinds, kinds.map((k) => (k === "tool" ? "Bash" : undefined)));
   assert.deepEqual(items, [
-    { kind: "retrygroup", indices: [0, 1] },
+    { kind: "noticegroup", indices: [0, 1] },   // noticegroup since 2026-09-08
     { kind: "toolgroup", indices: [2, 3] },
-    { kind: "retrygroup", indices: [4, 5] },
+    { kind: "noticegroup", indices: [4, 5] },
   ]);
 });
 
 test("thinking hides without breaking a retry run, same as a tool run", () => {
   const kinds = ["retried", "thinking", "retried"];
-  assert.deepEqual(compactDisplay(kinds), [{ kind: "retrygroup", indices: [0, 2] }]);
+  assert.deepEqual(compactDisplay(kinds), [{ kind: "noticegroup", indices: [0, 2] }]);   // noticegroup since 2026-09-08
 });

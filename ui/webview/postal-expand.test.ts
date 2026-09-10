@@ -23,36 +23,39 @@ test("a postal summary is the caption, or the first non-empty line of the body w
   assert.match(RENDER, /function postalServiceSummary/);
   assert.match(RENDER, /const cap = ev\.summary && ev\.summary\.trim\(\)/);
   assert.match(RENDER, /\.split\("\\n"\)\.map\(\(s\) => s\.trim\(\)\)\.find\(Boolean\)/);
-  // no hard pre-truncation — the CSS two-line clamp cuts at the box edge instead
   assert.doesNotMatch(RENDER, /slice\(0, 99\)/, "the 100-char pre-truncation must be gone");
-  assert.match(CSS, /\.postal-service-summary-text \{[^}]*-webkit-line-clamp: 2/);
+  // 2026-09-08 (the notice-vocabulary pass): the summary is the notice GIST — one nowrap line with an ellipsis, the
+  // head grammar every notice shares (the two-line clamp went with the bespoke card)
+  assert.match(RENDER, /const summaryText = postalServiceSummary\(ev\) \|\| gistOf\(fullText\);/);
+  assert.match(CSS, /\.notice-gist \{[^}]*text-overflow: ellipsis/);
 });
 
 test("both directions render the summary + a click-to-expand full body (no hover tooltip)", () => {
-  // expandable when the full body differs from the summary — same path for incoming and outgoing
   assert.match(RENDER, /const expandable = .*collapseWs\(fullText\) !== collapseWs\(summaryText\)/);
-  assert.match(RENDER, /body\.classList\.add\("postal-service-expandable"\)/);
+  // 2026-09-08: the full message is the notice BODY, markdown-rendered against the sender's repo
+  assert.match(RENDER, /if \(expandable\) \{ body = el\("div", "notice-md md"\); body\.innerHTML = md\(ev\.body, postalRepoFor\(ev\)\); highlight\(body\); \}/);
   assert.doesNotMatch(RENDER, /body\.title = ev\.body/, "the old hover-tooltip full body must be gone");
   assert.doesNotMatch(RENDER, /caption \|\| ev\.body/, "no longer 'caption else whole body'");
 });
 
 test("the expand is KEYED so a kernel push can't silently re-collapse it (the user 2026-07-25)", () => {
-  assert.match(RENDER, /const pkey = "postal:" \+ \(ev\.mid \|\| ev\.uuid \|\| ""\)/);
-  assert.match(RENDER, /applyFold\(body, "expanded", pkey\)/);
-  assert.match(RENDER, /rememberFold\(body, "expanded", pkey\)/);
-  // no bare unkeyed toggle left inside the postal renderer (unkeyed = lost on the next re-render)
-  const start = RENDER.indexOf("function renderPostalService");
-  const end = RENDER.indexOf("function renderTeammate");
-  assert.doesNotMatch(RENDER.slice(start, end), /classList\.toggle\("expanded"\)/,
-    "the postal card must not hand-roll its expand state");
+  // 2026-09-08: the key rides the ONE builder (openFolds "notice:postal:<mid>"), toggled by the body delegate
+  assert.match(RENDER, /key: "postal:" \+ \(ev\.mid \|\| ev\.uuid \|\| ""\), rail: ev\.color \? ev\.color\.bg : undefined,/);
+  const start = RENDER.indexOf("function renderPostalService(");
+  const end = RENDER.indexOf("\nfunction ", start + 10);
+  assert.doesNotMatch(RENDER.slice(start, end), /classList\.toggle\("expanded"\)|addEventListener/,
+    "no DOM-only toggle and no per-node listener — both died with the node on the next push");
 });
 
-test("the postal expand box is styled (full body hidden until expanded; summary is clickable)", () => {
-  assert.match(CSS, /\.postal-service-full \{[^}]*display: none/);
-  assert.match(CSS, /\.postal-service-expandable\.expanded \.postal-service-full \{[^}]*display: block/);
-  assert.match(CSS, /\.postal-service-expandable \.postal-service-summary \{[^}]*cursor: pointer/);
+test("the postal notice folds like every notice (body hidden until open; the head is the click target)", () => {
+  assert.match(CSS, /\.notice-collapsible:not\(\.notice-open\) > \.notice-body \{ display: none; \}/);
+  assert.match(CSS, /\.notice-collapsible > \.notice-head \{ cursor: pointer; user-select: none; \}/);
+  assert.doesNotMatch(CSS, /\.postal-service-full|\.postal-service-summary|\.postal-service-expandable/);
 });
 
-test("expanded shows the full message ALONE — the summary text yields to its caret (the user 2026-07-25)", () => {
-  assert.match(CSS, /\.postal-service-expandable\.expanded \.postal-service-summary-text \{[^}]*display: none/);
+test("an incoming QUESTION opens by default — a reply is owed; everything else folds (2026-09-08)", () => {
+  // the notice-vocabulary pass: the head (summary) always stays visible above the body — the one fold rule; what
+  // changed for postal is the DEFAULT: a peer asking a question is the human-is-the-bottleneck case
+  assert.match(RENDER, /const owed = !!intent && intent\.cls === "question" && ev\.direction === "in";/);
+  assert.match(RENDER, /body, open: owed,/);
 });

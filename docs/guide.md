@@ -57,7 +57,13 @@ file served from the dashboard's own address (a published report, an evidence do
 and links inside the document resolve relative to the document, so a `![fig](fig.png)`
 beside it shows, and a link to a sibling document opens in the same viewer. Links to files
 on other sites open in a new tab, as before — and a ctrl- or ⌘-click still opens the file in
-a tab.
+a tab. The document is set for reading: a sans face at a slightly larger size, headings in
+proportion, a centred column about 80 characters wide, and task lists, keyboard keys and
+aligned table columns as GitHub shows them. Every code block is numbered by line and carries a
+**Copy** button that copies the block as the file holds it, tabs included; fences labelled
+`rust`, `go`, `c`, `java`, `sql` or `toml` are highlighted, in addition to the languages the
+chat already knows. Printing the page while a rendered file is open prints the file alone,
+black on white, across as many pages as it needs.
 
 **A file's own HTML.** The Rendered view keeps the HTML a markdown file carries, under rules
 modelled on those GitHub applies to a README, so nothing in a file can move, hide or cover the
@@ -99,8 +105,8 @@ instead; a PDF too large to show offers a download in its place.
 several. Right-click a tab and open **Tags** to add or remove them. Tags filter every
 surface (the tag button in the strip narrows the tabs to the tags you pick), and they group
 the tabs: as soon as any session carries a tag, the strip shows one section per tag, in your
-tag order, each with a header in the tag's color, and the untagged sessions after a divider
-at the end. A session with several tags appears under each of them; every copy is the same
+tag order, each with a header in the tag's color, and the untagged sessions on a row of their
+own at the end. A session with several tags appears under each of them; every copy is the same
 session (click either to open it, and closing either ends it). Each header shows a chevron, the tag's color, its name, and a
 member count. Click a header, or press Enter on it, to fold its section down to the header
 alone; the count then says how many tabs are folded away, and a small dot after it says when
@@ -116,7 +122,10 @@ reorders the tags on every surface (the timeline's tag table shows the same orde
 a tab into another group, right-click it and pick **Move to <tag>** under **Tags**: one click
 adds that tag and drops the tag of the group you right-clicked it in, leaving its other tags alone. The row's
 **+** adds the tag without moving the tab. **Group tabs by tag**, at the foot of the tag
-button's menu, turns the sections off for this browser.
+button's menu, turns the sections off for this browser. Every group starts on its own row; turning off
+the gear's **One tag group per row in the tab strip** lets the groups follow one another across the
+strip and wrap as they need, with the untagged sessions behind a thin divider, so a strip with many
+tags stays short.
 
 **Coming back after a dropped connection.** When the dashboard's link to the kernel
 drops and comes back (a laptop lid closed and opened, a network change, a phone that
@@ -549,7 +558,10 @@ internet and your agents, with no device check in front of it.
 #### Notifications on your phone
 
 Romp can buzz your phone when a session needs you or finishes a task, so you can
-put the phone down while the sessions work. On an iPhone, first add Romp to the
+put the phone down while the sessions work. Every notification is titled with
+the session's name: **Romp needs you: web** when that session is waiting on you,
+and **Romp: web** for anything else (a task finished, a turn ended); the line
+under it says what happened. On an iPhone, first add Romp to the
 Home Screen (share sheet, then **Add to Home Screen**) and open it from there:
 iOS only lets an installed app receive notifications, so in a plain Safari tab
 the option stays off and says so. On Android and on a desktop browser the page
@@ -678,7 +690,11 @@ how many sessions are waiting and names the problem: **rate limited**,
 **overloaded**, **offline** (this machine cannot reach the API), or **errors**.
 Red **paused** means auto-retry and the judges are stopped, and says why: a
 usage limit, the monthly spend cap, or that you stopped them. Hover for the same
-reading with the waiting sessions listed. Click the cell, or press Enter on it,
+reading with the waiting sessions listed, and the history under it: the API's
+state over the last 1, 5 and 15 minutes (attempts, the 429 and 5xx shares,
+give-ups, sessions that retried) and the most recent state changes with how long
+each held. A kernel restart shows as its own line there, because the counts
+start over with the kernel. Click the cell, or press Enter on it,
 for the detail: each waiting session (click one to open that session), a button
 that stops auto-retry for every session while sessions are waiting and resumes
 it while paused, and links to the usage figures and the Log.

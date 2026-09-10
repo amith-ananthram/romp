@@ -14416,7 +14416,17 @@ def _sdk_locked():
                 mcp_config=(str(_SDK_MCP) if _SDK_MCP.exists() else None),
                 append_prompt_path=(str(_SDK_PROMPT) if _SDK_PROMPT.exists() else None),
                 log=lambda m: sys.stderr.write("sdk-backend: %s\n" % m),
-                reconcile=True)   # boot reconcile: reap orphaned CLIs, resume cut turns, deliver persisted queues
+                reconcile=True,   # boot reconcile: reap orphaned CLIs, resume cut turns, deliver persisted queues
+                # the API-health aggregator's boot clock: this kernel's own _STARTED, which the aggregator
+                # truncates to the millisecond (the precision of every stamp in the payload) and serves as
+                # /api-health's bootAt, so a bucket the boot seeded is unknown since the kernel's own start
+                # and the hover's head, divider and restart row name one time (the aggregator's own clock would
+                # run seconds later: this backend is built after the boot's imports, migrations and warm-up).
+                # The float, never int(): truncated to the second boundary BEFORE the process started, the seed
+                # would sort under a row the previous kernel filed in that same second, and the tail would read
+                # the old kernel's last state as current above the restart row. /version's `started` is the
+                # same start in whole seconds.
+                boot_at=_STARTED)
             # a limit-shaped judge error envelope pokes ONE exact usage poll (get_usage rides turn
             # ends, so an idle fleet's usage.json goes stale — measured ~15h — and the rate gate is
             # only as good as that file); the backend picks any live login session to ask
@@ -19506,17 +19516,21 @@ def _pr_watch_notice(verdict, repo, pr, detail="", replay=False, ended_owner="")
            else "you asked romp to watch")
     if verdict == "merged":
         body = "[romp] The pull request %s has MERGED: %s. This watch is done." % (who, ref)
+        gist = "pull request %s merged" % ref
     elif verdict == "closed":
         body = ("[romp] The pull request %s was CLOSED without merging: %s. "
                 "This watch is done." % (who, ref))
+        gist = "pull request %s closed without merging" % ref
     elif verdict == "failed":
         body = ("[romp] The pull request %s has a FAILED check (%s): %s. "
                 "It will not land on its own — it needs your attention. This watch is done."
                 % (who, detail or "a check", ref))
+        gist = "pull request %s has a failed check" % ref
     else:   # the loud gh-failure retire
         body = ("[romp] romp could not read %s (gh said: %s) after several tries, so this watch was "
                 "dropped — check `gh auth status` on this machine and re-register with `romp watch-pr` "
                 "if you still need it." % (ref, detail or "an unknown error"))
+        gist = "the watch on pull request %s was dropped" % ref
     if ended_owner:
         body += " That session has ended, so this comes to you as the escalation contact named for it."
     if replay:
@@ -19524,6 +19538,9 @@ def _pr_watch_notice(verdict, repo, pr, detail="", replay=False, ended_owner="")
     # romp-injected: the chat classifies by MARKER, never by prose (T130) — without it this notice
     # rendered as a generic tagged machine message instead of wearing the romp attribution the
     # nudges wear; romp-system marks the mechanics-notice family; the tag stays as the shape's id.
+    # romp-gist is the one-line user-facing head the chat shows (2026-09-08, see sdk_backend); it
+    # closes the prose line so the marker tail below stays LAST (test_pr_watch pins the tail's end).
+    body += _romp_gist(gist)
     return body + "\n\n<!-- romp-injected --><!-- romp-system --><!-- romp-tag: pr-watch -->"
 
 
@@ -20025,6 +20042,8 @@ def _watch_notice(kind, row, detail=""):
     watch service, like the pr-watch and restart notices). PURE for the voice test. The session's
     own `note` leads when present — the user's words for what they were waiting on."""
     what = row.get("note") or ("`%s`" % str(row.get("cmd") or "")[:120])
+    gist = {"met": "the condition it was watching now holds", "timeout": "a watch timed out without holding",
+            "soft": "still watching past the requested bound"}.get(kind, "a watch command could not run")
     if kind == "met":
         body = ("[romp] The condition you asked romp to watch now HOLDS: %s. This watch is done."
                 % what)
@@ -20045,7 +20064,8 @@ def _watch_notice(kind, row, detail=""):
         body = ("[romp] The watch command could not run at all (%s): %s. This watch was dropped — "
                 "fix the command and re-register with `romp watch`."
                 % (detail or "exec failed", what))
-    # same marker discipline as the pr-watch notice above (T130)
+    # same marker discipline as the pr-watch notice above (T130); the gist closes the prose line, the tail stays last
+    body += _romp_gist(gist)
     return body + "\n\n<!-- romp-injected --><!-- romp-system --><!-- romp-tag: watch -->"
 
 
@@ -22868,9 +22888,28 @@ def _genuine_queued(text):
     return not ("romp-msg-id" in t or t.startswith("####################") or "\U0001F4EC" in t)
 
 
+# A [romp] mechanics notice's ONE-LINE, user-facing head (2026-09-08): `<!-- romp-gist: … -->`, written by the
+# notice's emitter beside its other markers (sdk_backend BOOT_RESUME_NUDGE & co., _pr_watch_notice,
+# _watch_notice) and lifted here into ev["gist"], so the chat never has to show the agent-facing body's first
+# sentence as a head. Comment form only, like every other romp marker: prose merely mentioning a gist is not one.
+ROMP_GIST_RE = re.compile(r"<!--\s*romp-gist:\s*(.*?)\s*-->")
+
+
+def _romp_gist(text):
+    """The marker an emitter appends to a romp SYSTEM notice — the head the chat shows for it."""
+    return "<!-- romp-gist: %s -->" % str(text or "").replace("-->", "").strip()
+
+
+def _romp_system_gist(text):
+    """The lifted gist of a romp SYSTEM notice, or None when the notice predates gists (the chat falls back to
+    the first line then, as it always did)."""
+    m = ROMP_GIST_RE.search(text or "")
+    return m.group(1) if m else None
+
+
 def _queued_romp_flags(text):
-    """The flags a LANDED romp-injected message gets from its markers (romp / rompSystem / rompAuto — see the
-    user-event build), read off a QUEUED text so the client can draw the same gray romp notice grammar for a
+    """The flags a LANDED romp-injected message gets from its markers (romp / rompSystem / rompAuto / gist — see
+    the user-event build), read off a QUEUED text so the client can draw the same gray romp notice grammar for a
     notice romp itself queued (T243, the user 2026-09-07: a queued watch notice wore the user's own pending
     bubble). The markers stay in the text; the client hides them the way the landed card does."""
     t = text or ""
@@ -22879,6 +22918,9 @@ def _queued_romp_flags(text):
         out["romp"] = True
     if "<!-- romp-system -->" in t:
         out["rompSystem"] = True
+        g = _romp_system_gist(t)
+        if g:
+            out["gist"] = g
     if "<!-- romp-auto -->" in t:
         out["rompAuto"] = True
     return out
@@ -30316,6 +30358,9 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
                                     ev["rompSystem"] = True  #   distinctly → its OWN notice card, not a nudge bubble.
                                     #   Comment form only (the user 2026-07-08): content merely MENTIONING
                                     #   romp-system must not flip the card kind (same class as ROMP_INJECT_RE).
+                                    g = _romp_system_gist(text)   # the notice's user-facing head (2026-09-08)
+                                    if g:
+                                        ev["gist"] = g
                             if imgs:
                                 ev["images"] = imgs
                             events.append(ev)
@@ -40821,6 +40866,22 @@ def _pure_feed(now, tmux):
 _NOTIFY_PREV = [None]   # itemId -> column at the last build; None = baseline pending
 
 
+def _notify_title(name, needs_you=False):
+    """The ONE title every notification wears — desktop, phone, test push, and a relayed event as
+    its origin composed it (the user 2026-09-09, whose phone found the notifications too busy: a
+    lowercase "romp: web" over a body that had to carry the kind read like a subtitle). Two shapes
+    and no third: an event that needs the user is "Romp needs you: <session>"; everything else — a
+    completion, a turn end, the test — is "Romp: <session>". The body is the event's own and stays
+    as it was; the kind is decided by the CALLER from authoritative state (a card's column), never
+    from the body text. `name` is the session's name and nothing more: no host prefix, no sid, no
+    decoration — the tap carries the routing in the payload's `data`, and which machine a session
+    runs on is not the user's concern in the words they read. With no name (a sid-less test) the
+    title is the bare wordmark."""
+    name = " ".join(str(name if name is not None else "").split())
+    head = "Romp needs you" if needs_you else "Romp"
+    return "%s: %s" % (head, name) if name else head
+
+
 def _system_notify(title, body):
     """Best-effort OS notification (macOS osascript; notify-send elsewhere) — fire-and-forget Popen so the
     pusher thread never blocks on it; never raises."""
@@ -40861,9 +40922,10 @@ def _feed_notifications(feed):
             continue
         if not _notify_card_effective(cards, iid, str(a.get("sid") or "")):
             continue
-        what = "Needs you" if col == "needs_input" else "Completed"
+        needs_you = col == "needs_input"                # the card's column: the authoritative state, not the words
+        what = "Needs you" if needs_you else "Completed"
         txt = str(a.get("text") or "").strip()
-        out.append(("romp: %s" % (a.get("name") or "session"),
+        out.append((_notify_title(a.get("name") or "session", needs_you),
                     "%s: %s" % (what, txt[:140] if txt else "a task changed state"),
                     str(a.get("sid") or ""), iid))
     return out
@@ -41236,18 +41298,30 @@ def _push_session_name(sid, label=""):
     (_remote_name_of), host-prefixed the way the merged dashboard shows it; then the caller's `label` (the
     shell's own tab text — display-only, clipped and flattened, never consulted ahead of the kernel's copy);
     then the short id. "" for no session."""
+    return _push_session_names(sid, label)[0]
+
+
+def _push_session_names(sid, label=""):
+    """_push_session_name's lookup, returning BOTH forms as a (name, bare) pair: `name` host-prefixed
+    for a federated session the way the merged dashboard shows it, `bare` the session's own name with
+    no host in front — what _notify_title puts in a notification's title (the user 2026-09-09: which
+    machine a session runs on is not their concern in the words they read; the tap carries the
+    routing). One lookup for both so a body and its title can never name two different sessions.
+    The label and short-id stand-ins are shared: neither has a host to strip. ("", "") for no session."""
     sid = str(sid or "")
     if not sid:
-        return ""
+        return "", ""
     label = " ".join(str(label or "").split())[:PUSH_LABEL_MAX]
     if ":" in sid:
-        pfx, bare = sid.split(":", 1)
-        rn = _remote_name_of(pfx, bare)
+        pfx, bare_sid = sid.split(":", 1)
+        rn = _remote_name_of(pfx, bare_sid) or ""
         name = ("%s:%s" % (pfx, rn)) if rn else ""
     else:
-        bare = sid
-        name = _name_of(bare) or ""
-    return name or label or bare[:8]
+        bare_sid = sid
+        rn = _name_of(bare_sid) or ""
+        name = rn
+    stand_in = label or bare_sid[:8]
+    return (name or stand_in), (rn or stand_in)
 
 
 def _push_test(endpoint, sid="", host="", label=""):
@@ -41276,9 +41350,9 @@ def _push_test(endpoint, sid="", host="", label=""):
     (_remote_name_of), worn host-prefixed the way the merged dashboard shows it. When the kernel
     truly has no name — a host not polled yet, a kernel too old to file names — the shell's
     `label` stands in: the active tab's own text, the user's UI text and nothing more, so it is
-    clipped and flattened here and never consulted ahead of the kernel's own copy. Neither → the
-    short id, as before."""
-    sid, host, name = str(sid or ""), str(host or ""), ""
+    clipped and flattened (_push_session_names) and never consulted ahead of the kernel's own copy.
+    Neither → the short id, as before."""
+    sid, host, name, bare_name = str(sid or ""), str(host or ""), "", ""
     # One stderr line per test push (2026-09-08: a phone's test tap brought romp forward and nothing more,
     # and the journal could not say whether the test had carried a session at all — this route logged nothing).
     # The session's id clipped, the endpoint's host only: enough to match the shell's client-diag row.
@@ -41290,11 +41364,16 @@ def _push_test(endpoint, sid="", host="", label=""):
         return {"ok": False, "status": 0, "detail": "this device isn't subscribed yet"}
     _vapid_keys()                                          # RuntimeError without cryptography → the route's 500
     if sid:
-        name = _push_session_name(sid, label)
+        # ONE lookup names the session in both forms (#1157's _push_session_name is the authority; the
+        # pair-returning twin below it keeps the two from ever disagreeing): the body, the echoed
+        # `name` and the payload's routing block wear the host-prefixed form the merged dashboard
+        # shows, while the TITLE wears the session name alone (_notify_title: the host is not the
+        # user's concern there — the tap carries the routing in `data`)
+        name, bare_name = _push_session_names(sid, label)
         body = "Test notification — tap to come back to %s." % name
     else:
         body = "Test notification — this device is set up."
-    payload = json.dumps(_push_payload("romp", body, sid=sid, kind="test", host=host, name=name)).encode()
+    payload = json.dumps(_push_payload(_notify_title(bare_name), body, sid=sid, kind="test", host=host, name=name)).encode()
     status, detail = _push_post(sub, payload)
     print("[push] test sid=%s endpoint=%s: %s" % (_tag, _ep_host, status), file=sys.stderr)
     ok = 200 <= status < 300
@@ -41425,7 +41504,7 @@ def _push_forward(events):
 
 # ── the turn-finished push (the bell popover's third row, 2026-09-05) ─────────────────────────────
 # With the master AND the turn switch on, every session's turn end buzzes the subscribed phones:
-# {title: the session's name, body: the first line of what it said, sid}. The EVENT is the session's
+# {title: "Romp: <the session's name>" (_notify_title), body: the first line of what it said, sid}. The EVENT is the session's
 # recorded settle — the Stop hook's `lastStopAt` stamp (SDK sessions) or the states/ 'waiting'/'idle'
 # transition the Stop hook writes (tmux) — read per pusher cycle, which the very same settle wakes
 # (/tick, the backend's poke). No timer, no transcript-mtime inference. The first sight of a session
@@ -41505,8 +41584,9 @@ def _turn_notify_tick(now, tmux):
         if not _buzz_claim(sid, key, "turn"):
             continue                                     # a bell event already buzzed for this turn end
         body = _first_line(_last_assistant_text(s.get("path") or "")) or "finished a turn"
-        title = str(s.get("name") or _name_of(sid) or sid[:8])
-        _push_notify(title, body, sid, kind="turn", name=title)     # badge omitted: the count rides its own push; the title IS the name
+        sname = str(s.get("name") or _name_of(sid) or sid[:8])
+        title = _notify_title(sname)                             # a turn end is never a needs-you
+        _push_notify(title, body, sid, kind="turn", name=sname)  # badge omitted: the count rides its own push; the routing block carries the name the title wears
         fired.append({"title": title, "body": body, "sid": sid, "kind": "turn"})   # the kind rides to peers too, so their tap lands the same way
     if fired:
         _push_forward(fired)                             # peers' phones hear it too, the bell-event way
@@ -44096,17 +44176,26 @@ window.addEventListener('message',function(e){var m=e.data;if(m&&m.romp==='usage
 
 # The bottom bar's API health cell: one dot and one word beside the usage readout, painted from the kernel's
 # apiHealth shell push (_api_health_frame), the reading on hover, the detail with its actions pinned on click
-# (or Enter / Space: the cell is a keyboard button). It renders ONLY from the last pushed frame, no fetch, no
-# timer: the frame moves on events, and the cell repaints only when its state or text changed, so the ready
-# re-send of an identical frame cannot pulse it. The detail card is built in the usage tip's grammar and shares
-# its skin (#ah-tip sits beside #ru-tip in every selector) and its backdrop (#ru-back, one modal at a time).
+# (or Enter / Space: the cell is a keyboard button). The cell and the frame's reading render ONLY from the last
+# pushed frame, no fetch, no timer: the frame moves on events, and the cell repaints only when its state or text
+# changed, so the ready re-send of an identical frame cannot pulse it. The hover's History section (the user
+# 2026-09-08, who wanted the cell's hover to carry some history the way the spend hover does) is the ONE read:
+# GET /api-health, the designed signal (docs/reference.md "The API-health signal"), fetched when the hover or the
+# detail opens and again when a frame lands on an open one. The signal derives its state at read time by design,
+# so the read is the observation; the frame stays byte-identical and its dedupe untouched. The detail card is
+# built in the usage tip's grammar and shares its skin (#ah-tip sits beside #ru-tip in every selector) and its
+# backdrop (#ru-back, one modal at a time).
 # The web shell's rail only, for now; the VS Code strip twin (strip.ts apiCell's sibling, with a --st-retrying
 # token) and the phone's Usage-modal section (no rail on the phone) are named follow-ups.
 _LANDING_APIH_JS = """
 (function(){var el=document.getElementById('rail-api');if(!el)return;
 var txt=el.querySelector('.ah-text');
 var tip=document.createElement('div');tip.id='ah-tip';tip.style.display='none';
-tip.setAttribute('role','dialog');tip.setAttribute('aria-label','API health');tip.setAttribute('aria-modal','true');tip.tabIndex=-1;document.body.appendChild(tip);
+tip.setAttribute('role','tooltip');tip.setAttribute('aria-label','API health');tip.tabIndex=-1;document.body.appendChild(tip);
+// what the cell is described by while the hover shows (aria-describedby): a SHORT visually-hidden summary, refreshed
+// when the read lands, never the tip's whole text (the tip runs to hundreds of characters of rows, and at focus time,
+// when assistive tech reads the description, it would be the loader's markup); Enter reaches the rest
+var desc=document.createElement('span');desc.id='ah-summary';desc.className='ah-vh';document.body.appendChild(desc);
 var back=document.getElementById('ru-back');
 if(!back){back=document.createElement('div');back.id='ru-back';document.body.appendChild(back);}
 // LAST: the newest frame. pinned: the detail is the modal. held / dirty: a PRIMARY pointer is down over the detail
@@ -44116,8 +44205,30 @@ if(!back){back=document.createElement('div');back.id='ru-back';document.body.app
 // button. lastX: where the hover anchored, so a re-anchor keeps its place. focusBack: where focus returns when the
 // detail closes.
 var LAST=null,pinned=false,held=false,dirty=false,pending=null,pendSeq=null,hint='',lastX=null,focusBack=null;
+// HIST: the last /api-health answer, {error} for a failed read, null before the first; histSeq keys the paint to the
+// newest read so an older answer landing last is dropped. skipFocus: the dialog's close refocuses the cell, and that
+// focus event must not pop the hover. winFocusEl: the element that held focus when the window's own focus event
+// fired, cleared on the next animation frame (an event, not a timer). When the window regains system focus the
+// browser re-dispatches focus on the active element in that same task (the cell keeps focus after Escape by
+// design), which is not the user reaching for the cell: the cell's focus is skipped only when the cell WAS that
+// element. Chromium fires the same window event whenever the focused FRAME changes, and the shell's panes are
+// iframes, so a Tab out of a pane onto the cell (its keyboard path here) arrives under the mark too; the recorded
+// element is then the document's body (the pane's host is cleared before the event fires), never the cell, and the
+// hover shows. No timer anywhere: the show is the event.
+var HIST=null,histSeq=0,skipFocus=false,winFocusEl=null;
+window.addEventListener('focus',function(){winFocusEl=document.activeElement;requestAnimationFrame(function(){winFocusEl=null;});});
+var RESTART_WHY='kernel restarted: the event ring is empty';   // sdk_backend.API_HEALTH_RESTART_WHY: the row the boot files
+var HIST_ROWS=6;
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 function hm(ep){return new Date(ep*1000).toTimeString().slice(0,5);}
+function hms(ep){return new Date(ep*1000).toTimeString().slice(0,8);}
+// a stamp from another day carries its date (a quiet tail can span days): '09-07 14:02'
+function hmd(ep){var d=new Date(ep*1000),n=new Date();if(d.toDateString()===n.toDateString())return hm(ep);
+return ('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2)+' '+hm(ep);}
+function dur(s){s=Math.max(0,Math.round(s));if(s<60)return s+' s';var m=Math.round(s/60);if(m<60)return m+' min';
+var h=Math.floor(m/60);m-=h*60;if(h<24)return h+' h'+(m?' '+m+' min':'');var d=Math.floor(h/24);h-=d*24;return d+' d'+(h?' '+h+' h':'');}
+function pct(r){return (r==null?0:Math.round(r*100))+'%';}
+function pl(n,w){n=n||0;return n+' '+w+(n===1?'':'s');}
 // The plain-words pause reasons and the ok line: the kernel's `text` is the headline, these say what it means.
 var PAUSE={limit:'Auto-retry and the judges are paused until your usage limit resets.',
 spend:'Auto-retry and the judges are paused: you have reached the monthly spend limit. Raise it at claude.ai/settings/usage.',
@@ -44139,6 +44250,84 @@ return '<div class="ru-tip-row ah-row'+(full?'':' ah-ro')+'"'+(full?' role=butto
 +(bg?'<i class=ah-sw style="background:'+bg+'"></i><span class=ah-nm style="color:'+bg+'">':'<i class=ah-sw></i><span class=ah-nm>')+esc(r.name)+'</span>'
 +'<span class=ah-desc>'+(r.kind==='retrying'?'retrying':'stopped')+' · '+clsWords(r)+(r.since?' · since '+hm(r.since):'')
 +(r.suppressed?' · auto-retry off for this session (you interrupted it)':'')+'</span></div>';}
+// -- History: GET /api-health at show time. The shell authenticates the way its other fetches do (the romp_token
+// cookie; a same-origin GET sends no Origin, which _origin_ok accepts). A failed read is said in the section, in
+// place of the rows: never stale numbers, never silence. Painted through the same held / dirty gate as a frame.
+// fresh=true (a show) drops the last answer first, so a hover never paints an earlier hover's numbers while its
+// own read is in flight. A frame on an open card re-reads behind the stamped answer the card shows, and a pin from
+// hidden behind the last hover's answer (its as-of says when it was read; the dots only before the first answer):
+// the card the user opened is not blanked for the read's duration, on purpose.
+function load(fresh){var n=++histSeq;if(fresh)HIST=null;
+fetch('/api-health',{cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
+.then(function(d){if(n!==histSeq)return;HIST=(d&&d.buckets)?d:{error:'malformed answer'};
+if(tip.style.display!=='block')return;if(held){dirty=true;return;}render();},
+function(e){if(n!==histSeq)return;HIST={error:String((e&&e.message)||e)};
+if(tip.style.display!=='block')return;if(held){dirty=true;return;}render();});}
+// a bucket's name for the card: its model family, plus its auth label when another bucket shares the family
+function bname(d,key){var b=(d.buckets||{})[key]||{},fam=b.family||key.split('|')[1]||key,dup=false;
+Object.keys(d.buckets||{}).forEach(function(k){if(k!==key&&((d.buckets[k]||{}).family||'')===fam)dup=true;});
+return dup?fam+' · '+(b.auth||key.split('|')[0]):fam;}
+// one window row in the spend hover's grammar: the label (with its caveat when the window outreaches the kernel's
+// uptime, the way the rolling month says 'complete since'), then the figures. The figures are the window's totals,
+// said in the window's tense ('retried', never 'retrying': the live set is the Sessions waiting list above).
+// `requests` counts attempts WITH a status and the shares are over it; a connection-level failure has none
+// (`noStatus`, outside that sum), so a window is quiet only when every count is zero, and its no-status attempts
+// are named when there are any (an offline window would otherwise read 'no attempts' and hide its give-ups). A mixed
+// window counts every attempt once and says how many of them had no status, with the shares' base named beside them:
+// '15 attempts, 7 of them without a status · 25% 429 · 0% 5xx of the other 8'.
+function winRow(w,c,up){var lab=(w%60===0?(w/60)+' min':w+' s');if(c&&c.complete===false&&typeof up==='number')lab+=' · kernel up '+dur(up);
+var v,rq=(c&&c.requests)||0,ns=(c&&c.noStatus)||0;if(!c||!(rq||ns||c.gaveUp||c.sessionsRetrying))v='no attempts';
+else{v=rq?(pl(rq+ns,'attempt')+(ns?', '+ns+' of them without a status':'')+' · '+pct(c.rate429)+' 429 · '+pct(c.rate5xx)+' 5xx'+(ns?' of the other '+(rq===1?'one':rq):'')):(pl(ns,'attempt')+' without a status');
+v+=' · '+(c.gaveUp||0)+' gave up · '+pl(c.sessionsRetrying,'session')+' retried';}
+return '<div class="ru-tip-row ah-hrow"><span class=ru-tip-k>'+esc(lab)+'</span><span class=ru-tip-v>'+esc(v)+'</span></div>';}
+// the newest HIST_ROWS transitions, newest first: the time, the state entered (with its bucket when there are
+// several), and how long it held (until the same bucket's next transition; 'so far' for the current one, a flag and
+// never a stamp comparison: the transition the hover's own read files carries that read's asOf as its time, and the
+// state it closed must not read 'so far' beside it). A row the boot filed says so; where the tail crosses this
+// kernel's bootAt with no such row shown above the crossing (the bucket was already unknown at shutdown, so the boot
+// filed nothing), a divider names the restart, and takes no slot: the cap counts transitions. Any restart row above
+// suppresses it, not only the one right above, so one restart is one mark whatever sits between. bootAt is the
+// backend's own seed stamp (the start to the millisecond, or one millisecond past a row the previous kernel filed at
+// or after it), so every restored row is before it and the restart rows sit at it. Every bucket comes back unknown
+// at a restart, so a hold from before the boot ends at the boot and is never 'so far'; a bucket the boot seeded
+// carries that same boot clock as its stateSince, so the head and the tail name one time. Never hidden.
+function transRows(d){var rows=(d.transitions||[]).slice().sort(function(a,b){return b.t-a.t;});
+var multi=Object.keys(d.buckets||{}).length>1,now=d.asOf,boot=d.bootAt,hasBoot=typeof boot==='number',out='',crossed=false,sawRestart=false,shown=0;
+for(var i=0;i<rows.length&&shown<HIST_ROWS;i++){var r=rows[i],restart=r.why===RESTART_WHY,pre=hasBoot&&r.t<boot;
+if(!crossed&&pre){crossed=true;
+if(!sawRestart){out+='<div class="ru-tip-row ah-hrow ah-boot"><span class=ru-tip-k>'+hmd(boot)+'</span><span class=ah-hword>kernel restarted</span></div>';}}
+var end=now,cur=true;for(var j=i-1;j>=0;j--)if(rows[j].bucket===r.bucket){end=rows[j].t;cur=false;break;}
+if(pre&&end>boot){end=boot;cur=false;}
+var word=(multi?bname(d,r.bucket)+' ':'')+r.to+(restart?' · kernel restarted':'');
+out+='<div class="ru-tip-row ah-hrow"><span class=ru-tip-k>'+hmd(r.t)+'</span><span class=ah-hword>'+esc(word)+'</span><span class=ru-tip-v>'+dur(end-r.t)+(cur?' so far':'')+'</span></div>';
+if(restart)sawRestart=true;shown++;}
+return out;}
+function histHTML(){var h='<div class="ru-tip-win ah-hist"><div class=ru-tip-name><span>History</span>'
++((HIST&&!HIST.error&&typeof HIST.asOf==='number')?'<span class=ru-tip-reset>as of '+hms(HIST.asOf)+'</span>':'')+'</div>';
+if(!HIST)return h+'<div class="rl-dots ah-wait"><i></i><i></i><i></i></div></div>';
+if(HIST.error)return h+'<div class="ah-line ah-err">Could not read the API history: '+esc(HIST.error)+'</div></div>';
+var d=HIST,ov=d.overall||{},key=ov.worstBucket,b=key?(d.buckets||{})[key]:null,nb=Object.keys(d.buckets||{}).length,st=ov.state||'unknown';
+// since is the bucket's stateSince as the backend files it: a bucket the boot seeded is unknown since the kernel's
+// own start (SdkBackend seeds the aggregator with the boot clock the payload serves as bootAt), so the head, the
+// tail's divider and the boot's row name one time with no branch here
+var since=b?b.stateSince:0;
+h+='<div class="ru-tip-row ah-head"><i class=ah-dot data-state='+esc(st)+'></i><span class=ah-word>'+esc(st)+'</span>'
++((nb>1&&b)?'<span class=ah-hsub>'+esc(bname(d,key))+' · worst of '+nb+' buckets</span>':'')
++(since?'<span class=ah-since>since '+hmd(since)+'</span>':'')+'</div>';
+if(b&&b.why)h+='<div class="ah-line ru-tip-reset">'+esc(b.why)+'</div>';
+if(!b)h+='<div class=ah-line>No API traffic seen'+(typeof d.bootAt==='number'?' since the kernel started at '+hmd(d.bootAt):' yet')+'.</div>';
+else ((d.config&&d.config.windows)||[60,300,900]).forEach(function(w){h+=winRow(w,(b.windows||{})[String(w)],d.uptimeS);});
+var tr=transRows(d);if(tr)h+='<div class="ru-tip-name ah-hname"><span>State changes</span></div>'+tr;
+return h+'</div>';}
+// the cell's description while the hover shows: the state word and its since, then how to reach the rest. Before the
+// answer lands it carries the state word the frame already put on the cell (assistive tech reads the description once,
+// at focus time, and the landed text replaces it with nothing to announce the change: a loading line with no state
+// word would leave a screen-reader user with none) and says the read is in flight; the landed line adds the since; a
+// failed read says so in the same words as the section's line
+function descText(){var tail=' Press Enter to open it.';if(!HIST)return 'History: '+((LAST&&LAST.text)||'unknown')+'. Reading the details.'+tail;
+if(HIST.error)return 'Could not read the API history: '+HIST.error+'.'+tail;
+var ov=HIST.overall||{},key=ov.worstBucket,b=key?(HIST.buckets||{})[key]:null;
+return 'History: '+(ov.state||'unknown')+((b&&b.stateSince)?' since '+hmd(b.stateSince):'')+'.'+tail;}
 // full=false is the HOVER: the same reading with no controls. The hover sits under pointer-events:none and hides
 // on mouseleave, so a button there could not be honored; the click is where the actions live.
 function html(m,full){var h='<div class=ru-tip-win><div class=ru-tip-name><span>API · this machine</span></div>'
@@ -44151,40 +44340,69 @@ h+='</div>';
 var rows=m.sessions||[];
 if(rows.length){h+='<div class=ru-tip-win><div class=ru-tip-name><span>Sessions waiting</span></div>';
 rows.forEach(function(r){h+=rowHTML(r,full);});h+='</div>';}
+h+=histHTML();
 if(m.tmux>0)h+='<div class="ru-tip-win ah-line">'+(m.tmux===1?'1 tmux session is seen through its transcript only':m.tmux+' tmux sessions are seen through their transcripts only')
 +', so a retry in progress there shows only when it fails or recovers.</div>';
 if(full)h+='<div class="ru-tip-row ah-foot"><span class=ah-link role=button tabindex=0 data-act=usage>Usage and spend</span><span class=ah-link role=button tabindex=0 data-act=log>Log</span></div>';
 return h;}
-// The hover anchors above the rail, centered on the cursor, exactly as the usage tip's showTip does; a re-render
-// re-anchors from the same x, since new rows change the height and the tip hangs ABOVE the rail.
+// The hover anchors above the rail, centered on the cursor, as the usage tip's showTip does; a re-render re-anchors
+// from the same x, since new rows change the height and the tip hangs ABOVE the rail. Measured AFTER a reset: a
+// fixed element's shrink-to-fit width is taken against where it last sat, so a tip measured at its old left comes
+// out narrower than its rows and sits flush with the viewport's edge (at 830 px wide: a wrapped row and no margin).
+// The height is capped to the room above the rail (6 px margin, 8 px gap; #ah-tip clips), so a short window clips
+// the section's oldest rows instead of clamping the top to 6 and spilling over the rail and the cell; open() clears
+// the cap, and the pinned card keeps .ru-modal's own scroll pane.
 function anchor(){var r=el.getBoundingClientRect();var x=(typeof lastX==='number')?lastX:(r.left+r.width/2);
-tip.style.left=Math.max(6,Math.min(window.innerWidth-tip.offsetWidth-6,x-tip.offsetWidth/2))+'px';
-tip.style.top=Math.max(6,r.top-tip.offsetHeight-8)+'px';}
+tip.style.left='0px';tip.style.top='0px';tip.style.maxHeight=Math.max(0,r.top-14)+'px';
+var w=tip.offsetWidth,h=tip.offsetHeight;
+tip.style.left=Math.max(6,Math.min(window.innerWidth-w-6,x-w/2))+'px';
+tip.style.top=Math.max(6,r.top-h-8)+'px';}
 // A re-render replaces the card's nodes, so a focused control would fall to the page body and the next Tab would
 // leave the dialog: the same control (by act and sid) takes focus again in the new markup, else the card does.
 function focusKey(n){return (n&&n.getAttribute)?(n.getAttribute('data-act')||'')+'|'+(n.getAttribute('data-sid')||''):'';}
 function render(){if(!LAST)return;var a=document.activeElement,key=(pinned&&a&&a!==tip&&tip.contains(a))?focusKey(a):null;
-tip.innerHTML=html(LAST,pinned);if(!pinned)anchor();
+tip.innerHTML=html(LAST,pinned);if(!pinned)anchor();desc.textContent=descText();
 if(key!==null){var n=null,all=tip.querySelectorAll('[data-act]');for(var i=0;i<all.length;i++)if(focusKey(all[i])===key){n=all[i];break;}
 try{if(n)n.focus();if(!n||document.activeElement!==n)tip.focus();}catch(e){}}}
+// The shown, unpinned tip is a TOOLTIP (the role, the cell described by the short summary, no aria-modal): a keyboard
+// user who Tabs onto the cell must not meet a modal dialog their focus sits outside of. open() makes it the dialog.
 function show(ev){if(!LAST)return;lastX=(ev&&typeof ev.clientX==='number')?ev.clientX:null;
-tip.classList.remove('ru-modal');tip.style.display='block';render();}
-function close(){tip.style.display='none';tip.classList.remove('ru-modal');back.classList.remove('on');pinned=false;
+tip.classList.remove('ru-modal');tip.setAttribute('role','tooltip');tip.removeAttribute('aria-modal');
+tip.style.display='block';el.setAttribute('aria-describedby','ah-summary');load(true);render();}
+function hide(){tip.style.display='none';el.removeAttribute('aria-describedby');}
+function close(){hide();tip.classList.remove('ru-modal');back.classList.remove('on');pinned=false;
 window.__rompApiClose=null;if(back.onclick===close)back.onclick=null;
-var fb=focusBack;focusBack=null;try{(fb&&fb.focus?fb:el).focus();}catch(e){}}
+// the refocus fires the cell's focus event, which would pop the hover right after Escape: skipFocus covers that one
+// call (the handler runs synchronously inside .focus(), so the flag is reset as soon as the call returns)
+var fb=focusBack;focusBack=null;skipFocus=true;try{(fb&&fb.focus?fb:el).focus();}catch(e){}skipFocus=false;}
 // A click PINS the detail as a centered modal over the dimmed dashboard (the usage modal's own backdrop and
 // pattern); Escape lands via _LANDING_ESC_JS (shell AND pane documents), the backdrop tap closes too. An open
 // usage modal is closed FIRST, explicitly: the two share #ru-back, and its one handler must belong to one modal.
-// Focus moves into the detail and comes back to the cell (or wherever it was) on close.
+// Focus moves into the detail and comes back to the cell (or wherever it was) on close. A pin reads only when the
+// tip was hidden: a hover's read, landed or in flight, is this same document, so a click after the pointer's
+// mouseenter (or a tap after its compat mouseenter) costs one read and keeps its answer.
 function open(){if(!LAST)return;try{window.__rompUsageClose&&window.__rompUsageClose();}catch(e){}
-focusBack=document.activeElement;pinned=true;tip.classList.add('ru-modal');tip.style.left='';tip.style.top='';
+var was=tip.style.display==='block';
+focusBack=document.activeElement;pinned=true;tip.classList.add('ru-modal');tip.style.left='';tip.style.top='';tip.style.maxHeight='';
+tip.setAttribute('role','dialog');tip.setAttribute('aria-modal','true');el.removeAttribute('aria-describedby');
 tip.style.display='block';render();back.classList.add('on');
-window.__rompApiClose=close;back.onclick=close;try{tip.focus();}catch(e){}}
+window.__rompApiClose=close;back.onclick=close;try{tip.focus();}catch(e){}if(!was)load();}
 // The listeners sit on the STABLE #rail-api cell; __rompApiHealth writes its children, never the cell.
-el.addEventListener('mouseenter',function(ev){if(!pinned)show(ev);});
-el.addEventListener('mouseleave',function(){if(!pinned)tip.style.display='none';});
+// a pointer arriving on a tip that focus already shows re-anchors it from the pointer and keeps its rows: the
+// document did not change, so no re-read and no flash to the loader's dots
+el.addEventListener('mouseenter',function(ev){if(pinned)return;
+if(tip.style.display==='block'){if(typeof ev.clientX==='number')lastX=ev.clientX;anchor();return;}show(ev);});
+el.addEventListener('mouseleave',function(){if(!pinned)hide();});
+// keyboard focus shows the hover as the pointer does (the tooltip pattern) and blur hides it; a pinned detail is
+// unmoved, a hover the pointer already opened is left where it anchored, and a focus the browser re-dispatches
+// because the window regained focus while the cell already held it (winFocusEl) is not the user reaching for the cell
+el.addEventListener('focus',function(){if(skipFocus||winFocusEl===el||pinned||tip.style.display==='block')return;show(null);});
+el.addEventListener('blur',function(){if(!pinned)hide();});
 el.addEventListener('click',function(){if(pinned)close();else open();});
-el.addEventListener('keydown',function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();if(pinned)close();else open();}});
+// Escape on the focused cell dismisses the hover that focus showed, without moving focus (content shown on focus
+// must be dismissible in place); the pinned dialog's Escape lands via _LANDING_ESC_JS, inert while no modal is on
+el.addEventListener('keydown',function(ev){if(ev.key==='Escape'){if(!pinned&&tip.style.display==='block'){ev.preventDefault();hide();}return;}
+if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();if(pinned)close();else open();}});
 // Click-safe across a frame (ui/CLAUDE.md): a frame that lands while a pointer is DOWN over the detail is painted
 // on release, never under the press, so the pressed button survives to its click. A PRIMARY release inside the
 // detail is followed by the click, so the flush waits for it (a swap between mouseup and click would detach the
@@ -44249,6 +44467,7 @@ if(pending!==null&&(m.seq==null||m.seq!==pendSeq))pending=null;
 if(el.hidden)el.hidden=false;   // the first frame reveals the cell (a kernel that sends none shows nothing)
 if(el.getAttribute('data-state')!==m.state||txt.textContent!==m.text){el.setAttribute('data-state',m.state);txt.textContent=m.text;el.setAttribute('aria-label','API '+m.text);}
 if(tip.style.display!=='block')return;   // an open detail re-renders from the new frame, nothing else does
+load();   // and re-reads the history: the world changed
 if(held){dirty=true;return;}render();};
 })();
 """
@@ -46287,8 +46506,20 @@ def _landing():
             # a failed send's reason, under the button it restored; the hover's rows carry no action (.ah-ro),
             # so no pointer and no hover wash; the pinned detail takes focus as a dialog without a ring on the card
             ".ah-hint{margin-top:4px;opacity:.75;max-width:340px}"
+            # the History section: the signal's state dot in status hexes (never the accent), the transition rows'
+            # state word, the restart divider in italics, a failed read in a red that reads (#ef6b6f, about 5.5:1 on
+            # the tip: the API-error red #e5484d is 4.3:1 there, under the 4.5:1 text floor), and the loader's dots
+            # (.rl-dots, _LOADER_CSS) while the first answer is in flight. The hover clips at the height anchor()
+            # caps it to (the room above the rail): border-box, so the cap is the outline the user sees and not the
+            # content plus 18 px of padding and border; .ru-modal's own overflow-y:auto outranks the clip on the
+            # pinned card, which scrolls as before.
+            ".ah-dot[data-state=thrashing]{background:#e5484d;opacity:1}.ah-dot[data-state=recovering]{background:#e67e22;opacity:.7}"
+            ".ah-hword{opacity:.8}.ah-hsub{opacity:.55}.ah-boot .ah-hword{font-style:italic;opacity:.6}"
+            ".ah-hname{margin-top:6px}.ah-err{color:#ef6b6f}.ah-wait{margin:5px 0 2px}"
             ".ah-row.ah-ro{cursor:default}.ah-row.ah-ro:hover{background:transparent}"
-            "#ah-tip:focus{outline:none}"
+            "#ah-tip:focus{outline:none}#ah-tip{overflow:hidden;box-sizing:border-box}"
+            # the cell's short description for assistive tech (#ah-summary): present in the tree, off the screen
+            ".ah-vh{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}"
             # ONE shared hover panel for BOTH windows (the user 2026-06-26): it reproduces exactly the used/
             # elapsed bars that used to sit under the timeline — per window, a "used" bar (selected colormap)
             # over an "elapsed" bar (slate) with the % + reset countdown, and nothing else (no prose).
@@ -46699,7 +46930,13 @@ def _landing():
             # bare `body.theme-light .ah-dot` (0,2,1) would outrank the detail's `.ah-dot[data-state=...]`
             # state rules (0,2,0), and the card's headline dot would lose its amber and red in the light
             # theme while the rail's id-scoped dot kept them
-            "body.theme-light #rail-api[data-state=ok] .ah-dot,body.theme-light .ah-dot[data-state=ok]{background:#5D574E}"
+            # and the History head's dot for the signal's quiet states (healthy, unknown) is the same glyph: the base
+            # gray falls to about 1.6:1 on the white tip too
+            "body.theme-light #rail-api[data-state=ok] .ah-dot,body.theme-light .ah-dot[data-state=ok],"
+            "body.theme-light .ah-dot[data-state=healthy],body.theme-light .ah-dot[data-state=unknown]{background:#5D574E}"
+            # the failure line in the light theme's error-text red (styles.css --err #B02A1C, about 6.6:1 on white;
+            # the dark line's #ef6b6f is 3.0:1 there)
+            "body.theme-light .ah-err{color:#B02A1C}"
             "body.theme-light #rail-api[data-state=ok] .ah-text{color:#5D574E}"
             "body.theme-light .ah-word{color:#1F1E1D}"
             "body.theme-light .ah-btn{background:#F1EAE2;border-color:rgba(0,0,0,0.12);color:#1F1E1D}"
@@ -47797,7 +48034,14 @@ class Handler(BaseHTTPRequestHandler):
                 now = time.time()
                 out = fn(now, uptime_s=now - _STARTED)
                 out["bootId"] = _BOOT_ID
-                out["bootAt"] = int(_STARTED)
+                # bootAt rides the snapshot: the aggregator's boot_stamp, this kernel's _STARTED (passed at
+                # construction, _sdk_locked) truncated to the millisecond, the precision of every other stamp
+                # in the payload (asOf, transitions[].t, stateSince), or one millisecond past the newest
+                # transition the previous kernel left when that overlaps the start. The aggregator owns the
+                # number, so a bucket the boot seeded carries it as its stateSince and the restart row's t in
+                # every case, clamp or not (a stamp made here would be a second number whenever the clamp
+                # fired). /version's `started` is int(_STARTED), the same start in whole seconds:
+                # int(bootAt) == started unless the clamp moved the stamp.
                 # coverage's kernel half: tmux-backed sessions have no SDK stream and sit outside
                 # the signal — the count says how much of the machine the signal does not see. A null
                 # (never a silent 0) when the live enumeration fails. Codex-backed sessions are outside
@@ -48292,15 +48536,14 @@ class Handler(BaseHTTPRequestHandler):
                     if kind == "turn" and not _notify_turns_on():
                         held["turn"] += 1
                         continue
-                    # Wear the origin the way every federated surface wears it (host-prefix.ts):
-                    # the sid gains "origin:" so a tap routes through the merged dashboard's own
-                    # tabs, and the title's session name gains the same prefix. Tolerant surgery:
-                    # a title a different build composed passes through unprefixed rather than
-                    # mangled — version skew between peers is a normal state, not an error.
+                    # Wear the origin on the SID only, the way every federated surface routes
+                    # (host-prefix.ts): it gains "origin:" so a tap goes through the merged
+                    # dashboard's own tabs. The TITLE reaches the phone exactly as the origin
+                    # composed it (_notify_title: the session name alone — the user 2026-09-09;
+                    # which kernel detected an event is romp's business, and the host already rides
+                    # the routing block). Until then the relay grafted "romp: <origin>:" onto it.
                     if sid and ":" not in sid:
                         sid = "%s:%s" % (origin, sid)
-                    if t.startswith("romp: "):
-                        t = "romp: %s:%s" % (origin, t[len("romp: "):])
                     # badge omitted: the origin's count is not ours. kind/cardId pass through
                     # (an older peer sends neither → the card default, which is all it had);
                     # the card id is a goal id, globally unique and never host-prefixed
