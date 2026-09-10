@@ -973,6 +973,15 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `push.*` stages count every push, including the one a connecting page gets,
   so they can add up to more than `push`.
 - `builds`: `chat`, `feed`, `timeline`, each with `cached`, `built`, `ms`.
+  `chat` also carries `active_built` and `bg_built` (rebuilds of the watched
+  tab, served while its exact key holds, against rebuilds of a background tab
+  whose signature moved) and `bg_miss`, a map from each labelled component of
+  the chat-build signature (`transcript`, `states`, `judge_gen`, `tasks`,
+  `cut`, `row`, plus `cold` for a tab with no cached build and `nosig` for
+  one whose signature could not be taken) to the background rebuilds it
+  caused. A rebuild with several moved components counts under each, so the
+  map's sum can exceed `bg_built`. `romp perf` prints the split and the
+  non-zero causes after the chat average.
 - `sends`: `full`, `delta`, `deduped`, each a map from slot name (`chat`,
   `feed`, `bars`, `taborder`, ...) to `count` and `bytes`. A deduplicated frame
   was built and compared, then not sent.
@@ -1036,13 +1045,70 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   walks, and the walks that left a launch unresolved: an upper bound on what a
   negative walk cache would save), `idx_build` (placement indexes built, one
   per store object asked, a writer's private copy included) and the gauge
-  `entries` (sessions holding a map). The compaction sweep after each judge
-  pass evicts from `pass` and `shared` the entries of stores no session in the
-  discover window owns, so both stay bounded by the live board; the courier's
-  and the planner's change-gate tables are pruned to the sessions each pass
-  discovers, the evidence gate's stamps are cleared at a fixed cap, and the
-  awaiting lift's tick drops the gate's and the placed-launch memo's entries
-  of sessions that left the alive set.
+  `entries` (sessions holding a map). `intrMarks` is the interrupt-marks
+  memo behind the interrupt tick, the nudge tick and the feed's badge, one
+  entry per (session, parse family) keyed on the parse object's identity and
+  the machine-cut stamp (`hit`, `miss`, `evict` for entries released when a
+  session leaves the alive set or the memo is cleared at its cap, and the
+  gauge `entries`). `statesOverlay` is the awaiting overlay's read of the
+  states log through the shared append-incremental reader, one carried answer
+  per states file (`hit`: the records were the cached ones and no row was
+  stepped; `append`: only the appended rows were stepped; `refold`: every row
+  was stepped again, after a rewrite or a shrink or on the file's first read;
+  `fail`: a read that failed on a file that exists, answered as no overlay,
+  memoized nothing and named once per episode on the kernel's stderr;
+  `evict`: entries dropped for sessions that left the alive set; and the
+  gauge `entries`). The compaction sweep after each judge pass evicts from
+  `pass` and `shared` the entries of stores no session in the discover window
+  owns, so both stay bounded by the live board; the courier's and the
+  planner's change-gate tables are pruned to the sessions each pass discovers,
+  the evidence gate's stamps are cleared at a fixed cap, and the awaiting
+  lift's tick drops the gate's and the placed-launch memo's entries of
+  sessions that left the alive set. The interrupt tick drops from `intrMarks`
+  and `statesOverlay` the entries of sessions outside its alive set each
+  cycle; the `statesOverlay` cache is also cleared whole above 256 entries, a
+  drop `evict` does not count and `entries` shows. `lanes` is the timeline's
+  per-lane segment memo: a live lane's bars, segment ends, last activity,
+  compaction markers and judging marks, held while its parsed transcript and
+  goal store are the previous build's objects and its captions file, archive
+  file, branch clip and the host's recorded suspensions stand. One outcome per
+  live lane per bars build: `hit`, `miss`, `live_tail` (a live tail was merged,
+  so the lane was derived and not held), `complain_skip` (the parse or a stage
+  failed) and `unshared_skip` (a private store with content); `evict` and the
+  gauge `entries`; `segs_hit` and `segs_miss` count the segments served and
+  derived. `dead_serve`, `dead_miss` and `dead_failed_serve` are the dead-lane
+  memo's outcomes on the same block, so one block carries every lane.
+  Four memos cover the chat build's per-build fixed costs, each keyed on the
+  inputs it reads and evicted by the pusher with the tab set (a comment thread
+  built this cycle is kept, like its fold prefix). `chatMergeSets` is the
+  live-tail merge's memo of the sets it derives from a parsed transcript (the
+  uuids and user texts the transcript already holds, and the newest human
+  turn's time), one entry per session keyed on the parsed session object's
+  identity and shared by the chat, feed and timeline builds of one cycle:
+  `hit` and `miss` (merges served against derived) and the gauge `entries`
+  (a session neither shown as a tab nor alive is dropped). `chatPostal` is
+  the chat fold's memo of a tab's sealed postal cards, keyed on the values
+  the cards embed from outside the transcript (the message log's identity
+  and, per card, its caption and its peer's name and colour): `gate` (gate
+  checks that re-hydrated a tab's sealed cards because one of those values
+  moved, or because the entry was sealed outside the pusher's names snapshot
+  and had to be verified), `hit` (checks that verified the sealed cards from
+  their recorded values without hydrating), and `commit_new` (raw postal
+  events hydrated at fold commits; each is hydrated once, when it is first
+  sealed). Before this memo every judge pass re-hydrated every tab's sealed
+  cards, although a caption is the only judge-written value a card carries.
+  `chatLedger` is the chat build's memo of a session's goal-tree walk and
+  live roots, keyed on the parsed transcript's identity, the store's
+  identity and seams, `cleared.jsonl`'s identity and the warm-anchor table's
+  per-session revision: `hit` and `miss`, `bypass_live` (a build that merged
+  live atoms: the last turn's segments differ from the parse's),
+  `bypass_hold` (an armed rewind hold filters a store copy per build),
+  `bypass_empty` (a store with no nodes), `evict` (entries dropped for tabs
+  no longer shown) and the gauge `entries`. `chatFoldTasks` is the per-turn
+  memo of the transcript's task fold, keyed per session on each turn's atoms
+  list and fingerprint: `hit` and `miss` count turns served from the memo
+  against turns scanned, so a build of a working session with one moved turn
+  is one miss, plus the gauge `entries` (sessions held).
 - `judge`: `passes`, `ms_sum`, `ms_last`, `ms_mean` (wall time; a pass waits
   on model calls), `cpu_ms_sum` (CPU time of the judge tier threads and every
   per-session worker they run; the workers' share is `cpu_ms_workers`).

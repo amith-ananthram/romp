@@ -21,6 +21,8 @@ import time
 import unittest
 from importlib.machinery import SourceFileLoader
 
+from tests.dist_copy import copy_dist
+
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
 BIN = os.path.join(ROOT, "bin")
@@ -125,7 +127,7 @@ class ServedOpener(unittest.TestCase):
         if b.returncode != 0:
             raise unittest.SkipTest("esbuild failed here: " + (b.stderr or b.stdout)[-200:])
         dist = os.path.join(cls.lab, "dist")
-        shutil.copytree(os.path.join(EXT, "dist"), dist)
+        copy_dist(os.path.join(EXT, "dist"), dist)
         state = os.path.join(cls.lab, "xdg", "romp")
         os.makedirs(state, exist_ok=True)
         cls.port = _free_port()

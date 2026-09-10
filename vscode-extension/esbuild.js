@@ -177,6 +177,15 @@ async function buildAll(configs) {
   return outputs.map((f) => f.path);
 }
 
+// The messages of an esbuild BuildFailure, each already printed with its code frame, or null for anything
+// else: an fs error, a bug here, or an error object whose `errors` list is empty, which esbuild's API never
+// yields (another library's error that carries an `errors` array). failureSummary and main().catch both read
+// it, so such an error is treated like any other: its message is the line and its stack is printed, rather
+// than read for a first message it has not got.
+function buildErrors(e) {
+  return e && Array.isArray(e.errors) && e.errors.length ? e.errors : null;
+}
+
 // The LAST line on stderr is the one the kernel shows: its in-place rebuild puts the tail of this process's
 // stderr into the notice that tells the person the served UI is stale, and the tail of an esbuild
 // BuildFailure printed whole is its stack through esbuild's own transport (`at Socket.emit`,
@@ -196,7 +205,7 @@ async function buildAll(configs) {
 // kernel's `[-300:]` drops the head instead (src/esbuild-failure-cap.test.ts).
 function failureSummary(e, untouched) {
   const fit = (s) => s.length > 300 ? s.slice(0, 297) + "..." : s;
-  const errors = e && Array.isArray(e.errors) ? e.errors : null;
+  const errors = buildErrors(e);
   if (!errors) return fit("esbuild.js: build failed: " + (e && e.message ? e.message : String(e)));
   const n = errors.length;
   let line = "esbuild.js: build failed with " + n + (n === 1 ? " error" : " errors") +
@@ -251,7 +260,7 @@ if (require.main === module) {
   main().catch((e) => {
     // Not an esbuild BuildFailure (an fs error, a bug here): its stack is the diagnosis, and esbuild
     // printed nothing for it. A BuildFailure's errors are already on stderr with their code frames.
-    if (!(e && Array.isArray(e.errors))) console.error(e);
+    if (!buildErrors(e)) console.error(e);
     console.error(failureSummary(e, tests || watch ? null : "dist/"));
     process.exit(1);
   });

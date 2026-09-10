@@ -17,7 +17,6 @@ A genuine multi-message drain must still hydrate EVERY id, so that stays covered
 
 SYNTHETIC fixtures only: invented sessions (notes-api's web/api/tests), placeholder UUIDs, TESTHOST.
 """
-import inspect
 import io
 import json
 import os
@@ -217,9 +216,91 @@ class HydrateRecipient(unittest.TestCase):
                          "no sid to compare against → no recipient check (direct callers)")
 
     def test_build_session_passes_its_sid_in(self):
-        # Without the wiring the recipient check is dead code in the only caller that matters.
-        self.assertIn("_hydrate_postal(events, _postal_index(), sid)",
-                      inspect.getsource(km.build_session))
+        # Without the wiring the recipient check is dead code in the only caller that matters: a spy on the
+        # hydrator records the sid every hydration build_session makes carries (the tail pass at least).
+        seen = []
+        real = km._hydrate_postal
+
+        def spy(events, index, sid=None, captions=None):
+            seen.append(sid)
+            return real(events, index, sid, captions=captions)
+        km._hydrate_postal = spy
+        self.addCleanup(setattr, km, "_hydrate_postal", real)
+        saved = (km._sessions, km._tmux_sessions, km._msg_summaries)
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        tx = os.path.join(td.name, ME + ".jsonl")
+        with open(tx, "w") as f:
+            f.write(json.dumps({"type": "user", "uuid": "u1", "timestamp": "2026-09-01T10:00:00.000Z",
+                                "message": {"role": "user", "content": "hello"}}) + "\n")
+        km._sessions = lambda now, **kw: [{"sid": ME, "name": "web", "anchor": ME, "path": tx, "mtime": 1}]
+        km._tmux_sessions = lambda: {}
+        km._msg_summaries = lambda: {}
+        try:
+            km.build_session(ME, 1700000000, {})
+        finally:
+            km._sessions, km._tmux_sessions, km._msg_summaries = saved
+        self.assertTrue(seen, "build_session hydrated at least once")
+        self.assertEqual(set(seen), {ME}, "every hydration carried the session's own sid")
+
+
+class HydrateIndependence(unittest.TestCase):
+    """hydrate(A + B) == hydrate(A) + hydrate(B). The chat fold's commit hydrates only the raw postal events
+    new since its seal and prepends the sealed cards (2026-09-09); that equals a hydration of the whole list
+    only while hydration carries no state from one event to the next. Pinned over the four event shapes: an
+    outgoing send, a resolved incoming id, an unresolved id, a plain Bash row, split at every position."""
+
+    M_OUT = "1700000009.77777_88888.TESTHOST"
+
+    def setUp(self):
+        km._POSTAL_UNRESOLVED_RESET()
+
+    def _events(self):
+        return [tool("mcp__romp-postal-service__send_message", "Delivered to 'api'.",
+                     input=json.dumps({"to": "api", "body": "taking the deploy"}), ts="2026-09-07T10:00:00.000Z"),
+                user("mail: " + MARKER % M1),
+                user("look at this: " + MARKER % M3),        # no row: passes through, ids kept
+                bash("uv run pytest -q", "ok")]
+
+    def _index(self):
+        out_row = dict(row(self.M_OUT, PEER, body="taking the deploy"), fromId=ME)   # the send's own log row
+        return {M1: row(M1, ME), self.M_OUT: out_row}
+
+    def test_every_split_equals_the_whole(self):
+        evs, idx = self._events(), self._index()
+        caps = lambda: {M1: "api: the deploy is handed over", self.M_OUT: "web: taking the deploy"}
+        err, saved = io.StringIO(), km.sys.stderr
+        km.sys.stderr = err
+        try:
+            whole = km._hydrate_postal(list(evs), idx, ME, captions=caps)
+            for k in range(len(evs) + 1):
+                split = (km._hydrate_postal(evs[:k], idx, ME, captions=caps)
+                         + km._hydrate_postal(evs[k:], idx, ME, captions=caps))
+                self.assertEqual(split, whole, "split at %d" % k)
+        finally:
+            km.sys.stderr = saved
+        self.assertEqual([(e["kind"], e.get("direction")) for e in whole],
+                         [("postal-service", "out"), ("postal-service", "in"), ("user", None), ("tool", None)])
+        self.assertEqual(whole[0].get("summary"), "web: taking the deploy", "the send joined its row and caption")
+        self.assertEqual(whole[1]["summary"], "api: the deploy is handed over")
+        self.assertEqual(whole[2]["mids"], [M3])
+
+    def test_the_captions_getter_stands_in_for_msg_summaries_and_is_read_once(self):
+        calls = []
+
+        def caps():
+            calls.append(1)
+            return {M1: "cap"}
+        saved = km._msg_summaries
+        km._msg_summaries = lambda: self.fail("_msg_summaries must not be read when a getter is given")
+        try:
+            out = km._hydrate_postal([user(MARKER % M1), user(MARKER % M1)], {M1: row(M1, ME)}, ME, captions=caps)
+        finally:
+            km._msg_summaries = saved
+        self.assertEqual([e["summary"] for e in out], ["cap", "cap"])
+        self.assertEqual(len(calls), 1, "fetched once per hydration, on first need")
+        self.assertEqual(km._hydrate_postal([bash("ls", "ok")], {}, ME, captions=lambda: self.fail("no card, no map")),
+                         [bash("ls", "ok")])
 
 
 if __name__ == "__main__":
