@@ -21678,9 +21678,10 @@ SIGNAL_MANAGER_NOTE_WAIT_S = 0.5   # how long an unexplained SIGTERM waits for t
 
 
 def _manager_sigterm_row_for_us(now=None, window=90, started=None, reasons=("stop",)):
-    """Whether the audit tail holds a `manager-sigterm` note aimed at THIS kernel (its `pid` is ours, or
+    """The newest `manager-sigterm` note in the audit tail aimed at THIS kernel (its `pid` is ours, or
     it names none) with a `reason` in `reasons`, within `window` seconds and not before this kernel's
-    start (`started`; the default is the process start, _STARTED, in whole seconds as the rows are).
+    start (`started`; the default is the process start, _STARTED, in whole seconds as the rows are), as
+    the row itself, or None when there is none; a caller reads the note's `trigger` off the row.
     With the default, only `reason: stop` counts: the manager's note that it is stopping us, which is
     what _unrequested_signal_reason takes as the manager going down alongside us. A `restart` note means
     the manager is alive and about to respawn the kernel, and one landing during the drain of an
@@ -21688,17 +21689,20 @@ def _manager_sigterm_row_for_us(now=None, window=90, started=None, reasons=("sto
     stop with `managerStopped: true` while the manager's own log shows a requested restart. With
     `reasons=("restart", "stop")` the question is whether the manager noted ANY kill of this kernel,
     which is how _graceful_term tells the delivery of a parked quiet request from a signal nobody sent
-    through the manager. The start bound is the one _recent_restart_audit
-    applies: the note this waits for lands AFTER our signal, so a stop note for our pid from before the
-    process existed is a predecessor's, left behind when a reboot reused the pid (the machine back inside
-    the window, the kernel up under the pid the previous one had, then a stray kill), and without the
-    bound it would read as the manager going down now. The tail is as deep as _recent_restart_audit's:
+    through the manager; the note's `trigger` then tells the stop of this kernel alone (`stop`, which
+    leaves the manager's park armed, so no delivery) from a restart or the self-bounce's `refresh` (the
+    delivery), which is why the row comes back and not a flag. The start bound is the one
+    _recent_restart_audit applies: the note this waits for lands AFTER our signal, so a stop note for our
+    pid from before the process existed is a predecessor's, left behind when a reboot reused the pid (the
+    machine back inside the window, the kernel up under the pid the previous one had, then a stray kill),
+    and without the bound it would read as the manager going down now. The tail is as deep as
+    _recent_restart_audit's:
     a service stop notes every kernel, and each session's own end-on-idle row lands in the same file,
     so a short tail would miss the note behind a dozen such rows and file the stop as a stray signal."""
     try:
         tail = (jd.STATE / "restart-audit.jsonl").read_text().strip().splitlines()
     except Exception:
-        return False
+        return None
     t0 = int(now if now is not None else time.time())
     born = int(_STARTED if started is None else started)
     for line in reversed(tail[-200:]):
@@ -21709,10 +21713,10 @@ def _manager_sigterm_row_for_us(now=None, window=90, started=None, reasons=("sto
         if not (isinstance(rec, dict) and rec.get("action") == "manager-sigterm" and isinstance(rec.get("t"), int)):
             continue
         if t0 - rec["t"] > window or rec["t"] < born:
-            return False
+            return None
         if rec.get("pid") in (None, os.getpid()) and rec.get("reason") in reasons:
-            return True
-    return False
+            return rec
+    return None
 
 
 def _unrequested_signal_reason(signum, be=None, wait=None, sleep=time.sleep, now=None, started=None):
@@ -21937,9 +21941,10 @@ def _recent_restart_audit(window=90, now=None, started=None):
         kernel that filed it. With the manager's note for us on record the note answers (below); with none
         the parked row itself is returned, unless a row above it shows it delivered or dropped. That
         no-note return serves the label and _parked_quiet_deploy, not consumption: _graceful_term
-        consumes a quiet row only when the manager noted a kill of this pid (its delivery), and files a
-        SIGTERM with a park on record and no such note as unrequested, the park untouched. Delivered or
-        dropped: a `manager-sigterm` note for a restart (every restart the manager
+        consumes a quiet row only when the manager noted a kill of this pid that delivers it (a restart, or
+        the self-bounce's `refresh`), files a SIGTERM with a park on record and no such note as unrequested,
+        the park untouched, and names a `stop` note with trigger `stop` as the cut instead (below). Delivered
+        or dropped: a `manager-sigterm` note for a restart (every restart the manager
         sends clears the park in passing) or for the stop of this kernel or of every kernel (the manager's
         own shutdown takes the park down with it), a verdict that the manager was gone (`parent-gone`, or
         `signal` with `managerStopped`), or a cut row that already joined it (`auditT`: the restart it asked
@@ -21952,8 +21957,10 @@ def _recent_restart_audit(window=90, now=None, started=None):
         passed over (or settles the park) and never ends the walk with the park unread. A park this kernel
         filed itself (its t at or after the start) is its own request whatever sits above it, inside the
         window and past it alike: a note for this pid above it is the delivery of that very park, or the
-        stop of this kernel, which the rule above already reads as taking the park down, and the settled
-        rule reads predecessors' parks only;
+        stop of this kernel alone, and the two are told apart at the cut, not here: _graceful_term takes a
+        `stop` note with trigger `stop` as the cut's request and leaves the park unconsumed (the manager
+        may still hold it), a restart or `refresh` note as the park's delivery. The settled rule reads
+        predecessors' parks only;
       - a row with an action is a request and wins, unless a cut row already consumed it: spent on the
         cut it asked for, this cut is anonymous;
       - a `when: quiet` request is pending until the restart it asked for lands, up to the far manager's
@@ -53629,8 +53636,12 @@ def _graceful_term(signum, frame):
     backend here: no SDK sessions were running if it doesn't exist. A second SIGTERM while the first
     is draining returns at once (_EXIT_ONCE): the first finishes and exits. A parked quiet request on
     record is consumed only when the manager noted a kill of this kernel (its `manager-sigterm` row for
-    this pid, or one naming none): the manager delivers the park, so a SIGTERM with no such note is not
-    its delivery, and the park stays on record for the kernel the quiet window will restart."""
+    this pid, or one naming none) that delivers it: a restart note, or the stale-manager self-bounce's
+    stop note with trigger `refresh`, since the manager clears its park before either. A SIGTERM with no
+    such note is not its delivery, and neither is a stop note with trigger `stop`: the stop of this
+    kernel alone leaves the manager's park armed, the stop of every kernel drops it, the note cannot tell
+    them apart, and that cut is named by the note. Either way the park stays on record for the kernel
+    the quiet window will restart."""
     if not _EXIT_ONCE.acquire(blocking=False):
         return
     _TERMINATING[0] = True                          # the parent-watch stands down (see _parent_watch)
@@ -53642,17 +53653,31 @@ def _graceful_term(signum, frame):
     # this). A row that lands during the drain below did not send this signal. The row itself rides
     # along so the cut row can join it and consume it (auditT; see _recent_restart_audit).
     rec = _recent_restart_audit()
-    if isinstance(rec, dict) and rec.get("when") == "quiet" \
-            and not _manager_sigterm_row_for_us(reasons=("restart", "stop")):
-        # A parked quiet request is delivered by the manager, and the manager notes every kill it sends
-        # before sending it. With no note for this pid inside the window and this kernel's lifetime, this
-        # SIGTERM is not that delivery: the manager still holds the park for whatever kernel runs at the
-        # quiet window (a dynamic kernel or a stateDir-less aux shares this root and this park). Consuming
-        # the park here stamped its t as auditT, which hid it from every reader under the root
-        # (_consumed_audit_t), labeled a signal nobody asked for as the deploy, filed no `signal` row,
-        # and counted a stray kill as a deploy landing (_last_deploy_restart_t). So the pick is dropped
-        # and the exit takes the unrequested path below: a `signal` row, the unrequested reason, no auditT.
-        rec = None
+    if isinstance(rec, dict) and rec.get("when") == "quiet":
+        note = _manager_sigterm_row_for_us(reasons=("restart", "stop"))
+        if not note:
+            # A parked quiet request is delivered by the manager, and the manager notes every kill it sends
+            # before sending it. With no note for this pid inside the window and this kernel's lifetime, this
+            # SIGTERM is not that delivery: the manager still holds the park for whatever kernel runs at the
+            # quiet window (a dynamic kernel or a stateDir-less aux shares this root and this park). Consuming
+            # the park here stamped its t as auditT, which hid it from every reader under the root
+            # (_consumed_audit_t), labeled a signal nobody asked for as the deploy, filed no `signal` row,
+            # and counted a stray kill as a deploy landing (_last_deploy_restart_t). So the pick is dropped
+            # and the exit takes the unrequested path below: a `signal` row, the unrequested reason, no auditT.
+            rec = None
+        elif note.get("reason") == "stop" and (note.get("trigger") or note.get("reason")) == "stop":
+            # The manager's stop note with trigger `stop` (the default mirrors its writer: trigger, else
+            # reason) is the stop of this kernel alone (POST /stop naming one kernel: the manager keeps its
+            # park armed for whatever kernel runs at the quiet window) or of every kernel (its shutdown drops
+            # the park), and the note cannot tell them apart; neither delivers the park. Taking the park as
+            # this cut's request consumed it just the same (auditT = the park's t, hidden from every reader
+            # under the root), and only for the kernel that filed the park: the reader's walk already named
+            # the note for a sibling born after the park, so the row differed by birth order. The note is
+            # the cut's request instead ("manager-sigterm: stop", auditT = the note's t, no `signal` row, as
+            # for a single stop with nothing parked), and the park stays on record. A restart note (every
+            # restart the manager sends clears its park first) and the self-bounce's stop note with trigger
+            # `refresh` (shutdownAll clears the park before it notes) deliver the park and consume it.
+            rec = note
     _drain_and_exit(_audit_reason_text(rec), signum=signum, what="SIGTERM", audit=rec)
 
 
