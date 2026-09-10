@@ -46,6 +46,22 @@
 // word, a URL fragment or a color literal — `#1EA1EB` and `#0c1a2e` fail the number shape (hex letters
 // after the digits, or a leading zero; a PR number has neither). Typographic wrappers (<em>, <strong>,
 // <sup>) are walked: a `#13` in them is still a reference.
+//
+// The boundary is judged over the RENDERED text, not per text node. The markdown renderer, or a pass that
+// ran before this one, may cut one run of text into several nodes: inline code followed by a number
+// (`docs/a.md`#12 in a message) renders as <code>docs/a.md</code> and then a text node that begins `#12`,
+// and **docs/a.md**#12, [text](url)#12 and a path link (.file-uri-link) followed by its fragment have the
+// same shape. The start of such a node is no boundary. So the walk carries the last character of the text
+// before each node into it (a skipped element's text included), and a `#` at a node's head links only when
+// that character is one of the boundary characters above, or when nothing precedes it in the run. The
+// carry crosses INLINE elements only: an <img>, an empty <span>, an element with no text renders no
+// boundary, so the text before it decides. It resets at a line or block edge (BLOCK_TAGS below: <br>,
+// <hr>, <p>, <li>, a heading, a table cell, ...), where the rendered text has a boundary whether or not a
+// whitespace node sits there: marked renders a GFM hard break (`done` with two trailing spaces, then `#12`
+// on the next line) as `<p>done<br>#12</p>`, with no text between the <br> and the `#`, and `#12` links.
+// An element the list does not name is treated as inline, the safe default: a missed edge costs a link,
+// an invented one makes a wrong link.
+//
 // A session with no GitHub repository (`githubRepo` null: no repo, no origin, or an origin elsewhere)
 // links NOTHING, the cross-repo form included — the honest rendering is the plain text, never a
 // guessed host.
@@ -72,8 +88,11 @@ const DOT_TAIL = /\.$/;                        // `.`, `..`, `repo.`: inside the
 // which is what keeps `#12abc`, `#1EA1EB` and a `#12/x` path fragment out — the run is greedy and the
 // lookahead follows it, so `#12/#13/x` backtracks to nothing rather than to `#12`
 const RUN = "((?:/#" + NUM + ")*)";
+// the characters a reference may follow (the header's list); `^` stands for the start of the rendered text
+const BOUNDARY = "\\s(\\[{<,;:\"'“‘«—–";
+const BOUNDARY_RE = new RegExp("^[" + BOUNDARY + "]$");
 const REF_SRC =
-  "(^|[\\s(\\[{<,;:\"'“‘«—–])(?:" +
+  "(^|[" + BOUNDARY + "])(?:" +
   "(" + OWNER + ")/(" + REPO + ")#(" + NUM + ")" +
   "|(?:(?:PR|pull)\\s?#(" + NUM + ")|#(" + NUM + "))" + RUN +
   ")(?![\\w#/])";
@@ -100,8 +119,15 @@ export function prUrl(repo: string, n: string): string {
 }
 
 /** Split `text` into plain runs and PR-reference links against `repo`. Pure: no DOM. With no valid
- *  repo, or no reference in the text, the whole text comes back as one plain segment. */
-export function prRefSegments(text: string, repo: string | null | undefined): PrRefSegment[] {
+ *  repo, or no reference in the text, the whole text comes back as one plain segment. `before` is the
+ *  one character (a UTF-16 code unit, the DOM walk's `text.slice(-1)`) that precedes `text` in the run
+ *  it was cut from, "" (the default) when `text` starts the run: a match at the start of `text` counts
+ *  only when that character is a boundary (the header); a longer string never is one, and neither is
+ *  the lone surrogate an emoji ends in, which the one-node regex refuses too. A refused match is scanned
+ *  again from its second character, so a boundary inside it still counts (`d` then `PR #12` links the
+ *  `#12`, as the one-node reading of `dPR #12` does) while a glued run (`d` then `#12/#13`) links
+ *  nothing, `/` being no boundary. */
+export function prRefSegments(text: string, repo: string | null | undefined, before = ""): PrRefSegment[] {
   const r = validPrRepo(repo);
   if (!r || !text || text.indexOf("#") < 0) return [{ text }];
   const re = new RegExp(REF_SRC, "gi");
@@ -110,6 +136,7 @@ export function prRefSegments(text: string, repo: string | null | undefined): Pr
   while ((m = re.exec(text))) {
     const start = m.index + m[1].length;          // the boundary character stays plain text
     const end = m.index + m[0].length;
+    if (start === 0 && before && !BOUNDARY_RE.test(before)) { re.lastIndex = 1; continue; }   // glued to the text before this node: no boundary
     let target: string, n: string;
     if (m[4]) {
       // `a/..#12` and `a/repo.#12` are no repo; `docs/x.html#12` is a path's fragment — the scan resumes after either
@@ -138,9 +165,25 @@ export function prRefSegments(text: string, repo: string | null | undefined): Pr
 const CODE_LIKE = "a, code, pre, kbd, samp, var, tt";
 const SKIP_TAGS = new Set(["A", "CODE", "PRE", "KBD", "SAMP", "VAR", "TT", "SCRIPT", "STYLE", "TEXTAREA", "INPUT", "BUTTON", "SELECT", "OPTION", "SVG"]);
 const SKIP_CLASSES = ["file-uri-link", "url-code-link"];
+// Elements whose edges are line or block boundaries in the rendered text: the run of text the walk carries
+// ends at one and starts fresh after it (the header). These are HTML's block-level and line-breaking
+// elements, listed by how they render rather than by what the chat's sanitizer admits (md-sanitize.ts
+// strips form, fieldset, legend and dialog today and keeps their text), so the two lists move
+// independently. Everything not listed is inline, and an inline element with no text passes the run
+// through unchanged: the safe default, since a missed boundary costs a link and an invented one makes a
+// wrong link.
+const BLOCK_TAGS = new Set([
+  "BR", "HR", "P", "PRE", "BLOCKQUOTE", "UL", "OL", "LI", "H1", "H2", "H3", "H4", "H5", "H6",
+  "TABLE", "CAPTION", "THEAD", "TBODY", "TFOOT", "TR", "TD", "TH",
+  "DIV", "DL", "DT", "DD", "SECTION", "ARTICLE", "HEADER", "FOOTER", "NAV", "ASIDE", "MAIN",
+  "FIGURE", "FIGCAPTION", "DETAILS", "SUMMARY", "FORM", "FIELDSET", "ADDRESS",
+  "CENTER", "LEGEND", "DIALOG", "DIR", "MENU", "HGROUP", "SEARCH",
+]);
+
+const tagOf = (e: Element): string => String(e.tagName || "").toUpperCase();
 
 function skipElement(e: Element): boolean {
-  if (SKIP_TAGS.has(String(e.tagName || "").toUpperCase())) return true;
+  if (SKIP_TAGS.has(tagOf(e))) return true;
   const cl = e.classList;
   return !!cl && SKIP_CLASSES.some((k) => cl.contains(k));
 }
@@ -150,7 +193,11 @@ function skipElement(e: Element): boolean {
  *  existing anchors (SKIP_TAGS) and the chat's path links; a root that itself sits inside one of those
  *  is left alone. Returns the number of links made. A root whose whole text has no `#` — the common
  *  case — costs one native textContent read and no walk. Walks childNodes and edits through
- *  insertBefore/removeChild only, so a test's plain-object DOM stand-in runs it as the browser does. */
+ *  insertBefore/removeChild only, so a test's plain-object DOM stand-in runs it as the browser does.
+ *  The walk carries the last character of the text before each node (a skipped element's text counts,
+ *  an inline element with no text does not, and a line or block edge, BLOCK_TAGS, resets the run), so a
+ *  node's start is a boundary only when the rendered text has one there (the header: `docs/a.md` and
+ *  `#12` split across two nodes is still one path; `done<br>#12` is two lines). */
 export function linkifyPrRefs(root: Node | null | undefined, repo: string | null | undefined): number {
   const r = validPrRepo(repo);
   if (!r || !root) return 0;
@@ -158,22 +205,38 @@ export function linkifyPrRefs(root: Node | null | undefined, repo: string | null
   const rootEl = root as Element;
   if (root.nodeType === 1 && typeof rootEl.closest === "function" && rootEl.closest(CODE_LIKE)) return 0;
   let made = 0;
-  const visit = (node: Node): void => {
+  /** links the text under `node`, given the character before it; returns the character before whatever
+   *  follows: "" after a line or block edge, the way the root starts */
+  const visit = (node: Node, before: string): string => {
     const kids = Array.from(node.childNodes || []);   // snapshot: text children are replaced as we go
     for (const c of kids) {
-      if (c.nodeType === 3) { made += linkifyTextNode(c, r); continue; }
-      if (c.nodeType !== 1 || skipElement(c as Element)) continue;
-      visit(c);
+      if (c.nodeType === 3) {
+        const text = c.textContent || "";
+        made += linkifyTextNode(c, r, before);
+        if (text) before = text.slice(-1);
+        continue;
+      }
+      if (c.nodeType !== 1) continue;                  // a comment renders nothing: the run is unbroken
+      const e = c as Element;
+      const edge = BLOCK_TAGS.has(tagOf(e));
+      if (skipElement(e)) {
+        const text = e.textContent || "";
+        before = edge ? "" : text ? text.slice(-1) : before;
+        continue;
+      }
+      if (edge) { visit(e, ""); before = ""; }         // its text starts a line or block; so does whatever follows it
+      else before = visit(e, before);
     }
+    return before;
   };
-  visit(root);
+  visit(root, "");
   return made;
 }
 
-function linkifyTextNode(tn: Node, repo: string): number {
+function linkifyTextNode(tn: Node, repo: string, before: string): number {
   const text = tn.textContent || "";
   if (text.indexOf("#") < 0) return 0;
-  const segs = prRefSegments(text, repo);
+  const segs = prRefSegments(text, repo, before);
   if (!segs.some((s) => s.href)) return 0;
   const parent = tn.parentNode;
   if (!parent) return 0;

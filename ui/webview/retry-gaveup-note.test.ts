@@ -26,16 +26,17 @@ test("both durable kinds exist in the event union and are dispatched", () => {
 test("the gave-up note is the red twin of the recovered note, and can never read as a recovery", () => {
   const fn = RENDER.slice(RENDER.indexOf("function renderRetryGaveUp"),
                           RENDER.indexOf("function renderApiErrorNote"));
-  assert.match(fn, /turn\.appendChild\(dot\("red"\)\)/);           // red rail dot — a failure, not a shrug
-  assert.match(fn, /gave up after \$\{n\}/);                       // says what actually happened
-  assert.doesNotMatch(fn, /Recovered/, "the failed storm's note must never borrow the recovery wording");
-  assert.match(CSS, /\.gaveup-text \{[^}]*var\(--st-blocked-bg\)/);  // blocked/red voice, not the muted dim
+  // 2026-09-08 (the notice-vocabulary pass): the err severity puts the red on the rail + dot; the words stay --fg
+  assert.match(fn, /sev: "err", gist: `gave up after \$\{n\}/);      // says what actually happened, in the error severity
+  assert.doesNotMatch(fn, /recovered/i, "the failed storm's note must never borrow the recovery wording");
+  assert.match(CSS, /\.notice-sev-err\s+\{ --notice-rail: var\(--st-blocked-bg\);\s+--notice-dot: var\(--st-blocked-bg\); \}/);
+  assert.doesNotMatch(CSS, /\.gaveup-text/);
 });
 
 test("the durable error card wears the live card's chrome but carries NO buttons", () => {
   const fn = RENDER.slice(RENDER.indexOf("function renderApiErrorNote"),
                           RENDER.indexOf("function renderEffortApplied"));
-  assert.match(fn, /apierror-card apierror-note/);                // same dress as the live card
-  assert.match(fn, /API error · \$\{ev\.status\}|`API error · \$\{ev\.status\}`/); // the status badge
-  assert.doesNotMatch(fn, /button/i, "history is not actionable — Retry lives on the LIVE card only");
+  // 2026-09-08: the same API notice as the live card (src API · plug glyph · err severity), no actions
+  assert.match(fn, /notice\(\{ src: "API", glyph: "api", sev: "err", gist: ev\.status \? `error \$\{ev\.status\}` : "error", body,/);
+  assert.doesNotMatch(fn, /noticeAct|acts:/, "history is not actionable — Retry lives on the LIVE card only");
 });

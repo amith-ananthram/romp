@@ -81,7 +81,7 @@ body.scheme-solarized-dark {
      (as raw hexes the palette was dark-only — pale tan on #F1EAE2). Mirrored in feed.css (own
      :root) — the viewer mounts in both documents, and file-view.test.ts pins the two identical. */
   --hl-fg: #d8c6a8; --hl-kw: #c98a6a; --hl-str: #9fb878; --hl-num: #d4a36a;
-  --hl-cmt: #6f6a5f; --hl-title: #e1c08d; --hl-meta: #9a8f7a; --hl-attr: #cdaf7e;
+  --hl-cmt: #978f81; --hl-title: #e1c08d; --hl-meta: #9a8f7a; --hl-attr: #cdaf7e;   /* --hl-cmt raised from #6f6a5f (2.85:1 on a code block) to 4.79:1; theme-parity.test.ts holds the pair */
   --box-bg: rgba(255, 255, 255, 0.03);
   --box-border: var(--vscode-editorHoverWidget-border, rgba(255, 255, 255, 0.12));
   /* the feed's button hairline, MIRRORED byte-equal from feed.css --card-border (T141: the chat's
@@ -121,6 +121,7 @@ body.scheme-solarized-dark {
      feed.css (own :root); the kernel's banners carry the same values as literals. */
   --surface-raised: #252526;
   --radius-toast: 8px;
+  --radius-card: 6px;   /* the transcript's boxed notice / card radius (2026-09-08: retires the 7px API card, the 9px system card) */
   --shadow-toast: 0 8px 28px rgba(0, 0, 0, 0.45);
   /* the centered-modal vocabulary (CLAUDE.md "Panels open as centered modals over a dimmed,
      UNCHANGED dashboard") — one card radius/shadow and ONE backdrop dim; the picker, the feed's
@@ -174,10 +175,18 @@ body.scheme-solarized-dark {
   --st-awaitbg-bg: #54B204; --st-awaitbg-fg: #0c1a00;
   --st-compacting-bg: #14b8a6; --st-compacting-fg: #ffffff;   /* teal — the compacting accent (text + compression bar) */
   --st-blocked-bg: #e5484d; --st-blocked-fg: #ffffff;   /* alarm red — session stopped on an API error */
+  /* amber-orange — the API is backing off and retrying (the tab ring, the chip, the chat's retry notices); the
+     hue sat RAW in seven rules until 2026-09-08 (5.38:1 on the chat's card surface) */
+  --st-retrying-bg: #e67e22; --st-retrying-fg: #2a1500;
 
-  /* the assistant's READING face (.assistant, .fileview-md): the UI face in dark; the light
-     theme swaps in the serif (Claude-desktop's reply-text feel) */
+  /* the assistant's READING face (.assistant): the UI face in dark, mono in light (the light block re-points it).
+     --font-doc is the file viewer's face for a rendered document (.fileview-md): sans in both themes, since the mono
+     ruling was about chat output and a README in mono reads as source. --color-scheme names the theme to a form
+     control a document carries (a task list's checkbox), so its checkbox is drawn for the page it sits on. Mirrored in
+     feed.css (own :root). */
   --font-prose: var(--sans);
+  --font-doc: var(--sans);
+  --color-scheme: dark;
   --mono: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   --sans: "Inter", var(--vscode-chat-font-family, var(--vscode-font-family, system-ui, -apple-system, "Segoe UI", sans-serif));
   --fs: var(--vscode-chat-font-size, 13px);
@@ -210,7 +219,7 @@ body.theme-light {
   --code-bg: rgba(180, 83, 9, 0.08);
   --link: #1D63A8;   /* inked cobalt — clearly clickable, clearly not the error red (5.2:1 on the page) */
   --hl-fg: #3E3A35; --hl-kw: #A03509; --hl-str: #47720F; --hl-num: #915C0B;
-  --hl-cmt: #6E675C; --hl-title: #8C4A00; --hl-meta: #6E6455; --hl-attr: #7A5A20;
+  --hl-cmt: #67614f; --hl-title: #8C4A00; --hl-meta: #6E6455; --hl-attr: #7A5A20;   /* --hl-cmt from #6E675C (4.39:1 on a code block) to 4.86:1 */
   --box-bg: rgba(0, 0, 0, 0.03);
   --box-border: rgba(0, 0, 0, 0.12);
   --err: #B02A1C;
@@ -219,12 +228,17 @@ body.theme-light {
   --cmt-hl: #FFDF70;
   --fast: #D45500;
   --warn: #9A6A00;
-  --st-working-bg: #e0b020; --st-working-fg: #332600;   /* status FILLS carry their own fg — same chips, both themes */
+  /* the WORKING gold and the COMPACTING teal are re-inked for cream (the user 2026-09-08, decision 3 of the
+     notice audit): the dark values sat at 1.59:1 and 1.96:1 on the light card surface, under even the 3:1
+     graphics bar, so a status dot or chip carried no meaning there. #8B6914 = 4.00:1 on the card, white on it
+     5.09:1; #0F766E = 4.30:1, white on it 5.47:1 (theme-parity.test.ts pins the fg pairs). Dark stays as it was. */
+  --st-working-bg: #8B6914; --st-working-fg: #ffffff;
   --st-ready-bg: #2b7fb8;   --st-ready-fg: #ffffff;
   --st-awaiting-bg: #c0392b;--st-awaiting-fg: #ffffff;
   --st-awaitbg-bg: #54B204; --st-awaitbg-fg: #0c1a00;
-  --st-compacting-bg: #14b8a6; --st-compacting-fg: #ffffff;
+  --st-compacting-bg: #0F766E; --st-compacting-fg: #ffffff;
   --st-blocked-bg: #e5484d; --st-blocked-fg: #ffffff;
+  --st-retrying-bg: #9C4A0C; --st-retrying-fg: #ffffff;   /* the retrying amber in the light palette: 4.86:1 on the card, white on it 6.18:1 */
   --radius-menu: 6px;
   --shadow-menu: 0 4px 12px rgba(31, 26, 20, 0.16);
   --menu-bg: #FBF6EF;
@@ -235,6 +249,7 @@ body.theme-light {
   --check-ring: rgba(194, 65, 12, 0.55);
   --surface-raised: #FAF5EE;
   --radius-toast: 8px;
+  --radius-card: 6px;   /* the transcript's boxed notice / card radius (2026-09-08: retires the 7px API card, the 9px system card) */
   --shadow-toast: 0 8px 28px rgba(31, 26, 20, 0.18);
   --radius-modal: 10px;
   --shadow-modal: 0 12px 36px rgba(31, 26, 20, 0.22);
@@ -257,6 +272,8 @@ body.theme-light {
   --mono: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   --sans: "Space Grotesk", "Inter", var(--vscode-chat-font-family, var(--vscode-font-family, system-ui, -apple-system, "Segoe UI", sans-serif));
   --font-prose: var(--mono);   /* the user 2026-08-31, off the live preview: the serif read awful — assistant output goes MONO in light */
+  --font-doc: var(--sans);     /* a viewed document stays sans: the mono ruling was about chat output */
+  --color-scheme: light;
   --fs: var(--vscode-chat-font-size, 13px);
   /* the --vscode-* stand-ins: inline rules fall back through these (menus, inputs, widget cards) */
   --vscode-editor-background: #F1EAE2;
@@ -401,17 +418,25 @@ body.tabbar-resizing { cursor: ns-resize; user-select: none; }
    meaning). Not the header's own status: the header wears no state class. */
 .tab-group-pip { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var(--st-working-bg); }
 .tab-group-pip.blocked { background: var(--st-blocked-bg); }
-.tab-group-pip.retrying { background: #e67e22; }
+.tab-group-pip.retrying { background: var(--st-retrying-bg); }
 /* ONE GROUP PER LINE (T264, the user 2026-09-08: the grouped strip read as one long concatenation).
    A break is a zero-height flex item spanning the whole row, so the item after it — a group's header,
    or the untagged trail's first tab — opens a new line: the chip sits at the left edge and its tabs
    follow, wrapping onto further rows as they need. Zero height, so it adds no rhythm of its own
    (the Yatharth seam is a column gap only); no pointer, so it can neither take a drop nor a hover.
-   The visible separator the untagged trail used to stand behind is gone — a line of its own, with
-   no chip, already says "in no tag" (the trail stays unlabeled by the user's ruling); the element
-   keeps the .tab-group-sep class as the boundary sectionHeadOf reads. The tab drag's virtual layout
+   The breaks are emitted only while the gear's "One tag group per row in the tab strip" is on
+   (stripGroupRows, the default; render.ts renderTabs). Under it the untagged trail stands behind no
+   visible divider: a line of its own, with no chip, already says "in no tag" (the trail stays
+   unlabeled by the user's ruling); the element keeps the .tab-group-sep class as the boundary
+   sectionHeadOf reads. With the setting off the divider below returns. The tab drag's virtual layout
    (dragslot.ts) opens a row at the same places (`br`), so a drag wraps where the strip wraps. */
 .tab-group-break { flex: 0 0 100%; height: 0; margin: 0; padding: 0; pointer-events: none; }
+/* THE UNTAGGED TRAIL'S DIVIDER with the one-group-per-row setting off (render.ts makeTrailSep): a 1px
+   line between 6px gutters. The gutters are PADDING, not margin, and the line is the content box, so
+   its box is the full 13px it occupies in the row and the tab drag's virtual layout (which measures
+   getBoundingClientRect widths) wraps where the real strip wraps. Scoped off the row break above,
+   which wears .tab-group-sep too (the boundary sectionHeadOf reads) and must keep no box. */
+.tab-group-sep:not(.tab-group-break) { flex: 0 0 auto; box-sizing: border-box; width: 13px; padding: 8px 6px; background: var(--box-border); background-clip: content-box; }
 /* (the settings gear + modal live on the TIMELINE now — see ui/romp-timeline-view.js) */
 
 .tab {
@@ -438,7 +463,7 @@ body.tabbar-resizing { cursor: ns-resize; user-select: none; }
 .tab.tab-awaiting { --state: var(--st-awaiting-bg); }
 /* RETRYING: an amber dashed ring (soft 'blocked on the API' auto-retry) — same dashed treatment as awaiting,
    but amber not red, and no fill: it isn't a hard error or a hang (the user via api 2026-06-23). */
-.tab.tab-retrying { --state: #e67e22; }
+.tab.tab-retrying { --state: var(--st-retrying-bg); }
 /* BLOCKED (API error): the SAME dashed ring as awaiting but in the alarm-red blocked color, PLUS a faint
    red fill so a stopped session is highlighted (not just outlined). It isn't working, so it has NO dot
    (the user 2026-06-16). */
@@ -889,7 +914,7 @@ body.chat-theme-yatharth .tab.active.colored:not(.tab-blocked) {
    2 agents · 1 command" working — 2026-09-06). No own border/radius — the box provides them; a bottom border
    appears when expanded, separating it from the list below. */
 .bg-fold-head { --bgt: var(--st-working-bg); flex: 0 0 auto; display: flex; align-items: center; gap: 7px;
-  padding: 7px 11px; cursor: pointer; user-select: none; font-size: 12px; }
+  padding: 7px 11px; cursor: pointer; user-select: none; font-size: 0.92em; }   /* the gist rung (was 12px) */
 .bg-fold-head.open { border-bottom: 1px solid var(--box-border); }
 .bg-fold-head:hover { background: rgba(255, 255, 255, 0.04); }
 /* Stop (a live task) and Cancel (an armed watch — slice 2, 2026-09-05) wear ONE button treatment */
@@ -913,13 +938,13 @@ body.chat-theme-yatharth .tab.active.colored:not(.tab-blocked) {
 .bg-task.bg-armed, .bg-task.bg-waiting { --bgt: var(--st-awaitbg-bg); }
 /* the rows grouped by KIND (slice 2, 2026-09-05): a small dim header per group, in the .bg-status
    vocabulary (10px uppercase), shown only when more than one group is on screen */
-.bg-group-head { flex: 0 0 auto; padding: 6px 9px 2px; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; font-weight: 600; color: var(--dim); }
+.bg-group-head { flex: 0 0 auto; padding: 6px 9px 2px; font-size: 0.72em; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; color: var(--dim); }   /* the source-label rung (was 10px) */
 .bg-group-head + .bg-group-head { padding-top: 2px; }
 /* a row with nothing to unfold (a hook-only agent, a PR watch, a peer) is not a toggle: no hand, no hover wash */
 .bg-head.bg-flat { cursor: default; }
 .bg-head.bg-flat:hover { background: none; }
 /* how long a row has been waited on (its own event time; the statusline tick keeps it live) */
-.bg-since { flex: 0 0 auto; font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.bg-since { flex: 0 0 auto; font-size: 0.82em; color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; }   /* the meta rung (was 11px) */
 .bg-list > .bg-await-note { padding: 2px 9px 4px; }
 /* AWAITED (the user 2026-08-19): the session's await-green chip is waiting on THIS task — the box
    border + the row's thin outline take the chip's green; the dot keeps meaning the task's own status */
@@ -935,20 +960,20 @@ body.chat-theme-yatharth .tab.active.colored:not(.tab-blocked) {
    right edge and a wide desktop pane lost it entirely). The label takes only its own width and shrinks with
    an ellipsis when too long (flex 0 1 auto, min-width 0); every cluster item is 0 0 auto, so the label can
    never push them off-screen; no spacer, no margin-left:auto, no space-between. */
-.bg-sum { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--fg); }
-.bg-status { flex: 0 0 auto; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; font-weight: 600; color: var(--bgt); }
-.bg-caret { flex: 0 0 auto; color: var(--dim); font-size: 10px; width: 10px; }
+.bg-sum { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.92em; color: var(--fg); }
+.bg-status { flex: 0 0 auto; font-size: 0.72em; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; color: var(--bgt); }
+.bg-caret { flex: 0 0 auto; color: var(--dim); font-size: 0.72em; width: 10px; opacity: 0.7; }
 /* level 3: a task's command + output, each its own scrollable block, indented under the line (overscroll-
    contain so the wheel scrolls the body, not the chat behind it — the "expanded view won't scroll" fix) */
 .bg-detail { padding: 2px 9px 8px 25px; }
 .bg-cmd, .bg-out { margin: 4px 0 0; padding: 6px 8px; background: rgba(0, 0, 0, 0.25); border-radius: 5px;
-  font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: #cdd9e5;
+  font: 0.82em/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: #cdd9e5;
   white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; overscroll-behavior: contain; }
 .bg-cmd { color: #9cd2ff; }
 /* the Awaiting why's expanded body: the full sentence, the awaited items, a plain-words note */
-.bg-await-why { font-size: 12px; color: var(--fg); margin: 4px 0 0; }
-.bg-await-task { font-size: 12px; color: var(--dim); margin-top: 3px; }
-.bg-await-note { font-size: 11px; color: var(--dim); opacity: .8; margin-top: 6px; }
+.bg-await-why { font-size: 0.92em; color: var(--fg); margin: 4px 0 0; }
+.bg-await-task { font-size: 0.92em; color: var(--dim); margin-top: 3px; }
+.bg-await-note { font-size: 0.82em; color: var(--dim); opacity: .8; margin-top: 6px; }
 
 #footer {
   position: relative;   /* anchors #composer-resize on the top-edge divider */
@@ -992,7 +1017,7 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 /* The line above the box after the ACTIVE tab was torn down under the user (T236, render.ts renderComposerNote):
    whose box went away and that the unsent draft is kept. Chip-strip geometry and the chips' 12px; the ✕ is the
    chip ✕. Dim by default, the session name in the normal fg — it is the one thing to read. */
-#composer-note { flex: 1 1 100%; display: flex; align-items: center; gap: 6px; padding: 0 0 6px 2px; font-size: 12px; line-height: 1.4; color: var(--dim, #9a9a9a); }
+#composer-note { flex: 1 1 100%; display: flex; align-items: center; gap: 6px; padding: 0 0 6px 2px; font-size: 0.82em; line-height: 1.4; color: var(--dim, #9a9a9a); }   /* the meta rung (was 12px) */
 .composer-note-msg { flex: 1 1 auto; min-width: 0; }
 .composer-note-name { color: var(--fg); }
 .composer-note-hint { opacity: 0.75; }
@@ -1058,6 +1083,23 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 .staged-head .staged-go { margin-left: auto; background: none; border: 1px solid var(--accent); color: var(--accent);
   border-radius: 5px; font: inherit; padding: 1px 8px; cursor: pointer; }
 .staged-head .staged-go:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-wash); }   /* the feed word-button hover (2026-08-25) */
+/* the head's caret and label: a click collapses the strip to the head line alone, count and Send now
+   still on it; the caret is a real button so the keyboard reaches it. It wears --dim like the label and
+   the chip ✕'s padding (2px 4px), so its hit target is that of the strip's other small control (about
+   13 by 15px) rather than the glyph's own 9px: the one control the keyboard and a finger reach */
+.staged-head .staged-caret { flex: 0 0 auto; background: none; border: 0; padding: 2px 4px; color: var(--dim); font: inherit; line-height: 1; cursor: pointer; }
+.staged-head .staged-lbl { cursor: pointer; }
+/* the items in their own scrolling list UNDER the head, about four items tall: a dozen staged comments
+   otherwise fill the page below the strip and push the transcript out of view. A staged item with one
+   quote is 50px (the quote pill 22.8px = 12px text at the pill's 1.4 line height plus 2px padding and
+   1px border top and bottom; the comment row 19.2px = 12px text at the page's 1.6 line height; the 2px
+   gap between them; the item's 2px padding and 1px border top and bottom), so four items and the three
+   3px gaps between them are 209px. The head with the count and Send now sits outside the scroll; an
+   expanded item grows inside it. overflow-x hidden, as on every scroll container in the pane: a
+   scrolling list computes overflow-x to auto on its own, and an expanded item holding one unbroken
+   token (a digest, a query string) wider than the list would give the pane a sideways scroll; the open
+   labels below wrap such a token so it stays readable. */
+.staged-list { display: flex; flex-direction: column; gap: 3px; min-height: 0; max-height: 209px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }
 /* the chips strip's Stage button (the user 2026-08-23; moved 2026-08-24): it FOLLOWS the blue
    context chips in the strip's column — immediately after what it acts on, where its meaning reads;
    right-justified it floated detached. Exists exactly while context is held (the strip renders it,
@@ -1082,12 +1124,12 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
    one-line-ellipsis-then-expand read as everything else here. min-width:0 + max-width guard the
    pane against sideways growth at every level. */
 .staged-cite { min-width: 0; max-width: 100%; cursor: pointer; }
-.staged-cite.open .composer-chip-label { white-space: pre-wrap; overflow: visible; }
+.staged-cite.open .composer-chip-label { white-space: pre-wrap; overflow: visible; overflow-wrap: anywhere; }
 .staged-cite.open { align-items: flex-start; }
 /* min-width:0 lets the flex label actually SHRINK — without it the line ran off the pane edge with no
    ellipsis (the user 2026-08-15); expanded, the same label wraps to the full text */
 .staged-chip .composer-chip-label { flex: 1 1 auto; max-width: 100%; min-width: 0; }
-.staged-chip.open .staged-row .composer-chip-label { white-space: pre-wrap; overflow: visible; }
+.staged-chip.open .staged-row .composer-chip-label { white-space: pre-wrap; overflow: visible; overflow-wrap: anywhere; }
 .staged-chip.open .staged-row { align-items: flex-start; }
 .staged-expand { flex: 0 0 auto; color: var(--dim); font-size: 0.86em; }   /* chrome, not message text */
 .composer-chip-x {
@@ -1238,27 +1280,12 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 .chip-working { background: var(--st-working-bg); color: var(--st-working-fg); }
 /* blocked = API error: red chip; the TAB itself goes dashed-red (above), no dot — it isn't working. */
 .chip-blocked { background: var(--st-blocked-bg); color: var(--st-blocked-fg); }
-/* API-error card: a red dot on the rail + a red-outlined "API error" badge, a live auto-retry countdown,
-   and a "Retry now" button. */
-.turn-apierror { padding: 6px 0 10px; }
+/* (the API-error card is THE notice — err severity, "API · error 529", the countdown as meta, the actions as
+   .notice-act word buttons — since 2026-09-08; .dot.red stays the tool-error / blocked rail glyph) */
 .dot.red { background: var(--st-blocked-bg); border: none; }
 /* a still-running subagent: solid amber working dot (NOT pulsing — oscillation was distracting, the user
    2026-06-16), distinct from the green ✓ a finished tool gets, so a dispatched agent reads as "still going". */
 .dot.working { background: var(--st-working-bg); border: none; }
-.apierror-card { border: 1px solid var(--st-blocked-bg); border-radius: 7px; padding: 7px 9px; background: rgba(229, 72, 77, 0.07); }
-.apierror-head { display: flex; align-items: center; gap: 8px; }
-.apierror-countdown { flex: 0 0 auto; font-size: 0.82em; color: var(--st-blocked-bg); font-variant-numeric: tabular-nums; opacity: 0.9; }
-.apierror-badge { flex: 0 0 auto; font-size: 0.72em; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase;
-  color: var(--st-blocked-bg); border: 1px solid var(--st-blocked-bg); border-radius: 5px; padding: 1px 7px; }
-.apierror-retry { margin-left: auto; font-size: 11px; padding: 2px 11px; border-radius: 5px; cursor: pointer;
-  color: var(--st-blocked-bg); background: transparent; border: 1px solid var(--st-blocked-bg); }
-.apierror-retry:hover:not(:disabled) { color: #fff; background: var(--st-blocked-bg); }
-/* "Stop retrying" — a neutral/dim action (it calms the loop, it's not an alarm), distinct from the red Retry */
-.apierror-stop { font-size: 11px; padding: 2px 11px; border-radius: 5px; cursor: pointer;
-  color: var(--dim); background: transparent; border: 1px solid var(--rail); }
-.apierror-stop:hover { color: var(--fg); border-color: var(--dim); background: rgba(255, 255, 255, 0.06); }
-.apierror-retry:disabled { opacity: 0.55; cursor: default; }
-.apierror-body { margin-top: 5px; font-size: 0.86em; color: var(--dim); line-height: 1.35; }
 .chip-ready { background: var(--st-ready-bg); color: var(--st-ready-fg); }
 .chip-needsInput { background: var(--st-awaiting-bg); color: var(--st-awaiting-fg); }
 .chip-awaiting { background: var(--st-awaiting-bg); color: var(--st-awaiting-fg); }   /* legacy name — an older remote kernel */
@@ -1277,7 +1304,7 @@ button.chip:active { transform: scale(0.96); }
 button.chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* retrying = a SOFT 'blocked on the API' (rate-limit / overload auto-retry) — not a hang, not working. Amber/
    orange, deliberately distinct from working-yellow and blocked-red (the user via api 2026-06-23). */
-.chip-retrying { background: #e67e22; color: #2a1500; }
+.chip-retrying { background: var(--st-retrying-bg); color: var(--st-retrying-fg); }
 .chip-idle { background: rgba(255, 255, 255, 0.08); color: var(--dim); }
 .chip-closed { background: rgba(255, 255, 255, 0.07); color: var(--dim); }
 .status-timer { color: var(--dim); font-variant-numeric: tabular-nums; font-size: 0.92em; }
@@ -1386,6 +1413,12 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   color: var(--fg); position: relative; white-space: nowrap;
 }
 .meta-item:hover { background: var(--menu-hover); }   /* the themed row wash (T226) */
+/* the one row a Codex menu shows when it has no list: a statement, not a choice, so no pointer
+   and no hover wash; its sub-line carries the kernel's reason, which wraps: a reason is a sentence, and
+   .meta-item's nowrap would run it past the panel's edge */
+.meta-item.meta-empty { cursor: default; white-space: normal; max-width: 280px; }
+.meta-item.meta-empty:hover { background: none; }
+.meta-item-sub .meta-dots { margin-left: 5px; vertical-align: middle; }   /* the wait's loader dots, beside the text */
 /* second line for a choice whose consequence its label doesn't carry (Bypass permissions). Same
    0.82em / 0.6 opacity as .ctx-item-sub — one sub-line size across every romp menu. */
 .meta-item-sub { font-size: 0.82em; opacity: 0.6; }
@@ -1490,69 +1523,19 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 }
 /* tool + thinking rows pack tighter than prose turns (the user: ~half the spacing) */
 .turn-tool, .turn-thinking, .turn-toolgroup { padding-top: 4px; padding-bottom: 4px; }
-/* the compaction boundary now renders as a notice card in the system-event family (renderCompact → noticeCard,
-   variant "compact") — its teal accent lives with the other .notice-card-* variants below. */
-/* LIVE compaction — animated inline element that becomes the .compact-line divider above once done. Same
-   teal + type as the divider (reads as one element maturing); the bar reuses @keyframes ctx-compress (the
-   statusline ctx-scan motion) and — like the statusline/tab bars — sweeps through the context colormap
-   (renderCompacting calls applyCompactSweep, which sets --cmp0..4). Teal is only the fallback if unset. */
-.turn-compacting { padding-top: 4px; padding-bottom: 4px; }
-.turn-compacting .dot, .turn-compacting .time-marker { top: 10px; }
-.turn-compacting .dot { background: var(--st-compacting-bg, #14b8a6); border: none; }
-.compacting-inline { display: inline-flex; align-items: center; gap: 8px; color: var(--st-compacting-bg, #14b8a6); font-size: 0.92em; font-weight: 600; letter-spacing: 0.02em; }
-.compacting-bar { position: relative; display: inline-block; width: 42px; height: 11px; border-radius: 2px; overflow: hidden; background: color-mix(in srgb, var(--st-compacting-bg, #14b8a6) 18%, transparent); }
-.compacting-bar-fill { position: absolute; left: 1px; top: 1px; bottom: 1px; width: calc(100% - 2px); border-radius: 1px; background: var(--st-compacting-bg, #14b8a6); transform-origin: left center; animation: ctx-compress 3.2s linear infinite; }
-.compacting-text { letter-spacing: 0.02em; }
-/* LIVE session reconnect (an /effort switch reloading the session) — the romp-accent pulsing dots (the loader
-   motif) + a muted "Reloading session…" line; a transient sibling of the compacting element. */
-.turn-reconnecting { padding-top: 4px; padding-bottom: 4px; }
-.turn-reconnecting .dot, .turn-reconnecting .time-marker { top: 10px; }
-.turn-reconnecting .dot { background: var(--accent); border: none; }
-.reconnecting-line { display: inline-flex; align-items: center; gap: 8px; color: var(--dim); font-size: 0.92em; font-weight: 600; letter-spacing: 0.02em; }
-/* LIVE /clear in progress — the loader dots + a muted "Clearing conversation…" line; a transient sibling
-   of the reconnecting element (same treatment: an in-flight romp-driven session operation). */
-.turn-clearing { padding-top: 4px; padding-bottom: 4px; }
-.turn-clearing .dot, .turn-clearing .time-marker { top: 10px; }
-.turn-clearing .dot { background: var(--accent); border: none; }
-.clearing-line { display: inline-flex; align-items: center; gap: 8px; color: var(--dim); font-size: 0.92em; font-weight: 600; letter-spacing: 0.02em; }
-/* LIVE api_retry (rate-limit/overload backoff) — the loader dots + an AMBER "API retrying…" line, tinted the
-   SAME retrying status color as the tab border (#e67e22 — a STATUS color, not accent chrome) so the chat
-   element reads as that state; a transient sibling of the compacting/reconnecting elements. */
-.turn-retrying { padding-top: 4px; padding-bottom: 4px; }
-.turn-retrying .dot, .turn-retrying .time-marker { top: 10px; }
-.turn-retrying .dot { background: #e67e22; border: none; }
-.turn-retrying .meta-dots i { background: #e67e22; }   /* tint the loader dots amber to match the state (default is accent blue) */
-.retrying-line { display: inline-flex; align-items: center; gap: 8px; color: #e67e22; font-size: 0.92em; font-weight: 600; letter-spacing: 0.02em; }
-/* the error behind the backoff (kernel retryInfo, the user 2026-07-10) — same 0.9em as the retrying line
-   (one size per information type), muted so the amber headline stays the signal */
-.retrying-err { margin-top: 2px; color: color-mix(in srgb, #e67e22 55%, var(--dim)); font-size: 0.92em; overflow-wrap: anywhere; }
-/* the LIVE next-attempt countdown (the user 2026-07-24) — inherits the retrying line's size/weight (it IS
-   that line's text, not a new information type); tabular digits so the ticking number never jitters the row */
-.retrying-countdown { font-variant-numeric: tabular-nums; }
-/* "Stop retrying" — the SAME neutral/dim control chrome as the API-error card's stop (a control matches a
-   control), so the two cards' actions read as one family rather than two inventions */
-.retrying-stop { margin-left: 4px; font-size: 11px; padding: 2px 11px; border-radius: 5px; cursor: pointer;
-  color: var(--dim); background: transparent; border: 1px solid var(--rail); }
-.retrying-stop:hover:not(:disabled) { color: var(--fg); border-color: var(--dim); background: rgba(255, 255, 255, 0.06); }
-.retrying-stop:disabled { opacity: 0.55; cursor: default; }
-/* the persistent "Recovered after N retries" marker left where output resumed — muted, static, one line */
-/* the durable "effort set to X" note shares the retried note's slim rail treatment (the user 2026-07-16) */
-.turn-retried, .turn-effort { padding-top: 4px; padding-bottom: 4px; }
-.turn-retried .dot, .turn-retried .time-marker, .turn-effort .dot, .turn-effort .time-marker { top: 10px; }
-.retried-line, .effort-line { display: inline-flex; align-items: center; gap: 8px; color: var(--dim); font-size: 0.92em; letter-spacing: 0.02em; }
-/* the FAILED twin — "API errors — gave up after N retries": same slim line, in the blocked/red voice,
-   so a storm that produced nothing never reads like a recovery (the user 2026-07-25) */
-.gaveup-text { color: var(--st-blocked-bg); font-weight: 600; }
-/* the durable "safeguards flagged → switched model" note (the user 2026-08-03: a mid-turn model swap
-   must be apparent in the chat, never silent) is a notice card since T279: see .notice-card-refusal */
-/* the durable record of a died turn — the live card's chrome without its buttons; slightly dimmer body
-   so history reads calmer than the ACTIVE blocked card while staying unmistakably an error */
-.apierror-note .apierror-body { color: var(--dim); }
+/* (the compaction boundary is THE notice — compact severity, "COMPACTION · Context compacted · auto · 142k → 38k") */
+/* the live compaction bar — rides the glyph slot of the compacting notice (renderCompacting): the SAME
+   compressing motion as the statusline ctx-bar (@keyframes ctx-compress), sweeping through the context
+   colormap (applyCompactSweep sets --cmp0..4); the teal token is only the fallback if unset */
+.compacting-bar { position: relative; display: inline-block; width: 42px; height: 11px; border-radius: 2px; overflow: hidden; background: color-mix(in srgb, var(--st-compacting-bg) 18%, transparent); }
+.compacting-bar-fill { position: absolute; left: 1px; top: 1px; bottom: 1px; width: calc(100% - 2px); border-radius: 1px; background: var(--st-compacting-bg); transform-origin: left center; animation: ctx-compress 3.2s linear infinite; }
+/* (the compacting / reconnecting / clearing / retrying / retried / effort / gave-up / model-swap rows and the
+   API-error card are all THE notice now — see the .notice family below; their bespoke rules left 2026-09-08) */
 /* compact-mode collapsed tool run → one line ("▸ 3 Edits, 2 Reads"); click to expand/collapse */
 .turn-toolgroup .dot, .turn-toolgroup .time-marker { top: 10px; }
 .toolgroup-line { color: var(--dim); font-size: 0.92em; line-height: 1.4; cursor: pointer; width: fit-content; padding-right: 6px; }
 .toolgroup-line:hover { color: var(--fg); }
-.toolgroup-caret { display: inline-block; font-size: 1.3em; color: var(--vscode-foreground, #fff); line-height: 1; margin-right: 2px; }
+.toolgroup-caret { display: inline-block; font-size: 0.72em; opacity: 0.7; color: var(--dim); margin-right: 4px; }   /* the notice caret's size (was 1.3em) */
 .toolgroup-tool { font-weight: 700; color: var(--vscode-foreground, #fff); }   /* matches .tool-name */
 /* An expanded tool-group's children are a DETOUR of the main rail (the user 2026-07-17 ×2: the rail
    goes IN, DOWN, and BACK — one path, never two parallel verticals): a right-turn arm under the open
@@ -1699,7 +1682,7 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    dot with stroke #e8eef5, so the same event wears the same mark on both surfaces rather than a bordered
    version there and a bare one here. inset:0 on the glyph because the border already eats 1px off the
    11px box (box-sizing: border-box), so the swirl keeps the size it had before the ring arrived. */
-.dot.romp { background: #000; border: 1px solid #e8eef5; }
+.dot.romp { background: var(--bg); border: 1px solid var(--fg); }   /* tokenised 2026-09-08 (was #000 / #e8eef5) */
 .dot.romp::before {
   content: ""; position: absolute; inset: 0; border-radius: 50%;
   background: url(../media/romp-swirl-glyph.svg) center / contain no-repeat;
@@ -1846,25 +1829,30 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    A GRAY bubble in the SAME right-aligned spot as the blue user bubble (so it sits where "an outgoing
    message" goes), but clearly NOT you — gray, with a small "↯ romp" tag above it (the user 2026-06-19).
    Right-align is inherited from .turn-user:not(.injected) since a romp turn carries no .injected class. */
+/* the attribution mark above a romp / tagged bubble wears the notice SOURCE label's size and weight
+   (0.72em 600 uppercase — one label rung across the transcript, 2026-09-08; was 0.66em 700) */
 .romp-tag {
   display: inline-flex; align-items: center; gap: 4px;
-  font-size: 0.66em; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+  font-size: 0.72em; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
   color: var(--dim); margin-bottom: 3px; margin-right: 2px;
 }
 .romp-tag-logo { width: 14px; height: 14px; display: block; flex: 0 0 auto; }
+.romp-tag .notice-glyph { color: var(--dim); }   /* a tagged bubble's gear (the ⚙ text glyph retired) */
+/* the bubble on the shared overlay tokens (2026-09-08): its white-alpha bg/border vanished on the light
+   theme's cream — --overlay-05/-10 are the theme's own washes, so it reads in both */
 .romp-bubble {
   max-width: 72%;
-  background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.18);
+  background: var(--overlay-05); border: 1px solid var(--overlay-10);
   border-radius: 14px; padding: 7px 12px; color: var(--fg);
   display: flow-root;
 }
 .romp-bubble a { color: var(--fg); text-decoration: underline; text-underline-offset: 2px; }
 .romp-bubble blockquote { margin: 0 0 6px; padding-left: 9px; border-left: 2px solid var(--box-border); color: var(--dim); }
-.romp-bubble :not(pre) > code { background: rgba(255, 255, 255, 0.12); }
+.romp-bubble :not(pre) > code { background: var(--overlay-10); }
 /* Progressive disclosure on a nudge (the user 2026-07-17): the bubble defaults to a one-line GIST with
    a caret; clicking swaps in the full text. Dim gist — it's bookkeeping, not the user's words. */
 .romp-bubble.nudge-collapsible { cursor: pointer; }
-.nudge-gist { color: var(--dim); }
+.nudge-gist { color: var(--dim); font-size: 0.92em; }   /* the notice gist's size — one gist rung (2026-09-08) */
 .nudge-caret { display: inline-block; margin-right: 5px; color: var(--dim); }
 .romp-bubble .nudge-full { display: none; }
 .romp-bubble.expanded .nudge-full { display: block; }
@@ -1907,36 +1895,27 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 .queued-bubble.queued-romp { background: transparent; border: 0; padding: 0; opacity: 1; }
 .queued-bubble.queued-romp.cancelable { padding-right: 0; }
 .queued-bubble.queued-romp.cancelable:hover { border-color: transparent; }
-.queued-bubble.queued-romp > .notice-card { margin-top: 0; }
+.queued-bubble.queued-romp > .notice { margin-top: 0; }
 /* The queued NUDGE nests the landed .romp-tag + .romp-bubble: the wrapper is the landed romp turn's own
    right-aligned column (tag above, bubble flush right), the nested bubble sheds its own 72% cap (the
    wrapper already carries it — nested, it shrank to 72% of 72% and wrapped one-line gists) and anchors the
    ✕ in ITS corner, not the wrapper's (T243 follow-up, measured in queued-romp-layout.test.ts). */
 .queued-bubble.queued-romp:not(.queued-sys) { display: flex; flex-direction: column; align-items: flex-end; }
 .queued-bubble.queued-romp > .romp-bubble { max-width: none; position: relative; }
-.queued-bubble.queued-romp.cancelable > .notice-card,
+.queued-bubble.queued-romp.cancelable > .notice,
 .queued-bubble.queued-romp.cancelable > .romp-bubble { padding-right: 30px; }   /* room for the ✕ only when there is one */
 /* NEVER-DELIVERED send (ev.undelivered): a message whose CLI died holding it — kept, because the bubble
    is the only surviving copy of the text, but marked as a LOSS instead of posing as delivered history
    (the user 2026-07-29). Dashed like the queued family (a send that never became a turn), red-edged like
    every "something went wrong" cue. The note + actions sit under the right-aligned bubble and are always
    visible — a loss notice is not a hover secret. Button sizes wear .msg-edit's clothes (one size). */
-.user-bubble.undelivered-bubble { background: color-mix(in srgb, var(--you) 10%, transparent); }
+/* the bubble KEEPS its solid --you fill (2026-09-08: the old 10% wash put white text on a tint — unreadable on
+   cream); the loss reads in the dashed --err edge, the label, and the actions (.notice-act, the one button dress) */
 .user-bubble.undelivered-bubble, .romp-bubble.undelivered-bubble {
-  border: 1px dashed rgba(244, 135, 113, 0.65); opacity: 0.85;
+  border: 1px dashed color-mix(in srgb, var(--err) 65%, transparent); opacity: 0.85;
 }
 .undelivered-note { display: flex; align-items: center; gap: 4px; align-self: flex-end; margin-top: 3px; }
-.undelivered-label {
-  font-size: 0.82em; color: var(--vscode-errorForeground, #f48771);
-  letter-spacing: 0.02em; margin-right: 4px;
-}
-.undelivered-act {
-  font-family: var(--sans); font-size: 11px; line-height: 1; padding: 3px 7px; border-radius: 4px;
-  border: 1px solid var(--card-border); background: transparent; color: var(--dim);   /* T141: the one button rest */
-  cursor: pointer; user-select: none; font-style: normal;
-  transition: color 0.12s ease, border-color 0.12s ease;
-}
-.undelivered-act:hover { color: var(--fg); border-color: var(--accent); }
+.undelivered-label { font-size: 0.82em; color: var(--err); letter-spacing: 0.02em; margin-right: 4px; }
 /* a pending bubble whose confirmation is in doubt — the connection dropped after the press (send-pending.ts
    `lost`): the bare group's label counts it in a warn-amber "not confirmed" part; the group's other bubbles
    keep their dim "sending…" part beside it (one label, per-bubble state) */
@@ -1956,7 +1935,10 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 .followup-wrap { display: contents; }
 .followup-tag.followup-expandable { cursor: pointer; }
 .followup-tag.followup-expandable:hover .followup-goal { color: var(--fg); }
-.followup-tri { color: var(--dim); }   /* inherits the header's one size */
+.followup-tri { color: var(--dim); }   /* inherits the header's one size; ▸/▾ follows the wrap's fold state */
+.followup-tri::before { content: "▸"; }
+.followup-wrap.expanded .followup-tri::before { content: "▾"; }
+.followup-wrap:not(.expanded) > .followup-ctx { display: none; }
 .followup-ctx { max-width: 72%; margin-bottom: 2px; padding: 5px 9px; border-left: 2px solid var(--accent);
   border-radius: 6px; background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--dim);
   font-size: 0.82em; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -1981,15 +1963,8 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 .file-uri-link:hover { text-decoration: underline; }
 .img-copy { flex: 0 0 auto; cursor: pointer; padding: 0 3px; border-radius: 3px; }
 .img-copy:hover { background: rgba(255, 255, 255, 0.18); }
-/* the injected-note variant keeps captions readable on its dim background */
-.user-note .img-caption { color: var(--fg); }
-/* harness-injected user-role lines (compact summary, /command stdout, reminders,
-   postal pushes) — NOT the user's message → the old neutral box, full-width left */
-.user-note {
-  background: rgba(255, 255, 255, 0.04); border: 1px solid var(--box-border);
-  border-radius: 6px; padding: 10px 14px; color: var(--dim);
-  display: flow-root;
-}
+/* (harness-injected user-role lines — a compact summary, /command stdout — are a SYSTEM notice now; the
+   user-note box left 2026-09-08) */
 
 /* ---------- thinking ---------- */
 .thinking { color: var(--dim); font-style: italic; }
@@ -2025,7 +2000,6 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 /* ---------- AskUserQuestion (choice prompt) ---------- */
 .turn-ask { padding-top: 11px; padding-bottom: 11px; }
 .ask-card { border: 1px solid var(--box-border); border-radius: 6px; padding: 9px 13px; background: var(--box-bg); }
-.ask-head { font-size: 0.72em; letter-spacing: 0.06em; text-transform: uppercase; color: var(--dim); margin-bottom: 6px; }
 .ask-q + .ask-q { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--box-border); }
 .ask-qtext { font-weight: 600; color: var(--vscode-foreground, #fff); margin-bottom: 5px; }
 /* Option rows must survive a narrow screen (the user 2026-07-30, on a phone). The old flex row held a
@@ -2058,7 +2032,7 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   box-shadow: inset 3px 0 0 var(--you);
 }
 /* the "↳ You answered Claude's question" marker line atop the box */
-.ask-answered-tag { font-size: 0.72em; letter-spacing: 0.04em; font-weight: 700; color: #6da0ff; margin-bottom: 6px; }
+.ask-answered-tag { font-size: 0.72em; letter-spacing: 0.06em; font-weight: 600; text-transform: uppercase; color: var(--you); margin-bottom: 6px; }   /* the source-label rung, in YOUR colour (was a raw #6da0ff) */
 
 /* ---------- live "awaiting your input" picker (pending, click-to-answer) ---------- */
 /* The picker is part of the scrolling transcript (the user 2026-06-27): it's the last child of #content and
@@ -2135,9 +2109,9 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 .ask-btn-primary:hover { filter: brightness(1.1); }
 /* safeguard: awaiting screen the panel can't read → warn to check the terminal */
 .ask-live-unknown { border-color: var(--st-awaiting-bg); box-shadow: inset 3px 0 0 var(--st-awaiting-bg); }
-.ask-warn { color: var(--st-awaiting-bg); font-weight: 700; margin-bottom: 9px; line-height: 1.4; }
+.ask-warn { color: var(--fg); font-weight: 600; margin-bottom: 9px; line-height: 1.4; }   /* the needs-you red is the rail + inset bar; the words stay --fg (2026-09-08) */
 
-.compacting-line { color: var(--st-compacting-bg); font-weight: 600; }
+.compacting-line { color: var(--st-compacting-bg); font-weight: 600; }   /* the STATUSLINE's compacting caption (not a transcript notice) */
 /* "Opening session" + three staggered pulsing dots (the user 2026-08-05) — the loader idiom's smallest
    form: accent-colored, event-cleared (first payload / first record), same line style as compacting */
 .opening-line { color: var(--accent); }
@@ -2149,13 +2123,8 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 @keyframes opening-line-pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
 
 /* ---------- to-do checklist (Claude Code Task list, folded from TaskCreate/Update) ---------- */
-.turn-todo { padding-top: 6px; padding-bottom: 6px; }
-.todo-card { border: 1px solid var(--box-border); border-radius: 6px; padding: 8px 12px; background: var(--box-bg); }
-.todo-head { font-weight: 700; color: var(--dim); font-size: 0.72em; letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 6px; }
-/* the authoritative task store was unreadable → a surfaced error, not a silently-degraded stale list */
-.todo-card-error { border-color: var(--err); }
-.todo-card-error .todo-head { color: var(--err); }
-.todo-error-msg { color: var(--err); font-size: 0.86em; line-height: 1.4; }
+/* (the to-do card + head are THE notice since 2026-09-08 — "TO-DO · N of M done", the list its open body;
+   the unavailable-store error is the err severity on the rail, its reason in the body's own ink) */
 .todo-item { display: flex; gap: 8px; align-items: baseline; padding: 1px 0; line-height: 1.45; }
 /* the completed bulk's fold (the user 2026-08-24): a quiet row where the finished items live —
    on-deck stays visible, the bulk is one click away; the box holds the rows when expanded */
@@ -2172,96 +2141,20 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   display: inline-flex; align-items: center; justify-content: center; align-self: center; line-height: 1;
 }
 .todo-completed .todo-text { color: var(--dim); text-decoration: line-through; }
-.todo-in_progress .todo-mark { color: #e0b020; }
+.todo-in_progress .todo-mark { color: var(--st-working-bg); }
 .todo-in_progress .todo-text { color: var(--fg); font-weight: 600; }
 .todo-pending .todo-mark { color: var(--dim); }
 .todo-pending .todo-text { color: var(--dim); }
 
-/* ---------- postal cards (romp peer mail) ---------- */
+/* ---------- postal cards (romp peer mail) + teammate messages ---------- */
+/* Both are THE notice since 2026-09-08 (renderPostalService / renderTeammate): a peer's mail wears its
+   identity colour on the rail + dot + the session chip in the SOURCE slot and a 6% wash of it (.notice-peer);
+   the intent and delivery state read as meta text; a teammate message is the plain notice under the
+   "teammate <name>" label (the dashed frame said what the label now says). One keyed fold each. */
 .dot.mail { background: var(--peer-bg, var(--dim)); border: none; }
-.turn-postal-service { padding-top: 11px; padding-bottom: 11px; }
-.postal-service-card {
-  border: 1px solid var(--box-border);
-  border-left: 3px solid var(--peer-bg, var(--dim));
-  border-radius: 6px;
-  padding: 8px 13px;
-  /* faint wash of the peer's identity colour; plain fallback if color-mix is unsupported */
-  background: var(--box-bg);
-  background: color-mix(in srgb, var(--peer-bg, transparent) 8%, var(--box-bg));
-}
-/* sent mail: accent + wash sit on the right, so direction reads at a glance */
-.postal-service-out .postal-service-card {
-  border-left: 1px solid var(--box-border);
-  border-right: 3px solid var(--peer-bg, var(--dim));
-}
-.postal-service-head {
-  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
-  margin-bottom: 6px; font-size: 0.92em;
-}
-.postal-service-romp-logo { width: 13px; height: 13px; flex: 0 0 auto; border-radius: 2px; }   /* romp-postal-service identity mark (the user 2026-06-23) */
-.postal-service-arrow { color: var(--peer-bg, var(--dim)); font-weight: 700; }
-.postal-service-dir { color: var(--dim); font-size: 0.86em; }
-.postal-service-peer {
-  display: inline-flex; align-items: center;
-  font-weight: 700; font-size: 0.82em; letter-spacing: 0.02em;
-  padding: 2px 9px; border-radius: 11px;
-  background: var(--peer-bg, rgba(255, 255, 255, 0.1));
-  color: var(--peer-fg, var(--fg));
-}
 /* a session-name chip that navigates on click (sender/recipient name) */
 .chip-nav { cursor: pointer; }
 .chip-nav:hover { filter: brightness(1.12); text-decoration: underline; text-underline-offset: 2px; }
-.postal-service-badge { font-size: 0.72em; font-weight: 700; letter-spacing: 0.03em; padding: 2px 8px; border-radius: 9px; }
-.postal-service-badge.parked { background: var(--st-awaiting-bg); color: var(--st-awaiting-fg); }
-.postal-service-badge.delivered { color: var(--check-bg); }
-/* interaction-type chip on a postal card — THREE top-level categories (the user 2026-06-17): delegation /
-   coordination / question. A small outlined pill in a per-type colour, scannable in compact + expanded
-   views. (FYI folds into coordination now — it is no longer its own chip.) */
-.postal-service-intent { font-size: 0.7em; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
-  padding: 1px 7px; border-radius: 9px; border: 1px solid currentColor; opacity: 0.95; }
-.postal-service-intent-delegate { color: #b08cff; }            /* delegation — a peer handed off work */
-.postal-service-intent-coordinate { color: #14b8a6; }          /* coordination — teal (heads-up, optional reply) */
-.postal-service-intent-question { color: var(--st-working-bg); }  /* question — amber, needs an answer */
-.postal-service-body { color: var(--fg); }
-.postal-service-body.md > :first-child { margin-top: 0; }
-.postal-service-body.md > :last-child { margin-bottom: 0; }
-/* postal body: ALWAYS a one-line summary that expands to the full message on click — both incoming
-   (Haiku caption) and outgoing (first line) read the same now (the user 2026-06-16). */
-.postal-service-summary { display: flex; align-items: baseline; gap: 6px; }
-.postal-service-expandable .postal-service-summary { cursor: pointer; }
-.postal-service-expandable .postal-service-summary:hover .postal-service-summary-text { text-decoration: underline; text-underline-offset: 2px; }
-.postal-service-expand-caret { flex: 0 0 auto; font-size: 0.82em; opacity: 0.7; }
-/* the collapsed gist: at most two FULL lines, ellipsized by the box (the user 2026-07-25 — the old
-   100-char pre-truncation parked its "…" mid-line and wasted the second line) */
-.postal-service-summary-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.postal-service-full { display: none; margin-top: 7px; }
-.postal-service-expandable.expanded .postal-service-full { display: block; }
-/* expanded = the full message ALONE (the user 2026-07-25: the preview repeated the same words above the
-   body) — the summary row shrinks to its caret, which stays as the collapse control */
-.postal-service-expandable.expanded .postal-service-summary-text { display: none; }
-
-/* NATIVE Claude Code teammate/agent message (renderTeammate) — its OWN neutral look, deliberately UNLIKE
-   the romp postal card above: a DASHED monochrome frame (no per-peer colour bar, no colour-mix wash, no
-   session-colour chip, no romp swirl), so a Claude-native agent message never reads as a romp-postal one or
-   as something you typed (the user 2026-07-05). Shares only the collapse→expand affordance + its sizes. */
-.turn-teammate { padding-top: 11px; padding-bottom: 11px; }
-.dot.teammate { border-style: dashed; }
-.teammate-card { border: 1px dashed var(--box-border); border-radius: 6px; padding: 8px 13px; background: var(--box-bg); }
-.teammate-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-bottom: 6px; font-size: 0.92em; }
-.teammate-tag { font-size: 0.7em; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
-  padding: 1px 7px; border-radius: 9px; border: 1px dashed var(--dim); color: var(--dim); }
-.teammate-names { font-size: 0.82em; font-weight: 600; color: var(--fg); opacity: 0.85; overflow-wrap: anywhere; }
-.teammate-body { color: var(--fg); }
-.teammate-body.md > :first-child { margin-top: 0; }
-.teammate-body.md > :last-child { margin-bottom: 0; }
-.teammate-summary { display: flex; align-items: baseline; gap: 6px; }
-.teammate-expandable .teammate-summary { cursor: pointer; }
-.teammate-expandable .teammate-summary:hover .teammate-summary-text { text-decoration: underline; text-underline-offset: 2px; }
-.teammate-expand-caret { flex: 0 0 auto; font-size: 0.82em; opacity: 0.7; }
-.teammate-summary-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; color: var(--dim); }
-.teammate-full { display: none; margin-top: 7px; }
-.teammate-expandable.expanded .teammate-full { display: block; }
 
 /* ---------- progressive disclosure + tool vocabulary ---------- */
 /* error tool: hollow red dot + red name (consistent "this failed" cue) */
@@ -2319,90 +2212,126 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 }
 .reminder-body .fold-pre + .fold-pre { margin-top: 6px; }
 
-/* THE notice-card family (noticeCard, the user 2026-07-06): informational transcript notices — a
-   backgrounded agent's report, a romp system notice, folded system-reminders — each a boxed card with a
-   type CHIP + a one-line gist head + a keyed collapse→expand body. Own look, inspired by the postal/teammate
-   cards but distinct from BOTH: a per-VARIANT color (agent = accent blue, romp = swirl + faded-accent,
-   reminder = muted) instead of postal's per-peer color or teammate's dashed neutral. The clickable head IS
-   the collapse toggle (like the `foldable` disclosure), so the box never needs a redundant summary line. */
-.notice-card {
-  border: 1px solid var(--box-border); border-left: 2px solid var(--dim); border-radius: 6px;
-  background: var(--box-bg); padding: 7px 12px; overflow: hidden;
+/* ═══ THE notice (2026-09-08): ONE vocabulary for everything that HAPPENED in a session ════════════
+   Two shapes only in the transcript. BUBBLES are things SAID into the session (your prompt, a romp
+   nudge or follow-up, the Continue gesture, a queued message) and keep the 14px right-hand bubble
+   family. NOTICES are things that happened — a background agent's report, a compaction, an API
+   error, a peer's mail, a reload, a system reminder — and every one of them is this one element,
+   built by render.ts notice(spec). Before this there were ~20 bespoke renderers wearing eight head
+   sizes, seven radii, six chip dresses and four fold stores (the 2026-09-08 audit). The rules:
+   - SKIN: --box-bg / --box-border / a 2px left rail in the severity colour / --radius-card; full
+     width, LEFT — never 72%, never right-aligned (direction belongs to the bubbles: the session
+     speaks from the left, you and romp-on-your-behalf from the right).
+   - DENSITY is mechanical: a notice with a body or actions is a card; a head-only notice is SLIM
+     (.notice-slim — the rail-line density, no box) — derived from the spec, never chosen per kind.
+   - HEAD, one grammar: [caret] glyph SOURCE · gist [· meta] [actions], one baseline row.
+   - SIZES, the whole vocabulary: gist 0.92em · src 0.72em · meta 0.82em · body 0.92em · caret
+     0.72em · buttons --btn-fs-sm. Nothing else, and no px (notice-vocab.test.ts pins it).
+   - SEVERITY is the rail + the rail dot + the glyph, in the EXISTING status tokens; text is always
+     --fg/--dim (as text the light theme's status hues sit under 3:1; the source label and glyph name
+     the severity redundantly, so a colour never carries meaning alone). One custom property per
+     severity, set on the OUTERMOST element (the .turn, or the card itself when nested) so a peer's
+     identity colour can override it inline for postal mail.
+   - FOLD: head always visible, body folded by default, state in openFolds keyed notice:<key>,
+     toggled through the document.body delegate (data-act=noticetoggle) — zero per-node listeners. */
+.notice-sev-info    { --notice-rail: var(--dim);              --notice-dot: var(--fg); }
+.notice-sev-romp    { --notice-rail: var(--accent);           --notice-dot: var(--accent); }
+.notice-sev-warn    { --notice-rail: var(--warn);             --notice-dot: var(--warn); }
+.notice-sev-err     { --notice-rail: var(--st-blocked-bg);    --notice-dot: var(--st-blocked-bg); }
+.notice-sev-compact { --notice-rail: var(--st-compacting-bg); --notice-dot: var(--st-compacting-bg); }
+.notice-sev-retry   { --notice-rail: var(--st-retrying-bg);   --notice-dot: var(--st-retrying-bg); }
+.notice-sev-needs   { --notice-rail: var(--st-awaiting-bg);   --notice-dot: var(--st-awaiting-bg); }
+.notice {
+  position: relative; width: 100%; box-sizing: border-box;
+  background: var(--box-bg); border: 1px solid var(--box-border);
+  border-left: 2px solid var(--notice-rail, var(--dim)); border-radius: var(--radius-card);
+  padding: 7px 12px;
 }
-/* a NESTED notice (agent / reminder) sits inside its parent turn's rail column — no own dot/rail; just space
-   it from the content above (the turn's own padding no longer wraps it). A standalone romp notice keeps its
-   .turn dot. */
+/* head-only → the rail-line density (the retired retried-line / effort-line / interrupt-line rows) */
+.notice.notice-slim { background: none; border: 0; padding: 2px 0; }
+/* an error card carries a faint wash of its red (the retired API-error card's 7% rgba, as a mix) */
+.notice-sev-err > .notice:not(.notice-slim), .notice.notice-sev-err:not(.notice-slim) {
+  background: color-mix(in srgb, var(--st-blocked-bg) 6%, var(--box-bg)); }
+/* needs-you (the live ask) keeps its inset bar — the one notice that must not fade into the column */
+.notice-sev-needs > .notice:not(.notice-slim), .notice.notice-sev-needs:not(.notice-slim) {
+  box-shadow: inset 3px 0 0 var(--st-awaiting-bg); }
+/* a peer's mail: a 6% wash of the peer's identity colour (the rail/dot take it inline) */
+.notice-peer > .notice:not(.notice-slim), .notice.notice-peer:not(.notice-slim) {
+  background: color-mix(in srgb, var(--notice-rail, transparent) 6%, var(--box-bg)); }
+.turn-notice { padding-top: 6px; padding-bottom: 6px; }
+.turn-notice > .dot, .turn-notice > .time-marker { top: 10px; }              /* slim: on the head line */
+.turn-notice.notice-boxed > .dot, .turn-notice.notice-boxed > .time-marker { top: 18px; }   /* boxed: past the border + padding */
+.turn-notice > .dot.notice-dot { background: var(--notice-dot, var(--fg)); border: none; }
+/* NESTED (inside the carrying user turn — a prompt that arrived with a notification, a reminder): the
+   card stretches to the column (no stair-step under the right-aligned bubble — the audit's row 09:44)
+   and draws its OWN dot on the turn's rail with a ::before at the dot's x (turn padding 24 − dot 6). */
 .notice-nested { margin-top: 8px; }
-/* A standalone ROMP notice right-justifies like every other message FROM romp (the user 2026-08-18):
-   in the transcript, direction says who is speaking — the session from the left, romp and the user
-   from the right — and the kernel-restart/Retry notices wore the session's side, reading as session
-   output. Same card otherwise, with the bubbles' 72% width cap so it sits beside the nudges it
-   travels with. Other notice variants (an agent's report, folded reminders) ARE session-side
-   output and stay left. The dot and time marker are absolute, so the flex moves only the card. */
-.turn-notice.notice-romp { display: flex; flex-direction: column; align-items: flex-end; }
-.turn-notice.notice-romp > .notice-card { max-width: 72%; }
-.notice-head { display: flex; align-items: baseline; gap: 7px; font-size: 0.92em; }
-.notice-collapsible .notice-head { cursor: pointer; }
-.notice-caret { flex: 0 0 auto; font-size: 0.72em; opacity: 0.7; }
-.notice-chip {
-  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px;
-  font-size: 0.7em; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
-  padding: 1px 7px; border-radius: 9px; border: 1px solid var(--dim); color: var(--dim);
-}
-.notice-chip-logo { width: 12px; height: 12px; display: block; flex: 0 0 auto; }
-.notice-head-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  color: var(--fg); opacity: 0.9; }
-.notice-collapsible .notice-head:hover .notice-head-text { text-decoration: underline; text-underline-offset: 2px; }
-.notice-body { margin-top: 7px; max-height: 420px; overflow: auto; }
-.notice-collapsible:not(.notice-open) .notice-body { display: none; }
-.notice-md { color: var(--fg); }
+.turn-user > .notice-nested { align-self: stretch; }
+.turn-user > .notice-nested::before { content: ""; position: absolute; left: -18px; top: 9px; width: 11px; height: 11px;
+  border-radius: 50%; background: var(--notice-dot, var(--fg)); }
+.turn-user > .notice-nested.notice-slim::before { top: 3px; }
+/* a harness-injected turn (.injected) already owns a rail ring (the hover/nav handle renderEvent wires): that dot
+   and its stamp drop to the nested card's head line instead of a second dot being drawn (the gallery, 2026-09-08) */
+.turn-user.injected > .notice-nested::before { display: none; }
+.turn-user.injected > .dot, .turn-user.injected > .time-marker { top: 28px; }
+/* ── head ── */
+.notice-head { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.notice-collapsible > .notice-head { cursor: pointer; user-select: none; }
+.notice-collapsible > .notice-head:hover .notice-gist { text-decoration: underline; text-underline-offset: 2px; }
+.notice-caret { flex: 0 0 auto; font-size: 0.72em; opacity: 0.7; color: var(--dim); }
+/* the 16-unit line icon, 12×12, stroke currentColor 1.4 — coloured by the rail; the romp swirl is the
+   one non-stroke glyph (the brand mark), a wide slot hosts the live compacting bar / loader dots */
+.notice-glyph { flex: 0 0 auto; display: inline-flex; align-items: center; align-self: center; width: 12px; height: 12px;
+  color: var(--notice-rail, var(--dim)); }
+.notice-glyph svg, .notice-glyph img { display: block; width: 12px; height: 12px; }
+.notice-glyph.notice-glyph-wide { width: auto; }
+.notice-glyph .meta-dots i { background: var(--notice-rail, var(--accent)); }
+.notice-src { flex: 0 0 auto; font-size: 0.72em; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--dim); white-space: nowrap; }
+/* the ONE coloured element in the vocabulary: the house session chip naming a peer (postal mail) */
+.notice-src-chip { display: inline-block; padding: 0 7px; border-radius: var(--radius-pill); letter-spacing: 0.02em;
+  text-transform: none; font-weight: 700; background: var(--peer-bg, var(--overlay-10)); color: var(--peer-fg, var(--fg)); }
+.notice-gist { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 0.92em; color: var(--fg); }
+.notice-gist[data-act] { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }   /* a gist that is a link (the branch divider) */
+.notice-gist[data-act]:hover { text-decoration: underline; }
+.notice-meta { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 0.82em; color: var(--dim); font-variant-numeric: tabular-nums; }
+.notice-acts { flex: 0 0 auto; margin-left: auto; display: inline-flex; gap: 4px; align-self: center; }
+/* word buttons on the button vocabulary: the sm box, the T141 rest, pattern-A hover, the press cue */
+.notice-act { font-family: var(--sans); font-size: var(--btn-fs-sm); line-height: 1.4; padding: var(--btn-pad-sm);
+  border-radius: var(--radius-card); cursor: pointer; white-space: nowrap;
+  color: var(--dim); background: transparent; border: 1px solid var(--card-border);
+  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease, transform 0.08s ease; }
+.notice-act:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-wash); }
+.notice-act:active { transform: scale(0.96); }
+.notice-act:disabled { opacity: 0.55; cursor: default; }
+/* ── body ── */
+.notice-body { margin-top: 7px; max-height: 420px; overflow: auto; font-size: 0.92em; color: var(--fg); }
+.notice-collapsible:not(.notice-open) > .notice-body { display: none; }
 .notice-md.md > :first-child { margin-top: 0; }
 .notice-md.md > :last-child { margin-bottom: 0; }
 .notice-plain { color: var(--dim); }
-/* a small dim heading inside an agent/task notice body, marking the "command" / "output" sections of a
-   background command's detail — no new font-size (inherits), per the one-size-per-info-type rule */
+.notice-prose { white-space: pre-wrap; overflow-wrap: anywhere; }   /* a plain-text body that keeps its line breaks */
+/* a small dim heading inside a body, marking the "command" / "output" / "harness note" sections — no
+   font-size of its own (inherits the body's), per the one-size-per-role rule */
 .notice-sub { color: var(--dim); opacity: 0.7; margin: 6px 0 2px; }
 .notice-sub:first-child { margin-top: 0; }
-
-/* agent notices — the romp accent blue (a backgrounded agent came to rest) */
-.notice-card-agent { border-left-color: var(--accent); }
-.notice-chip-agent { color: var(--accent); border-color: var(--accent); }
-.notice-dot-agent { border-color: var(--accent); }
-/* romp system notices — the swirl carries the identity; a FADED accent ties it to "the romp blue" without
-   competing with the bright agent card. NOT the gray nudge bubble. */
-.notice-card-romp { border-left-color: rgba(156, 210, 255, 0.45); }
-.notice-chip-romp { color: var(--fg); opacity: 0.85; border-color: rgba(156, 210, 255, 0.45); }
-/* reminders — the most muted: a plain dim frame, no logo, dimmest of the three */
-.notice-card-reminder { opacity: 0.9; }
-.notice-chip-reminder { font-style: italic; }
-/* context compaction — the COMPACTION TEAL (--st-compacting-bg), the status color it shares with the live
-   compacting bar + the statusline battery. Same card family as the others; teal is its identity, the way
-   agent=blue. The summary body scrolls (notice-body's own max-height) so a long recap never runs the thread. */
-.notice-card-compact { border-left-color: var(--st-compacting-bg, #14b8a6); }
-.notice-chip-compact { color: var(--st-compacting-bg, #14b8a6); border-color: var(--st-compacting-bg, #14b8a6); }
-.notice-dot-compact { border-color: var(--st-compacting-bg, #14b8a6); }
-/* a peer session's / channel's message surfaced as a notice (renderInjected, the user 2026-09-07) — the
-   teammate card's dashed, neutral language (NOT the per-peer color chrome of a romp postal card), on the
-   notice-card frame so every injected record wears one family */
-.notice-card-peer { border-left-color: var(--dim); border-style: dashed; }
-.notice-chip-peer { color: var(--fg); opacity: 0.85; border-color: var(--dim); }
-.notice-dot-peer { border-color: var(--dim); }
-/* the /clear boundary — QUIET, like the timeline's film-splice seam: a dim frame (this is a historical
-   marker, not a live status), with the pre-clear conversation nested in the body once lazy-loaded. */
-.notice-card-clear { border-left-color: var(--dim); }
-.notice-chip-clear { color: var(--dim); border-color: var(--dim); }
-.notice-dot-clear { border-color: var(--dim); }
-/* a safeguards refusal the CLI retried on a fallback model (T279): the heads-up amber — attention, not an
-   error. The fold: the API's explanation, then the CLI's own line, dimmed. */
-.notice-card-refusal { border-left-color: var(--warn, #d7a23a); }
-.notice-chip-refusal { color: var(--warn, #d7a23a); border-color: var(--warn, #d7a23a); }
-.notice-dot-refusal { border-color: var(--warn, #d7a23a); }
+.notice-body .fold-pre + .fold-pre { margin-top: 6px; }
+/* a live row (compacting / clearing / reloading / retrying): the head is the whole notice; nothing to fold */
+.notice-live .notice-gist { color: var(--fg); }
+/* a safeguards refusal's fold (renderModelFallback, T279): the first line restates the swap (a truncated
+   head is recoverable), then the API's explanation, then the CLI's own line, dimmed — no dress of its own:
+   the warn severity is the rail + dot */
 .refusal-swap { font-weight: 600; }
 .refusal-cli-line { color: var(--dim); }
 .refusal-swap + .refusal-explanation, .refusal-swap + .refusal-cli-line,
 .refusal-explanation + .refusal-cli-line { margin-top: 6px; }
+/* the clear boundary's lazy body (loader dots while the cleared conversation is fetched, then the episode) */
 .clear-loading { display: inline-flex; align-items: center; gap: 8px; }
 .clear-truncated { color: var(--dim); padding: 4px 0 6px; }
+/* a notice sitting OUTSIDE the rail (the host-offline foot at the transcript's tail): the prose column's indent */
+.notice-foot { padding: 6px 12px 10px 24px; }
 
 /* ── SUBAGENT TRANSCRIPTS (plans/subagent-transcripts.md, 2026-09-05) ──────────────────────────────
    The open-transcript arrow on an Agent head / agent bg row and the viewer header's pin share ONE
@@ -2424,7 +2353,7 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 .turn-tool.fold-open > .agent-preview { display: none; }
 .agent-folds > .agent-steps { margin: 6px 0 6px 2px; }
 .agent-steps-note { opacity: 0.8; font-style: italic; margin-bottom: 2px; }
-#sub-head { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--box-border); color: var(--dim); font-size: 0.86em; }
+#sub-head { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--box-border); color: var(--dim); font-size: 0.82em; }   /* the meta rung (was 0.86em) */
 .sub-head-line { display: flex; align-items: center; gap: 6px; padding: 6px 12px; min-width: 0; }
 .sub-head-parent { color: var(--fg); cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
 .sub-head-parent:hover { text-decoration: underline; }
@@ -2443,19 +2372,9 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    rail — no dot, and its left gutter + vertical rail line are suppressed (the next turn starts the rail). */
 .turn-system { padding-left: 0; padding-top: 10px; padding-bottom: 8px; }
 .turn-system::before { display: none; }
-.sys-card { border: 1px solid var(--box-border); border-radius: 9px; background: var(--box-bg); overflow: hidden; }
-.sys-card-head {
-  display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;
-  padding: 8px 12px; font-size: 0.86em;
-}
-.sys-card-head:hover { background: var(--hover-bg, rgba(127, 127, 127, 0.08)); }
-.sys-gear { flex: 0 0 auto; opacity: 0.85; }
-.sys-title { font-weight: 600; color: var(--fg); }
-.sys-sub { color: var(--dim); font-size: 0.92em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sys-caret { flex: 0 0 auto; margin-left: auto; color: var(--dim); font-size: 0.82em; transition: transform 0.12s ease; }
-.sys-card.open .sys-caret { transform: rotate(90deg); }
-.sys-card-body { display: none; padding: 2px 12px 12px; }
-.sys-card.open .sys-card-body { display: block; }
+/* (the card, its ⚙ head and caret are THE notice since 2026-09-08 — "SYSTEM · System context · <model> ·
+   <dir> · N CLAUDE.md"; these rules dress its body) */
+.turn-system .notice-nested { margin-top: 0; }
 .sys-meta {
   display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px;
   font-size: 0.86em; margin: 4px 0 10px; align-items: baseline;
@@ -2537,15 +2456,30 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   white-space: pre-wrap; overflow-wrap: anywhere;   /* fallback wrap if line-numbering didn't run */
 }
 /* subtle line-number gutter on wrapped code blocks: .cl = one logical line, .ct = its wrapping content;
-   the counter sits faint to the left so a soft-wrap reads distinctly from a real newline (the user 2026-06-16) */
+   the counter sits faint to the left so a soft-wrap reads distinctly from a real newline (the user 2026-06-16).
+   The gutter's own line-height is 1: at 0.92em under align-items: baseline its line box hung further below the shared
+   baseline than the text's (Chromium floors the half-leading it puts above a line box, and the remainder goes below),
+   so every row was a fraction taller than the code's line-height. With line-height 1 the gutter's box is never taller
+   than the text's and the baselines are still shared. It never wraps either (overflow-wrap: normal against the code's
+   anywhere, which broke a four-digit number over two lines and doubled every row from line 1000 on). The basis is
+   2.5em, four digits, or the block's own digit count in ch (its zero glyph's advance, plus a twentieth of an em against
+   the layout unit's rounding): wrapCodeLines (code-block.ts) writes --ln-digits on the code element, the digits of its
+   last line number, so every row of a 10000-line block carries a five-digit gutter and the text column stays one line,
+   where a basis a single row outgrew widened that row alone and stepped its code to the right. A .ct with no text (a
+   blank line, or a blank line inside a token that spans lines, which leaves an empty hljs span) had no line box, so the
+   row was only the gutter's 0.92em tall; the .ct's ::before puts a word joiner (U+2060: zero width, no break before or
+   after it, not in the DOM's text) at the start of every line, so an empty .ct is one line-height with the text's
+   baseline and a text line is unchanged. The file viewer's fences carry the same declarations under .fileview-md (both
+   sheets; code-block.test.ts). */
 pre code.hljs { counter-reset: ln; }
 pre code .cl { display: flex; align-items: baseline; }
 pre code .cl::before {
   counter-increment: ln; content: counter(ln);
-  flex: 0 0 2.3em; margin-right: 0.85em; text-align: right;
-  color: var(--dim); opacity: 0.32; user-select: none; font-size: 0.92em;
+  flex: 0 0 max(2.5em, calc(var(--ln-digits, 0) * 1ch + 0.05em)); margin-right: 0.85em; text-align: right;
+  color: var(--dim); opacity: 0.32; user-select: none; font-size: 0.92em; line-height: 1; overflow-wrap: normal;
 }
 pre code .ct { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+pre code .ct::before { content: "\2060"; }
 /* automatic per-block Copy button (the user 2026-06-22): parked top-right, faint until the block is
    hovered, flips to a green "Copied" on success; position:relative on the pre anchors it. */
 pre.has-copy { position: relative; }
@@ -2851,7 +2785,7 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 .locate-toast {
   position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
   max-width: 82%; padding: 6px 14px; border-radius: var(--radius-toast); z-index: 60;
-  background: var(--surface-raised); border: 1px solid rgba(224, 176, 32, 0.55);
+  background: var(--surface-raised); border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent);
   box-shadow: var(--shadow-toast);
   color: var(--fg); font-size: 0.86em; pointer-events: none;
   transition: opacity 0.7s ease;
@@ -2884,6 +2818,24 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 #jump-bottom:hover { border-color: var(--accent); color: var(--accent); }
 #jump-bottom[hidden] { display: none; }   /* author display:flex defeats [hidden] — the login-modal lesson */
 @media (pointer: coarse) { #jump-bottom { width: 64px; height: 32px; } }   /* the phone half: WIDEN for the hit area, never heighten — the compact look is the ask */
+/* replies ready (the user 2026-09-08): two chips stacked ABOVE the jump chip in the SAME slot and dress —
+   "↑ 2 replies unread" / "↓ 1 reply unread" — for the unread landed replies whose marks sit off-screen in
+   that direction (render.ts updateReplyChips places the box by measurement over the jump chip, so the three
+   never overlap). The jump chip's tokens, token for token: the menu card background, the --menu-border
+   hairline, the toast shadow, the pill radius, the 22px height, dim at rest and accent on hover. Text at
+   the seek-note's 12px — the size this bottom-of-pane chrome already wears — in the page font (a button
+   does not inherit it on its own); the chevron is the jump chip's stemless glyph, turned. */
+#reply-chips { position: fixed; left: 14px; z-index: 40; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+#reply-chips[hidden] { display: none; }
+.reply-chip {
+  height: 22px; border-radius: var(--radius-pill); cursor: pointer; padding: 0 10px 0 6px;
+  display: flex; align-items: center; gap: 4px; font: inherit; font-size: 12px; line-height: 1; white-space: nowrap;
+  background: var(--vscode-menu-background, var(--surface-raised)); color: var(--dim);
+  border: 1px solid var(--menu-border); box-shadow: var(--shadow-toast);
+}
+.reply-chip:hover { border-color: var(--accent); color: var(--accent); }
+.reply-chip[hidden] { display: none; }   /* author display:flex defeats [hidden] — the jump chip's own lesson */
+@media (pointer: coarse) { .reply-chip { height: 32px; padding: 0 14px 0 9px; } }   /* the phone half: the jump chip's taller target, same stack */
 #seek-note .seek-note-x {
   flex: 0 0 auto; border: none; background: none; cursor: pointer; color: var(--dim);
   font-size: 11px; line-height: 1.4; padding: 2px 4px; border-radius: 8px;
@@ -2921,11 +2873,7 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 .chip-interrupting { background: var(--st-working-bg); color: var(--st-working-fg, #332600); opacity: 0.75; }
 /* the stop button's click-ack is now REMOVAL + the optimistic chip flip (the user 2026-07-05): the word
    "interrupting…" no longer rides the fixed-width button (it overflowed onto the elapsed timer). */
-/* the transcript's interrupt MARKER — the compact-divider's language for "you stopped it here": a rail ring
-   and one dim italic line. */
-.turn-interrupt .dot { background: var(--dim); border: none; }
-.interrupt-line { display: flex; align-items: center; gap: 6px; color: var(--dim); font-size: 0.82em; font-style: italic; }
-.interrupt-square { width: 8px; height: 8px; border-radius: 2px; background: var(--dim); flex: none; }
+/* (the transcript's interrupt marker is a slim SESSION notice since 2026-09-08 — the stop square is its glyph) */
 
 /* rail dots are nav handles: hover white-highlights this turn's event on the
    timeline + outlines its feed card(s); click opens that card's feed modal */
@@ -2965,7 +2913,7 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
    opacity vs its 0.7 (the user 2026-07-17, replacing the white capsule outline). */
 .rail-band { position: absolute; width: 4px; border-radius: 2px; pointer-events: none; z-index: 2;
   background: var(--active-accent, var(--rail)); }
-.turn.ext-glow .postal-service-card { outline: 1.5px solid rgba(255, 255, 255, 0.75); outline-offset: 1px; }
+.turn.ext-glow .notice { outline: 1.5px solid color-mix(in srgb, var(--fg) 75%, transparent); outline-offset: 1px; }   /* a peer's mail card, lit from the feed modal (the page's ink, both themes) */
 .turn.ext-glow:not(:has(.dot)) { outline: 1.5px solid rgba(255, 255, 255, 0.55); outline-offset: -1px; border-radius: 9px; }
 /* overview ruler (link_audit's #4, the user 2026-06-22): a fixed strip over the #content scrollbar gutter
    that bands the full-transcript location of the currently .ext-glow'd turns, so a cross-surface hover shows
@@ -3153,9 +3101,7 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
    line saying that is where it stops BECAUSE the link is down, not because nothing more happened. Quiet
    and dim — it is a footnote on the reading, not an alarm — and it wears the same dotted-underline stale
    vocabulary as the host token above it. */
-.tx-hostoff {
-  color: var(--dim); text-align: center; padding: 14px 28px 22px; font-size: 0.86em; font-style: italic;
-}
+/* (the host-offline foot is a slim SESSION notice in .notice-foot since 2026-09-08) */
 /* the tab of a session on an unreachable host: dimmed as a whole, so "not connected" is glanceable and
    the marked "host:" inside it is the detail one look further in. */
 .tab.host-off { opacity: 0.62; }
@@ -3211,18 +3157,19 @@ mark.cmt-hl {
   color: inherit;
   border-radius: 0;
   cursor: pointer;
-  position: relative;   /* anchors the unread dot on the run's last segment */
 }
 mark.cmt-hl.unread { background: color-mix(in srgb, var(--cmt-hl) 45%, transparent); }
-/* NEW-here dot (the user 2026-08-23): the 45% unread tint alone was too subtle to read as "something
-   new since you last looked". A thread with messages you haven't seen — it replied while the box was
-   closed, and you haven't opened it since — wears a solid full-strength dot on the top-right corner
-   of its run's LAST segment (one dot per thread), ringed in the page bg so it reads over any text.
-   It clears with the unread flag the moment the popover opens (optimistic + kernel watermark). */
-mark.cmt-hl.unread.hl-last::after {
-  content: ""; position: absolute; top: -4px; right: -4px; width: 7px; height: 7px;
-  border-radius: 50%; background: var(--cmt-hl); box-shadow: 0 0 0 1.5px var(--bg);
-}
+/* UNREAD = the needs-you ring (the user 2026-09-08): a landed reply you have not opened wears the SAME
+   dashed ring the tab strip puts on a session that needs you (.tab.tab-awaiting: `2px dashed
+   var(--st-awaiting-bg)`, inset) — one idiom for "something here waits on you", scaled to a text run:
+   1.5px so the dash/gap (Chromium scales them with the width) shortens with it, offset OUTWARD so the
+   ring never crosses the glyphs. An outline, so nothing reflows when it comes and goes; on a run that
+   wraps, every line fragment is ringed. It replaces the 2026-08-23 corner dot (a yellow dot on yellow
+   read as decoration, not as an ask). Its OWN rule, apart from the fill line above: the fill still says
+   pending vs landed exactly as before — the 45% yellow tier is the landed reply, .busy's green wash below
+   the reply still being written — and T237's tests pin that line byte for byte. Read marks wear no ring.
+   Clears with the unread flag the moment the popover opens (optimistic + kernel watermark). */
+mark.cmt-hl.unread { outline: 1.5px dashed var(--st-awaiting-bg); outline-offset: 1px; }
 /* the turn's rail segment shouts an unread thread (the user 2026-08-23): the identity line's own
    segment tints the comment yellow — wider and fully opaque so it reads from across the pane — and
    the rail-hit strip over it opens the thread on click. applyCommentMarks clears the class the
@@ -3384,21 +3331,7 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
    The child's divider marks where its history splits from the parent's — an accent hairline with a
    clickable label that jumps to the parent at the branch point. The parent wears a small chip on
    the departed-from turn, jumping the other way. Accent = highlight chrome, per the accent rule. */
-.turn-branchmark { padding: 2px 0; }
-.branch-divider {
-  display: flex; align-items: center; gap: 8px;
-}
-.branch-divider::before, .branch-divider::after {
-  content: ""; flex: 1; height: 1px;
-  background: color-mix(in srgb, var(--accent) 45%, transparent);
-}
-.branch-label {
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
-  border-radius: 10px; padding: 1px 10px; cursor: pointer;
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: inherit; font: inherit; font-size: 0.82em; opacity: 0.85;
-}
-.branch-label:hover { opacity: 1; background: color-mix(in srgb, var(--accent) 22%, transparent); }
+/* (the child's branch divider is a slim BRANCH notice since 2026-09-08 — its gist is the jump link) */
 .branch-chips {
   position: absolute; top: 2px; right: 24px; z-index: 5;
   display: flex; gap: 4px;
@@ -3468,10 +3401,14 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
   background: var(--bg, #1e1e1e); border: 1px solid var(--box-border); border-radius: var(--radius-modal);
   box-shadow: var(--shadow-modal); }
 body.fileview-open { overflow: hidden; }
-.fileview-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; min-width: 0;
+.fileview-bar { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0;
   padding: 7px 10px; border-bottom: 1px solid var(--box-border); }
 /* Only the DIRECTORY may be truncated: the filename identifies the file, so it holds its width however
-   deep the path is, and the dimmed directory in front of it gives up room first. */
+   deep the path is, and the dimmed directory in front of it gives up room first. The bar WRAPS: the path
+   keeps at least 12em and the action row drops to a second line, right-aligned, when the two do not fit
+   side by side (the text-size control's three buttons pushed Download, Copy path and the close button off
+   the card below about 600px; .fileview is overflow: hidden, and a phone has no Escape). The wrap is the
+   bar's own: the two .fileview-bar rules after .fileview-acts below. */
 .fileview-name { flex: 1 1 auto; min-width: 0; font-size: 0.86em; color: var(--fg);
   display: flex; align-items: baseline; white-space: nowrap; }
 .fileview-dir { flex: 0 1 auto; min-width: 0; color: var(--dim);
@@ -3494,6 +3431,12 @@ body.fileview-open { overflow: hidden; }
   background: var(--overlay-10, rgba(255, 255, 255, 0.12)); color: var(--fg); user-select: none; }
 .fileview-sess .host-prefix { color: inherit; opacity: 0.75; }
 .fileview-acts { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+/* The wrap is the TITLE BAR's, not the classes': the file browser's action row (.fb-bar, file-browse.ts)
+   wears .fileview-acts outside any bar and keeps one line at every width (its crumb trail is what gives up
+   room), so the plain flex above holds there. Inside the bar the path keeps 12em and takes the rest of a
+   wide bar, and the action row shrinks and wraps to the right edge. */
+.fileview-bar .fileview-name { flex: 1 1 0; min-width: 12em; }
+.fileview-bar .fileview-acts { flex: 0 1 auto; min-width: 0; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
 .fileview-btn { font: inherit; font-size: 0.82em; cursor: pointer; flex: 0 0 auto;
   padding: 3px 9px; border-radius: 6px; background: transparent; color: var(--fg);   /* T151: the one button rest */
   border: 1px solid var(--card-border);
@@ -3514,11 +3457,21 @@ a.fileview-btn { text-decoration: none; display: inline-flex; align-items: cente
    dimmed button and the loader's dots (.fileview-dot, the pane's own) where the caption will go — a slow
    check must read as a wait, not as the old no-button state nor as a verdict (the loading-state rule) */
 .fileview-gh-dots { display: inline-flex; align-items: center; gap: 4px; }
-/* no link: a real disabled button, greyed, hover inert — never hidden (an absent button read as
-   "broken" when the file was simply not committed yet, 2026-09-05) */
-.fileview-gh .fileview-btn:disabled { opacity: 0.55; cursor: default; }
-.fileview-gh .fileview-btn:disabled:hover { border-color: var(--card-border); color: var(--fg); background: transparent; }
-.fileview-gh .fileview-btn:disabled:active { transform: none; }
+/* a disabled bar button, greyed, hover inert: the GitHub unit's no-link state (a real disabled button, never
+   hidden: an absent button read as "broken" when the file was simply not committed yet, 2026-09-05), the
+   editor's Save while a save is in flight (disabled and reading "Saving…"), and the text-size control's ends
+   (A− at the smallest step, A+ at the largest; aria-disabled, so the button keeps the keyboard focus it holds
+   and the ring stays where the person left it). One treatment for every bar button, so neither an end nor a
+   save in progress reads as live under the pointer. */
+.fileview-btn:disabled, .fileview-btn[aria-disabled="true"] { opacity: 0.55; cursor: default; }
+.fileview-btn:disabled:hover, .fileview-btn[aria-disabled="true"]:hover { border-color: var(--card-border); color: var(--fg); background: transparent; }
+.fileview-btn:disabled:active, .fileview-btn[aria-disabled="true"]:active { transform: none; }
+/* the text-size readout between A− and A+ (file-view.ts textSizeControl): a slot of ONE width whatever it
+   says, and at the default (nothing to reset, nothing to say) an empty slot rather than none, so A− never
+   moves under the pointer when the readout appears after the first press. visibility, not display: the slot
+   stays, the button leaves the tab order. */
+.fileview-size-reset { min-width: 5.5em; box-sizing: border-box; text-align: center; font-variant-numeric: tabular-nums; }
+.fileview-size-reset.fileview-size-default { visibility: hidden; }
 /* a link whose branch is not on origin yet: dashed, the caption carries the note */
 a.fileview-gh-note { border-style: dashed; }
 .fileview-body { flex: 1 1 auto; min-height: 0; overflow: auto; }
@@ -3586,11 +3539,11 @@ body.filebrowse-open { overflow: hidden; }
 .fileview-code { display: flex; align-items: flex-start; min-height: 100%; }
 .fileview-gutter { flex: 0 0 auto; position: sticky; left: 0; z-index: 1;
   padding: 10px 8px 10px 10px; text-align: right; user-select: none;
-  font-family: var(--mono, ui-monospace, monospace); font-size: 12px; line-height: 1.5;
+  font-family: var(--mono, ui-monospace, monospace); font-size: calc(12px * var(--fv-scale, 1)); line-height: 1.5;
   color: var(--dim); opacity: 0.55; background: var(--bg, #1e1e1e);
   border-right: 1px solid var(--box-border); white-space: pre; }
 .fileview-pre { flex: 1 1 auto; margin: 0; padding: 10px 12px;
-  font-family: var(--mono, ui-monospace, monospace); font-size: 12px; line-height: 1.5;
+  font-family: var(--mono, ui-monospace, monospace); font-size: calc(12px * var(--fv-scale, 1)); line-height: 1.5;
   white-space: pre; tab-size: 4; }
 .fileview-pre code { background: none; padding: 0; font: inherit; }
 /* a refusal explains itself in place, in the kernel's own words (too large — with the size and the
@@ -3638,30 +3591,78 @@ body.filebrowse-open { overflow: hidden; }
 }
 .fileview-wrap .fv-ct { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 
+/* ── text size and measure (file-view.ts textSizeControl) ── The A− / A+ buttons and Ctrl/Cmd + wheel over the
+   body set `data-fv-text` on the viewer root to one of TEXT_SIZES; this table turns the step into the ONE
+   property the text views read, --fv-scale. Every text size below is a multiple of it, so the prose, its
+   headings (em of the prose), inline and fenced code, and the Raw view's rows and gutter scale together, and
+   the prose measure with them (80 of the root's own ch, so the same characters per line at every size; the
+   Rendered markdown block below says how it is laid). Nothing else reads it: the title bar, its buttons and the
+   editor keep the page's size. Absent (a bundle without these rules) every fallback reads as 1, today's sizes
+   exactly. file-view-text-size.test.ts pins the table against TEXT_SIZES in both sheets and measures the layout. */
+.fileview[data-fv-text="70"] { --fv-scale: 0.7; }
+.fileview[data-fv-text="80"] { --fv-scale: 0.8; }
+.fileview[data-fv-text="90"] { --fv-scale: 0.9; }
+.fileview[data-fv-text="100"] { --fv-scale: 1; }
+.fileview[data-fv-text="115"] { --fv-scale: 1.15; }
+.fileview[data-fv-text="130"] { --fv-scale: 1.3; }
+.fileview[data-fv-text="150"] { --fv-scale: 1.5; }
+.fileview[data-fv-text="175"] { --fv-scale: 1.75; }
+.fileview[data-fv-text="200"] { --fv-scale: 2; }
 /* Rendered markdown (the Raw ⇄ Rendered toggle; Rendered is the default — the user 2026-08-09).
-   Typography mirrors the chat's .md block in styles.css, the reference aesthetic (one treatment, two
-   sheets — the .romp-acted precedent); font sizes reuse what this surface already wears (the page base,
-   12px mono, the err-hint's 0.92em). Vars the feed sheet does not define carry the chat's literals as
-   fallbacks (feed-css-vars.test.ts holds that line). */
-/* contain: layout makes .fileview-md the containing block for any fixed or absolutely positioned descendant: an
-   element in a file that reaches `position: fixed` (a class of the page's it happens to wear; the sanitizer drops
-   an inline one) stays inside the note instead of covering the viewer's chrome. Layout only, not paint: the
-   body's vertical scroll is untouched. Content wider than .fileview-md becomes ink overflow the body cannot
-   scroll to, so the media rules below cap an <svg>, <canvas> or <video> at the column as `.fileview-md img`
-   already does, and the table rule below gives a table wider than the column a horizontal scroll of its own.
-   Pinned byte-equal in both sheets (fileview-parity.test.ts). */
-.fileview-md { padding: 14px 18px; max-width: 860px; overflow-wrap: anywhere; font-family: var(--font-prose); contain: layout; }
+   A document's type scale, GitHub's: the prose at 1.15 times the page's size (14.95px at the 13px default) in the
+   document's own face, --font-doc (sans in both themes; --font-prose is the assistant's reading face, mono in the light
+   theme, and a README in mono reads as source); headings 2 / 1.5 / 1.25 / 1em with h5 and h6 dimmed and a rule under h1
+   and h2; a 2em list gutter; fenced code at 12px mono with the chat's per-line rows and Copy button; inline code and kbd
+   at 0.92 and 0.86em; the leading 1.5, declared on the root rather than inherited, since the chat's body is 1.6 and the
+   feed's 1.5, so the same document was a different height on the two surfaces. Vars the feed sheet does not define
+   carry the chat's literals as fallbacks (feed-css-vars.test.ts holds that line). One treatment, two sheets: the
+   .romp-acted precedent; fileview-parity.test.ts pins every head byte-equal.
+   The measure is 80 of the root's own ch, laid as inline padding rounded DOWN to whole pixels (a fractional left edge put
+   the text on sub-pixel positions where a drag selection stayed collapsed), centred, never under 18px; the plain calc()
+   is the fallback for an engine without round(), declared first. It replaces a fixed pixel cap, so the column is the
+   same characters wide at every text size. contain: layout makes the root the containing block for anything inside it
+   (an element in a file that reaches `position: fixed` through a class of the page's it happens to wear, the sanitizer
+   having dropped an inline one, stays inside the note instead of covering the viewer's chrome; layout only, not paint, so
+   the body's vertical scroll is untouched) and turns content wider than the root into ink overflow the body cannot scroll
+   to, so nothing a document carries widens the viewer: the img rule and the media rules below cap a picture, an inline
+   svg, a canvas or a video at the column, and a table wider than the column scrolls on its own (the table rules below).
+   --fv-body-w, the body's content width for a top-level table's cap (below), is registered non-inherited so a write to a
+   table restyles that table alone. */
+@property --fv-body-w { syntax: "*"; inherits: false; }
+.fileview-md { padding: 14px 18px; padding-inline: max(18px, calc((100% - 80ch) / 2)); padding-inline: max(18px, round(down, calc((100% - 80ch) / 2), 1px)); overflow-wrap: anywhere; font-family: var(--font-doc); font-size: calc(var(--fs) * 1.15 * var(--fv-scale, 1)); line-height: 1.5; contain: layout; }
 .fileview-md > :first-child { margin-top: 0; }
 .fileview-md > :last-child { margin-bottom: 0; }
 .fileview-md p { margin: 0.5em 0; }
-.fileview-md h1, .fileview-md h2, .fileview-md h3, .fileview-md h4 {
-  font-weight: 600; color: var(--fg); margin: 1em 0 0.4em; line-height: 1.3; }
-.fileview-md h1 { font-size: 1.3em; } .fileview-md h2 { font-size: 1.15em; } .fileview-md h3 { font-size: 1.05em; }
+/* The heading ladder: h1 2em, h2 1.5em, h3 1.25em, h4 1em, h5 and h6 1em in the dim tier, weight 600, a rule under h1 and
+   h2. em of the prose, so the text-size control scales them with it. The margins are 1.5 above and 0.5 below every
+   heading in the PROSE's em whatever the heading's size: a heading's em is its own, so the larger levels divide by their
+   size to land on the same distance. */
+.fileview-md h1, .fileview-md h2, .fileview-md h3, .fileview-md h4, .fileview-md h5, .fileview-md h6 {
+  font-weight: 600; color: var(--fg); margin: 1.5em 0 0.5em; line-height: 1.25; }
+.fileview-md h1 { font-size: 2em; margin: calc(1.5em / 2) 0 calc(0.5em / 2); }
+.fileview-md h2 { font-size: 1.5em; margin: calc(1.5em / 1.5) 0 calc(0.5em / 1.5); }
+.fileview-md h3 { font-size: 1.25em; margin: calc(1.5em / 1.25) 0 calc(0.5em / 1.25); }
+.fileview-md h4 { font-size: 1em; }
+.fileview-md h5, .fileview-md h6 { font-size: 1em; color: var(--dim); }
+.fileview-md h1, .fileview-md h2 { padding-bottom: 0.3em; border-bottom: 1px solid var(--box-border); }
 /* a heading an in-document link lands on (scrollIntoView) sits a breath below the title bar's hairline
    rather than flush against it — the bar's own 10px spacing */
 .fileview-md h1, .fileview-md h2, .fileview-md h3, .fileview-md h4, .fileview-md h5, .fileview-md h6 { scroll-margin-top: 10px; }
-.fileview-md ul, .fileview-md ol { margin: 0.4em 0; padding-left: 1.4em; }
+.fileview-md ul, .fileview-md ol { margin: 0.4em 0; padding-left: 2em; }
 .fileview-md li { margin: 0.2em 0; }
+/* A task item (`- [ ] ...`): no bullet beside the checkbox (mdBlock stamps GitHub's task-list-item on the li after the
+   sanitize, for a disabled checkbox that is the item's first child, in a paragraph or not), the checkbox pulled into the
+   gutter where the bullet was, drawn for the theme the page wears (--color-scheme; without it a dark page draws a white
+   checkbox). The pull is measured against Chromium's disc, whose centre sits about 7px plus 0.45em before the item's text at
+   every size, and the checkbox is the control's own 13px, declared so the margin can centre it on that point. font-size:
+   inherit makes the em the prose's: a control's own em is the UA's 13.33px, which the text-size control never moves.
+   The size is a rule of its own, for every checkbox under a task item (a nested list's too). 0.2em after the checkbox plus the
+   source's own space puts the text on the plain items' text edge. No accent-color: marked emits every checkbox disabled, and
+   Chromium paints a disabled checkbox grey whatever accent is declared. */
+.fileview-md li.task-list-item { list-style: none; }
+.fileview-md li.task-list-item input { font-size: inherit; }
+.fileview-md li.task-list-item > input[type="checkbox"], .fileview-md li.task-list-item > p:first-child > input[type="checkbox"] {
+  width: 13px; height: 13px; margin: 0 0.2em 0.25em calc(-13px - 0.46em); vertical-align: middle; color-scheme: var(--color-scheme); }
 .fileview-md strong { color: var(--fg); font-weight: 600; }
 .fileview-md em { font-style: italic; }
 .fileview-md a { color: var(--link); text-decoration: none; }
@@ -3674,22 +3675,80 @@ body.filebrowse-open { overflow: hidden; }
   color: var(--code-fg, #e1c08d); background: var(--code-bg, rgba(217, 119, 87, 0.10));
   padding: 0.12em 0.4em; border-radius: 4px;
 }
+/* <kbd>, a key: the settings modal's two tokens (gear.css reads them too), mono at 0.86em, a bottom shadow line for the
+   key's edge. */
+.fileview-md kbd {
+  display: inline-block; padding: 0.1em 0.4em; font-family: var(--mono, ui-monospace, monospace); font-size: 0.86em;
+  line-height: 1.3; color: var(--fg); vertical-align: middle; background: var(--kbd-bg); border: 1px solid var(--kbd-border);
+  border-radius: 3px; box-shadow: inset 0 -1px 0 var(--kbd-border);
+}
 .fileview-md pre {
   background: var(--box-bg, rgba(255, 255, 255, 0.03)); border: 1px solid var(--box-border);
   border-radius: 6px; padding: 11px 14px; margin: 0.6em 0; overflow-x: auto;
 }
 .fileview-md pre code {
   background: none; padding: 0; display: block;
-  font-family: var(--mono, ui-monospace, monospace); font-size: 12px; line-height: 1.5;
+  font-family: var(--mono, ui-monospace, monospace); font-size: calc(12px * var(--fv-scale, 1)); line-height: 1.5;
   color: var(--code-fg, #e1c08d); white-space: pre-wrap; overflow-wrap: anywhere;
+  tab-size: 4; counter-reset: ln;   /* tabs as the Raw view shows them (.fileview-pre); the line counter, for every fence (below) */
 }
-/* A table wider than the column (a `nowrap` cell, many columns) scrolls sideways on its own, as on GitHub: a block
-   box shrink-wrapped to its content (width: max-content) and capped at the column, with the overflow scrollable.
-   Under contain: layout the body cannot scroll to what a table lets run past the column, so the table has to.
-   border-collapse is inherited by the anonymous table box the block wraps, so the cell borders still collapse. */
-.fileview-md table { border-collapse: collapse; margin: 0.6em 0; display: block; width: max-content; max-width: 100%; overflow-x: auto; }
+/* A fence's per-line rows and Copy button (code-block.ts, the chat's own): .cl is one logical line, .ct its wrapping
+   content, the number a CSS counter in ::before so a soft-wrap reads distinctly from a real newline and the numbers never
+   copy with the code. The counter resets on `.fileview-md pre code` above, not on `code.hljs` as the chat's does: mdBlock
+   wraps EVERY fence, and an unregistered language's fence carries no hljs class, so it would have gone on counting from
+   the block before. The Copy button is parked top-right, faint until the block is hovered, green on success. Scoped
+   copies of the chat's unscoped rules (styles.css), byte-equal in both sheets since the feed page loads only feed.css
+   (fileview-parity.test.ts, code-block.test.ts); the code tint carries the chat's literal as its fallback, since feed.css
+   defines no --code-bg in :root (feed-css-vars.test.ts). The gutter's own line-height is 1 and it never wraps, its basis
+   is 2.5em or the fence's digit count in ch (--ln-digits, written by wrapCodeLines), and the .ct's ::before is a word
+   joiner so a blank line's row is the line-height: the chat's rule says why each. */
+.fileview-md pre code .cl { display: flex; align-items: baseline; }
+.fileview-md pre code .cl::before {
+  counter-increment: ln; content: counter(ln);
+  flex: 0 0 max(2.5em, calc(var(--ln-digits, 0) * 1ch + 0.05em)); margin-right: 0.85em; text-align: right;
+  color: var(--dim); opacity: 0.32; user-select: none; font-size: 0.92em; line-height: 1; overflow-wrap: normal;
+}
+.fileview-md pre code .ct { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.fileview-md pre code .ct::before { content: "\2060"; }
+.fileview-md pre.has-copy { position: relative; }
+.fileview-md .code-copy {
+  position: absolute; top: 6px; right: 6px; z-index: 1;
+  font-family: var(--sans); font-size: 11px; line-height: 1; padding: 3px 7px; border-radius: 4px;
+  border: 1px solid var(--box-border); background: var(--code-bg, rgba(217, 119, 87, 0.10)); color: var(--dim);
+  cursor: pointer; opacity: 0; user-select: none;
+  transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.fileview-md pre.has-copy:hover .code-copy, .fileview-md .code-copy:focus-visible { opacity: 0.9; }
+.fileview-md .code-copy:hover { color: var(--fg); border-color: var(--dim); }
+.fileview-md .code-copy.copied { color: var(--green); border-color: var(--green); opacity: 1; }
+@media (hover: none) { .fileview-md .code-copy { opacity: 0.8; } }   /* touch: no hover state, so keep it visible */
+/* A table is a block as wide as its columns need, scrolling in its own box past its cap, whole words kept (overflow-wrap:
+   normal against the root's anywhere). A table inside a quote or a list item is capped at its container. A table of the
+   page's own (a direct child of the root) is capped at the BODY's width less the root's 18px inset, not the column's:
+   --fv-body-w is the body's content width as its ResizeObserver reports it (file-view.ts watchBodyWidth), written on
+   each top-level table and registered non-inherited above. A table no wider than the column sits at the column's left
+   edge with the prose, as on GitHub; one wider than the column grows out of it EVENLY, into both gutters, until it meets
+   the body's inset: the translate moves it left by half of what it exceeds the column by (a percentage in translate is
+   of the table's own width; half the body less the root's inline padding is half the column, the padding rounded down
+   here as the root rounds it, and the observer's width is the content box the root's 100% is, so the two agree to the
+   pixel; min() holds a narrower table still; the shift is rounded to whole pixels, as the measure is). Scrollable overflow
+   is computed from the transformed box, so the shifted table never makes the body scroll sideways; contain: layout on the
+   root is for anything else wider than the column (a fixed-width svg, an iframe), which it turns into ink overflow the
+   body cannot scroll to. Before the observer's first report, or with no ResizeObserver, the property is unset and both
+   declarations read the same stand-in, 100% plus the inset the cap takes back: the cap is then the column, and in the
+   translate, where 100% is the table's own width, the padding term is under 19px for any table the column holds and
+   rounds down to its 18px floor, so the shift is exactly none. border-collapse is inherited by the anonymous table box the
+   block wraps, so the cell borders still collapse. */
+.fileview-md table { border-collapse: collapse; margin: 0.6em 0; display: block; width: max-content; max-width: 100%; overflow-x: auto; overflow-wrap: normal; }
+.fileview-md > table { max-width: calc(var(--fv-body-w, calc(100% + 36px)) - 36px); translate: min(0px, round(calc(var(--fv-body-w, calc(100% + 36px)) / 2 - max(18px, round(down, (var(--fv-body-w, calc(100% + 36px)) - 80ch) / 2, 1px)) - 50%), 1px)); }
 .fileview-md th, .fileview-md td { border: 1px solid var(--box-border); padding: 4px 10px; text-align: left; }
-.fileview-md th { background: var(--box-bg); }
+.fileview-md th { font-weight: 600; background: var(--overlay-05); }
+.fileview-md tbody tr:nth-child(even) { background: var(--overlay-05); }
+/* marked writes a column's `:---:` / `---:` alignment as the cell's align attribute (DOMPurify keeps it); the rule above
+   overrode the presentational hint, so every cell read left */
+.fileview-md th[align="center"], .fileview-md td[align="center"] { text-align: center; }
+.fileview-md th[align="right"], .fileview-md td[align="right"] { text-align: right; }
+.fileview-md th[align="left"], .fileview-md td[align="left"] { text-align: left; }
 .fileview-md img { max-width: 100%; }
 /* Media a file draws itself (an inline <svg> diagram, a <canvas>, a <video>) fits the column the way an <img> does:
    under contain: layout anything wider than .fileview-md is clipped at the body's edge and unreachable. :where() keeps
@@ -3710,6 +3769,40 @@ body.filebrowse-open { overflow: hidden; }
 .fileview-img { max-width: 100%; max-height: 82vh; object-fit: contain; border-radius: 8px;
   box-shadow: var(--shadow-modal); }
 .fileview-frame { display: block; width: 100%; height: 100%; border: 0; background: #fff; }
+
+/* ── print (Ctrl/Cmd + P while a rendered file is open): the file alone, black on white, across as many pages as it needs.
+   The dashboard's chrome behind the viewer is left out and the viewer's own title bar and Copy buttons with it; the page
+   and the card go white (both :root and body.fileview-open, so a served page's inline theme cannot paint the canvas grey)
+   and every fixed height and overflow that holds the card to one screen is released, so the document runs on to the
+   next page instead of being cut at the first. Tokens and gutters print in full black in the document and in the Raw
+   view (code.hljs and its spans under the body, the wrap mode's row numbers, the plain gutter); the task checkbox is drawn in
+   the light scheme whatever the page's theme; fills and washes go, borders turn black. A table is laid out as a table
+   again (display: block would let it scroll, and paper does not), and a table of the page's own keeps the screen's room,
+   the body less the root's inset, with the screen's shift into both gutters: the cap and the translate are restated in
+   container units, the body made a size container here (no script runs at print layout, so a unit the sheet resolves is
+   the one that holds). Byte-equal in styles.css and feed.css (fileview-parity.test.ts). */
+@media print {
+  :root, body.fileview-open { height: auto; overflow: visible; background: white; color: black; }
+  body.fileview-open { display: block; }
+  body.fileview-open > :not(#romp-fileview) { display: none; }
+  #romp-fileview { position: static; inset: auto; z-index: auto; display: block; background: none; }
+  .fileview { width: auto; height: auto; display: block; overflow: visible; background: white; color: black; border: 0; border-radius: 0; box-shadow: none; }
+  .fileview-bar, .fileview > .fileview-err, .fileview-md .code-copy { display: none; }
+  .fileview-body { overflow: visible; container-type: inline-size; }
+  .fileview-md, .fileview-md h1, .fileview-md h2, .fileview-md h3, .fileview-md h4, .fileview-md h5, .fileview-md h6, .fileview-md strong,
+  .fileview-md blockquote, .fileview-md a, .fileview-md kbd, .fileview-md :not(pre) > code, .fileview-md pre code, .fileview-md pre code span,
+  .fileview-md pre code .cl::before { color: black; }
+  .fileview-md a { text-decoration: underline; }
+  .fileview-md li.task-list-item input[type="checkbox"] { color-scheme: light; }
+  .fileview-md :not(pre) > code, .fileview-md kbd, .fileview-md pre, .fileview-md th, .fileview-md tbody tr:nth-child(even) { background: none; }
+  .fileview-md pre, .fileview-md th, .fileview-md td, .fileview-md hr, .fileview-md blockquote, .fileview-md h1, .fileview-md h2, .fileview-md kbd { border-color: black; }
+  .fileview-md kbd { box-shadow: none; }
+  .fileview-body code.hljs, .fileview-body code.hljs span, .fileview-body .fv-cl::before, .fileview-gutter { color: black; }
+  .fileview-md pre code .cl::before, .fileview-body .fv-cl::before, .fileview-gutter { opacity: 1; }
+  .fileview-gutter { background: none; border-color: black; }
+  .fileview-md table { display: table; width: max-content; overflow: visible; overflow-wrap: anywhere; }
+  .fileview-md > table { max-width: calc(100cqi - 36px); translate: min(0px, round(calc(50cqi - max(18px, round(down, (100cqi - 80ch) / 2, 1px)) - 50%), 1px)); }
+}
 
 /* a MACHINE-sent message's notch (romp injections, ⚙-tagged sends — the same senderKind verdict the
    bubble wears): light gray, visibly quieter than the user's blue, so the scroll map separates "you

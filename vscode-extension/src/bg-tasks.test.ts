@@ -26,13 +26,16 @@ test("the header is ONE line worded from the rows — 'Awaiting …' idle, 'In t
   assert.match(SRC, /lab\.textContent = "In the background · " \+ awaitBreakdown\(counted\);/);
   assert.match(SRC, /lab\.textContent = "Awaiting " \+ word \+ " · " \+ awaitBreakdown\(items\);/);
   // collapsed by default: when the fold isn't open, only the header renders
-  assert.match(SRC, /const open = bgFoldOpen\.has\(sid\);/);
+  assert.match(SRC, /const open = openFolds\.has\("bgfold:" \+ sid\);/);   // the ONE fold store since 2026-09-08 (was bgFoldOpen)
   assert.match(SRC, /if \(!open\) return;/);
 });
 
 test("three-level disclosure: header fold, then per-task detail, both keyed so they survive re-render", () => {
-  assert.match(SRC, /const bgExpanded = new Set<string>\(\);/);
-  assert.match(SRC, /const bgFoldOpen = new Set<string>\(\);/);
+  // 2026-09-08 (the notice-vocabulary pass): both folds key into openFolds — "bgfold:<sid>" for the box,
+  // "bgrow:<id>" for a row — the ONE fold store (their private Sets were two of the four the audit found)
+  assert.match(SRC, /const open = openFolds\.has\("bgfold:" \+ sid\);/);
+  assert.match(SRC, /const tOpen = openFolds\.has\("bgrow:" \+ t\.id\);/);
+  assert.doesNotMatch(SRC.replace(/\/\/[^\n]*/g, ""), /bgExpanded|bgFoldOpen/);
   assert.match(SRC, /head\.dataset\.act = "bg-fold"; head\.dataset\.id = sid;/);
   assert.match(SRC, /rh\.dataset\.act = "bg-toggle"; rh\.dataset\.id = t\.id;/);
   // detail body = command + output, textContent only (untrusted)

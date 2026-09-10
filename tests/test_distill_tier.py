@@ -68,7 +68,7 @@ class DistillTierResolution(unittest.TestCase):
             self.assertIn('tier="distill"', src, fn.__name__)
         full = inspect.getsource(jd)
         self.assertIn('_judge_run(_distill_model(), STALL_BRIEF_SYS', full)
-        self.assertIn('_distill_effort() if tier == "distill"', inspect.getsource(jd._judge_run))
+        self.assertIn('_distill_effort() if tier == "distill"', inspect.getsource(jd._judge_run_impl))
 
 
 if __name__ == "__main__":

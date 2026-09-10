@@ -2,7 +2,7 @@
 ⚠ chip and auto-retry recovers it. BUT an ON-YOU error floors the focus card to needs-input and gets the
 alarm-red tab: "prompt is too long" (compact needed), a monthly spend cap (raise it, the user 2026-07-14), or a
 spent MODEL allowance (switch model / add credits, the user 2026-08-01) — the spend cap ALSO stops auto-retry
-entirely (no reset to wait out). Source pins on _api_error + build_feed. The model-limit case has its own
+entirely (no reset to wait out). Source pins on _api_error_pass + build_feed. The model-limit case has its own
 behavioural file, tests/test_kernel_model_limit.py."""
 import inspect
 import os
@@ -23,9 +23,9 @@ km = SourceFileLoader("romp_kernel", os.path.join(BIN, "romp-kernel")).load_modu
 
 class ApiErrorWorking(unittest.TestCase):
     def test_api_error_carries_a_tooLong_flag(self):
-        # the classification lives in _api_error_scan since the tail-window split — _api_error is now the
-        # widening driver around it, so read the pair rather than pinning which half holds the flag
-        src = inspect.getsource(km._api_error) + inspect.getsource(km._api_error_scan)
+        # the classification lives in _api_error_pass, the one-pass scanner both _api_error and the latched
+        # _api_last_failed read through, so the pin reads that function
+        src = inspect.getsource(km._api_error_pass)
         self.assertIn('"tooLong": "too long" in text.lower()', src)
 
     def test_only_on_you_errors_floor_the_card_to_needs_input(self):
@@ -41,10 +41,9 @@ class ApiErrorWorking(unittest.TestCase):
         self.assertIn('or (col == "blocked" and not recheck and not rejudging))', src)
 
     def test_spend_cap_is_classified_and_floors_like_tooLong(self):
-        # a monthly spend cap is on you (raise it) AND never auto-retried — classified in _api_error, floored
-        # to needs-input, and badged with the raise-your-cap guidance (the user 2026-07-14).
-        self.assertIn('"spendLimit": _is_spend_limit(text)',
-                      inspect.getsource(km._api_error) + inspect.getsource(km._api_error_scan))
+        # a monthly spend cap is on you (raise it) AND never auto-retried: classified in _api_error_pass,
+        # floored to needs-input, and badged with the raise-your-cap guidance (the user 2026-07-14).
+        self.assertIn('"spendLimit": _is_spend_limit(text)', inspect.getsource(km._api_error_pass))
         bf = inspect.getsource(km.build_feed)
         self.assertIn('"spendLimit": bool(aerr.get("spendLimit"))', bf)
         self.assertIn("monthly spend limit — raise it at claude.ai/settings/usage", bf)

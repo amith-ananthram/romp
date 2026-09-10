@@ -153,6 +153,7 @@ class DormantHandoffConverts(unittest.TestCase):
     def setUp(self):
         self._td = tempfile.TemporaryDirectory()      # a private root: see CourierLinkRepair.setUp
         self._state = jd.STATE
+        self._shared_before = self._shared_sid_leftovers()   # the run-wide root's state, read before the rebind
         jd._rebind_state(Path(self._td.name))
         _seed_sender()
         d = jd.STATE / "states"
@@ -170,6 +171,27 @@ class DormantHandoffConverts(unittest.TestCase):
         # returns None (reg-less sid, no owner answer) and the sweep rightly stands down.
         km._TMUX.available = lambda: True
         km._TMUX.alive_sids = lambda t=3: set()
+        self.addCleanup(self._assert_no_shared_sid_leftovers)   # runs AFTER tearDown: the run-wide root is as it was
+
+    @staticmethod
+    def _shared_sid_leftovers():
+        # the two files the dead-wait block writes under the shared placeholder sid, as (exists, mtime_ns)
+        # at whatever root the judge is bound to: the journal row for SENDER:g1 (append_block) and the
+        # nudge record in auto-nudge.json. Either one left at the run-wide root reaches every later
+        # goal-store test under that sid in this process: load_goals replays the row onto their fresh g1
+        # (blocked) and the distiller takes the staller path instead of distilling. Sixteen test_judge.py
+        # tests (the distiller and procedural-block classes) went red when xdist placed them after this one
+        # in a worker; the two modules in one process, this one first, reproduced it.
+        out = []
+        for p in (jd._overrides_dir() / (SENDER + ".jsonl"), jd.STATE / "auto-nudge.json"):
+            out.append((p.exists(), p.stat().st_mtime_ns if p.exists() else None))
+        return tuple(out)
+
+    def _assert_no_shared_sid_leftovers(self):
+        # checked once tearDown has rebound the judge to the run-wide root: both files land under the
+        # private root and go with the tempdir, so the run-wide root's pair is exactly as setUp read it
+        self.assertEqual(self._shared_sid_leftovers(), self._shared_before,
+                         "the sender's journal row or the nudge record reached the run-wide root")
 
     def tearDown(self):
         for nm in ("available", "alive_sids"):

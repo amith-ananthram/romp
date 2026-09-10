@@ -407,3 +407,17 @@ times" bug. Every interactive control MUST therefore:
 Reuse `ui/webview/actions.ts` for any new dashboard control. (`.romp-acted` is
 defined in both `styles.css` and `feed.css` since the feed page loads only the
 latter.)
+
+### Designs must accommodate many tags and many sessions (user rule, 2026-09-09)
+Assume dozens of tags and dozens of sessions on every surface that lists them, and lay
+the surface out for that case, not for three. Per-item controls take ONE line: a tag row
+is its pill, its actions and one colour dot; a session row is its name, its [+] and its
+chips. Palettes, pane-by-tag matrices and any other per-item detail open on demand (a
+popover, a fold), never inline for every item at once. The working area keeps the space:
+the sections above it fold or cap their height and scroll within themselves, so the part
+the user came to act on (the sessions table in Sessions & tags) is never pushed under
+the fold. Triggered by that dialog with ten tags, where twelve inline swatches per row
+and a five-pane matrix of every tag filled the page and left two session rows showing.
+A change to a tag or session surface is checked against a fixture of thirty tags (the
+dialog's is `ui/timeline-tags-scale.test.ts`, with the measured layout in
+`ui/timeline-tags-scale-browser.test.ts`).

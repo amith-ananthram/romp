@@ -15,8 +15,9 @@ test("the todo ChatEvent carries an optional error", () => {
 
 test("renderTodo shows the surfaced error instead of the task list", () => {
   assert.match(RENDER, /if \(ev\.error\) \{/);
-  assert.match(RENDER, /card\.classList\.add\("todo-card-error"\)/);
-  assert.match(RENDER, /el\("div", "todo-error-msg"\)/);
+  // 2026-09-08 (the notice-vocabulary pass): the err severity on the TO-DO notice, gist "unavailable", the reason its body
+  assert.match(RENDER, /const body = el\("div", "notice-md"\); body\.textContent = ev\.error;/);
+  assert.match(RENDER, /notice\(\{ src: "to-do", glyph: "todo", sev: "err", gist: "unavailable", body, key, open: true, cls: "turn-todo",/);
   // and it returns early — the normal per-task rendering is skipped when erroring
   const body = RENDER.slice(RENDER.indexOf("function renderTodo"));
   const errIdx = body.indexOf("if (ev.error)");
@@ -24,7 +25,9 @@ test("renderTodo shows the surfaced error instead of the task list", () => {
   assert.ok(errIdx > -1 && rowIdx > -1 && errIdx < rowIdx, "the error branch precedes (and returns before) the row machinery");
 });
 
-test("the error card is styled in the error color, not a normal card", () => {
-  assert.match(CSS, /\.todo-card-error \{ border-color: var\(--err\); \}/);
-  assert.match(CSS, /\.todo-error-msg \{ color: var\(--err\)/);
+test("the error card wears the err severity — red rail + dot; the reason reads in the body's own ink", () => {
+  // 2026-09-08: --err as TEXT sat at 2.82:1 on the dark card; the severity is the rail, the words stay --fg
+  assert.match(CSS, /\.notice-sev-err\s+\{ --notice-rail: var\(--st-blocked-bg\);/);
+  assert.match(CSS, /\.notice-body \{[^}]*color: var\(--fg\)/);
+  assert.doesNotMatch(CSS, /\.todo-card-error|\.todo-error-msg/);
 });
