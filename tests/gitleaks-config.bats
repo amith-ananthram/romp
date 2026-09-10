@@ -6,8 +6,8 @@
 # the hook looks like when gitleaks really runs, which a stub cannot check).
 #
 # Skipped when gitleaks is not installed, so a clone that never wanted the
-# scanner still runs a green suite. ROMP_GITLEAKS names a binary that is not on
-# PATH, as it does for the hook.
+# scanner still runs a green suite; CI installs it and is the arbiter.
+# ROMP_GITLEAKS names a binary that is not on PATH, as it does for the hook.
 #
 # Nothing in this file may contain a credential-shaped literal: gitleaks scans
 # this repo, and a fixture secret written out longhand would flag the very test
@@ -45,7 +45,7 @@ probe_token() { printf 'gh%s_%s%s' p "$(printf '0123456789%.0s' 1 2 3)" abcdef; 
 }
 
 @test "every commit in this branch's history is clean" {
-    # Each merge by its first-parent diff, as the hook scans it.
+    # Each merge by its first-parent diff, as the hook and CI scan it.
     run "$GL" git "$ROMP_DIR" --no-banner --redact --exit-code 2 --config "$CFG" \
         --log-opts="HEAD --diff-merges=first-parent"
     [ "$status" -eq 0 ]
@@ -60,8 +60,8 @@ probe_token() { printf 'gh%s_%s%s' p "$(printf '0123456789%.0s' 1 2 3)" abcdef; 
 @test "a secret introduced only in a merge commit is caught by the history scan" {
     # `gitleaks git` runs `git log -p`, which shows NO diff for a merge commit by default, so a
     # credential added during a conflict resolution (present in neither parent, only the merge
-    # tree) is scanned by nothing. The hook passes --diff-merges=first-parent to close that; this
-    # proves the flag actually surfaces the secret, against the real scanner.
+    # tree) is scanned by nothing. The hook and CI pass --diff-merges=first-parent to close that;
+    # this proves the flag actually surfaces the secret, against the real scanner.
     R="$TEST_DIR/repo"; mkdir -p "$R"
     git -C "$R" init -q
     git -C "$R" symbolic-ref HEAD refs/heads/main     # whatever init.defaultBranch says
@@ -80,7 +80,7 @@ probe_token() { printf 'gh%s_%s%s' p "$(printf '0123456789%.0s' 1 2 3)" abcdef; 
     run "$GL" git "$R" --no-banner --redact --exit-code 2 --config "$CFG" --log-opts=--all
     [ "$status" -ne 1 ]
     [ "$status" -eq 0 ] || skip "this gitleaks reads merge diffs by default; the flag is redundant here"
-    # With the flag the hook passes, the first-parent diff surfaces it and the scan refuses.
+    # With the flag the hook and CI pass, the first-parent diff surfaces it and the scan refuses.
     run "$GL" git "$R" --no-banner --redact --exit-code 2 --config "$CFG" \
         --log-opts="--all --diff-merges=first-parent"
     [ "$status" -eq 2 ]

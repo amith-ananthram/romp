@@ -76,18 +76,24 @@ This repo may go public; assume every commit is permanent and world-readable.
   text only, so screenshots and recordings under `docs/assets/` must be
   eyeballed for on-screen session content before release.
 
-### Credentials: the pre-push hook runs gitleaks over every pushed commit
+### Credentials: gitleaks scans every pushed commit and all of history
 The rule above is about identifiers a human can enumerate. Credentials are the
 other half and cannot work that way: nobody knows a token's text until it leaks,
-so there is no list to write. **gitleaks** covers them: `.githooks/pre-push`
-runs it over the commits a push would publish (a merge by its first-parent diff,
-so a secret typed into a conflict resolution is read too) and refuses the push
-on a hit. No gitleaks on the machine means a loud notice and no scan (requiring
-an install to push would break every clone that never asked for it); a gitleaks
-that fails to run refuses the push and says so. `ROMP_NO_GITLEAKS=1` skips the
-scan, `ROMP_GITLEAKS` points at a binary. This is the same hook as the
-identifier scan and both report before it refuses, so one push tells you about
-both. Three things follow for anyone touching this:
+so there is no list to write. **gitleaks** covers them, in two places:
+- **`.githooks/pre-push`** runs it over the commits a push would publish (a
+  merge by its first-parent diff, so a secret typed into a conflict resolution
+  is read too) and refuses the push on a hit. No gitleaks on the machine means a
+  loud notice and no scan (requiring an install to push would break every clone
+  that never asked for it); a gitleaks that fails to run refuses the push and
+  says so. `ROMP_NO_GITLEAKS=1` skips the scan, `ROMP_GITLEAKS` points at a
+  binary. This is the same hook as the identifier scan and both report before
+  it refuses, so one push tells you about both.
+- **CI's `Secret scan (gitleaks)` job** scans all of history, every branch and
+  tag the checkout brings, on every PR and every push to `main`, from a
+  pinned, checksummed binary. It needs `fetch-depth: 0`: a default checkout
+  scans one commit and reports clean.
+
+Three things follow for anyone touching this:
 - **A hit means rotate, not amend.** A credential that reached a commit is
   compromised from that moment; removing it in a later commit leaves it in the
   old one, and on a repo that may go public that is a published secret. Rotate

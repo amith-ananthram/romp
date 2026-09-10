@@ -4,7 +4,7 @@
 # hostnames, real transcripts) and is enforced by the pre-push denylist. This is
 # the other half: credentials, which no denylist can anticipate because nobody
 # knows a token's text until it leaks. gitleaks runs over every PUSHED commit in
-# .githooks/pre-push, reading this file.
+# .githooks/pre-push and over the whole history in CI, reading this file.
 #
 # Start from gitleaks' own rule set and only ever SUBTRACT from it here, with a
 # reason. An allowlist is a standing claim that a match is not a credential; a
