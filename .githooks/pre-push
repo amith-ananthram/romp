@@ -11,7 +11,8 @@
 # Two checks per pushed ref, both about what THIS push changes on the remote:
 #
 #   the tip's tree    the content the push exposes. A banned string anywhere in
-#                     it refuses the push.
+#                     it, in a regular file or a symlink's target, refuses the
+#                     push.
 #   each new commit   the lines it ADDS: against its parent, or for a merge the
 #                     lines in none of its parents. A string introduced in an
 #                     intermediate commit and removed by a later one is still
@@ -81,10 +82,12 @@ rev_range() {   # <local_sha> <remote_sha> → a rev-list argument list
 # was clean (the #968 review). In a combined diff every content line carries one
 # column per parent, and a line in no parent has a `+` in each; -c also omits a
 # file that matches any parent outright, which holds no such line. -M keeps a
-# rename from re-adding every line of the file. The path comes from the
-# `+++ b/<path>` header, read only between a `diff --git` or `diff --combined`
-# line and the first hunk: inside a hunk, a line that begins with `+++ ` is added
-# content (`++ b/x` as written) and belongs to the current file.
+# rename from re-adding every line of the file. A new symlink shows up here too:
+# a link's target is its blob content, so it is an added line. The path comes
+# from the `+++ b/<path>` header, read only between a `diff --git` or
+# `diff --combined` line and the first hunk: inside a hunk, a line that begins
+# with `+++ ` is added content (`++ b/x` as written) and belongs to the current
+# file.
 added_lines() {   # <rev>
     local n
     n=$(git rev-list --parents -n 1 "$1" | awk '{ print NF - 1 }')
@@ -107,6 +110,28 @@ while read -r local_ref local_sha _remote_ref remote_sha; do
         echo "romp pre-push: the tip of $local_ref (${local_sha:0:10}) would publish a personal identifier in:" >&2
         echo "$hits" | sed "s/^$local_sha:/  /" >&2
         blocked=1
+    fi
+
+    # The tip's symlinks. git grep reads regular-file blobs only, so a link whose
+    # TARGET holds a string is invisible to the grep above. A committed link's
+    # target is its blob content, so read each 120000 entry's blob itself. Not
+    # hypothetical: a `node_modules -> /home/<user>/code/romp/...` link, made to
+    # run the extension tests in a worktree and swept up by a broad `git add`,
+    # reached a public branch past a git grep of its tree, and a reviewer found
+    # it, not the hook. An ls-tree line is "<mode> <type> <sha>\t<path>". A blob
+    # that cannot be read counts as empty: under set -e a failed substitution
+    # would end the hook with no message, before its verdict on everything else.
+    if links=$(git ls-tree -r "$local_sha" 2>/dev/null | grep '^120000 '); then
+        while IFS= read -r link; do
+            blob=${link#* * }; blob=${blob%%[[:space:]]*}
+            link_path=${link#*$'\t'}
+            target=$(git cat-file -p "$blob" 2>/dev/null) || target=""
+            if printf '%s' "$target" | grep -qi -F "${grep_args[@]}"; then
+                echo "romp pre-push: the tip of $local_ref (${local_sha:0:10}) would publish a personal identifier" >&2
+                echo "  in the SYMLINK TARGET of $link_path -> $target" >&2
+                blocked=1
+            fi
+        done <<< "$links"
     fi
 
     # The lines each commit new to the remote adds.
