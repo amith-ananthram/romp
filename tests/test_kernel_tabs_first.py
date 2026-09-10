@@ -1,8 +1,11 @@
 """TABS-FIRST (the user 2026-06-26): the tabOrder push carries name+color per tab so the client can paint the
-WHOLE strip as placeholders up front (no one-by-one pop-in). Both emit sites — the periodic/connect _push and
-the WS 'ready' handler — send a `tabs` list of {id, name, color} alongside the sid `order`.
+WHOLE strip as placeholders up front (no one-by-one pop-in). Every strip sender (_push, on its cycle and as
+the connect push a `ready` triggers; _push_session_now; _confirm_close_now) hands a `tabs` list of {id, name,
+color} alongside the sid `order` to _send_tab_order, the one frame builder's caller. The `ready` handler
+sends no strip of its own, whichever app's renderer posted it.
 """
 import inspect
+import json
 import os
 import unittest
 from importlib.machinery import SourceFileLoader
@@ -45,25 +48,66 @@ class TabsFirst(unittest.TestCase):
         self.assertEqual(frame["type"], "tabOrder")
         self.assertEqual(frame["selfHost"], km._self_host())
         self.assertEqual(sorted(frame), ["live", "order", "selfHost", "tabs", "type", "views"])
-        # the four senders share the one spelling — the pusher's tabs-first send, the off-cycle session push,
-        # the close confirmation and the WS 'ready' handler's connect-time frame all hand their order + meta +
+        # the three senders share the one spelling: the pusher's tabs-first send (the connect push a `ready`
+        # triggers included), the off-cycle session push and the close confirmation all hand their order + meta +
         # liveness to _send_tab_order, the builder's ONE caller (2026-09-07: it builds the frame per client,
-        # so a reconnecting client's skeleton list can ride it) — a fifth inline dict would drop the field again
+        # so a reconnecting client's skeleton list can ride it); a fourth inline dict would drop the field again
         text = open(KPATH).read()
         self.assertEqual(text.count('_send_client(c, ("taborder",), _tab_order_frame(tab_order, tab_meta, live, c))'), 1)
         self.assertEqual(text.count("_tab_order_frame(tab_order, tab_meta, live, c)"), 1, "the builder's one caller: _send_tab_order")
         self.assertEqual(text.count("_send_tab_order(c, tab_order, tab_meta, tmux)"), 3)
-        self.assertEqual(text.count("_send_tab_order(client, _o, _tabs, _tm)"), 1)
         self.assertEqual(text.count('{"type": "tabOrder"'), 1, "the literal lives in _tab_order_frame alone")
         self.assertIn("_send_tab_order(c, tab_order, tab_meta, tmux)", inspect.getsource(km._push_session_now))
         self.assertIn("_send_tab_order(c, tab_order, tab_meta, tmux)", inspect.getsource(km._confirm_close_now))
 
-    def test_connect_ready_handler_also_sends_tabs(self):
-        text = open(KPATH).read()
-        # 2026-09-07: the direct send goes through _send_tab_order too (one frame builder, one dedup slot)
-        self.assertIn('_send_tab_order(client, _o, _tabs, _tm)', text,
-                      "the WS 'ready' connect push also carries name+color tabs")
-        self.assertIn('_tabs = [{"id": s["sid"], "name": s.get("name", ""), "color": _name_color(s["sid"])}', text)
+    def _ready(self, app):
+        """One `ready` from a renderer of `app`, the connect push stubbed as a marker: the types of the frames
+        the handler put on the socket, in order, and the client's dedup slots afterwards. The slots read the
+        same frames a second way: a strip sent through _send_client records its ("taborder",) key there."""
+        # the liveness reads a strip built at ready would make: pinned, so should such a strip return, these
+        # tests fail the same way with or without tmux on this machine
+        saved = (km._tmux_sessions, km._alive_sessions)
+        km._tmux_sessions = lambda: {}
+        km._alive_sessions = lambda now, tmux: []
+        try:
+            sent = []
+            h = object.__new__(km.Handler)
+            h._push_one = lambda c: sent.append({"type": "_pushed"})   # the connect push, as a marker
+            client = {"app": app, "wid": "w1", "alive": True, "send": lambda s: sent.append(json.loads(s))}
+            km.Handler._dispatch_ws(h, {"type": "ready"}, client)
+        finally:
+            km._tmux_sessions, km._alive_sessions = saved
+        return [m["type"] for m in sent], client.get("sent", {})
+
+    def test_connect_ready_handler_sends_no_tab_order_of_its_own(self):
+        # The strip a chat page gets at `ready` is the connect push's: _push lists living plus kept-open tabs
+        # through the ("taborder",) slot. The ready arm used to send a second strip from a liveness read of its
+        # own (living sessions only), and the client closes every tab a later frame omits without affirming it
+        # live, so every read-only reopened tab the push had just listed went down at each ready.
+        types, slots = self._ready("chat")
+        self.assertEqual(types, ["_pushed", "caps"],
+                         "the connect push, then the caps frame: no strip from the handler itself")
+        self.assertNotIn(("taborder",), slots, "and none attempted through the strip's dedup slot")
+
+    def test_a_feed_clients_ready_yields_no_tab_order_frame(self):
+        # The strip the ready arm used to send went to every app's socket, not only a chat's. The feed page has
+        # no tabOrder handler, but every pane's federation layer writes an inbound strip into the stored
+        # arrangement (federation.ts absorbHostReport), so a strip for a feed client would prune the kept-open
+        # tabs from that store again, and the chat case above would not notice.
+        types, slots = self._ready("feed")
+        self.assertEqual(types, ["_pushed", "caps"], "a feed client's ready: the connect push, then caps, no strip")
+        self.assertNotIn(("taborder",), slots)
+
+    def test_a_timeline_clients_ready_yields_no_tab_order_frame(self):
+        types, slots = self._ready("timeline")
+        self.assertEqual(types, ["_pushed", "caps"], "a timeline client's ready: the connect push, then caps, no strip")
+        self.assertNotIn(("taborder",), slots)
+
+    def test_no_living_only_ordered_reader_remains(self):
+        # The ready arm's strip was the one reader of a living-only ordered list; chat tabs and timeline lanes
+        # read _chat_tab_sessions and _timeline_sessions, each through _ordered. With that strip gone the
+        # reader had no caller, so it goes too: a strip rebuilt from it would drop every kept-open tab again.
+        self.assertFalse(hasattr(km, "_ordered_alive"), "no module-level living-only ordered reader")
 
     def test_name_color_shape_matches_the_client_color_type(self):
         # _name_color returns {bg,fg} or None — exactly the render.ts Color the placeholder applies.

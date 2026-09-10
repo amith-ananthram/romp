@@ -31,11 +31,29 @@ export function canPreview(): boolean {
 
 // Which click means "in a browser tab of its own"? The browser-wide idiom, so there is nothing new to
 // learn and no setting to find: a Cmd/Ctrl-click (the `click` event carries the modifier) or a
-// middle-button press (which arrives as `auxclick`, button 1). A plain click keeps a PDF inside the
-// dashboard exactly as an image opens (the user 2026-09-07, who wanted one opening rule for both); the
-// modifier is the one signal that the browser's own viewer, beside the dashboard, is what is wanted.
+// middle-button press (which arrives as `auxclick`, button 1). A plain click acts inside the dashboard
+// (the user 2026-09-07, who wanted one opening rule for every file: a plain click keeps a PDF inside the
+// dashboard exactly as an image opens; the modifier is the one signal that the browser's own tab, beside
+// the dashboard, is what is wanted). The PDF and folder gestures read this signal, and so do the links
+// inside a file the viewer shows (file-view.ts).
 export function wantsOwnTab(ev?: { metaKey?: boolean; ctrlKey?: boolean; button?: number } | null): boolean {
   return !!ev && (!!ev.metaKey || !!ev.ctrlKey || ev.button === 1);
+}
+
+// A file in the browser's OWN tab, on the gesture above: ONE window.open aimed at the kernel's /file URL, the
+// same-origin, cookie-authed route the viewer fetches from (a remote session's file relays exactly as the
+// viewer's fetch does), so the browser renders what the kernel serves: a PDF in its viewer, an image, a text
+// file as text. False when nothing opened, and the caller's in-app view takes over: the popup was blocked, or
+// this is the VS Code webview, whose sandbox has no tabs and no kernel origin (canPreview). The tab's opener is
+// severed on the handle: a link inside the opened file may navigate the tab to a foreign site, which must not
+// hold the dashboard. Not the `noopener` feature, which returns null even on success. The one opener behind
+// every own-tab gesture: the viewer's links hand it any file (file-view.ts), openPdfTab below hands it a PDF.
+export function openFileTab(path: string, sid?: string | null): boolean {
+  if (!canPreview()) return false;
+  const w = window.open(fileUrl(path, sid), "_blank");
+  if (!w) return false;                                   // blocked: the caller's in-app view takes over
+  try { w.opener = null; } catch { /* unreachable while the tab is our own initial page */ }
+  return true;
 }
 
 // LOADING CUE (the user 2026-07-31): a remote image's bytes arrive over the ssh tunnel, so for a
@@ -142,13 +160,11 @@ export function fileUrl(path: string, sid?: string | null): string {
 // there anyway (canPreview). The KIND check lives here, by extension — the only fact available inside
 // the gesture — so a caller passes any path and a non-PDF is simply "not mine" (false): the viewer's own
 // media branch keeps keying on the kernel's Content-Type verdict, never on an extension re-test
-// (file-view.test.ts pins that).
+// (file-view.test.ts pins that). The tab itself is openFileTab's (above): one window.open, one severed
+// opener, one blocked-popup verdict, shared with the viewer's links, which open any file that way.
 export function openPdfTab(path: string, sid?: string | null): boolean {
-  if (previewKind(path) !== "pdf" || !canPreview()) return false;
-  const w = window.open(fileUrl(path, sid), "_blank");
-  if (!w) return false;                                   // blocked: the caller's in-app view takes over
-  try { w.opener = null; } catch { /* unreachable while the tab is our own initial page */ }
-  return true;
+  if (previewKind(path) !== "pdf") return false;
+  return openFileTab(path, sid);
 }
 
 // The PDF card's click, with its gesture: a plain click opens the in-app lightbox, like an image; a
@@ -713,6 +729,7 @@ export function previewFull(path: string, sid?: string | null, verified = false,
 // as the manual path and the backstop once a box's bounded auto-retries are spent).
 const failedPreviews = new Map<HTMLElement, () => void>();
 export function retryFailedPreviews(): void {
+  retryMdImgProbes();                                // parked markdown images with attempts left (T291c): the budget rides the URL
   if (!failedPreviews.size) return;
   for (const [box, rebuild] of Array.from(failedPreviews.entries())) {
     failedPreviews.delete(box);                      // one attempt per registration; re-registers on error
@@ -725,6 +742,7 @@ export function retryFailedPreviews(): void {
 // never by the per-message heal above, so a dead figure costs one fetch per reconnect, not per push.
 const settledPreviews = new Map<HTMLElement, () => void>();
 export function refreshSettledPreviews(): void {
+  healMdImgs();                                      // parked markdown images ride the same reconnect-class heal (T291c)
   if (!settledPreviews.size) return;
   for (const [box, rebuild] of Array.from(settledPreviews.entries())) {
     settledPreviews.delete(box);                     // one attempt per registration; re-registers on error
@@ -732,14 +750,103 @@ export function refreshSettledPreviews(): void {
   }
 }
 
-// Markdown-inline <img> (a figure pasted as markdown in a message body) had NO failure handling at
-// all: DOMPurify strips inline handlers (correctly — untrusted transcript HTML) and nothing
-// re-attached one, so a load that failed once sat as a dead element in the cached DOM until a send
-// re-rendered the turn (the user 2026-08-24). Error events don't bubble but DO capture: one
-// document-level capture listener covers every md() img on the page — no per-render wiring — and
-// registers the element in the same failedPreviews machinery, so every kernel message re-attempts
-// it. Previews' own <img>s are skipped: their machinery (budgets, resume, chips) owns those.
+// Markdown-inline <img> (a figure written as markdown in a message body): marked leaves `![fig](path)` as
+// <img src="path"> (the chat rewrites no image source), the browser resolves the path against the page's
+// origin, and the kernel answers 404, so the img fails and the browser shows its alt text. The 2026-08-24
+// heal re-set that img's src on every kernel message; each reset hid the alt text while the reload was in
+// flight and the 404 showed it again, so a streaming turn flipped every such caption on and off at the
+// push rate (T291c, the user 2026-09-09: three captions, two to four lines each, ten times a second). A
+// failed markdown image is PARKED instead: its src leaves (into data-md-src), the element wears
+// .md-img-failed, and the browser shows the alt text as a stable caption: no src, no fetch, nothing to
+// flip. No per-message path touches the img on the page: a URL the kernel serves gets a bounded probe OFF the
+// DOM (servedByKernel and retryMdImgProbes, below), every other parked URL waits for a reconnect. A URL that
+// failed is remembered for the page life, and the reconnect-class heal (refreshSettledPreviews: romp:wsup,
+// hostUp, romp:hostRelayUp) probes every remembered URL once OFF the DOM with a detached Image, whether or not
+// an img with it is on the page (a turn evicted from the rendered window, a closed tab): a failure changes
+// nothing on screen, a success lands the picture on every parked img with that URL. The sanitizer post-pass
+// (mdImgPostPass, registered by render.ts) parks a re-rendered img with a remembered URL BEFORE the browser
+// fetches it, so a re-render of the same markdown reuses the state instead of fetching, failing and flipping
+// once more. DOMPurify strips inline handlers
+// (correctly), so the failures are caught by ONE document-level capture listener (error events do not
+// bubble but do capture); previews' own <img>s are skipped: their machinery (budgets, resume, chips) owns those.
+const mdImgFailed = new Set<string>();             // URLs that failed this page life: a re-render parks them before any fetch
+const mdImgProbe = new Map<string, number>();      // served URLs with per-message attempts left: the budget rides the URL, not the img
+const mdImgProbing = new Set<string>();            // served URLs with a per-message probe in flight: one at a time per URL
 let mdImgHealOn = false;
+function parkMdImg(img: HTMLImageElement, url: string): void {
+  mdImgFailed.add(url);
+  img.dataset.mdSrc = url;
+  if (img.hasAttribute("src")) img.removeAttribute("src");   // no src: the browser shows the alt text and fetches nothing
+  img.classList.add("md-img-failed");
+}
+/** The chat's post-pass (render.ts runs it on md() and userMd() output after the sanitize, NEVER through the shared
+ *  sanitizer: the file viewer rewrites its images' paths to /file URLs after its own sanitize, and a park inside the
+ *  sanitizer removed the src that rewrite keys on, the review's find): an img whose URL is already known to fail is
+ *  parked at RENDER, before any fetch. */
+export function mdImgPostPass(root: ParentNode): void {
+  if (!mdImgFailed.size) return;
+  for (const img of Array.from(root.querySelectorAll("img")) as HTMLImageElement[]) {
+    const u = img.src || "";
+    if (u && mdImgFailed.has(u)) parkMdImg(img, u);
+  }
+}
+/** A URL the kernel actually answers (/file, a remote relay's /file, /media): a file an agent is still writing or a
+ *  relay behind a blip may come back with no reconnect event, so those get a BOUNDED probe on the per-message path
+ *  (three attempts, off the DOM, so the caption never moves for them). The budget is keyed on the URL, not on the img
+ *  that failed: a streaming turn is re-rendered on every push, so that img is off the page by the next push and the
+ *  post-pass has parked a fresh one, which inherits the attempts left. An origin-resolved path no route serves is
+ *  park-only, since nothing but a reconnect could change its answer. */
+function servedByKernel(u: string): boolean {
+  try {
+    const p = new URL(u, location.href).pathname;
+    return p === "/file" || /^\/remote\/[^/]+\/file$/.test(p) || p.startsWith("/media/");
+  } catch { return false; }
+}
+/** One detached probe of a parked URL. On load the picture lands on every parked img with that URL that is on the
+ *  page NOW, re-queried, not a snapshot: a re-render during the probe parks a fresh img, which a snapshot missed
+ *  (the review's find). On failure nothing on screen changes. */
+function probeMdImgUrl(u: string, onFail?: () => void): void {
+  const probe = new Image();
+  probe.onload = () => {
+    mdImgFailed.delete(u);                           // first: a rebuild from here on fetches normally
+    mdImgProbe.delete(u); mdImgProbing.delete(u);    // a healed URL has no pending budget
+    for (const img of Array.from(document.querySelectorAll("img.md-img-failed[data-md-src]")) as HTMLImageElement[]) {
+      if (img.dataset.mdSrc !== u || !img.isConnected) continue;
+      img.classList.remove("md-img-failed");
+      delete img.dataset.mdSrc;
+      img.src = u;                                   // the bytes are in the browser's cache: the picture lands
+    }
+  };
+  probe.onerror = () => { if (onFail) onFail(); };  // still down: the parked captions stay exactly as they are
+  probe.src = u;
+}
+/** The per-message path for the served URLs with attempts left: one detached probe per URL per push, the next armed
+ *  only once the previous has failed (a push while it is pending fires nothing), whatever img carries the URL now and
+ *  whether or not one is on the page (the probe is off the DOM; a load re-queries the page). Run from
+ *  retryFailedPreviews, so it rides the kernel-message event like the figure previews' own retries. */
+function retryMdImgProbes(): void {
+  for (const [u, left] of Array.from(mdImgProbe.entries())) {
+    if (mdImgProbing.has(u)) continue;
+    mdImgProbing.add(u);
+    probeMdImgUrl(u, () => {
+      mdImgProbing.delete(u);
+      if (left > 1 && mdImgFailed.has(u)) mdImgProbe.set(u, left - 1);   // still down: one attempt spent
+      else mdImgProbe.delete(u);                                          // spent (or healed meanwhile): the reconnect heal alone from here
+    });
+  }
+}
+/** The reconnect-class heal for parked markdown images: one detached probe per remembered URL. The remembered set is
+ *  the source, since a URL whose turn left the rendered window or whose tab was closed has no img on the page, and a
+ *  re-render would park it again for the page life; the page's parked imgs are read too, for one parked under a URL
+ *  the memory no longer holds. */
+export function healMdImgs(): void {
+  const urls = new Set<string>(mdImgFailed);
+  for (const img of Array.from(document.querySelectorAll("img.md-img-failed[data-md-src]")) as HTMLImageElement[]) {
+    const u = img.dataset.mdSrc || "";
+    if (u) urls.add(u);
+  }
+  for (const u of urls) probeMdImgUrl(u);
+}
 export function installMdImgHeal(): void {
   if (mdImgHealOn) return;                           // ensure-once (the click-safety installation rule)
   mdImgHealOn = true;
@@ -749,12 +856,9 @@ export function installMdImgHeal(): void {
     const src = img.src || "";
     if (!src || src.startsWith("data:")) return;     // a broken data: URI has no server to heal
     if (img.onerror || img.closest(".path-full")) return;   // the preview machinery retries its own
-    // a relay URL (fileUrl builds /remote/<host>/file for a remote sid) failed on the LINK's account as
-    // likely as the image's: it waits for the reconnect-class heal (T291); a local src keeps the per-message one
-    (/\/remote\/[^/]+\/file\b/.test(src) ? settledPreviews : failedPreviews).set(img, () => {
-      const u = img.src;
-      img.removeAttribute("src");
-      img.src = u;                                   // a fresh attempt; a repeat error re-registers here
-    });
+    parkMdImg(img, src);
+    if (servedByKernel(src)) {                       // bounded and off the DOM: the caption never moves for it
+      if (!mdImgProbe.has(src)) mdImgProbe.set(src, 3);   // the budget rides the URL: a re-rendered turn inherits what is left
+    }
   }, true);
 }

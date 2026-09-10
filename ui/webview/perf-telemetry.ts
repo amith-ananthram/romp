@@ -67,7 +67,7 @@ export interface PerfDeps {
   heapBytes(): number | null;        // performance.memory.usedJSHeapSize (Chrome); null when absent
   domCount(): number | null;         // document.getElementsByTagName("*").length; null when absent
   visible(): boolean;                // document.visibilityState !== "hidden"
-  hiddenPane(): boolean;             // the shim's zero-viewport test: a framed pane the shell has display:none'd
+  hiddenPane(): boolean;             // the pane shim's test: the zero-viewport probe (a framed pane the shell has display:none'd) OR the pane's published word (window.__rompPaneHidden, paint-gate.ts; Chromium keeps a hidden iframe's size)
   ua: UaClass;
   pageUrl: string;                   // location.href without query or fragment: an inline script's sourceURL
   windowEvents: EventTarget | null;  // pagehide flushes the minute; resize cancels a free sample when the viewport goes to zero
@@ -526,7 +526,7 @@ function browserDeps(post: PerfPost | null): PerfDeps | null {
     heapBytes: () => { const m = perf.memory; return m && typeof m.usedJSHeapSize === "number" ? m.usedJSHeapSize : null; },
     domCount: () => (doc && typeof doc.getElementsByTagName === "function") ? doc.getElementsByTagName("*").length : null,
     visible: () => !doc || doc.visibilityState !== "hidden",
-    hiddenPane: () => { try { return w.parent !== w && (w.innerWidth === 0 || w.innerHeight === 0); } catch (e) { return false; } },
+    hiddenPane: () => { try { return (w.parent !== w && (w.innerWidth === 0 || w.innerHeight === 0)) || w.__rompPaneHidden === true; } catch (e) { return false; } },
     ua: uaClass(String(nav.userAgent || ""), Number(nav.maxTouchPoints) || 0),
     pageUrl,
     windowEvents: typeof w.addEventListener === "function" ? w : null,

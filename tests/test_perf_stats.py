@@ -115,7 +115,30 @@ class Collector(unittest.TestCase):
         self.assertIn("cpu_ms_workers", snap["judge"])
         self.assertEqual(set(snap["goals"]), {"loads", "saves", "writes"}, "read through jd.goal_io_stats")
         # the three identity memos' readers land here (review find, 2026-09-08: they had no consumer)
-        self.assertEqual(set(snap["memos"]), {"pass", "shared", "chain", "nudgeGate", "cleared", "courierSkip", "backref", "captions", "goalArchive", "plannerSkip"})
+        self.assertEqual(set(snap["memos"]), {"pass", "shared", "chain", "nudgeGate", "cleared", "courierSkip", "backref", "captions", "goalArchive", "plannerSkip",
+                                              "bgTops", "liftGate", "intrMarks", "statesOverlay", "lanes"})
+        self.assertEqual(set(snap["memos"]["bgTops"]), {"hit", "miss", "resolve", "walk", "walk_neg", "idx_build", "entries"},
+                         "the placed-launch memo (_bg_placed_tops): counters plus its occupancy")
+        for k, v in snap["memos"]["bgTops"].items():
+            self.assertIsInstance(v, int, k)
+        self.assertEqual(set(snap["memos"]["liftGate"]), {"skip", "load", "shared", "writer", "noop", "entries"},
+                         "the awaiting-lift gate: session-cycles skipped vs read, the probes the shared cache "
+                         "answered, the writer loads and the ones that filed nothing, plus its occupancy")
+        for k, v in snap["memos"]["liftGate"].items():
+            self.assertIsInstance(v, int, k)
+        # the two memos the interrupt tick trims to its alive set: the interrupt-marks memo and the awaiting
+        # overlay's states-log fold, each with its counters and its occupancy
+        self.assertEqual(set(snap["memos"]["intrMarks"]), {"hit", "miss", "evict", "entries"})
+        self.assertEqual(snap["memos"]["intrMarks"], km._intr_marks_memo_report())
+        self.assertEqual(set(snap["memos"]["statesOverlay"]), {"hit", "append", "refold", "fail", "evict", "entries"})
+        self.assertEqual(snap["memos"]["statesOverlay"], km._states_overlay_report())
+        for blk in ("intrMarks", "statesOverlay"):
+            for k, v in snap["memos"][blk].items():
+                self.assertIsInstance(v, int, "%s.%s" % (blk, k))
+        self.assertEqual(set(snap["memos"]["lanes"]), {"hit", "miss", "live_tail", "complain_skip", "unshared_skip", "evict", "entries",
+                                                     "segs_hit", "segs_miss", "dead_serve", "dead_miss", "dead_failed_serve"},
+                         "the timeline's per-lane segment memo: one outcome per live lane per bars build, the dead lanes beside")
+        self.assertTrue(all(type(v) is int for v in snap["memos"]["lanes"].values()))
         self.assertEqual(set(snap["memos"]["plannerSkip"]), {"skipped", "planned", "recorded"})
         self.assertEqual(set(snap["memos"]["captions"]), {"served", "parsed"})
         self.assertEqual(set(snap["memos"]["goalArchive"]), {"served", "loaded"})
@@ -410,7 +433,7 @@ class GoalIoCounters(unittest.TestCase):
         # with this PR, so the doc names the memos section and sends the reader there (review find, 2026-09-08)
         doc = Path(HERE).parent.joinpath("docs", "reference.md").read_text()
         self.assertIn("- `memos`:", doc)
-        for k in ("`pass`", "`shared`", "`chain`"):
+        for k in ("`pass`", "`shared`", "`chain`", "`intrMarks`", "`statesOverlay`"):
             self.assertIn(k, doc)
         self.assertIn("`memos.shared`", doc)
 
@@ -591,6 +614,34 @@ class PusherRecords(unittest.TestCase):
         after = km._PERF_STATS.snapshot()["stages_ms"]
         self.assertEqual(after["push"], before["push"])
         self.assertGreaterEqual(after["jobs"], before["jobs"])
+
+    def test_a_connect_serves_the_build_it_tested_when_the_cache_is_replaced_between_its_reads(self):
+        # _cached_timeline tested the cached payload and returned it as two reads of the shared list while the
+        # pusher thread assigns _built_timeline[:] on a rebuild; a connect on the handler thread whose two reads
+        # straddled that assignment returned the replacement build, not the one its freshness test saw. One read.
+        class Swapped(list):
+            """_built_timeline with the pusher's `_built_timeline[:] = [...]` landing between two reads of the
+            payload slot: the first read answers the build, every later one the replacement."""
+            def __init__(self, entry, later):
+                super().__init__(entry)
+                self.reads, self.later = 0, later
+
+            def __getitem__(self, i):
+                if i == 1:
+                    self.reads += 1
+                    if self.reads > 1:
+                        return self.later
+                return list.__getitem__(self, i)
+        built = {"type": "timeline", "now": 1.0, "turns": {}, "judging": {}, "messages": []}
+        replacement = {"type": "timeline", "now": 2.0, "turns": {}, "judging": {}, "messages": []}
+        real = km._built_timeline
+        km._built_timeline = Swapped(["sig-a", built, 5.0, 4.0], replacement)   # the pusher replaced the build between the two reads
+        self.addCleanup(setattr, km, "_built_timeline", real)
+        km.build_timeline = lambda *a, **k: (_ for _ in ()).throw(AssertionError("a connect never rebuilds"))
+        served = km._VIEW_STATS["tlServe"]
+        self.assertIs(km._cached_timeline(int(time.time()), {}, "sig-b", connect=True), built,
+                      "the connect gets the build its freshness test saw, not the replacement that landed under it")
+        self.assertEqual(km._VIEW_STATS["tlServe"], served + 1)
 
     def test_feed_and_timeline_builds_count_cached_and_rebuilt(self):
         km.build_feed = lambda now, tmux: {"working": [], "items": []}

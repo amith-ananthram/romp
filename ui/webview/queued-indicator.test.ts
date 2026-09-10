@@ -96,8 +96,8 @@ test("the kernel answers every cancelQueued with an authoritative cancelResult f
 test("the ✕ only renders while a recall can still win (queue_recallable gates cancelable)", () => {
   assert.match(KERNEL, /cancelable = hasattr\(_cbe, "unqueue"\) and _queue_recallable\(_cbe, sid\)/);
   assert.match(SDKBE, /def queue_recallable\(self, sid: str\) -> bool:/);
-  assert.match(SDKBE, /def unqueue\(self, idx: int, expect: str \| None = None\)/,
-    "the pop re-verifies the exact text under the session lock — never a wrong-message cancel");
+  assert.match(SDKBE, /def unqueue\(self, idx: int, expect: str \| None = None, qid: str \| None = None\)/,
+    "the pop re-verifies the exact text, or locates the copy by its id, under the session lock: never a wrong-message cancel");
 });
 
 test("a queued bubble with no ✕ says where the message actually is", () => {

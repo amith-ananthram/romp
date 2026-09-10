@@ -110,14 +110,15 @@ test("creating a session opens the provisional tab instead of a modal", () => {
 test("a send on a provisional tab is HELD, not posted to a session that doesn't exist", () => {
   assert.match(RENDER, /provisionalQueue\.push\(text\);\s*\n\s*registerOptimistic\(sid, text, attached\.filter\(\(p\) => previewKind\(p\) === "img"\)\);/,
     "the dashed bubble goes up now — with its dragged-image thumbnails — romp has it, it is not delivered");
-  // a FAILED tab has no pending spawn to queue onto: refuse loudly, the box keeps the only copy
-  assert.match(RENDER, /if \(sid !== provisionalId\) \{\s*\n\s*warnToast\("“" \+ \(sessions\.get\(sid\)\?\.name \|\| "this session"\)/);
+  // a FAILED tab has no pending spawn to queue onto: refuse loudly, the box keeps the only copy. The refusal reports
+  // a state the page after a reload does not have, so it is ephemeral (executed in reload-notices.test.ts)
+  assert.match(RENDER, /if \(sid !== provisionalId\) \{\s*\n\s*ephemeralWarnToast\("“" \+ \(sessions\.get\(sid\)\?\.name \|\| "this session"\)/);
 });
 
 test("adoption flushes the held messages FOR REAL and carries the draft across", () => {
   assert.match(RENDER, /if \(adoptsProvisional\(existed, msg\.name, pendingNewSession\)\) \{\s*\n\s*adoptProvisional\(msg\.id\);/);
-  assert.match(RENDER, /vscodeApi\?\.postMessage\(\{ type: "sendMessage", id: realId, text \}\);/);
-  assert.match(RENDER, /registerOptimistic\(realId, text\);/);
+  assert.match(RENDER, /vscodeApi\?\.postMessage\(\{ type: "sendMessage", id: realId, text, qid \}\);/);   // under the id the press minted, so the bubble carried over wears it too
+  assert.match(RENDER, /registerOptimistic\(realId, text, undefined, qid\);/);
   // the draft must be set BEFORE the switch — setActive fills the box from `drafts`
   const adopt = RENDER.slice(RENDER.indexOf("function adoptProvisional"));
   assert.ok(adopt.indexOf("drafts.set(realId, draft)") < adopt.indexOf("setActive(realId)"),

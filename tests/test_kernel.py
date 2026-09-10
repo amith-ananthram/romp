@@ -1337,8 +1337,8 @@ class ViewBuilder(unittest.TestCase):
         import inspect
         src = inspect.getsource(km)
         self.assertIn('elif t == "cancelQueued" and msg.get("md"):', src)
-        self.assertIn("err = _cancel_parked(sid, -1, md)", src)
-        self.assertIn("err2 = _cancel_backend_queued(be, sid, -1, md)", src)
+        self.assertIn("err = _cancel_parked(sid, -1, md, qid=qid)", src)
+        self.assertIn("err2 = _cancel_backend_queued(be, sid, -1, md, qid=qid)", src)
 
     def test_tmux_echo_the_transcript_OVERTOOK_is_not_counted_as_queued(self):
         # The reported bug (the user 2026-08-26): a busy session's queued header counted sends from DAYS
@@ -1529,8 +1529,9 @@ class ViewBuilder(unittest.TestCase):
             "rompUuid": SID, "seq": 2, "lastNode": top, "nodes": nodes,
             "placements": placements, "status": status}))
         km._task_seg_cache.clear()
-        km._BG_TOPS_CACHE.clear()          # both classifier caches key on store/transcript file stats —
-        km._SESSION_STAMP_CACHE.clear()    # cleared so a same-stat rewrite can't serve a stale verdict
+        km._BG_TOPS_CACHE.clear()          # the launch-segment positives, the (parse, store)-keyed placement
+        km._SESSION_STAMP_CACHE.clear()    # memo and the stat-keyed stamp read: cleared so an earlier fixture's
+        #                                    answer under this sid, or a same-stat rewrite, serves nothing here
         saved = km._tmux_sessions
         km._tmux_sessions = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
                                            "context": None, "compactPct": None, "color": None,
@@ -4386,7 +4387,8 @@ class ViewBuilder(unittest.TestCase):
             self.assertEqual(km._alive_sessions(NOW, {}), [], "tmux present + empty → no sessions")
             feed = km.build_feed(NOW, tmux={})
             self.assertEqual(feed.get("cards", []), [], "feed shows no card for a dead session")
-            self.assertEqual(km._ordered_alive(NOW, {}), [], "no chat tabs / timeline lanes either")
+            self.assertEqual(km._chat_tab_sessions(NOW, {}), [], "no chat tabs either")
+            self.assertEqual(km._timeline_sessions(NOW, {}, live_only=True), [], "and no live timeline lanes")
         finally:
             km._has_tmux = saved
 
@@ -4733,6 +4735,18 @@ class ViewBuilder(unittest.TestCase):
         self.assertIn("gb.checked = s.showBranch === true", _gear_src())  # open → reflect (default OFF)
         self.assertIn("showBranch: false", _gear_src())               # load() default OFF, both branches
         self.assertNotIn("showBranch: true", _gear_src())             # the old default must not linger
+
+    def test_gear_has_compact_tabs_and_agents_toggle(self):
+        # the user 2026-09-08: a "Compact tabs and agents" checkbox in the Chat section shrinks the tab strip's
+        # tabs and group headers and tightens the rows of the background-work panel (one body class, styles.css
+        # body.dense-chrome, applied by dense-chrome.ts from render.ts). OFF by default: an explicit stored true
+        # opts in. It mirrors render.ts' loadSettings().denseChrome read, persisted in romp:settings.
+        self.assertIn("id=rs-dense", _gear_src())
+        self.assertIn("Compact tabs and agents", _gear_src())
+        self.assertIn("s.denseChrome = dn.checked", _gear_src())          # change → persist
+        self.assertIn("dn.checked = s.denseChrome === true", _gear_src())  # open → reflect (default OFF)
+        self.assertIn("denseChrome: false", _gear_src())              # load() default OFF (dense-chrome.test.ts counts both branches)
+        self.assertNotIn("denseChrome: true", _gear_src())
 
     def test_chat_body_has_an_explicit_send_button(self):
         # The web-dashboard composer (kernel _chat_body, a SECOND copy of vscode-extension/src/page-skeleton.chatBody)
@@ -6576,18 +6590,21 @@ class ViewBuilder(unittest.TestCase):
                 "output": "Delivered to 'beta'.", "isError": False, "uuid": "t4", "ts": "x"}
         self.assertEqual(km._hydrate_postal([bare], {})[0]["intent"], "")
 
-    def test_ordered_alive_is_stable_under_activity(self):
+    def test_live_order_is_stable_under_activity(self):
         """Lanes/tabs must not auto-shuffle when a session becomes active: a fresh session is appended
-        once and keeps its slot even when its mtime later jumps ahead (the user 2026-06-15)."""
+        once and keeps its slot even when its mtime later jumps ahead (the user 2026-06-15). Read the way
+        the surfaces read it: the timeline's live-only lanes and the chat tabs, both through _ordered."""
         saved = km._alive_sessions
         try:
             km._alive_sessions = lambda now, tmux: [{"sid": "A", "mtime": 100}, {"sid": "B", "mtime": 50}]
-            first = [s["sid"] for s in km._ordered_alive(NOW, {})]
+            first = [s["sid"] for s in km._timeline_sessions(NOW, {}, live_only=True)]
             # B now becomes the most-recently-active (its mtime jumps past A) — the order must NOT change
             km._alive_sessions = lambda now, tmux: [{"sid": "A", "mtime": 100}, {"sid": "B", "mtime": 999}]
-            second = [s["sid"] for s in km._ordered_alive(NOW, {})]
+            second = [s["sid"] for s in km._timeline_sessions(NOW, {}, live_only=True)]
             self.assertEqual(first, ["A", "B"], "new sessions frozen newest-active-first, once")
             self.assertEqual(second, first, "activity (mtime) must not reorder existing lanes/tabs")
+            self.assertEqual([s["sid"] for s in km._chat_tab_sessions(NOW, {})], first,
+                             "the chat tabs read the same order")
         finally:
             km._alive_sessions = saved
 
@@ -6599,8 +6616,10 @@ class ViewBuilder(unittest.TestCase):
         saved = km._alive_sessions
         km._alive_sessions = lambda now, tmux: list(fake)
         try:
-            self.assertEqual([s["sid"] for s in km._ordered_alive(NOW, {})], ["b", "a", "c"],
-                             "living sessions follow the saved shared order")
+            self.assertEqual([s["sid"] for s in km._timeline_sessions(NOW, {}, live_only=True)], ["b", "a", "c"],
+                             "living sessions follow the saved shared order as timeline lanes")
+            self.assertEqual([s["sid"] for s in km._chat_tab_sessions(NOW, {})], ["b", "a", "c"],
+                             "and as chat tabs")
         finally:
             km._alive_sessions = saved
 
@@ -8248,11 +8267,11 @@ class SessionOrderStable(unittest.TestCase):
     keeps its persisted slot, only a drag reorders (the user 2026-06-23). Before the fix, dead lanes were
     pulled into a separate mtime-sorted block, so a session jumped slots the moment it died."""
     def setUp(self):
-        self._saved = (km._ordered_alive, km._alive_sessions, km._sessions, km._session_order,
+        self._saved = (km._alive_sessions, km._sessions, km._session_order,
                        km._session_order_proved, set(km._kept_open))
 
     def tearDown(self):
-        (km._ordered_alive, km._alive_sessions, km._sessions, km._session_order,
+        (km._alive_sessions, km._sessions, km._session_order,
          km._session_order_proved, kept) = self._saved
         km._kept_open.clear(); km._kept_open.update(kept)
 
@@ -8267,11 +8286,10 @@ class SessionOrderStable(unittest.TestCase):
         km._session_order = lambda: ["A", "B", "C"]
         km._session_order_proved = lambda: ["A", "B", "C"]
         km._sessions = lambda now: [B, A, C]             # _sessions is mtime-DESC → B first
-        # _chat_tab_sessions/_timeline_sessions now read _alive_sessions directly and order via _ordered
-        # (the session-order refactor, 15f5037) — stub THAT for the live list; _ordered_alive is no longer
-        # on their path. B has DIED → only A, C live, in persisted order.
+        # _chat_tab_sessions/_timeline_sessions read _alive_sessions directly and order via _ordered
+        # (the session-order refactor, 15f5037): stub THAT for the live list. B has DIED, so only A, C live,
+        # in persisted order.
         km._alive_sessions = lambda now, tmux: [A, C]
-        km._ordered_alive = lambda now, tmux: [A, C]
         return A, B, C
 
     def test_dead_timeline_lane_keeps_its_slot(self):
