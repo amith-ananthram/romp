@@ -193,9 +193,10 @@ def fig_restart_timing(cp, fr, out):
     if not rows:
         return None
     pal = _palette(cp, fr["labels"])
-    f, axs = cp.fig(rows=1, cols=2, w=14, h=max(3.5, 0.5 * len(rows) + 1.5))
-    _dots_with_p90(cp, axs[0], rows, "outageP50", "outageP90", pal, "Outage, kernel exit to first serve (s): dot p50, line to p90 — shorter better")
-    _dots_with_p90(cp, axs[1], rows, "settleP50", "settleP90", pal, "Boot reconcile settle (s): dot p50, line to p90 — shorter better")
+    f, axs = cp.fig(rows=1, cols=2, w=16, h=max(3.5, 0.5 * len(rows) + 1.5))
+    f.subplots_adjust(wspace=0.3)
+    _dots_with_p90(cp, axs[0], rows, "outageP50", "outageP90", pal, "Exit to first serve (s): dot p50, line to p90 — shorter better")
+    _dots_with_p90(cp, axs[1], rows, "settleP50", "settleP90", pal, "Reconcile settle (s): dot p50, line to p90 — shorter better")
     axs[1].set_yticklabels([""] * len(rows))
     return _save(f, out, "restart_timing.png")
 
@@ -205,7 +206,7 @@ def fig_quiet_window(cp, fr, out):
     if not rows:
         return None
     pal = _palette(cp, fr["labels"])
-    f, ax = cp.fig(w=9, h=max(3.5, 0.5 * len(rows) + 1.5))
+    f, ax = cp.fig(w=10, h=max(3.5, 0.5 * len(rows) + 1.5))
     _dots_with_p90(cp, ax, rows, "quietP50", "quietP90", pal, "Quiet-window wait, parked to restart (s): dot p50, line to p90 — shorter better")
     for y, r in enumerate(rows):
         if r["quietWindows"]:
@@ -269,8 +270,8 @@ def fig_turn_latency(cp, fr, out):
     positions = list(range(len(series)))
     for pos, (r, s, ev) in zip(positions, series):
         ax.box([s], positions=[pos], showfliers=False, color=pal[r["label"]], legend=False, widths=0.6, vert=False)
-        ax.annotate("n=%d%s" % (len(s), "" if ev else ", state log (1 s)"), (max(s) if len(s) < 4 else sorted(s)[int(0.75 * (len(s) - 1))], pos),
-                    xytext=(6, 0), textcoords="offset points", va="center", fontsize=10)
+        ax.annotate("n=%d%s" % (len(s), "" if ev else ", state log (1 s)"), (1.0, pos), xycoords=("axes fraction", "data"),
+                    xytext=(6, 0), textcoords="offset points", va="center", fontsize=10)   # past the axis, clear of the whiskers
     ax.set_yticks(positions)
     ax.set_yticklabels(["%s · %s" % (r["label"], r["window"]) for r, _, _ in series])
     ax.clean(xlabel="Feed to result (s): box quartiles, whiskers 1.5 IQR — shorter better", ylabel="")
