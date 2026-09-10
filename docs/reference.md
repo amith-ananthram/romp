@@ -973,6 +973,15 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `push.*` stages count every push, including the one a connecting page gets,
   so they can add up to more than `push`.
 - `builds`: `chat`, `feed`, `timeline`, each with `cached`, `built`, `ms`.
+  `chat` also carries `active_built` and `bg_built` (rebuilds of the watched
+  tab, served while its exact key holds, against rebuilds of a background tab
+  whose signature moved) and `bg_miss`, a map from each labelled component of
+  the chat-build signature (`transcript`, `states`, `judge_gen`, `tasks`,
+  `cut`, `row`, plus `cold` for a tab with no cached build and `nosig` for
+  one whose signature could not be taken) to the background rebuilds it
+  caused. A rebuild with several moved components counts under each, so the
+  map's sum can exceed `bg_built`. `romp perf` prints the split and the
+  non-zero causes after the chat average.
 - `sends`: `full`, `delta`, `deduped`, each a map from slot name (`chat`,
   `feed`, `bars`, `taborder`, ...) to `count` and `bytes`. A deduplicated frame
   was built and compared, then not sent.
@@ -1069,6 +1078,37 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   gauge `entries`; `segs_hit` and `segs_miss` count the segments served and
   derived. `dead_serve`, `dead_miss` and `dead_failed_serve` are the dead-lane
   memo's outcomes on the same block, so one block carries every lane.
+  Four memos cover the chat build's per-build fixed costs, each keyed on the
+  inputs it reads and evicted by the pusher with the tab set (a comment thread
+  built this cycle is kept, like its fold prefix). `chatMergeSets` is the
+  live-tail merge's memo of the sets it derives from a parsed transcript (the
+  uuids and user texts the transcript already holds, and the newest human
+  turn's time), one entry per session keyed on the parsed session object's
+  identity and shared by the chat, feed and timeline builds of one cycle:
+  `hit` and `miss` (merges served against derived) and the gauge `entries`
+  (a session neither shown as a tab nor alive is dropped). `chatPostal` is
+  the chat fold's memo of a tab's sealed postal cards, keyed on the values
+  the cards embed from outside the transcript (the message log's identity
+  and, per card, its caption and its peer's name and colour): `gate` (gate
+  checks that re-hydrated a tab's sealed cards because one of those values
+  moved, or because the entry was sealed outside the pusher's names snapshot
+  and had to be verified), `hit` (checks that verified the sealed cards from
+  their recorded values without hydrating), and `commit_new` (raw postal
+  events hydrated at fold commits; each is hydrated once, when it is first
+  sealed). Before this memo every judge pass re-hydrated every tab's sealed
+  cards, although a caption is the only judge-written value a card carries.
+  `chatLedger` is the chat build's memo of a session's goal-tree walk and
+  live roots, keyed on the parsed transcript's identity, the store's
+  identity and seams, `cleared.jsonl`'s identity and the warm-anchor table's
+  per-session revision: `hit` and `miss`, `bypass_live` (a build that merged
+  live atoms: the last turn's segments differ from the parse's),
+  `bypass_hold` (an armed rewind hold filters a store copy per build),
+  `bypass_empty` (a store with no nodes), `evict` (entries dropped for tabs
+  no longer shown) and the gauge `entries`. `chatFoldTasks` is the per-turn
+  memo of the transcript's task fold, keyed per session on each turn's atoms
+  list and fingerprint: `hit` and `miss` count turns served from the memo
+  against turns scanned, so a build of a working session with one moved turn
+  is one miss, plus the gauge `entries` (sessions held).
 - `judge`: `passes`, `ms_sum`, `ms_last`, `ms_mean` (wall time; a pass waits
   on model calls), `cpu_ms_sum` (CPU time of the judge tier threads and every
   per-session worker they run; the workers' share is `cpu_ms_workers`).
