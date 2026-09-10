@@ -36,7 +36,7 @@ import { reconcileTabOrder } from "./tab-order";
 import { writeViewOrder } from "./view-order";
 import { planStrip, readTabGroups, writeTabGroups, setSectionCollapsed, sectionRef, isPinned, setPinned, prunePinned, reachableFrom, headWords,
          followAdoption, reorderTagOrder, TABGROUPS_KEY, TABGROUPS_EVENT, type TabSection } from "./tab-groups";
-import { tabStateClass, tabDotClass, sectionPip, sectionPipMembers, sectionPipTitle } from "./tab-state";
+import { tabStateClass, tabDotClass, tabDotTitle, sectionPip, sectionPipMembers, sectionPipTitle } from "./tab-state";
 import { titleWithKey, chordOf, effectiveChord, loadOverrides } from "./keybindings";
 import { DEFAULT_CHORDS } from "./commands";
 import { NavHistory } from "./nav-history";
@@ -5362,8 +5362,12 @@ function applyTabStatus(tab: HTMLElement, s: { status: Partial<Status> }): ChipS
   // loader dot (the user 2026-08-10). The slot itself is there in EVERY state (T262g, the user 2026-09-08):
   // a dot that came and went with the state changed the tab's width, and with the strip at a wrap boundary
   // that added or removed a row and slid the transcript under the reader by a row's height (tabDotClass).
+  // Each pip explains itself on hover, the same titles the feed's DOT_TIP speaks (the user 2026-07-22; tab-state.ts
+  // tabDotTitle, beside the class rule); the hidden slot and the compacting bar say nothing.
   const dotCls = tabDotClass(st);
   if (dotCls) tab.appendChild(el("span", dotCls));
+  const dotTip = dotCls ? tabDotTitle(st) : null;
+  if (dotTip) (tab.lastElementChild as HTMLElement).title = dotTip;
   // compacting → a tiny animated compaction bar before the name (the tab gets no outline for this state,
   // so the bar IS the cue). A teal fill whose right edge slides left and loops — the same "compression"
   // motion as the statusline ctx-scan bar (.ctx-compress), miniaturised. Replaces the static ⇲ glyph the

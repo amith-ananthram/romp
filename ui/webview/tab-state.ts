@@ -96,3 +96,15 @@ export function tabDotClass(st: string | undefined | null): string | null {
   if (st === "opening") return "tab-dot opening";
   return "tab-dot none";
 }
+
+/** What a tab's dot says on hover (the user 2026-07-22: each pip explains itself, the same titles the feed's
+ *  DOT_TIP speaks), beside the class rule above so the two can never disagree on what a dot means: working,
+ *  awaitingBg, a missing state and opening have a title; the hidden slot ("tab-dot none") and the compacting
+ *  bar (no dot) say nothing. render.ts sets it on the slot tabDotClass classed. */
+export function tabDotTitle(st: string | undefined | null): string | null {
+  if (st === "working") return "working — a turn is running right now";
+  if (st === "awaitingBg") return "awaiting — idle, but background work it dispatched is still running";
+  if (!st) return "state unknown — romp couldn't read this session's live state";
+  if (st === "opening") return "opening — this session is still starting up";
+  return null;
+}
