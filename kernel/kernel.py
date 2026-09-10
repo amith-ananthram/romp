@@ -13758,11 +13758,12 @@ def _comments_frame(sid, tmux=None):
                 # deliberate re-send repeat earlier texts, which read as "already in the transcript" and hid a
                 # send the CLI still held (round-5 review). A `dropped` echo (the backend adjudicated the send
                 # LOST — a reconnect with it in flight; the popover shows "never delivered") owes nothing.
-                user_atoms = [a for tr in turns for a in (tr.get("atoms") or []) if a.get("type") == "user"]
+                user_atoms = [(float(a.get("t") or 0), set(_atom_user_texts(a)))       # (stamp, its texts), built once per frame
+                              for tr in turns for a in (tr.get("atoms") or []) if a.get("type") == "user"]
                 def _landed(e):
-                    et = sb.echo_text_key(e.get("_echo_text"))
+                    keys = set(sb.echo_keys(e.get("_echo_text")))     # the plain key and, for a slash send, its words
                     since = float(e.get("t") or 0)                     # the send's own stamp: the record the CLI writes for
-                    return any(et in _atom_user_texts(a) for a in user_atoms if float(a.get("t") or 0) >= since)   # it is at or after it
+                    return any(t >= since and not keys.isdisjoint(texts) for t, texts in user_atoms)   # it is at or after it
                 floor = _human_turn_floor({"turns": turns}) if turns else 0
                 # `_landed` on the atom: the backend's boot/spawn scan read the landing off the transcript
                 # itself (sdk_backend._mark_dropped_echoes) — delivered, so nothing is held for it
@@ -30112,7 +30113,14 @@ def _atom_user_texts(a):
     sdk_backend.prune_live floors no echo (2026-09-06; before that the floor was narrowed to path-bearing
     echoes, 2026-07-20), so a genuinely dropped send stays visible. Per-block EXACT match, never a
     substring test: a bundled block is the very string that was
-    echoed, so this retires the delivered nudge without ever guessing about containment."""
+    echoed, so this retires the delivered nudge without ever guessing about containment.
+
+    A slash-shaped text also yields its command key (sb.command_text_key: the tokens joined by single
+    spaces). The CLI records a slash or skill send as a wrapper record, which the event model reads as a
+    command atom whose text is "/name args" with one space, whatever the sender typed between the name and
+    the arguments; the typed echo meets that atom under the command key whatever whitespace it carried
+    (2026-09-10). The backend's _landed_texts adds the same key to the raw records its landing scan reads,
+    so the two agree."""
     if a.get("type") != "user":
         return ()
     out = []
@@ -30126,7 +30134,22 @@ def _atom_user_texts(a):
                 t = sb.echo_text_key(b.get("text") or "")
                 if t and t != joined:
                     out.append(t)
+    for t in list(out):
+        ck = sb.command_text_key(t)
+        if ck and ck not in out:
+            out.append(ck)
     return tuple(out)
+
+
+def _echo_landed_in(text, tx_texts):
+    """Is an echo's text among `tx_texts`, the keys _atom_user_texts built? Under either of its keys
+    (sb.echo_keys: the plain key, and the command key when the echo is a slash send, whose record parses
+    to "/name args", which equals the typed text only when the typed whitespace already matches; the sets
+    carry that form). The membership test every kernel-side echo reader uses: build_session's queued
+    count, _merge_live_atoms' display dedup and _tmux_echo_prune; the thread's held count (_comments_frame)
+    asks the same keys against per-atom sets it builds once per frame. The SDK backend's prune_live and its
+    landing scan ask the same keys on their side."""
+    return any(k in tx_texts for k in sb.echo_keys(text))
 
 
 # Optimistic input echo for TMUX sends. The SDK backend echoes a composer message instantly via its own
@@ -30161,8 +30184,7 @@ def _tmux_echo_prune(sid, tx_uuids, tx_texts):
         return
 
     def _landed(a):
-        et = sb.echo_text_key(a.get("_echo_text"))
-        return a.get("uuid") in tx_uuids or (et and et in tx_texts)
+        return a.get("uuid") in tx_uuids or _echo_landed_in(a.get("_echo_text"), tx_texts)
     for k in [k for k, a in d.items() if _landed(a)]:
         d.pop(k, None)
     if not d:
@@ -30372,7 +30394,7 @@ def _merge_live_atoms(session, sid, shown_texts=()):
     # scan read the record off the transcript — the prune just retired it, and painting it once more would
     # show a delivered message as a pending bubble for one build)
     fresh = [a for a in live if a.get("uuid") not in tx_uuids
-             and not (a.get("_echo_text") and (a.get("_landed") or sb.echo_text_key(a["_echo_text"]) in hide))]
+             and not (a.get("_echo_text") and (a.get("_landed") or _echo_landed_in(a["_echo_text"], hide)))]
     if not fresh:
         return session
     # Reopen the turn ONLY for genuine live ASSISTANT work (a streaming reply), never for a lone input echo.
@@ -30768,7 +30790,7 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
         echo_floor = _human_turn_floor(parsed)
         for a in be.live_atoms(sid):
             et = sb.echo_text_key(a.get("_echo_text"))
-            if et and et not in already and et not in tx_user and not _echo_overtaken(a, echo_floor):
+            if et and et not in already and not _echo_landed_in(et, tx_user) and not _echo_overtaken(a, echo_floor):
                 queued = queued + [et]; already.add(et)
     session = parsed if path_override else _merge_live_atoms(parsed, sid, shown_texts=queued)
     events, by_tool = [], {}                  # by_tool: tool_use_id → its tool event (fill output later)
@@ -34210,13 +34232,14 @@ def build_feed(now, tmux=None):
             # clear its store-backed flag. Cards move on new information, never on activity boundaries.
             #
             # NO ECHO ARM (the user 2026-07-22): the flip used to ALSO ride the backend send-echo
-            # (echo_send_t), for a sub-second flip before the turn's atom lands in the cached parse. But a
-            # composer slash-command echo never retires — its expanded transcript form ("<command-name>…")
-            # doesn't text-match the raw echo, and the parser skips it from the human floor — so the stale
-            # echo pinned rejudging TRUE forever: the card sat in Working, idle, invisible to the nudge
-            # (which reads the still-blocked store). The latch arms only off the PARSE's plain-reply turn
-            # (a real transcript atom, never the echo), and the watermark clear is judge-driven, so the
-            # stranded-echo failure stays impossible.
+            # (echo_send_t), for a sub-second flip before the turn's atom lands in the cached parse. At the
+            # time a composer slash-command echo never retired (its transcript form is the "<command-name>"
+            # wrapper, which did not text-match the raw echo; since 2026-09-10 the echo lands under
+            # sb.command_text_key, see _echo_landed_in), and the parser skips it from the human floor, so
+            # the stale echo pinned rejudging TRUE forever: the card sat in Working, idle, invisible to the
+            # nudge (which reads the still-blocked store). The latch arms only off the PARSE's plain-reply
+            # turn (a real transcript atom, never the echo), and the watermark clear is judge-driven, so
+            # the stranded-echo failure stays impossible whatever an echo does.
             # The watermark that bounds the latch is the one covering THE BLOCK THE CARD SURFACES —
             # a descendant's, when the block rolled up (_block_check_floor above; the user 2026-07-31).
             _bct = _block_check_floor(nid)

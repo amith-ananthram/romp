@@ -283,9 +283,14 @@ reads the whole file. The found verdict is recorded on the echo (`_landed`), and
 `prune_live` and the chat merge retire the echo on it without a text match, so a
 found echo always has an exit and a later boot never re-scans it. Every by-text
 comparison of an echo against a record (the guard's scan, `prune_live`'s retire, the
-kernel's `_atom_user_texts` and its folds, and the tmux echo's prune
-`_tmux_echo_prune`) uses one key, `echo_text_key` in `session_backend.py`: outer
-whitespace stripped, nothing else.
+kernel's `_atom_user_texts` and its folds, the fed-copy pairing `qids_for_landing`, and
+the tmux echo's prune `_tmux_echo_prune`) uses the two keys in `session_backend.py`:
+`echo_text_key` (outer whitespace stripped, nothing else) and, for a slash send,
+`command_text_key` (the tokens joined by single spaces). The second exists because the
+CLI records a slash or skill command as its `<command-name>` wrapper, which parses to
+`/name args` with one space whatever the sender typed between the name and the
+arguments; both sides key a slash-shaped text both ways, so the scan and the prune
+agree on the same records.
 
 **The ledger is a table of contents** (pure projection of captions + archive):
 - top: the archiver's one-sentence headline for the session,
