@@ -41,8 +41,9 @@ test("an undelivered bubble is marked and carries the note, not just a plain sen
 
 test("both actions ride the body delegate (click-safe), never a per-render listener", () => {
   // the buttons carry data-act; the handlers live in the delegate map next to qx/nudgetoggle
-  assert.match(RENDER, /re\.dataset\.act = "echorestore"/);
-  assert.match(RENDER, /dx\.dataset\.act = "echodismiss"/);
+  // 2026-09-08 (the notice-vocabulary pass): both are notice word buttons (noticeAct → data-act only)
+  assert.match(RENDER, /const re = noticeAct\("copy to composer", "echorestore",/);
+  assert.match(RENDER, /const dx = noticeAct\("dismiss", "echodismiss",/);
   assert.match(RENDER, /echorestore: \(el\) => \{/);
   assert.match(RENDER, /echodismiss: \(el\) => \{/);
 });
@@ -68,8 +69,11 @@ test("restore is offered only for the user's own words, dismiss for every flavor
 test("the loss treatment exists in CSS: dashed red-edged bubble + always-visible note", () => {
   assert.match(CSS, /\.user-bubble\.undelivered-bubble, \.romp-bubble\.undelivered-bubble \{/);
   assert.match(CSS, /\.undelivered-note \{[^}]*align-self: flex-end/);
-  assert.match(CSS, /\.undelivered-label \{[^}]*errorForeground/);
-  assert.match(CSS, /\.undelivered-act \{/);
+  // 2026-09-08: the label is the --err token (the light theme has its own); the buttons are .notice-act; the bubble
+  // keeps its SOLID --you fill (the 10% wash put white text on a tint — unreadable on cream)
+  assert.match(CSS, /\.undelivered-label \{[^}]*color: var\(--err\)/);
+  assert.match(CSS, /\.notice-act \{/);
+  assert.doesNotMatch(CSS, /\.undelivered-act|\.user-bubble\.undelivered-bubble \{ background/);
   // the note is NOT hover-gated like .msg-edit — a loss notice is not a hover secret
   assert.doesNotMatch(CSS, /\.undelivered-note \{[^}]*opacity: 0/);
 });

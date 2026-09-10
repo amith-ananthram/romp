@@ -12,24 +12,26 @@ import * as path from "node:path";
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
 
-test("renderCompact builds a 'compact' notice card dispatched off kind:'compact'", () => {
+test("renderCompact builds a COMPACTION notice dispatched off kind:'compact'", () => {
+  // 2026-09-08 (the notice-vocabulary pass): the ONE builder, notice(spec) — source "compaction", the chevrons-in
+  // glyph, the compact severity on the rail; the gist is the plain fact, the meta carries trigger + token win
   assert.match(RENDER, /ev\.kind === "compact"\) return renderCompact\(ev\)/);
-  assert.match(RENDER, /noticeCard\(\{ variant: "compact", chip: "compacted"/);
-  assert.match(RENDER, /const head = "Context compacted"/);
-  // the compact event carries the boundary metadata the head notes
+  assert.match(RENDER, /notice\(\{ src: "compaction", glyph: "compaction", sev: "compact", gist: "Context compacted",/);
   assert.match(RENDER, /kind: "compact"; trigger\?: string; preTokens\?: number; postTokens\?: number;/);
 });
 
-test("the head's muted meta names the trigger + the token win (before → after)", () => {
+test("the head's meta names the trigger + the token win (before → after)", () => {
   assert.match(RENDER, /if \(ev\.trigger === "auto"\) bits\.push\("auto"\);/);
   assert.match(RENDER, /else if \(ev\.trigger === "manual"\) bits\.push\("manual"\);/);
   assert.match(RENDER, /\$\{compactTokens\(ev\.preTokens\)\} → \$\{compactTokens\(ev\.postTokens\)\}/);
-  assert.match(RENDER, /const head = "Context compacted" \+ \(bits\.length \? " · " \+ bits\.join\(" · "\) : ""\)/);
+  // 2026-09-08: the bits ride the builder's META slot (0.82em, tabular), no longer glued onto the head string
+  assert.match(RENDER, /meta: bits\.join\(" · "\) \|\| undefined, body: summary \? body : null,/);
 });
 
-test("it wears the compaction TEAL as its notice-card variant accent — a system event, not a bespoke line", () => {
-  assert.match(CSS, /\.notice-card-compact \{[^}]*border-left-color: var\(--st-compacting-bg/);
-  assert.match(CSS, /\.notice-chip-compact \{[^}]*color: var\(--st-compacting-bg/);
+test("it wears the compaction TEAL as its severity — rail + dot, never text (2026-09-08)", () => {
+  // the teal sits under 3:1 as text on the light theme's cream; the severity classes put it on the rail and dot only
+  assert.match(CSS, /\.notice-sev-compact \{ --notice-rail: var\(--st-compacting-bg\); --notice-dot: var\(--st-compacting-bg\); \}/);
+  assert.doesNotMatch(CSS, /\.notice-card-compact|\.notice-chip-compact/);
 });
 
 // executed: mirror compactTokens' logic to guard its intent (compact + human-readable)

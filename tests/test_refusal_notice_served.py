@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """T279: a safeguards refusal the CLI retried on a fallback model renders in the served chat pane as a
-SOURCED notice in the shared notice-card grammar, never as the user's bubble.
+SOURCED notice through the one notice builder (render.ts notice()), never as the user's bubble.
 
 The executed guard drives the real /chat page against a hermetic kernel whose one session's transcript
 carries the refusal turn as the CLI writes it (the refused call's assistant record with a fallback block,
 the fallback model's reply, the system/model_refusal_fallback record with the category, the API's
 explanation and the scope). Asserted on the page: one notice card in the refusal variant with the
-"safeguards" chip; a head naming both models (prettified) and the category; the fold collapsed by default,
+"safeguards" source label; a gist naming both models (prettified) and the category; the fold collapsed by default,
 holding the API's explanation and the CLI's own line, opening on a head click; the notice's own rail dot;
 the notice placed before the fallback model's reply; and the notice text in NO user bubble. Screenshots
 when T279_SHOTS names a directory. Skips LOUDLY without the extension deps or a Playwright browser (CI
@@ -66,7 +66,7 @@ catch (e) {
     text: (document.body.innerText || "").replace(/\s+/g, " ").slice(0, 200) }));
   console.error("no user turn rendered: " + JSON.stringify(st)); process.exit(1);
 }
-try { await page.waitForSelector(".notice-card-refusal", { timeout: 20000 }); }
+try { await page.waitForSelector('.notice-head[data-nkey^="notice:mswap:"]', { timeout: 20000 }); }
 catch (e) {
   const st = await page.evaluate(() => ({ turns: Array.from(document.querySelectorAll(".turn")).map((t) => t.className.slice(5, 60)),
     text: (document.body.innerText || "").replace(/\s+/g, " ").slice(0, 400) }));
@@ -74,20 +74,22 @@ catch (e) {
 }
 await page.waitForTimeout(400);
 const measure = () => page.evaluate((reply) => {
-  const cards = Array.from(document.querySelectorAll(".notice-card-refusal"));
+  // the notice is keyed by the record's uuid (openFolds "notice:mswap:<uuid>"): that key is its stable hook
+  const cards = Array.from(document.querySelectorAll('.notice-head[data-nkey^="notice:mswap:"]')).map((h) => h.closest(".notice"));
   const card = cards[0];
   const turn = card.closest(".turn");
   const turns = Array.from(document.querySelectorAll(".turn"));
   const replyTurn = turns.find((t) => !t.classList.contains("turn-user") && (t.textContent || "").includes(reply)) || null;
   return {
     cards: cards.length,
-    chip: ((card.querySelector(".notice-chip") || {}).textContent || "").trim(),
-    head: ((card.querySelector(".notice-head-text") || {}).textContent || "").trim(),
+    src: ((card.querySelector(".notice-src") || {}).textContent || "").trim(),
+    head: ((card.querySelector(".notice-gist") || {}).textContent || "").trim(),
     open: card.classList.contains("notice-open"),
     collapsible: card.classList.contains("notice-collapsible"),
     body: ((card.querySelector(".notice-body") || {}).textContent || "").replace(/\s+/g, " ").trim(),
     bodyVisible: (() => { const b = card.querySelector(".notice-body"); return b ? b.getBoundingClientRect().height > 0 : false; })(),
-    dot: !!turn.querySelector(".notice-dot-refusal"),
+    dot: !!turn.querySelector(".dot.notice-dot"),
+    warn: turn.classList.contains("notice-sev-warn"),
     turnClasses: turn.className,
     idxNotice: turns.indexOf(turn), idxReply: replyTurn ? turns.indexOf(replyTurn) : -1,
     userTexts: Array.from(document.querySelectorAll(".turn.turn-user")).map((t) => (t.textContent || "").replace(/\s+/g, " ").trim()),
@@ -97,7 +99,7 @@ const measure = () => page.evaluate((reply) => {
 const closed = await measure();
 const shot = async (name) => { if (!cfg.shots) return; fs.mkdirSync(cfg.shots, { recursive: true }); await page.screenshot({ path: cfg.shots + "/t279-refusal-notice" + name, fullPage: false }); };
 await shot(".png");
-await page.click(".notice-card-refusal .notice-head");
+await page.click('.notice-head[data-nkey^="notice:mswap:"]');
 await page.waitForTimeout(300);
 const opened = await measure();
 await shot("-open.png");
@@ -216,7 +218,7 @@ class ServedRefusalNotice(unittest.TestCase):
         r = json.loads(line[len("RESULT:"):])
         c, o = r["closed"], r["opened"]
         self.assertEqual(c["cards"], 1, "one notice card for the one record: %r" % c)
-        self.assertEqual(c["chip"], "safeguards", "the chip is the source: %r" % c)
+        self.assertEqual(c["src"], "safeguards", "the source label: %r" % c)
         for part in ("Fable 5", "Opus 5", "(%s)" % CATEGORY, "safeguards"):
             self.assertIn(part, c["head"], "the head: both models prettified and the category: %r" % c)
         self.assertNotIn("this reply came from", c["head"], "session scope: the session's model was swapped")
@@ -225,7 +227,8 @@ class ServedRefusalNotice(unittest.TestCase):
         self.assertIn("Fable 5 → Opus 5", c["body"], "the fold restates the swap, so a truncated head is recoverable: %r" % c)
         self.assertIn(EXPLANATION, c["body"], "the fold holds the API's explanation: %r" % c)
         self.assertIn(NOTICE, c["body"], "and the CLI's own line, verbatim: %r" % c)
-        self.assertTrue(c["dot"], "the notice's own rail dot, in the refusal variant: %r" % c)
+        self.assertTrue(c["dot"], "the notice's own rail dot: %r" % c)
+        self.assertTrue(c["warn"], "the warn severity carries the heads-up amber (rail + dot): %r" % c)
         self.assertIn("turn-notice", c["turnClasses"])
         self.assertEqual(c["slimLines"], 0, "the retired slim rail line is gone")
         self.assertGreaterEqual(c["idxReply"], 0, "the fallback model's reply is on the page: %r" % c)

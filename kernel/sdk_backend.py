@@ -22,6 +22,7 @@ import difflib
 import errno
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -2136,6 +2137,11 @@ class ApiHealth:
         self._last_state: dict = {}
         self._transitions: deque = deque(maxlen=API_HEALTH_TRANSITIONS_KEEP)   # the global tail, newest last
         self._by_bucket: dict = {}       # bucket key -> deque(maxlen=API_HEALTH_TRANSITIONS_KEEP): that bucket's own tail
+        # the boot's stamp in the signal: boot_at truncated to the millisecond, or one millisecond past the newest
+        # restored transition when that is not before it. Set by _seed; served as the payload's bootAt, and the
+        # stateSince of every bucket the boot seeded and the t of every row the boot filed carry the same number
+        # (a route stamping its own number would be a second one whenever the clamp fired)
+        self.boot_stamp = None
         self._seed(time.time() if boot_at is None else float(boot_at))
 
     # ---- labels ----
@@ -2273,17 +2279,24 @@ class ApiHealth:
 
     @staticmethod
     def _row_ok(r) -> bool:
-        """A persisted transition row: a dict with a non-empty string `bucket` and `to` and a numeric `t`."""
+        """A persisted transition row: a dict with a non-empty string `bucket` and `to` and a finite numeric `t`.
+        A `t` that is missing, null, a bool, a string, not finite, or an int no float can hold fails the row, so
+        the seed's max over the restored stamps never meets one (`float(r.get("t") or 0)` passed a null t, the max
+        then raised on it, and the outer guard dropped EVERY restored row and bucket, not the one; math.isfinite
+        converts an int to float first and RAISES OverflowError past about 309 digits instead of answering, and
+        json.loads reads a 400-digit integer literal as such an int, so the raise would leave this check for the
+        same outer guard, with the same loss)."""
         if not isinstance(r, dict):
             return False
-        b, to = r.get("bucket"), r.get("to")
+        b, to, t = r.get("bucket"), r.get("to"), r.get("t")
         if not (isinstance(b, str) and b and isinstance(to, str) and to):
             return False
-        try:
-            float(r.get("t") or 0)
-        except (TypeError, ValueError):
+        if not isinstance(t, (int, float)) or isinstance(t, bool):
             return False
-        return True
+        try:
+            return math.isfinite(t)
+        except OverflowError:       # an int beyond float range: not a stamp float(t) can read
+            return False
 
     def _seed(self, boot_at: float):
         """Restore the per-bucket (state, stateSince, why, evidence) and the transition tail from
@@ -2293,9 +2306,23 @@ class ApiHealth:
         list is continuous across the restart and the first read with enough evidence records
         `unknown -> <state>` after it. What the boot filed is written.
 
+        The seed is stamped at `boot_at` truncated to the millisecond (math.floor, never round: a start at
+        X.9996 would round to (X+1).000 while /version's `started` is int(X.9996) = X), or one millisecond past
+        the newest transition the file carries when that is not before it: a transition the previous kernel
+        filed after this one's start (the two overlapped, or the clock stepped) would otherwise sort ABOVE
+        the restart row in the tail and read as the current state, with the head saying unknown since the
+        boot. The clamp is logged once. The stamp is kept as `boot_stamp` and served as the payload's bootAt,
+        so bootAt, the stateSince of every bucket the boot seeded and the restart rows are one number in
+        every case, clamp or not.
+
         Never raises: this runs inside SdkBackend.__init__, and an exception here pinned the SDK backend
         unavailable for the kernel's whole life. A row that is not JSON, lacks its fields, or carries a
-        non-numeric `t` or a non-string `bucket` is skipped; the skips are logged once."""
+        missing, null, non-numeric or non-finite `t` (an int past float range included) or a non-string
+        `bucket` is skipped and counted; the skips are logged once, and the other rows are kept."""
+        # floor, so int(boot_stamp) == int(boot_at) (/version's started) whenever nothing is clamped: a float one step
+        # below a whole second multiplies to more than half an ulp below it, so the floor never lands on the next second
+        base = math.floor(boot_at * 1000) / 1000.0
+        self.boot_stamp = base
         try:
             rows, per, recs, bad = [], {}, {}, 0
             try:
@@ -2329,6 +2356,17 @@ class ApiHealth:
                         bad += 1
             if bad and self._log:
                 self._log("api-health: %d malformed row(s) skipped at boot (%s)" % (bad, API_HEALTH_STATE_FILE))
+            # one stamp, at the tail's millisecond precision, for the restart rows, the seeded since and the payload's
+            # bootAt: the boot itself, or one millisecond past the newest restored transition when that is not before
+            # the boot (every row passed _row_ok, so every t here is a finite number)
+            at = base
+            newest = max((float(r["t"]) for rs in [rows] + list(per.values()) for r in rs), default=None)
+            if newest is not None and newest >= at:
+                if self._log:
+                    self._log("api-health: the state file's newest transition (%.3f) is not before this boot (%.3f): "
+                              "seeding at %.3f so the restart row stays the newest" % (newest, at, newest + 0.001))
+                at = round(newest + 0.001, 3)
+            self.boot_stamp = at
             filed = False
             with self._lock:
                 self._transitions.extend(rows)
@@ -2340,11 +2378,11 @@ class ApiHealth:
                     fam = rec["family"] if isinstance(rec["family"], str) and rec["family"] else f
                     ev = {"window": None, "rate429": None, "rate5xx": None, "n": 0}
                     if rec["state"] != "unknown":
-                        self._file_locked({"t": round(boot_at, 3), "bucket": key, "auth": auth, "family": fam,
+                        self._file_locked({"t": at, "bucket": key, "auth": auth, "family": fam,
                                            "from": rec["state"], "to": "unknown", "why": API_HEALTH_RESTART_WHY,
                                            "evidence": ev})
                         filed = True
-                    self._last_state[key] = {"state": "unknown", "since": boot_at, "why": API_HEALTH_RESTART_WHY,
+                    self._last_state[key] = {"state": "unknown", "since": at, "why": API_HEALTH_RESTART_WHY,
                                              "evidence": ev, "auth": auth, "family": fam}
                 if filed:
                     self._write_state_locked()
@@ -2352,6 +2390,7 @@ class ApiHealth:
             if self._log:
                 self._log("api-health: state file unreadable (%s) — starting with no history" % e)
             self._last_state, self._transitions, self._by_bucket = {}, deque(maxlen=API_HEALTH_TRANSITIONS_KEEP), {}
+            self.boot_stamp = base           # nothing restored, so nothing to clamp past
 
     def _file_locked(self, row: dict):
         """Record one transition in both tails: the global one and its bucket's own. The bucket's tail is
@@ -2394,8 +2433,9 @@ class ApiHealth:
 
     # ---- the read ----
     def snapshot(self, now: float | None = None, uptime_s=None) -> dict:
-        """The /api-health payload minus boot identity (the kernel stamps bootId/bootAt from /version's
-        globals). Windows and states are computed here, from the ring and the last persisted
+        """The /api-health payload minus `bootId` (the kernel stamps that from /version's globals; `bootAt`
+        is this aggregator's `boot_stamp`, the number every seeded stateSince and every restart row
+        carry). Windows and states are computed here, from the ring and the last persisted
         (state, stateSince), at read time; the transitions a read finds are the events that rewrite
         the state file. Every KNOWN bucket is derived — one in the ring, or one the state file remembers
         whose events have all aged out: absent from the ring is `unknown`, filed at the read that found
@@ -2457,7 +2497,8 @@ class ApiHealth:
             if filed:
                 self._write_state_locked()       # once per read, after every bucket's record is current
             transitions = list(self._transitions)
-        return {"schema": API_HEALTH_SCHEMA, "asOf": round(now, 3), "uptimeS": None if uptime_s is None else round(uptime_s, 1),
+        return {"schema": API_HEALTH_SCHEMA, "asOf": round(now, 3), "bootAt": self.boot_stamp,
+                "uptimeS": None if uptime_s is None else round(uptime_s, 1),
                 "complete": None if uptime_s is None else bool(uptime_s >= max(cfg["windows"])),
                 "seq": seq, "lastEventAt": None if last_at is None else round(last_at, 3),
                 "rate429Basis": "attempts",
@@ -2523,7 +2564,14 @@ BOOT_RESUME_NUDGE = (
     "shows '[Request interrupted by user]', that record came from this cut, not from the user: nobody "
     "asked you to stop. Re-read the tail of the conversation and pick the work back up where it "
     "stopped, without asking whether to continue. Any messages queued before the restart follow "
-    "this one.")
+    "this one.<!-- romp-gist: resumed after a romp restart cut its turn -->")
+# Every [romp] mechanics notice carries a <!-- romp-gist --> marker (2026-09-08): the ONE-LINE, user-facing
+# head the chat shows for it. The prose is written to the AGENT ("Re-read the tail… pick the work back
+# up"), and its first sentence read wrong as a head in the transcript; the kernel lifts the gist beside
+# the rompSystem flag (build_session) and the chat folds the agent-facing text beneath it. Appended on these
+# constants (the rename ping is detected by its leading head, RENAME_PING_HEAD, and the interrupt causes by
+# their leading sentences, kernel INTR_RESTART_SIG / INTR_CRASH_SIG); task_death_notice carries its gist in
+# the leading marker run instead, where its voice test wants every marker. The lift reads either position.
 
 # T214: the restart also killed a QUESTION the session had up — the ask future lived only in the
 # old process, so the user's answer (often flushed by the reconnecting page) had nowhere to land,
@@ -2532,7 +2580,8 @@ BOOT_RESUME_NUDGE = (
 ASK_DIED_NOTICE = (
     "<!-- romp-injected --><!-- romp-system -->[romp] The restart also killed a question this "
     "session had up awaiting the user's answer — it was never delivered, and any answer they sent "
-    "could not land. Ask the question again so they can answer it.")
+    "could not land. Ask the question again so they can answer it."
+    "<!-- romp-gist: a question it had up was lost in the restart -->")
 
 # Staggered boot-resume (the user 2026-07-20): spawning every reconciled session's CLI at once
 # detonated a fleet-wide CPU storm — each resumed claude burns ~a full core catching up on its
@@ -2561,7 +2610,8 @@ CRASH_RESUME_NUDGE = (
     "(killed or crashed); the session has been resumed with its history intact. If the conversation "
     "tail shows '[Request interrupted by user]', that record came from this cut, not from the user: "
     "nobody asked you to stop. Re-read the tail of the conversation and pick the work back up where "
-    "it stopped, without asking whether to continue.")
+    "it stopped, without asking whether to continue."
+    "<!-- romp-gist: resumed after its process died mid-turn -->")
 
 
 # A CLI that cannot even START says so on the way out — and the ONE cause that reliably does this is the
@@ -2718,7 +2768,11 @@ def task_death_notice(tasks: list, cause: str = "a restart or crash") -> str:
     n = len(tasks)
     descs = "; ".join(d for d in ((t.get("desc") or "").strip() for t in tasks[:4]) if d)
     one = n == 1
-    return ("<!-- romp-injected --><!-- romp-system -->[romp] %d background task%s you had running %s "
+    # the gist marker rides in the LEADING marker run here (this notice's voice test wants every marker ahead of
+    # the prose, one line after it); the restart constants above append theirs — the lift reads either position
+    return ("<!-- romp-injected --><!-- romp-system --><!-- romp-gist: %d background task%s cut off when the process ended -->"
+            % (n, "" if one else "s")
+            + "[romp] %d background task%s you had running %s "
             "cut off when the claude process that started %s ended (%s)%s. "
             "%s completion notification%s will never arrive. Check whether %s still running before "
             "relaunching %s; if %s needed, carry on."
@@ -7290,7 +7344,7 @@ class SdkBackend:
     def __init__(self, state_dir, claude_bin: str, notify, poke=None, push=None,
                  push_session=None,
                  mcp_config: str | None = None, append_prompt_path: str | None = None,
-                 log=None, reconcile: bool = False):
+                 log=None, reconcile: bool = False, boot_at=None):
         self.state_dir = Path(state_dir)
         self.claude_bin = claude_bin
         self.thread_wake_model = None      # kernel-installed: model_id -> replacement or None, consulted
@@ -7366,7 +7420,11 @@ class SdkBackend:
         #                                     after startup_auth_env's claim above, so it names what sessions inherit
         # The /api-health aggregator (one ring, one lock; see ApiHealth). Fed from _on_message on each
         # session's thread, read by the kernel's route; the salt is minted lazily at the first label.
-        self.api_health = ApiHealth(self.state_dir, log=self._log)
+        # Seeded as of `boot_at`, the kernel's own start when the kernel passes it (the aggregator truncates
+        # it to the millisecond and serves the stamp as the payload's bootAt), else this construction's
+        # clock: the two run seconds apart, and a hover head naming one for a bucket the boot seeded while
+        # the tail's divider named the other would name two different minutes for one boot.
+        self.api_health = ApiHealth(self.state_dir, log=self._log, boot_at=boot_at)
         # The dependency check, done ONCE here: absent → every session this backend owns reports the same
         # launch error (launch_error), instead of each one silently dying at its own lazy import.
         self._sdk_missing = not sdk_importable()
@@ -8725,7 +8783,8 @@ class SdkBackend:
     def api_health_snapshot(self, now: float | None = None, uptime_s=None) -> dict:
         """The /api-health payload (ApiHealth.snapshot) plus what only the backend knows: how many SDK
         sessions it holds and how many are in a retry storm right now — the cheapest direct thrash
-        indicator, independent of the ratio thresholds. Boot identity is the kernel's to stamp."""
+        indicator, independent of the ratio thresholds. `bootId` is the kernel's to stamp; `bootAt` is
+        the aggregator's own boot stamp, already in the payload."""
         out = self.api_health.snapshot(now, uptime_s=uptime_s)
         with self._lock:
             sess = list(self.sessions.values())
@@ -11595,7 +11654,8 @@ class SdkBackend:
         # its pre-turn record, the very fold this gate guards. The note is spent only AFTER the
         # ping is provably queued; a kernel death between the two re-pings at a later settle
         # (a repeat of a true fact) instead of losing the note.
-        if not s.enqueue_if_empty("<!-- romp-injected --><!-- romp-system -->" + RENAME_NUDGE % note):
+        if not s.enqueue_if_empty("<!-- romp-injected --><!-- romp-system -->" + RENAME_NUDGE % note
+                                  + "<!-- romp-gist: renamed to '%s' -->" % note):
             return False                   # a queued turn would share the pre-turn window — hold the note
         self._update_reg(s.sid, renameNote=None)
         return True

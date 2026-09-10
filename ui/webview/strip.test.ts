@@ -28,11 +28,13 @@ test("usageColor is theme-aware (ctx-color.ts): with no body classes = CLASSIC =
   assert.equal(usageColor(90), "#c0392b");
 });
 
-test("fmtReset renders d/h/m compactly and 'soon' at rollover", () => {
+test("fmtReset is 'soon' at rollover, else the ONE duration format (duration.ts, 2026-09-08)", () => {
+  // the notice audit counted six span formats across the panes; every one rides durLabel now — the two-digit
+  // minor unit keeps a ticking value from jittering, and days show where the old strip format did
   assert.equal(fmtReset(10_000, 10_100), "soon");
-  assert.equal(fmtReset(10_000 + 5 * 60, 10_000), "5m");
-  assert.equal(fmtReset(10_000 + 2 * 3600 + 5 * 60, 10_000), "2h 5m");
-  assert.equal(fmtReset(10_000 + 86400 + 3600, 10_000), "1d 1h 0m");
+  assert.equal(fmtReset(10_000 + 5 * 60, 10_000), "5m 0s");
+  assert.equal(fmtReset(10_000 + 2 * 3600 + 5 * 60, 10_000), "2h 05m");
+  assert.equal(fmtReset(10_000 + 86400 + 3600, 10_000), "1d 01h");
 });
 
 test("usageWindows keeps only reported windows, clamps, and computes pace", () => {
@@ -45,7 +47,7 @@ test("usageWindows keeps only reported windows, clamps, and computes pace", () =
   assert.deepEqual(ws.map((w) => w.short), ["5h", "F5"], "each window carries its compressed tag");
   assert.equal(ws[0].pct, 91);
   assert.equal(ws[0].elapsedPct, 80);
-  assert.match(ws[0].title, /5 hours — used 91% · 80% through the window · resets in 1h 0m/);
+  assert.match(ws[0].title, /5 hours — used 91% · 80% through the window · resets in 1h 00m/);   // the one duration format (2026-09-08)
   assert.equal(ws[1].pct, 100);
   assert.equal(ws[1].elapsedPct, 0);
 });

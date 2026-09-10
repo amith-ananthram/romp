@@ -7,6 +7,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
+const BLOCK = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "code-block.ts"), "utf8");   // the rows' home, shared with the file viewer
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
 
 test("markdown code blocks wrap instead of scrolling sideways", () => {
@@ -19,9 +20,17 @@ test("wrapped code carries a subtle (faint) line-number gutter", () => {
   assert.match(CSS, /pre code \.cl::before \{[^}]*counter-increment: ln/);      // each .cl draws its number
   assert.match(CSS, /pre code \.cl::before \{[^}]*opacity: 0\.3/);              // "incognito" — faint
   assert.match(CSS, /pre code \.ct \{[^}]*white-space: pre-wrap/);             // the content wraps
-  // render splits each highlighted line into <span class=cl><span class=ct>…, re-opening straddling spans
-  assert.match(RENDER, /function wrapCodeLines/);
-  assert.match(RENDER, /class="cl"><span class="ct"/);
+  // the shared module splits each highlighted line into <span class=cl><span class=ct>…, re-opening straddling
+  // spans (code-block.test.ts executes the walk); the chat calls it for every fence when line numbers are on
+  assert.match(BLOCK, /export function wrapCodeLines/);
+  assert.match(BLOCK, /class="cl"><span class="ct"/);
+  assert.match(RENDER, /if \(lineNos\) wrapCodeLines\(code\);/);
+  assert.doesNotMatch(RENDER, /function wrapCodeLines/, "render.ts keeps no copy of its own");
+  // the gutter's basis grows with the fence's digit count (wrapCodeLines writes --ln-digits), its line box is never
+  // taller than the text's, and a blank row keeps the line-height through the word joiner in its empty cell
+  assert.match(CSS, /pre code \.cl::before \{[^}]*flex: 0 0 max\(2\.5em, calc\(var\(--ln-digits, 0\) \* 1ch \+ 0\.05em\)\)/);
+  assert.match(CSS, /pre code \.cl::before \{[^}]*line-height: 1;/);
+  assert.match(CSS, /pre code \.ct::before \{ content: "\\2060"; \}/);
 });
 
 test("Edit diffs render a two-column line-number gutter (the user 2026-06-29)", () => {

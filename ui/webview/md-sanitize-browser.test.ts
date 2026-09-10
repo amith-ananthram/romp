@@ -345,9 +345,11 @@ test("content wider than the column: an inline svg, canvas or video shrinks to t
       const box = (sel: string) => { const r = (md.querySelector(sel) as HTMLElement).getBoundingClientRect(); return { width: r.width, height: r.height }; };
       const table = md.querySelector(".fx-table") as HTMLElement;
       table.scrollLeft = 200;
+      const tr = table.getBoundingClientRect(), br = body.getBoundingClientRect();
       return {
         column, svg: box(".fx-svg"), canvas: box(".fx-canvas"), video: box(".fx-video"),
         tableClient: table.clientWidth, tableScroll: table.scrollWidth, tableOverflowX: getComputedStyle(table).overflowX, tableScrolled: table.scrollLeft,
+        tableInset: { left: tr.left - br.left, right: br.right - tr.right },
         cellBorders: getComputedStyle(md.querySelector(".fx-table td") as HTMLElement).borderLeftWidth,
         bodyClient: body.clientWidth, bodyScroll: body.scrollWidth,
       };
@@ -358,7 +360,11 @@ test("content wider than the column: an inline svg, canvas or video shrinks to t
     assert.ok(facts.canvas.width <= facts.column + 0.5 && facts.canvas.width > facts.column - 2, "the canvas fills the column, no wider: " + JSON.stringify(facts.canvas));
     near(facts.canvas.height, facts.canvas.width * 100 / 2500, "the canvas keeps its own ratio", 1.5);
     assert.ok(facts.video.width <= facts.column + 0.5, "the video is no wider than the column: " + JSON.stringify(facts.video));
-    assert.ok(facts.tableClient <= facts.column + 0.5, "the table's box is no wider than the column: " + facts.tableClient);
+    // a table of the page's own (a direct child of the root) may grow out of the prose column, evenly into both gutters, but
+    // never past the body's content width less the root's 18px inset (`.fileview-md > table`, both sheets; the cap is the
+    // column itself until the viewer's width observer has reported), so its box stays inside the body and nothing is clipped
+    assert.ok(facts.tableClient >= facts.column - 0.5 && facts.tableClient <= facts.bodyClient - 36 + 0.5, "the table's box is the column or wider, up to the body less the inset: " + facts.tableClient + " (column " + facts.column + ", body " + facts.bodyClient + ")");
+    assert.ok(facts.tableInset.left >= 18 - 0.5 && facts.tableInset.right >= 18 - 0.5, "the table's box keeps the root's inset on both sides of the body: " + JSON.stringify(facts.tableInset));
     assert.ok(facts.tableScroll > facts.tableClient + 100, "the table's content runs past its box: " + facts.tableScroll + " vs " + facts.tableClient);
     assert.equal(facts.tableOverflowX, "auto", "and the table scrolls it");
     assert.ok(facts.tableScrolled > 0, "the table did scroll: " + facts.tableScrolled);

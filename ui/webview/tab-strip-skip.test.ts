@@ -45,7 +45,7 @@ test("every input the strip renders is in the signature", () => {
   // `unions` is the tag unions the filter chips render (the same viewTagUnion(effViews()) the plan read).
   for (const needle of [
     "activeId", "peekId", "ids", "visibleIds", "tabInView(activeId)", "plan.items",
-    "settings.tabCtx", "settings.theme", "settings.colormap", 'titleWithKey("Open a session", "session.new")',
+    "settings.tabCtx", "settings.stripGroupRows", "settings.theme", "settings.colormap", 'titleWithKey("Open a session", "session.new")',
     'surfaceLens(effViews(), "chat")', "unions",
     "m?.name", "m?.color?.bg", "m?.color?.fg",
     "s.name", "s.color?.bg", "s.color?.fg", "st.state", "tabStateClass(st)", "!!st.faded",

@@ -38,11 +38,12 @@ Decisions, and the reasons they went this way:
   devices; `directed`/`isolated`/unknown drops WITH ITS REASON on stderr (fail loudly), naming
   the network panel's per-host selector as the remedy. The sender also forwards only to trusted
   peers: your events leave your kernel only toward boxes you control.
-- **The origin is worn the way every federated surface wears it** (`host-prefix.ts`): the
-  mirrored event's sid gains `origin:` so a tap routes through the merged dashboard's own tabs,
-  and the title's session name gains the same prefix (`romp: boxa:web`). The title surgery is
-  tolerant — a title composed by a different build passes through unprefixed rather than
-  mangled, because version skew between peers is a normal state.
+- **The origin is worn on the sid, the way every federated surface routes** (`host-prefix.ts`):
+  the mirrored event's sid gains `origin:` so a tap routes through the merged dashboard's own
+  tabs. The title passes through exactly as the origin composed it (`Romp needs you: web`,
+  `Romp: web` — `_notify_title`): the session name alone, since 2026-09-09. Until then the relay
+  grafted the origin onto the title too (`romp: boxa:web`); the user found the host noise in
+  the words, when the tap already carries the routing in `data`.
 - **Mirrored events omit `badge`** and the service worker applies `setAppBadge` only to a
   numeric value: the origin kernel's needs-you count is not the receiving kernel's count, and
   repainting 0 would clear a real local badge.

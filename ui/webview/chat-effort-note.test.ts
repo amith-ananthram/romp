@@ -16,16 +16,18 @@ test("effortApplied is a ChatEvent, dispatched to its own renderer", () => {
   assert.match(RENDER, /ev\.kind === "effortApplied"\) return renderEffortApplied\(ev\)/);
 });
 
-test("renderEffortApplied is a static, muted 'effort set to X' rail note", () => {
-  const body = RENDER.slice(RENDER.indexOf("function renderEffortApplied("), RENDER.indexOf("// Compact a token count"));
-  assert.match(body, /el\("div", "turn turn-effort"\)/);
-  assert.match(body, /turn\.appendChild\(dot\("ring"\)\)/);         // the hollow ring, like the retried note
-  assert.match(body, /`effort set to \$\{ev\.effort\}`/);
-  assert.match(body, /line\.title = /, "a tooltip explains the reconnect-to-apply + that this marks the apply moment");
+test("renderEffortApplied is a slim SESSION notice — 'effort set to X', with the power glyph", () => {
+  // 2026-09-08 (the notice-vocabulary pass): the ONE builder; head-only → slim (the rail-line density), the
+  // explanation through the one tooltip (setTip), never a native title
+  const body = RENDER.split("function renderEffortApplied(")[1].split("\nfunction ")[0];
+  assert.match(body, /notice\(\{ src: "session", glyph: "power", gist: `effort set to \$\{ev\.effort\}`, cls: "turn-effort",/);
+  assert.match(body, /tip: "reasoning effort is a connect-time setting/, "a tip explains the reconnect-to-apply + that this marks the apply moment");
+  assert.doesNotMatch(body, /\.title = /);
 });
 
-test("the effort note reuses the retried note's slim treatment (one shared style, per the font rule)", () => {
-  // grouped selectors → the effort note inherits the SAME size/colour as the retried note, not a new one
-  assert.match(CSS, /\.turn-retried, \.turn-effort \{/);
-  assert.match(CSS, /\.retried-line, \.effort-line \{[^}]*font-size: 0\.92em/);
+test("the effort note and the retried note wear the ONE slim notice (one shared style, per the font rule)", () => {
+  // 2026-09-08: .notice-slim is the head-only density every rail-line notice shares; the gist is the one 0.92em rung
+  assert.match(CSS, /\.notice\.notice-slim \{ background: none; border: 0; padding: 2px 0; \}/);
+  assert.match(CSS, /\.notice-gist \{[^}]*font-size: 0\.92em/);
+  assert.doesNotMatch(CSS, /\.retried-line|\.effort-line/);
 });

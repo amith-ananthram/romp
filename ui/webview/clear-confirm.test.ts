@@ -67,8 +67,9 @@ test("sendComposer gates a /clear behind showConfirm — Cancel first (safe defa
 });
 
 test("the chat boundary card counts the dropped cards, and hover names them", () => {
-  assert.match(RENDER, /" open card" \+ \(dropped\.length === 1 \? "" : "s"\) \+ " dropped with it"/);
-  assert.match(RENDER, /setAttribute\("title", "dropped: " \+ dropped\.join\(", "\)\)/);
+  // 2026-09-08 (the notice-vocabulary pass): the count rides the notice head's META slot ("N cards dropped")
+  assert.match(RENDER, /meta: dropped\.length \? dropped\.length \+ " card" \+ \(dropped\.length === 1 \? "" : "s"\) \+ " dropped" : undefined,/);
+  assert.match(RENDER, /tip: dropped\.length \? "dropped: " \+ dropped\.join\(", "\) : undefined/);   // through the ONE tooltip (setTip), never a native title
 });
 
 test("the feed's per-node clear story is src-aware — a romp boundary clear is not blamed on the user", () => {
