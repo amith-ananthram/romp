@@ -53546,6 +53546,17 @@ _TERMINATING = [False]   # set the moment an exit path takes the lock: the watch
 #                          know an exit is underway ask this instead of touching the lock
 
 
+def _exit_log(text):
+    """One stderr line on the exit path, best-effort. The kernel writes on the stdio bin/romp-manager
+    spawned it with (stdio inherit), so a supervisor closing its own stderr does not close this
+    descriptor, but a reset journal stream, a closed tty or a full log disk makes the write raise, and
+    nothing said here is worth skipping the drain, filing the fault as the drain's, or skipping the exit."""
+    try:
+        sys.stderr.write(text)
+    except Exception:
+        pass
+
+
 def _parent_watch():
     """Exit if the manager that spawned us (ROMP_MANAGER_PID) dies, so a supervisor crash doesn't
     orphan the kernel. No-op when launched standalone (no ROMP_MANAGER_PID). The exit leaves the same
@@ -53611,19 +53622,21 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
     `audit` the audit row it was read from (the cut row records its t as `auditT`, so the same request
     never names a later, anonymous cut too); empty with a `signum` means the signal reached this pid
     with no request on record, which is worth a row of its own plus a cut reason that says so
-    (_unrequested_signal_reason: an empty reason used to be all restart-cuts.jsonl had for such a restart)."""
+    (_unrequested_signal_reason: an empty reason used to be all restart-cuts.jsonl had for such a restart).
+    Every stderr line here goes through _exit_log, so a stderr that raises can neither skip the drain, be
+    recorded as the drain's error, nor skip the exit."""
     res = {}
     err = ""
     reason_err = ""
     be = _sdk_backend or None
+    _exit_log("romp-kernel: %s, draining SDK sessions\n" % what)
     try:
-        sys.stderr.write("romp-kernel: %s, draining SDK sessions\n" % what)
         if be is not None and hasattr(be, "drain"):
             res = be.drain(2.0)
     except Exception:
         # log-and-record, never die recordless (T143: a raising drain lost 2 of 18 restarts' rows)
         err = traceback.format_exc()
-        sys.stderr.write("romp-kernel: drain failed: %s\n" % err)
+        _exit_log("romp-kernel: drain failed: %s\n" % err)
     finally:
         # the restart-cut ledger (T121): one row per restart, ALWAYS: an empty cutTurns row is the
         # clean-drain metric, and a drain that errored writes what it knew plus the error (T143).
@@ -53640,11 +53653,8 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
                 except Exception:
                     reason = SIGNAL_REASON_UNREQUESTED
                     reason_err = traceback.format_exc().strip().splitlines()[-1][:200]
-                    try:                              # best-effort: a closed stderr is one of the causes
-                        sys.stderr.write("romp-kernel: the signal's reason helper failed, the cut row "
-                                         "carries the plain verdict and reasonError: %s\n" % reason_err)
-                    except Exception:
-                        pass
+                    _exit_log("romp-kernel: the signal's reason helper failed, the cut row carries the "
+                              "plain verdict and reasonError: %s\n" % reason_err)
             row = _restart_cut_row(res, watches_armed=len(_pr_watches) + len(_watches),
                                    audit_reason=reason)
             if audit:
@@ -53655,7 +53665,7 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
                 row["reasonError"] = reason_err     # the reason helper's fault: no `signal` row was filed
             _append_restart_cut(row)
         except Exception:
-            sys.stderr.write("romp-kernel: cut ledger failed: %s\n" % traceback.format_exc())
+            _exit_log("romp-kernel: cut ledger failed: %s\n" % traceback.format_exc())
         os._exit(0)
 
 
