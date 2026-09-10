@@ -570,7 +570,10 @@ class ReconnectFlag(unittest.TestCase):
     per tab into a document with no listener yet, all redone whole once the bundle's ready is processed (the kernel
     pops the set at `ready`). Nor does a redial whose bundle said ready while the socket was down:
     that ready sits in the queue (readyQueued) and flushes onto the redial socket as the bundle's own, so the dial
-    keys on the queue bit too. What no shim bit sees: a ready that left on an OPEN socket which then died before any
+    keys on the queue bit too. A ready posted while the FIRST socket is still CONNECTING (the bundle evaluated before
+    the handshake finished) queues the same way: send() sees readyState 0, sets the bit and queues the ready, that
+    socket's onopen flushes it exactly once and clears the bit, and the next redial declares itself. What no shim bit
+    sees: a ready that left on an OPEN socket which then died before any
     frame came back; that redial carries the flag and is served skeletons that fill on click or in idle (stated at
     the kernel's accept). The twin-retire at registration was rejected as the signal: it misses a socket the kernel
     already dropped."""
@@ -643,6 +646,42 @@ out({onDead:onDead,queued:queued,flushed:flushed,designed:designed,n:sockets.len
         self.assertEqual(r["flushed"], 1, "the queued ready goes out on the redial socket, once: the flush carries it")
         self.assertTrue(r["designed"].endswith("&active=S1&reconnect=1"),
                         "the ready has left on a socket: the next redial declares itself: " + r["designed"])
+
+    def test_a_ready_posted_while_the_first_socket_is_still_connecting_queues_flushes_once_at_its_open_and_the_next_redial_declares_itself(self):
+        # the bundle evaluates before the first socket's handshake finishes: the shim dialled during HTML parse, so
+        # the socket is CONNECTING (readyState 0) when the bundle posts ready. send() cannot put it on a socket that
+        # is not open, so the ready queues with readyQueued set; the first onopen flushes it exactly once and clears
+        # the bit (on the FIRST open too, not only on a reconnect's); the next redial then declares itself. The bits
+        # are read by name (readyQueued, bundleReady, queue: the shim's own variables at the harness's module scope,
+        # the way SocketFlipMarker reads FIFO), because while a socket is CONNECTING no dial runs, so no URL can show
+        # what the queue bit held at that moment.
+        r = _run(r"""
+function redial(){var live=timers.filter(function(t){return t.live&&t.fn.name==="connect";});live[live.length-1].fn();}
+function readys(s){return s.sent.filter(function(x){return JSON.parse(x).type==="ready";}).length;}
+function queuedReadys(){return queue.filter(function(x){return JSON.parse(x).type==="ready";}).length;}
+localStorage.getItem=function(){return JSON.stringify({activeId:"S1"});};
+var first=sockets[0].url,firstState=sockets[0].readyState;
+window.__rompLocalSend({type:"ready"});                                                    // the bundle says ready while the first socket is still connecting
+var connecting={sent:readys(sockets[0]),readyQueued:readyQueued,bundleReady:bundleReady,inQueue:queuedReadys()};
+open();                                                                                     // the first socket opens: the flush carries the ready
+var opened={sent:readys(sockets[0]),readyQueued:readyQueued,inQueue:queuedReadys()};
+recv({type:"ka"});sock().readyState=3;sock().onclose();redial();var designed=sock().url;   // the ready has left on a socket: the designed redial
+open();                                                                                     // the redial opens: nothing left to flush
+out({first:first,firstState:firstState,connecting:connecting,opened:opened,designed:designed,onFirst:readys(sockets[0]),onRedial:readys(sockets[1]),n:sockets.length});""")
+        self.assertEqual(r["n"], 2)
+        self.assertEqual(r["firstState"], 0, "the harness's first socket is CONNECTING until open()")
+        self.assertNotIn("reconnect", r["first"], "the first dial never carries the flag: " + r["first"])
+        self.assertEqual(r["connecting"]["sent"], 0, "nothing goes out on a socket that has not opened")
+        self.assertTrue(r["connecting"]["bundleReady"], "send() has seen the bundle's ready (bundleReady, read by name)")
+        self.assertTrue(r["connecting"]["readyQueued"], "the ready waits for the open (readyQueued, read by name), on a CONNECTING socket as on a closed one")
+        self.assertEqual(r["connecting"]["inQueue"], 1, "the ready sits in the shim's queue (queue, read by name)")
+        self.assertEqual(r["opened"]["sent"], 1, "the first open flushes the queued ready onto its socket, once")
+        self.assertFalse(r["opened"]["readyQueued"], "the flush clears the queue bit on the FIRST open, not only on a reconnect's")
+        self.assertEqual(r["opened"]["inQueue"], 0, "the flush emptied the queue: no second copy waits for a later open")
+        self.assertTrue(r["designed"].endswith("&active=S1&reconnect=1"),
+                        "the ready has left on a socket and none is queued: the next redial declares itself: " + r["designed"])
+        self.assertEqual(r["designed"].count("&reconnect=1"), 1)
+        self.assertEqual((r["onFirst"], r["onRedial"]), (1, 0), "one ready on the first socket, none on the redial's: the bundle's ready went out exactly once")
 
 
 class SocketFlipMarker(unittest.TestCase):
