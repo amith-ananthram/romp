@@ -48,3 +48,29 @@ test("the progressive-disclosure principle is recorded in ui/CLAUDE.md", () => {
   const doc = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "CLAUDE.md"), "utf8");
   assert.match(doc, /### Progressive disclosure is the UI's organizing principle/);
 });
+
+test("every UI rule heading is written down once, in ui/CLAUDE.md, and the root CLAUDE.md points there", () => {
+  // One home for the UI rules: the root file points at ui/CLAUDE.md and carries no copy of a rule,
+  // and ui/CLAUDE.md carries each rule under its own heading, exactly once, with a blank line before
+  // the heading so the rule above ends there (the accent paragraph once ran on from the Menus rule
+  // with neither a heading nor a blank line).
+  const root = fs.readFileSync(path.resolve(process.cwd(), "..", "CLAUDE.md"), "utf8");
+  const rules = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "CLAUDE.md"), "utf8");
+  const lines = rules.split("\n");
+  const headings = (md: string, h: string) => md.split("\n").filter((l) => l.startsWith(h)).length;
+  assert.equal(headings(root, "### UI design rules live in `ui/CLAUDE.md`"), 1, "the root file points at the UI rules");
+  for (const h of [
+    "### Progressive disclosure is the UI's organizing principle",
+    "### Panels open as centered modals over a dimmed, UNCHANGED dashboard",
+    "### Font sizes: few, and consistent by information type",
+    "### Menus and dropdowns wear ONE vocabulary",
+    "### The accent color is light blue `#9cd2ff`",
+    "### Loading/waiting states: show the romp loader FIRST",
+    "### Buttons must stay click-safe across re-renders, and always acknowledge",
+    "### Designs must accommodate many tags and many sessions",
+  ]) {
+    assert.equal(headings(rules, h), 1, "ui/CLAUDE.md carries the rule once: " + h);
+    assert.equal(headings(root, h), 0, "the root CLAUDE.md carries no second copy: " + h);
+    assert.equal(lines[lines.findIndex((l) => l.startsWith(h)) - 1], "", "a blank line precedes the heading: " + h);
+  }
+});

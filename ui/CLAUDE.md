@@ -75,6 +75,8 @@ MUST declare `font-family` explicitly there: an adopted element inherits the hos
 app's font otherwise, which is exactly how the timeline gear menu drifted
 off-brand (triggered 2026-08-09: bluish `#1c2430` card, host font, its own radii
 and sub-sizes).
+
+### The accent color is light blue `#9cd2ff` — use `var(--accent)`
 The romp accent is light blue `#9cd2ff` (`--accent` in `ui/webview/styles.css`, with
 `--accent-fg: #0c1a2e` for text on it). Use it for accent/highlight chrome — selected
 toggles, in-progress loading dots, the Fleet pill, focus cues — anywhere you want "the
