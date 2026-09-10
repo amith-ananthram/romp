@@ -24477,7 +24477,8 @@ def _states_awaiting_overlay(sid):
 
 _states_overlay_cache = {}    # str(states path) -> _fold_records entry over (last overlay row or None, working_after)
 _states_overlay_stats = {"hit": 0, "append": 0, "refold": 0, "fail": 0, "evict": 0}
-_states_overlay_failed = set()   # paths whose last read failed on a file that exists: one stderr line per episode
+_states_overlay_failed = set()   # paths whose last read failed on a file that exists: one stderr line per episode;
+#                                  cleared whole above 256 paths (_states_overlay_on), never per departed path
 _STATES_OVERLAY_LOCK = threading.Lock()   # the counters are bumped from the pusher, the connect-time builds on WS
 #                                           threads and GET /sessions at once, so a bare `+= 1` is a read-modify-write
 #                                           across threads (the _INTR_MARKS_STATS_LOCK precedent). The cache dict
@@ -24513,11 +24514,18 @@ def _states_overlay_on(path_s, kind):
     """The fold's `on` for one states file: count the path the fold took, and on "fail" (the file exists and
     could not be stat'ed, opened or read; the fold answered the empty state and memoized nothing) write one
     stderr line per episode, so a failed read is told apart from a rewrite in GET /perf and in the log. A
-    later good fold of the same file ends the episode. Cheap on purpose, since it runs inside every fold:
-    one locked increment, and the set is touched only on a failure or while an episode is open."""
+    later good fold of the same file ends the episode, and no per-path event does: the interrupt tick's forget
+    (_states_overlay_forget) leaves the set alone, since a departed session's file is still read. The set is
+    instead cleared whole above 256 paths, the fold cache's own bound (fold_records), so a path stranded by a
+    session whose file is never read again cannot pin it forever; a whole clear ends every open episode at
+    once, so a still-unreadable file is named a second time after it, exactly as the fold cache re-folds
+    after its clear. Cheap on purpose, since it runs inside every fold: one locked increment, and the set is
+    touched only on a failure or while an episode is open."""
     _states_overlay_bump(kind)
     if kind == "fail":
         with _STATES_OVERLAY_LOCK:
+            if len(_states_overlay_failed) > 256:          # the fold cache's cap: a stranded path cannot pin the set
+                _states_overlay_failed.clear()
             first = path_s not in _states_overlay_failed
             _states_overlay_failed.add(path_s)
         if first:
@@ -24530,24 +24538,21 @@ def _states_overlay_on(path_s, kind):
 
 def _states_overlay_forget(alive):
     """Drop the fold entries of sessions outside `alive` (the interrupt tick's alive set, once per cycle): the
-    readers of this overlay are the chips and lanes of live sessions, so a session leaving the alive set is
-    the event that retires its entry, the same event that releases its interrupt-marks entries. Iterates a
-    key snapshot: a connect-time build on a WS thread may insert concurrently. The records stay in the event
-    model's LRU reader; a later read of a departed session's file re-folds them without re-reading the file.
-    A departed path also loses its open-fail episode, if any, straight out of `_states_overlay_failed`: a
-    fail always pops the cache entry too (fold_records), so a path whose LAST read before it left the alive
-    set failed is never IN the cache for this loop to reach, and nothing else reads a departed session's
-    file again to end the episode the ordinary way. `_states_overlay_failed` has no cap of its own (unlike
-    the cache's 256-entry clear-whole), so a path stranded there would sit forever otherwise."""
+    readers of this overlay are mostly the chips and lanes of live sessions, so a session leaving the alive
+    set is the event that retires its entry, the same event that releases its interrupt-marks entries.
+    Iterates a key snapshot: a connect-time build on a WS thread may insert concurrently. The records stay in
+    the event model's LRU reader; a later read of a departed session's file re-folds them without re-reading
+    the file.
+    The fail latch (`_states_overlay_failed`) is not touched here: a departed session's file is still read,
+    by build_session for a dead session kept open as a read-only tab and for the scroll-back handler, and by
+    GET /classify for any sid, so a discard here would name the same open episode again on the next of those
+    reads, against the one-line-per-episode contract; the set is bounded by its own cap in _states_overlay_on
+    instead."""
     keep = {str(jd.STATE / "states" / ("%s.jsonl" % sid)) for sid in alive}
     n = 0
     for k in list(_states_overlay_cache):
         if k not in keep and _states_overlay_cache.pop(k, None) is not None:
             n += 1
-    with _STATES_OVERLAY_LOCK:
-        for k in list(_states_overlay_failed):
-            if k not in keep:
-                _states_overlay_failed.discard(k)
     if n:
         _states_overlay_bump("evict", n)
 
