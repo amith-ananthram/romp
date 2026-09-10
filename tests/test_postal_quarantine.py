@@ -6,6 +6,7 @@ feed's blocked card. peer_update carries the per-host trust the gate reads.
 
 Synthetic only — hermetic temp state dir, placeholder mids, invented notes-domain sessions, no real data.
 """
+import errno
 import json
 import os
 import tempfile
@@ -74,6 +75,49 @@ class InboundTrustGate(unittest.TestCase):
         self.assertEqual(held[0]["origin"], "TESTHOST")
         self.assertEqual(ps.read_box("sess-web", consume=False), [],
                          "directed mail must NOT reach the session until approved")
+
+    def test_a_hold_that_could_not_be_written_answers_retry_not_ack(self):
+        """_quarantine_put says False when the hold file could not be written (ENOSPC, a permission
+        bit, a store path that is not a directory), and the directed arm ignored it: the sender was
+        ack'd, deleted its record and read 'delivered' forever, the mid was marked seen so the
+        re-relay was deduped away, and no hold existed for anyone to approve. The False is now read
+        the way the trusted arm reads DeliveryNotRecorded: silence on the wire, nothing marked seen,
+        so the sender keeps its record and the re-relay is held once the store writes again."""
+        self._set_trust("TESTHOST", "directed")
+        blocker = ps.QUARANTINE.parent / "hold-blocker"
+        blocker.write_text("")                       # a regular file where the store's parent must be
+        saved, saved_log, logged = ps.QUARANTINE, ps._log, []
+        ps.QUARANTINE = blocker / "quarantine"       # every mkdir/write under it fails with ENOTDIR
+        ps._log = lambda line: logged.append(line)
+        try:
+            verdict = ps._relay_in("TESTHOST", _relay("q-hold-fail"))
+        finally:
+            ps.QUARANTINE, ps._log = saved, saved_log
+            blocker.unlink()
+        self.assertEqual(verdict, ("retry", None), "silence on the wire: the sender keeps it parked and re-relays")
+        cause = [l for l in logged if "q-hold-fail" in l and "could not be written" in l and "[Errno %d]" % errno.ENOTDIR in l]
+        self.assertEqual(len(cause), 1, "the store says WHY the hold did not land, with the errno: %r" % logged)
+        self.assertTrue(any("the sender re-relays" in l for l in logged), "and the arm says what follows: %r" % logged)
+        self.assertFalse(ps.peer_seen_check("q-hold-fail"), "not marked seen, so the re-relay is processed in full")
+        self.assertEqual(ps.quarantine_list(), [], "nothing is held")
+        self.assertEqual(ps.read_box("sess-web", consume=False), [], "and nothing reached the session")
+        # the re-relay, with the store writing again, is held exactly as a first arrival would be
+        self.assertEqual(ps._relay_in("TESTHOST", _relay("q-hold-fail")), ("ack", None))
+        self.assertEqual([h["mid"] for h in ps.quarantine_list()], ["q-hold-fail"])
+        self.assertTrue(ps.peer_seen_check("q-hold-fail"))
+
+    def test_a_mid_no_hold_can_be_named_by_bounces_instead_of_retrying_forever(self):
+        # The hold is a file named by the mid, so _quarantine_put also says False for an id that
+        # cannot be a path component. That False must not read as 'retry': a peer that keeps
+        # sending the crafted id would be re-relaying it every exchange. Final refusal instead,
+        # and (as before) nothing held, nothing delivered; unlike before, not marked seen or ack'd.
+        self._set_trust("TESTHOST", "directed")
+        verdict, bounce = ps._relay_in("TESTHOST", _relay("../q-hold-crafted"))
+        self.assertEqual(verdict, "bounce", "final: silence would have the sender re-relay it every exchange")
+        self.assertEqual(bounce["mid"], "../q-hold-crafted")
+        self.assertFalse(ps.peer_seen_check("../q-hold-crafted"))
+        self.assertEqual(ps.quarantine_list(), [])
+        self.assertEqual(ps.read_box("sess-web", consume=False), [])
 
     def test_isolated_drops(self):
         self._set_trust("TESTHOST", "isolated")
