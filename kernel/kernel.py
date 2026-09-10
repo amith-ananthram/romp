@@ -44033,23 +44033,22 @@ def _push_send_one(sub, payload):
     status, _detail = _push_post(sub, payload)
     return status not in _PUSH_DEAD_STATUSES
 
-# ── the push ledger: the kernel's record of what became of each push (2026-09-09; the tap made the OS's own
-# callback for a killed app 2026-09-10, and the vanished notification the live app's road the same day) ──
-# THE FINDING (2026-09-09/10, a real iPhone): the worker's `push` handler runs and its acks reach the kernel
-# (`[push] test … 201`, then `[push] ack stage=shown` a second later). A KILLED Home Screen app gets the tap as the
-# OS's own callback: an Apple endpoint gets a Declarative Web Push message (_push_declarative) whose `navigate` is
-# the deep link, iOS navigates the app to '/?push-reveal=<sid>[&push-card=<id>]&push-pid=<pid>' and the page lands
-# it by the link road, settling this row (POST /push/landed). A LIVE app (background or foreground) gets NOTHING: iOS
-# only foregrounds it — no navigation, NO notificationclick to the worker, and NO notificationclose either (zero
-# 'closed' acks, ever). The one thing the page can then read is the screen: registration.getNotifications() lists
-# what is still displayed, so a push the worker acked shown whose notification is GONE is read as tapped (the
-# 'vanish' road, _LANDING_REVEAL_JS).
-# THE TRADE-OFF, ACCEPTED (the user 2026-09-10): because iOS fires neither the click nor the close for a live app, a
-# swiped-away notification leaves exactly the evidence a tapped one leaves — gone from the screen — and lands on the
-# next foregrounding as if tapped. The user weighed that and decided a working background tap is worth an
-# occasional wrong landing after a swipe. This is their explicit call, not an oversight (the road shipped as
-# a1a9d4b5, was taken out over this very conflation, and is back by that decision). The foreground case stays
-# non-switching: no wake event reaches the page, so nothing moves until it next comes forward.
+# ── the push ledger: the kernel's record of what became of each push, and the roads a tap takes (2026-09-09/10) ──
+# THE FINDING (a real iPhone, 2026-09-09/10): the worker's `push` handler runs and its acks reach the kernel, but iOS
+# fires neither notificationclick nor notificationclose for a LIVE Home Screen web app; only a killed app's tap is
+# answered by iOS itself. So the tap has one road per state of the app, and nothing is inferred beyond them:
+#   KILLED     — the OS's own callback. An Apple endpoint is sent a Declarative Web Push message (_push_declarative)
+#                whose `navigate` is the deep link '/?push-reveal=<sid>[&push-card=<id>]&push-pid=<pid>'; iOS displays
+#                it, navigates the app there on a tap, and the page lands the link ('link', _LANDING_REVEAL_JS).
+#   BACKGROUND — iOS only foregrounds the app. The one thing the page can then read is the screen:
+#                registration.getNotifications() lists what is still displayed, so a push the worker acked shown whose
+#                notification is GONE is read as tapped ('vanish'). THE ACCEPTED TRADE-OFF (the user 2026-09-10): a
+#                swiped-away notification leaves exactly that evidence and lands on the next foregrounding as if tapped;
+#                they weighed it and took a working background tap over the occasional wrong landing after a swipe.
+#                Their explicit call, carried in full at the landing site (fromLedger in _LANDING_REVEAL_JS).
+#   FOREGROUND — nothing moves: no wake event reaches the page, so a row waits for the app's next coming-forward.
+#   A browser that dispatches notificationclick (Chrome; every non-Apple endpoint) lands the tap from the worker's own
+#   message ('sw'), or from the clicked row this ledger holds when that message reached no page ('ack').
 #
 # Every session-addressed push gets an unguessable `pid` in its routing block and a row here, and the worker tells
 # the kernel what became of it — POST /push/ack {pid, stage} for 'shown' (started before the show; on Apple, from
@@ -44058,14 +44057,14 @@ def _push_send_one(sub, payload):
 # EVERY row to THIS device nobody has settled, newest first, on boot / visible / pageshow / focus, and holds the
 # shown ones against the notifications still displayed. A clicked row lands (/reveal via 'ack'); EXACTLY ONE
 # vanished row lands, silently (/reveal via 'vanish'); anything else — two or more gone at once, everything still
-# displayed, rows never acked shown, a screen the page cannot read — shows NOTHING: no chip, no prompt (the user
+# displayed, rows never acked shown, a screen the page cannot read — shows NOTHING: no prompt, ever (the user
 # 2026-09-09). The page settles each row it is done with: POST /push/landed (the push landed, by whichever road —
 # the worker's message 'sw', the deep link 'link', 'ack', 'vanish'), /push/superseded (a NEWER notification for
 # the same session is still displayed — the notification tag is per session, so the show REPLACED this one's on
 # the screen: gone without a tap) or /push/dropped (vanished beside another landing, or one of several vanished at
 # once: spent, never a landing, and never left to inflate the next check's count). The kernel supersedes at the
 # shown ack too — the event itself: a shown ack for a session retires that session's older unsettled, untapped rows
-# on that device, with a line.
+# on that device, with a line. No 'closed' stage anywhere (the finding above).
 #
 # The ledger is small and kernel-owned: STATE/push-ledger.json, {rows: [...]} oldest first, the newest
 # PUSH_LEDGER_CAP rows per endpoint, 0600 (an endpoint is a capability URL, the subscription store's rule),
@@ -44081,7 +44080,7 @@ PUSH_LEDGER_CAP = 20            # rows kept per endpoint: the last few pushes to
 _PID_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")   # secrets.token_urlsafe(16) is 22 such characters; the routes admit nothing else
 _PUSH_ACK_MAX_BYTES = 2048      # the unauthenticated ack's body cap: {pid, stage, v} is well under 200 bytes
 _PUSH_STAGE_FIELD = {"shown": "shownAt", "clicked": "tappedAt", "landed": "landedAt", "superseded": "supersededAt", "dropped": "droppedAt"}
-_PUSH_ACK_STAGES = ("shown", "clicked")                     # what /push/ack admits: the worker's word on what became of a notification (no 'closed': iOS never reports one)
+_PUSH_ACK_STAGES = ("shown", "clicked")                     # what /push/ack admits: the worker's word on what became of a notification (no 'closed': the finding above)
 _PUSH_SETTLE_STAGES = ("landed", "superseded", "dropped")   # the page's routes, POST /push/<stage> {pid}: its word that a row is done with
 
 
@@ -44183,8 +44182,7 @@ def _push_unsettled(row):
 
 def _push_stage_of(row):
     """The strongest word the row carries: 'clicked' (the worker saw the tap), 'shown' (it showed the notification,
-    as far as anyone said) or 'sent' (no ack at all). No 'closed': iOS never reports a close, so none is ever on
-    record (the ledger block above)."""
+    as far as anyone said) or 'sent' (no ack at all)."""
     return "clicked" if row.get("tappedAt") else ("shown" if row.get("shownAt") else "sent")
 
 
@@ -44192,9 +44190,9 @@ def _push_pending(endpoint):
     """GET /push/pending: {rows: [...]} — EVERY row for `endpoint` that nobody has landed, superseded or dropped,
     NEWEST FIRST, each as the page reads it: {pid, sid, host, kind, cardId, name, stage, ageS}. stage is 'clicked'
     (the worker acked the tap: the page lands it via 'ack'), 'shown' (acked the show: the page holds it against the
-    notifications still displayed and lands the ONE that is gone via 'vanish' — the ledger block above has the
-    trade-off the user accepted) or 'sent' (no ack at all: nothing is known to have been displayed, so nothing of it
-    can have vanished). ageS counts from the newest stamp, clipped like every age the shell files. Every row, not
+    notifications still displayed and lands the ONE that is gone via 'vanish' — the ledger block above) or 'sent'
+    (no ack at all: nothing is known to have been displayed, so nothing of it can have vanished). ageS counts from
+    the newest stamp, clipped like every age the shell files. Every row, not
     the newest (2026-09-09: the newest unsettled row was a push for ANOTHER session, sent 40 s after the one the
     user tapped, and it was the one named); {rows: []} when there is none."""
     out = []
@@ -44222,9 +44220,9 @@ PUSH_LABEL_MAX = 80    # the shell's tab label, as a last-resort session name: d
 
 
 def _push_session_name(sid, label=""):
-    """The session name a push carries in its routing block (2026-09-09: the shell's offer chip names the
-    session a shown-but-untapped notification was about, and has nothing but the payload to name it from),
-    in _push_test's order of authority: a local session's from the names registry (_name_of); a federated
+    """The session name a push carries in its routing block (2026-09-09: the ledger row files it off the payload,
+    so the kernel's lines and the device trail can name the session a push was about), in _push_test's order of
+    authority: a local session's from the names registry (_name_of); a federated
     one's what its host calls it in the tunnel supervisor's snapshot of that host's /sessions
     (_remote_name_of), host-prefixed the way the merged dashboard shows it; then the caller's `label` (the
     shell's own tab text — display-only, clipped and flattened, never consulted ahead of the kernel's copy);
@@ -44295,9 +44293,8 @@ def _push_test(endpoint, sid="", host="", label=""):
         return {"ok": False, "status": 0, "detail": "this device isn't subscribed yet"}
     _vapid_keys()                                          # RuntimeError without cryptography → the route's 500
     if sid:
-        # ONE lookup names the session in both forms (#1157's _push_session_name is the authority; the
-        # pair-returning twin below it keeps the two from ever disagreeing): the body, the echoed
-        # `name` and the payload's routing block wear the host-prefixed form the merged dashboard
+        # ONE lookup names the session in both forms (_push_session_names, so the two can never
+        # disagree): the body, the echoed `name` and the payload's routing block wear the host-prefixed form the merged dashboard
         # shows, while the TITLE wears the session name alone (_notify_title: the host is not the
         # user's concern there — the tap carries the routing in `data`)
         name, bare_name = _push_session_names(sid, label)
@@ -44379,9 +44376,8 @@ def _push_payload(title, body, sid="", badge=None, kind="card", card_id="", host
 
 
 # ── Declarative Web Push for Apple endpoints (2026-09-10) ─────────────────────────────────────────
-# The tap as the OS's own callback (the ledger block above _push_ledger has the finding: a live Home Screen app on
-# iOS gets no notificationclick and no notificationclose, so nothing the worker or the screen could say was ever the
-# tap). Safari 18.4+ and iOS Home Screen web apps parse a push whose payload is the declarative JSON below, display
+# The tap for a KILLED app as the OS's own callback (the ledger block above _push_ledger has the finding). Safari
+# 18.4+ and iOS Home Screen web apps parse a push whose payload is the declarative JSON below, display
 # the notification themselves, and on a tap NAVIGATE the app to its `navigate` URL — the deep link the shell already
 # lands (_LANDING_REVEAL_JS, via 'link'). Every member here is verified, not guessed, against the W3C Push API
 # editor's draft ("Declarative push message": `web_push` must be 8030; `notification` with `title` and `navigate`
@@ -44663,8 +44659,8 @@ function ack(pid,stage){if(!pid)return Promise.resolve();try{return fetch('/push
 // TWO SHAPES REACH THIS HANDLER (2026-09-10). To an Apple endpoint the kernel sends a Declarative Web Push message
 // ({web_push:8030, notification:{title, body, navigate, tag, data[, silent]}, mutable:true[, app_badge]} — _push_declarative
 // in the kernel): a user agent that parses it (Safari 18.4+, an iOS Home Screen web app) DISPLAYS the notification itself,
-// and a tap NAVIGATES the app to `navigate` — the OS's own callback, where iOS dispatched no notificationclick to a live
-// app. `mutable` makes it hand this worker the parsed Notification as e.notification (the W3C draft and WebKit's
+// and a tap NAVIGATES the app to `navigate` — the OS's own callback (the ledger block above _push_ledger in the kernel).
+// `mutable` makes it hand this worker the parsed Notification as e.notification (the W3C draft and WebKit's
 // ServiceWorkerThread both dispatch it as a `push` event with a null data), so the worker acks 'shown' by the pid in its
 // data and shows NOTHING: the system is displaying it, and a second show would replace it. Feature-detected on
 // e.notification, never a user-agent sniff. Every other push arrives as e.data — the imperative shape to FCM/Mozilla, or
@@ -44713,9 +44709,9 @@ e.waitUntil(Promise.all(work));
 // EVERY MESSAGE WEARS A `diag` BLOCK (2026-09-08): the shell files it in client-diag.jsonl beside its own rows,
 // so one file says what the worker saw: how many window clients, how many top-level, which road it took, the
 // target's visibility. The pid rides too, so the page lands one push ONCE however many roads deliver it (the
-// message and the link can both carry the same tap) and settles the kernel's row. NO RELOAD ROAD (review find,
-// 2026-09-09, on #1127): visibilityState is not a liveness test, and no road of the worker's loads a page. No
-// kept tap, no stored tap, no fingerprint either (2026-09-10): a tap the worker did not see is not inferred.
+// message and the link can both carry the same tap) and settles the kernel's row. No reload road (visibilityState is
+// not a liveness test, and no road of the worker's loads a page), and nothing kept between events: a tap the worker
+// did not see is not inferred.
 self.addEventListener('notificationclick',function(e){
 var d=e.notification.data||{};var sid=d.sid||'',pid=String(d.pid||'');
 var acked=ack(pid,'clicked');   // THE ACK FIRST: the kernel's row says tapped before anything here can be cut short
@@ -44748,23 +44744,19 @@ def _sw_js():
 
 
 # ── landing a push tap on the session that fired ─────────────────────────────────────────────────
-# The cold-start half of notificationclick: the app was closed, the SW opened '/?push-reveal=sid',
-# and the shell POSTs /reveal {sid, wid} at boot — necessarily BEFORE its chat pane's WS exists, so
-# the focus cannot be sent yet. It parks here and is delivered on the exact event it was waiting
+# The cold-start half of a tap: the app was closed, the page opened on the deep link (the worker's
+# openWindow, or iOS's own navigate), and the shell POSTs /reveal {sid, wid} at boot — necessarily
+# BEFORE its chat pane's WS exists, so the focus cannot be sent yet. It parks here and is delivered on the exact event it was waiting
 # for: that window's chat pane saying "ready" (matched by wid — the per-dashboard id the shell
 # mints and every same-window pane shares — so a second dashboard's reload cannot steal it). One
 # slot, latest wins: two taps before a boot completes should land on the newer notification.
 # `sent` (2026-09-06): the clients a LIVE tap was already handed to while unproven — see
 # _reveal_request; a pong from one of them retires the slot, a redial's ready consumes it.
 _PENDING_REVEAL = [None]                     # {"sid": ..., "wid": ...[, "sent": [clients]]} or None
-# The roads a shell may name in /reveal's `via`, the log line's first word: the worker's message to a live window
-# ('sw' — a browser that dispatches notificationclick), the deep link the page opened on or was navigated to ('link' —
-# on Apple the OS's own tap callback for a killed app, the Declarative Web Push message's `navigate`; 2026-09-10), the
-# kernel's own ledger ('ack' — GET /push/pending said the worker had acked a tap no message or link delivered; the
-# ledger block above _push_ledger), and the vanished notification ('vanish' — a shown push whose notification is gone
-# from the screen, the one thing a LIVE iOS app leaves for the page to read; back 2026-09-10 by the user's call, with
-# the swipe-dismiss conflation accepted — the ledger block has it). 'store' and 'offer' — the kept entry and the chip —
-# are gone, and the route refuses them like any other word. Any other word the body carries is logged as 'other'
+# The roads a shell may name in /reveal's `via`, the log line's first word (the ledger block above _push_ledger has
+# the design): the worker's message to a live window ('sw'), the deep link the page opened on or was navigated to
+# ('link' — on Apple the OS's own tap callback for a killed app), the kernel's own clicked row ('ack') and the shown
+# push whose notification is gone from the screen ('vanish'). Any other word the body carries is logged as 'other'
 # (review find, 2026-09-09, on #1127: the word went from the request body straight into the line-oriented stderr
 # journal); a shell of a build before the field sends none, and that stays the bare line.
 _REVEAL_ROADS = frozenset({"sw", "link", "ack", "vanish"})
@@ -44810,15 +44802,11 @@ def _reveal_request(sid, wid, boot=False, via=""):
 
     One stderr line per tap, whatever became of it (2026-09-08: a phone's tap "did nothing" and
     nothing anywhere recorded whether it had even reached the kernel). `via` is the road the shell
-    says the tap took ('sw': the worker's message to a live window; 'link': the deep link the page opened
-    on or was navigated to — on Apple the OS's own tap callback, 2026-09-10; 'ack': the kernel's ledger
-    said the worker had acked a tap no message or link delivered; 'vanish': the ledger said the push was
-    shown and the screen no longer shows it — the one road a live iOS app leaves, 2026-09-10; the route
-    admits those four, _REVEAL_ROADS, and logs any other word as 'other'); _consume_pending_reveal and _reveal_proven log a
-    park's end the same way, so the journal
-    answers the next such report: no line — the worker never posted or opened; parked and never
-    consumed — the pane's ready never came for that wid; consumed — the pane got it. Ids clipped:
-    enough to match rows, not a transcript of anything."""
+    says the tap took (one of _REVEAL_ROADS; the route logs any other word as 'other');
+    _consume_pending_reveal and _reveal_proven log a park's end the same way, so the journal answers
+    the next such report: no line — the worker never posted or opened; parked and never consumed —
+    the pane's ready never came for that wid; consumed — the pane got it. Ids clipped: enough to
+    match rows, not a transcript of anything."""
     with _clients_lock:
         targets = [] if boot else [c for c in _clients if c["app"] == "chat" and (c.get("wid") or "") == wid]
     delivered, sent = False, []
@@ -48655,30 +48643,29 @@ if(!isOn)testOut.textContent+=" Real notifications won't arrive until the main s
 
 # Landing a notification tap on what fired (the user 2026-08-08, whose first push opened a different
 # session; 2026-09-06, who wants the tap to come back to the romp already open and put them on the
-# session — and the card — that buzzed). Three roads, ONE activation path: each asks the KERNEL to
+# session — and the card — that buzzed). Four roads, ONE activation path: each asks the KERNEL to
 # aim the chat focus at THIS dashboard (POST /reveal {sid, wid, via[, boot]}) — never a focus posted
 # straight into the chat iframe, which could only ever address a tab that is already there. The kernel
 # answers a live session with the focus (chat pane connected → delivered now; not yet → parked for
 # that wid and consumed on the pane's ready — the exact event, no delay heuristics) and a dead or
-# unknown one with the revive prompt (_reveal_msg), so no sid ever ends in a silent no-op.
+# unknown one with the revive prompt (_reveal_msg), so no sid ever ends in a silent no-op. The roads,
+# and when each fires (the ledger block above _push_ledger has the finding they rest on):
 #  - 'link': the page opened on — or was navigated to — the kernel's deep link
-#    '/?push-reveal=<sid>[&push-card=<id>]&push-pid=<pid>'. On Apple this IS the tap (2026-09-10): the Declarative
-#    Web Push message's `navigate`, the OS's own callback for a KILLED app — the ledger block above _push_ledger has
-#    the finding: a live one gets no navigation, no notificationclick and no notificationclose, only the screen (the
-#    'vanish' road below). Read at boot AND on pageshow / popstate (a window the user agent navigates without
-#    a full load), stripped (history.replaceState) the moment it is read so a manual reload does not replay the
-#    jump. boot:true at boot: the page's chat pane is not connected yet, so the kernel must park for it rather than
-#    hand the focus to a same-wid socket the previous page left behind (the phone, 2026-09-06: iOS reopens the
-#    installed app's one window on the link and sessionStorage keeps the wid).
+#    '/?push-reveal=<sid>[&push-card=<id>]&push-pid=<pid>'. On Apple this IS the tap for a KILLED app: the Declarative
+#    Web Push message's `navigate`, the OS's own callback. Read at boot AND on pageshow / popstate (a window the user
+#    agent navigates without a full load), stripped (history.replaceState) the moment it is read so a manual reload
+#    does not replay the jump. boot:true at boot: the page's chat pane is not connected yet, so the kernel must park
+#    for it rather than hand the focus to a same-wid socket the previous page left behind (the phone, 2026-09-06: iOS
+#    reopens the installed app's one window on the link and sessionStorage keeps the wid).
 #  - 'sw': a browser that dispatches notificationclick (Chrome): the worker focused this window and posted
 #    {romp:'notificationClick', sid, host, kind, cardId, pid, diag}.
 #  - 'ack': the kernel's own ledger — GET /push/pending?endpoint=<this page's subscription> lists every unsettled
-#    push to this device; the ones the worker acked clicked (a tap whose message and link reached no page) land;
-#    asked on the events a page that came forward produces: boot, visible, pageshow, focus.
-#  - 'vanish' (2026-09-10, the user's call; the fromLedger comment below has the whole table and the trade-off): the
-#    same list's SHOWN rows, held against registration.getNotifications() — exactly ONE shown push whose
-#    notification is gone from the screen lands, silently. The one thing a LIVE iOS app leaves: it gets no
-#    navigation, no click and no close, only these events and the screen.
+#    push to this device; the ones the worker acked clicked (a tap whose message and link reached no page) land.
+#    Asked on the events a page that came forward produces: boot, visible, pageshow, focus.
+#  - 'vanish': the same list's SHOWN rows, held against registration.getNotifications() — exactly ONE shown push
+#    whose notification is gone from the screen lands, silently. The one thing a LIVE iOS app leaves for the page:
+#    no event reaches the worker or the page, only these events and the screen (the fromLedger comment below has
+#    the decision table and the trade-off the user accepted).
 #  The pid rides all four, so one push lands ONCE: the first road to land it settles the kernel's row (POST
 #  /push/landed) and the rest are dups. A card kind ALSO scrolls the feed to its card: {romp:'revealCard'} into the
 #  feed iframe — the same message the Log's bell entries post — but only once the feed has its cards, which it
@@ -48688,6 +48675,11 @@ if(!isOn)testOut.textContent+=" Real notifications won't arrive until the main s
 #  button (2026-09-06) and comes back to it exactly like a turn's; only a card kind adds the card scroll. A sid-less
 #  tap (a test pressed with no session in front) has nowhere to land. A /reveal the kernel refuses lands in the Log
 #  rather than vanishing.
+# THE KNOWN LIMITS, by the state of the app when the notification is tapped: KILLED lands natively (the link road);
+# BACKGROUND lands on the next coming-forward (the vanish road), and a swipe-dismiss lands the same way — the
+# accepted trade-off; FOREGROUND does not switch (no wake event reaches the page; the row lands the next time the app
+# comes forward, if the notification is gone by then). Nothing is shown or offered in any case: a tap lands or
+# nothing happens.
 # THE BOOT FLAG FOLLOWS THE CHAT PANE'S OWN SOCKET (review find, 2026-09-09, on #1127): every road posts boot:true
 # until this page's chat pane reports its socket up ({romp:'wsState',app:'chat',state:'up'}, the message the pane's
 # shim posts to the shell on every open) or has rendered its tabs (the tabs come over that very socket, and the
@@ -48701,9 +48693,6 @@ if(!isOn)testOut.textContent+=" Real notifications won't arrive until the main s
 # rows[, getNotifications, displayed, vanished][, superseded][, err]}, 'tap-pending-land' {sid8, ageS, dup} and
 # 'tap-vanish-land' {sid8, ageS} for the ledger check; 'reveal-post' {status, via, boot} with /reveal's answer.
 # Structure and clipped ids only, never text or a session id whole.
-# GONE (2026-09-10): the stored tap and its replay, the worker fingerprint with its sw-stale and sw-update rows,
-# the offer chip. (The vanished-notification road went with them that morning and came BACK the same day by the
-# user's call — the fromLedger comment below.)
 # Its own <script>, like every shell behaviour (test_kernel_mobile's count pin): a throw in the
 # bell's script must not strand a tap, and a bell that bails where the Push API is missing must
 # not take the deep-link half with it.
@@ -48773,7 +48762,7 @@ return r.getNotifications().then(function(ns){var d={};(ns||[]).forEach(function
 // per-session tag replaced its notification: /push/superseded, never a tap); 'sent' → nothing known displayed, so nothing
 // of it can have vanished. A link this page landed at the same time (linkSid — a killed app, navigated by iOS) or a
 // clicked row landed here is the newer word: whatever else vanished is dropped. A screen this page cannot read (no
-// getNotifications, or it throws) decides nothing. No chip, no prompt, no timer: a tap lands or nothing happens.
+// getNotifications, or it throws) decides nothing. No prompt, no timer: a tap lands or nothing happens.
 // THE KNOWN CONFLATION, AND THE USER'S CALL (2026-09-10): iOS fires neither notificationclick nor notificationclose for
 // a live Home Screen web app, so a notification the user SWIPED AWAY leaves exactly what a tapped one leaves — gone from
 // the screen — and lands here on the next foregrounding as if tapped. The user weighed that on 2026-09-10 and accepted
@@ -48799,7 +48788,7 @@ rows.forEach(function(r,i){if(r.stage!=='shown'||seen[r.pid]||d[r.pid])return;  
 if((r.sid in front)&&front[r.sid]<i){seen[r.pid]=1;superseded++;settle('superseded',r.pid);return;}   // a newer notification for the same session is on the screen: the tag replaced this one's — gone without a tap
 vanished.push(r);});}   // acked shown, gone from the screen: tapped, as far as this page can tell (or swiped — the accepted trade-off above)
 row.vanished=vanished.length;if(superseded)row.superseded=superseded;diag('tap-pending',row);
-if(landed||vanished.length!==1){vanished.forEach(function(v){seen[v.pid]=1;settle('dropped',v.pid);});return;}   // another road landed, or more than one gone at once: spent, silently — no chip, no prompt
+if(landed||vanished.length!==1){vanished.forEach(function(v){seen[v.pid]=1;settle('dropped',v.pid);});return;}   // another road landed, or more than one gone at once: spent, silently
 var v=vanished[0];seen[v.pid]=1;diag('tap-vanish-land',{sid8:v.sid.slice(0,8),ageS:v.ageS});
 land(v.sid,String(v.kind||''),String(v.cardId||''),via==='boot','vanish');settle('landed',v.pid);});});}
 // the worker's message (a browser that dispatches notificationclick: the tap focused this window, or opened it): its
@@ -49269,7 +49258,7 @@ def _landing():
             # minted by the body script, AFTER the iframes: on a fast origin the chat pane's shim read
             # sessionStorage and connected before that script ran, so its socket carried no wid, and a reveal
             # the kernel aimed at this dashboard's wid found no chat socket to deliver to — parked for a ready
-            # that never comes on a live page (2026-09-09, the served tap-resume test on localhost, two runs in
+            # that never comes on a live page (2026-09-09, the served tap test on localhost, two runs in
             # three; a phone's first-ever load runs the same race). Same <script> as the standalone flip: the
             # shell's script count is pinned, and both must run before anything else does.
             "<script>try{if(!sessionStorage.getItem('romp:wid'))sessionStorage.setItem('romp:wid',"
@@ -50233,8 +50222,6 @@ def _landing():
             "</div>"   # /.rail-acts
             "</div>"   # /.pane-rail (bottom bar)
             "</div>"
-            # (no "from the notification" chip here — the user 2026-09-09: a notification that was tapped lands, by
-            # the roads _LANDING_REVEAL_JS documents, and the shell never offers or guesses.)
             "<nav id=mtabs>"
             # the pane tabs, from _PANE_ORDER — the desktop rail's exact order (the user 2026-08-30:
             # mobile is a re-layout, never a re-ordering)

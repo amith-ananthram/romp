@@ -718,10 +718,11 @@ quiet. A card that stops needing you and then needs you again is announced
 once, not at every turn, unless you acted on the card in between (answered
 it, resolved it, crossed it off) or it finished in the meantime.
 
-The handler that answers a tap lives on the phone, and the phone refreshes it
-whenever you open the app and whenever a notification arrives. If a tap ever
-opens Romp on the wrong session, close the app from the app switcher and open
-it again once.
+Tapping a notification brings Romp forward on the session it was about. On an
+iPhone with the app already open in the background, the switch happens as the
+app comes forward; a notification you swipe away instead is read the same way,
+so the next time you open the app it may land on that session. With the app in
+front, nothing moves until you next come back to it.
 
 The bell itself shows the state of the device you are looking at: lit when the
 main switch is on and this device is set up, and crossed out otherwise. Its
