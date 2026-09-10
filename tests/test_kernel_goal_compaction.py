@@ -559,7 +559,16 @@ class ClearedLedgerIsAuthoritativeAcrossTheCompaction(unittest.TestCase):
         self.assertEqual(km._compact_goal_store(SID), 1)
         arch = json.loads((jd.GOALARCHDIR / (SID + ".json")).read_text())
         self.assertTrue(arch["nodes"][self.g("g4")]["cleared"], "stamped before the copy")
-        self.assertEqual(arch["status"][self.g("g4")], "completed", "the status is history, untouched")
+        # the re-seal's rollup replaces the store's status dict, and the copy reads the replaced one, as it does
+        # when the clear lands on the live card (a clear after a done rolls up to cleared): the archive gets the
+        # rolled-up value, the live file keeps no entry for a node it no longer holds, and Show completed does
+        # not list the top (the pre-reseal copy read completed, which kept it listed, struck through)
+        self.assertEqual(arch["status"][self.g("g4")], "cleared", "the rolled-up status moves with the node")
+        live = json.loads((jd.GOALDIR / (SID + ".json")).read_text())      # the raw file: a load's replay may re-roll
+        self.assertNotIn(self.g("g4"), live.get("status", {}), "no status for a node the live store no longer holds")
+        self._fresh_process()
+        self.assertEqual([n["id"] for n in km._fleet_archived_tops(SID)], [],
+                         "a cleared top is not a completed one: nothing for Show completed to list")
 
     def test_the_projection_reads_the_ledger_over_the_copied_flag_after_its_cache(self):
         jd.GOALARCHDIR.mkdir(parents=True, exist_ok=True)
