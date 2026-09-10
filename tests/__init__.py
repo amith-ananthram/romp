@@ -7,6 +7,7 @@ script run — the per-module preambles do, and tests/test_state_isolation_order
 import atexit
 import os
 import shutil
+import sys
 import tempfile
 
 # Temp-directory hygiene, the in-process half (2026-09-06): the suite used to leak every directory it
@@ -67,3 +68,10 @@ os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="romp-tests-state-")
 # thread method ends a hung run that way), so a hung run leaves this dir beside the root.
 STATE_DIR = os.environ["XDG_STATE_HOME"]
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
+
+# `from romp_load import load_source` in a test module (tests/romp_load.py): under pytest and
+# `python -m unittest tests.test_x` the test modules are imported as members of this package, so the
+# bare name resolves only because it is registered here; a direct script run finds the file on
+# sys.path itself. One module object either way.
+from . import romp_load as _romp_load  # noqa: E402
+sys.modules.setdefault("romp_load", _romp_load)

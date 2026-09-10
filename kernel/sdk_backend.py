@@ -45,13 +45,17 @@ from pathlib import Path
 # The tmux launcher picks the first unused colour; for an SDK session we pick deterministically by a
 # stable hash of the sid (the launcher's own fallback when all are taken), so the session gets a
 # consistent colour without cross-backend "used" bookkeeping.
-from importlib.machinery import SourceFileLoader as _SFL
-_pal = _SFL("romp_palette", str(Path(__file__).resolve().parent / "palette.py")).load_module()
+import importlib.util
+_HERE = Path(__file__).resolve().parent
+_ls_spec = importlib.util.spec_from_file_location("romp_loadsource", str(_HERE / "loadsource.py"))
+_ls_mod = importlib.util.module_from_spec(_ls_spec)
+_ls_spec.loader.exec_module(_ls_mod)
+load_source = _ls_mod.load_source   # file-path imports with load_module()'s sys.modules semantics (kernel/loadsource.py)
+_pal = load_source("romp_palette", _HERE / "palette.py")
 # How romp reaches an API credential (credentials.py: stdlib only, loaded the same way as event_model so
 # the standalone judges and the kernel share one copy). romp holds no key of its own since 2026-09-08:
 # the module reads Claude Code's apiKeyHelper for the kernel's two calls and checks the boot environment.
-_cred = sys.modules.get("romp_credentials") or _SFL(
-    "romp_credentials", str(Path(__file__).resolve().parent / "credentials.py")).load_module()
+_cred = sys.modules.get("romp_credentials") or load_source("romp_credentials", _HERE / "credentials.py")
 # The by-text KEY RULES (session_backend.echo_text_key, and command_text_key for a slash send): the one
 # normalization under which an input echo's text is compared with a transcript record's, shared with the
 # kernel's _atom_user_texts so the landing scan below can never find what prune_live cannot retire. The
@@ -59,8 +63,8 @@ _cred = sys.modules.get("romp_credentials") or _SFL(
 # is loaded under its OWN module name: the kernel loads it as romp_session_backend and TmuxBackend
 # subclasses that copy's ABC, and re-executing the source into that module object would rebind the class
 # out from under the subclass.
-_keys = (sys.modules.get("romp_session_backend") or _SFL(
-    "romp_session_backend_keys", str(Path(__file__).resolve().parent / "session_backend.py")).load_module())
+_keys = (sys.modules.get("romp_session_backend")
+         or load_source("romp_session_backend_keys", _HERE / "session_backend.py"))
 echo_text_key = _keys.echo_text_key
 command_text_key = _keys.command_text_key
 echo_keys = _keys.echo_keys                  # both keys of a text, the "either key" rule written once

@@ -13,9 +13,8 @@ CLI:
   romp-judge --once               # one caption pass over the live fleet (writes captions/)
   romp-judge --test <transcript>  # caption one transcript's recent units, print them (no write)
 """
-import contextlib, copy, hashlib, json, os, re, secrets, shutil, signal, stat, sys, time, subprocess, threading, traceback
+import contextlib, copy, hashlib, json, os, re, secrets, shutil, signal, stat, sys, time, subprocess, threading, traceback, importlib.util
 from pathlib import Path
-from importlib.machinery import SourceFileLoader
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -62,9 +61,12 @@ class _TimedPool(ThreadPoolExecutor):
 ThreadPoolExecutor = _TimedPool      # every pool below is a timed one (see above)
 
 HERE = Path(__file__).resolve().parent
-em = SourceFileLoader("romp_event_model", str(HERE / "event_model.py")).load_module()
-_cred = sys.modules.get("romp_credentials") or SourceFileLoader(
-    "romp_credentials", str(HERE / "credentials.py")).load_module()
+_ls_spec = importlib.util.spec_from_file_location("romp_loadsource", str(HERE / "loadsource.py"))
+_ls_mod = importlib.util.module_from_spec(_ls_spec)
+_ls_spec.loader.exec_module(_ls_mod)
+load_source = _ls_mod.load_source   # file-path imports with load_module()'s sys.modules semantics (kernel/loadsource.py)
+em = load_source("romp_event_model", HERE / "event_model.py")
+_cred = sys.modules.get("romp_credentials") or load_source("romp_credentials", HERE / "credentials.py")
 
 HOME     = Path.home()
 STATE    = Path(os.environ.get("ROMP_STATE_DIR")   # per-kernel state root override (plans/multi-kernel.md)
@@ -1032,7 +1034,7 @@ _judge_ctx = threading.local()                       # per-thread: the fsid bein
 # In-flight judge calls, so the live timeline can draw a run-span GROWING to now the moment a call STARTS,
 # instead of the bar only appearing (back-dated to its real start) once the call returns and its usage line
 # is written (the user 2026-06-23). In-process registry: the kernel runs the judge in its own threads
-# (SourceFileLoader), so it reads `active_runs()` directly — no file, no cross-process race. Self-cleaning:
+# (loaded by file path), so it reads `active_runs()` directly — no file, no cross-process race. Self-cleaning:
 # every call deregisters in a `finally`, so a timeout/parse-fail/exception can't leak a forever-growing bar.
 _active = {}                                          # run_id -> {"judge", "fsid", "sent"}
 _PASS_DONE = {}                                       # (tier, fsid) -> wall clock of that tier's last COMPLETED
