@@ -291,7 +291,7 @@ class PushTestRoute(_LoopbackMixin, unittest.TestCase):
         self.assertEqual([r["sid"] for r in km._push_ledger() if r["pid"] == pid], [SID_WEB], "the row the pid names is this push's")
         self.assertEqual(d["data"], {"sid": SID_WEB, "host": "", "kind": "test", "cardId": "",
                                      "url": "/?push-reveal=" + SID_WEB,
-                                     "name": "web"})   # the same name the answer carries (2026-09-09: the shell's offer chip reads it off the payload)
+                                     "name": "web"})   # the same name the answer carries (2026-09-09: the ledger row files it, so the kernel's lines and the page's rows can name the session)
         self.assertNotIn("badge", d, "the count rides its own push")
 
     def test_every_test_push_leaves_a_line_in_the_kernel_log(self):

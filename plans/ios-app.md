@@ -30,11 +30,22 @@ Implementation notes that amend this sketch:
   the worker leaves a FINGERPRINT beside the tap (`/__romp/sw`: a version baked at serve time — the
   kernel's sha + dist token, the string the shell page carries too — plus install/activate/last-push/
   last-click stamps and a click count), which the shell folds into every `tap-resume` row (`sw-stale`
-  on a mismatch; `registration.update()` at boot and on every visible); and every session-addressed
-  push writes the notification it shows to `/__romp/shown` BEFORE attempting the show, so a page that
-  comes forward with that record and no tap OFFERS the session instead of jumping — a bottom-left chip
-  ("Open <name> · from the notification", with a dismiss) that lands by the same path (`via: 'offer'`)
-  when taken. A stored tap outranks the offer; the session already in front retires it.
+  on a mismatch; `registration.update()` at boot and on every visible). (An OFFER chip — "Open <name>
+  · from the notification", sourced from a `/__romp/shown` record the push wrote — shipped the same
+  day and was removed the same day: it named the wrong session, and the user wants no chip and no
+  prompt, ever.)
+- Later still, the finding read right (2026-09-09, 23:30 UTC): the worker's acks DO reach the kernel;
+  what a live Home Screen app never gets is the `notificationclick` — a tap only foregrounds the app
+  (a killed app gets the click and the deep link). So the kernel keeps a push LEDGER (a `pid` per push
+  per device, in the payload's routing block; `STATE/push-ledger.json`): the worker acks `shown`,
+  `clicked` and `closed` by pid alone (`POST /push/ack`), and the page, on boot / visible / pageshow /
+  focus with no stored tap, asks `GET /push/pending?endpoint=` for EVERY unsettled row to its own
+  subscription and reads `registration.getNotifications()`. A `clicked` row lands (`via: 'ack'`);
+  EXACTLY ONE `shown` row whose notification is gone with no close on record lands (`via: 'vanish'`);
+  anything else — two or more gone, all displayed, sent-only, a screen it cannot read — shows nothing.
+  Rows go back as `/push/landed`, `/push/superseded` (a newer notification for the same session
+  displayed in its place; the kernel applies the same at the shown ack) or `/push/dropped` (spent
+  without a landing). `tests/test_notification_tap_resume_browser.py` runs it in a real browser.
 - The shell background is `#1e1e1e`, not the `#101418` guessed below (that is the login page);
   the manifest and theme-color use `#1e1e1e`.
 - The manifest and the three icon PNGs are served auth-EXEMPT: browsers fetch a manifest (and
