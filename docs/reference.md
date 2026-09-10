@@ -1782,14 +1782,29 @@ The shell's rail carries one dot for the signal, placed after the `API` label
 of the spend readout: the accent colour when every connected kernel is fine,
 red when errors are being met anywhere (a 429 storm, 5xx failures, a machine
 offline, auto-retry paused), and the label gray when no kernel has API traffic
-in the windows. The hover and the pinned detail read the document in plain
-words rather than the state machine's vocabulary: traffic with no errors reads
-as what happened ("4 requests in the last 15 min, all succeeded"), with "too
-few requests to call a trend" as a sub-line while the machine still says
-`unknown`; errors read as the failures counted; no traffic reads as quiet. The
-word `unknown` stays in the document and appears nowhere on the dashboard. The
-graph is attempts per minute from `series`, 429 attempts in red and 5xx in
-orange, and one sentence explains the codes.
+in the windows. The hover reads the document as counts, never as the state
+machine's vocabulary: one line per machine, named by its kernel's own name,
+with its successful requests in the accent and each failure class counted in
+its own colour only when present (429s in the blocked red, 5xx with 529 in the
+5xx magenta, no-connection and other-status failures in the label gray); no
+traffic reads as "no API traffic"; a machine whose sessions are waiting or
+whose kernel is paused shows that kernel's own words instead. The window the
+lines count is named once at the top: the ledger's last 24 hours, or an older
+kernel's longest window. There is no summary sentence: the lines do the work,
+and a machine not reachable keeps its own line saying so. The word `unknown`
+stays in the document and appears nowhere on the dashboard. Under the lines,
+the **History** draws one stacked histogram per machine from the `ledger`:
+one bar per bin, successes in the accent, 429 attempts in red and 5xx in
+magenta stacked on them, and a gray band for no-connection and other-status
+failures only when the range holds any; one ceiling label, no peak figure; a
+vertical, left-justified legend with a swatch in each bar colour (429 on one
+line, 5xx below it, the gray line only when it applies); the age of the read
+in words ("now", "3 minutes ago"), recomputed at every repaint. The hover
+draws the last 24 hours as 96 quarter-hour bars. A click on the dot (or Enter)
+opens the detail, a centred modal in the spend modal's grammar: the same lines,
+the waiting sessions and the pause control, and one large histogram per machine
+with range chips for 1 hour (60 one-minute bars), 24 hours (96 quarter-hour
+bars) and 7 days (168 hourly bars); the hover is unchanged by it.
 
 The signal covers every connected kernel, not only the one serving the page.
 Each kernel serves its own last shell frame at `GET /api-health/frame` (its
@@ -1816,6 +1831,24 @@ its document passes through as answered (404 for an unknown host, 502 when the
 tunnel is down). The merge happens in the browser and follows the federation
 rule: per-host maps in, one line per machine out, the worst state wins for the
 dot, and no count or clock is ever added to or compared with another kernel's.
+
+### The ledger
+
+Every attempt is also folded, the moment it lands, into `ledger`, a per-bucket
+set of fixed-width bins behind the dashboard's histograms: `minute` (60
+one-minute bins, the last hour), `fiveMin` (288 five-minute bins, the last 24
+hours) and `hour` (168 hourly bins, the last 7 days), each tier an object with
+`binS`, `from` (the first bin's start) and one integer array per class (`ok`,
+`rateLimited`, `serverErrors` with 529, `noStatus`, `other`), oldest first, the
+last bin the one holding `asOf`, zeros where nothing landed. The event ring
+holds only the windows' span, so this is what lets the popup show the day and
+the detail the week. Bounded: at most 516 bins per bucket, under about 100 KB
+per bucket in memory when every bin has traffic and about 10 KB in the state
+file; buckets (auth times family) are few. It is written to `api-health.json`
+with the state (on a transition, and on the first event of each minute, so a
+restart loses at most the current minute) and restored at boot, malformed
+pieces skipped and counted in the log. Additive: a reader that ignores it sees
+the document it always saw.
 
 ### Derived state
 
@@ -1946,7 +1979,7 @@ again to a shell that sends `ready`:
 {"type": "apiHealth", "state": "ok | degraded | paused",
  "cls": "429 | 529 | offline | errors | ''", "reason": "'' | limit | spend | manual",
  "text": "<the rail's words>", "waiting": 0, "retrying": 0, "blocked": 0,
- "since": 0, "tmux": 0, "seq": 0, "quiet": false, "errs": 0,
+ "since": 0, "tmux": 0, "seq": 0, "quiet": false, "errs": 0, "host": "<this kernel's name to its peers>",
  "sessions": [{"sid": "", "name": "", "color": null, "kind": "retrying | blocked",
                "cls": "", "status": null, "since": 0, "suppressed": false}],
  "hosts": {"<host>": {"state": "ok | degraded | paused", "cls": "", "text": "", "waiting": 0,
@@ -1970,7 +2003,9 @@ model allowance, a dead credential, a refusal) are not counted; a spend cap is,
 and engages the `spend` pause in the same cycle. `quiet` is true when this
 kernel's API-health aggregator saw no event in its longest window (or the
 kernel has no SDK backend), the fact behind the dot's gray before any history
-is read. `hosts` is every attached
+is read. `host` is this kernel's own name, the one its peers know it by
+(`_self_host`): the popup's line for this machine carries it instead of "this
+machine". `hosts` is every attached
 machine's own frame as the tunnel supervisor last heard it (the fields above
 minus `sessions` and `seq`, which stay on their kernel), keyed by host name,
 with `stale` true while that tunnel is not up; a kernel with no attached
@@ -1987,12 +2022,15 @@ Nothing polls; the frame carries no history and is unchanged. Each machine's
 document is read in the plain words of "On the dashboard" above: over the
 longest window of `config.windows`, `requests` plus `noStatus` are the
 attempts, `rateLimited`, `serverErrors` (with `overloaded`), `otherErrors`
-and `noStatus` the failures, and `gaveUp` the turns that gave up; traffic with
-no failures reads as the successes counted, failures read counted in the
-machine's phrase (`thrashing` as a rate-limit storm, `degraded` as the API
-failing), and no attempts read as quiet; the state machine's word itself is
-never shown. Under each machine's reading sits the graph from `series`, then
-one legend sentence for the codes, and this machine's State changes: up to
+and `noStatus` the failures, and `gaveUp` the turns that gave up; the lines
+count the `ledger` instead when the kernel serves one (its five-minute tier,
+the last 24 hours): successes as "N successful requests", each failure class
+counted in its colour when present, no attempts as "no API traffic"; the state
+machine's word itself is never shown. Under the lines sit the histograms from
+the `ledger` (one per machine, the tier the range names, summed bin by bin
+across one kernel's buckets; an older kernel's document, which has no ledger,
+draws its 15-minute `series` the same way), then the legend, and this
+machine's State changes: up to
 four rows of `transitions` newest first with the state entered in plain words
 (`rate-limit storm`, `API failing`, `recovering`, `fine`, `quiet`) and how
 long it held (until the same bucket's next transition, `so far` for the

@@ -82,10 +82,32 @@ def _win(requests, r429, r5xx, gave, sess, complete=True, no_status=0):
             "sessionsRetrying": sess, "turnsRetrying": sess, "rate429": r429, "rate5xx": r5xx}
 
 
+def _spread(total, n, k):
+    """`total` events over the newest `k` of `n` bins, evenly, deterministic (the oldest of the k gets the remainder)."""
+    out = [0] * n
+    for i in range(k):
+        out[n - 1 - i] = total // k + (1 if i < total % k else 0)
+    return out
+
+
+def _tier(win, bin_s, n, k):
+    return {"binS": bin_s, "from": NOW - NOW % bin_s - (n - 1) * bin_s,
+            "ok": _spread(win["ok"], n, k), "rateLimited": _spread(win["rateLimited"], n, k),
+            "serverErrors": _spread(win["serverErrors"] + win["overloaded"], n, k),
+            "noStatus": _spread(win["noStatus"], n, k), "other": _spread(win["otherErrors"], n, k)}
+
+
+def _ledger(windows):
+    """T316: the ledger's three tiers (one-minute bins for the hour, five-minute for the day, hourly for the week) carrying
+    the 15-minute window's counts, so the counts the lines read (the day) are the window's and the bars draw."""
+    w = windows.get("900") or _win(0, None, None, 0, 0)
+    return {"minute": _tier(w, 60, 60, 15), "fiveMin": _tier(w, 300, 288, 3), "hour": _tier(w, 3600, 168, 1)}
+
+
 def _bucket(key, state, since, why, windows):
     auth, fam = key.split("|")
     return {"auth": auth, "family": fam, "state": state, "stateSince": since, "why": why, "windows": windows,
-            "evidence": None, "transitions": [], "lastError": None}
+            "evidence": None, "transitions": [], "lastError": None, "ledger": _ledger(windows)}
 
 
 def _tr(t, key, frm, to, why="x"):
@@ -246,20 +268,27 @@ const ev = (fn, arg) => page.evaluate(fn, arg);
 const rows = () => ev(() => Array.from(document.querySelectorAll("#ah-tip .ah-hist .ah-hrow")).map((n) => ({
   k: (n.querySelector(".ru-tip-k") || {}).textContent || "", w: n.querySelector(".ah-hword") ? n.querySelector(".ah-hword").textContent : null,
   v: n.querySelector(".ru-tip-v") ? n.querySelector(".ru-tip-v").textContent : null, boot: n.classList.contains("ah-boot") })));
-// T301: the reading sits in the FIRST section's head (word + dot); the History section holds the legend, the graph
-// (when the document carries a series), the machine lines with several hosts, and this machine's State changes
+// T316: the FIRST section is the title (with the window named once) and one line per machine (dot, name, coloured
+// counts); `word`/`dot`/`name`/`since` read THIS machine's line. The History section holds the bars, the vertical legend
+// (its rows), the age of the read, the machine names over their bars with several hosts, and this machine's State changes
 const head = () => ev(() => { const h = document.querySelector("#ah-tip .ah-hist"), top = document.querySelector("#ah-tip > .ru-tip-win");
   const q = (s) => { const n = h && h.querySelector(s); return n ? n.textContent : null; };
   const qt = (s) => { const n = top && top.querySelector(s); return n ? n.textContent : null; };
-  return { word: qt(".ah-head .ah-word"), dot: top && top.querySelector(".ah-head .ah-dot") ? top.querySelector(".ah-head .ah-dot").getAttribute("data-dot") : null,
-           since: qt(".ah-since"), sub: qt(".ah-line.ru-tip-reset"), title: qt(".ru-tip-name span"), asOf: q(".ru-tip-name .ru-tip-reset"),
-           legend: q(".ah-legend"), graphs: h ? h.querySelectorAll(".ru-tip-graph").length : 0, err: q(".ah-err"), wait: !!(h && h.querySelector(".ah-wait")),
-           mlines: Array.from(document.querySelectorAll("#ah-tip .ah-mline")).map((n) => n.textContent),
+  const me = top && top.querySelector('.ah-mline[data-host=""]');
+  const mq = (s) => { const n = me && me.querySelector(s); return n ? n.textContent : null; };
+  const bars = h ? Array.from(h.querySelectorAll(".ah-bars")) : [];
+  return { word: mq(".ah-desc"), dot: me && me.querySelector(".ah-dot") ? me.querySelector(".ah-dot").getAttribute("data-dot") : null, name: mq(".ah-nm"),
+           since: mq(".ah-since"), title: qt(".ru-tip-name span"), win: qt(".ah-win"), ago: q(".ah-ago"),
+           legend: h ? Array.from(h.querySelectorAll(".ah-legend .ah-lrow")).map((n) => n.textContent) : null, graphs: bars.length,
+           bars: bars.length ? +bars[0].getAttribute("data-bars") : 0, big: bars.some((b) => b.classList.contains("ah-big")),
+           err: q(".ah-err"), wait: !!(h && h.querySelector(".ah-wait")),
+           mlines: Array.from(document.querySelectorAll("#ah-tip .ah-mline")).map((n) => ((n.querySelector(".ah-nm") || {}).textContent || "") + ": " + ((n.querySelector(".ah-desc") || {}).textContent || "")),
+           gnames: Array.from(h ? h.querySelectorAll(".ah-gname .ah-nm") : []).map((n) => n.textContent),
            unknown: /unknown/i.test(document.getElementById("ah-tip").innerText),
            names: Array.from(h ? h.querySelectorAll(".ru-tip-name span:first-child") : []).map((n) => n.textContent) }; });
 const shown = () => ev(() => document.getElementById("ah-tip").style.display === "block");
 // the colours the theme resolves to, read from the computed style of the head's dot and of the failure line
-const dotColor = () => ev(() => getComputedStyle(document.querySelector("#ah-tip > .ru-tip-win .ah-head .ah-dot")).backgroundColor);
+const dotColor = () => ev(() => getComputedStyle(document.querySelector('#ah-tip > .ru-tip-win .ah-mline[data-host=""] .ah-dot')).backgroundColor);
 const errColor = () => ev(() => getComputedStyle(document.querySelector("#ah-tip .ah-hist .ah-err")).color);
 const described = () => ev(() => document.getElementById("rail-api").getAttribute("aria-describedby"));
 // the tip's role and modal flag, whether focus sits inside it, and whether it is the centered card
@@ -449,13 +478,35 @@ await step("order", async () => {
 await step("hosts", async () => {
   // 11b. T301: a frame carrying an attached host's frame reads that host's document through the relay and names
   //      every machine: the section counts them, the dot is the worst state, the History carries a line per machine
-  await ev((f) => { window.__rompApiHealth(f); }, frame({ hosts: { TESTHOST: { state: "degraded", cls: "429", text: "rate limited · 2 waiting", waiting: 2, retrying: 2, blocked: 0, since: NOW_PLACEHOLDER, reason: "", tmux: 0, stale: false } } }));
+  await ev((f) => { window.__rompApiHealth(f); }, frame({ host: "HUBHOST", hosts: { TESTHOST: { state: "degraded", cls: "429", text: "rate limited · 2 waiting", waiting: 2, retrying: 2, blocked: 0, since: NOW_PLACEHOLDER, reason: "", tmux: 0, stale: false } } }));
   await variant("quiet");
-  await enter(); await waitSel("#ah-tip .ah-hist .ah-legend");
+  await enter(); await page.waitForFunction(() => document.querySelectorAll("#ah-tip .ah-hist .ah-bars").length >= 2, null, { timeout: 8000 });
   R.hosts = { head: await head(), rows: await rows(), fetched: await ev(() => window.__lastUrls || null) };
   await leave();
   await ev((f) => { window.__rompApiHealth(f); }, frame());
   await variant("storm");
+});
+await step("detail", async () => {
+  // 11c. T316: the dot's click opens the detail: the same card with range chips (1 hour, 24 hours, 7 days) and one LARGE
+  //      stacked histogram per machine; the day is the default and draws 96 quarter-hour bars from the 288 five-minute
+  //      bins, the hour its 60 one-minute bins, the week its 168 hourly bins; Escape closes it
+  await ev((f) => { window.__rompApiHealth(f); }, frame(await flagsFor()));
+  await ev(() => { document.getElementById("rail-api").click(); });
+  await waitSel("#ah-tip .ah-range"); await page.waitForFunction(() => !!document.querySelector("#ah-tip .ah-bars.ah-big"), null, { timeout: 8000 });
+  const chips = () => ev(() => Array.from(document.querySelectorAll("#ah-tip .ah-range .rsp-btn")).map((b) => ({ t: b.textContent, on: b.classList.contains("on"), act: b.getAttribute("data-act") })));
+  const barsOf = () => ev(() => { const b = document.querySelector("#ah-tip .ah-bars.ah-big"); return b ? +b.getAttribute("data-bars") : 0; });
+  R.detail = { mode: await mode(), chips: await chips(), dayBars: await barsOf(), head: await head() };
+  await ev(() => { document.querySelector('#ah-tip [data-act="range:hour"]').click(); });
+  R.detail.hourBars = await barsOf(); R.detail.hourOn = await ev(() => document.querySelector('#ah-tip [data-act="range:hour"]').classList.contains("on"));
+  await ev(() => { document.querySelector('#ah-tip [data-act="range:week"]').click(); });
+  R.detail.weekBars = await barsOf();
+  await ev(() => { document.querySelector('#ah-tip [data-act="range:day"]').click(); });
+  await page.keyboard.press("Escape");
+  R.detail.closed = !(await shown());
+  // the hover after the detail draws the day, small, with no chips
+  await enter(); await waitRows();
+  R.detail.hoverAfter = await head(); R.detail.hoverChips = await ev(() => document.querySelectorAll("#ah-tip .ah-range").length);
+  await leave();
 });
 await step("focus", async () => {
   // 12. keyboard focus shows the hover as the pointer does; blur hides it. The focus and the look at the description
@@ -714,8 +765,8 @@ class ServedHistory(unittest.TestCase):
             self.assertEqual(R[name + "Rows0"], 0, name)
         self.assertEqual(R["racePending"], 2, "enter, leave, enter: two reads in flight")
         self.assertTrue(R["raceAfterOld"]["wait"], "the older answer landing first is dropped: the dots stay")
-        self.assertEqual(R["raceAfterOld"]["word"], "Fine.", "and the head still reads the frame's own word")
-        self.assertEqual(R["raceAfterNew"]["word"], '30 requests in the last 15 min, all succeeded.', "the newer read's answer is what shows")
+        self.assertEqual(R["raceAfterOld"]["word"], "", "and this machine's line still says what the frame alone says: nothing yet (no verdict word)")
+        self.assertEqual(R["raceAfterNew"]["word"], "30 successful requests", "the newer read's answer is what shows")
         self.assertFalse(R["raceAfterNew"]["wait"])
 
     def test_the_storm_reads_in_plain_words_with_the_legend_and_the_tail_with_its_restart_row(self):
@@ -723,14 +774,17 @@ class ServedHistory(unittest.TestCase):
         # (the counts, the machine's verdict as a plain phrase), the dot is red for a window in errors even with
         # nothing waiting right now, the legend explains the codes, and the tail is capped at four in plain words
         h, rows = self.R["storm"]["head"], self.R["storm"]["rows"]
-        self.assertEqual((h["word"], h["dot"]), ('Rate-limit storm: 9 rate-limited attempts, 1 server error among 45 attempts in the last 15 min; 1 turn gave up.', "errors"))
+        # T316: this machine's line is its counts over the day in their colours, no verdict word; the window named once
+        self.assertEqual((h["word"], h["dot"]), ('35 successful requests · 9 429s · 1 5xx', "errors"))
+        self.assertEqual(h["name"], "this machine", "a frame without a host name")
         self.assertEqual(h["title"], "API health", "one machine: no count")
-        self.assertIsNone(h["since"], "the frame is ok: no since on the head")
-        self.assertIsNone(h["sub"], "the machine has a verdict: no trend caveat")
-        self.assertEqual(h["asOf"], "as of " + time.strftime("%H:%M:%S", time.localtime(NOW)))
+        self.assertEqual(h["win"], "last 24 hours", "the ledger's day, named once at the top")
+        self.assertIsNone(h["since"], "the frame is ok: no since on the line")
+        self.assertRegex(h["ago"], r"^(now|\d+ minutes? ago)$", "the read's age in words, never a clock stamp")
         self.assertEqual(h["names"], ["History", "State changes"])
-        self.assertEqual(h["legend"], "429 = the API told us to slow down (rate limit) · 5xx = the API itself failed (server error) · offline = no connection")
-        self.assertEqual(h["graphs"], 0, "this fixture carries no series: no graph")
+        self.assertEqual(h["legend"], ["429 = the API told us to slow down (rate limit)", "5xx = the API itself failed (server error)"],
+                         "vertical: one line each, 429 then 5xx; no gray line when the range holds no such failure")
+        self.assertEqual((h["graphs"], h["bars"], h["big"]), (1, 96, False), "the day as 96 quarter-hour bars, small in the hover")
         self.assertFalse(h["unknown"], "the word never reaches the user")
         self.assertEqual([(r["k"], r["w"], r["v"], r["boot"]) for r in rows],
                          [(_hmd(NOW - 300), "rate-limit storm", "5 min so far", False),
@@ -741,8 +795,7 @@ class ServedHistory(unittest.TestCase):
 
     def test_a_tail_crossing_boot_at_without_a_restart_row_gets_the_divider_and_the_hold_ends_at_the_boot(self):
         h, rows = self.R["quiet"]["head"], self.R["quiet"]["rows"]
-        self.assertEqual((h["word"], h["dot"]), ('30 requests in the last 15 min, all succeeded.', "fine"))
-        self.assertIsNone(h["sub"], "healthy: no trend caveat")
+        self.assertEqual((h["word"], h["dot"]), ("30 successful requests", "fine"))
         self.assertEqual([(r["k"], r["w"], r["v"], r["boot"]) for r in rows],
                          [(_hmd(NOW - 100), "fine", "2 min so far", False),
                           (_hmd(BOOT), "kernel restarted", None, True),
@@ -752,7 +805,7 @@ class ServedHistory(unittest.TestCase):
 
     def test_a_bucket_the_boot_seeded_reads_since_the_boot_in_the_head_and_the_tail_alike(self):
         h, rows = self.R["stale"]["head"], self.R["stale"]["rows"]
-        self.assertEqual((h["word"], h["dot"]), ('No API traffic in the last 15 min.', "quiet"), "no traffic reads quiet and gray, never the machine's word")
+        self.assertEqual((h["word"], h["dot"]), ("no API traffic", "quiet"), "no traffic reads quiet and gray, never the machine's word")
         self.assertFalse(h["unknown"])
         tail = rows
         self.assertEqual([(r["k"], r["w"], r["v"], r["boot"]) for r in tail],
@@ -766,7 +819,7 @@ class ServedHistory(unittest.TestCase):
 
     def test_a_boot_at_58_seconds_reads_one_time_in_the_head_and_on_its_restart_row(self):
         h, rows = self.R["minute"]["head"], self.R["minute"]["rows"]
-        self.assertEqual((h["word"], h["dot"]), ('No API traffic in the last 15 min.', "quiet"))
+        self.assertEqual((h["word"], h["dot"]), ("no API traffic", "quiet"))
         tail = rows
         self.assertEqual([(r["k"], r["w"], r["v"], r["boot"]) for r in tail],
                          [(_hmd(BOOT_M), "quiet · kernel restarted", _min(NOW - BOOT_M) + " so far", False),
@@ -778,7 +831,7 @@ class ServedHistory(unittest.TestCase):
 
     def test_the_restart_row_sorts_above_the_previous_kernel_s_last_row_filed_in_the_same_second(self):
         h, rows = self.R["inversion"]["head"], self.R["inversion"]["rows"]
-        self.assertEqual(h["word"], 'No API traffic in the last 15 min.')
+        self.assertEqual(h["word"], "no API traffic")
         tail = rows
         self.assertEqual([(r["k"], r["w"], r["v"], r["boot"]) for r in tail],
                          [(_hmd(BOOT + 0.9), "quiet · kernel restarted", _dur(NOW - (BOOT + 0.9)) + " so far", False),
@@ -805,7 +858,7 @@ class ServedHistory(unittest.TestCase):
 
     def test_a_transition_the_hover_s_own_read_filed_closes_the_state_before_it(self):
         h, rows = self.R["ownread"]["head"], self.R["ownread"]["rows"]
-        self.assertEqual(h["word"], 'Rate-limit storm: 9 rate-limited attempts, 1 server error among 45 attempts in the last 15 min; 1 turn gave up.')
+        self.assertEqual(h["word"], '35 successful requests · 9 429s · 1 5xx')
         tail = rows
         self.assertEqual([(r["k"], r["w"], r["v"]) for r in tail],
                          [(_hmd(NOW), "rate-limit storm", "0 s so far"), (_hmd(NOW - 500), "fine", "8 min")],
@@ -814,30 +867,33 @@ class ServedHistory(unittest.TestCase):
 
     def test_no_bucket_reads_quiet_and_gray_with_no_rows(self):
         h, rows = self.R["empty"]["head"], self.R["empty"]["rows"]
-        self.assertEqual((h["word"], h["dot"]), ('No API traffic in the last 15 min.', "quiet"))
+        self.assertEqual((h["word"], h["dot"]), ("no API traffic", "quiet"))
         self.assertEqual(rows, [])
         self.assertIsNone(h["since"])
-        self.assertIsNotNone(h["legend"], "the legend stands whatever the traffic")
+        self.assertEqual(len(h["legend"]), 2, "the legend stands whatever the traffic")
+        self.assertEqual(h["graphs"], 0, "no bucket: nothing to draw")
         self.assertFalse(h["unknown"])
 
     def test_two_buckets_of_one_family_read_as_one_machine_and_the_tail_tells_them_apart_by_auth(self):
         # T301: the head counts every bucket of this machine (one kernel's buckets share its clock); the "worst of N
         # buckets" caveat is gone; the tail still names a bucket by family and auth when two share the family
         h, rows = self.R["two"]["head"], self.R["two"]["rows"]
-        self.assertEqual(h["word"], 'Rate-limit storm: 9 rate-limited attempts, 1 server error among 56 attempts in the last 15 min; 1 turn gave up.')
+        self.assertEqual(h["word"], "46 successful requests · 9 429s · 1 5xx", "both buckets' counts, added (one kernel's clock)")
         tail = rows
         self.assertEqual([r["w"] for r in tail], ["fable · %s rate-limit storm" % AUTH, "fable · %s fine" % LAUTH])
         self.assertEqual([r["v"] for r in tail], ["5 min so far", "8 min so far"], "each bucket's current state is its own 'so far'")
 
     def test_two_buckets_of_two_families_are_named_by_family_alone(self):
         h, rows = self.R["twoFam"]["head"], self.R["twoFam"]["rows"]
-        self.assertEqual(h["word"], 'Rate-limit storm: 9 rate-limited attempts, 1 server error among 56 attempts in the last 15 min; 1 turn gave up.')
+        self.assertEqual(h["word"], "46 successful requests · 9 429s · 1 5xx")
         self.assertEqual([r["w"] for r in rows], ["fable rate-limit storm", "opus fine"])
 
     def test_an_offline_window_reads_its_no_connection_attempts_in_plain_words(self):
         h, rows = self.R["offline"]["head"], self.R["offline"]["rows"]
-        self.assertEqual((h["word"], h["dot"]), ('Errors: 2 rate-limited attempts, 7 attempts with no connection among 15 attempts in the last 15 min; 1 turn gave up.', "errors"),
+        self.assertEqual((h["word"], h["dot"]), ("6 successful requests · 2 429s · 7 no connection", "errors"),
                          "attempts without a status are counted as no connection; the machine's word (unknown) is never said")
+        self.assertEqual(h["legend"][-1], "gray = no connection, or another error", "the gray line joins the legend when the range holds such failures")
+        self.assertEqual(len(h["legend"]), 3)
         self.assertFalse(h["unknown"])
 
     def test_the_cap_shows_four_transitions_with_the_divider_extra_and_four_without_one(self):
@@ -864,8 +920,8 @@ class ServedHistory(unittest.TestCase):
         self.assertEqual(R["failReject"]["head"]["err"], "Could not read the API history: Failed to fetch")
         self.assertEqual(R["failReject"]["rows"], [])
         self.assertEqual(R["failMalformed"]["head"]["err"], "Could not read the API history: malformed answer")
-        self.assertIsNone(R["fail503"]["head"]["asOf"], "no as-of stamp on a failure")
-        self.assertEqual(R["recovered"]["head"]["word"], 'Rate-limit storm: 9 rate-limited attempts, 1 server error among 45 attempts in the last 15 min; 1 turn gave up.', "the next successful read replaces the failure")
+        self.assertIsNone(R["fail503"]["head"]["ago"], "no age on a failure")
+        self.assertEqual(R["recovered"]["head"]["word"], '35 successful requests · 9 429s · 1 5xx', "the next successful read replaces the failure")
         self.assertIsNone(R["recovered"]["head"]["err"])
 
     def test_the_section_sits_between_the_sessions_waiting_and_the_tmux_line(self):
@@ -936,7 +992,7 @@ class ServedHistory(unittest.TestCase):
                          "before the answer: the frame's own count and the read in flight, not the loader's markup")
         m = R["storm"]["mode"]
         d = m["descText"]
-        self.assertEqual(d, "API health: " + 'Rate-limit storm: 9 rate-limited attempts, 1 server error among 45 attempts in the last 15 min; 1 turn gave up.' + " Press Enter to open it.", "the reading in plain words, how to reach the rest")
+        self.assertEqual(d, "API health: 35 successful requests · 9 429s · 1 5xx. Press Enter to open it.", "this machine's counts, how to reach the rest")
         self.assertLess(len(d), 160, "bounded: a sentence, not the tip")
         for w in ("kernel restarted", "as of", "State changes", "unknown"):
             self.assertNotIn(w, d, "no transition, no stamp, no machine word in the description")
@@ -954,7 +1010,7 @@ class ServedHistory(unittest.TestCase):
         self.assertTrue(R["kbPinned"])
         self.assertEqual(R["kbFetchPost"], R["kbFetchPre"], "the pin reads nothing new: the focus show's read is the same document")
         self.assertGreater(R["kbRows"], 3)
-        self.assertEqual(R["kbHead"]["word"], 'Rate-limit storm: 9 rate-limited attempts, 1 server error among 45 attempts in the last 15 min; 1 turn gave up.')
+        self.assertEqual(R["kbHead"]["word"], '35 successful requests · 9 429s · 1 5xx')
         self.assertGreater(R["kbFetchAfter"], R["kbFetchBefore"], "a frame on the open detail re-reads the history")
         self.assertTrue(R["escHidden"])
         self.assertTrue(R["escFocusBack"], "focus returns to the cell")
@@ -979,14 +1035,14 @@ class ServedHistory(unittest.TestCase):
         # the detail still shows the previous frame's word (overloaded, from the frame that re-read the history) until
         # the release: nothing painted under the press
         self.assertEqual(R["heldWord"], "overloaded · 1 waiting", "the frame's re-read landed under the held pointer: not painted")
-        self.assertEqual(R["releasedWord"], '30 requests in the last 15 min, all succeeded.', "the release paints it")
+        self.assertEqual(R["releasedWord"], "30 successful requests", "the release paints it")
 
     def test_the_light_theme_colours_the_fine_and_quiet_head_dots_and_the_failure_line(self):
         R = self.R
         # T301: fine wears the light theme's accent (the clay), quiet the light label gray #5D574E (the base gray #9aa4ad
         # is about 1.6:1 on the white tip), and the failure line the light error red #B02A1C; the dark line keeps #ef6b6f
-        self.assertEqual((R["lightHealthyDot"]["word"], R["lightHealthyDot"]["color"]), ('30 requests in the last 15 min, all succeeded.', "rgb(194, 65, 12)"))
-        self.assertEqual((R["lightUnknownDot"]["word"], R["lightUnknownDot"]["color"]), ('No API traffic in the last 15 min.', "rgb(93, 87, 78)"))
+        self.assertEqual((R["lightHealthyDot"]["word"], R["lightHealthyDot"]["color"]), ("30 successful requests", "rgb(194, 65, 12)"))
+        self.assertEqual((R["lightUnknownDot"]["word"], R["lightUnknownDot"]["color"]), ("no API traffic", "rgb(93, 87, 78)"))
         self.assertEqual(R["lightErr"], "rgb(176, 42, 28)", "the light theme's error-text red")
         self.assertEqual(R["fail503"]["errColor"], "rgb(239, 107, 111)", "the dark tip's status red")
 
@@ -995,15 +1051,28 @@ class ServedHistory(unittest.TestCase):
         # host's document through /remote/<host>/api-health and name every machine; worst state wins for the dot
         h = self.R["hosts"]["head"]
         self.assertEqual(h["title"], "API health · 2 machines")
-        self.assertEqual(h["dot"], "errors", "TESTHOST's storm reddens the merged dot")
-        self.assertEqual(h["word"], "Errors on TESTHOST", "several machines: the head sums them up; each line follows")
-        self.assertEqual(h["mlines"][:2], ["this machine: fine · 30 requests in the last 15 min, all succeeded", "TESTHOST: rate limited · 2 waiting"],
-                         "one line per machine in the first section, local first")
-        self.assertTrue(any(m.startswith("TESTHOST") and "Rate-limit storm" in m for m in h["mlines"][2:]),
-                        "the History names TESTHOST with ITS reading (its own document, never summed into this machine's)")
-        self.assertIn("State changes · this machine", h["names"])
+        self.assertEqual(self.R["hosts"]["head"]["mlines"][1], "TESTHOST: rate limited · 2 waiting")
+        # T316: no summary head line; this machine is named by its kernel's own name; each line carries its own counts
+        self.assertEqual((h["name"], h["word"], h["dot"]), ("HUBHOST", "30 successful requests", "fine"), "this machine's own line, by its name")
+        self.assertEqual(h["mlines"], ["HUBHOST: 30 successful requests", "TESTHOST: rate limited · 2 waiting"], "one line per machine, local first")
+        self.assertEqual(h["gnames"], ["HUBHOST", "TESTHOST"], "the History draws each machine's bars under its name (its own document, never summed)")
+        self.assertEqual(h["graphs"], 2)
+        self.assertIn("State changes · HUBHOST", h["names"])
         self.assertIn("/remote/TESTHOST/api-health", self.R["hosts"]["fetched"] or [], "the relay read")
         self.assertFalse(h["unknown"])
+
+    def test_the_click_opens_the_detail_with_range_chips_and_large_bars_and_the_hover_stays_the_day(self):
+        # T316: the dot's click is the detail (the spend modal's grammar): range chips 1 hour / 24 hours / 7 days, the day
+        # pressed by default, one large stacked histogram per machine drawn from the tier the range names
+        d = self.R["detail"]
+        self.assertEqual((d["mode"]["role"], d["mode"]["modal"]), ("dialog", "true"))
+        self.assertEqual([c["t"] for c in d["chips"]], ["1 hour", "24 hours", "7 days"])
+        self.assertEqual([c["on"] for c in d["chips"]], [False, True, False], "the day by default")
+        self.assertEqual((d["dayBars"], d["head"]["big"]), (96, True), "the day: 96 quarter-hour bars, large")
+        self.assertEqual((d["hourBars"], d["hourOn"]), (60, True), "the hour: its 60 one-minute bins, the chip pressed")
+        self.assertEqual(d["weekBars"], 168, "the week: its 168 hourly bins")
+        self.assertTrue(d["closed"], "Escape closes the detail")
+        self.assertEqual((d["hoverAfter"]["bars"], d["hoverAfter"]["big"], d["hoverChips"]), (96, False, 0), "the hover stays the day, small, with no chips")
 
     def test_the_hover_keeps_its_margin_at_830_wide_and_stays_above_the_rail_on_a_short_window(self):
         g = self.R["geo830"]

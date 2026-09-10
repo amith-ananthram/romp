@@ -128,6 +128,8 @@ class HostsMap(_Fixture):
         self.assertEqual(f["hosts"], {})
         self.assertEqual(f["state"], "ok")
         self.assertIs(f["quiet"], True, "the fixture has no SDK backend traffic: quiet")
+        self.assertEqual(f["host"], "TESTHOST", "the frame names this kernel the way its peers know it (T316)")
+        self.assertNotIn("host", km._APIH_HOST_KEYS, "a peer's row is keyed by its name already: the field is not copied into the map")
 
     def test_quiet_follows_the_aggregator_s_last_event(self):
         ah = sb.ApiHealth(Path(self.td.name) / "api-health-state.json") if hasattr(sb, "ApiHealth") else None

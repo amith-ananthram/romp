@@ -37,7 +37,7 @@ MDOT = "·"
 
 
 def _frame_keys():
-    return {"type", "state", "cls", "reason", "text", "waiting", "retrying", "blocked", "since", "tmux", "sessions", "seq", "hosts", "quiet", "errs"}
+    return {"type", "state", "cls", "reason", "text", "waiting", "retrying", "blocked", "since", "tmux", "sessions", "seq", "hosts", "quiet", "errs", "host"}
 
 
 class Reference(unittest.TestCase):
@@ -89,11 +89,14 @@ class _Fixture(unittest.TestCase):
         self.backend, self.sdk_calls = None, []
         self._sdk = km._sdk
         km._sdk = lambda: (self.sdk_calls.append(1), self.backend)[1]
+        self._self_host = km._self_host
+        km._self_host = lambda: "TESTHOST"   # the frame names this kernel (T316); synthetic, never the machine's real name
         km._APIH_LAST[0] = None
         km._retry_suppress_cache.clear()
 
     def tearDown(self):
         km._sdk = self._sdk
+        km._self_host = self._self_host
         km.jd.STATE = self._state
         km._alive_sessions = self._alive
         km._api_last_failed = self._last
