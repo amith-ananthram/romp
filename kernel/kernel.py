@@ -3031,7 +3031,7 @@ def _tab_order_frame(order, tabs, live, c=None):
     one's transcript) — and `selfHost`, this kernel's own name (_self_host). The pane keeps a live sid on the
     strip even if this frame's `order` omits it: a transient read failure that drops a session from the order
     is not a close (render.ts applyTabOrder). That rule is why the WS `ready` handler sends no strip of its own:
-    a frame built there from _ordered_alive (living only) omitted every kept-open read-only tab the connect push
+    a frame built there from a living-only liveness read omitted every kept-open read-only tab the connect push
     had just listed, and the pane closed them all at each ready. The chat reads a postal card's sender host against
     `selfHost` (its postalSenderHost). The session frame carries the name too, but only a LOCAL session's frame teaches
     it, so a dashboard whose kernel runs no sessions of its own — every session attached from elsewhere —
@@ -3699,12 +3699,6 @@ def _ordered(sessions):
                 #                                              is filed once per episode and the next pass retries it
     idx = {sid: i for i, sid in enumerate(order)}
     return sorted(sessions, key=lambda s: idx.get(s["sid"], len(idx)))   # stable sort: ties keep input order
-
-
-def _ordered_alive(now, tmux):
-    """Living sessions in the shared, persisted order (see _ordered): chat tabs AND timeline lanes resolve the
-    SAME order through _ordered, in lockstep."""
-    return _ordered(_alive_sessions(now, tmux))
 
 
 # (Hidden tabs are GONE — the user 2026-08-11. ×-closing used to write the sid to hidden-tabs.json and
