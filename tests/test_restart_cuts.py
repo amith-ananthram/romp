@@ -308,6 +308,17 @@ class UnrequestedSignal(unittest.TestCase):
                          "the cut row used to say nothing at all here")
         self.assertEqual(cuts[0]["cutTurns"], [])
 
+    def test_a_raising_reason_helper_still_leaves_the_cut_row(self):
+        # the helper reads ROMP_MANAGER_PID (a pid too large for os.kill raises OverflowError out of
+        # _pid_alive) and writes to a stderr the dying supervisor may have closed; a raise there used
+        # to skip the cut row this exit exists to leave. The row lands with the plain verdict instead.
+        with mock.patch.object(km, "_unrequested_signal_reason", side_effect=OverflowError("pid")):
+            self._fire()
+        cuts = self._rows(km.RESTART_CUTS_FILE)
+        self.assertEqual(len(cuts), 1, "the cut row is written whether or not the reason helper survives")
+        self.assertEqual(cuts[0]["reason"], km.SIGNAL_REASON_UNREQUESTED)
+        self.assertEqual(cuts[0]["cutTurns"], [])
+
     def test_an_unlabeled_row_is_neither_the_request_nor_consumed(self):
         # the CLI's actionless refresh row alone, fresh, and the SIGTERM arrives (the manager's note never
         # came: a manager older than the note, or a stray kill first). The reader returns nothing, so the

@@ -21718,9 +21718,12 @@ def _unrequested_signal_reason(signum, be=None, wait=None, sleep=time.sleep, now
         if not stopped:
             stopped = not _pid_alive(int(mgr))        # gone during the wait, without a note
     reason = _audit_unrequested_signal(signum, pending=pending, now=now, manager_stopped=stopped)
-    sys.stderr.write("romp-kernel: this SIGTERM matched no restart request on record%s "
-                     "(restart-audit.jsonl has a 'signal' row for it)\n"
-                     % ("; the manager was stopped too" if stopped else ""))
+    try:                                              # stdio inherited from a dying supervisor can be closed
+        sys.stderr.write("romp-kernel: this SIGTERM matched no restart request on record%s "
+                         "(restart-audit.jsonl has a 'signal' row for it)\n"
+                         % ("; the manager was stopped too" if stopped else ""))
+    except Exception:
+        pass
     return reason
 
 
@@ -53563,7 +53566,13 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
         # clean-drain metric, and a drain that errored writes what it knew plus the error (T143).
         try:
             if not reason and signum is not None:
-                reason = _unrequested_signal_reason(signum, be)
+                # the helper's own guard: it reads ROMP_MANAGER_PID and writes to stderr, and a raise
+                # there (a pid too large for os.kill, a stderr the dying supervisor closed) must not
+                # skip the cut row this exit exists to leave; the reason falls back to the plain verdict
+                try:
+                    reason = _unrequested_signal_reason(signum, be)
+                except Exception:
+                    reason = SIGNAL_REASON_UNREQUESTED
             row = _restart_cut_row(res, watches_armed=len(_pr_watches) + len(_watches),
                                    audit_reason=reason)
             if audit:
