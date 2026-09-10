@@ -6,6 +6,11 @@
 // The federation rule holds throughout: per-host MAPS in, per-host lines out; nothing here adds a count from
 // one kernel to a count from another or compares two kernels' clocks. "Worst state wins" is a comparison of
 // STATE WORDS, which are the same vocabulary on every kernel.
+//
+// The dot follows the FRAMES alone (review find, 2026-09-10): each kernel's frame carries `quiet` (no API event
+// in its longest window) and `errs` (failed attempts in it), rebuilt every cycle and pushed on change, so the dot
+// changes on the kernel's events and never on a history reading the browser took at some earlier hover. The
+// readings only word each machine's line in the popup.
 
 /** One kernel's apiHealth shell frame, local half (the fields the merge reads). */
 export interface HostFrame {
@@ -15,8 +20,10 @@ export interface HostFrame {
   waiting?: number;
   reason?: string;       // a pause's reason: limit | spend | manual
   since?: number;
-  quiet?: boolean;       // that kernel saw no API event in its longest window (T301): gray before any history is read
-  stale?: boolean;       // the tunnel to that host is not up: the frame is the last one heard
+  quiet?: boolean;       // that kernel saw no API event in its longest window (T301): gray
+  errs?: number;         // failed attempts that kernel counted in its longest window (T301): red while any
+  stale?: boolean;       // the tunnel to that host is not up, or its frame could not be read: the frame is the last one heard
+  fault?: string;        // why the last read of that host's frame was refused ("HTTP 403"), when it was
 }
 
 /** The dot's three states: the accent when everything is fine, red when errors are being met, gray when quiet. */
@@ -26,7 +33,7 @@ export interface MachineLine {
   host: string;
   dot: Dot;
   text: string;          // one plain line for the popup: "TESTHOST: rate limited · 2 waiting"
-  stale: boolean;
+  stale: boolean;        // named, not counted: a machine not reachable right now has no say in the dot
 }
 
 export interface Merged {
@@ -41,13 +48,13 @@ function frameRank(f: HostFrame): number {
   return f.state === "paused" || f.state === "degraded" ? 2 : f.state === "ok" ? 1 : 0;
 }
 
-/** A frame's dot with its history reading in hand: errors when the kernel's frame says so OR the reading found
- *  errors in the window; quiet when the reading found no traffic; else fine. A frame alone (no reading yet) is
- *  errors or fine on its own words. */
-export function frameDot(f: HostFrame, reading?: Reading | null): Dot {
+/** A frame's dot, from the frame alone: errors when its kernel says a session is waiting on the API (degraded),
+ *  is paused, or counted a failed attempt in its longest window (`errs`); quiet when it saw no event in that window;
+ *  else fine. A frame with neither flag (an older kernel) is fine or errors on its state word. */
+export function frameDot(f: HostFrame): Dot {
   if (f.state === "paused" || f.state === "degraded") return "errors";
-  if (reading && reading.level === "errors") return "errors";
-  if (reading ? !reading.traffic : f.quiet === true) return "quiet";
+  if ((f.errs || 0) > 0) return "errors";
+  if (f.quiet === true) return "quiet";
   return "fine";
 }
 
@@ -55,29 +62,43 @@ const CLS_WORDS: Record<string, string> = {
   "429": "rate limited", "529": "overloaded", "offline": "offline", "errors": "errors",
 };
 
-/** One machine's line for the popup, in plain words: the kernel's own headline when its frame carries one (a pause,
- *  sessions waiting on the API), else what the history reading says happened. */
-export function machineText(host: string, f: HostFrame, reading?: Reading | null): string {
-  const name = host || "this machine";
+/** What one machine's frame says, in plain words: the kernel's own headline when its frame carries one (a pause,
+ *  sessions waiting on the API), the failures counted when its window holds some (the history reading's sentence
+ *  when read, the frame's count otherwise), the successes counted when fine and read, quiet when its window is empty. */
+function stateWords(f: HostFrame, reading?: Reading | null): string {
   if (f.state === "paused") {
     const why = f.reason === "limit" ? "paused until the usage limit resets" : f.reason === "spend" ? "paused at the spend limit" : "paused by you";
-    return name + ": " + why + (f.waiting ? " · " + f.waiting + " waiting" : "");
+    return why + (f.waiting ? " · " + f.waiting + " waiting" : "");
   }
   if (f.state === "degraded") {
-    return name + ": " + (CLS_WORDS[f.cls || ""] || "errors") + (f.waiting ? " · " + f.waiting + " waiting" : "");
+    return (CLS_WORDS[f.cls || ""] || "errors") + (f.waiting ? " · " + f.waiting + " waiting" : "");
   }
-  if (reading && reading.level === "errors") return name + ": " + reading.headline.replace(/\.$/, "");
-  if (reading ? !reading.traffic : f.quiet === true) return name + ": no API traffic";
-  if (reading) return name + ": fine · " + plural(reading.requests, "request") + " in the last 15 min, all succeeded";
-  return name + ": fine";
+  if ((f.errs || 0) > 0) {
+    if (reading && reading.level === "errors") return reading.headline.replace(/\.$/, "");
+    return plural(f.errs as number, "failed attempt") + " in the last 15 min";
+  }
+  if (f.quiet === true) return "no API traffic";
+  if (reading && reading.level === "fine") return "fine · " + plural(reading.requests, "request") + " in the last 15 min, all succeeded";
+  return "fine";
+}
+
+/** One machine's line for the popup. A machine not reachable right now is named with what was last heard from
+ *  it (and why the read failed, when a read was refused), and reads as such rather than as its old state. */
+export function machineText(host: string, f: HostFrame, reading?: Reading | null): string {
+  const name = host || "this machine";
+  const words = f.state ? stateWords(f, reading) : "";
+  if (f.fault) return name + ": could not read its API health (" + f.fault + ")" + (words ? ", last seen " + words : "");
+  if (f.stale) return name + ": not reachable, last seen " + (words || "fine");
+  return name + ": " + words;
 }
 
 /**
  * The dot and the machine lines over the local frame, the per-host map the kernel's frame carries, and each
- * machine's history reading when read (`readings[host]`; absent or null = not read yet: the frame's word stands
- * alone). Worst state wins: one machine in errors (its frame, or its window) makes the dot red whatever the others
- * say; every machine known quiet (its reading, or its frame's flag) makes it gray; otherwise the accent. Per-host
- * in, per-host out.
+ * machine's history reading when read (`readings[host]`; absent or null = not read yet). The dot is the frames':
+ * worst state wins, so one machine in errors (waiting sessions, a pause, or failed attempts in its window) makes
+ * the dot red whatever the others say; every reachable machine quiet makes it gray; otherwise the accent. A
+ * machine whose tunnel is down or whose frame could not be read is named and has no say (its frame is old news).
+ * The readings word the lines only. Per-host in, per-host out.
  */
 export function mergeFrames(local: HostFrame, hosts: Record<string, HostFrame> | undefined,
                             readings?: Record<string, Reading | null | undefined>): Merged {
@@ -87,12 +108,14 @@ export function mergeFrames(local: HostFrame, hosts: Record<string, HostFrame> |
   let worstRank = -1, worst = "", allQuiet = true;
   const machines: MachineLine[] = rows.map(([host, f]) => {
     const rd = readings ? readings[host] || null : null;
-    const d = frameDot(f, rd);
-    const traffic = rd ? rd.traffic : (f.quiet === true ? false : null);
-    if (traffic !== false) allQuiet = false;   // gray only when EVERY machine is known quiet; an unread peer is not assumed so
-    const r = d === "errors" ? 2 : frameRank(f);
-    if (r > worstRank) { worstRank = r; worst = host; }
-    return { host, dot: d, text: machineText(host, f, rd), stale: !!f.stale };
+    const away = !!(f.stale || f.fault);
+    const d: Dot = away ? "quiet" : frameDot(f);
+    if (!away) {
+      if (f.quiet !== true) allQuiet = false;   // gray only when EVERY reachable machine says quiet; a frame without the flag is not assumed so
+      const r = d === "errors" ? 2 : frameRank(f);
+      if (r > worstRank) { worstRank = r; worst = host; }
+    }
+    return { host, dot: d, text: machineText(host, f, rd), stale: away };
   });
   let dot: Dot;
   if (worstRank >= 2) dot = "errors";
@@ -173,12 +196,14 @@ export function readHistory(d: HistoryDoc | null | undefined): Reading {
   return { level: state === "recovering" && errors === 0 ? "fine" : "errors", state, headline: head, sub: null, requests, errors, traffic, windowS: slow };
 }
 
-/** One machine's reading, kept under its name; a failed read is its own line. */
-export interface HostReading { host: string; reading: Reading | null; error: string | null }
+/** One machine's reading, kept under its name; a failed read is its own line; a read still in flight is pending. */
+export interface HostReading { host: string; reading: Reading | null; error: string | null; pending: boolean }
 
-/** The histories merged for the popup: per-host readings (the map the frame merge takes), the worst level, and
- *  the traffic verdicts. No document's counts are added to another's: each machine keeps its own sentence. */
-export function mergeHistories(byHost: Record<string, HistoryDoc | { error: string } | null | undefined>): {
+/** The histories merged for the popup: per-host readings (the map the frame merge takes for its lines), the worst
+ *  level, and the traffic verdicts. No document's counts are added to another's: each machine keeps its own
+ *  sentence. A `{pending: true}` entry (the shell's placeholder while that machine's read is in flight) and an
+ *  `{error}` entry are no reading. */
+export function mergeHistories(byHost: Record<string, HistoryDoc | { error: string } | { pending: true } | null | undefined>): {
   level: "errors" | "fine" | "quiet" | "unread"; rows: HostReading[]; traffic: Record<string, boolean | null>;
   readings: Record<string, Reading | null>;
 } {
@@ -190,10 +215,11 @@ export function mergeHistories(byHost: Record<string, HistoryDoc | { error: stri
   const rank = { unread: -1, quiet: 0, fine: 1, errors: 2 };
   for (const h of names) {
     const d = byHost[h];
-    if (!d) { rows.push({ host: h, reading: null, error: null }); traffic[h] = null; readings[h] = null; continue; }
-    if ((d as { error?: string }).error) { rows.push({ host: h, reading: null, error: String((d as { error: string }).error) }); traffic[h] = null; readings[h] = null; continue; }
+    if (!d) { rows.push({ host: h, reading: null, error: null, pending: false }); traffic[h] = null; readings[h] = null; continue; }
+    if ((d as { pending?: boolean }).pending) { rows.push({ host: h, reading: null, error: null, pending: true }); traffic[h] = null; readings[h] = null; continue; }
+    if ((d as { error?: string }).error) { rows.push({ host: h, reading: null, error: String((d as { error: string }).error), pending: false }); traffic[h] = null; readings[h] = null; continue; }
     const r = readHistory(d as HistoryDoc);
-    rows.push({ host: h, reading: r, error: null });
+    rows.push({ host: h, reading: r, error: null, pending: false });
     traffic[h] = r.traffic; readings[h] = r;
     if (rank[r.level] > rank[level]) level = r.level;
   }

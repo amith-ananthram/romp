@@ -37,7 +37,7 @@ MDOT = "·"
 
 
 def _frame_keys():
-    return {"type", "state", "cls", "reason", "text", "waiting", "retrying", "blocked", "since", "tmux", "sessions", "seq", "hosts", "quiet"}
+    return {"type", "state", "cls", "reason", "text", "waiting", "retrying", "blocked", "since", "tmux", "sessions", "seq", "hosts", "quiet", "errs"}
 
 
 class Reference(unittest.TestCase):
@@ -84,10 +84,16 @@ class _Fixture(unittest.TestCase):
         km._send_to_app = lambda app, m: self.sent.append((app, m))
         km.Sessions.backend_for = staticmethod(lambda sid: km._TMUX if sid in self.tmux_sids else object())
         km._name_color = lambda sid: self.colors.get(sid)
+        # the frame's quiet and errs flags ask the SDK backend through km._sdk (T301): patched, so no test builds a
+        # real SdkBackend in-process (its boot reconcile thread and catalog fetch); `self.backend` is what it answers
+        self.backend, self.sdk_calls = None, []
+        self._sdk = km._sdk
+        km._sdk = lambda: (self.sdk_calls.append(1), self.backend)[1]
         km._APIH_LAST[0] = None
         km._retry_suppress_cache.clear()
 
     def tearDown(self):
+        km._sdk = self._sdk
         km.jd.STATE = self._state
         km._alive_sessions = self._alive
         km._api_last_failed = self._last
@@ -492,10 +498,10 @@ class Detail(unittest.TestCase):
         # GET /api-health at show time, and there is still no timer anywhere (test_api_health_hover.py holds the
         # section's own pins)
         self.assertEqual(self.JS.count("fetch("), 1, "one read path: fetchDoc, the history's")
-        self.assertIn("fetchDoc('/api-health')", self.JS)
+        self.assertIn("fetchDoc(h?'/remote/'+encodeURIComponent(h)+'/api-health':'/api-health')", self.JS)
         # T301: every attached host's document rides the same read, through the kernel's relay, kept per host
-        self.assertIn("fetchDoc('/remote/'+encodeURIComponent(h)+'/api-health')", self.JS)
-        self.assertIn("Promise.all(reads)", self.JS)
+        self.assertIn("names.forEach(function(h){fetchDoc(h?", self.JS)
+        self.assertIn("names.forEach(function(h){fetchDoc(h?'/remote/'+encodeURIComponent(h)+'/api-health':'/api-health')", self.JS)
         self.assertNotIn("setInterval", self.JS)
         self.assertNotIn("setTimeout", self.JS)
         self.assertIn("window.__rompApiHealth=function(m){", self.JS)
@@ -591,7 +597,7 @@ class Detail(unittest.TestCase):
 
     def test_the_cell_is_a_keyboard_button_and_the_detail_takes_and_returns_focus(self):
         self.assertIn("el.addEventListener('keydown',function(ev){if(ev.key==='Escape')", self.JS)
-        self.assertIn("if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();if(pinned)close();else open();}});", self.JS)
+        self.assertIn("if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();ev.stopPropagation();if(pinned)close();else open();}});", self.JS)
         self.assertIn("el.setAttribute('aria-label',lab)", self.JS)   # T301: the merged description ("API health: fine|errors|no traffic")
         self.assertIn("tip.setAttribute('role','dialog')", self.JS)
         self.assertIn("focusBack=document.activeElement;", self.JS)
@@ -604,7 +610,7 @@ class Detail(unittest.TestCase):
 
     def test_actions_are_delegated_on_the_stable_tip_node(self):
         self.assertIn("var el=document.getElementById('rail-api');", self.JS)
-        self.assertIn("el.addEventListener('click',function(){if(pinned)close();else open();});", self.JS)
+        self.assertIn("el.addEventListener('click',function(ev){if(ev&&ev.stopPropagation)ev.stopPropagation();if(pinned)close();else open();});", self.JS)
         self.assertNotIn("el.innerHTML", self.JS, "the frame handler writes the cell's children, never the cell")
         self.assertIn("tip.addEventListener('click',function(ev){", self.JS)
         self.assertEqual(self.JS.count("addEventListener('click'"), 2, "one on #rail-api, one on #ah-tip; none per row")

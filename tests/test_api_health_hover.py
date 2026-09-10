@@ -571,7 +571,7 @@ class Route(unittest.TestCase):
         status, body = _serve_get("/api-health", {"Cookie": "romp_token=" + TOK,
                                                   "Origin": "http://evil.example", "Host": "127.0.0.1:%d" % km.PORT})
         self.assertEqual(status, 403, "a cross-site page's cookie is refused")
-        self.assertIn("fetchDoc('/api-health')", JS)
+        self.assertIn("fetchDoc(h?'/remote/'+encodeURIComponent(h)+'/api-health':'/api-health')", JS)
         self.assertIn("fetch(u,{cache:'no-store'})", JS)
         self.assertIn("fetch('/usage/fleet',{cache:'no-store'})", km._LANDING_USAGE_JS, "the same shape as the shell's other read")
 
@@ -610,7 +610,7 @@ class FrameUnchanged(unittest.TestCase):
         km._api_health_push(f1)
         self.assertEqual(len(self.sent), 1)
         self.assertEqual(set(f1), {"type", "state", "cls", "reason", "text", "waiting", "retrying", "blocked",
-                                   "since", "tmux", "sessions", "seq", "hosts", "quiet"}, "the documented keys, nothing added")
+                                   "since", "tmux", "sessions", "seq", "hosts", "quiet", "errs"}, "the documented keys, nothing added")
         for k in ("windows", "transitions", "buckets", "history", "overall", "bootAt"):
             self.assertNotIn(k, f1)
         # a hover reads the route in between (the read files a transition: the storm classifies)
@@ -673,7 +673,7 @@ class Script(unittest.TestCase):
     def test_the_history_is_the_one_read_fired_by_the_show_the_open_from_hidden_and_a_frame_on_an_open_card(self):
         self.assertTrue(HIST, "the cell's script carries a History block")
         self.assertEqual(JS.count("fetch("), 1, "one read in the cell's script: the history's")
-        self.assertIn("function load(fresh){var n=++histSeq;if(fresh)HIST=null;", HIST)
+        self.assertIn("function load(fresh){var n=++histSeq,names=[''].concat(hostsOf(LAST)),by={};", HIST)
         self.assertIn("tip.style.display='block';el.setAttribute('aria-describedby','ah-summary');load(true);render();}", JS,
                       "show drops the last answer and reads")
         self.assertIn("var was=tip.style.display==='block';", JS)
@@ -689,11 +689,11 @@ class Script(unittest.TestCase):
         self.assertNotIn("setInterval", JS)
         self.assertIn("window.addEventListener('focus',function(){winFocusEl=document.activeElement;requestAnimationFrame(function(){winFocusEl=null;});});", JS,
                       "the window-focus mark is cleared on the next animation frame, an event")
-        # T301: ONE arm (Promise.all over this machine's document and every attached host's), so one guard of each
+        # T301: one read per machine (this machine's document and every attached host's, each landing on its own), so one guard of each
         self.assertEqual(HIST.count("if(n!==histSeq)return;"), 1, "the read drops an answer a newer read superseded")
         self.assertEqual(HIST.count("if(tip.style.display!=='block')return;if(held){dirty=true;return;}render();"), 1,
                          "the answer repaints an open card only, and never under a held pointer")
-        self.assertIn("Promise.all(reads)", HIST, "every machine's document in one read")
+        self.assertIn("names.forEach(function(h){fetchDoc(h?'/remote/'+encodeURIComponent(h)+'/api-health':'/api-health')", HIST, "one read per machine, each landing on its own")
         self.assertIn(".catch(function(e){return {error:String((e&&e.message)||e)};});}", HIST, "a rejected fetch is that machine's failure line, never an unhandled rejection")
 
     def test_a_failed_read_is_one_line_in_place_of_the_rows(self):
@@ -744,14 +744,14 @@ class Script(unittest.TestCase):
         self.assertIn("return dup?fam+' · '+(b.auth||key.split('|')[0]):fam;}", HIST, "two of one family are told apart by auth")
 
     def test_the_roles_follow_the_mode_and_the_cell_is_described_by_the_short_summary(self):
-        self.assertIn("el.addEventListener('focus',function(){if(skipFocus||winFocusEl===el||pinned||tip.style.display==='block')return;show(null);});", JS)
+        self.assertIn("el.addEventListener('focus',function(){if(moving||skipFocus||winFocusEl===el||pinned||tip.style.display==='block')return;show(null);});", JS)
         self.assertNotIn("winFocus=true", JS, "the mark is an element, not a flag")
         self.assertIn("var desc=document.createElement('span');desc.id='ah-summary';desc.className='ah-vh';document.body.appendChild(desc);", JS)
         self.assertIn("tip.innerHTML=html(LAST,pinned);if(!pinned)anchor();desc.textContent=descText();", JS, "refreshed on every render")
         # T301: the description is the head's plain words, a failed read said as such, and the read in flight named
         self.assertIn("function descText(){var tail=' Press Enter to open it.';var mg=merged();var w=LAST?headWords(LAST,mg):'';", HIST)
         self.assertIn("var loc=HIST&&HIST[''];if(loc&&loc.error)return 'Could not read the API history: '+loc.error+'.'+tail;", HIST)
-        self.assertIn("if(!HIST)return 'API health: '+w+' Reading the details.'+tail;\nreturn 'API health: '+w+tail;}", HIST)
+        self.assertIn("if(!HIST||(HIST['']&&HIST[''].pending))return 'API health: '+w+' Reading the details.'+tail;\nreturn 'API health: '+w+tail;}", HIST)
         self.assertNotIn("'unknown'", HIST.replace("unknown:'quiet'", ""), "the machine's word never reaches the description")
         self.assertNotIn("'aria-describedby','ah-tip'", JS, "the tip's whole text is never the description")
         self.assertIn("tip.setAttribute('role','tooltip');tip.setAttribute('aria-label','API health');tip.tabIndex=-1;", JS, "created as a tooltip")
@@ -759,7 +759,7 @@ class Script(unittest.TestCase):
         self.assertIn("tip.setAttribute('role','dialog');tip.setAttribute('aria-modal','true');el.removeAttribute('aria-describedby');", JS, "open: dialog")
         self.assertEqual(JS.count("'aria-modal'"), 2, "set by open, removed by show, nowhere else")
         self.assertIn("function hide(){tip.style.display='none';el.removeAttribute('aria-describedby');}", JS)
-        self.assertIn("el.addEventListener('blur',function(){if(!pinned)hide();});", JS)
+        self.assertIn("el.addEventListener('blur',function(){if(moving)return;if(!pinned)hide();});", JS)
         self.assertIn("skipFocus=true;try{(fb&&fb.focus?fb:el).focus();}catch(e){}skipFocus=false;}", JS,
                       "the close's refocus fires the cell's focus event; the flag covers that one call")
 

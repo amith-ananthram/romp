@@ -809,11 +809,14 @@ judgment tier defaults to Sonnet.
 
 The bottom bar's API readout carries one small dot, right after its **API**
 label, that shows how the API is treating your sessions on
-every connected kernel. Blue (the romp accent) means everything is fine. Red means errors are
-being met somewhere: a 429 rate-limit storm, 5xx failures, a machine that
-cannot reach the API, or auto-retry paused (a usage limit, the monthly spend
-cap, or you stopped it). Gray means the API is not being used right now: no
-traffic in the last 15 minutes on any machine. Hover for the reading in plain
+every connected kernel. The accent colour (blue in the dark theme, clay in the
+light one) means everything is fine. Red means errors are being met somewhere:
+a 429 rate-limit storm, 5xx failures, a machine that cannot reach the API, or
+auto-retry paused (a usage limit, the monthly spend cap, or you stopped it), and
+it stays red while a failed attempt sits in the last 15 minutes anywhere. Gray
+means the API is not being used right now: no traffic in the last 15 minutes on
+any machine. A machine whose link is down is named in the popup with what it
+last said and does not colour the dot. Hover for the reading in plain
 words (for example, 4 requests in the last 15 minutes, all succeeded), one
 line per machine when several are connected, the waiting sessions listed, and
 the history under it: a graph of attempts per minute over the last 15 minutes

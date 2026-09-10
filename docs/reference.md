@@ -1750,11 +1750,22 @@ orange, and one sentence explains the codes.
 The signal covers every connected kernel, not only the one serving the page.
 Each kernel serves its own last shell frame at `GET /api-health/frame` (its
 local half only, never its view of its peers), and the tunnel supervisor polls
-every attached host's frame (every 10 seconds, kept on a blip, cleared when the
-host answers that it has none) and carries them in the shell frame under
-`hosts`, a map keyed by host name with each machine's `state`, class, headline,
-waiting count, since, pause reason and a `stale` mark when that tunnel is not
-up. The hover's history reads each attached host's document through `GET
+every attached host's frame (once per supervisor pass, about every 15 s; kept on
+a blip; kept and marked with a `fault` when the read is refused, a 403 from a
+rotated token or a 500; cleared when the host answers that it has none) and
+carries them in the shell frame under `hosts`, a map keyed by host name with
+each machine's `state`, class, headline, waiting count, since, pause reason,
+its `quiet` and `errs` flags when that kernel sends them, and a `stale` mark
+when that tunnel is not up or the read was refused (the frame's own `type`,
+`sessions` and `seq` stay on their kernel). The frame's `quiet` says that
+kernel saw no API event in its longest window and `errs` counts the attempts
+that failed in it; both come from the aggregator every cycle, so the frame
+changes, and is pushed, the moment the last failure ages out. The dot follows
+the frames alone: red when any reachable machine's frame is degraded, paused or
+holds a failed attempt (`errs`), gray when every reachable machine's frame says
+quiet, the accent otherwise; a machine whose tunnel is down or whose frame
+could not be read is named in the popup and has no say. The hover's history
+reads each attached host's document through `GET
 /remote/<host>/api-health`, a read relay beside the `/ws` and `/file` relays:
 the local token gates it, the remote's own token goes in the forwarded request,
 its document passes through as answered (404 for an unknown host, 502 when the
@@ -1891,12 +1902,12 @@ again to a shell that sends `ready`:
 {"type": "apiHealth", "state": "ok | degraded | paused",
  "cls": "429 | 529 | offline | errors | ''", "reason": "'' | limit | spend | manual",
  "text": "<the rail's words>", "waiting": 0, "retrying": 0, "blocked": 0,
- "since": 0, "tmux": 0, "seq": 0, "quiet": false,
+ "since": 0, "tmux": 0, "seq": 0, "quiet": false, "errs": 0,
  "sessions": [{"sid": "", "name": "", "color": null, "kind": "retrying | blocked",
                "cls": "", "status": null, "since": 0, "suppressed": false}],
  "hosts": {"<host>": {"state": "ok | degraded | paused", "cls": "", "text": "", "waiting": 0,
                       "retrying": 0, "blocked": 0, "since": 0, "reason": "", "tmux": 0, "quiet": false,
-                      "stale": false}}}
+                      "errs": 0, "stale": false, "fault": "HTTP 403 (only when the last read was refused)"}}}
 ```
 
 `seq` counts the retry-pause file's writes since the kernel started. A press

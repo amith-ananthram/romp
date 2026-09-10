@@ -18965,6 +18965,9 @@ _NOT_SAVED = ("proc",       # the live Popen
               #               ITSELF stays: _remotes_load keeps it and
               #               _views_client serves every cached reading, status aside, so a down host's tags
               #               survive a kernel restart; the boot's first poll re-reads, the gate unstamped
+              "apiHealth",  # a remote's API-health frame (T301): re-polled within a pass of any boot; saved, a dead
+              "_apih_at",   #   host's last-life storm came back at boot and painted the dot red with no date, and the
+              "_apih_fault",#   poll's stamp rewrote this 0600 file every pass forever (the _usage_at story again)
               "misses",     # the poll run counters: they describe THIS connection, and a fresh boot
               "ok_polls",   # dials from scratch, so carrying them across would judge a link that is gone
               "upSeq",      # the recovery counter (T291b): the same per-process story; the dashboard skips a first observation
@@ -19612,10 +19615,12 @@ REMOTE_APIH_EVERY = 10.0    # the API-health frame: a storm shows within a few p
 def _poll_remote_api_health(r):
     """GET a remote kernel's /api-health/frame THROUGH the -L tunnel: that machine's own apiHealth shell frame
     (its local half only, never its view of ITS peers), so this kernel's shell frame can carry every attached
-    machine's state as a per-host map (T301, the user 2026-09-10: the signal must cover every connected kernel,
-    not this one alone). Returns the parsed frame, {} when the host answered that it has none yet (an older
-    build's 404 too: the row is then cleared rather than kept stale), or None when nothing answered (keep the
-    last reading, as the usage poll does). Rate-limited to REMOTE_APIH_EVERY per host."""
+    machine's state as a per-host map (T301, the user 2026-09-10, who wanted the signal to cover every connected
+    kernel, not this one alone). Returns the parsed frame, {} when the host answered that it has none yet (503) or
+    is an older build (404): the row is then cleared rather than kept stale; or the row's last frame when nothing
+    answered or the read was refused (a 403 from a rotated token, a 500): kept, as the usage and views polls keep
+    theirs, and the refusal recorded in `_apih_fault` so the shell names the machine with its fault instead of
+    losing it (review find, 2026-09-10). Rate-limited to REMOTE_APIH_EVERY per host."""
     import urllib.parse
     now = time.time()
     if now - float(r.get("_apih_at") or 0) < REMOTE_APIH_EVERY:
@@ -19628,8 +19633,13 @@ def _poll_remote_api_health(r):
         data = resp.read()
         c.close()
         r["_apih_at"] = now
-        if resp.status != 200:
+        if resp.status in (503, 404):
+            r.pop("_apih_fault", None)
             return {}                                   # no frame there (not yet, or an older kernel): clear
+        if resp.status != 200:
+            r["_apih_fault"] = "HTTP %d" % resp.status  # refused: keep the last frame, say why
+            return r.get("apiHealth")
+        r.pop("_apih_fault", None)
         u = json.loads(data.decode("utf-8"))
         return u if isinstance(u, dict) and u.get("state") else {}
     except Exception:
@@ -43792,6 +43802,10 @@ def _api_health_frame(now, tmux):
             # no API traffic in the longest window (T301): the dot reads gray on this alone, before any history is read;
             # True with no SDK backend (nothing can have talked to the API through this kernel)
             "quiet": _apih_quiet(now),
+            # failed attempts in that window (T301 review): the dot reads red for a storm the window still holds when
+            # no session waits right now, and clears the cycle the last failure ages out; the frame is rebuilt every
+            # cycle and pushed on change, so the browser never polls the history for the dot
+            "errs": _apih_errs(now),
             # every attached machine's own frame, by host (T301): a per-host MAP, never a merged count or a
             # compared clock (the federation rule: merged payloads keep local scalars and carry per-host maps);
             # the shell merges it for the dot (worst state wins) and names each machine. `stale` marks a row
@@ -43799,7 +43813,7 @@ def _api_health_frame(now, tmux):
             "hosts": _api_health_hosts()}
 
 
-_APIH_HOST_KEYS = ("state", "cls", "text", "waiting", "retrying", "blocked", "since", "reason", "tmux", "quiet")
+_APIH_HOST_KEYS = ("state", "cls", "text", "waiting", "retrying", "blocked", "since", "reason", "tmux", "quiet", "errs")
 
 
 def _apih_quiet(now):
@@ -43812,17 +43826,33 @@ def _apih_quiet(now):
         return True
 
 
+def _apih_errs(now):
+    """How many attempts failed inside this kernel's longest window (T301): the frame's `errs`. 0 with no backend."""
+    try:
+        be = _sdk()
+        ah = getattr(be, "api_health", None) if be else None
+        return 0 if ah is None else int(ah.window_errors(now))
+    except Exception:
+        return 0
+
+
 def _api_health_hosts():
-    """{host: {state, cls, text, waiting, retrying, blocked, since, reason, tmux, stale}} for every attached
-    machine whose frame the tunnel supervisor has cached (_poll_remote_api_health). Deterministic for an
-    unchanged world (no clock), so an identical fleet still yields an identical frame and no push."""
+    """{host: {state, cls, text, waiting, retrying, blocked, since, reason, tmux, quiet, errs, stale[, fault]}} for
+    every attached machine whose frame the tunnel supervisor has cached (_poll_remote_api_health), and for one
+    whose read it refused (`fault`, the HTTP status; the frame keys are then whatever was last heard). `stale`
+    marks both a tunnel that is not up and a refused read: the shell names such a machine and gives it no say in
+    the dot. Deterministic for an unchanged world (no clock), so the same hosts in the same states yield an
+    identical frame and no push."""
     out = {}
     with _remotes_lock:
-        rows = [(r["host"], dict(r.get("apiHealth") or {}), r.get("status")) for r in _remotes.values()
-                if isinstance(r.get("apiHealth"), dict) and r.get("apiHealth")]
-    for host, f, st in rows:
+        rows = [(r["host"], dict(r.get("apiHealth") or {}), r.get("status"), r.get("_apih_fault"))
+                for r in _remotes.values()
+                if (isinstance(r.get("apiHealth"), dict) and r.get("apiHealth")) or r.get("_apih_fault")]
+    for host, f, st, fault in rows:
         row = {k: f.get(k) for k in _APIH_HOST_KEYS if k in f}
-        row["stale"] = st != "up"
+        row["stale"] = st != "up" or bool(fault)
+        if fault:
+            row["fault"] = str(fault)
         out[host] = row
     return out
 
@@ -46823,7 +46853,11 @@ r.usage=v;});});}
 var RAIL_HOME=(function(){var c=document.getElementById('rail-api');return c?c.parentNode:null;})();   // where the dot lives with no readout
 // the API-health dot may sit INSIDE this cell (in the readout's slot); every innerHTML write below would destroy it
 // with the readout, so it is parked back at its own place first and moved into the fresh slot after (T301)
-function parkApiCell(){var c=document.getElementById('rail-api');if(c&&el.contains(c)&&RAIL_HOME)RAIL_HOME.insertBefore(c,el.nextSibling);}
+// a DOM move blurs a focused node: the dot's script is told the move is ours (__rompApiCellMoving) so its blur and
+// focus handlers stand down, and focus is put back after, so a focus-shown hover survives the readout's minute repaint
+function moveApiCell(c,into){var had=document.activeElement===c,mv=window.__rompApiCellMoving;if(mv)mv(true);
+into();if(had){try{c.focus({preventScroll:true});}catch(e){}}if(mv)mv(false);}
+function parkApiCell(){var c=document.getElementById('rail-api');if(c&&el.contains(c)&&RAIL_HOME)moveApiCell(c,function(){RAIL_HOME.insertBefore(c,el.nextSibling);});}
 function renderRows(rows,selfHost){ROWS=rows||[];LAST=[];parkApiCell();
 var live=ROWS.filter(function(r){return hasBars(r.usage)||hasSpend(r.usage);});
 if(!live.length){el.innerHTML='';tip.style.display='none';return;}
@@ -46835,7 +46869,7 @@ el.innerHTML=aggBarsHTML(LAST)+apiCellHTML(LAST);
 // the API-health dot rides the readout (T301): the STABLE #rail-api node moves into the readout's slot, and back to
 // its own place in the rail when no readout renders; a move keeps its listeners, an innerHTML copy would not
 (function(){var cell=document.getElementById('rail-api');if(!cell)return;var slot=el.querySelector('.ah-slot');
-if(slot){slot.appendChild(cell);}else if(cell.parentNode!==RAIL_HOME&&RAIL_HOME){RAIL_HOME.insertBefore(cell,el.nextSibling);}})();
+if(slot){moveApiCell(cell,function(){slot.appendChild(cell);});}else if(cell.parentNode!==RAIL_HOME&&RAIL_HOME){moveApiCell(cell,function(){RAIL_HOME.insertBefore(cell,el.nextSibling);});}})();
 // a HOVER tip already open re-renders in place when fresh data lands (the 60s pull, the timeline's
 // live forward) — the user 2026-08-14, replacing the footer's click-me hint with the refresh itself.
 // Re-anchor the top edge after the swap: new content can change the tip's height, and it hangs ABOVE
@@ -47036,6 +47070,11 @@ pullFleet().then(openIt,openIt);};
 el.addEventListener('mouseenter',function(ev){var c=document.getElementById('rail-api');
 if(c&&ev&&typeof ev.clientX==='number'){var at=document.elementFromPoint(ev.clientX,ev.clientY);if(at&&(at===c||c.contains(at)))return;}showTip(ev);});
 el.addEventListener('mouseleave',function(){tip.style.display='none';});
+// the dot's own tip takes over while the pointer is on the dot (T301 review): the dot's script hides this tip as its
+// own shows and asks for it back when the pointer slides from the dot onto the readout's figures (its mouseenter
+// and mouseleave, never a timer), so the two tips are never up at once
+window.__rompUsageTipHide=function(){tip.style.display='none';};
+window.__rompUsageTipShow=function(ev){showTip(ev);};
 // Refresh-from-source (the user 2026-06-30): GET /usage re-reads usage.json — the snapshot Claude Code's
 // statusline (tmux) OR the SDK backend's RateLimitEvent capture writes — and re-renders. `pull(ack)` is the
 // shared path: a CLICK forces it now (ack=true → instant dim pulse before the round-trip, per the button
@@ -47392,7 +47431,8 @@ _LANDING_APIH_JS = """
 // the merge and reading rules (ui/webview/api-health-merge.ts via api-health-global.ts); absent (a stale dist), the
 // local frame alone paints the dot and the popup says so in the kernel's own words
 var MERGE=window.__rompApiHealthMerge||null;
-var READINGS={};   // per host: the history reading (readHistory), null until read; the frame merge takes it
+var READINGS={};   // per host: the history reading (readHistory), null until read; the machine lines take it (the dot follows the frames)
+var moving=false;  // the readout is re-parenting the cell (moveApiCell): its blur and focus are not the user's
 var DOTWORD={fine:'fine',errors:'errors',quiet:'no traffic'};
 var LEGEND='429 = the API told us to slow down (rate limit) \u00b7 5xx = the API itself failed (server error) \u00b7 offline = no connection';
 var STATE_WORD={thrashing:'rate-limit storm',degraded:'API failing',recovering:'recovering',healthy:'fine',unknown:'quiet'};
@@ -47469,16 +47509,19 @@ return tp.then(function(t){return {error:'HTTP '+r.status+(t?' \u00b7 '+String(t
 return r.json().then(function(d){return (d&&d.buckets)?d:{error:'malformed answer'};},function(){return {error:'malformed answer'};});})
 .catch(function(e){return {error:String((e&&e.message)||e)};});}
 function hostsOf(m){return Object.keys((m&&m.hosts)||{}).sort();}
-function load(fresh){var n=++histSeq;if(fresh)HIST=null;
-var hs=hostsOf(LAST),reads=[fetchDoc('/api-health')].concat(hs.map(function(h){return fetchDoc('/remote/'+encodeURIComponent(h)+'/api-health');}));
-Promise.all(reads).then(function(docs){if(n!==histSeq)return;var by={'':docs[0]};hs.forEach(function(h,i){by[h]=docs[i+1];});HIST=by;
-READINGS=MERGE?MERGE.mergeHistories(by).readings:{};paintCell();
-if(tip.style.display!=='block')return;if(held){dirty=true;return;}render();});}
+// one read per machine, each landing on its own (review find): a hung tunnel holds its relay for the relay's timeout,
+// and this machine's numbers must not wait on it. A fresh show starts every machine as a loader line; a re-read while
+// open keeps each machine's last answer until its new one lands. The newest read wins a race (histSeq).
+function load(fresh){var n=++histSeq,names=[''].concat(hostsOf(LAST)),by={};
+names.forEach(function(h){by[h]=(!fresh&&HIST&&HIST[h]&&!HIST[h].pending)?HIST[h]:{pending:true};});HIST=by;
+names.forEach(function(h){fetchDoc(h?'/remote/'+encodeURIComponent(h)+'/api-health':'/api-health').then(function(d){if(n!==histSeq)return;by[h]=d;
+READINGS=MERGE?MERGE.mergeHistories(by).readings:{};
+if(tip.style.display!=='block')return;if(held){dirty=true;return;}render();});});}
 // the merged view of the frame: the dot and one line per machine (worst state wins; per-host maps, nothing summed)
 function merged(){if(!LAST)return {dot:'fine',worst:'',machines:[],n:1};
 if(MERGE)return MERGE.mergeFrames(LAST,LAST.hosts||{},READINGS);
 var d=LAST.state==='ok'?'fine':'errors';return {dot:d,worst:'',machines:[{host:'',dot:d,text:'this machine: '+LAST.text,stale:false}],n:1};}
-function readingOf(host){var d=HIST&&HIST[host];if(!d||d.error||!MERGE)return null;return MERGE.readHistory(d);}
+function readingOf(host){var d=HIST&&HIST[host];if(!d||d.error||d.pending||!MERGE)return null;return MERGE.readHistory(d);}
 // the cell: the dot's state and its description, from the merge; the DOM is touched only on a change
 function paintCell(){var mg=merged();if(el.getAttribute('data-dot')!==mg.dot)el.setAttribute('data-dot',mg.dot);
 var lab='API health: '+DOTWORD[mg.dot]+(mg.n>1?' across '+mg.n+' machines':'');if(el.getAttribute('aria-label')!==lab)el.setAttribute('aria-label',lab);}
@@ -47487,11 +47530,14 @@ function headWords(m,mg){if(m.state==='paused')return m.text;
 var rd=readingOf('');
 if(mg.n>1){   // several machines: the head sums them up in one line; each machine's own line follows
 var bad=mg.machines.filter(function(x){return x.dot==='errors';}).map(function(x){return x.host||'this machine';});
-if(bad.length)return 'Errors on '+bad.join(', ');
+var away=mg.machines.filter(function(x){return x.stale;}).map(function(x){return x.host||'this machine';});   // named, not counted
+if(bad.length)return 'Errors on '+bad.join(', ')+(away.length?'; '+away.join(', ')+' not reachable':'');
+if(away.length)return (mg.dot==='quiet'?'No API traffic':'Fine')+' on the reachable machines; '+away.join(', ')+' not reachable.';
 if(mg.dot==='quiet')return 'No API traffic on any machine.';
 return 'All '+mg.n+' machines fine.';}
 if(mg.dot==='errors'){if(m.state!=='ok')return m.text;   // this machine's frame: sessions waiting on the API, in the kernel's words
-return rd?rd.headline:m.text;}   // the window in errors: the reading's sentence
+if(rd)return rd.headline;   // the window in errors: the reading's sentence once read
+return (m.errs||0)>0?m.errs+' failed attempt'+(m.errs===1?'':'s')+' in the last 15 min.':m.text;}   // before it lands: the frame's own count
 if(rd)return rd.headline;return mg.dot==='quiet'?'No API traffic in the last 15 min.':'Fine.';}
 // a bucket's name for the card: its model family, plus its auth label when another bucket shares the family
 function bname(d,key){var b=(d.buckets||{})[key]||{},fam=b.family||key.split('|')[1]||key,dup=false;
@@ -47511,7 +47557,7 @@ return dup?fam+' · '+(b.auth||key.split('|')[0]):fam;}
 function graphHTML(sr){var n=sr.ok.length,W=168,H=48,tot=[],mx=0;
 for(var i=0;i<n;i++){var v=(sr.ok[i]||0)+(sr.rateLimited[i]||0)+(sr.serverErrors[i]||0)+(sr.noStatus[i]||0);tot.push(v);if(v>mx)mx=v;}
 if(mx<=0)return '';
-var steps=[1,2,5,10,20,50,100,200,500,1000],top=steps[steps.length-1];for(var k=0;k<steps.length;k++)if(steps[k]>=mx){top=steps[k];break;}
+var p=Math.pow(10,Math.floor(Math.log(mx)/Math.LN10)),m=mx/p,top=(m<=1?1:m<=2?2:m<=5?5:10)*p;   // a 1-2-5 ceiling at any magnitude: the peak is never clipped
 var X=function(i){return (n>1?i/(n-1):0.5)*W;},Y=function(v){return H-1-Math.max(0,Math.min(1,v/top))*(H-2);};
 var line=function(arr,color,op){var pts=[],anyv=false;for(var i=0;i<n;i++){var v=arr[i]||0;if(v)anyv=true;pts.push(X(i).toFixed(1)+','+Y(v).toFixed(1));}
 if(!anyv)return '';return '<polyline points="'+pts.join(' ')+'" fill="none" style="stroke:'+color+'" stroke-width="1.5" vector-effect="non-scaling-stroke"/>'
@@ -47557,6 +47603,8 @@ var h='<div class="ru-tip-win ah-hist"><div class=ru-tip-name><span>History</spa
 if(!HIST)return h+'<div class="rl-dots ah-wait"><i></i><i></i><i></i></div></div>';
 var hs=Object.keys(HIST).sort(localFirst),many=hs.length>1;
 hs.forEach(function(host){var d=HIST[host],name=host||'this machine';
+// a machine whose answer is still in flight: its loader line (alone, the section's loader), never a blank
+if(d&&d.pending){h+=many?'<div class="ru-tip-row ah-mline"><i class=ah-dot data-dot=quiet></i><span class=ah-nm>'+esc(name)+'</span><span class="rl-dots ah-wait"><i></i><i></i><i></i></span></div>':'<div class="rl-dots ah-wait"><i></i><i></i><i></i></div>';return;}
 if(!d||d.error){h+='<div class="ah-line ah-err">Could not read the API history'+(many?' of '+esc(name):'')+': '+esc((d&&d.error)||'no answer')+'</div>';return;}
 var rd=MERGE?MERGE.readHistory(d):null;
 // with several machines each gets its line (the head already carries this machine's when alone)
@@ -47564,7 +47612,7 @@ if(many)h+='<div class="ru-tip-row ah-mline"><i class=ah-dot data-dot='+levelDot
 if(rd&&rd.sub&&many)h+='<div class="ah-line ru-tip-reset">'+esc(rd.sub)+'</div>';
 var sr=MERGE?MERGE.documentSeries(d):null;if(sr)h+=graphHTML(sr);});
 h+='<div class="ah-line ah-legend">'+LEGEND+'</div>';
-var tr=(loc&&!loc.error)?transRows(loc):'';if(tr)h+='<div class="ru-tip-name ah-hname"><span>State changes'+(many?' \u00b7 this machine':'')+'</span></div>'+tr;
+var tr=(loc&&!loc.error&&!loc.pending)?transRows(loc):'';if(tr)h+='<div class="ru-tip-name ah-hname"><span>State changes'+(many?' \u00b7 this machine':'')+'</span></div>'+tr;
 return h+'</div>';}
 // the cell's description while the hover shows: the state word and its since, then how to reach the rest. Before the
 // answer lands it carries the state word the frame already put on the cell (assistive tech reads the description once,
@@ -47574,7 +47622,7 @@ return h+'</div>';}
 function descText(){var tail=' Press Enter to open it.';var mg=merged();var w=LAST?headWords(LAST,mg):'';
 if(!/[.!?]$/.test(w))w+='.';
 var loc=HIST&&HIST[''];if(loc&&loc.error)return 'Could not read the API history: '+loc.error+'.'+tail;
-if(!HIST)return 'API health: '+w+' Reading the details.'+tail;
+if(!HIST||(HIST['']&&HIST[''].pending))return 'API health: '+w+' Reading the details.'+tail;
 return 'API health: '+w+tail;}
 // full=false is the HOVER: the same reading with no controls. The hover sits under pointer-events:none and hides
 // on mouseleave, so a button there could not be honored; the click is where the actions live.
@@ -47584,8 +47632,8 @@ var h='<div class=ru-tip-win><div class=ru-tip-name><span>API health'+(mg.n>1?' 
 +((m.since&&m.state!=='ok')?'<span class=ah-since>since '+hm(m.since)+'</span>':'')+'</div>';
 if(m.state==='paused')h+='<div class=ah-line>'+(PAUSE[m.reason]||PAUSE.manual)+'</div>';
 if(rd&&rd.sub&&mg.n===1)h+='<div class="ah-line ru-tip-reset">'+esc(rd.sub)+'</div>';
-// several machines: one line each, the dot in that machine's state, a stale link said plainly
-if(mg.n>1)mg.machines.forEach(function(x){h+='<div class="ru-tip-row ah-mline"><i class=ah-dot data-dot='+esc(x.dot)+'></i><span class=ah-desc>'+esc(x.text)+(x.stale?' \u00b7 last heard before its link dropped':'')+'</span></div>';});
+// several machines: one line each, the dot in that machine's state (a machine not reachable says so in its line)
+if(mg.n>1)mg.machines.forEach(function(x){h+='<div class="ru-tip-row ah-mline"><i class=ah-dot data-dot='+esc(x.dot)+'></i><span class=ah-desc>'+esc(x.text)+'</span></div>';});
 if(full)h+=btnHTML(m);
 h+='</div>';
 var rows=m.sessions||[];
@@ -47618,6 +47666,7 @@ try{if(n)n.focus();if(!n||document.activeElement!==n)tip.focus();}catch(e){}}}
 // The shown, unpinned tip is a TOOLTIP (the role, the cell described by the short summary, no aria-modal): a keyboard
 // user who Tabs onto the cell must not meet a modal dialog their focus sits outside of. open() makes it the dialog.
 function show(ev){if(!LAST)return;lastX=(ev&&typeof ev.clientX==='number')?ev.clientX:null;
+try{window.__rompUsageTipHide&&window.__rompUsageTipHide();}catch(e){}   // the readout's tip yields while ours shows (the cell sits inside it)
 tip.classList.remove('ru-modal');tip.setAttribute('role','tooltip');tip.removeAttribute('aria-modal');
 tip.style.display='block';el.setAttribute('aria-describedby','ah-summary');load(true);render();}
 function hide(){tip.style.display='none';el.removeAttribute('aria-describedby');}
@@ -47643,17 +47692,24 @@ window.__rompApiClose=close;back.onclick=close;try{tip.focus();}catch(e){}if(!wa
 // document did not change, so no re-read and no flash to the loader's dots
 el.addEventListener('mouseenter',function(ev){if(pinned)return;
 if(tip.style.display==='block'){if(typeof ev.clientX==='number')lastX=ev.clientX;anchor();return;}show(ev);});
-el.addEventListener('mouseleave',function(){if(!pinned)hide();});
+el.addEventListener('mouseleave',function(ev){if(pinned)return;hide();
+// the pointer slid from the dot onto the readout's own figures: the readout's tip comes back (its mouseenter fired
+// before ours and yielded to the dot, so nothing else would show it now); a pointer that left the readout too gets none
+var ru=document.getElementById('rail-usage'),to=ev&&ev.relatedTarget;if(ru&&to&&ru.contains(to)&&window.__rompUsageTipShow)window.__rompUsageTipShow(ev);});
 // keyboard focus shows the hover as the pointer does (the tooltip pattern) and blur hides it; a pinned detail is
 // unmoved, a hover the pointer already opened is left where it anchored, and a focus the browser re-dispatches
 // because the window regained focus while the cell already held it (winFocusEl) is not the user reaching for the cell
-el.addEventListener('focus',function(){if(skipFocus||winFocusEl===el||pinned||tip.style.display==='block')return;show(null);});
-el.addEventListener('blur',function(){if(!pinned)hide();});
-el.addEventListener('click',function(){if(pinned)close();else open();});
+el.addEventListener('focus',function(){if(moving||skipFocus||winFocusEl===el||pinned||tip.style.display==='block')return;show(null);});
+el.addEventListener('blur',function(){if(moving)return;if(!pinned)hide();});
+// the readout re-parents the cell on every repaint (moveApiCell): while it does, the blur and the focus it causes are
+// not the user's, and once it is done a shown hover is re-anchored from the cell's new place
+window.__rompApiCellMoving=function(on){moving=!!on;if(!on&&!pinned&&tip.style.display==='block')anchor();};
+// the cell sits INSIDE the spend readout, whose own click opens the spend modal: ours must not reach it (review find)
+el.addEventListener('click',function(ev){if(ev&&ev.stopPropagation)ev.stopPropagation();if(pinned)close();else open();});
 // Escape on the focused cell dismisses the hover that focus showed, without moving focus (content shown on focus
 // must be dismissible in place); the pinned dialog's Escape lands via _LANDING_ESC_JS, inert while no modal is on
 el.addEventListener('keydown',function(ev){if(ev.key==='Escape'){if(!pinned&&tip.style.display==='block'){ev.preventDefault();hide();}return;}
-if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();if(pinned)close();else open();}});
+if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();ev.stopPropagation();if(pinned)close();else open();}});
 // Click-safe across a frame (ui/CLAUDE.md): a frame that lands while a pointer is DOWN over the detail is painted
 // on release, never under the press, so the pressed button survives to its click. A PRIMARY release inside the
 // detail is followed by the click, so the flush waits for it (a swap between mouseup and click would detach the
@@ -49808,7 +49864,10 @@ def _landing():
             "#rail-api[data-dot=errors] .ah-dot,.ah-dot[data-dot=errors]{background:var(--st-blocked-bg,#e5484d);opacity:1}"
             "#rail-api[data-dot=quiet] .ah-dot,.ah-dot[data-dot=quiet]{background:var(--dim,#9aa4ad);opacity:.55}"
             "#rail-api{cursor:pointer;margin:0 1px;padding:4px 2px}"   # a 15px hit target around a 7px dot; sits inside the readout's slot
-            ".ah-slot{display:inline-flex;align-items:center}"
+            # the slot is not a flex item of its own (display:contents), so the readout pays no gap for a dot that is
+            # still hidden and exactly one for a shown one (review find: the API label and the 1-day label sat 14 px
+            # apart before the first frame and jumped when the dot appeared)
+            ".ah-slot{display:contents}"
             # the detail card's own rows, in the tip's font and palette (#ah-tip shares #ru-tip's skin below)
             ".ah-head{gap:7px}.ah-word{font-weight:700;color:#e8eef5}.ah-since{opacity:.55;margin-left:auto}"
             ".ah-line{margin-top:4px;max-width:340px}"

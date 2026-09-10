@@ -298,7 +298,12 @@ await ev(() => { const real = window.fetch; window.__fetchN = 0; window.__doneN 
     const p = real.apply(window, arguments);
     return api ? p.then((r) => { const j = r.json.bind(r); r.json = () => j().then((d) => { window.__doneN++; return d; }); return r; }) : p; }; };
   window.__restoreFetch(); });
-await ev((f) => { window.__rompApiHealth(f); }, frame());
+// the frame's quiet and errs flags come from the kernel's own ring, the same events the document counts (T301 review:
+// the dot follows the frame, a reading only words the lines), so the lab derives them from the served document with the
+// page's own reading rule and pushes a frame that says what a kernel serving that document would say
+const flagsFor = () => ev(() => window.__realFetch("/api-health").then((r) => r.json()).then((d) => {
+  const r = window.__rompApiHealthMerge.readHistory(d); return { quiet: r.level === "quiet", errs: r.level === "errors" ? (r.errors || 1) : 0 }; }));
+await ev((f) => { window.__rompApiHealth(f); }, frame(await flagsFor()));
 await step("storm", async () => {
   // 1. the hover: the loader's dots first, the rows when the read lands; the cell is described by the tip
   const first = await enter();
@@ -309,7 +314,7 @@ await step("storm", async () => {
   R.stormHidden = !(await shown()); R.stormDescribedAfter = await described();
 });
 // each later show is sampled the same way: a fresh show drops the last answer (the dots stand in again) and reads once
-const show = async (name) => { await variant(name); const e = await enter(); R[name + "Wait"] = e.wait; R[name + "Rows0"] = e.rows; };
+const show = async (name) => { await variant(name); await ev((f) => { window.__rompApiHealth(f); }, frame(await flagsFor())); const e = await enter(); R[name + "Wait"] = e.wait; R[name + "Rows0"] = e.rows; };
 await step("quiet", async () => {
   // 2. the tail crosses bootAt with no restart row: the divider; the hold from before the boot ends at the boot
   await show("quiet"); await waitRows();
@@ -412,7 +417,9 @@ await step("theme", async () => {
 });
 await step("race", async () => {
   // 10. two reads in flight (enter, leave, enter): the older answer landing first is dropped, the dots stay until
-  //     the newer one lands, and the newer one is what shows
+  //     the newer one lands, and the newer one is what shows. The frame is a plain fine one (the last show pushed the
+  //     stale variant's quiet flag): the head's word while the dots stand is the frame's, so it must be known here
+  await ev((f) => { window.__rompApiHealth(f); }, frame({ quiet: false, errs: 0 }));
   await ev(async () => { const rf = window.__realFetch;
     await rf("/variant/storm"); window.__A = await (await rf("/api-health")).json();
     await rf("/variant/quiet"); window.__B = await (await rf("/api-health")).json();
@@ -923,8 +930,10 @@ class ServedHistory(unittest.TestCase):
 
     def test_the_cell_is_described_by_a_short_summary_and_never_by_the_rows(self):
         R = self.R
-        self.assertEqual(R["stormDesc0"], "API health: Fine. Reading the details. Press Enter to open it.",
-                         "before the answer: the frame's own word and the read in flight, not the loader's markup")
+        # the frame carries the kernel's own count of failed attempts in the window (T301 review: the dot follows the
+        # frame), so the description names it before the document is read, then the reading's sentence replaces it
+        self.assertEqual(R["stormDesc0"], "API health: 10 failed attempts in the last 15 min. Reading the details. Press Enter to open it.",
+                         "before the answer: the frame's own count and the read in flight, not the loader's markup")
         m = R["storm"]["mode"]
         d = m["descText"]
         self.assertEqual(d, "API health: " + 'Rate-limit storm: 9 rate-limited attempts, 1 server error among 45 attempts in the last 15 min; 1 turn gave up.' + " Press Enter to open it.", "the reading in plain words, how to reach the rest")

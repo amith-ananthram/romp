@@ -2551,6 +2551,15 @@ class ApiHealth:
             last = self._last_event_at
         return last is None or (now - last) > max(api_health_config()["windows"])
 
+    def window_errors(self, now: float | None = None) -> int:
+        """Failed attempts (a retry or a give-up) inside the longest window ending at `now` (T301): the frame's
+        `errs`, so the rail's dot reads red for a storm the window still holds while no session waits, and clears
+        the cycle the last failure ages out. Clock-derived like quiet(): the frame that carries it changes then."""
+        now = time.time() if now is None else float(now)
+        lo = now - max(api_health_config()["windows"])
+        with self._lock:
+            return sum(1 for e in self._ring if e.kind != "ok" and lo < e.t <= now)
+
     def snapshot(self, now: float | None = None, uptime_s=None) -> dict:
         """The /api-health payload minus `bootId` (the kernel stamps that from /version's globals; `bootAt`
         is this aggregator's `boot_stamp`, the number every seeded stateSince and every restart row

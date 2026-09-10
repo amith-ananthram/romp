@@ -4,8 +4,11 @@
     authed, 503 before the first cycle;
   - the tunnel supervisor's poll of an attached host's frame (_poll_remote_api_health) is rate-gated, keeps
     the last reading on a blip and clears it when the host answers that it has none;
-  - the shell frame carries every cached remote frame under `hosts` as a per-host MAP with a `stale` mark,
-    and an unchanged fleet yields an identical frame (no push);
+  - the shell frame carries every cached remote frame under `hosts` as a per-host MAP with a `stale` mark (a
+    down tunnel or a refused read, the read's `fault` beside it), and the same hosts in the same states yield an
+    identical frame (no push); its `quiet` and `errs` flags come from the aggregator through the _sdk seam;
+  - a remote's frame, its poll stamp and its fault are per process: never written to the 0600 remotes file (a
+    polled frame must not rewrite the credential file every pass), never restored at boot;
   - GET /remote/<host>/api-health relays one read of an attached host's document: 404 for an unknown host, the
     remote's own token in the forwarded request, the status and JSON passed through, 502 on a dead tunnel;
   - the snapshot's additive per-bucket `series` (api_health_series) bins attempts per minute over the slow
@@ -48,7 +51,7 @@ class _FakeRemote(BaseHTTPRequestHandler):
         _FakeRemote.seen.append((self.path, self.headers.get("X-Romp-Token")))
         tok = self.headers.get("X-Romp-Token") or (self.path.split("token=")[1].split("&")[0] if "token=" in self.path else "")
         if tok != REMOTE_TOKEN:
-            self.send_response(401); self.end_headers(); self.wfile.write(b"bad token"); return
+            self.send_response(403); self.end_headers(); self.wfile.write(b"bad token"); return
         if self.path.startswith("/api-health/frame"):
             body = json.dumps(_FakeRemote.frame).encode() if _FakeRemote.frame else b""
             if not _FakeRemote.frame:
@@ -86,10 +89,39 @@ class HostsMap(_Fixture):
             km._remotes.update(self._saved)
         super().tearDown()
 
-    def _row(self, host, frame, status="up"):
+    def _row(self, host, frame, status="up", fault=None):
         with km._remotes_lock:
             km._remotes[host] = {"host": host, "kernel_port": 1, "local_port": 1, "token": REMOTE_TOKEN,
-                                 "status": status, "apiHealth": frame}
+                                 "status": status}
+            if frame is not None:
+                km._remotes[host]["apiHealth"] = frame
+            if fault:
+                km._remotes[host]["_apih_fault"] = fault
+
+    def test_the_flags_come_from_the_aggregator_through_the_sdk_seam_and_no_backend_is_built(self):
+        class AH:
+            def quiet(self, now): return False
+            def window_errors(self, now): return 3
+        class BE:
+            api_health = AH()
+        before = km._sdk_backend
+        f = self.frame()
+        self.assertEqual((f["quiet"], f["errs"]), (True, 0), "no backend: quiet, nothing failed")
+        self.backend = BE()
+        f = self.frame()
+        self.assertEqual((f["quiet"], f["errs"]), (False, 3), "the aggregator's own answers")
+        self.assertTrue(self.sdk_calls, "the frame asked the seam, not the module singleton")
+        self.assertIs(km._sdk_backend, before, "no SdkBackend was constructed by building a frame")
+
+    def test_a_refused_read_names_the_host_with_its_fault_and_marks_it_stale(self):
+        self._row("TESTHOST", FRAME_A, fault="HTTP 403")
+        self._row("PEERHOST", None, fault="HTTP 500")
+        f = self.frame()
+        t = f["hosts"]["TESTHOST"]
+        self.assertEqual((t["state"], t["fault"], t["stale"]), ("degraded", "HTTP 403", True), "the last frame, marked, never dropped")
+        p = f["hosts"]["PEERHOST"]
+        self.assertEqual((p["fault"], p["stale"]), ("HTTP 500", True))
+        self.assertNotIn("state", p, "no frame was ever heard: the fault alone names the machine")
 
     def test_no_attached_host_gives_an_empty_map_and_the_local_scalars_stand(self):
         f = self.frame()
@@ -120,7 +152,7 @@ class HostsMap(_Fixture):
         # the LOCAL scalars are this kernel's alone: a remote storm does not change them
         self.assertEqual((f["state"], f["waiting"]), ("ok", 0))
 
-    def test_an_unchanged_fleet_yields_an_identical_frame_so_nothing_is_pushed_twice(self):
+    def test_the_same_hosts_in_the_same_states_yield_an_identical_frame_so_nothing_is_pushed_twice(self):
         self._row("TESTHOST", FRAME_A)
         a = json.dumps(self.frame(), sort_keys=True)
         b = json.dumps(self.frame(), sort_keys=True)
@@ -137,6 +169,48 @@ class HostsMap(_Fixture):
         f = km._apih_local_frame()
         self.assertNotIn("hosts", f, "a peer gets this kernel's local half only: no nesting between two attached kernels")
         self.assertEqual(f["state"], "ok")
+
+
+class HostFramesArePerProcess(unittest.TestCase):
+    """A remote's frame, poll stamp and fault never reach the 0600 remotes file and never come back at boot."""
+
+    def setUp(self):
+        with km._remotes_lock:
+            self._saved = dict(km._remotes)
+            km._remotes.clear()
+            km._remotes["TESTHOST"] = {"host": "TESTHOST", "kernel_port": 29855, "local_port": 1, "token": REMOTE_TOKEN,
+                                       "status": "up", "sids": [], "trust": "directed", "proc": None}
+        km._remotes_save()          # baseline: disk agrees with memory
+
+    def tearDown(self):
+        with km._remotes_lock:
+            km._remotes.clear(); km._remotes.update(self._saved)
+
+    def test_a_polled_frame_its_stamp_and_its_fault_are_not_a_change_to_the_credential_file(self):
+        for k in ("apiHealth", "_apih_at", "_apih_fault"):
+            self.assertIn(k, km._NOT_SAVED)
+        with km._remotes_lock:
+            km._remotes["TESTHOST"]["apiHealth"] = FRAME_A
+            km._remotes["TESTHOST"]["_apih_at"] = 1785272930.0
+            km._remotes["TESTHOST"]["_apih_fault"] = "HTTP 403"
+        self.assertFalse(km._remotes_save_if_changed(),
+                         "a frame polled every pass must not rewrite the 0600 token file every pass (the _usage_at story)")
+        row = json.loads(km.REMOTES_FILE.read_text())[0]
+        for k in ("apiHealth", "_apih_at", "_apih_fault"):
+            self.assertNotIn(k, row)
+
+    def test_a_file_an_older_build_wrote_with_a_frame_loads_without_it_so_a_dead_host_s_last_storm_never_paints_the_dot_at_boot(self):
+        rows = [{"host": "TESTHOST", "kernel_port": 29855, "local_port": 1, "token": REMOTE_TOKEN, "status": "up", "sids": [],
+                 "trust": "directed", "apiHealth": FRAME_A, "_apih_at": 1.0, "_apih_fault": "HTTP 403"}]
+        km.REMOTES_FILE.write_text(json.dumps(rows))
+        with km._remotes_lock:
+            km._remotes.clear()
+        km._remotes_load()
+        with km._remotes_lock:
+            r = dict(km._remotes["TESTHOST"])
+        for k in ("apiHealth", "_apih_at", "_apih_fault"):
+            self.assertNotIn(k, r, "a frame from a process that is gone describes nothing this one knows")
+        self.assertEqual(km._api_health_hosts(), {}, "the host is not on the surface until it answers again")
 
 
 class RemotePoll(unittest.TestCase):
@@ -160,6 +234,14 @@ class RemotePoll(unittest.TestCase):
         again = km._poll_remote_api_health(self.row)
         self.assertEqual(again, f, "inside the gate the cached reading comes back")
         self.assertEqual(len(_FakeRemote.seen), 1, "and the remote is not asked again")
+
+    def test_a_refused_read_keeps_the_last_frame_and_records_the_fault_which_a_good_read_clears(self):
+        row = dict(self.row, token="rotated-token-DO-NOT-USE", apiHealth=FRAME_A)
+        self.assertEqual(km._poll_remote_api_health(row), FRAME_A, "a 403 keeps the last frame: the machine does not vanish")
+        self.assertEqual(row["_apih_fault"], "HTTP 403")
+        row["token"], row["_apih_at"] = REMOTE_TOKEN, 0
+        self.assertEqual(km._poll_remote_api_health(row)["state"], "degraded")
+        self.assertNotIn("_apih_fault", row, "a good read clears the fault")
 
     def test_an_answered_no_frame_clears_and_a_dead_port_keeps_the_last_reading(self):
         _FakeRemote.frame = None
@@ -213,6 +295,27 @@ class Relay(unittest.TestCase):
         self.assertEqual(st, 502)
         self.assertIn(b"not answering", body)
 
+    def test_the_local_frame_route_answers_503_before_the_first_frame_and_the_local_half_after(self):
+        km._APIH_LAST[0] = None
+        saved = km._send_to_app
+        km._send_to_app = lambda app, m: None
+        try:
+            st, body, _ = self._get("/api-health/frame")
+            self.assertEqual(st, 503)
+            self.assertIn(b"no API-health frame yet", body)
+            km._api_health_push(dict(FRAME_A, hosts={"PEERHOST": {"state": "ok", "stale": False}}))
+            st, body, ct = self._get("/api-health/frame")
+            self.assertEqual(st, 200, body[:200])
+            f = json.loads(body)
+            self.assertEqual(f["state"], "degraded")
+            self.assertNotIn("hosts", f, "a peer gets this kernel's local half only")
+            self.assertTrue(ct.startswith("application/json"))
+            st, _, _ = self._get("/api-health/frame", token=False)
+            self.assertIn(st, (401, 403))
+        finally:
+            km._send_to_app = saved
+            km._APIH_LAST[0] = None
+
     def test_the_relay_is_behind_the_local_auth_gate(self):
         st, _, _ = self._get("/remote/TESTHOST/api-health", token=False)
         self.assertIn(st, (401, 403))
@@ -242,9 +345,24 @@ class Series(unittest.TestCase):
         self.assertEqual(sum(s["ok"]), 1, "an event older than the window is outside every bin")
         self.assertEqual(s["other"][-2], 1)
 
-    def test_the_snapshot_carries_it_per_bucket_and_the_documented_keys_hold(self):
-        src = Path(ROOT, "kernel", "sdk_backend.py").read_text()
-        self.assertIn('"lastError": last_err, "series": series}', src)
+    def test_the_snapshot_carries_the_series_per_bucket_from_the_ring_and_the_frame_flags_read_the_same_ring(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        ah = sb.ApiHealth(Path(td.name))
+        now = 10000.0
+        ah.note_ok(now - 5, auth="key:helper", family="fable", sid="s", message_id="m1")
+        ah.note_retry(now - 30, auth="key:helper", family="fable", status=429, sid="s", turn=1)
+        ah.note_retry(now - 61, auth="key:helper", family="fable", status=529, sid="s", turn=1)
+        ah.note_ok(now - 890, auth="key:helper", family="fable", sid="s", message_id="m0")
+        s = ah.snapshot(now)["buckets"]["key:helper|fable"]["series"]
+        self.assertEqual((s["binS"], len(s["ok"]), s["from"]), (60, 15, now - 900))
+        self.assertEqual((s["ok"][-1], s["rateLimited"][-1], s["serverErrors"][-2]), (1, 1, 1))
+        self.assertEqual(s["ok"][0], 1, "the oldest bin holds the response 890 s back")
+        self.assertEqual(sum(s["ok"]) + sum(s["rateLimited"]) + sum(s["serverErrors"]), 4, "every attempt once")
+        # the frame's flags read the same ring: two failed attempts in the window, traffic seen; nothing once it ages out
+        self.assertEqual(ah.window_errors(now), 2)
+        self.assertFalse(ah.quiet(now))
+        self.assertEqual(ah.window_errors(now + 1000), 0)
         doc = Path(ROOT, "docs", "reference.md").read_text()
         self.assertIn("`series`", doc, "the reference names the additive field")
 
@@ -267,14 +385,21 @@ class CellCss(unittest.TestCase):
         # pull: the usage script parks the dot outside before any write and moves it into the fresh slot after
         usage = km._LANDING_USAGE_JS
         self.assertIn("function renderRows(rows,selfHost){ROWS=rows||[];LAST=[];parkApiCell();", usage)
-        self.assertIn("function parkApiCell(){var c=document.getElementById('rail-api');if(c&&el.contains(c)&&RAIL_HOME)RAIL_HOME.insertBefore(c,el.nextSibling);}", usage)
-        self.assertIn("var slot=el.querySelector('.ah-slot');\nif(slot){slot.appendChild(cell);}", usage)
+        self.assertIn("function parkApiCell(){var c=document.getElementById('rail-api');if(c&&el.contains(c)&&RAIL_HOME)moveApiCell(c,function(){RAIL_HOME.insertBefore(c,el.nextSibling);});}", usage)
+        self.assertIn("var slot=el.querySelector('.ah-slot');\nif(slot){moveApiCell(cell,function(){slot.appendChild(cell);});}", usage)
+        # the move keeps focus and tells the dot's script (review find: the minute repaint blurred a focused cell and
+        # hid a focus-shown hover)
+        self.assertIn("function moveApiCell(c,into){var had=document.activeElement===c,mv=window.__rompApiCellMoving;if(mv)mv(true);\ninto();if(had){try{c.focus({preventScroll:true});}catch(e){}}if(mv)mv(false);}", usage)
+        # the readout's tip yields to the dot's and comes back when the pointer slides onto the figures
+        self.assertIn("window.__rompUsageTipHide=function(){tip.style.display='none';};\nwindow.__rompUsageTipShow=function(ev){showTip(ev);};", usage)
+        self.assertIn(".ah-slot{display:contents}", html, "the slot is no flex item: a hidden dot costs the readout no gap")
+        self.assertNotIn(".ah-slot{display:inline-flex", html)
         self.assertIn("body.theme-light #rail-api[data-dot=quiet] .ah-dot,body.theme-light .ah-dot[data-dot=quiet]{background:#5D574E}", html)
         self.assertIn("/dist/api-health-global.js?v=", html)
 
     def test_the_shell_script_reads_every_connected_kernel_and_never_says_unknown(self):
         js = km._LANDING_APIH_JS
-        self.assertIn("fetchDoc('/remote/'+encodeURIComponent(h)+'/api-health')", js)
+        self.assertIn("fetchDoc(h?'/remote/'+encodeURIComponent(h)+'/api-health':'/api-health')", js)
         self.assertIn("MERGE.mergeFrames(LAST,LAST.hosts||{},READINGS)", js)
         self.assertIn("MERGE.readHistory(d)", js)
         self.assertNotIn("'unknown'", js.replace("unknown:'quiet'", ""), "the word appears only as the key the plain word replaces")

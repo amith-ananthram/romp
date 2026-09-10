@@ -237,7 +237,7 @@ class ApiHealthCell(unittest.TestCase):
         self.assertTrue(tag in self.html, "the cell's markup: hidden, a keyboard button, a dot and nothing else")
         self.assertNotIn(".ah-text", self.html, "no word beside the dot")
         self.assertIn("<div class=ru-name>API</div><span class=ah-slot></span>", self.html, "the readout's slot for the dot")
-        self.assertIn(".ah-slot{display:inline-flex;align-items:center}", self.html)
+        self.assertIn(".ah-slot{display:contents}", self.html)   # no flex item of its own: a hidden dot costs no gap
         tag = re.search(r"<div id=rail-api[^>]*>", self.html).group(0)
         self.assertNotIn("title", tag, "the rail's no-title rule: the detail is the one hover surface")
         self.assertNotIn("data-keycmd", tag, "no palette command yet")
