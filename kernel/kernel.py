@@ -39981,7 +39981,7 @@ def _client_reset_chat_base(client):
 # a laptop sleep, a network change) redials, and the kernel used to serve the new socket as a client that
 # holds nothing: a full session frame for EVERY tab — 17 frames, ~9 MB on the measured board — for ONE tab on
 # screen. The page still holds every session it had; it only needs the one it shows. So the shim declares the
-# redial (?reconnect=1: its bundle's ready has left on a socket), and the kernel sends that client the tab strip
+# redial (?reconnect=1: the caps frame answered its ready), and the kernel sends that client the tab strip
 # with a `skeleton` list — every listed tab except the active one, cheapest transcript first — the active
 # tab's full session, and a small status frame per skeleton tab so its chip stays honest. A skeleton tab
 # loads on the user's click (activeTab / needFull) or on the client's idle prefetch (needFull), and any full
@@ -40430,7 +40430,9 @@ def _send_slot_delta(c, key, ftype, payload, pre, sig, parts=None):
 
 
 # What THIS kernel can do for a dashboard beyond the base protocol, announced on the socket in reply to
-# every `ready` (the page's own at load, and the shim's re-send on a reconnected socket) as
+# every `ready` (a pane's bundle posts one per renderer life through the shim, so a reconnected pane socket
+# carries one only when it queued across the drop; the shell page's own socket, shellWS, posts one at every
+# open, the one reconnected socket that learns the caps again) as
 # {type: "caps", caps: [...]} and listed on /version. Until 2026-09-05 nothing told a dashboard what its
 # kernel could take, and a dashboard newer than its kernel posted ops the kernel silently dropped. A
 # client uses a targeted op only when the cap is present and takes the pre-cap path otherwise.
@@ -40474,10 +40476,13 @@ def _views_seq_of(msg):
 
 def _send_caps(client, views_seq=None):
     """The caps frame, on the client's own socket: {type: "caps", caps, viewsSeq} (the comment on
-    KERNEL_WS_CAPS has the field). Sent AFTER the ready handler's pushes: the shim clears its stale banner
-    on the first non-keepalive frame after a reconnect, which must stay the resync frame itself and not
-    this one. `views_seq` is the seq of the views blob those pushes served, else the store's current seq
-    (the comment on KERNEL_WS_CAPS), None only with no store."""
+    KERNEL_WS_CAPS has the field). Sent by the ready handler alone, AFTER its pushes, and both matter: the pane
+    shim's redial gate latches on this frame (readyAcked in _shim) as the kernel's word that it processed the
+    bundle's ready and served the page whole ahead of it, so no other path may send it and nothing may send it
+    before the pushes; and the shim retires the stale prompt a reconnect arms on the first non-keepalive frame,
+    which must be a resync frame and not this one (a reconnected pane socket carries a ready, and so earns this
+    frame, only when the bundle's ready queued across the drop). `views_seq` is the seq of the views blob those
+    pushes served, else the store's current seq (the comment on KERNEL_WS_CAPS), None only with no store."""
     try:
         client["send"](json.dumps({"type": "caps", "caps": list(KERNEL_WS_CAPS),
                                    "viewsSeq": views_seq if isinstance(views_seq, int) else None}))
@@ -45467,7 +45472,7 @@ def _shim(app, v=0, no_stale=False):
     return """
 %s
 (function(){/*shim-core*/var queue=[],ws=null,everConnected=false;
-var bundleReady=false,readyQueued=false;   // the BUNDLE's own {type:"ready"} has passed through send() on this page / is waiting in `queue` for an open (onopen clears it once the flush has carried it); the dial's reconnect term (connect) keys on both
+var bundleReady=false,readyQueued=false,readyAcked=false;   // the BUNDLE's own {type:"ready"} has passed through send() on this page / is waiting in `queue` for an open (onopen clears it once the flush has carried it) / has been ANSWERED: the kernel's caps frame has arrived on a socket of this page (onmessage), the ready arm's own statement (_send_caps, sent after that arm's pushes) that it processed the bundle's ready and served the page whole ahead of it; the dial's reconnect term (connect) keys on all three
 var queuedDiag=0,DIAG_QUEUE_MAX=20;   // clientDiag rows waiting in `queue` for a reconnect, capped (an outage must not pile up breadcrumbs); other queued messages are untouched
 var failedConnects=0,firstFailT=0;   // handshakes that never OPENED since the last open: reported as ONE wsconnfail row on the next open, never one wsclose per redial
 // This pane's DASHBOARD id. ?wid= when the host supplies one (the VS Code extension builds its own pane
@@ -45622,7 +45627,7 @@ function connect(){if(ws&&(ws.readyState===0||ws.readyState===1))return;   // on
 if(returnAt)returnRedialed=true;   // a dial inside a return window (whatever path led here) → the return-fresh row says so
 connT=Date.now();var proto=location.protocol==="https:"?"wss://":"ws://";
 var active="";try{var st0=JSON.parse(localStorage.getItem(SK)||"null");active=(st0&&st0.activeId)||"";}catch(e){}
-ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&!readyQueued)?"&reconnect=1":""));   // reconnect=1: this page has held a socket before AND its bundle has said ready AND that ready is not still waiting in the queue for this open, so it may already hold sessions; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own): both redials dial as a fresh page (2026-09-10)
+ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1":""));   // reconnect=1: this page has held a socket before AND its bundle has said ready AND the kernel's caps frame has answered that ready AND the ready is not still waiting in the queue for this open, so it holds the sessions the kernel served it; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own); a ready that left on an open socket the kernel never answered (the socket died before its caps frame came back) served the page nothing either: all three redials dial as a fresh page, the last for the page's life, since the bundle posts ready once and no later socket carries one for a caps frame to answer (2026-09-10)
 // onopen: flush the queue; a RECONNECT (after a drop) also PROMPTS a reload — the fresh socket resyncs live via
 // the kernel's next push, and the banner offers a full reload for anything a live push doesn't cover. This
 // replaced the old silent location.reload() (the user 2026-07-05: don't foist a reload; let me click). Narrowed by
@@ -45643,6 +45648,7 @@ if(!ann)armStale(pendingWhy||"reconnect");   // T217: an ANNOUNCED restart's rec
 pendingWhy="";freshPending=true;try{window.dispatchEvent(new Event("romp:wsup"));}catch(e){}
 enqueue({type:"wsup"});}};   // the flip as a FRAME too: frames of the dead socket may still be draining from the FIFO, and a bundle that scopes "loaded on this socket" must see the flip between them and the new socket's frames, not at onopen (review find 2026-09-07)
 ws.onmessage=function(ev){lastRecv=Date.now();resumeProvisional=0;if(returnAt)returnBytes+=(ev.data&&ev.data.length)||0;var msg;try{msg=JSON.parse(ev.data);}catch(e){return;}
+if(msg&&msg.type==="caps")readyAcked=true;   // the kernel's answer to a ready it processed: _send_caps, which the ready arm alone sends, after its own pushes. From here a redial may declare itself (the dial term in connect); the frame goes on to the bundle below like any other
 if(msg&&msg.type==="ka"){if(LOADEDV&&msg.dv&&msg.dv>LOADEDV)raiseBuild();
 if(stalePending&&++staleKa>=2){var sw=stalePending;stalePending="";raiseStale(sw);}   // the SECOND keepalive since the arm, no resync between: a full heartbeat period on THIS socket with the kernel alive, talking to it, and not resyncing it — the view IS stale. (One keepalive alone can be a beat queued at accept, ahead of the resync frame.)
 return;}   // keepalive: stamped lastRecv above and confirmed a resumed keep (resumeProvisional=0: any frame does); carries the build token (drift → reload banner); nothing for the bundle to render
@@ -53369,8 +53375,11 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 seqs, _VIEWS_SERVED.seqs = _VIEWS_SERVED.seqs, None
             # What this kernel can do for the page (KERNEL_WS_CAPS), after the pushes above and on every
-            # `ready` — so a reconnected socket learns them again, and a page whose views writes were
-            # in flight across the drop learns, by this frame, that their answers may never come. It
+            # `ready`: the shell's socket, which re-sends ready at every open, learns them again; a page
+            # whose views writes were in flight across a drop learns, when a ready reaches its socket and
+            # this frame answers it, that their answers may never come; and the pane shim reads the frame
+            # as the kernel's word that this ready was processed and the page served whole ahead of it, the
+            # latch of its redial gate (readyAcked in _shim): the frame goes last and from this arm alone. It
             # carries the seq of the views blob those pushes served (viewsSeq), read above — or, when
             # they served none (a chat page on a sentinel cycle gets no tabOrder frame), the STORE's
             # current seq, the seq the next push serves (the 2026-09-05 review: with null here nothing
@@ -54356,10 +54365,15 @@ class Handler(BaseHTTPRequestHandler):
             # flag skeletons the tabs it is not looking at (_resolve_reconnect); a full push for one tab on
             # screen was 17 session frames / 9 MB on the measured board (2026-09-07).
             # The shim dials the term only once its bundle's ready has left on a socket with none still queued
-            # (everConnected&&bundleReady&&!readyQueued, 2026-09-10): a socket that died before the bundle said
-            # ready, or while its ready was queued, redials as a fresh page. What no shim bit sees: a ready that
-            # left on an open socket the kernel never processed, the socket dying before any frame came back,
-            # still redials with the term and is served skeletons that fill on click or the idle prefetch.
+            # AND the ready arm's caps frame has answered it (everConnected&&bundleReady&&readyAcked&&!readyQueued,
+            # 2026-09-10): a socket that died before the bundle said ready, while its ready was queued, or after
+            # the ready left but before the caps frame came back redials as a fresh page (_send_caps runs after the
+            # ready arm's pushes, so the frame is the kernel's word that the page was served whole). A caps frame
+            # that never arrives (the socket died between the pushes and the frame, the ready itself lost on a
+            # half-dead socket, or the ready arm raised into the dispatch loop's except below) leaves the page
+            # dialling fresh for its life: the bundle posts ready once, so no later socket carries one and no caps
+            # frame follows. Every redial of such a page is served whole, the cost before 2026-09-07, never a
+            # false skeleton.
             client["reconnect"] = True
         _register_ws_client(client)
         if client.get("reconnect"):
