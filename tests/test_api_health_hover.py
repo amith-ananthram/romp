@@ -25,6 +25,7 @@ Synthetic only: a private synthetic sid, invented key material assembled at run 
 import hashlib
 import inspect
 import io
+from contextlib import redirect_stderr
 import json
 import math
 import os
@@ -267,8 +268,8 @@ class OneClock(unittest.TestCase):
 
         fake = types.SimpleNamespace(SdkBackend=_Recorder, startup_auth_env=lambda *a, **k: {})
 
-        names = ("_sdk_backend", "load_source", "_ensure_sdk_on_path", "_load_model_catalog_cache",
-                 "_refresh_model_catalog", "_claude_bin", "_mark_boot", "_sdk_problem")
+        names = ("_sdk_backend", "load_source", "_ensure_sdk_on_path", "_model_catalog_boot",
+                 "_claude_bin", "_mark_boot", "_sdk_problem")
         saved = {n: getattr(km, n) for n in names}
         saved_jd = (km.jd._LOGIN_AUTH_ENV_FN, km.jd._USAGE_REFRESH_FN)
         problems = []
@@ -276,17 +277,20 @@ class OneClock(unittest.TestCase):
             km._sdk_backend = None
             km.load_source = lambda name, path: fake
             km._ensure_sdk_on_path = lambda: True
-            km._load_model_catalog_cache = lambda: None
-            km._refresh_model_catalog = lambda why: None
+            km._model_catalog_boot = lambda _async=True: False   # the boot's one catalog call (T296): stubbed whole
             km._claude_bin = lambda: "/bin/true"
             km._mark_boot = lambda *a, **k: None
             km._sdk_problem = problems.append
-            be = km._sdk_locked()
+            err = io.StringIO()
+            with redirect_stderr(err):
+                be = km._sdk_locked()
         finally:
             for n in names:
                 setattr(km, n, saved[n])
             km.jd._LOGIN_AUTH_ENV_FN, km.jd._USAGE_REFRESH_FN = saved_jd
         self.assertEqual(problems, [], "the construction ran clean")
+        self.assertNotIn("model catalog boot:", err.getvalue(),
+                         "...and so did the catalog leg: no swallowed traceback under the boot's own except (T296b)")
         self.assertEqual(len(built), 1, "one backend built")
         self.assertIsInstance(be, _Recorder)
         kw = built[0]

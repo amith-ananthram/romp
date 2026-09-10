@@ -6,8 +6,9 @@ credential and merges new version ids into the families — ADD-ONLY (an id the 
 knows stays; key-scoped visibility differs per account), newest-first by each id's own version tuple,
 labels from display_name. The seed is also the LOUD fallback: an unreachable API or a credential-less
 box serves seed+cache and says so (stderr + /version.modelCatalog), never a quietly stale list. The
-refresh is EVENT-keyed — boot, plus the exact staleness event of a claude-* id reaching a set path or
-the pick store that the merged list does not know — never a timer. A durable cache
+fetch is EVENT-keyed — an install's first boot, when no cache exists, plus the exact staleness event of
+a claude-* id reaching a set path or the pick store that the merged list does not know — never a timer,
+and not a boot that has a cache (T296). A durable cache
 (STATE/model-catalog.json) means a dead API never blanks a picker.
 
 The Models API leg runs against a HERMETIC fake here (a local HTTP server; the kernel's fetch URL is
@@ -444,6 +445,20 @@ class BootPolicy(FetchAndFallback):
         km._atomic_write(km._catalog_cache_path(), json.dumps({"fetchedAt": 1, "models": []}))
         started, _ = self._boot()
         self.assertTrue(started, "a cache with no rows serves nothing: fetch")
+
+    def test_a_corrupt_fetch_time_in_the_cache_still_serves_and_says_an_unknown_time(self):
+        # T296b: an out-of-range, NaN, negative-beyond-epoch, string or null fetchedAt must not turn the served
+        # cache into a swallowed traceback under the boot's own except; the line says "an unknown time"
+        rows = json.dumps(list(FAKE_ROWS))
+        for stamp in ('"corrupt"', "1e30", "NaN", "-1e18", "null"):
+            _reset_catalog(); _FakeModelsAPI.seen = []
+            km._catalog_cache_path().write_text('{"fetchedAt": %s, "models": %s}' % (stamp, rows))
+            started, err = self._boot()
+            self.assertFalse(started, stamp)
+            self.assertEqual(self._runs(), 0, stamp)
+            self.assertIn("fetched an unknown time", err, stamp)
+            self.assertNotIn("Traceback", err, stamp)
+            self.assertEqual(km._catalog_status["source"], "cache", "the cache serves whatever its stamp says")
 
     def test_an_unknown_id_still_refreshes_with_a_cache_present(self):
         km._atomic_write(km._catalog_cache_path(), json.dumps({"fetchedAt": 1_800_000_000, "models": list(FAKE_ROWS)}))

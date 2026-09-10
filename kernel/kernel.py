@@ -1684,9 +1684,11 @@ _models_rev = [int(time.time() * 1000)]
 # new version ids into the families, ADD-ONLY: an id the API omits but the seed knows stays (key-scoped
 # visibility differs per account); a dated snapshot, a suffixed variant (-fast) or the pre-4 naming
 # never joins (routing ids, not versions — the alias-table lesson); every family stays newest-first.
-# Cached durably (STATE/model-catalog.json) so a dead API never blanks a picker. Refreshed on exact
-# EVENTS — boot, and a claude-* id reaching a set path or the pick store that the merged list does not
-# know (the very moment staleness bites) — never on a timer. Unreachable API = serve seed+cache and
+# Cached durably (STATE/model-catalog.json) so a dead API never blanks a picker. Fetched on exact
+# EVENTS — an install's first boot, when no cache exists, and a claude-* id reaching a set path or the
+# pick store that the merged list does not know (the very moment staleness bites) — never on a timer,
+# and not at a boot that has a cache (T296: the fetch runs the apiKeyHelper, a desktop prompt on some
+# boxes; a boot is a clock). Unreachable API = serve seed+cache and
 # SAY SO (stderr + /version), never a quietly stale list. ROMP_MODEL_CATALOG=off disables the fetch
 # outright — hermetic labs must never reach the network; ROMP_MODELS_URL points tests at a fake.
 MODEL_CATALOG_FILE_NAME = "model-catalog.json"
@@ -1800,7 +1802,8 @@ def _catalog_cache_path():
 
 def _load_model_catalog_cache():
     """Boot: install the last fetched catalog BEFORE any picker asks, so a dead API never blanks a
-    picker and the seed alone is only what this build shipped with. Returns the cached row count."""
+    picker and the seed alone is only what this build shipped with. Returns the cached row count; zero
+    (absent, unreadable, or no rows) is what makes _model_catalog_boot fetch, the one boot that does."""
     try:
         d = json.loads(_catalog_cache_path().read_text())
         rows = d.get("models") if isinstance(d, dict) else None
@@ -1925,8 +1928,11 @@ def _model_catalog_boot(_async=True):
     n = _load_model_catalog_cache()
     if n:
         fetched = _catalog_status.get("fetchedAt")
-        when = (datetime.fromtimestamp(int(fetched), timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-                if isinstance(fetched, (int, float)) and fetched else "an unknown time")
+        try:                                           # a corrupt fetchedAt (out of range, NaN, a string) must not
+            when = (datetime.fromtimestamp(int(fetched), timezone.utc).strftime("%Y-%m-%d %H:%M UTC")   # turn the
+                    if isinstance(fetched, (int, float)) and fetched else "an unknown time")           # served
+        except (ValueError, OverflowError, OSError, TypeError):                                        # cache into a
+            when = "an unknown time"                                                                  # swallowed traceback
         sys.stderr.write("model catalog (boot): serving the cached list (%d id(s), fetched %s); it refreshes when a "
                          "session reports a model it lacks, not at boot\n" % (n, when))
         return False
@@ -1939,9 +1945,9 @@ def _note_unknown_model(mid):
     refresh per unknown id per kernel life (dedup by id, never a clock); aliases, dated snapshots
     and garbage never fire. Returns whether a refresh was started.
     The id is marked asked only when its refresh actually STARTS: the refresh is single-flight, so a
-    sighting while one is inflight — the boot fetch, exactly when a running session's CLI first
-    reports a new release — starts nothing, and marking it then spent the id's one refresh on a
-    no-op. Unmarked, the next sighting after the inflight fetch lands (every /models read re-derives
+    sighting while one is inflight — an install's first-boot fetch, or another id's, exactly when a
+    running session's CLI first reports a new release — starts nothing, and marking it then spent the
+    id's one refresh on a no-op. Unmarked, the next sighting after the inflight fetch lands (every /models read re-derives
     the learned list) asks for real if the catalog still lacks the id; a catalog that caught up
     short-circuits on _VERSION_FAMILY first."""
     mid = str(mid or "")
