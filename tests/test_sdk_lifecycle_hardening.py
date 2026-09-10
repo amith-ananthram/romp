@@ -249,6 +249,17 @@ class LeaseRules(unittest.TestCase):
         c = self._census([self._cli(701, 1)], [self._lease(701)], {701: "1000", self.HOLDER: "51"})
         self.assertEqual((c["orphans"], [p["kind"] for p in c["problems"]]), ([701], ["lease.holder-gone"]))
 
+    def test_a_dead_hosts_cli_is_left_to_finish_its_turn_not_reaped(self):
+        # T315: a per-session HOST that died closed its CLI's stdin; the CLI finishes its turn and exits on its
+        # own, and the session's next connect waits for that. The census reports the lost host but never reaps.
+        lease = self._lease(720, holder={"pid": self.HOLDER, "start": "50", "kind": "host"})
+        c = self._census([self._cli(720, 1)], [lease], {720: "1000"})              # the host (holder) is gone
+        self.assertEqual((c["orphans"], c["owned"]), ([], {720: "host-gone-finishing"}))
+        self.assertEqual([p["kind"] for p in c["problems"]], ["lease.holder-gone"])
+        # a KERNEL-held lease with its holder gone is still today's orphan
+        c = self._census([self._cli(721, 1)], [self._lease(721)], {721: "1000"})
+        self.assertEqual(c["orphans"], [721])
+
     def test_a_stale_heartbeat_makes_the_cli_an_orphan_and_the_boundary_is_the_ttl(self):
         starts = {702: "1000", self.HOLDER: "50"}
         c = self._census([self._cli(702, 1)], [self._lease(702, t=self.NOW - sb.LEASE_TTL_S - 0.5)], starts)

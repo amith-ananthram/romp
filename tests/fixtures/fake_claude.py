@@ -17,7 +17,8 @@ Behaviour:
       cancel-after=N   cancel an unanswered control request after N seconds (the CLI's own timeout)
       after=N          wait N seconds before the extras above (so a test can detach first)
   * Stdin end-of-file: finish the current turn, then exit 0 (probe finding 4).
-  * SIGINT: the current turn ends with an `interrupted` result.
+  * SIGINT, or an `interrupt` control request (the SDK's interrupt()): the current turn ends with an
+    `interrupted` result, as the real CLI's does.
   * FAKE_CLI_LOG (env): every stdin line is appended there, so a test can see what reached the CLI.
   * FAKE_CLI_TRANSCRIPT_DIR (env): the turn's records are also appended to <dir>/<session id>.jsonl,
     a transcript stand-in, so a test can count writers.
@@ -147,6 +148,8 @@ def handle(line: str) -> None:
         req = obj.get("request") or {}
         rid = obj.get("request_id")
         resp = {"subtype": "success", "request_id": rid, "response": {}}
+        if req.get("subtype") == "interrupt":
+            _interrupted.set()            # like the real CLI: the current turn ends with an interrupted result
         if req.get("subtype") == "initialize":
             hooks = req.get("hooks") or {}
             _hooks.clear()

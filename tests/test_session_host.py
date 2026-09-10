@@ -249,7 +249,7 @@ class HostProcess(unittest.TestCase):
         self.assertEqual((lease["holder"]["pid"], lease["holder"]["kind"], lease["version"]), (host.pid, "host", "abc12345"))
         self.assertEqual(sb.lease_state(lease, time.time()), "valid")
         k, hello = self._attach(sock)
-        self.assertEqual((hello["cli"]["pid"], hello["journal"]["next"], hello["parked"]), (lease["pid"], 0, []))
+        self.assertEqual((hello["cli"]["pid"], hello["journal"]["next"], hello["parked"], hello["inflight"]), (lease["pid"], 0, [], 0))
         k.send({"t": "in", "data": json.dumps({"type": "control_request", "request_id": "req_0_aaaa",
                                                  "request": {"subtype": "initialize", "hooks": {"Stop": [{"matcher": None, "hookCallbackIds": ["hook_0"], "timeout": 540}]}}})})
         resp = k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "control_response")
@@ -282,6 +282,7 @@ class HostProcess(unittest.TestCase):
         self.assertIsNone(host.poll(), "the host keeps running the turn")
         self.assertEqual(sb.lease_state(self._lease(), time.time()), "valid", "and keeps the lease")
         k2, hello = self._attach(sock, ack=first["offset"], pid=4343)
+        self.assertEqual(hello["inflight"], 1, "the host reports the open turn, so the new kernel knows it is mid-turn")
         res = k2.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result", timeout=10)
         offs = [f["offset"] for f in k2.outs()]
         self.assertEqual(offs[0], first["offset"] + 1, "replay starts after the acknowledged offset")

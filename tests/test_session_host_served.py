@@ -29,6 +29,11 @@ from pathlib import Path
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
 BIN = os.path.join(ROOT, "bin")
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import test_ship_reship as _lab   # noqa: E402  the lab kernel's environment (named runner variables, never the whole environment)
+from dist_copy import copy_dist   # noqa: E402
+EXT_DIST = os.path.join(ROOT, "vscode-extension", "dist")
 FAKE = os.path.join(HERE, "fixtures", "fake_claude.py")
 SDKVENV = os.path.expanduser("~/.local/state/romp/sdkvenv")
 # the kernel must run on the python the SDK venv was built for (its lib/python3.X names it), not on whatever
@@ -59,10 +64,23 @@ class ServedRestart(unittest.TestCase):
         Path(self.state, "sdk", self.sid + ".json").write_text(json.dumps(
             {"sid": self.sid, "name": "web", "cwd": self.cwd, "mode": "bypassPermissions", "effort": "high", "lastSid": self.sid, "alive": True}))
         self.port, self.token = _free_port(), "testtok-host"
+        self.dist = os.path.join(self.lab, "dist")
+        if os.path.isdir(EXT_DIST):
+            copy_dist(EXT_DIST, self.dist)       # a lab copy: the kernel must never rebuild bundles in the shared checkout
+        else:
+            os.makedirs(self.dist, exist_ok=True)
+        self.fake_log = os.path.join(self.lab, "fake-cli.log")
         self.kernels = []
         self.klogs = []
 
     def _sweep(self):
+        lease = self._lease()
+        for pid in ((lease or {}).get("pid"), ((lease or {}).get("holder") or {}).get("pid")):
+            if isinstance(pid, int):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
         for k in self.kernels:
             if k.poll() is None:
                 try:
@@ -84,10 +102,10 @@ class ServedRestart(unittest.TestCase):
         shutil.rmtree(self.lab, ignore_errors=True)
 
     def _env(self):
-        env = dict(os.environ, XDG_STATE_HOME=os.path.join(self.lab, "xdg"), CLAUDE_CONFIG_DIR=self.claude,
-                   ROMP_MANAGER_PORT="1", ROMP_KERNEL_NO_OPEN="1", ROMP_SERVE_TOKEN=self.token, ROMP_KERNEL_PORT=str(self.port),
-                   ROMP_MODEL_CATALOG="off", ROMP_POSTAL_PORT=str(_free_port()), ROMP_POSTAL_PEERS="0", ROMP_POSTAL_CLIENT_ONLY="1",
-                   ROMP_CLAUDE_BIN=FAKE, ROMP_CLI_SCOPE="0", FAKE_CLI_TRANSCRIPT_DIR=os.path.join(self.lab, "transcripts"))
+        env = _lab.kernel_env(self.lab, self.claude, self.dist, self.port, self.token,
+                              ROMP_CLAUDE_BIN=FAKE, ROMP_CLI_SCOPE="0",
+                              FAKE_CLI_TRANSCRIPT_DIR=os.path.join(self.lab, "transcripts"), FAKE_CLI_LOG=self.fake_log,
+                              PATH=os.environ.get("PATH", ""), HOME=os.environ.get("HOME", ""))
         for k in ("ROMP_STATE_DIR", "ROMP_API_KEY_CMD", "ANTHROPIC_API_KEY", "ROMP_SDK_SITE"):
             env.pop(k, None)
         return env
@@ -182,14 +200,21 @@ class ServedRestart(unittest.TestCase):
         self.assertFalse(any("restart" in t.lower() and "cut" in t.lower() for t in queued), "no continuation notice: %r" % queued)
         transcript = list(Path(self.lab, "transcripts").glob("*.jsonl"))
         self.assertEqual(len(transcript), 1, "one transcript stand-in, one writer")
-        results = [l for l in transcript[0].read_text().splitlines() if '"type":"result"' in l]
-        self.assertEqual(len(results), 1, "the turn produced exactly one result")
+        results = [json.loads(l) for l in transcript[0].read_text().splitlines() if '"type":"result"' in l]
+        self.assertEqual([r["result"] for r in results], ["done"], "one result, the turn's normal completion: the restart neither cut nor interrupted it")
 
     def test_control_with_hosts_off_the_restart_cuts_the_turn(self):
         lease1, cut, queued = self._run(hosts_on=False)
         self.assertEqual([c["sid"] for c in cut["cutTurns"]], [self.sid], "today's behaviour: the turn is cut")
-        self.assertTrue(any("restart" in t.lower() for t in queued) or self._state() == "waiting",
-                        "the continuation notice was queued (or already delivered): %r" % queued)
+        # the continuation notice reached the CLI (the fake logs every stdin line): a user message naming the restart
+        fed = [json.loads(l) for l in Path(self.fake_log).read_text().splitlines() if l.strip()]
+        users = [m for m in fed if m.get("type") == "user"]
+        texts = [c if isinstance(c := (m.get("message") or {}).get("content"), str) else json.dumps(c) for m in users]
+        self.assertTrue(any("restart" in t.lower() for t in texts), "the second kernel fed the continuation notice: %r" % texts[-3:])
+        lease2 = self._lease()
+        self.assertIsNotNone(lease2, "the resumed session holds a fresh kernel lease")
+        self.assertNotEqual(lease2["pid"], lease1["pid"], "a NEW CLI process: the old one was cut and reaped")
+        self.assertNotEqual((lease2.get("holder") or {}).get("kind"), "host")
         self.assertEqual(self._events("host.attached"), [], "no host, no attach")
 
 

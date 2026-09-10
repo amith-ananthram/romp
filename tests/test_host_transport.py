@@ -79,8 +79,9 @@ class SpawnSpec(unittest.TestCase):
         src = inspect.getsource(scli.SubprocessCLITransport._build_command) + inspect.getsource(scli.SubprocessCLITransport.connect)
         read = set(re.findall(r"self\._options\.([a-z_]+)", src)) | {"cwd"}
         callables_or_sdk_side = {"stderr", "user", "session_store", "sandbox", "task_budget", "max_budget_usd", "betas",
-                                 "plugins", "agents", "output_format", "tools", "thinking", "max_thinking_tokens",
+                                 "plugins", "agents", "output_format", "tools",
                                  "include_hook_events", "strict_mcp_config", "resume_drops_turn", "permission_prompt_tool_name"}
+        self.assertIn("thinking", sh.SPEC_FIELDS, "the thinking-summaries toggle reaches a hosted CLI")
         missing = read - set(sh.SPEC_FIELDS) - callables_or_sdk_side
         self.assertEqual(missing, set(), "fields the SDK reads that the spec does not carry: %r" % sorted(missing))
 
@@ -193,13 +194,16 @@ class TransportOverSocket(unittest.TestCase):
             async def read():
                 async for m in t.read_messages():
                     got.append(m)
-                    if len(got) == 2:
-                        await t.write(json.dumps({"type": "control_request", "request_id": "req_1_x", "request": {"subtype": "initialize"}}))
                     if len(got) == 3:
                         break
-            await asyncio.wait_for(read(), 5)
-            self.assertEqual([m.get("n") for m in got[:2]], [1, 2], "replay started after the acknowledged offset 0")
-            self.assertEqual(got[2]["type"], "control_response", "a write is forwarded as an `in` frame and answered live")
+            # the Query's shape: the reader is started, then the initialize is written; the records are held until
+            # its answer has been handed over, then follow in order
+            reader = asyncio.ensure_future(read())
+            await asyncio.sleep(0.05)
+            await t.write(json.dumps({"type": "control_request", "request_id": "req_1_x", "request": {"subtype": "initialize"}}))
+            await asyncio.wait_for(reader, 5)
+            self.assertEqual(got[0]["type"], "control_response", "the initialize's answer comes first, ahead of the replay")
+            self.assertEqual([m.get("n") for m in got[1:]], [1, 2], "then the replay, from after the acknowledged offset 0")
             self.assertEqual(stderr, ["a stderr line"])
             self.assertEqual(acks[-1], 3)
             t.detach_mode = True
@@ -209,6 +213,42 @@ class TransportOverSocket(unittest.TestCase):
             kinds = [f["t"] for f in fh.got]
             self.assertIn("detach", kinds); self.assertNotIn("end", kinds)
             self.assertEqual(fh.got[0]["ack"], 0)
+            fh.close()
+        run(go())
+
+    def test_a_replay_of_three_hundred_records_still_answers_the_initialize_first(self):
+        # the commit 2-3 review's second finding: the SDK's message stream buffers 100 records before its reader
+        # blocks, and the initialize's answer used to sit behind the whole replay in the one ordered stream
+        recs = [{"type": "assistant", "n": i} for i in range(300)]
+        async def go():
+            fh = FakeHost(self._path(), recs); await fh.start()
+            t = ht.HostTransport(fh.path, kernel={"pid": 1})
+            await t.connect()
+            got = []
+            async def read():
+                async for m in t.read_messages():
+                    got.append(m)
+                    if len(got) == 301:
+                        break
+            reader = asyncio.ensure_future(read())
+            await asyncio.sleep(0.1)                     # the replay is already flowing (and held)
+            await t.write(json.dumps({"type": "control_request", "request_id": "req_0_init", "request": {"subtype": "initialize"}}))
+            await asyncio.wait_for(reader, 10)
+            self.assertEqual(got[0]["type"], "control_response")
+            self.assertEqual([m["n"] for m in got[1:]], list(range(300)), "every replayed record, in order, after the answer")
+            self.assertEqual(t.ack_offset, 300)
+            fh.close()
+        run(go())
+
+    def test_a_connect_that_never_completed_detaches_on_close_and_never_ends_the_cli(self):
+        async def go():
+            fh = FakeHost(self._path(), [{"type": "assistant"}]); await fh.start()
+            t = ht.HostTransport(fh.path, kernel={"pid": 1}, end_grace=7)
+            await t.connect()                            # attached, but no initialize answered yet
+            await t.close()
+            await asyncio.sleep(0.1)
+            kinds = [f["t"] for f in fh.got]
+            self.assertIn("detach", kinds); self.assertNotIn("end", kinds, "a failed attach must not end the turn it failed to join")
             fh.close()
         run(go())
 
@@ -287,9 +327,11 @@ class Pins(unittest.TestCase):
         src = open(os.path.join(BIN, "romp_sdk_backend.py")).read()
         self.assertIn("async with ClaudeSDKClient(options=opts, transport=transport) as client:", src)
         self.assertIn("transport = await self.backend._host_transport_for(self, opts,", src)
+        self.assertIn("if self.loop and self.client and not self.detached:", src, "shutdown never interrupts a detached session")
+        self.assertIn("if self.backend.session_hosts_on() or self.backend._host_lease_applies(self):", src, "a live host lease is attached whatever the setting")
         self.assertIn("if not sess.ended and not sess.detached:", src, "a latched detach is not a crash")
         self.assertIn("s._host.detach_mode = True", src, "the drain detaches")
-        self.assertIn('for s in sessions if s.inflight and getattr(s, "_host", None) is None]', src, "an attached session is never a cut")
+        self.assertIn('if s.inflight and getattr(s, "_host", None) is None and not getattr(s, "_host_intent", False)]', src, "an attached (or attaching) session is never a cut")
         self.assertIn("s._host.end_grace = _ht().sh.END_GRACE_KILL_S", src, "kill gets the short bound")
         self.assertIn('== "attach":', src, "boot attach-first")
         self.assertIn('append_session_event(self.state_dir, "host.attached"', src)
@@ -329,6 +371,12 @@ class EndToEnd(unittest.TestCase):
         self.addCleanup(self._sweep)
         Path(self.d, "session-hosts").write_text("on")
         Path(self.d, "session-host-grace").write_text("600")
+        # the fake CLI's transcript stand-in: it inherits the backend's environment through the host, and the
+        # test reads the result text from it (an interrupted turn would say so)
+        self.tdir = os.path.join(self.d, "transcripts")
+        self._env_before = os.environ.get("FAKE_CLI_TRANSCRIPT_DIR")
+        os.environ["FAKE_CLI_TRANSCRIPT_DIR"] = self.tdir
+        self.addCleanup(self._restore_env)
         self.sid = str(__import__("uuid").uuid4())
         for sub in ("sdk", "states", "names"):
             os.makedirs(os.path.join(self.d, sub), exist_ok=True)
@@ -336,6 +384,12 @@ class EndToEnd(unittest.TestCase):
         sb.write_reg(Path(self.d), self.sid, {"sid": self.sid, "name": "web", "cwd": cwd, "alive": True, "mode": "bypassPermissions",
                                               "effort": "high", "lastSid": self.sid})
         self.logs = []
+
+    def _restore_env(self):
+        if self._env_before is None:
+            os.environ.pop("FAKE_CLI_TRANSCRIPT_DIR", None)
+        else:
+            os.environ["FAKE_CLI_TRANSCRIPT_DIR"] = self._env_before
 
     def _sweep(self):
         for be in getattr(self, "_bes", []):
@@ -387,6 +441,9 @@ class EndToEnd(unittest.TestCase):
         mine = [l for l in ps_lines if self.sid in l]
         self.assertEqual(census["problems"], [], "the census before the second boot: owned=%r orphans=%r dead=%r; ps lines: %r; lease=%r"
                          % (census["owned"], census["orphans"], census["dead_leases"], mine, sb.read_lease(self.d, self.sid)))
+        # the setting is turned OFF while the host lives: a live host lease is attached regardless (the setting
+        # governs new spawns), never a second CLI beside the host's (the commit 2-3 review's third finding)
+        Path(self.d, "session-hosts").write_text("off")
         be2 = self._backend()
         be2._boot_reconcile([sb.read_reg(Path(self.d), self.sid)])
         self._wait(lambda: sum(1 for l in self._events() if l.get("kind") == "host.attached") >= 2, what="the second host.attached row")
@@ -396,6 +453,10 @@ class EndToEnd(unittest.TestCase):
         self.assertGreater(att[1]["replayFrom"], 0, "the boot attach replayed from the acknowledged offset, not from zero")
         self._wait(lambda: sb.last_state_value(Path(self.d), self.sid) == "waiting", timeout=30, what="the turn's result under the second backend")
         self.assertEqual(sb.read_lease(self.d, self.sid)["pid"], lease["pid"], "one CLI process the whole way: one writer")
+        transcripts = list(Path(self.tdir).glob("*.jsonl"))
+        self.assertEqual(len(transcripts), 1, "one transcript stand-in")
+        results = [json.loads(l)["result"] for l in transcripts[0].read_text().splitlines() if '"type":"result"' in l]
+        self.assertEqual(results, ["done"], "the turn's normal completion: the drain neither cut nor interrupted it (the first finding)")
         self.assertFalse(any("restarted" in t for t in ((sb.read_reg(Path(self.d), self.sid) or {}).get("queue") or [])),
                          "no continuation notice for a turn that was never cut")
         # kill: end with the short bound; the host ends the CLI and leaves, the lease goes

@@ -76,7 +76,7 @@ SPEC_FIELDS = ("cli_path", "cwd", "env", "permission_mode", "permission_prompt_t
                "session_id", "resume_session_at", "fork_session", "extra_args", "settings", "mcp_servers",
                "system_prompt", "model", "effort", "include_partial_messages", "enable_file_checkpointing",
                "max_buffer_size", "setting_sources", "add_dirs", "allowed_tools", "disallowed_tools",
-               "max_turns", "continue_conversation", "fallback_model")
+               "max_turns", "continue_conversation", "fallback_model", "thinking", "max_thinking_tokens")
 # Spec keys that are the host's own, not option fields
 SPEC_HOST_KEYS = ("sid", "name", "version", "hook_timeout_s", "hook_self_answer_s", "unattached_grace_s",
                   "state_dir", "protocol", "reader_behind_records")
@@ -787,6 +787,7 @@ class SessionHost:
                             "host": {"pid": os.getpid(), "start": self.lease_api["proc_start"](os.getpid()) or "", "version": self.version},
                             "cli": {"pid": self.cli_pid, "start": self.cli_start, "fsid": self.fsid},
                             "journal": {"next": self._replay_end}, "parked": self.parked.ids(),
+                            "inflight": self.inflight,      # the open turns, so an attaching kernel knows it is mid-turn
                             "exited": self.exit_info is not None})
         n = 0
         for off, rec in self.journal.read_from(ack + 1, self._replay_end):

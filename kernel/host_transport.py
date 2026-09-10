@@ -197,6 +197,9 @@ class HostTransport(_Base):
         self._early: list = []          # frames that arrived with hello, before the reader started
         self._fr = sh.FrameReader()
         self._init_answered = False
+        self._my_requests: set = set()  # control_request ids this transport wrote (the Query's initialize first)
+        self._hold: list = []           # replayed records held until the initialize's answer has been yielded
+        self._init_pending = True       # live mode: the Query's initialize has not been answered yet
 
     @classmethod
     def from_journal(cls, journal_dir, ack=sh.ACK_NONE, **kw):
@@ -239,6 +242,12 @@ class HostTransport(_Base):
             return
         if not self._ready or self._closed:
             raise CLIConnectionError("host transport is not ready for writing")
+        try:
+            obj = json.loads(data)
+            if isinstance(obj, dict) and obj.get("type") == "control_request" and obj.get("request_id"):
+                self._my_requests.add(str(obj["request_id"]))
+        except ValueError:
+            pass
         self._writer.write(sh.encode_frame({"t": "in", "data": data.rstrip("\n")}))
         await self._writer.drain()
 
@@ -258,7 +267,9 @@ class HostTransport(_Base):
                 await self._synth.put(None)
             return
         try:
-            if self.detach_mode:
+            if self.detach_mode or self._init_pending:
+                # a kernel leaving, or a connect that never completed (the initialize unanswered): the host
+                # keeps its CLI either way — a failed attach must never END the turn it failed to join
                 await self._flush_ack()
                 await self._send({"t": "detach"})
             else:
@@ -317,6 +328,21 @@ class HostTransport(_Base):
             self.on_fault(f)
         return None
 
+    def _take(self, out: dict):
+        """Bookkeeping for one record handed to the Query: acknowledged means RECEIVED by this process (not
+        persisted); the offset moves as the record is handed over, and derived state is rebuilt from the
+        transcript and the journal."""
+        self.ack_offset = max(self.ack_offset, int(out.get("offset", self.ack_offset)))
+        if self.on_ack:
+            self.on_ack(self.ack_offset)
+        return out["data"]
+
+    def _answers_mine(self, data) -> bool:
+        if not isinstance(data, dict) or data.get("type") != "control_response":
+            return False
+        rid = str(((data.get("response") or {}).get("request_id")) or "")
+        return rid in self._my_requests
+
     async def _read_socket(self):
         pending = list(self._early)
         self._early = []
@@ -324,15 +350,29 @@ class HostTransport(_Base):
             for f in pending:
                 out = self._dispatch_side(f)
                 if out is not None:
-                    # acknowledged means RECEIVED by this process (not persisted): the offset moves as the record
-                    # is handed to the Query, and derived state is rebuilt from the transcript and the journal
-                    self.ack_offset = max(self.ack_offset, int(out.get("offset", self.ack_offset)))
-                    if self.on_ack:
-                        self.on_ack(self.ack_offset)
+                    # The Query's initialize must be answered AHEAD of a replay: the SDK client connects, starts
+                    # its reader and awaits the initialize before anything consumes the message stream, whose
+                    # buffer holds 100 records; a replay longer than that would block the reader with the
+                    # initialize's answer still behind it (the commit 2-3 review's second finding). So every
+                    # record is held until the first answer to a request this transport wrote has been handed
+                    # over; then the held records follow, in order, and live delivery resumes.
+                    if self._init_pending:
+                        if self._answers_mine(out.get("data")):
+                            self._init_pending = False
+                            yield self._take(out)
+                            held, self._hold = self._hold, []
+                            for h in held:
+                                yield self._take(h)
+                        else:
+                            self._hold.append(out)
+                    else:
+                        yield self._take(out)
                     if self.ack_offset - self._last_ack_sent >= ACK_BATCH or time.time() - self._last_ack_t >= ACK_INTERVAL_S:
                         await self._flush_ack()
-                    yield out["data"]
                 if self.exit_info is not None:
+                    held, self._hold = self._hold, []       # the CLI is gone: whatever was held goes out first
+                    for h in held:
+                        yield self._take(h)
                     await self._flush_ack()
                     code = self.exit_info.get("code")
                     if code not in (0, None):
