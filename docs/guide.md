@@ -51,13 +51,29 @@ A pull request number in a message, a card, or a note (`#123`, `PR #123`, or
 directory has as its `origin` remote; when that remote is not on GitHub, the number stays
 plain text.
 
+**A message that has not gone yet.** Send to a busy session and your message waits as a
+dashed bubble under an hourglass until the session takes it — while it compacts, while a
+turn runs, or in the beat before the kernel confirms the send. Until then it is still
+yours: the **✕** in its corner pulls it back into the composer, and the **✎** beside it loads
+the text into the composer under an editing pill, so you can change your mind without
+losing your place in the queue. Send replaces the message where it was, a follow-up keeps
+its context, and Esc or the pill's ✕ leaves it as it was. If the session takes the message
+before the edit lands, romp says so and gives your edited words back to the composer
+rather than sending them twice.
+
 **Opening a markdown document.** A markdown link in the chat opens in the file viewer,
 rendered, with **Raw** one click away — a path on the session's machine, or a link to a
 file served from the dashboard's own address (a published report, an evidence doc). Figures
 and links inside the document resolve relative to the document, so a `![fig](fig.png)`
 beside it shows, and a link to a sibling document opens in the same viewer. Links to files
 on other sites open in a new tab, as before — and a ctrl- or ⌘-click still opens the file in
-a tab.
+a tab. The document is set for reading: a sans face at a slightly larger size, headings in
+proportion, a centred column about 80 characters wide, and task lists, keyboard keys and
+aligned table columns as GitHub shows them. Every code block is numbered by line and carries a
+**Copy** button that copies the block as the file holds it, tabs included; fences labelled
+`rust`, `go`, `c`, `java`, `sql` or `toml` are highlighted, in addition to the languages the
+chat already knows. Printing the page while a rendered file is open prints the file alone,
+black on white, across as many pages as it needs.
 
 **A file's own HTML.** The Rendered view keeps the HTML a markdown file carries, under rules
 modelled on those GitHub applies to a README, so nothing in a file can move, hide or cover the
@@ -95,12 +111,43 @@ way a paper opens from OpenReview: full size, and it stays open beside the dashb
 you keep working. If the browser blocks that new tab, the PDF opens inside the dashboard
 instead; a PDF too large to show offers a download in its place.
 
+**Links in a file.** Wherever the viewer shows a file's text, the links in that text work. A
+web address opens in a new browser tab. A file path opens that file in the viewer, in place of
+the one you were reading: a relative path such as `docs/guide.md` is taken from the folder of
+the file you are reading, an absolute or `~/` path as written, on the machine of the session the
+file belongs to, and a line written after the path (`src/app.py:12`, or `src/app.py#L12`)
+scrolls the code view to that line. A Markdown file opens in its Raw view for that one open, since
+the Rendered view has no lines; your Raw/Rendered choice is unchanged. A line past the end of the
+file lands on the last line, with a notice saying so. In a Markdown file, a `[link](target)`
+follows the same two rules: a web target opens a tab, a file target opens the file (a host with a
+port, `127.0.0.1:3000` or `api.example.com:8443`, is neither, and says so). A link to a section
+of another file (`report.md#results`) opens that file at the section. A link to a section of the
+same document scrolls to it when the document has a heading or an anchor by that name
+(`<a name="install">` included), and otherwise says so when you hover it; it scrolls under every
+click, since a section of the shown file has no tab of its own. One click does one thing: a plain
+click acts in the dashboard, and a Cmd-click (Ctrl on Windows and Linux) or a middle-click opens
+the link in a browser tab of its own. Inside a file the test for a path is stricter than the one
+a chat message gets: a path links only when it has a slash and a file extension, starts on its
+own, at the start of a line or after a space, a quote, a bracket, a comma, a semicolon, an
+equals sign, a pipe or Markdown's `*` (so `$HOME/docs/a.md`, `@scope/pkg/index.js` and
+`C:/Users/x.txt` stay text), is not part of a web address, does not start with a site name
+(`www.example.org/docs/index.html`), and is not the package an `import` statement or a
+`require()` call names, whether the statement fits one line or its `from` starts the next (a
+relative import such as `./app.css` still links, and so does a path after the English word
+"from" in prose, unless that line holds nothing but `from` and the
+quoted path). After a `*` the path must be the whole emphasised text, closed by a `*` of its
+own: `*docs/a.md*` and `**./scripts/setup.sh**` link; a glob's `**/docs/a.md`, an operand's
+`w*h/img.size` and the first path in `**docs/a.md and docs/b.md**` stay text. Web addresses and
+paths found in the text wear a dotted underline that turns solid under the pointer; a Markdown
+link that names a file keeps the ordinary link look. Selecting text across a link works as
+before, and a click that lands while text is selected inside a link opens nothing.
+
 **Tags and groups.** A tag is a named, colored set of sessions; a session can be in
 several. Right-click a tab and open **Tags** to add or remove them. Tags filter every
 surface (the tag button in the strip narrows the tabs to the tags you pick), and they group
 the tabs: as soon as any session carries a tag, the strip shows one section per tag, in your
-tag order, each with a header in the tag's color, and the untagged sessions after a divider
-at the end. A session with several tags appears under each of them; every copy is the same
+tag order, each with a header in the tag's color, and the untagged sessions on a row of their
+own at the end. A session with several tags appears under each of them; every copy is the same
 session (click either to open it, and closing either ends it). Each header shows the tag's color and name, then a chevron and a
 member count. Click a header, or press Enter on it, to fold its section down to the header
 alone; the count then says how many tabs are folded away, and a small dot after it says when
@@ -116,7 +163,10 @@ reorders the tags on every surface (the timeline's tag table shows the same orde
 a tab into another group, right-click it and pick **Move to <tag>** under **Tags**: one click
 adds that tag and drops the tag of the group you right-clicked it in, leaving its other tags alone. The row's
 **+** adds the tag without moving the tab. **Group tabs by tag**, at the foot of the tag
-button's menu, turns the sections off for this browser.
+button's menu, turns the sections off for this browser. Every group starts on its own row; turning off
+the gear's **One tag group per row in the tab strip** lets the groups follow one another across the
+strip and wrap as they need, with the untagged sessions behind a thin divider, so a strip with many
+tags stays short.
 
 **Coming back after a dropped connection.** When the dashboard's link to the kernel
 drops and comes back (a laptop lid closed and opened, a network change, a phone that
@@ -131,6 +181,13 @@ not loaded yet.
 ![After a reconnect, the tab you were reading is back in full while the other tabs wait as skeletons](assets/guide/reconnect-skeleton-tabs.png){ width="32%" }
 ![Clicking a skeleton tab puts up the loader until its transcript arrives](assets/guide/reconnect-skeleton-click.png){ width="32%" }
 ![The clicked tab, loaded](assets/guide/reconnect-skeleton-loaded.png){ width="32%" }
+
+**On a small screen.** To keep more of the transcript in view, turn on the gear's
+**Compact tabs and agents** setting. It tightens the rows in the background-work panel above the
+composer (the one headed **Awaiting** or **In the background**) and shows about four of its rows,
+scrolling for the rest; the cap lifts while a row's details are open. Where the tab strip is showing,
+it also shrinks the tabs and group headers; on a phone the session picker stands in for the strip, so
+there the setting tightens the panel alone. Like the other chat settings, it is per browser.
 
 ### The feed
 
@@ -549,7 +606,10 @@ internet and your agents, with no device check in front of it.
 #### Notifications on your phone
 
 Romp can buzz your phone when a session needs you or finishes a task, so you can
-put the phone down while the sessions work. On an iPhone, first add Romp to the
+put the phone down while the sessions work. Every notification is titled with
+the session's name: **Romp needs you: web** when that session is waiting on you,
+and **Romp: web** for anything else (a task finished, a turn ended); the line
+under it says what happened. On an iPhone, first add Romp to the
 Home Screen (share sheet, then **Add to Home Screen**) and open it from there:
 iOS only lets an installed app receive notifications, so in a plain Safari tab
 the option stays off and says so. On Android and on a desktop browser the page
@@ -678,7 +738,11 @@ how many sessions are waiting and names the problem: **rate limited**,
 **overloaded**, **offline** (this machine cannot reach the API), or **errors**.
 Red **paused** means auto-retry and the judges are stopped, and says why: a
 usage limit, the monthly spend cap, or that you stopped them. Hover for the same
-reading with the waiting sessions listed. Click the cell, or press Enter on it,
+reading with the waiting sessions listed, and the history under it: the API's
+state over the last 1, 5 and 15 minutes (attempts, the 429 and 5xx shares,
+give-ups, sessions that retried) and the most recent state changes with how long
+each held. A kernel restart shows as its own line there, because the counts
+start over with the kernel. Click the cell, or press Enter on it,
 for the detail: each waiting session (click one to open that session), a button
 that stops auto-retry for every session while sessions are waiting and resumes
 it while paused, and links to the usage figures and the Log.

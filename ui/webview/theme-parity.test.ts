@@ -72,7 +72,8 @@ const PAIRS: Array<[string, string, number]> = [
   ["--hl-kw", "--bg", 4.5],
   ["--hl-str", "--bg", 4.5],
   ["--hl-num", "--bg", 4.5],
-  ["--hl-cmt", "--bg", 3],          // comments are deliberately quiet — the dark set sits just above 3
+  ["--hl-cmt", "--bg", 3],          // comments are deliberately quiet
+  ["--hl-cmt", "--box-bg", 4.5],    // ...but readable on the code block they sit in (the fence's fill is --box-bg over --bg)
   ["--hl-title", "--bg", 4.5],
   ["--hl-meta", "--bg", 4.5],
   ["--hl-attr", "--bg", 4.5],

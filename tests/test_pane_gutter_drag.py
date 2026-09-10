@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""A pane divider drag moves a landing line; the panes take their widths once, at release.
+
+The dashboard's chat | Outline | feed panes are sized by flex-grow weights the gutter script (_LANDING_JS
+in kernel/kernel.py) writes as --g-* variables on .row. Each write re-lays out the row, and with it every
+same-origin pane document in that frame. Writing the pair's two grows on every mousemove made a drag cost
+one full relayout of every pane per pointer step, which is a freeze once any pane holds a large document.
+So a drag now moves only #gv-ghost, a fixed line over the row where the divider will land, and the release
+writes the pair's grows once and persists them.
+
+This EXECUTES the real _LANDING_JS in node against a DOM stub (the test_error_center.py pattern; a source
+pin cannot show that a handler writes nothing) and drives two drags on the chat | feed gutter, a grab
+whose right pane is gone, and a drag on the Outline | feed gutter with the Outline pane shown:
+
+  the grab normalises the shown panes' grows to their widths and shows the ghost at the divider, spanning
+  the row; the move repositions the ghost and writes no grow; the release writes exactly the pair's two
+  grows, hides the ghost, drops the drag classes, persists the grows and removes its window listeners; a
+  far drag clamps both the ghost and the release at the pair's minimum, min(120 px, a quarter of the pair);
+  a grab whose pane is missing arms nothing and leaves no drag cursor behind; a left pane that is not the
+  leftmost places the ghost from its own client left, and a narrow pair clamps at a quarter of itself.
+
+Synthetic only: no browser, no real DOM. The stub is told the layout the browser would produce from the
+written grows (layout()), since a stub has no layout engine of its own.
+"""
+import json
+import os
+import subprocess
+import tempfile
+import unittest
+from importlib.machinery import SourceFileLoader
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+BIN = os.path.join(os.path.dirname(HERE), "bin")
+os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
+os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
+# Hermetic state BEFORE the loads: they resolve their state root at import time, and only pytest runs
+# conftest's floor (a bare unittest or script run otherwise writes REAL state).
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
+os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
+km = SourceFileLoader("romp_kernel_gutter_drag", os.path.join(BIN, "romp-kernel")).load_module()
+
+# Everything _LANDING_JS touches, and nothing else: .col (the timeline band's --tl var, never driven here),
+# .row (records every --g-* write, in order), the gutters and panes by id with offsetWidth and a client rect,
+# #gv-ghost with a style record, getComputedStyle(el).display for shown(), body.classList (po-* reads,
+# drag/dragv writes), localStorage, and the window's mousemove/mouseup listeners a drag installs and removes.
+# f-timeline is present (the served shell always carries the iframe) so the 'load' hookup runs; the event
+# is never fired. The ghost's style record starts at display 'none', standing for the stylesheet's rule.
+# The row's rect (top 24, height 760) differs from the panes' (top 0, height 800) on purpose: the ghost spans
+# the row, and the test can tell which rect it read.
+HARNESS = r"""
+'use strict';
+const STORE = {};
+global.localStorage = {
+  getItem: (k) => (k in STORE ? STORE[k] : null),
+  setItem: (k, v) => { STORE[k] = String(v); },
+  removeItem: (k) => { delete STORE[k]; },
+};
+const WRITES = [];   // every --g-* write on .row, in order: [name, value]
+const ROW = {};      // the current --g-* values (the script's `grow` object is a closure)
+const rowEl = {
+  style: { setProperty: (k, v) => { ROW[k] = v; WRITES.push([k, v]); }, removeProperty: (k) => { delete ROW[k]; } },
+  getBoundingClientRect: () => ({ left: 0, top: 24, width: 1007, height: 760 }),
+};
+const colEl = { style: { setProperty() {} }, getBoundingClientRect: () => ({ bottom: 800 }) };
+function mkEl(id, w, left, display) {
+  return {
+    id: id, offsetWidth: w, _left: left, _display: display, _ls: {},
+    style: {},   // a plain record: the script writes top / height / left / display on the ghost
+    getBoundingClientRect() { return { left: this._left, top: 0, width: this.offsetWidth, height: 800 }; },
+    addEventListener(k, f) { (this._ls[k] = this._ls[k] || []).push(f); },
+    fire(k, ev) { (this._ls[k] || []).slice().forEach((f) => f(ev)); },
+  };
+}
+const EL = {};
+['gh', 'gv-a', 'gv-b', 'f-timeline'].forEach((id) => { EL[id] = mkEl(id, 7, 0, 'flex'); });
+// chat 600 px at the left edge, the Outline pane hidden (so gv-b is the chat | feed gutter), feed 400 px
+// after the 7 px gutter: the divider sits at x = 600
+EL['chat-pane'] = mkEl('chat-pane', 600, 0, 'flex');
+EL['fleet-pane'] = mkEl('fleet-pane', 300, 0, 'none');
+EL['feed-pane'] = mkEl('feed-pane', 400, 607, 'flex');
+EL['gv-ghost'] = mkEl('gv-ghost', 7, 0, 'none');
+EL['gv-ghost'].style.display = 'none';
+const WL = {};
+global.window = {
+  innerHeight: 900,
+  addEventListener: (k, f) => { (WL[k] = WL[k] || []).push(f); },
+  removeEventListener: (k, f) => { WL[k] = (WL[k] || []).filter((g) => g !== f); },
+};
+global.getComputedStyle = (el) => ({ display: el._display });
+const BODY = new Set(['po-chat', 'po-feed', 'po-timeline']);
+global.document = {
+  querySelector: (sel) => (sel === '.col' ? colEl : sel === '.row' ? rowEl : null),
+  getElementById: (id) => EL[id] || null,
+  body: { classList: {
+    contains: (c) => BODY.has(c),
+    add: (...cs) => cs.forEach((c) => BODY.add(c)),
+    remove: (...cs) => cs.forEach((c) => BODY.delete(c)),
+  } },
+};
+function winFire(k, ev) { (WL[k] || []).slice().forEach((f) => f(ev)); }
+function snap() {
+  return {
+    writes: WRITES.length,
+    grows: Object.assign({}, ROW),
+    ghost: Object.assign({}, EL['gv-ghost'].style),
+    drag: BODY.has('drag'), dragv: BODY.has('dragv'),
+    listeners: { move: (WL['mousemove'] || []).length, up: (WL['mouseup'] || []).length },
+    store: JSON.parse(STORE['romp-pane-grow'] || 'null'),
+  };
+}
+// the browser lays the panes out from the written grows; the stub has no layout engine, so it is told the
+// shown panes' widths, left to right, and places each after the one before it plus the 7 px gutter
+function layout(widths) {
+  let x = 0;
+  [['chat', 'chat-pane'], ['fleet', 'fleet-pane'], ['feed', 'feed-pane']].forEach(([k, id]) => {
+    if (!(k in widths)) return;
+    EL[id].offsetWidth = widths[k]; EL[id]._left = x; x += widths[k] + 7;
+  });
+}
+"""
+
+DRIVER = r"""
+const out = {};
+out.boot = snap();
+// 1) grab gv-b at the divider, move the pointer 100 px left, release
+EL['gv-b'].fire('mousedown', { preventDefault() {}, clientX: 600 });
+out.grab = snap();
+winFire('mousemove', { clientX: 500 });
+out.move = snap();
+winFire('mouseup', {});
+out.release = snap();
+out.releaseWrites = WRITES.slice(out.move.writes);
+layout({ chat: 500, feed: 500 });
+// 2) a second grab at the new divider, dragged far past the right edge: the clamp holds the pair's minimum
+EL['gv-b'].fire('mousedown', { preventDefault() {}, clientX: 500 });
+out.grab2 = snap();
+winFire('mousemove', { clientX: 1590 });
+out.move2 = snap();
+winFire('mouseup', {});
+out.release2 = snap();
+out.release2Writes = WRITES.slice(out.move2.writes);
+layout({ chat: 880, feed: 120 });
+// 3) a grab whose right pane is gone from the document
+const feed = EL['feed-pane'];
+delete EL['feed-pane'];
+EL['gv-b'].fire('mousedown', { preventDefault() {}, clientX: 880 });
+out.orphan = snap();
+EL['feed-pane'] = feed;
+// 4) the Outline pane shown, so gv-b is the Outline | feed gutter and its left pane sits at a nonzero client
+//    left (307: chat 300 plus the gutter), and a narrow pair (200 | 200) whose minimum is a quarter of it, 100
+BODY.add('po-fleet');
+EL['fleet-pane']._display = 'flex';
+layout({ chat: 300, fleet: 200, feed: 200 });   // the Outline | feed divider sits at x = 507
+EL['gv-b'].fire('mousedown', { preventDefault() {}, clientX: 507 });
+out.grab3 = snap();
+winFire('mousemove', { clientX: 457 });
+out.move3 = snap();
+winFire('mousemove', { clientX: 350 });
+out.move3far = snap();
+winFire('mouseup', {});
+out.release3 = snap();
+out.release3Writes = WRITES.slice(out.move3far.writes);
+console.log(JSON.stringify(out));
+"""
+
+
+class PaneGutterDragExecutes(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        script = HARNESS + km._LANDING_JS + DRIVER
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+            f.write(script)
+            path = f.name
+        try:
+            r = subprocess.run(["node", path], capture_output=True, text=True, timeout=30)
+        finally:
+            os.unlink(path)
+        assert r.returncode == 0, "the gutter script threw: " + r.stderr[:800]
+        cls.out = json.loads(r.stdout.strip().splitlines()[-1])
+
+    def test_boot_writes_the_three_default_grows_and_shows_no_ghost(self):
+        b = self.out["boot"]
+        self.assertEqual(b["writes"], 3)
+        self.assertEqual(b["grows"], {"--g-chat": 60, "--g-fleet": 34, "--g-feed": 40})
+        self.assertEqual(b["ghost"]["display"], "none")
+        self.assertFalse(b["drag"] or b["dragv"])
+        self.assertEqual(b["listeners"], {"move": 0, "up": 0}, "no drag listeners before a grab")
+
+    def test_the_grab_normalises_the_shown_panes_and_shows_the_ghost_at_the_divider(self):
+        g = self.out["grab"]
+        # the two shown panes are written as their px widths (the hidden Outline pane keeps its grow)
+        self.assertEqual(g["writes"], self.out["boot"]["writes"] + 2)
+        self.assertEqual(g["grows"], {"--g-chat": 600, "--g-fleet": 34, "--g-feed": 400})
+        # the ghost shows at the divider, spanning the row (its rect, not the pane's)
+        self.assertEqual(g["ghost"], {"display": "block", "left": "600px", "top": "24px", "height": "760px"})
+        self.assertTrue(g["drag"] and g["dragv"], "body.drag and body.dragv during the drag")
+        self.assertEqual(g["listeners"], {"move": 1, "up": 1})
+
+    def test_the_move_positions_the_ghost_and_writes_no_grow(self):
+        g, m = self.out["grab"], self.out["move"]
+        self.assertEqual(m["writes"], g["writes"], "no grow is written while the pointer moves")
+        self.assertEqual(m["grows"], g["grows"], "the panes hold their widths during the drag")
+        self.assertEqual(m["ghost"]["display"], "block")
+        self.assertEqual(m["ghost"].get("left"), "500px", "the ghost follows the pointer")
+        self.assertTrue(m["drag"] and m["dragv"])
+
+    def test_the_release_writes_the_pair_once_hides_the_ghost_and_persists(self):
+        m, r = self.out["move"], self.out["release"]
+        self.assertEqual(self.out["releaseWrites"], [["--g-chat", 500], ["--g-feed", 500]],
+                         "exactly the pair's two grows, written at release")
+        self.assertEqual(r["writes"], m["writes"] + 2)
+        self.assertEqual(r["grows"], {"--g-chat": 500, "--g-fleet": 34, "--g-feed": 500})
+        self.assertEqual(r["ghost"]["display"], "none", "the ghost hides at release")
+        self.assertFalse(r["drag"] or r["dragv"], "body.drag and body.dragv are removed")
+        self.assertEqual(r["store"], {"chat": 500, "fleet": 34, "feed": 500}, "the grows persist at release")
+        self.assertEqual(r["listeners"], {"move": 0, "up": 0}, "the drag's window listeners are removed")
+
+    def test_a_far_drag_clamps_the_ghost_and_the_release_at_the_pair_minimum(self):
+        # chat 500 | feed 500: the pair's minimum is min(120, 1000 * 0.25) = 120, so the pointer at 1590
+        # (asking for chat 1590) lands the divider at 880
+        g2, m2, r2 = self.out["grab2"], self.out["move2"], self.out["release2"]
+        self.assertEqual(g2["grows"], {"--g-chat": 500, "--g-fleet": 34, "--g-feed": 500})
+        self.assertEqual(g2["ghost"].get("left"), "500px", "the ghost shows at the new divider")
+        self.assertEqual(m2["writes"], g2["writes"], "still no grow written while the pointer moves")
+        self.assertEqual(m2["ghost"].get("left"), "880px", "the ghost clamps at the pair's minimum")
+        self.assertEqual(self.out["release2Writes"], [["--g-chat", 880], ["--g-feed", 120]])
+        self.assertEqual(r2["grows"], {"--g-chat": 880, "--g-fleet": 34, "--g-feed": 120})
+        self.assertEqual(r2["store"], {"chat": 880, "fleet": 34, "feed": 120})
+        self.assertEqual(r2["ghost"]["display"], "none")
+
+    def test_a_grab_whose_pane_is_gone_arms_nothing(self):
+        # the pair is resolved before anything else happens: no drag classes to leave the col-resize cursor
+        # stuck, no normalisation writes, no window listeners, no ghost
+        r2, o = self.out["release2"], self.out["orphan"]
+        self.assertEqual(o["writes"], r2["writes"], "a grab with a missing pane writes nothing")
+        self.assertFalse(o["drag"] or o["dragv"], "no drag class is left on the body")
+        self.assertEqual(o["listeners"], {"move": 0, "up": 0})
+        self.assertEqual(o["ghost"]["display"], "none")
+        self.assertEqual(o["grows"], r2["grows"])
+
+    def test_with_the_outline_pane_shown_the_line_is_placed_from_its_client_left(self):
+        # gv-b's left pane is now the Outline pane, at client left 307 (chat 300 and a 7 px gutter): the line's
+        # left is that pane's client left plus the dragged width, not the width alone
+        o, g3, m3 = self.out["orphan"], self.out["grab3"], self.out["move3"]
+        self.assertEqual(g3["writes"], o["writes"] + 3, "all three shown panes are normalised")
+        self.assertEqual(g3["grows"], {"--g-chat": 300, "--g-fleet": 200, "--g-feed": 200})
+        self.assertEqual(g3["ghost"], {"display": "block", "left": "507px", "top": "24px", "height": "760px"},
+                         "the line shows at the Outline | feed divider")
+        self.assertEqual(m3["writes"], g3["writes"], "no grow written while the pointer moves")
+        self.assertEqual(m3["ghost"]["left"], "457px", "307 + 150: the client left plus the dragged width")
+
+    def test_a_narrow_pair_clamps_at_a_quarter_of_the_pair(self):
+        # Outline 200 | feed 200: min(120, 400 * 0.25) = 100, so the pointer at 350 (asking for Outline 43)
+        # lands the divider at 307 + 100, and the release writes that pair alone
+        m3, r3 = self.out["move3far"], self.out["release3"]
+        self.assertEqual(m3["ghost"]["left"], "407px", "the line clamps at a quarter of the pair")
+        self.assertEqual(self.out["release3Writes"], [["--g-fleet", 100], ["--g-feed", 300]])
+        self.assertEqual(r3["grows"], {"--g-chat": 300, "--g-fleet": 100, "--g-feed": 300}, "the chat grow is untouched")
+        self.assertEqual(r3["store"], {"chat": 300, "fleet": 100, "feed": 300})
+        self.assertEqual(r3["ghost"]["display"], "none")
+        self.assertFalse(r3["drag"] or r3["dragv"])
+        self.assertEqual(r3["listeners"], {"move": 0, "up": 0})
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -12,6 +12,8 @@ import { test, type TestContext } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createRequire } from "node:module";
+import { marked } from "marked";   // the browser leg renders a synthetic task list through the real marked for mdBlock's task stamp
 
 const web = (f: string) => fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", f), "utf8");
 const VIEW = web("file-view.ts");
@@ -576,45 +578,56 @@ test("both sheets: the step table maps every TEXT_SIZES entry to --fv-scale on t
     }
     assert.equal((css.match(/\.fileview\[data-fv-text="\d+"\]/g) || []).length, TEXT_SIZES.length, name + ": no step the table does not hold");
     assert.equal((css.match(/--fv-scale:/g) || []).length, TEXT_SIZES.length, name + ": nothing else sets the property");
-    // the readers: the prose (em of its parent, so the page's size times the scale), fenced code, the Raw view's rows and gutter
-    assert.ok(decls(ruleOf(css, ".fileview-md {")).includes("font-size: calc(1em * var(--fv-scale, 1))"), name + ": the prose reads it");
-    assert.ok(!decls(ruleOf(css, ".fileview-md {")).some((d) => d.startsWith("max-width")), name + ": the root is fluid to the viewer (the measure moved to its children)");
+    // the readers: the prose (the page's size times the document's 1.15, times the scale), fenced code, the Raw view's rows and gutter
+    const root = decls(ruleOf(css, ".fileview-md {"));
+    assert.ok(root.includes("font-size: calc(var(--fs) * 1.15 * var(--fv-scale, 1))"), name + ": the prose reads it");
+    assert.ok(!root.some((d) => d.startsWith("max-width")), name + ": the root is fluid to the viewer (the measure is its inline padding)");
+    assert.ok(root.includes("padding-inline: max(18px, round(down, calc((100% - 80ch) / 2), 1px))"), name + ": the measure is 80 of the root's own ch, centred as whole-pixel padding, never under 18px");
+    const plain = root.indexOf("padding-inline: max(18px, calc((100% - 80ch) / 2))"), rounded = root.findIndex((d) => d.startsWith("padding-inline: max(18px, round("));
+    assert.ok(plain >= 0 && plain < rounded, name + ": a plain calc() fallback is declared first, for an engine without round()");
+    assert.ok(root.includes("line-height: 1.5") && root.includes("font-family: var(--font-doc)") && root.includes("contain: layout"), name + ": the leading and the face are the document's own, and nothing inside can widen the body");
     assert.ok(decls(ruleOf(css, ".fileview-md pre code {")).includes("font-size: calc(12px * var(--fv-scale, 1))"), name + ": fenced code reads it");
     assert.ok(decls(ruleOf(css, ".fileview-pre {")).includes("font-size: calc(12px * var(--fv-scale, 1))"), name + ": the Raw rows read it");
     assert.ok(decls(ruleOf(css, ".fileview-gutter {")).includes("font-size: calc(12px * var(--fv-scale, 1))"), name + ": the gutter reads it, in lockstep with the rows");
-    assert.ok(decls(ruleOf(css, ".fileview-md h1 {")).includes("font-size: 1.3em"), name + ": headings stay em of the prose, so they scale with it");
+    assert.ok(decls(ruleOf(css, ".fileview-md h1 {")).includes("font-size: 2em"), name + ": headings stay em of the prose, so they scale with it");
+    assert.ok(decls(ruleOf(css, ".fileview-md h2 {")).includes("font-size: 1.5em") && decls(ruleOf(css, ".fileview-md h3 {")).includes("font-size: 1.25em"), name + ": the ladder is 2 / 1.5 / 1.25 / 1em");
     assert.ok(decls(ruleOf(css, ".fileview-md :not(pre) > code {")).includes("font-size: 0.92em"), name + ": inline code stays em of the prose");
     assert.ok(decls(ruleOf(css, ".fileview-editor {")).includes("font-size: 12px"), name + ": the editor keeps the page's size");
     assert.ok(decls(ruleOf(css, ".fileview-btn {")).includes("font-size: 0.82em"), name + ": the bar's buttons keep the page's size");
     // no other rule reads the property: the title bar, its buttons and the editor keep the page's size
     const readers = (css.match(/^[^\n{]*\{[^}]*var\(--fv-scale[^}]*\}/gm) || []).map((r) => r.slice(0, r.indexOf("{")).trim());
-    assert.deepEqual(readers.sort(), [".fileview-gutter", ".fileview-md", ".fileview-md > :where(:not(table))", ".fileview-md > :is(img, svg, canvas, video)", ".fileview-md pre code", ".fileview-pre"].sort(), name + ": the readers, exactly");
+    assert.deepEqual(readers.sort(), [".fileview-gutter", ".fileview-md", ".fileview-md pre code", ".fileview-pre"].sort(), name + ": the readers, exactly");
   }
 });
 
-test("both sheets: the measure sits on the root's children at zero specificity and scales with the text; a table takes the viewer's width and scrolls on its own with whole words; a picture always fits; byte-equal across the sheets", () => {
+test("both sheets: the measure is the root's own inline padding; a table takes the body's width and scrolls on its own with whole words; a picture fits the column; byte-equal across the sheets", () => {
   for (const [name, css] of SHEETS) {
-    assert.deepEqual(decls(ruleOf(css, ".fileview-md > :where(:not(table)) {")), ["max-width: calc(860px * var(--fv-scale, 1))"], name + ": the measure, a max that grows with the size (the same characters per line at every step)");
-    // :where carries no specificity, so `.fileview-md img { max-width: 100% }` outranks it for a bare <img> line (a direct
-    // child of the root) whatever the order of the two rules; a plain :not() chain would tie the img rule on specificity
-    // and leave the winner to rule order. The media a file draws itself (svg, canvas, video) are capped at element
-    // specificity (`:where(.fileview-md) svg`), which the measure's class WOULD beat for a direct child, so the top-level
-    // cap names them with img: a wide inline diagram on a narrow viewer is the column, never 860px clipped under
-    // contain: layout.
-    assert.doesNotMatch(css, /\.fileview-md > :not\(/, name + ": the measure rule carries no specificity of its own");
-    assert.deepEqual(decls(ruleOf(css, ".fileview-md img {")), ["max-width: 100%"], name + ": a picture shrinks to its column");
-    assert.deepEqual(decls(ruleOf(css, ".fileview-md > :is(img, svg, canvas, video) {")), ["max-width: min(100%, calc(860px * var(--fv-scale, 1)))"], name + ": a bare top-level picture, or an inline svg, canvas or video block, takes the measure AND the column, like an image paragraph");
-    assert.ok(css.indexOf("\n.fileview-md img {") < css.indexOf("\n.fileview-md > :is(img, svg, canvas, video) {"), name + ": the top-level cap follows the general one, so it wins at equal specificity");
-    assert.deepEqual(decls(ruleOf(css, ":where(.fileview-md) svg, :where(.fileview-md) canvas, :where(.fileview-md) video {")), ["max-width: 100%"], name + ": the element-level media cap stands for a nested svg, canvas or video");
+    assert.doesNotMatch(css, /\.fileview-md > :where\(/, name + ": no per-child measure rule remains (the root's padding is the measure)");
+    assert.doesNotMatch(css, /\.fileview-md > :not\(/, name + ": nor a specificity-bearing one");
+    assert.doesNotMatch(css, /860px/, name + ": the fixed cap is gone");
+    assert.deepEqual(decls(ruleOf(css, ".fileview-md img {")), ["max-width: 100%"], name + ": a picture shrinks to its column (the root's content box)");
+    assert.deepEqual(decls(ruleOf(css, ":where(.fileview-md) svg, :where(.fileview-md) canvas, :where(.fileview-md) video {")), ["max-width: 100%"], name + ": the media a file draws itself (svg, canvas, video) shrink to the column too, at element specificity");
+    // with the column the root's own content box there is no measure for a top-level medium's cap to outrank: the general
+    // caps above hold a bare <img> line or an inline <svg> block, direct children of the root, to the column by themselves
+    assert.equal(css.indexOf("\n.fileview-md > img {"), -1, name + ": a bare top-level picture needs no rule of its own now that the column is the root's box");
+    assert.doesNotMatch(css, /\.fileview-md > :is\(img/, name + ": nor does a top-level svg, canvas or video block");
     assert.deepEqual(decls(ruleOf(css, ".fileview-md table {")),
       ["border-collapse: collapse", "margin: 0.6em 0", "display: block", "width: max-content", "max-width: 100%", "overflow-x: auto", "overflow-wrap: normal"],
-      name + ": a table is a block as wide as its columns need up to the viewer, scrolling inside beyond it, whole words kept");
+      name + ": a table is a block as wide as its columns need up to its container, scrolling inside beyond it, whole words kept");
+    // a table of the page's own may grow out of the column, evenly into both gutters, up to the body's content width less
+    // the root's 18px inset (--fv-body-w, written by the viewer's width observer on each top-level table); unset, both
+    // declarations read the column and the shift is none
+    const top = decls(ruleOf(css, ".fileview-md > table {"));
+    assert.equal(top[0], "max-width: calc(var(--fv-body-w, calc(100% + 36px)) - 36px)", name + ": the cap is the body less the inset, the column before the first report");
+    assert.equal(top[1], "translate: min(0px, round(calc(var(--fv-body-w, calc(100% + 36px)) / 2 - max(18px, round(down, (var(--fv-body-w, calc(100% + 36px)) - 80ch) / 2, 1px)) - 50%), 1px))", name + ": the shift left is half of what the table exceeds the column by, whole pixels, never right");
+    assert.equal(top.length, 2);
+    assert.match(css, /^@property --fv-body-w \{ syntax: "\*"; inherits: false; \}$/m, name + ": the property is registered non-inherited, so a write restyles the tables alone");
     assert.ok(decls(ruleOf(css, ".fileview-md {")).includes("overflow-wrap: anywhere"), name + ": prose still breaks an unbreakable string");
     assert.ok(decls(ruleOf(css, ".fileview-md pre {")).includes("overflow-x: auto"), name + ": a code block scrolls on its own");
     assert.ok(decls(ruleOf(css, ".fileview-md pre code {")).includes("white-space: pre-wrap"), name + ": and wraps first");
   }
   const [chat, feed] = SHEETS.map(([, css]) => css);
-  for (const head of [".fileview-md {", ".fileview-md > :where(:not(table)) {", ".fileview-md table {", ".fileview-md pre code {", ".fileview-pre {", ".fileview-gutter {", ".fileview-md img {", ".fileview-md > :is(img, svg, canvas, video) {"]) {
+  for (const head of [".fileview-md {", ".fileview-md table {", ".fileview-md > table {", ".fileview-md pre code {", ".fileview-pre {", ".fileview-gutter {", ".fileview-md img {"]) {
     assert.equal(ruleOf(chat, head), ruleOf(feed, head), head + " mirrors exactly (the viewer mounts in both documents)");
   }
   const block = (css: string) => { const a = css.indexOf("/* ── text size and measure"); const b = css.indexOf("/* Rendered markdown ("); assert.ok(a >= 0 && b > a, "the step-table block precedes the prose block"); return css.slice(a, b); };
@@ -656,17 +669,22 @@ test("both sheets: the title bar wraps and its action row shrinks and wraps to t
 // measured in headless Chromium. The measurement runs in a standalone driver (the test bundle is CommonJS without
 // top-level await, and esbuild must never try to bundle playwright); the driver exits 3 without playwright or a
 // browser, and the leg skips loudly there.
-const LONG = "unbreakable".repeat(6);
+const LONG = "unbreakable".repeat(5);   // wide enough to push the table past the column at 1000px, narrow enough that the body still holds it
 const SVG = (w: number) => `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="120"><rect width="${w}" height="120" fill="#369"/></svg>`)}`;
 const ROWS = Array.from({ length: 3 }, (_, i) => `<tr><td>row ${i} alpha beta gamma delta</td><td>a fairly long cell of prose that keeps going on for a while</td><td>${LONG}</td><td>another long cell with many words in it to widen the table</td><td>five</td><td>six more text here</td></tr>`).join("");
 /** A six-column table whose columns want more than the prose measure: at the top level, inside a quote and inside a list item. */
 const TABLE = (id: string) => `<table id="${id}"><thead><tr><th>one</th><th>two</th><th>three</th><th>four</th><th>five</th><th>six</th></tr></thead><tbody>${ROWS}</tbody></table>`;
-const MD = `<h1 id="h1">Report</h1><p id="p">Prose ${"lorem ipsum ".repeat(40)}</p>
+const ROW = (t: string) => `<span class="cl"><span class="ct">${t}</span></span>`;
+const MD = `<h1 id="h1">Report</h1><h2 id="h2">Findings</h2><h3 id="h3">Detail</h3><p id="p">Prose ${"lorem ipsum ".repeat(40)}</p>
 ${TABLE("t")}
 <blockquote id="bq"><p>A quoted note with a table of its own.</p>${TABLE("tq")}</blockquote>
 <ul><li>A first item.</li><li id="li">An item with a table of its own.${TABLE("tl")}</li></ul>
 <pre id="pre"><code>${"const x = 1; ".repeat(30)}</code></pre>
 <pre id="pre2"><code>const y = 2;</code></pre>
+<pre id="pre3"><code style="--ln-digits: 1">${ROW("a")}${ROW("")}${ROW("b")}</code></pre>
+<pre id="pre4"><code style="--ln-digits: 5">${ROW("a")}</code></pre>
+<pre id="pre5" class="has-copy"><code>z</code><button class="code-copy" id="copy">Copy</button></pre>
+<ul><li id="task" class="task-list-item"><input type="checkbox" disabled> A task</li></ul>
 <p id="lw">${"x".repeat(140)}</p>
 <p><img id="im" width="900" height="120" src="${SVG(900)}"></p>
 <img id="im2" width="1600" height="120" src="${SVG(1600)}">
@@ -679,11 +697,26 @@ const LAYOUT_MEASURE = `(() => {
   const q = (s) => document.querySelector(s);
   const w = (s) => q(s).getBoundingClientRect().width;
   const fz = (s) => parseFloat(getComputedStyle(q(s)).fontSize);
-  const body = q("#body"), t = q("#t"), tq = q("#tq"), tl = q("#tl"), pre = q("#pre");
+  const body = q("#body"), t = q("#t"), tq = q("#tq"), tl = q("#tl"), pre = q("#pre"), md = q("#md"), cs = getComputedStyle(md);
+  const probe = document.createElement("span"); probe.textContent = "0".repeat(80); probe.style.whiteSpace = "nowrap"; probe.style.position = "absolute";
+  md.appendChild(probe); const ch80 = probe.getBoundingClientRect().width; probe.remove();
+  const rows = Array.from(q("#pre3 code").children).map((r) => r.getBoundingClientRect().height);
+  const ctOff = (s) => q(s + " .ct").getBoundingClientRect().left - q(s + " code").getBoundingClientRect().left;
+  const r = (s) => q(s).getBoundingClientRect();
   return { win: innerWidth, docScroll: document.documentElement.scrollWidth, bodyClient: body.clientWidth, bodyScroll: body.scrollWidth,
+    padL: parseFloat(cs.paddingLeft), padR: parseFloat(cs.paddingRight), ch80, pLeft: r("#p").left, pRight: r("#p").right, tLeft: r("#t").left, tRight: r("#t").right,
+    h2Font: fz("#h2"), h3Font: fz("#h3"), rows, ct1: ctOff("#pre3"), ct5: ctOff("#pre4"),
+    taskStyle: getComputedStyle(q("#task")).listStyleType, taskScheme: getComputedStyle(q("#task input")).colorScheme,
     md: w("#md"), p: w("#p"), t: w("#t"), tClient: t.clientWidth, tScroll: t.scrollWidth, pre: w("#pre"), preClient: pre.clientWidth, preScroll: pre.scrollWidth,
     bq: w("#bq"), tq: w("#tq"), tqClient: tq.clientWidth, tqScroll: tq.scrollWidth, li: w("#li"), tl: w("#tl"), tlClient: tl.clientWidth, tlScroll: tl.scrollWidth,
     pre2: w("#pre2"), lw: w("#lw"), img: w("#im"), img2: w("#im2"), svg: w("#sv"), mdFont: fz("#md"), h1Font: fz("#h1"), codeFont: fz("#pre code") };
+})()`;
+/** The print sheet over the same page: what leaves, what turns black, what a table becomes. */
+const PRINT_MEASURE = `(() => {
+  const q = (s) => document.querySelector(s); const cs = (s) => getComputedStyle(q(s));
+  return { bar: cs(".fileview-bar").display, copy: cs("#copy").display, md: cs("#md").color, h1: cs("#h1").color, code: cs("#pre code").color, dim: cs("#h1").borderBottomColor,
+    table: cs("#t").display, bodyBg: getComputedStyle(document.body).backgroundColor, rootBg: getComputedStyle(document.documentElement).backgroundColor,
+    bodyOverflow: cs("#body").overflowY, scheme: cs("#task input").colorScheme, tWidth: q("#t").getBoundingClientRect().width, bodyW: q("#body").clientWidth, docH: document.documentElement.scrollHeight, winH: innerHeight };
 })()`;
 /** The bar a kernel-answered markdown file shows: the format toggles, the control, Edit, the GitHub unit with its caption,
  *  Download, Copy path and the close button, behind a deep path and a session chip. */
@@ -706,21 +739,60 @@ const FB_MEASURE = `(() => {
   return { win: innerWidth, barH: bar.getBoundingClientRect().height, barOver: bar.scrollWidth - bar.clientWidth, hidTop: hid.top, closeTop: close.top, closeLeft: close.left, closeRight: close.right,
     acts: acts.getBoundingClientRect().width, wrap: getComputedStyle(acts).flexWrap, crumbsClient: crumbs.clientWidth, crumbsScroll: crumbs.scrollWidth };
 })()`;
-type Step = { width?: number; size?: number; prep?: string; tag: string };
-type Case = { name: string; html: string; width: number; measure: string; steps: Step[] };
+// mdBlock's task stamp, run in the page over marked's own output for a synthetic document, sanitized as mdBlock sanitizes
+// it (the shared sanitizer, md-sanitize.ts, bundled from the source with esbuild and added to the page as a script; the
+// body it returns is adopted the way mdBlock adopts it) and then stamped by the statement lifted from mdBlock. marked
+// emits a task item's checkbox as the li's first node (inside its first paragraph in a loose list); a checkbox an author's
+// raw HTML puts after the item's text matches the stamp's :first-child selector (elements alone count) and must not make a
+// task item of the item. A tight list, a numbered one, a loose one (every item of a loose list is a paragraph, the mid-item
+// case included), an enabled box (the sanitizer makes it disabled before the stamp sees it, so it opens its item like
+// marked's own), a raw disabled box that opens its item, and an author's own class.
+const STAMP_MD = [
+  "- [ ] open task", "- [x] done task", "- plain item", '- text then <input type="checkbox" disabled> mid-item',
+  '- **bold** then <input type="checkbox" disabled> after bold', '- <input type="checkbox"> enabled first', '- <input type="checkbox" disabled> raw first',
+  "", "1. [ ] numbered task", "", "- [ ] loose task", "", "  with a second paragraph", "", '- loose text then <input type="checkbox" disabled> loose mid-item',
+  "", '<ul><li class="task-list-item"><input type="checkbox" disabled> an author item</li></ul>', "",
+].join("\n");
+/** The real sanitizer for the page: md-sanitize.ts and the DOMPurify under it, bundled from the source (esbuild and the
+ *  packages resolve from the extension package, as the test bundle itself was built), exposing sanitizeMd on the window. */
+function sanitizerJs(): string {
+  const requireExt = createRequire(path.resolve(process.cwd(), "package.json"));
+  const esbuild = requireExt("esbuild");
+  const r = esbuild.buildSync({
+    stdin: { contents: 'import { sanitizeMd } from "./md-sanitize"; (window as any).sanitizeMd = sanitizeMd;', resolveDir: path.resolve(process.cwd(), "..", "ui", "webview"), loader: "ts", sourcefile: "fv-textsize-sanitizer-entry.ts" },
+    bundle: true, write: false, format: "iife", platform: "browser", target: "es2020", nodePaths: [path.resolve(process.cwd(), "node_modules")], logLevel: "silent",
+  });
+  return r.outputFiles[0].text as string;
+}
+const STAMP_CODE = (() => { const at = VIEW.indexOf("box.querySelectorAll('li > input"); return at < 0 ? "" : VIEW.slice(at, VIEW.indexOf("\n  });", at) + 6); })();
+const STAMP_PAGE = (css: string) => sheet(css) + `<body class="fileview-open"><div id="romp-fileview"><div class="fileview" id="root"><div class="fileview-body" id="body"><div class="fileview-md" id="md"></div></div></div></div></body></html>`;
+const STAMP_PREP = `(() => { const box = document.getElementById("md"); box.replaceChildren(...Array.from(sanitizeMd(${JSON.stringify(marked.parse(STAMP_MD) as string)}).childNodes)); ${STAMP_CODE} })()`;
+const STAMP_MEASURE = `(() => Array.from(document.querySelectorAll("#md li")).map((li) => {
+  const input = li.querySelector("input"), lr = li.getBoundingClientRect();
+  return { text: (li.textContent || "").replace(/\\s+/g, " ").trim(), stamped: li.classList.contains("task-list-item"), bullet: getComputedStyle(li).listStyleType,
+    input: input ? { disabled: input.disabled, checked: input.checked, marginLeft: parseFloat(getComputedStyle(input).marginLeft), left: input.getBoundingClientRect().left - lr.left, scheme: getComputedStyle(input).colorScheme } : null };
+}))()`;
+type Step = { width?: number; size?: number; prep?: string; media?: string; measure?: string; tag: string };
+type Case = { name: string; html: string; width: number; measure: string; steps: Step[]; inline?: string[] };   // inline: script text added to the page after its HTML
 type Rows = Record<string, { rows: Array<{ step: Step; got: any }>; errors: string[] }>;
-const step = (n: number) => `(() => { document.getElementById("root").dataset.fvText = "${n}"; })()`;
+/** A step, and the body's content width written on each top-level table the way the viewer's width observer writes it
+ *  (file-view.ts watchBodyWidth: --fv-body-w on the tables themselves, after every paint and every width change); the
+ *  page here carries no script, so the prep stands in for the observer. */
+const step = (n: number) => `(() => { document.getElementById("root").dataset.fvText = "${n}"; const w = document.getElementById("body").clientWidth + "px"; for (const t of document.querySelectorAll("#md > table")) t.style.setProperty("--fv-body-w", w); })()`;
 function cases(): Case[] {
   const out: Case[] = [];
+  const sanitizer = sanitizerJs();
   for (const [name, css] of SHEETS) {
     out.push({ name: "layout/" + name, html: LAYOUT_PAGE(css), width: 1000, measure: LAYOUT_MEASURE, steps: [
       { size: 100, prep: step(100), tag: "@1000/100" }, { size: 150, prep: step(150), tag: "@1000/150" },
       { width: 420, size: 100, prep: step(100), tag: "@420/100" }, { size: 150, prep: step(150), tag: "@420/150" },
+      { width: 1000, size: 100, prep: step(100), media: "print", measure: PRINT_MEASURE, tag: "@1000 print" },
     ] });
     const bar: Step[] = [];
     for (const w of [380, 420, 480, 600, 1000, 1400]) { bar.push({ width: w, prep: READOUT_OFF, tag: "@" + w + " default" }); bar.push({ prep: READOUT_ON, tag: "@" + w + " readout" }); }
     out.push({ name: "bar/" + name, html: BAR_PAGE(css), width: 1000, measure: BAR_MEASURE, steps: bar });
     out.push({ name: "fb/" + name, html: FB_PAGE(css), width: 1000, measure: FB_MEASURE, steps: [1000, 480, 360, 320].map((w) => ({ width: w, tag: "@" + w })) });
+    out.push({ name: "stamp/" + name, html: STAMP_PAGE(css), width: 1000, measure: STAMP_MEASURE, inline: [sanitizer], steps: [{ prep: STAMP_PREP, tag: "stamp" }] });
   }
   return out;
 }
@@ -740,11 +812,13 @@ for (const c of spec) {
   const errors = [];
   page.on("pageerror", (e) => { errors.push(e.message); });
   await page.setContent(c.html);
+  for (const s of c.inline || []) await page.addScriptTag({ content: s });
   const rows = [];
   for (const s of c.steps) {
     if (s.width) await page.setViewportSize({ width: s.width, height: 900 });
     if (s.prep) await page.evaluate(s.prep);
-    rows.push({ step: s, got: await page.evaluate(c.measure) });
+    if (s.media) await page.emulateMedia({ media: s.media });
+    rows.push({ step: s, got: await page.evaluate(s.measure || c.measure) });
   }
   out[c.name] = { rows, errors };
   await page.close();
@@ -773,38 +847,60 @@ const m = measure();
 const skip = m ? false : "no Playwright browser here (CI installs none); the layout claims rest on the sheet pins above";
 const near = (a: number, b: number, what: string) => assert.ok(Math.abs(a - b) < 1, what + ": " + a + " vs " + b);
 
-test("in a browser: the page never widens at 1000 and 420px, at 100% and 150%, in both sheets; prose and code keep the measure and the table takes the viewer while a table in a quote or a list item keeps the prose width; at 150% every text size and the measure grow together; narrow, a table scrolls on its own", { skip }, () => {
+test("in a browser: the page never widens at 1000 and 420px, at 100% and 150%, in both sheets; prose and code keep the measure (80 of the root's ch, centred, whole pixels) and a table grows evenly out of the column up to the body while a table in a quote or a list item keeps the prose width; the heading ladder and the fence rows measure; at 150% every text size and the measure grow together; narrow, a table scrolls on its own; in print the file alone prints black on white", { skip }, () => {
   for (const [name] of SHEETS) {
     const c = m!["layout/" + name];
     assert.deepEqual(c.errors, [], name + ": no script error in the page");
     const at = (tag: string) => c.rows.find((r) => r.step.tag === tag)!.got;
-    for (const r of c.rows) {
+    for (const r of c.rows.filter((x) => !x.step.media)) {
       const l = r.got, cell = name + " " + r.step.tag;
       assert.equal(l.bodyScroll, l.bodyClient, cell + ": the body does not scroll sideways");
       assert.equal(l.docScroll, l.win, cell + ": the page is the window");
       const col = l.bodyClient - 36 + 0.5;                            // the root's 18px padding a side
       assert.ok(l.pre <= col && l.pre2 <= col && l.lw <= col && l.img <= col, cell + ": code, the long string and the image paragraph fit the column");
       assert.ok(l.img2 <= col, cell + ": the bare <img> line fits the column too (" + l.img2 + " in " + (l.bodyClient - 36) + "): its own cap outranks the measure");
-      assert.ok(l.svg <= col, cell + ": a wide inline svg block, a direct child of the root, fits the column too (" + l.svg + " in " + (l.bodyClient - 36) + "): the top-level cap outranks the measure, which alone would beat the element-level media cap");
+      assert.ok(l.svg <= col, cell + ": a wide inline svg block, a direct child of the root, fits the column too (" + l.svg + " in " + (l.bodyClient - 36) + "): the element-level media cap holds it to the root's content box");
       assert.ok(l.preScroll <= l.preClient + 1, cell + ": the long code line wraps inside its block");
       near(l.md, l.bodyClient, cell + ": the root is the body's width");
       assert.ok(l.bq <= l.p + 0.5 && l.tq <= l.bq + 0.5 && l.li <= l.p + 0.5 && l.tl <= l.li + 0.5,
         cell + ": a quote and a list item keep the prose width and the table inside each keeps to it (quote " + l.bq + ", its table " + l.tq + "; item " + l.li + ", its table " + l.tl + "; prose " + l.p + ")");
     }
     const base = at("@1000/100"), big = at("@1000/150");
-    near(base.p, 860, name + " @1000/100: the prose measure is 860px at 100%");
-    near(base.pre, 860, name + " @1000/100: a code block keeps the measure"); near(base.pre2, 860, name + " @1000/100: a two-line snippet too, no viewer-wide block");
-    assert.ok(base.t > 860 && base.t <= base.bodyClient - 36 + 0.5, name + " @1000/100: the table takes the viewer (" + base.t + "), past the prose measure, inside the padding");
+    for (const r of c.rows.filter((x) => !x.step.media)) {
+      const l = r.got, cell = name + " " + r.step.tag;
+      // the measure: 80 of the root's own ch, centred as inline padding rounded down to whole pixels, never under 18px; when the
+      // column cannot hold 80ch the padding is its 18px floor and the prose follows the viewer
+      const want = Math.min(l.ch80, l.bodyClient - 36);
+      assert.ok(l.p >= want - 0.5 && l.p <= want + 2.5, cell + ": the prose measure is 80ch or the column (" + l.p + ", 80ch " + l.ch80 + ", column " + (l.bodyClient - 36) + ")");
+      near(l.p, l.bodyClient - l.padL - l.padR, cell + ": the measure is the root's content box, laid as its inline padding");
+      assert.equal(l.padL, l.padR, cell + ": centred (" + l.padL + " / " + l.padR + ")");
+      assert.ok(Number.isInteger(l.padL) && l.padL >= 18, cell + ": whole pixels, never under 18px (" + l.padL + ")");
+      near(l.pre, l.p, cell + ": a code block keeps the measure"); near(l.pre2, l.p, cell + ": a two-line snippet too, no viewer-wide block");
+      assert.ok(l.tq <= l.p + 0.5 && l.tl <= l.p + 0.5, cell + ": the same table in a quote (" + l.tq + ") or a list item (" + l.tl + ") keeps the prose measure");
+      assert.ok(l.img <= l.p + 0.5 && l.lw <= l.p + 0.5 && l.img2 <= l.p + 0.5 && l.svg <= l.p + 0.5, cell + ": both pictures, the inline svg and an unbreakable string stay in the measure");
+      // the ladder, em of the prose: 2 / 1.5 / 1.25
+      near(l.h1Font, l.mdFont * 2, cell + ": h1 is 2em of the prose"); near(l.h2Font, l.mdFont * 1.5, cell + ": h2 is 1.5em"); near(l.h3Font, l.mdFont * 1.25, cell + ": h3 is 1.25em");
+      // the fence rows: a text row, a blank row and the last row are each one line-height of the code; the gutter's basis
+      // follows the fence's digit count (2.5em of the gutter's own 0.92em for one digit, plus the 0.85em gap)
+      assert.equal(l.rows.length, 3);
+      for (const h of l.rows) near(h, l.codeFont * 1.5, cell + ": a row is the code's line-height (" + l.rows.join(", ") + ")");
+      near(l.ct1, l.codeFont * 0.92 * 3.35, cell + ": the one-digit gutter is 2.5em plus the gap (" + l.ct1 + ")");
+      assert.ok(l.ct5 > l.ct1 + 3, cell + ": a five-digit fence's gutter is wider than a one-digit fence's (" + l.ct5 + " vs " + l.ct1 + ")");
+      // a task item: no bullet beside the box, the box drawn for the page's scheme (no theme class here: dark)
+      assert.equal(l.taskStyle, "none", cell + ": a task item has no bullet"); assert.equal(l.taskScheme, "dark", cell + ": the box follows the page's scheme");
+    }
+    // at 1000px and 100% the column holds 80ch with room to spare, and a table wider than the column grows out of it evenly
+    assert.ok(base.padL > 18, name + " @1000/100: room to spare (" + base.padL + "px a side)");
+    assert.ok(base.t > base.p + 1 && base.t <= base.bodyClient - 36 + 0.5, name + " @1000/100: the table grows out of the column (" + base.t + " past " + base.p + "), inside the body's inset");
     assert.equal(base.tScroll, base.tClient, name + " @1000/100: room enough, so the table does not scroll");
-    assert.ok(base.tq <= 860.5 && base.tl <= 860.5, name + " @1000/100: the same table in a quote (" + base.tq + ") or a list item (" + base.tl + ") keeps the prose measure while the top-level one takes the viewer");
-    assert.ok(base.img <= 860.5 && base.lw <= 860.5 && base.img2 <= 860.5 && base.svg <= 860.5, name + " @1000/100: both pictures, the inline svg and an unbreakable string stay in the measure");
+    assert.ok(Math.abs((base.pLeft - base.tLeft) - (base.tRight - base.pRight)) <= 1.5, name + " @1000/100: evenly into both gutters (" + (base.pLeft - base.tLeft) + " left, " + (base.tRight - base.pRight) + " right)");
+    assert.ok(Math.abs(base.mdFont - 13 * 1.15) < 0.05, name + " @100%: the prose is 1.15 times the page's 13px (" + base.mdFont + ")");
     assert.equal(base.codeFont, 12, name + " @100%: fenced code at 12px, the size it had");
-    near(base.h1Font, base.mdFont * 1.3, name + " @100%: the heading is 1.3em of the prose");
-    near(big.mdFont, base.mdFont * 1.5, name + " @150%: the prose"); near(big.h1Font, big.mdFont * 1.3, name + " @150%: the heading follows the prose"); assert.equal(big.codeFont, 18, name + " @150%: fenced code");
-    near(big.p, Math.min(1290, big.bodyClient - 36), name + " @1000/150: the measure is 860 times 1.5, capped by the viewer");
-    near(big.pre, big.p, name + " @1000/150: the code block's measure grows with the prose's");
+    near(big.mdFont, base.mdFont * 1.5, name + " @150%: the prose"); assert.equal(big.codeFont, 18, name + " @150%: fenced code");
+    assert.ok(big.ch80 > base.ch80 * 1.4, name + " @150%: the measure's unit grows with the text (" + big.ch80 + " from " + base.ch80 + ")");
     for (const tag of ["@420/100", "@420/150"]) {
       const l = at(tag), cell = name + " " + tag;
+      assert.equal(l.padL, 18, cell + ": the inset floor holds when the column cannot hold 80ch");
       near(l.t, l.bodyClient - 36, cell + ": the table is the column");
       assert.ok(l.tScroll > l.tClient + 100, cell + ": the unbreakable cell scrolls inside the table (" + l.tScroll + " in " + l.tClient + ")");
       near(l.p, l.bodyClient - 36, cell + ": the prose follows the viewer below its measure");
@@ -816,6 +912,14 @@ test("in a browser: the page never widens at 1000 and 420px, at 100% and 150%, i
       assert.ok(l.tqScroll > l.tqClient + 100 && l.tlScroll > l.tlClient + 100,
         cell + ": a nested table its quote or item cannot hold scrolls inside itself (" + l.tqScroll + " in " + l.tqClient + "; " + l.tlScroll + " in " + l.tlClient + ")");
     }
+    // print: the file alone, black on white, as many pages as it needs
+    const print = at("@1000 print"), cell = name + " print";
+    assert.equal(print.bar, "none", cell + ": the title bar leaves"); assert.equal(print.copy, "none", cell + ": the Copy buttons leave");
+    for (const [k, v] of Object.entries({ md: print.md, h1: print.h1, code: print.code, rule: print.dim })) assert.equal(v, "rgb(0, 0, 0)", cell + ": " + k + " in black");
+    assert.equal(print.bodyBg, "rgb(255, 255, 255)", cell + ": the page is white"); assert.equal(print.rootBg, "rgb(255, 255, 255)", cell + ": the canvas too");
+    assert.equal(print.table, "table", cell + ": a table is a table again"); assert.equal(print.scheme, "light", cell + ": the task box is drawn light");
+    assert.equal(print.bodyOverflow, "visible", cell + ": the body does not clip to one screen"); assert.ok(print.docH > print.winH, cell + ": the document runs past one window's height (" + print.docH + " over " + print.winH + ")");
+    assert.ok(print.tWidth > 0 && print.tWidth <= print.bodyW - 36 + 0.5, cell + ": the wide table keeps the body's room less the inset (" + print.tWidth + " in " + print.bodyW + ")");
   }
 });
 
@@ -859,6 +963,42 @@ test("in a browser: the file browser's bar stays one line at 320, 360, 480 and 1
       assert.ok(g.closeLeft >= 0 && g.closeRight <= g.win + 0.5, cell + ": the close button lies inside the window: x " + g.closeLeft + " to " + g.closeRight);
       assert.equal(g.barOver, 0, cell + ": the bar overflows nothing");
       if (g.win < 1000) assert.ok(g.crumbsScroll > g.crumbsClient, cell + ": the crumb trail is what gives up room (" + g.crumbsScroll + " in " + g.crumbsClient + ")");
+    }
+  }
+});
+
+test("in a browser: mdBlock's task stamp over marked's own output, sanitized as mdBlock sanitizes it, in both sheets: a disabled checkbox that opens its item (a tight list, a numbered one, a loose one's first paragraph, an author's raw box) makes a task item with no bullet and the box pulled into the gutter; an author's enabled box is made inert by the sanitizer and opens its item too; a box after the item's text leaves the item and its bullet as the file wrote them; an author's own class is kept", { skip }, () => {
+  assert.ok(STAMP_CODE, "the stamp statement is lifted from the source");
+  assert.match(VIEW, /box\.replaceChildren\(\.\.\.Array\.from\(sanitizeMd\(dirty\)\.childNodes\)\);/, "mdBlock adopts the shared sanitizer's body, as the page here does");
+  type Row = { text: string; stamped: boolean; bullet: string; input: { disabled: boolean; checked: boolean; marginLeft: number; left: number; scheme: string } | null };
+  for (const [name] of SHEETS) {
+    const c = m!["stamp/" + name];
+    assert.deepEqual(c.errors, [], name + ": no script error in the page");
+    const rows = c.rows[0].got as Row[];
+    assert.equal(rows.length, 11, name + ": every item of the document is in the page (" + rows.map((r) => r.text).join(" | ") + ")");
+    const item = (start: string) => { const r = rows.find((x) => x.text.startsWith(start)); assert.ok(r, name + ": an item starting " + JSON.stringify(start)); return r!; };
+    for (const start of ["open task", "done task", "numbered task", "loose task", "enabled first", "raw first", "an author item"]) {
+      const r = item(start), cell = name + " " + JSON.stringify(start);
+      assert.equal(r.stamped, true, cell + ": a task item");
+      assert.equal(r.bullet, "none", cell + ": no bullet beside the box");
+      assert.ok(r.input && r.input.disabled, cell + ": the disabled box survived the sanitize");
+      assert.ok(r.input!.marginLeft < -13, cell + ": the box is pulled into the gutter (" + r.input!.marginLeft + ")");
+      assert.ok(r.input!.left < 0, cell + ": the box sits before the item's edge, where the bullet was (" + r.input!.left + ")");
+      assert.equal(r.input!.scheme, "dark", cell + ": drawn for the page's scheme (no theme class here: dark)");
+    }
+    assert.equal(item("done task").input!.checked, true, name + ": a checked box stays checked");
+    // an author's enabled box is made inert by the sanitizer (md-sanitize.ts keeps marked's checkbox as the one control a note
+    // carries, disabled), so by the time the stamp runs it is a disabled box opening its item, and a task item like the rest
+    assert.equal(item("enabled first").input!.disabled, true, name + ": the sanitizer disabled the author's enabled box before the stamp");
+    for (const start of ["plain item", "text then", "bold then", "loose text then"]) {
+      const r = item(start), cell = name + " " + JSON.stringify(start);
+      assert.equal(r.stamped, false, cell + ": not a task item");
+      assert.equal(r.bullet, "disc", cell + ": the bullet stays");
+      if (start !== "plain item") {
+        assert.ok(r.input, cell + ": the sanitize kept the author's box");
+        assert.ok(r.input!.marginLeft >= 0 && r.input!.left >= 0, cell + ": the box keeps the control's own margin, inside the item, not pulled into the gutter (" + r.input!.marginLeft + ", " + r.input!.left + ")");
+        assert.ok(r.input!.left > 20, cell + ": the box sits after the item's text, where the file put it (" + r.input!.left + ")");
+      }
     }
   }
 });
