@@ -258,10 +258,13 @@ it with the send, the kernel parks the copy under it (the parked op's fourth slo
 or queues it under it, and the ✕ names it, so the kernel cancels exactly the copy
 the bubble stands for, never a same-text neighbour by index or body. That holds
 wherever the copy carries the id: a parked send on any backend, and the SDK
-route's queue. A copy without one (the tmux route's queue, which the CLI holds)
-is still cancelled by index and body. Every copy the kernel queues itself (mail,
-a nudge, a re-delivery) is still minted an id where it enters the backend's
-queue. The CLI extracts
+route's queue. A copy whose ✕ names no id (an op the kernel parked itself, such
+as a nudge or a re-delivery; a ✕ from an older client) is still cancelled by
+index and body. The tmux route's queue, which the CLI holds, has no ✕ at all:
+`TmuxBackend` has no `unqueue`, so `build_session` ships those copies
+`cancelable: false` and the chat draws no ✕ for them. Every copy the kernel
+queues itself (mail, a nudge, a re-delivery) is still minted an id where it
+enters the backend's queue. The CLI extracts
 no image paths on the stream-json route (its only image-path test belongs to the
 interactive composer's paste handler), so an image path in an SDK send lands as
 typed and the echo's text matches. `_path_bearing` and the extension set it tests

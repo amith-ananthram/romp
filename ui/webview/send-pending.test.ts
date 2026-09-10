@@ -768,6 +768,27 @@ test("newPending mints the send's id at the press, in the kernel's echo form, un
   assert.deepEqual(list, [p]);
 });
 
+test("our bubble's ✕ carries the press time AND the id: the id decides, never the first same-text entry pressed in the same millisecond", () => {
+  // two same-text sends registered in one synchronous loop can share a Date.now() stamp and differ only by id:
+  // flushStaged posts each staged slash command and goal-cited item as its own send, and adoptProvisional posts each
+  // text a new session's tab held the same way. The ✕ on OUR bubble rides both (data-qts and data-qid), and the id is
+  // the identity.
+  const p = newPending("x", undefined, T0), q = newPending("x", undefined, T0);
+  assert.notEqual(p.qid, q.qid);
+  const list = [p, q];
+  assert.equal(dropPending(list, "x", T0, q.qid), q, "our bubble's ✕ carries the press time and the id: the id decides, never the first entry with the text and the millisecond");
+  assert.deepEqual(list, [p]);
+  assert.equal(dropPending(list, "x", T0, q.qid), undefined, "an id no entry owns removes nothing, not the same-text neighbour pressed in the same millisecond");
+  assert.deepEqual(list, [p]);
+  // the cancel the kernel answers names the same id, so the entry the client drops is the copy the kernel removes
+  // (an id-first drop that misses leaves the neighbour for ITS own ✕); an id-less bubble, older data, still names
+  // its entry by the press time and the text, never a same-text neighbour pressed at another time
+  const r = newPending("x", undefined, T0 + 1);
+  list.push(r);
+  assert.equal(dropPending(list, "x", T0), p);
+  assert.deepEqual(list, [r]);
+});
+
 test("the ✕ on a kernel copy the kernel identified otherwise drops the send it covered by text on the last push, and nothing when it covered none of ours", () => {
   const tail: TailEvent[] = [{ kind: "assistant", md: "…", uuid: "a1" }];
   const [p1, p2] = press(tail, "ok", "ok");

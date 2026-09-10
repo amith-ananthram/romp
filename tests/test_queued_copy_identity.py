@@ -25,6 +25,8 @@ queue:
 
 SYNTHETIC fixtures only: a private synthetic sid, the notes-api demo world, hostname-free.
 """
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -393,7 +395,8 @@ class TheSdkQueueTakesTheClientsId(unittest.TestCase):
     """SdkBackend.send takes the id the client minted at the press and unqueue removes a copy BY that id: of two
     same-text copies the one named leaves, and its echo (keyed by the same id) goes with it while the other's stays.
     The handler's shape check reads this backend's queue and live echoes, so an id the session already holds is
-    refused and the kernel mints instead."""
+    refused and the kernel mints instead; a queue read or a live-echo read that raises refuses too, and the line it
+    logs names the session alone."""
 
     def setUp(self):
         self.w = _World()
@@ -442,9 +445,40 @@ class TheSdkQueueTakesTheClientsId(unittest.TestCase):
         self.assertEqual(km._client_qid({"qid": fresh}, SID, self.w.be), fresh)
         self.assertIsNone(km._client_qid({"qid": queued}, SID, self.w.be), "held by the queue")
         self.assertIsNone(km._client_qid({"qid": fed}, SID, self.w.be), "held by a live echo (fed, not landed)")
-        for bad in ("", "s-1", "echo:", "echo:" + "F" * 32, "echo:" + "f" * 8, "echo:" + "f" * 70, 7, None):
+        for bad in ("", "s-1", "echo:", "echo:" + "F" * 32, "echo:" + "f" * 8, "echo:" + "f" * 70, "echo:" + "f" * 32 + "\n", 7, None):
             self.assertIsNone(km._client_qid({"qid": bad}, SID, self.w.be), repr(bad))
         self.assertIsNone(km._client_qid({}, SID, self.w.be))
+
+    def test_the_handler_refuses_a_fresh_id_when_the_hold_cannot_be_checked_and_names_the_sid_only(self):
+        # fails toward the kernel's own id: a queue read or a live-echo read that raises is taken as "held", the
+        # client's id is refused, and the stderr line names the session and nothing the client sent (the id, the words)
+        fresh = "echo:" + "f" * 32
+        msg = {"qid": fresh, "md": "private words"}
+
+        def boom(*a, **k):
+            raise RuntimeError("queue unreadable")
+
+        real_meta, real_atoms = self.w.be.pending_queued_meta, self.w.be.live_atoms
+        try:
+            self.w.be.pending_queued_meta = boom
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertIsNone(km._client_qid(msg, SID, self.w.be), "the queue could not be read")
+            self.assertIn(SID, err.getvalue())
+            self.assertNotIn(fresh, err.getvalue())
+            self.assertNotIn("private words", err.getvalue())
+            self.w.be.pending_queued_meta = lambda sid: []
+            self.w.be.live_atoms = boom
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertIsNone(km._client_qid(msg, SID, self.w.be), "the live echoes could not be read")
+            self.assertIn(SID, err.getvalue())
+            self.assertNotIn(fresh, err.getvalue())
+            self.assertNotIn("private words", err.getvalue())
+            self.assertNotIn("queue unreadable", err.getvalue(), "the fault's text is not the line's either")
+        finally:
+            self.w.be.pending_queued_meta, self.w.be.live_atoms = real_meta, real_atoms
+        self.assertEqual(km._client_qid(msg, SID, self.w.be), fresh, "the same id is taken once both reads answer")
 
 
 class TheTmuxQueueCarriesStamps(unittest.TestCase):
