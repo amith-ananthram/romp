@@ -1836,15 +1836,61 @@ test("the guide states the every-tag rule (T264b)", () => {
   assert.doesNotMatch(GUIDE, /sits under the first of them in your tag order/, "the retired home-tag sentence is gone");
 });
 
+test("the guide's small-dot sentence says the dot shows only in the pip's three states and names them in the rule's order (tab-state.ts sectionPip): red for blocked or waiting on you, else gold for working, else amber for an API retry", () => {
+  const prose = (t: string) => new RegExp(t.replace(/[.()]/g, "\\$&").split(" ").join("\\s+"));   // the guide wraps its lines
+  assert.match(GUIDE, prose("a small dot after it shows when one of them is busy or needs you: red when one is blocked or waiting on you, otherwise gold when one is working, otherwise amber when one hit an API error and is retrying on its own (hover it for their names)."));
+  assert.doesNotMatch(GUIDE, prose("a small dot after it says when one of them is working or waiting on you"), "the two-state sentence is gone");
+});
+
 test("the guide lists the header's parts in the built order: the tag's color and name, then the chevron and the count (T284)", () => {
   assert.match(GUIDE, /Each header shows the tag's color and name, then a chevron and a\s+member count\./);
   assert.doesNotMatch(GUIDE, /Each header shows a chevron, the tag's color/, "the pre-T284 caret-first sentence is gone");
   // The guide names the parts in the order the builder appends them (the structure pin above), and that is
   // the order the reader sees only while the header's flex row keeps DOM order: no rule on the header or on
-  // one of its parts may reorder them (order, flex-direction, a margin-left: auto push).
-  const rules = [...CSS.matchAll(/(?:^|\n)([^{}\n]*\.tab-group-(?:head|caret|chip|count|pip)[^{}\n]*)\{([^}]*)\}/g)];
+  // one of its parts may reorder them (headerReorderRules below names the forms).
+  const rules = headerRules(CSS);
   assert.ok(rules.length >= 5, "the header's rules are read: " + rules.length);
-  for (const [, sel, body] of rules) {
-    assert.doesNotMatch(body, /(?:^|[\s;])order\s*:|flex-direction\s*:|margin-left\s*:\s*auto/, "no rule reorders the header: " + sel.trim());
-  }
+  assert.deepEqual(headerReorderRules(CSS), [], "no rule reorders the header");
+});
+
+/** The stylesheet's rules on the header or one of its parts, as [selector, body] pairs. */
+function headerRules(css: string): Array<[string, string]> {
+  return [...css.matchAll(/(?:^|\n)([^{}\n]*\.tab-group-(?:head|caret|chip|count|pip)[^{}\n]*)\{([^}]*)\}/g)].map((m) => [m[1].trim(), m[2]]);
+}
+/** A body that would show the header's parts in another order than the DOM's: an order, a flex-direction,
+ *  a flex-flow whose value carries row-reverse or column-reverse (the wrap may come first), direction: rtl,
+ *  a margin-left: auto push; in any case, as CSS reads property names and keywords. The anchors keep
+ *  `border:` from reading as `order:` and a custom property such as `--head-direction:` from reading as
+ *  `direction:`. */
+const REORDERS = /(?:^|[\s;])order\s*:|flex-direction\s*:|flex-flow\s*:[^;}]*(?:row|column)-reverse|(?:^|[\s;])direction\s*:\s*rtl|margin-left\s*:\s*auto/i;
+/** The selectors of the header rules the guard rejects. */
+function headerReorderRules(css: string): string[] {
+  return headerRules(css).filter(([, body]) => REORDERS.test(body)).map(([sel]) => sel);
+}
+
+test("executed: the header-order guard rejects a flex-flow with a reverse value, wrap first or last, in any case; a wrap alone passes", () => {
+  assert.deepEqual(headerReorderRules(".tab-group-head { flex-flow: row-reverse; }"), [".tab-group-head"], "the shorthand's row-reverse is a flex-direction: row-reverse");
+  assert.deepEqual(headerReorderRules(".tab-group-head { flex-flow: column-reverse wrap; }"), [".tab-group-head"], "column-reverse, with a wrap after it");
+  assert.deepEqual(headerReorderRules(".tab-group-head { flex-flow: wrap column-reverse; }"), [".tab-group-head"], "the wrap may come first");
+  assert.deepEqual(headerReorderRules(".tab-group-head { FLEX-FLOW: ROW-REVERSE; }"), [".tab-group-head"], "CSS reads property names and keywords in any case");
+  assert.deepEqual(headerReorderRules(".tab-group-head {\n  display: flex;\n  flex-flow : row-reverse nowrap;\n}"), [".tab-group-head"], "spaced and multi-line, like the stylesheet");
+  assert.deepEqual(headerReorderRules(".tab-group-head { flex-flow: row wrap; }"), [], "a wrap alone keeps the order");
+});
+
+test("executed: the header-order guard rejects direction: rtl on the header, and accepts ltr and a custom property whose name ends in direction", () => {
+  assert.deepEqual(headerReorderRules(".tab-group-head { direction: rtl; }"), [".tab-group-head"], "rtl lays the row out from the right");
+  assert.deepEqual(headerReorderRules(".tab-group-head { color: var(--fg); direction:rtl }"), [".tab-group-head"], "no space after the colon, no semicolon after the value");
+  assert.deepEqual(headerReorderRules(".tab-group-head { direction: ltr; }"), [], "ltr is the order the DOM has");
+  assert.deepEqual(headerReorderRules(".tab-group-head { --head-direction: rtl; }"), [], "a custom property is not the direction");
+});
+
+test("executed: the header-order guard's earlier forms still reject (order, flex-direction, a margin-left: auto push) and a border, a fixed margin or an unrelated rule passes", () => {
+  assert.deepEqual(headerReorderRules(".tab-group-head { order: 1; }"), [".tab-group-head"]);
+  assert.deepEqual(headerReorderRules(".tab-group-count { order: -1; }"), [".tab-group-count"], "a part can be reordered too");
+  assert.deepEqual(headerReorderRules(".tab-group-head { flex-direction: row-reverse; }"), [".tab-group-head"]);
+  assert.deepEqual(headerReorderRules(".tab-group-caret { margin-left: auto; }"), [".tab-group-caret"], "the push that sends a part to the far end");
+  assert.deepEqual(headerReorderRules(".tab-group-head { display: flex; align-items: center; gap: 6px; border: 1px solid var(--box-border); }"), [], "a border is not an order");
+  assert.deepEqual(headerReorderRules(".tab-group-chip { margin-left: 4px; }"), [], "a fixed margin is not a push");
+  assert.deepEqual(headerReorderRules(".tab-group-head.dragging { opacity: 0.5; }\n.tab-strip { order: 2; }"), [], "only the header and its parts are read");
+  assert.deepEqual(headerReorderRules(".tab-group-head { order: 1; }\n.tab-group-pip { flex-direction: column; }"), [".tab-group-head", ".tab-group-pip"], "every offending rule is named, in stylesheet order");
 });
