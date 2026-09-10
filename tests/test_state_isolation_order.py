@@ -32,6 +32,15 @@ the few that aren't pay two harmless lines rather than this test resolving targe
 spawned with a hand-built env= dict that carries the real HOME — env construction is dynamic and
 defeats static checking; the preamble covers the common case because a child spawned without
 env= inherits the mutated os.environ.
+
+Two more rules over the same directory live in this module, because they read the same file list.
+Every module loads through load_source: `SourceFileLoader(...).load_module()` warns on Python 3.10
+and later with removal documented for 3.15, tools/loadsource-sweep.py rewrites a module still
+written that way, and test_no_test_module_uses_the_removed_loader refuses the idiom by file and
+line, naming that command. Every pytest module is named test_<stem>.py, never <stem>_test.py:
+pytest's default collection takes both spellings, but unittest's discovery (test*.py), the
+state-isolation check above and tests/test_postal_marker_form.py's fixture scan take the test_
+prefix only, so a module under the other name would run with none of the three reading it.
 """
 import ast
 import os
@@ -55,6 +64,12 @@ ROOT_PACKAGES = {"kernel", "postal", "cli"}
 # bin file would recreate the corruption with the ratchet silent otherwise.
 LOAD_CALLS = {"load_source", "SourceFileLoader", "spec_from_file_location", "exec_module",
               "import_module", "__import__"}
+
+# The files tools/loadsource-sweep.py never rewrites and test_no_test_module_uses_the_removed_loader
+# never reads: the suite's own plumbing (the loader helper, the two state floors, the report hook's
+# pattern table), none of which loads romp code by path. tests/test_loadsource_sweep.py pins this
+# tuple to the tool's SKIP, so a helper added to one list is added to the other.
+LOADER_SKIP = ("romp_load.py", "conftest.py", "__init__.py", "credential_patterns.py")
 
 
 # The ports the suite floors poison to a dead value (never popped: to every reader an absent variable
@@ -88,6 +103,16 @@ def _environ_key(node):
         if isinstance(node.slice, ast.Constant):
             return node.slice.value
     return None
+
+
+def removed_loader_sites(tree):
+    """The line of every `<expr>.load_module()` call in a parsed module, in source order. The call is
+    what Python removes; SourceFileLoader itself stays (kernel/loadsource.py builds on it), so an
+    import kept for another purpose is not flagged. tools/loadsource-sweep.py's leftovers() is the
+    same scan, pinned equal by tests/test_loadsource_sweep.py."""
+    return sorted(node.lineno for node in ast.walk(tree)
+                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                  and node.func.attr == "load_module")
 
 
 def scan(path):
@@ -163,6 +188,38 @@ class StateIsolationOrder(unittest.TestCase):
         self.assertEqual(first_load, 3, "the load_source call is the module's first load")
         self.assertEqual(first_set, 4)
         self.assertIsNone(rsd_handled)
+
+    def test_no_test_module_uses_the_removed_loader(self):
+        """Every module here loads by load_source (tests/romp_load.py). SourceFileLoader.load_module()
+        warns on Python 3.10 and later and its removal is documented for 3.15, so a module still
+        written that way (a branch from before the conversion) fails here by file and line, with the
+        command that rewrites it, instead of surviving as a warning until the interpreter removes the
+        call. Outside the scan's reach, by construction, and a hand edit each: the idiom inside a
+        string (a child-process snippet), and the sys.path line a module needs before `from romp_load
+        import load_source` when another test executes it by file path from outside this directory
+        (tests/smoke_codex_live.py, under tests/test_state_dir_override.py's child)."""
+        stale = []
+        for fn in sorted(os.listdir(HERE)):
+            if not fn.endswith(".py") or fn in LOADER_SKIP:
+                continue
+            tree = ast.parse(open(os.path.join(HERE, fn)).read(), filename=fn)
+            stale.extend("%s:%d calls load_module()" % (fn, lineno) for lineno in removed_loader_sites(tree))
+        self.assertFalse(stale,
+            "These modules still use SourceFileLoader.load_module(), deprecated with removal documented\n"
+            "for Python 3.15. Run tools/loadsource-sweep.py and commit the result:\n%s" % "\n".join(stale))
+
+    def test_every_pytest_module_is_named_test_stem(self):
+        """pytest's default python_files collects test_*.py and *_test.py alike, but unittest's
+        discovery (test*.py), the state-isolation check above and tests/test_postal_marker_form.py's
+        fixture scan take the test_ prefix only. A module named <stem>_test.py therefore runs under
+        pytest and is read by none of those three: a state-root or fixture mistake there would fail
+        nothing. The convention is test_<stem>.py, and this holds it."""
+        stray = sorted(fn for fn in os.listdir(HERE)
+                       if fn.endswith("_test.py") and not fn.startswith("test_"))
+        self.assertFalse(stray,
+            "These modules are collected by pytest but skipped by unittest's discovery, the state-isolation\n"
+            "check and the fixture scan (each takes test_*.py only). Rename each to test_<stem>.py:\n%s"
+            % "\n".join(stray))
 
     def test_the_suite_wide_floors_stay_in_place(self):
         # The suspenders: conftest.py (pytest) and __init__.py (unittest package runs) each set the
