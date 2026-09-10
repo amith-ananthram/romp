@@ -67,6 +67,31 @@ export function hostIsDown(sid: string | null | undefined): boolean {
   } catch { return false; }
 }
 
+/** The host-down notice is LIVE (the romp swirl after "Reconnecting" spins) only while romp is actually
+ *  trying to reach the host: the kernel's /tunnels row says `dialing` (an ssh dial spawned and not yet
+ *  confirmed, or the supervisor's health request to the host in flight; kernel.py _row_dialing), or this
+ *  page's relay socket to the host is in its CONNECTING state (readyState 0, from `new WebSocket` until
+ *  the open or close event). Between attempts (the row waiting out its backoff, the socket closed and
+ *  waiting on the redial timer) and while open it is still. Pure over the two states federation
+ *  publishes, so the spinner is keyed on the dial EVENTS, never on a timer (the user 2026-09-10, who
+ *  wanted to see romp actually trying, not a spinner that spins whatever happens). The kernel's row is
+ *  the one that matters for a DOWN host: the browser does not dial a host the kernel reports down. */
+export function hostDialLive(rowDialing: boolean | null | undefined, readyState: number | null | undefined): boolean {
+  return !!rowDialing || readyState === 0;
+}
+
+/** Is a dial to this (prefixed) sid's host in flight right now? Reads the federation manager's published
+ *  state (`dialing`, hostDialLive over the host's socket); false wherever no manager is loaded, for a
+ *  local session, and with a manager too old to publish it. */
+export function hostIsDialing(sid: string | null | undefined): boolean {
+  const i = typeof sid === "string" ? sid.indexOf(":") : -1;
+  if (i <= 0) return false;
+  try {
+    const fed = (globalThis as any).__rompFed;
+    return !!fed && typeof fed.dialing === "function" && !!fed.dialing((sid as string).slice(0, i));
+  } catch { return false; }
+}
+
 /** The tooltip a marked host wears: what is wrong, when it was last reached, and that romp is still on it. */
 export function hostDownNote(sid: string | null | undefined): string {
   const i = typeof sid === "string" ? sid.indexOf(":") : -1;

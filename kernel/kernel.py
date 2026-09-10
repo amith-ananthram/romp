@@ -18911,6 +18911,35 @@ def _expected_restart_status(r, st, rsha, now):
     return st
 
 
+def _row_dialing(r):
+    """Is romp trying to reach this host RIGHT NOW? True while an ssh dial is spawned and not yet confirmed
+    (status "starting"; "connecting" is the checked-in row's birth state) or while the supervisor's health
+    request to the host is in flight (_dialing, set around the poll below). False while the row waits out
+    its backoff (status "down" until nextTry). The dashboard's host-down notice spins
+    its swirl on exactly this (the user 2026-09-10, who wanted a spinner that means romp is trying right
+    now, never one that spins whatever happens); federation reads it from the /tunnels row every few
+    seconds and repaints on a change. The mark is on for ANY polled row during its pass's requests, an up
+    row included (milliseconds against an answering host); the notice only ever shows for a down one."""
+    return bool(r.get("_dialing")) or (r.get("status") or "") in ("starting", "connecting")
+
+
+@contextlib.contextmanager
+def _dialing_mark(r):
+    """The row wears the in-flight mark (_dialing, read by _row_dialing) for the supervisor pass's health
+    requests to its host: on from the first round-trip until the last returns, HOWEVER the block ends. The
+    clear is the context manager's exit, a finally by construction, because a mark left on by an exception
+    (a socket the port check could not build) would read as dialing through the row's whole next backoff, the
+    one state the mark exists to distinguish (review find, 2026-09-10). The polls themselves stay inline in
+    _tunnel_supervisor, whose source a dozen tests pin line by line."""
+    with _remotes_lock:
+        r["_dialing"] = True
+    try:
+        yield
+    finally:
+        with _remotes_lock:
+            r["_dialing"] = False
+
+
 def _remote_public(r):
     """The API view of a remote row — everything the browser needs, minus the Popen and minus the remote's
     credential. The browser reaches a remote through /remote/<host>/ws, where _remote_ws injects that
@@ -18981,6 +19010,9 @@ def _remote_public(r):
             # forever-retry must never look identical to a healthy idle row, so the popover can say how
             # many dials have failed and when the next one lands.
             "fails": int(r.get("fails") or 0), "nextTry": int(r.get("next_try") or 0),
+            # a dial or health request to the host in flight at this moment (_row_dialing): the host-down
+            # notice's swirl spins on it as of the dashboard's last poll, sits still between attempts
+            "dialing": _row_dialing(r),
             # not live: everything above derived from kernel_sha / the peer's declared tier is a memory of
             # the last successful exchange. lastOk is when that was (0 = never seen up this process).
             "stale": stale, "lastOk": int(r.get("last_ok") or 0),
@@ -18993,6 +19025,8 @@ _remotes_saved_sig = None   # signature of the last blob written — lets the su
 
 
 _NOT_SAVED = ("proc",       # the live Popen
+              "_dialing",   # a health request to the host in flight right now (_row_dialing): this pass's
+              #               mark, meaningless to the next boot
               "usage",      # a remote's rate-limit snapshot: re-polled a minute after any boot, and
               "_usage_at",  # persisting it would rewrite this 0600 credential file every minute forever
               "_views_at",  # the /views poll's stamp, restamped once a minute per up host (REMOTE_VIEWS_EVERY):
@@ -22459,16 +22493,17 @@ def _tunnel_supervisor():
                         _mark_known_unreachable(r["host"])
                 if skip:
                     continue
-                up = _port_open(r["local_port"])              # outside the lock (socket round-trip)
-                rows = _poll_remote_sessions(r) if up else None   # its session rows: ids for the wake-router, names for notifications
-                sids = None if rows is None else [x.get("id") for x in rows]
-                rver = _poll_remote_version(r) if up else None   # the code the remote is running (drift check)
-                rsha = (rver or {}).get("sha")
-                # …and which Claude account it burns, so the rail can draw a second set of bars when it is
-                # a different one (self-rate-limited to a minute — these windows are hours wide)
-                ruse = _poll_remote_usage(r) if up else None
-                rviews = _poll_remote_views(r) if up else None   # tag federation v0: the read half
-                rapih = _poll_remote_api_health(r) if up else None   # its API-health frame, for the shell's per-host map (T301)
+                with _dialing_mark(r):   # the pass's health requests: the row reads dialing meanwhile (_row_dialing)
+                    up = _port_open(r["local_port"])              # outside the lock (socket round-trip)
+                    rows = _poll_remote_sessions(r) if up else None   # its session rows: ids for the wake-router, names for notifications
+                    sids = None if rows is None else [x.get("id") for x in rows]
+                    rver = _poll_remote_version(r) if up else None   # the code the remote is running (drift check)
+                    rsha = (rver or {}).get("sha")
+                    # …and which Claude account it burns, so the rail can draw a second set of bars when it is
+                    # a different one (self-rate-limited to a minute — these windows are hours wide)
+                    ruse = _poll_remote_usage(r) if up else None
+                    rviews = _poll_remote_views(r) if up else None   # tag federation v0: the read half
+                    rapih = _poll_remote_api_health(r) if up else None   # its API-health frame, for the shell's per-host map (T301)
                 with _remotes_lock:
                     if r["host"] not in _remotes:
                         continue
