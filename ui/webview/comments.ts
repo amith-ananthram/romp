@@ -47,6 +47,21 @@ export function threadsByAnchor(threads: CommentThread[]): Map<string, CommentTh
   return by;
 }
 
+/** Which thread a click on a comment mark opens, given the mark CHAIN under the pointer — the clicked
+ *  mark first, then each enclosing mark outward. Marks nest when two threads anchor to the same passage
+ *  (the user 2026-09-10, who commented on one selection twice within seconds): ensureCommentMark re-finds
+ *  the identical range for the second thread and wraps its <mark> inside the first's, and the store's
+ *  order makes the EARLIER thread the outer one. The delegate hands the click to the innermost mark, so
+ *  the outer thread's needs-you ring could never be opened from its own ring: its unread never cleared
+ *  and the reply-ready chip stayed lit. The rule: the innermost UNREAD mark when any is (the ring under
+ *  the pointer belongs to it; two rings, the newest is the one under the finger), else the innermost,
+ *  as before. Null for an empty chain. */
+export function pickMarkToOpen(chain: { tid: string; unread: boolean }[]): string | null {
+  if (!chain.length) return null;
+  const ring = chain.find((m) => m.unread);
+  return (ring || chain[0]).tid;
+}
+
 /** The thread session is mid-turn — the popover shows its thinking dots. */
 export function threadBusy(state: string): boolean {
   return state === "working" || state === "retrying" || state === "compacting";
