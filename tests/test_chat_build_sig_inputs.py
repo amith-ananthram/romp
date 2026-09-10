@@ -455,8 +455,10 @@ class _World(unittest.TestCase):
         km._live_scope.names = None
         km._live_scope.snapshot = None
         km._live_scope.chat_shared = None
-        for k in [k for k in km._PATH_LINK_CACHE if k[0] == SID]:
-            km._PATH_LINK_CACHE.pop(k, None)
+        for cache in (km._PATH_LINK_CACHE, km._SPACE_PATH_CACHE):
+            for k in [k for k in cache if k[0] == SID]:
+                cache.pop(k, None)
+        km._PIN_ASSOC_MEMO.pop(SID, None)
         self.td.cleanup()
 
     def sig(self, now=NOW, deps=None, tm=None):
@@ -779,6 +781,33 @@ class Differential(_World):
         (self.cdir / "notes" / "report.md").write_text("42\n")
         b = self.sig(deps=rec)
         self.assertEqual(self.moved(a, b), ("pathlink",), "the mention became a link")
+
+    def test_a_fresh_worlds_pin_sidecar_is_read_under_a_reused_id(self):
+        """The pin sidecar is loaded once per sid and served from memory from then on (_pin_assoc), so a
+        world that resolved a token leaves the next world reading a sidecar it never wrote: an empty map
+        where its own file says a pin was latched. The hazard is cross-test by construction, so this test
+        runs two worlds itself, through the fixture's own hooks: the first resolves notes/report.md for u9,
+        which loads the empty sidecar; the second writes one sidecar row for the same message and must
+        build with that pin."""
+        def pending():
+            km._PATH_LINK_CACHE[(SID, "u9")] = ({}, ("notes/report.md",), {})
+            (self.cdir / "notes").mkdir()
+            (self.cdir / "notes" / "report.md").write_text("42\n")
+            return {"task_outs": [], "pl_pending": [("u9", "see notes/report.md for the numbers")],
+                    "pl_at": (("u9", None, None),), "pl_check": None, "postal_any": False, "postal_cards": []}
+        self.sig(deps=pending())                            # the first world: the resolve loads SID's sidecar, which is empty
+        self.tearDown()
+        self.setUp()                                        # the next test's world (its temp dir is cleaned by the final tearDown)
+        saved = km._MENTION_PINS
+        km._MENTION_PINS = None                             # the pin dir latches at first use: point it at this world's root
+        try:
+            with open(km._pin_assoc_dir() / (SID + ".jsonl"), "w", encoding="utf-8") as f:
+                f.write(json.dumps({"u": "u9", "t": "notes/report.md", "p": "pin1"}) + "\n")
+            s = self.sig(deps=pending())
+        finally:
+            km._MENTION_PINS = saved
+        self.assertEqual(s[km._CHAT_SIG_LABELS.index("pathlink")][0][2], {"notes/report.md": "pin1"},
+                         "pinned from this world's sidecar, not a prior world's memo")
 
     def test_a_postal_dependency_misses_under_postal_when_the_log_moves_or_a_caption_changes(self):
         caps = {}
