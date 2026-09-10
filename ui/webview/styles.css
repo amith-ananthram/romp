@@ -402,8 +402,7 @@ body.tabbar-resizing { cursor: ns-resize; user-select: none; }
    2026-09-06): a disclosure chevron that flips with the fold, the tag as THE CHIP it wears everywhere
    (T251), and the member count (the folded-away count while folded). No state class, no close, no pip
    of its own — none of a tab's dress; folded, one small MEMBER-derived mark follows the count (the
-   state pip below), and hover/focus brighten the label and color the chevron in the accent (a fold
-   cue), never a row wash (a "select me" cue). The chip is coloured by IDENTITY, so it brightens by a
+   state pip below), The chip is coloured by IDENTITY, so it brightens by a
    filter rather than to --fg (T251b: --fg would erase the tag; the chip's inline colour is what the
    header's colour rule cannot reach) — the same lift the plain name used to get, on the tag's own hue. The header is focusable (Enter or Space fold),
    drags to reorder the groups (tagOrder), and the header under a dragged group wears the accent
@@ -1024,8 +1023,16 @@ body.chat-theme-yatharth .tab.active.colored:not(.tab-blocked) {
    one selection on the strip. The active tab's classes stay (activeId is the way back; focus and the arrows key
    on them), only its dress is neutralised to a resting tab's. Selecting any tab clears the mode (setActive). */
 body.snap-mode #footer { display: none; }
-body.snap-mode #tabs .tab.active { color: var(--dim); background: transparent; box-shadow: none; }
+/* the neutralised active tab is a RESTING tab of its theme (review finds): a hard-blocked tab keeps its red fill (the
+   user's standing rule: the blocked fill survives on the active tab), hover still lifts it, and under the Yatharth theme
+   it wears that theme's resting wash with no border (Yatharth's selection mark IS the 55% identity border). The strip
+   (#tabs) carries the mode class beside the body (setSnapMode, one switch): a tint rule must start with the theme's
+   body class (tab-theme.test.ts: every identity wash lives under it), so the mode is read off the strip there. */
+body.snap-mode #tabs .tab.active:not(.tab-blocked) { color: var(--dim); background: transparent; box-shadow: none; }
+body.snap-mode #tabs .tab.active:not(.tab-blocked):hover { color: var(--fg); background: rgba(255, 255, 255, 0.06); }
 body.snap-mode:not(.chat-theme-yatharth) #tabs .tab.active:not(.tab-blocked):not(.tab-add) { border-color: rgba(255, 255, 255, 0.06); }
+body.chat-theme-yatharth #tabs.snap-mode .tab.active.colored:not(.tab-blocked) { background: color-mix(in srgb, var(--chip-bg) 9%, transparent); border-color: transparent; }
+body.chat-theme-yatharth #tabs.snap-mode .tab.active.colored:not(.tab-blocked):hover { background: color-mix(in srgb, var(--chip-bg) 15%, transparent); }
 #footer {
   position: relative;   /* anchors #composer-resize on the top-edge divider */
   flex: 0 0 auto;
@@ -4108,7 +4115,7 @@ body.dense-chrome .tab-add { padding: 3px 8px; font-size: 1.1em; }              
    the 18px line + 2 x 3px dense padding + the 1px border; #tabs stretches every item on a row to the tallest, so
    without this the row holding the + and the tag control would stay 31px beside 25px rows */
 body.dense-chrome .tab-tagbox { min-height: 25px; }                                     /* 31px */
-body.dense-chrome .tab-group-head { gap: 4px; padding: 3px 5px 3px 4px; }               /* 5px; 6px 7px 6px 6px */
+body.dense-chrome .tab-group-head { gap: 4px; padding: 3px 5px; }                       /* 5px; 6px 7px — the dense tab's own padding, so the row keeps a tab's box here too (T322) */
 /* the untagged trail's divider (the inline layout, stripGroupRows off): its 1px line is the content area under fixed
    gutters, so the 8px gutters sized for the 32px row would leave a 9px line in the 25px row; 6px keeps the default's
    half-row proportion (about 13px). Scoped off the row break, which must keep no footprint; the width stays 13px,

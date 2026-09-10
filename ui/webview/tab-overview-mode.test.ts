@@ -46,9 +46,12 @@ test("2. the overview's title: 'Overview of', the tag's ordinary chip from tagCh
 test("3 and 6. the overview is a mode: the message box and the bottom bar are gone while it shows", () => {
   assert.match(CSS, /body\.snap-mode #footer \{ display: none; \}/, "the whole footer: the message box and the session's bottom bar");
   const show = fn("function showActive(");
-  assert.match(show, /if \(snapView && renderSnapshot\(\)\) \{\s*\n\s*document\.body\.classList\.add\("snap-mode"\);/, "set as the overview paints");
-  assert.match(show, /return;\s*\n\s*\}\s*\n\s*document\.body\.classList\.remove\("snap-mode"\);/, "cleared on the transcript path of the same function");
-  assert.match(fn("function hideSnapshot(): void {"), /document\.body\.classList\.remove\("snap-mode"\);/, "and on every exit that hides the view");
+  assert.match(show, /if \(snapView && renderSnapshot\(\)\) \{\s*\n\s*setSnapMode\(true\);/, "set as the overview paints");
+  assert.match(show, /return;\s*\n\s*\}\s*\n\s*setSnapMode\(false\);/, "cleared on the transcript path of the same function");
+  assert.match(fn("function hideSnapshot(): void {"), /setSnapMode\(false\);/, "and on every exit that hides the view");
+  // one switch, two carriers: the body (the footer, the Classic neutraliser) and the strip (the Yatharth tint rule must
+  // start with the theme's body class, so it reads the mode off #tabs)
+  assert.match(fn("function setSnapMode(on: boolean): void {"), /document\.body\.classList\.toggle\("snap-mode", on\);\s*\n\s*document\.getElementById\("tabs"\)\?\.classList\.toggle\("snap-mode", on\);/);
   // the keyboard agrees: Enter on a folded stand-in drops into the message box only while no overview shows
   assert.match(RENDER, /if \(e\.key === "Enter" && standIn && !snapView && focusComposerOrAsk\(\)\)/);
 });
@@ -74,8 +77,23 @@ test("4. a tag row is not a tab: a tab's box of space, no dress; its overview sh
 });
 
 test("5. no tab renders as selected while the overview shows; selecting any tab clears it", () => {
-  assert.match(CSS, /body\.snap-mode #tabs \.tab\.active \{ color: var\(--dim\); background: transparent; box-shadow: none; \}/, "the active tab's dress neutralised to a resting tab's");
+  // the neutralised active tab is a RESTING tab of its theme: a hard-blocked tab keeps its red fill (the standing rule),
+  // hover still lifts it, and Yatharth's resting wash replaces that theme's 55% selection border
+  assert.match(CSS, /body\.snap-mode #tabs \.tab\.active:not\(\.tab-blocked\) \{ color: var\(--dim\); background: transparent; box-shadow: none; \}/, "the active tab's dress neutralised to a resting tab's, the blocked fill excepted");
+  assert.match(CSS, /body\.snap-mode #tabs \.tab\.active:not\(\.tab-blocked\):hover \{ color: var\(--fg\); background: rgba\(255, 255, 255, 0\.06\); \}/, "hover lifts it like any resting tab");
   assert.match(CSS, /body\.snap-mode:not\(\.chat-theme-yatharth\) #tabs \.tab\.active:not\(\.tab-blocked\):not\(\.tab-add\) \{ border-color: rgba\(255, 255, 255, 0\.06\); \}/, "…rest outline included, the tab rule's own gray");
+  const rest = CSS.match(/body\.chat-theme-yatharth \.tab\.colored:not\(\.tab-blocked\) \{[^}]*background: ([^;]+);/)![1];
+  assert.match(CSS, new RegExp("body\\.chat-theme-yatharth #tabs\\.snap-mode \\.tab\\.active\\.colored:not\\(\\.tab-blocked\\) \\{ background: " + rest.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "; border-color: transparent; \\}"), "Yatharth: the theme's own resting wash, no selection border");
+  assert.doesNotMatch(CSS, /body\.snap-mode #tabs \.tab\.active \{/, "no rule neutralises a blocked tab's fill");
+  // the faded-label exemption for the active tab stands down in the mode: no residual selection cue among faded siblings
+  assert.match(RENDER, /if \(s\.status\.faded && \(id !== activeId \|\| snapView\) && s\.color\) \{/);
+  // the footer's hide is not a box below the reader: the boxes-below follow rule stands down while the overview owns #content
+  assert.match(RENDER, /if \(content && !snapView && lastH >= 0 && content\.clientHeight > 0 && v && v\.shown && followBoxBelow\(v\.stick, h - lastH\)\) \{/);
+  // leaving the overview re-measures the message box, which a pick's draft swap measured under display:none
+  assert.match(fn("function showActive("), /const wasSnap = document\.body\.classList\.contains\("snap-mode"\);[\s\S]*if \(wasSnap\) \{[^}]*growComposer\(ta\);/);
+  // dense chrome mirrors the row's tab box too
+  assert.match(CSS, /body\.dense-chrome \.tab-group-head \{ gap: 4px; padding: 3px 5px; \}/);
+  assert.match(CSS, /body\.dense-chrome \.tab \{ gap: 3px; padding: 3px 5px;/);
   // the class itself stays on the tab: activeId is the way back, focus and the arrows key on it
   assert.match(RENDER, /const tab = el\("div", "tab" \+ \(id === activeId \? " active" : ""\)\);/);
   // a pick clears the view (setActive), as before

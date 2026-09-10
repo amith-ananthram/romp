@@ -322,6 +322,7 @@ function chipWorld(opts: { clientHeight: number; innerHeight: number; transcript
     // the section-at-a-glance view, inert: no section shows (snapView null), so showActive's branch is not taken
     let snapView = null, snapKeep = null;
     const renderSnapshot = () => false, hideSnapshot = () => {}, composerRestingPlaceholder = () => "";
+    const setSnapMode = () => {}, growComposer = () => {};   // the overview mode's switch and the box re-measure on leaving it (T322)
     const requestFullSession = (id, why) => { HOOKS.fulls.push(why + ":" + id); };
   `;
   const epilogue = `

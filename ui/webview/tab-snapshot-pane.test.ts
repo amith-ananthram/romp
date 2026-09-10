@@ -604,7 +604,7 @@ test("executed: the nav trail records the reader's spot while the view shows: th
 test("pinned: the wiring the lifted slices cannot reach: showActive's branch, the exits, setActive's pick, the strip's follow", () => {
   // showActive: while a section shows, every transcript is hidden, the reader's place held, the composer disabled with a
   // placeholder that says what to do; the transcript path hides the host first
-  assert.match(SHOW, /if \(snapView && renderSnapshot\(\)\) \{\s*\n\s*document\.body\.classList\.add\("snap-mode"\);[^\n]*\n\s*for \(const v of views\.values\(\)\) v\.el\.style\.display = "none";/, "the mode class first (the message box goes, no tab selected), then the views hide");
+  assert.match(SHOW, /if \(snapView && renderSnapshot\(\)\) \{\s*\n\s*setSnapMode\(true\);[^\n]*\n\s*for \(const v of views\.values\(\)\) v\.el\.style\.display = "none";/, "the mode switch first (the message box goes, no tab selected), then the views hide");
   assert.match(SHOW, /const av = activeId \? views\.get\(activeId\) : null;\s*\n\s*if \(av && !snapKeep\) snapKeep = \{ v: av, scrollTop: av\.scrollTop, stick: av\.stick \};/, "the reader's place, once per visit");
   assert.match(SHOW, /if \(av && snapKeep && snapKeep\.v !== av\) \{\s*\n\s*snapKeep\.v\.scrollTop = snapKeep\.scrollTop; snapKeep\.v\.stick = snapKeep\.stick;\s*\n\s*snapKeep = \{ v: av, scrollTop: av\.scrollTop, stick: av\.stick \};\s*\n\s*\}/, "the active changed under the view (the session being read closed): the survivor's place is held instead");
   assert.match(SHOW, /if \(ta\) \{ ta\.disabled = true; ta\.placeholder = "Pick a session above to write to it"; \}/);

@@ -5969,7 +5969,7 @@ function renderTabs() {
     // ...and the whole tab dims when that host is unreachable, so a disconnected session reads as one at
     // a glance rather than only on inspection (the user 2026-07-29). The marked "host:" carries the why.
     if (hostIsDown(id)) { tab.classList.add("host-off"); tab.title = hostDownNote(id); }
-    if (s.status.faded && id !== activeId && s.color) {
+    if (s.status.faded && (id !== activeId || snapView) && s.color) {   // in the overview mode the active tab fades like any other (no residual selection cue, T322)
       const full = s.color.bg;
       label.style.color = fadedColor(full);
       // The "host:" prefix declares its OWN color (quiet gray), so the parent's faded color can't inherit
@@ -11241,10 +11241,17 @@ function snapshotHost(): HTMLElement | null {
   host.addEventListener("pointerdown", () => { tabPointerHeld = true; });
   return host;
 }
+/** The overview MODE's one switch (T322): the body carries the class (the footer hides by it, the Classic strip's active
+ *  tab is neutralised by it) and so does the strip itself, because the Yatharth theme's neutraliser is a tint rule and
+ *  every tint rule starts with the theme's body class (tab-theme.test.ts), so that rule reads the mode off #tabs. */
+function setSnapMode(on: boolean): void {
+  document.body.classList.toggle("snap-mode", on);
+  document.getElementById("tabs")?.classList.toggle("snap-mode", on);
+}
 function hideSnapshot(): void {
   const host = document.getElementById("tab-snapshot");
   if (host) host.style.display = "none";
-  document.body.classList.remove("snap-mode");
+  setSnapMode(false);
   snapModel = null;
   // the transcript comes back where the reader left it, not where the view's scrolls put the spot (snapKeep)
   if (snapKeep) { snapKeep.v.scrollTop = snapKeep.scrollTop; snapKeep.v.stick = snapKeep.stick; snapKeep = null; }
@@ -11418,8 +11425,9 @@ function showActive(keep?: { uuid: string; y: number } | null) {
   // kernel's active hint, the MRU and the drafts still point at the session being read, and its header wears
   // the mark. renderSnapshot answers false when the section is gone from the strip (a tag deleted, its last
   // member hidden): then the transcript.
+  const wasSnap = document.body.classList.contains("snap-mode");   // read before renderSnapshot's gone-section path can clear it
   if (snapView && renderSnapshot()) {
-    document.body.classList.add("snap-mode");   // the overview is a mode: the message box goes, no tab is selected (styles.css, T322)
+    setSnapMode(true);   // the overview is a mode: the message box goes, no tab is selected (styles.css, T322)
     for (const v of views.values()) v.el.style.display = "none";
     // the reader's place (snapKeep; once per visit): the hide above only queues the clamp's scroll event, so the
     // view's fields still hold what the reader's last scroll recorded
@@ -11442,7 +11450,11 @@ function showActive(keep?: { uuid: string; y: number } | null) {
     updateStatusline();
     return;
   }
-  document.body.classList.remove("snap-mode");   // a session's transcript: the message box and the selected tab are back
+  setSnapMode(false);   // a session's transcript: the message box and the selected tab are back
+  if (wasSnap) {   // the box was measured while the footer was display:none (a pick's draft swap): measure it now it has a layout box
+    const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
+    if (ta) growComposer(ta);
+  }
   hideSnapshot();
   const s = activeId ? liveSession(activeId) : null;
   if (!s) {
@@ -12193,7 +12205,7 @@ if (typeof ResizeObserver === "function") {
       const h = entries[0]?.contentRect?.height ?? 0;
       const content = document.getElementById("content");
       const v = activeId ? views.get(activeId) : null;
-      if (content && lastH >= 0 && content.clientHeight > 0 && v && v.shown && followBoxBelow(v.stick, h - lastH)) {
+      if (content && !snapView && lastH >= 0 && content.clientHeight > 0 && v && v.shown && followBoxBelow(v.stick, h - lastH)) {   // a transcript rule: it stands down while the overview owns #content (the footer's hide is not a box below the reader, T322)
         writeScroll(content, content.scrollHeight, "box-below", true);
         v.scrollTop = content.scrollTop;                      // keep the per-view saved position in sync
       }

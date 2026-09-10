@@ -103,6 +103,20 @@ await page.mouse.move(700, 600);
 await page.waitForTimeout(600);
 out.overview = await measure();
 if (cfg.shots) await page.screenshot({ path: cfg.shots + "/romp_chat-tab-overview-dark.png", fullPage: false });
+// the cascade's two exceptions, probed in the mode: a hard-blocked active tab keeps its red fill (the class the tab
+// state paints, added here since a hermetic kernel has no blocked session), and under the Yatharth theme the active
+// tab wears that theme's resting wash with no selection border
+const probe = (fn) => page.evaluate(fn, cfg.web);
+await probe((id) => { document.querySelector('#tabs .tab[data-id="' + id + '"]').classList.add("tab-blocked"); });
+await page.waitForTimeout(100);
+out.blocked = await probe((id) => { const t = document.querySelector('#tabs .tab[data-id="' + id + '"]'); const cs = getComputedStyle(t); return { bg: cs.backgroundColor, active: t.classList.contains("active") }; });
+await probe((id) => { document.querySelector('#tabs .tab[data-id="' + id + '"]').classList.remove("tab-blocked"); document.body.classList.add("chat-theme-yatharth"); });
+await page.waitForTimeout(150);
+out.yatharth = await probe((id) => { const t = document.querySelector('#tabs .tab[data-id="' + id + '"]'); const cs = getComputedStyle(t);
+  const rest = Array.from(document.querySelectorAll('#tabs .tab.colored:not(.active)')).map((r) => getComputedStyle(r).backgroundColor);
+  return { border: cs.borderTopColor, bg: cs.backgroundColor, restBgs: rest, snap: document.body.classList.contains("snap-mode") }; });
+await probe(() => document.body.classList.remove("chat-theme-yatharth"));
+await page.waitForTimeout(150);
 // a tab pick clears the overview: the docs tab, in the untagged trail (the row's click folded infra's tabs away)
 await page.click('#tabs .tab[data-id="' + cfg.docs + '"]');
 await page.waitForTimeout(500);
@@ -249,6 +263,17 @@ class ServedTabOverviewMode(unittest.TestCase):
         web = next(t for t in o["tabs"] if t["id"] == SIDS["web"])
         self.assertTrue(web["active"], "the active tab keeps its class (the way back), only its dress is neutralised: %r" % web)
         self.assertEqual(web["bg"], "rgba(0, 0, 0, 0)", "…transparent like a resting tab: %r" % web)
+        # the two exceptions: a blocked active tab keeps the red fill; Yatharth's active tab wears the resting wash, no border
+        b = r["blocked"]
+        self.assertTrue(b["active"])
+        self.assertTrue(b["bg"].startswith("rgba(229, 72, 77, 0."), "a hard-blocked active tab keeps its red fill in the mode (the active-blocked tier): %r" % b)
+        y = r["yatharth"]
+        self.assertTrue(y["snap"])
+        self.assertEqual(y["border"], "rgba(0, 0, 0, 0)", "Yatharth: no 55%% selection border on the active tab in the mode: %r" % y)
+        # the resting wash is each tab's own identity colour at the theme's resting alpha: the active tab's alpha matches its siblings'
+        alpha = lambda c: c.rsplit("/", 1)[-1].strip(" )") if "/" in c else None
+        self.assertEqual(alpha(y["bg"]), "0.09", "…and the theme's resting wash (its 9 percent tint, not the 22 percent selected one): %r" % y)
+        self.assertTrue(y["restBgs"] and all(alpha(bg) == alpha(y["bg"]) for bg in y["restBgs"]), "…the same alpha as the other coloured tabs: %r" % y)
         # a tab pick clears the overview: the footer and the fill are back
         pk = r["picked"]
         self.assertNotIn("snap-mode", pk["body"].split())

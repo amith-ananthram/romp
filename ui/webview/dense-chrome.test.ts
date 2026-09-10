@@ -99,7 +99,7 @@ test("the dense rules exist under the class, with these exact values", () => {
   assert.match(add, /font-size: 1\.1em;/, "the + keeps its glyph size: the dense .tab rule outranks .tab-add's own 1.1em, so it is restated");
   assert.match(denseRule(".tab-tagbox"), /min-height: 25px;/, "the tag control's floor follows the dense + tab's rendered height (the arithmetic test below)");
   const head = denseRule(".tab-group-head");
-  assert.match(head, /gap: 4px;/); assert.match(head, /padding: 3px 5px 3px 4px;/);
+  assert.match(head, /gap: 4px;/); assert.match(head, /padding: 3px 5px;/, 'the dense tab\'s own padding: the row keeps a tab\'s box (T322)');
   assert.doesNotMatch(head, /font-size/, "the group header keeps the surface's one sub-line size (0.82em); its count inherits it and stays legible");
   const sep = denseRule(".tab-group-sep:not(.tab-group-break)");
   assert.match(sep, /padding: 6px 6px;/, "the trail divider's gutters scale with the row, so its line keeps the default's half-row proportion");
@@ -182,7 +182,8 @@ test("every dense rule is scoped to the body class, and the sheet's defaults are
   assert.match(defaultRule(".tab-tagbox"), /min-height: 31px;/);
   assert.match(defaultRule(".tab-group-sep:not(.tab-group-break)"), /width: 13px; padding: 8px 6px;/);
   const head = defaultRule(".tab-group-head");
-  assert.match(head, /gap: 5px; padding: 6px 7px;/);   // a tab's box of space (T322) assert.match(head, /font-size: 0\.82em;/);
+  assert.match(head, /gap: 5px; padding: 6px 7px;/);   // a tab's box of space (T322)
+  assert.match(head, /font-size: 0\.82em;/);
   assert.match(defaultRule("#bg-tasks"), /margin: 8px 10px 6px;/);
   assert.match(defaultRule(".bg-fold-head"), /padding: 7px 11px;/);
   assert.match(defaultRule(".bg-list"), /padding: 4px 2px;/);
