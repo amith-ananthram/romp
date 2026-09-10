@@ -239,9 +239,9 @@ class Document(unittest.TestCase):
 
     def test_summary_text_names_the_numbers(self):
         doc = rm.collect(self.state, kind="week", anchor="2026-09-10", tz=TZ, live=False)
-        doc["host"] = "TESTHOST"
+        doc["label"] = "TESTHOST"
         text = rm.summary(doc)
-        self.assertIn("host TESTHOST", text)
+        self.assertIn("restart metrics: TESTHOST, week windows", text)
         self.assertIn("week of 2026-09-10", text)
         self.assertIn("restarts 3 · turns cut 3 (1.0 per restart) · clean restarts 0 · boots with no cut row 1", text)
         self.assertIn("quiet windows 2 · wait n=2 p50 297 s p90 900 s max 900 s · backstop fired 1", text)
@@ -253,6 +253,41 @@ class Document(unittest.TestCase):
         self.assertIn("live: skipped", text)
         self.assertIn("note: Redo cost", text)
         self.assertNotIn("MISSING", text)
+
+    def test_default_label_is_this_machine_and_nothing_the_user_reads_carries_an_em_dash(self):
+        """Two of the user's standing rules for anything they read (the manager's fold, 2026-09-10): the
+        hostname is a personal identifier, so the default header names 'this machine' and the hostname
+        appears nowhere unless --label passes it; and no em-dash anywhere in the summary."""
+        import socket
+        host = (socket.gethostname() or "").split(".")[0]
+        doc = rm.collect(self.state, kind="week", anchor="2026-09-10", tz=TZ, live=False)
+        self.assertEqual(doc["label"], "this machine")
+        self.assertNotIn("host", doc, "no host field at all: the document names itself by label only")
+        text = rm.summary(doc)
+        self.assertIn("restart metrics: this machine, week windows", text)
+        if host:
+            self.assertNotIn(host, text)
+            self.assertNotIn(host, json.dumps(doc))
+        self.assertNotIn("\u2014", text)
+        self.assertNotIn("\u2014", json.dumps(doc))
+        labelled = rm.collect(self.state, kind="week", anchor="2026-09-10", tz=TZ, live=False, label="web box")
+        self.assertIn("restart metrics: web box,", rm.summary(labelled))
+
+    def test_no_em_dash_in_any_output_string_of_the_reader_or_the_report(self):
+        """Every non-docstring string literal of the two modules (the summary lines, the figure labels, the
+        notes) is free of em-dashes, by AST, so a new label cannot bring one back."""
+        import ast
+        for path in (os.path.join(BIN, "romp-restart-metrics"), os.path.join(os.path.dirname(HERE), "scripts", "restart_metrics_report.py")):
+            tree = ast.parse(open(path, encoding="utf-8").read())
+            docstrings = set()
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    body = node.body
+                    if body and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], "value", None), ast.Constant):
+                        docstrings.add(id(body[0].value))
+            offenders = [(n.lineno, n.value) for n in ast.walk(tree)
+                         if isinstance(n, ast.Constant) and isinstance(n.value, str) and "\u2014" in n.value and id(n) not in docstrings]
+            self.assertEqual(offenders, [], "%s carries an em-dash in an output string" % os.path.basename(path))
 
     def test_missing_ledgers_are_said(self):
         empty = Path(tempfile.mkdtemp())

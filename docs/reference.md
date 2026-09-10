@@ -2104,8 +2104,9 @@ CPU, resident size and the pusher's idle-cycle share, and lists any
 conversation two Claude Code processes hold right now. Windows are days or
 weeks (`--window`), weeks anchored on `--anchor` (default the first restart's
 day in range), bounded by `--since` and `--until`, in the machine's local time
-unless `--tz` names a zone. A missing ledger is named at the top, never a
-silent zero. `--json` prints the whole document (`schema` 1): `restarts`
+unless `--tz` names a zone. The header names the machine `this machine`
+unless `--label` says otherwise, so no hostname reaches the text by default. A
+missing ledger is named at the top, never a silent zero. `--json` prints the whole document (`schema` 1): `restarts`
 (each cut row joined to the boot that followed it), `quietWindows` (each
 joined to the restart it released), `kernelSeries`, `events`, `buckets` (every
 metric above per window, with capped latency samples for the distribution
@@ -2127,7 +2128,12 @@ window, continuation notices and redo dollars, the turn-latency distribution,
 resident memory per session scope and the kernel's own, and the kernel's
 resident memory at each exit and boot over the days of each document; beside
 them `figures.json` carries the numbers drawn and `summary.txt` the reader's
-text per document. Without cleanplots the script says so and draws nothing.
+text per document. Session names are hidden by default (`session 1..N` by
+memory rank; the kernel's own bar keeps its name and its own colour) for any
+output directory outside your state root, because real session names are
+private and must not reach a repository, an issue or a pull request; `--named`
+shows them, and inside your own state root they show by default. Without
+cleanplots the script says so and draws nothing.
 
 ## Switches
 

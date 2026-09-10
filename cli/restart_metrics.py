@@ -40,7 +40,6 @@ import json
 import os
 import platform
 import re
-import socket
 import subprocess
 import sys
 import time
@@ -62,9 +61,8 @@ def state_dir() -> Path:
                 or Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local/state")) / "romp")
 
 
-def host_name() -> str:
-    env = os.environ.get("ROMP_HOST_NAME")
-    return env if env else (socket.gethostname() or "?").split(".")[0]
+DEFAULT_LABEL = "this machine"   # the document's name for itself; never the hostname (a personal identifier
+#                                  the user's rules keep out of anything they read) unless the caller passes one
 
 
 def _read_jsonl(path: Path) -> tuple[list[dict], dict]:
@@ -615,7 +613,7 @@ def kernel_live(state: Path) -> dict:
 
 def live_snapshot(state: Path) -> dict:
     regs = _regs(state)
-    out = {"host": host_name(), "platform": platform.system(), "t": int(time.time()), "sessions": [], "errors": []}
+    out = {"platform": platform.system(), "t": int(time.time()), "sessions": [], "errors": []}
     by8 = {}
     for sid, r in regs.items():
         if r.get("lastSid"):
@@ -645,7 +643,8 @@ def live_snapshot(state: Path) -> dict:
 
 
 # ── the document and its summary ────────────────────────────────────────────────────────────────────────
-def collect(state: Path, kind="day", anchor=None, tz=None, since=None, until=None, live=True) -> dict:
+def collect(state: Path, kind="day", anchor=None, tz=None, since=None, until=None, live=True,
+            label=DEFAULT_LABEL) -> dict:
     cuts, n_cuts = _read_jsonl(state / "restart-cuts.jsonl")
     audit, n_audit = _read_jsonl(state / "restart-audit.jsonl")
     ev, n_ev = _read_jsonl(state / "session-events.jsonl")
@@ -685,7 +684,7 @@ def collect(state: Path, kind="day", anchor=None, tz=None, since=None, until=Non
         anchor = local_date(first, tz)
     buckets = build_buckets(restarts, quiet, events, turns, sl_turns, machine_cuts, spend_by_day(spend),
                             kind, anchor, tz, since, until)
-    doc = {"schema": SCHEMA, "generatedAt": int(time.time()), "host": host_name(),
+    doc = {"schema": SCHEMA, "generatedAt": int(time.time()), "label": str(label or DEFAULT_LABEL),
            "window": {"kind": kind, "anchor": anchor, "tz": tz or "local"},
            "range": {"since": since, "until": until},
            "sources": {"restartCuts": n_cuts, "restartAudit": n_audit, "sessionEvents": n_ev, "turns": n_tu,
@@ -742,7 +741,8 @@ def summary(doc: dict) -> str:
     """The one-screen text per window."""
     w = doc["window"]
     src = doc["sources"]
-    lines = ["restart metrics — host %s — %s windows, anchor %s, times %s" % (doc["host"], w["kind"], w["anchor"], w["tz"])]
+    lines = ["restart metrics: %s, %s windows, anchor %s, times %s"
+             % (doc.get("label") or DEFAULT_LABEL, w["kind"], w["anchor"], w["tz"])]
     missing = [k for k in ("restartCuts", "restartAudit", "sessionEvents", "turns") if not (src.get(k) or {}).get("present")]
     if missing:
         lines.append("  MISSING ledgers (nothing measured from them): " + ", ".join((src[k] or {}).get("path", k) for k in missing))
@@ -814,6 +814,8 @@ def main(argv=None) -> int:
     ap.add_argument("--tz", help="a zone name for the day boundaries (default: the machine's local time)")
     ap.add_argument("--no-live", action="store_true", help="skip the live reads (scopes, ps, the kernel's routes)")
     ap.add_argument("--state", help="a state directory other than this machine's")
+    ap.add_argument("--label", default=DEFAULT_LABEL,
+                    help="what the document calls this machine (default: '%s'; never the hostname unless you say so)" % DEFAULT_LABEL)
     a = ap.parse_args(argv)
     state = Path(a.state) if a.state else state_dir()
     try:
@@ -822,7 +824,8 @@ def main(argv=None) -> int:
     except ValueError as e:
         sys.stderr.write("romp restart-metrics: bad date: %s\n" % e)
         return 2
-    doc = collect(state, kind=a.window, anchor=a.anchor, tz=a.tz, since=since, until=until, live=not a.no_live)
+    doc = collect(state, kind=a.window, anchor=a.anchor, tz=a.tz, since=since, until=until, live=not a.no_live,
+                  label=a.label)
     if a.json:
         sys.stdout.write(json.dumps(doc, indent=1, sort_keys=True) + "\n")
     else:

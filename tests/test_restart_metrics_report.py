@@ -31,8 +31,8 @@ def _doc(label_shift=0):
     state = Path(tempfile.mkdtemp())
     _fixture(state)
     doc = rm.collect(state, kind="week", anchor="2026-09-10", tz="UTC", live=False)
-    doc["host"] = "TESTHOST"
-    doc["live"] = {"host": "TESTHOST", "source": "cgroup", "t": 1, "errors": [], "duplicateClis": [],
+    doc["label"] = "TESTHOST"
+    doc["live"] = {"source": "cgroup", "t": 1, "errors": [], "duplicateClis": [],
                    "sessions": [{"sid": SID, "name": "web", "memBytes": 300 * 1048576, "cpuS": 12.5, "sid8": "11111111"},
                                 {"sid": None, "name": "22222222", "memBytes": 100 * 1048576, "cpuS": None, "sid8": "22222222"}],
                    "kernel": {"port": 1, "pid": 42, "uptimeS": 100, "perf": {"cpuS": 55.0, "rssKb": 2048 * 1024, "idleShare": 0.4}},
@@ -42,7 +42,7 @@ def _doc(label_shift=0):
 
 class Frames(unittest.TestCase):
     def test_frames_from_two_documents(self):
-        fr = rep.frames([("baseline", _doc()), ("after", _doc())])
+        fr = rep.frames([("baseline", _doc()), ("after", _doc())], anonymize=False)   # the named view; the default is pinned below
         self.assertEqual(fr["labels"], ["baseline", "after"])
         self.assertEqual([r["label"] for r in fr["windows"]], ["baseline", "after"])
         w = fr["windows"][0]
@@ -60,6 +60,19 @@ class Frames(unittest.TestCase):
         self.assertEqual(ks["label"], "baseline")
         self.assertEqual([(p["kind"], p["rssMb"]) for p in ks["points"]], [("exit", 4096.0), ("boot", 300.0), ("exit", 2048.0)])
         self.assertEqual(ks["points"][0]["days"], 0.0)
+
+    def test_session_names_are_hidden_by_default_outside_the_state_root(self):
+        """The manager's fold (2026-09-10): real session names (other projects' among them) are private, so
+        every figure written outside the user's own state root names sessions by memory rank, and only the
+        caller's explicit ask shows them."""
+        fr = rep.frames([("baseline", _doc())])                       # anonymize=True is the frames default
+        self.assertEqual([s["name"] for s in fr["live"][0]["sessions"]], ["session 1", "session 2"])
+        self.assertTrue(fr["anonymized"])
+        named = rep.frames([("baseline", _doc())], anonymize=False)
+        self.assertEqual([s["name"] for s in named["live"][0]["sessions"]], ["web", "22222222"])
+        self.assertTrue(rep.anonymize_default(tempfile.mkdtemp()), "a scratch dir is outside the state root")
+        self.assertFalse(rep.anonymize_default(rep.STATE_ROOT / "romp-research" / "restart-metrics"), "the user's own state root shows names")
+        self.assertTrue(rep.anonymize_default(Path("/nonexistent/place")))
 
     def test_load_docs_labels(self):
         d = Path(tempfile.mkdtemp())
@@ -83,8 +96,13 @@ class Render(unittest.TestCase):
             self.assertIsNotNone(path, name + " drew nothing")
             self.assertGreater(os.path.getsize(path), 1000, name + " is empty")
             self.assertTrue(path.endswith(".png"))
-        self.assertTrue((out / "figures.json").exists())
-        self.assertIn("host TESTHOST", (out / "summary.txt").read_text())
+        figs = (out / "figures.json").read_text()
+        self.assertNotIn("web", figs, "a scratch out dir is outside the state root: names hidden by default")
+        self.assertIn("session 1", figs)
+        self.assertIn("restart metrics: TESTHOST", (out / "summary.txt").read_text())
+        made2 = rep.render([("baseline", _doc())], out / "named", anonymize=False)
+        self.assertIn("web", (out / "named" / "figures.json").read_text())
+        self.assertIsNotNone(made2["session_resources"])
 
     def test_main_prints_the_paths(self):
         d = Path(tempfile.mkdtemp())
@@ -96,6 +114,11 @@ class Render(unittest.TestCase):
             rc = rep.main(["--doc", "baseline=%s" % (d / "b.json"), "--out", str(d / "out")])
         self.assertEqual(rc, 0)
         self.assertIn("cut_turns", buf.getvalue())
+        self.assertIn("session names: hidden", buf.getvalue())
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rep.main(["--doc", "baseline=%s" % (d / "b.json"), "--out", str(d / "out2"), "--named"])
+        self.assertIn("session names: shown", buf.getvalue())
 
 
 if __name__ == "__main__":

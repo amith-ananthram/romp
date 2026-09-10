@@ -12,15 +12,14 @@ setup() {
     TEST_DIR="$(mktemp -d)"
     export XDG_STATE_HOME="$TEST_DIR/state"
     mkdir -p "$XDG_STATE_HOME/romp"
-    export ROMP_HOST_NAME=TESTHOST
 }
 
 teardown() { rm -rf "$TEST_DIR"; }
 
 @test "romp restart-metrics runs the reader against the state dir and names a missing ledger" {
-    run "$ROMP_SCRIPT" restart-metrics --no-live --tz UTC
+    run "$ROMP_SCRIPT" restart-metrics --no-live --tz UTC --label TESTHOST
     [ "$status" -eq 0 ]
-    [[ "$output" == *"restart metrics — host TESTHOST"* ]]
+    [[ "$output" == *"restart metrics: TESTHOST, day windows"* ]]
     [[ "$output" == *"MISSING ledgers"* ]]
     [[ "$output" == *"restart-cuts.jsonl"* ]]
     [[ "$output" == *"live: skipped"* ]]
@@ -34,6 +33,14 @@ teardown() { rm -rf "$TEST_DIR"; }
     [[ "$output" == *'"schema": 1'* ]]
     [[ "$output" == *'"week of 2023-11-14"'* ]]
     [[ "$output" == *'"restarts": 1'* ]]
+}
+
+@test "the default header names this machine, never the hostname" {
+    run "$ROMP_SCRIPT" restart-metrics --no-live --tz UTC
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"restart metrics: this machine, day windows"* ]]
+    host="$(hostname -s 2>/dev/null || hostname)"
+    [[ -z "$host" || "$output" != *"$host"* ]]
 }
 
 @test "a bad date is refused with exit 2" {

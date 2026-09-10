@@ -33,7 +33,19 @@ import os
 import sys
 from pathlib import Path
 
-DEFAULT_OUT = Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local/state")) / "romp-research" / "restart-metrics"
+STATE_ROOT = Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local/state"))
+DEFAULT_OUT = STATE_ROOT / "romp-research" / "restart-metrics"
+
+
+def anonymize_default(out) -> bool:
+    """Whether session names are hidden by default for figures written to `out`: they are, unless `out`
+    lies inside the user's own state root (their local named view). Real session names are private (other
+    projects' sessions sit among them), so nothing rendered for a repo, an issue or a pull request may carry
+    them; `--named` is the caller's explicit ask for the local view elsewhere."""
+    try:
+        return not Path(out).resolve().is_relative_to(STATE_ROOT.resolve())
+    except (OSError, ValueError):
+        return True
 EVENT_COLUMNS = (("orphansReaped", "Orphans reaped at boot"), ("scopesStopped", "Leftover scopes stopped"),
                  ("duplicateClis", "Two CLIs on one conversation"), ("crashHeals", "Crash heals"),
                  ("crashLoops", "Crash loops"), ("drainLeftClosing", "Drain left closing"),
@@ -62,8 +74,9 @@ def _st(b, *keys):
     return d if isinstance(d, dict) else {}
 
 
-def frames(docs) -> dict:
-    """Everything the figures draw, as plain lists keyed by figure: one row per (label, window)."""
+def frames(docs, anonymize=True) -> dict:
+    """Everything the figures draw, as plain lists keyed by figure: one row per (label, window). With
+    `anonymize` the live sessions are named "session 1..N" by memory rank (the kernel row keeps its name)."""
     rows = []
     for label, doc in docs:
         for b in doc.get("buckets") or []:
@@ -94,9 +107,13 @@ def frames(docs) -> dict:
             continue
         sess = [{"name": s.get("name") or s.get("sid8") or "?", "memMb": s["memBytes"] / 1048576.0,
                  "cpuS": s.get("cpuS")} for s in (lv.get("sessions") or []) if isinstance(s.get("memBytes"), (int, float))]
+        sess.sort(key=lambda s: -s["memMb"])
+        if anonymize:
+            for i, s in enumerate(sess, 1):
+                s["name"] = "session %d" % i
         k = lv.get("kernel") or {}
         pf = k.get("perf") or {}
-        live.append({"label": label, "sessions": sorted(sess, key=lambda s: -s["memMb"]),
+        live.append({"label": label, "sessions": sess,
                      "kernelRssMb": (pf["rssKb"] / 1024.0) if isinstance(pf.get("rssKb"), (int, float)) else None,
                      "kernelCpuS": pf.get("cpuS"), "kernelIdleShare": pf.get("idleShare"), "kernelPid": k.get("pid")})
     series = []
@@ -108,7 +125,7 @@ def frames(docs) -> dict:
         series.append({"label": label, "t0": t0,
                        "points": [{"days": round((k["t"] - t0) / 86400.0, 4), "rssMb": k["rssMb"], "kind": k["kind"],
                                    "cpuS": k.get("cpuS")} for k in ks]})
-    return {"windows": rows, "live": live, "labels": [l for l, _ in docs], "kernel": series}
+    return {"windows": rows, "live": live, "labels": [l for l, _ in docs], "kernel": series, "anonymized": bool(anonymize)}
 
 
 def _ylabels(rows):
@@ -158,14 +175,14 @@ def fig_cut_turns(cp, fr, out):
                      (r["cutTurns"], y), xytext=(4, 0), textcoords="offset points", va="center", fontsize=11)
     ax1.set_yticks(ys)
     ax1.set_yticklabels(_ylabels(rows))
-    ax1.clean(xlabel="Turns cut by restarts, per window — fewer better", ylabel="")
+    ax1.clean(xlabel="Turns cut by restarts, per window, fewer is better", ylabel="")
     ax1.set_xlim(0, max(vals + [1]) * 1.6)         # room for the annotation past the longest bar
     f.subplots_adjust(wspace=0.3)
     per = [r["cutTurnsPerRestart"] or 0 for r in rows]
     ax2.scatter(per, ys, color=[pal[r["label"]] for r in rows], legend=False, s=60)
     ax2.set_yticks(ys)
     ax2.set_yticklabels([""] * len(ys))
-    ax2.clean(xlabel="Turns cut per restart — fewer better", ylabel="")
+    ax2.clean(xlabel="Turns cut per restart, fewer is better", ylabel="")
     ax2.set_xlim(0, max(per + [1]) * 1.3)           # from zero, the natural origin; no degenerate tick pair
     ax2.set_xticks([0, round(max(per + [1]), 2)])
     return _save(f, out, "cut_turns.png")
@@ -195,8 +212,8 @@ def fig_restart_timing(cp, fr, out):
     pal = _palette(cp, fr["labels"])
     f, axs = cp.fig(rows=1, cols=2, w=16, h=max(3.5, 0.5 * len(rows) + 1.5))
     f.subplots_adjust(wspace=0.3)
-    _dots_with_p90(cp, axs[0], rows, "outageP50", "outageP90", pal, "Exit to first serve (s) — shorter better\ndot p50, line to p90")
-    _dots_with_p90(cp, axs[1], rows, "settleP50", "settleP90", pal, "Reconcile settle (s) — shorter better\ndot p50, line to p90")
+    _dots_with_p90(cp, axs[0], rows, "outageP50", "outageP90", pal, "Exit to first serve (s), shorter is better\ndot p50, line to p90")
+    _dots_with_p90(cp, axs[1], rows, "settleP50", "settleP90", pal, "Reconcile settle (s), shorter is better\ndot p50, line to p90")
     axs[1].set_yticklabels([""] * len(rows))
     return _save(f, out, "restart_timing.png")
 
@@ -207,7 +224,7 @@ def fig_quiet_window(cp, fr, out):
         return None
     pal = _palette(cp, fr["labels"])
     f, ax = cp.fig(w=10, h=max(3.5, 0.5 * len(rows) + 1.5))
-    _dots_with_p90(cp, ax, rows, "quietP50", "quietP90", pal, "Quiet-window wait, parked to restart (s): dot p50, line to p90 — shorter better")
+    _dots_with_p90(cp, ax, rows, "quietP50", "quietP90", pal, "Quiet-window wait, parked to restart (s): dot p50, line to p90, shorter is better")
     for y, r in enumerate(rows):
         if r["quietWindows"]:
             ax.annotate("%d windows, backstop fired %d" % (r["quietWindows"], r["backstopFires"]),
@@ -224,7 +241,7 @@ def fig_boot_events(cp, fr, out):
     df = pd.DataFrame({title: [r["events"][k] for r in rows] for k, title in EVENT_COLUMNS}, index=_ylabels(rows))
     f, ax = cp.fig(w=12, h=max(4, 0.9 * len(rows) + 1.5))
     ax.barh(df)
-    ax.clean(xlabel="Sessions gone wrong, per window — fewer better", ylabel="", color_labels="auto")
+    ax.clean(xlabel="Sessions gone wrong, per window, fewer is better", ylabel="", color_labels="auto")
     ax.set_xlim(0, max(float(df.values.max()) if len(df.values) else 1.0, 1.0) * 1.8)   # the labels sit in the clear
     return _save(f, out, "boot_events.png")
 
@@ -239,7 +256,7 @@ def fig_redo_cost(cp, fr, out):
     df = pd.DataFrame({"Continuation notices": [r["resumedTurns"] for r in rows],
                        "Redo turns recorded": [r["redoTurns"] for r in rows]}, index=_ylabels(rows))
     axs[0].barh(df)
-    axs[0].clean(xlabel="Turns resumed after a cut, per window — fewer better", ylabel="", color_labels="auto")
+    axs[0].clean(xlabel="Turns resumed after a cut, per window, fewer is better", ylabel="", color_labels="auto")
     axs[0].set_xlim(0, max(float(df.values.max()) if len(df.values) else 1.0, 1.0) * 1.8)
     f.subplots_adjust(wspace=0.3)
     ys = list(range(len(rows)))
@@ -250,7 +267,7 @@ def fig_redo_cost(cp, fr, out):
                             xytext=(4, 0), textcoords="offset points", va="center", fontsize=11)
     axs[1].set_yticks(ys)
     axs[1].set_yticklabels([""] * len(ys))
-    axs[1].clean(xlabel="Dollars spent redoing cut work, per window — fewer better", ylabel="")
+    axs[1].clean(xlabel="Dollars spent redoing cut work, per window, fewer is better", ylabel="")
     axs[1].set_xlim(left=0)
     return _save(f, out, "redo_cost.png")
 
@@ -274,7 +291,7 @@ def fig_turn_latency(cp, fr, out):
                     xytext=(6, 0), textcoords="offset points", va="center", fontsize=10)   # past the axis, clear of the whiskers
     ax.set_yticks(positions)
     ax.set_yticklabels(["%s · %s" % (r["label"], r["window"]) for r, _, _ in series])
-    ax.clean(xlabel="Feed to result (s): box quartiles, whiskers 1.5 IQR — shorter better", ylabel="")
+    ax.clean(xlabel="Feed to result (s): box quartiles, whiskers 1.5 IQR, shorter is better", ylabel="")
     ax.set_xlim(left=0)
     if have_first:
         ax2 = axs[1]
@@ -284,7 +301,7 @@ def fig_turn_latency(cp, fr, out):
         ax2.set_yticks(pos2)
         same_rows = [(r["label"], r["window"]) for r, _ in have_first] == [(r["label"], r["window"]) for r, _, _ in series]
         ax2.set_yticklabels([""] * len(pos2) if same_rows else ["%s · %s" % (r["label"], r["window"]) for r, _ in have_first])
-        ax2.clean(xlabel="Feed to first output (s) — shorter better", ylabel="")
+        ax2.clean(xlabel="Feed to first output (s), shorter is better", ylabel="")
         ax2.set_xlim(left=0)
     return _save(f, out, "turn_latency.png")
 
@@ -298,14 +315,16 @@ def fig_session_resources(cp, fr, out):
     f, axs = cp.fig(rows=1, cols=n, w=6 * n + 2, h=max(4, 0.4 * rows_max + 2))
     axs = list(axs) if hasattr(axs, "__len__") else [axs]
     pal = _palette(cp, fr["labels"])
+    kernel_color = list(cp.colors)[-1]          # the kernel's own bar in a colour no document uses, so the eye finds it
     for ax, l in zip(axs, live):
         names = [s["name"] for s in l["sessions"]] + (["kernel (pid %s)" % l["kernelPid"]] if l["kernelRssMb"] else [])
         vals = [s["memMb"] for s in l["sessions"]] + ([l["kernelRssMb"]] if l["kernelRssMb"] else [])
+        colors = [pal[l["label"]]] * len(l["sessions"]) + ([kernel_color] if l["kernelRssMb"] else [])
         ys = list(range(len(names)))[::-1]
-        ax.barh(ys, vals, color=pal[l["label"]], legend=False)
+        ax.barh(ys, vals, color=colors, legend=False)
         ax.set_yticks(ys)
         ax.set_yticklabels(names)
-        ax.clean(xlabel="Resident memory (MB) — %s%s" % (l["label"], (", kernel CPU %.0f s, pusher idle %.0f%%" % (l["kernelCpuS"], 100 * l["kernelIdleShare"])) if isinstance(l.get("kernelIdleShare"), float) and l.get("kernelCpuS") is not None else ""), ylabel="")
+        ax.clean(xlabel="Resident memory (MB), %s%s" % (l["label"], (", kernel CPU %.0f s, pusher idle %.0f%%" % (l["kernelCpuS"], 100 * l["kernelIdleShare"])) if isinstance(l.get("kernelIdleShare"), float) and l.get("kernelCpuS") is not None else ""), ylabel="")
         ax.set_xlim(left=0)
     return _save(f, out, "session_resources.png")
 
@@ -325,7 +344,7 @@ def fig_kernel_memory(cp, fr, out):
         if boots:
             ax.scatter([p["days"] for p in boots], [p["rssMb"] for p in boots], label="%s, at boot" % s["label"],
                        color=pal[s["label"]], marker="x", s=70, alpha=0.9)
-    ax.clean(xlabel="Days since the document's first restart", ylabel="Kernel resident memory (MB) — lower better",
+    ax.clean(xlabel="Days since the document's first restart", ylabel="Kernel resident memory (MB), lower is better",
              color_labels="auto")
     ax.set_ylim(bottom=0)
     ax.set_xlim(left=0)
@@ -336,11 +355,13 @@ FIGURES = (fig_cut_turns, fig_restart_timing, fig_quiet_window, fig_boot_events,
            fig_session_resources, fig_kernel_memory)
 
 
-def render(docs, out: Path) -> dict:
-    """Draw every figure; returns {figure name: path or None (no data)} and writes figures.json + summary.txt."""
+def render(docs, out: Path, anonymize=None) -> dict:
+    """Draw every figure; returns {figure name: path or None (no data)} and writes figures.json + summary.txt.
+    `anonymize` None means anonymize_default(out): names hidden everywhere but the user's own state root."""
     cp = _cp()
+    out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    fr = frames(docs)
+    fr = frames(docs, anonymize=anonymize_default(out) if anonymize is None else bool(anonymize))
     made = {}
     for fn in FIGURES:
         made[fn.__name__.replace("fig_", "")] = fn(cp, fr, out)
@@ -360,9 +381,13 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--doc", action="append", required=True, help="label=path of a `romp restart-metrics --json` document; repeat in order (baseline first)")
     ap.add_argument("--out", default=str(DEFAULT_OUT))
+    ap.add_argument("--named", action="store_true",
+                    help="show real session names (the default only inside your own state root; real names never go into a repo, an issue or a pull request)")
     a = ap.parse_args(argv)
     docs = load_docs(a.doc)
-    made = render(docs, Path(a.out))
+    anon = False if a.named else anonymize_default(a.out)
+    made = render(docs, Path(a.out), anonymize=anon)
+    sys.stdout.write("session names: %s\n" % ("hidden (session 1..N by memory rank; --named shows them)" if anon else "shown"))
     for k, v in made.items():
         sys.stdout.write("%-20s %s\n" % (k, v or "(no data)"))
     return 0
