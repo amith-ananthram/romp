@@ -145,21 +145,35 @@ def boot_once(tree, dist, sessions, turns, settle_s):
 
 
 def draw(rows, out):
+    """Three panels of boot cost against the transcripts' size on disk: the kernel's own cold parses (the stage 1
+    number; a tree without the counter drew every living session by construction, which the panel says), bytes the
+    process read, and its resident size. Axes start at zero; flat is the goal."""
     import cleanplots as cp
     import matplotlib
     matplotlib.use("Agg")
     labels = sorted({r["label"] for r in rows})
     cols = list(cp.colors)
-    f, axs = cp.fig(rows=1, cols=2, w=14, h=4.5)
+    f, axs = cp.fig(rows=1, cols=3, w=19, h=4.8)
+    f.subplots_adjust(wspace=0.45)
+    tops = [0.0, 0.0, 0.0]
     for i, label in enumerate(labels):
         rs = sorted([r for r in rows if r["label"] == label and not r.get("error")], key=lambda r: r["worldBytes"])
         xs = [r["worldBytes"] / 1048576 for r in rs]
-        axs[0].line(xs, [(r["readBytes"] or 0) / 1048576 for r in rs], label=label, color=cols[i % len(cols)], marker="o")
-        axs[1].line(xs, [(r["rssKb"] or 0) / 1024 for r in rs], label=label, color=cols[i % len(cols)], marker="o")
-    axs[0].clean(xlabel="Transcripts on disk (MB), all sessions", ylabel="Bytes the kernel read by settle (MB)\nflat is the goal")
-    axs[1].clean(xlabel="Transcripts on disk (MB), all sessions", ylabel="Kernel resident size at settle (MB)\nflat is the goal")
-    for ax in axs:
-        ax.set_xlim(left=0); ax.set_ylim(bottom=0)
+        c = cols[i % len(cols)]
+        counted = all(r.get("parses") is not None for r in rs)
+        parses = [r["parses"] if counted else r["sessions"] for r in rs]
+        axs[0].line(xs, parses, label=label if counted else label + " (every session, by construction)", color=c, marker="o",
+                    linestyle="-" if counted else "--")
+        axs[1].line(xs, [(r["readBytes"] or 0) / 1048576 for r in rs], label=label, color=c, marker="o")
+        axs[2].line(xs, [(r["rssKb"] or 0) / 1024 for r in rs], label=label, color=c, marker="o")
+        tops = [max(tops[0], max(parses)), max(tops[1], max((r["readBytes"] or 0) / 1048576 for r in rs)),
+                max(tops[2], max((r["rssKb"] or 0) / 1024 for r in rs))]
+    axs[0].clean(xlabel="Transcripts on disk (MB), all sessions", ylabel="Cold parses by the kernel at boot\nzero is the goal")
+    axs[1].clean(xlabel="Transcripts on disk (MB), all sessions", ylabel="Bytes the process read by settle (MB)\nflat is the goal")
+    axs[2].clean(xlabel="Transcripts on disk (MB), all sessions", ylabel="Resident size at settle (MB)\nflat is the goal")
+    for ax, top in zip(axs, tops):
+        ax.set_xlim(0, None); ax.set_ylim(0, top * 1.25 if top else 1)
+        ax.set_yticks([0, round(top, 1) if top < 10 else round(top)])
     path = os.path.join(out, "boot_cost_vs_size.png")
     f.savefig(path, dpi=150, bbox_inches="tight")
     return path
@@ -174,8 +188,13 @@ def main(argv=None):
     ap.add_argument("--settle", type=float, default=8.0, help="seconds after first serve before reading the cost")
     ap.add_argument("--out", required=True)
     ap.add_argument("--no-figure", action="store_true")
+    ap.add_argument("--figure-only", action="store_true", help="redraw from <out>/bench.json without booting anything")
     a = ap.parse_args(argv)
     os.makedirs(a.out, exist_ok=True)
+    if a.figure_only:
+        with open(os.path.join(a.out, "bench.json")) as f:
+            sys.stdout.write("figure " + draw(json.load(f)["rows"], a.out) + "\n")
+        return 0
     trees = [(s.split("=", 1)[0], os.path.abspath(s.split("=", 1)[1])) for s in a.tree]
     sizes = [int(x) for x in a.sizes.split(",")]
     ext = os.path.join(trees[0][1], "vscode-extension")   # one bundle serves every boot (the kernel only serves it)
