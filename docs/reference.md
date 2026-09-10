@@ -707,7 +707,10 @@ token included. Its output must be one non-empty line with no whitespace, at
 most 16 KiB; a trailing newline is forgiven. A helper that fails is a problem
 row in the Log panel in static words. With no helper configured the catalog
 serves its cached list, or its built-in one, and the kernel log says why at
-each refresh attempt (boot, and once per model id it does not know); the
+each refresh attempt (an install's first boot, when no cache exists, and once
+per model id it does not know; a boot with a cache serves it, says so with the
+cache's fetch time, and never runs the helper: the helper can be a desktop
+prompt, and a boot is not an event); the
 pickers still work, and Claude Code's own alias table still tracks each
 family's newest. The fast-mode probe then leaves the CLI's own check standing
 and says nothing.
