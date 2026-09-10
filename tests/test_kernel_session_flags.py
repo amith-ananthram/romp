@@ -855,6 +855,7 @@ class WsFlagsMustBeBooleans(unittest.TestCase):
             ("setThinkingSummaries", "enabled", {}, km._thinking_summaries_on, warn),
             ("setConserve", "enabled", {}, km._conserve_on, warn),
             ("setTmuxBackend", "enabled", {}, lambda: km.jd._state_str("tmux-backend", "off") == "on", warn),   # T288
+            ("setJudgeFast", "enabled", {}, lambda: km.jd._state_str("judge-fast", "off") == "on", warn),   # Fast judging
             ("setGlobalRetryPaused", "value", {}, km._retry_paused_on, warn),
             ("setSessionFlag", "value", {"id": self.SID, "flag": "hideFromFeed"},
              lambda: km._session_flag(self.SID, "hideFromFeed"), lane),

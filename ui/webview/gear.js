@@ -162,6 +162,10 @@ var GEAR_HTML =
   '<div class=rs-sec>Judges</div>' +
   "<div class='rs-row rs-jrow'><b>Triage model <span class=rs-mixed hidden></span></b><span class=rs-sub>The model the triage judges use — planner, grouper, closer, courier (the judgment-heavy tier). Applies on the judges' next pass; no restart. A pick here follows to every connected machine's kernel.</span><select id=rs-judgemodel></select></div>" +
   "<div class='rs-row rs-jrow'><b>Triage effort <span class=rs-mixed hidden></span></b><span class=rs-sub>Thinking effort for the triage judges. Default = no effort flag (the judges' standard behavior). Not every model accepts every level. Follows to every connected machine's kernel.</span><select id=rs-judgeeffort></select></div>" +
+  "<label class='rs-row'><input type=checkbox id=rs-judgefast>" +
+  '<span><b>Fast judging</b><span class=rs-mixed hidden></span>' +
+  "<span class=rs-sub>Run the judges in fast mode (an Opus-only research preview, billed at a premium over standard Opus rates). Engages only on calls whose model is Opus, whichever tier; every other model runs as before. Fast requests draw on fast mode's own rate limits, the same pool your sessions' fast toggles use. Off by default. Applies on the judges' next pass; no restart. Follows to every connected machine's kernel.</span>" +
+  '</span></label>' +
   "<div class='rs-row rs-jrow'><b>Distilling model <span class=rs-mixed hidden></span></b><span class=rs-sub>The model for the judges that write the prose you read on cards — distiller, briefer, staller. Follow triage (the default) keeps them on the triage pick; pinning a model here lets the copy you read run richer than the placement judges. Follows to every connected machine's kernel.</span><select id=rs-distillmodel></select></div>" +
   "<div class='rs-row rs-jrow'><b>Distilling effort <span class=rs-mixed hidden></span></b><span class=rs-sub>Thinking effort for the distilling judges. Follow triage (the default) rides the triage effort; Default pins no effort flag. Follows to every connected machine's kernel.</span><select id=rs-distilleffort></select></div>" +
   "<div class='rs-row rs-jrow'><b>Indexing model <span class=rs-mixed hidden></span></b><span class=rs-sub>The model the indexing judges use — captioner + archiver (high-volume, low-stakes summarization). Haiku by default for cost. Follows to every connected machine's kernel.</span><select id=rs-indexmodel></select></div>" +
@@ -250,6 +254,7 @@ function initGear(post) {
     dm = document.getElementById('rs-distillmodel'), de = document.getElementById('rs-distilleffort'),
     cmm = document.getElementById('rs-cmtmodel'), cme = document.getElementById('rs-cmteffort'),
     cmf = document.getElementById('rs-cmtfast'),
+    jf = document.getElementById('rs-judgefast'),
     tb = document.getElementById('rs-tmuxbackend'), bkn = document.getElementById('rs-backend-note'),
     fe = document.getElementById('rs-fileedit'),
     ths = document.getElementById('rs-thinksum'),
@@ -750,6 +755,8 @@ function initGear(post) {
   // the tmux backend's offer (T288): a kernel setting like the judge knobs (stamped, propagated); the Default
   // backend list repaints at once so the pick and the offer never disagree in the same modal
   if (tb) tb.addEventListener('change', function () { post({ type: 'setTmuxBackend', enabled: tb.checked, gt: gclock.stamp('tmux-backend') }); paintBackendOffer(tb.checked); });
+  // Fast judging: a kernel setting like the judge knobs (stamped, propagated); the judges read it per call
+  if (jf) jf.addEventListener('change', function () { post({ type: 'setJudgeFast', enabled: jf.checked, gt: gclock.stamp('judge-fast') }); });
   // "Claude Code (tmux)" is in the Default backend list only while the setting is on; a saved default of tmux
   // while it is off is set aside (the select shows Claude Code and the note says so), never erased: it returns
   // with the setting. The option is removed rather than hidden: the facade paints from sel.options.
@@ -827,7 +834,8 @@ function initGear(post) {
     'index-model': 'Indexing model', 'index-effort': 'Indexing effort', 'judge-concurrency': 'Judge concurrency',
     'distill-model': 'Distilling model', 'distill-effort': 'Distilling effort',
     'comment-model': 'Comment model', 'comment-effort': 'Comment effort',
-    'comment-fast': 'Fast comment threads', 'tmux-backend': 'Claude Code tmux backend', 'thinking-summaries': 'Thinking summaries' };
+    'comment-fast': 'Fast comment threads', 'tmux-backend': 'Claude Code tmux backend', 'judge-fast': 'Fast judging',
+    'thinking-summaries': 'Thinking summaries' };
   // store name → the message type that sets it: the whitelist for the toast's Apply anyway (a frame
   // may re-issue the one setting it names, nothing else) and the completeness pin's map
   // (gear.test.ts checks every emitter stamps through the clock under its own store name)
@@ -837,7 +845,7 @@ function initGear(post) {
     'index-model': 'setIndexModel', 'index-effort': 'setIndexEffort', 'judge-concurrency': 'setJudgeConcurrency',
     'distill-model': 'setDistillModel', 'distill-effort': 'setDistillEffort',
     'comment-model': 'setCommentModel', 'comment-effort': 'setCommentEffort', 'comment-fast': 'setCommentFast',
-    'tmux-backend': 'setTmuxBackend' };
+    'tmux-backend': 'setTmuxBackend', 'judge-fast': 'setJudgeFast' };
   // store name → the words its select shows for the sentinel options whose value is not the word. The
   // effort selects' Default is the EMPTY value (no effort flag), which read as no value at all, so a
   // refused Default pick drew the value-less copy and a plain Apply anyway — in the frozen-tab case, the
@@ -1111,7 +1119,8 @@ function initGear(post) {
     [['updateMode', upm], ['judgeModel', jm], ['judgeEffort', je], ['indexModel', im],
      ['indexEffort', ie], ['judgeConcurrency', jc], ['distillModel', dm], ['distillEffort', de], ['fileEditing', fe],
      ['compactSuggest', csg],
-     ['commentModel', cmm], ['commentEffort', cme], ['commentFast', cmf], ['tmuxBackend', tb]].forEach(function (pair) {
+     ['commentModel', cmm], ['commentEffort', cme], ['commentFast', cmf], ['tmuxBackend', tb],
+     ['judgeFast', jf]].forEach(function (pair) {
       var key = pair[0], el = pair[1];
       if (!el) return;
       var row = el.closest ? el.closest('.rs-row') : null;
@@ -1157,6 +1166,7 @@ function initGear(post) {
     if (typeof v.commentEffort === 'string') setShow(cme, v.commentEffort);
     if (cmf && typeof v.commentFast === 'string') cmf.checked = v.commentFast === 'on';
     if (tb && typeof v.tmuxBackend === 'string') { tb.checked = v.tmuxBackend === 'on'; paintBackendOffer(tb.checked); }   // T288: the offer, then the list follows it
+    if (jf && typeof v.judgeFast === 'string') jf.checked = v.judgeFast === 'on';   // RAW on/off: the kernel's persisted answer
     cmtFastGate(false);
     if (dd && typeof v.defaultDir === 'string') dd.value = v.defaultDir;   // the kernel's persisted default is authoritative
     // Browse… draws on the KERNEL's screen, and a kernel with no desktop has none — the click used to

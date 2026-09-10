@@ -46,8 +46,24 @@ test("the gear posts kernel ops through ONE shared channel (never re-acquires th
   assert.ok(!GEAR.includes("acquireVsCodeApi"), "a second acquire throws in a real webview");
   for (const op of ["setAutoNudge", "setJudgeModel", "setIndexModel", "setJudgeEffort", "setIndexEffort", "setJudgeConcurrency",
     "setDistillModel", "setDistillEffort", "setCommentModel", "setCommentEffort", "setCommentFast", "setTmuxBackend",
-    "setFileEditing", "setColormap", "setPalette", "setDefaultDir", "browseDir"])
+    "setJudgeFast", "setFileEditing", "setColormap", "setPalette", "setDefaultDir", "browseDir"])
     assert.ok(GEAR.includes(`'${op}'`), `gear must post ${op}`);
+});
+
+test("Fast judging is a kernel setting: a stamped emitter under its own store name, a toast name, a mixed mark, and it follows to every machine", () => {
+  assert.ok(GEAR.includes("post({ type: 'setJudgeFast', enabled: jf.checked, gt: gclock.stamp('judge-fast') })"),
+    "the click posts the kernel's designed message with the gesture stamp minted in the literal");
+  assert.ok(GEAR.includes("jf.checked = v.judgeFast === 'on'"),
+    "the checkbox shows the kernel's persisted answer (RAW on/off), never a page default");
+  assert.match(GEAR, /STALE_LABELS = \{[\s\S]*?'judge-fast': 'Fast judging'/,
+    "a stood-down gesture toasts under the row's own name");
+  assert.match(GEAR, /STALE_TYPE = \{[\s\S]*?'judge-fast': 'setJudgeFast'/,
+    "the store maps to its message type (the toast's Apply anyway whitelist)");
+  assert.match(GEAR, /\['judgeFast', jf\]/, "the row carries the mixed mark where machines disagree");
+  const FED = read("ui", "webview", "federation.ts");
+  const setSrc = FED.match(/const KERNEL_SETTING = new Set\(\[([\s\S]*?)\]\)/);
+  assert.ok(setSrc && setSrc[1].includes('"setJudgeFast"'),
+    "one click writes every attached kernel, like the other judge settings");
 });
 
 test("EVERY queued-class kernel setting is emitted with its gesture time (completeness-pinned to federation's own set)", () => {
