@@ -211,6 +211,39 @@ class SpendModalServed(unittest.TestCase):
         self.assertTrue(o["days"]["segs"] > 0 and not o["days"]["ylabels"][0].startswith("$"), "tokens on the toggle")
         self.assertTrue(any("/" in x for x in o["days"]["xlabels"]), "date labels on the daily range")
         self.assertIn("·", o["tip"], "a segment hover names value · session · bucket")
+        # T293 (the user 2026-09-09): the crosshair. Hovering the chart clear of every bar draws the hairline at the
+        # pointer's bucket and a stamp in words; the tooltip lists that bucket's sessions in spend order in their stack
+        # colours; over a bar the same box names the bar's session on its emphasised row; the marks take no pointer
+        # events, move nothing under the pointer, and leave with it
+        xh = o["xh"]
+        self.assertTrue(xh["lineShown"] and xh["stampShown"] and xh["tipShown"], xh)
+        self.assertRegex(xh["stamp"], r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) [A-Z][a-z]{2} \d{1,2}, \d{1,2} (AM|PM)$")
+        self.assertIn(xh["stamp"], xh["head"], "the tooltip's header carries the stamp")
+        self.assertTrue(xh["head"].startswith("$"), "the bucket's total leads: " + xh["head"])
+        self.assertGreaterEqual(len(xh["rows"]), 2, xh["rows"])
+        vals = [int(r["v"].replace("$", "").replace(",", "")) for r in xh["rows"] if r["v"].startswith("$")]
+        self.assertEqual(vals, sorted(vals, reverse=True), "spend order: " + json.dumps(xh["rows"]))
+        self.assertTrue(all(r["dot"] for r in xh["rows"]), "every row wears its stack's colour")
+        self.assertFalse(any(r["on"] for r in xh["rows"]), "no bar under the pointer, no emphasised row")
+        self.assertEqual((xh["lineInert"], xh["stampInert"], xh["tipInert"]), ("none", "none", "none"), "pointer-inert marks")
+        self.assertEqual(xh["stampFont"], "10px", "the surface's annotation size")
+        self.assertEqual(xh["chartH"], o["hBefore"], "nothing moves under the pointer")
+        self.assertNotEqual(xh["movedX1"], xh["x1"], "the line follows the pointer to another bucket")
+        self.assertTrue(xh["flip"], "near the right edge the stamp sits to the line's left")
+        self.assertEqual(o["xhAfter"], {"line": "none", "stamp": "none", "tip": "none"}, "all three leave with the pointer")
+        # the middle range is 7 days: the label, and seven local midnights on the axis (192 hours carried eight)
+        self.assertEqual(o["week"]["label"], "7 days · by hour")
+        self.assertEqual(len(o["out"]["xlabels"]), 7, o["out"]["xlabels"])
+        # the 1-day view stamps hours too; the 90-day view stamps dates and folds dozens of sessions into one line
+        self.assertRegex(o["xhDay"]["stamp"], r", \d{1,2} (AM|PM)$")
+        self.assertTrue(o["xhDay"]["tipShown"], o["xhDay"])
+        xd = o["xhDays"]
+        self.assertRegex(xd["stamp"], r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) [A-Z][a-z]{2} \d{1,2}$")
+        self.assertEqual(len(xd["rows"]), 6, "the top several: " + json.dumps(xd["rows"]))
+        self.assertRegex(xd["more"] or "", r"^\+\d+ more$")
+        # over a bar: the same box with the bar's row emphasised and named, the line still up
+        self.assertTrue(o["tipOn"]["name"], o["tipOn"])
+        self.assertTrue(o["tipOn"]["lineShown"])
         self.assertTrue(o["hiddenAfter"], "Escape closes it")
         self.assertTrue(o["hiddenAfterTap"], "a backdrop tap closes it")
         self.assertFalse(o["hiddenAfterDrag"], "…but a drag-select that ends over the backdrop does not (review find)")
