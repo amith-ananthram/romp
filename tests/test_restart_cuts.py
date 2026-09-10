@@ -433,6 +433,48 @@ class UnrequestedSignal(unittest.TestCase):
             self.assertEqual(km._unrequested_signal_reason(signal.SIGTERM, wait=0), km.SIGNAL_REASON_MANAGER_STOPPED,
                              "the reason comes back with the log line lost, not the other way round")
 
+    def test_a_stray_sigterm_with_a_quiet_park_on_record_does_not_spend_the_park(self):
+        # a quiet converge parked with the manager (the row _run_main_update writes), then a SIGTERM the
+        # manager did not send: no manager-sigterm note for this pid. The manager still holds the park and
+        # delivers it to whatever kernel runs at the quiet window, so the park is not this signal's request.
+        # Taking it stamped the park's t as auditT, and _consumed_audit_t then hid the park from every reader
+        # under this root (a sibling kernel sharing it, the successor's drift stand-down); the cut row named
+        # the deploy, no `signal` row was filed, and _last_deploy_restart_t counted a stray kill as a deploy
+        # landing. The signal is filed as unrequested and the park stays on record
+        t = int(time.time())
+        park = {"t": t, "action": "main-converge", "tag": "restart", "when": "quiet", "sha": "1111111"}
+        self.AUDIT.write_text(json.dumps(park) + "\n")
+        with mock.patch.dict(os.environ, {"ROMP_MANAGER_PID": str(os.getpid())}):   # alive, and wrote no note
+            self._fire()
+        rows = self._rows(self.AUDIT)
+        self.assertEqual([r["action"] for r in rows], ["main-converge", "signal"])
+        self.assertIs(rows[1]["managerStopped"], False)
+        cuts = self._rows(km.RESTART_CUTS_FILE)
+        self.assertEqual(len(cuts), 1)
+        self.assertEqual(cuts[0]["reason"], km.SIGNAL_REASON_UNREQUESTED)
+        self.assertNotIn("auditT", cuts[0], "the park is not consumed by a signal that did not deliver it")
+        self.assertEqual(km._recent_restart_audit(window=90, now=t, started=t - 10)["t"], t,
+                         "still the request on record for a sibling kernel or the successor")
+        self.assertEqual(km._parked_quiet_deploy("1111111", now=t), t, "the drift stand-down still holds")
+
+    def test_the_managers_delivery_of_a_quiet_park_consumes_it(self):
+        # the same park with the manager's restart-all note for this pid above it: that SIGTERM is the
+        # delivery, so the cut row names the park and consumes it, as it did before the stray-kill rule
+        t = int(time.time())
+        park = {"t": t, "action": "main-converge", "tag": "restart", "when": "quiet", "sha": "1111111"}
+        note = {"t": t, "action": "manager-sigterm", "kernel": "main", "pid": os.getpid(),
+                "reason": "restart", "trigger": "restart-all"}
+        self.AUDIT.write_text(json.dumps(park) + "\n" + json.dumps(note) + "\n")
+        with mock.patch.dict(os.environ, {"ROMP_MANAGER_PID": str(os.getpid())}):
+            self._fire()
+        self.assertEqual([r["action"] for r in self._rows(self.AUDIT)], ["main-converge", "manager-sigterm"],
+                         "delivered: no signal row")
+        cuts = self._rows(km.RESTART_CUTS_FILE)
+        self.assertEqual(len(cuts), 1)
+        self.assertEqual(cuts[0]["reason"], "main-converge")
+        self.assertEqual(cuts[0]["auditT"], t, "the park is consumed by the kernel the manager noted before killing it")
+        self.assertEqual(km._parked_quiet_deploy("1111111", now=t), 0, "and nothing is parked any more")
+
     def test_a_second_sigterm_mid_drain_does_not_write_a_second_row(self):
         # a service stop signals the kernel, then the manager's shutdownAll signals it again while the
         # first handler drains; the second invocation returns and the first finishes: ONE cut row
