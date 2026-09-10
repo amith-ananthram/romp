@@ -2138,51 +2138,99 @@ def _pid_alive(pid: int) -> bool:
 
 TEST_ROOT_PREFIX = "romp-tests-"
 TEST_ROOT_OWNER_MARKER = "romp-tests-owner.json"    # tests/conftest.py writes it at mint time
+TEST_ROOT_TOMBSTONE = ".sweeping"                   # a root renamed to <name>.sweeping is ours to finish deleting
+TEST_ROOT_SWEEP_BUDGET_S = 30.0                     # per boot; the rest waits for the next boot's sweep
 
 
-def sweep_dead_test_roots(tmpdir: str, log=None) -> int:
+def _rmtree_stubborn(root: str) -> None:
+    """rmtree that gets past a child with its permission bits cleared (a 000-mode directory some suite
+    tests create and restore only in a finally that an os._exit skipped): on the first failure at a
+    path, restore owner rwx on it and its parent and retry that step once. Raises on a second failure
+    so the caller can leave the tombstone standing and say so."""
+    def onexc(func, path, exc):
+        # `func` is whichever os call failed (3.12's fd-based rmtree hands over os.open, os.scandir,
+        # os.rmdir, os.unlink with their own signatures), so it is not called back: the subtree at
+        # `path` is removed again plainly after the chmod, and a second failure raises.
+        try:
+            os.chmod(os.path.dirname(path), 0o700)
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        elif os.path.lexists(path):
+            os.unlink(path)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(root, onexc=onexc)
+    else:                                               # pre-3.12 spelling: (func, path, exc_info)
+        shutil.rmtree(root, onerror=lambda func, path, ei: onexc(func, path, ei[1]))
+
+
+def sweep_dead_test_roots(tmpdir: str, log=None, budget_s: float = TEST_ROOT_SWEEP_BUDGET_S) -> int:
     """Remove the test suite's `romp-tests-*` temp roots under `tmpdir` whose OWNER IS DEAD; return the
     count removed. tests/conftest.py mints one root per run, redirects TMPDIR into it and removes it
     at run end — but a run that dies without reaching that removal (pytest-timeout's os._exit, a kernel
     restart cutting the tool shell, the cut-turn reaper's kill) leaves the whole root standing, and on
     a shared machine those roots piled into millions of files that the next boot's /tmp cleanup spent
-    39 minutes deleting (2026-09-10). Nothing in the dead run can clean up, so the kernel does, at boot
-    reconcile: it already reaps orphaned CLIs and leftover scopes there.
+    39 minutes deleting (2026-09-10). Nothing in the dead run can clean up, so the kernel does, from
+    boot reconcile — AFTER the session pass and on its own thread (a dead pile is minutes of rmtree;
+    the orphan-CLI reap and the cut-session resumes must not wait behind it), within `budget_s` per
+    boot: whatever is left waits for the next boot, and the count left is logged.
     The marker inside the root names the owning pid. A root whose pid is ALIVE is a run in progress
     and stays (a sibling test kernel booting inside a run's TMPDIR sees the run's own live root); a
     root with NO marker, or one this code cannot read, stays too — the sweep cannot tell a foreign
     directory or a pre-marker root from a leak, and refusing is the safe direction. Only a readable
-    marker naming a dead pid is a leak by construction. Never raises; a failure is logged and skipped.
-    Under the test suite the kernel's own tmpdir IS a run's root (TMPDIR is redirected), so the sweep
-    never reaches the real system temp dir from inside a test."""
+    marker naming a dead pid is a leak by construction.
+    Deleting is two steps so a partial failure can never strand a marker-less root the sweep would
+    then refuse forever: the root is first RENAMED to a tombstone (`<name>.sweeping`, which this sweep
+    owns outright and deletes on every boot regardless of marker), then removed; a child that resists
+    (a 000-mode directory) is chmod'ed and retried once, and a survivor is logged on EVERY boot, never
+    silently skipped. Never raises. Under the test suite the kernel's own tmpdir IS a run's root
+    (TMPDIR is redirected), so the sweep never reaches the real system temp dir from inside a test."""
     swept = 0
+    deadline = time.monotonic() + max(0.0, float(budget_s))
     try:
-        names = os.listdir(tmpdir)
+        names = sorted(os.listdir(tmpdir))
     except OSError:
         return 0
+    todo = []                                           # (path, is_tombstone)
     for name in names:
         if not name.startswith(TEST_ROOT_PREFIX):
             continue
         root = os.path.join(tmpdir, name)
-        marker = os.path.join(root, TEST_ROOT_OWNER_MARKER)
         try:
             if os.path.islink(root) or not os.path.isdir(root):
                 continue
-            with open(marker, "r", encoding="utf-8") as fh:
+        except OSError:
+            continue
+        if name.endswith(TEST_ROOT_TOMBSTONE):
+            todo.append((root, True))                   # a previous sweep's unfinished delete
+            continue
+        try:
+            with open(os.path.join(root, TEST_ROOT_OWNER_MARKER), "r", encoding="utf-8") as fh:
                 pid = int(json.load(fh)["pid"])
         except (OSError, ValueError, TypeError, KeyError):
             continue                                    # no marker, or not one we wrote: not ours to remove
         if pid == os.getpid() or _pid_alive(pid):
             continue
+        todo.append((root, False))
+    left = 0
+    for i, (root, is_tomb) in enumerate(todo):
+        if time.monotonic() > deadline:
+            left = len(todo) - i
+            break
+        tomb = root if is_tomb else root + TEST_ROOT_TOMBSTONE
         try:
-            shutil.rmtree(root, ignore_errors=True)
-            if not os.path.isdir(root):
-                swept += 1
-            elif log:
-                log("boot reconcile: dead test root not fully removed: %s" % root)
-        except Exception as e:                          # rmtree(ignore_errors) should not raise; belt and braces
+            if not is_tomb:
+                os.rename(root, tomb)                   # claim it: from here on the marker no longer matters
+            _rmtree_stubborn(tomb)
+            swept += 1
+        except OSError as e:
             if log:
-                log("boot reconcile: dead test root %s: %s" % (root, e))
+                log("boot reconcile: dead test root not removed (will retry next boot): %s: %s" % (tomb, e))
+    if left and log:
+        log("boot reconcile: test-root sweep budget (%.0fs) spent — %d dead root(s) left for the next boot"
+            % (budget_s, left))
     return swept
 
 
@@ -8106,13 +8154,6 @@ class SdkBackend:
                 except Exception:
                     self._log("boot reconcile: cwdPending heal for %s failed: %s"
                               % (r.get("sid"), traceback.format_exc()))
-        # Dead-owner test roots: `romp-tests-*` dirs left in the temp dir by suites that died without
-        # their run-end cleanup (see sweep_dead_test_roots). Independent of the sessions below.
-        try:
-            swept_roots = sweep_dead_test_roots(tempfile.gettempdir(), self._log)
-        except Exception:
-            swept_roots = 0
-            self._log("boot reconcile: test-root sweep failed (continuing): %s" % traceback.format_exc())
         try:
             alive = [r for r in regs if r.get("alive") and r.get("sid")]
             reaped = 0
@@ -8219,11 +8260,11 @@ class SdkBackend:
                 except Exception:
                     self._log("boot reconcile: session %s failed (sweep continues): %s"
                               % (r.get("sid"), traceback.format_exc()))
-            if reaped or resumed or restored or notified or scopes_stopped or swept_roots:
+            if reaped or resumed or restored or notified or scopes_stopped:
                 self._log("boot reconcile: resumed %d cut turn(s), restored %d queued message(s), "
                           "notified %d session(s) of dead background tasks, reaped %d orphaned CLI(s) with their "
-                          "process trees, stopped %d leftover session scope(s), swept %d dead test root(s)"
-                          % (resumed, restored, notified, reaped, scopes_stopped, swept_roots))
+                          "process trees, stopped %d leftover session scope(s)"
+                          % (resumed, restored, notified, reaped, scopes_stopped))
                 self._poke()
             # STAGGERED spawn (see BOOT_RESUME_CONCURRENCY): every reg above is already fixed —
             # queues persisted, heals applied — so even a death mid-stagger loses nothing (the next
@@ -8255,6 +8296,21 @@ class SdkBackend:
                               % (sid, traceback.format_exc()))
         except Exception:
             self._log("boot reconcile failed: %s" % traceback.format_exc())
+        # Dead-owner test roots (see sweep_dead_test_roots) — LAST, and off this thread: the reap and
+        # the resumes above close the two-writers window and re-deliver cut sessions' queues, and a
+        # dead pile of roots is minutes of rmtree that must never sit in front of them. Budgeted per
+        # boot; the remainder waits for the next boot. Daemon: a kernel shutdown does not wait on it.
+        self._start_test_root_sweep()
+
+    def _start_test_root_sweep(self) -> None:
+        def run():
+            try:
+                n = sweep_dead_test_roots(tempfile.gettempdir(), self._log)
+                if n:
+                    self._log("boot reconcile: swept %d dead test root(s) from %s" % (n, tempfile.gettempdir()))
+            except Exception:
+                self._log("boot reconcile: test-root sweep failed: %s" % traceback.format_exc())
+        threading.Thread(target=run, name="test-root-sweep", daemon=True).start()
 
     def drive_idle_queue(self, cands, wait: bool = False) -> None:
         """Deliver wake signals stuck in a STUCK-regime session's CLI queue (the user 2026-08-18; the

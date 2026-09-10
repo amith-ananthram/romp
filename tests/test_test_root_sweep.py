@@ -20,7 +20,9 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 from romp_load import load_source
 
@@ -104,6 +106,53 @@ class DeadOwnerSweep(unittest.TestCase):
     def test_missing_tmpdir_is_a_no_op(self):
         self.assertEqual(sb.sweep_dead_test_roots(os.path.join(self.tmp, "absent")), 0)
 
+    def test_a_stubborn_child_is_chmoded_and_removed(self):
+        # A 000-mode directory inside the root (suite tests make one and restore it only in a
+        # finally that os._exit skips): rmtree fails on it once, the sweep restores owner rwx and
+        # retries, and the whole root goes.
+        dead = _root(self.tmp, "romp-tests-stubborn", {"pid": _dead_pid()})
+        locked = os.path.join(dead, "deep", "locked")
+        os.makedirs(locked)
+        with open(os.path.join(locked, "inner.txt"), "w") as fh:
+            fh.write("x")
+        os.chmod(locked, 0o000)
+        try:
+            self.assertEqual(sb.sweep_dead_test_roots(self.tmp), 1)
+        finally:
+            if os.path.isdir(locked):
+                os.chmod(locked, 0o700)
+        self.assertFalse(os.path.exists(dead))
+
+    def test_a_leftover_tombstone_is_removed_without_a_marker(self):
+        # A previous boot renamed the root and died before finishing: the tombstone is ours by name.
+        tomb = _root(self.tmp, "romp-tests-old" + sb.TEST_ROOT_TOMBSTONE)
+        self.assertEqual(sb.sweep_dead_test_roots(self.tmp), 1)
+        self.assertFalse(os.path.exists(tomb))
+
+    def test_rename_first_so_a_failed_delete_leaves_a_tombstone_not_a_markerless_root(self):
+        dead = _root(self.tmp, "romp-tests-fails", {"pid": _dead_pid()})
+        logs = []
+        with mock.patch.object(sb, "_rmtree_stubborn", side_effect=OSError("still busy")):
+            self.assertEqual(sb.sweep_dead_test_roots(self.tmp, log=logs.append), 0)
+        self.assertFalse(os.path.exists(dead), "the root was claimed by rename before the delete ran")
+        tomb = dead + sb.TEST_ROOT_TOMBSTONE
+        self.assertTrue(os.path.isdir(tomb))
+        self.assertTrue(any("not removed" in l and tomb in l for l in logs), logs)
+        # ...and the next sweep finishes it, marker or no marker, and says nothing.
+        logs.clear()
+        self.assertEqual(sb.sweep_dead_test_roots(self.tmp, log=logs.append), 1)
+        self.assertFalse(os.path.exists(tomb))
+        self.assertEqual(logs, [])
+
+    def test_the_per_boot_budget_leaves_the_rest_for_the_next_boot_and_says_so(self):
+        for i in range(3):
+            _root(self.tmp, "romp-tests-b%d" % i, {"pid": _dead_pid()})
+        logs = []
+        self.assertEqual(sb.sweep_dead_test_roots(self.tmp, log=logs.append, budget_s=0), 0)
+        self.assertEqual(sum(1 for n in os.listdir(self.tmp) if n.startswith("romp-tests-b")), 3)
+        self.assertTrue(any("budget" in l and "3 dead root(s) left" in l for l in logs), logs)
+        self.assertEqual(sb.sweep_dead_test_roots(self.tmp, log=logs.append), 3)
+
 
 @unittest.skipUnless(os.environ.get("ROMP_TESTS_SYSTEM_TMPDIR"), "conftest not loaded (bare unittest run)")
 class RunningSuiteIsMarked(unittest.TestCase):
@@ -116,13 +165,9 @@ class RunningSuiteIsMarked(unittest.TestCase):
             m = json.load(fh)
         self.assertEqual(m["pid"], os.getpid())
         self.assertGreater(m["started"], 0)
-        # ...and so the sweep, run over the dir that holds our root, leaves it alone.
-        parent = os.path.dirname(root)
-        before = set(os.listdir(parent))
-        sb.sweep_dead_test_roots(parent)
-        self.assertTrue(os.path.isdir(root))
-        self.assertTrue(os.path.basename(root) in os.listdir(parent))
-        self.assertLessEqual(set(os.listdir(parent)), before)   # it only ever removes, never adds
+        # ...which is the pid the sweep would test, and it is alive, so a sweep would keep this root
+        # (test_live_owner_root_stays pins that in a private arena; the real temp dir is never swept here).
+        self.assertTrue(sb._pid_alive(m["pid"]))
 
     def test_marker_name_agrees_with_conftest(self):
         conftest = sys.modules.get("tests.conftest") or sys.modules.get("conftest")
@@ -131,10 +176,33 @@ class RunningSuiteIsMarked(unittest.TestCase):
 
 
 class BootReconcileCallsIt(unittest.TestCase):
-    def test_boot_reconcile_sweeps_the_system_temp_dir(self):
+    def test_boot_reconcile_starts_the_sweep_last_and_off_thread(self):
+        # Order pinned in the source: the sweep starts AFTER the resume loop (the reap and the cut
+        # sessions' queue re-delivery must never wait behind minutes of rmtree), and on a daemon
+        # thread of its own, over the system temp dir, with the per-boot budget default.
         src = inspect.getsource(sb.SdkBackend._boot_reconcile)
-        self.assertIn("sweep_dead_test_roots(tempfile.gettempdir()", src)
-        self.assertIn("swept %d dead test root(s)", src)
+        self.assertIn("self._start_test_root_sweep()", src)
+        self.assertGreater(src.index("self._start_test_root_sweep()"), src.index("for sid in to_start"))
+        starter = inspect.getsource(sb.SdkBackend._start_test_root_sweep)
+        self.assertIn("sweep_dead_test_roots(tempfile.gettempdir()", starter)
+        self.assertIn("daemon=True", starter)
+
+    def test_the_starter_runs_the_sweep_on_a_thread_and_logs_the_count(self):
+        arena = tempfile.mkdtemp(prefix="sweep-arena-")
+        _root(arena, "romp-tests-t", {"pid": _dead_pid()})
+        logs = []
+        be = mock.Mock(spec=[])
+        be._log = logs.append
+        with mock.patch.object(sb.tempfile, "gettempdir", return_value=arena):
+            sb.SdkBackend._start_test_root_sweep(be)
+            deadline = time.monotonic() + 5
+            while os.path.exists(os.path.join(arena, "romp-tests-t")) and time.monotonic() < deadline:  # loop-ok: bounded test wait
+                time.sleep(0.02)
+        self.assertFalse(os.path.exists(os.path.join(arena, "romp-tests-t")))
+        deadline = time.monotonic() + 2
+        while not logs and time.monotonic() < deadline:  # loop-ok: bounded test wait
+            time.sleep(0.02)
+        self.assertTrue(any("swept 1 dead test root(s)" in l for l in logs), logs)
 
 
 if __name__ == "__main__":
