@@ -229,10 +229,15 @@ class ApiHealthCell(unittest.TestCase):
         self.assertLess(i_api, i_acts, "inside .rail-scroll, before the pinned actions")
         self.assertGreater(i_api, self.html.index("<div class=rail-scroll>"))
 
-    def test_the_cell_ships_hidden_with_its_own_label_a_dot_and_the_word(self):
-        tag = ('<div id=rail-api class="ru-w ru-ah" hidden role=button tabindex=0 aria-label="API ok" data-state=ok>'
-               '<span class=ru-name>API</span><i class=ah-dot></i><span class=ah-text>ok</span></div>')
-        self.assertTrue(tag in self.html, "the cell's markup: hidden, a keyboard button, its own label, a dot, the word")
+    def test_the_cell_ships_hidden_as_a_dot_alone(self):
+        # T301 (the user 2026-09-10): no second API word and no "ok"; the dot moves into the spend readout's slot
+        # (.ah-slot, right after the readout's own API label) whenever that readout renders
+        tag = ('<div id=rail-api class="ru-w ru-ah" hidden role=button tabindex=0 aria-label="API health" data-dot=fine>'
+               '<i class=ah-dot></i></div>')
+        self.assertTrue(tag in self.html, "the cell's markup: hidden, a keyboard button, a dot and nothing else")
+        self.assertNotIn(".ah-text", self.html, "no word beside the dot")
+        self.assertIn("<div class=ru-name>API</div><span class=ah-slot></span>", self.html, "the readout's slot for the dot")
+        self.assertIn(".ah-slot{display:inline-flex;align-items:center}", self.html)
         tag = re.search(r"<div id=rail-api[^>]*>", self.html).group(0)
         self.assertNotIn("title", tag, "the rail's no-title rule: the detail is the one hover surface")
         self.assertNotIn("data-keycmd", tag, "no palette command yet")
@@ -244,21 +249,18 @@ class ApiHealthCell(unittest.TestCase):
         self.assertTrue(".ru-w{display:flex;" in self.html, "the author display rule the attribute must beat")
         self.assertTrue("#rail-api[hidden]{display:none}" in self.html, "no author [hidden] rule for #rail-api")
 
-    def test_the_word_wears_the_usage_cell_s_exact_font(self):
-        pct = re.search(r"\.ru-pct\{([^}]*)\}", self.html).group(1)
-        txt = re.search(r"\.ah-text\{([^}]*)\}", self.html).group(1)
-        self.assertEqual(pct, txt, "byte for byte: no new font size on the rail")
-        self.assertIn("#rail-api[data-state=ok] .ah-text{color:#9aa4ad}", self.html, "ok in the label gray")
-        self.assertIn("body.theme-light .ah-text{color:#1F1E1D}", self.html)
-        self.assertIn("body.theme-light #rail-api[data-state=ok] .ah-text{color:#5D574E}", self.html)
-        self.assertIn("#rail-api{cursor:pointer;margin-left:4px}", self.html)
+    def test_the_cell_adds_no_font_size_and_sits_in_the_readout_s_slot(self):
+        self.assertNotIn(".ah-text", self.html, "T301: no word on the rail, so no font rule for one")
+        self.assertIn("#rail-api{cursor:pointer;margin:0 1px;padding:4px 2px}", self.html, "a 15 px hit target around a 7 px dot")
 
-    def test_the_dot_wears_status_hexes_never_the_accent(self):
-        self.assertIn(".ah-dot{width:7px;height:7px;border-radius:50%;background:#9aa4ad;opacity:.55;flex:0 0 auto}", self.html)
-        self.assertIn("#rail-api[data-state=degraded] .ah-dot,.ah-dot[data-state=degraded]{background:#e67e22;opacity:1}", self.html)
-        self.assertIn("#rail-api[data-state=paused] .ah-dot,.ah-dot[data-state=paused]{background:#e5484d;opacity:1}", self.html)
-        for rule in re.findall(r"[^{}]*\.ah-dot[^{}]*\{[^}]*\}", self.html):
-            self.assertNotIn("var(--accent)", rule, "status colors keep their own meaning")
+    def test_the_dot_wears_the_accent_when_fine_and_the_status_tokens_otherwise(self):
+        # T301 (the user 2026-09-10): the fine dot IS the romp accent; errors the blocked red; quiet the label gray;
+        # every colour through a token with a fallback for a var-less harness
+        self.assertIn(".ah-dot{width:7px;height:7px;border-radius:50%;background:var(--dim,#9aa4ad);opacity:.55;flex:0 0 auto}", self.html)
+        self.assertIn("#rail-api[data-dot=fine] .ah-dot,.ah-dot[data-dot=fine]{background:var(--accent,#9cd2ff);opacity:1}", self.html)
+        self.assertIn("#rail-api[data-dot=errors] .ah-dot,.ah-dot[data-dot=errors]{background:var(--st-blocked-bg,#e5484d);opacity:1}", self.html)
+        self.assertIn("#rail-api[data-dot=quiet] .ah-dot,.ah-dot[data-dot=quiet]{background:var(--dim,#9aa4ad);opacity:.55}", self.html)
+        self.assertNotIn("data-state=degraded", self.html, "the machine's words are not colours any more")
 
     def test_the_light_theme_keeps_the_ok_dot_visible_and_the_state_dots_their_colors(self):
         # the dark label gray at .55 blends into the light rail; the light label color keeps the glyph. Scoped to
@@ -266,11 +268,11 @@ class ApiHealthCell(unittest.TestCase):
         # rules (0,2,0), and the card's headline dot would lose its amber and red. The History head shows the signal's
         # quiet states (healthy, unknown) with the same glyph, so the rule names them too (the base gray falls to
         # about 1.6:1 on the white tip)
-        self.assertTrue("body.theme-light #rail-api[data-state=ok] .ah-dot,body.theme-light .ah-dot[data-state=ok],"
-                        "body.theme-light .ah-dot[data-state=healthy],body.theme-light .ah-dot[data-state=unknown]{background:#5D574E}" in self.html,
-                        "the light override names the ok state and the History head's quiet states")
+        # T301: the quiet dot alone needs the light override (fine and errors read on white as they are)
+        self.assertTrue("body.theme-light #rail-api[data-dot=quiet] .ah-dot,body.theme-light .ah-dot[data-dot=quiet]{background:#5D574E}" in self.html,
+                        "the light override names the quiet state, on the rail and in the popup alike")
         self.assertNotIn("body.theme-light .ah-dot{", self.html, "no bare light rule on the dot")
-        self.assertNotIn("body.theme-light .ah-dot[data-state=degraded]", self.html, "the state rules are not restated per theme")
+        self.assertNotIn("body.theme-light .ah-dot[data-dot=errors]", self.html, "the state rules are not restated per theme")
 
     def test_the_shell_socket_carries_the_dashboard_s_wid_minted_before_it_connects(self):
         # the detail's openSession rides the shell socket; with no wid on it the kernel's reveal would fall to the

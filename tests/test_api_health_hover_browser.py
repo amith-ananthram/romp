@@ -74,8 +74,11 @@ SID = "11111111-2222-4333-8444-000000000001"      # a placeholder sid for the fr
 
 
 def _win(requests, r429, r5xx, gave, sess, complete=True, no_status=0):
-    return {"complete": complete, "requests": requests, "ok": requests, "rateLimited": 0, "overloaded": 0,
-            "serverErrors": 0, "otherErrors": 0, "noStatus": no_status, "gaveUp": gave, "retries": 0,
+    # the counts follow the rates (T301: the reading counts the failures; the old fixture carried rates alone)
+    n429 = int(round(requests * (r429 or 0))) if requests else 0
+    n5xx = int(round(requests * (r5xx or 0))) if requests else 0
+    return {"complete": complete, "requests": requests, "ok": requests - n429 - n5xx, "rateLimited": n429, "overloaded": 0,
+            "serverErrors": n5xx, "otherErrors": 0, "noStatus": no_status, "gaveUp": gave, "retries": n429 + n5xx,
             "sessionsRetrying": sess, "turnsRetrying": sess, "rate429": r429, "rate5xx": r5xx}
 
 
@@ -136,13 +139,13 @@ PAYLOADS = {
                     buckets={KEY: _bucket(KEY, "thrashing", NOW - 300, WHY, STORM_WINS),
                              OTHER: _bucket(OTHER, "healthy", NOW - 500, None, {"60": _win(11, 0.0, 0.0, 0, 0), "300": _win(11, 0.0, 0.0, 0, 0), "900": _win(11, 0.0, 0.0, 0, 0, complete=False)})},
                     transitions=[_tr(NOW - 500, OTHER, "unknown", "healthy"), _tr(NOW - 300, KEY, "unknown", "thrashing")]),
-    # this machine cannot reach the API: every attempt fails at the connection level, so `requests` (attempts WITH
-    # a status) is 0 while noStatus, gaveUp and sessionsRetrying are not; the 5 min window mixes both kinds; the
-    # 15 min window is quiet
+    # this machine cannot reach the API: attempts fail at the connection level, so `requests` (attempts WITH a
+    # status) is small while noStatus, gaveUp and sessionsRetrying are not; the windows NEST (the 15 min window
+    # holds everything the 5 min one does), as a real document's do
     "offline": _base(overall={"state": "unknown", "worstBucket": KEY},
                      buckets={KEY: _bucket(KEY, "unknown", NOW - 200, FEW, {"60": _win(0, None, None, 1, 2, no_status=5),
                                                                           "300": _win(8, 0.25, 0.0, 1, 2, no_status=7),
-                                                                          "900": _win(0, None, None, 0, 0, complete=False)})},
+                                                                          "900": _win(8, 0.25, 0.0, 1, 2, no_status=7, complete=False)})},
                      transitions=[_tr(NOW - 500, KEY, "unknown", "healthy"), _tr(NOW - 200, KEY, "healthy", "unknown", FEW)]),
     # a bucket unknown since before the boot with nothing since: the boot found it unknown, filed no row and seeded
     # its stateSince from the kernel's boot clock (bootAt itself; the backend is seeded with it); the read that
@@ -243,15 +246,20 @@ const ev = (fn, arg) => page.evaluate(fn, arg);
 const rows = () => ev(() => Array.from(document.querySelectorAll("#ah-tip .ah-hist .ah-hrow")).map((n) => ({
   k: (n.querySelector(".ru-tip-k") || {}).textContent || "", w: n.querySelector(".ah-hword") ? n.querySelector(".ah-hword").textContent : null,
   v: n.querySelector(".ru-tip-v") ? n.querySelector(".ru-tip-v").textContent : null, boot: n.classList.contains("ah-boot") })));
-const head = () => ev(() => { const h = document.querySelector("#ah-tip .ah-hist");
+// T301: the reading sits in the FIRST section's head (word + dot); the History section holds the legend, the graph
+// (when the document carries a series), the machine lines with several hosts, and this machine's State changes
+const head = () => ev(() => { const h = document.querySelector("#ah-tip .ah-hist"), top = document.querySelector("#ah-tip > .ru-tip-win");
   const q = (s) => { const n = h && h.querySelector(s); return n ? n.textContent : null; };
-  return { word: q(".ah-head .ah-word"), dot: h && h.querySelector(".ah-head .ah-dot") ? h.querySelector(".ah-head .ah-dot").getAttribute("data-state") : null,
-           since: q(".ah-since"), sub: q(".ah-hsub"), why: q(".ah-line.ru-tip-reset"), asOf: q(".ru-tip-name .ru-tip-reset"),
-           line: q(".ah-line:not(.ru-tip-reset):not(.ah-err)"), err: q(".ah-err"), wait: !!(h && h.querySelector(".ah-wait")),
+  const qt = (s) => { const n = top && top.querySelector(s); return n ? n.textContent : null; };
+  return { word: qt(".ah-head .ah-word"), dot: top && top.querySelector(".ah-head .ah-dot") ? top.querySelector(".ah-head .ah-dot").getAttribute("data-dot") : null,
+           since: qt(".ah-since"), sub: qt(".ah-line.ru-tip-reset"), title: qt(".ru-tip-name span"), asOf: q(".ru-tip-name .ru-tip-reset"),
+           legend: q(".ah-legend"), graphs: h ? h.querySelectorAll(".ru-tip-graph").length : 0, err: q(".ah-err"), wait: !!(h && h.querySelector(".ah-wait")),
+           mlines: Array.from(document.querySelectorAll("#ah-tip .ah-mline")).map((n) => n.textContent),
+           unknown: /unknown/i.test(document.getElementById("ah-tip").innerText),
            names: Array.from(h ? h.querySelectorAll(".ru-tip-name span:first-child") : []).map((n) => n.textContent) }; });
 const shown = () => ev(() => document.getElementById("ah-tip").style.display === "block");
 // the colours the theme resolves to, read from the computed style of the head's dot and of the failure line
-const dotColor = () => ev(() => getComputedStyle(document.querySelector("#ah-tip .ah-hist .ah-head .ah-dot")).backgroundColor);
+const dotColor = () => ev(() => getComputedStyle(document.querySelector("#ah-tip > .ru-tip-win .ah-head .ah-dot")).backgroundColor);
 const errColor = () => ev(() => getComputedStyle(document.querySelector("#ah-tip .ah-hist .ah-err")).color);
 const described = () => ev(() => document.getElementById("rail-api").getAttribute("aria-describedby"));
 // the tip's role and modal flag, whether focus sits inside it, and whether it is the centered card
@@ -285,7 +293,8 @@ const geo = () => ev(() => { const tip = document.getElementById("ah-tip"), t = 
 // answer), so a step can wait for an answer to have landed in the script rather than for a fetch to have started.
 // __restoreFetch puts the wrapper back after a step swapped fetch out.
 await ev(() => { const real = window.fetch; window.__fetchN = 0; window.__doneN = 0; window.__realFetch = real;
-  window.__restoreFetch = function () { window.fetch = function (u) { const api = String(u).indexOf("/api-health") === 0; if (api) window.__fetchN++;
+  window.__lastUrls = [];
+  window.__restoreFetch = function () { window.fetch = function (u) { const api = String(u).indexOf("/api-health") === 0; if (api) window.__fetchN++; window.__lastUrls.push(String(u));
     const p = real.apply(window, arguments);
     return api ? p.then((r) => { const j = r.json.bind(r); r.json = () => j().then((d) => { window.__doneN++; return d; }); return r; }) : p; }; };
   window.__restoreFetch(); });
@@ -309,7 +318,7 @@ await step("quiet", async () => {
 });
 await step("empty", async () => {
   // 3. no bucket: the head says so, no rows
-  await show("empty"); await waitSel("#ah-tip .ah-hist .ah-line");
+  await show("empty"); await waitSel("#ah-tip .ah-hist .ah-legend");
   R.empty = { head: await head(), rows: await rows() };
   await leave();
 });
@@ -429,6 +438,17 @@ await step("order", async () => {
   R.order = await ev(() => Array.from(document.querySelectorAll("#ah-tip > .ru-tip-win")).map((w) => { const n = w.querySelector(".ru-tip-name span"); return n ? n.textContent : w.textContent.slice(0, 24); }));
   await leave();
   await ev((f) => { window.__rompApiHealth(f); }, frame());
+});
+await step("hosts", async () => {
+  // 11b. T301: a frame carrying an attached host's frame reads that host's document through the relay and names
+  //      every machine: the section counts them, the dot is the worst state, the History carries a line per machine
+  await ev((f) => { window.__rompApiHealth(f); }, frame({ hosts: { TESTHOST: { state: "degraded", cls: "429", text: "rate limited · 2 waiting", waiting: 2, retrying: 2, blocked: 0, since: NOW_PLACEHOLDER, reason: "", tmux: 0, stale: false } } }));
+  await variant("quiet");
+  await enter(); await waitSel("#ah-tip .ah-hist .ah-legend");
+  R.hosts = { head: await head(), rows: await rows(), fetched: await ev(() => window.__lastUrls || null) };
+  await leave();
+  await ev((f) => { window.__rompApiHealth(f); }, frame());
+  await variant("storm");
 });
 await step("focus", async () => {
   // 12. keyboard focus shows the hover as the pointer does; blur hides it. The focus and the look at the description
@@ -610,6 +630,12 @@ class _Lab(http.server.SimpleHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/api-health":
             return self._json(PAYLOADS[self.variant[0]])
+        if path == "/remote/TESTHOST/api-health":            # T301: an attached host's document through the relay
+            return self._json(PAYLOADS["storm"])
+        if path == "/dist/api-health-global.js":            # the merge + reading rules the shell script reads
+            body = open(os.path.join(EXT, "dist", "api-health-global.js"), "rb").read()
+            self.send_response(200); self.send_header("Content-Type", "application/javascript")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if path.startswith("/variant/"):
             name = path.rsplit("/", 1)[1]
             if name in PAYLOADS:
@@ -627,6 +653,10 @@ class ServedHistory(unittest.TestCase):
         if not os.path.isdir(os.path.join(EXT, "node_modules", "playwright")):
             raise unittest.SkipTest("extension deps absent (npm ci not run here): the served hover needs a browser")
         cls.lab = tempfile.mkdtemp(prefix="apih-hover-browser-")
+        if not os.path.exists(os.path.join(EXT, "dist", "api-health-global.js")):
+            b = subprocess.run(["node", "esbuild.js"], cwd=EXT, capture_output=True, text=True)
+            if b.returncode != 0:
+                raise unittest.SkipTest("esbuild failed here: " + (b.stderr or b.stdout)[-200:])
         html = km._landing()
         with open(os.path.join(cls.lab, "index.html"), "w") as f:
             f.write(html if isinstance(html, str) else html.decode("utf-8"))
@@ -677,164 +707,147 @@ class ServedHistory(unittest.TestCase):
             self.assertEqual(R[name + "Rows0"], 0, name)
         self.assertEqual(R["racePending"], 2, "enter, leave, enter: two reads in flight")
         self.assertTrue(R["raceAfterOld"]["wait"], "the older answer landing first is dropped: the dots stay")
-        self.assertIsNone(R["raceAfterOld"]["word"])
-        self.assertEqual(R["raceAfterNew"]["word"], "healthy", "the newer read's answer is what shows")
+        self.assertEqual(R["raceAfterOld"]["word"], "Fine.", "and the head still reads the frame's own word")
+        self.assertEqual(R["raceAfterNew"]["word"], '30 requests in the last 15 min, all succeeded.', "the newer read's answer is what shows")
         self.assertFalse(R["raceAfterNew"]["wait"])
 
-    def test_the_storm_reads_as_state_since_why_windows_and_the_tail_with_its_restart_row(self):
+    def test_the_storm_reads_in_plain_words_with_the_legend_and_the_tail_with_its_restart_row(self):
+        # T301: no per-window rows and no state-machine word: the head says what happened over the longest window
+        # (the counts, the machine's verdict as a plain phrase), the dot is red for a window in errors even with
+        # nothing waiting right now, the legend explains the codes, and the tail is capped at four in plain words
         h, rows = self.R["storm"]["head"], self.R["storm"]["rows"]
-        self.assertEqual((h["word"], h["dot"]), ("thrashing", "thrashing"))
-        self.assertEqual(h["since"], "since " + _hmd(NOW - 300))
-        self.assertEqual(h["why"], WHY)
-        self.assertIsNone(h["sub"], "one bucket: no bucket name, no count")
+        self.assertEqual((h["word"], h["dot"]), ('Rate-limit storm: 9 rate-limited attempts, 1 server error among 45 attempts in the last 15 min; 1 turn gave up.', "errors"))
+        self.assertEqual(h["title"], "API health", "one machine: no count")
+        self.assertIsNone(h["since"], "the frame is ok: no since on the head")
+        self.assertIsNone(h["sub"], "the machine has a verdict: no trend caveat")
         self.assertEqual(h["asOf"], "as of " + time.strftime("%H:%M:%S", time.localtime(NOW)))
         self.assertEqual(h["names"], ["History", "State changes"])
-        wins = rows[:3]
-        self.assertEqual([r["k"] for r in wins], ["1 min", "5 min", "15 min · kernel up 10 min"],
-                         "the third window outreaches the uptime and says so")
-        self.assertEqual([r["v"] for r in wins],
-                         ["4 attempts · 50% 429 · 0% 5xx · 0 gave up · 1 session retried",
-                          "20 attempts · 40% 429 · 0% 5xx · 1 gave up · 2 sessions retried",
-                          "45 attempts · 20% 429 · 2% 5xx · 1 gave up · 2 sessions retried"],
-                         "the window's totals in the window's tense")
-        self.assertTrue(all(r["w"] is None and not r["boot"] for r in wins))
-        tail = rows[3:]
-        self.assertEqual([(r["k"], r["w"], r["v"], r["boot"]) for r in tail],
-                         [(_hmd(NOW - 300), "thrashing", "5 min so far", False),
-                          (_hmd(BOOT + 1), "unknown · kernel restarted", "5 min", False),
-                          (_hmd(NOW - 1200), "thrashing", "10 min", False),
-                          (_hmd(NOW - 3000), "healthy", "30 min", False)],
+        self.assertEqual(h["legend"], "429 = the API told us to slow down (rate limit) · 5xx = the API itself failed (server error) · offline = no connection")
+        self.assertEqual(h["graphs"], 0, "this fixture carries no series: no graph")
+        self.assertFalse(h["unknown"], "the word never reaches the user")
+        self.assertEqual([(r["k"], r["w"], r["v"], r["boot"]) for r in rows],
+                         [(_hmd(NOW - 300), "rate-limit storm", "5 min so far", False),
+                          (_hmd(BOOT + 1), "quiet · kernel restarted", "5 min", False),
+                          (_hmd(NOW - 1200), "rate-limit storm", "10 min", False),
+                          (_hmd(NOW - 3000), "fine", "30 min", False)],
                          "newest first; each state held until the bucket's next change; the boot's own row names the restart, so no divider")
 
     def test_a_tail_crossing_boot_at_without_a_restart_row_gets_the_divider_and_the_hold_ends_at_the_boot(self):
         h, rows = self.R["quiet"]["head"], self.R["quiet"]["rows"]
-        self.assertEqual(h["word"], "healthy")
-        self.assertIsNone(h["why"], "no reason line when the bucket has none")
-        tail = rows[3:]
-        self.assertEqual([(r["k"], r["w"], r["v"], r["boot"]) for r in tail],
-                         [(_hmd(NOW - 100), "healthy", "2 min so far", False),
+        self.assertEqual((h["word"], h["dot"]), ('30 requests in the last 15 min, all succeeded.', "fine"))
+        self.assertIsNone(h["sub"], "healthy: no trend caveat")
+        self.assertEqual([(r["k"], r["w"], r["v"], r["boot"]) for r in rows],
+                         [(_hmd(NOW - 100), "fine", "2 min so far", False),
                           (_hmd(BOOT), "kernel restarted", None, True),
-                          (_hmd(NOW - 3500), "unknown", "48 min", False),
-                          (_hmd(NOW - 4000), "healthy", "8 min", False)],
+                          (_hmd(NOW - 3500), "quiet", "48 min", False),
+                          (_hmd(NOW - 4000), "fine", "8 min", False)],
                          "the unknown from before the boot ended at the boot (every bucket comes back unknown), not at the next change")
 
     def test_a_bucket_the_boot_seeded_reads_since_the_boot_in_the_head_and_the_tail_alike(self):
         h, rows = self.R["stale"]["head"], self.R["stale"]["rows"]
-        self.assertEqual(h["word"], "unknown")
-        self.assertEqual(h["since"], "since " + _hmd(BOOT), "stateSince is the boot clock itself: the backend is seeded with it")
-        self.assertEqual(h["why"], FEW, "the read's own reason, as the live route serves it; the head keys on nothing in it")
-        self.assertEqual([r["v"] for r in rows[:3]], ["no attempts"] * 3)
-        tail = rows[3:]
+        self.assertEqual((h["word"], h["dot"]), ('No API traffic in the last 15 min.', "quiet"), "no traffic reads quiet and gray, never the machine's word")
+        self.assertFalse(h["unknown"])
+        tail = rows
         self.assertEqual([(r["k"], r["w"], r["v"], r["boot"]) for r in tail],
                          [(_hmd(BOOT), "kernel restarted", None, True),
-                          (_hmd(NOW - 100000), "unknown", "1 d 3 h", False),
-                          (_hmd(NOW - 183000), "degraded", "23 h 3 min", False),
-                          (_hmd(NOW - 190000), "healthy", "1 h 57 min", False)],
-                         "the divider and the head name one time; the pre-boot unknown is closed at the boot, never 'so far'")
-        self.assertEqual(h["since"], "since " + tail[0]["k"], "head since == divider stamp")
+                          (_hmd(NOW - 100000), "quiet", "1 d 3 h", False),
+                          (_hmd(NOW - 183000), "API failing", "23 h 3 min", False),
+                          (_hmd(NOW - 190000), "fine", "1 h 57 min", False)],
+                         "the divider at the boot; the pre-boot quiet is closed at the boot, never 'so far'")
         self.assertTrue(all(" so far" not in (r["v"] or "") for r in tail), "no open-ended state for a bucket the boot seeded")
         self.assertTrue(all(re.match(r"\d\d-\d\d \d\d:\d\d$", r["k"]) for r in tail[1:]), "stamps from another day carry their date")
 
     def test_a_boot_at_58_seconds_reads_one_time_in_the_head_and_on_its_restart_row(self):
         h, rows = self.R["minute"]["head"], self.R["minute"]["rows"]
-        self.assertEqual(h["word"], "unknown")
-        self.assertEqual(h["since"], "since " + _hmd(BOOT_M))
-        tail = rows[3:]
+        self.assertEqual((h["word"], h["dot"]), ('No API traffic in the last 15 min.', "quiet"))
+        tail = rows
         self.assertEqual([(r["k"], r["w"], r["v"], r["boot"]) for r in tail],
-                         [(_hmd(BOOT_M), "unknown · kernel restarted", _min(NOW - BOOT_M) + " so far", False),
-                          (_hmd(NOW - 1500), "thrashing", _min(BOOT_M - (NOW - 1500)), False),
-                          (_hmd(NOW - 3000), "healthy", "25 min", False)],
+                         [(_hmd(BOOT_M), "quiet · kernel restarted", _min(NOW - BOOT_M) + " so far", False),
+                          (_hmd(NOW - 1500), "rate-limit storm", _min(BOOT_M - (NOW - 1500)), False),
+                          (_hmd(NOW - 3000), "fine", "25 min", False)],
                          "the boot's own row names the restart (no divider); the pre-boot hold ends at the boot")
-        self.assertEqual(h["since"], "since " + tail[0]["k"], "head since == the restart row's stamp: one clock")
         self.assertFalse(any(r["boot"] for r in tail))
         self.assertEqual(BOOT_M % 60, 58, "the payload's boot sits two seconds before a minute boundary")
 
     def test_the_restart_row_sorts_above_the_previous_kernel_s_last_row_filed_in_the_same_second(self):
         h, rows = self.R["inversion"]["head"], self.R["inversion"]["rows"]
-        self.assertEqual(h["word"], "unknown")
-        self.assertEqual(h["since"], "since " + _hmd(BOOT + 0.9), "the seeded stateSince, the boot to the millisecond")
-        tail = rows[3:]
+        self.assertEqual(h["word"], 'No API traffic in the last 15 min.')
+        tail = rows
         self.assertEqual([(r["k"], r["w"], r["v"], r["boot"]) for r in tail],
-                         [(_hmd(BOOT + 0.9), "unknown · kernel restarted", _dur(NOW - (BOOT + 0.9)) + " so far", False),
-                          (_hmd(BOOT + 0.7), "healthy", "0 s", False),
-                          (_hmd(NOW - 1500), "thrashing", _dur(BOOT + 0.7 - (NOW - 1500)), False),
-                          (_hmd(NOW - 3000), "healthy", "25 min", False)],
+                         [(_hmd(BOOT + 0.9), "quiet · kernel restarted", _dur(NOW - (BOOT + 0.9)) + " so far", False),
+                          (_hmd(BOOT + 0.7), "fine", "0 s", False),
+                          (_hmd(NOW - 1500), "rate-limit storm", _dur(BOOT + 0.7 - (NOW - 1500)), False),
+                          (_hmd(NOW - 3000), "fine", "25 min", False)],
                          "the restart row is the newest; the previous kernel's last state closed at the restart, never 'so far'; "
                          "the boot's own row names the restart, so no divider")
-        self.assertEqual(h["since"], "since " + tail[0]["k"], "head since == the restart row's stamp")
         self.assertEqual(sum(1 for r in tail if " so far" in (r["v"] or "")), 1)
         self.assertFalse(any(r["boot"] for r in tail))
 
     def test_a_row_the_previous_kernel_filed_after_this_start_sits_under_the_clamped_restart_row_with_one_mark(self):
         h, rows = self.R["clamped"]["head"], self.R["clamped"]["rows"]
-        self.assertEqual(h["since"], "since " + _hmd(BOOT + 0.951), "the head reads the clamped stamp, which is bootAt")
-        tail = rows[3:]
+        tail = rows
         self.assertEqual([(r["k"], r["w"], r["v"], r["boot"]) for r in tail],
-                         [(_hmd(BOOT + 0.951), "unknown · kernel restarted", _dur(NOW - (BOOT + 0.951)) + " so far", False),
-                          (_hmd(BOOT + 0.95), "healthy", "0 s", False),
-                          (_hmd(NOW - 1500), "thrashing", _dur(BOOT + 0.95 - (NOW - 1500)), False),
-                          (_hmd(NOW - 3000), "healthy", "25 min", False)],
+                         [(_hmd(BOOT + 0.951), "quiet · kernel restarted", _dur(NOW - (BOOT + 0.951)) + " so far", False),
+                          (_hmd(BOOT + 0.95), "fine", "0 s", False),
+                          (_hmd(NOW - 1500), "rate-limit storm", _dur(BOOT + 0.95 - (NOW - 1500)), False),
+                          (_hmd(NOW - 3000), "fine", "25 min", False)],
                          "the old row is the first pre-boot row (its hold ends at the restart row, one millisecond on); the row "
                          "before it closed at the old row; the restart row above suppresses the divider: one restart, one mark")
-        self.assertEqual(h["since"], "since " + tail[0]["k"], "head since == the restart row's stamp == bootAt: one number")
         self.assertFalse(any(r["boot"] for r in tail), "no divider under a shown restart row")
         self.assertEqual(sum(1 for r in tail if "kernel restarted" in (r["w"] or "")), 1)
 
     def test_a_transition_the_hover_s_own_read_filed_closes_the_state_before_it(self):
         h, rows = self.R["ownread"]["head"], self.R["ownread"]["rows"]
-        self.assertEqual(h["since"], "since " + _hmd(NOW), "the state entered at this read's asOf")
-        tail = rows[3:]
+        self.assertEqual(h["word"], 'Rate-limit storm: 9 rate-limited attempts, 1 server error among 45 attempts in the last 15 min; 1 turn gave up.')
+        tail = rows
         self.assertEqual([(r["k"], r["w"], r["v"]) for r in tail],
-                         [(_hmd(NOW), "thrashing", "0 s so far"), (_hmd(NOW - 500), "healthy", "8 min")],
+                         [(_hmd(NOW), "rate-limit storm", "0 s so far"), (_hmd(NOW - 500), "fine", "8 min")],
                          "the closed state reads its duration with no 'so far' although its end is asOf; the new one is 'so far'")
         self.assertEqual(sum(1 for r in tail if " so far" in r["v"]), 1)
 
-    def test_no_bucket_says_so_in_place_of_the_rows(self):
+    def test_no_bucket_reads_quiet_and_gray_with_no_rows(self):
         h, rows = self.R["empty"]["head"], self.R["empty"]["rows"]
-        self.assertEqual(h["word"], "unknown")
-        self.assertEqual(h["line"], "No API traffic seen since the kernel started at %s." % _hmd(BOOT))
+        self.assertEqual((h["word"], h["dot"]), ('No API traffic in the last 15 min.', "quiet"))
         self.assertEqual(rows, [])
         self.assertIsNone(h["since"])
+        self.assertIsNotNone(h["legend"], "the legend stands whatever the traffic")
+        self.assertFalse(h["unknown"])
 
-    def test_two_buckets_of_one_family_are_told_apart_by_auth_and_counted(self):
+    def test_two_buckets_of_one_family_read_as_one_machine_and_the_tail_tells_them_apart_by_auth(self):
+        # T301: the head counts every bucket of this machine (one kernel's buckets share its clock); the "worst of N
+        # buckets" caveat is gone; the tail still names a bucket by family and auth when two share the family
         h, rows = self.R["two"]["head"], self.R["two"]["rows"]
-        self.assertEqual(h["word"], "thrashing")
-        self.assertEqual(h["sub"], "fable · %s · worst of 2 buckets" % AUTH)
-        tail = rows[3:]
-        self.assertEqual([r["w"] for r in tail], ["fable · %s thrashing" % AUTH, "fable · %s healthy" % LAUTH])
+        self.assertEqual(h["word"], 'Rate-limit storm: 9 rate-limited attempts, 1 server error among 56 attempts in the last 15 min; 1 turn gave up.')
+        tail = rows
+        self.assertEqual([r["w"] for r in tail], ["fable · %s rate-limit storm" % AUTH, "fable · %s fine" % LAUTH])
         self.assertEqual([r["v"] for r in tail], ["5 min so far", "8 min so far"], "each bucket's current state is its own 'so far'")
 
     def test_two_buckets_of_two_families_are_named_by_family_alone(self):
         h, rows = self.R["twoFam"]["head"], self.R["twoFam"]["rows"]
-        self.assertEqual(h["sub"], "fable · worst of 2 buckets")
-        self.assertEqual([r["w"] for r in rows[3:]], ["fable thrashing", "opus healthy"])
+        self.assertEqual(h["word"], 'Rate-limit storm: 9 rate-limited attempts, 1 server error among 56 attempts in the last 15 min; 1 turn gave up.')
+        self.assertEqual([r["w"] for r in rows], ["fable rate-limit storm", "opus fine"])
 
-    def test_an_offline_window_names_its_no_status_attempts_with_its_give_ups_and_sessions(self):
+    def test_an_offline_window_reads_its_no_connection_attempts_in_plain_words(self):
         h, rows = self.R["offline"]["head"], self.R["offline"]["rows"]
-        self.assertEqual(h["word"], "unknown")
-        self.assertEqual([r["v"] for r in rows[:3]],
-                         ["5 attempts without a status · 1 gave up · 2 sessions retried",
-                          "15 attempts, 7 of them without a status · 25% 429 · 0% 5xx of the other 8 · 1 gave up · 2 sessions retried",
-                          "no attempts"],
-                         "never 'no attempts' while give-ups or sessions are non-zero; a mixed window counts every attempt once "
-                         "(requests 8 with a status plus 7 without: noStatus sits outside requests) and names the shares' base")
+        self.assertEqual((h["word"], h["dot"]), ('Errors: 2 rate-limited attempts, 7 attempts with no connection among 15 attempts in the last 15 min; 1 turn gave up.', "errors"),
+                         "attempts without a status are counted as no connection; the machine's word (unknown) is never said")
+        self.assertFalse(h["unknown"])
 
-    def test_the_cap_shows_six_transitions_with_the_divider_extra_and_six_without_one(self):
-        rows = self.R["cap"]["rows"][3:]
+    def test_the_cap_shows_four_transitions_with_the_divider_extra_and_four_without_one(self):
+        # T301: the State changes list is a glance, not a log: four rows, in plain words
+        rows = self.R["cap"]["rows"]
         self.assertEqual([(r["k"], r["w"], r["v"], r["boot"]) for r in rows],
-                         [(_hmd(NOW - 200), "degraded", "3 min so far", False),
-                          (_hmd(NOW - 400), "healthy", "3 min", False),
+                         [(_hmd(NOW - 200), "API failing", "3 min so far", False),
+                          (_hmd(NOW - 400), "fine", "3 min", False),
                           (_hmd(BOOT), "kernel restarted", None, True),
-                          (_hmd(NOW - 2500), "unknown", "32 min", False),
-                          (_hmd(NOW - 3000), "recovering", "8 min", False),
-                          (_hmd(NOW - 3500), "thrashing", "8 min", False),
-                          (_hmd(NOW - 4000), "healthy", "8 min", False)],
-                         "six transitions and the divider, the two oldest changes cut")
-        self.assertEqual(sum(1 for r in rows if not r["boot"]), 6)
-        rows = self.R["capPost"]["rows"][3:]
-        self.assertEqual(len(rows), 6)
+                          (_hmd(NOW - 2500), "quiet", "32 min", False),
+                          (_hmd(NOW - 3000), "recovering", "8 min", False)],
+                         "four transitions and the divider, the four oldest changes cut")
+        self.assertEqual(sum(1 for r in rows if not r["boot"]), 4)
+        rows = self.R["capPost"]["rows"]
+        self.assertEqual(len(rows), 4)
         self.assertFalse(any(r["boot"] for r in rows), "nothing crosses the boot: no divider")
-        self.assertEqual([r["w"] for r in rows], ["healthy", "degraded", "healthy", "recovering", "thrashing", "healthy"])
+        self.assertEqual([r["w"] for r in rows], ["fine", "API failing", "fine", "recovering"])
         self.assertEqual(rows[0]["v"], "1 min so far")
 
     def test_a_failed_read_is_one_loud_line_and_never_the_previous_numbers(self):
@@ -845,12 +858,12 @@ class ServedHistory(unittest.TestCase):
         self.assertEqual(R["failReject"]["rows"], [])
         self.assertEqual(R["failMalformed"]["head"]["err"], "Could not read the API history: malformed answer")
         self.assertIsNone(R["fail503"]["head"]["asOf"], "no as-of stamp on a failure")
-        self.assertEqual(R["recovered"]["head"]["word"], "thrashing", "the next successful read replaces the failure")
+        self.assertEqual(R["recovered"]["head"]["word"], 'Rate-limit storm: 9 rate-limited attempts, 1 server error among 45 attempts in the last 15 min; 1 turn gave up.', "the next successful read replaces the failure")
         self.assertIsNone(R["recovered"]["head"]["err"])
 
     def test_the_section_sits_between_the_sessions_waiting_and_the_tmux_line(self):
         order = self.R["order"]
-        self.assertEqual(order[:3], ["API · this machine", "Sessions waiting", "History"])
+        self.assertEqual(order[:3], ["API health", "Sessions waiting", "History"])
         self.assertTrue(order[3].startswith("1 tmux session is seen"), order)
 
     def test_focus_shows_the_hover_and_blur_hides_it(self):
@@ -910,30 +923,29 @@ class ServedHistory(unittest.TestCase):
 
     def test_the_cell_is_described_by_a_short_summary_and_never_by_the_rows(self):
         R = self.R
-        self.assertEqual(R["stormDesc0"], "History: ok. Reading the details. Press Enter to open it.",
-                         "before the answer: the state word the frame put on the cell and the read in flight, not the loader's markup")
+        self.assertEqual(R["stormDesc0"], "API health: Fine. Reading the details. Press Enter to open it.",
+                         "before the answer: the frame's own word and the read in flight, not the loader's markup")
         m = R["storm"]["mode"]
         d = m["descText"]
-        self.assertEqual(d, "History: thrashing since %s. Press Enter to open it." % _hmd(NOW - 300), "the state word, its since, how to reach the rest")
-        self.assertLess(len(d), 90, "bounded: a sentence, not the tip")
-        for w in ("attempts", "429", "5xx", "gave up", "retried", "kernel restarted", "as of", "State changes"):
-            self.assertNotIn(w, d, "no window row, no transition, no stamp in the description")
+        self.assertEqual(d, "API health: " + 'Rate-limit storm: 9 rate-limited attempts, 1 server error among 45 attempts in the last 15 min; 1 turn gave up.' + " Press Enter to open it.", "the reading in plain words, how to reach the rest")
+        self.assertLess(len(d), 160, "bounded: a sentence, not the tip")
+        for w in ("kernel restarted", "as of", "State changes", "unknown"):
+            self.assertNotIn(w, d, "no transition, no stamp, no machine word in the description")
         self.assertTrue(m["descInTree"])
         self.assertLessEqual(max(m["descBox"]), 1.0, "visually hidden: one pixel or less each way")
         self.assertEqual(R["fail503"]["desc"], "Could not read the API history: HTTP 503. Press Enter to open it.")
-        # at focus time, in the focus's own task (where assistive tech reads it), the description carries the state
-        # word the frame already put on the cell; the landed one carries the since
-        self.assertEqual(R["focusDesc0"], "History: rate limited · 1 waiting. Reading the details. Press Enter to open it.")
+        # at focus time, in the focus's own task (where assistive tech reads it), the description carries the frame's
+        # own words (a session waiting on a 429); the landed one keeps them: the frame's errors outrank the reading
+        self.assertEqual(R["focusDesc0"], "API health: rate limited · 1 waiting. Reading the details. Press Enter to open it.")
         self.assertIn("rate limited", R["focusDesc0"], "the frame's own words, before any read")
-        self.assertEqual(R["focusDesc"], "History: thrashing since %s. Press Enter to open it." % _hmd(NOW - 300))
-        self.assertIn(" since ", R["focusDesc"])
+        self.assertEqual(R["focusDesc"], "API health: rate limited · 1 waiting. Press Enter to open it.")
 
     def test_enter_pins_the_section_a_frame_re_reads_it_and_escape_does_not_re_pop_the_hover(self):
         R = self.R
         self.assertTrue(R["kbPinned"])
         self.assertEqual(R["kbFetchPost"], R["kbFetchPre"], "the pin reads nothing new: the focus show's read is the same document")
         self.assertGreater(R["kbRows"], 3)
-        self.assertEqual(R["kbHead"]["word"], "thrashing")
+        self.assertEqual(R["kbHead"]["word"], 'Rate-limit storm: 9 rate-limited attempts, 1 server error among 45 attempts in the last 15 min; 1 turn gave up.')
         self.assertGreater(R["kbFetchAfter"], R["kbFetchBefore"], "a frame on the open detail re-reads the history")
         self.assertTrue(R["escHidden"])
         self.assertTrue(R["escFocusBack"], "focus returns to the cell")
@@ -955,17 +967,34 @@ class ServedHistory(unittest.TestCase):
 
     def test_an_answer_under_a_held_pointer_paints_on_release(self):
         R = self.R
-        self.assertEqual(R["heldWord"], "thrashing", "the frame's re-read landed under the held pointer: not painted")
-        self.assertEqual(R["releasedWord"], "healthy", "the release paints it")
+        # the detail still shows the previous frame's word (overloaded, from the frame that re-read the history) until
+        # the release: nothing painted under the press
+        self.assertEqual(R["heldWord"], "overloaded · 1 waiting", "the frame's re-read landed under the held pointer: not painted")
+        self.assertEqual(R["releasedWord"], '30 requests in the last 15 min, all succeeded.', "the release paints it")
 
-    def test_the_light_theme_colours_the_quiet_head_dot_and_the_failure_line(self):
+    def test_the_light_theme_colours_the_fine_and_quiet_head_dots_and_the_failure_line(self):
         R = self.R
-        # the ok state's #5D574E on the head's dot for the signal's quiet states (the base gray #9aa4ad is about 1.6:1
-        # on the white tip), and the light error red #B02A1C on the failure line; the dark line keeps #ef6b6f
-        self.assertEqual((R["lightHealthyDot"]["word"], R["lightHealthyDot"]["color"]), ("healthy", "rgb(93, 87, 78)"))
-        self.assertEqual((R["lightUnknownDot"]["word"], R["lightUnknownDot"]["color"]), ("unknown", "rgb(93, 87, 78)"))
+        # T301: fine wears the light theme's accent (the clay), quiet the light label gray #5D574E (the base gray #9aa4ad
+        # is about 1.6:1 on the white tip), and the failure line the light error red #B02A1C; the dark line keeps #ef6b6f
+        self.assertEqual((R["lightHealthyDot"]["word"], R["lightHealthyDot"]["color"]), ('30 requests in the last 15 min, all succeeded.', "rgb(194, 65, 12)"))
+        self.assertEqual((R["lightUnknownDot"]["word"], R["lightUnknownDot"]["color"]), ('No API traffic in the last 15 min.', "rgb(93, 87, 78)"))
         self.assertEqual(R["lightErr"], "rgb(176, 42, 28)", "the light theme's error-text red")
         self.assertEqual(R["fail503"]["errColor"], "rgb(239, 107, 111)", "the dark tip's status red")
+
+    def test_an_attached_host_is_read_through_the_relay_and_every_machine_is_named(self):
+        # T301: the frame's hosts map (a per-host MAP the kernel's tunnel supervisor filled) makes the shell read that
+        # host's document through /remote/<host>/api-health and name every machine; worst state wins for the dot
+        h = self.R["hosts"]["head"]
+        self.assertEqual(h["title"], "API health · 2 machines")
+        self.assertEqual(h["dot"], "errors", "TESTHOST's storm reddens the merged dot")
+        self.assertEqual(h["word"], "Errors on TESTHOST", "several machines: the head sums them up; each line follows")
+        self.assertEqual(h["mlines"][:2], ["this machine: fine · 30 requests in the last 15 min, all succeeded", "TESTHOST: rate limited · 2 waiting"],
+                         "one line per machine in the first section, local first")
+        self.assertTrue(any(m.startswith("TESTHOST") and "Rate-limit storm" in m for m in h["mlines"][2:]),
+                        "the History names TESTHOST with ITS reading (its own document, never summed into this machine's)")
+        self.assertIn("State changes · this machine", h["names"])
+        self.assertIn("/remote/TESTHOST/api-health", self.R["hosts"]["fetched"] or [], "the relay read")
+        self.assertFalse(h["unknown"])
 
     def test_the_hover_keeps_its_margin_at_830_wide_and_stays_above_the_rail_on_a_short_window(self):
         g = self.R["geo830"]
@@ -985,7 +1014,10 @@ class ServedHistory(unittest.TestCase):
         self.assertEqual(g["ih"], 280)
         self.assertGreaterEqual(g["t"], 5.5)
         self.assertLessEqual(g["b"], g["cellTop"] - 8 + 0.5, "above the rail, never over it or the cell")
-        self.assertTrue(g["clipped"], "the section's oldest rows are clipped rather than spilled")
+        # T301: the section is shorter (no window rows), so on this height it may fit under the cap; when it does not,
+        # it clips rather than spills
+        self.assertTrue(g["clipped"] or g["h"] <= float(str(g["maxH"]).replace("px", "") or 0) + 0.5,
+                        "the section's oldest rows are clipped rather than spilled: %r" % g)
         self.assertLessEqual(g["h"], g["cellTop"] - 14 + 0.5)
         g = self.R["geoWide"]
         self.assertFalse(g["clipped"], "1200x800: the whole section fits")

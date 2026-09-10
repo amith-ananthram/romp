@@ -68,7 +68,7 @@ const R = await page.evaluate((SID) => {
   const R = { err: {} };
   window.__realShellSend = window.__rompShellSend;             // the page's own binding, before the steps stub it
   const step = (name, fn) => { try { fn(); } catch (e) { R.err[name] = String(e && e.stack || e); } };
-  const el = document.getElementById("rail-api"), txt = el.querySelector(".ah-text");
+  const el = document.getElementById("rail-api");   // T301: a dot alone, its state on data-dot; no text beside it
   const tip = () => document.getElementById("ah-tip");
   const back = document.getElementById("ru-back");
   const disp = (n) => getComputedStyle(n).display;
@@ -87,7 +87,7 @@ const R = await page.evaluate((SID) => {
   R.role = el.getAttribute("role"); R.tabindex = el.getAttribute("tabindex");
   // 2. the first frame reveals it and names the state for a screen reader
   window.__rompApiHealth(frame());
-  R.firstFrameDisplay = disp(el); R.firstFrameText = txt.textContent; R.ariaLabel = el.getAttribute("aria-label");
+  R.firstFrameDisplay = disp(el); R.firstFrameDot = el.getAttribute("data-dot"); R.firstFrameText = el.textContent.trim(); R.ariaLabel = el.getAttribute("aria-label");
   step('hover', () => {
   // 3. the hover surface is inert: no button, no data-act; a growing frame re-anchors it above the rail
   el.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false, clientX: el.getBoundingClientRect().left + 10 }));
@@ -348,7 +348,7 @@ await step2('socket', async () => {
   await open(1);
   R.sock1Ready = (await sock(1)).sent;
   await feed(1, PAUSED);
-  R.sockPainted = await page.evaluate(() => document.getElementById("rail-api").querySelector(".ah-text").textContent);
+  R.sockPainted = await page.evaluate(() => document.getElementById("rail-api").getAttribute("data-dot"));
   await page.evaluate(() => { document.getElementById("rail-api").click(); });
   await press();
   R.sockPressSent = (await sock(1)).sent;
@@ -431,15 +431,17 @@ class ServedCell(unittest.TestCase):
         self.assertTrue(self.R["preFrameHidden"], "the markup ships the attribute")
         self.assertEqual(self.R["preFrameDisplay"], "none", "and the attribute must actually hide it: %r" % self.R)
         self.assertEqual(self.R["firstFrameDisplay"], "flex", "the first frame reveals the cell")
-        self.assertEqual(self.R["firstFrameText"], "overloaded · 1 waiting")
+        self.assertEqual(self.R["firstFrameDot"], "errors", "a degraded frame paints the errors dot (T301)")
+        self.assertEqual(self.R["firstFrameText"], "", "a dot alone: no word beside it")
 
     def test_the_driver_hit_no_script_error(self):
         self.assertEqual(self.R["err"], {})
 
-    def test_the_light_theme_gives_the_ok_dot_the_label_color(self):
-        # .ah-dot's dark label gray at .55 blends into the light rail (about 1.4:1), so the ok glyph would vanish
-        self.assertEqual(self.R["lightDot"], "rgb(93, 87, 78)", "errors: %r" % self.R.get("err"))
-        self.assertEqual(self.R["lightDotOpacity"], "0.55")
+    def test_the_light_theme_gives_the_fine_dot_its_accent(self):
+        # T301: an ok frame with no history read yet is the FINE dot, the theme's accent (the light clay, not the dark
+        # sky blue); the quiet gray (rgb(93, 87, 78), the light label colour) is pinned in tests/test_api_health_fleet.py
+        self.assertEqual(self.R["lightDot"], "rgb(194, 65, 12)", "errors: %r" % self.R.get("err"))
+        self.assertEqual(self.R["lightDotOpacity"], "1")
 
     def test_an_emptied_usage_cell_takes_no_gap(self):
         # renderRows empties #rail-usage on a login-only machine; as a zero-width flex item it would still pay the
@@ -448,7 +450,7 @@ class ServedCell(unittest.TestCase):
 
     def test_the_cell_is_a_keyboard_reachable_button_that_names_its_state(self):
         self.assertEqual((self.R["role"], self.R["tabindex"]), ("button", "0"))
-        self.assertEqual(self.R["ariaLabel"], "API overloaded · 1 waiting")
+        self.assertEqual(self.R["ariaLabel"], "API health: errors")
         self.assertTrue(self.R["kbOpened"], "Enter opens the pinned detail: %r" % self.R.get("err"))
         self.assertTrue(self.R["kbFocusInTip"], "focus moves into the detail")
         self.assertEqual(self.R["tipRole"], "dialog")
@@ -511,10 +513,11 @@ class ServedCell(unittest.TestCase):
     def test_the_light_theme_keeps_the_head_dot_s_state_colors(self):
         # a bare light rule on the dot would outrank the state rules, so the detail's headline dot would read the
         # label gray while the rail's id-scoped dot kept amber and red
-        amber, red, gray = "rgb(230, 126, 34)", "rgb(229, 72, 77)", "rgb(93, 87, 78)"
-        self.assertEqual(self.R["lightDegraded"], {"rail": amber, "head": amber, "headOpacity": "1"}, "errors: %r" % self.R.get("err"))
+        # T301: degraded and paused are both the ERRORS dot (the blocked red); ok is the fine dot (the accent)
+        red, accent = "rgb(229, 72, 77)", "rgb(194, 65, 12)"
+        self.assertEqual(self.R["lightDegraded"], {"rail": red, "head": red, "headOpacity": "1"}, "errors: %r" % self.R.get("err"))
         self.assertEqual(self.R["lightPaused"], {"rail": red, "head": red})
-        self.assertEqual(self.R["lightOkHead"], {"head": gray, "headOpacity": "0.55"})
+        self.assertEqual(self.R["lightOkHead"], {"head": accent, "headOpacity": "1"})
 
     def test_the_driver_s_second_phase_hit_no_error(self):
         self.assertEqual(self.R["err2"], {})
@@ -557,7 +560,7 @@ class ServedCell(unittest.TestCase):
         self.assertEqual(R["shellSendRestored"], "function", "the shell's own send survives the driver's stubs")
         self.assertEqual(R["sockRedialed"], 2, "a close redials")
         self.assertEqual(R["sock1Ready"], [ready], "the open sends ready")
-        self.assertEqual(R["sockPainted"], "paused · usage limit · 1 waiting", "a frame on the socket paints the cell")
+        self.assertEqual(R["sockPainted"], "errors", "a frame on the socket paints the cell (T301: a paused frame is the errors dot)")
         self.assertEqual(R["sockPressSent"], [ready, pressed], "the press rode the real socket")
         self.assertEqual(R["sockAcked"], {"disabled": True, "label": "Stop all auto-retries", "acted": True, "hint": ""})
         self.assertEqual(R["sockDropped"], {"disabled": False, "label": "Resume all auto-retries", "acted": False,

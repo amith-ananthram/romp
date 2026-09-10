@@ -807,17 +807,20 @@ separating your sessions from the judge pipeline. You can also reconfigure the
 judges from the gear: the high-volume indexing tier defaults to Haiku, and the
 judgment tier defaults to Sonnet.
 
-The bottom bar's **API** cell, a dot and a word, shows how the API is treating
-your sessions. Gray **ok** means no session is waiting on the API. Amber shows
-how many sessions are waiting and names the problem: **rate limited**,
-**overloaded**, **offline** (this machine cannot reach the API), or **errors**.
-Red **paused** means auto-retry and the judges are stopped, and says why: a
-usage limit, the monthly spend cap, or that you stopped them. Hover for the same
-reading with the waiting sessions listed, and the history under it: the API's
-state over the last 1, 5 and 15 minutes (attempts, the 429 and 5xx shares,
-give-ups, sessions that retried) and the most recent state changes with how long
-each held. A kernel restart shows as its own line there, because the counts
-start over with the kernel. Click the cell, or press Enter on it,
-for the detail: each waiting session (click one to open that session), a button
-that stops auto-retry for every session while sessions are waiting and resumes
-it while paused, and links to the usage figures and the Log.
+The bottom bar's API readout carries one small dot, right after its **API**
+label, that shows how the API is treating your sessions on
+every connected kernel. Blue (the romp accent) means everything is fine. Red means errors are
+being met somewhere: a 429 rate-limit storm, 5xx failures, a machine that
+cannot reach the API, or auto-retry paused (a usage limit, the monthly spend
+cap, or you stopped it). Gray means the API is not being used right now: no
+traffic in the last 15 minutes on any machine. Hover for the reading in plain
+words (for example, 4 requests in the last 15 minutes, all succeeded), one
+line per machine when several are connected, the waiting sessions listed, and
+the history under it: a graph of attempts per minute over the last 15 minutes
+with rate-limited attempts in red and server errors in orange, one sentence
+explaining the codes, and the most recent state changes with how long each
+held. A kernel restart shows as its own line there, because the counts start
+over with the kernel. Click the dot, or press Enter on it, for the detail:
+each waiting session (click one to open that session), a button that stops
+auto-retry for every session while sessions are waiting and resumes it while
+paused, and links to the usage figures and the Log.

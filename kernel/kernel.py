@@ -19606,6 +19606,36 @@ def _poll_remote_usage(r):
         return r.get("usage")   # keep the last good reading rather than blanking the bars on one blip
 
 
+REMOTE_APIH_EVERY = 10.0    # the API-health frame: a storm shows within a few passes; the frame is a few hundred bytes
+
+
+def _poll_remote_api_health(r):
+    """GET a remote kernel's /api-health/frame THROUGH the -L tunnel: that machine's own apiHealth shell frame
+    (its local half only, never its view of ITS peers), so this kernel's shell frame can carry every attached
+    machine's state as a per-host map (T301, the user 2026-09-10: the signal must cover every connected kernel,
+    not this one alone). Returns the parsed frame, {} when the host answered that it has none yet (an older
+    build's 404 too: the row is then cleared rather than kept stale), or None when nothing answered (keep the
+    last reading, as the usage poll does). Rate-limited to REMOTE_APIH_EVERY per host."""
+    import urllib.parse
+    now = time.time()
+    if now - float(r.get("_apih_at") or 0) < REMOTE_APIH_EVERY:
+        return r.get("apiHealth")
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", int(r["local_port"]), timeout=5)
+        path = "/api-health/frame" + (("?token=" + urllib.parse.quote(r["token"])) if r.get("token") else "")
+        c.request("GET", path)
+        resp = c.getresponse()
+        data = resp.read()
+        c.close()
+        r["_apih_at"] = now
+        if resp.status != 200:
+            return {}                                   # no frame there (not yet, or an older kernel): clear
+        u = json.loads(data.decode("utf-8"))
+        return u if isinstance(u, dict) and u.get("state") else {}
+    except Exception:
+        return r.get("apiHealth")                       # a blip keeps the last good reading
+
+
 def _poll_remote_views(r):
     """GET a remote kernel's /views THROUGH the -L tunnel — the read half of tag federation v0 (the
     user 2026-08-24): each attached kernel's own tags ride to this viewer read-only, and
@@ -22377,6 +22407,7 @@ def _tunnel_supervisor():
                 # a different one (self-rate-limited to a minute — these windows are hours wide)
                 ruse = _poll_remote_usage(r) if up else None
                 rviews = _poll_remote_views(r) if up else None   # tag federation v0: the read half
+                rapih = _poll_remote_api_health(r) if up else None   # its API-health frame, for the shell's per-host map (T301)
                 with _remotes_lock:
                     if r["host"] not in _remotes:
                         continue
@@ -22481,6 +22512,12 @@ def _tunnel_supervisor():
                             r["usage"] = ruse
                         else:
                             r.pop("usage", None)
+                    if rapih is not None:
+                        # the same contract as usage: {} = answered with no frame → clear; None = no answer → keep
+                        if rapih:
+                            r["apiHealth"] = rapih
+                        else:
+                            r.pop("apiHealth", None)
                     _cache_remote_views(r, rviews)     # a CHANGED reading wakes the pusher: the tags reach the pane by its frame
                     auto_check = (st == "up")
                     peer_up = (st == "up")
@@ -43751,7 +43788,56 @@ def _api_health_frame(now, tmux):
             # the pause file's write count (_RETRY_PAUSE_SEQ): a press on the detail's pause button writes it,
             # so the frame after the press differs from every frame before it even when the auto-pause put
             # the same state back within the same second; the shell clears its acknowledgment on that
-            "seq": _RETRY_PAUSE_SEQ[0]}
+            "seq": _RETRY_PAUSE_SEQ[0],
+            # no API traffic in the longest window (T301): the dot reads gray on this alone, before any history is read;
+            # True with no SDK backend (nothing can have talked to the API through this kernel)
+            "quiet": _apih_quiet(now),
+            # every attached machine's own frame, by host (T301): a per-host MAP, never a merged count or a
+            # compared clock (the federation rule: merged payloads keep local scalars and carry per-host maps);
+            # the shell merges it for the dot (worst state wins) and names each machine. `stale` marks a row
+            # whose tunnel is not up: the frame is the last one heard, and the shell says so
+            "hosts": _api_health_hosts()}
+
+
+_APIH_HOST_KEYS = ("state", "cls", "text", "waiting", "retrying", "blocked", "since", "reason", "tmux", "quiet")
+
+
+def _apih_quiet(now):
+    """Whether this kernel's API-health aggregator saw no event in the longest window (T301): the frame's `quiet`."""
+    try:
+        be = _sdk()
+        ah = getattr(be, "api_health", None) if be else None
+        return True if ah is None else bool(ah.quiet(now))
+    except Exception:
+        return True
+
+
+def _api_health_hosts():
+    """{host: {state, cls, text, waiting, retrying, blocked, since, reason, tmux, stale}} for every attached
+    machine whose frame the tunnel supervisor has cached (_poll_remote_api_health). Deterministic for an
+    unchanged world (no clock), so an identical fleet still yields an identical frame and no push."""
+    out = {}
+    with _remotes_lock:
+        rows = [(r["host"], dict(r.get("apiHealth") or {}), r.get("status")) for r in _remotes.values()
+                if isinstance(r.get("apiHealth"), dict) and r.get("apiHealth")]
+    for host, f, st in rows:
+        row = {k: f.get(k) for k in _APIH_HOST_KEYS if k in f}
+        row["stale"] = st != "up"
+        out[host] = row
+    return out
+
+
+def _apih_local_frame():
+    """The last frame this kernel pushed, minus its `hosts` map: what GET /api-health/frame serves a PEER, so
+    two kernels attached to each other never nest each other's maps (the peer builds its own from this)."""
+    if _APIH_LAST[0] is None:
+        return None
+    try:
+        f = dict(json.loads(_APIH_LAST[0]))
+    except Exception:
+        return None
+    f.pop("hosts", None)
+    return f
 
 
 # The last apiHealth frame the shells heard, as its sorted serialization (None = nothing since boot): the
@@ -46708,7 +46794,7 @@ var seg=function(k,lbl,cav){return '<div class=ru-name>'+lbl+(cav?' \u26a0':'')+
 +'<div class=ru-pct>'+fmtUsd(sum[k].usd)+' \u00b7 '+fmtTok(sum[k].tok)+' tok</div>';};
 var monthCav=legacyN>0;   // some machine's calendar month was left out of this rolling segment (T235b)
 return '<div class="ru-w ru-api">'
-+'<div class=ru-name>API</div>'
++'<div class=ru-name>API</div><span class=ah-slot></span>'   // the API-health dot's place (T301): the stable #rail-api moves in
 +seg('day','1 day')+seg('month','1 month',monthCav)
 +'</div>';}
 // The collapsed rail is the AGGREGATE story (the user 2026-08-08; supersedes the one-set-per-account
@@ -46734,7 +46820,11 @@ for(k in u)v[k]=u[k];
 ['fiveHour','sevenDay','fable','t','limited','acctLabel'].forEach(function(w){
 if(b[w]!==undefined)v[w]=b[w];else delete v[w];});
 r.usage=v;});});}
-function renderRows(rows,selfHost){ROWS=rows||[];LAST=[];
+var RAIL_HOME=(function(){var c=document.getElementById('rail-api');return c?c.parentNode:null;})();   // where the dot lives with no readout
+// the API-health dot may sit INSIDE this cell (in the readout's slot); every innerHTML write below would destroy it
+// with the readout, so it is parked back at its own place first and moved into the fresh slot after (T301)
+function parkApiCell(){var c=document.getElementById('rail-api');if(c&&el.contains(c)&&RAIL_HOME)RAIL_HOME.insertBefore(c,el.nextSibling);}
+function renderRows(rows,selfHost){ROWS=rows||[];LAST=[];parkApiCell();
 var live=ROWS.filter(function(r){return hasBars(r.usage)||hasSpend(r.usage);});
 if(!live.length){el.innerHTML='';tip.style.display='none';return;}
 shareFreshest(live);
@@ -46742,6 +46832,10 @@ LAST=live.map(function(r){var det={};det._t=(typeof r.usage.t==='number')?r.usag
 winDet(r.usage,det);spendDet(r.usage,det);
 return {host:r.host||selfHost||'this machine',det:det};});
 el.innerHTML=aggBarsHTML(LAST)+apiCellHTML(LAST);
+// the API-health dot rides the readout (T301): the STABLE #rail-api node moves into the readout's slot, and back to
+// its own place in the rail when no readout renders; a move keeps its listeners, an innerHTML copy would not
+(function(){var cell=document.getElementById('rail-api');if(!cell)return;var slot=el.querySelector('.ah-slot');
+if(slot){slot.appendChild(cell);}else if(cell.parentNode!==RAIL_HOME&&RAIL_HOME){RAIL_HOME.insertBefore(cell,el.nextSibling);}})();
 // a HOVER tip already open re-renders in place when fresh data lands (the 60s pull, the timeline's
 // live forward) — the user 2026-08-14, replacing the footer's click-me hint with the refresh itself.
 // Re-anchor the top edge after the swap: new content can change the tip's height, and it hangs ABOVE
@@ -46938,7 +47032,9 @@ var bs=document.getElementById('ru-bysession');if(bs)bs.onclick=function(e){e.st
 window.__rompUsageClose=off;
 back.onclick=off;}
 pullFleet().then(openIt,openIt);};
-el.addEventListener('mouseenter',showTip);
+// the API-health dot sits inside this cell (T301): a pointer arriving on the DOT gets the dot's own tip, not this one
+el.addEventListener('mouseenter',function(ev){var c=document.getElementById('rail-api');
+if(c&&ev&&typeof ev.clientX==='number'){var at=document.elementFromPoint(ev.clientX,ev.clientY);if(at&&(at===c||c.contains(at)))return;}showTip(ev);});
 el.addEventListener('mouseleave',function(){tip.style.display='none';});
 // Refresh-from-source (the user 2026-06-30): GET /usage re-reads usage.json — the snapshot Claude Code's
 // statusline (tmux) OR the SDK backend's RateLimitEvent capture writes — and re-renders. `pull(ack)` is the
@@ -47293,7 +47389,13 @@ window.addEventListener('message',function(e){var m=e.data;if(m&&m.romp==='usage
 # token) and the phone's Usage-modal section (no rail on the phone) are named follow-ups.
 _LANDING_APIH_JS = """
 (function(){var el=document.getElementById('rail-api');if(!el)return;
-var txt=el.querySelector('.ah-text');
+// the merge and reading rules (ui/webview/api-health-merge.ts via api-health-global.ts); absent (a stale dist), the
+// local frame alone paints the dot and the popup says so in the kernel's own words
+var MERGE=window.__rompApiHealthMerge||null;
+var READINGS={};   // per host: the history reading (readHistory), null until read; the frame merge takes it
+var DOTWORD={fine:'fine',errors:'errors',quiet:'no traffic'};
+var LEGEND='429 = the API told us to slow down (rate limit) \u00b7 5xx = the API itself failed (server error) \u00b7 offline = no connection';
+var STATE_WORD={thrashing:'rate-limit storm',degraded:'API failing',recovering:'recovering',healthy:'fine',unknown:'quiet'};
 var tip=document.createElement('div');tip.id='ah-tip';tip.style.display='none';
 tip.setAttribute('role','tooltip');tip.setAttribute('aria-label','API health');tip.tabIndex=-1;document.body.appendChild(tip);
 // what the cell is described by while the hover shows (aria-describedby): a SHORT visually-hidden summary, refreshed
@@ -47322,7 +47424,7 @@ var LAST=null,pinned=false,held=false,dirty=false,pending=null,pendSeq=null,hint
 var HIST=null,histSeq=0,skipFocus=false,winFocusEl=null;
 window.addEventListener('focus',function(){winFocusEl=document.activeElement;requestAnimationFrame(function(){winFocusEl=null;});});
 var RESTART_WHY='kernel restarted: the event ring is empty';   // sdk_backend.API_HEALTH_RESTART_WHY: the row the boot files
-var HIST_ROWS=6;
+var HIST_ROWS=4;   // the State changes list, capped (T301: a glance, not a log)
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 function hm(ep){return new Date(ep*1000).toTimeString().slice(0,5);}
 function hms(ep){return new Date(ep*1000).toTimeString().slice(0,8);}
@@ -47331,13 +47433,11 @@ function hmd(ep){var d=new Date(ep*1000),n=new Date();if(d.toDateString()===n.to
 return ('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2)+' '+hm(ep);}
 function dur(s){s=Math.max(0,Math.round(s));if(s<60)return s+' s';var m=Math.round(s/60);if(m<60)return m+' min';
 var h=Math.floor(m/60);m-=h*60;if(h<24)return h+' h'+(m?' '+m+' min':'');var d=Math.floor(h/24);h-=d*24;return d+' d'+(h?' '+h+' h':'');}
-function pct(r){return (r==null?0:Math.round(r*100))+'%';}
 function pl(n,w){n=n||0;return n+' '+w+(n===1?'':'s');}
 // The plain-words pause reasons and the ok line: the kernel's `text` is the headline, these say what it means.
 var PAUSE={limit:'Auto-retry and the judges are paused until your usage limit resets.',
 spend:'Auto-retry and the judges are paused: you have reached the monthly spend limit. Raise it at claude.ai/settings/usage.',
 manual:'Auto-retry and the judges are paused: you stopped them.'};
-var OK='No session is waiting on the API. Auto-retry and the judges are running.';
 var RESUME='Resume all auto-retries',STOP='Stop all auto-retries';   // the chat card's own words
 var NOTSENT='Not sent: the dashboard is disconnected. Try again.';
 var LOST='Connection lost before the answer arrived. When it is back, the button shows the current state.';
@@ -47361,12 +47461,38 @@ return '<div class="ru-tip-row ah-row'+(full?'':' ah-ro')+'"'+(full?' role=butto
 // own read is in flight. A frame on an open card re-reads behind the stamped answer the card shows, and a pin from
 // hidden behind the last hover's answer (its as-of says when it was read; the dots only before the first answer):
 // the card the user opened is not blanked for the read's duration, on purpose.
+// HIST is {host: document | {error}} with '' for this machine (T301): this kernel's /api-health and every attached
+// host's through /remote/<host>/api-health, read together; a host that fails is its own {error}, never dropped
+function fetchDoc(u){return fetch(u,{cache:'no-store'}).then(function(r){
+if(!r.ok){var tp=(typeof r.text==='function')?r.text():Promise.resolve('');
+return tp.then(function(t){return {error:'HTTP '+r.status+(t?' \u00b7 '+String(t).slice(0,120):'')};},function(){return {error:'HTTP '+r.status};});}
+return r.json().then(function(d){return (d&&d.buckets)?d:{error:'malformed answer'};},function(){return {error:'malformed answer'};});})
+.catch(function(e){return {error:String((e&&e.message)||e)};});}
+function hostsOf(m){return Object.keys((m&&m.hosts)||{}).sort();}
 function load(fresh){var n=++histSeq;if(fresh)HIST=null;
-fetch('/api-health',{cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
-.then(function(d){if(n!==histSeq)return;HIST=(d&&d.buckets)?d:{error:'malformed answer'};
-if(tip.style.display!=='block')return;if(held){dirty=true;return;}render();},
-function(e){if(n!==histSeq)return;HIST={error:String((e&&e.message)||e)};
+var hs=hostsOf(LAST),reads=[fetchDoc('/api-health')].concat(hs.map(function(h){return fetchDoc('/remote/'+encodeURIComponent(h)+'/api-health');}));
+Promise.all(reads).then(function(docs){if(n!==histSeq)return;var by={'':docs[0]};hs.forEach(function(h,i){by[h]=docs[i+1];});HIST=by;
+READINGS=MERGE?MERGE.mergeHistories(by).readings:{};paintCell();
 if(tip.style.display!=='block')return;if(held){dirty=true;return;}render();});}
+// the merged view of the frame: the dot and one line per machine (worst state wins; per-host maps, nothing summed)
+function merged(){if(!LAST)return {dot:'fine',worst:'',machines:[],n:1};
+if(MERGE)return MERGE.mergeFrames(LAST,LAST.hosts||{},READINGS);
+var d=LAST.state==='ok'?'fine':'errors';return {dot:d,worst:'',machines:[{host:'',dot:d,text:'this machine: '+LAST.text,stale:false}],n:1};}
+function readingOf(host){var d=HIST&&HIST[host];if(!d||d.error||!MERGE)return null;return MERGE.readHistory(d);}
+// the cell: the dot's state and its description, from the merge; the DOM is touched only on a change
+function paintCell(){var mg=merged();if(el.getAttribute('data-dot')!==mg.dot)el.setAttribute('data-dot',mg.dot);
+var lab='API health: '+DOTWORD[mg.dot]+(mg.n>1?' across '+mg.n+' machines':'');if(el.getAttribute('aria-label')!==lab)el.setAttribute('aria-label',lab);}
+// the head's words: a pause in the kernel's own words; errors as the worst machine's line; else what happened
+function headWords(m,mg){if(m.state==='paused')return m.text;
+var rd=readingOf('');
+if(mg.n>1){   // several machines: the head sums them up in one line; each machine's own line follows
+var bad=mg.machines.filter(function(x){return x.dot==='errors';}).map(function(x){return x.host||'this machine';});
+if(bad.length)return 'Errors on '+bad.join(', ');
+if(mg.dot==='quiet')return 'No API traffic on any machine.';
+return 'All '+mg.n+' machines fine.';}
+if(mg.dot==='errors'){if(m.state!=='ok')return m.text;   // this machine's frame: sessions waiting on the API, in the kernel's words
+return rd?rd.headline:m.text;}   // the window in errors: the reading's sentence
+if(rd)return rd.headline;return mg.dot==='quiet'?'No API traffic in the last 15 min.':'Fine.';}
 // a bucket's name for the card: its model family, plus its auth label when another bucket shares the family
 function bname(d,key){var b=(d.buckets||{})[key]||{},fam=b.family||key.split('|')[1]||key,dup=false;
 Object.keys(d.buckets||{}).forEach(function(k){if(k!==key&&((d.buckets[k]||{}).family||'')===fam)dup=true;});
@@ -47379,11 +47505,26 @@ return dup?fam+' · '+(b.auth||key.split('|')[0]):fam;}
 // are named when there are any (an offline window would otherwise read 'no attempts' and hide its give-ups). A mixed
 // window counts every attempt once and says how many of them had no status, with the shares' base named beside them:
 // '15 attempts, 7 of them without a status · 25% 429 · 0% 5xx of the other 8'.
-function winRow(w,c,up){var lab=(w%60===0?(w/60)+' min':w+' s');if(c&&c.complete===false&&typeof up==='number')lab+=' · kernel up '+dur(up);
-var v,rq=(c&&c.requests)||0,ns=(c&&c.noStatus)||0;if(!c||!(rq||ns||c.gaveUp||c.sessionsRetrying))v='no attempts';
-else{v=rq?(pl(rq+ns,'attempt')+(ns?', '+ns+' of them without a status':'')+' · '+pct(c.rate429)+' 429 · '+pct(c.rate5xx)+' 5xx'+(ns?' of the other '+(rq===1?'one':rq):'')):(pl(ns,'attempt')+' without a status');
-v+=' · '+(c.gaveUp||0)+' gave up · '+pl(c.sessionsRetrying,'session')+' retried';}
-return '<div class="ru-tip-row ah-hrow"><span class=ru-tip-k>'+esc(lab)+'</span><span class=ru-tip-v>'+esc(v)+'</span></div>';}
+// attempts per minute over the longest window, in the usage hover's graph grammar (T301): the polyline + fill for
+// every attempt, 429 attempts in the blocked red and 5xx in the warn amber over it so a storm reads at a glance, ONE
+// ceiling label, a tick every five minutes. Colours through the tokens (fallbacks for a var-less harness).
+function graphHTML(sr){var n=sr.ok.length,W=168,H=48,tot=[],mx=0;
+for(var i=0;i<n;i++){var v=(sr.ok[i]||0)+(sr.rateLimited[i]||0)+(sr.serverErrors[i]||0)+(sr.noStatus[i]||0);tot.push(v);if(v>mx)mx=v;}
+if(mx<=0)return '';
+var steps=[1,2,5,10,20,50,100,200,500,1000],top=steps[steps.length-1];for(var k=0;k<steps.length;k++)if(steps[k]>=mx){top=steps[k];break;}
+var X=function(i){return (n>1?i/(n-1):0.5)*W;},Y=function(v){return H-1-Math.max(0,Math.min(1,v/top))*(H-2);};
+var line=function(arr,color,op){var pts=[],anyv=false;for(var i=0;i<n;i++){var v=arr[i]||0;if(v)anyv=true;pts.push(X(i).toFixed(1)+','+Y(v).toFixed(1));}
+if(!anyv)return '';return '<polyline points="'+pts.join(' ')+'" fill="none" style="stroke:'+color+'" stroke-width="1.5" vector-effect="non-scaling-stroke"/>'
++'<polygon points="0,'+(H-1)+' '+pts.join(' ')+' '+W+','+(H-1)+'" style="fill:'+color+'" opacity="'+op+'" stroke="none"/>';};
+var ty=Y(top),grid='<line x1="0" y1="'+ty.toFixed(1)+'" x2="'+W+'" y2="'+ty.toFixed(1)+'" stroke="rgba(255,255,255,0.10)" stroke-width="1" vector-effect="non-scaling-stroke"/>',xlab='';
+var per=Math.max(1,Math.round(300/(sr.binS||60)));   // a tick every five minutes
+for(var i=0;i<n;i++){var ago=(n-1-i)*(sr.binS||60);if(i===n-1||(ago%300===0&&ago>0)){var gx=X(i);
+grid+='<line x1="'+gx.toFixed(1)+'" y1="0" x2="'+gx.toFixed(1)+'" y2="'+H+'" stroke="rgba(255,255,255,0.06)" stroke-width="1" vector-effect="non-scaling-stroke"/>';
+xlab+='<span style="left:'+(gx/W*100).toFixed(1)+'%">'+(i===n-1?'now':(ago/60)+'m')+'</span>';}}
+var body=line(tot,'var(--accent,#9cd2ff)',0.18)+line(sr.serverErrors,'var(--warn,#e67e22)',0.35)+line(sr.rateLimited,'var(--st-blocked-bg,#e5484d)',0.35);
+return '<div class=ru-tip-row><span class=ru-tip-k>attempts / min \u00b7 15 min</span><span class=ru-tip-v>peak '+mx+'</span></div>'
++'<div class=ru-tip-graph><svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+grid+body+'</svg>'
++'<span class=ru-tip-gy style="top:'+(ty/H*56).toFixed(0)+'px">'+top+'</span><div class=ru-tip-gx>'+xlab+'</div></div>';}
 // the newest HIST_ROWS transitions, newest first: the time, the state entered (with its bucket when there are
 // several), and how long it held (until the same bucket's next transition; 'so far' for the current one, a flag and
 // never a stamp comparison: the transition the hover's own read files carries that read's asOf as its time, and the
@@ -47402,43 +47543,49 @@ if(!crossed&&pre){crossed=true;
 if(!sawRestart){out+='<div class="ru-tip-row ah-hrow ah-boot"><span class=ru-tip-k>'+hmd(boot)+'</span><span class=ah-hword>kernel restarted</span></div>';}}
 var end=now,cur=true;for(var j=i-1;j>=0;j--)if(rows[j].bucket===r.bucket){end=rows[j].t;cur=false;break;}
 if(pre&&end>boot){end=boot;cur=false;}
-var word=(multi?bname(d,r.bucket)+' ':'')+r.to+(restart?' · kernel restarted':'');
+var word=(multi?bname(d,r.bucket)+' ':'')+(STATE_WORD[r.to]||r.to)+(restart?' \u00b7 kernel restarted':'');
 out+='<div class="ru-tip-row ah-hrow"><span class=ru-tip-k>'+hmd(r.t)+'</span><span class=ah-hword>'+esc(word)+'</span><span class=ru-tip-v>'+dur(end-r.t)+(cur?' so far':'')+'</span></div>';
 if(restart)sawRestart=true;shown++;}
 return out;}
-function histHTML(){var h='<div class="ru-tip-win ah-hist"><div class=ru-tip-name><span>History</span>'
-+((HIST&&!HIST.error&&typeof HIST.asOf==='number')?'<span class=ru-tip-reset>as of '+hms(HIST.asOf)+'</span>':'')+'</div>';
+// History (T301): what happened, per machine, in plain words; the graph; the legend; this machine's State changes,
+// capped and worded plainly. The state machine's word appears only inside the plain phrasing (readHistory), and
+// "unknown" nowhere: traffic with no errors reads as the successes counted, no traffic reads as quiet.
+function localFirst(a,b){return a===''?-1:b===''?1:(a<b?-1:a>b?1:0);}
+function levelDot(rd){return rd?(rd.level==='errors'?'errors':rd.level==='quiet'?'quiet':'fine'):'fine';}
+function histHTML(){var loc=HIST&&HIST[''],asOf=(loc&&!loc.error&&typeof loc.asOf==='number')?'<span class=ru-tip-reset>as of '+hms(loc.asOf)+'</span>':'';
+var h='<div class="ru-tip-win ah-hist"><div class=ru-tip-name><span>History</span>'+asOf+'</div>';
 if(!HIST)return h+'<div class="rl-dots ah-wait"><i></i><i></i><i></i></div></div>';
-if(HIST.error)return h+'<div class="ah-line ah-err">Could not read the API history: '+esc(HIST.error)+'</div></div>';
-var d=HIST,ov=d.overall||{},key=ov.worstBucket,b=key?(d.buckets||{})[key]:null,nb=Object.keys(d.buckets||{}).length,st=ov.state||'unknown';
-// since is the bucket's stateSince as the backend files it: a bucket the boot seeded is unknown since the kernel's
-// own start (SdkBackend seeds the aggregator with the boot clock the payload serves as bootAt), so the head, the
-// tail's divider and the boot's row name one time with no branch here
-var since=b?b.stateSince:0;
-h+='<div class="ru-tip-row ah-head"><i class=ah-dot data-state='+esc(st)+'></i><span class=ah-word>'+esc(st)+'</span>'
-+((nb>1&&b)?'<span class=ah-hsub>'+esc(bname(d,key))+' · worst of '+nb+' buckets</span>':'')
-+(since?'<span class=ah-since>since '+hmd(since)+'</span>':'')+'</div>';
-if(b&&b.why)h+='<div class="ah-line ru-tip-reset">'+esc(b.why)+'</div>';
-if(!b)h+='<div class=ah-line>No API traffic seen'+(typeof d.bootAt==='number'?' since the kernel started at '+hmd(d.bootAt):' yet')+'.</div>';
-else ((d.config&&d.config.windows)||[60,300,900]).forEach(function(w){h+=winRow(w,(b.windows||{})[String(w)],d.uptimeS);});
-var tr=transRows(d);if(tr)h+='<div class="ru-tip-name ah-hname"><span>State changes</span></div>'+tr;
+var hs=Object.keys(HIST).sort(localFirst),many=hs.length>1;
+hs.forEach(function(host){var d=HIST[host],name=host||'this machine';
+if(!d||d.error){h+='<div class="ah-line ah-err">Could not read the API history'+(many?' of '+esc(name):'')+': '+esc((d&&d.error)||'no answer')+'</div>';return;}
+var rd=MERGE?MERGE.readHistory(d):null;
+// with several machines each gets its line (the head already carries this machine's when alone)
+if(many)h+='<div class="ru-tip-row ah-mline"><i class=ah-dot data-dot='+levelDot(rd)+'></i><span class=ah-nm>'+esc(name)+'</span><span class=ah-desc>'+esc(rd?rd.headline:'')+'</span></div>';
+if(rd&&rd.sub&&many)h+='<div class="ah-line ru-tip-reset">'+esc(rd.sub)+'</div>';
+var sr=MERGE?MERGE.documentSeries(d):null;if(sr)h+=graphHTML(sr);});
+h+='<div class="ah-line ah-legend">'+LEGEND+'</div>';
+var tr=(loc&&!loc.error)?transRows(loc):'';if(tr)h+='<div class="ru-tip-name ah-hname"><span>State changes'+(many?' \u00b7 this machine':'')+'</span></div>'+tr;
 return h+'</div>';}
 // the cell's description while the hover shows: the state word and its since, then how to reach the rest. Before the
 // answer lands it carries the state word the frame already put on the cell (assistive tech reads the description once,
 // at focus time, and the landed text replaces it with nothing to announce the change: a loading line with no state
 // word would leave a screen-reader user with none) and says the read is in flight; the landed line adds the since; a
 // failed read says so in the same words as the section's line
-function descText(){var tail=' Press Enter to open it.';if(!HIST)return 'History: '+((LAST&&LAST.text)||'unknown')+'. Reading the details.'+tail;
-if(HIST.error)return 'Could not read the API history: '+HIST.error+'.'+tail;
-var ov=HIST.overall||{},key=ov.worstBucket,b=key?(HIST.buckets||{})[key]:null;
-return 'History: '+(ov.state||'unknown')+((b&&b.stateSince)?' since '+hmd(b.stateSince):'')+'.'+tail;}
+function descText(){var tail=' Press Enter to open it.';var mg=merged();var w=LAST?headWords(LAST,mg):'';
+if(!/[.!?]$/.test(w))w+='.';
+var loc=HIST&&HIST[''];if(loc&&loc.error)return 'Could not read the API history: '+loc.error+'.'+tail;
+if(!HIST)return 'API health: '+w+' Reading the details.'+tail;
+return 'API health: '+w+tail;}
 // full=false is the HOVER: the same reading with no controls. The hover sits under pointer-events:none and hides
 // on mouseleave, so a button there could not be honored; the click is where the actions live.
-function html(m,full){var h='<div class=ru-tip-win><div class=ru-tip-name><span>API · this machine</span></div>'
-+'<div class="ru-tip-row ah-head"><i class=ah-dot data-state='+esc(m.state)+'></i><span class=ah-word>'+esc(m.text)+'</span>'
-+(m.since?'<span class=ah-since>since '+hm(m.since)+'</span>':'')+'</div>';
+function html(m,full){var mg=merged(),rd=readingOf('');
+var h='<div class=ru-tip-win><div class=ru-tip-name><span>API health'+(mg.n>1?' \u00b7 '+mg.n+' machines':'')+'</span></div>'
++'<div class="ru-tip-row ah-head"><i class=ah-dot data-dot='+esc(mg.dot)+'></i><span class=ah-word>'+esc(headWords(m,mg))+'</span>'
++((m.since&&m.state!=='ok')?'<span class=ah-since>since '+hm(m.since)+'</span>':'')+'</div>';
 if(m.state==='paused')h+='<div class=ah-line>'+(PAUSE[m.reason]||PAUSE.manual)+'</div>';
-else if(m.state==='ok')h+='<div class=ah-line>'+OK+'</div>';
+if(rd&&rd.sub&&mg.n===1)h+='<div class="ah-line ru-tip-reset">'+esc(rd.sub)+'</div>';
+// several machines: one line each, the dot in that machine's state, a stale link said plainly
+if(mg.n>1)mg.machines.forEach(function(x){h+='<div class="ru-tip-row ah-mline"><i class=ah-dot data-dot='+esc(x.dot)+'></i><span class=ah-desc>'+esc(x.text)+(x.stale?' \u00b7 last heard before its link dropped':'')+'</span></div>';});
 if(full)h+=btnHTML(m);
 h+='</div>';
 var rows=m.sessions||[];
@@ -47569,7 +47716,7 @@ window.__rompApiHealth=function(m){if(!m||!m.state)return;LAST=m;hint='';   // a
 // that cleared only on a frame whose state matched the press would leave a Resume disabled and mislabeled for the window.
 if(pending!==null&&(m.seq==null||m.seq!==pendSeq))pending=null;
 if(el.hidden)el.hidden=false;   // the first frame reveals the cell (a kernel that sends none shows nothing)
-if(el.getAttribute('data-state')!==m.state||txt.textContent!==m.text){el.setAttribute('data-state',m.state);txt.textContent=m.text;el.setAttribute('aria-label','API '+m.text);}
+paintCell();
 if(tip.style.display!=='block')return;   // an open detail re-renders from the new frame, nothing else does
 load();   // and re-reads the history: the world changed
 if(held){dirty=true;return;}render();};
@@ -49652,12 +49799,16 @@ def _landing():
             # without this author rule the rail would show a gray 'API ok' from page load, and forever on a
             # kernel that never sends a frame (the #mtabs button[hidden] idiom).
             "#rail-api[hidden]{display:none}"
-            ".ah-dot{width:7px;height:7px;border-radius:50%;background:#9aa4ad;opacity:.55;flex:0 0 auto}"
-            "#rail-api[data-state=degraded] .ah-dot,.ah-dot[data-state=degraded]{background:#e67e22;opacity:1}"
-            "#rail-api[data-state=paused] .ah-dot,.ah-dot[data-state=paused]{background:#e5484d;opacity:1}"
-            ".ah-text{font:600 10px 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color:#cfe6ff;font-variant-numeric:tabular-nums;white-space:nowrap}"
-            "#rail-api[data-state=ok] .ah-text{color:#9aa4ad}"
-            "#rail-api{cursor:pointer;margin-left:4px}"
+            # the dot's THREE states (T301, the user 2026-09-10): the accent when every connected kernel is fine, the
+            # blocked red when errors are being met anywhere (a 429 storm, 5xx, offline, paused), the label gray when
+            # no kernel has API traffic in the windows. Tokens with fallbacks (a var-less harness). The same dot,
+            # keyed by its own data-dot, heads the detail card and each machine's line.
+            ".ah-dot{width:7px;height:7px;border-radius:50%;background:var(--dim,#9aa4ad);opacity:.55;flex:0 0 auto}"
+            "#rail-api[data-dot=fine] .ah-dot,.ah-dot[data-dot=fine]{background:var(--accent,#9cd2ff);opacity:1}"
+            "#rail-api[data-dot=errors] .ah-dot,.ah-dot[data-dot=errors]{background:var(--st-blocked-bg,#e5484d);opacity:1}"
+            "#rail-api[data-dot=quiet] .ah-dot,.ah-dot[data-dot=quiet]{background:var(--dim,#9aa4ad);opacity:.55}"
+            "#rail-api{cursor:pointer;margin:0 1px;padding:4px 2px}"   # a 15px hit target around a 7px dot; sits inside the readout's slot
+            ".ah-slot{display:inline-flex;align-items:center}"
             # the detail card's own rows, in the tip's font and palette (#ah-tip shares #ru-tip's skin below)
             ".ah-head{gap:7px}.ah-word{font-weight:700;color:#e8eef5}.ah-since{opacity:.55;margin-left:auto}"
             ".ah-line{margin-top:4px;max-width:340px}"
@@ -49679,8 +49830,9 @@ def _landing():
             # caps it to (the room above the rail): border-box, so the cap is the outline the user sees and not the
             # content plus 18 px of padding and border; .ru-modal's own overflow-y:auto outranks the clip on the
             # pinned card, which scrolls as before.
-            ".ah-dot[data-state=thrashing]{background:#e5484d;opacity:1}.ah-dot[data-state=recovering]{background:#e67e22;opacity:.7}"
             ".ah-hword{opacity:.8}.ah-hsub{opacity:.55}.ah-boot .ah-hword{font-style:italic;opacity:.6}"
+            # the graph (T301): the usage hover's own .ru-tip-graph grammar; the legend and the machine lines are sub-lines
+            ".ah-legend{opacity:.6;margin-top:4px;max-width:340px}.ah-mline{gap:7px}.ah-mline .ah-desc{opacity:.9}"
             ".ah-hname{margin-top:6px}.ah-err{color:#ef6b6f}.ah-wait{margin:5px 0 2px}"
             ".ah-row.ah-ro{cursor:default}.ah-row.ah-ro:hover{background:transparent}"
             "#ah-tip:focus{outline:none}#ah-tip{overflow:hidden;box-sizing:border-box}"
@@ -50091,7 +50243,6 @@ def _landing():
             "body.theme-light .ru-tip-name{color:#1F1E1D}"
             "body.theme-light .ru-name{color:#5D574E}"
             "body.theme-light .ru-pct{color:#1F1E1D}"
-            "body.theme-light .ah-text{color:#1F1E1D}"
             # the ok dot: the dark label gray at .55 blends into the light rail (about 1.4:1); the light label
             # color at the same opacity keeps the glyph where the eye expects it. Scoped to the ok state: a
             # bare `body.theme-light .ah-dot` (0,2,1) would outrank the detail's `.ah-dot[data-state=...]`
@@ -50099,12 +50250,10 @@ def _landing():
             # theme while the rail's id-scoped dot kept them
             # and the History head's dot for the signal's quiet states (healthy, unknown) is the same glyph: the base
             # gray falls to about 1.6:1 on the white tip too
-            "body.theme-light #rail-api[data-state=ok] .ah-dot,body.theme-light .ah-dot[data-state=ok],"
-            "body.theme-light .ah-dot[data-state=healthy],body.theme-light .ah-dot[data-state=unknown]{background:#5D574E}"
+            "body.theme-light #rail-api[data-dot=quiet] .ah-dot,body.theme-light .ah-dot[data-dot=quiet]{background:#5D574E}"
             # the failure line in the light theme's error-text red (styles.css --err #B02A1C, about 6.6:1 on white;
             # the dark line's #ef6b6f is 3.0:1 there)
             "body.theme-light .ah-err{color:#B02A1C}"
-            "body.theme-light #rail-api[data-state=ok] .ah-text{color:#5D574E}"
             "body.theme-light .ah-word{color:#1F1E1D}"
             "body.theme-light .ah-btn{background:#F1EAE2;border-color:rgba(0,0,0,0.12);color:#1F1E1D}"
             "body.theme-light .ah-row:hover{background:rgba(0,0,0,0.05)}"
@@ -50181,15 +50330,18 @@ def _landing():
             # the Claude /usage rate-limit bars (Pro/Max): three compact vertical bar-pairs (used % colored +
             # elapsed % slate), %-label, full detail on hover — side-by-side in the bottom bar.
             "<div id=rail-usage data-keycmd=usage.open></div>"
-            # the API health cell: its own label, a 7px dot, one word, painted by _LANDING_APIH_JS from the
-            # kernel's apiHealth push. Ships HIDDEN: it shows on its first frame, so a kernel that never sends
+            # the API health cell (T301, the user 2026-09-10): ONE small dot and nothing else, no second "API" word
+            # and no "ok". It ships here after the usage bars and MOVES into the spend readout's slot (.ah-slot,
+            # right after that readout's existing API label and left of its 1-day segment) whenever the readout
+            # renders (_LANDING_USAGE_JS renderRows re-parents the node, so its listeners survive every rebuild
+            # of the readout's innerHTML); with no spend readout it stays here. Painted by _LANDING_APIH_JS from the
+            # kernel's apiHealth push, merged across every attached machine. Ships HIDDEN: it shows on its first frame, so a kernel that never sends
             # one shows nothing rather than a false ok. Its own element, not a child of #rail-usage (renderRows
             # empties that one when there are no bars and no spend). No title (the rail's no-title rule); no
             # data-keycmd yet. role=button + tabindex=0 make it a keyboard control (Enter / Space open the
             # detail); aria-label follows the frame's text.
-            "<div id=rail-api class=\"ru-w ru-ah\" hidden role=button tabindex=0 aria-label=\"API ok\" data-state=ok>"
-            "<span class=ru-name>API</span>"
-            "<i class=ah-dot></i><span class=ah-text>ok</span></div>"
+            "<div id=rail-api class=\"ru-w ru-ah\" hidden role=button tabindex=0 aria-label=\"API health\" data-dot=fine>"
+            "<i class=ah-dot></i></div>"
             "</div>"   # /.rail-scroll
             # refresh + network + settings, pinned to the far RIGHT (settings last), always visible:
             "<div class=rail-acts>"
@@ -50363,6 +50515,10 @@ def _landing():
             # for `romp perf client`. Early, so a long frame during the boot's own work is seen; the boot
             # script runs first so the splash is not held behind a bundle fetch.
             ("<script src=/dist/shell-perf.js?v=%d></script>" % v) +
+            # the API-health merge and reading rules (ui/webview/api-health-merge.ts), published as
+            # window.__rompApiHealthMerge for _LANDING_APIH_JS the same way (T301): pure, unit-tested, and the
+            # one place the multi-host merge and the plain-words reading live
+            ("<script src=/dist/api-health-global.js?v=%d></script>" % v) +
             "<script>" + _LANDING_ERRS_JS + "</script>"
             "<script>" + _LANDING_USAGE_JS.replace("__ROMP_LOADER__", json.dumps(_loader_inner())) + "</script>"
             "<script>" + _LANDING_APIH_JS + "</script>"
@@ -50976,6 +51132,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(403, "forbidden: " + why, "text/plain")
             if p == "/ws":
                 return self._ws()
+            if p.startswith("/remote/") and p.endswith("/api-health"):
+                # the API-health signal of an attached host, relayed (T301): one JSON read, that kernel's own
+                # token rewritten in, its document passed through as it answered it
+                return self._remote_api_health(unquote(p[len("/remote/"):-len("/api-health")]))
             if p.startswith("/remote/") and p.endswith("/ws"):
                 # federated dashboard, viewed off this machine: relay to the attached host's kernel
                 return self._remote_ws(unquote(p[len("/remote/"):-len("/ws")]), u.query)
@@ -51200,6 +51360,14 @@ class Handler(BaseHTTPRequestHandler):
                 if (q.get("local") or [""])[0]:
                     return self._send(200, json.dumps(_spend_detail_local()), "application/json", cache="no-cache")
                 return self._send(200, json.dumps(_spend_detail()), "application/json", cache="no-cache")
+            if p == "/api-health/frame":
+                # This kernel's LAST apiHealth shell frame, its local half only (no `hosts`): what an attached
+                # peer's tunnel supervisor polls to carry this machine in ITS shell's per-host map (T301). Authed
+                # like /api-health (it names sessions). 503 before the first cycle has built one.
+                f = _apih_local_frame()
+                if f is None:
+                    return self._send(503, json.dumps({"error": "no API-health frame yet"}), "application/json", cache="no-cache")
+                return self._send(200, json.dumps(f), "application/json", cache="no-cache")
             if p == "/api-health":
                 # The API-health signal (docs/reference.md): per-(auth label, model family) attempt /
                 # response / give-up counts over rolling windows and a thrash/degraded/recovering state
@@ -54181,6 +54349,37 @@ class Handler(BaseHTTPRequestHandler):
                 up.close()                       # ours alone — safe to close fully
             except OSError:
                 pass
+
+    def _remote_api_health(self, host):
+        """GET /remote/<host>/api-health: relay ONE read of an attached host's API-health signal through this
+        kernel's tunnel (T301). The same shape as the /file relay: the local auth gate has run, the remote's own
+        token goes in the request (the browser needs only its local credential), and this kernel mirrors the
+        status and the JSON body it got, bounded, under a Content-Type this side sets. The remote's numbers are
+        the remote's: the shell keeps them under that host's name and never adds them to this kernel's. A dead
+        tunnel is a 502 and a redial, as for every relay."""
+        with _remotes_lock:
+            r = _remotes.get(host)
+            port, rtok = (r or {}).get("local_port") or 0, (r or {}).get("token") or ""
+        if not port:
+            return self._send(404, "no attached host %r" % host, "text/plain")
+        conn = http.client.HTTPConnection("127.0.0.1", int(port), timeout=10)
+        try:
+            conn.request("GET", "/api-health", headers=({"X-Romp-Token": rtok} if rtok else {}))
+            resp = conn.getresponse()
+            body = resp.read(1 << 20)
+            status = resp.status
+        except (OSError, http.client.HTTPException) as e:
+            _demand_redial(host, "refused" if isinstance(e, ConnectionRefusedError) else "timeout")
+            return self._send(502, "tunnel to %s is not answering: re-dialing now" % host, "text/plain")
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        if status != 200:
+            # the remote's verdict in prose (an older build's 404, its 401, its 503): the shell names it per host
+            return self._send(status, body[:2000].decode("utf-8", "replace") or ("HTTP %d" % status), "text/plain")
+        return self._send(200, body, "application/json", cache="no-cache")
 
     def _remote_file(self, host, query, head=False):
         """GET/HEAD /remote/<host>/file — relay ONE preview request to an attached host's kernel

@@ -176,7 +176,7 @@ class Payload(unittest.TestCase):
         m = re.search(r"var HIST_ROWS=(\d+);", JS)
         self.assertIsNotNone(m, "the section caps its rows")
         self.assertLessEqual(int(m.group(1)), sb.API_HEALTH_TRANSITIONS_KEEP, "the section shows a slice of the tail")
-        self.assertEqual(int(m.group(1)), 6, "about six rows: what fits the hover")
+        self.assertEqual(int(m.group(1)), 4, "four rows: a glance, not a log (T301)")
 
     def test_a_restart_files_the_row_the_section_matches(self):
         self.storm(T0 - 600, T0)
@@ -251,8 +251,8 @@ class OneClock(unittest.TestCase):
         self._check(be.api_health.snapshot(T0 + 31), T0 + 30)
         self.assertIn('"bootAt": self.boot_stamp', inspect.getsource(sb.ApiHealth.snapshot))
         self.assertNotIn('out["bootAt"]', inspect.getsource(km.Handler.do_GET))
-        # and the section reads stateSince alone: no why-keyed branch, nothing for it to be dead on
-        self.assertIn("var since=b?b.stateSince:0;", HIST)
+        # and the section keys the divider on bootAt alone: no why-keyed branch, nothing for it to be dead on
+        self.assertIn("boot=d.bootAt,", HIST)
         self.assertNotIn("b.why===RESTART_WHY", HIST)
 
     def test_the_kernel_builds_the_backend_with_its_own_start_as_boot_at(self):
@@ -360,8 +360,7 @@ class OneClock(unittest.TestCase):
         self.assertIn(int(out["bootAt"]), (int(km._STARTED), int(km._STARTED) + 1),
                       "the clamp may cross the second; /version's started stays int(_STARTED)")
         self.assertEqual(len([ln for ln in lines if "not before this boot" in ln]), 1, lines)
-        # the section reads the three from these fields and nothing else, so they show one time
-        self.assertIn("var since=b?b.stateSince:0;", HIST)
+        # the section reads the divider and the restart row from these fields and nothing else, so they show one time
         self.assertIn("boot=d.bootAt,", HIST)
         self.assertIn("<span class=ru-tip-k>'+hmd(boot)+'</span><span class=ah-hword>kernel restarted</span>", HIST)
 
@@ -572,7 +571,8 @@ class Route(unittest.TestCase):
         status, body = _serve_get("/api-health", {"Cookie": "romp_token=" + TOK,
                                                   "Origin": "http://evil.example", "Host": "127.0.0.1:%d" % km.PORT})
         self.assertEqual(status, 403, "a cross-site page's cookie is refused")
-        self.assertIn("fetch('/api-health',{cache:'no-store'})", JS)
+        self.assertIn("fetchDoc('/api-health')", JS)
+        self.assertIn("fetch(u,{cache:'no-store'})", JS)
         self.assertIn("fetch('/usage/fleet',{cache:'no-store'})", km._LANDING_USAGE_JS, "the same shape as the shell's other read")
 
     def test_a_missing_backend_is_a_loud_503_that_the_section_shows_as_its_failure_line(self):
@@ -580,9 +580,10 @@ class Route(unittest.TestCase):
         status, body = _serve_get("/api-health", {"Cookie": "romp_token=" + TOK})
         self.assertEqual(status, 503)
         self.assertIn("error", json.loads(body))
-        self.assertIn("if(!r.ok)throw new Error('HTTP '+r.status);", HIST, "a non-2xx is the failure, with its status")
-        self.assertIn("HIST={error:String((e&&e.message)||e)};", HIST)
-        self.assertIn("Could not read the API history: '+esc(HIST.error)", HIST)
+        self.assertIn("if(!r.ok){var tp=(typeof r.text==='function')?r.text():Promise.resolve('');", HIST, "a non-2xx is the failure, with its status")
+        self.assertIn("return {error:'HTTP '+r.status+(t?", HIST)
+        self.assertIn(".catch(function(e){return {error:String((e&&e.message)||e)};});}", HIST)
+        self.assertIn("Could not read the API history'+(many?' of '+esc(name):'')+': '+esc((d&&d.error)||'no answer')", HIST)
 
 
 class FrameUnchanged(unittest.TestCase):
@@ -609,7 +610,7 @@ class FrameUnchanged(unittest.TestCase):
         km._api_health_push(f1)
         self.assertEqual(len(self.sent), 1)
         self.assertEqual(set(f1), {"type", "state", "cls", "reason", "text", "waiting", "retrying", "blocked",
-                                   "since", "tmux", "sessions", "seq"}, "the documented keys, nothing added")
+                                   "since", "tmux", "sessions", "seq", "hosts", "quiet"}, "the documented keys, nothing added")
         for k in ("windows", "transitions", "buckets", "history", "overall", "bootAt"):
             self.assertNotIn(k, f1)
         # a hover reads the route in between (the read files a transition: the storm classifies)
@@ -632,9 +633,12 @@ class Docs(unittest.TestCase):
         sec = self._section()
         self.assertIn("**History**", sec)
         self.assertIn("`GET /api-health`", sec)
-        for k in ("`overall.state`", "`stateSince`", "`why`", "`config.windows`", "`requests`", "`rate429`", "`rate5xx`",
-                  "`gaveUp`", "`sessionsRetrying`", "`complete`", "`transitions`", "`asOf`", "`bootAt`"):
+        # T301: the reading counts the failures over the longest window and draws `series`; the state machine's word
+        # is read only through the plain phrasing, so `overall.state` is no longer what the section describes
+        for k in ("`config.windows`", "`requests`", "`noStatus`", "`rateLimited`", "`serverErrors`", "`gaveUp`", "`series`",
+                  "`transitions`", "`asOf`", "`bootAt`", "`hosts`", "`quiet`"):
             self.assertIn(k, sec, k)
+        self.assertNotIn("`overall.state` with", sec, "the machine's word is not what the user reads")
         self.assertIn("`kernel restarted`", sec)
         self.assertIn("never the previous numbers", sec)
         self.assertIn("Nothing polls", sec)
@@ -651,8 +655,9 @@ class Docs(unittest.TestCase):
     def test_the_guide_tells_the_user_what_the_hover_shows(self):
         guide = Path(DOCS, "guide.md").read_text()
         self.assertIn("the history under it", guide)
-        self.assertIn("last 1, 5 and 15 minutes", guide)
+        self.assertIn("the last 15 minutes", guide)
         self.assertIn("A kernel restart shows as its own line there", guide)
+        self.assertIn("every connected kernel", guide)
 
     def test_the_reference_names_the_three_failed_reads(self):
         self.assertIn("A read that fails (a non-2xx, no answer, or an answer without the signal's shape) shows one line "
@@ -684,37 +689,47 @@ class Script(unittest.TestCase):
         self.assertNotIn("setInterval", JS)
         self.assertIn("window.addEventListener('focus',function(){winFocusEl=document.activeElement;requestAnimationFrame(function(){winFocusEl=null;});});", JS,
                       "the window-focus mark is cleared on the next animation frame, an event")
-        self.assertEqual(HIST.count("if(n!==histSeq)return;"), 2, "both arms of the read drop an answer a newer read superseded")
-        self.assertEqual(HIST.count("if(tip.style.display!=='block')return;if(held){dirty=true;return;}render();"), 2,
+        # T301: ONE arm (Promise.all over this machine's document and every attached host's), so one guard of each
+        self.assertEqual(HIST.count("if(n!==histSeq)return;"), 1, "the read drops an answer a newer read superseded")
+        self.assertEqual(HIST.count("if(tip.style.display!=='block')return;if(held){dirty=true;return;}render();"), 1,
                          "the answer repaints an open card only, and never under a held pointer")
+        self.assertIn("Promise.all(reads)", HIST, "every machine's document in one read")
+        self.assertIn(".catch(function(e){return {error:String((e&&e.message)||e)};});}", HIST, "a rejected fetch is that machine's failure line, never an unhandled rejection")
 
     def test_a_failed_read_is_one_line_in_place_of_the_rows(self):
-        self.assertIn("HIST=(d&&d.buckets)?d:{error:'malformed answer'};", HIST, "an answer without the signal's shape is a failure too")
-        self.assertIn("if(HIST.error)return h+'<div class=\"ah-line ah-err\">Could not read the API history: '+esc(HIST.error)+'</div></div>';", HIST,
-                      "the line stands where the rows would, and the function returns before any row")
+        self.assertIn("return (d&&d.buckets)?d:{error:'malformed answer'};", HIST, "an answer without the signal's shape is a failure too")
+        # T301: per machine: the line stands where that machine's reading would, named when there are several
+        self.assertIn("if(!d||d.error){h+='<div class=\"ah-line ah-err\">Could not read the API history'+(many?' of '+esc(name):'')+': '+esc((d&&d.error)||'no answer')+'</div>';return;}", HIST)
         self.assertIn("if(!HIST)return h+'<div class=\"rl-dots ah-wait\"><i></i><i></i><i></i></div></div>';", HIST,
                       "before the first answer: the loader's dots")
 
-    def test_the_rows_wear_the_spend_hover_s_grammar(self):
-        self.assertIn("'<div class=\"ru-tip-win ah-hist\"><div class=ru-tip-name><span>History</span>'", HIST)
-        self.assertIn("'<span class=ru-tip-reset>as of '+hms(HIST.asOf)+'</span>'", HIST, "the payload's asOf on the heading")
-        self.assertIn("'<div class=\"ru-tip-row ah-head\"><i class=ah-dot data-state='+esc(st)+'></i><span class=ah-word>'+esc(st)+'</span>'", HIST)
-        self.assertIn("if(b&&b.why)h+='<div class=\"ah-line ru-tip-reset\">'+esc(b.why)+'</div>';", HIST, "the reason in the small annotation grammar")
-        self.assertIn("((d.config&&d.config.windows)||[60,300,900]).forEach(function(w){h+=winRow(w,(b.windows||{})[String(w)],d.uptimeS);});", HIST,
-                      "the windows come from the config in force")
-        self.assertIn("var lab=(w%60===0?(w/60)+' min':w+' s');if(c&&c.complete===false&&typeof up==='number')lab+=' · kernel up '+dur(up);", HIST)
-        self.assertIn("var v,rq=(c&&c.requests)||0,ns=(c&&c.noStatus)||0;if(!c||!(rq||ns||c.gaveUp||c.sessionsRetrying))v='no attempts';", HIST,
-                      "a window is quiet only when every count is zero")
-        self.assertIn("v+=' · '+(c.gaveUp||0)+' gave up · '+pl(c.sessionsRetrying,'session')+' retried';}", HIST)
-        self.assertNotIn("' retrying'", HIST, "no present-tense label on a windowed count")
-        self.assertIn("'<div class=\"ru-tip-row ah-hrow\"><span class=ru-tip-k>'+esc(lab)+'</span><span class=ru-tip-v>'+esc(v)+'</span></div>'", HIST,
-                      "the spend row's classes")
+    def test_the_section_wears_the_usage_hover_s_grammar_the_graph_the_legend_and_plain_words(self):
+        # T301: no per-window rows; the graph in the usage hover's grammar (polyline + fill, ONE ceiling label, five-minute
+        # ticks), the codes explained once, every machine's line in the small annotation grammar
+        self.assertIn("var h='<div class=\"ru-tip-win ah-hist\"><div class=ru-tip-name><span>History</span>'+asOf+'</div>';", HIST)
+        self.assertIn("'<span class=ru-tip-reset>as of '+hms(loc.asOf)+'</span>'", HIST, "this machine's asOf on the heading")
+        self.assertIn("<span class=ru-tip-k>attempts / min ", HIST)
+        self.assertIn("<span class=ru-tip-v>peak '+mx+'</span></div>'", HIST)
+        self.assertIn("'<div class=ru-tip-graph><svg viewBox=\"0 0 '+W+' '+H+'\" preserveAspectRatio=\"none\">'+grid+body+'</svg>'", HIST, "the usage graph's own container")
+        self.assertIn("'<span class=ru-tip-gy style=\"top:'+(ty/H*56).toFixed(0)+'px\">'+top+'</span><div class=ru-tip-gx>'+xlab+'</div></div>';}", HIST, "one ceiling label; the ticks under")
+        self.assertIn("line(tot,'var(--accent,#9cd2ff)',0.18)+line(sr.serverErrors,'var(--warn,#e67e22)',0.35)+line(sr.rateLimited,'var(--st-blocked-bg,#e5484d)',0.35)", HIST,
+                      "every attempt in the accent, 5xx in the warn amber, 429 in the blocked red, through the tokens")
+        self.assertIn("var LEGEND='429 = the API told us to slow down (rate limit) ", JS)
+        self.assertIn("5xx = the API itself failed (server error) ", JS)
+        self.assertIn("offline = no connection';", JS)
+        self.assertIn("h+='<div class=\"ah-line ah-legend\">'+LEGEND+'</div>';", HIST, "the legend stands under the graphs, once")
+        self.assertIn("if(many)h+='<div class=\"ru-tip-row ah-mline\"><i class=ah-dot data-dot='+levelDot(rd)+'></i><span class=ah-nm>'+esc(name)+'</span><span class=ah-desc>'+esc(rd?rd.headline:'')+'</span></div>';", HIST,
+                      "several machines: one line each, that machine's own reading")
+        self.assertNotIn("winRow", JS, "the per-window rows are gone")
+        self.assertNotIn("worst of", JS, "and the bucket-count caveat with them")
+        self.assertNotIn("kernel up", JS, "and the uptime caveat")
         self.assertEqual(sb._AH_COUNTED, ("ok", "429", "529", "5xx", "other"),
                          "requests excludes 'none', so requests plus noStatus counts every attempt once")
         self.assertIn("rows.forEach(function(r){h+=rowHTML(r,full);});h+='</div>';}\nh+=histHTML();\nif(m.tmux>0)h+=", JS,
                       "the section sits after the sessions waiting and before the tmux line, in hover and detail alike")
 
-    def test_the_tail_holds_six_rows_newest_first_each_state_s_hold_and_a_restart_never_hidden(self):
+    def test_the_tail_holds_four_rows_newest_first_in_plain_words_each_state_s_hold_and_a_restart_never_hidden(self):
+        self.assertIn("var HIST_ROWS=4;", JS, "T301: a glance, not a log")
         self.assertIn(".sort(function(a,b){return b.t-a.t;})", HIST, "newest first")
         self.assertIn("var end=now,cur=true;for(var j=i-1;j>=0;j--)if(rows[j].bucket===r.bucket){end=rows[j].t;cur=false;break;}", HIST,
                       "a state holds until the SAME bucket's next change")
@@ -724,7 +739,8 @@ class Script(unittest.TestCase):
         self.assertIn("pre=hasBoot&&r.t<boot;", HIST)
         self.assertIn("if(restart)sawRestart=true;shown++;}", HIST, "any restart row above suppresses the divider")
         self.assertEqual(HIST.count("shown++"), 1, "shown counts transition rows only: the divider takes no slot")
-        self.assertIn("var word=(multi?bname(d,r.bucket)+' ':'')+r.to", HIST, "a bucket is named only when there are several")
+        self.assertIn("var word=(multi?bname(d,r.bucket)+' ':'')+(STATE_WORD[r.to]||r.to)", HIST, "a bucket is named only when there are several; the state in plain words")
+        self.assertIn("var STATE_WORD={thrashing:'rate-limit storm',degraded:'API failing',recovering:'recovering',healthy:'fine',unknown:'quiet'};", JS)
         self.assertIn("return dup?fam+' · '+(b.auth||key.split('|')[0]):fam;}", HIST, "two of one family are told apart by auth")
 
     def test_the_roles_follow_the_mode_and_the_cell_is_described_by_the_short_summary(self):
@@ -732,8 +748,11 @@ class Script(unittest.TestCase):
         self.assertNotIn("winFocus=true", JS, "the mark is an element, not a flag")
         self.assertIn("var desc=document.createElement('span');desc.id='ah-summary';desc.className='ah-vh';document.body.appendChild(desc);", JS)
         self.assertIn("tip.innerHTML=html(LAST,pinned);if(!pinned)anchor();desc.textContent=descText();", JS, "refreshed on every render")
-        self.assertIn("function descText(){var tail=' Press Enter to open it.';if(!HIST)return 'History: '+((LAST&&LAST.text)||'unknown')+'. Reading the details.'+tail;", HIST)
-        self.assertIn("return 'History: '+(ov.state||'unknown')+((b&&b.stateSince)?' since '+hmd(b.stateSince):'')+'.'+tail;}", HIST)
+        # T301: the description is the head's plain words, a failed read said as such, and the read in flight named
+        self.assertIn("function descText(){var tail=' Press Enter to open it.';var mg=merged();var w=LAST?headWords(LAST,mg):'';", HIST)
+        self.assertIn("var loc=HIST&&HIST[''];if(loc&&loc.error)return 'Could not read the API history: '+loc.error+'.'+tail;", HIST)
+        self.assertIn("if(!HIST)return 'API health: '+w+' Reading the details.'+tail;\nreturn 'API health: '+w+tail;}", HIST)
+        self.assertNotIn("'unknown'", HIST.replace("unknown:'quiet'", ""), "the machine's word never reaches the description")
         self.assertNotIn("'aria-describedby','ah-tip'", JS, "the tip's whole text is never the description")
         self.assertIn("tip.setAttribute('role','tooltip');tip.setAttribute('aria-label','API health');tip.tabIndex=-1;", JS, "created as a tooltip")
         self.assertIn("tip.classList.remove('ru-modal');tip.setAttribute('role','tooltip');tip.removeAttribute('aria-modal');", JS, "show: tooltip")
@@ -753,12 +772,16 @@ class Skin(unittest.TestCase):
     def setUpClass(cls):
         cls.html = km._landing()
 
-    def test_the_dot_wears_status_hexes_never_the_accent_and_the_rows_are_quiet(self):
-        self.assertIn(".ah-dot[data-state=thrashing]{background:#e5484d;opacity:1}.ah-dot[data-state=recovering]{background:#e67e22;opacity:.7}", self.html)
-        rules = re.findall(r"[^{}]*\.ah-(?:dot|err)[^{}]*\{[^}]*\}", self.html)
-        self.assertGreater(len(rules), 3)
+    def test_the_dot_wears_the_accent_when_fine_the_status_tokens_otherwise_and_the_rows_are_quiet(self):
+        # T301 (the user 2026-09-10): the fine dot IS the romp accent; errors wear the blocked red, quiet the label gray;
+        # every colour through a token with a fallback for a var-less harness
+        self.assertIn("#rail-api[data-dot=fine] .ah-dot,.ah-dot[data-dot=fine]{background:var(--accent,#9cd2ff);opacity:1}", self.html)
+        self.assertIn("#rail-api[data-dot=errors] .ah-dot,.ah-dot[data-dot=errors]{background:var(--st-blocked-bg,#e5484d);opacity:1}", self.html)
+        self.assertIn("#rail-api[data-dot=quiet] .ah-dot,.ah-dot[data-dot=quiet]{background:var(--dim,#9aa4ad);opacity:.55}", self.html)
+        self.assertNotIn("data-state=thrashing", self.html, "the machine's words are not colours any more")
+        rules = re.findall(r"[^{}]*\.ah-err[^{}]*\{[^}]*\}", self.html)
         for rule in rules:
-            self.assertNotIn("var(--accent)", rule, rule)
+            self.assertNotIn("var(--accent", rule, "the failure line is never the accent: " + rule)
         self.assertIn(".ah-hword{opacity:.8}.ah-hsub{opacity:.55}.ah-boot .ah-hword{font-style:italic;opacity:.6}", self.html)
         self.assertIn(".ah-hname{margin-top:6px}.ah-err{color:#ef6b6f}.ah-wait{margin:5px 0 2px}", self.html)
         self.assertIn("body.theme-light .ah-err{color:#B02A1C}", self.html, "the light theme's error-text red")
