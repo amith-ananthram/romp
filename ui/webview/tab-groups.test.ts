@@ -228,7 +228,10 @@ test("executed + pinned: the section holding the ACTIVE tab folds like any other
   assert.match(head, /const words = headWords\(name, total, hidden\.length, collapsed, holdsActive, back, shown\);\s*\n\s*head\.title = words\.title;/, "the words are the pure module's");
   assert.ok(!RENDER.includes('"group-active"'), "no delegate handler for a no-op either");
   assert.doesNotMatch(CSS, /\.tab-group-head\.holds-active \{ cursor: default; \}/, "the header folds, so its cursor promises the click");
-  assert.match(CSS, /\.tab-group-head\.holds-active \.tab-group-chip \{ text-decoration: underline; text-decoration-color: var\(--accent\);/, "the mark: the tag's chip accent-underlined");
+  // the holding row wears no mark of its own (T322, the user 2026-09-10: the chip's accent underline read as a second
+  // selection); the class stays for aria-current and the folded stand-in's focus and arrows
+  assert.doesNotMatch(CSS, /\.tab-group-head\.holds-active \.tab-group-chip \{ text-decoration: underline/, "no underline on the holding row's chip");
+  assert.doesNotMatch(CSS, /\.tab-group-head\.holds-active[^\n]*\{[^}]*(background|border|outline|text-decoration)/, "no dress of any kind on the holding row");
   // the hidden active tab's stand-in in render.ts: focus lands on the header, the arrows step from it, and a
   // pick of a folded-away session opens its section (tab-snapshot-pane.test.ts runs these)
   assert.match(RENDER, /const home = activeId \? homeSectionOf\(lastStripItems, activeId\) : null;\s*\n\s*if \(!home \|\| home\.name === null \|\| !bar\) return;\s*\n\s*Array\.from\(bar\.querySelectorAll<HTMLElement>\("\.tab-group-head"\)\)\.find\(\(h\) => h\.dataset\.group === home\.name\)\?\.focus\(\);/,
@@ -571,8 +574,8 @@ test("the header's structure and gestures read as a label: the tag's chip, then 
     "…falling back to the active tab when the group is gone or now holds it");
   // hover/focus: the count brightens to --fg, the chevron takes the accent, and the CHIP brightens by a
   // filter on its own identity colour (T251b — a --fg swap would erase the tag) — no row wash ("select me")
-  assert.match(CSS, /\.tab-group-head:hover, \.tab-group-head:focus-visible \{ color: var\(--fg\); \}/);
-  assert.match(CSS, /\.tab-group-head:hover \.tab-group-chip, \.tab-group-head:focus-visible \.tab-group-chip \{ filter: brightness\(1\.3\); \}/);
+  assert.doesNotMatch(CSS, /\.tab-group-head:hover/, "no hover lift on a tag row: it is not a tab (T322)");
+  assert.doesNotMatch(CSS, /\.tab-group-head:hover \.tab-group-chip/, "no brightness lift on hover either (T322)");
   {
     // the RENDERED outcome, not the sheet's text: the chip's inline style is what the header's colour rule
     // cannot reach (inline beats class), so the cue must be a property the chip never sets inline. Run the
@@ -599,8 +602,12 @@ test("the header's structure and gestures read as a label: the tag's chip, then 
       assert.ok(!/font-size/.test(style), "and the header-hosted chip inherits the header's size");
     } finally { g.document = saved; g.window = savedWin; }
   }
-  assert.match(CSS, /\.tab-group-head:hover \.tab-group-caret, \.tab-group-head:focus-visible \.tab-group-caret \{ color: var\(--accent\); \}/);
-  for (const m of CSS.matchAll(/\n\.tab-group-head:hover[^{\n]*\{([^}]*)\}/g)) assert.doesNotMatch(m[1], /background/, "no wash on hover");
+  // a tag row is not a tab (T322): no hover dress at all — no lift of the words, the caret or the chip, no wash — only
+  // the keyboard's focus ring; and it takes a tab's box of space (the same padding and transparent border as .tab)
+  assert.doesNotMatch(CSS, /\n\.tab-group-head:hover/, "no hover rule on the row");
+  assert.match(CSS, /\n\.tab-group-head \{[^}]*padding: 6px 7px;[^}]*border-radius: 6px 6px 0 0;/s, "a tab's allotment: .tab's padding around the chip, the caret and the count");
+  assert.match(CSS, /\n\.tab \{[^}]*padding: 6px 7px;/s, "…the tab's own");
+  assert.doesNotMatch(CSS.match(/\n\.tab-group-head \{([^}]*)\}/)![1], /border:|background/, "no border, no fill: empty around the parts");
   assert.match(CSS, /\.tab-group-head:focus-visible \{ outline: 1px solid var\(--accent\); outline-offset: -1px; \}/);
   assert.match(head, /head\.draggable = true;/, "still drags to reorder the groups");
   assert.match(head, /head\.dataset\.act = "toggle-group";/, "…and still folds through the delegate");
@@ -609,7 +616,7 @@ test("the header's structure and gestures read as a label: the tag's chip, then 
   // --accent against --bg in both themes); --accent-wash is the shown section's header (the pane shows it:
   // .snap-shown), the wash the picker's active row already wears
   const rules = Array.from(CSS.matchAll(/\n(\.tab-group-[^{\n]*)\{([^}]*)\}/g));
-  assert.ok(rules.length >= 15, "the section rules were found: " + rules.length);
+  assert.ok(rules.length >= 12, "the section rules were found: " + rules.length);   // the hover dress rules left with T322
   for (const [, sel, body] of rules) {
     // no exception any more (2026-09-08): the retrying amber is a token, --st-retrying-bg, on the pip AND the tab
     assert.doesNotMatch(body.replace(/var\([^)]*\)/g, "V"), /#[0-9a-fA-F]{3,8}\b|rgba?\(/, "a raw color in " + sel.trim());
@@ -617,7 +624,7 @@ test("the header's structure and gestures read as a label: the tag's chip, then 
   assert.equal(CSS.match(/\.tab-group-pip\.retrying \{ background: (var\(--st-retrying-bg\)); \}/)![1], CSS.match(/\.tab\.tab-retrying \{ --state: (var\(--st-retrying-bg\)); \}/)![1],
     "the pip's retrying amber IS the tab's — the same status token");
   const toks = new Set((rules.map((m) => m[2]).join(" ").match(/var\((--[a-z-]+)/g) || []).map((m) => m.slice(4)));
-  for (const t of toks) assert.ok(["--fg", "--dim", "--accent", "--accent-wash", "--box-border", "--st-working-bg", "--st-blocked-bg", "--st-retrying-bg"].includes(t), "a token the strip does not already wear: " + t);
+  for (const t of toks) assert.ok(["--fg", "--dim", "--accent", "--accent-wash", "--box-border", "--st-working-bg", "--st-blocked-bg", "--st-retrying-bg", "--tab-active-bg", "--chip-bg"].includes(t), "a token the strip does not already wear: " + t);
 });
 
 // SHOW WHEN FOLDED (the user 2026-09-06): a member pinned to its section keeps its tab on the strip

@@ -62,7 +62,7 @@ class FakeEl {
   tag: string; id = ""; className: string; children: FakeEl[] = []; parent: FakeEl | null = null;
   dataset: Record<string, string> = {}; attrs: Record<string, string> = {}; listeners: Record<string, Function[]> = {};
   textContent = ""; title = ""; tabIndex = -1; type = ""; disabled = false; scrollTop = 0; draggable = false;
-  style: Record<string, string> = { display: "", background: "", color: "" };
+  style: Record<string, any> = { display: "", background: "", color: "", setProperty(k: string, v: string) { (this as Record<string, string>)[k] = v; } };   // setProperty: the row's --chip-bg (T322)
   classList: { add: (...c: string[]) => void; remove: (...c: string[]) => void; contains: (c: string) => boolean; toggle: (c: string, on?: boolean) => void };
   constructor(tag: string, cls = "") {
     this.tag = tag; this.className = cls;
@@ -265,10 +265,15 @@ test("executed: the view paints one row per member from the model: heading, keye
   const host = content.byId("tab-snapshot")!;
   assert.ok(host, "the host hangs off #content");
   assert.equal(host.getAttribute("role"), "region"); assert.equal(host.style.display, "");
-  assert.equal(host.getAttribute("aria-label"), "infra: 2 sessions; click one to open it");
+  assert.equal(host.getAttribute("aria-label"), "Overview of infra: 2 sessions; click one to open it");
   const head = host.children[0];
-  assert.deepEqual([head.tag, head.className, head.children.map((c) => c.className)], ["h2", "snap-head", ["snap-swatch", "snap-name", "snap-count"]]);
-  assert.equal(head.children[0].style.background, "#4EC9B0"); assert.equal(head.children[1].textContent, "infra"); assert.equal(head.children[2].textContent, "2 sessions");
+  // "Overview of <the tag's ordinary chip> <count>" (T322): the words, the chip slot holding tagChip's pill, the count
+  assert.deepEqual([head.tag, head.className, head.children.map((c) => c.className)], ["h2", "snap-head", ["snap-of", "snap-chip-slot", "snap-count"]]);
+  assert.equal(head.children[0].textContent, "Overview of");
+  const chip = head.children[1].children[0];
+  assert.ok(chip.has("snap-chip"), "the chip carries the view's class: " + chip.className); assert.equal(chip.text(), "infra", "the tag's name in the chip");
+  assert.ok(chip.has("tag-chip"), "built by tagChip (the world's stub marks its pills): " + chip.className);
+  assert.equal(head.children[2].textContent, "2 sessions");
   const items = rowsOf(host);
   assert.deepEqual(items.map((i) => [i.getAttribute("role"), i.dataset.id]), [["listitem", "web"], ["listitem", "api"]], "keyed by the session id, in strip order");
   const [web, api_] = items.map((i) => i.children[0]);
@@ -322,7 +327,7 @@ test("executed: a push that changes nothing a row shows moves nothing: the same 
   assert.equal(after[0], webItem, "web's node stands");
   assert.deepEqual([after[1].children[0].className, after[1].children[0].getAttribute("aria-label")], ["snap-row loading", "tests; opening"], "a placeholder tab (its meta alone) is a loading row");
   assert.equal(after[1].children[0].querySelector(".snap-now")!.textContent, "opening…");
-  assert.equal(host.getAttribute("aria-label"), "infra: 2 sessions; click one to open it");
+  assert.equal(host.getAttribute("aria-label"), "Overview of infra: 2 sessions; click one to open it");
 });
 
 test("executed: focus survives the push that changes the rows: a moved row is re-focused on its own node, a removed row hands focus to the row in its place", () => {
@@ -599,7 +604,7 @@ test("executed: the nav trail records the reader's spot while the view shows: th
 test("pinned: the wiring the lifted slices cannot reach: showActive's branch, the exits, setActive's pick, the strip's follow", () => {
   // showActive: while a section shows, every transcript is hidden, the reader's place held, the composer disabled with a
   // placeholder that says what to do; the transcript path hides the host first
-  assert.match(SHOW, /if \(snapView && renderSnapshot\(\)\) \{\s*\n\s*for \(const v of views\.values\(\)\) v\.el\.style\.display = "none";/);
+  assert.match(SHOW, /if \(snapView && renderSnapshot\(\)\) \{\s*\n\s*document\.body\.classList\.add\("snap-mode"\);[^\n]*\n\s*for \(const v of views\.values\(\)\) v\.el\.style\.display = "none";/, "the mode class first (the message box goes, no tab selected), then the views hide");
   assert.match(SHOW, /const av = activeId \? views\.get\(activeId\) : null;\s*\n\s*if \(av && !snapKeep\) snapKeep = \{ v: av, scrollTop: av\.scrollTop, stick: av\.stick \};/, "the reader's place, once per visit");
   assert.match(SHOW, /if \(av && snapKeep && snapKeep\.v !== av\) \{\s*\n\s*snapKeep\.v\.scrollTop = snapKeep\.scrollTop; snapKeep\.v\.stick = snapKeep\.stick;\s*\n\s*snapKeep = \{ v: av, scrollTop: av\.scrollTop, stick: av\.stick \};\s*\n\s*\}/, "the active changed under the view (the session being read closed): the survivor's place is held instead");
   assert.match(SHOW, /if \(ta\) \{ ta\.disabled = true; ta\.placeholder = "Pick a session above to write to it"; \}/);
@@ -631,9 +636,9 @@ test("pinned: the wiring the lifted slices cannot reach: showActive's branch, th
 });
 
 test("pinned: the sheet: the shown header's wash and the stand-in's mark on the tab-group rules; the view's two sizes, tokens only, the tab's state colors on the pip", () => {
-  assert.match(CSS, /\.tab-group-head\.snap-shown \{ background: var\(--accent-wash\); \}/, "the shown section's header wears the accent wash");
+  assert.match(CSS, /\.tab-group-head\.snap-shown \{ color: var\(--fg\); background: var\(--tab-active-bg\); box-shadow: inset 0 0 0 1\.5px var\(--chip-bg, transparent\); \}/, "the shown section's row wears the SELECTED TAB's box (T322): its fill token and its inset identity ring");
   assert.doesNotMatch(CSS, /\.tab-group-head\.holds-active \{ cursor: default; \}/, "the header folds, so its cursor promises the click");
-  assert.match(CSS, /\.tab-group-head\.holds-active \.tab-group-chip \{ text-decoration: underline; text-decoration-color: var\(--accent\);/, "the stand-in's mark: the tag's chip accent-underlined");
+  assert.doesNotMatch(CSS, /\.tab-group-head\.holds-active \.tab-group-chip \{ text-decoration: underline/, "the stand-in wears no mark of its own (T322): the tab's highlight says which session is active");
   const block = CSS.slice(CSS.indexOf("#tab-snapshot {"), CSS.indexOf(".snap-when {") + 200);
   assert.ok(block.length > 200, "the sheet was found");
   assert.deepEqual([...new Set(block.match(/font-size: [^;]+/g))], ["font-size: 0.82em"], "one sub-line size, the header's; the rest inherit the body");

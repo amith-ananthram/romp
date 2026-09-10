@@ -5375,6 +5375,9 @@ function makeGroupHead(sec: TabSection, collapsed: boolean, holdsActive: boolean
   // (headWords) and its own way back are derived from
   const shown = snapView === name;
   if (shown) head.classList.add("snap-shown");
+  // the tag's colour as the row's --chip-bg (the tab sets the same variable from its identity colour): the shown
+  // row's box wears the selected tab's inset ring in it (styles.css .tab-group-head.snap-shown, T322)
+  if (sec.color) head.style.setProperty("--chip-bg", sec.color);
   // THE WAY BACK: the header whose section the pane shows, OPEN, holding the tab being read, is the click that
   // put the section in the pane; a second click puts the transcript back (show-transcript, leaveSnapshot)
   // instead of folding the section under its reader. Derived from the rendered state, as the fold is, and
@@ -11241,6 +11244,7 @@ function snapshotHost(): HTMLElement | null {
 function hideSnapshot(): void {
   const host = document.getElementById("tab-snapshot");
   if (host) host.style.display = "none";
+  document.body.classList.remove("snap-mode");
   snapModel = null;
   // the transcript comes back where the reader left it, not where the view's scrolls put the spot (snapKeep)
   if (snapKeep) { snapKeep.v.scrollTop = snapKeep.scrollTop; snapKeep.v.stick = snapKeep.stick; snapKeep = null; }
@@ -11324,16 +11328,18 @@ function renderSnapshot(): boolean {
   let list = host.querySelector<HTMLElement>(":scope > .snap-list");
   if (!list) {
     const h = document.createElement("h2"); h.className = "snap-head";
-    // the heading's own bar (snap-swatch) and the name: the strip's header wears the tag chip; this heading
-    // keeps a bar + name pair, whose parts the patch below rewrites in place (the rows' rule: nothing is remade)
-    const sw = el("span", "snap-swatch"); sw.setAttribute("aria-hidden", "true");
-    h.append(sw, el("span", "snap-name"), el("span", "snap-count"));
+    // the heading reads "Overview of <the tag's ordinary chip> <count>" (T322, the user 2026-09-10: a name beside a
+    // little colour bar was not it): the words, a slot the tag chip is placed in (tagChip, the same builder the
+    // strip's row and the tag menu use — never a chip rule of its own), and the count; the patch below rewrites
+    // the slot's chip and the count in place (the rows' rule: nothing else is remade)
+    const of = el("span", "snap-of"); of.textContent = "Overview of";
+    h.append(of, el("span", "snap-chip-slot"), el("span", "snap-count"));
     list = el("div", "snap-list"); list.setAttribute("role", "list");
     host.replaceChildren(h, list);
   }
   const part = (cls: string) => host.querySelector<HTMLElement>(".snap-head > ." + cls)!;
-  part("snap-swatch").style.background = next.color || "";
-  part("snap-name").textContent = next.name;
+  const chip = tagChip(next.name, next.color, { inheritSize: true }); chip.classList.add("snap-chip");
+  part("snap-chip-slot").replaceChildren(chip);
   part("snap-count").textContent = words.count;
   // a MOVED row: insertBefore detaches and re-attaches its node, which blurs it (the browser's focus fixup); the
   // same event puts focus back on it (the strip's refocus rule, by node instead of by id). A row GONE from under
@@ -11413,6 +11419,7 @@ function showActive(keep?: { uuid: string; y: number } | null) {
   // the mark. renderSnapshot answers false when the section is gone from the strip (a tag deleted, its last
   // member hidden): then the transcript.
   if (snapView && renderSnapshot()) {
+    document.body.classList.add("snap-mode");   // the overview is a mode: the message box goes, no tab is selected (styles.css, T322)
     for (const v of views.values()) v.el.style.display = "none";
     // the reader's place (snapKeep; once per visit): the hide above only queues the clamp's scroll event, so the
     // view's fields still hold what the reader's last scroll recorded
@@ -11435,6 +11442,7 @@ function showActive(keep?: { uuid: string; y: number } | null) {
     updateStatusline();
     return;
   }
+  document.body.classList.remove("snap-mode");   // a session's transcript: the message box and the selected tab are back
   hideSnapshot();
   const s = activeId ? liveSession(activeId) : null;
   if (!s) {

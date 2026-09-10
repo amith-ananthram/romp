@@ -182,7 +182,7 @@ test("every dense rule is scoped to the body class, and the sheet's defaults are
   assert.match(defaultRule(".tab-tagbox"), /min-height: 31px;/);
   assert.match(defaultRule(".tab-group-sep:not(.tab-group-break)"), /width: 13px; padding: 8px 6px;/);
   const head = defaultRule(".tab-group-head");
-  assert.match(head, /gap: 5px; padding: 6px 7px 6px 6px;/); assert.match(head, /font-size: 0\.82em;/);
+  assert.match(head, /gap: 5px; padding: 6px 7px;/);   // a tab's box of space (T322) assert.match(head, /font-size: 0\.82em;/);
   assert.match(defaultRule("#bg-tasks"), /margin: 8px 10px 6px;/);
   assert.match(defaultRule(".bg-fold-head"), /padding: 7px 11px;/);
   assert.match(defaultRule(".bg-list"), /padding: 4px 2px;/);
