@@ -22,8 +22,9 @@ Three scenarios against the REAL shell, the REAL worker and the REAL kernel (her
      Apple endpoint is dispatched at the REAL `push` handler as e.data — the shape a browser that does not parse it
      receives — and then a `notificationclick` carrying that notification's data at the REAL click handler. The tap
      must land: the chat pane's active tab becomes `api`, ONE /reveal via 'sw', /push/landed for the pid, and the
-     kernel log carries [push] ack stage=shown, [push] ack stage=clicked, [reveal] sw and [push] landed, in that
-     order. (Headless Chromium refuses showNotification whatever the context grants, so the show's promise rejects;
+     kernel log carries [push] ack stage=shown, [push] ack stage=clicked, [reveal] sw and [push] landed (all
+     four; their order is not pinned, each rides its own connection). (Headless Chromium refuses showNotification
+     whatever the context grants, so the show's promise rejects;
      the ack was started before it. The click is dispatched as a plain event carrying the two fields the handler
      reads, .notification and .waitUntil — and, a script-made click carrying no user activation, with focus()
      granted the way a real click grants it.)
@@ -460,10 +461,11 @@ class ServedTapLanding(unittest.TestCase):
                      r"\[reveal\] sw sid=%s wid=\S+: delivered" % re.escape(SID_B[:8]),
                      r"\[push\] landed sid=%s endpoint=%s" % (re.escape(SID_B[:8]), ep_host)):
             self.assertRegex(klog, line, "the kernel logged it: %s" % klog[-2000:])
-        self.assertLess(klog.index("[push] ack stage=shown"), klog.index("[push] ack stage=clicked"), "the push settled before the click was dispatched")
-        # (the worker STARTS the clicked ack before it tells the page, but that ack and the page's /reveal — like the
-        # /reveal and the /push/landed — travel on two connections the kernel serves on two threads: all are on the
-        # trail, their relative order is not a fact of the design, and pinning it flaked on 2026-09-10)
+        # (the worker STARTS the shown ack before the click and the clicked ack before it tells the page, but every one
+        # of those requests — the two acks, the page's /reveal, the /push/landed — travels on its own connection, which
+        # the kernel serves on its own thread: all four are on the trail, and their relative order is not a fact of
+        # the design. Pinning clicked-before-reveal flaked on 2026-09-10; pinning shown-before-clicked flaked the same
+        # day on the CI runner (T308), so neither order is pinned: the four lines' presence is the whole claim.)
         # the shell's trail: the worker's message row, structure only
         rows = self._diag_rows("sw-message")
         self.assertTrue(rows, "an sw-message row is on file")
