@@ -222,7 +222,11 @@ class _PerfStats:
                                    (_goals_memo_report: hit, miss, fail, evict, punch, entries,
                                    bytes), the pusher's shared read-only store cache
                                    (judge.shared_store_stats) and the write-moment chain memo
-                                   (judge.chain_memo_stats)
+                                   (judge.chain_memo_stats); intrMarks / statesOverlay: the
+                                   interrupt-marks memo (_intr_marks_memo_report: hit, miss, evict,
+                                   entries) and the awaiting overlay's states-log fold
+                                   (_states_overlay_report: hit, append, refold, fail, evict,
+                                   entries), both trimmed to the interrupt tick's alive set each cycle
       judge                        passes (one per _producer pass), ms_sum / ms_last / ms_mean (wall:
                                    a pass is a join over the tier threads, so this is mostly model
                                    latency), cpu_ms_sum (CPU: the two tier threads' own time, from
@@ -395,12 +399,15 @@ class _PerfStats:
         # The three identity memos' readers land here (review find, 2026-09-08: they had no consumer): the
         # judge pass's stat-keyed store memo, the pusher's shared read-only store cache and the write-moment
         # chain memo. `goals.loads` is the writer's loader alone; the pusher's loads show under memos.shared.
+        # intrMarks and statesOverlay are the two memos the interrupt tick trims to its alive set: the
+        # interrupt-marks memo and the awaiting overlay's states-log fold, each with its counters and occupancy.
         memos = {}
         for key, read in (("pass", _goals_memo_report), ("shared", jd.shared_store_stats),
                           ("chain", jd.chain_memo_stats), ("courierSkip", jd.courier_skip_stats),
                           ("backref", jd.backref_memo_stats), ("captions", jd.captions_memo_stats),
                           ("goalArchive", jd.goal_archive_memo_stats), ("plannerSkip", jd.planner_skip_stats),
-                          ("liftGate", _lift_gate_report), ("bgTops", _bg_tops_report)):
+                          ("liftGate", _lift_gate_report), ("bgTops", _bg_tops_report),
+                          ("intrMarks", _intr_marks_memo_report), ("statesOverlay", _states_overlay_report)):
             try:
                 memos[key] = read()
             except Exception:
@@ -742,6 +749,17 @@ def _intr_marks_forget(alive):
     for k in list(_intr_marks_memo):
         if k[0] not in alive and _intr_marks_memo.pop(k, None) is not None:
             _intr_marks_bump("evict")
+
+
+def _intr_marks_memo_report():
+    """The memo's counters plus its occupancy, for GET /perf (memos.intrMarks): hit and miss (answers served
+    from memory against re-tallied), evict (entries released for sessions that left the alive set, or the
+    whole memo cleared at its cap) and the gauge entries. The counters are copied under their lock; the
+    gauge is one len() of a dict whose every op is a single dict operation, so it takes none."""
+    with _INTR_MARKS_STATS_LOCK:
+        out = dict(_intr_marks_memo_stats)
+    out["entries"] = len(_intr_marks_memo)
+    return out
 
 
 def _interrupt_marks_atoms(atoms, cut_t=0.0, cut_cause=""):
@@ -8857,7 +8875,9 @@ def _interrupt_block_tick(now, tmux):
                 if _lift_interrupt_block(sid, ib, turns[-1].get("t") if turns else 0):
                     _set_intr_blocked(sid, None)     # spent → the marker goes; refused under a fault it stays
                 #                                      in the last proved snapshot and the next tick retries
-    _intr_marks_forget({s["sid"] for s in alive})       # a sid that left the alive set releases its memo entries
+    alive_sids = {s["sid"] for s in alive}              # a sid that left the alive set is the event that retires
+    _intr_marks_forget(alive_sids)                      # its interrupt-marks entries and its states-overlay fold
+    _states_overlay_forget(alive_sids)                  # entry alike
     # a flip's writer marked the views dirty and woke the pusher: the next cycle carries it (docstring)
 
 
@@ -24403,19 +24423,125 @@ def _states_awaiting_overlay(sid):
     chat off a stale awaiting:true from 08:57 — never cleared — while idle on the timeline; the chat's working
     signal is open_now OR awaiting, the timeline's is open_now alone, so a stale awaiting splits them). An
     idle/waiting state after an awaiting:true is consistent with awaiting (idle while the job runs) and does
-    NOT supersede it. State records carry "state", overlay records carry "awaiting"; the two never overlap."""
-    last = None
-    working_after = False
-    for o in _states_rows(sid):
-        if not isinstance(o, dict):
-            continue
-        if "awaiting" in o:
-            last, working_after = o, False             # a fresh overlay record resets the supersede flag
-        elif o.get("state") == "working":
-            working_after = True                       # a real work turn resumed since the last overlay record
+    NOT supersede it. State records carry "state", overlay records carry "awaiting"; the two never overlap.
+
+    Folded append-incrementally through _fold_records, the reader _state_intervals and _last_machine_cut
+    already use on this file: the carried state is (the last overlay row or None, working_after), and each
+    row steps it through _states_overlay_step, the row walk this replaced taken one row at a time. That
+    walk ran over every parsed row on every call, and the one caller, _session_awaiting, runs from the
+    nudge tick, the timeline lanes, build_session, the feed, the background-work read and GET /sessions:
+    per idle session, per site, per cycle, on a file that had not changed. The identity gate is the shared
+    reader's: (st_mtime, st_size) plus the tail compare on growth, a full re-fold on a shrink or a same-size
+    new mtime. Every states writer appends (sdk_backend's append helpers, the kernel's own markers, the tmux
+    status hook), so an append is the only change the file sees and the gate is exact for it. One difference
+    from that walk: a complete final record still waiting for its newline is stepped provisionally onto a
+    copy of the carried state, as the other readers of this file already read it (_fold_eof_fragment), and
+    for good once its newline lands; the walk over the incremental reader skipped it until then. Every
+    states writer puts the row and its newline in one write, so that is a write caught between the two. A
+    missing file folds to the empty state, the None the walk answered; a read that fails on a file that exists
+    answers the same None, counts under `fail`, is logged once per episode and is never memoized
+    (_states_overlay_on). The shared reader serves an UNCHANGED file's records from its cache without
+    opening it, so a permission flip shows as a failure only once the file changes or its reader entry was
+    evicted: `fail` counts reads that were attempted and failed. The interrupt tick drops the entries of
+    sessions outside its alive set each cycle (_states_overlay_forget); a dormant session read by
+    GET /sessions re-enters and leaves again on the next tick, one fold of cached records with no I/O, and
+    the fold's own cache clears whole above 256 entries, the shared idiom. Counters ride GET /perf under
+    memos.statesOverlay."""
+    p = jd.STATE / "states" / ("%s.jsonl" % sid)
+    last, working_after = _fold_records(_states_overlay_cache, p, _states_overlay_init, _states_overlay_step,
+                                        on=functools.partial(_states_overlay_on, str(p)))
     if last is not None and last.get("awaiting") and working_after:
         return {"awaiting": False, "why": None}            # stale true — superseded by a later work turn
     return last
+
+
+_states_overlay_cache = {}    # str(states path) -> _fold_records entry over (last overlay row or None, working_after)
+_states_overlay_stats = {"hit": 0, "append": 0, "refold": 0, "fail": 0, "evict": 0}
+_states_overlay_failed = set()   # paths whose last read failed on a file that exists: one stderr line per episode
+_STATES_OVERLAY_LOCK = threading.Lock()   # the counters are bumped from the pusher, the connect-time builds on WS
+#                                           threads and GET /sessions at once, so a bare `+= 1` is a read-modify-write
+#                                           across threads (the _INTR_MARKS_STATS_LOCK precedent). The cache dict
+#                                           itself needs no lock: its ops are single dict operations on immutable
+#                                           tuples, and _states_overlay_forget iterates a key snapshot.
+
+
+def _states_overlay_init():
+    return (None, False)
+
+
+def _states_overlay_step(state, o):
+    """One states row into (last overlay row, working_after): the walk's if/elif, one row at a time. A row
+    carrying an `awaiting` key is an overlay row whatever else it carries (it resets the supersede flag and
+    never sets it); a row whose `state` is "working" is a work turn (extra keys such as the picker check's
+    `tier` change nothing); every other row leaves the state alone (idle/waiting states and the markers the
+    other writers append: retriesGaveUp, retriesRecovered, orphanReply, cmdGesture, machineCut, resumeFork,
+    effortApplied, supersededBy). _fold_records steps dict records only, so a non-dict row never reaches
+    this."""
+    if "awaiting" in o:
+        return (o, False)
+    if o.get("state") == "working":
+        return (state[0], True)
+    return state
+
+
+def _states_overlay_bump(kind, n=1):
+    with _STATES_OVERLAY_LOCK:
+        _states_overlay_stats[kind] = _states_overlay_stats.get(kind, 0) + n
+
+
+def _states_overlay_on(path_s, kind):
+    """The fold's `on` for one states file: count the path the fold took, and on "fail" (the file exists and
+    could not be stat'ed, opened or read; the fold answered the empty state and memoized nothing) write one
+    stderr line per episode, so a failed read is told apart from a rewrite in GET /perf and in the log. A
+    later good fold of the same file ends the episode. Cheap on purpose, since it runs inside every fold:
+    one locked increment, and the set is touched only on a failure or while an episode is open."""
+    _states_overlay_bump(kind)
+    if kind == "fail":
+        with _STATES_OVERLAY_LOCK:
+            first = path_s not in _states_overlay_failed
+            _states_overlay_failed.add(path_s)
+        if first:
+            sys.stderr.write("states-overlay: %s unreadable (the file exists); answered no overlay and memoized nothing\n"
+                             % os.path.basename(path_s))
+    elif _states_overlay_failed:
+        with _STATES_OVERLAY_LOCK:
+            _states_overlay_failed.discard(path_s)
+
+
+def _states_overlay_forget(alive):
+    """Drop the fold entries of sessions outside `alive` (the interrupt tick's alive set, once per cycle): the
+    readers of this overlay are the chips and lanes of live sessions, so a session leaving the alive set is
+    the event that retires its entry, the same event that releases its interrupt-marks entries. Iterates a
+    key snapshot: a connect-time build on a WS thread may insert concurrently. The records stay in the event
+    model's LRU reader; a later read of a departed session's file re-folds them without re-reading the file.
+    A departed path also loses its open-fail episode, if any, straight out of `_states_overlay_failed`: a
+    fail always pops the cache entry too (fold_records), so a path whose LAST read before it left the alive
+    set failed is never IN the cache for this loop to reach, and nothing else reads a departed session's
+    file again to end the episode the ordinary way. `_states_overlay_failed` has no cap of its own (unlike
+    the cache's 256-entry clear-whole), so a path stranded there would sit forever otherwise."""
+    keep = {str(jd.STATE / "states" / ("%s.jsonl" % sid)) for sid in alive}
+    n = 0
+    for k in list(_states_overlay_cache):
+        if k not in keep and _states_overlay_cache.pop(k, None) is not None:
+            n += 1
+    with _STATES_OVERLAY_LOCK:
+        for k in list(_states_overlay_failed):
+            if k not in keep:
+                _states_overlay_failed.discard(k)
+    if n:
+        _states_overlay_bump("evict", n)
+
+
+def _states_overlay_report():
+    """The fold's counters plus its occupancy, for GET /perf (memos.statesOverlay): hit (the records were the
+    cached ones), append (only the appended rows stepped), refold (every row stepped: a rewrite, a shrink, or
+    the first fold of a file), fail (a read that failed on a file that exists; not memoized), evict (entries
+    dropped for sessions that left the alive set) and the gauge entries. _fold_records clears the cache whole
+    above 256 entries; that drop is not counted under evict and shows as entries falling."""
+    with _STATES_OVERLAY_LOCK:
+        out = dict(_states_overlay_stats)
+    out["entries"] = len(_states_overlay_cache)
+    return out
 
 
 def _session_retrying(sid, tm):

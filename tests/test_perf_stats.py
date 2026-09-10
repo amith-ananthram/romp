@@ -116,7 +116,7 @@ class Collector(unittest.TestCase):
         self.assertEqual(set(snap["goals"]), {"loads", "saves", "writes"}, "read through jd.goal_io_stats")
         # the three identity memos' readers land here (review find, 2026-09-08: they had no consumer)
         self.assertEqual(set(snap["memos"]), {"pass", "shared", "chain", "nudgeGate", "cleared", "courierSkip", "backref", "captions", "goalArchive", "plannerSkip",
-                                              "bgTops", "liftGate"})
+                                              "bgTops", "liftGate", "intrMarks", "statesOverlay"})
         self.assertEqual(set(snap["memos"]["bgTops"]), {"hit", "miss", "resolve", "walk", "walk_neg", "idx_build", "entries"},
                          "the placed-launch memo (_bg_placed_tops): counters plus its occupancy")
         for k, v in snap["memos"]["bgTops"].items():
@@ -126,6 +126,15 @@ class Collector(unittest.TestCase):
                          "answered, the writer loads and the ones that filed nothing, plus its occupancy")
         for k, v in snap["memos"]["liftGate"].items():
             self.assertIsInstance(v, int, k)
+        # the two memos the interrupt tick trims to its alive set: the interrupt-marks memo and the awaiting
+        # overlay's states-log fold, each with its counters and its occupancy
+        self.assertEqual(set(snap["memos"]["intrMarks"]), {"hit", "miss", "evict", "entries"})
+        self.assertEqual(snap["memos"]["intrMarks"], km._intr_marks_memo_report())
+        self.assertEqual(set(snap["memos"]["statesOverlay"]), {"hit", "append", "refold", "fail", "evict", "entries"})
+        self.assertEqual(snap["memos"]["statesOverlay"], km._states_overlay_report())
+        for blk in ("intrMarks", "statesOverlay"):
+            for k, v in snap["memos"][blk].items():
+                self.assertIsInstance(v, int, "%s.%s" % (blk, k))
         self.assertEqual(set(snap["memos"]["plannerSkip"]), {"skipped", "planned", "recorded"})
         self.assertEqual(set(snap["memos"]["captions"]), {"served", "parsed"})
         self.assertEqual(set(snap["memos"]["goalArchive"]), {"served", "loaded"})
@@ -420,7 +429,7 @@ class GoalIoCounters(unittest.TestCase):
         # with this PR, so the doc names the memos section and sends the reader there (review find, 2026-09-08)
         doc = Path(HERE).parent.joinpath("docs", "reference.md").read_text()
         self.assertIn("- `memos`:", doc)
-        for k in ("`pass`", "`shared`", "`chain`"):
+        for k in ("`pass`", "`shared`", "`chain`", "`intrMarks`", "`statesOverlay`"):
             self.assertIn(k, doc)
         self.assertIn("`memos.shared`", doc)
 

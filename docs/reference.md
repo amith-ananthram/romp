@@ -1036,13 +1036,29 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   walks, and the walks that left a launch unresolved: an upper bound on what a
   negative walk cache would save), `idx_build` (placement indexes built, one
   per store object asked, a writer's private copy included) and the gauge
-  `entries` (sessions holding a map). The compaction sweep after each judge
-  pass evicts from `pass` and `shared` the entries of stores no session in the
-  discover window owns, so both stay bounded by the live board; the courier's
-  and the planner's change-gate tables are pruned to the sessions each pass
-  discovers, the evidence gate's stamps are cleared at a fixed cap, and the
-  awaiting lift's tick drops the gate's and the placed-launch memo's entries
-  of sessions that left the alive set.
+  `entries` (sessions holding a map). `intrMarks` is the interrupt-marks
+  memo behind the interrupt tick, the nudge tick and the feed's badge, one
+  entry per (session, parse family) keyed on the parse object's identity and
+  the machine-cut stamp (`hit`, `miss`, `evict` for entries released when a
+  session leaves the alive set or the memo is cleared at its cap, and the
+  gauge `entries`). `statesOverlay` is the awaiting overlay's read of the
+  states log through the shared append-incremental reader, one carried answer
+  per states file (`hit`: the records were the cached ones and no row was
+  stepped; `append`: only the appended rows were stepped; `refold`: every row
+  was stepped again, after a rewrite or a shrink or on the file's first read;
+  `fail`: a read that failed on a file that exists, answered as no overlay,
+  memoized nothing and named once per episode on the kernel's stderr;
+  `evict`: entries dropped for sessions that left the alive set; and the
+  gauge `entries`). The compaction sweep after each judge pass evicts from
+  `pass` and `shared` the entries of stores no session in the discover window
+  owns, so both stay bounded by the live board; the courier's and the
+  planner's change-gate tables are pruned to the sessions each pass discovers,
+  the evidence gate's stamps are cleared at a fixed cap, and the awaiting
+  lift's tick drops the gate's and the placed-launch memo's entries of
+  sessions that left the alive set. The interrupt tick drops from `intrMarks`
+  and `statesOverlay` the entries of sessions outside its alive set each
+  cycle; the `statesOverlay` cache is also cleared whole above 256 entries, a
+  drop `evict` does not count and `entries` shows.
 - `judge`: `passes`, `ms_sum`, `ms_last`, `ms_mean` (wall time; a pass waits
   on model calls), `cpu_ms_sum` (CPU time of the judge tier threads and every
   per-session worker they run; the workers' share is `cpu_ms_workers`).

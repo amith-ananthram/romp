@@ -589,15 +589,21 @@ def _scan_jsonl_bytes(data, base_offset):
     return records, base_offset + end + 1
 
 
-def _read_jsonl_incremental(path):
+def _read_jsonl_incremental(path, on_fail=None):
     """The parsed records of `path` (a list, NOT a generator), served append-incrementally per the cache
-    contract above. Falls back to a full read on any surprise; [] on any error, like _read_jsonl."""
+    contract above. Falls back to a full read on any surprise; [] on any error, like _read_jsonl. `on_fail`,
+    when given, is called with the exception for a stat, open or read that raised on a file that EXISTS (any
+    OSError but FileNotFoundError): an absent file is a state and answers [] quietly, an unreadable one is a
+    failure the caller may count and log (fold_records passes it through as on("fail")). The answer is []
+    either way."""
     path = str(path)
     try:
         st = os.stat(path)
-    except OSError:
+    except OSError as e:
         with _JSONL_CACHE_LOCK:
             _JSONL_CACHE.pop(path, None)
+        if on_fail is not None and not isinstance(e, FileNotFoundError):
+            on_fail(e)
         return []
     with _JSONL_CACHE_LOCK:
         hit = _JSONL_CACHE.get(path)
@@ -621,9 +627,11 @@ def _read_jsonl_incremental(path):
             tail_from = max(0, offset - _JSONL_TAIL_GUARD)
             fh.seek(tail_from)
             tail = fh.read(offset - tail_from)
-    except OSError:
+    except OSError as e:
         with _JSONL_CACHE_LOCK:
             _JSONL_CACHE.pop(path, None)
+        if on_fail is not None and not isinstance(e, FileNotFoundError):
+            on_fail(e)
         return []
     with _JSONL_CACHE_LOCK:
         _JSONL_CACHE.pop(path, None)
@@ -633,7 +641,7 @@ def _read_jsonl_incremental(path):
     return records
 
 
-def fold_records(cache, path, init, step):
+def fold_records(cache, path, init, step, on=None):
     """Fold a JSONL file's records into a carried state, APPEND-INCREMENTALLY (issue 903, 2026-09-03):
     the states/transcript readers re-read their whole file behind an (mtime,size) key that every append
     invalidates — O(file) per push for every working session. _read_jsonl_incremental already serves the
@@ -645,33 +653,53 @@ def fold_records(cache, path, init, step):
     cached state is deep-copied before folding onto it, so a state a caller was handed never changes
     under it). Returns the state; [] records (a missing or unreadable file) fold to init().
 
+    `on`, when given, is called once per call with the path the fold took: "hit" (the records are the
+    cached ones; nothing stepped), "append" (only the records past the cached prefix stepped), "refold"
+    (every record stepped: a rewrite, a shrink, or the first fold of this file) or "fail" (the file exists
+    and its stat, open or read raised: the answer is init(), the cache entry for the path is dropped and
+    nothing is memoized, so the next call reads again; an ABSENT file is not a failure and folds to init()
+    through the normal path). A caller's counters ride it (the kernel's `_states_awaiting_overlay`); the
+    fold itself keeps no counters, since one cache dict serves many readers and a caller's counters are
+    locked per reader.
+
     Lives here (moved from the kernel, 2026-09-03) so the judge's readers can fold too — the
     background-task pairing below is shared by both."""
     key = str(path)
-    recs = _read_jsonl_incremental(path)
+    failed = []                                           # the reader's failures: a stat, open or read that raised on a
+    recs = _read_jsonl_incremental(path, on_fail=failed.append)   # file that exists (an absent file is [] and no failure)
     ent = _pinned_entry(key, recs)                        # the reader's entry for THIS read, pinned by identity: another
     if ent is _UNPINNED:                                  # thread (the judge pool, a handler) may advance the shared entry
-        recs = _read_jsonl_incremental(path)              # past our records before we look at its tail, and a newer tail
-        ent = _pinned_entry(key, recs)                    # folded onto an older prefix would skip the records between. A
-        if ent is _UNPINNED:                              # lost pin re-reads once — the newer entry pins cleanly, so the
-            ent = None                                    # answer is current, not a poll behind; lost twice, the fold
-    hit = cache.get(key)                                  # answers without the tail, never with the wrong one
+        del failed[:]                                     # past our records before we look at its tail, and a newer tail
+        recs = _read_jsonl_incremental(path, on_fail=failed.append)   # folded onto an older prefix would skip the
+        ent = _pinned_entry(key, recs)                    # records between. A lost pin re-reads once: the newer entry
+        if ent is _UNPINNED:                              # pins cleanly, so the answer is current, not a poll behind;
+            ent = None                                    # lost twice, the fold answers without the tail, never with
+    if failed:                                            # the wrong one. The re-read's verdict is the one that counts.
+        cache.pop(key, None)                              # A failed read is never memoized: the next call reads again
+        if on is not None:
+            on("fail")
+        return init()
+    hit = cache.get(key)
     if hit is not None:
         n0, last0, state0 = hit
         if n0 == len(recs) and (n0 == 0 or recs[-1] is last0):
+            if on is not None:
+                on("hit")
             return _fold_eof_fragment(key, ent, state0, step)   # unchanged records; a newline-less tail may still sit past them
         if 0 < n0 < len(recs) and recs[n0 - 1] is last0:
-            state, start = copy.deepcopy(state0), n0
+            state, start, kind = copy.deepcopy(state0), n0, "append"
         else:
-            state, start = init(), 0
+            state, start, kind = init(), 0, "refold"
     else:
-        state, start = init(), 0
+        state, start, kind = init(), 0, "refold"
     for r in recs[start:]:
         if isinstance(r, dict):
             state = step(state, r)
     if len(cache) > 256:                                  # bounded by the session count; never unbounded
         cache.clear()
     cache[key] = (len(recs), recs[-1] if recs else None, state)
+    if on is not None:
+        on(kind)
     return _fold_eof_fragment(key, ent, state, step)
 
 
