@@ -206,8 +206,10 @@ test("a reply dot sits at its anchor's position in the notches' own frame, over 
 });
 
 test("the dot is the comment's landed colour; UNREAD shouts; keyed on the kernel's bit on an open thread", () => {
-  assert.match(CSS, /\.cmt-tick \{\s*\n\s*position: absolute; right: 1px; width: 8px; height: 4px;[\s\S]{0,120}background: var\(--cmt-hl\);/, "the landed token, never a raw hex");
-  assert.match(CSS, /\.cmt-tick\.unread \{ width: 10px; height: 6px; right: 0; opacity: 1; z-index: 1;\s*\n\s*box-shadow: 0 0 0 1\.5px var\(--bg\), 0 0 0 3px color-mix\(in srgb, var\(--cmt-hl\) 85%, transparent\); \}/,
+  // the tick's fill is the comment INK (T310): the highlighter yellow itself in the dark theme, a darker amber on the cream
+  // page, the same token the unread passage's outline box wears — never a raw hex
+  assert.match(CSS, /\.cmt-tick \{\s*\n\s*position: absolute; right: 1px; width: 8px; height: 4px;[\s\S]{0,120}background: var\(--cmt-hl-outline\);/, "the ink token, never a raw hex");
+  assert.match(CSS, /\.cmt-tick\.unread \{ width: 10px; height: 6px; right: 0; opacity: 1; z-index: 1;\s*\n\s*box-shadow: 0 0 0 1\.5px var\(--bg\), 0 0 0 3px color-mix\(in srgb, var\(--cmt-hl-outline\) 85%, transparent\); \}/,
     "…and lifted above a read sibling at the same top (nested-marks.test.ts)");
   assert.match(RAIL, /\+ \(th\.unread && th\.status === "open" \? " unread" : ""\)/, "the same predicate the mark's ring and the reply chips read");
   assert.match(RAIL, /\+ ":" \+ \(t\.th\.unread \? 1 : 0\)/, "the unread bit rides the signature: a reply landing repaints the dot");

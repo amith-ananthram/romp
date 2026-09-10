@@ -95,16 +95,19 @@ test("the popover keeps the chat renderer but sheds its transcript-coupled hover
     "no rail time-markers on gutterless popover turns");
 });
 
-test("an unread thread wears the needs-you RING on its mark and a shouting rail tick", () => {
+test("an unread thread wears ONE outline box around its whole passage and a shouting rail tick", () => {
   // the user 2026-08-23: the 45% unread tint alone was too subtle — a thread that replied while the
   // box was closed needs a visible element. That element was a yellow corner dot on the run's last
-  // segment until 2026-09-08, when the user asked for the tab strip's needs-you idiom instead: the
-  // SAME dashed ring a tab wears while its session waits on you (.tab.tab-awaiting, --st-awaiting-bg),
-  // scaled to a text run — one idiom for "this waits on you" across the surface. The dot pins below
-  // were rewritten deliberately for that; the ring's pins live in comment-mark.test.ts. The rail tick
-  // still grows and double-rings. Both clear with the unread flag on open.
-  assert.doesNotMatch(CSS, /mark\.cmt-hl\.unread\.hl-last::after/, "the corner dot is gone — the ring replaced it");
-  assert.match(CSS, /mark\.cmt-hl\.unread \{ outline: 1\.5px dashed var\(--st-awaiting-bg\); outline-offset: 1px; \}/);
+  // segment until 2026-09-08 (then the tab strip's dashed needs-you ring on the mark), and since
+  // 2026-09-10 it is ONE solid outline in the notch's yellow around the WHOLE highlighted area: the
+  // ring was an outline on the inline mark and painted once per line fragment, a dashed box per line.
+  // The box is a positioned child of the turn that render.ts measures from the marks (its pins live in
+  // comment-outline.test.ts). The rail tick still grows and double-rings. Both clear with the unread
+  // flag on open.
+  assert.doesNotMatch(CSS, /mark\.cmt-hl\.unread\.hl-last::after/, "the corner dot is gone");
+  assert.doesNotMatch(CSS, /mark\.cmt-hl\.unread \{ outline/, "no outline on the mark itself: it would paint per line fragment");
+  assert.match(CSS, /\.cmt-outline \{ position: absolute; pointer-events: none;[^}]*outline: 1\.5px solid var\(--cmt-hl-outline\);/s, "one box, the notch's ink");
+  assert.match(UI, /function paintCommentOutlines\(sid: string\): void \{/);
   assert.doesNotMatch(CSS, /mark\.cmt-hl \{[^}]*position: relative;/s, "nothing left for the mark to anchor");
   assert.match(CSS, /\.cmt-tick\.unread \{ width: 10px; height: 6px; right: 0; opacity: 1;/);
   // the clearing story is the existing machinery, untouched: optimistic on open + kernel watermark

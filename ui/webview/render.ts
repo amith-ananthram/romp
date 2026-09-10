@@ -3009,7 +3009,7 @@ let railStickyPending = false;
 function scheduleRailSticky(): void {
   if (railStickyPending) return;
   railStickyPending = true;
-  requestAnimationFrame(() => { railStickyPending = false; paintRailSticky(); paintScrollMarks(); updateCommentRail(); });
+  requestAnimationFrame(() => { railStickyPending = false; paintRailSticky(); paintScrollMarks(); updateCommentRail(); if (activeId && hasUnreadOpenThread(activeId)) paintCommentOutlines(activeId); });
 }
 
 function renderEventInner(ev: ChatEvent): HTMLElement {
@@ -8378,7 +8378,7 @@ function applyCommentMarks(sid: string): void {
   // the rail cue clears first (idempotent re-apply): a thread viewed, resolved, or removed must
   // drop its turn's tint on this very pass, not linger until the next anchor match
   for (const t of Array.from(v.el.querySelectorAll(".turn.cmt-rail-unread"))) t.classList.remove("cmt-rail-unread");
-  if (!threads.length) { if (sid === activeId) updateReplyChips(); return; }   // no threads → no chips (the last one resolved/deleted)
+  if (!threads.length) { paintCommentOutlines(sid); if (sid === activeId) updateReplyChips(); return; }   // no threads → no boxes, no chips (the last one resolved/deleted)
   for (const [uuid, list] of threadsByAnchor(threads)) {
     const turn = v.el.querySelector(`.turn[data-uuid="${cssEscape(uuid)}"]`) as HTMLElement | null;
     if (!turn) continue;                       // windowed out — the mark returns when the turn does
@@ -8389,9 +8389,82 @@ function applyCommentMarks(sid: string): void {
     // openCommentPopover drops the unread flag and re-runs this pass.
     turn.classList.toggle("cmt-rail-unread", list.some((t) => !!t.unread && t.status === "open"));
   }
+  paintCommentOutlines(sid);                   // the unread boxes follow the marks this pass just placed (or unwrapped)
   // the reply chips MEASURE the marks (above/below the viewport), so they recount after this pass has the
   // highlights back in the DOM — this is the comments frame's and every transcript rebuild's hook for them
   if (sid === activeId) updateReplyChips();
+}
+
+/** ONE outline around the WHOLE highlighted passage of an unread open thread (the user 2026-09-10), in the scroll
+ *  notch's yellow (var(--cmt-hl)) — in place of the dashed ring each line fragment wore (an outline on the inline
+ *  mark paints per fragment, so a wrapped passage read as a stack of dashed boxes). CSS cannot merge the fragments,
+ *  so the box is an absolutely positioned child of the TURN (.cmt-outline, one per thread), sized to the union of the
+ *  thread's mark fragments' client rects, turn-relative: it scrolls with the text and needs no repaint on scroll.
+ *  Each fragment is first cut to every scrolling ancestor between its mark and the turn (a notice body, a wide formula):
+ *  the box sits outside those containers, so an unclipped fragment scrolled out of one would draw over the content
+ *  below. Repainted where the geometry can move — after every marks pass (each transcript rebuild and comments frame),
+ *  on the rail's rAF scheduler (a re-render, the view's resize observer, every scroll in the pane, inner containers'
+ *  included through the capture-phase listener) and on window resize — those two only while the session has an unread
+ *  open thread (hasUnreadOpenThread: a store read, so a scroll frame with nothing to move walks no DOM); the same measure-then-write
+ *  pass either way, writing only what changed. pointer-events: none, so hover and click land on the marks beneath.
+ *  A box goes with its unread bit (styleCommentMark drops the class when the popover opens or the thread resolves)
+ *  and with its marks (a windowed-out turn, a deleted thread); a hidden view has no boxes to measure and keeps none. */
+/** The cheap gate for the geometry hooks (the rail scheduler fires on every scroll frame, the resize listener on every
+ *  resize): a session with no unread open thread has no box to move, so those paths never walk its DOM (review find,
+ *  T310). Read from the thread store, no DOM. The marks pass calls the painter unconditionally: it is the removal path
+ *  (the last unread thread read, resolved or deleted takes its box with it on that pass). */
+function hasUnreadOpenThread(sid: string): boolean {
+  return (commentThreads.get(sid) || []).some((t) => !!t.unread && t.status === "open");
+}
+
+function paintCommentOutlines(sid: string): void {
+  const v = views.get(sid);
+  if (!v) return;
+  const want = new Map<string, HTMLElement[]>();          // tid -> its unread fragments, document order
+  if (v.el.style.display !== "none") {
+    for (const m of Array.from(v.el.querySelectorAll("mark.cmt-hl.unread")) as HTMLElement[]) {
+      const tid = m.dataset.tid || "";
+      const list = want.get(tid);
+      if (list) list.push(m); else want.set(tid, [m]);
+    }
+  }
+  for (const box of Array.from(v.el.querySelectorAll(".cmt-outline")) as HTMLElement[]) {
+    const tid = box.dataset.tid || "";
+    const marks = want.get(tid);
+    // a box whose thread is no longer unread, or that sits on a turn its marks have left, goes
+    if (!marks || marks[0].closest(".turn") !== box.parentElement) box.remove();
+  }
+  const PAD = 1;                                          // the box sits 1px clear of the glyphs (outline-offset's role)
+  for (const [tid, marks] of want) {
+    const turn = marks[0].closest(".turn") as HTMLElement | null;
+    if (!turn) continue;
+    let l = Infinity, t = Infinity, r = -Infinity, b = -Infinity;
+    for (const m of marks) {
+      // a fragment counts only where it can be SEEN: the box lives on the turn, outside any scrolling container between
+      // the mark and the turn (a notice body at its max height, a wide formula), whose clip the fragment's own rect
+      // ignores — so each fragment is cut to every such ancestor first, and a fragment scrolled out of view adds nothing
+      // (review find, T310). The union of what remains is the box; nothing left → no box.
+      let cl = -Infinity, ct = -Infinity, cr = Infinity, cb = Infinity;
+      for (let a = m.parentElement; a && a !== turn; a = a.parentElement) {
+        const cs = getComputedStyle(a);
+        if (cs.overflowX === "visible" && cs.overflowY === "visible") continue;
+        const ar = a.getBoundingClientRect();
+        cl = Math.max(cl, ar.left); ct = Math.max(ct, ar.top); cr = Math.min(cr, ar.right); cb = Math.min(cb, ar.bottom);
+      }
+      for (const q of Array.from(m.getClientRects())) {
+        if (!q.width && !q.height) continue;
+        const ql = Math.max(q.left, cl), qt = Math.max(q.top, ct), qr = Math.min(q.right, cr), qb = Math.min(q.bottom, cb);
+        if (qr <= ql || qb <= qt) continue;              // clipped away by a scrolling ancestor
+        l = Math.min(l, ql); t = Math.min(t, qt); r = Math.max(r, qr); b = Math.max(b, qb);
+      }
+    }
+    let box = turn.querySelector(`:scope > .cmt-outline[data-tid="${cssEscape(tid)}"]`) as HTMLElement | null;
+    if (!isFinite(l)) { box?.remove(); continue; }        // no visible fragment (a display:none ancestor, or all scrolled out)
+    if (!box) { box = el("div", "cmt-outline"); box.dataset.tid = tid; turn.appendChild(box); }
+    const tr = turn.getBoundingClientRect();
+    const css = { left: (l - tr.left - PAD) + "px", top: (t - tr.top - PAD) + "px", width: (r - l + 2 * PAD) + "px", height: (b - t + 2 * PAD) + "px" };
+    for (const k of ["left", "top", "width", "height"] as const) if (box.style[k] !== css[k]) box.style[k] = css[k];
+  }
 }
 
 /** The parent side of a branch (the user 2026-08-13): a small "↳ <name>" chip on the turn a fork
@@ -8531,7 +8604,7 @@ function updateCommentRail(): void {
     return tick;
   }));
 }
-window.addEventListener("resize", () => updateCommentRail());
+window.addEventListener("resize", () => { updateCommentRail(); if (activeId && hasUnreadOpenThread(activeId)) paintCommentOutlines(activeId); });
 
 // (The per-turn count badge is GONE — the user 2026-08-17: the highlight does the speaking, and
 // the scroll-rail tick already covers a thread whose rendered text drifted beyond re-matching.)
@@ -11592,10 +11665,13 @@ if (typeof ResizeObserver === "function") {
   const c = document.getElementById("content");
   if (c) ro.observe(c);
 }
-// the sticky rail stamp tracks the scroll it annotates (passive: it only measures, never blocks the scroll)
+// the sticky rail stamp tracks the scroll it annotates (passive: it only measures, never blocks the scroll). CAPTURE,
+// so a scroll INSIDE the pane reaches it too — a notice body at its max height, a wide formula: scroll events do not
+// bubble, and the unread comment boxes (paintCommentOutlines, on this same scheduler) must follow marks that move
+// inside such a container and be cut to it (review find, T310). The other painters here are signature-guarded.
 {
   const c = document.getElementById("content");
-  if (c) c.addEventListener("scroll", scheduleRailSticky, { passive: true });
+  if (c) c.addEventListener("scroll", scheduleRailSticky, { passive: true, capture: true });
 }
 // ── jump to newest (the user 2026-08-31) ─────────────────────────────────────────────────────────
 // Scrolled-up reading leaves follow mode, and the send gate keeps it that way — this chip is the

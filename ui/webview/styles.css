@@ -164,6 +164,7 @@ body.scheme-solarized-dark {
      stroke, DISTINCT from both the accent blue (selection/chrome) and the working-status yellow
      chip. Text-highlight use only — comment chrome (badge, buttons, chips) stays var(--accent). */
   --cmt-hl: #ffd54a;
+  --cmt-hl-outline: #ffd54a;   /* the ink of the comment notch and the unread box: the fill's yellow here, darker on cream (T310) */
   /* fast mode ON — the CLI's own fastMode orange, a STATUS color (means "this session runs fast
      mode"), so the badge reads the same here as in the Claude Code TUI. Not the accent. */
   --fast: #ff6a00;
@@ -232,6 +233,7 @@ body.theme-light {
   --accent: #C2410C; --accent-fg: #FFF8F2;
   --accent-wash: rgba(194, 65, 12, 0.10);
   --cmt-hl: #FFDF70;
+  --cmt-hl-outline: #8f6a00;   /* amber ink: 4.2:1 on the cream page — the fill's yellow measures 1.1:1 there, invisible as a line (T310) */
   --fast: #D45500;
   --warn: #9A6A00;
   /* the WORKING gold and the COMPACTING teal are re-inked for cream (the user 2026-09-08, decision 3 of the
@@ -3313,17 +3315,21 @@ mark.cmt-hl {
   cursor: pointer;
 }
 mark.cmt-hl.unread { background: color-mix(in srgb, var(--cmt-hl) 45%, transparent); }
-/* UNREAD = the needs-you ring (the user 2026-09-08): a landed reply you have not opened wears the SAME
-   dashed ring the tab strip puts on a session that needs you (.tab.tab-awaiting: `2px dashed
-   var(--st-awaiting-bg)`, inset) — one idiom for "something here waits on you", scaled to a text run:
-   1.5px so the dash/gap (Chromium scales them with the width) shortens with it, offset OUTWARD so the
-   ring never crosses the glyphs. An outline, so nothing reflows when it comes and goes; on a run that
-   wraps, every line fragment is ringed. It replaces the 2026-08-23 corner dot (a yellow dot on yellow
-   read as decoration, not as an ask). Its OWN rule, apart from the fill line above: the fill still says
-   pending vs landed exactly as before — the 45% yellow tier is the landed reply, .busy's green wash below
-   the reply still being written — and T237's tests pin that line byte for byte. Read marks wear no ring.
-   Clears with the unread flag the moment the popover opens (optimistic + kernel watermark). */
-mark.cmt-hl.unread { outline: 1.5px dashed var(--st-awaiting-bg); outline-offset: 1px; }
+/* UNREAD = ONE outline around the WHOLE passage (the user 2026-09-10): a landed reply you have not opened draws a
+   single solid box in the scroll notch's ink — var(--cmt-hl-outline), the colour .cmt-tick wears for the same thread:
+   the highlighter yellow itself in the dark theme, a darker amber on the cream page, where the yellow reads as a fill
+   but not as a line — around the union of the highlight's line fragments, clipped to any scrolling container between
+   the marks and the turn (a notice body, a wide formula). The 2026-09-08 dashed ring was an outline on the inline
+   mark, which Chromium paints once per line fragment, so a wrapped passage wore a stack of dashed boxes. CSS
+   cannot merge a mark's fragments (box-decoration-break: clone keeps them apart), so the box is a positioned
+   child of the TURN that render.ts's paintCommentOutlines measures from the marks' client rects — turn-relative,
+   so it scrolls with the text and needs no repaint on scroll; repainted after every marks pass, on the rail's
+   rAF scheduler (a re-render, the view's resize) and on window resize. An OUTLINE on an empty box, so nothing
+   reflows when it comes and goes; 1px clear of the glyphs; transparent to the pointer, so hover and click land
+   on the marks beneath. The fill still says pending vs landed exactly as before (the 45% tier above, .busy's
+   green below); read marks have no box. */
+.cmt-outline { position: absolute; pointer-events: none; user-select: none; box-sizing: border-box;
+  outline: 1.5px solid var(--cmt-hl-outline); border-radius: 3px; }
 /* the turn's rail segment shouts an unread thread (the user 2026-08-23): the identity line's own
    segment tints the comment yellow — wider and fully opaque so it reads from across the pane — and
    the rail-hit strip over it opens the thread on click. applyCommentMarks clears the class the
@@ -3529,7 +3535,7 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
 .cmt-tick {
   position: absolute; right: 1px; width: 8px; height: 4px;
   border: 0; border-radius: 2px; padding: 0;
-  background: var(--cmt-hl); opacity: 0.75; pointer-events: auto; cursor: pointer;
+  background: var(--cmt-hl-outline); opacity: 0.75; pointer-events: auto; cursor: pointer;   /* the ink the unread box shares (T310) */
 }
 .cmt-tick:hover { opacity: 1; }
 .cmt-tick.resolved { opacity: 0.3; }
@@ -3538,7 +3544,7 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
    two threads on one passage share a `top`, and the later-painted read tick covered the unread one
    (the user 2026-09-10) */
 .cmt-tick.unread { width: 10px; height: 6px; right: 0; opacity: 1; z-index: 1;
-  box-shadow: 0 0 0 1.5px var(--bg), 0 0 0 3px color-mix(in srgb, var(--cmt-hl) 85%, transparent); }
+  box-shadow: 0 0 0 1.5px var(--bg), 0 0 0 3px color-mix(in srgb, var(--cmt-hl-outline) 85%, transparent); }
 /* a WRITING thread's tick wears the same await-green as the passage (the user 2026-08-24: the
    marching-ants crawl — the "spinning dots" — is retired; the state COLOR is the in-flight cue,
    here as everywhere on the rail) */
