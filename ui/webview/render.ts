@@ -78,7 +78,7 @@ import { apiErrorReason } from "./api-error-reason";
 import { chatMdExtensions, userMdHtml } from "./chat-md";
 import { setTip, pruneTip } from "./tip";
 import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAnchorRange, sliceRanges, prunePending, newCommentCreate, commentCreateFrame,
-         type CommentThread, type CommentCreate } from "./comments";
+         pickMarkToOpen, type CommentThread, type CommentCreate } from "./comments";
 import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, chipLabel, chipTip, chipAria, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
 import { dragSlotIndex } from "./dragslot";
 import { perfFrameHandler } from "./perf-telemetry";
@@ -8406,6 +8406,25 @@ function styleCommentMark(m: HTMLElement, th: CommentThread): void {
     : th.status === "merged" ? "relayed thread: its discussion was sent back into the session"
     : th.status === "resolved" ? "resolved thread: closed — click to read; a new comment continues the conversation"
     : "thread: click to open";
+}
+
+/** The marks under a click, innermost first: the clicked mark, then each enclosing mark.cmt-hl outward.
+ *  Two threads on the same passage NEST (the user 2026-09-10: one selection commented on twice within
+ *  seconds; ensureCommentMark re-finds the identical range and wraps the second mark inside the first),
+ *  and the delegate hands the click to the innermost — so cmtopen picks over the whole chain
+ *  (pickMarkToOpen), with each mark's unread bit read from the thread store, the source styleCommentMark
+ *  paints the ring from, so the ring you click is the thread that opens. */
+function markChain(start: HTMLElement, sid: string): { el: HTMLElement; tid: string; unread: boolean }[] {
+  const threads = commentThreads.get(sid) || [];
+  const out: { el: HTMLElement; tid: string; unread: boolean }[] = [];
+  for (let m = start.closest("mark.cmt-hl") as HTMLElement | null; m;
+       m = (m.parentElement?.closest("mark.cmt-hl") as HTMLElement | null) || null) {
+    const tid = m.dataset.tid;
+    if (!tid) continue;
+    const th = threads.find((t) => t.tid === tid);
+    out.push({ el: m, tid, unread: !!th?.unread && th.status === "open" });
+  }
+  return out;
 }
 
 /** The comment's identity color (the user 2026-08-17): one of the session palette's colors,
@@ -16737,9 +16756,14 @@ setupSettings();
     // every popover BUTTON below: the popover's conversation refreshes on comments frames, and a
     // per-render listener would eat the mid-press click (the click-safety rule).
     cmtopen: (elx) => {
-      const tid = elx.dataset.tid;
-      if (!tid || !activeId) return;
-      const r = elx.getBoundingClientRect();
+      if (!activeId) return;
+      // the ring you click opens the thread that owns the ring (the user 2026-09-10): two threads on one
+      // passage nest their marks, the delegate lands on the innermost, and the outer thread's unread ring
+      // could never be opened from itself — pick over the chain instead (markChain / pickMarkToOpen)
+      const chain = markChain(elx, activeId);
+      const tid = pickMarkToOpen(chain);
+      if (!tid) return;
+      const r = (chain.find((m) => m.tid === tid)?.el || elx).getBoundingClientRect();
       openCommentPopover(activeId, tid, Math.min(r.left, window.innerWidth - 380), r.bottom + 6);
     },
     cmtclose: () => closeCommentPop(),
