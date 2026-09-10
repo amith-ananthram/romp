@@ -8742,14 +8742,30 @@ class SdkBackend:
         lease = {"sid": str(sess.sid), "fsid": str(sess.resume_sid or sess.sid), "name": str(sess.name),
                  "pid": int(pid), "start": start, "holder": self._lease_holder(), "version": self.code_version,
                  "spawnedAt": int(now), "t": now}
+        refused = None
         with self._lock:
             self._leases[str(sess.sid)] = (sess, lease)
             if self._lease_thread is None or not self._lease_thread.is_alive():
                 # started UNDER the lock: an unstarted thread reads as not alive, so a second session
                 # connecting in the first's write window would otherwise adopt it too and both would call
                 # start() on one Thread (RuntimeError out of the connect; the review of T305, 2026-09-10)
-                self._lease_thread = threading.Thread(target=self._lease_beat_loop, name="sdk-lease-beat", daemon=True)
-                self._lease_thread.start()
+                t = threading.Thread(target=self._lease_beat_loop, name="sdk-lease-beat", daemon=True)
+                try:
+                    t.start()
+                except (RuntimeError, OSError) as e:   # the OS refused a thread ("can't start new thread")
+                    # Raised from here, inside the connect and after the handshake, the connect's handler
+                    # would crash-heal a CLI that is up and answering. This session runs unleased instead,
+                    # the missing-pid posture above: its entry goes, so no beat ever claims it, and the
+                    # slot stays empty so the next open tries the start again. Said outside the lock.
+                    self._leases.pop(str(sess.sid), None)
+                    self._lease_thread = None
+                    refused = e
+                else:
+                    self._lease_thread = t
+        if refused is not None:
+            self._log("lease (%s): the heartbeat thread could not start (%s); the session runs unleased and a boot "
+                      "judges it by parentage" % (sess.name, refused), problem=True)
+            return
         try:
             write_lease(self.state_dir, lease)
         except Exception as e:
@@ -8785,12 +8801,16 @@ class SdkBackend:
                 self._log("lease (%s): heartbeat write failed: %s" % (sess.name, err), problem=True)
         return len(items)
 
-    def _lease_beat_loop(self) -> None:
+    def _lease_beat_loop(self, sleep=None, now=None) -> None:
         """The heartbeat thread: one beat every LEASE_HEARTBEAT_S while any lease is held; exits when
-        none is (the next _lease_open starts a new one)."""
+        none is (the next _lease_open starts a new one). `sleep` and `now` are the test seams, resolved
+        at call time as _end_cli_tree's are, so a test steps a beat, the empty exit and the restart with
+        no second behind them; the thread target passes neither, so the kernel beats on the real clock."""
+        sleep = sleep or time.sleep
+        now = now or time.time
         while True:
-            time.sleep(LEASE_HEARTBEAT_S)
-            if self._lease_beat_once() == 0:
+            sleep(LEASE_HEARTBEAT_S)
+            if self._lease_beat_once(now=now()) == 0:
                 with self._lock:
                     if not self._leases:
                         self._lease_thread = None
