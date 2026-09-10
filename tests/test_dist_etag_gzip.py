@@ -14,7 +14,7 @@ import io
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()   # isolate: importing the kernel must not touch live state
@@ -23,7 +23,7 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
-km = SourceFileLoader("romp_kernel_dist_etag", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_dist_etag", os.path.join(BIN, "romp-kernel"))
 
 JS = (b"// a bundle-shaped blob that gzips like real code\n"
       b"function render(state){return state.sessions.map(function(s){return s.name;});}\n" * 400)

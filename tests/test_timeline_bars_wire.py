@@ -16,13 +16,13 @@ import os
 import re
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()      # hermetic BEFORE the load: never live state
 os.environ.pop("ROMP_STATE_DIR", None)
-km = SourceFileLoader("kernel_bars_wire", os.path.join(os.path.dirname(HERE), "kernel", "kernel.py")).load_module()
+km = load_source("kernel_bars_wire", os.path.join(os.path.dirname(HERE), "kernel", "kernel.py"))
 
 FIXTURE = os.path.join(HERE, "fixtures", "timeline-bars-wire.json")
 SID = "11111111-2222-3333-4444-555555555555"

@@ -15,7 +15,7 @@ import re
 import tempfile
 import unittest
 from datetime import datetime, timezone
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -32,8 +32,8 @@ _SESS = os.path.join(os.environ["XDG_STATE_HOME"], "sessions.json")
 Path(_SESS).write_text(json.dumps([{"id": "sess-web", "name": "web", "dir": "/tmp/notes-api",
                                     "state": "waiting", "working": ""}]))
 os.environ["ROMP_SESSIONS_FILE"] = _SESS
-ps = SourceFileLoader("romp_postal_tracked", os.path.join(BIN, "romp-postal-service")).load_module()
-jd = SourceFileLoader("romp_judge_tracked", os.path.join(BIN, "romp-judge")).load_module()
+ps = load_source("romp_postal_tracked", os.path.join(BIN, "romp-postal-service"))
+jd = load_source("romp_judge_tracked", os.path.join(BIN, "romp-judge"))
 
 RECIP = "11111111-2222-3333-4444-555555555555"   # the worker (web)
 SENDER = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"  # the delegator (api)

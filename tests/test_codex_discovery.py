@@ -14,7 +14,7 @@ import threading
 import time
 import unittest
 from unittest import mock
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -22,7 +22,7 @@ ROOT = os.path.dirname(HERE)
 
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
-jd = SourceFileLoader("romp_judge_codexdisc", os.path.join(ROOT, "bin", "romp-judge")).load_module()
+jd = load_source("romp_judge_codexdisc", os.path.join(ROOT, "bin", "romp-judge"))
 
 NOW = 1781100000
 SID = "11111111-2222-3333-4444-555555555555"

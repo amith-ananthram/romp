@@ -18,14 +18,14 @@ import json
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-jd = SourceFileLoader("romp_judge_backref_memo", os.path.join(BIN, "romp-judge")).load_module()
+jd = load_source("romp_judge_backref_memo", os.path.join(BIN, "romp-judge"))
 
 S1 = "11111111-2222-3333-4444-999999999901"
 S2 = "11111111-2222-3333-4444-999999999902"

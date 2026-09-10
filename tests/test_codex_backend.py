@@ -18,7 +18,7 @@ import threading
 import time
 import unittest
 from unittest import mock
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 from tests.conftest import thread_census, wait_for_census
 from pathlib import Path
@@ -29,8 +29,8 @@ ROOT = os.path.dirname(HERE)
 
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
-cb = SourceFileLoader("romp_codex_backend", os.path.join(ROOT, "kernel", "codex_backend.py")).load_module()
-sb = SourceFileLoader("romp_session_backend", os.path.join(ROOT, "kernel", "session_backend.py")).load_module()
+cb = load_source("romp_codex_backend", os.path.join(ROOT, "kernel", "codex_backend.py"))
+sb = load_source("romp_session_backend", os.path.join(ROOT, "kernel", "session_backend.py"))
 
 
 @contextlib.contextmanager
@@ -1095,8 +1095,9 @@ class Lifecycle(unittest.TestCase):
         self.assertTrue(be.kill(sid))       # child backends load it without starting queue workers
         code = r'''
 import sys
-from importlib.machinery import SourceFileLoader
-cb = SourceFileLoader("codex_child", sys.argv[1]).load_module()
+sys.path.insert(0, sys.argv[5])          # the tests dir, where romp_load lives
+from romp_load import load_source
+cb = load_source("codex_child", sys.argv[1])
 be = cb.CodexBackend(sys.argv[2], client_factory=lambda: None, log=lambda message: None)
 s = be._session(sys.argv[3])
 for i in range(20):
@@ -1104,7 +1105,7 @@ for i in range(20):
     be._save_registry(s, queue_append={"id": "child-" + text, "text": text})
 '''
         backend_path = str(Path(ROOT) / "kernel" / "codex_backend.py")
-        procs = [subprocess.Popen([sys.executable, "-c", code, backend_path, tmp, sid, str(n)])
+        procs = [subprocess.Popen([sys.executable, "-c", code, backend_path, tmp, sid, str(n), HERE])
                  for n in range(4)]
         for p in procs:
             self.assertEqual(p.wait(timeout=15), 0)

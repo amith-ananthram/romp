@@ -13,7 +13,7 @@ Synthetic sessions only — the demo notes-api world (web / api / tests), never 
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -22,7 +22,7 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()   # hermetic BEFORE any romp code loads
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-km = SourceFileLoader("romp_kernel_pips", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_pips", os.path.join(BIN, "romp-kernel"))
 
 
 def sess(sid, name):

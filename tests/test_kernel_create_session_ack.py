@@ -11,7 +11,7 @@ build arrives) and wake the pusher via the dirty-mark — never a synchronous fl
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()   # isolate: importing the kernel must not touch live state
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
@@ -19,7 +19,7 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
-km = SourceFileLoader("romp_kernel_createack", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_createack", os.path.join(BIN, "romp-kernel"))
 
 KSRC = open(os.path.join(BIN, "romp-kernel"), encoding="utf-8").read()
 

@@ -37,7 +37,7 @@ import tempfile
 import time
 import types
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -46,7 +46,7 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()      # hermetic state BEFORE the load (import-time root)
 os.environ.pop("ROMP_STATE_DIR", None)
-km = SourceFileLoader("romp_kernel_chatsiginputs", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_chatsiginputs", os.path.join(BIN, "romp-kernel"))
 jd = km.jd
 
 

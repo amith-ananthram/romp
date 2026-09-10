@@ -26,7 +26,7 @@ import tempfile
 import threading
 import unittest
 from datetime import datetime, timezone
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 from unittest import mock
 
@@ -37,7 +37,7 @@ os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
-km = SourceFileLoader("romp_kernel_gitfile_bytes", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_gitfile_bytes", os.path.join(BIN, "romp-kernel"))
 jd = km.jd
 
 TORN = b"gitdir: /x/y\xff\xfe"                      # a pointer file with two undecodable bytes in it

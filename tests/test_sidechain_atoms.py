@@ -17,7 +17,7 @@ Task/Agent head's prompt+report folds and the background-task rows. Skill payloa
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
@@ -35,7 +35,7 @@ class TextBlock:
 
 
 def _load(name):
-    return SourceFileLoader(name, os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+    return load_source(name, os.path.join(BIN, "romp_sdk_backend.py"))
 
 
 class SidechainDrop(unittest.TestCase):

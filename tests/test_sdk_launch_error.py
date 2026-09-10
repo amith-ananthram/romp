@@ -27,7 +27,7 @@ import sys
 import tempfile
 import types
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -36,7 +36,7 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-sb = SourceFileLoader("romp_sdk_backend_launcherr", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+sb = load_source("romp_sdk_backend_launcherr", os.path.join(BIN, "romp_sdk_backend.py"))
 
 SID = "11111111-2222-3333-4444-555555555555"
 OTHER = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -366,9 +366,9 @@ class ContractConformance(unittest.TestCase):
     """launch_error is part of the backend contract, with a None default for tmux."""
 
     def test_the_abc_defaults_to_no_known_failure(self):
-        mod = SourceFileLoader(
+        mod = load_source(
             "romp_session_backend_launcherr",
-            os.path.join(BIN, "romp_session_backend.py")).load_module()
+            os.path.join(BIN, "romp_session_backend.py"))
         self.assertIsNone(mod.SessionBackend.launch_error(object(), SID),
                           "a backend whose CLI launches into a visible pane reports nothing here")
 

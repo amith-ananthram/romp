@@ -12,7 +12,7 @@ import tempfile
 from types import ModuleType
 import unittest
 from unittest.mock import patch
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 ROOT = Path(__file__).resolve().parents[1]
 _IMPORT_STATE = tempfile.mkdtemp(prefix="romp-envnames-")
@@ -22,7 +22,7 @@ os.environ["ROMP_MANAGER_PORT"] = "1"          # never dial the real manager (re
 os.environ["ROMP_KERNEL_PORT"] = "1"           # never dial the real kernel
 os.environ["ROMP_SERVICE_ENV_FILE"] = _IMPORT_STATE + "/absent.env"
 os.environ["ROMP_SERVICE_ENV"] = os.environ["ROMP_SERVICE_ENV_FILE"]
-sb = SourceFileLoader("romp_sdk_envnames", str(ROOT / "kernel/sdk_backend.py")).load_module()
+sb = load_source("romp_sdk_envnames", str(ROOT / "kernel/sdk_backend.py"))
 
 
 def _op_name(n):

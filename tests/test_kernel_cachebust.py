@@ -5,7 +5,7 @@ serves HTML no-cache, so a reload always pulls fresh JS. We pin the page-builder
 (the HTTP layer isn't unit-tested in this repo — see test_kernel.py's header).
 """
 import os
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 import tempfile
 
 BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "bin")
@@ -13,10 +13,10 @@ BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
+load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
-km = SourceFileLoader("romp_kernel_cb", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_cb", os.path.join(BIN, "romp-kernel"))
 
 
 def test_dist_ver_is_int():
