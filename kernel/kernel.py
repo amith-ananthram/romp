@@ -1137,6 +1137,7 @@ def _version_info():
             "commentEffort": jd._state_str("comment-effort", "session"),
             "commentFast": jd._state_str("comment-fast", "session"),
             "tmuxBackend": jd._state_str("tmux-backend", "off"),   # T288: "on" offers Claude Code (tmux) in the picker and the gear
+            "judgeFast": jd._state_str("judge-fast", "off"),   # RAW "on" | "off": Fast judging, the fast-mode opt-in on Opus judge calls
             # One dict with every kernel-side setting, lifted by a PEER kernel's /version poll onto its
             # /tunnels row so its gear can mark controls where machines disagree (the user 2026-08-14).
             # The top-level fields above stay: this tab's own gear and older kernels read those.
@@ -1156,7 +1157,8 @@ def _version_info():
                          "commentModel": jd._state_str("comment-model", "session"),
                          "commentEffort": jd._state_str("comment-effort", "session"),
                          "commentFast": jd._state_str("comment-fast", "session"),
-                         "tmuxBackend": jd._state_str("tmux-backend", "off")},
+                         "tmuxBackend": jd._state_str("tmux-backend", "off"),
+                         "judgeFast": jd._state_str("judge-fast", "off")},
             # every gt-gated store's last-applied gesture stamp (epoch-ms ints, nothing path-shaped):
             # the gear stamps its next gesture above these instead of trusting the device clock.
             # Top-level, not lifted into /tunnels rows — a remote's newer stamp reaches the dashboard
@@ -40066,6 +40068,11 @@ def _set_comment_fast(v, gt=None):   return _set_judge_state("comment-fast", v, 
 # ids and the protocol are unchanged. Rides the judge-knob machinery (validated, stamped, propagated to
 # every linked kernel: the 2026-08-14 gear rule, one value across machines).
 def _set_tmux_backend(v, gt=None):   return _set_judge_state("tmux-backend", v, {"on", "off"}, gt=gt)
+# Fast judging (the gear's Judges section): "on" runs every judge call whose model is Opus in the CLI's fast
+# mode (jd._judge_cmd adds the flag-settings opt-in per call; a call on any other model is untouched); off by
+# default. Fast mode bills Opus at a premium and draws on fast mode's own rate limits, so it is a deliberate
+# pick. Rides the judge-knob machinery: validated, stamped, propagated to every linked kernel.
+def _set_judge_fast(v, gt=None):     return _set_judge_state("judge-fast", v, {"on", "off"}, gt=gt)
 
 
 # The four judge-tier settings PROPAGATE: a pick made here follows to every linked kernel (the user
@@ -40090,7 +40097,8 @@ _JUDGE_SETTING_FIELDS = (("judgeModel", _set_judge_model), ("indexModel", _set_i
                          # /judge-settings is the tunnel-side propagation that already does it
                          ("commentModel", _set_comment_model), ("commentEffort", _set_comment_effort),
                          ("commentFast", _set_comment_fast),
-                         ("tmuxBackend", _set_tmux_backend))   # T288: the tmux backend's offer, "on" | "off"
+                         ("tmuxBackend", _set_tmux_backend),   # T288: the tmux backend's offer, "on" | "off"
+                         ("judgeFast", _set_judge_fast))       # Fast judging, "on" | "off"
 
 # The per-field PICK STAMPS this leg carried from 2026-08-30 (each field's STATE-file mtime in a
 # body "stamps" dict, preserved by utime at the receiver — the distill-pick stomp fix) are
@@ -40142,7 +40150,8 @@ def _apply_judge_settings(body):
             "commentModel": jd._state_str("comment-model", "session"),
             "commentEffort": jd._state_str("comment-effort", "session"),
             "commentFast": jd._state_str("comment-fast", "session"),
-            "tmuxBackend": jd._state_str("tmux-backend", "off")}
+            "tmuxBackend": jd._state_str("tmux-backend", "off"),
+            "judgeFast": jd._state_str("judge-fast", "off")}
 
 
 def _propagate_judge_settings(body):
@@ -40353,7 +40362,7 @@ def _adopt_peer_settings(host, rver):
 _GT_STORES = ("auto-nudge", "compact-suggest", "file-editing", "update-mode", "thinking-summaries",
               "judge-model", "index-model", "judge-effort", "index-effort", "judge-concurrency",
               "distill-model", "distill-effort", "comment-model", "comment-effort", "comment-fast",
-              "tmux-backend")
+              "tmux-backend", "judge-fast")
 
 
 def _setting_stored_gt(name):
@@ -52754,6 +52763,21 @@ class Handler(BaseHTTPRequestHandler):
             if _jgt is not None:
                 threading.Thread(target=_propagate_judge_settings,
                                  args=({"tmuxBackend": _tbv, "gt": _jgt},), daemon=True).start()
+            else:
+                _tell_stale_gesture(client, msg)
+        elif msg and msg.get("type") == "setJudgeFast" and msg.get("enabled") is not None:
+            # gear "Fast judging": a checkbox, stored as on/off and read by the judges per call (jd._judge_fast).
+            # The boolean is checked like its siblings' (_as_bool), and a malformed frame is refused with a
+            # warn, unwritten; an applied pick fans out to every linked kernel under its gesture stamp.
+            _jfe, ferr = _as_bool(msg.get("enabled"), "enabled")
+            if ferr:
+                _refuse_ws_flag(client, msg["type"], ferr, "enabled", msg.get("enabled"))
+                return
+            _jfv = "on" if _jfe else "off"
+            _jgt = _set_judge_fast(_jfv, gt=_gesture_ms(msg))
+            if _jgt is not None:
+                threading.Thread(target=_propagate_judge_settings,
+                                 args=({"judgeFast": _jfv, "gt": _jgt},), daemon=True).start()
             else:
                 _tell_stale_gesture(client, msg)
         else:

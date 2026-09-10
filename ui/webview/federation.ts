@@ -82,7 +82,8 @@ const KERNEL_SETTING = new Set(["setAutoNudge", "setJudgeModel", "setIndexModel"
                                 "setDistillModel", "setDistillEffort", "setFileEditing",
                                 "setCompactSuggest",
                                 "setCommentModel", "setCommentEffort", "setCommentFast",
-                                "setTmuxBackend"]);   // T288: the tmux backend's offer, one value across machines
+                                "setTmuxBackend",   // T288: the tmux backend's offer, one value across machines
+                                "setJudgeFast"]);   // Fast judging: the judges' fast-mode opt-in, one value across machines
 
 /** Return a COPY of an inbound message with every session-id field prefixed by `host`. The local host
  *  ("") is the identity transform, so local messages are untouched. Unknown fields pass through. */

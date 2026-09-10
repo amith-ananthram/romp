@@ -243,6 +243,8 @@ def _index_effort():  return _state_str("index-effort", "")
 def _judge_engine():  return _state_str("judge-engine", "claude")   # "claude" | "codex" — which model
 #   harness runs the judges (docs/codex.md §judges). "codex" lets a machine with no Claude login keep
 #   the board thinking: every judge becomes a one-shot `codex exec` billing the machine's codex login.
+def _judge_fast():    return _state_str("judge-fast", "off") == "on"   # gear "Fast judging": the CLI's fast-mode
+#   opt-in rides every judge call whose model is Opus (_judge_cmd); off by default. Read per call, like the tiers.
 INDEX_EFFORT_DEFAULT = "low"   # the index tier's cost lever on models that take --effort (2026-09-01; see _judge_env)
 
 
@@ -854,12 +856,26 @@ def _judge_cmd(model, sys_prompt, effort=None, auth=None):
            "--output-format", "json"]                 # stdout = {"result", "usage", "duration_ms", "total_cost_usd"}
     if effort:
         cmd += ["--effort", effort]
+    # The per-call settings layer. `--settings` takes ONE value (a path or a JSON string), so every key the
+    # call needs rides one overlay; --safe-mode drops only the auto-discovered settings, an explicit
+    # --settings still loads. Two keys can ride it:
+    overlay = {}
+    if _judge_fast() and _model_family_version(model)[0] == "opus":
+        # Fast judging (the gear's Judges section, off by default): the CLI refuses fast mode to a
+        # non-interactive client unless the flag-settings layer carries this exact key, the same opt-in a
+        # fast-picked session's launch uses (sdk_backend.flag_settings_path), and fast mode is an Opus-only
+        # preview, so the key rides only a call whose model reads as the opus family: the bare alias or a
+        # pinned version id (a tier pinned to a version id reaches here with that id). Whether fast then
+        # engaged is the CLI's answer, per account: the envelope's fast_mode_state, kept on the usage row.
+        overlay["fastMode"] = True
     if auth == "login":
         # A login-billed call must not bill the key (2026-09-08): in the CLI's precedence apiKeyHelper outranks
         # every login form, so the per-call settings layer disables the helper. The empty string is the value
         # the CLI takes as unset (null falls through to the settings files; verified on 2.1.257), the same
         # lever a login-picked session's launch uses (sdk_backend.flag_settings_path).
-        cmd += ["--settings", '{"apiKeyHelper": ""}']
+        overlay["apiKeyHelper"] = ""
+    if overlay:
+        cmd += ["--settings", json.dumps(overlay)]
     return cmd
 
 
@@ -1484,6 +1500,8 @@ def _log_judge_usage(judge, tier, model, fsid, wrap, sent=None, recv=None):
                                 "in": u.get("input_tokens"), "out": u.get("output_tokens"),
                                 "cache_w": u.get("cache_creation_input_tokens"),
                                 "cache_r": u.get("cache_read_input_tokens"),
+                                "fast": wrap.get("fast_mode_state"),   # the CLI's word on whether fast mode engaged
+                                #   ("on" | "off" | "cooldown"; null when the envelope carries none): Fast judging's readback
                                 "cost": wrap.get("total_cost_usd")}) + "\n")
     except Exception:
         pass

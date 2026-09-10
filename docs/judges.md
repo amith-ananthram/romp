@@ -459,6 +459,8 @@ permission/API-error floors: one interrupt at a time, the present event first.
 
 - Toggles: `CLOSER_ON`, `GROUPER_ON`, `DISTILLER_ON`, `CONSOLIDATE_ON`.
   Models: `STATE/judge-model` (triage), `STATE/index-model`.
+  Fast judging: `STATE/judge-fast` (`on` | `off`, off by default; read per
+  call, and the fast-mode opt-in rides only a call whose model is Opus).
   Pool width: `STATE/judge-concurrency` (the gear's Judge concurrency, 1..16,
   read fresh each pass; empty = `ROMP_JUDGE_CONCURRENCY` as read at load,
   else 6). Every pool reads it at call time (`_conc`, or `_judge_concurrency()`
@@ -486,7 +488,8 @@ permission/API-error floors: one interrupt at a time, the present event first.
   the sessions the evidence gate ran. Outside
   a pass frame (`romp-judge --plan`) the evidence gate stamps nothing, and
   the inner gate does the skipping.
-- Logs: `STATE/judge-usage.jsonl` (per-call cost, one name per prompt),
+- Logs: `STATE/judge-usage.jsonl` (per-call cost, one name per prompt, and
+  the CLI's `fast_mode_state` as `fast`),
   `STATE/judge-errors.jsonl` (the row contract above; kinds are parse,
   call, give-up, sweep-cut, cite-miss, rate-limited, task-store, history-unreadable,
   task-key-collision (a duplicated to-do mirror key, reconciled per node

@@ -508,6 +508,7 @@ test("routeOutbound: the gear's kernel-side settings reach EVERY attached kernel
                      { type: "setCommentModel", model: "claude-opus-5" },
                      { type: "setCommentEffort", effort: "high" },
                      { type: "setCommentFast", fast: "on" },
+                     { type: "setJudgeFast", enabled: true },
                      { type: "setFileEditing", enabled: true },
                      { type: "setCompactSuggest", enabled: true }]) {   // T248: no longer per-install
     const routes = routeOutbound(msg, new Set(["TESTHOST", "gpu1"]));
