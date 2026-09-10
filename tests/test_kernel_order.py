@@ -3,7 +3,7 @@
 auto-reshuffle on activity (mtime / status / death), only a user drag reorders (the user 2026-06-24:
 "the only thing that should reorder them is the user clicking and dragging").
 
-Pins bin/romp-kernel's _ordered / _ordered_alive / _chat_tab_sessions / _timeline_sessions and the
+Pins bin/romp-kernel's _ordered / _chat_tab_sessions / _timeline_sessions and the
 non-destructive _merge_session_order. Synthetic fleet only: placeholder UUIDs, no real session data.
 """
 import json
