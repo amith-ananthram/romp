@@ -126,7 +126,9 @@ broad `git add` will sweep up your work). Conventions:
   other sessions).
 - **Standing green light to publish.** When the work is done and tests pass, publish it
   without asking — through the fork (user rule, 2026-07-27): rulesets on the upstream
-  block EVERY direct branch push (`main` and feature branches alike, no bypass), so
+  block EVERY direct branch push (`main` and feature branches alike, no bypass; the one
+  exception since 2026-09-10 is the `stack/**` namespace, a staging area for GitHub's stacked
+  pull requests, unprotected and deleted on merge, see `docs/pr-tiers.md`), so
   publishing is always push-then-PR:
   1. `git push -u origin <branch>`: `origin` is the maintainer's **fork** and `upstream`
      is romp-on/romp (remote convention, the user 2026-09-06; a plain install has only
