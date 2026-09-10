@@ -25,7 +25,8 @@ test("the ruler observes ONLY the active view's .ext-glow turns and hides when t
   // other views are display:none (zero rects), so only the active view's glows map onto its #content scroll
   assert.match(RENDER, /const v = activeId \? views\.get\(activeId\) : null;/);
   assert.match(RENDER, /v\.el\.querySelectorAll<HTMLElement>\("\.turn\.ext-glow"\)/);
-  assert.match(RENDER, /if \(!content \|\| !glows\.length\) \{ ruler\.style\.display = "none"; ruler\.replaceChildren\(\); return; \}/);
+  // …or history marks (T318b): a hover on turns outside the resident tail shows the strip with no glowing row
+  assert.match(RENDER, /if \(!content \|\| \(!glows\.length && !hist\.length\)\) \{ ruler\.style\.display = "none"; ruler\.replaceChildren\(\); return; \}/);
 });
 
 test("bands are CONTENT-space (scroll-independent), mapped to ruler space by scrollHeight", () => {
@@ -34,8 +35,10 @@ test("bands are CONTENT-space (scroll-independent), mapped to ruler space by scr
   assert.match(RENDER, /const top = turn\.getBoundingClientRect\(\)\.top - rect\.top \+ content\.scrollTop;/);
   assert.match(RENDER, /const rulerH = content\.clientHeight;/);
   assert.match(RENDER, /const scrollH = content\.scrollHeight \|\| 1;/);
-  assert.match(RENDER, /band\.style\.top = \(b\.top \/ scrollH \* rulerH\) \+ "px";/);
-  assert.match(RENDER, /band\.style\.height = Math\.max\(3, \(b\.bot - b\.top\) \/ scrollH \* rulerH\) \+ "px";/);
+  // the resident map sits under the history cap (0 px when nothing unloaded is hovered, T318b): capH + span / scrollH * mapH
+  assert.match(RENDER, /band\.style\.top = \(capH \+ b\.top \/ scrollH \* mapH\) \+ "px";/);
+  assert.match(RENDER, /band\.style\.height = Math\.max\(3, \(b\.bot - b\.top\) \/ scrollH \* mapH\) \+ "px";/);
+  assert.match(RENDER, /const mapH = Math\.max\(1, rulerH - capH\);/);
 });
 
 test("contiguous glowing turns coalesce into ONE band; gaps make separate bands (link_audit spec)", () => {

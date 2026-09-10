@@ -173,8 +173,9 @@ test("a deep-link to an anchor OLDER than the resident tail fetches older histor
 test("timeline→chat glow matches turns BY UUID, not a ±2s time window (the user 2026-06-19)", () => {
   // applyGlow lights .turn[data-uuid] against the segment's atom uuids the kernel sends (kernel
   // _segment_atom_uuids); the old data-t range match was a flaky time heuristic and is gone.
-  assert.match(RENDER, /function applyGlow\(groups: Array<\{ sid: string; uuids: string\[\] \}>/);
-  assert.match(RENDER, /uset\.has\(n\.dataset\.uuid \|\| ""\)/, "glow matches by uuid set");
+  // (the group also carries idx/total since T318b, for the ruler's history strip; the uuid match is unchanged)
+  assert.match(RENDER, /function applyGlow\(groups: Array<\{ sid: string; uuids: string\[\]; idx\?: Record<string, number>; total\?: number \}>/);
+  assert.match(RENDER, /const u = n\.dataset\.uuid \|\| "";\s*if \(uset\.has\(u\)\)/, "glow matches by uuid set");
   assert.doesNotMatch(RENDER, /t >= s - 2 && t <= e \+ 2/, "the old ±2s data-t window match is gone");
 });
 
