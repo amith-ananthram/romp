@@ -406,7 +406,7 @@ setup_hook_repo() {
 # the hook's wiring (which commits it hands over, what it does with the verdict),
 # not gitleaks' own rules, and a stub keeps the suite deterministic on a machine
 # that has never installed it. The rules and .gitleaks.toml are exercised for
-# real in tests/gitleaks-config.bats.
+# real in tests/gitleaks-config.bats and by CI's secret-scan job.
 
 setup_gitleaks_stub() {   # <exit-code>: records its args, then exits that code
     # 0 is a clean scan; 2 is a finding (the hook asks gitleaks to report one so,

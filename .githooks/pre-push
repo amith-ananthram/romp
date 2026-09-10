@@ -15,7 +15,8 @@
 #   credentials   strings NOBODY can enumerate in advance (a token's text is
 #                 unknown until it leaks), matched by gitleaks' rules, tuned by
 #                 the repo's .gitleaks.toml. With no gitleaks binary the scan
-#                 prints a notice and stands down.
+#                 prints a notice and stands down; CI runs the same scan over
+#                 the full history, so nothing goes unscanned for long.
 #
 # The identifier scan makes two checks per pushed ref, both about what THIS
 # push changes on the remote:
@@ -194,9 +195,11 @@ scan_credentials() {
     gl="${ROMP_GITLEAKS:-$(command -v gitleaks || true)}"
     if [ -z "$gl" ] || [ ! -x "$gl" ]; then
         # Loud rather than silent, but not a blocker: requiring an install to
-        # push would break every clone that never wanted the scanner.
+        # push would break every clone that never wanted the scanner, and CI
+        # scans the full history regardless.
         echo "romp pre-push: gitleaks not installed, pushing WITHOUT a secret scan." >&2
-        echo "  Install it (brew install gitleaks, or a release binary named by ROMP_GITLEAKS), or set ROMP_NO_GITLEAKS=1 to silence this." >&2
+        echo "  Install it (brew install gitleaks, or the release .github/workflows/ci.yml pins)." >&2
+        echo "  ROMP_GITLEAKS names a binary that is not on PATH; ROMP_NO_GITLEAKS=1 silences this." >&2
         return 0
     fi
 
