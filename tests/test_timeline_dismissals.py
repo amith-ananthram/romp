@@ -337,6 +337,30 @@ class ClearedLanesStateDoor(unittest.TestCase):
         km._undismiss_lanes([SID])                         # the disk reads again: the revive sheds the record now
         self.assertEqual(json.loads(self.p.read_text()), [SID2])
 
+    def test_a_clear_that_lands_ends_the_fault_episode_so_the_next_fault_is_said_again(self):
+        # _note_state_fault says a read fault ONCE per episode, keyed on the path, and only a clean read of
+        # that path ends the episode. The other stores' display readers end theirs on every build; this store
+        # has none (build_timeline reads the memory copy), so the proved read on the mutation path is the
+        # one clean read it has -- without the clear there, one fault muted every later fault with the same
+        # text for the life of the process, however many Clears landed in between
+        notices, saved = [], km._sync_notice
+        km._sync_notice = lambda text, ok=True, kind="sync": notices.append((str(text), ok, kind))
+        try:
+            km._dismiss_lane(SID)
+            with _reads_fault(self.p):
+                km._undismiss_lanes([SID])             # the pusher: the lane came back live over a disk that will not read
+            self.assertEqual(len(notices), 1, "the first fault is said")
+            km._dismiss_lane(SID2)                     # the disk reads again and a Clear lands: the episode is over
+            self.assertEqual(km._dismissed_lanes, {SID, SID2})
+            with _reads_fault(self.p):
+                km._undismiss_lanes([SID])             # a second episode, with the same errno text as the first
+        finally:
+            km._sync_notice = saved
+        self.assertEqual(len(notices), 2, "the second episode is said too (without the clear on the mutation path it is "
+                                          "deduped against the first for the life of the process)")
+        self.assertEqual([(ok, kind) for _, ok, kind in notices], [(False, "refused")] * 2)
+        self.assertIn("timeline-dismissed.json could not be read", notices[1][0])
+
     def test_the_ws_arm_answers_a_refused_clear_on_the_posters_socket(self):
         km._dismiss_lane(SID2)
         before = self.p.read_bytes()

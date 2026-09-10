@@ -28995,6 +28995,12 @@ def _dismissed_lanes_proved():
     back at the next boot, and the user's next Clear then wrote that empty-plus-one over the record of
     all the others."""
     raw = _read_state_json(_dismissed_lanes_file(), expect=list)
+    # The store's ONLY clean read, so it ends the read-fault episode here: build_timeline reads the memory
+    # copy, never the file, so no display reader clears _state_fault_seen for this path the way the flags,
+    # order and bell readers do for theirs. Without this a fault said once (a boot read, a revive over a disk
+    # that would not read) kept its entry for the life of the process, and every later fault with the same
+    # text was deduped silent even after the disk had recovered and a Clear had landed (review find, 2026-09-10).
+    _clear_state_fault(_dismissed_lanes_file())
     return set(str(x) for x in raw) if isinstance(raw, list) else set()
 
 
@@ -29004,11 +29010,10 @@ def _load_dismissed_lanes():
     memory copy starts EMPTY and UNPROVED. It stays empty until the next landed write, whose proved read
     under the lock takes the record from disk; no writer ever publishes the empty copy itself."""
     try:
-        cur = _dismissed_lanes_proved()
+        cur = _dismissed_lanes_proved()               # a clean read ends the store's fault episode there
     except _StateUnreadable as e:
         _note_state_fault(e)
         return set()
-    _clear_state_fault(_dismissed_lanes_file())
     return cur
 
 
