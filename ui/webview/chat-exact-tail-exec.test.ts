@@ -48,6 +48,7 @@ function liftChatTail(): (hooks: TailHooks) => TailApi {
     const scheduleRenderTabs = () => { H.tabRenders++; };
     const scheduleAppendActive = () => { H.appends++; };
     const renderBgTasks = () => { H.bgRenders++; };
+    const awaitChanged = (_sid) => { H.bgRenders++; };   // 2026-09-10: the tail calls this (box + a viewer's header); it counts as the box render
     const schedulePrebuild = () => { H.prebuilds++; };
   `;
   const epilogue = `

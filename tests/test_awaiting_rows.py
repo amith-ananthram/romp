@@ -14,7 +14,9 @@ several kinds at once make kind "mixed" (jd.AWAIT_KINDS) with count = every row.
 Synthetic inputs only; sources stubbed like test_awaiting_count.
 """
 import inspect
+import json
 import os
+import shutil
 import tempfile
 import unittest
 from romp_load import load_source
@@ -318,6 +320,169 @@ class MixedKind(unittest.TestCase):
         finally:
             km._states_awaiting_overlay, km._tmux_sessions = saved
         self.assertEqual((aw["kind"], aw["count"], aw["items"]), ("mixed", 3, []))
+
+
+class NestedWaits(unittest.TestCase):
+    """A subagent's OWN background work nests under the agent's row (the user 2026-09-10, who saw a session
+    running one background agent read "Awaiting 2 · 1 agent · 1 command" — the command was a test chunk the
+    AGENT had launched, registered under the parent because Claude Code keeps one task list per session).
+    The session waits on the agent; the agent waits on the command. So the top level counts only what the
+    session itself waits on, and an agent row carries what that agent in turn waits on as `waits`.
+
+    Attribution is exact or nothing: the launch ledger's acting agent (the PostToolUse hook's agent_id,
+    which the SDK documents as present only inside a subagent) first; else the agent's own transcript
+    naming the launch's tool_use id; a row neither source attributes stays top-level. Synthetic files:
+    placeholder sid, invented agent ids, the notes-api demo domain."""
+    A1, A2 = "a1111111111111111", "a2222222222222222"
+
+    def setUp(self):
+        self._saved = {n: getattr(km, n) for n in
+                       ("_tmux_sessions", "_bg_live_norm", "_bg_pending", "_states_awaiting_overlay",
+                        "_owned_yield_why", "_session_stamp_full", "_session_delegated_why",
+                        "_session_delegated_identities", "_watches", "_pr_watches")}
+        km._bg_pending = lambda sid, path, tasks: tasks
+        km._states_awaiting_overlay = lambda sid: None
+        km._owned_yield_why = lambda sid, path: None
+        km._session_stamp_full = lambda sid: (None, 0, None, None, ())
+        km._session_delegated_why = lambda sid: None
+        km._session_delegated_identities = lambda sid: []
+        km._watches, km._pr_watches = [], []
+        self.tmp = tempfile.mkdtemp()
+        self.path = os.path.join(self.tmp, "parent.jsonl")
+        self._write(self.path, [])
+        km._tmux_sessions = lambda: {SID: {"subagents": [{"type": "general-purpose", "since": 100, "agentId": self.A1}]}}
+
+    def tearDown(self):
+        for n, f in self._saved.items():
+            setattr(km, n, f)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def _write(path, rows):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            for r in rows:
+                f.write(json.dumps(r) + "\n")
+
+    @staticmethod
+    def _bash(tid, desc):
+        return {"type": "assistant", "timestamp": "2026-09-10T10:00:00.000Z", "message": {"content": [
+            {"type": "tool_use", "id": tid, "name": "Bash",
+             "input": {"run_in_background": True, "command": "uv run pytest tests/test_parser.py -q", "description": desc}}]}}
+
+    @staticmethod
+    def _agent_call(tid, desc):
+        return {"type": "assistant", "timestamp": "2026-09-10T10:00:01.000Z", "message": {"content": [
+            {"type": "tool_use", "id": tid, "name": "Agent",
+             "input": {"description": desc, "prompt": "audit the retries", "subagent_type": "general-purpose"}}]}}
+
+    def _agent_file(self, aid):
+        return os.path.join(self.tmp, "parent", "subagents", "agent-%s.jsonl" % aid)
+
+    def _rows(self, cmd_owner=None, with_cmd=True):
+        rows = [{"tid": "tu_agent1", "desc": "map the parser", "t": 95, "type": "local_agent", "agentId": self.A1}]
+        if with_cmd:
+            c = {"tid": "tu_bash1", "desc": "run the parser test chunk", "t": 130, "type": "local_bash"}
+            if cmd_owner:
+                c["agentId"] = cmd_owner      # the ledger's ACTING agent (the hook's agent_id)
+            rows.append(c)
+        km._bg_live_norm = lambda sid, path: rows
+
+    def test_a_command_the_ledger_attributes_to_a_live_agent_nests_under_it(self):
+        self._rows(cmd_owner=self.A1)
+        aw = km._session_awaiting(SID, self.path, True)
+        self.assertEqual((aw["kind"], aw["count"]), ("agents", 1), "the session waits on ONE thing: the agent")
+        self.assertEqual(aw["why"], "1 background agent still working", "the single-agent sentence, unchanged")
+        self.assertEqual(aw["tasks"], ["map the parser"], "the legacy descriptions list the top level only")
+        self.assertEqual(aw["items"], [{"kind": "agents", "id": "tu_agent1", "label": "map the parser", "since": 95,
+                                        "agentId": self.A1,
+                                        "waits": [{"kind": "commands", "id": "tu_bash1", "label": "run the parser test chunk",
+                                                   "since": 130}]}])
+
+    def test_a_command_named_only_by_the_agents_own_transcript_nests_by_the_transcript_join(self):
+        # no ledger entry (the reg was unreadable at the hook's instant, say): the agent's own file names the launch
+        self._write(self._agent_file(self.A1), [self._bash("tu_bash1", "run the parser test chunk")])
+        self._rows()
+        aw = km._session_awaiting(SID, self.path, True)
+        self.assertEqual((aw["kind"], aw["count"]), ("agents", 1))
+        self.assertEqual([w["id"] for w in aw["items"][0]["waits"]], ["tu_bash1"])
+
+    def test_a_command_the_session_itself_launched_stays_top_level(self):
+        # the SAME launch id in the PARENT transcript, and the agent's file names something else: two rows, mixed
+        self._write(self.path, [self._bash("tu_bash1", "run the parser test chunk")])
+        self._write(self._agent_file(self.A1), [self._bash("tu_other", "grep the fixtures")])
+        self._rows()
+        aw = km._session_awaiting(SID, self.path, True)
+        self.assertEqual((aw["kind"], aw["count"]), ("mixed", 2))
+        self.assertEqual([it["kind"] for it in aw["items"]], ["agents", "commands"])
+        self.assertNotIn("waits", aw["items"][0])
+        self.assertEqual(aw["why"], "waiting on 1 background agent and 1 background command")
+
+    def test_an_unattributable_command_stays_top_level_never_a_guess(self):
+        # no ledger owner, no transcript names it, one live agent that COULD have launched it: still top-level
+        self._write(self._agent_file(self.A1), [self._bash("tu_other", "grep the fixtures")])
+        self._rows()
+        aw = km._session_awaiting(SID, self.path, True)
+        self.assertEqual((aw["kind"], aw["count"]), ("mixed", 2))
+        self.assertNotIn("waits", aw["items"][0])
+
+    def test_a_ledger_owner_that_is_not_a_live_row_leaves_the_command_top_level(self):
+        # the ledger names an agent nobody lists (it finished; its command outlived it): nothing to nest under
+        self._rows(cmd_owner=self.A2)
+        aw = km._session_awaiting(SID, self.path, True)
+        self.assertEqual((aw["kind"], aw["count"]), ("mixed", 2))
+        self.assertNotIn("waits", aw["items"][0])
+
+    def test_a_nested_agent_nests_under_its_launcher_one_level_per_row(self):
+        # A launched B (B's launch tool_use is in A's file); B launched the command (the ledger's acting agent):
+        # the session waits on A; A waits on B; B waits on the command — each nested under its owner
+        km._tmux_sessions = lambda: {SID: {"subagents": [{"type": "general-purpose", "since": 100, "agentId": self.A1},
+                                                         {"type": "general-purpose", "since": 110, "agentId": self.A2}]}}
+        self._write(self._agent_file(self.A1), [self._agent_call("tu_agent2", "audit the retries")])
+        km._bg_live_norm = lambda sid, path: [
+            {"tid": "tu_agent1", "desc": "map the parser", "t": 95, "type": "local_agent", "agentId": self.A1},
+            {"tid": "tu_agent2", "desc": "audit the retries", "t": 108, "type": "local_agent", "agentId": self.A2},
+            {"tid": "tu_bash1", "desc": "run the retry suite", "t": 130, "type": "local_bash", "agentId": self.A2}]
+        aw = km._session_awaiting(SID, self.path, True)
+        self.assertEqual((aw["kind"], aw["count"], aw["why"]), ("agents", 1, "1 background agent still working"))
+        top = aw["items"]
+        self.assertEqual([it["id"] for it in top], ["tu_agent1"])
+        self.assertEqual([w["id"] for w in top[0]["waits"]], ["tu_agent2"])
+        self.assertEqual([w["id"] for w in top[0]["waits"][0]["waits"]], ["tu_bash1"])
+        self.assertEqual(aw["tasks"], ["map the parser"])
+
+    def test_a_nested_agent_with_a_sidecar_parent_needs_no_transcript(self):
+        # the sidecar's parentAgentId (an optional key the CLI writes) is the designed link when present
+        km._tmux_sessions = lambda: {SID: {"subagents": [{"type": "general-purpose", "since": 100, "agentId": self.A1},
+                                                         {"type": "general-purpose", "since": 110, "agentId": self.A2}]}}
+        self._write(self._agent_file(self.A2), [])
+        with open(os.path.join(self.tmp, "parent", "subagents", "agent-%s.meta.json" % self.A2), "w") as f:
+            json.dump({"agentType": "general-purpose", "description": "audit the retries", "spawnDepth": 2,
+                       "toolUseId": "tu_agent2", "parentAgentId": self.A1}, f)
+        self._rows(with_cmd=False)
+        aw = km._session_awaiting(SID, self.path, True)
+        self.assertEqual([it["id"] for it in aw["items"]], ["tu_agent1"])
+        self.assertEqual([w.get("agentId") for w in aw["items"][0]["waits"]], [self.A2])
+        self.assertEqual(aw["count"], 1)
+
+    def test_the_turn_agnostic_read_nests_the_same_way(self):
+        self._rows(cmd_owner=self.A1)
+        idle = km._session_awaiting(SID, self.path, True)["items"]
+        self.assertIsNone(km._session_awaiting(SID, self.path, False))
+        self.assertEqual(km._session_background_items(SID, self.path), idle, "mid-turn the box lists the same nested rows")
+        self.assertEqual(km._awaiting_items_payload(None, SID, self.path), idle)
+
+    def test_without_agents_no_transcript_is_read(self):
+        # the join is only ever consulted with a live agent to attribute to — a plain command costs nothing extra
+        km._tmux_sessions = lambda: {SID: {}}
+        km._bg_live_norm = lambda sid, path: [{"tid": "tu_bash1", "desc": "build the docs", "t": 130, "type": "local_bash"}]
+        saved = km._agent_launch_ids
+        km._agent_launch_ids = lambda p: (_ for _ in ()).throw(AssertionError("read a transcript with no agent to attribute to"))
+        try:
+            aw = km._session_awaiting(SID, self.path, True)
+        finally:
+            km._agent_launch_ids = saved
+        self.assertEqual((aw["kind"], aw["count"]), ("task", 1))
 
 
 if __name__ == "__main__":

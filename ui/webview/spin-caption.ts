@@ -42,6 +42,13 @@
 export interface AwaitRow {
   kind: string; id?: string; label?: string; since?: number | null;
   agentId?: string | null; detail?: string | null; watchId?: string | null;
+  /** the row is a task in the SDK's live lifecycle set — stop_task resolves its id, so Stop is offered
+   *  even when no tracked task (the parent transcript's scan) lends a handle (2026-09-10) */
+  stoppable?: boolean | null;
+  /** what the thing this row names is ITSELF waiting on (kernel _awaiting_nest, 2026-09-10): a subagent's
+   *  own background commands, or its own subagents (which may nest again). The top level lists only what
+   *  the session itself waits on; every count and word on the surfaces reads the top level alone. */
+  waits?: AwaitRow[] | null;
 }
 
 /** The card fields the ladder reads. Structural, so the test can pass plain objects. */
@@ -141,9 +148,43 @@ export function groupRows(items: readonly AwaitRow[] | null | undefined): { kind
   return out;
 }
 
-/** "2 agents · 1 command · 1 watch" — the tooltip breakdown; "" with no rows. */
+/** "2 agents · 1 command · 1 watch" — the tooltip breakdown; "" with no rows. Reads the rows it is given
+ *  and nothing beneath them: fed the top level, it counts what the session itself waits on. */
 export function awaitBreakdown(items: readonly AwaitRow[] | null | undefined): string {
   return groupRows(items).map((g) => g.rows.length + " " + rowWord(g.kind, g.rows.length)).join(" · ");
+}
+
+// ── nested waits (2026-09-10): what an awaited agent is in turn waiting on ────────────────────────────
+/** Every row beneath these, depth-first: a row's waits, their waits, and so on. */
+export function flattenWaits(items: readonly AwaitRow[] | null | undefined): AwaitRow[] {
+  const out: AwaitRow[] = [];
+  const walk = (rows: readonly AwaitRow[] | null | undefined) => {
+    for (const r of rows || []) { if (!r) continue; out.push(r); walk(r.waits); }
+  };
+  walk(items);
+  return out;
+}
+
+/** The ids of the rows AND of everything nested under them — the set a tracked task must be in to count
+ *  as "named by the wait" rather than an unrelated leftover. */
+export function rowIds(items: readonly AwaitRow[] | null | undefined): Set<string> {
+  return new Set(flattenWaits(items).map((r) => r.id || "").filter(Boolean));
+}
+
+/** The agent row for `agentId` anywhere in the rows — top level or nested under another agent. */
+export function agentRowOf(items: readonly AwaitRow[] | null | undefined, agentId: string | null | undefined): AwaitRow | undefined {
+  if (!agentId) return undefined;
+  return flattenWaits(items).find((r) => r.kind === "agents" && r.agentId === agentId);
+}
+
+/** The words for what ONE row is waiting on, in the row vocabulary: a single wait → its label ("run the
+ *  parser test chunk"); several → the breakdown ("2 commands", "1 agent · 1 command"); "" with none.
+ *  Counts EVERYTHING beneath the row, so a level the box does not draw is still said. */
+export function waitsNote(row: AwaitRow | null | undefined): string {
+  const all = flattenWaits(row && row.waits);
+  if (!all.length) return "";
+  if (all.length === 1) return (all[0].label || "").trim() || rowWord(all[0].kind, 1);
+  return awaitBreakdown(all);
 }
 
 /** The text after "Awaiting" on the chat chip, the box gist and the feed pill — ONE rule (the user

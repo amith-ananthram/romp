@@ -75,7 +75,8 @@ class MergeCarriesBgTasks(unittest.TestCase):
         self.assertEqual(why, {"kind": "task", "since": 1,   # the dispatch stamp → the chips' elapsed readout (the user 2026-08-23)
                                "why": "waiting on a background command: 20-minute timer for campaign-start check",   # "command" since slice 2 (2026-09-05)
                                "count": 1,
-                               "items": [{"kind": "commands", "id": "tu1", "label": "20-minute timer for campaign-start check", "since": 1}],   # the one awaited row
+                               "items": [{"kind": "commands", "id": "tu1", "label": "20-minute timer for campaign-start check", "since": 1,
+                                          "stoppable": True}],   # the one awaited row; stoppable = a lifecycle-set task (2026-09-10)
                                "tasks": ["20-minute timer for campaign-start check"]})
 
 

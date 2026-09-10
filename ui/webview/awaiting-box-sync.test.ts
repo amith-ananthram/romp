@@ -35,16 +35,20 @@ test("a status-only frame re-renders the awaiting box when its fields change —
   assert.match(tail, /const before = awaitKey\(s\.status\);\s*\n\s*if \(msg\.status\) s\.status = msg\.status;/);
   // (2026-09-07: the active tab's repaint is scheduled per animation frame — scheduleAppendActive carries
   // appendActive + renderLedger — while the awaited-agents box still keys on THIS frame's status change)
-  assert.match(tail, /scheduleAppendActive\(\);[\s\S]{0,900}?if \(awaitKey\(s\.status\) !== before\) renderBgTasks\(\);/,
+  // (2026-09-10: the render goes through awaitChanged(sid) — the box for the active session, plus the subagent
+  // viewer's header when the active tab is a viewer INTO this session, whose "waiting on" tail reads the parent's
+  // nested rows — and the call sits after the active/inactive branch so a viewer tab reaches it)
+  assert.match(tail, /scheduleAppendActive\(\);[\s\S]{0,3000}?if \(awaitKey\(s\.status\) !== before\) awaitChanged\(msg\.id\);/,
     "the box renders from the SAME chatTail frame that flipped the chip");
+  assert.match(RENDER, /function awaitChanged\(sid: string\): void \{\s*\n\s*if \(sid === activeId\) renderBgTasks\(\);/);
   // the `update` delta and the host-side status frame render it the same way
   const upd = RENDER.split("function update(msg: any) {")[1].split("\n}")[0];
   assert.match(upd, /const before = awaitKey\(s\.status\);\s*\n\s*s\.status = msg\.status \|\| s\.status;/);
-  assert.match(upd, /if \(awaitKey\(s\.status\) !== before\) renderBgTasks\(\);/);
+  assert.match(upd, /if \(awaitKey\(s\.status\) !== before\) awaitChanged\(msg\.id\);/);
   const body = RENDER.split("function statusOnly(msg: any) {")[1].split("\n}")[0];
   assert.match(body, /const before = awaitKey\(s\.status\);/);
   assert.match(body, /if \(msg\.id === activeId\) \{\s*\n\s*updateStatusline\(\);/, "the chip repaint stays");
-  assert.match(body, /if \(awaitKey\(s\.status\) !== before\) renderBgTasks\(\);/);
+  assert.match(body, /if \(awaitKey\(s\.status\) !== before\) awaitChanged\(msg\.id\);/);
   // …and the kernel's delta carries the full status the box reads from
   assert.match(KERNEL, /tail = \{"type": "chatTail", "id": sid, "from": change_from,\s*\n\s*"events": evs\[change_from:\], "total": total, "status": m\.get\("status"\)\}/);
 });
@@ -72,7 +76,7 @@ test("the chip and the box gist take the kind word from ONE count (T225 rider)",
   // gist and the feed pill from the kernel's kind + count + the awaited ROWS — "agent" for one, "3
   // agents" for several, the bare number when the kinds are mixed. kindWord stays underneath for a
   // payload with no rows (an older kernel), so the count still decides the number there.
-  assert.match(RENDER, /import \{ awaitWord, awaitBreakdown, groupRows, GROUP_TITLE, workingFor, type AwaitRow \} from "\.\/spin-caption";/);
+  assert.match(RENDER, /import \{ awaitWord, awaitBreakdown, groupRows, rowIds, waitsNote, GROUP_TITLE, workingFor, type AwaitRow \} from "\.\/spin-caption";/);   // + the nested-wait helpers (2026-09-10)
   assert.match(RENDER, /awaitingCount\?: number \| null;/, "the Status shape carries the kernel's count");
   assert.match(RENDER, /awaitingItems\?: AwaitRow\[\];/, "…and the rows (slice 2)");
   assert.match(RENDER, /const chipWord = awaitWord\(s\.status\.awaitingKind, s\.status\.awaitingCount, chipItems\);/);
@@ -80,7 +84,7 @@ test("the chip and the box gist take the kind word from ONE count (T225 rider)",
   assert.match(RENDER, /const word = awaitWord\(s\.status\.awaitingKind, s\.status\.awaitingCount, items\);/);   // `s` is narrowed by the one renderer's gate since 2026-09-06 (no `s!`)
   assert.match(RENDER, /lab\.textContent = "Awaiting" \+ \(word \? " " \+ word : ""\) \+ " · " \+ why\.replace/);
   // the feed pill and the spin caption derive their word the same way
-  assert.match(FEED, /import \{ spinFor, awaitWord, groupRows, GROUP_TITLE, ROW_KIND_OF_LEGACY, type AwaitRow \} from "\.\/spin-caption";/);
+  assert.match(FEED, /import \{ spinFor, awaitWord, groupRows, waitsNote, GROUP_TITLE, ROW_KIND_OF_LEGACY, type AwaitRow \} from "\.\/spin-caption";/);
   assert.match(FEED, /const pillWord = awaitWord\(awKind, \(it\.awaiting && it\.awaiting\.count\) \?\? taskRows\.length, taskRows\);/);
   assert.match(SPIN, /const word = kindWord\(aw\.kind, aw\.count\);/);
   assert.match(SPIN, /export function kindWord\(kind: string \| null \| undefined, count: number \| null \| undefined\): string \{/);

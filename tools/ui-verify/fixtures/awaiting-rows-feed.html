@@ -1,10 +1,13 @@
 <!-- SYNTHETIC fixture: a feed card whose Awaiting pill is pressed open on a MIXED wait
      (plans/subagent-transcripts.md slice 2, 2026-09-05): the pill reads "Awaiting 4 · 12m" and the
      checklist spot lists the awaited rows grouped under small dim headers (Agents / Commands / Watches),
-     labels only, the mini swirl as each row's mark. Invented content (notes-api demo domain), the DOM
-     class for class as applySections' renderTree emits it.
+     labels only, the mini swirl as each row's mark. NESTED waits (2026-09-10): under the first agent, what
+     that agent is itself waiting on — indented sub-rows, the first led by a dim "waiting on", the second by
+     its blank twin; a nested agent's own deeper wait counted in its label. The pill still reads 4 (the top
+     level). Invented content (notes-api demo domain), the DOM class for class as applySections' renderTree
+     emits it.
        tools/ui-verify/shot.sh --css ui/webview/feed.css --body tools/ui-verify/fixtures/awaiting-rows-feed.html \
-           --out /tmp/awaiting-shots/feed-dark.png --size 520x300 --extra-css '#feed-list { min-height: 260px; }'
+           --out /tmp/awaiting-shots/feed-dark.png --size 520x340 --extra-css '#feed-list { min-height: 300px; }'
 -->
 <div id="feed-head"></div>
 <div id="feed-list">
@@ -22,6 +25,8 @@
           <div class="fask-checklist">
             <div class="ftask-group">Agents</div>
             <div class="fcheck ftask"><span class="fcheck-tri empty"></span><span class="fcheck-mark"><span class="fask-awaiting-swirl ftask-swirl"></span></span><span class="fcheck-text">Map the notes-api parser</span></div>
+            <div class="fcheck ftask ftask-sub"><span class="ftask-waits-on">waiting on</span><span class="fcheck-tri empty"></span><span class="fcheck-mark"><span class="fask-awaiting-swirl ftask-swirl"></span></span><span class="fcheck-text">Run the parser test chunk</span></div>
+            <div class="fcheck ftask ftask-sub"><span class="ftask-waits-on ftask-waits-blank"></span><span class="fcheck-tri empty"></span><span class="fcheck-mark"><span class="fask-awaiting-swirl ftask-swirl"></span></span><span class="fcheck-text">Check the fixture loader<span class="ftask-deeper"> · waiting on 1 command</span></span></div>
             <div class="fcheck ftask"><span class="fcheck-tri empty"></span><span class="fcheck-mark"><span class="fask-awaiting-swirl ftask-swirl"></span></span><span class="fcheck-text">Audit the exporter's retries</span></div>
             <div class="ftask-group">Commands</div>
             <div class="fcheck ftask"><span class="fcheck-tri empty"></span><span class="fcheck-mark"><span class="fask-awaiting-swirl ftask-swirl"></span></span><span class="fcheck-text">Build the docs site</span></div>

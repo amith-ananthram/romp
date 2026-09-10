@@ -93,7 +93,7 @@ test("the awaiting WHY lives in the background box, not the statusline (the user
   assert.match(RENDER, /chip-awaiting-" \+ \(s\.status\.awaitingKind \|\| "untyped"\)/);
   assert.match(RENDER, /if \(descs\.length > 1\)/);   // the no-rows fallback lists the legacy descriptions only when there are several
   assert.match(RENDER, /bg-await-note/);
-  assert.match(RENDER, /stopId: running \? tracked!\.id : null/);
+  assert.match(RENDER, /const stopId = running \? tracked!\.id : \(it\.stoppable && id \? id : null\);/);   // (2026-09-10: computed once above the kind branches; a kernel-marked stoppable row offers Stop without a tracked task)
   assert.match(RENDER, /return \{ id, status: "armed", caption: "armed", label: it\.label \|\| "a watch", since: it\.since,\s*\n\s*watchId: it\.watchId \|\| null, command: it\.detail \|\| null \};/, "a watch row: Cancel when the kernel has a handle, never Stop");
   assert.match(STYLES, /\.bg-fold-head\.bg-await \{ --bgt: var\(--st-awaitbg-bg\); \}/);
 });

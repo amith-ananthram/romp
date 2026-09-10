@@ -24182,17 +24182,23 @@ _AWAIT_ITEM_KINDS = ("agents", "commands", "watches", "peer", "timer")       # t
 _AWAIT_ITEM_LEGACY_KIND = {"agents": "agents", "commands": "task", "watches": "job", "peer": "peer", "timer": "timer"}
 
 
-def _awaiting_item(kind, iid, label, since, agent_id=None, detail=None):
-    """One awaited row: {kind, id, label, since} plus agentId (an agent row — the open-transcript arrow)
-    and detail (a watch's predicate) only when known, so every row without them is byte-identical to the
-    minimal shape. `since` is the row's OWN event time (a dispatch stamp, a hook's start, a watch's
-    registration) or None — never wall-clock now (the user 2026-08-23)."""
+def _awaiting_item(kind, iid, label, since, agent_id=None, detail=None, stoppable=False):
+    """One awaited row: {kind, id, label, since} plus agentId (an agent row — the open-transcript arrow),
+    detail (a watch's predicate) and stoppable (the row is a task in the SDK's live lifecycle set, so its
+    id is one the stop_task control request resolves — the box offers Stop on it even when the parent
+    transcript never saw the launch, as it never does for a subagent's own command; 2026-09-10) only when
+    known, so every row without them is byte-identical to the minimal shape. A row may also grow `waits`
+    (_awaiting_nest): the rows the thing it names is in turn waiting on. `since` is the row's OWN event
+    time (a dispatch stamp, a hook's start, a watch's registration) or None — never wall-clock now (the
+    user 2026-08-23)."""
     assert kind in _AWAIT_ITEM_KINDS, kind
     it = {"kind": kind, "id": str(iid or ""), "label": str(label or "").strip(), "since": (int(since) if since else None)}
     if agent_id:
         it["agentId"] = str(agent_id)
     if detail:
         it["detail"] = str(detail)
+    if stoppable:
+        it["stoppable"] = True
     return it
 
 
@@ -24295,6 +24301,7 @@ def _awaiting_live_rows(sid, path, live):
     pending = _bg_pending(sid, path, tasks) if tasks else []
     pending_tids = {t.get("tid") for t in pending}
     meta = None   # the subagents sidecar map, read once and only if an agent launch lacks its agentId
+    cmd_owner = {}   # command row id → the launch ledger's ACTING agent (the hook's agent_id), when it recorded one
     for t in tasks:
         # Sources 0.5/0.75 — a NEW row is added only for a PENDING task (launch not yet placed); a placed
         # launch's story belongs to the judge's verdicts (see the docstring's 0.5 entry for the full
@@ -24307,9 +24314,13 @@ def _awaiting_live_rows(sid, path, live):
         # as two groups, never "task".
         is_pending = t.get("tid") in pending_tids
         is_agent = _bg_is_agent(t.get("type"))
+        stoppable = bool(t.get("stoppable"))
         if not is_agent:
             if is_pending:
-                commands.append(_awaiting_item("commands", t.get("tid") or "", t.get("desc") or "background command", t.get("t")))
+                commands.append(_awaiting_item("commands", t.get("tid") or "", t.get("desc") or "background command", t.get("t"),
+                                               stoppable=stoppable))
+                if t.get("agentId"):
+                    cmd_owner[commands[-1]["id"]] = str(t["agentId"])   # a shell launched by a subagent (the ledger's acting agent)
             continue
         aid = t.get("agentId")
         if not aid and path and t.get("tid"):
@@ -24325,15 +24336,106 @@ def _awaiting_live_rows(sid, path, live):
             hit["label"] = t.get("desc") or hit["label"]
             if t.get("t") and (not hit.get("since") or int(t["t"]) < hit["since"]):
                 hit["since"] = int(t["t"])
+            if stoppable:
+                hit["stoppable"] = True
             continue
         if is_pending:   # unmatched by the hook set: a new row only while its launch is still unplaced
-            agents.append(_awaiting_item("agents", t.get("tid") or "", t.get("desc") or "background agent", t.get("t"), agent_id=aid))
+            agents.append(_awaiting_item("agents", t.get("tid") or "", t.get("desc") or "background agent", t.get("t"), agent_id=aid,
+                                         stoppable=stoppable))
+    # What a SUBAGENT itself waits on nests under the agent's row (2026-09-10) — the session waits on the
+    # agent, the agent on its command — so the top level counts only what the session itself waits on.
+    agents, commands = _awaiting_nest(agents, commands, cmd_owner, path)
     # Source 0.9 — ARMED KERNEL WATCHES this session registered (`romp watch --cmd` / `romp watch-pr`):
     # kernel-owned and restart-proof like the rows themselves, event-true at both ends (armed at
     # registration, cleared when the predicate fires or the watch cancels/times out). The user's rule
     # (2026-08-30): ANY awaited thing shows — an idle session holding only a watch used to read plain
     # ready, its wait visible nowhere but `romp watch --list`.
     return agents, commands, _watch_awaiting(sid)
+
+
+def _awaiting_nest(agents, commands, cmd_owner, path):
+    """Move every row a live SUBAGENT owns out of the top level and under that agent's row as `waits` →
+    (top-level agents, top-level commands). Claude Code keeps ONE task list per session, so a background
+    command a subagent launches registers under the parent, and the box listed it beside the agent as a
+    second thing the session waited on ("Awaiting 2 · 1 agent · 1 command" for a session running one agent
+    whose test chunk was the command — the user 2026-09-10, who wants the top level to count what the
+    session itself waits on and the agent's row to show what the agent in turn waits on). Ownership is
+    read from designed sources, exact or not at all — never a guess:
+      - a COMMAND's owner is the launch ledger's acting agent (`cmd_owner`: the PostToolUse hook's
+        agent_id, which the SDK documents as present only when the hook fires inside a subagent — the one
+        reliable attribution when several agents' hooks interleave), else the one live agent whose OWN
+        transcript holds the launch's tool_use block (_agent_launch_ids: the file the CLI writes for the
+        agent, append-folded; the parent's transcript never contains a subagent's calls, so a hit there
+        is exact);
+      - a nested AGENT's owner is its sidecar's parentAgentId when the CLI wrote one, else the one live
+        agent whose transcript holds its launch's tool_use id (the row's id from the stream, or the
+        sidecar's toolUseId for a hook-only row).
+    A row whose owner is unknown, or names an agent that is not a live row (it finished; its command
+    outlived it), stays top-level. An owner chain that loops (malformed data) is left flat. Rows move by
+    reference, so a chain nests to any depth (A's waits hold B, B's hold B's command); the client shows one
+    level and counts the deeper ones in the label. `waits` is ordered like the top level (agents, then
+    commands) and present only when non-empty, so every other row keeps the minimal shape. Nothing here
+    is read unless there is a live agent row to attribute to: a session with no agents costs no file read."""
+    by_agent = {}
+    for it in agents:
+        aid = it.get("agentId")
+        if aid and aid not in by_agent:
+            by_agent[aid] = it
+    if not by_agent:
+        return agents, commands
+    launch_sets = {}   # agentId → the launch tool_use ids in that agent's own transcript (read lazily, once)
+
+    def launches(aid):
+        if aid not in launch_sets:
+            ap = _subagent_file(path, aid) if path else None
+            launch_sets[aid] = _agent_launch_ids(ap) if ap else set()
+        return launch_sets[aid]
+
+    def owner_by_transcript(tuid, exclude=None):
+        if not tuid:
+            return None
+        hits = [a for a in by_agent if a != exclude and tuid in launches(a)]
+        return hits[0] if len(hits) == 1 else None   # exactly one agent's file names the launch, or nobody does
+
+    owned = {}   # id(row) → owner agentId
+    for it in commands:
+        o = cmd_owner.get(it["id"])
+        if o is None:
+            o = owner_by_transcript(it["id"])
+        if o in by_agent:
+            owned[id(it)] = o
+    inv_meta = None
+    agent_owner = {}
+    for aid, it in by_agent.items():
+        if inv_meta is None:
+            inv_meta = {v["agentId"]: dict(v, toolUseId=k) for k, v in (_subagent_meta_map(path) if path else {}).items()}
+        m = inv_meta.get(aid) or {}
+        o = m.get("parentAgentId")
+        if not o:
+            tuid = it["id"] if it["id"] and it["id"] != aid else m.get("toolUseId")
+            o = owner_by_transcript(tuid, exclude=aid)
+        if o and o != aid and o in by_agent:
+            agent_owner[aid] = o
+    for aid in list(agent_owner):
+        seen, cur = set(), aid       # a loop (A owns B owns A) can only come from malformed data: leave it flat
+        while cur in agent_owner and cur not in seen:
+            seen.add(cur)
+            cur = agent_owner[cur]
+        if cur in seen:
+            for a in seen:
+                agent_owner.pop(a, None)
+    for aid, o in agent_owner.items():
+        owned[id(by_agent[aid])] = o
+    if not owned:
+        return agents, commands
+    for it in agents + commands:
+        o = owned.get(id(it))
+        if o:
+            by_agent[o].setdefault("waits", []).append(it)
+    for it in by_agent.values():
+        if it.get("waits"):
+            it["waits"].sort(key=lambda w: _AWAIT_ITEM_KINDS.index(w["kind"]))   # stable: agents, then commands
+    return [a for a in agents if id(a) not in owned], [c for c in commands if id(c) not in owned]
 
 
 def _session_background_items(sid, path):
@@ -24562,7 +24664,8 @@ def _bg_live_norm(sid, path):
                 continue
             kind = str(t.get("type") or "")
             row = {"tid": t.get("toolUseId"), "desc": _agent_task_label(t.get("desc"), kind),
-                   "t": int(t.get("since") or 0), "type": kind}
+                   "t": int(t.get("since") or 0), "type": kind,
+                   "stoppable": True}   # a lifecycle-set task: stop_task resolves its id (request_stop_task takes either form)
             e = led.get(str(t.get("toolUseId")))
             if e and e.get("deadlineEpoch"):
                 row["deadline"] = float(e["deadlineEpoch"])
@@ -25354,7 +25457,7 @@ def _subagents_dir(path):
 
 
 def _subagent_meta_map(path):
-    """toolUseId → {agentId, agentType, description, spawnDepth} for every agent-*.meta.json beside the
+    """toolUseId → {agentId, agentType, description, spawnDepth, parentAgentId} for every agent-*.meta.json beside the
     transcript at `path`, cached on the DIRECTORY's mtime (a sidecar landing changes it — a stat, never a
     timer). {} when the directory does not exist (older CLIs wrote no subagent files)."""
     d = _subagents_dir(path)
@@ -25390,7 +25493,8 @@ def _subagent_meta_map(path):
             continue
         out[str(meta["toolUseId"])] = {"agentId": aid, "agentType": meta.get("agentType") or "",
                                        "description": meta.get("description") or "",
-                                       "spawnDepth": meta.get("spawnDepth")}
+                                       "spawnDepth": meta.get("spawnDepth"),
+                                       "parentAgentId": meta.get("parentAgentId") or None}   # optional: a nested agent's launcher (_awaiting_nest)
     if len(_SUBAGENT_META_CACHE) > 256:
         _SUBAGENT_META_CACHE.clear()
     _SUBAGENT_META_CACHE[str(d)] = (key, out)
@@ -25468,6 +25572,42 @@ def _gist_step(state, o):
                                                          "desc": _tool_gist_desc(b.get("name"), b.get("input")),
                                                          "ts": ts}])[-SUBAGENT_STEPS_CAP:]
     return state
+
+
+_AGENT_LAUNCH_IDS_CACHE = {}    # agent jsonl path -> em.fold_records entry: the tool_use ids of the launches the agent itself made
+
+
+def _launch_ids_fresh():
+    return set()
+
+
+def _launch_ids_step(state, o):
+    """Collect the tool_use ids of the LAUNCH-shaped calls in a subagent's own transcript — a
+    run_in_background Bash, a Monitor, an Agent/Task (background by default) — the ids the session's task
+    list carries for the agent's own background work. A few ids per agent, never the whole call list."""
+    if o.get("type") != "assistant":
+        return state
+    c = (o.get("message") or {}).get("content")
+    if isinstance(c, list):
+        for b in c:
+            if not (isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id")):
+                continue
+            nm = b.get("name")
+            inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+            if nm in ("Agent", "Task", "Monitor") or (nm == "Bash" and inp.get("run_in_background")):
+                state.add(str(b["id"]))
+    return state
+
+
+def _agent_launch_ids(agent_path):
+    """The launch tool_use ids in one agent's own file (_launch_ids_step), folded append-incrementally like
+    the head's steps (a growing file steps only its new records; an unchanged one costs a stat). The
+    transcript half of _awaiting_nest's attribution: a background command whose tool_use id is in THIS
+    file was launched by THIS agent. set() when unreadable."""
+    try:
+        return em.fold_records(_AGENT_LAUNCH_IDS_CACHE, str(agent_path), _launch_ids_fresh, _launch_ids_step)
+    except Exception:
+        return set()
 
 
 def _agent_steps(agent_path):

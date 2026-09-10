@@ -1881,7 +1881,8 @@ class ViewBuilder(unittest.TestCase):
             # source 0.5: the live bg-task set — one task shows its description verbatim (a COMMAND row;
             # the sentence says "command" since slice 2)
             desc = "20-minute timer for campaign-start check"
-            cmd_row = {"kind": "commands", "id": "tu_bg", "label": desc, "since": T0 + 9}
+            cmd_row = {"kind": "commands", "id": "tu_bg", "label": desc, "since": T0 + 9,
+                       "stoppable": True}   # a lifecycle-set row: stop_task resolves its id (2026-09-10)
             km._tmux_sessions = lambda: {SID: {"bgTasks": [timer]}}
             self.assertEqual(km._session_awaiting(SID, str(p), True),
                              {"kind": "task", "since": T0 + 9,   # the dispatch stamp (the user 2026-08-23)

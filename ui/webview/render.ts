@@ -28,7 +28,7 @@ import { loadSettings, onExternalSettingsChange, installSettingsSync, type RompS
 import { backendLabel, effectiveDefaultBackend } from "./backend-names";
 import { delegate } from "./actions";
 import { flash } from "./actions";   // its own line: the import above is pinned verbatim by click-safe.test.ts (the file-view precedent)
-import { awaitWord, awaitBreakdown, groupRows, GROUP_TITLE, workingFor, type AwaitRow } from "./spin-caption";
+import { awaitWord, awaitBreakdown, groupRows, rowIds, waitsNote, GROUP_TITLE, workingFor, type AwaitRow } from "./spin-caption";
 import { isClearCmd, openTopTitles, clearConfirmDetail, endConfirmDetail } from "./clear-confirm";
 import { prebuildPlan, type ViewState } from "./prebuild";
 import { newSkeletonState, applyTabOrderSkeleton, onStatus, onFull, onDismiss, onSocketUp, nextPrefetch, renderKind } from "./skeleton-tabs";
@@ -50,7 +50,7 @@ import { onlyTag, matchesOnly } from "./only-filter";
 import { numberDiff, type DiffRow } from "./diff-lines";
 import { parseAgentNotif, notifHead, type AgentNotif } from "./agent-notif";
 import { injectedHead, type InjectedSource } from "./injected-source";
-import { subTabId, isSubId, subParts, subLabel, gistLines, stepLines, stepsNote, agentFoldLabel, subHeadParts, openIconSvg, pinIconSvg, type SubMeta, type AgentGist, type AgentGistRow, type GistLine } from "./subagent-view";
+import { subTabId, isSubId, subParts, subLabel, gistLines, stepLines, stepsNote, agentFoldLabel, subHeadParts, subWaitTail, openIconSvg, pinIconSvg, type SubMeta, type AgentGist, type AgentGistRow, type GistLine } from "./subagent-view";
 import { previewKind, previewFull, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal, mdImgPostPass, setLightboxNav, type LightboxNavEntry } from "./preview";
 import { openFileClick } from "./file-view";                  // a clicked file WITH its gesture (pdf-new-tab.test.ts)
 // initFileView rides its OWN line: the import above is pinned verbatim by file-view.test.ts
@@ -11885,6 +11885,10 @@ function renderSubHead(): void {
   const parts = subHeadParts(s.sub.meta, s.sub.running);
   const typ = el("span", "sub-head-type"); typ.textContent = "· " + parts.type; line.appendChild(typ);
   const state = el("span", "sub-head-state " + parts.state); state.textContent = "· " + parts.state; line.appendChild(state);
+  // what the agent is itself waiting on (2026-09-10), from the PARENT's awaited rows — the same nested
+  // `waits` its box draws under this agent's row; re-rendered when those rows change (awaitChanged)
+  const tail = subWaitTail(s.sub.running, liveSession(s.sub.parentId)?.status.awaitingItems, s.sub.agentId);
+  if (tail) { const w = el("span", "sub-head-waits"); w.textContent = "· " + tail; line.appendChild(w); }
   const pin = el("span", "sub-head-pin" + (pinnedSubs.has(s.id) ? " pinned" : ""));
   pin.dataset.act = "pinSubagent"; pin.dataset.id = s.id;
   pin.innerHTML = pinIconSvg();
@@ -11924,7 +11928,7 @@ function renderBgTasks() {
   const open = openFolds.has("bgfold:" + sid);
   const groups = groupRows(items);
   const awPeers = s.status.awaitingPeers || [];
-  const itemIds = new Set<string>(items.map((it) => it.id || "").filter(Boolean));
+  const itemIds = rowIds(items);   // the rows AND what nests under them (an agent's own waits name their tasks too)
   const leftovers = tasks.filter((t) => !itemIds.has(t.id));   // tracked tasks the wait does not name (services)
   // the header dot: await-green while waiting, like the chip; otherwise the worst tracked status, so a
   // failed task is glanceable while collapsed (running-yellow when nothing tracked has failed)
@@ -11987,7 +11991,21 @@ function renderBgTasks() {
   const list = el("div", "bg-list");
   for (const g of groups) {
     if (headers) { const gh = el("div", "bg-group-head"); gh.textContent = GROUP_TITLE[g.kind] || "Other"; list.appendChild(gh); }
-    for (const it of g.rows) list.appendChild(bgRow(awaitRowSpec(it, taskById.get(it.id || ""), peerByName), sid));
+    for (const it of g.rows) {
+      list.appendChild(bgRow(awaitRowSpec(it, taskById.get(it.id || ""), peerByName), sid));
+      // what THIS row's agent is in turn waiting on (kernel `waits`, 2026-09-10): its own background commands
+      // or subagents, as indented sub-rows in the same row vocabulary — dot · label · elapsed · STATUS · Stop
+      // — under a small dim "waiting on" on the first. ONE level is drawn; a sub-row with waits of its own
+      // says so in its label ("· waiting on 1 command") rather than opening a third indent. The header and
+      // the chip never count these: the session waits on the agent, the agent waits on them.
+      const waits = (it.waits || []).filter((w) => w && w.kind);
+      waits.forEach((w, i) => {
+        const spec = awaitRowSpec(w, taskById.get(w.id || ""), peerByName);
+        spec.sub = i === 0 ? "first" : "rest";
+        spec.deeper = waitsNote(w) || null;
+        list.appendChild(bgRow(spec, sid));
+      });
+    }
   }
   if (leftovers.length) {
     if (headers) { const gh = el("div", "bg-group-head"); gh.textContent = BG_LEFTOVER_TITLE; list.appendChild(gh); }
@@ -12026,6 +12044,8 @@ interface BgRowSpec {
   command?: string | null;    // the fold: an agent's prompt, a command's command line, a watch's predicate
   output?: string | null;     // the fold: a command's output tail (never an agent's — its output file IS the transcript; the arrow is the way in)
   peer?: PeerIdent | null;    // a peer row: the name in identity colour
+  sub?: "first" | "rest" | null;   // a NESTED row — what the agent above it waits on (2026-09-10): indented; "first" wears the "waiting on" label, "rest" its blank twin so the dots align
+  deeper?: string | null;     // a nested row that has waits of its own: their count, said in the label ("waiting on 1 command") — the box draws one level
 }
 
 function taskRowSpec(t: BgTask, awaited: boolean): BgRowSpec {
@@ -12040,15 +12060,20 @@ function taskRowSpec(t: BgTask, awaited: boolean): BgRowSpec {
 function awaitRowSpec(it: AwaitRow, tracked: BgTask | undefined, peerByName: Map<string, PeerIdent>): BgRowSpec {
   const running = !!tracked && (tracked.status || "running") === "running";
   const id = it.id || it.agentId || "";
+  // Stop's handle: the tracked task's id while it runs, else the row's own id when the kernel marks the row
+  // stoppable (a task in the SDK's live lifecycle set — stop_task resolves that id; 2026-09-10). A subagent's
+  // own command is never a tracked task (the parent transcript never saw its launch), so without the flag
+  // the nested rows would have no Stop at all.
+  const stopId = running ? tracked!.id : (it.stoppable && id ? id : null);
   if (it.kind === "agents") {
     return { id, status: "running", caption: "running", label: it.label || (tracked && tracked.summary) || "background agent",
              agentId: it.agentId || (tracked && tracked.agentId) || null, since: it.since,
-             stopId: running ? tracked!.id : null, command: (tracked && tracked.command) || null, output: null };
+             stopId, command: (tracked && tracked.command) || null, output: null };
   }
   if (it.kind === "commands") {
     const status = (tracked && tracked.status) || "running";
     return { id, status, caption: status, label: it.label || (tracked && tracked.summary) || "background command", since: it.since,
-             stopId: running ? tracked!.id : null, command: (tracked && tracked.command) || null,
+             stopId, command: (tracked && tracked.command) || null,
              output: tracked ? (tracked.output || "(no output captured)") : null };
   }
   if (it.kind === "watches") {
@@ -12064,9 +12089,16 @@ function awaitRowSpec(it: AwaitRow, tracked: BgTask | undefined, peerByName: Map
 function bgRow(t: BgRowSpec, sid: string): HTMLElement {
   const tOpen = openFolds.has("bgrow:" + t.id);
   const foldable = !!(t.command || t.output);
-  const row = el("div", "bg-task bg-" + (t.status || "running") + (t.awaited ? " bg-awaited" : "") + (tOpen && foldable ? " open" : ""));
+  const row = el("div", "bg-task bg-" + (t.status || "running") + (t.awaited ? " bg-awaited" : "") + (t.sub ? " bg-sub" : "") + (tOpen && foldable ? " open" : ""));
   const rh = el("div", "bg-head" + (foldable ? "" : " bg-flat"));
   if (foldable) { rh.dataset.act = "bg-toggle"; rh.dataset.id = t.id; }   // the row header toggles; clicks in the detail body don't collapse it
+  if (t.sub) {
+    // a NESTED row: the small dim "waiting on" leads the first sub-row; the rest carry its blank twin (same
+    // width) so every sub-row's dot sits on one line under the agent above
+    const on = el("span", "bg-waits-on" + (t.sub === "first" ? "" : " bg-waits-blank"));
+    on.textContent = t.sub === "first" ? "waiting on" : "";
+    rh.appendChild(on);
+  }
   rh.appendChild(el("span", "bg-dot"));
   const sum = el("span", "bg-sum");
   if (t.peer) {
@@ -12075,6 +12107,10 @@ function bgRow(t: BgRowSpec, sid: string): HTMLElement {
     if (t.peer.color && t.peer.color.bg) sum.style.color = t.peer.color.bg;
   } else sum.textContent = t.label || "Background task";
   rh.appendChild(sum);
+  if (t.deeper) {
+    // the level the box does not draw, counted in words (the meta rung, like the elapsed time)
+    const dp = el("span", "bg-deeper"); dp.textContent = "· waiting on " + t.deeper; rh.appendChild(dp);
+  }
   if (t.agentId) {
     // an AGENT row: the same open-transcript arrow the Agent tool head wears (plans/subagent-transcripts.md).
     // Nested inside the bg-toggle row; the body delegate's closest-[data-act] lookup finds the arrow first,
@@ -14726,12 +14762,12 @@ function update(msg: any) {
   if (msg.id === activeId) {
     appendActive();
     renderLedger(); // refresh the summary box (ages + any new items) as the active session works
-    if (awaitKey(s.status) !== before) renderBgTasks();   // the box rides the chip's own frame (T225; see chatTail)
   } else {
     const v = views.get(msg.id);
     if (v) v.stale = true; // re-render its current turn when it's next shown
     schedulePrebuild(); // rebuild the now-stale off-screen view in idle, before the user switches to it
   }
+  if (awaitKey(s.status) !== before) awaitChanged(msg.id);   // the box rides the chip's own frame (T225; see chatTail)
 }
 
 // DELTA-send (the user 2026-06-25): the kernel keeps the whole transcript resident in the browser but, once
@@ -14846,7 +14882,6 @@ function chatTail(msg: any) {
     // rendered only from the full-session path, so the chip read "Awaiting agents" with no box until a
     // transcript change happened to send a full frame (31s+ in the user's shot; never, in the quiet lab).
     // Render the box from the SAME frame, keyed on the awaited fields CHANGING — never on the per-second ticks.
-    if (awaitKey(s.status) !== before) renderBgTasks();
   } else {
     // The SAME rule as the active tab: repaint from the exact changed point. Marking the view stale routed
     // the idle rebuild — and, when idle never came, the click itself — through a full 80-unit window
@@ -14862,6 +14897,7 @@ function chatTail(msg: any) {
     }
     schedulePrebuild(); // rebuild the now-stale off-screen view in idle, before the user switches to it (an incremental repaint now)
   }
+  if (awaitKey(s.status) !== before) awaitChanged(msg.id);   // (see the comment above: the box, keyed on the awaited fields changing)
 }
 
 // Older history streaming in from a loadOlder request (scroll-back past the loaded tail, the user 2026-06-25).
@@ -14950,6 +14986,16 @@ function requestOlder(sid: string, v: View, content: HTMLElement): void {
 // The awaiting fields the #bg-tasks box renders from (renderBgTasks — the header words, the rows, the awaited-row outline) — one
 // key per status, so a status-only frame re-renders the box exactly when THESE change (the chip's own
 // flip is one of them) and never on the per-second ticks that touch nothing the box shows.
+// The awaited fields of session `sid` changed (awaitKey moved on a frame): re-render what reads them — the
+// active pane's box, and the subagent viewer's header when the active tab is a viewer INTO that session
+// (its "· waiting on …" tail reads the parent's nested rows, 2026-09-10). The box renders only for the
+// active real session (renderBgTasks reads activeId), so calling it for a viewer tab is a no-op.
+function awaitChanged(sid: string): void {
+  if (sid === activeId) renderBgTasks();
+  const a = activeId ? liveSession(activeId) : null;
+  if (a && a.sub && a.sub.parentId === sid) renderSubHead();
+}
+
 function awaitKey(st: Status | undefined): string {
   if (!st) return "";
   return JSON.stringify([st.state, st.awaitingWhy || "", st.awaitingKind || "", st.awaitingCount ?? null,
@@ -14974,8 +15020,8 @@ function statusOnly(msg: any) {
     // this one payload, but the box was rendered only by the full-session frame path, so a status-only
     // flip to Awaiting left the chip on and the box absent until the next transcript change or tab
     // switch (31s+ observed). Same frame, same data — re-render the box when its fields changed.
-    if (awaitKey(s.status) !== before) renderBgTasks();
   }
+  if (awaitKey(s.status) !== before) awaitChanged(msg.id);
 }
 
 // The ✕'s own path: drop the tab now, THEN remember the close (see closingTabs). The order matters and

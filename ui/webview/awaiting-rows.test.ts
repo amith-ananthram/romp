@@ -20,7 +20,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { awaitWord, awaitBreakdown, groupRows, rowWord, kindWord, spinFor, GROUP_TITLE, ROW_KIND_OF_LEGACY,
-         type AwaitRow } from "./spin-caption";
+         flattenWaits, rowIds, agentRowOf, waitsNote, type AwaitRow } from "./spin-caption";
+import { subWaitTail } from "./subagent-view";
 
 const W = (f: string) => fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", f), "utf8");
 const RENDER = W("render.ts");
@@ -152,9 +153,12 @@ test("the box groups the rows by kind, headers only when more than one group sho
 
 test("per-kind affordances on ONE row shape: agent → arrow + Stop; command → output fold + Stop; watch → armed-since + Cancel", () => {
   const spec = RENDER.split("function awaitRowSpec(")[1].split("\nfunction ")[0];
-  assert.match(spec, /if \(it\.kind === "agents"\) \{[\s\S]*?agentId: it\.agentId \|\| \(tracked && tracked\.agentId\) \|\| null[\s\S]*?stopId: running \? tracked!\.id : null[\s\S]*?output: null \};/,
+  // (2026-09-10: Stop's handle is computed once above the kind branches — the tracked task's id while it runs,
+  // else the row's own id when the kernel marks it stoppable — so the branches carry the one `stopId`)
+  assert.match(spec, /const stopId = running \? tracked!\.id : \(it\.stoppable && id \? id : null\);/);
+  assert.match(spec, /if \(it\.kind === "agents"\) \{[\s\S]*?agentId: it\.agentId \|\| \(tracked && tracked\.agentId\) \|\| null[\s\S]*?stopId, command[\s\S]*?output: null \};/,
     "an agent row: the arrow's id, Stop while its launch is live, NO output tail (its file is the transcript)");
-  assert.match(spec, /if \(it\.kind === "commands"\) \{[\s\S]*?stopId: running \? tracked!\.id : null[\s\S]*?output: tracked \? \(tracked\.output \|\| "\(no output captured\)"\) : null \};/);
+  assert.match(spec, /if \(it\.kind === "commands"\) \{[\s\S]*?stopId, command[\s\S]*?output: tracked \? \(tracked\.output \|\| "\(no output captured\)"\) : null \};/);
   assert.match(spec, /if \(it\.kind === "watches"\) \{[\s\S]*?status: "armed", caption: "armed"[\s\S]*?watchId: it\.watchId \|\| null, command: it\.detail \|\| null \};/);
   assert.match(spec, /if \(it\.kind === "peer"\) \{[\s\S]*?peer: peerByName\.get\(it\.label \|\| ""\) \|\| null \};/);
   const row = RENDER.split("function bgRow(")[1].split("\nfunction ")[0];
@@ -240,7 +244,7 @@ test("ONE renderer: the grouped rows render whenever rows exist, idle or not; th
   // the same row renderer for every row in either state — tracked tasks still lend the command rows their
   // output tail and Stop handle (awaitRowSpec's `tracked`), and list on their own when the wait names none
   assert.match(body, /const taskById = new Map<string, BgTask>\(tasks\.map\(\(t\) => \[t\.id, t\]\)\);/);
-  assert.match(body, /for \(const it of g\.rows\) list\.appendChild\(bgRow\(awaitRowSpec\(it, taskById\.get\(it\.id \|\| ""\), peerByName\), sid\)\);/);
+  assert.match(body, /for \(const it of g\.rows\) \{\s*list\.appendChild\(bgRow\(awaitRowSpec\(it, taskById\.get\(it\.id \|\| ""\), peerByName\), sid\)\);/);   // the loop is a block since 2026-09-10 (each agent row's nested waits follow it)
   assert.match(body, /for \(const t of leftovers\) list\.appendChild\(bgRow\(taskRowSpec\(t, awaited\.has\(t\.id\)\), sid\)\);/);
   // the awaited outline keys on the wait / the awaited ids' presence as before — never the chip state
   assert.match(body, /host\.classList\.toggle\("bg-awaited", !!why \|\| tasks\.some\(\(t\) => awaited\.has\(t\.id\)\)\);/);
@@ -296,4 +300,98 @@ test("the user-visible words are agent / command / watch / <peer> / timer; the k
   assert.doesNotMatch(KERNEL.split("def _awaiting_from_items")[1].split("\ndef ")[0], /background task/, "the collapse word is gone from the derived sentences");
   // the state formula that MOVES a card/chip is untouched: awaiting still keys on awaiting_why alone
   assert.match(KERNEL, /"awaitingBg" if awaiting_why else "ready"\)/);
+});
+
+// --- nested waits (2026-09-10): what an awaited agent is ITSELF waiting on ---------------------------------
+// Seen live: a session running ONE background agent read "Awaiting 2 · 1 agent · 1 command" — the command was
+// a test chunk the AGENT had launched (Claude Code keeps one task list per session, so it registered under the
+// parent). The user wants the top level to count what the session itself waits on ("Awaiting 1 · 1 agent") and
+// the agent's row to show, nested beneath it, what the agent in turn waits on. The kernel ships that as `waits`
+// on the agent row (kernel _awaiting_nest); every count and word here reads the top level alone.
+const SUB_CMD: AwaitRow = { kind: "commands", id: "b_chunk", label: "run the parser test chunk", since: 130, stoppable: true };
+const SUB_AGENT: AwaitRow = { kind: "agents", id: "tu_inner", label: "check the fixture loader", since: 140, agentId: "a2222222222222222",
+                              waits: [{ kind: "commands", id: "b_inner", label: "grep the fixtures", since: 150 }] };
+const NESTED: AwaitRow = { ...agent("map the parser"), waits: [SUB_CMD, SUB_AGENT] };
+
+test("the top level counts what the SESSION waits on: one agent with nested waits reads 'agent' / '1 agent', never 2", () => {
+  assert.equal(awaitWord("agents", 1, [NESTED]), "agent");
+  assert.equal(awaitBreakdown([NESTED]), "1 agent", "the breakdown never descends into waits");
+  assert.deepEqual(groupRows([NESTED]).map((g) => g.kind), ["agents"], "no Commands group from a nested command");
+});
+
+test("flattenWaits / rowIds reach every nested level, so a tracked task named by an agent's wait is not a leftover", () => {
+  assert.deepEqual(flattenWaits([NESTED]).map((r) => r.id), ["tu_map the parser", "b_chunk", "tu_inner", "b_inner"]);
+  assert.deepEqual([...rowIds([NESTED])].sort(), ["b_chunk", "b_inner", "tu_inner", "tu_map the parser"]);
+  assert.deepEqual(flattenWaits(null), []);
+});
+
+test("waitsNote: one wait → its label; several → the breakdown; deeper levels are counted, not dropped", () => {
+  assert.equal(waitsNote(SUB_AGENT), "grep the fixtures", "a single nested wait is named");
+  assert.equal(waitsNote(NESTED), "1 agent · 2 commands", "the agent's own command, the nested agent and ITS command — the level the box does not draw still counts");
+  assert.equal(waitsNote(SUB_CMD), "");
+  assert.equal(waitsNote(null), "");
+  assert.equal(waitsNote({ kind: "agents", id: "x", waits: [{ kind: "commands", id: "y" }] }), "command", "a label-less wait falls to its kind's word");
+});
+
+test("agentRowOf finds an agent at the top level or nested under another", () => {
+  assert.equal(agentRowOf([NESTED], "a0123456789abcdef"), NESTED);
+  assert.equal(agentRowOf([NESTED], "a2222222222222222"), SUB_AGENT);
+  assert.equal(agentRowOf([NESTED], "a9999999999999999"), undefined);
+  assert.equal(agentRowOf([NESTED], null), undefined);
+});
+
+test("the subagent viewer's header tail reads the PARENT's rows: '· waiting on <label>' while running, nothing finished", () => {
+  assert.equal(subWaitTail(true, [NESTED], "a2222222222222222"), "waiting on grep the fixtures");
+  assert.equal(subWaitTail(true, [NESTED], "a0123456789abcdef"), "waiting on 1 agent · 2 commands");
+  assert.equal(subWaitTail(false, [NESTED], "a2222222222222222"), "", "a finished agent waits on nothing, whatever a stale row says");
+  assert.equal(subWaitTail(true, [agent("plain")], "a0123456789abcdef"), "", "no waits → no tail");
+  assert.match(RENDER, /const tail = subWaitTail\(s\.sub\.running, liveSession\(s\.sub\.parentId\)\?\.status\.awaitingItems, s\.sub\.agentId\)/,
+               "renderSubHead reads the parent session's awaitingItems — the same rows the box draws");
+  assert.match(RENDER, /if \(a && a\.sub && a\.sub\.parentId === sid\) renderSubHead\(\);/, "the header re-renders when the parent's awaited fields change");
+  assert.equal((RENDER.match(/if \(awaitKey\(s\.status\) !== before\) awaitChanged\(msg\.id\);/g) || []).length, 3,
+               "every status-bearing frame path (full, tail, status-only) goes through awaitChanged");
+  assert.ok(STYLES.includes(".sub-head-waits {"), "the tail's own class");
+});
+
+test("the box draws an agent's waits as indented sub-rows in the SAME row vocabulary, 'waiting on' leading the first", () => {
+  // the sub-row loop sits under each agent row, inside the group loop — never a group of its own
+  assert.match(RENDER, /const waits = \(it\.waits \|\| \[\]\)\.filter\(\(w\) => w && w\.kind\);\s*waits\.forEach\(\(w, i\) => \{\s*const spec = awaitRowSpec\(w, taskById\.get\(w\.id \|\| ""\), peerByName\);\s*spec\.sub = i === 0 \? "first" : "rest";\s*spec\.deeper = waitsNote\(w\) \|\| null;\s*list\.appendChild\(bgRow\(spec, sid\)\);/,
+               "each wait is a bgRow from the same awaitRowSpec (dot · label · elapsed · STATUS · Stop), marked sub");
+  assert.match(RENDER, /sub\?: "first" \| "rest" \| null;/, "the spec's sub marker");
+  assert.match(RENDER, /const on = el\("span", "bg-waits-on" \+ \(t\.sub === "first" \? "" : " bg-waits-blank"\)\);\s*on\.textContent = t\.sub === "first" \? "waiting on" : "";/,
+               "the small dim label on the first sub-row; a blank twin on the rest so the dots align");
+  assert.match(RENDER, /\(t\.sub \? " bg-sub" : ""\)/, "the sub-row class (the indent)");
+  assert.match(RENDER, /dp\.textContent = "· waiting on " \+ t\.deeper;/, "a sub-row with waits of its own counts them in its label");
+  assert.ok(STYLES.includes(".bg-task.bg-sub > .bg-head { padding-left: 24px; }"), "indented under the agent");
+  assert.match(STYLES, /\.bg-waits-on \{[^}]*font-size: 0\.72em;[^}]*text-transform: uppercase;/, "the label rung .bg-status / .bg-group-head wear — no new font size");
+  assert.match(STYLES, /\.bg-deeper \{[^}]*font-size: 0\.82em;/, "the meta rung, like .bg-since");
+  assert.doesNotMatch(STYLES.match(/\.bg-waits-on \{[^}]*\}/)![0], /#[0-9a-fA-F]{3,6}/, "tokens, never hex");
+});
+
+test("the header and the chip count the top level only: the breakdown reads `items`, and nested ids still keep their tracked task out of 'Also running'", () => {
+  assert.match(RENDER, /lab\.textContent = "Awaiting " \+ word \+ " · " \+ awaitBreakdown\(items\);/, "the mixed header's breakdown is the top-level rows");
+  assert.match(RENDER, /const word = awaitWord\(s\.status\.awaitingKind, s\.status\.awaitingCount, items\);/, "the header word: top-level rows + the kernel's top-level count");
+  assert.match(RENDER, /const itemIds = rowIds\(items\);/, "a task an agent's wait names is named, not a leftover");
+});
+
+test("Stop rides a row the kernel marks stoppable even with no tracked task — a subagent's own command is never tracked", () => {
+  assert.match(RENDER, /const stopId = running \? tracked!\.id : \(it\.stoppable && id \? id : null\);/);
+  assert.match(KERNEL, /"stoppable": True\}\s*# a lifecycle-set task: stop_task resolves its id/, "the kernel marks lifecycle-set rows");
+  assert.match(KERNEL, /def _awaiting_nest\(agents, commands, cmd_owner, path\):/, "the kernel's nesting step");
+  assert.match(KERNEL, /agents, commands = _awaiting_nest\(agents, commands, cmd_owner, path\)/, "…applied to the live rows both turn states read");
+});
+
+test("the feed pill's list nests the same way: indented sub-rows, 'waiting on' on the first, deeper waits counted", () => {
+  assert.match(FEED, /const taskRow = \(r: AwaitRow, sub: "first" \| "rest" \| null\): HTMLElement => \{/);
+  assert.match(FEED, /\(\(r\.waits \|\| \[\]\)\.filter\(\(w\) => w && w\.kind\)\)\.forEach\(\(w, i\) => cl\.appendChild\(taskRow\(w, i === 0 \? "first" : "rest"\)\)\);/);
+  assert.match(FEED, /on\.textContent = sub === "first" \? "waiting on" : "";/);
+  assert.match(FEED, /dp\.textContent = " · waiting on " \+ deeper;/);
+  assert.ok(FEEDCSS.includes(".fcheck.ftask-sub { padding-left: 1.2em; }"));
+  assert.match(FEEDCSS, /\.ftask-waits-on \{[^}]*font-size: 0\.72em;/, "the .ftask-group rung");
+  assert.match(FEED, /const pillWord = awaitWord\(awKind, \(it\.awaiting && it\.awaiting\.count\) \?\? taskRows\.length, taskRows\);/, "the pill word reads the top-level rows + count");
+});
+
+test("the timeline's word reads the kernel's top-level count alone — a nested wait never reaches it", () => {
+  assert.match(TL, /label: 'Awaiting' \+ tlAwaitSuffix\(s\.awaitingKind, s\.awaitingCount\)/);
+  assert.doesNotMatch(TL, /awaitingItems|\.waits\b/, "the lane reads no rows at all: awaitingCount is computed from the top level in the kernel");
 });
