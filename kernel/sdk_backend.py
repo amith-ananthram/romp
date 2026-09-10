@@ -1515,10 +1515,12 @@ def append_resume_fork(state_dir: Path, sid: str, from_fsid: str, to_fsid: str, 
 #                          "sid": romp sid when about a session, "name": its name then, ...flat fields}.
 #                         Kinds this file writes: reconcile.boot (the sweep's summary, every boot, ledger only),
 #                         reconcile.orphan-reaped, reconcile.scope-stopped, reconcile.duplicate-cli, crash.heal,
-#                         crash.loop, drain.unjoined. Every kind that IS a problem also lands on the backend's
-#                         problem ring (the dashboard's bell and error center) as its prose, and on the kernel
-#                         log as `<prose> ;; problem-row {json}` so a log reader parses the same object with
-#                         `line.rsplit(PROBLEM_ROW_MARK, 1)[1]`.
+#                         crash.loop, drain.unjoined. Every kind but the boot summary is written through
+#                         problem_row: its row carries the prose as `text`, and the kernel log gets
+#                         `<prose> ;; problem-row {json}` so a log reader parses the same object with
+#                         `line.rsplit(PROBLEM_ROW_MARK, 1)[1]`. Every one of those but drain.unjoined also
+#                         lands on the backend's problem ring (the dashboard's bell and error center) as its
+#                         prose; the drain rows are written as the kernel exits, when the ring has no reader.
 #   turns.jsonl           one row per settled turn (SdkSession._turn_ledger_row): the event stamps the latency
 #                         and redo-cost figures read. Every stamp is an EVENT's time: fedT is the feed pop
 #                         (the turn left the queue for the CLI's stdin), firstOutT the first streamed work atom,
@@ -1860,6 +1862,9 @@ def acct_digest() -> str:
 # written to disk (STATE/api-health.json: the per-bucket state plus a bounded transition tail, rewritten
 # whole and atomically on each), so the history survives a restart while the per-request events do not:
 # persisting every attempt would add a write per API call for a window that empties itself in 17
+# The T316 ledger persists per-BIN counts (five integers per bin, three bounded tiers), never an attempt:
+# it reaches disk on the first event of a minute at most, so a day of the picture survives a restart at
+# the cost of one small write a minute.
 # minutes, and a restart already announces itself through bootId/complete — every bucket comes back
 # `unknown` (an empty ring is no evidence) with its transitions continuous across the boot.
 #
@@ -2136,6 +2141,108 @@ def api_health_series(events, now: float, window: int, bin_s: int = 60) -> dict:
         out[k][i] += 1
     out.update({"binS": bin_s, "from": round(start, 3)})
     return out
+
+
+# The per-bin LEDGER behind the dashboard's histograms (T316, the user 2026-09-10, who wanted the popup to show the past
+# 24 hours and a detail view with 1 hour / 24 hours / 7 days): the event ring holds only the windows' span, so every
+# attempt is also folded into three tiers of fixed-width bins the moment it lands, the way the spend ledger keeps its
+# hour buckets (T293): one-minute bins for the last hour, five-minute bins for the last 24 hours, hourly bins for the
+# last 7 days. Five counters per bin (successes, 429, 5xx with 529, no connection, another status). Bounded: at most
+# 60 + 288 + 168 = 516 bins per bucket, so under about 100 KB per bucket in memory when every bin has traffic and about
+# 17 KB in the state file (about 33 bytes a bin); buckets (auth x family) are few. Persisted in api-health.json with the state and restored at
+# boot, so a restart keeps the day's picture. Additive to the payload: a reader that ignores `ledger` sees the
+# document it always saw.
+API_HEALTH_LEDGER_TIERS = (("minute", 60, 60), ("fiveMin", 300, 288), ("hour", 3600, 168))   # name, seconds per bin, bins kept
+API_HEALTH_LEDGER_CLASSES = ("ok", "rateLimited", "serverErrors", "noStatus", "other")
+
+
+def api_health_ledger_class(kind, cls) -> int:
+    """The counter an event lands in: successes, 429 attempts, 5xx (529 included), no connection, another status."""
+    if kind == "ok":
+        return 0
+    if cls == "429":
+        return 1
+    if cls in ("529", "5xx"):
+        return 2
+    if cls == "none":
+        return 3
+    return 4
+
+
+def api_health_ledger_add(ledger: dict, key: str, t: float, kind, cls) -> None:
+    """Fold one event into every tier of `ledger[key]` ({tier: {binStart: [5 counts]}}) and drop the bins that fell
+    out of the tier's span, and any bin MORE THAN ONE BIN past this event's (a clock that stepped back left it; the
+    event's own time is the best "now" there is; a neighbouring bin stays, since two threads' stamps can straddle a
+    boundary and land out of order). Pure over its arguments; the caller holds the aggregator's lock."""
+    i = api_health_ledger_class(kind, cls)
+    tiers = ledger.setdefault(key, {})
+    for name, bin_s, keep in API_HEALTH_LEDGER_TIERS:
+        bins = tiers.setdefault(name, {})
+        start = int(t // bin_s) * bin_s
+        row = bins.get(start)
+        if row is None:
+            row = bins[start] = [0, 0, 0, 0, 0]
+        row[i] += 1
+        lo = start - (keep - 1) * bin_s          # the tier's span ends at this bin: older bins go, whatever their number,
+        hi = start + bin_s                       # so sparse traffic keeps only the span's bins (never a sawtooth of stale ones);
+        for k in [k for k in bins if k < lo or k > hi]:   # a bin PAST this event's (stamped before a clock step back) goes too,
+            del bins[k]                          # or it would resurface as a phantom bar when the clock reaches it (review find)
+
+
+def api_health_ledger_view(tiers: dict | None, now: float) -> dict:
+    """The dense payload form of one bucket's ledger at `now`: per tier, `binS`, `from` (the first bin's start) and
+    one integer array per class, oldest first, the last bin the one that holds `now`, zeros where nothing landed.
+    Bins newer than `now` (a clock that went back) are left out rather than drawn in the future."""
+    out = {}
+    for name, bin_s, keep in API_HEALTH_LEDGER_TIERS:
+        bins = (tiers or {}).get(name) or {}
+        last = int(now // bin_s) * bin_s
+        first = last - (keep - 1) * bin_s
+        cols = [[0] * keep for _ in API_HEALTH_LEDGER_CLASSES]
+        for start, row in bins.items():
+            if first <= start <= last:
+                j = (start - first) // bin_s
+                for c in range(len(API_HEALTH_LEDGER_CLASSES)):
+                    cols[c][j] += int(row[c]) if c < len(row) else 0
+        tier = {"binS": bin_s, "from": first}
+        for c, cname in enumerate(API_HEALTH_LEDGER_CLASSES):
+            tier[cname] = cols[c]
+        out[name] = tier
+    return out
+
+
+def api_health_ledger_parse(raw) -> tuple:
+    """A persisted ledger ({bucket: {tier: {"<start>": [counts]}}}) back into memory: (ledger, skipped). Anything
+    malformed (a non-dict, an unknown tier, a start that is not an integer, a row that is not a list of counts) is
+    skipped and counted, never raised: this runs at boot."""
+    ledger, bad = {}, 0
+    if not isinstance(raw, dict):
+        return ledger, (1 if raw is not None else 0)
+    names = {n: (b, k) for n, b, k in API_HEALTH_LEDGER_TIERS}
+    for key, tiers in raw.items():
+        if not (isinstance(key, str) and key and isinstance(tiers, dict)):
+            bad += 1
+            continue
+        out = {}
+        for name, bins in tiers.items():
+            if name not in names or not isinstance(bins, dict):
+                bad += 1
+                continue
+            rows = {}
+            for start, row in bins.items():
+                try:
+                    st = int(start)
+                    ok = isinstance(row, list) and 1 <= len(row) <= len(API_HEALTH_LEDGER_CLASSES) and all(
+                        isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in row)
+                except (TypeError, ValueError):
+                    ok = False
+                if not ok:
+                    bad += 1
+                    continue
+                rows[st] = list(row) + [0] * (len(API_HEALTH_LEDGER_CLASSES) - len(row))
+            out[name] = rows
+        ledger[key] = out
+    return ledger, bad
 
 
 API_HEALTH_SEVERITY = {"unknown": 0, "healthy": 1, "recovering": 2, "degraded": 3, "thrashing": 4}
@@ -2453,6 +2560,8 @@ class ApiHealth:
         self._seen: dict = {}            # (sid, message_id) -> t; dedupes the CLI's one-frame-per-block replies
         self._seq = 0
         self._last_event_at = None
+        self._ledger: dict = {}          # bucket key -> {tier: {binStart: [5 counts]}}: the histograms' bins (T316)
+        self._ledger_minute = None       # the minute bin of the last event: a change is the rollover that writes the state file
         self._salt = None                # lazily read/minted: nothing is written until a label is needed
         # bucket key -> {"state", "since", "why", "evidence", "auth", "family"}: the persisted half of
         # the derivation's input is (state, since); the rest is what the newest transition recorded
@@ -2557,6 +2666,14 @@ class ApiHealth:
             self._ring.append(ev)
             self._seq += 1
             self._last_event_at = ev.t if self._last_event_at is None else max(self._last_event_at, ev.t)
+            api_health_ledger_add(self._ledger, "%s|%s" % (ev.auth, ev.family), ev.t, ev.kind, ev.cls)
+            minute = int(ev.t // 60)
+            if self._ledger_minute is None or minute > self._ledger_minute:
+                # the ledger reaches disk on a NEW minute's first event (monotone: two threads whose stamps straddle a
+                # boundary and land out of order do not write twice, review find), so a restart loses at most the
+                # current minute's counts; a transition rewrites the same file anyway
+                self._ledger_minute = minute
+                self._write_state_locked()
             if self._seq % 256 == 0:
                 self._evict_locked(ev.t)
 
@@ -2676,6 +2793,8 @@ class ApiHealth:
                         per[key].append(r)
                     else:
                         bad += 1
+            ledger, lbad = api_health_ledger_parse(doc.get("ledger"))   # the histograms' bins (T316), malformed ones skipped
+            bad += lbad
             if bad and self._log:
                 self._log("api-health: %d malformed row(s) skipped at boot (%s)" % (bad, API_HEALTH_STATE_FILE))
             # one stamp, at the tail's millisecond precision, for the restart rows, the seeded since and the payload's
@@ -2691,6 +2810,7 @@ class ApiHealth:
             self.boot_stamp = at
             filed = False
             with self._lock:
+                self._ledger = ledger
                 self._transitions.extend(rows)
                 for key, rs in per.items():
                     self._by_bucket[key] = deque(rs, maxlen=API_HEALTH_TRANSITIONS_KEEP)
@@ -2739,7 +2859,10 @@ class ApiHealth:
                "transitions": list(self._transitions),
                "buckets": {k: {"state": v["state"], "stateSince": v["since"], "why": v["why"], "evidence": v["evidence"],
                                "auth": v["auth"], "family": v["family"],
-                               "transitions": list(self._by_bucket.get(k, ()))} for k, v in self._last_state.items()}}
+                               "transitions": list(self._by_bucket.get(k, ()))} for k, v in self._last_state.items()},
+               # the histograms' bins (T316): {bucket: {tier: {"<start>": [counts]}}}, bounded by the tiers' spans
+               "ledger": {k: {n: {str(st): row for st, row in bins.items()} for n, bins in tiers.items()}
+                          for k, tiers in self._ledger.items()}}
         tmp = p.with_name("%s.%d.%s.tmp" % (p.name, os.getpid(), uuid.uuid4().hex[:8]))
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -2792,29 +2915,36 @@ class ApiHealth:
             events = list(self._ring)
             seq, last_at = self._seq, self._last_event_at
             known = {k: dict(v) for k, v in self._last_state.items()}
+            ledgers = {k: {n: dict(b) for n, b in tiers.items()} for k, tiers in self._ledger.items()}
         by_bucket: dict = {}
         for e in events:
             by_bucket.setdefault("%s|%s" % (e.auth, e.family), []).append(e)
         derived = []
-        for key in sorted(set(by_bucket) | set(known)):
+        for key in sorted(set(by_bucket) | set(known) | set(ledgers)):
             evs = by_bucket.get(key, [])
             prev = known.get(key)
-            auth, fam = (evs[0].auth, evs[0].family) if evs else (prev["auth"], prev["family"])
+            if evs:
+                auth, fam = evs[0].auth, evs[0].family
+            elif prev:
+                auth, fam = prev["auth"], prev["family"]
+            else:   # a bucket the ledger alone remembers (T316): its key names it
+                auth, fam = key.split("|", 1) if "|" in key else (key, "unknown")
             st = api_health_state(evs, now, (prev["state"], prev["since"]) if prev else None, cfg)
             wins = {str(w): api_health_counts(evs, now, w, uptime_s) for w in cfg["windows"]}
             series = api_health_series(evs, now, max(cfg["windows"]))   # the graph's per-minute bins (T301)
+            ledger = api_health_ledger_view(ledgers.get(key), now)        # the histograms' three tiers (T316)
             last_err = None
             for e in reversed(evs):
                 if e.kind != "ok":
                     last_err = {"at": round(e.t, 3), "status": e.status, "category": e.category or None,
                                 "class": e.cls, "kind": e.kind}
                     break
-            derived.append((key, auth, fam, prev, st, wins, last_err, series))
+            derived.append((key, auth, fam, prev, st, wins, last_err, series, ledger))
         buckets = {}
         worst, worst_key = "unknown", None
         filed = False
         with self._lock:
-            for key, auth, fam, prev, st, wins, last_err, series in derived:
+            for key, auth, fam, prev, st, wins, last_err, series, ledger in derived:
                 cur = self._last_state.get(key)
                 if cur != prev:
                     rec = cur                    # a concurrent read filed this bucket first: its record stands
@@ -2832,7 +2962,7 @@ class ApiHealth:
                                 "state": rec["state"], "stateSince": round(rec["since"], 3),
                                 "evidence": rec["evidence"], "why": rec["why"],
                                 "transitions": list(self._by_bucket.get(key, ())),
-                                "lastError": last_err, "series": series}
+                                "lastError": last_err, "series": series, "ledger": ledger}
                 if API_HEALTH_SEVERITY[rec["state"]] > API_HEALTH_SEVERITY[worst] or worst_key is None:
                     worst, worst_key = rec["state"], key
             if filed:
@@ -9440,10 +9570,15 @@ class SdkBackend:
                 pass                                     # exited between the join and the reap — fine
             except Exception:
                 self._log("drain: reap failed for %s: %s" % (s.name, traceback.format_exc()))
-        for s in unjoined:   # T304: the sessions the bound left closing, one ledger row each (the cut row's
-            #                 `unjoined` is the count alone); the process is exiting, so the ring is not asked
-            append_session_event(self.state_dir, "drain.unjoined", sid=s.sid, name=s.name,
-                                 inflight=int(bool(getattr(s, "inflight", 0))), reaped=(s.sid in reaped_sids))
+        for s in unjoined:   # T304: the sessions the bound left closing, one problem row each (the cut row's
+            #                 `unjoined` is the count alone): the row with its prose as `text` and the
+            #                 kernel-log line a reader parses, like every kind but the boot summary. ring=False:
+            #                 the process is exiting, so the bell has no reader left for the ring entry
+            problem_row(self.state_dir,
+                        "drain: session %s was still closing when the shutdown's wait ran out%s"
+                        % (s.name, "; its claude process was ended" if s.sid in reaped_sids else ""),
+                        "drain.unjoined", sid=s.sid, name=s.name, log=self._log, ring=False,
+                        inflight=int(bool(getattr(s, "inflight", 0))), reaped=(s.sid in reaped_sids))
         if sessions:
             names = [s.name for s in unjoined]
             self._log("drain: stopped %d session(s), %d in-flight turn(s) interrupted%s%s"

@@ -15110,9 +15110,14 @@ def _session_event_rows(since=0.0, limit=200, tail=SESSION_EVENTS_TAIL):
     CLIs holding one conversation, a crash heal or loop, a session the drain left closing, and the boot
     sweep's summary), newest first, rows with t >= `since`, at most `limit`, each carrying `host` (this
     kernel's own name, _self_host) so a federated shell merges per-host maps and never sums across kernels.
-    `count` is the problems since THIS kernel's boot on THIS host: every row at or after _STARTED except the
-    boot summary (reconcile.boot, which every boot writes). Reads the file's tail only; a missing or
-    unreadable ledger is ([], 0)."""
+    `count` is the problems since THIS kernel's boot on THIS host: every row at or after int(_STARTED) except
+    the boot summary (reconcile.boot, which every boot writes). The route's default `since` is that same whole
+    second, the resolution every row's `t` has (append_session_event stamps it to the second), so the default
+    rows and `count` are one predicate but for the boot summary and the `limit` cap (`count` is uncapped). A
+    row the previous kernel stamped in this kernel's boot second (its drain rows are written as it exits, and
+    the manager spawns the next kernel on that exit) is therefore both listed and counted here: whole seconds
+    are what the rows have, and /version's `started` and the response's `bootAt` name that same second. Reads
+    the file's tail only; a missing or unreadable ledger is ([], 0)."""
     path = jd.STATE / "session-events.jsonl"
     try:
         lines = path.read_text(encoding="utf-8").splitlines()[-int(tail):]
@@ -44281,6 +44286,7 @@ def _api_health_frame(now, tmux):
             # no API traffic in the longest window (T301): the dot reads gray on this alone, before any history is read;
             # True with no SDK backend (nothing can have talked to the API through this kernel)
             "quiet": _apih_quiet(now),
+            "host": _self_host(),   # this kernel's own name to its peers (T316): the popup's line for this machine names it
             # failed attempts in that window (T301 review): the dot reads red for a storm the window still holds when
             # no session waits right now, and clears the cycle the last failure ages out; the frame is rebuilt every
             # cycle and pushed on change, so the browser never polls the history for the dot
@@ -47676,6 +47682,10 @@ function spMany(d){return spHosts(d).length>1;}
 // .tab-label with the identity color as --chip-bg (styles.css keys the color and weight on the SAME
 // rule the strip uses, so the two cannot drift) and the quiet .host-prefix — no swatch
 function spTitle(s,many){return '<span class="tab-label colored" style="--chip-bg:'+spColor(s)+'">'+(many&&s.host?'<span class=host-prefix>'+esc(s.host)+':</span>':'')+esc(spName(s))+'</span>';}
+// a merge-by-tag row names its TAG, and a tag is the one tag chip everywhere (T321): the landing page loads no module,
+// so this is tagChip's pill inlined (ui/webview/tag-menu.ts; the row's size, weight 400, normal tracking), never the
+// session title's bold. tests/test_spend_detail.py pins it against the renderer.
+function spTagChip(s){var c=spColor(s);return '<span class=rsp-tag-chip style="display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:9px;border:1px solid '+c+';color:'+c+';background:transparent;white-space:nowrap;font-weight:400;letter-spacing:normal;">'+esc(s.name)+'</span>';}
 // ── T247g (the user 2026-09-08): three ranges, and "merge by tag"
 // the series for the range: "1 day" is the hourly series' last 24 buckets and "7 days" its last 168 (T293, the
 // user 2026-09-09; the ledger holds 192 hours, a day of slack past the view, and 90 days; a range is a slice of
@@ -47762,7 +47772,7 @@ var h='<table class=rsp-tbl><thead><tr><th>session</th><th class=n>dollars</th>'
 var many=spMany(d);
 var model=spRows(d);
 model.rows.forEach(function(s){h+='<tr data-sid="'+esc(s.sid||'')+'"'+(s.live?' class=rsp-live':' class=rsp-dead')+(s.kind==='tag'?' data-tag="'+esc(s.name)+'"':'')+'>'
-+'<td class=rsp-name>'+(s.kind==='tag'?('<span class="tab-label colored" style="--chip-bg:'+spColor(s)+'">'+esc(s.name)+'</span><span class=ru-tip-reset> \u00b7 '+s.members.length+' session'+(s.members.length===1?'':'s')+'</span>'):spTitle(s.s,many))+(s.live?'':'<span class=ru-tip-reset> \u00b7 not running</span>')+'</td>'
++'<td class=rsp-name>'+(s.kind==='tag'?(spTagChip(s)+'<span class=ru-tip-reset> \u00b7 '+s.members.length+' session'+(s.members.length===1?'':'s')+'</span>'):spTitle(s.s,many))+(s.live?'':'<span class=ru-tip-reset> \u00b7 not running</span>')+'</td>'
 +'<td class=n>'+fmtUsd(s.usd)+'</td>'+(keyCol?'<td class=n>'+(s.key?fmtUsd(s.key.usd):'\u2014')+'</td>':'')
 +'<td class=n>'+(s.turns||0)+'</td><td class=n>'+fmtTok(s.tok||0)+'</td></tr>';});
 // spend recorded before per-session attribution existed (T100, 2026-08-24), or the part of a bucket no
@@ -47968,9 +47978,22 @@ _LANDING_APIH_JS = """
 // local frame alone paints the dot and the popup says so in the kernel's own words
 var MERGE=window.__rompApiHealthMerge||null;
 var READINGS={};   // per host: the history reading (readHistory), null until read; the machine lines take it (the dot follows the frames)
+var LANDED=null;   // when this machine's document last landed, on THIS clock (Date.now): the read's age never compares two hosts' clocks
+var ageTimer=null; // while the tip or the detail is open, the age label alone is re-worded once a minute (a pinned detail must not say 'now' for ten minutes)
+function ageWords(){return LANDED&&MERGE?'read '+MERGE.agoWords((Date.now()-LANDED)/1000):'';}
+function ageTick(){var n=tip.querySelector('.ah-ago');if(n){var w=ageWords();if(w)n.textContent=w;}}
+function armAge(){if(!ageTimer)ageTimer=setInterval(ageTick,60000);}
+function disarmAge(){if(ageTimer){clearInterval(ageTimer);ageTimer=null;}}
 var moving=false;  // the readout is re-parenting the cell (moveApiCell): its blur and focus are not the user's
 var DOTWORD={fine:'fine',errors:'errors',quiet:'no traffic'};
-var LEGEND='429 = the API told us to slow down (rate limit) \u00b7 5xx = the API itself failed (server error) \u00b7 offline = no connection';
+// the legend (T316, the user's design): vertical and left-justified, a swatch in each bar's colour, 429 on one line and
+// 5xx on its own below it; the gray line only when the range holds a no-connection or other-status failure
+var LEGEND_ROWS=[['r429','429 = the API told us to slow down (rate limit)'],['r5xx','5xx = the API itself failed (server error)'],['none','gray = no connection, or another error']];
+// the histograms' ranges (T316): the hover draws the day; the detail (the dot's click) offers 1 hour, 24 hours and 7 days
+// in the spend modal's range-chip grammar. Each names the ledger tier it reads and how many bins make one bar.
+var RANGES={hour:{tier:'minute',per:1,label:'1 hour',s:3600},day:{tier:'fiveMin',per:3,label:'24 hours',s:86400},week:{tier:'hour',per:1,label:'7 days',s:604800}};
+var range='day';
+function SELF(){return (LAST&&LAST.host)||'this machine';}   // this kernel's own name, from its frame (T316)
 var STATE_WORD={thrashing:'rate-limit storm',degraded:'API failing',recovering:'recovering',healthy:'fine',unknown:'quiet'};
 var tip=document.createElement('div');tip.id='ah-tip';tip.style.display='none';
 tip.setAttribute('role','tooltip');tip.setAttribute('aria-label','API health');tip.tabIndex=-1;document.body.appendChild(tip);
@@ -48050,31 +48073,18 @@ function hostsOf(m){return Object.keys((m&&m.hosts)||{}).sort();}
 // open keeps each machine's last answer until its new one lands. The newest read wins a race (histSeq).
 function load(fresh){var n=++histSeq,names=[''].concat(hostsOf(LAST)),by={};
 names.forEach(function(h){by[h]=(!fresh&&HIST&&HIST[h]&&!HIST[h].pending)?HIST[h]:{pending:true};});HIST=by;
-names.forEach(function(h){fetchDoc(h?'/remote/'+encodeURIComponent(h)+'/api-health':'/api-health').then(function(d){if(n!==histSeq)return;by[h]=d;
+if(fresh){READINGS={};LANDED=null;}   // a fresh show drops the last hover's counts with its rows: the frame's words stand until this read lands
+names.forEach(function(h){fetchDoc(h?'/remote/'+encodeURIComponent(h)+'/api-health':'/api-health').then(function(d){if(n!==histSeq)return;by[h]=d;if(h==='')LANDED=Date.now();
 READINGS=MERGE?MERGE.mergeHistories(by).readings:{};
 if(tip.style.display!=='block')return;if(held){dirty=true;return;}render();});});}
 // the merged view of the frame: the dot and one line per machine (worst state wins; per-host maps, nothing summed)
 function merged(){if(!LAST)return {dot:'fine',worst:'',machines:[],n:1};
 if(MERGE)return MERGE.mergeFrames(LAST,LAST.hosts||{},READINGS);
-var d=LAST.state==='ok'?'fine':'errors';return {dot:d,worst:'',machines:[{host:'',dot:d,text:'this machine: '+LAST.text,stale:false}],n:1};}
+var d=LAST.state==='ok'?'fine':'errors';return {dot:d,worst:'',machines:[{host:'',name:SELF(),dot:d,parts:[{text:LAST.text,kind:'plain'}],text:SELF()+': '+LAST.text,stale:false}],n:1};}
 function readingOf(host){var d=HIST&&HIST[host];if(!d||d.error||d.pending||!MERGE)return null;return MERGE.readHistory(d);}
 // the cell: the dot's state and its description, from the merge; the DOM is touched only on a change
 function paintCell(){var mg=merged();if(el.getAttribute('data-dot')!==mg.dot)el.setAttribute('data-dot',mg.dot);
 var lab='API health: '+DOTWORD[mg.dot]+(mg.n>1?' across '+mg.n+' machines':'');if(el.getAttribute('aria-label')!==lab)el.setAttribute('aria-label',lab);}
-// the head's words: a pause in the kernel's own words; errors as the worst machine's line; else what happened
-function headWords(m,mg){if(m.state==='paused')return m.text;
-var rd=readingOf('');
-if(mg.n>1){   // several machines: the head sums them up in one line; each machine's own line follows
-var bad=mg.machines.filter(function(x){return x.dot==='errors';}).map(function(x){return x.host||'this machine';});
-var away=mg.machines.filter(function(x){return x.stale;}).map(function(x){return x.host||'this machine';});   // named, not counted
-if(bad.length)return 'Errors on '+bad.join(', ')+(away.length?'; '+away.join(', ')+' not reachable':'');
-if(away.length)return (mg.dot==='quiet'?'No API traffic':'Fine')+' on the reachable machines; '+away.join(', ')+' not reachable.';
-if(mg.dot==='quiet')return 'No API traffic on any machine.';
-return 'All '+mg.n+' machines fine.';}
-if(mg.dot==='errors'){if(m.state!=='ok')return m.text;   // this machine's frame: sessions waiting on the API, in the kernel's words
-if(rd)return rd.headline;   // the window in errors: the reading's sentence once read
-return (m.errs||0)>0?m.errs+' failed attempt'+(m.errs===1?'':'s')+' in the last 15 min.':m.text;}   // before it lands: the frame's own count
-if(rd)return rd.headline;return mg.dot==='quiet'?'No API traffic in the last 15 min.':'Fine.';}
 // a bucket's name for the card: its model family, plus its auth label when another bucket shares the family
 function bname(d,key){var b=(d.buckets||{})[key]||{},fam=b.family||key.split('|')[1]||key,dup=false;
 Object.keys(d.buckets||{}).forEach(function(k){if(k!==key&&((d.buckets[k]||{}).family||'')===fam)dup=true;});
@@ -48087,26 +48097,38 @@ return dup?fam+' · '+(b.auth||key.split('|')[0]):fam;}
 // are named when there are any (an offline window would otherwise read 'no attempts' and hide its give-ups). A mixed
 // window counts every attempt once and says how many of them had no status, with the shares' base named beside them:
 // '15 attempts, 7 of them without a status · 25% 429 · 0% 5xx of the other 8'.
-// attempts per minute over the longest window, in the usage hover's graph grammar (T301): the polyline + fill for
-// every attempt, 429 attempts in the blocked red and 5xx in the warn amber over it so a storm reads at a glance, ONE
-// ceiling label, a tick every five minutes. Colours through the tokens (fallbacks for a var-less harness).
-function graphHTML(sr){var n=sr.ok.length,W=168,H=48,tot=[],mx=0;
-for(var i=0;i<n;i++){var v=(sr.ok[i]||0)+(sr.rateLimited[i]||0)+(sr.serverErrors[i]||0)+(sr.noStatus[i]||0);tot.push(v);if(v>mx)mx=v;}
+// the histogram (T316, the user's design): one bar per bin, STACKED bottom-up, successes in the accent, 429 attempts in
+// the blocked red, 5xx (529 included) in the 5xx magenta, and a gray band for no-connection and other-status failures
+// only when the range holds any; one ceiling label, no peak text; a tick at each quarter of the span in ago words. The
+// hover draws the day as 96 quarter-hour bars; the detail draws the chosen range, larger. Colours through the tokens
+// (fallbacks for a var-less harness). EVERY attribute quoted: this goes through innerHTML (the spend chart's lesson).
+var BAR_CLASSES=['ok','rateLimited','serverErrors','noStatus','other'];   // the stack order; each fill is a CSS class per theme (.ah-seg-<class>)
+function niceTopAh(mx){var p=Math.pow(10,Math.floor(Math.log(mx)/Math.LN10)),m=mx/p;return (m<=1?1:m<=2?2:m<=5?5:10)*p;}   // a 1-2-5 ceiling at any magnitude
+function tickWords(sec){if(sec>=86400)return Math.round(sec/86400)+'d';if(sec>=3600)return Math.round(sec/3600)+'h';return Math.round(sec/60)+'m';}
+function sumArr(a){var t=0;(a||[]).forEach(function(v){t+=v||0;});return t;}
+function barsHTML(led,big){var n=led.ok.length,W=big?560:168,H=big?110:48,tot=[],mx=0;
+for(var i=0;i<n;i++){var v=0;BAR_CLASSES.forEach(function(c){v+=(led[c]||[])[i]||0;});tot.push(v);if(v>mx)mx=v;}
 if(mx<=0)return '';
-var p=Math.pow(10,Math.floor(Math.log(mx)/Math.LN10)),m=mx/p,top=(m<=1?1:m<=2?2:m<=5?5:10)*p;   // a 1-2-5 ceiling at any magnitude: the peak is never clipped
-var X=function(i){return (n>1?i/(n-1):0.5)*W;},Y=function(v){return H-1-Math.max(0,Math.min(1,v/top))*(H-2);};
-var line=function(arr,color,op){var pts=[],anyv=false;for(var i=0;i<n;i++){var v=arr[i]||0;if(v)anyv=true;pts.push(X(i).toFixed(1)+','+Y(v).toFixed(1));}
-if(!anyv)return '';return '<polyline points="'+pts.join(' ')+'" fill="none" style="stroke:'+color+'" stroke-width="1.5" vector-effect="non-scaling-stroke"/>'
-+'<polygon points="0,'+(H-1)+' '+pts.join(' ')+' '+W+','+(H-1)+'" style="fill:'+color+'" opacity="'+op+'" stroke="none"/>';};
-var ty=Y(top),grid='<line x1="0" y1="'+ty.toFixed(1)+'" x2="'+W+'" y2="'+ty.toFixed(1)+'" stroke="rgba(255,255,255,0.10)" stroke-width="1" vector-effect="non-scaling-stroke"/>',xlab='';
-var per=Math.max(1,Math.round(300/(sr.binS||60)));   // a tick every five minutes
-for(var i=0;i<n;i++){var ago=(n-1-i)*(sr.binS||60);if(i===n-1||(ago%300===0&&ago>0)){var gx=X(i);
-grid+='<line x1="'+gx.toFixed(1)+'" y1="0" x2="'+gx.toFixed(1)+'" y2="'+H+'" stroke="rgba(255,255,255,0.06)" stroke-width="1" vector-effect="non-scaling-stroke"/>';
-xlab+='<span style="left:'+(gx/W*100).toFixed(1)+'%">'+(i===n-1?'now':(ago/60)+'m')+'</span>';}}
-var body=line(tot,'var(--accent,#9cd2ff)',0.18)+line(sr.serverErrors,'var(--warn,#e67e22)',0.35)+line(sr.rateLimited,'var(--st-blocked-bg,#e5484d)',0.35);
-return '<div class=ru-tip-row><span class=ru-tip-k>attempts / min \u00b7 15 min</span><span class=ru-tip-v>peak '+mx+'</span></div>'
-+'<div class=ru-tip-graph><svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+grid+body+'</svg>'
-+'<span class=ru-tip-gy style="top:'+(ty/H*56).toFixed(0)+'px">'+top+'</span><div class=ru-tip-gx>'+xlab+'</div></div>';}
+var top=niceTopAh(mx),slot=W/n,gap=Math.min(2,slot*0.3),bw=Math.max(0.8,slot-gap),PADT=4;
+var Y=function(v){return H-Math.max(0,Math.min(1,v/top))*(H-PADT);};
+var bars='';
+for(var i=0;i<n;i++){if(!(tot[i]>0))continue;var x=i*slot+gap/2,acc=0;
+BAR_CLASSES.forEach(function(c){var v=(led[c]||[])[i]||0;if(!(v>0))return;var yb=Y(acc),yt=Y(acc+v);acc+=v;var hgt=Math.max(0.6,yb-yt);
+bars+='<rect class="ah-seg ah-seg-'+c+'" x="'+x.toFixed(1)+'" y="'+(yb-hgt).toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+hgt.toFixed(1)+'"></rect>';});}
+var ty=Y(top),grid='<line x1="0" y1="'+ty.toFixed(1)+'" x2="'+W+'" y2="'+ty.toFixed(1)+'" stroke="rgba(255,255,255,0.10)" stroke-width="1" vector-effect="non-scaling-stroke"></line>',xlab='';
+// ticks at round ages for the span (45/30/15 min, 18/12/6 h, 6/4/2 d), the span itself at the left edge, now at the right
+var span=n*(led.binS||60),marks=span>=604800?[6*86400,4*86400,2*86400]:span>=86400?[18*3600,12*3600,6*3600]:[2700,1800,900];
+xlab+='<span style="left:0%">'+tickWords(span)+'</span>';
+marks.forEach(function(ago){if(ago>=span)return;var gx=(1-ago/span)*W;grid+='<line x1="'+gx.toFixed(1)+'" y1="0" x2="'+gx.toFixed(1)+'" y2="'+H+'" stroke="rgba(255,255,255,0.06)" stroke-width="1" vector-effect="non-scaling-stroke"></line>';
+xlab+='<span style="left:'+((1-ago/span)*100).toFixed(1)+'%">'+tickWords(ago)+'</span>';});
+xlab+='<span style="left:100%">now</span>';
+return '<div class="ru-tip-graph ah-bars'+(big?' ah-big':'')+'" data-bars="'+n+'"><svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+grid+bars+'</svg>'
++'<span class=ru-tip-gy style="top:'+(big?ty:ty/H*56).toFixed(0)+'px">'+top+'</span><div class=ru-tip-gx>'+xlab+'</div></div>';}
+function legendHTML(gray){var h='<div class=ah-legend>';LEGEND_ROWS.forEach(function(r){if(r[0]==='none'&&!gray)return;
+h+='<div class=ah-lrow><i class="ah-lsw ah-sw-'+r[0]+'"></i><span>'+r[1]+'</span></div>';});return h+'</div>';}
+function rangeHTML(){var h='<div class="rsp-ctl ah-range">';Object.keys(RANGES).forEach(function(k){h+='<button class="rsp-btn'+(range===k?' on':'')+'" data-act="range:'+k+'">'+RANGES[k].label+'</button>';});return h+'</div>';}
+// a machine's line pieces, each class in its colour (the merge's Seg kinds: ok, r429, r5xx, none, plain)
+function partsHTML(parts){return '<span class=ah-desc>'+parts.map(function(p){return '<span class="ah-c-'+esc(p.kind)+'">'+esc(p.text)+'</span>';}).join(' \u00b7 ')+'</span>';}
 // the newest HIST_ROWS transitions, newest first: the time, the state entered (with its bucket when there are
 // several), and how long it held (until the same bucket's next transition; 'so far' for the current one, a flag and
 // never a stamp comparison: the transition the hover's own read files carries that read's asOf as its time, and the
@@ -48129,47 +48151,63 @@ var word=(multi?bname(d,r.bucket)+' ':'')+(STATE_WORD[r.to]||r.to)+(restart?' \u
 out+='<div class="ru-tip-row ah-hrow"><span class=ru-tip-k>'+hmd(r.t)+'</span><span class=ah-hword>'+esc(word)+'</span><span class=ru-tip-v>'+dur(end-r.t)+(cur?' so far':'')+'</span></div>';
 if(restart)sawRestart=true;shown++;}
 return out;}
-// History (T301): what happened, per machine, in plain words; the graph; the legend; this machine's State changes,
-// capped and worded plainly. The state machine's word appears only inside the plain phrasing (readHistory), and
-// "unknown" nowhere: traffic with no errors reads as the successes counted, no traffic reads as quiet.
+// History (T301, T316): one stacked histogram per machine over the range (the day in the hover, the chosen range in the
+// detail), the machine's name above it when there are several, the legend, this machine's State changes (capped, worded
+// plainly). The as-of stamp reads as an age in words, recomputed at every render. An older kernel's document (no
+// ledger) draws its 15-minute series the same way.
 function localFirst(a,b){return a===''?-1:b===''?1:(a<b?-1:a>b?1:0);}
-function levelDot(rd){return rd?(rd.level==='errors'?'errors':rd.level==='quiet'?'quiet':'fine'):'fine';}
-function histHTML(){var loc=HIST&&HIST[''],asOf=(loc&&!loc.error&&typeof loc.asOf==='number')?'<span class=ru-tip-reset>as of '+hms(loc.asOf)+'</span>':'';
-var h='<div class="ru-tip-win ah-hist"><div class=ru-tip-name><span>History</span>'+asOf+'</div>';
+function ledgerOf(d,R){var led=MERGE?MERGE.documentLedger(d,R.tier):null;if(led&&R.per>1)led=MERGE.rebin(led,R.per);
+// an older kernel's document has no ledger: its 15-minute series draws instead, and is named as such (its span is not the range's)
+if(!led){var sr=MERGE?MERGE.documentSeries(d):null;if(sr)led={binS:sr.binS,from:sr.from,ok:sr.ok,rateLimited:sr.rateLimited,serverErrors:sr.serverErrors,noStatus:sr.noStatus,other:[],older:true};}
+return led;}
+function histHTML(){var loc=HIST&&HIST[''],R=RANGES[pinned?range:'day'];
+// the read's age: the time since this machine's document LANDED, on this clock alone (the kernel's asOf is another host's clock)
+var ago=(loc&&!loc.error&&!loc.pending&&LANDED&&MERGE)?'<span class="ru-tip-reset ah-ago">'+esc(ageWords())+'</span>':'';
+var h='<div class="ru-tip-win ah-hist"><div class=ru-tip-name><span>History</span>'+ago+'</div>';
+var hs=HIST?Object.keys(HIST).sort(localFirst):[],many=hs.length>1,gray=false;
+// the gray legend line applies when any machine's drawn range OR any machine's counted line holds a no-connection or
+// other-status failure (the lines count the day whatever the range): known up front
+hs.forEach(function(host){var d=HIST[host];if(!d||d.error||d.pending)return;var l=ledgerOf(d,R);if(l&&sumArr(l.noStatus)+sumArr(l.other)>0)gray=true;
+var rd=READINGS[host];if(rd&&rd.counts&&(rd.counts.none+rd.counts.other)>0)gray=true;});
+if(pinned)h+=rangeHTML()+legendHTML(gray);   // the detail: the chips, then the colours named where the eye starts
 if(!HIST)return h+'<div class="rl-dots ah-wait"><i></i><i></i><i></i></div></div>';
-var hs=Object.keys(HIST).sort(localFirst),many=hs.length>1;
-hs.forEach(function(host){var d=HIST[host],name=host||'this machine';
+hs.forEach(function(host){var d=HIST[host],name=host||SELF();
 // a machine whose answer is still in flight: its loader line (alone, the section's loader), never a blank
 if(d&&d.pending){h+=many?'<div class="ru-tip-row ah-mline"><i class=ah-dot data-dot=quiet></i><span class=ah-nm>'+esc(name)+'</span><span class="rl-dots ah-wait"><i></i><i></i><i></i></span></div>':'<div class="rl-dots ah-wait"><i></i><i></i><i></i></div>';return;}
 if(!d||d.error){h+='<div class="ah-line ah-err">Could not read the API history'+(many?' of '+esc(name):'')+': '+esc((d&&d.error)||'no answer')+'</div>';return;}
-var rd=MERGE?MERGE.readHistory(d):null;
-// with several machines each gets its line (the head already carries this machine's when alone)
-if(many)h+='<div class="ru-tip-row ah-mline"><i class=ah-dot data-dot='+levelDot(rd)+'></i><span class=ah-nm>'+esc(name)+'</span><span class=ah-desc>'+esc(rd?rd.headline:'')+'</span></div>';
-if(rd&&rd.sub&&many)h+='<div class="ah-line ru-tip-reset">'+esc(rd.sub)+'</div>';
-var sr=MERGE?MERGE.documentSeries(d):null;if(sr)h+=graphHTML(sr);});
-h+='<div class="ah-line ah-legend">'+LEGEND+'</div>';
-var tr=(loc&&!loc.error&&!loc.pending)?transRows(loc):'';if(tr)h+='<div class="ru-tip-name ah-hname"><span>State changes'+(many?' \u00b7 this machine':'')+'</span></div>'+tr;
+if(many)h+='<div class="ru-tip-row ah-gname"><span class=ah-nm>'+esc(name)+'</span></div>';
+var led=ledgerOf(d,R),bars=led?barsHTML(led,pinned):'',span=(led&&led.older)?'last 15 min (an older kernel)':R.label;
+if(!bars){h+='<div class="ah-line ru-tip-reset">no attempts in the '+esc(span)+'</div>';return;}
+h+=bars;if(led.older)h+='<div class="ah-line ru-tip-reset">the last 15 min: an older kernel serves no longer history</div>';});
+if(!pinned)h+=legendHTML(gray);   // the hover: the legend under the bars
+var tr=(loc&&!loc.error&&!loc.pending)?transRows(loc):'';if(tr)h+='<div class="ru-tip-name ah-hname"><span>State changes'+(many?' \u00b7 '+esc(SELF()):'')+'</span></div>'+tr;
 return h+'</div>';}
 // the cell's description while the hover shows: the state word and its since, then how to reach the rest. Before the
 // answer lands it carries the state word the frame already put on the cell (assistive tech reads the description once,
 // at focus time, and the landed text replaces it with nothing to announce the change: a loading line with no state
 // word would leave a screen-reader user with none) and says the read is in flight; the landed line adds the since; a
 // failed read says so in the same words as the section's line
-function descText(){var tail=' Press Enter to open it.';var mg=merged();var w=LAST?headWords(LAST,mg):'';
-if(!/[.!?]$/.test(w))w+='.';
+function descText(){var tail=' Press Enter to open it.';var mg=merged();var m0=mg.machines[0];   // this machine's own line, its words alone
+var w=m0?(m0.parts||[]).map(function(p){return p.text;}).join(' \u00b7 '):'';
+// a fine frame says nothing in its line until the read lands, but the description is read once, at focus time, and needs
+// a state word: the dot's own (Fine, Errors, No traffic)
+if(!w){w=DOTWORD[mg.dot]||'';if(w)w=w.charAt(0).toUpperCase()+w.slice(1);}   // the kernel's own words keep their case
+if(w&&!/[.!?]$/.test(w))w+='.';
 var loc=HIST&&HIST[''];if(loc&&loc.error)return 'Could not read the API history: '+loc.error+'.'+tail;
 if(!HIST||(HIST['']&&HIST[''].pending))return 'API health: '+w+' Reading the details.'+tail;
 return 'API health: '+w+tail;}
 // full=false is the HOVER: the same reading with no controls. The hover sits under pointer-events:none and hides
 // on mouseleave, so a button there could not be honored; the click is where the actions live.
 function html(m,full){var mg=merged(),rd=readingOf('');
-var h='<div class=ru-tip-win><div class=ru-tip-name><span>API health'+(mg.n>1?' \u00b7 '+mg.n+' machines':'')+'</span></div>'
-+'<div class="ru-tip-row ah-head"><i class=ah-dot data-dot='+esc(mg.dot)+'></i><span class=ah-word>'+esc(headWords(m,mg))+'</span>'
-+((m.since&&m.state!=='ok')?'<span class=ah-since>since '+hm(m.since)+'</span>':'')+'</div>';
+// the window the lines count, named ONCE at the top (T316): the ledger's day when this kernel serves one, else the
+// document's longest window; before the read lands, the day
+var win=MERGE?MERGE.windowWords(rd?rd.windowS:86400):'';
+var h='<div class=ru-tip-win><div class=ru-tip-name><span>API health'+(mg.n>1?' \u00b7 '+mg.n+' machines':'')+'</span>'+(win?'<span class="ru-tip-reset ah-win">'+esc(win)+'</span>':'')+'</div>';
+// one line per machine (T316): the dot in that machine's state, its name, then its counts in their colours, or the
+// kernel's own words when its sessions are waiting or it is paused; a machine not reachable says so in its line
+mg.machines.forEach(function(x){h+='<div class="ru-tip-row ah-mline" data-host="'+esc(x.host)+'"><i class=ah-dot data-dot='+esc(x.dot)+'></i><span class=ah-nm>'+esc(x.name)+'</span>'+partsHTML(x.parts||[])
++((x.host===''&&m.since&&m.state!=='ok')?'<span class=ah-since>since '+hm(m.since)+'</span>':'')+'</div>';});
 if(m.state==='paused')h+='<div class=ah-line>'+(PAUSE[m.reason]||PAUSE.manual)+'</div>';
-if(rd&&rd.sub&&mg.n===1)h+='<div class="ah-line ru-tip-reset">'+esc(rd.sub)+'</div>';
-// several machines: one line each, the dot in that machine's state (a machine not reachable says so in its line)
-if(mg.n>1)mg.machines.forEach(function(x){h+='<div class="ru-tip-row ah-mline"><i class=ah-dot data-dot='+esc(x.dot)+'></i><span class=ah-desc>'+esc(x.text)+'</span></div>';});
 if(full)h+=btnHTML(m);
 h+='</div>';
 var rows=m.sessions||[];
@@ -48204,8 +48242,8 @@ try{if(n)n.focus();if(!n||document.activeElement!==n)tip.focus();}catch(e){}}}
 function show(ev){if(!LAST)return;lastX=(ev&&typeof ev.clientX==='number')?ev.clientX:null;
 try{window.__rompUsageTipHide&&window.__rompUsageTipHide();}catch(e){}   // the readout's tip yields while ours shows (the cell sits inside it)
 tip.classList.remove('ru-modal');tip.setAttribute('role','tooltip');tip.removeAttribute('aria-modal');
-tip.style.display='block';el.setAttribute('aria-describedby','ah-summary');load(true);render();}
-function hide(){tip.style.display='none';el.removeAttribute('aria-describedby');}
+tip.style.display='block';el.setAttribute('aria-describedby','ah-summary');load(true);render();armAge();}
+function hide(){tip.style.display='none';el.removeAttribute('aria-describedby');disarmAge();}
 function close(){hide();tip.classList.remove('ru-modal');back.classList.remove('on');pinned=false;
 window.__rompApiClose=null;if(back.onclick===close)back.onclick=null;
 // the refocus fires the cell's focus event, which would pop the hover right after Escape: skipFocus covers that one
@@ -48221,7 +48259,7 @@ function open(){if(!LAST)return;try{window.__rompUsageClose&&window.__rompUsageC
 var was=tip.style.display==='block';
 focusBack=document.activeElement;pinned=true;tip.classList.add('ru-modal');tip.style.left='';tip.style.top='';tip.style.maxHeight='';
 tip.setAttribute('role','dialog');tip.setAttribute('aria-modal','true');el.removeAttribute('aria-describedby');
-tip.style.display='block';render();back.classList.add('on');
+tip.style.display='block';render();back.classList.add('on');armAge();
 window.__rompApiClose=close;back.onclick=close;try{tip.focus();}catch(e){}if(!was)load();}
 // The listeners sit on the STABLE #rail-api cell; __rompApiHealth writes its children, never the cell.
 // a pointer arriving on a tip that focus already shows re-anchors it from the pointer and keeps its rows: the
@@ -48278,6 +48316,7 @@ else if(act==='reveal'){var sid=t.getAttribute('data-sid')||'';
 // dashboard's chat alone (_reveal_chat_for), never at every open window's. No pane is toggled here, so nothing
 // about the layout is persisted.
 if(window.__rompShellSend&&window.__rompShellSend({type:'openSession',id:sid}))close();else{hint=NOTSENT;dirty=true;}}
+else if(act.indexOf('range:')===0){range=act.slice(6);render();}   // the detail's histogram span (T316)
 else if(act==='usage'){close();try{window.__rompUsagePanel&&window.__rompUsagePanel();}catch(e){}}
 else if(act==='log'){close();try{window.__rompOpenErrs&&window.__rompOpenErrs();}catch(e){}}}
 tip.addEventListener('click',function(ev){var t=actOf(ev.target);if(t)run(t);flush();});
@@ -50499,6 +50538,24 @@ def _landing():
             ".ah-nm{font-weight:600}.ah-desc{opacity:.75}"
             ".ah-foot{margin-top:7px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.08);gap:12px}"
             ".ah-link{cursor:pointer;color:var(--accent)}"
+            # T316: a machine line's pieces in their class colours (successes the accent, 429 the blocked red, 5xx the 5xx
+            # magenta, no connection and other statuses the label gray), the vertical legend with swatches in the bar
+            # colours, the stacked bars (the hover's small, the detail's large), the detail's range chips and width
+            # the counts' TEXT inks per theme (review find: the chip colours as text sit under 4.5:1 on the tip; the
+            # failure line's precedent is #ef6b6f dark / #B02A1C light): 429 the error-text red, 5xx a lighter magenta in
+            # the dark, a deeper one in the light; the swatches and the bars keep the chip colours
+            ".ah-c-ok{color:var(--accent,#9cd2ff)}.ah-c-r429{color:#ef6b6f}.ah-c-r5xx{color:#e879f9}"
+            ".ah-c-none{color:#9aa4ad}.ah-mline .ah-desc{opacity:1}.ah-mline .ah-c-plain{opacity:.85}"
+            ".ah-win,.ah-ago{margin-left:auto}"
+            ".ah-legend{display:flex;flex-direction:column;align-items:flex-start;gap:3px;margin-top:7px;opacity:.75}"
+            ".ah-lrow{display:flex;align-items:center;gap:6px}.ah-lsw{width:8px;height:8px;border-radius:2px;flex:0 0 auto}"
+            ".ah-sw-r429{background:var(--st-blocked-bg,#e5484d)}.ah-sw-r5xx{background:var(--st-5xx-bg,#c026d3)}.ah-sw-none{background:#9aa4ad}"
+            # the bars' fills, one class per stack segment (the landing defines no --dim, so the gray is written out)
+            ".ah-seg-ok{fill:var(--accent,#9cd2ff)}.ah-seg-rateLimited{fill:var(--st-blocked-bg,#e5484d)}.ah-seg-serverErrors{fill:var(--st-5xx-bg,#c026d3)}"
+            ".ah-seg-noStatus,.ah-seg-other{fill:#9aa4ad}"
+            ".ah-gname{margin-top:6px}.ah-bars.ah-big svg{height:110px}.ah-bars.ah-big{margin-bottom:12px}"
+            ".ah-range{margin:4px 0 6px}"
+            "#ah-tip.ru-modal{width:min(720px,92vw)}"
             # a failed send's reason, under the button it restored; the hover's rows carry no action (.ah-ro),
             # so no pointer and no hover wash; the pinned detail takes focus as a dialog without a ring on the card
             ".ah-hint{margin-top:4px;opacity:.75;max-width:340px}"
@@ -50933,6 +50990,11 @@ def _landing():
             # the failure line in the light theme's error-text red (styles.css --err #B02A1C, about 6.6:1 on white;
             # the dark line's #ef6b6f is 3.0:1 there)
             "body.theme-light .ah-err{color:#B02A1C}"
+            # T316, the light tip is white: the counts' inks (the clay accent, the light error red, a deep magenta 6.5:1, the
+            # light label gray 7.15:1), the swatches and the bars' fills in the light palette's chip colours
+            "body.theme-light .ah-c-ok{color:#C2410C}body.theme-light .ah-c-r429{color:#B02A1C}body.theme-light .ah-c-r5xx{color:#86198F}body.theme-light .ah-c-none{color:#5D574E}"
+            "body.theme-light .ah-sw-r5xx{background:#A21CAF}body.theme-light .ah-sw-none{background:#5D574E}"
+            "body.theme-light .ah-seg-ok{fill:#C2410C}body.theme-light .ah-seg-serverErrors{fill:#A21CAF}body.theme-light .ah-seg-noStatus,body.theme-light .ah-seg-other{fill:#5D574E}"
             "body.theme-light .ah-word{color:#1F1E1D}"
             "body.theme-light .ah-btn{background:#F1EAE2;border-color:rgba(0,0,0,0.12);color:#1F1E1D}"
             "body.theme-light .ah-row:hover{background:rgba(0,0,0,0.05)}"
@@ -52094,14 +52156,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps(out), "application/json", cache="no-cache")
             if p == "/session-events":
                 # T304: the session-event ledger for the dashboard's "sessions gone wrong" cue and `romp
-                # restart-metrics` (_session_event_rows): ?since=<epoch s> (default this kernel's boot),
+                # restart-metrics` (_session_event_rows): ?since=<epoch s> (default this kernel's boot in
+                # whole seconds, int(_STARTED), for a missing and for an unparseable value alike: every row's
+                # `t` is stamped to the second, and `count` and `bootAt` below use that same second, so the
+                # default rows and `count` are one predicate but for the boot summary and the `limit` cap;
+                # the float _STARTED here left a row stamped in the boot second counted and unlisted),
                 # ?limit=<n> (default 200, at most 1000). AUTHED like /api-health, by the plain _authorize:
-                # session names ride it. `count` is this kernel's alone, never a cross-kernel sum (a federated
-                # shell keeps per-host maps; every row names its host for that merge).
+                # session names ride it. `count` is this kernel's alone, never a cross-kernel sum (a
+                # federated shell keeps per-host maps; every row names its host for that merge).
+                raw_since = (q.get("since") or [""])[0]
                 try:
-                    since = float((q.get("since") or [""])[0] or _STARTED)
+                    since = float(raw_since) if raw_since else int(_STARTED)
                 except ValueError:
-                    since = float(_STARTED)
+                    since = int(_STARTED)
                 try:
                     limit = max(1, min(1000, int((q.get("limit") or [""])[0] or 200)))
                 except ValueError:

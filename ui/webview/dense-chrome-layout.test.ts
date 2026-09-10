@@ -15,7 +15,7 @@ const CSS_PATH = path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"
 // the markup render.ts builds, reduced to the nodes the dense rules touch. The chip's inline style is tagChip's
 // (tag-menu.ts, inheritSize), the tag button's is tagMenuButton's, the arrow is agentOpenButton's svg.
 const ARROW = '<span class="tool-open-agent bg-open-agent" role="button"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 3.5H4a1 1 0 0 0-1 1V12a1 1 0 0 0 1 1h7.5a1 1 0 0 0 1-1V9"/></svg></span>';
-const CHIP = '<span class="tab-group-chip" style="display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:9px;border:1px solid var(--dim);color:var(--dim);background:transparent;white-space:nowrap;">web</span>';
+const CHIP = '<span class="tab-group-chip" style="display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:9px;border:1px solid var(--dim);color:var(--dim);background:transparent;white-space:nowrap;font-weight:400;letter-spacing:normal;">web</span>';
 const TAGBTN = '<button type="button" style="background:transparent;border:1px solid #3c3c3c;border-radius:6px;padding:4px 6px;cursor:pointer;color:#9aa0a6;display:inline-flex;align-items:center;"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 7.5 L7.5 2.5 H14 V9 L8.5 14 Z" stroke="currentColor" stroke-width="1.4"/></svg></button>';
 const tab = (id: string, label: string, cls = "") =>
   `<div class="tab${cls}" id="${id}"><span class="tab-label">${label}</span><span class="tab-close">×</span></div>`;

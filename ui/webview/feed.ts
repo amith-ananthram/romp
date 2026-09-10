@@ -19,7 +19,7 @@ import { spinFor, awaitWord, groupRows, waitsNote, GROUP_TITLE, ROW_KIND_OF_LEGA
 import { onlyTag, matchesOnly } from "./only-filter";
 import { searchMatches, searchSids } from "./feed-search";
 import { TagLens, lensAll, lensLabel, lensVisible, lensUnions } from "./tag-lens";
-import { openTagMenu, tagMenuButton, syncTagFilter } from "./tag-menu";
+import { openTagMenu, tagMenuButton, syncTagFilter, tagChip } from "./tag-menu";
 import { SessionViews } from "./session-views";
 import { freezeDiff, contentSig } from "./feed-freeze";
 import { hostNameNodes, hostPartsNodes, hostIsDown, hostDownNote, hostOf } from "./host-prefix";
@@ -4016,9 +4016,8 @@ function openSessList(): void {
       const chips = el("span", "fsm-chips");
       for (const g of lensUnions(feedTagViews)) {
         if (!g.members.includes(pick)) continue;
-        const c = el("i", "fsm-chip-tag");
-        c.textContent = g.name;
-        if (g.color) { c.style.color = g.color; c.style.borderColor = g.color; }
+        const c = tagChip(g.name, g.color || null);   // the one tag chip (T321); the class is the dialog's layout hook
+        c.classList.add("fsm-chip-tag");
         chips.appendChild(c);
       }
       if (chips.childElementCount) r.appendChild(chips);

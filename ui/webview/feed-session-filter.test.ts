@@ -84,12 +84,13 @@ test("session rows carry their tag chips — grouping visible, the pick untouche
   // non-interactive, ellipsizing in the row's leftover space
   assert.match(FEED, /if \(!g\.members\.includes\(pick\)\) continue;/);
   assert.match(FEED, /if \(chips\.childElementCount\) r\.appendChild\(chips\);/);
-  assert.match(FEED, /if \(g\.color\) \{ c\.style\.color = g\.color; c\.style\.borderColor = g\.color; \}/,
-    "the tag's own colour, outline-pill like the dialog");
+  assert.match(FEED, /const c = tagChip\(g\.name, g\.color \|\| null\);/,
+    "the tag's own colour on the one tag chip every surface draws (T321)");
+  assert.match(FEED, /c\.classList\.add\("fsm-chip-tag"\);/, "the dialog's layout hook stays on it");
   const CSS2 = fs.readFileSync(path.join(ROOT, "ui", "webview", "feed.css"), "utf8");
   assert.match(CSS2, /\.fsm-chips \{ flex: 1 1 auto; min-width: 0; margin-left: 8px; text-align: right;\s*\n\s*overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; \}/,
     "ellipsizes, never wraps the row; never a click target — the pick stays byte-identical");
-  assert.match(CSS2, /\.fsm-chip-tag \{ display: inline-block; font-style: normal; padding: 0 6px; margin-left: 4px;/,
+  assert.match(CSS2, /\.fsm-chip-tag \{ margin-left: 4px; \}/,
     "compact at the row's scale");
 });
 

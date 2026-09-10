@@ -3,10 +3,11 @@
 read. session-events.jsonl gets one flat row per thing that went wrong with a session's process (an orphaned
 CLI ended at boot, a leftover scope stopped, two CLIs holding one conversation, a crash heal or crash loop, a
 session the drain's bound left closing) and one summary row per boot sweep; every problem also lands on the
-backend's problem ring as its prose and on the kernel log as `<prose> ;; problem-row {json}` (the shape agreed
-with the lease work, which writes its `lease.*` kinds through the same helper). turns.jsonl gets one row per
-settled turn with the event stamps the latency and redo-cost figures read. Synthetic fixtures only: placeholder
-uuids, fake pids above pid_max, scripted `run` / `kill` seams, no real CLI."""
+kernel log as `<prose> ;; problem-row {json}`, and every one but a drain row (written as the kernel exits) on
+the backend's problem ring as its prose (the shape agreed with the lease work, which writes its `lease.*`
+kinds through the same helper). turns.jsonl gets one row per settled turn with the event stamps the latency
+and redo-cost figures read. Synthetic fixtures only: placeholder uuids, fake pids above pid_max, scripted
+`run` / `kill` seams, no real CLI."""
 import json
 import os
 import tempfile
@@ -235,8 +236,10 @@ class CrashRows(unittest.TestCase):
 
 
 class DrainRows(unittest.TestCase):
-    def test_unjoined_sessions_get_a_row_each(self):
-        d = tempfile.mkdtemp(); be = _backend(d)
+    def _drain(self, be, cli_pid=None):
+        """Drain two doubles: `web` still closing with a turn in flight, `api` joined clean. `cli_pid` is
+        what the CLI-pid seam answers for the stuck one; a stub `kill` (nothing real is signalled) reports the
+        process gone at the first existence poll."""
         class Thr:
             def __init__(self, alive): self._alive = alive
             def join(self, *_): pass
@@ -247,12 +250,50 @@ class DrainRows(unittest.TestCase):
         stuck = sess(SID, "web", True, 1)
         clean = sess(SID2, "api", False, 0)
         be.sessions = {SID: stuck, SID2: clean}
-        with mock.patch.object(sb.SdkBackend, "_session_cli_pid", lambda self, s: None):
-            res = be.drain(0.01)
+        def kill(pid, sig):
+            if sig == 0:
+                raise ProcessLookupError()
+        with mock.patch.object(sb.SdkBackend, "_session_cli_pid", lambda self, s: cli_pid):
+            return be.drain(0.01, kill=kill)
+
+    def test_unjoined_sessions_get_a_row_each(self):
+        d = tempfile.mkdtemp(); be = _backend(d)
+        res = self._drain(be)
         self.assertEqual((res["stopped"], res["unjoined"], res["reaped"]), (2, 1, 0))
         rows = _events(d)
         self.assertEqual([(r["kind"], r["sid"], r["name"], r["inflight"], r["reaped"]) for r in rows],
                          [("drain.unjoined", SID, "web", 1, False)])
+
+    def test_unjoined_row_is_a_problem_row_without_the_ring(self):
+        """A drain.unjoined row is a problem row like every kind but the boot summary: it carries `text` and
+        the kernel log gets `<prose> ;; problem-row {json}`. The ring alone is not asked, since the kernel is
+        exiting and the bell has no reader for it."""
+        d = tempfile.mkdtemp(); lines = []
+        be = _backend(d, log=lambda m: lines.append(m))
+        self._drain(be)
+        (row,) = _events(d)
+        self.assertEqual(row["kind"], "drain.unjoined")
+        self.assertIsInstance(row.get("text"), str)
+        self.assertIn("web", row["text"])
+        self.assertNotIn("ended", row["text"], "not reaped: the prose does not say its process was ended")
+        marked = [m for m in lines if sb.PROBLEM_ROW_MARK in m]
+        self.assertEqual(len(marked), 1, lines)
+        self.assertEqual(sb.parse_problem_row(marked[0]), row, "the log line carries the same object")
+        self.assertTrue(marked[0].startswith(row["text"] + sb.PROBLEM_ROW_MARK))
+        self.assertTrue(any(m.startswith("drain: stopped 2 session(s)") for m in lines),
+                        "the drain's own summary still logs")
+        self.assertEqual(_ring(be), [])
+
+    def test_reaped_row_says_so_in_its_prose(self):
+        d = tempfile.mkdtemp(); lines = []
+        be = _backend(d, log=lambda m: lines.append(m))
+        res = self._drain(be, cli_pid=CLI)
+        self.assertEqual((res["unjoined"], res["reaped"]), (1, 1))
+        (row,) = _events(d)
+        self.assertEqual((row["kind"], row["reaped"]), ("drain.unjoined", True))
+        self.assertIn("ended", row["text"])
+        self.assertEqual(sb.parse_problem_row([m for m in lines if sb.PROBLEM_ROW_MARK in m][0]), row)
+        self.assertEqual(_ring(be), [])
 
 
 class LedgerRotation(unittest.TestCase):
