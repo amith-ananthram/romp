@@ -14750,7 +14750,8 @@ def _sdk_locked():
                 # would sort under a row the previous kernel filed in that same second, and the tail would read
                 # the old kernel's last state as current above the restart row. /version's `started` is the
                 # same start in whole seconds.
-                boot_at=_STARTED)
+                boot_at=_STARTED,
+                code_version=_kernel_sha())   # stamped on every session lease this kernel writes (T305)
             # a limit-shaped judge error envelope pokes ONE exact usage poll (get_usage rides turn
             # ends, so an idle fleet's usage.json goes stale — measured ~15h — and the rate gate is
             # only as good as that file); the backend picks any live login session to ask
