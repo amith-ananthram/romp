@@ -13,7 +13,7 @@ const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "
 test("a queued ChatEvent carries the pending messages (backend-agnostic, per-message md)", () => {
   // idx = backend-queue position (SDK); park = _pending_ops position (compaction/model parking, any backend)
   // `optimistic` (romp's own unconfirmed echo) rides along at the end — see optimistic-send.test.ts
-  assert.match(RENDER, /kind: "queued"; texts: \{ md: string; followUp\?: boolean; goal\?: string; fuCtx\?: string; idx\?: number; park\?: number; cancelable\?: boolean; optimistic\?: boolean; romp\?: boolean; rompSystem\?: boolean; rompAuto\?: boolean; gist\?: string; imgPaths\?: string\[\]; lost\?: string; qts\?: number; qid\?: string; hiddenByPending\?: boolean; landing\?: boolean \}\[\]/);   // gist: a queued romp SYSTEM notice's user-facing head (2026-09-08); imgPaths: the echo's dragged-image thumbnails (2026-08-25); romp flags: T243; lost + qts: the pending entry's connection-drop state and its identity for the ✕ (2026-09-06)
+  assert.match(RENDER, /kind: "queued"; texts: \{ md: string; followUp\?: boolean; goal\?: string; fuCtx\?: string; idx\?: number; park\?: number; cancelable\?: boolean; optimistic\?: boolean; romp\?: boolean; rompSystem\?: boolean; rompAuto\?: boolean; gist\?: string; imgPaths\?: string\[\]; lost\?: string; qts\?: number; qid\?: string; held\?: boolean; hiddenByPending\?: boolean; landing\?: boolean \}\[\]/);   // gist: a queued romp SYSTEM notice's user-facing head (2026-09-08); imgPaths: the echo's dragged-image thumbnails (2026-08-25); romp flags: T243; lost + qts: the pending entry's connection-drop state and its identity for the ✕ (2026-09-06)
 });
 
 test("renderQueued draws a wireframe-hourglass header (singular/plural) + one markdown bubble per queued message", () => {
@@ -247,7 +247,7 @@ test("the kernel flags a romp-injected queued entry from the same markers as a l
 });
 
 test("what romp itself queued wears the LANDED romp grammar, split as landed: notice card vs gray romp bubble (T243)", () => {
-  assert.match(RENDER, /romp\?: boolean; rompSystem\?: boolean; rompAuto\?: boolean; gist\?: string; imgPaths\?: string\[\]; lost\?: string; qts\?: number; qid\?: string; hiddenByPending\?: boolean; landing\?: boolean \}\[\]/, "the queued text shape carries the flags (+ the gist, 2026-09-08)");
+  assert.match(RENDER, /romp\?: boolean; rompSystem\?: boolean; rompAuto\?: boolean; gist\?: string; imgPaths\?: string\[\]; lost\?: string; qts\?: number; qid\?: string; held\?: boolean; hiddenByPending\?: boolean; landing\?: boolean \}\[\]/, "the queued text shape carries the flags (+ the gist, 2026-09-08)");
   const body = RENDER.split("function renderQueued(")[1].split("\nfunction ")[0];
   assert.match(body, /const bubble = el\("div", "queued-bubble md" \+ \(t\.cancelable \? " cancelable" : ""\)\s*\n\s*\+ \(t\.romp \? " queued-romp" : ""\) \+ \(t\.rompSystem \? " queued-sys" : ""\)\);/);
   // a SYSTEM notice → the landed card's own builder, nested; a one-line notice gets no body repeating its head

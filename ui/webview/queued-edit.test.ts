@@ -1,9 +1,11 @@
-// EDITING a queued message (the user 2026-09-08): a message that has not reached the session yet — held in
-// the SDK backend's queue (idx), parked in romp's FIFO (park), or still at the optimistic "sending…" stage
-// — is the user's to change until it goes. The ✎ beside the ✕ loads the text into the composer under an
-// editing pill; send posts editQueued and the kernel replaces the entry IN PLACE (same slot, a follow-up's
-// wrapper kept), answering editResult like the ✕'s cancelResult. No jsdom harness → source pins, the
-// repo's convention (queued-indicator.test.ts is the ✕'s twin of this file).
+// EDITING a queued message IN PLACE (T306, the user 2026-09-10): a message that has not reached the session yet — held
+// in the SDK backend's queue (idx), parked in romp's FIFO (park), or still at the optimistic "sending…" stage — is the
+// user's to change until it goes. The ✎ turns the bubble's text into a field where it sits (same width, the dashed
+// provisional look kept) with Save and Cancel; the composer is never touched (the 2026-09-08 design pulled the text
+// into the composer). While the field is open the entry is HELD: the open posts holdQueued and the kernel's drains skip
+// it until Save (the editQueued releases it), Cancel (holdQueued hold:false) or the page's socket closing. No jsdom
+// harness → source pins, the repo's convention (queued-indicator.test.ts is the ✕'s twin of this file); the kernel and
+// backend halves EXECUTE in tests/test_queued_edit_hold.py.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -15,115 +17,129 @@ const CSS = fs.readFileSync(path.join(ROOT, "ui", "webview", "styles.css"), "utf
 const KERNEL = fs.readFileSync(path.join(ROOT, "kernel", "kernel.py"), "utf8");
 const SDKBE = fs.readFileSync(path.join(ROOT, "kernel", "sdk_backend.py"), "utf8");
 
-test("an editable queued bubble carries a ✎ beside its ✕ — the same three stages, the same recall gate, user words only", () => {
-  assert.match(RENDER, /if \(t\.cancelable && !t\.romp && !isCmd && \(t\.idx !== undefined \|\| t\.park !== undefined \|\| t\.optimistic\)\)/,
-    "romp's notices and slash commands are not edited — a command is cancelled and typed again");
-  assert.match(RENDER, /bubble\.classList\.add\("editable"\);/);
-  assert.match(RENDER, /el\("button", "queued-edit"\)/);
-  assert.match(RENDER, /ed\.dataset\.act = "qedit";/, "delegated through the stable document.body delegate, like the ✕");
-  assert.match(RENDER, /if \(t\.idx !== undefined\) ed\.dataset\.qidx = String\(t\.idx\);/);
-  assert.match(RENDER, /if \(t\.park !== undefined\) ed\.dataset\.qpark = String\(t\.park\);/);
-  assert.match(RENDER, /if \(t\.optimistic\) ed\.dataset\.qopt = "1";/);
-  assert.match(RENDER, /\(ed as any\)\._qmd = t\.md;/, "the body rides along: the kernel's drift guard and the composer read it");
-  assert.doesNotMatch(RENDER, /bubble\.addEventListener\("click"/, "the bubble itself still carries no listener");
-  assert.match(CSS, /\.queued-bubble\.editable \{ padding-right: 52px; \}/, "room for both corner controls");
-  assert.match(CSS, /\.queued-edit \{\s*\n\s*position: absolute; top: 3px; right: 26px;/);
-  assert.match(CSS, /\.queued-edit:hover \{ color: var\(--accent\)/, "accent, not red — it changes the message, it does not remove it");
+function slice(from: string, to: string, src = RENDER): string {
+  const a = src.indexOf(from);
+  assert.ok(a >= 0, "anchor present: " + from.slice(0, 60));
+  const b = src.indexOf(to, a);
+  assert.ok(b > a, "end anchor present after it: " + to.slice(0, 60));
+  return src.slice(a, b);
+}
+// the editor's code: its state, open / cancel / save, and the field's render
+const EDITOR = slice("// ---- editing a QUEUED message IN PLACE (T306", "// The optimistic half of an edit:");
+// the delegated handlers: the ✎, Save, Cancel
+const DELEGATES = slice("    qedit: (el) => {", "    cmtopen: (elx) => {");
+// the kernel's verdict handling
+const VERDICT = slice('else if (m.type === "editResult" && typeof m.id === "string") {', "// The identity palette changed");
+// the queued bubble's render
+const BUBBLE = slice("function renderQueued(", "\nfunction restoreToComposer(");
+
+test("the ✎ opens a field IN the bubble: the editor is keyed by the entry, the hold goes out with the open, nothing touches the composer", () => {
+  assert.match(EDITOR, /type QueuedEditRef = \{ md: string; idx\?: number; park\?: number; qts\?: number; qid\?: string; optimistic\?: boolean \};/);
+  assert.match(EDITOR, /type QueuedEditor = \{ eid: number; sid: string; key: string; ref: QueuedEditRef; text: string; sel: \[number, number\] \| null;\s*\n\s*focused: boolean; open: boolean; note: string \};/);
+  assert.match(EDITOR, /const queuedEditors = new Map<string, QueuedEditor>\(\);/);
+  assert.match(EDITOR, /const queuedEditorKey = \(sid: string, t: \{ md: string; qid\?: string; qts\?: number \}\): string =>\s*\n\s*sid \+ "\\u0001" \+ t\.md \+ "\\u0001" \+ \(t\.qid \|\| ""\) \+ "\\u0001" \+ \(t\.qts === undefined \? "" : String\(t\.qts\)\);/,
+    "keyed by session, body, the copy's id and its stamp: two same-words copies keep separate editors, and the state survives the tail's rebuild");
+  assert.match(EDITOR, /function openQueuedEditor\(sid: string, ref: QueuedEditRef\): void \{[\s\S]*?queuedEditors\.set\(key, \{ eid: \+\+queuedEditorSeq, sid, key, ref, text: ref\.md, sel: \[ref\.md\.length, ref\.md\.length\],\s*\n\s*focused: true, open: true, note: "" \}\);\s*\n\s*if \(!isProvisionalId\(sid\) && !hostIsDown\(sid\)\) vscodeApi\?\.postMessage\(holdQueuedMsg\(sid, ref, true\)\);\s*\n\s*repaintQueuedFor\(sid\);/,
+    "the open records the state (the words, the caret at the end, focus) and posts the hold; the repaint is the acknowledgement");
+  assert.match(EDITOR, /function holdQueuedMsg\(sid: string, ref: QueuedEditRef, hold: boolean\): Record<string, unknown> \{\s*\n\s*const m: Record<string, unknown> = \{ type: "holdQueued", id: sid, md: ref\.md, hold \};\s*\n\s*if \(ref\.idx !== undefined\) m\.idx = ref\.idx;\s*\n\s*if \(ref\.park !== undefined\) m\.park = ref\.park;\s*\n\s*if \(ref\.qid\) m\.qid = ref\.qid;/,
+    "the hold names the entry the way the ✎ and the ✕ do: body, slot, and the copy's id");
+  assert.match(DELEGATES, /qedit: \(el\) => \{[\s\S]*?const sidQ = owningSidOf\(el\) \|\| activeId;[\s\S]*?if \(el\.dataset\.qid\) ref\.qid = el\.dataset\.qid;[\s\S]*?openQueuedEditor\(sidQ, ref\);/,
+    "the ✎ opens the editor for the bubble's own session; no active-composer gate any more");
+  assert.doesNotMatch(DELEGATES, /open that session's chat to edit its queued message/, "another session's bubble is edited where it sits, not declined");
 });
 
-test("the qedit delegate loads the composer under an editing pill (the rewind edit's grammar)", () => {
-  assert.match(RENDER, /qedit: \(el\) => \{/);
-  assert.match(RENDER, /if \(sidQ !== activeId\) \{ warnToast\("open that session's chat to edit its queued message"\); return; \}/,
-    "the edit rides the ACTIVE composer — another session's bubble is declined, never edited in the wrong box");
-  assert.match(RENDER, /beginQueuedEdit\(sidQ, ref\);/);
-  assert.match(RENDER, /type QueuedEditRef = \{ md: string; idx\?: number; park\?: number; qts\?: number; optimistic\?: boolean \};/);
-  assert.match(RENDER, /const queuedEdits = new Map<string, QueuedEditRef>\(\);/);
-  assert.match(RENDER, /function beginQueuedEdit\(sid: string, ref: QueuedEditRef\): void \{\s*\n\s*if \(composerEdits\.has\(sid\)\) cancelComposerEdit\(sid\);/,
-    "one edit at a time: a rewind edit yields to a queued edit…");
-  assert.match(RENDER, /function beginComposerEdit\(sid: string, uuid: string, orig: string\): void \{\s*\n\s*if \(queuedEdits\.has\(sid\)\) cancelQueuedEdit\(sid\);/,
-    "…and a queued edit yields to a rewind edit");
-  assert.match(RENDER, /label\.textContent = "Editing queued message — send replaces it in the queue";/);
-  assert.match(RENDER, /if \(activeId && queuedEdits\.has\(activeId\)\) \{ cancelQueuedEdit\(activeId\); return; \}/, "Escape cancels it first");
+test("the field: the bubble keeps its width and dotted look, Save and Cancel are delegated, Enter saves, Shift+Enter breaks a line, Escape cancels, caret and focus survive the rebuild", () => {
+  assert.match(EDITOR, /function renderQueuedEditor\(bubble: HTMLElement, ed: QueuedEditor\): void \{\s*\n\s*bubble\.classList\.add\("editing"\);/);
+  assert.match(EDITOR, /field\.className = "queued-editbox";\s*\n\s*field\.value = ed\.text;/);
+  assert.match(EDITOR, /field\.addEventListener\("input", \(\) => \{ ed\.text = field\.value; remember\(\); grow\(\); \}\);/, "every keystroke lands in the state the next rebuild paints from");
+  assert.match(EDITOR, /if \(e\.key === "Enter" && !e\.shiftKey\) \{ e\.preventDefault\(\); saveQueuedEditor\(ed\); \}\s*\n\s*else if \(e\.key === "Escape"\) \{ e\.preventDefault\(\); cancelQueuedEditor\(ed\); \}/);
+  assert.match(EDITOR, /cancel\.dataset\.act = "qcancel"; cancel\.dataset\.eid = String\(ed\.eid\);/, "delegated through the one body delegate, like the ✕ and the ✎");
+  assert.match(EDITOR, /save\.dataset\.act = "qsave"; save\.dataset\.eid = String\(ed\.eid\);/);
+  assert.match(EDITOR, /if \(ed\.focused && document\.body\.contains\(field\)\) \{ field\.focus\(\); if \(ed\.sel\) field\.setSelectionRange\(ed\.sel\[0\], ed\.sel\[1\]\); \}/,
+    "the tail rebuilds on every push: the field comes back with its caret and focus");
+  assert.match(DELEGATES, /qsave: \(el\) => \{ const ed = queuedEditorByEid\(Number\(el\.dataset\.eid\)\); if \(ed\) saveQueuedEditor\(ed\); \},/);
+  assert.match(DELEGATES, /qcancel: \(el\) => \{ const ed = queuedEditorByEid\(Number\(el\.dataset\.eid\)\); if \(ed\) cancelQueuedEditor\(ed\); \},/);
+  // the render: an open editor paints its field instead of the words; the ✎ steps aside while it is open
+  assert.match(BUBBLE, /const qsid = renderingSid \|\| activeId \|\| "";\s*\n\s*const qed = qsid && !t\.romp && !isCmd \? queuedEditorFor\(qsid, t\) : undefined;\s*\n\s*if \(qed && qed\.open\) \{ bubble\.innerHTML = ""; renderQueuedEditor\(bubble, qed\); \}/);
+  assert.match(BUBBLE, /if \(t\.cancelable && !t\.romp && !isCmd && \(t\.idx !== undefined \|\| t\.park !== undefined \|\| t\.optimistic\) && !\(qed && qed\.open\)\) \{/);
+  assert.match(BUBBLE, /if \(t\.qid\) ed\.dataset\.qid = t\.qid;/, "the ✎ names the copy by its id, as the ✕ does");
+  // the dress: same bubble, accent ring while editing, room for the ✕ only; the field inherits the bubble's type
+  assert.match(CSS, /\.queued-bubble\.editing \{ opacity: 1; border-color: var\(--accent\); padding-right: 30px; \}/);
+  assert.match(CSS, /\.queued-editbox \{\s*\n\s*width: 100%; box-sizing: border-box; display: block; resize: none; overflow: hidden;\s*\n\s*font: inherit; line-height: inherit; color: var\(--fg\); background: transparent; border: 0; padding: 0; margin: 0; outline: none;/);
+  assert.match(CSS, /\.queued-editbtn \{\s*\n\s*font: inherit; font-size: 0\.82em;/, "the queued header's own size, not a new one");
+  assert.match(CSS, /\.queued-editbtn\.save \{ background: var\(--accent\); color: var\(--accent-fg\); border-color: transparent; \}/);
+  assert.match(CSS, /\.queued-held-label \{ font-size: 0\.82em; color: var\(--dim\);/);
+  assert.match(CSS, /\.queued-editnote \{ font-size: 0\.82em; color: var\(--vscode-errorForeground, #f48771\);/);
 });
 
-test("send in queued-edit mode posts editQueued with the old body and keeps the words if the kernel refuses", () => {
-  assert.match(RENDER, /const qmsg: Record<string, unknown> = \{ type: "editQueued", id: activeId, md: qedit\.md, text: typed \};/);
-  assert.match(RENDER, /if \(qedit\.idx !== undefined\) qmsg\.idx = qedit\.idx;/);
-  assert.match(RENDER, /if \(qedit\.park !== undefined\) qmsg\.park = qedit\.park;/);
-  assert.match(RENDER, /if \(!typed\) return;\s*\/\/ an empty edit is not a send — to drop the message, use its ✕/);
-  assert.match(RENDER, /pendingEditRestores\.set\(activeId \+ " " \+ qedit\.md, \{ typed, ref: qedit \}\);/);
-  assert.match(RENDER, /applyQueuedEditLocally\(activeId, qedit, typed\);/, "the bubble shows the new words at once (acknowledge the click)");
-  assert.doesNotMatch(RENDER, /registerOptimistic\(activeId, typed\);\s*\n\s*queuedEdits/, "an edit is not a new send — no optimistic send entry");
-  // the verdict frame: cancelResult's twin
-  assert.match(RENDER, /m\.type === "editResult" && typeof m\.id === "string"/);
-  assert.match(RENDER, /applyQueuedEditLocally\(m\.id, stash\.ref, stash\.typed, true\);/, "the optimistic repaint is reversed");
-  assert.match(RENDER, /if \(m\.id === activeId\) restoreToComposer\(stash\.typed\);/, "the typed words come back — never lost, never sent twice");
-  assert.match(RENDER, /pendingEditRestores\.delete\(key\);/);
-});
-
-test("the optimistic repaint touches the client's copy of the queue AND our own pending-send entry", () => {
-  assert.match(RENDER, /function applyQueuedEditLocally\(sid: string, ref: QueuedEditRef, text: string, back = false\): void/);
-  assert.match(RENDER, /if \(p\.text === from && \(ref\.qts === undefined \|\| p\.ts === ref\.qts\)\) \{ p\.text = to; p\.body = pendingBody\(to, p\.imgPaths\); \}/,
-    "our pending entry follows the edit, or the pending reconcile would paint the old words back");
-  assert.match(RENDER, /if \(e\.kind !== "queued"\) continue;[\s\S]*?t\.md = to;/);
-});
-
-test("the kernel replaces the entry in place at every stage and answers with an authoritative editResult", () => {
-  assert.match(KERNEL, /def _edit_parked\(sid, park, md, text\):/);
-  assert.match(KERNEL, /def _edit_backend_queued\(be, sid, idx, md, text\):/);
-  assert.match(KERNEL, /def _replace_followup_body\(text, body\):/, "a follow-up keeps its goal quote and markers");
-  assert.match(KERNEL, /ops\[park\] = \("send", _replace_followup_body\(op\[1\], body\)\) \+ tuple\(op\[2:\]\)/, "same slot, same echo author");
-  assert.match(KERNEL, /if park == 0 and inflight_head:\s*\n\s*return _edit_miss_text\(md\)/, "the head the backend holds is too late, like the ✕");
-  assert.equal(KERNEL.split('"type": "editResult"').length - 1, 3, "one reply per arm: park + idx + the optimistic md-only arm");
-  assert.match(KERNEL, /def _edit_miss_text\(md\):/);
-  assert.match(KERNEL, /too late to edit — the message already reached the session as it was/);
-  assert.match(KERNEL, /"cancelQueued", "dismissEcho", "apiRetry", "editQueued"/, "routes to the owning kernel across linked machines");
-  assert.match(SDKBE, /def replace_queued\(self, idx: int, text: str, expect: str \| None = None\) -> str \| None:/,
-    "the swap re-verifies the exact old text under the session lock — never a wrong-message rewrite");
-  assert.match(SDKBE, /def edit_queued\(self, sid: str, idx: int, text: str, expect: str \| None = None\) -> str \| None:/);
-  assert.match(SDKBE, /a\["_echo_text"\] = text/, "the optimistic echo is re-worded, so the live tail shows the edited message");
-});
-
-// ---- review finds (2026-09-08) --------------------------------------------------------------------------
-// The qedit branch of sendComposer, from its head to the editQueued post: every refusal below must sit in
-// this window, so the words are still in the box (and the bubble unchanged) when the branch bails.
-const QEDIT_BRANCH = RENDER.slice(RENDER.indexOf("const qedit = queuedEdits.get(activeId);\n    if (qedit) {"),
-                                  RENDER.indexOf('const qmsg: Record<string, unknown> = { type: "editQueued"'));
-
-test("a queued edit cannot become a command: the kernel refuses in both arms and the composer keeps the words", () => {
-  assert.ok(QEDIT_BRANCH.length > 0, "the qedit branch precedes the editQueued post");
-  assert.match(QEDIT_BRANCH, /if \(SLASH_CMD_RE\.test\(typed\)\) \{ warnToast\("A queued message cannot become a command\. Cancel it with its ✕ and type the command\."\); return; \}/,
-    "the words stay in the box under the pill; nothing is posted (the kernel would deliver a command as text)");
-  for (const head of ["def _edit_parked(sid, park, md, text):", "def _edit_backend_queued(be, sid, idx, md, text):"]) {
-    const arm = KERNEL.slice(KERNEL.indexOf(head));
-    assert.match(arm, /^[\s\S]*?if not body:\s*\n\s*return "nothing to send[^\n]*\n\s*if _is_slash_command\(body\):\s*\n(?:\s*#[^\n]*\n)*\s*return "a queued message cannot become a command: cancel it with its ✕ and type the command"/,
-      head + " refuses a slash-command body right after the empty-body check, before anything is replaced");
+test("Save posts editQueued with the old body and the new words, repaints at once, and drops the editor — the kernel's edit is the hold's release", () => {
+  const SAVE = slice("function saveQueuedEditor(ed: QueuedEditor): void {", "function renderQueuedEditor(", EDITOR);
+  assert.match(SAVE, /const qmsg: Record<string, unknown> = \{ type: "editQueued", id: ed\.sid, md: ed\.ref\.md, text: typed \};\s*\n\s*if \(ed\.ref\.idx !== undefined\) qmsg\.idx = ed\.ref\.idx;\s*\n\s*if \(ed\.ref\.park !== undefined\) qmsg\.park = ed\.ref\.park;\s*\n\s*if \(ed\.ref\.qid\) qmsg\.qid = ed\.ref\.qid;\s*\n\s*vscodeApi\?\.postMessage\(qmsg\);/);
+  assert.match(SAVE, /pendingEditRestores\.set\(ed\.sid \+ " " \+ ed\.ref\.md, \{ typed, ref: ed\.ref \}\);\s*\n\s*queuedEditors\.delete\(ed\.key\);\s*\n\s*applyQueuedEditLocally\(ed\.sid, ed\.ref, typed\);/,
+    "the bubble shows the new words at once (acknowledge the click); no separate release is posted");
+  // the three refusals leave the field as it is and precede the post
+  const post = SAVE.indexOf("vscodeApi?.postMessage(qmsg);");
+  for (const guard of [
+    'if (!typed) { ephemeralWarnToast("Nothing to send — to drop the message, use its ✕."); return; }',
+    'if (SLASH_CMD_RE.test(typed)) { warnToast("A queued message cannot become a command. Cancel it with its ✕ and type the command."); return; }',
+    'ephemeralWarnToast("Can\'t reach the session right now, so the edit wasn\'t saved. It\'s still in the message: save again when the link is back.");',
+  ]) {
+    const i = SAVE.indexOf(guard);
+    assert.ok(i >= 0 && i < post, "refused before anything is posted: " + guard.slice(0, 40));
   }
+  assert.match(SAVE, /if \(hostIsDown\(ed\.sid\)\) vscodeApi\?\.postMessage\(\{ type: "redial", host: String\(ed\.sid\)\.slice\(0, String\(ed\.sid\)\.indexOf\(":"\)\) \}\);/, "deliver()'s guard: a down host is re-dialled, the edit kept");
+  assert.doesNotMatch(SAVE, /registerOptimistic/, "an edit is not a new send");
+  // Cancel: the field goes, the bubble is as it was, the hold is released
+  assert.match(EDITOR, /function cancelQueuedEditor\(ed: QueuedEditor\): void \{\s*\n\s*queuedEditors\.delete\(ed\.key\);\s*\n\s*if \(!isProvisionalId\(ed\.sid\) && !hostIsDown\(ed\.sid\)\) vscodeApi\?\.postMessage\(holdQueuedMsg\(ed\.sid, ed\.ref, false\)\);\s*\n\s*repaintQueuedFor\(ed\.sid\);/);
 });
 
-test("⌘/Ctrl+⏎ cannot stage a queued edit as a NEW message while the original stays queued", () => {
-  assert.match(RENDER, /if \(composerEdits\.has\(activeId\)\) \{ ephemeralWarnToast\("An edit replaces a past message[^\n]*\n\s*if \(queuedEdits\.has\(activeId\)\) \{ ephemeralWarnToast\("This edit replaces a queued message\. Send it normally\."\); return; \}/,
-    "staging is refused while a queued edit owns the box, as it is for a rewind edit");
+test("the hold: every other client reads 'editing' on a held copy; the kernel skips a held entry in both queues and releases on Save, Cancel and the socket closing", () => {
+  assert.match(RENDER, /qts\?: number; qid\?: string; held\?: boolean; hiddenByPending\?: boolean;/, "the queued event carries the mark");
+  assert.match(BUBBLE, /else if \(t\.held && !t\.romp && !isCmd\) \{\s*\n\s*bubble\.classList\.add\("held"\);\s*\n\s*const h = el\("span", "queued-held-label"\); h\.textContent = "editing";/);
+  // the kernel: the op, the marks, the skips, the release on disconnect (executed in tests/test_queued_edit_hold.py)
+  assert.match(KERNEL, /elif t == "holdQueued":/);
+  assert.match(KERNEL, /"cancelQueued", "dismissEcho", "apiRetry", "editQueued", "holdQueued", "setModel"/, "routed to the owning kernel across linked machines");
+  assert.match(KERNEL, /def _hold_parked\(sid, park, md, owner, qid=None, hold=True\):/);
+  assert.match(KERNEL, /def _hold_backend_queued\(be, sid, idx, md, owner, qid=None, hold=True\):/);
+  assert.match(KERNEL, /def _parked_held\(sid, op\):/);
+  assert.match(KERNEL, /k = next\(\(j for j, o in enumerate\(ops\) if not _parked_held\(sid, o\)\), -1\)/, "the parked walk takes the first unheld op");
+  assert.match(KERNEL, /def _inflight_slot\(sid, ops\):/, "the in-flight guard finds the op the backend holds wherever a held send left it");
+  assert.match(KERNEL, /def _release_client_holds\(client\):/);
+  assert.match(KERNEL, /_clients\.remove\(client\)\s*\n\s*_release_client_holds\(client\)/, "the socket's finally is the release event; no timer");
+  assert.match(KERNEL, /"cid": uuid\.uuid4\(\)\.hex\[:12\],/, "every connection owns its holds");
+  assert.equal(KERNEL.split('m["held"] = True').length - 1, 2, "both queue builders mark a held entry for the chat");
+  assert.equal(KERNEL.split('"op": "hold" if want else "release"').length - 1, 1, "one authoritative frame, editResult, per hold or release");
+  // the backend: the feed pops the first unheld copy; Save clears the mark; a disconnect clears the owner's
+  assert.match(SDKBE, /def _feed_index_locked\(self\) -> int:/);
+  assert.match(SDKBE, /fi = self\._feed_index_locked\(\) if \(self\._pending and not blocked\) else -1\s*\n\s*item, _meta = self\._pop_for_feed_locked\(fi\) if fi >= 0 else \(None, None\)/);
+  assert.match(SDKBE, /def hold_queued\(self, idx: int, expect, owner: str, qid: str \| None = None\) -> bool:/);
+  assert.match(SDKBE, /def release_holds_by\(self, owner: str\) -> int:/);
+  assert.match(SDKBE, /self\._pending_hold\[idx\] = None\s+# the Save is the hold's release \(T306\)/);
+  assert.match(SDKBE, /"held": bool\(self\._pending_hold\[i\] if i < len\(self\._pending_hold\) else None\)/, "the chat reads the mark beside each copy");
 });
 
-test("an editQueued is refused BEFORE the box is cleared when the host is down or the tab is provisional", () => {
-  assert.match(QEDIT_BRANCH, /if \(hostIsDown\(activeId\) \|\| isProvisionalId\(activeId\)\) \{\s*\n\s*if \(hostIsDown\(activeId\)\) vscodeApi\?\.postMessage\(\{ type: "redial"/,
-    "deliver()'s guard: a down host drops the frame and no editResult would ever hand the words back");
-  assert.match(QEDIT_BRANCH, /It's still in the box/);
+test("the verdict: a refused Save reverses the repaint and hands the words back in a toast; a refused hold closes the field and the bubble says so", () => {
+  assert.match(VERDICT, /if \(m\.op === "hold"\) \{[\s\S]*?if \(ed\.sid !== m\.id \|\| ed\.ref\.md !== md \|\| !ed\.open\) continue;\s*\n\s*ed\.open = false; ed\.note = why \|\| "too late to edit — the message already reached the session as it was";/);
+  assert.match(VERDICT, /\} else if \(m\.op !== "release"\) \{\s*\n\s*if \(stash\) applyQueuedEditLocally\(m\.id, stash\.ref, stash\.typed, true\);\s*\n\s*if \(why \|\| stash\) warnToast\(\(why \|\| "The edit was not applied\."\) \+ \(stash \? " Your edit: " \+ stash\.typed : ""\)\);/,
+    "the words are never lost and never sent twice; they ride a sticky toast, not the composer");
+  assert.match(VERDICT, /repaintQueuedFor\(m\.id\);/);
+  assert.match(BUBBLE, /else if \(qed && qed\.note\) \{ const n = el\("div", "queued-editnote"\); n\.textContent = qed\.note; bubble\.appendChild\(n\); \}/, "the bubble says so, under its words");
 });
 
-test("editResult ok:false lands the typed words in that session's draft when the tab changed mid-round-trip", () => {
-  assert.match(RENDER, /if \(m\.id === activeId\) restoreToComposer\(stash\.typed\);\s*\n\s*else \{\n(?:[^\n]*\n){0,4}?\s*drafts\.set\(m\.id, [^\n]*stash\.typed[^\n]*\);\s*\n\s*persistDrafts\(\);/,
-    "neither the bubble nor the box holds them, so the draft store must; the next switch back shows them");
-});
-
-test("the ✎ holds the draft it displaces and gives it back when the edit ends; a closed session forgets its edit", () => {
-  assert.match(RENDER, /const queuedEditHeld = new Map<string, string>\(\);/);
-  assert.match(RENDER, /function beginQueuedEdit\(sid: string, ref: QueuedEditRef\): void \{[\s\S]*?if \(ta\.value\.trim\(\)\) queuedEditHeld\.set\(sid, ta\.value\);[\s\S]*?ta\.value = ref\.md;/,
-    "the in-progress draft is held BEFORE the queued text overwrites the box");
-  assert.match(RENDER, /function cancelQueuedEdit\(sid: string\): void \{\s*\n\s*if \(!queuedEdits\.delete\(sid\)\) return;\s*\n\s*restoreHeldDraft\(sid\);/);
-  assert.match(RENDER, /applyQueuedEditLocally\(activeId, qedit, typed\);\s*\n\s*restoreHeldDraft\(activeId\);/, "…and after a send");
-  assert.match(RENDER, /function restoreHeldDraft\(sid: string\): void \{[\s\S]*?if \(held\) drafts\.set\(sid, held\); else \{ drafts\.delete\(sid\); draftStartedAt\.delete\(sid\); \}/);
-  assert.match(RENDER, /queuedEdits\.delete\(id\); queuedEditHeld\.delete\(id\);[^\n]*\n\s*drafts\.delete\(id\); composerCitations\.delete\(id\); composerEdits\.delete\(id\);/,
-    "a close clears the queued edit with the rewind edit, so a stale pill never survives its session");
+test("an edit of a queued message never writes the composer or its chips, and the composer-based edit is gone", () => {
+  const COMPOSER = /composer-input|composer-chips|composer-chip|restoreToComposer|renderComposerChips|drafts\.set|drafts\.delete|persistDrafts|growComposer|composerCitations|composerManualH/;
+  for (const [name, src] of [["the editor", EDITOR], ["the delegates", DELEGATES], ["the verdict", VERDICT]] as const) {
+    assert.doesNotMatch(src, COMPOSER, name + " touches no composer state");
+  }
+  // the bubble's render: only the ✕'s own restore names the composer (a cancel returns the words to it, unchanged rule)
+  assert.equal((BUBBLE.match(COMPOSER) || []).length, 0, "the queued bubble's render touches no composer state");
+  for (const gone of ["beginQueuedEdit", "cancelQueuedEdit(", "queuedEditHeld", "restoreHeldDraft", "Editing queued message — send replaces it in the queue",
+                      "const qedit = queuedEdits.get(activeId)", "This edit replaces a queued message. Send it normally."]) {
+    assert.ok(!RENDER.includes(gone), "the composer-based edit is gone: " + gone);
+  }
+  assert.doesNotMatch(RENDER, /\bqueuedEdits\b/, "no composer-held queued edit state remains");
+  const CHIPS = slice("function renderComposerChips(", "\nfunction ", RENDER);
+  assert.doesNotMatch(CHIPS, /queued/i, "the composer's chip strip knows nothing of queued messages: the stray context chip cannot recur");
+  assert.match(RENDER, /closeQueuedEditorsFor\(id\);\s+\/\/ its in-place queued editors go with the tab/, "a closed tab drops its editors; the kernel releases the holds with the socket");
+  assert.match(RENDER, /composerEdits and the in-place queued editors are in memory alone/, "the reload note names the new state");
 });

@@ -1908,6 +1908,25 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   color: var(--dim); background: transparent; border: 0; border-radius: 6px; padding: 0;
 }
 .queued-edit:hover { color: var(--accent); background: rgba(255, 255, 255, 0.08); }
+/* EDITING IN PLACE (T306, the user 2026-09-10): the ✎ turns the bubble's text into a field where it sits — the same
+   width, the dashed provisional look kept, the ✕ still in its corner — with Save and Cancel under the text. The field
+   inherits the bubble's type; the buttons and the labels wear the queued header's 0.82em. A bubble another client is
+   editing reads "editing" beside its text; a refused edit says why on its own line. */
+.queued-bubble.editing { opacity: 1; border-color: var(--accent); padding-right: 30px; }
+.queued-editor { display: flex; flex-direction: column; gap: 6px; }
+.queued-editbox {
+  width: 100%; box-sizing: border-box; display: block; resize: none; overflow: hidden;
+  font: inherit; line-height: inherit; color: var(--fg); background: transparent; border: 0; padding: 0; margin: 0; outline: none;
+}
+.queued-editbtns { display: flex; justify-content: flex-end; gap: 6px; }
+.queued-editbtn {
+  font: inherit; font-size: 0.82em; line-height: 1.4; cursor: pointer; padding: 2px 9px; border-radius: 6px;
+  color: var(--fg); background: transparent; border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent);
+}
+.queued-editbtn:hover { border-color: var(--accent); }
+.queued-editbtn.save { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+.queued-held-label { font-size: 0.82em; color: var(--dim); margin-left: 8px; font-style: italic; }
+.queued-editnote { font-size: 0.82em; color: var(--vscode-errorForeground, #f48771); margin-top: 4px; }
 /* A notice romp itself queued (T243) wears the LANDED romp notice card nested inside the queued bubble: the
    dashed "you" dress comes off the wrapper (the card brings its own gray tone), and the ✕ moves inside the
    card's corner so it reads as the card's control. */
