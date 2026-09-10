@@ -3275,7 +3275,7 @@ _STATE_REPLACED = "replaced meanwhile; the new bytes get their own read"   # _st
 # notice says what starts over in the person's words. The views store holds the user's tags and lenses,
 # which are not settings (review find, 2026-09-08: its notice called them that); the flags, order and
 # bell stores are settings, the default.
-_STATE_FILE_HOLDS = {"timeline-views.json": "the tags and lenses"}
+_STATE_FILE_HOLDS = {"timeline-views.json": "the tags and lenses", "timeline-dismissed.json": "the cleared lanes"}
 
 
 def _state_quarantine(p, st, reason):
@@ -28977,37 +28977,81 @@ def _dismissed_lanes_file():
     return jd.STATE / "timeline-dismissed.json"
 
 
+# One writer of timeline-dismissed.json at a time: _dismiss_lane (the WS dismissLane arm, one receive loop
+# per dashboard) and _undismiss_lanes (build_timeline, on the pusher and the producer) both read-modify-write
+# the whole set, and two unlocked writers that read the same store both publish, the second silently
+# dropping the first one's change (the flags and order stores' rule). Taken around the proved read, the
+# publish and the memory copy's update as one step; nothing under it touches another store.
+_dismissed_lock = threading.Lock()
+
+
+def _dismissed_lanes_proved():
+    """The MUTATION snapshot of the cleared set, through the state-file door (_read_state_json): a
+    MISSING file is no dismissals; TORN or non-list bytes are moved aside to a `.corrupt-<stamp>` sidecar
+    (the evidence survives) and the set starts empty; an UNREADABLE file (EIO, EACCES) RAISES
+    _StateUnreadable, so a writer refuses rather than publishing a fabricated empty over the user's record.
+    The old reader folded every fault to an empty set, and the old writer truncated the file in place: a
+    kernel killed mid-write (a restart), or a disk that would not read, brought every cleared dead lane
+    back at the next boot, and the user's next Clear then wrote that empty-plus-one over the record of
+    all the others."""
+    raw = _read_state_json(_dismissed_lanes_file(), expect=list)
+    return set(str(x) for x in raw) if isinstance(raw, list) else set()
+
+
 def _load_dismissed_lanes():
+    """The BOOT read (the hydration below; the build path reads the memory copy, never the file): a read
+    fault is said once (_note_state_fault: one stderr line and one dashboard notice per episode) and the
+    memory copy starts EMPTY and UNPROVED. It stays empty until the next landed write, whose proved read
+    under the lock takes the record from disk; no writer ever publishes the empty copy itself."""
     try:
-        v = json.loads(_dismissed_lanes_file().read_text())
-        return set(str(x) for x in v) if isinstance(v, list) else set()
-    except (OSError, ValueError):
-        return set()                                  # absent/corrupt file = no dismissals, never a crash
-
-
-def _save_dismissed_lanes():
-    try:
-        _dismissed_lanes_file().parent.mkdir(parents=True, exist_ok=True)
-        _dismissed_lanes_file().write_text(json.dumps(sorted(_dismissed_lanes)))
-    except OSError as e:
-        sys.stderr.write("romp-kernel: could not persist timeline dismissals: %s\n" % e)
+        cur = _dismissed_lanes_proved()
+    except _StateUnreadable as e:
+        _note_state_fault(e)
+        return set()
+    _clear_state_fault(_dismissed_lanes_file())
+    return cur
 
 
 _dismissed_lanes = _load_dismissed_lanes()   # sids the user cleared from the timeline (dead lanes only)
 
 
+def _publish_dismissed_lanes(cur):
+    """Publish `cur` through the atomic write door (_write_state_json: a failed publish raises
+    _StateUnwritable and files the fault once per episode, and the file keeps its last whole contents),
+    then let the memory copy follow it -- never lead it, so a refused write leaves both exactly as they
+    were. Callers hold _dismissed_lock."""
+    _write_state_json(_dismissed_lanes_file(), json.dumps(sorted(cur)))
+    _dismissed_lanes.clear()
+    _dismissed_lanes.update(cur)
+
+
 def _dismiss_lane(sid):
-    """Record a Clear-pill dismissal durably — it survives kernel restarts and reconnects."""
-    _dismissed_lanes.add(str(sid))
-    _save_dismissed_lanes()
+    """Record a Clear-pill dismissal durably — it survives kernel restarts and reconnects. A locked
+    read-modify-write of the store: a read or write fault RAISES (_StateUnreadable / _StateUnwritable) for
+    the WS arm to refuse on the poster's socket, and the record on disk stays exactly as it was."""
+    with _dismissed_lock:
+        cur = _dismissed_lanes_proved()
+        cur.add(str(sid))
+        _publish_dismissed_lanes(cur)
 
 
 def _undismiss_lanes(sids):
-    """Shed dismissal records whose sids came back LIVE — the revive is the un-dismiss event."""
+    """Shed dismissal records whose sids came back LIVE — the revive is the un-dismiss event. Runs on the
+    BUILD path (build_timeline: the pusher, the producer), so a store fault is said once and the build goes
+    on with the record as it stands: the revived lane shows all the same (build_timeline filters only DEAD
+    sids), and its record sheds the next time the store can be read and written."""
     hit = _dismissed_lanes.intersection(str(s) for s in sids)
-    if hit:
-        _dismissed_lanes.difference_update(hit)
-        _save_dismissed_lanes()
+    if not hit:
+        return
+    try:
+        with _dismissed_lock:
+            cur = _dismissed_lanes_proved()
+            cur.difference_update(hit)
+            _publish_dismissed_lanes(cur)
+    except _StateUnreadable as e:
+        _note_state_fault(e)
+    except _StateUnwritable:
+        pass                                          # filed once per episode by _write_state_json itself
 
 
 def _mark_compacting(sid):
@@ -53474,8 +53518,15 @@ class Handler(BaseHTTPRequestHandler):
             # (the user: cleared lanes must survive restarts and reconnects) — _dismiss_lane persists it.
             # Only dead lanes carry the Clear button; build_timeline drops the sid only while it's dead,
             # so a revived one returns (and sheds its record — the revive is the un-dismiss event).
-            _dismiss_lane(str(msg["id"]))
-            _mark_views_dirty()
+            try:
+                _dismiss_lane(str(msg["id"]))
+            except (_StateUnreadable, _StateUnwritable) as e:
+                # the cleared-lanes store could not be read, or its publish failed: refuse on the DELIVERING
+                # socket, addressed to the lane, so the page puts the row back and says why (before this a
+                # failed save was one stderr line, and the lane stayed hidden until a reload)
+                _refuse_setting(client, e, "that clear", "lane", sid=msg["id"])
+            else:
+                _mark_views_dirty()
         elif msg and msg.get("type") == "locateDiag":
             # Every chat landing attempt (render.ts posts one per anchor jump, hit or miss) → an
             # append-only audit, so a "couldn't locate" report is diagnosed from the recorded trail
