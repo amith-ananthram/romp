@@ -373,10 +373,12 @@ STUB
 }
 
 @test "pick_python: a uv-built venv (home plus version_info, no executable) still names its interpreter" {
-    # uv writes `home =` and `version_info = X.Y.Z` and no `executable =` line (the stdlib's venv writes
-    # `version =`), so the X.Y that gates every home candidate comes from the version_info key alone. The
-    # `version_info` fake_python matches is in the probe's Python source, a different thing: every other
-    # cfg in this file writes `version =` or no version line, so the key was read by nothing here.
+    # uv writes `home =` and `version_info =` (X.Y for one of its managed interpreters, X.Y.Z for a system
+    # python) and no `executable =` line (the stdlib's venv writes `version =`), so the X.Y that gates every
+    # home candidate comes from the version_info key alone; the reader takes the X.Y prefix of either shape,
+    # and this cfg carries the longer one. The `version_info` fake_python matches is in the probe's Python
+    # source, a different thing: every other cfg in this file writes `version =` or no version line, so the
+    # key was read by nothing here.
     fakebin="$TEST_DIR/fakebin-uv"; mkdir -p "$fakebin"
     fake_python "$fakebin/python3.14" 3.14
     fake_python "$TEST_DIR/uvhome/python3.12" 3.12
