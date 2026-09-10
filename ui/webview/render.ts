@@ -13,6 +13,9 @@ import diff from "highlight.js/lib/languages/diff";
 import yaml from "highlight.js/lib/languages/yaml";
 import type { ParsedAsk } from "../ask-types";
 import { TABBAR_H_KEY, TABBAR_H_DEFAULT, clampTabbarH, parseTabbarH } from "./tabbar-resize";
+import type { CmtPopFrac } from "./comment-pop-size";
+import { CMT_POP_SIZE_KEY, CMT_POP_THREAD_DEFAULT, parseCmtPopSize, clampCmtPopPx, toCmtPopFrac, isCmtPopMax,
+         centerCmtPop, cmtPopCapPx } from "./comment-pop-size";
 import { ctxFallbackColor, pickTone, readableRgb } from "./ctx-color";
 import { applyTheme } from "./theme";
 import { applyDenseChrome } from "./dense-chrome";
@@ -64,7 +67,7 @@ import { openPathLink, linkifyPathTokens, selectionOpenIn } from "./path-links";
 import { initFileBrowse, openFileBrowse } from "./file-browse";   // the browser is pane-local here now (the user 2026-08-24)
 import { pastedFilePath } from "./paste-path";
 import { insertAtCaret } from "./composer-insert";
-import { hostNameNodes, hostPartsNodes, hostPrefix, hostOf, hostIsDown, hostDownNote } from "./host-prefix";
+import { hostNameNodes, hostPartsNodes, hostPrefix, hostOf, hostIsDown, hostIsDialing, hostDownNote } from "./host-prefix";
 import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionToken, insertMention, mentionKeyAction, mentionSegments } from "./composer-mention";   // the @-mention card's rules, pure; the DOM is setupComposer's mention block and markMentions
 import type { MentionCandidate, MentionQuery } from "./composer-mention";
 import { defaultCommentName, defaultBreakoutName, defaultForkName, nameToSend } from "./comment-name";
@@ -210,7 +213,7 @@ type ChatEvent = (
   // `held` DOES come from the kernel (_limit_hold): the queue is stuck on the ACCOUNT rather than on this
   // session — a usage limit or a monthly spend cap holds every send — so the head names what it is waiting
   // for, and how long is left when the API reported a reset (the user 2026-07-24).
-  | { kind: "queued"; texts: { md: string; followUp?: boolean; goal?: string; fuCtx?: string; idx?: number; park?: number; cancelable?: boolean; optimistic?: boolean; romp?: boolean; rompSystem?: boolean; rompAuto?: boolean; gist?: string; imgPaths?: string[]; lost?: string; qts?: number; qid?: string; hiddenByPending?: boolean; landing?: boolean }[]; ts?: string; uuid?: string; bare?: boolean; held?: { reason: string; resetsAt?: number | null; what: string; detail?: string } }   // imgPaths: an optimistic echo's dragged-image attachments → thumbnails, the landed form's own renderer (the user 2026-08-25); lost: client-only, the connection dropped after this unconfirmed send; qts: on OUR optimistic copy the pending entry's identity (its press time) so the ✕ removes ITS entry, on a kernel copy its enqueue stamp (T252c); qid: the copy's identity (T252c): minted at the press on OUR copy and posted with the send, so the kernel's copy wears the same one; the ✕ names it on both (send-pending.ts)
+  | { kind: "queued"; texts: { md: string; followUp?: boolean; goal?: string; fuCtx?: string; idx?: number; park?: number; cancelable?: boolean; optimistic?: boolean; romp?: boolean; rompSystem?: boolean; rompAuto?: boolean; gist?: string; imgPaths?: string[]; lost?: string; qts?: number; qid?: string; held?: boolean; hiddenByPending?: boolean; landing?: boolean }[]; ts?: string; uuid?: string; bare?: boolean; held?: { reason: string; resetsAt?: number | null; what: string; detail?: string } }   // imgPaths: an optimistic echo's dragged-image attachments → thumbnails, the landed form's own renderer (the user 2026-08-25); lost: client-only, the connection dropped after this unconfirmed send; qts: on OUR optimistic copy the pending entry's identity (its press time) so the ✕ removes ITS entry, on a kernel copy its enqueue stamp (T252c); qid: the copy's identity (T252c): minted at the press on OUR copy and posted with the send, so the kernel's copy wears the same one; the ✕ names it on both (send-pending.ts)
   // The turn stopped on an API error (event-based: transcript isApiErrorMessage). The session is BLOCKED
   // until retried — a red-dot card at the bottom with a Retry button (the user 2026-06-16).
   | { kind: "apiError"; text: string; status?: number; ts?: string; uuid?: string }
@@ -1422,11 +1425,12 @@ document.addEventListener("click", (e) => {
 // own event, never a per-click guess (no reading the parent's DOM, no polling). Standalone /chat never
 // hears one and reads as all-off, which the framed gate makes moot anyway.
 let panesOn: Record<string, boolean> = {};
+let panesAvail: Record<string, boolean> = {};   // …and which panes EXIST to bring forward (avail: the Files control's setting, T317); absent = available
 function openPath(path: string, sid?: string | null, ev?: MouseEvent | null): void {
   if (!vscodeApi) return;
   if (location.protocol === "http:" || location.protocol === "https:") {
     const to = sid || activeId || null;
-    const route = fileLinkRoute(settings.fileLinkPane, window.parent !== window, panesOn.files === true);
+    const route = fileLinkRoute(settings.fileLinkPane, window.parent !== window, panesOn.files === true, panesAvail.files !== false);
     // with its gesture, read first: a Cmd/Ctrl- or middle-click on a PDF takes the browser's own tab wherever
     // the plain click would have landed; a plain click routed to the Files pane is handed to the shell
     openFileClick(ev, path, to, route === "pane" ? () => {
@@ -1459,7 +1463,7 @@ function onMiddleClick(a: HTMLElement, fn: (e: MouseEvent) => void): void {
 // tells the person where Browse files will land, so the two cannot disagree.
 function browseRouteNow(): BrowseRoute {
   const web = location.protocol === "http:" || location.protocol === "https:";
-  return browseRoute(web, settings.fileLinkPane, window.parent !== window, panesOn.files === true);
+  return browseRoute(web, settings.fileLinkPane, window.parent !== window, panesOn.files === true, panesAvail.files !== false);
 }
 // Surface the FILE BROWSER at `path` for the session: the folder shown under the chat, the system context
 // card's Directory row, a tab menu's Browse files, a chat-hosted viewer's directory link. The listing goes
@@ -3009,7 +3013,7 @@ let railStickyPending = false;
 function scheduleRailSticky(): void {
   if (railStickyPending) return;
   railStickyPending = true;
-  requestAnimationFrame(() => { railStickyPending = false; paintRailSticky(); paintScrollMarks(); updateCommentRail(); });
+  requestAnimationFrame(() => { railStickyPending = false; paintRailSticky(); paintScrollMarks(); updateCommentRail(); if (activeId && hasUnreadOpenThread(activeId)) paintCommentOutlines(activeId); });
 }
 
 function renderEventInner(ev: ChatEvent): HTMLElement {
@@ -4157,7 +4161,8 @@ const pendingGroupNode = new Map<string, { sig: string; node: HTMLElement }>();
 function renderPendingGroup(ev: Extract<ChatEvent, { kind: "queued" }>): HTMLElement {
   const sid = renderingSid || activeId || "";
   const sig = JSON.stringify(ev.texts.map((t) => [t.md, !!t.lost, t.qts, t.imgPaths || null])) + "|" + JSON.stringify(ev.held || null)
-    + (ev.held && ev.held.resetsAt ? "|" + Math.floor(Date.now() / 60000) : "");   // a held countdown reads the minute: re-rendered as it ticks
+    + (ev.held && ev.held.resetsAt ? "|" + Math.floor(Date.now() / 60000) : "")   // a held countdown reads the minute: re-rendered as it ticks
+    + "|" + JSON.stringify(ev.texts.map((t) => { const e = queuedEditorFor(sid, t); return e ? [e.eid, e.open, e.text, e.note] : null; }));   // an editor on one of OUR copies (T306): the cached node predates it
   const fresh = renderQueued(ev);
   const cached = pendingGroupNode.get(sid);
   if (cached && cached.node.isConnected !== undefined) {
@@ -4312,6 +4317,18 @@ function renderQueued(ev: Extract<ChatEvent, { kind: "queued" }>): HTMLElement {
     }
     if (!t.romp && !isCmd) bubble.innerHTML = userMd(t.md);   // the user's words, newlines kept — byte-for-byte what the landed bubble shows
     if (!t.romp && !isCmd) markMentions(bubble);   // and a typed @name chipped, as the landed bubble wears it (renderEventInner). A statement of its own, not a brace around both: tests pin the line above verbatim (chat-md, queued-indicator)
+    // EDITING IN PLACE (T306): an open editor paints its field instead of the words; a closed one carrying the kernel's
+    // refusal says so under them; a copy another client is editing (the kernel's hold) reads "editing" beside them
+    const qsid = renderingSid || activeId || "";
+    const qed = qsid && !t.romp && !isCmd ? queuedEditorFor(qsid, t) : undefined;
+    if (qed && qed.open) { bubble.innerHTML = ""; renderQueuedEditor(bubble, qed); }
+    else if (qed && qed.note && t.held) { const n = el("div", "queued-editnote"); n.textContent = qed.note; bubble.appendChild(n); }
+    else if (qed && qed.note) queuedEditors.delete(qed.key);   // the hold the note spoke of is gone (the other client cancelled or saved): the bubble stops saying it
+    else if (t.held && !t.romp && !isCmd) {
+      bubble.classList.add("held");
+      const h = el("span", "queued-held-label"); h.textContent = "editing"; h.title = "being edited — it goes when the edit is done";
+      bubble.appendChild(h);
+    }
     // An optimistic echo's dragged images render as THUMBNAILS, not just their trailing paths (the
     // user 2026-08-25: composer preview → path-only provisional → thumbnail landing flashed). Same
     // machinery end to end: userImage with the landed form's exact "path:" shape — buildPathImg's
@@ -4346,9 +4363,10 @@ function renderQueued(ev: Extract<ChatEvent, { kind: "queued" }>): HTMLElement {
     // still the user's to change. The same three stages the ✕ covers (backend queue, parked, optimistic),
     // and the same recall gate (cancelable); romp's own words and slash commands are not edited — a
     // command is cancelled and typed again, and romp's notices are not the user's to reword. Delegated
-    // like the ✕ (data-act="qedit"); the composer takes the text under an editing pill (beginQueuedEdit),
-    // and send replaces the message where it sits — see the editQueued path in sendComposer.
-    if (t.cancelable && !t.romp && !isCmd && (t.idx !== undefined || t.park !== undefined || t.optimistic)) {
+    // like the ✕ (data-act="qedit"); the bubble's text becomes a field where it sits (openQueuedEditor, T306),
+    // and its Save replaces the message in place — the composer is never touched. An open field has its own
+    // Save and Cancel, so the ✎ steps aside while it is open.
+    if (t.cancelable && !t.romp && !isCmd && (t.idx !== undefined || t.park !== undefined || t.optimistic) && !(qed && qed.open)) {
       bubble.classList.add("editable");
       const ed = el("button", "queued-edit");
       ed.textContent = "✎";
@@ -4358,6 +4376,7 @@ function renderQueued(ev: Extract<ChatEvent, { kind: "queued" }>): HTMLElement {
       if (t.park !== undefined) ed.dataset.qpark = String(t.park);
       if (t.optimistic) ed.dataset.qopt = "1";
       if (t.optimistic && t.qts !== undefined) ed.dataset.qts = String(t.qts);   // OUR entry's identity, as on the ✕: a kernel copy's qts is its enqueue stamp, not an entry (T252c)
+      if (t.qid) ed.dataset.qid = t.qid;   // the copy's id: the hold and the edit name exactly this copy (T306)
       (ed as any)._qmd = t.md;
       xHost.appendChild(ed);
     }
@@ -4844,6 +4863,12 @@ function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>)
   const kind = kindLabel(intent ? intent.cls : null);
   let meta: HTMLElement | undefined;
   if (kind && intent) { meta = el("span", "postal-kind postal-kind-" + intent.cls); meta.textContent = kind; }
+  // the delivery state, read once here: it decides the meta below and the icon + dress after the card is built
+  const delivery = deliveryOf(ev);
+  // no recognised kind (a legacy row with neither a declared kind nor a leading token) but a delivery state to show:
+  // an EMPTY meta slot, so the icon always rides in the meta (T313 review find) — one geometry for every card, and
+  // the CSS needs no second path for an icon appended straight to the head
+  if (!meta && delivery) meta = el("span", "postal-meta-empty");
   // Gist: ALWAYS a one-line summary, the incoming caption, else the first line of the message CLIPPED (gist.ts
   // postalHead), with the full message one click deeper whenever the gist does not carry all of it (the user
   // 2026-06-16; T294, the user 2026-09-10, whose one-paragraph sent card had no fold at all). KEYED (the user
@@ -4861,9 +4886,11 @@ function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>)
   // relay, or parked for an unreachable host) — the SAME provisional dress the user's own pending send wears
   // (the queued bubble's class and tokens, the T302 amendment): solid again once the receipt says delivered,
   // relayed or read; bounced keeps its red mark. Incoming: only a parked clock (it waited while you were offline).
-  const delivery = deliveryOf(ev);
   if (delivery) {
-    turn.querySelector(".notice-head")?.appendChild(deliveryIcon(delivery));
+    // the icon rides INSIDE the meta slot, after the kind word (T313): the meta grows to the head's right edge, so the
+    // icon still sits at that edge, and on a phone-width head the kind word and the icon wrap as ONE unit (an icon
+    // alone on a line of its own was the alternative); the meta always exists when there is an icon (above)
+    turn.querySelector(".notice-meta")?.appendChild(deliveryIcon(delivery));
     if (ev.direction === "out" && (delivery.state === "sent" || delivery.state === "parked")) {
       turn.querySelector(".notice")?.classList.add("queued-bubble");
       turn.classList.add("postal-provisional");   // the bubble's border + padding move the head line: the rail dot follows
@@ -6682,6 +6709,9 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
 // this only when the reachable set actually CHANGES (its own /tunnels poll is the event), so this is a
 // repaint per connect/drop, not per poll (the user 2026-07-29).
 window.addEventListener("romp-hosts", () => { renderTabs(); });
+// a dial attempt to a remote host began or ended (federation.ts dialEvent): the host-down foot's swirl
+// spins while one is in flight, as of the last /tunnels poll, so it repaints on this event and on nothing else
+window.addEventListener("romp:hostDial", () => { syncHostOfflineFoot(); });
 window.addEventListener("mousedown", (e) => { if (ctxMenuEl && !ctxMenuEl.contains(e.target as Node)) dismissTabMenu(); }, true);
 // an Escape that closed the menu says so on the event (preventDefault), so the section view's own Escape
 // (installSnapshotEscape, armed at this same capture phase, later in the listener order) yields to it
@@ -6891,6 +6921,7 @@ function typeFromAnywhereTarget(e: Event): HTMLTextAreaElement | null {
   const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
   if (!ta || ta.disabled || document.activeElement === ta) return null;   // no box / read-only session / already in the box (covers key repeat; a paste there is native)
   if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return null;
+  for (const ed of queuedEditors.values()) if (ed.open && ed.focused) return null;   // a queued message's field owns the keys, across the tail's rebuild (T306)
   if (activeId && liveAsks.has(activeId)) return null;   // the live-ask card owns input while it is up (digits are its number keys)
   if (ctxMenuEl || document.querySelector(".picker-overlay")) return null;   // an open menu / #picker / #confirm owns the keys
   if (document.getElementById("romp-fileview") || document.getElementById("romp-filebrowse")
@@ -8329,6 +8360,10 @@ let pendingCommentAnchor: { sid: string; uuid: string; exact: string;
   model?: string; effort?: string; fast?: string; color?: string } | null = null; // create mode (+ the thread's own picks)
 let pendingAdoptTid: string | null = null;                          // commentCreated ack that beat its frame
 let commentPopPos: { x: number; y: number } | null = null;
+// the size WE set on the open popover (its open geometry, a stored preference, maximize/restore) — the
+// ResizeObserver tells our own sizing from the user's pull by it, so only a pull is remembered (2026-09-10)
+let cmtPopApplied: { w: number; h: number } | null = null;
+let cmtPopPreMax: CmtPopFrac | null = null;     // the size the box had before the last maximize this page-load: restore's target
 
 // the popover's own file picker (the user 2026-08-17: the attach clip, like the chat's) — files
 // ship through the SAME dropFile flow; the droppedPath ack sees the open popover and lands there
@@ -8378,7 +8413,7 @@ function applyCommentMarks(sid: string): void {
   // the rail cue clears first (idempotent re-apply): a thread viewed, resolved, or removed must
   // drop its turn's tint on this very pass, not linger until the next anchor match
   for (const t of Array.from(v.el.querySelectorAll(".turn.cmt-rail-unread"))) t.classList.remove("cmt-rail-unread");
-  if (!threads.length) { if (sid === activeId) updateReplyChips(); return; }   // no threads → no chips (the last one resolved/deleted)
+  if (!threads.length) { paintCommentOutlines(sid); if (sid === activeId) updateReplyChips(); return; }   // no threads → no boxes, no chips (the last one resolved/deleted)
   for (const [uuid, list] of threadsByAnchor(threads)) {
     const turn = v.el.querySelector(`.turn[data-uuid="${cssEscape(uuid)}"]`) as HTMLElement | null;
     if (!turn) continue;                       // windowed out — the mark returns when the turn does
@@ -8389,9 +8424,82 @@ function applyCommentMarks(sid: string): void {
     // openCommentPopover drops the unread flag and re-runs this pass.
     turn.classList.toggle("cmt-rail-unread", list.some((t) => !!t.unread && t.status === "open"));
   }
+  paintCommentOutlines(sid);                   // the unread boxes follow the marks this pass just placed (or unwrapped)
   // the reply chips MEASURE the marks (above/below the viewport), so they recount after this pass has the
   // highlights back in the DOM — this is the comments frame's and every transcript rebuild's hook for them
   if (sid === activeId) updateReplyChips();
+}
+
+/** ONE outline around the WHOLE highlighted passage of an unread open thread (the user 2026-09-10), in the scroll
+ *  notch's yellow (var(--cmt-hl)) — in place of the dashed ring each line fragment wore (an outline on the inline
+ *  mark paints per fragment, so a wrapped passage read as a stack of dashed boxes). CSS cannot merge the fragments,
+ *  so the box is an absolutely positioned child of the TURN (.cmt-outline, one per thread), sized to the union of the
+ *  thread's mark fragments' client rects, turn-relative: it scrolls with the text and needs no repaint on scroll.
+ *  Each fragment is first cut to every scrolling ancestor between its mark and the turn (a notice body, a wide formula):
+ *  the box sits outside those containers, so an unclipped fragment scrolled out of one would draw over the content
+ *  below. Repainted where the geometry can move — after every marks pass (each transcript rebuild and comments frame),
+ *  on the rail's rAF scheduler (a re-render, the view's resize observer, every scroll in the pane, inner containers'
+ *  included through the capture-phase listener) and on window resize — those two only while the session has an unread
+ *  open thread (hasUnreadOpenThread: a store read, so a scroll frame with nothing to move walks no DOM); the same measure-then-write
+ *  pass either way, writing only what changed. pointer-events: none, so hover and click land on the marks beneath.
+ *  A box goes with its unread bit (styleCommentMark drops the class when the popover opens or the thread resolves)
+ *  and with its marks (a windowed-out turn, a deleted thread); a hidden view has no boxes to measure and keeps none. */
+/** The cheap gate for the geometry hooks (the rail scheduler fires on every scroll frame, the resize listener on every
+ *  resize): a session with no unread open thread has no box to move, so those paths never walk its DOM (review find,
+ *  T310). Read from the thread store, no DOM. The marks pass calls the painter unconditionally: it is the removal path
+ *  (the last unread thread read, resolved or deleted takes its box with it on that pass). */
+function hasUnreadOpenThread(sid: string): boolean {
+  return (commentThreads.get(sid) || []).some((t) => !!t.unread && t.status === "open");
+}
+
+function paintCommentOutlines(sid: string): void {
+  const v = views.get(sid);
+  if (!v) return;
+  const want = new Map<string, HTMLElement[]>();          // tid -> its unread fragments, document order
+  if (v.el.style.display !== "none") {
+    for (const m of Array.from(v.el.querySelectorAll("mark.cmt-hl.unread")) as HTMLElement[]) {
+      const tid = m.dataset.tid || "";
+      const list = want.get(tid);
+      if (list) list.push(m); else want.set(tid, [m]);
+    }
+  }
+  for (const box of Array.from(v.el.querySelectorAll(".cmt-outline")) as HTMLElement[]) {
+    const tid = box.dataset.tid || "";
+    const marks = want.get(tid);
+    // a box whose thread is no longer unread, or that sits on a turn its marks have left, goes
+    if (!marks || marks[0].closest(".turn") !== box.parentElement) box.remove();
+  }
+  const PAD = 1;                                          // the box sits 1px clear of the glyphs (outline-offset's role)
+  for (const [tid, marks] of want) {
+    const turn = marks[0].closest(".turn") as HTMLElement | null;
+    if (!turn) continue;
+    let l = Infinity, t = Infinity, r = -Infinity, b = -Infinity;
+    for (const m of marks) {
+      // a fragment counts only where it can be SEEN: the box lives on the turn, outside any scrolling container between
+      // the mark and the turn (a notice body at its max height, a wide formula), whose clip the fragment's own rect
+      // ignores — so each fragment is cut to every such ancestor first, and a fragment scrolled out of view adds nothing
+      // (review find, T310). The union of what remains is the box; nothing left → no box.
+      let cl = -Infinity, ct = -Infinity, cr = Infinity, cb = Infinity;
+      for (let a = m.parentElement; a && a !== turn; a = a.parentElement) {
+        const cs = getComputedStyle(a);
+        if (cs.overflowX === "visible" && cs.overflowY === "visible") continue;
+        const ar = a.getBoundingClientRect();
+        cl = Math.max(cl, ar.left); ct = Math.max(ct, ar.top); cr = Math.min(cr, ar.right); cb = Math.min(cb, ar.bottom);
+      }
+      for (const q of Array.from(m.getClientRects())) {
+        if (!q.width && !q.height) continue;
+        const ql = Math.max(q.left, cl), qt = Math.max(q.top, ct), qr = Math.min(q.right, cr), qb = Math.min(q.bottom, cb);
+        if (qr <= ql || qb <= qt) continue;              // clipped away by a scrolling ancestor
+        l = Math.min(l, ql); t = Math.min(t, qt); r = Math.max(r, qr); b = Math.max(b, qb);
+      }
+    }
+    let box = turn.querySelector(`:scope > .cmt-outline[data-tid="${cssEscape(tid)}"]`) as HTMLElement | null;
+    if (!isFinite(l)) { box?.remove(); continue; }        // no visible fragment (a display:none ancestor, or all scrolled out)
+    if (!box) { box = el("div", "cmt-outline"); box.dataset.tid = tid; turn.appendChild(box); }
+    const tr = turn.getBoundingClientRect();
+    const css = { left: (l - tr.left - PAD) + "px", top: (t - tr.top - PAD) + "px", width: (r - l + 2 * PAD) + "px", height: (b - t + 2 * PAD) + "px" };
+    for (const k of ["left", "top", "width", "height"] as const) if (box.style[k] !== css[k]) box.style[k] = css[k];
+  }
 }
 
 /** The parent side of a branch (the user 2026-08-13): a small "↳ <name>" chip on the turn a fork
@@ -8531,7 +8639,7 @@ function updateCommentRail(): void {
     return tick;
   }));
 }
-window.addEventListener("resize", () => updateCommentRail());
+window.addEventListener("resize", () => { updateCommentRail(); if (activeId && hasUnreadOpenThread(activeId)) paintCommentOutlines(activeId); });
 
 // (The per-turn count badge is GONE — the user 2026-08-17: the highlight does the speaking, and
 // the scroll-rail tick already covers a thread whose rendered text drifted beyond re-matching.)
@@ -9006,6 +9114,77 @@ function wireEdgeResize(pop: HTMLElement): void {
   });
 }
 
+// ── remembered size + maximize (the user 2026-09-10, who enlarged the box by hand on every open) ── the
+// rules are comment-pop-size.ts's; this is the DOM half. localStorage reads and writes are wrapped so a
+// denied or full store costs the preference, never the popover (file-view.ts's convention).
+function readCmtPopSize(): CmtPopFrac | null {
+  try { return parseCmtPopSize(localStorage.getItem(CMT_POP_SIZE_KEY)); } catch { return null; }
+}
+function saveCmtPopSize(pop: HTMLElement): void {
+  const frac = toCmtPopFrac(pop.offsetWidth, pop.offsetHeight, window.innerWidth, window.innerHeight);
+  try { localStorage.setItem(CMT_POP_SIZE_KEY, JSON.stringify(frac)); } catch { /* storage full or denied */ }
+}
+/** Size the box programmatically and record what it measures: the observer treats that size as ours. */
+function sizeCommentPop(pop: HTMLElement, w: number, h: number): void {
+  pop.style.width = w + "px";
+  pop.style.height = h + "px";
+  cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };
+}
+// the house line-icon style (16-unit box, 1.4 stroke, round caps): one frame = maximize, two offset frames = restore
+const CMT_MAX_GLYPH = '<rect x="2.5" y="2.5" width="11" height="11" rx="1.5"/>';
+const CMT_RESTORE_GLYPH = '<path d="M5.5 5.5V3.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2"/>'
+  + '<rect x="2.5" y="5.5" width="8" height="8" rx="1"/>';
+/** "Maximized" is COMPUTED from the live size (within a few px of the cap), never a stored bit that can
+ *  drift: the data-max mark and the button's glyph/title/aria-label follow it (a control changes its own
+ *  label on click — ui/CLAUDE.md). Called at open, after every toggle, and after every user resize. */
+function syncCmtMaxState(pop: HTMLElement): void {
+  const max = isCmtPopMax(pop.offsetWidth, pop.offsetHeight, window.innerWidth, window.innerHeight);
+  if (max) pop.dataset.max = "1"; else delete pop.dataset.max;
+  const btn = pop.querySelector(".cmt-max") as HTMLElement | null;
+  if (!btn) return;
+  btn.innerHTML = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" '
+    + 'stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">' + (max ? CMT_RESTORE_GLYPH : CMT_MAX_GLYPH) + "</svg>";
+  btn.title = max ? "Restore" : "Maximize";
+  btn.setAttribute("aria-label", max ? "Restore" : "Maximize");
+}
+/** Maximize ⇄ restore — the head's button and a double-click on the title bar both land here. Maximize
+ *  sizes to the cap, centers, and remembers the fraction like any resize; restore goes back to the size
+ *  the box had before the maximize (this page-load), else the mode's own default — the thread's 70%/60%,
+ *  or the create dialog's content size (inline size AND preference dropped) — centered too. */
+function toggleCommentPopMax(): void {
+  const pop = document.getElementById("cmt-pop");
+  if (!pop) return;
+  const W = window.innerWidth, H = window.innerHeight;
+  if (isCmtPopMax(pop.offsetWidth, pop.offsetHeight, W, H)) {
+    if (cmtPopPreMax) {
+      const px = clampCmtPopPx(cmtPopPreMax, W, H);
+      sizeCommentPop(pop, px.w, px.h);
+      saveCmtPopSize(pop);
+    } else if (pop.dataset.mode === "thread") {
+      sizeCommentPop(pop, Math.round(W * CMT_POP_THREAD_DEFAULT.w), Math.round(H * CMT_POP_THREAD_DEFAULT.h));
+      saveCmtPopSize(pop);
+    } else {
+      pop.style.removeProperty("width");
+      pop.style.removeProperty("height");
+      pop.classList.remove("sized");                  // no expressed size any more: the quote clamp comes back…
+      cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };   // …and reflows the content size, so measure AFTER it
+      try { localStorage.removeItem(CMT_POP_SIZE_KEY); } catch { /* storage denied */ }
+    }
+  } else {
+    // an expressed size only: a content-sized create dialog has nothing to go back to but its content
+    cmtPopPreMax = pop.style.width ? toCmtPopFrac(pop.offsetWidth, pop.offsetHeight, W, H) : null;
+    const cap = cmtPopCapPx(W, H);
+    sizeCommentPop(pop, cap.w, cap.h);
+    saveCmtPopSize(pop);
+    pop.classList.add("sized");
+  }
+  const c = centerCmtPop(pop.offsetWidth, pop.offsetHeight, W, H);
+  pop.style.left = c.left + "px";
+  pop.style.top = c.top + "px";
+  commentPopPos = { x: c.left, y: c.top };             // a later rebuild reopens where the toggle put it, like a drag
+  syncCmtMaxState(pop);
+}
+
 function commentPopTitle(create: boolean, th: CommentThread | null | undefined): string {
   const nm = th?.name || "Thread";
   return create ? "New comment:"
@@ -9131,18 +9310,34 @@ function renderCommentPopover(): void {
     const nb = nameBox;
     nb.addEventListener("input", () => { nb.classList.remove("bad"); commentDrafts.set(nk, nb.value); });
   }
+  // maximize ⇄ restore (the user 2026-09-10), right before the ×; delegated like the × (cmtmax), the
+  // glyph and label painted by syncCmtMaxState once the box has its open size
+  const maxBtn = el("button", "cmt-max") as HTMLButtonElement;
+  maxBtn.type = "button";
+  maxBtn.dataset.act = "cmtmax";
   const closeBtn = el("button", "cmt-x") as HTMLButtonElement;
   closeBtn.type = "button";
   closeBtn.textContent = "×";
   closeBtn.title = "Close (the thread stays on its highlight)";
   closeBtn.dataset.act = "cmtclose";
-  if (nameBox) head.append(title, nameBox, closeBtn);
-  else head.append(title, closeBtn);
+  if (nameBox) head.append(title, nameBox, maxBtn, closeBtn);
+  else head.append(title, maxBtn, closeBtn);
   // DRAG by the header (the user 2026-08-13, who found the popover's spot inconvenient): pointer
   // capture, viewport-clamped, and the position writes through to commentPopPos so a later full
   // rebuild (a status flip) reopens where the user parked it. The header survives in-place
   // refreshes, so a drag is never cut by a comments frame; a full rebuild mid-drag just ends it.
-  head.title = "Drag to move";
+  head.title = "Drag to move · double-click to maximize or restore";
+  // DOUBLE-CLICK on the title bar toggles maximize, a window's title bar (the user 2026-09-10) — the same
+  // toggle as the button. Listened on the BOX and hit-tested at the pointer: the drag below captures the
+  // pointer on every press, and a captured press retargets the click/dblclick it ends in to the box, so a
+  // listener on the head would never hear it. Interactive children of the head (the name box, the two
+  // buttons) keep their own double-click.
+  pop.addEventListener("dblclick", (ev: MouseEvent) => {
+    const at = document.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement | null;
+    if (!at || !at.closest(".cmt-head") || at.closest(".cmt-name, .cmt-x, .cmt-max, button, input")) return;
+    ev.preventDefault();
+    toggleCommentPopMax();
+  });
   // the WHOLE box drags (the user 2026-08-17), not just the header — any grip that isn't an
   // interactive control or selectable text, and never the bottom-right resize corner
   pop.addEventListener("pointerdown", (ev: PointerEvent) => {
@@ -9180,7 +9375,9 @@ function renderCommentPopover(): void {
     quote.title = "the highlighted passage this thread is about";
     pop.appendChild(quote);
   }
-  if (th) {
+  if (th && th.status !== "promoted") {
+    // (a promoted thread gets no list: the kernel ships it with no messages or events — see the
+    // promoted branch below — and an empty list only grew into the box's fixed height)
     const list = el("div", "cmt-msgs");
     fillCommentMsgs(list, th, sid);
     pop.appendChild(list);
@@ -9394,10 +9591,22 @@ function renderCommentPopover(): void {
     }
     pop.appendChild(row);
   } else if (th) {
+    // a thread that became its own session (the user 2026-09-10, with a screenshot): the kernel
+    // ships it with no messages or events — the talk lives in the session now — so this view is the
+    // quote, one line saying where the talk went, and the one action, stacked from the top; nothing
+    // here grows into the box's fixed height (the empty list and the .sized quote used to split the
+    // free room between them: a one-line quote ran hundreds of pixels tall over a void, the action
+    // pinned under it). The action wears the shared .cmt-act word-button dress like every other
+    // action in this popover — it wore the composer's send-glyph square (.cmt-send: ~36px wide,
+    // 16px, no border), so "Open the session" wrapped one word per line in an oversized font.
+    const note = el("div", "cmt-note");
+    note.textContent = "The discussion continues there.";
+    pop.appendChild(note);
     const row = el("div", "cmt-actions");
-    const open = el("button", "cmt-send") as HTMLButtonElement;
+    const open = el("button", "cmt-act") as HTMLButtonElement;
     open.type = "button";
     open.textContent = "Open the session";
+    open.title = "Switch to that session";
     open.dataset.act = "cmtopensession";
     open.dataset.tid = th.tid;
     row.appendChild(open);
@@ -9408,10 +9617,38 @@ function renderCommentPopover(): void {
     // resizing the BOX (resize: both) hands the extra room to the quoted context: the .sized class
     // unlocks the quote's clamp; armed only after a real user resize, so the natural size stays tight
     const w0 = pop.offsetWidth, h0 = pop.offsetHeight;
+    // …and REMEMBERS the size (the user 2026-09-10): this observer sees the native grip and the edge
+    // bands alike, so it is the one event every user resize fires — each observation writes the fraction
+    // (comment-pop-size.ts) except the ones that are not the user's: the size WE set (cmtPopApplied —
+    // the open geometry, a stored preference, maximize/restore), a box the WINDOW moved through the
+    // vw/vh caps (re-baselined on resize below: a briefly-small window never rewrites the preference,
+    // the tab strip's rule), and the box leaving the page (a 0×0 box is a close, not a choice).
     const ro = new ResizeObserver(() => {
       if (Math.abs(pop.offsetWidth - w0) > 6 || Math.abs(pop.offsetHeight - h0) > 6) pop.classList.add("sized");
+      if (!pop.isConnected || !pop.offsetWidth || !pop.offsetHeight) return;
+      const a = cmtPopApplied;
+      if (a && Math.abs(pop.offsetWidth - a.w) <= 1 && Math.abs(pop.offsetHeight - a.h) <= 1) return;
+      cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };
+      saveCmtPopSize(pop);
+      syncCmtMaxState(pop);                          // a pull onto or off the cap flips the toggle's label with it
     });
     ro.observe(pop);
+    const onWin = () => {
+      if (!pop.isConnected) { window.removeEventListener("resize", onWin); return; }
+      cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };   // the resize event runs before the observer's frame
+    };
+    window.addEventListener("resize", onWin);
+  }
+  // REMEMBERED SIZE (the user 2026-09-10): the fraction of the window the user last dragged the box to,
+  // applied in BOTH modes and re-clamped to the live window (comment-pop-size.ts: the CSS mins as the
+  // floor, the CSS caps and an 8px margin as the cap). With nothing stored, both modes open exactly as
+  // before: the thread geometry below, the create dialog at its content size with no inline size at all.
+  const pref = readCmtPopSize();
+  if (pref) {
+    const sz = clampCmtPopPx(pref, window.innerWidth, window.innerHeight);
+    pop.style.width = sz.w + "px";
+    pop.style.height = sz.h + "px";
+    pop.classList.add("sized");                      // an expressed size: the quote/msgs reflow rules apply from open
   }
   // OPEN GEOMETRY (the user 2026-08-25), THREAD mode: 70% of the chat pane's width with the RIGHT
   // edge on the chat's right edge, 60% of the pane's height — and the size is FIXED from open:
@@ -9421,12 +9658,14 @@ function renderCommentPopover(): void {
   // The CREATE composer keeps its natural size at the selection point — a different gesture.
   if (th && !pop.style.width) { pop.style.width = Math.round(window.innerWidth * 0.7) + "px"; }
   if (th && !pop.style.height) { pop.style.height = Math.round(window.innerHeight * 0.6) + "px"; }
+  cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };   // whatever it measures now is ours, the content size included
   const r = pop.getBoundingClientRect();
   const defaultX = th ? (window.innerWidth - r.width - 8) : (window.innerWidth - r.width) / 2;
   const px = Math.max(8, Math.min(commentPopPos?.x ?? defaultX, window.innerWidth - r.width - 8));
   const py = Math.max(8, Math.min(commentPopPos?.y ?? 120, window.innerHeight - r.height - 8));
   pop.style.left = px + "px";
   pop.style.top = py + "px";
+  syncCmtMaxState(pop);                              // a stored cap-sized preference opens reading "Restore"
   const msgs = pop.querySelector(".cmt-msgs") as HTMLElement | null;
   if (msgs) msgs.scrollTop = msgs.scrollHeight;
   if (create || hadFocus || !th || !th.msgs.length) (pop.querySelector(".cmt-input") as HTMLTextAreaElement | null)?.focus();
@@ -10143,18 +10382,7 @@ function landToast(msg: string) {
 // additive noise-removal, not a key the rest of the UI loses — and overlay consumers
 // that capture Escape (the lightbox, the viewer) still peel first by construction.
 function warnToast(msg: string): HTMLElement {
-  let box = document.getElementById("warn-toasts");
-  if (!box) {
-    box = el("div", "");
-    box.id = "warn-toasts";
-    document.body.appendChild(box);
-    box.addEventListener("click", (e) => {
-      (e.target as HTMLElement | null)?.closest(".warn-toast")?.remove();
-    });
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") for (const w of Array.from(box!.children)) w.remove();
-    });
-  }
+  const box = ensureToastBox();
   const t = el("div", "warn-toast");
   const txt = el("span", "warn-toast-msg");
   txt.textContent = msg;
@@ -10169,6 +10397,44 @@ function warnToast(msg: string): HTMLElement {
   setTimeout(() => t.remove(), 12000);
   return t;   // the toast, for a caller that marks it (ephemeralWarnToast)
 }
+function ensureToastBox(): HTMLElement {
+  let box = document.getElementById("warn-toasts");
+  if (!box) {
+    box = el("div", "");
+    box.id = "warn-toasts";
+    document.body.appendChild(box);
+    box.addEventListener("click", (e) => {
+      (e.target as HTMLElement | null)?.closest(".warn-toast")?.remove();   // the Copy button stops its own click short of here
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") for (const w of Array.from(box!.children)) w.remove();
+    });
+  }
+  return box;
+}
+// A toast that never fades and carries the words: for typed words that have nowhere else to live (a queued message's
+// edit refused after the copy left the queue, T306 review). No timers; dismissed by its ✕, Escape or a click on its
+// text; the Copy button puts the words on the clipboard and stays put.
+function stickyToast(msg: string, copyText: string): HTMLElement {
+  const box = ensureToastBox();
+  const t = el("div", "warn-toast sticky");
+  const txt = el("span", "warn-toast-msg");
+  txt.textContent = msg;
+  const c = el("button", "warn-toast-copy");
+  c.textContent = "Copy";
+  c.title = "copy the words to the clipboard";
+  c.addEventListener("click", (e) => {
+    e.stopPropagation();
+    try { navigator.clipboard?.writeText(copyText); c.textContent = "Copied"; } catch (_) { c.textContent = "Select the text above"; }
+  });
+  const x = el("button", "warn-toast-x");
+  x.setAttribute("aria-label", "Dismiss");
+  x.title = "dismiss (Esc)";
+  x.textContent = "✕";
+  t.append(txt, c, x);
+  box.appendChild(t);
+  return t;
+}
 // A toast the page that follows a reload must not repeat: a refusal that reports a STATE rather than an event. The
 // staged sends' "Can't send yet" says the session's host is unreachable (hostIsDown, a remote host's tunnel) or its tab
 // is still being created (isProvisionalId); the plain send's refusal on a disconnected host (sendComposer's deliver)
@@ -10180,7 +10446,7 @@ function warnToast(msg: string): HTMLElement {
 // mark and the transcript foot, from the kernel's tunnel health, which the page reads afresh into a disconnected set
 // that starts empty; the staged strip; the picker, the attachments and the roster come back from the kernel and the
 // persisted drafts, the refused message among them) or no longer has it (a provisional tab, pending or failed, does not
-// survive a reload; composerEdits and queuedEdits are in memory alone, so no edit is in progress on a fresh page, and a
+// survive a reload; composerEdits and the in-place queued editors are in memory alone, so no edit is in progress on a fresh page, and a
 // "send again" there would post the words as a new message), so kept by persistNoticesForReload and shown again by the
 // page that follows, it would be redundant at best and false at worst; a replay also posts no redial, so the
 // disconnected-host refusal's "re-dialing now" would not be true there. The mark keeps it out of the replay
@@ -11539,15 +11805,35 @@ function syncHostOfflineFoot(): void {
   if (!activeId || !hostIsDown(activeId)) { existing?.remove(); return; }
   const host = String(activeId).slice(0, String(activeId).indexOf(":"));
   const text = host + " is disconnected — this is the last romp got from it. Reconnecting.";
-  if (existing && existing.dataset.text === text) return;
+  // The swirl after "Reconnecting" spins only while romp is actually trying to reach the host (the user
+  // 2026-09-10, who wanted it dynamic and honest: trying right now, not a spinner because something is wrong).
+  // hostIsDialing reads what federation publishes (host-prefix.ts hostDialLive): the kernel's /tunnels row
+  // saying `dialing` (an ssh dial spawned and unconfirmed, or its health request to the host in flight;
+  // the browser never dials a host the kernel reports down, so the kernel's word is the one that matters
+  // here) or this page's relay socket in its CONNECTING state. Federation's romp:hostDial event, on the
+  // row's change and on the socket's dial, open and close, is what repaints this foot; between attempts
+  // (the kernel waiting out its backoff) the swirl sits still. It sits AFTER the sentence as the gist's flex
+  // SIBLING in the head (the postal delivery icon's convention), never inside the gist: that span ellipsizes
+  // on a narrow pane and would clip the swirl first, the one dynamic cue. The rebuild is keyed on the state
+  // too, so a repaint with nothing changed leaves the DOM alone.
+  const dialing = hostIsDialing(activeId);
+  const key = text + (dialing ? " |dialing" : "");
+  if (existing && existing.dataset.text === key) return;
   existing?.remove();
   // a slim SESSION notice in the warn severity at the transcript's tail (the audit's row 35 — it was a
   // centred italic line, the one row outside the vocabulary); off the rail, so the prose-column indent
   const foot = el("div", "notice-foot");
   foot.id = "host-offline-foot";
-  foot.dataset.text = text;
-  foot.appendChild(notice({ src: "session", glyph: "api", sev: "warn", gist: text, nested: true,
-                            tip: hostDownNote(activeId) }));   // the one place that note is worded — host-prefix.ts
+  foot.dataset.text = key;
+  const card = notice({ src: "session", glyph: "api", sev: "warn", gist: text, nested: true, live: dialing,
+                        tip: hostDownNote(activeId) });   // the one place that note is worded — host-prefix.ts
+  if (dialing) {
+    const swirl = el("img", "host-dial-swirl") as HTMLImageElement;   // the romp-loader motif (the placeholder tab's mini swirl)
+    swirl.src = mediaSrc("romp-swirl-glyph.svg"); swirl.alt = ""; swirl.onerror = () => swirl.remove();
+    const gistEl = card.querySelector(".notice-head .notice-gist");
+    if (gistEl) gistEl.after(swirl); else card.querySelector(".notice-head")?.appendChild(swirl);
+  }
+  foot.appendChild(card);
   content.appendChild(foot);
 }
 
@@ -11592,10 +11878,13 @@ if (typeof ResizeObserver === "function") {
   const c = document.getElementById("content");
   if (c) ro.observe(c);
 }
-// the sticky rail stamp tracks the scroll it annotates (passive: it only measures, never blocks the scroll)
+// the sticky rail stamp tracks the scroll it annotates (passive: it only measures, never blocks the scroll). CAPTURE,
+// so a scroll INSIDE the pane reaches it too — a notice body at its max height, a wide formula: scroll events do not
+// bubble, and the unread comment boxes (paintCommentOutlines, on this same scheduler) must follow marks that move
+// inside such a container and be cut to it (review find, T310). The other painters here are signature-guarded.
 {
   const c = document.getElementById("content");
-  if (c) c.addEventListener("scroll", scheduleRailSticky, { passive: true });
+  if (c) c.addEventListener("scroll", scheduleRailSticky, { passive: true, capture: true });
 }
 // ── jump to newest (the user 2026-08-31) ─────────────────────────────────────────────────────────
 // Scrolled-up reading leaves follow mode, and the send gate keeps it that way — this chip is the
@@ -14087,6 +14376,7 @@ window.addEventListener("romp:wsup", () => {
 window.addEventListener("romp:hostRelayUp", (e) => {
   const h = String((((e as CustomEvent).detail || {}) as any).host || "");
   if (h) reshipPendingUploads([h]);
+  if (h) reholdQueuedEditors(true);   // the remote kernel released this page's holds with the old relay socket (T306)
   // …and the figure previews parked on that host's link (T291): the relay socket's open is the reconnect-class
   // event a remote kernel's restart produces (it fires neither romp:wsup nor hostUp), so settled previews
   // make their one attempt here as well
@@ -14391,52 +14681,182 @@ function renderStagedStrip(id: string | null, opts?: { reveal?: "last" }): void 
   list.scrollTop = opts?.reveal === "last" ? list.scrollHeight : (stagedScroll.get(id) || 0);
 }
 
-// ---- editing a QUEUED message (the user 2026-09-08) --------------------------------------------------
-// A message that has not reached the session yet — parked in romp's FIFO, held in the SDK backend's own
-// queue, or still at the optimistic "sending…" stage — is the user's to change until it goes. The ✎ on its
-// bubble loads the text into the composer under an EDITING pill (the rewind edit's grammar, one level
-// deeper: "Editing queued message"), and send REPLACES it in place: same queue slot, same follow-up
-// context, only the words. The kernel verifies the entry by body (editQueued's md — the ✕'s drift guard)
-// and answers editResult; ok:false means the message left the queue meanwhile, so the typed words go
-// back to the composer and the queue repaints from the kernel — nothing is lost, nothing is sent twice.
-type QueuedEditRef = { md: string; idx?: number; park?: number; qts?: number; optimistic?: boolean };
-const queuedEdits = new Map<string, QueuedEditRef>();
-// the typed text + the entry it replaced, keyed sid + " " + old body, so a failed edit can give the words
-// back and undo the optimistic repaint (one-shot, ok or not — pendingCancelRestores' twin)
+// ---- editing a QUEUED message IN PLACE (T306, the user 2026-09-10) --------------------------------------
+// A message that has not reached the session yet — parked in romp's FIFO, held in the SDK backend's own queue, or
+// still at the optimistic "sending…" stage — is the user's to change until it goes. The ✎ on its bubble turns the
+// bubble's text into a field where it sits (the same width, the dashed provisional look kept) with Save and Cancel;
+// the composer is never touched (the 2026-09-08 design pulled the text into the composer, where a message that went
+// meanwhile left its words behind as a stray context chip). While the field is open the entry is HELD: the open
+// posts holdQueued and the kernel's drains skip the entry until the Save (the editQueued itself releases it), the
+// Cancel (holdQueued hold:false) or this page's socket closing releases it. Save posts editQueued with the new words
+// and the kernel replaces the entry in place (same slot, a follow-up's wrapper kept), answering editResult: ok:false
+// on a Save means the message left the queue meanwhile — the optimistic repaint is reversed and the typed words ride
+// a sticky toast, never the composer; ok:false on the hold (the entry fed before the field could hold it) closes the
+// field and the bubble says so. The editor's state is keyed by the entry (session + body + the copy's id and stamp)
+// and lives in memory, so the tail's rebuild on every push repaints the field from it — text, caret and focus — and
+// a fresh page has no edit in progress (the kernel released the hold with the old socket).
+type QueuedEditRef = { md: string; idx?: number; park?: number; qts?: number; qid?: string; optimistic?: boolean };
+type QueuedEditor = { eid: number; sid: string; key: string; ref: QueuedEditRef; text: string; sel: [number, number] | null;
+                      focused: boolean; open: boolean; note: string; width: number; height: number };
+const queuedEditors = new Map<string, QueuedEditor>();   // sid + the entry's key → its editor (open, or a closed one carrying a note)
+let queuedEditorSeq = 0;
+// the typed text + the entry it replaced, keyed sid + " " + old body, so a refused Save can undo the optimistic
+// repaint and hand the words back (one-shot, ok or not — pendingCancelRestores' twin)
 const pendingEditRestores = new Map<string, { typed: string; ref: QueuedEditRef }>();
-// the in-progress draft the ✎ displaced, per session, handed back when the edit ends (cancelled or sent) so
-// correcting a queued message never costs a half-typed one (review find, 2026-09-08)
-const queuedEditHeld = new Map<string, string>();
-
-function beginQueuedEdit(sid: string, ref: QueuedEditRef): void {
-  if (composerEdits.has(sid)) cancelComposerEdit(sid);   // one edit at a time: a rewind edit yields to this one
-  queuedEdits.set(sid, ref);
-  composerCitations.delete(sid);   // the queued text carries its own context (a follow-up keeps it kernel-side)
+// the copy's identity: its id when it has one (every kernel copy, and every press this page minted), else the press
+// stamp (an id-less optimistic copy of ours) — never the stamp BESIDE an id: a kernel copy's stamp is its enqueue time,
+// which the ✎ does not carry, so keying on it left the field unfindable and the copy held (review find)
+const queuedEditorKey = (sid: string, t: { md: string; qid?: string; qts?: number }): string =>
+  sid + "\u0001" + t.md + "\u0001" + (t.qid ? "id:" + t.qid : "ts:" + (t.qts === undefined ? "" : String(t.qts)));
+function queuedEditorFor(sid: string, t: { md: string; qid?: string; qts?: number }): QueuedEditor | undefined {
+  return queuedEditors.get(queuedEditorKey(sid, t));
+}
+function queuedEditorByEid(eid: number): QueuedEditor | undefined {
+  for (const ed of queuedEditors.values()) if (ed.eid === eid) return ed;
+  return undefined;
+}
+function repaintQueuedFor(sid: string): void {
   if (sid !== activeId) return;
-  const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
-  if (ta) {
-    if (ta.value.trim()) queuedEditHeld.set(sid, ta.value);   // hold the draft this edit displaces
-    ta.value = ref.md; growComposer(ta); ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+  const v = views.get(sid);
+  if (v) { v.stale = true; appendActive(); }
+}
+function holdQueuedMsg(sid: string, ref: QueuedEditRef, hold: boolean): Record<string, unknown> {
+  const m: Record<string, unknown> = { type: "holdQueued", id: sid, md: ref.md, hold };
+  if (ref.idx !== undefined) m.idx = ref.idx;
+  if (ref.park !== undefined) m.park = ref.park;
+  if (ref.qid) m.qid = ref.qid;
+  return m;
+}
+// the ✎: the field opens where the bubble is (the acknowledgement), and the hold goes out with it. A session that
+// cannot be reached (a down host, a provisional tab) gets no hold posted: there is no kernel entry to hold yet, and the
+// Save's own guard says so if it is still unreachable then.
+let queuedEditorListenersOn = false;
+// the field's focus is tracked by the USER's own acts, never by blur: the tail's rebuild removes the focused field (a
+// blur Chromium fires before the node reads as disconnected, after the container is cleared), so a blur listener and a
+// render-time snapshot both read the rebuild as the user leaving. A pointer press outside the field, or focus landing on
+// some other element, is the user leaving; nothing else clears the flag, and the rebuilt field takes focus back
+// (preventScroll: the tail's scroll position is the reader's).
+function installQueuedEditorListeners(): void {
+  if (queuedEditorListenersOn) return;
+  queuedEditorListenersOn = true;
+  const isField = (t: EventTarget | null, ed: QueuedEditor) =>
+    !!t && t instanceof HTMLElement && t.classList.contains("queued-editbox") && (t as any)._eid === ed.eid;
+  const insideBox = (t: EventTarget | null, ed: QueuedEditor) =>
+    !!t && t instanceof Node && !!(t as HTMLElement).closest?.(".queued-editor") && ((t as HTMLElement).closest(".queued-editor") as any)?._eid === ed.eid;
+  document.addEventListener("pointerdown", (e) => {
+    for (const ed of queuedEditors.values()) if (ed.open && ed.focused && !insideBox(e.target, ed)) ed.focused = false;
+  }, true);
+  document.addEventListener("focusin", (e) => {
+    for (const ed of queuedEditors.values()) if (ed.open && ed.focused && !isField(e.target, ed) && !insideBox(e.target, ed)) ed.focused = false;
+  }, true);
+}
+function openQueuedEditor(sid: string, ref: QueuedEditRef, width = 0): void {
+  installQueuedEditorListeners();
+  const key = queuedEditorKey(sid, ref);
+  const cur = queuedEditors.get(key);
+  if (cur && cur.open) return;
+  // the bubble's width as it stood (measured at the click): the field keeps it, so the words do not re-wrap in a
+  // box that shrank to the textarea's own size; the editor carries it across the tail's rebuilds
+  queuedEditors.set(key, { eid: ++queuedEditorSeq, sid, key, ref, text: ref.md, sel: [ref.md.length, ref.md.length],
+                           focused: true, open: true, note: "", width: Math.round(width), height: 0 });
+  if (!isProvisionalId(sid) && !hostIsDown(sid)) vscodeApi?.postMessage(holdQueuedMsg(sid, ref, true));
+  repaintQueuedFor(sid);
+}
+// Cancel (the button, Esc): the field goes, the bubble is as it was, the hold is released
+function cancelQueuedEditor(ed: QueuedEditor): void {
+  queuedEditors.delete(ed.key);
+  if (!isProvisionalId(ed.sid) && !hostIsDown(ed.sid)) vscodeApi?.postMessage(holdQueuedMsg(ed.sid, ed.ref, false));
+  repaintQueuedFor(ed.sid);
+}
+// a closed tab takes its editors with it and RELEASES their holds: the session and its queue live on, and so does this
+// page's socket, so the kernel's socket-close release would never come (review find)
+function closeQueuedEditorsFor(sid: string): void {
+  for (const [k, ed] of queuedEditors) {
+    if (ed.sid !== sid) continue;
+    if (ed.open && !isProvisionalId(sid) && !hostIsDown(sid)) vscodeApi?.postMessage(holdQueuedMsg(sid, ed.ref, false));
+    queuedEditors.delete(k);
   }
-  renderComposerChips(sid);
 }
-
-function cancelQueuedEdit(sid: string): void {
-  if (!queuedEdits.delete(sid)) return;
-  restoreHeldDraft(sid);
+// the socket came back (a kernel restart, a dropped link, a relay re-dial): the kernel released the old socket's holds
+// with it, so every field still open re-holds its entry; a copy that fed meanwhile answers ok:false (op hold) and the
+// field closes with the words in the toast (review find: the kernel's comments promised this and nothing did it)
+function reholdQueuedEditors(remoteOnly = false): void {
+  for (const ed of queuedEditors.values()) {
+    if (!ed.open || isProvisionalId(ed.sid) || hostIsDown(ed.sid)) continue;
+    if (remoteOnly && !String(ed.sid).includes(":")) continue;
+    vscodeApi?.postMessage(holdQueuedMsg(ed.sid, ed.ref, true));
+  }
 }
-
-// The queued edit is over (cancelled, or sent): the box goes back to the draft the ✎ displaced, or empties,
-// and the pill goes with it. The draft store follows either way, so a tab switch or a reload sees the same.
-function restoreHeldDraft(sid: string): void {
-  const held = queuedEditHeld.get(sid) || "";
-  queuedEditHeld.delete(sid);
-  if (held) drafts.set(sid, held); else { drafts.delete(sid); draftStartedAt.delete(sid); }
-  persistDrafts();
-  if (sid !== activeId) return;
-  const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
-  if (ta) { ta.value = held; composerManualH = null; ta.style.height = ""; if (held) growComposer(ta); }
-  renderComposerChips(sid);
+// Save (the button, Enter): editQueued with the new words; the kernel replaces the entry in place and drops the hold
+// with the edit. Three refusals leave the field exactly as it is: an empty edit (to drop the message, use its ✕), a
+// slash command (the kernel would deliver it as text, skipping the routing every typed command gets — it refuses too),
+// and a session that cannot be reached (deliver()'s guard: a down host drops the frame and no editResult would ever
+// come back). None of them touches the composer.
+function saveQueuedEditor(ed: QueuedEditor): void {
+  const typed = ed.text.trim();
+  if (!typed) { ephemeralWarnToast("Nothing to send — to drop the message, use its ✕."); return; }
+  if (SLASH_CMD_RE.test(typed)) { warnToast("A queued message cannot become a command. Cancel it with its ✕ and type the command."); return; }
+  if (hostIsDown(ed.sid) || isProvisionalId(ed.sid)) {
+    if (hostIsDown(ed.sid)) vscodeApi?.postMessage({ type: "redial", host: String(ed.sid).slice(0, String(ed.sid).indexOf(":")) });
+    ephemeralWarnToast("Can't reach the session right now, so the edit wasn't saved. It's still in the message: save again when the link is back.");
+    return;
+  }
+  const qmsg: Record<string, unknown> = { type: "editQueued", id: ed.sid, md: ed.ref.md, text: typed };
+  if (ed.ref.idx !== undefined) qmsg.idx = ed.ref.idx;
+  if (ed.ref.park !== undefined) qmsg.park = ed.ref.park;
+  if (ed.ref.qid) qmsg.qid = ed.ref.qid;
+  vscodeApi?.postMessage(qmsg);
+  pendingEditRestores.set(ed.sid + " " + ed.ref.md, { typed, ref: ed.ref });
+  queuedEditors.delete(ed.key);
+  applyQueuedEditLocally(ed.sid, ed.ref, typed);   // the bubble shows the new words at once (acknowledge the click)
+}
+// the field the bubble wears while its editor is open: the text, then Save and Cancel (delegated: qsave / qcancel).
+// Enter saves, Shift+Enter breaks a line, Escape cancels. The tail rebuilds on every push, so the field is repainted
+// from the editor's state — its words, its caret and its focus — instead of losing them to the rebuild.
+function renderQueuedEditor(bubble: HTMLElement, ed: QueuedEditor): void {
+  bubble.classList.add("editing");
+  if (ed.width > 0) bubble.style.width = ed.width + "px";   // the same width as the bubble it replaces (max-width still caps it)
+  // whether THIS editor's previous field holds the focus right now: read off the DOM before the rebuild swaps it out,
+  // because the old field's blur fires during its removal, before it reads as disconnected, and would otherwise cancel
+  // the refocus on every push (the served-page harness lost focus within a second)
+  const prev = document.activeElement as HTMLElement | null;
+  const wasFocused = !!prev && prev.classList.contains("queued-editbox") && (prev as any)._eid === ed.eid;
+  const box = el("div", "queued-editor");
+  (box as any)._eid = ed.eid;
+  const field = document.createElement("textarea");
+  (field as any)._eid = ed.eid;
+  field.className = "queued-editbox";
+  field.value = ed.text;
+  field.rows = Math.max(1, ed.text.split("\n").length);   // sized on the spot: the rebuild must not paint one row and grow a frame later
+  if (ed.height > 0) field.style.height = ed.height + "px";
+  field.setAttribute("aria-label", "edit the queued message");
+  const grow = () => { field.style.height = "auto"; field.style.height = field.scrollHeight + "px"; ed.height = field.scrollHeight; };
+  const remember = () => { ed.sel = [field.selectionStart, field.selectionEnd]; };
+  field.addEventListener("input", () => { ed.text = field.value; remember(); grow(); });
+  field.addEventListener("select", remember);
+  field.addEventListener("keyup", remember);
+  field.addEventListener("focus", () => { ed.focused = true; });   // (no blur listener: see installQueuedEditorListeners)
+  field.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveQueuedEditor(ed); }
+    else if (e.key === "Escape") { e.preventDefault(); cancelQueuedEditor(ed); }
+  });
+  box.appendChild(field);
+  if (ed.note) { const n = el("div", "queued-editnote"); n.textContent = ed.note; box.appendChild(n); }   // a refused Save's reason, beside the words it kept
+  const btns = el("div", "queued-editbtns");
+  const cancel = el("button", "queued-editbtn");
+  cancel.textContent = "Cancel"; cancel.title = "leave the message as it was (Esc)";
+  cancel.dataset.act = "qcancel"; cancel.dataset.eid = String(ed.eid);
+  const save = el("button", "queued-editbtn save");
+  save.textContent = "Save"; save.title = "replace the queued message with these words (Enter)";
+  save.dataset.act = "qsave"; save.dataset.eid = String(ed.eid);
+  btns.appendChild(cancel);
+  btns.appendChild(save);
+  box.appendChild(btns);
+  bubble.appendChild(box);
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => {
+    grow();
+    if ((wasFocused || ed.focused) && document.body.contains(field)) { ed.focused = true; field.focus({ preventScroll: true }); if (ed.sel) field.setSelectionRange(ed.sel[0], ed.sel[1]); }
+  });
 }
 
 // The optimistic half of an edit: the queued bubble shows the NEW words at once (the acknowledge-the-click
@@ -14469,7 +14889,6 @@ function applyQueuedEditLocally(sid: string, ref: QueuedEditRef, text: string, b
 }
 
 function beginComposerEdit(sid: string, uuid: string, orig: string): void {
-  if (queuedEdits.has(sid)) cancelQueuedEdit(sid);   // …and a queued edit yields to a rewind edit
   composerEdits.set(sid, { uuid, orig });
   composerCitations.delete(sid);   // an edit replaces the message wholesale — mixed goal/quote context would mislead
   if (sid !== activeId) return;
@@ -14519,22 +14938,6 @@ function renderComposerChips(id: string | null): void {
     chip.appendChild(label);
     const x = el("button", "composer-chip-x"); x.setAttribute("aria-label", "Cancel edit"); x.textContent = "✕";
     x.addEventListener("click", (e) => { e.stopPropagation(); cancelComposerEdit(id); });
-    chip.appendChild(x);
-    strip.appendChild(chip);
-    return;
-  }
-  // the QUEUED edit's pill (the user 2026-09-08): the rewind pill's grammar, saying what send does instead
-  const qedit = id ? queuedEdits.get(id) : undefined;
-  if (qedit && id) {
-    strip.style.display = "flex";
-    const chip = el("div", "composer-chip composer-chip-edit");
-    chip.title = "the message keeps its place in the queue and goes as edited — ✕ (or Esc) leaves it as it was";
-    const mark = el("span", "composer-chip-mark"); mark.textContent = "✎"; chip.appendChild(mark);
-    const label = el("span", "composer-chip-label");
-    label.textContent = "Editing queued message — send replaces it in the queue";
-    chip.appendChild(label);
-    const x = el("button", "composer-chip-x"); x.setAttribute("aria-label", "Cancel edit"); x.textContent = "✕";
-    x.addEventListener("click", (e) => { e.stopPropagation(); cancelQueuedEdit(id); });
     chip.appendChild(x);
     strip.appendChild(chip);
     return;
@@ -15661,7 +16064,7 @@ function dismissSession(id: string, why: DismissWhy, doomed?: ReadonlySet<string
     // closed session was ACTIVE: the shared chip strip above the composer still shows its chip until
     // someone repaints it, and that stale chip's ✕ targets the dead id (whose map entry is gone), so the
     // click early-returns and the chip can't even be dismissed — hence the repaint below.
-    queuedEdits.delete(id); queuedEditHeld.delete(id);   // a queued edit goes with the rewind edit's pill (review find, 2026-09-08)
+    closeQueuedEditorsFor(id);   // its in-place queued editors go with the tab; the kernel releases their holds with the socket (T306)
     drafts.delete(id); composerCitations.delete(id); composerEdits.delete(id); composerFiles.delete(id); persistDrafts();
   } else {
     persistDrafts();   // a host drop / omission KEEPS it all (see DismissWhy) — the stash above may have updated the copy
@@ -15777,6 +16180,10 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
       for (const k of Object.keys(m.on)) on[k] = m.on[k] === true;
       panesOn = on;
     }
+    // which panes exist to bring forward (the Files control's setting): whole-set replace as well
+    const avail: Record<string, boolean> = {};
+    if (m.avail && typeof m.avail === "object") for (const k of Object.keys(m.avail)) avail[k] = m.avail[k] !== false;
+    panesAvail = avail;
     return;
   }
   // the pipe's down edge is the VS Code twin of the shim's romp:wsdown: unconfirmed sends say so (markPendingLost)
@@ -15810,7 +16217,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   else if (m.type === "chatEpisode") chatEpisode(m);
   else if (m.type === "subagent") applySubagentFrame(m);
   else if (m.type === "update") update(m);
-  else if (m.type === "wsup") { onSocketUp(skeletonTabs); skeletonDiagArmed = true; }   // the shim's socket-flip marker, in FRAME order: the dead socket's frames may still be draining from the FIFO when onopen fires (review find 2026-09-07)
+  else if (m.type === "wsup") { onSocketUp(skeletonTabs); skeletonDiagArmed = true; reholdQueuedEditors(); }   // the shim's socket-flip marker, in FRAME order: the dead socket's frames may still be draining from the FIFO when onopen fires (review find 2026-09-07)
   else if (m.type === "status") statusOnly(m);
   else if (m.type === "focus") {
     revealSelfPane();   // every focus is someone jumping HERE — on mobile, come forward (incl. from a remote kernel)
@@ -15937,29 +16344,44 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
       if (rv) { rv.stale = true; appendActive(); }
     }
   }
-  // The kernel's verdict on an editQueued (the user 2026-09-08) — cancelResult's twin. ok:false: the message
-  // left the queue before the edit reached it (or the chip was never a message), so the optimistic repaint is
-  // reversed, the typed words go back to the composer (never lost, never sent twice), and the queue repaints
-  // from the kernel's events, which hold what the session actually has.
+  // The kernel's verdict on an editQueued or a holdQueued (T306) — cancelResult's twin. A refused SAVE (ok:false, the
+  // message left the queue before the edit reached it): the optimistic repaint is reversed, the queue repaints from the
+  // kernel's events, and the typed words ride a sticky toast — never the composer, which this flow does not touch. A
+  // refused HOLD (op "hold": the entry fed before the field could hold it): the field closes and the bubble says so
+  // until the kernel's push retires it, with the same words in a toast so the reason is not missed.
   else if (m.type === "editResult" && typeof m.id === "string") {
-    const key = m.id + " " + (typeof m.md === "string" ? m.md : "");
-    const stash = pendingEditRestores.get(key);
-    pendingEditRestores.delete(key);
+    const md = typeof m.md === "string" ? m.md : "";
+    const key = m.id + " " + md;
+    const isSave = m.op !== "hold" && m.op !== "release";   // a hold's or a release's acknowledgement carries the same body: it must not consume a Save's stash
+    const stash = isSave ? pendingEditRestores.get(key) : undefined;
+    if (isSave) pendingEditRestores.delete(key);
     if (!m.ok) {
-      if (typeof m.text === "string" && m.text) warnToast(m.text);
-      if (stash) {
-        applyQueuedEditLocally(m.id, stash.ref, stash.typed, true);
-        if (m.id === activeId) restoreToComposer(stash.typed);
-        else {
-          // the tab changed mid-round-trip (review find, 2026-09-08): the words land in THAT session's draft,
-          // which setActive puts back in the box on the next switch to it, as the paste-verify restore does
-          const d = drafts.get(m.id);
-          drafts.set(m.id, d && d.trim() ? d.replace(/\s*$/, "") + "\n" + stash.typed : stash.typed);
-          persistDrafts();
+      const why = typeof m.text === "string" && m.text ? m.text : "";
+      if (m.op === "hold") {
+        let edited = "";
+        for (const ed of queuedEditors.values()) {
+          if (ed.sid !== m.id || ed.ref.md !== md || !ed.open) continue;
+          if (typeof m.qid === "string" && m.qid && ed.ref.qid && ed.ref.qid !== m.qid) continue;   // two same-words copies: only the refused one closes
+          ed.open = false; ed.note = why || "too late to edit — the message already reached the session as it was";
+          if (ed.text.trim() && ed.text !== ed.ref.md) edited = ed.text;
         }
+        if (edited) stickyToast((why || "The message could not be held for editing.") + " Your edit: " + edited, edited);   // never fades: the words live here now
+        else if (why) warnToast(why);
+      } else if (m.op !== "release") {
+        if (stash) applyQueuedEditLocally(m.id, stash.ref, stash.typed, true);
+        if (stash && m.gone) {
+          // the copy left the queue (fed already): no bubble to hold a field, so the words go to a toast that never fades
+          stickyToast((why || "The edit was not applied.") + " Your edit: " + stash.typed, stash.typed);
+        } else if (stash) {
+          // the copy is still queued (another client holds it, the words were a command, the session is not running):
+          // the field reopens with the typed words and the refusal beside them, so nothing typed is lost (review find)
+          const key = queuedEditorKey(m.id, stash.ref);
+          queuedEditors.set(key, { eid: ++queuedEditorSeq, sid: m.id, key, ref: stash.ref, text: stash.typed, sel: [stash.typed.length, stash.typed.length],
+                                   focused: true, open: true, note: why || "The edit was not applied.", width: 0, height: 0 });
+          if (!isProvisionalId(m.id) && !hostIsDown(m.id)) vscodeApi?.postMessage(holdQueuedMsg(m.id, stash.ref, true));
+        } else if (why) warnToast(why);
       }
-      const rv = m.id === activeId && activeId ? views.get(activeId) : null;
-      if (rv) { rv.stale = true; appendActive(); }
+      repaintQueuedFor(m.id);
     }
   }
   // The identity palette changed (gear → Session colors): refresh the right-click menu's swatch set so a
@@ -16444,7 +16866,6 @@ function setupComposer() {
     if (!typed && !(composerCitations.get(activeId) || []).some((c) => c.quote)) return;
     if (composerAnswersAsk()) { ephemeralWarnToast("A picker is waiting on this box — answer it, or send normally."); return; }
     if (composerEdits.has(activeId)) { ephemeralWarnToast("An edit replaces a past message — send it normally."); return; }
-    if (queuedEdits.has(activeId)) { ephemeralWarnToast("This edit replaces a queued message. Send it normally."); return; }   // staged, the words would go as a NEW message behind the unchanged original (review find, 2026-09-08)
     if ((composerFiles.get(activeId) || []).length) { ephemeralWarnToast("Attachments can't be staged — send them with a normal message."); return; }
     stagedMsgs.push(activeId, { text: typed, cites: (composerCitations.get(activeId) || []).slice() });
     composerCitations.delete(activeId); renderComposerChips(activeId);   // the chips now live on the staged item
@@ -16522,39 +16943,6 @@ function setupComposer() {
       if (s) { reconcileRewind(s); appendActive(); }   // paint the overlay NOW (stale → window re-render)
       drafts.delete(activeId); draftStartedAt.delete(activeId); persistDrafts();
       clearBox();
-      return;
-    }
-    // A QUEUED-message edit → editQueued: the entry is replaced in place, kernel-side. No registerOptimistic
-    // (nothing new is sent — the bubble already exists and only changes words; applyQueuedEditLocally shows
-    // them now). The kernel's push confirms; editResult ok:false (the message left the queue meanwhile)
-    // hands the typed words back to the composer. Attachments wait for the next normal send, as for an edit.
-    const qedit = queuedEdits.get(activeId);
-    if (qedit) {
-      if (!typed) return;   // an empty edit is not a send — to drop the message, use its ✕
-      // Two refusals that leave the box exactly as it is (review finds, 2026-09-08). A down host DROPS the
-      // frame (federation posts nothing to a closed socket) and no editResult ever comes back to hand the
-      // words over, so the plain send's deliver() guard applies here, BEFORE the box is cleared; a provisional
-      // tab has no session behind it and nothing queued. And a slash command cannot be edited INTO a queued
-      // message: the kernel would deliver it as text, skipping the routing every typed command gets (the
-      // fire-alone park, the /model and /effort setters, the /clear confirm below), so the kernel refuses it
-      // too; this mirror keeps the words in the box instead of round-tripping them.
-      // The refusal reports a state (an edit in progress on a session that cannot be reached), and the edit is in
-      // memory alone: on the page that follows a reload no edit is in progress and "send again" would post the
-      // words as a new message, so it does not ride one (ephemeralWarnToast).
-      if (hostIsDown(activeId) || isProvisionalId(activeId)) {
-        if (hostIsDown(activeId)) vscodeApi?.postMessage({ type: "redial", host: String(activeId).slice(0, String(activeId).indexOf(":")) });
-        ephemeralWarnToast("Can't reach the session right now, so the edit wasn't sent. It's still in the box: send again when the link is back.");
-        return;
-      }
-      if (SLASH_CMD_RE.test(typed)) { warnToast("A queued message cannot become a command. Cancel it with its ✕ and type the command."); return; }
-      const qmsg: Record<string, unknown> = { type: "editQueued", id: activeId, md: qedit.md, text: typed };
-      if (qedit.idx !== undefined) qmsg.idx = qedit.idx;
-      if (qedit.park !== undefined) qmsg.park = qedit.park;
-      vscodeApi?.postMessage(qmsg);
-      pendingEditRestores.set(activeId + " " + qedit.md, { typed, ref: qedit });
-      queuedEdits.delete(activeId);
-      applyQueuedEditLocally(activeId, qedit, typed);
-      restoreHeldDraft(activeId);   // the pill goes; the box gets back the draft the ✎ displaced, or empties
       return;
     }
     const sid = activeId;   // the session this send (and any confirm below) was armed for
@@ -17155,7 +17543,6 @@ function setupComposer() {
       // for "tab mode" — focus the active tab so ←/→ switch sessions (the user 2026-06-25). Enter on a
       // tab drops back in (onTabKey). Any draft text stays in the box, untouched.
       e.preventDefault();
-      if (activeId && queuedEdits.has(activeId)) { cancelQueuedEdit(activeId); return; }
       if (activeId && composerEdits.has(activeId)) { cancelComposerEdit(activeId); return; }
       focusActiveTab();
       return;
@@ -17615,7 +18002,11 @@ setupSettings();
         // the composer's before/after so the kernel's cancelResult ok:false can undo it (untouched only).
         const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
         const before = ta ? ta.value : "";
-        restoreToComposer(qmd);
+        // a field open on this bubble (T306): the editor goes with the entry, and the words the user was working on are
+        // what comes back, not the message as it stood (review find)
+        const edx = queuedEditorFor(sidQ, { md: qmd, qid: el.dataset.qid || undefined, qts: el.dataset.qts !== undefined ? Number(el.dataset.qts) : undefined });
+        if (edx) queuedEditors.delete(edx.key);
+        restoreToComposer(edx && edx.open && edx.text.trim() ? edx.text : qmd);
         // a provisional ✕ gets no cancelResult (nothing was posted) — no stash to consume, none kept
         if (!provisional) pendingCancelRestores.set(activeId + " " + qmd, { before, after: ta ? ta.value : "" });
       }
@@ -17631,23 +18022,27 @@ setupSettings();
       if (grp) reflowQueuedGroup(grp);
       if (contentX && wasAtBottom) writeScroll(contentX, contentX.scrollHeight, "queued-x", true);
     },
-    // ✎ on a queued bubble (the user 2026-09-08): edit the message while it is still romp's to change.
-    // Delegated like the ✕ (the tail rebuilds every push). The edit rides the ACTIVE composer, so a bubble
-    // owned by another session (a comment thread's popover) is declined with a pointer rather than edited
-    // in the wrong box. The acknowledgement is the composer filling + the editing pill, at once.
+    // ✎ on a queued bubble (the user 2026-09-08; in place since T306): the bubble's text becomes a field where it
+    // sits, the hold goes out, and the composer is never touched. Delegated like the ✕ (the tail rebuilds every push);
+    // the bubble's owner (a comment thread's popover, or the chat) is the session the edit belongs to.
     qedit: (el) => {
-      if (!activeId) return;
       const qmd = (el as any)._qmd as string | undefined;
       if (!qmd) return;
       const sidQ = owningSidOf(el) || activeId;
-      if (sidQ !== activeId) { warnToast("open that session's chat to edit its queued message"); return; }
+      if (!sidQ) return;
+      if (sidQ !== activeId) { warnToast("open that session's chat to edit its queued message"); return; }   // the field is painted by the active chat's render; a bubble owned elsewhere gets a pointer, not a silent hold
       const ref: QueuedEditRef = { md: qmd };
       if (el.dataset.qidx !== undefined) ref.idx = Number(el.dataset.qidx);
       if (el.dataset.qpark !== undefined) ref.park = Number(el.dataset.qpark);
       if (el.dataset.qts !== undefined) ref.qts = Number(el.dataset.qts);
+      if (el.dataset.qid) ref.qid = el.dataset.qid;
       if (el.dataset.qopt === "1") ref.optimistic = true;
-      beginQueuedEdit(sidQ, ref);
+      const bub = el.closest(".queued-bubble") as HTMLElement | null;
+      openQueuedEditor(sidQ, ref, bub ? bub.getBoundingClientRect().width : 0);
     },
+    // the field's Save and Cancel (T306): delegated too, keyed by the editor's id (the field is rebuilt every push)
+    qsave: (el) => { const ed = queuedEditorByEid(Number(el.dataset.eid)); if (ed) saveQueuedEditor(ed); },
+    qcancel: (el) => { const ed = queuedEditorByEid(Number(el.dataset.eid)); if (ed) cancelQueuedEditor(ed); },
     // a comment highlight or its turn badge (the user 2026-08-13): open the thread's popover at the
     // click. Delegated — marks and badges are re-created on every transcript rebuild — and so is
     // every popover BUTTON below: the popover's conversation refreshes on comments frames, and a
@@ -17664,6 +18059,7 @@ setupSettings();
       openCommentPopover(activeId, tid, Math.min(r.left, window.innerWidth - 380), r.bottom + 6);
     },
     cmtclose: () => closeCommentPop(),
+    cmtmax: () => toggleCommentPopMax(),   // maximize ⇄ restore; the head's double-click lands in the same function
     // Interrupt the THREAD's own turn (T138): the sid rides the button (the thread's session),
     // never activeId — the exact owner-scoping class queued-x/Retry were fixed for. The gesture
     // itself ENDS the exchange with no reply record coming, so the T102 send-latch clears on THIS

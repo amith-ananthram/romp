@@ -54,12 +54,19 @@ const PAIRS: Array<[string, string, number]> = [
   ["--dim", "--bg", 4.5],
   ["--fg", "--surface-raised", 4.5],
   ["--accent", "--bg", 3],
+  ["--cmt-hl-outline", "--bg", 3],   // the comment notch and the unread box: a LINE, so it must read against the page (T310)
   ["--accent-fg", "--accent", 3],
   ["--warn", "--bg", 3],
   ["--err", "--bg", 3],
   ["--green", "--bg", 3],
   ["--code-fg", "--bg", 4.5],
   ["--text-muted", "--surface-raised", 4.5],
+  ["--postal-coordinate", "--bg", 4.5],   // the postal kind word's three-step ramp (T320): text, so 4.5:1 on the page in both themes...
+  ["--postal-delegate", "--bg", 4.5],
+  ["--postal-question", "--bg", 4.5],
+  ["--postal-coordinate", "--box-bg", 4.5],   // ...and on a BOXED card (an incoming message paints --box-bg over --bg), where the
+  ["--postal-delegate", "--box-bg", 4.5],     // review found the light coordination step at 4.33:1 (2026-09-10)
+  ["--postal-question", "--box-bg", 4.5],
   ["--st-working-fg", "--st-working-bg", 3],
   ["--st-ready-fg", "--st-ready-bg", 3],
   ["--st-blocked-fg", "--st-blocked-bg", 3],

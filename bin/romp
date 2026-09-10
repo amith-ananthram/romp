@@ -658,6 +658,7 @@ EOF
     _romp_cmd "romp up [--foreground]"     romp-manager "Start the kernel manager: through the login service when installed, else in the foreground"
     _romp_cmd "romp version"               romp-version "Versions across the parts (tree, kernel, served vs built bundles)"
     _romp_cmd "romp spend-rebuild"         romp-spend-rebuild "Recount the spend ledger's token columns from the transcripts (dry run; --apply writes, dollars untouched)"
+    _romp_cmd "romp restart-metrics [--json|--window day|week]" romp-restart-metrics "What kernel restarts do to the sessions, from the state ledgers and the kernel's routes: turns cut, outage and reconcile times, quiet-window waits, orphans and reaps, crash heals, redo cost, turn latency, per-session memory and CPU"
     _romp_cmd "romp uninstall"             romp-uninstall "Remove romp's installed footprint (--purge also deletes recorded state)"
     _romp_cmd "romp help"                  -            "Show this help"
     cat <<'EOF'
@@ -753,6 +754,17 @@ fi
 if [[ "${1:-}" == "spend-rebuild" ]]; then
     shift
     exec romp-spend-rebuild "$@"
+fi
+
+# `romp restart-metrics [--json] [--window day|week] [--anchor D] [--since D] [--until D] [--tz Z] [--no-live]`
+# — the restart monitors (stage 0 of the restart-surviving sessions program, 2026-09-10): what kernel
+# restarts do to the sessions, read from the state ledgers (restart-cuts, restart-audit, session-events,
+# turns, the state logs, spend) and the running kernel's /version and /perf; a text summary per window, or
+# the whole document as JSON for the figure script. Read-only; never loads a kernel module. Delegates to
+# romp-restart-metrics (python, cli/restart_metrics.py).
+if [[ "${1:-}" == "restart-metrics" ]]; then
+    shift
+    exec romp-restart-metrics "$@"
 fi
 
 # The kernel serve token — required on EVERY kernel/bus request, loopback included (Jupyter's

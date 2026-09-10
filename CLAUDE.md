@@ -134,7 +134,8 @@ broad `git add` will sweep up your work). Conventions:
      is romp-on/romp (remote convention, the user 2026-09-06; a plain install has only
      `origin`, which is then romp-on itself). `remote.pushDefault` points at `origin`,
      so a bare `git push` does the same. Never push to `upstream`: the server rejects
-     it, and naming it in scripts bakes in a failure.
+     a push to every branch but `stack/**` (the stacked-pull-request staging area above), and
+     naming it in scripts bakes in a failure.
   2. `gh pr create --repo romp-on/romp --label <tier>` (gh detects the fork head; a
      contributor who cannot label writes `Tier: fix` on a line of the body instead, and the
      tier workflow applies the label), then

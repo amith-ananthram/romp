@@ -1119,6 +1119,7 @@ class TimelinePanel {
     this._laneRefusal = null;    // {sid, flag, text}: the kernel's refusal of the last lane-gear toggle, shown in the gear until dismissed or retried
     this._laneMenuBuild = null;  // the last-opened lane gear's rebuild-in-place, so a refusal arriving while it is open repaints it (like _viewsDialogBuild; every use is gated on _laneMenu being open)
     this._dismissed = new Set(); // sids cleared via the dead-lane Clear pill, held STICKY the same way (see _reconcileDismissed)
+    this._dismissedRows = new Map(); // sid -> [row, index] a Clear took out of the frame, so a Clear the kernel refuses puts it straight back (settingRefused, gesture 'lane')
     this._views = null;          // the kernel-echoed views blob (data.views); null until the first push
     this._rejectedViews = null;  // the last blob the seq gate turned away since it last adopted one — what the caps frame adopts (setCaps)
     this._announcedViewsSeq = null; // the seq the last caps frame announced as the kernel's current store when it adopted no kept blob — a LATER blob at exactly that seq is adopted below the held one (_takeViews); cleared by the next adoption that changes the held blob (viewsAnnouncedAfter)
@@ -3406,6 +3407,16 @@ class TimelinePanel {
       this._laneRefusal = { sid, flag, text };
       if (this._laneMenu && this._laneMenu._sid === sid && this._laneMenuBuild) this._laneMenuBuild();
     }
+    if (m && m.gesture === 'lane' && sid) {
+      // the kernel could not record this Clear: release the sticky removal and put the row back in the slot
+      // the click took it from, so the lane is visible again on THIS event (see _holdDismissed)
+      this._dismissed.delete(sid);
+      const rows = this._dismissedRows || new Map(), held = rows.get(sid);
+      rows.delete(sid);
+      if (held && this.data && Array.isArray(this.data.sessions) && !this.data.sessions.some((x) => x.id === sid)) {
+        this.data.sessions.splice(Math.min(Math.max(held[1], 0), this.data.sessions.length), 0, held[0]);
+      }
+    }
     let shell = false;
     try {
       shell = !!(typeof window !== 'undefined' && window.parent && window.parent !== window);
@@ -5222,9 +5233,23 @@ class TimelinePanel {
     const byId = new Map(this.data.sessions.map((s) => [s.id, s]));
     for (const id of Array.from(this._dismissed)) {
       const s = byId.get(id);
-      if (!s || s.live) this._dismissed.delete(id);   // kernel caught up, or the sid revived → stop holding it
+      if (!s || s.live) { this._dismissed.delete(id); if (this._dismissedRows) this._dismissedRows.delete(id); }   // kernel caught up, or the sid revived → stop holding it
     }
     if (this._dismissed.size) this.data.sessions = this.data.sessions.filter((s) => !this._dismissed.has(s.id));
+  }
+
+  // The Clear pill's state step: drop the lane from the current frame so it vanishes at once, hold its sid in
+  // _dismissed so a stale or federation-merged push can't put it back before the kernel confirms
+  // (_reconcileDismissed), and keep the row and its slot so a Clear the kernel REFUSES (settingRefused with
+  // gesture 'lane') puts it straight back on that event: an unchanged lanes frame dedups on the kernel side
+  // for up to a minute, so waiting for the next push would leave the refused lane hidden that long.
+  _holdDismissed(s) {
+    if (!this._dismissedRows) this._dismissedRows = new Map();   // a panel built without the constructor (the node harnesses)
+    this._dismissed.add(s.id);
+    if (this.data && Array.isArray(this.data.sessions)) {
+      this._dismissedRows.set(s.id, [s, this.data.sessions.findIndex((x) => x.id === s.id)]);
+      this.data.sessions = this.data.sessions.filter((x) => x.id !== s.id);
+    }
   }
 
   // Persist a per-session flag. Web dashboard: the host WS hook (→ kernel setSessionFlag → rebuild
@@ -6083,8 +6108,7 @@ class TimelinePanel {
           // a stale or federation-merged push can't put it back before the kernel confirms (_reconcileDismissed).
           // The kernel persists the dismissal (2026-08-14), so restarts and reconnects keep it cleared;
           // only the session coming back live resurfaces the lane.
-          this._dismissed.add(s.id);
-          if (this.data && this.data.sessions) this.data.sessions = this.data.sessions.filter((x) => x.id !== s.id);
+          this._holdDismissed(s);
           this._dismissLane(s.id); this.draw();
         });
         svg.appendChild(chit);

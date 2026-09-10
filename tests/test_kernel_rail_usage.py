@@ -80,7 +80,9 @@ class RailUsage(unittest.TestCase):
 
     def test_the_usage_tooltip_is_one_shared_panel_reproducing_both_windows_bars(self):
         # a SINGLE tooltip on the whole rail-usage area (mouseenter on el), not a per-window panel
-        self.assertIn("el.addEventListener('mouseenter',showTip)", self.html, "one shared tooltip for the area")
+        # T301: the API-health dot sits inside this cell; the shared tip yields while the pointer is on the dot
+        self.assertIn("el.addEventListener('mouseenter',function(ev){var c=document.getElementById('rail-api');", self.html, "one shared tooltip for the area")
+        self.assertIn("if(at&&(at===c||c.contains(at)))return;}showTip(ev);});", self.html)
         self.assertIn("['fiveHour','sevenDay','fable'].filter", self.html, "the tooltip covers ALL windows at once")
         # it reproduces the used + elapsed bars (the exact set that used to sit under the timeline)
         self.assertIn("ru-tip-track", self.html, "horizontal used/elapsed bars in the tooltip")

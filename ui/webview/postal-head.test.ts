@@ -79,8 +79,9 @@ test("render.ts builds the postal card's head through postalHead and the shared 
 
 test("the head's meta never shrinks to a letter, and a head-only postal line wraps instead of truncating", () => {
   const CSS = read("ui", "webview", "styles.css");
-  assert.match(CSS, /\.turn-postal-service \.notice-head \{ container-type: inline-size; \}\n\.turn-postal-service \.notice-meta \{ flex: 0 0 auto; \}\n@container \(max-width: 360px\) \{\n  \.turn-postal-service \.notice-gist \{ min-width: min\(100%, 4ch\); \}\n\}/,
-               "the head is the size container and the postal meta is rigid at every width; under 360px the GIST yields to a smaller floor, never the kind word (T302)");
+  assert.match(CSS, /\.turn-postal-service \.notice \{ container-type: inline-size; \}\n(?:\/\*[\s\S]*?\*\/\n)?\.turn-postal-service \.notice-meta \{ flex: 1 0 auto; display: inline-flex; align-items: baseline; gap: 7px; min-width: 0; \}\n@container \(max-width: 360px\) \{\n  \.turn-postal-service \.notice-head \{ flex-wrap: wrap; \}\n  \.turn-postal-service \.notice-head > \.notice-gist \{ flex: 1 0 100%; order: 1; min-width: 0;/,
+               "the CARD is the size container (a query resolves against ancestors: a rule on the head cannot query the head itself) and the postal meta is rigid at every width; under 360px the head wraps and the GIST takes its own full-width line, never a letter column beside the kind word (T313)");
+  assert.doesNotMatch(CSS, /\.notice-head \{ container-type/, "never the head as its own container: its wrap rule would never match");
   // scoped to the postal card: every other notice head's meta still yields (an API-error meta is a sentence, a compact
   // group head's meta is a whole gist, and both sit beside actions that must stay on the pane)
   assert.match(CSS, /\n\.notice-meta \{ flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;/);

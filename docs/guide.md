@@ -72,12 +72,13 @@ session is doing; the message itself still carries the `@name` you typed.
 **A message that has not gone yet.** Send to a busy session and your message waits as a
 dashed bubble under an hourglass until the session takes it — while it compacts, while a
 turn runs, or in the beat before the kernel confirms the send. Until then it is still
-yours: the **✕** in its corner pulls it back into the composer, and the **✎** beside it loads
-the text into the composer under an editing pill, so you can change your mind without
-losing your place in the queue. Send replaces the message where it was, a follow-up keeps
-its context, and Esc or the pill's ✕ leaves it as it was. If the session takes the message
-before the edit lands, romp says so and gives your edited words back to the composer
-rather than sending them twice.
+yours: the **✕** in its corner pulls it back into the composer, and the **✎** beside it turns
+the bubble's text into a field where it sits, so you can change your mind without losing
+your place in the queue. While the field is open the message holds: it does not go until you
+are done. Enter (or Save) replaces the message where it was, a follow-up keeps its context,
+and Esc (or Cancel) leaves it as it was; the composer is not involved. If the session took
+the message before you could hold it, the bubble says so, and if an edit cannot be applied
+romp gives your words back in a notice rather than sending them twice.
 
 **Opening a markdown document.** A markdown link in the chat opens in the file viewer,
 rendered, with **Raw** one click away — a path on the session's machine, or a link to a
@@ -718,10 +719,11 @@ quiet. A card that stops needing you and then needs you again is announced
 once, not at every turn, unless you acted on the card in between (answered
 it, resolved it, crossed it off) or it finished in the meantime.
 
-The handler that answers a tap lives on the phone, and the phone refreshes it
-whenever you open the app and whenever a notification arrives. If a tap ever
-opens Romp on the wrong session, close the app from the app switcher and open
-it again once.
+Tapping a notification brings Romp forward on the session it was about. On an
+iPhone with the app already open in the background, the switch happens as the
+app comes forward; a notification you swipe away instead is read the same way,
+so the next time you open the app it may land on that session. With the app in
+front, nothing moves until you next come back to it.
 
 The bell itself shows the state of the device you are looking at: lit when the
 main switch is on and this device is set up, and crossed out otherwise. Its
@@ -809,17 +811,23 @@ separating your sessions from the judge pipeline. You can also reconfigure the
 judges from the gear: the high-volume indexing tier defaults to Haiku, and the
 judgment tier defaults to Sonnet.
 
-The bottom bar's **API** cell, a dot and a word, shows how the API is treating
-your sessions. Gray **ok** means no session is waiting on the API. Amber shows
-how many sessions are waiting and names the problem: **rate limited**,
-**overloaded**, **offline** (this machine cannot reach the API), or **errors**.
-Red **paused** means auto-retry and the judges are stopped, and says why: a
-usage limit, the monthly spend cap, or that you stopped them. Hover for the same
-reading with the waiting sessions listed, and the history under it: the API's
-state over the last 1, 5 and 15 minutes (attempts, the 429 and 5xx shares,
-give-ups, sessions that retried) and the most recent state changes with how long
-each held. A kernel restart shows as its own line there, because the counts
-start over with the kernel. Click the cell, or press Enter on it,
-for the detail: each waiting session (click one to open that session), a button
-that stops auto-retry for every session while sessions are waiting and resumes
-it while paused, and links to the usage figures and the Log.
+The bottom bar's API readout carries one small dot, right after its **API**
+label, that shows how the API is treating your sessions on
+every connected kernel. The accent colour (blue in the dark theme, clay in the
+light one) means everything is fine. Red means errors are being met somewhere:
+a 429 rate-limit storm, 5xx failures, a machine that cannot reach the API, or
+auto-retry paused (a usage limit, the monthly spend cap, or you stopped it), and
+it stays red while a failed attempt sits in the last 15 minutes anywhere. Gray
+means the API is not being used right now: no traffic in the last 15 minutes on
+any machine. A machine whose link is down is named in the popup with what it
+last said and does not colour the dot. Hover for the reading in plain
+words (for example, 4 requests in the last 15 minutes, all succeeded), one
+line per machine when several are connected, the waiting sessions listed, and
+the history under it: a graph of attempts per minute over the last 15 minutes
+with rate-limited attempts in red and server errors in orange, one sentence
+explaining the codes, and the most recent state changes with how long each
+held. A kernel restart shows as its own line there, because the counts start
+over with the kernel. Click the dot, or press Enter on it, for the detail:
+each waiting session (click one to open that session), a button that stops
+auto-retry for every session while sessions are waiting and resumes it while
+paused, and links to the usage figures and the Log.

@@ -17,24 +17,38 @@ function fn(name: string): string {
 }
 const CARD = fn("renderPostalService");
 
-test("the kind is coloured text in the meta slot, never a chip, in the old chip colours", () => {
+test("the kind is coloured text in the meta slot, never a chip, at prose weight, on one ranked ramp", () => {
   assert.match(RENDER, /import \{ kindLabel, deliveryOf, deliveryTitle[^}]*\} from "\.\/postal-state";/);
   assert.match(CARD, /const kind = kindLabel\(intent \? intent\.cls : null\);/);
   assert.match(CARD, /meta = el\("span", "postal-kind postal-kind-" \+ intent\.cls\); meta\.textContent = kind;/);
   assert.doesNotMatch(CARD, /postal-service-intent|notice-chip/, "no chip");
-  // the two raw colours are TOKENS with light-theme values (2.2:1 and 2.1:1 on the cream page otherwise; review):
-  // 5.4:1 and 5.3:1 there, 6.4:1 and 6.7:1 on the dark page (WCAG text contrast 4.5:1)
-  assert.match(CSS, /\.postal-kind-delegate \{ color: var\(--postal-delegate, #b08cff\); \}/);
-  assert.match(CSS, /\.postal-kind-coordinate \{ color: var\(--postal-coordinate, #14b8a6\); \}/);
-  assert.match(CSS, /\.postal-kind-question \{ color: var\(--postal-question, var\(--st-working-bg\)\); \}/);
-  assert.match(CSS, /\n  --postal-delegate: #b08cff;\s+--postal-coordinate: #14b8a6;\s+--postal-question: var\(--st-working-bg\);/, "the dark tokens (the old chip colours)");
+  // T320 (the user 2026-09-10): the word is NOT bold (the prose weight), and the three colours are TOKENS on ONE
+  // sequential ramp in the accent's hue, ranked coordination < delegation < question by how much each asks of the
+  // reader, each with a light-theme re-ink (the parity test holds every one at 4.5:1 on its page)
+  assert.match(CSS, /\.postal-kind \{ font-weight: 400; \}/, "prose weight, not bold");
+  assert.doesNotMatch(CSS, /\.postal-kind \{ font-weight: (600|700|bold)/);
+  assert.match(CSS, /\.postal-kind-delegate \{ color: var\(--postal-delegate, #7fb8e7\); \}/);
+  assert.match(CSS, /\.postal-kind-coordinate \{ color: var\(--postal-coordinate, #7996af\); \}/);
+  assert.match(CSS, /\.postal-kind-question \{ color: var\(--postal-question, #91d9ff\); \}/);
+  assert.match(CSS, /\n  --postal-coordinate: #7996af;\s+--postal-delegate: #7fb8e7;\s+--postal-question: #91d9ff;/, "the dark ramp, low to high");
   const light = CSS.slice(CSS.indexOf("body.theme-light {"), CSS.indexOf("\n}\n", CSS.indexOf("body.theme-light {")));
-  assert.match(light, /--postal-delegate: #6e3fd0;\s+--postal-coordinate: #0d6b64;\s+--postal-question: #7d5600;/, "the light tokens re-ink the three kinds (the working amber alone measured 4.26:1 on cream)");
-  // under the narrow container query the GIST yields, never the kind word (the ruling: the kind never truncates)
-  assert.match(CSS, /@container \(max-width: 360px\) \{\n  \.turn-postal-service \.notice-gist \{ min-width: min\(100%, 4ch\); \}\n\}/);
+  assert.match(light, /--postal-coordinate: #974a32;\s+--postal-delegate: #962b00;\s+--postal-question: #751000;/, "the light ramp, low to high, deepening");
+  // the ramp IS a ramp: in each theme the three steps are monotone in luminance in rank order (brighter with rank on
+  // the dark page, darker with rank on the light one), so the eye reads one scale, not three tags
+  const lumOf = (hex: string) => { const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((v) => v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)); return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; };
+  const dark = ["#7996af", "#7fb8e7", "#91d9ff"].map(lumOf), lightRamp = ["#974a32", "#962b00", "#751000"].map(lumOf);
+  assert.ok(dark[0] < dark[1] && dark[1] < dark[2], "dark: coordination < delegation < question in luminance");
+  assert.ok(lightRamp[0] > lightRamp[1] && lightRamp[1] > lightRamp[2], "light: coordination > delegation > question in luminance");
+  assert.match(CSS, /coordination lowest \(an FYI\), delegation\s+next \(work handed over\), question highest \(an answer owed\)/, "the ranking sits beside the tokens");
+  // under the narrow container query the head WRAPS: the gist takes its own full-width line, word-wise, and the kind
+  // word keeps the first line whole and inside the card (T313; the 4ch floor that squeezed the gist into a letter
+  // column beside the ends is gone)
+  assert.match(CSS, /@container \(max-width: 360px\) \{\n  \.turn-postal-service \.notice-head \{ flex-wrap: wrap; \}\n  \.turn-postal-service \.notice-head > \.notice-gist \{ flex: 1 0 100%; order: 1; min-width: 0;\n    white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: break-word; \}\n\}/);
+  assert.doesNotMatch(CSS, /min-width: min\(100%, 4ch\)/, "no character-wide gist column anywhere");
   assert.doesNotMatch(CSS, /@container \(max-width: 360px\) \{\n  \.turn-postal-service \.notice-meta/, "the meta no longer shrinks under it");
   // never truncated: the postal meta stays rigid
-  assert.match(CSS, /\.turn-postal-service \.notice-meta \{ flex: 0 0 auto; \}/);
+  assert.match(CSS, /\.turn-postal-service \.notice-meta \{ flex: 1 0 auto; display: inline-flex; align-items: baseline; gap: 7px; min-width: 0; \}/,
+    "the postal meta never shrinks (the kind word stays whole) and grows to the head's edge to carry the icon (T313)");
 });
 
 test("the delivery state is one icon per state at the head's right edge, each with a worded title", () => {
@@ -46,10 +60,17 @@ test("the delivery state is one icon per state at the head's right edge, each wi
   assert.match(fn("deliveryIcon"), /span\.setAttribute\("role", "img"\);/, "a labelled span is announced only with an image role");
   assert.match(fn("deliveryIcon"), /const title = deliveryTitle\(d, clockOf\);[^\n]*\n\s*setTip\(span, title\);[^\n]*\n\s*span\.setAttribute\("role", "img"\);[^\n]*\n\s*span\.setAttribute\("aria-label", title\);/);
   assert.match(CARD, /const delivery = deliveryOf\(ev\);/);
-  assert.match(CARD, /turn\.querySelector\("\.notice-head"\)\?\.appendChild\(deliveryIcon\(delivery\)\);/);
+  assert.match(CARD, /turn\.querySelector\("\.notice-meta"\)\?\.appendChild\(deliveryIcon\(delivery\)\);/);
   assert.match(CSS, /\.postal-delivery \{ flex: 0 0 auto; margin-left: auto;/, "the right edge");
   // on a fold-less card whose one line wraps, the icon sits on the FIRST line like the glyph, not centred over the block
-  assert.match(CSS, /\.turn-postal-service \.notice:not\(\.notice-collapsible\) \.postal-delivery \{ align-self: flex-start; margin-top: 4px; \}/);
+  // the icon rides inside the META slot (T313): a one-line flex box the head aligns by baseline, so it sits on the kind
+  // word's line, the first, however the gist wraps — and on a phone-width head the two wrap as one unit
+  assert.match(RENDER, /turn\.querySelector\("\.notice-meta"\)\?\.appendChild\(deliveryIcon\(delivery\)\);/);
+  // …and the meta always exists when there is an icon: a kind-less legacy card (no declared kind, no leading token) with
+  // a delivery state gets an EMPTY meta slot, so no icon is ever appended straight to the head (T313 review find)
+  assert.match(RENDER, /if \(!meta && delivery\) meta = el\("span", "postal-meta-empty"\);/);
+  assert.doesNotMatch(RENDER, /notice-head"\)\?\.appendChild\(deliveryIcon/, "no second path for the icon");
+  assert.doesNotMatch(CSS, /\.postal-delivery \{ align-self: flex-start; margin-top: 4px; \}/, "no first-line nudge left: the meta's line IS the first line");
   assert.match(CSS, /\.postal-delivery-read \{ color: var\(--accent\); \}/);
   assert.match(CSS, /\.postal-delivery-parked \{ color: var\(--warn\); \}/);
   assert.match(CSS, /\.postal-delivery-bounced \{ color: var\(--st-blocked-bg\); \}/);

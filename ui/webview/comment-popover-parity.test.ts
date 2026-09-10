@@ -186,6 +186,12 @@ test("the thread popover opens 70% wide right-aligned, 60% tall — and NEVER gr
   assert.ok(!opener.includes("commentPopPos = { x, y }"), "no click-coord seeding on thread open");
   // …and the CSS no longer hard-sizes the box (the inline open geometry owns it)
   assert.doesNotMatch(CSS, /\.cmt-pop \{[^}]*width: 440px/s);
+  // the remembered size (2026-09-10, comment-pop-size.test.ts) sits ABOVE these lines and only fills the
+  // inline size when a preference exists — so with nothing stored the two lines above still decide, byte
+  // for byte, and the create dialog still writes no inline size at all
+  const body = RENDER.split("function renderCommentPopover(")[1].split("\nfunction ")[0];
+  assert.ok(body.indexOf("const pref = readCmtPopSize();") < body.indexOf("if (th && !pop.style.width)"));
+  assert.match(body, /if \(pref\) \{[\s\S]*?pop\.style\.width = sz\.w \+ "px";[\s\S]*?\}\s*\n\s*\/\/ OPEN GEOMETRY/, "the preference branch, then the default");
 });
 
 test("the popover resizes from ANY edge or corner, macOS-style; the old grip keeps working", () => {

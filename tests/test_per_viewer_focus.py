@@ -80,7 +80,7 @@ class Wiring(unittest.TestCase):
         self.assertIn('window.sessionStorage.getItem("romp:wid")', shim)
 
     def test_the_id_is_minted_before_any_pane_can_connect(self):
-        # 2026-09-09 (the served tap-resume test, tests/test_notification_tap_resume_browser.py, two runs in
+        # 2026-09-09 (the served tap test, tests/test_notification_tap_resume_browser.py, two runs in
         # three on localhost): the mint sat in the BODY script, after the iframes, and the chat pane's shim read
         # sessionStorage and connected first — its socket carried no wid, so a reveal the kernel aimed at this
         # dashboard's wid found no chat socket to deliver to and parked for a ready that never comes on a live

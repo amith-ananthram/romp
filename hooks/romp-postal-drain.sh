@@ -38,9 +38,19 @@ postal="$(cd "$(dirname "$src")/../bin" 2>/dev/null && pwd)/romp-postal-service"
 msgs="$("$postal" drain --id "$sid" 2>/dev/null || true)"
 [[ -n "${msgs//[[:space:]]/}" ]] || exit 0
 
-# JSON-escape in pure bash (no Homebrew/python dependency in the hook path).
+# JSON-escape in pure bash (no Homebrew/python dependency in the hook path). Backslash first, so
+# the escapes added after it are not doubled. Every other byte 0x01-0x1f becomes \u00XX: JSON
+# forbids a raw control character inside a string, and Claude Code drops a decision it cannot
+# parse without a word, AFTER the drain has already consumed the mail, so a message carrying
+# pasted terminal output (colour sequences, a form feed) used to vanish on the way to the
+# session. CR is dropped as before; NUL cannot reach this block ($(...) strips it) and DEL
+# (0x7f) is legal as it is. Builtins only (printf -v), no fork per byte.
 esc="$(printf '%s' "$msgs" | { s="$(cat)"
     s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\n'/\\n}"; s="${s//$'\t'/\\t}"; s="${s//$'\r'/}"
+    for i in 1 2 3 4 5 6 7 8 11 12 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31; do
+        printf -v o '%03o' "$i"; printf -v c "\\$o"; printf -v h '%04x' "$i"
+        s="${s//$c/\\u$h}"
+    done
     printf '%s' "$s"; })"
 printf '{"decision":"block","reason":"%s"}\n' "$esc"
 exit 0
