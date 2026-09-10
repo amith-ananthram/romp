@@ -114,9 +114,15 @@ test("no card wears a background wash in a session's colour; incoming keeps bord
 
 test("a sent card that has not landed wears the pending send's own provisional dress: the same class and rule", () => {
   assert.match(CARD, /if \(ev\.direction === "out" && \(delivery\.state === "sent" \|\| delivery\.state === "parked"\)\) \{\s*\n\s*turn\.querySelector\("\.notice"\)\?\.classList\.add\("queued-bubble"\);/);
-  // the pending bubble's rule reaches the notice by a selector on the SAME declaration block — no lookalike copy
-  assert.match(CSS, /\.queued-bubble, \.notice\.notice-slim\.queued-bubble \{/);
-  assert.match(CSS, /\.notice\.notice-slim\.queued-bubble \{ max-width: none; display: block; \}/, "the row keeps its width (same specificity as the shared rule, later)");
+  // the pending bubble's rule reaches the notice by selectors on the SAME declaration block, no lookalike copy: the
+  // notice of EITHER density, since a sent card boxed by its fold is a .notice with no .notice-slim, and `.notice` alone
+  // (0,1,0) later in the file used to win that card's border, background and radius back from `.queued-bubble` (0,1,0);
+  // `.notice.queued-bubble` (0,2,0) outranks it. The slim selector (0,3,0) stays: `.notice.notice-slim` (0,2,0) is
+  // later in the file too and would otherwise take the slim card's dress back from `.notice.queued-bubble`.
+  assert.match(CSS, /\.queued-bubble, \.notice\.queued-bubble, \.notice\.notice-slim\.queued-bubble \{/);
+  // the width reset reaches both densities the same way: the boxed card keeps the column too, so it never snaps from
+  // the bubble's 72% to the full width when the receipt lands
+  assert.match(CSS, /\.notice\.queued-bubble, \.notice\.notice-slim\.queued-bubble \{ max-width: none; display: block; \}/, "the row keeps its width at either density (the same specificities as the shared rule, later)");
   // the bubble's border + padding move the head line down: the rail dot follows, as it does for a boxed card
   assert.match(CARD, /turn\.classList\.add\("postal-provisional"\)/);
   assert.match(CSS, /\.turn-postal-service\.postal-provisional > \.dot, \.turn-postal-service\.postal-provisional > \.time-marker \{ top: 18px; \}/);
