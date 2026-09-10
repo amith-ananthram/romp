@@ -54,9 +54,9 @@ def _clear_memos():
 
 # ── the signature's labels and the chat writer ───────────────────────────────────────────────────
 class SigLabels(unittest.TestCase):
-    """_chat_build_sig is a flat tuple; a background rebuild is attributed to the components that moved, by
-    position: two transcript values, two per states file, then the fixed tail. The row the push hands over
-    is one slot either way (None without a row), so the tail has one shape and every position a label."""
+    """_chat_build_sig is a flat tuple with one labelled position per component (_CHAT_SIG_LABELS); a rebuild
+    is attributed to the components that moved, by position. The row the push hands over is one slot
+    either way (None without a row), so every signature has the same shape."""
 
     def setUp(self):
         td = tempfile.TemporaryDirectory()
@@ -65,35 +65,34 @@ class SigLabels(unittest.TestCase):
         self.tx = Path(self.tmp) / (SID_A + ".jsonl")
         self.tx.write_text('{"type": "user"}\n')
         self.sess = {"sid": SID_A, "path": str(self.tx), "anchor": SID_A}
-        self.saved = km._sdk
+        self.saved = (km._sdk, km._tmux_sessions)
         km._sdk = lambda: None
+        km._tmux_sessions = lambda: {}
 
     def tearDown(self):
-        km._sdk = self.saved
+        km._sdk, km._tmux_sessions = self.saved
 
     def test_a_real_signature_has_one_label_per_position_and_a_row_slot_either_way(self):
         sig = km._chat_build_sig(self.sess)
-        self.assertEqual(km._CHAT_SIG_TAIL, ("judge_gen", "tasks", "cut", "row"))
-        self.assertEqual(km._chat_sig_labels(sig), ("transcript", "transcript", "states", "states") + km._CHAT_SIG_TAIL,
-                         "one states file: the fsid is the anchor")
-        self.assertEqual(len(sig), 8)
-        self.assertIsNone(sig[-1], "no row handed over: the slot is None, so the tail keeps one shape")
+        self.assertEqual(len(sig), len(km._CHAT_SIG_LABELS))
+        row_i = km._CHAT_SIG_LABELS.index("row")
+        self.assertEqual(sig[row_i], (None, False), "no row handed over and an empty map: the slot says so")
         self.assertEqual(km._chat_build_sig(self.sess), sig, "stable while nothing moved")
-        row = {"state": "idle", "model": "m", "context": 10, "effort": "e", "mode": None, "fast": False, "since": 1,
-               "subagents": [], "bgTasks": [], "connected": True}
+        row = {"state": "idle", "model": "m", "context": 10, "effort": "e", "mode": None, "fast": False,
+               "since": int(time.time()) - 5, "subagents": [], "bgTasks": [], "connected": True}   # since: recent, so the faded boolean holds
         sig2 = km._chat_build_sig(self.sess, row)
         self.assertEqual(len(sig2), len(sig))
         self.assertEqual(km._chat_sig_miss(sig, sig2), ("row",), "the row handed over is the row component")
         forked = dict(self.sess, anchor=SID_B)                # a forked lane stats two states files
         sig3 = km._chat_build_sig(forked)
-        self.assertEqual(km._chat_sig_labels(sig3), ("transcript", "transcript") + ("states",) * 4 + km._CHAT_SIG_TAIL)
-        self.assertEqual(km._PerfStats.CHAT_MISS, ("transcript", "states") + km._CHAT_SIG_TAIL + ("cold", "nosig"))
+        self.assertEqual(len(sig3), len(sig), "the states component holds both files; the shape never changes")
+        self.assertEqual(km._chat_sig_miss(sig, sig3), ("states",))
+        self.assertEqual(km._PerfStats.CHAT_MISS, km._CHAT_SIG_LABELS + ("cold", "nosig"))
         self.assertIsNone(km._chat_build_sig({"sid": SID_A, "path": ""}), "no path: no signature")
 
-    def test_each_moved_component_is_named_and_a_reshaped_key_names_the_states_section(self):
-        base = ("mt", "sz", "smt", "ssz", 3, ("fp",), "", None)
-        labels = km._chat_sig_labels(base)
-        for i, lab in enumerate(labels):
+    def test_each_moved_component_is_named(self):
+        base = tuple(range(len(km._CHAT_SIG_LABELS)))
+        for i, lab in enumerate(km._CHAT_SIG_LABELS):
             new = list(base)
             new[i] = "changed"
             self.assertEqual(km._chat_sig_miss(base, tuple(new)), (lab,), lab)
@@ -101,14 +100,11 @@ class SigLabels(unittest.TestCase):
         self.assertEqual(km._chat_sig_miss(None, base), ("cold",), "no cached build")
         self.assertEqual(km._chat_sig_miss(base, None), ("nosig",), "no signature could be taken")
         two = list(base)
-        two[0], two[4] = "x", 4
-        self.assertEqual(km._chat_sig_miss(base, tuple(two)), ("judge_gen", "transcript"),
+        two[km._CHAT_SIG_LABELS.index("transcript")] = "x"
+        two[km._CHAT_SIG_LABELS.index("store")] = "y"
+        self.assertEqual(km._chat_sig_miss(base, tuple(two)), ("store", "transcript"),
                          "several moved components are each named, sorted")
-        # the anchor appeared: the states section grew by one file, the tail still compares from its end
-        grown = ("mt", "sz", "smt", "ssz", "amt", "asz", 4, ("fp",), "", None)
-        self.assertEqual(km._chat_sig_miss(base, grown), ("judge_gen", "states"))
-        self.assertEqual(km._chat_sig_miss(base, ("mt2", "sz", "smt", "ssz", "amt", "asz", 3, ("fp",), "", None)),
-                         ("states", "transcript"))
+        self.assertEqual(km._chat_sig_miss(base, base[:-1]), ("cold",), "a signature of another shape is no cached build")
 
 
 class Collector(unittest.TestCase):
@@ -119,14 +115,15 @@ class Collector(unittest.TestCase):
         st = km._PerfStats()
         st.build_chat(True)
         st.build_chat(False, 0.010, active=True)
-        st.build_chat(False, 0.020, active=False, miss=("judge_gen",))
+        st.build_chat(False, 0.020, active=False, miss=("store",))
         st.build_chat(False, 0.030, active=False, miss=("states", "transcript"))
         st.build_chat(False, 0.005, active=False, miss=("cold",))
+        st.build_chat_moved()
         c = st.snapshot()["builds"]["chat"]
-        self.assertEqual((c["cached"], c["built"], c["active_built"], c["bg_built"]), (1, 4, 1, 3))
+        self.assertEqual((c["cached"], c["built"], c["active_built"], c["bg_built"], c["moved"]), (1, 4, 1, 3, 1))
         self.assertAlmostEqual(c["ms"], 65.0)
         self.assertEqual({k: v for k, v in c["bg_miss"].items() if v},
-                         {"judge_gen": 1, "states": 1, "transcript": 1, "cold": 1},
+                         {"store": 1, "states": 1, "transcript": 1, "cold": 1},
                          "one count per moved component: the two-component miss counts under both")
         self.assertEqual(set(c["bg_miss"]), set(km._PerfStats.CHAT_MISS))
         st.build_chat(False, 0.001, miss=("cold",))
@@ -261,7 +258,7 @@ class TwoTabAttribution(unittest.TestCase):
         km._push([self.chat, self.tl])
         c2 = self._chat()
         self.assertEqual(self._delta(c1, c2), {"cached": 2, "built": 0, "active_built": 0, "bg_built": 0, "bg_miss": {}},
-                         "nothing moved: both tabs are served, the watched one on its exact key")
+                         "nothing moved: both tabs are served on the one key")
         with open(self.tx[SID_B], "a") as f:
             f.write('{"type": "assistant"}\n')
         km._push([self.chat, self.tl])
@@ -269,12 +266,17 @@ class TwoTabAttribution(unittest.TestCase):
         self.assertEqual(self._delta(c2, c3), {"cached": 1, "built": 1, "active_built": 0, "bg_built": 1,
                                                "bg_miss": {"transcript": 1}},
                          "the background tab's transcript grew; the watched one is served")
-        km._judge_gen[0] += 1
+        (jd.GOALDIR / (SID_B + ".json")).write_text(json.dumps({"rompUuid": SID_B, "nodes": {}, "status": {}}))
+        km._bump_judge_gen_if_changed()                    # the producer's own bump after a pass that moved a store
         km._push([self.chat, self.tl])
         c4 = self._chat()
-        self.assertEqual(self._delta(c3, c4)["bg_miss"], {"judge_gen": 1},
-                         "a judge pass that changed a store rebuilds the background tab under judge_gen")
+        self.assertEqual(self._delta(c3, c4)["bg_miss"], {"store": 1},
+                         "a judge pass that published this session's store rebuilds its tab under store")
         self.assertEqual(self._delta(c3, c4)["bg_built"], 1)
+        km._judge_gen[0] += 1                              # a pass that moved nothing this world reads
+        km._push([self.chat, self.tl])
+        self.assertEqual(self._delta(c4, self._chat())["built"], 0, "the judge-pass counter alone rebuilds no tab")
+        c4 = self._chat()
         with open(jd.STATESDIR / (SID_B + ".jsonl"), "a") as f:
             f.write('{"t": 1, "state": "idle"}\n')
         km._push([self.chat, self.tl])

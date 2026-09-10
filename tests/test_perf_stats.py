@@ -201,7 +201,7 @@ class Collector(unittest.TestCase):
         # chat also carries the watched/background split and the per-component attribution (2026-09-09); the
         # plain writer counts the build and attributes nothing
         self.assertEqual(snap["builds"]["chat"], {"cached": 1, "built": 1, "ms": 40.0, "active_built": 0, "bg_built": 0,
-                                                  "bg_miss": {k: 0 for k in km._PerfStats.CHAT_MISS}})
+                                                  "moved": 0, "bg_miss": {k: 0 for k in km._PerfStats.CHAT_MISS}})
         self.assertEqual(snap["builds"]["feed"]["built"], 1)
         self.assertEqual(snap["builds"]["timeline"], {"cached": 0, "built": 0, "ms": 0.0})
         self.assertEqual(snap["judge"]["passes"], 2)

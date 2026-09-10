@@ -339,7 +339,7 @@ def _stub_place_llm(monkeypatch):
 
 
 # No test may leave the shared judge or a call-time environment seam changed (2026-09-09). kernel.py
-# loads the judge as SourceFileLoader("romp_judge", ...).load_module(), and load_module re-executes
+# loads the judge as load_source("romp_judge", ...) (kernel/loadsource.py), which re-executes
 # into the module object already in sys.modules under that name, so every kernel-loading test
 # module's km.jd is ONE process-wide object. A test that rebinds jd.STATE to a temp dir and removes
 # that dir in tearDown without restoring the prior value leaves every later STATE reader in the

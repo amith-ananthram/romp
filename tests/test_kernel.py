@@ -2860,10 +2860,12 @@ class ViewBuilder(unittest.TestCase):
         # the kernel on multi-MB transcripts and starved the webview. A BACKGROUND tab whose transcript+states
         # are unchanged reuses its built payload (one stat() instead of a reshape+serialize). The ACTIVE tab
         # used to rebuild on every push "to stay live"; since 2026-09-03 it too is served from its last build
-        # while its EXACT key (_active_chat_sig: file stats + live tail + snapshot + clock predicates) is
-        # unchanged and no kernel-side mutation postdates the build — so a watched 80 MB session no longer
-        # costs a reshape per 0.5 s cycle with nothing moving. Liveness is unchanged: any input that can
-        # move the payload is in the key, and _mark_views_dirty busts it for in-memory stamps.
+        # while its key is unchanged, so a watched 80 MB session no longer costs a reshape per 0.5 s cycle
+        # with nothing moving. That key is now the one complete per-session signature every tab shares
+        # (_chat_build_sig): every input that can move the payload is a component, the in-memory stamps
+        # included, so a tab rebuilds when an input moved and on nothing else. A bare _mark_views_dirty (the
+        # watermark that used to stand in for the stamps no file records) is not new information for the
+        # chat and rebuilds no tab; a live-tail echo, which the payload renders, is and does.
         import tempfile
         d = tempfile.mkdtemp()
         pa, pb = os.path.join(d, "A.jsonl"), os.path.join(d, "B.jsonl")
@@ -2872,8 +2874,9 @@ class ViewBuilder(unittest.TestCase):
                 f.write("{}\n")
         calls = []
         saved = (km._tmux_sessions, km._chat_tab_sessions, km.build_session, km.build_feed,
-                 km.build_timeline, km._send_client)
+                 km.build_timeline, km._send_client, km._sdk)
         km._tmux_sessions = lambda: {}
+        km._sdk = lambda: None                                          # both tabs tmux-owned
         km._chat_tab_sessions = lambda now, tmux: [{"sid": "A", "path": pa}, {"sid": "B", "path": pb}]
         km.build_session = lambda sid, now, tmux: (calls.append(sid) or
                                                    {"id": sid, "name": sid, "color": None, "status": None, "ledger": None})
@@ -2896,18 +2899,23 @@ class ViewBuilder(unittest.TestCase):
             os.utime(pa, None)
             km._push([client])                       # 4th: A rebuilt
             after_four = list(calls)
-            km._mark_views_dirty()                   # a kernel-side mutation no file records
-            km._push([client])                       # 5th: A rebuilt (dirty postdates its build)
+            km._mark_views_dirty()                   # a dirty mark with no moved input
+            km._push([client])                       # 5th: A still served (the key names inputs, not marks)
+            after_five = list(calls)
+            km._tmux_echo_add("A", "and also fix the header")   # a kernel-side mutation no file records: the live tail
+            km._push([client])                       # 6th: A rebuilt (its live-tail revision moved)
         finally:
             (km._tmux_sessions, km._chat_tab_sessions, km.build_session, km.build_feed,
-             km.build_timeline, km._send_client) = saved
+             km.build_timeline, km._send_client, km._sdk) = saved
             km._built_chat.clear()
+            km._tmux_echo.pop("A", None); km._tmux_echo_rev.pop("A", None)
         self.assertEqual(after_two.count("A"), 1, "an unchanged ACTIVE tab is served on the 2nd push")
         self.assertEqual(after_two.count("B"), 1, "an unchanged BACKGROUND tab is NOT rebuilt on the 2nd push")
         self.assertEqual(after_three.count("B"), 2, "the background tab rebuilds once its transcript actually changes")
         self.assertEqual(after_three.count("A"), 1, "…and that does not rebuild the active tab")
         self.assertEqual(after_four.count("A"), 2, "the active tab rebuilds once ITS transcript changes")
-        self.assertEqual(calls.count("A"), 3, "a kernel-side mutation (views dirty) rebuilds the active tab")
+        self.assertEqual(after_five.count("A"), 2, "a dirty mark alone is no new information for the chat: still served")
+        self.assertEqual(calls.count("A"), 3, "a kernel-side mutation no file records (a live-tail echo) rebuilds the active tab")
 
     def _orphaned_goal(self, idle=True, closer_done=True, planned=True):
         # an idle (or still-open) session whose top goal still shows "working". closer_done puts the latest

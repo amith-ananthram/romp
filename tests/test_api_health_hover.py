@@ -267,21 +267,14 @@ class OneClock(unittest.TestCase):
 
         fake = types.SimpleNamespace(SdkBackend=_Recorder, startup_auth_env=lambda *a, **k: {})
 
-        class _Loader:
-            def __init__(self, name, path):
-                pass
-
-            def load_module(self):
-                return fake
-
-        names = ("_sdk_backend", "SourceFileLoader", "_ensure_sdk_on_path", "_load_model_catalog_cache",
+        names = ("_sdk_backend", "load_source", "_ensure_sdk_on_path", "_load_model_catalog_cache",
                  "_refresh_model_catalog", "_claude_bin", "_mark_boot", "_sdk_problem")
         saved = {n: getattr(km, n) for n in names}
         saved_jd = (km.jd._LOGIN_AUTH_ENV_FN, km.jd._USAGE_REFRESH_FN)
         problems = []
         try:
             km._sdk_backend = None
-            km.SourceFileLoader = _Loader
+            km.load_source = lambda name, path: fake
             km._ensure_sdk_on_path = lambda: True
             km._load_model_catalog_cache = lambda: None
             km._refresh_model_catalog = lambda why: None

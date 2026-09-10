@@ -699,6 +699,7 @@ def make_backend(sbmod, state, dormant_rows, all_regs):
     be.__dict__.update({
         "state_dir": Path(state), "claude_bin": "/bin/false", "sessions": {},
         "_lock": threading.Lock(), "_reg_lock": threading.Lock(), "_pending_ask": {}, "_live": {},
+        "_live_rev": {},    # the live tail's per-sid revision (Sessions.live_rev reads it for every chat signature)
         "_owns_memo": {},   # owns() memoizes on the reg file's identity here, and build_session and
         #   _alive_sessions reach owns() through Sessions.backend_for: without the slot the first chat
         #   build raises on the attribute instead of answering

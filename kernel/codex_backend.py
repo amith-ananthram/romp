@@ -5,7 +5,7 @@ Drives OpenAI Codex sessions through the official openai-codex Python SDK's sync
 (JSON-RPC to `codex app-server` over stdio) and materializes each thread as Claude-transcript-shaped
 JSONL via kernel/codex_events.ThreadNormalizer, so romp's entire read side parses Codex sessions
 unchanged. Duck-types the SessionBackend ABC exactly like SdkBackend does (the kernel loads backends
-via SourceFileLoader; a conformance test asserts every abstract method exists).
+by file path; a conformance test asserts every abstract method exists).
 
 Shape of the machine:
 - ONE CodexClient per backend — the app-server hosts many threads, unlike Claude's one-CLI-per-
@@ -34,20 +34,24 @@ import threading
 import time
 import traceback
 import uuid as uuidlib
-from importlib.machinery import SourceFileLoader
+import importlib.util
 from pathlib import Path
 
 HERE = Path(os.path.dirname(os.path.realpath(__file__)))
-_events = SourceFileLoader("romp_codex_events", str(HERE / "codex_events.py")).load_module()
-_runtime = SourceFileLoader("romp_codex_runtime", str(HERE / "codex_runtime.py")).load_module()
+_ls_spec = importlib.util.spec_from_file_location("romp_loadsource", str(HERE / "loadsource.py"))
+_ls_mod = importlib.util.module_from_spec(_ls_spec)
+_ls_spec.loader.exec_module(_ls_mod)
+load_source = _ls_mod.load_source   # file-path imports with load_module()'s sys.modules semantics (kernel/loadsource.py)
+_events = load_source("romp_codex_events", HERE / "codex_events.py")
+_runtime = load_source("romp_codex_runtime", HERE / "codex_runtime.py")
 # The by-text KEY RULE (session_backend.echo_text_key): the one normalization under which an input echo's
 # text is compared with a transcript record's, shared with the kernel's _atom_user_texts and
 # SdkBackend.prune_live, so an echo whose text carries a trailing newline still lands. The kernel's own
 # copy of that module when it is loaded (kernel.py loads it as romp_session_backend, and TmuxBackend
 # subclasses that copy's ABC); otherwise the file is loaded under its OWN module name, as sdk_backend
 # does, so re-executing the source never rebinds the ABC out from under a subclass.
-echo_text_key = (sys.modules.get("romp_session_backend") or SourceFileLoader(
-    "romp_session_backend_keys", str(HERE / "session_backend.py")).load_module()).echo_text_key
+echo_text_key = (sys.modules.get("romp_session_backend")
+                 or load_source("romp_session_backend_keys", HERE / "session_backend.py")).echo_text_key
 
 SDK_PIN = "openai-codex==0.144.4"     # bin/romp-codex-setup installs exactly this into codexvenv
 SETUP_HINT = ("Session not created: the Codex backend isn't installed. "

@@ -2,14 +2,16 @@
 // kernel restarted, the pane stopped receiving live events for that host's active session until the user's
 // next send).
 //
-// A kernel serves the tab a client is LOOKING AT from the live change key (its per-client `active`:
-// _active_chat_sig folds in the backend's live tail, its queue, the snapshot row and every side file) and
-// every other session from the file-stat cache (_chat_build_sig), which no in-memory stream ever busts. A
-// client declares its tab two ways: the `?active=` connect hint (the pane shim's LOCAL socket carries it on
-// every dial, from the PERSISTED state) and the `activeTab` message (render.ts notifyActive, on every tab
-// switch). The federation relay carries no connect hint, and a remote kernel that restarted mints a fresh
-// client with no active tab — so the session the user was watching streamed nowhere until their next send
-// moved a file-stat input. federation.ts dispatches romp:hostRelayUp on the relay's own open, the exact
+// A kernel builds the tab a client is LOOKING AT (its per-client `active`) first and flushes it first; every
+// tab is served from its cached build while its complete signature (_chat_build_sig: the backend's live tail,
+// its queue, the snapshot row, every side file) holds, so the hint decides the build order and the first
+// flush. A client declares its tab two ways: the `?active=` connect hint (the pane shim's LOCAL socket
+// carries it on every dial, from the PERSISTED state) and the `activeTab` message (render.ts notifyActive,
+// on every tab switch). The federation relay carries no connect hint, and a remote kernel that restarted
+// mints a fresh client with no active tab. Under the key of the time, which folded no in-memory input for a
+// background tab, the session the user was watching then streamed nowhere until their next send moved a
+// file-stat input; today it costs the watched tab its place at the head of the build and the first flush.
+// federation.ts dispatches romp:hostRelayUp on the relay's own open, the exact
 // moment the fresh kernel-side client exists; render.ts re-announces the active tab on it through
 // notifyActive (routeOutbound strips the host prefix), when this decision says that host owns the tab.
 //
