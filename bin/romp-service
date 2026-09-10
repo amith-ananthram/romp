@@ -5,7 +5,12 @@
 # Cross-platform: a launchd user agent on macOS, a systemd --user service on Linux.
 #   romp-service install     write + load the agent (auto-start at login)
 #   romp-service uninstall    unload + remove it
-#   romp-service status       installed? running?
+#   romp-service stop         stop the running agent and keep it stopped (`romp down` calls this);
+#                             exit 3 when no agent is installed, 4 when one is installed but not
+#                             running: either way the caller stops the manager some other way
+#   romp-service start        start the installed agent again (`romp up` calls this); exit 3 when
+#                             none is installed
+#   romp-service status       installed? running? (a kernel stopped by `romp down` says so)
 # Safe + idle-free: the kernel is hardened (Origin gate + token) and the producer is
 # presence-gated (zero model calls when no browser is connected). Runs as a USER-level
 # agent (no root). PATH + ROMP_DIR are baked into the unit so the service finds
@@ -44,6 +49,12 @@ LAUNCHD_DIR="${ROMP_LAUNCHD_DIR:-$HOME/Library/LaunchAgents}"
 SYSTEMD_DIR="${ROMP_SYSTEMD_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
 NO_LOAD="${ROMP_SERVICE_NO_LOAD:-}"
 LAUNCHCTL="${ROMP_LAUNCHCTL:-launchctl}"
+SYSTEMCTL="${ROMP_SYSTEMCTL:-systemctl}"
+# `romp down` leaves this marker (time + command) so a stopped kernel reads as stopped on purpose,
+# not crashed: `romp status` and the status verb below say so, and `romp-manager ensure` (the
+# supervised start a remote update runs on a far host) refuses to bring the manager back while it
+# exists. A deliberate start (`romp up`, `romp-manager up`, the login service) clears it.
+DOWN_MARKER="$STATE/down-by-romp"
 PLIST="$LAUNCHD_DIR/$LABEL.plist"
 UNIT="$SYSTEMD_DIR/romp-manager.service"
 
@@ -212,6 +223,116 @@ audit_install() {
     } 2>/dev/null || true
 }
 
+_linux_active() { "$SYSTEMCTL" --user is-active romp-manager.service 2>/dev/null || true; }
+_darwin_loaded() { "$LAUNCHCTL" print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; }
+
+# The marker's one line for a status listing: when it was stopped and how to bring it back. Nothing
+# when there is no marker. python3 renders the time (a plain `date -d @` is GNU-only).
+_down_marker_line() {
+    [[ -f "$DOWN_MARKER" ]] || return 0
+    local when
+    when="$(python3 - "$DOWN_MARKER" 2>/dev/null <<'PYRENDER' || true
+import json, sys, time
+try:
+    d = json.load(open(sys.argv[1]))
+    t = int(d.get("t") or 0)
+except Exception:
+    t = 0
+if t:
+    fmt = "%H:%M" if time.strftime("%Y-%m-%d", time.localtime(t)) == time.strftime("%Y-%m-%d") else "%Y-%m-%d %H:%M"
+    print(time.strftime(fmt, time.localtime(t)))
+PYRENDER
+)"
+    echo "stopped by romp down${when:+ at $when} (romp up to start)"
+}
+
+# stop / start: the supervisor-side halves of `romp down` and `romp up`. They act on the INSTALLED
+# agent only: exit 3 when there is none, so the caller can stop or start the manager directly
+# instead (a foreground `romp up` has no agent). A stop through the supervisor is what keeps the
+# kernel down: the manager exiting on its own is a crash to it (Restart=always / KeepAlive) and
+# it would respawn within seconds. On macOS the job is booted out (it comes back at the next login
+# or `start`); on Linux the unit is stopped (still enabled, so with linger it comes back at the next
+# boot). A unit that is installed but NOT running is exit 4, never a "stopped": `systemctl --user
+# stop` on an inactive unit exits 0 and a bootout is skipped when the job is not loaded, and either
+# read as a stop while a manager started outside the service (`romp up --foreground`, a hand
+# `romp-manager up`) kept running. On a 4 the caller stops that manager itself.
+_service_stop() {
+    case "$os" in
+      Darwin)
+        [[ -f "$PLIST" ]] || { echo "romp-service: no login agent is installed" >&2; return 3; }
+        if [[ -z "$NO_LOAD" ]]; then
+            if ! _darwin_loaded; then
+                echo "romp-service: the login agent is installed but not running; nothing to stop through it" >&2
+                return 4
+            fi
+            "$LAUNCHCTL" bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+            # bootout only STARTS the teardown (the install path's lesson): wait for the job to
+            # actually leave launchd, bounded, so "stopped" is true when we say it
+            for _ in $(seq 1 100); do
+                _darwin_loaded || break
+                sleep 0.3
+            done
+            if _darwin_loaded; then
+                echo "romp-service: the login agent is still draining after 30s; check $LOG" >&2
+                return 1
+            fi
+        fi
+        echo "  Stopped the login agent; it stays stopped until \`romp up\` or the next login." ;;
+      Linux)
+        [[ -f "$UNIT" ]] || { echo "romp-service: no login service is installed" >&2; return 3; }
+        if [[ -z "$NO_LOAD" ]]; then
+            local state; state="$(_linux_active)"
+            case "$state" in
+              inactive|failed)
+                echo "romp-service: the login service is installed but not running ($state); nothing to stop through it" >&2
+                return 4 ;;
+            esac
+            if ! "$SYSTEMCTL" --user stop romp-manager.service; then
+                echo "romp-service: systemctl --user stop romp-manager.service failed" >&2
+                return 1
+            fi
+        fi
+        echo "  Stopped the login service; it stays stopped until \`romp up\` or the next boot." ;;
+      *) echo "romp-service: unsupported OS '$os'" >&2; return 1 ;;
+    esac
+}
+
+_service_start() {
+    case "$os" in
+      Darwin)
+        [[ -f "$PLIST" ]] || { echo "romp-service: no login agent is installed" >&2; return 3; }
+        if [[ -z "$NO_LOAD" ]]; then
+            if _darwin_loaded; then
+                # loaded but stopped (or already running): kickstart is idempotent
+                "$LAUNCHCTL" kickstart "gui/$(id -u)/$LABEL" 2>/dev/null || true
+            else
+                # booted out by `stop`: load it again the way install does, loudly on failure
+                local loaded="" err=""
+                for _ in $(seq 1 10); do
+                    if err="$("$LAUNCHCTL" bootstrap "gui/$(id -u)" "$PLIST" 2>&1)"; then loaded=1; break; fi
+                    sleep 0.3
+                done
+                if [[ -z "$loaded" ]]; then
+                    echo "romp-service: FAILED to load the login agent; romp-manager is NOT running." >&2
+                    echo "  launchctl bootstrap: ${err:-unknown error}" >&2
+                    return 1
+                fi
+            fi
+        fi
+        echo "  Started the login agent (romp-manager)." ;;
+      Linux)
+        [[ -f "$UNIT" ]] || { echo "romp-service: no login service is installed" >&2; return 3; }
+        if [[ -z "$NO_LOAD" ]]; then
+            if ! "$SYSTEMCTL" --user start romp-manager.service; then
+                echo "romp-service: systemctl --user start romp-manager.service failed" >&2
+                return 1
+            fi
+        fi
+        echo "  Started the login service (romp-manager)." ;;
+      *) echo "romp-service: unsupported OS '$os'" >&2; return 1 ;;
+    esac
+}
+
 case "${1:-status}" in
   install)
     audit_install install
@@ -275,8 +396,8 @@ case "${1:-status}" in
       Linux)
         write_unit
         if [[ -z "$NO_LOAD" ]]; then
-            systemctl --user daemon-reload
-            systemctl --user enable --now romp-manager.service
+            "$SYSTEMCTL" --user daemon-reload
+            "$SYSTEMCTL" --user enable --now romp-manager.service
             loginctl enable-linger "$(id -un)" 2>/dev/null || true   # survive logout (best-effort)
         fi
         echo "  Installed systemd --user service: $UNIT"
@@ -295,22 +416,24 @@ case "${1:-status}" in
         echo "  Removed launchd agent." ;;
       Linux)
         if [[ -z "$NO_LOAD" ]]; then
-            systemctl --user disable --now romp-manager.service 2>/dev/null || true
+            "$SYSTEMCTL" --user disable --now romp-manager.service 2>/dev/null || true
         fi
         rm -f "$UNIT"
-        if [[ -z "$NO_LOAD" ]]; then systemctl --user daemon-reload 2>/dev/null || true; fi
+        if [[ -z "$NO_LOAD" ]]; then "$SYSTEMCTL" --user daemon-reload 2>/dev/null || true; fi
         echo "  Removed systemd --user service." ;;
       *) echo "romp-service: unsupported OS '$os'" >&2; exit 1 ;;
     esac ;;
+  stop)  _service_stop ;;
+  start) _service_start ;;
   status)
     case "$os" in
       Darwin)
         if [[ -f "$PLIST" ]]; then echo "installed: $PLIST"; else echo "not installed"; fi
-        if [[ -z "$NO_LOAD" ]] && "$LAUNCHCTL" print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then echo "running"; fi ;;
+        if [[ -z "$NO_LOAD" ]] && _darwin_loaded; then echo "running"; else _down_marker_line; fi ;;
       Linux)
         if [[ -f "$UNIT" ]]; then echo "installed: $UNIT"; else echo "not installed"; fi
-        if [[ -z "$NO_LOAD" ]] && [[ "$(systemctl --user is-active romp-manager.service 2>/dev/null || true)" == "active" ]]; then echo "running"; fi ;;
+        if [[ -z "$NO_LOAD" ]] && [[ "$(_linux_active)" == "active" ]]; then echo "running"; else _down_marker_line; fi ;;
       *) echo "romp-service: unsupported OS '$os'" >&2; exit 1 ;;
     esac ;;
-  *) echo "usage: romp-service [install|uninstall|status]" >&2; exit 2 ;;
+  *) echo "usage: romp-service [install|uninstall|stop|start|status]" >&2; exit 2 ;;
 esac

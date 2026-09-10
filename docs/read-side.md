@@ -32,10 +32,12 @@ completed); the feed just paints columns. (Reflected in `docs/judges.md`.)
   manager's port (29855), and the front ends and tailscale serve attach unchanged.
 - **The UI is served by the kernel.** The front-end (the three panes) is `ui/`. A
   browser hits the kernel's port and gets it.
-- **The login service starts the supervisor**; `romp up` instead runs
-  `romp-manager` in the foreground (like `jupyter lab`), for machines without the
-  service or for watching it work. `romp refresh` restarts the kernel(s),
-  `romp status` reports them. The kernel binds loopback only; tailnet/phone reach is
+- **The login service starts the supervisor**; `romp up` starts that service,
+  or, on a machine without one, runs `romp-manager` in the foreground (like
+  `jupyter lab`; `romp up --foreground` forces that for watching it work).
+  `romp refresh` restarts the kernel(s), `romp down` stops them through the
+  service and keeps them stopped until `romp up`, `romp status` reports them.
+  The kernel binds loopback only; tailnet/phone reach is
   `tailscale serve` proxying to `127.0.0.1:29855` (there is no `0.0.0.0` opt-in
   door; the tailscale proxy carries the phone path). The UI itself is just a URL
   the kernel serves.
