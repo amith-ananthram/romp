@@ -241,7 +241,7 @@ class OneHopNeverALoop(unittest.TestCase):
                      'args=({"commentEffort": str(msg["effort"]), "gt": _jgt},)',
                      'args=({"commentFast": str(msg["fast"]), "gt": _jgt},)',
                      'args=({"tmuxBackend": _tbv, "gt": _jgt},)',   # T288
-                     'args=({"judgeFast": _jfv, "gt": _jgt},)'):    # Fast judging
+                     'args=({_ffield: _jfv, "gt": _jgt},)'):    # Fast judging
             self.assertIn(frag, self.src, frag)
         self.assertGreaterEqual(self.src.count("if _jgt is not None:"), 12,
                                 "every judge-tier fan-out is gated on the pick actually applying")

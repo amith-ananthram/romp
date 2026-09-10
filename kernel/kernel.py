@@ -1137,7 +1137,9 @@ def _version_info():
             "commentEffort": jd._state_str("comment-effort", "session"),
             "commentFast": jd._state_str("comment-fast", "session"),
             "tmuxBackend": jd._state_str("tmux-backend", "off"),   # T288: "on" offers Claude Code (tmux) in the picker and the gear
-            "judgeFast": jd._state_str("judge-fast", "off"),   # RAW "on" | "off": the judges' Fast mode box, the fast-mode opt-in on Opus judge calls
+            "judgeFast": jd._state_str("judge-fast", "off"),   # RAW "on" | "off": the TRIAGE tier's Fast mode box (T300: one per tier)
+            "distillFast": jd._state_str("distill-fast", "off"), "indexFast": jd._state_str("index-fast", "off"),
+            "fastRefused": jd._fast_refused(),   # tier -> {reason, model, t}: the CLI declined a fast ask; the gear's box says why
             # One dict with every kernel-side setting, lifted by a PEER kernel's /version poll onto its
             # /tunnels row so its gear can mark controls where machines disagree (the user 2026-08-14).
             # The top-level fields above stay: this tab's own gear and older kernels read those.
@@ -1158,7 +1160,8 @@ def _version_info():
                          "commentEffort": jd._state_str("comment-effort", "session"),
                          "commentFast": jd._state_str("comment-fast", "session"),
                          "tmuxBackend": jd._state_str("tmux-backend", "off"),
-                         "judgeFast": jd._state_str("judge-fast", "off")},
+                         "judgeFast": jd._state_str("judge-fast", "off"),
+                         "distillFast": jd._state_str("distill-fast", "off"), "indexFast": jd._state_str("index-fast", "off")},
             # every gt-gated store's last-applied gesture stamp (epoch-ms ints, nothing path-shaped):
             # the gear stamps its next gesture above these instead of trusting the device clock.
             # Top-level, not lifted into /tunnels rows — a remote's newer stamp reaches the dashboard
@@ -18911,6 +18914,35 @@ def _expected_restart_status(r, st, rsha, now):
     return st
 
 
+def _row_dialing(r):
+    """Is romp trying to reach this host RIGHT NOW? True while an ssh dial is spawned and not yet confirmed
+    (status "starting"; "connecting" is the checked-in row's birth state) or while the supervisor's health
+    request to the host is in flight (_dialing, set around the poll below). False while the row waits out
+    its backoff (status "down" until nextTry). The dashboard's host-down notice spins
+    its swirl on exactly this (the user 2026-09-10, who wanted a spinner that means romp is trying right
+    now, never one that spins whatever happens); federation reads it from the /tunnels row every few
+    seconds and repaints on a change. The mark is on for ANY polled row during its pass's requests, an up
+    row included (milliseconds against an answering host); the notice only ever shows for a down one."""
+    return bool(r.get("_dialing")) or (r.get("status") or "") in ("starting", "connecting")
+
+
+@contextlib.contextmanager
+def _dialing_mark(r):
+    """The row wears the in-flight mark (_dialing, read by _row_dialing) for the supervisor pass's health
+    requests to its host: on from the first round-trip until the last returns, HOWEVER the block ends. The
+    clear is the context manager's exit, a finally by construction, because a mark left on by an exception
+    (a socket the port check could not build) would read as dialing through the row's whole next backoff, the
+    one state the mark exists to distinguish (review find, 2026-09-10). The polls themselves stay inline in
+    _tunnel_supervisor, whose source a dozen tests pin line by line."""
+    with _remotes_lock:
+        r["_dialing"] = True
+    try:
+        yield
+    finally:
+        with _remotes_lock:
+            r["_dialing"] = False
+
+
 def _remote_public(r):
     """The API view of a remote row — everything the browser needs, minus the Popen and minus the remote's
     credential. The browser reaches a remote through /remote/<host>/ws, where _remote_ws injects that
@@ -18981,6 +19013,9 @@ def _remote_public(r):
             # forever-retry must never look identical to a healthy idle row, so the popover can say how
             # many dials have failed and when the next one lands.
             "fails": int(r.get("fails") or 0), "nextTry": int(r.get("next_try") or 0),
+            # a dial or health request to the host in flight at this moment (_row_dialing): the host-down
+            # notice's swirl spins on it as of the dashboard's last poll, sits still between attempts
+            "dialing": _row_dialing(r),
             # not live: everything above derived from kernel_sha / the peer's declared tier is a memory of
             # the last successful exchange. lastOk is when that was (0 = never seen up this process).
             "stale": stale, "lastOk": int(r.get("last_ok") or 0),
@@ -18993,6 +19028,8 @@ _remotes_saved_sig = None   # signature of the last blob written — lets the su
 
 
 _NOT_SAVED = ("proc",       # the live Popen
+              "_dialing",   # a health request to the host in flight right now (_row_dialing): this pass's
+              #               mark, meaningless to the next boot
               "usage",      # a remote's rate-limit snapshot: re-polled a minute after any boot, and
               "_usage_at",  # persisting it would rewrite this 0600 credential file every minute forever
               "_views_at",  # the /views poll's stamp, restamped once a minute per up host (REMOTE_VIEWS_EVERY):
@@ -22459,16 +22496,17 @@ def _tunnel_supervisor():
                         _mark_known_unreachable(r["host"])
                 if skip:
                     continue
-                up = _port_open(r["local_port"])              # outside the lock (socket round-trip)
-                rows = _poll_remote_sessions(r) if up else None   # its session rows: ids for the wake-router, names for notifications
-                sids = None if rows is None else [x.get("id") for x in rows]
-                rver = _poll_remote_version(r) if up else None   # the code the remote is running (drift check)
-                rsha = (rver or {}).get("sha")
-                # …and which Claude account it burns, so the rail can draw a second set of bars when it is
-                # a different one (self-rate-limited to a minute — these windows are hours wide)
-                ruse = _poll_remote_usage(r) if up else None
-                rviews = _poll_remote_views(r) if up else None   # tag federation v0: the read half
-                rapih = _poll_remote_api_health(r) if up else None   # its API-health frame, for the shell's per-host map (T301)
+                with _dialing_mark(r):   # the pass's health requests: the row reads dialing meanwhile (_row_dialing)
+                    up = _port_open(r["local_port"])              # outside the lock (socket round-trip)
+                    rows = _poll_remote_sessions(r) if up else None   # its session rows: ids for the wake-router, names for notifications
+                    sids = None if rows is None else [x.get("id") for x in rows]
+                    rver = _poll_remote_version(r) if up else None   # the code the remote is running (drift check)
+                    rsha = (rver or {}).get("sha")
+                    # …and which Claude account it burns, so the rail can draw a second set of bars when it is
+                    # a different one (self-rate-limited to a minute — these windows are hours wide)
+                    ruse = _poll_remote_usage(r) if up else None
+                    rviews = _poll_remote_views(r) if up else None   # tag federation v0: the read half
+                    rapih = _poll_remote_api_health(r) if up else None   # its API-health frame, for the shell's per-host map (T301)
                 with _remotes_lock:
                     if r["host"] not in _remotes:
                         continue
@@ -38514,8 +38552,8 @@ def _judge_usage(t0):
         return {"calls": 0, "in": 0, "out": 0, "cost": 0.0, "ms": 0}
     total, by_judge, by_tier = blank(), {}, {}
     for o in _judge_usage_rows():
-        if (o.get("t") or 0) < t0:
-            continue
+        if (o.get("t") or 0) < t0 or o.get("err"):     # err: an error envelope's row, kept for its fast readback
+            continue                                    # only (zero cost, no model call to count)
         for b in (total, by_judge.setdefault(o.get("judge") or "?", blank()),
                   by_tier.setdefault(o.get("tier") or "?", blank())):
             b["calls"] += 1
@@ -40874,6 +40912,51 @@ def _set_tmux_backend(v, gt=None):   return _set_judge_state("tmux-backend", v, 
 # default. Fast mode bills Opus at a premium and draws on fast mode's own rate limits, so it is a deliberate
 # pick. Rides the judge-knob machinery: validated, stamped, propagated to every linked kernel.
 def _set_judge_fast(v, gt=None):     return _set_judge_state("judge-fast", v, {"on", "off"}, gt=gt)
+# One flag per tier (T300, the user 2026-09-10): judge-fast above is the TRIAGE tier's, these two the distilling and
+# indexing tiers'. A box beside each tier's model picker in the gear, greyed with the reason when the tier's effective
+# model cannot run fast (jd.fast_capable); the value is kept then, and the judges simply ask nothing (jd._tier_fast).
+def _set_distill_fast(v, gt=None):   return _set_judge_state("distill-fast", v, {"on", "off"}, gt=gt)
+def _set_index_fast(v, gt=None):     return _set_judge_state("index-fast", v, {"on", "off"}, gt=gt)
+_JUDGE_FAST_TIERS = (("judgeFast", "judge-fast", "triage", _set_judge_fast, lambda: jd._triage_model()),
+                     ("distillFast", "distill-fast", "distilling", _set_distill_fast, lambda: jd._distill_model()),   # EFFECTIVE:
+                     ("indexFast", "index-fast", "indexing", _set_index_fast, lambda: jd._index_model()))           # follow resolves
+
+
+_JUDGE_FAST_MIGRATED = "judge-fast-tiers.migrated"   # STATE marker: the carry-over below ran to completion (epoch seconds)
+
+
+def _migrate_judge_fast_tiers():
+    """One-time carry-over from the single fast-mode flag (STATE/judge-fast alone, which ran every Opus call fast
+    whichever tier) to a flag per tier. On the first boot on this code, every new-tier file that is not yet written
+    gets a value: when judge-fast is "on", "on" where the tier's effective model can run fast and "off" where it
+    cannot, so an existing on keeps the behaviour it had; otherwise "off", the default it already read as. An
+    explicit marker (STATE/judge-fast-tiers.migrated) is written LAST and is the only done signal: a boot that
+    finds it does nothing, a boot that finds a file already written leaves that file alone and completes the rest
+    (a write that failed half-way completes on the next boot; a review finding on the add-on's first head, whose
+    marker was either file's existence, so a failed second write lost that tier's carry for good). A Triage box
+    ticked after the marker never spreads to the other tiers. The value writes carry stamp 1, older than any
+    gesture: a pick made on any machine, before or after this boot, outranks them."""
+    try:
+        marker = jd.STATE / _JUDGE_FAST_MIGRATED
+        if marker.exists():
+            return 0
+        carry = jd._state_str("judge-fast", "off") == "on"
+        n = 0
+        for field, fname, word, setter, model_of in _JUDGE_FAST_TIERS[1:]:
+            if (jd.STATE / fname).exists():
+                continue                             # written already (a half-applied earlier boot): left as it is
+            v = "on" if carry and jd.fast_capable(model_of()) else "off"
+            if setter(v, gt=1) is None:
+                return n                             # the write failed (said by the setter): no marker, the next boot completes
+            n += 1
+            if carry:
+                sys.stderr.write("judges: fast mode carried over to the %s tier as %s (its model: %s)\n" % (word, v, model_of()))
+        jd.STATE.mkdir(parents=True, exist_ok=True)
+        _atomic_write(marker, str(int(time.time())))
+        return n
+    except Exception:
+        sys.stderr.write("judge-fast migration: %s\n" % traceback.format_exc())
+        return 0
 
 
 # The four judge-tier settings PROPAGATE: a pick made here follows to every linked kernel (the user
@@ -40899,7 +40982,8 @@ _JUDGE_SETTING_FIELDS = (("judgeModel", _set_judge_model), ("indexModel", _set_i
                          ("commentModel", _set_comment_model), ("commentEffort", _set_comment_effort),
                          ("commentFast", _set_comment_fast),
                          ("tmuxBackend", _set_tmux_backend),   # T288: the tmux backend's offer, "on" | "off"
-                         ("judgeFast", _set_judge_fast))       # the judges' Fast mode, "on" | "off"
+                         ("judgeFast", _set_judge_fast),       # fast mode per tier, "on" | "off" (T300)
+                         ("distillFast", _set_distill_fast), ("indexFast", _set_index_fast))
 
 # The per-field PICK STAMPS this leg carried from 2026-08-30 (each field's STATE-file mtime in a
 # body "stamps" dict, preserved by utime at the receiver — the distill-pick stomp fix) are
@@ -40952,7 +41036,8 @@ def _apply_judge_settings(body):
             "commentEffort": jd._state_str("comment-effort", "session"),
             "commentFast": jd._state_str("comment-fast", "session"),
             "tmuxBackend": jd._state_str("tmux-backend", "off"),
-            "judgeFast": jd._state_str("judge-fast", "off")}
+            "judgeFast": jd._state_str("judge-fast", "off"),
+            "distillFast": jd._state_str("distill-fast", "off"), "indexFast": jd._state_str("index-fast", "off")}
 
 
 def _propagate_judge_settings(body):
@@ -41163,7 +41248,7 @@ def _adopt_peer_settings(host, rver):
 _GT_STORES = ("auto-nudge", "compact-suggest", "file-editing", "update-mode", "thinking-summaries",
               "judge-model", "index-model", "judge-effort", "index-effort", "judge-concurrency",
               "distill-model", "distill-effort", "comment-model", "comment-effort", "comment-fast",
-              "tmux-backend", "judge-fast")
+              "tmux-backend", "judge-fast", "distill-fast", "index-fast")
 
 
 def _setting_stored_gt(name):
@@ -54367,19 +54452,22 @@ class Handler(BaseHTTPRequestHandler):
                                  args=({"tmuxBackend": _tbv, "gt": _jgt},), daemon=True).start()
             else:
                 _tell_stale_gesture(client, msg)
-        elif msg and msg.get("type") == "setJudgeFast" and msg.get("enabled") is not None:
-            # the gear's Fast mode box on the Triage model row: a checkbox, stored as on/off and read by the judges per call (jd._judge_fast).
-            # The boolean is checked like its siblings' (_as_bool), and a malformed frame is refused with a
-            # warn, unwritten; an applied pick fans out to every linked kernel under its gesture stamp.
+        elif msg and msg.get("type") in ("setJudgeFast", "setDistillFast", "setIndexFast") and msg.get("enabled") is not None:
+            # the gear's Fast mode box beside a tier's model picker (T300: one per tier): a checkbox, stored as on/off
+            # and read by the judges per call (jd._tier_fast). The boolean is checked like its siblings' (_as_bool),
+            # and a malformed frame is refused with a warn, unwritten; an applied pick fans out to every linked
+            # kernel under its gesture stamp.
+            _ffield, _fset = {"setJudgeFast": ("judgeFast", _set_judge_fast), "setDistillFast": ("distillFast", _set_distill_fast),
+                              "setIndexFast": ("indexFast", _set_index_fast)}[msg["type"]]
             _jfe, ferr = _as_bool(msg.get("enabled"), "enabled")
             if ferr:
                 _refuse_ws_flag(client, msg["type"], ferr, "enabled", msg.get("enabled"))
                 return
             _jfv = "on" if _jfe else "off"
-            _jgt = _set_judge_fast(_jfv, gt=_gesture_ms(msg))
+            _jgt = _fset(_jfv, gt=_gesture_ms(msg))
             if _jgt is not None:
                 threading.Thread(target=_propagate_judge_settings,
-                                 args=({"judgeFast": _jfv, "gt": _jgt},), daemon=True).start()
+                                 args=({_ffield: _jfv, "gt": _jgt},), daemon=True).start()
             else:
                 _tell_stale_gesture(client, msg)
         else:
@@ -55049,6 +55137,7 @@ def main():
         _n = jd.migrate_all_stores()                          # goal store/archive BEFORE any judge pass runs —
         if _n:                                                # the hot paths carry no migration logic anymore
             sys.stderr.write("romp-kernel: diary sweep migrated %d store file(s)\n" % _n)
+        _migrate_judge_fast_tiers()                           # the one fast-mode flag -> one per tier (T300), once
     except Exception:
         sys.stderr.write("diary sweep: %s\n" % traceback.format_exc())
     try:                                                      # judge scratch transcripts are one-shot junk

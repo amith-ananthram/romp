@@ -30,7 +30,9 @@ test("hostOf/bareId live in host-prefix.ts (side-effect-free) and federation re-
   assert.match(hp, /export function bareId\(id: string\): string \{/);
   assert.doesNotMatch(hp, /import /, "host-prefix.ts must stay import-free — it is the safe home");
   const fed = fs.readFileSync(path.join(UI, "federation.ts"), "utf8");
-  assert.match(fed, /import \{ hostOf, bareId \} from "\.\/host-prefix";/);
+  // hostDialLive (2026-09-10) is the third pure helper federation takes from the safe home: the host-down
+  // notice's "is romp dialing right now" rule, over the row and socket state federation publishes
+  assert.match(fed, /import \{ hostOf, bareId, hostDialLive \} from "\.\/host-prefix";/);
   assert.match(fed, /export \{ hostOf, bareId \};/);
   const pv = fs.readFileSync(path.join(UI, "preview.ts"), "utf8");
   assert.match(pv, /import \{ hostOf, bareId \} from "\.\/host-prefix";/);
