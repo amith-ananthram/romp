@@ -720,13 +720,15 @@ class Script(unittest.TestCase):
         self.assertIn("var LEGEND_ROWS=[['r429','429 = the API told us to slow down (rate limit)'],['r5xx','5xx = the API itself failed (server error)'],['none','gray = no connection, or another error']];", JS)
         self.assertIn("function legendHTML(gray){var h='<div class=ah-legend>';LEGEND_ROWS.forEach(function(r){if(r[0]==='none'&&!gray)return;", HIST, "the gray line only when the range holds any")
         self.assertIn("h+='<div class=ah-lrow><i class=\"ah-lsw ah-sw-'+r[0]+'\"></i><span>'+r[1]+'</span></div>';});return h+'</div>';}", HIST, "a swatch in the bar's colour, one line each")
-        self.assertIn("h+=legendHTML(gray);", HIST, "the legend stands under the histograms, once")
+        self.assertIn("if(!pinned)h+=legendHTML(gray);", HIST, "the hover: the legend under the histograms, once")
+        self.assertIn("if(pinned)h+=rangeHTML()+legendHTML(gray);", HIST, "the detail: the legend under the range chips, where the eye starts (a short window folded the bottom one away)")
+        self.assertEqual(HIST.count("legendHTML(gray);"), 2, "drawn in exactly one of the two places")
         self.assertIn(".ah-legend{display:flex;flex-direction:column;align-items:flex-start;gap:3px;margin-top:7px;opacity:.75}", km._landing(), "vertical, left-justified")
         self.assertIn("if(many)h+='<div class=\"ru-tip-row ah-gname\"><span class=ah-nm>'+esc(name)+'</span></div>';", HIST, "several machines: each histogram under its machine's name")
         self.assertIn("var RANGES={hour:{tier:'minute',per:1,label:'1 hour',s:3600},day:{tier:'fiveMin',per:3,label:'24 hours',s:86400},week:{tier:'hour',per:1,label:'7 days',s:604800}};", JS,
                       "the hover draws the day as quarter-hours; the detail offers the three ranges")
         self.assertIn("R=RANGES[pinned?range:'day'];", HIST, "the hover draws the day; the detail its chosen range")
-        self.assertIn("if(pinned)h+=rangeHTML();", HIST, "the range chips only in the detail")
+        self.assertIn("if(pinned)h+=rangeHTML()+legendHTML(gray);", HIST, "the range chips only in the detail")
         self.assertIn("else if(act.indexOf('range:')===0){range=act.slice(6);render();}", JS)
         self.assertNotIn("winRow", JS, "the per-window rows are gone")
         self.assertNotIn("worst of", JS, "and the bucket-count caveat with them")
@@ -748,7 +750,7 @@ class Script(unittest.TestCase):
         self.assertNotIn("ah-head", JS.split("function html(m,full)")[1].split("function anchor()")[0], "no head row in the card")
         html = km._landing()
         for rule in (".ah-c-ok{color:var(--accent,#9cd2ff)}", ".ah-c-r429{color:var(--st-blocked-bg,#e5484d)}", ".ah-c-r5xx{color:var(--st-5xx-bg,#c026d3)}", ".ah-c-none{color:var(--dim,#9aa4ad)}",
-                     "#ah-tip.ru-modal{width:min(720px,92vw)}", ".ah-bars.ah-big svg{height:140px}"):
+                     "#ah-tip.ru-modal{width:min(720px,92vw)}", ".ah-bars.ah-big svg{height:110px}"):
             self.assertIn(rule, html)
 
     def test_the_tail_holds_four_rows_newest_first_in_plain_words_each_state_s_hold_and_a_restart_never_hidden(self):

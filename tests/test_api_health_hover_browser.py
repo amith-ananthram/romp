@@ -495,7 +495,9 @@ await step("detail", async () => {
   await waitSel("#ah-tip .ah-range"); await page.waitForFunction(() => !!document.querySelector("#ah-tip .ah-bars.ah-big"), null, { timeout: 8000 });
   const chips = () => ev(() => Array.from(document.querySelectorAll("#ah-tip .ah-range .rsp-btn")).map((b) => ({ t: b.textContent, on: b.classList.contains("on"), act: b.getAttribute("data-act") })));
   const barsOf = () => ev(() => { const b = document.querySelector("#ah-tip .ah-bars.ah-big"); return b ? +b.getAttribute("data-bars") : 0; });
-  R.detail = { mode: await mode(), chips: await chips(), dayBars: await barsOf(), head: await head() };
+  R.detail = { mode: await mode(), chips: await chips(), dayBars: await barsOf(), head: await head(),
+    legendAboveBars: await ev(() => { const l = document.querySelector("#ah-tip .ah-hist .ah-legend"), b = document.querySelector("#ah-tip .ah-hist .ah-bars"); return !!(l && b) && (l.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0; }),
+    legendCount: await ev(() => document.querySelectorAll("#ah-tip .ah-legend").length) };
   await ev(() => { document.querySelector('#ah-tip [data-act="range:hour"]').click(); });
   R.detail.hourBars = await barsOf(); R.detail.hourOn = await ev(() => document.querySelector('#ah-tip [data-act="range:hour"]').classList.contains("on"));
   await ev(() => { document.querySelector('#ah-tip [data-act="range:week"]').click(); });
@@ -1069,6 +1071,8 @@ class ServedHistory(unittest.TestCase):
         self.assertEqual([c["t"] for c in d["chips"]], ["1 hour", "24 hours", "7 days"])
         self.assertEqual([c["on"] for c in d["chips"]], [False, True, False], "the day by default")
         self.assertEqual((d["dayBars"], d["head"]["big"]), (96, True), "the day: 96 quarter-hour bars, large")
+        self.assertTrue(d["legendAboveBars"], "the detail names the colours under the chips, before the bars (a short window folded the bottom legend away)")
+        self.assertEqual(d["legendCount"], 1, "once")
         self.assertEqual((d["hourBars"], d["hourOn"]), (60, True), "the hour: its 60 one-minute bins, the chip pressed")
         self.assertEqual(d["weekBars"], 168, "the week: its 168 hourly bins")
         self.assertTrue(d["closed"], "Escape closes the detail")

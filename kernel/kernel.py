@@ -47684,7 +47684,7 @@ var BAR_CLASSES=[['ok','var(--accent,#9cd2ff)'],['rateLimited','var(--st-blocked
 function niceTopAh(mx){var p=Math.pow(10,Math.floor(Math.log(mx)/Math.LN10)),m=mx/p;return (m<=1?1:m<=2?2:m<=5?5:10)*p;}   // a 1-2-5 ceiling at any magnitude
 function tickWords(sec){if(sec>=86400)return Math.round(sec/86400)+'d';if(sec>=3600)return Math.round(sec/3600)+'h';return Math.round(sec/60)+'m';}
 function sumArr(a){var t=0;(a||[]).forEach(function(v){t+=v||0;});return t;}
-function barsHTML(led,big){var n=led.ok.length,W=big?560:168,H=big?140:48,tot=[],mx=0;
+function barsHTML(led,big){var n=led.ok.length,W=big?560:168,H=big?110:48,tot=[],mx=0;
 for(var i=0;i<n;i++){var v=0;BAR_CLASSES.forEach(function(c){v+=(led[c[0]]||[])[i]||0;});tot.push(v);if(v>mx)mx=v;}
 if(mx<=0)return '';
 var top=niceTopAh(mx),slot=W/n,gap=Math.min(2,slot*0.3),bw=Math.max(0.8,slot-gap),PADT=4;
@@ -47740,9 +47740,11 @@ return led;}
 function histHTML(){var loc=HIST&&HIST[''],R=RANGES[pinned?range:'day'];
 var ago=(loc&&!loc.error&&!loc.pending&&typeof loc.asOf==='number'&&MERGE)?'<span class="ru-tip-reset ah-ago">'+esc(MERGE.agoWords(Date.now()/1000-loc.asOf))+'</span>':'';
 var h='<div class="ru-tip-win ah-hist"><div class=ru-tip-name><span>History</span>'+ago+'</div>';
-if(pinned)h+=rangeHTML();
+var hs=HIST?Object.keys(HIST).sort(localFirst):[],many=hs.length>1,gray=false;
+// the gray legend line applies when any machine's range holds a no-connection or other-status failure: known up front
+hs.forEach(function(host){var d=HIST[host];if(!d||d.error||d.pending)return;var l=ledgerOf(d,R);if(l&&sumArr(l.noStatus)+sumArr(l.other)>0)gray=true;});
+if(pinned)h+=rangeHTML()+legendHTML(gray);   // the detail: the chips, then the colours named where the eye starts
 if(!HIST)return h+'<div class="rl-dots ah-wait"><i></i><i></i><i></i></div></div>';
-var hs=Object.keys(HIST).sort(localFirst),many=hs.length>1,gray=false;
 hs.forEach(function(host){var d=HIST[host],name=host||SELF();
 // a machine whose answer is still in flight: its loader line (alone, the section's loader), never a blank
 if(d&&d.pending){h+=many?'<div class="ru-tip-row ah-mline"><i class=ah-dot data-dot=quiet></i><span class=ah-nm>'+esc(name)+'</span><span class="rl-dots ah-wait"><i></i><i></i><i></i></span></div>':'<div class="rl-dots ah-wait"><i></i><i></i><i></i></div>';return;}
@@ -47750,8 +47752,8 @@ if(!d||d.error){h+='<div class="ah-line ah-err">Could not read the API history'+
 if(many)h+='<div class="ru-tip-row ah-gname"><span class=ah-nm>'+esc(name)+'</span></div>';
 var led=ledgerOf(d,R),bars=led?barsHTML(led,pinned):'';
 if(!bars){h+='<div class="ah-line ru-tip-reset">no attempts in the '+esc(R.label)+'</div>';return;}
-h+=bars;if(sumArr(led.noStatus)+sumArr(led.other)>0)gray=true;});
-h+=legendHTML(gray);
+h+=bars;});
+if(!pinned)h+=legendHTML(gray);   // the hover: the legend under the bars
 var tr=(loc&&!loc.error&&!loc.pending)?transRows(loc):'';if(tr)h+='<div class="ru-tip-name ah-hname"><span>State changes'+(many?' \u00b7 '+esc(SELF()):'')+'</span></div>'+tr;
 return h+'</div>';}
 // the cell's description while the hover shows: the state word and its since, then how to reach the rest. Before the
@@ -50033,7 +50035,7 @@ def _landing():
             ".ah-legend{display:flex;flex-direction:column;align-items:flex-start;gap:3px;margin-top:7px;opacity:.75}"
             ".ah-lrow{display:flex;align-items:center;gap:6px}.ah-lsw{width:8px;height:8px;border-radius:2px;flex:0 0 auto}"
             ".ah-sw-ok{background:var(--accent,#9cd2ff)}.ah-sw-r429{background:var(--st-blocked-bg,#e5484d)}.ah-sw-r5xx{background:var(--st-5xx-bg,#c026d3)}.ah-sw-none{background:var(--dim,#9aa4ad)}"
-            ".ah-gname{margin-top:6px}.ah-bars.ah-big svg{height:140px}.ah-bars.ah-big{margin-bottom:14px}"
+            ".ah-gname{margin-top:6px}.ah-bars.ah-big svg{height:110px}.ah-bars.ah-big{margin-bottom:12px}"
             ".ah-range{margin:4px 0 6px}"
             "#ah-tip.ru-modal{width:min(720px,92vw)}"
             # a failed send's reason, under the button it restored; the hover's rows carry no action (.ah-ro),
