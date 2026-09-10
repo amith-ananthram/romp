@@ -17,12 +17,14 @@ test("commentReply for a remote thread routes to the parent's host by sid; tid a
 
 test("commentCreate for a remote session routes by sid and carries the name exactly as given", () => {
   const routes = routeOutbound({ type: "commentCreate", id: "TESTHOST:" + SID, uuid: "u1", exact: "backoff",
-                                 text: "why jitter?", name: "", model: "", effort: "", fast: "", color: "" });
+                                 text: "why jitter?", name: "", model: "", effort: "", fast: "", color: "",
+                                 createId: "k1x2y3z4" });
   assert.equal(routes.length, 1);
   assert.equal(routes[0].host, "TESTHOST");
   assert.equal(routes[0].msg.id, SID);
   assert.equal(routes[0].msg.name, "", "an empty name stays empty: the owning kernel picks its default");
   assert.equal(routes[0].msg.uuid, "u1");
+  assert.equal(routes[0].msg.createId, "k1x2y3z4", "the gesture's id reaches the owning kernel, which keys its repeat memo on it");
 });
 
 test("a local thread's reply stays local with a bare sid", () => {

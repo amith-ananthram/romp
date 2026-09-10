@@ -13814,16 +13814,23 @@ def _comment_markers(sid):
 # alone starves; the client's frame-keyed re-post stays as the belt for a kernel restart that loses
 # this in-memory park). The typed transient nack keeps the client's optimistic mark alive meanwhile.
 ANCHOR_LAG_ERR = "that message isn't in the transcript yet; try again in a moment"
-_parked_creates = []                       # [{sid,uuid,exact,text,name,model,effort,fast,color,tries}]
+_parked_creates = []                       # [{sid,uuid,exact,text,name,model,effort,fast,color,createId,tries}]
 _PARK_MAX_TRIES = 30                       # pusher cycles (~15-90s) — past this the record isn't coming
-# A create's IDENTITY (T289): (parent sid, anchor uuid, passage, text) -> the thread it made. A lag-parked
-# create is retried by BOTH the pusher (above) and the client (its frame-keyed re-post), and a popover
-# whose ack was lost sends its create again; the second copy used to collide on its explicit name and
-# come back as the create door's refusal toast (the user 2026-09-09, on a remote session), or — with the
-# name now left to the kernel's default — would mint a SECOND thread for one comment. The memo answers a
-# repeat with the SAME thread's ack, and a parked copy is parked once. Bounded (oldest out), in memory:
-# a kernel restart forgets it, and the client's re-post after one creates exactly once.
-_recent_creates = {}                       # (sid, uuid, exact, text) -> tid
+# A create's IDENTITY (T289): the client's createId, minted by the popover at the send gesture and carried
+# by every re-post of it, under the parent sid -> the thread it made. A lag-parked create is retried by
+# BOTH the pusher (above) and the client (its frame-keyed re-post), and a popover whose ack was lost sends
+# its create again; the second copy used to collide on its explicit name and come back as the create
+# door's refusal toast (the user 2026-09-09, on a remote session), or, with the name now left to the
+# kernel's default, would mint a SECOND thread for one comment. The memo answers a repeat with the SAME
+# thread's ack, and a parked copy is parked once. The first cut keyed on the words (parent sid, anchor
+# uuid, passage, text), and so also answered a DELIBERATE second comment in the same words on the same
+# passage with the first thread: two acks, the second name nowhere on disk (review, 2026-09-09). The id
+# keys on the gesture instead; a frame from a client that sends none still keys on its words. A comment
+# the user posts again by hand while the first is still parked (after a viewer reload, or after the viewer
+# gave up at its own attempt bound) is a new gesture and lands as a second thread: a visible duplicate
+# the user can delete, where the words key lost the second comment silently. Bounded (oldest out), in
+# memory: a kernel restart forgets it, and the client's re-post after one creates exactly once.
+_recent_creates = {}                       # (sid, createId) or (sid, uuid, exact, text) -> tid
 _RECENT_CREATES_MAX = 256
 # The two doors that can run one create — the WS handler on a server thread and _retry_parked_creates on
 # the pusher — reserve the identity under ONE lock before creating (review, 2026-09-09): the pusher sends
@@ -13835,8 +13842,18 @@ _create_lock = threading.RLock()
 _inflight_creates = set()                  # keys whose _comment_create is running right now, either door
 
 
-def _create_key(sid, uuid, exact, text):
+def _create_key(sid, uuid, exact, text, create_id=""):
+    """What one create is remembered by: the gesture's own id when the frame carries one (a fresh comment
+    in the same words is a new id, a re-post is the same one), else its words. The two shapes never meet:
+    a stamped frame is not a repeat of an unstamped one, nor the other way round."""
+    cid = str(create_id or "")
+    if cid:
+        return (str(sid), cid)
     return (str(sid), str(uuid), str(exact), str(text))
+
+
+def _parked_key(pk):
+    return _create_key(pk["sid"], pk["uuid"], pk["exact"], pk["text"], pk.get("createId", ""))
 
 
 def _note_create(key, tid):
@@ -13867,8 +13884,7 @@ def _reserve_create(key):
         again = _repeat_create_tid(key)
         if again:
             return "repeat", again
-        if key in _inflight_creates or any(_create_key(pk["sid"], pk["uuid"], pk["exact"], pk["text"]) == key
-                                           for pk in _parked_creates):
+        if key in _inflight_creates or any(_parked_key(pk) == key for pk in _parked_creates):
             return "busy", None
         _inflight_creates.add(key)
         return "free", None
@@ -13888,7 +13904,7 @@ def _retry_parked_creates():
     if not _parked_creates:
         return
     for pk in list(_parked_creates):
-        key = _create_key(pk["sid"], pk["uuid"], pk["exact"], pk["text"])
+        key = _parked_key(pk)
         with _create_lock:
             if _repeat_create_tid(key):            # the client's re-post already made it: the park is moot
                 if pk in _parked_creates:
@@ -15720,7 +15736,9 @@ def _drive(msg, client):
         # guess) and the fresh {type:"comments"} frame rides straight back, ahead of the pusher cycle.
         # A REPEAT of a create this kernel already completed (a client re-post after a lost ack or a
         # parked copy that landed) is the same comment: answer with the same thread, never a twin (T289).
-        key = _create_key(sid, msg["uuid"], msg["exact"], msg["text"])
+        # The repeat is known by the createId the popover minted at the send gesture, so a second comment
+        # in the same words on the same passage, a new id, is a new thread (review, 2026-09-09).
+        key = _create_key(sid, msg["uuid"], msg["exact"], msg["text"], msg.get("createId") or "")
         state, again = _reserve_create(key)
         if state == "repeat":
             sys.stderr.write("comment create repeated (%s): the same comment again, answered with thread %s\n"
@@ -15754,13 +15772,14 @@ def _drive(msg, client):
             # client re-posts the same create on every frame while the nack stands.
             if err == ANCHOR_LAG_ERR:
                 with _create_lock:
-                    if not any(_create_key(pk["sid"], pk["uuid"], pk["exact"], pk["text"]) == key for pk in _parked_creates):
+                    if not any(_parked_key(pk) == key for pk in _parked_creates):
                         _parked_creates.append({"sid": sid, "uuid": str(msg["uuid"]), "exact": str(msg["exact"]),
                                                 "text": str(msg["text"]), "name": str(msg.get("name") or ""),
                                                 "model": str(msg.get("model") or ""),
                                                 "effort": str(msg.get("effort") or ""),
                                                 "fast": str(msg.get("fast") or ""),
-                                                "color": str(msg.get("color") or ""), "tries": 0})
+                                                "color": str(msg.get("color") or ""),
+                                                "createId": str(msg.get("createId") or ""), "tries": 0})
             else:
                 client["send"](json.dumps({"type": "warn", "text": err}))
                 # the kernel log carries the refusal too (T289): a name refused at this door showed only
@@ -17150,12 +17169,18 @@ def _note_recovery(r, st):
     timeout) mints one bump until a real silent poll or a status change re-arms it, so a request that keeps
     stalling on a healthy link cannot mint its own recovery, retry, stall, and mint again forever. A steady
     healthy row never bumps; a fresh boot starts at 0 (the counter describes THIS process, like the poll run
-    counters, and is not saved). Returns whether it bumped."""
+    counters, and is not saved). A Start in flight (`booting`, _start_remote's hold) owns the row's phase: the
+    pass skips its status write under the hold, so the row keeps reading "starting" however many polls answer
+    meanwhile, and every answered pass would count as a not-up row coming up and bump again (1, 2, 3, then
+    once more as the hold cleared). No pass under the hold bumps; the first answered pass after it clears
+    finds the row not up and bumps once, the one recovery of that Start. Returns whether it bumped."""
     answered = st == "up" and int(r.get("misses") or 0) == 0
     if not answered:
         if st != "up":
             r.pop("_demand_bumped", None)            # a status change re-arms the demand path
         return False
+    if r.get("booting"):
+        return False                                 # a Start hold: the pass after it clears bumps once (see above)
     real_miss = bool(r.pop("_poll_miss", False))
     demand_miss = bool(r.pop("_demand_miss", False))
     had_miss = real_miss or (demand_miss and not r.get("_demand_bumped"))
