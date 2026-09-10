@@ -355,10 +355,16 @@ class ViewSignatureKeysOnExactInputs(_StateSandbox):
             jd._active_end(rid)
 
 
-class ActiveTabIsServedOnAnExactKey(_StateSandbox):
+class EveryTabIsServedOnTheCompleteKey(_StateSandbox):
     """The watched chat tab used to rebuild from all atoms on every pusher cycle "by design", because its
-    payload moves with inputs no file records. _active_chat_sig names every one of them, so an identical
-    world serves the last build and any moved input rebuilds. Synthetic session, private sid."""
+    payload moves with inputs no file records; since 2026-09-03 it was served on a separate exact key
+    beside the background tabs' file-stat key. There is ONE key for every tab now, the complete per-session
+    signature (_chat_build_sig), and these tests pin the same observable through it: an identical world
+    yields the same key and any moved payload input moves it, attributed to its component. Of the old
+    key's inputs, the captions store is keyed through what the payload embeds from it (the postal cards'
+    caption values, the postal component; tests/test_chat_build_sig_inputs.py moves one), and the
+    in-flight judge set is not keyed because build_session does not read it (the census there is the
+    check). Synthetic session, private sid."""
 
     SID = "11111111-2222-3333-4444-999999999941"
 
@@ -371,180 +377,248 @@ class ActiveTabIsServedOnAnExactKey(_StateSandbox):
                                           "message": {"role": "user", "content": "hi"}}) + "\n")
         self.sess = {"sid": self.SID, "path": str(self.tpath), "anchor": self.SID}
         self.tm = {"state": "waiting", "since": NOW - 100, "model": "m", "subagents": [], "bgTasks": [], "snapT": NOW}
-        km._interrupt_clicked.pop(self.SID, None); km._model_switch_pending.pop(self.SID, None); km._compact_clicked.pop(self.SID, None)
+        self.saved_sdk = km._sdk
+        km._sdk = lambda: None                                    # tmux-owned unless a test says otherwise
+        km._built_chat.pop(self.SID, None)
+        km._live_scope.usage = km._live_scope.spend_pause = None   # a drain scope another module left on this thread
+        self._clear_stamps()
 
     def tearDown(self):
+        km._sdk = self.saved_sdk
         for p in (self.path, self.tpath):
             try: os.unlink(p)
             except OSError: pass
-        km._interrupt_clicked.pop(self.SID, None); km._model_switch_pending.pop(self.SID, None); km._compact_clicked.pop(self.SID, None)
+        self._clear_stamps()
+        km._built_chat.pop(self.SID, None)
+        with km._watch_lock:
+            km._watches[:] = [w for w in km._watches if w.get("sid") != self.SID]
+
+    def _clear_stamps(self):
+        for d in (km._interrupt_clicked, km._model_switch_pending, km._compact_clicked, km._tmux_echo, km._tmux_echo_rev):
+            d.pop(self.SID, None)
+
+    def sig(self, tm=None, now=NOW, **kw):
+        """The complete key, as the pusher takes it: the session, its liveness row, the push's clock and map."""
+        tm = self.tm if tm is None else tm
+        return km._chat_build_sig(self.sess, tm, now, tmux={self.SID: tm} if tm is not None else {}, **kw)
 
     def test_a_an_identical_world_yields_the_same_key_and_a_volatile_stamp_does_not_matter(self):
-        s1 = km._active_chat_sig(self.sess, self.tm, NOW)
+        s1 = self.sig()
         self.assertIsNotNone(s1)
+        self.assertEqual(len(s1), len(km._CHAT_SIG_LABELS), "one value per labelled component")
         tm2 = dict(self.tm); tm2["snapT"] = NOW + 7
-        self.assertEqual(s1, km._active_chat_sig(self.sess, tm2, NOW + 1), "snapT and the clock alone move nothing")
+        self.assertEqual(s1, self.sig(tm2, NOW + 1), "snapT and the clock alone move nothing")
 
     def test_b_each_input_class_moves_the_key(self):
-        s1 = km._active_chat_sig(self.sess, self.tm, NOW)
+        s1 = self.sig()
         tm = dict(self.tm); tm["state"] = "working"
-        self.assertNotEqual(s1, km._active_chat_sig(self.sess, tm, NOW), "a snapshot fact")
+        self.assertNotEqual(s1, self.sig(tm), "a snapshot fact")
         _append_rows(self.path, [{"t": NOW - 5, "state": "working"}])
-        s2 = km._active_chat_sig(self.sess, self.tm, NOW)
+        s2 = self.sig()
         self.assertNotEqual(s1, s2, "a states row")
-        jd.CAPDIR.mkdir(parents=True, exist_ok=True)
-        cap = jd.CAPDIR / (self.SID + ".jsonl")
+        # the judge's OUTPUT the payload reads is the goal store (the ledger, the seams, the awaiting stamps):
+        # a publish moves the key at once, through the store's live identity, and no other tab's
+        jd.GOALDIR.mkdir(parents=True, exist_ok=True)
+        gs = jd.GOALDIR / (self.SID + ".json")
         try:
-            cap.write_text(json.dumps({"id": "seg-1", "gist": "did a thing"}) + "\n")
-            s3 = km._active_chat_sig(self.sess, self.tm, NOW)
-            self.assertNotEqual(s2, s3, "a caption landed")
+            gs.write_text(json.dumps({"rompUuid": self.SID, "nodes": {}, "status": {}}))
+            s3 = self.sig()
+            self.assertNotEqual(s2, s3, "a goal store published")
+            self.assertEqual(km._chat_sig_miss(s2, s3), ("store",), "...attributed to the store component alone")
+            g0 = km._judge_gen[0]
+            km._judge_gen[0] += 1
+            try:
+                self.assertEqual(self.sig(), s3, "the judge-pass counter is not a chat input")
+            finally:
+                km._judge_gen[0] = g0
         finally:
-            try: os.unlink(cap)
+            try: os.unlink(gs)
             except OSError: pass
-        rid = jd._active_begin("closer", self.SID, 0)
-        try:
-            self.assertNotEqual(s2, km._active_chat_sig(self.sess, self.tm, NOW), "a judge call in flight")
-        finally:
-            jd._active_end(rid)
 
-    def test_c_clock_predicates_flip_exactly_at_their_deadlines(self):
+    def test_c_clock_booleans_flip_exactly_at_their_deadlines(self):
+        """The clock enters the key only as the booleans the build derives from it, so the key moves at each
+        crossing and at no other tick (the clock component)."""
         tm = {"state": "ready", "since": NOW - 3599, "bgTasks": []}
-        p0 = km._clock_predicates(self.SID, tm, NOW)
-        self.assertEqual(p0[:5], (False, False, False, False, False))
-        self.assertEqual(km._clock_predicates(self.SID, tm, NOW + 2)[0], True, "faded flips at the hour")
-        odd = dict(tm, state="")                          # the build derives 'ready' from an empty raw state
-        self.assertEqual(km._clock_predicates(self.SID, odd, NOW + 2)[1], True, "…keyed whatever the raw state says")
-        km._interrupt_clicked[self.SID] = NOW - 119
-        self.assertFalse(km._clock_predicates(self.SID, tm, NOW)[2])
-        self.assertTrue(km._clock_predicates(self.SID, tm, NOW + 2)[2], "the interrupt cap ran out")
-        s1 = km._active_chat_sig(self.sess, tm, NOW)
-        self.assertNotEqual(s1, km._active_chat_sig(self.sess, tm, NOW + 2), "…and the key follows the flip")
-
+        s0 = self.sig(tm, NOW)
+        self.assertEqual(s0, self.sig(tm, NOW + 1), "one second short of the hour: nothing moved")
+        s2 = self.sig(tm, NOW + 2)
+        self.assertNotEqual(s0, s2, "faded flips at the hour, and the key follows the flip")
+        self.assertEqual(km._chat_sig_miss(s0, s2), ("clock",))
+        km._compact_clicked[self.SID] = NOW - 179
+        s3 = self.sig(tm, NOW + 2)                                # 181 s: the compaction's optimistic cap ran out (stamp popped)
+        self.assertEqual(s2, s3, "a cap that already ran out is no fact: the key reads as if never clicked")
+        km._compact_clicked[self.SID] = NOW - 177
+        s4 = self.sig(tm, NOW + 2)                                # 179 s: still compacting, optimistically
+        self.assertNotEqual(s3, s4, "an armed compaction is a clock fact")
+        self.assertEqual(km._chat_sig_miss(s3, s4), ("clock",))
+        s5 = self.sig(tm, NOW + 4)                                # 181 s: the cap ran out, and the key follows the flip
+        self.assertEqual(s5, s3, "...back to the clicked-nothing key, exactly at the crossing")
 
     def test_d_a_live_task_expiring_moves_the_key_through_the_builds_own_filter(self):
         """The raw snapshot rows carry no deadline; the build joins each task's recorded deadline from the
-        launch ledger and drops expired ones. The key carries that filtered set, so an expiry — a tid
-        dropping out — moves it exactly when the awaiting box would change (review 2026-09-03)."""
+        launch ledger and drops expired ones. The key carries that filtered set (the bg component), so an
+        expiry, a tid dropping out, moves it exactly when the awaiting box would change (review 2026-09-03)."""
         saved = km._bg_live_norm
         rows = [{"tid": "t1", "desc": "watch", "t": NOW - 60}]
         km._bg_live_norm = lambda sid, path: list(rows)
         try:
-            s1 = km._active_chat_sig(self.sess, self.tm, NOW)
-            self.assertEqual(s1, km._active_chat_sig(self.sess, self.tm, NOW + 1))
+            s1 = self.sig()
+            self.assertEqual(s1, self.sig(now=NOW + 1))
             rows.clear()                                     # the watcher passed its deadline → filtered out
-            self.assertNotEqual(s1, km._active_chat_sig(self.sess, self.tm, NOW + 2))
+            s2 = self.sig(now=NOW + 2)
+            self.assertNotEqual(s1, s2)
+            self.assertEqual(km._chat_sig_miss(s1, s2), ("bg",))
         finally:
             km._bg_live_norm = saved
 
     def test_d2_a_running_tasks_output_growing_moves_the_key(self):
-        """The task box shows a running task's output tail, read live from a file outside the state root; the
-        key stats that file so the tail keeps moving (review 2026-09-03)."""
+        """The task box shows a running task's output tail, read live from a file outside the state root. The
+        build records each output it read as a dependency of its payload (_chat_build_deps), and the key
+        re-stats the recorded file every cycle (the taskout component), so the tail keeps moving (review
+        2026-09-03; the old watched-tab key stat'd the running tasks' files itself)."""
         out = jd.STATE / "task-out.log"; out.write_text("line 1\n")
-        saved = km._bg_scan_cached
-        km._bg_scan_cached = lambda path: [{"id": "toolu_1", "status": "running", "outputFile": str(out)}]
-        try:
-            s1 = km._active_chat_sig(self.sess, self.tm, NOW)
-            self.assertEqual(s1, km._active_chat_sig(self.sess, self.tm, NOW))
-            with open(out, "a") as f:
-                f.write("line 2\n")
-            self.assertNotEqual(s1, km._active_chat_sig(self.sess, self.tm, NOW), "the tail grew")
-        finally:
-            km._bg_scan_cached = saved
+        rec = {"task_outs": [(str(out), km._chat_stat_key(str(out)))], "pl_pending": [], "pl_at": (), "pl_check": None,
+               "postal_any": False, "postal_cards": []}
+        s1 = self.sig(deps=rec)
+        self.assertEqual(s1, self.sig(deps=rec))
+        with open(out, "a") as f:
+            f.write("line 2\n")
+        s2 = self.sig(deps=rec)
+        self.assertNotEqual(s1, s2, "the tail grew")
+        self.assertEqual(km._chat_sig_miss(s1, s2), ("taskout",))
 
-    def test_d3_the_branch_of_a_subdirectory_cwd_and_of_the_last_edited_files_tree_is_keyed(self):
-        """build_session reads the branch of the registered cwd's tree and of the last edited file's tree
-        (the per-session worktree); both HEADs are in the key, resolved through _tree_of like the build."""
+    def test_d3_the_branch_of_a_subdirectory_cwd_is_keyed(self):
+        """build_session reads the branch of the registered cwd's tree (and of the last edited file's tree);
+        the key carries them by value through the branch memo, which is keyed on the tree's HEAD."""
         import subprocess
         repo = tempfile.mkdtemp()
         subprocess.run(["git", "init", "-q", "-b", "main", repo], check=True)
+        subprocess.run(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                        "commit", "-q", "--allow-empty", "-m", "init"], check=True)   # main is born: the branch resolves
         sub = os.path.join(repo, "pkg"); os.makedirs(sub)
         saved_cwd = km._cwd_of
         km._cwd_of = lambda sid: sub                       # a cwd INSIDE the repo, not its top
         try:
-            e1 = km._external_sig(self.SID, str(self.tpath))
-            hp = km._git_head_file(repo)
-            st = os.stat(hp)
-            self.assertIn((st.st_mtime_ns, st.st_size, st.st_ino), e1,
-                          "the repo's HEAD is stat'd for a subdirectory cwd: %r" % (e1,))
-            s1 = km._active_chat_sig(self.sess, self.tm, NOW)
+            s1 = self.sig()
+            cwd_i = km._CHAT_SIG_LABELS.index("cwd")
+            self.assertEqual(s1[cwd_i][1], "main", "the repo's branch is read for a subdirectory cwd: %r" % (s1[cwd_i],))
             subprocess.run(["git", "-C", repo, "checkout", "-q", "-b", "feature"], check=True)
-            self.assertNotEqual(s1, km._active_chat_sig(self.sess, self.tm, NOW), "a branch switch moves the key")
+            s2 = self.sig()
+            self.assertNotEqual(s1, s2, "a branch switch moves the key")
+            self.assertEqual(s2[cwd_i][1], "feature")
         finally:
             km._cwd_of = saved_cwd
 
-    def test_e_the_backend_leg_and_the_watch_files_move_the_key(self):
+    def test_e_the_backend_leg_and_the_watches_move_the_key(self):
         """A stub backend stands in for the SDK: the live-tail revision, the send queue and the brackets each
-        move the key; so does the kernel-owned watch registry's file (review 2026-09-03)."""
+        move the key; so does a kernel-owned watch this session registered (review 2026-09-03; the watch
+        registry is read as the build reads it, from the in-memory list its file persists)."""
         class Stub:
             rev = 0; queue = []; comp = False; clr = False
             def owns(self, sid): return True
             def live_rev(self, sid): return self.rev
+            def live_atoms(self, sid): return []
             def pending_queued(self, sid): return list(self.queue)
             def compacting(self, sid): return self.comp
             def clearing(self, sid): return self.clr
             def pending_cut(self, sid): return ""
-        stub = Stub(); saved = km._sdk
+        stub = Stub()
         km._sdk = lambda: stub
-        try:
-            s1 = km._active_chat_sig(self.sess, self.tm, NOW)
-            self.assertEqual(s1, km._active_chat_sig(self.sess, self.tm, NOW))
-            stub.rev += 1;  s2 = km._active_chat_sig(self.sess, self.tm, NOW); self.assertNotEqual(s1, s2, "a live atom")
-            stub.queue = ["x"]; s3 = km._active_chat_sig(self.sess, self.tm, NOW); self.assertNotEqual(s2, s3, "a queued send")
-            stub.comp = True;  s4 = km._active_chat_sig(self.sess, self.tm, NOW); self.assertNotEqual(s3, s4, "compacting")
-            (jd.STATE / "watches.json").write_text(json.dumps([{"sid": self.SID, "what": "a build"}]))
-            self.assertNotEqual(s4, km._active_chat_sig(self.sess, self.tm, NOW), "a watch armed")
-        finally:
-            km._sdk = saved
-
+        s1 = self.sig()
+        self.assertEqual(s1, self.sig())
+        stub.rev += 1;  s2 = self.sig(); self.assertNotEqual(s1, s2, "a live atom")
+        self.assertEqual(km._chat_sig_miss(s1, s2), ("live",))
+        stub.queue = ["x"]; s3 = self.sig(); self.assertNotEqual(s2, s3, "a queued send")
+        stub.comp = True;  s4 = self.sig(); self.assertNotEqual(s3, s4, "compacting")
+        with km._watch_lock:
+            km._watches.append({"id": "w-stage0", "cmd": "true", "every": 60, "timeoutS": 600, "sid": self.SID,
+                                "note": "a build", "at": NOW})
+        s5 = self.sig()
+        self.assertNotEqual(s4, s5, "a watch armed")
+        self.assertEqual(km._chat_sig_miss(s4, s5), ("watch",))
 
     def test_f_the_owning_backends_live_tail_moves_the_key_for_a_tmux_session(self):
-        """Review 2026-09-05: the key read only the SDK backend's tail, so a tmux session's composer echo — a
-        kernel-side store the build renders — left the watched tab served stale until some file moved."""
-        saved_sdk = km._sdk
-        km._sdk = lambda: None                                    # this sid is tmux-owned
-        km._tmux_echo.pop(self.SID, None)
-        try:
-            s1 = km._active_chat_sig(self.sess, self.tm, NOW)
-            self.assertIsNotNone(s1)
-            km._tmux_echo_add(self.SID, "please also fix the header")
-            s2 = km._active_chat_sig(self.sess, self.tm, NOW)
-            self.assertNotEqual(s1, s2, "the echo the build renders is in the key")
-            for a in km._tmux_echo.get(self.SID, {}).values():
-                a["dropped"] = True                               # the pane dropped the keystroke: rendered differently
-            s3 = km._active_chat_sig(self.sess, self.tm, NOW)
-            self.assertNotEqual(s2, s3, "…and so is its dropped flag")
-            km._tmux_echo.pop(self.SID, None)                     # dismissed
-            self.assertEqual(km._active_chat_sig(self.sess, self.tm, NOW), s1, "back to the world before the send")
-        finally:
-            km._sdk = saved_sdk
-            km._tmux_echo.pop(self.SID, None)
+        """Review 2026-09-05: the key read only the SDK backend's tail, so a tmux session's composer echo, a
+        kernel-side store the build renders, left the watched tab served stale until some file moved. The
+        tmux echo store counts its changes (TmuxBackend.live_rev) the way the SDK backend does, and
+        Sessions.live_rev dispatches to the owning backend."""
+        s1 = self.sig()
+        self.assertIsNotNone(s1)
+        km._tmux_echo_add(self.SID, "please also fix the header")
+        s2 = self.sig()
+        self.assertNotEqual(s1, s2, "the echo the build renders is in the key")
+        t = km._tmux_echo_atoms(self.SID)[0]["t"]
+        km._tmux_echo_settle(self.SID, human_floor=t + 5)          # the pane dropped the keystroke: marked, rendered differently
+        self.assertTrue(km._tmux_echo_atoms(self.SID)[0].get("dropped"))
+        s3 = self.sig()
+        self.assertNotEqual(s2, s3, "...and so is its dropped flag")
+        self.assertEqual(km._TMUX.dismiss_echo(self.SID, t=t), "please also fix the header")
+        s4 = self.sig()
+        self.assertNotEqual(s3, s4, "the dismissal is a change too")
+        # a revision counts changes, so the key never returns to an earlier value (one rebuild per change,
+        # never a stale hit); the old key's digest of the atoms did
+        self.assertEqual([km._chat_sig_miss(a, b) for a, b in ((s1, s2), (s2, s3), (s3, s4))], [("live",)] * 3)
 
-    def test_g_the_background_key_carries_the_snapshot_facts_a_tabs_chips_render(self):
-        """The judge generation no longer advances every pass, so a background tab's chips (state, retrying,
-        subagents, pending picks…) are keyed on the snapshot row itself (review 2026-09-05)."""
-        b1 = km._chat_build_sig(self.sess, self.tm)
+    def test_g_the_key_carries_the_snapshot_facts_a_tabs_chips_render(self):
+        """The judge generation no longer advances every pass, so a tab's chips (state, retrying, subagents,
+        pending picks...) are keyed on the snapshot row itself (review 2026-09-05), minus its volatile stamp."""
+        b1 = self.sig()
         self.assertIsNotNone(b1)
         tm2 = dict(self.tm); tm2["snapT"] = NOW + 30
-        self.assertEqual(b1, km._chat_build_sig(self.sess, tm2), "the volatile stamp alone moves nothing")
+        self.assertEqual(b1, self.sig(tm2), "the volatile stamp alone moves nothing")
         for k, v in (("state", "retrying"), ("subagents", ["a"]), ("retryCount", 3), ("modelPending", True),
                      ("connected", True), ("spawning", True), ("model", "other"), ("auth", "key")):
             tm3 = dict(self.tm); tm3[k] = v
-            self.assertNotEqual(b1, km._chat_build_sig(self.sess, tm3), k)
-        self.assertNotEqual(b1, km._chat_build_sig(self.sess), "no row handed → a different (row-less) key, never a false hit")
+            b3 = self.sig(tm3)
+            self.assertNotEqual(b1, b3, k)
+            self.assertIn("row", km._chat_sig_miss(b1, b3), k)   # modelPending is a clock input too (_model_pending_now)
+        self.assertNotEqual(b1, km._chat_build_sig(self.sess, None, NOW, tmux={}),
+                            "no row for the sid: a different (row-less) key, never a false hit")
 
-    def test_h_the_spend_hold_moves_the_key_and_marks_the_views_dirty(self):
-        s1 = km._active_chat_sig(self.sess, self.tm, NOW)
-        before = km._views_dirty[0]
-        km._set_retry_paused(True, reason="spend")
+    def test_h_the_spend_hold_moves_the_key_of_a_tab_with_a_queued_send_and_marks_the_views_dirty(self):
+        """The account-level hold is what a QUEUED bubble names, so the key folds it exactly when the build
+        can render one (a queue, parked ops, an in-flight tmux echo) and never asks otherwise; the old
+        watched-tab key stat'd retry-paused.json for every watched tab. The writer still stamps the dirty
+        mark: the feed and the timeline rebuild past it."""
+        class Stub:
+            def owns(self, sid): return True
+            def live_rev(self, sid): return 0
+            def live_atoms(self, sid): return []
+            def pending_queued(self, sid): return ["a message waiting on the account"]
+            def unqueue(self, sid, idx, expect=None): return None
+            def queue_recallable(self, sid): return True
+            def compacting(self, sid): return False
+            def clearing(self, sid): return False
+            def pending_cut(self, sid): return ""
+            def launch_error(self, sid): return None
+        km._sdk = lambda: Stub()
+        # the hold reader, held for this test over the real pause file: other modules loading this same kernel
+        # module stub _limit_hold to a no-op at import (the drive-op gates), so the shared copy's may be theirs
+        saved_hold = km._limit_hold
+        km._limit_hold = lambda sid: ({"reason": "spend", "resetsAt": None, "what": "waiting for your monthly spend limit to be raised"}
+                                      if (km._retry_paused_on() and km._retry_pause_reason() == "spend") else None)
+        lim = km._CHAT_SIG_LABELS.index("limit")
         try:
-            self.assertNotEqual(s1, km._active_chat_sig(self.sess, self.tm, NOW), "retry-paused.json is a keyed side file")
-            self.assertGreater(km._views_dirty[0], before, "every writer of the hold publishes the flip")
+            s1 = self.sig()
+            self.assertIsNone(s1[lim], "a queue, no hold: read, and None")
+            before = km._views_dirty[0]
+            km._set_retry_paused(True, reason="spend")
+            try:
+                s2 = self.sig()
+                self.assertNotEqual(s1, s2, "the spend hold the queued bubble renders is in the key")
+                self.assertEqual(km._chat_sig_miss(s1, s2), ("limit",))
+                self.assertEqual(s2[lim]["reason"], "spend")
+                self.assertGreater(km._views_dirty[0], before, "every writer of the hold publishes the flip to the feed and timeline")
+            finally:
+                km._set_retry_paused(False)
+            km._sdk = lambda: None                                # nothing queued, nothing parked, no echo
+            km._set_retry_paused(True, reason="spend")
+            try:
+                self.assertIsNone(self.sig()[lim], "with no queued bubble to render, the hold is not read and not keyed")
+            finally:
+                km._set_retry_paused(False)
         finally:
-            km._set_retry_paused(False)
-
-    def test_i_the_active_key_reuses_the_pushers_base(self):
-        base = km._chat_build_sig(self.sess, self.tm)
-        self.assertEqual(km._active_chat_sig(self.sess, self.tm, NOW, base=base), km._active_chat_sig(self.sess, self.tm, NOW))
+            km._limit_hold = saved_hold
 
 
 class PerBuildReadersAreCached(_StateSandbox):

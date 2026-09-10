@@ -1,14 +1,16 @@
 // T246 (the user 2026-09-07): after an ATTACHED kernel restarts, the chat pane stopped receiving live events
 // for that host's ACTIVE session until the user's next send.
 //
-// Why: a kernel keys the tab a client is LOOKING AT (its per-client `active`, set by the `?active=` connect
-// hint or an `activeTab` message) on the live change key (_active_chat_sig: the backend's live tail, its
-// queue, the snapshot row, every side file); every OTHER session is served from the file-stat cache
-// (_chat_build_sig), which no in-memory stream ever busts. The pane shim's local socket carries `?active=`
+// Why: a kernel builds and flushes the tab a client is LOOKING AT (its per-client `active`, set by the
+// `?active=` connect hint or an `activeTab` message) first, and serves every tab from its cached build while
+// its complete signature (_chat_build_sig: the backend's live tail, its queue, the snapshot row, every side
+// file) holds. The pane shim's local socket carries `?active=`
 // on every dial, so a LOCAL kernel restart re-arms it. The federation relay (federation.ts connect) carries
-// no such hint, and nothing re-sent `activeTab` on the relay's reopen — so the restarted remote kernel
-// minted a client with no active tab, served the watched session as a background one, and its reply
-// streamed nowhere until the user's next send moved a file-stat input. Reproduced on two real hermetic
+// no such hint, and nothing re-sent `activeTab` on the relay's reopen, so the restarted remote kernel
+// minted a client with no active tab and served the watched session as a background one. Under the key of
+// the time, which folded no in-memory input for a background tab, its reply streamed nowhere until the
+// user's next send moved a file-stat input; today the missing hint costs the watched tab the head of the
+// build order and the first flush. Reproduced on two real hermetic
 // kernels (one attached to the other through the relay, a browser on the first): after the remote's restart
 // the in-memory probe never arrived in 12 s while that kernel logged the session as active=0 on every cycle;
 // a transcript append still flowed; a tab click flipped it back to active=1. The fix re-announces the active
