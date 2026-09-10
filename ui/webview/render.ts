@@ -8400,8 +8400,11 @@ function applyCommentMarks(sid: string): void {
  *  mark paints per fragment, so a wrapped passage read as a stack of dashed boxes). CSS cannot merge the fragments,
  *  so the box is an absolutely positioned child of the TURN (.cmt-outline, one per thread), sized to the union of the
  *  thread's mark fragments' client rects, turn-relative: it scrolls with the text and needs no repaint on scroll.
- *  Repainted where the geometry can move — after every marks pass (each transcript rebuild and comments frame), on
- *  the rail's rAF scheduler (a re-render, the view's resize observer) and on window resize; the same measure-then-write
+ *  Each fragment is first cut to every scrolling ancestor between its mark and the turn (a notice body, a wide formula):
+ *  the box sits outside those containers, so an unclipped fragment scrolled out of one would draw over the content
+ *  below. Repainted where the geometry can move — after every marks pass (each transcript rebuild and comments frame),
+ *  on the rail's rAF scheduler (a re-render, the view's resize observer, every scroll in the pane, inner containers'
+ *  included through the capture-phase listener) and on window resize; the same measure-then-write
  *  pass either way, writing only what changed. pointer-events: none, so hover and click land on the marks beneath.
  *  A box goes with its unread bit (styleCommentMark drops the class when the popover opens or the thread resolves)
  *  and with its marks (a windowed-out turn, a deleted thread); a hidden view has no boxes to measure and keeps none. */
@@ -8428,13 +8431,26 @@ function paintCommentOutlines(sid: string): void {
     if (!turn) continue;
     let l = Infinity, t = Infinity, r = -Infinity, b = -Infinity;
     for (const m of marks) {
+      // a fragment counts only where it can be SEEN: the box lives on the turn, outside any scrolling container between
+      // the mark and the turn (a notice body at its max height, a wide formula), whose clip the fragment's own rect
+      // ignores — so each fragment is cut to every such ancestor first, and a fragment scrolled out of view adds nothing
+      // (review find, T310). The union of what remains is the box; nothing left → no box.
+      let cl = -Infinity, ct = -Infinity, cr = Infinity, cb = Infinity;
+      for (let a = m.parentElement; a && a !== turn; a = a.parentElement) {
+        const cs = getComputedStyle(a);
+        if (cs.overflowX === "visible" && cs.overflowY === "visible") continue;
+        const ar = a.getBoundingClientRect();
+        cl = Math.max(cl, ar.left); ct = Math.max(ct, ar.top); cr = Math.min(cr, ar.right); cb = Math.min(cb, ar.bottom);
+      }
       for (const q of Array.from(m.getClientRects())) {
         if (!q.width && !q.height) continue;
-        l = Math.min(l, q.left); t = Math.min(t, q.top); r = Math.max(r, q.right); b = Math.max(b, q.bottom);
+        const ql = Math.max(q.left, cl), qt = Math.max(q.top, ct), qr = Math.min(q.right, cr), qb = Math.min(q.bottom, cb);
+        if (qr <= ql || qb <= qt) continue;              // clipped away by a scrolling ancestor
+        l = Math.min(l, ql); t = Math.min(t, qt); r = Math.max(r, qr); b = Math.max(b, qb);
       }
     }
     let box = turn.querySelector(`:scope > .cmt-outline[data-tid="${cssEscape(tid)}"]`) as HTMLElement | null;
-    if (!isFinite(l)) { box?.remove(); continue; }        // no fragment has a box (a display:none ancestor)
+    if (!isFinite(l)) { box?.remove(); continue; }        // no visible fragment (a display:none ancestor, or all scrolled out)
     if (!box) { box = el("div", "cmt-outline"); box.dataset.tid = tid; turn.appendChild(box); }
     const tr = turn.getBoundingClientRect();
     const css = { left: (l - tr.left - PAD) + "px", top: (t - tr.top - PAD) + "px", width: (r - l + 2 * PAD) + "px", height: (b - t + 2 * PAD) + "px" };
@@ -11626,10 +11642,13 @@ if (typeof ResizeObserver === "function") {
   const c = document.getElementById("content");
   if (c) ro.observe(c);
 }
-// the sticky rail stamp tracks the scroll it annotates (passive: it only measures, never blocks the scroll)
+// the sticky rail stamp tracks the scroll it annotates (passive: it only measures, never blocks the scroll). CAPTURE,
+// so a scroll INSIDE the pane reaches it too — a notice body at its max height, a wide formula: scroll events do not
+// bubble, and the unread comment boxes (paintCommentOutlines, on this same scheduler) must follow marks that move
+// inside such a container and be cut to it (review find, T310). The other painters here are signature-guarded.
 {
   const c = document.getElementById("content");
-  if (c) c.addEventListener("scroll", scheduleRailSticky, { passive: true });
+  if (c) c.addEventListener("scroll", scheduleRailSticky, { passive: true, capture: true });
 }
 // ── jump to newest (the user 2026-08-31) ─────────────────────────────────────────────────────────
 // Scrolled-up reading leaves follow mode, and the send gate keeps it that way — this chip is the

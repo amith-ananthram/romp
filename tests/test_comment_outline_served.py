@@ -3,10 +3,13 @@
 scroll notch's yellow around the WHOLE highlighted passage — never a dashed box per line.
 
 A hermetic kernel serves a synthetic chat (the notes-api demo world: session web) whose one answer carries two open
-comment threads with a landed, unseen reply each: a passage that wraps over two lines and one over five. Asserted on
+comment threads with a landed, unseen reply each: a passage that wraps over two lines and one over five
+(on a 640 px page; the kernel ships a thread's exact text capped at 500 characters, so the mark covers at most that),
+plus an incoming question card whose long body scrolls, with a third thread on its last sentence: that box exists only
+while its passage shows inside the body (cut to the scrolling container, repainted when the body scrolls). Asserted on
 the page: every unread thread has EXACTLY one outline box, positioned (the text under it never moves) and transparent
 to the pointer, whose rect covers every line fragment of the thread's marks; the box's outline is solid and its
-colour is byte-equal to the thread's scroll tick, in the dark theme and the light one; no mark fragment wears an
+colour is byte-equal to the thread's scroll tick and reads at 3:1 or better against the page, in the dark theme and the light one; no mark fragment wears an
 outline of its own; opening a thread (a click on its mark) removes ITS box on the same pass and leaves the other's.
 With COMMENT_SHOTS=<dir> the driver also writes a dark and a light screenshot. Skips LOUDLY without the extension
 deps or a Playwright browser. SYNTHETIC fixtures only (placeholder UUIDs, invented prose, host TESTHOST)."""
@@ -36,13 +39,39 @@ THREAD5 = "cccccccc-1111-2222-3333-444444444444"   # the five-line passage's thr
 
 # the answer: two paragraphs, each the exact text of one thread's highlight
 P2 = ("Use exponential backoff with a jitter of ten percent on every retry of the notes-api sync loop, and cap the "
-      "delay at two minutes so a long outage never turns into an hour-long silence between attempts.")
+      "delay at two minutes.")
 P5 = ("The retry budget itself should live in one place: a small table keyed by the failing endpoint, holding the "
       "attempt count, the next allowed time and the last error text, so the dashboard can show at a glance which "
       "endpoints are struggling and the operator can reset one row without touching the others. Persist that table "
       "with the notes themselves, never in memory alone, because a restart in the middle of an outage would otherwise "
-      "forget every backoff and hammer the endpoint the moment the process comes back, which is exactly the storm the "
-      "backoff exists to prevent in the first place.")
+      "forget every backoff and hammer the endpoint when it comes back.")
+assert len(P5) <= 500, "the kernel ships a thread's exact text capped at 500 chars; the mark covers what ships"
+THREADQ = "dddddddd-1111-2222-3333-444444444444"   # the thread on the question card's LAST sentence (a scrolled notice body)
+API = "eeeeeeee-1111-2222-3333-444444444444"
+BAR = "#" * 44
+PQ_LAST = "Which of the two caps do you want written into the README, two minutes or five?"
+# an incoming QUESTION card opens by default and its body scrolls at the notice body's 420 px max height: forty short
+# paragraphs, then the sentence the third thread anchors to, so that passage starts scrolled OUT of the body's view
+PQ = "\n\n".join("Point %d: the retry table needs a row for endpoint number %d, with its own attempt count and next allowed time." % (i, i)
+                 for i in range(1, 41)) + "\n\n" + PQ_LAST
+
+
+def banner(frm, kind, mid, body, t):
+    """The delivered banner the postal service injects (bin/romp-postal-service format_push), as a user record."""
+    hhmm = datetime.fromtimestamp(t).strftime("%H:%M")
+    return "\n".join([BAR, "## \U0001F4EC from %s \u00b7 %s" % (frm, hhmm), BAR, body, "<!-- romp-msg-id: %s -->" % mid,
+                      "<!-- romp-msg-kind: %s -->" % kind, BAR,
+                      "(to reply, only if substantive: romp mail send --kind delegate|coordinate|question %s \"...\")" % frm])
+
+
+def _contrast(a, b):
+    """WCAG contrast of two "rgb(r, g, b)" strings."""
+    def lum(c):
+        ch = [int(x) / 255 for x in c[c.index("(") + 1:c.index(")")].split(",")[:3]]
+        f = lambda v: v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+        return 0.2126 * f(ch[0]) + 0.7152 * f(ch[1]) + 0.0722 * f(ch[2])
+    la, lb = lum(a), lum(b)
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
 
 
 def _free_port():
@@ -77,7 +106,7 @@ const cfg = JSON.parse(fs.readFileSync(process.env.CFG, "utf8"));
 let browser;
 try { browser = await chromium.launch(); }
 catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
-const page = await browser.newPage({ viewport: { width: 900, height: 900 }, deviceScaleFactor: 2 });
+const page = await browser.newPage({ viewport: { width: 640, height: 900 }, deviceScaleFactor: 2 });
 await page.goto(cfg.chat);
 await page.waitForSelector("#tabs .tab, #tabs [data-sid]", { timeout: 20000 });
 await page.waitForFunction((n) => document.querySelectorAll("mark.cmt-hl.unread").length >= n, cfg.minMarks, { timeout: 30000 });
@@ -104,11 +133,24 @@ const measure = () => page.evaluate(() => {
                      boxes };
   }
   const tick = document.querySelector(".cmt-tick.unread");
-  return { threads, tickColor: tick ? getComputedStyle(tick).backgroundColor : null,
+  const nb = document.querySelector(".turn-postal-service .notice-body");
+  const nbr = nb ? nb.getBoundingClientRect() : null;
+  const solid = (c) => c && !/^rgba\(.*,\s*0\)$/.test(c) && c !== "transparent";
+  const pageBg = [document.getElementById("content"), document.body, document.documentElement]
+    .map((n) => n && getComputedStyle(n).backgroundColor).find(solid) || "rgb(30, 30, 30)";
+  return { threads, tickColor: tick ? getComputedStyle(tick).backgroundColor : null, pageBg,
+           noticeBody: nb ? { l: nbr.left, t: nbr.top, r: nbr.right, b: nbr.bottom, scrollTop: nb.scrollTop, scrollHeight: nb.scrollHeight, clientHeight: nb.clientHeight } : null,
            boxCount: document.querySelectorAll(".cmt-outline").length,
            theme: document.body.classList.contains("theme-light") ? "light" : "dark" };
 });
 const dark = await measure();
+// the question card's body scrolls: its last sentence (the third thread) starts out of view — scroll the body to its end
+// (a real scroll event inside the pane, which does not bubble) and let the rail's rAF pass repaint
+await page.evaluate(() => { const nb = document.querySelector(".turn-postal-service .notice-body"); nb.scrollTop = nb.scrollHeight; });
+await page.waitForTimeout(400);
+const scrolled = await measure();
+await page.evaluate(() => { const nb = document.querySelector(".turn-postal-service .notice-body"); nb.scrollTop = 0; });
+await page.waitForTimeout(400);
 if (cfg.shots) { fs.mkdirSync(cfg.shots, { recursive: true }); await page.screenshot({ path: cfg.shots + "/romp_chat-comment-outline-dark.png", fullPage: false }); }
 await page.evaluate(() => document.body.classList.add("theme-light"));
 await page.waitForTimeout(300);
@@ -122,7 +164,7 @@ await page.waitForFunction((tid) => !document.querySelector(`.cmt-outline[data-t
 await page.waitForTimeout(300);
 const afterRead = await measure();
 afterRead.popover = await page.evaluate(() => !!document.querySelector("#cmt-pop"));
-fs.writeSync(1, "RESULT:" + JSON.stringify({ dark, light, afterRead }) + "\n");
+fs.writeSync(1, "RESULT:" + JSON.stringify({ dark, scrolled, light, afterRead }) + "\n");
 await browser.close();
 process.exit(0);
 """
@@ -165,28 +207,34 @@ class ServedCommentOutline(unittest.TestCase):
              "model": "claude-opus-5", "liveModel": "Opus 5"}))
         Path(state, "usage.json").write_text(json.dumps({"five_hour": {"pct": 10}, "seven_day": {"pct": 10}}))
         t0 = int(time.time()) - 1800
+        Path(state, "names", API).write_text("api\t%s\t#1EA1EB\t#ffffff\n" % cwd)
+        os.makedirs(os.path.join(state, "timeline"), exist_ok=True)
+        Path(state, "timeline", "messages.jsonl").write_text(json.dumps(
+            {"t": t0 + 30, "ev": "sent", "id": "q-cap", "from": "api", "from_id": API, "to_id": WEB, "body": PQ, "kind": "question", "from_host": ""}) + "\n")
         parent = [user(t0, "u1", None, "how should the notes-api retry loop back off, and where does its budget live?", WEB),
-                  agent(t0 + 5, "a1", "u1", P2 + "\n\n" + P5, WEB)]
+                  agent(t0 + 5, "a1", "u1", P2 + "\n\n" + P5, WEB),
+                  user(t0 + 31, "m1", "a1", banner("api", "question", "q-cap", PQ, t0 + 30), WEB)]
         proj = os.path.join(claude, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd)))
         os.makedirs(proj, exist_ok=True)
         Path(proj, WEB + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in parent))
         # two threads, each a fork cut at the answer (the copied history, then the exchange), a reply landed and
         # never seen (no lastSeenT) — the kernel's unread bit; no names/ entry (a thread is never on the board)
         rows = []
-        for i, (tsid, exact, ask, reply) in enumerate([
-                (THREAD2, P2, "why jitter at all?", "Jitter spreads simultaneous retries apart so they do not arrive as one wave."),
-                (THREAD5, P5, "why persist the budget?", "A restart mid-outage would otherwise forget every backoff and storm the endpoint.")]):
+        for i, (tsid, anchor, exact, ask, reply) in enumerate([
+                (THREAD2, "a1", P2, "why jitter at all?", "Jitter spreads simultaneous retries apart so they do not arrive as one wave."),
+                (THREAD5, "a1", P5, "why persist the budget?", "A restart mid-outage would otherwise forget every backoff and storm the endpoint."),
+                (THREADQ, "m1", PQ_LAST, "is five too long?", "Five minutes is too long for a notes sync; two keeps the user waiting under a coffee.")]):
             t = t0 + 60 * (i + 1)
-            thread = [user(t0, "u1", None, "how should the notes-api retry loop back off, and where does its budget live?", tsid),
-                      agent(t0 + 5, "a1", "u1", P2 + "\n\n" + P5, tsid),
-                      user(t, "c%d" % i, "a1", ask, tsid),
-                      agent(t + 20, "r%d" % i, "c%d" % i, reply, tsid)]
+            thread = [r for r in parent if r["uuid"] in ("u1", "a1") or anchor == "m1"]   # the copied history, up to the cut
+            thread = [dict(r, sessionId=tsid) for r in thread]
+            thread += [user(t, "c%d" % i, anchor, ask, tsid),
+                       agent(t + 20, "r%d" % i, "c%d" % i, reply, tsid)]
             Path(proj, tsid + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in thread))
             Path(state, "sdk", tsid + ".json").write_text(json.dumps(
-                {"sid": tsid, "name": "web-comment-%d" % (i + 1), "cwd": cwd, "lastSid": tsid, "threadOf": WEB, "forkAt": "a1",
+                {"sid": tsid, "name": "web-comment-%d" % (i + 1), "cwd": cwd, "lastSid": tsid, "threadOf": WEB, "forkAt": anchor,
                  "alive": False, "mode": "auto", "effort": "high", "model": "claude-opus-5"}))
-            rows.append({"tid": "tid-%d" % (i + 1), "sid": tsid, "name": "web-comment-%d" % (i + 1), "anchorUuid": "a1",
-                         "cutUuid": "a1", "exact": exact, "status": "open", "createdT": t})
+            rows.append({"tid": "tid-%d" % (i + 1), "sid": tsid, "name": "web-comment-%d" % (i + 1), "anchorUuid": anchor,
+                         "cutUuid": anchor, "exact": exact, "status": "open", "createdT": t})
         Path(state, "comments", WEB + ".json").write_text(json.dumps({"threads": rows}))
         cls.port, cls.token = _free_port(), "testtok-outline"
         env = dict(os.environ, XDG_STATE_HOME=os.path.join(cls.lab, "xdg"), CLAUDE_CONFIG_DIR=claude,
@@ -216,7 +264,7 @@ class ServedCommentOutline(unittest.TestCase):
     def test_one_solid_box_around_the_whole_passage_in_the_ticks_yellow_gone_once_read(self):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
-            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "minMarks": 2, "read": "tid-1",
+            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "minMarks": 3, "read": "tid-1",
                        "shots": os.environ.get("COMMENT_SHOTS", "")}, f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
@@ -229,12 +277,20 @@ class ServedCommentOutline(unittest.TestCase):
         line = next((ln for ln in p.stdout.splitlines() if ln.startswith("RESULT:")), None)
         self.assertIsNotNone(line, "driver printed no result:\n" + p.stdout[-3000:])
         r = json.loads(line[len("RESULT:"):])
-        for theme, want in (("dark", "rgb(255, 213, 74)"), ("light", "rgb(255, 223, 112)")):
+        for theme, want in (("dark", "rgb(255, 213, 74)"), ("light", "rgb(143, 106, 0)")):
             m = r[theme]
             self.assertEqual(m["theme"], theme)
-            self.assertEqual(set(m["threads"]), {"tid-1", "tid-2"}, m)
-            self.assertEqual(m["boxCount"], 2, "exactly one box per unread thread: %r" % m)
-            self.assertEqual(m["tickColor"], want, "the scroll tick's yellow in this theme: %r" % m)
+            self.assertEqual(set(m["threads"]), {"tid-1", "tid-2", "tid-3"}, m)
+            self.assertEqual(m["tickColor"], want, "the scroll tick's ink in this theme: %r" % m)
+            self.assertGreaterEqual(_contrast(want, m["pageBg"]), 3.0, "the ink reads as a LINE against the page: %r on %r" % (want, m["pageBg"]))
+            # the third thread's passage sits below the question card's scrolled body: no box for it until it shows
+            q = m["threads"]["tid-3"]
+            self.assertTrue(q["unread"], q)
+            self.assertEqual(m["noticeBody"]["scrollTop"], 0, m["noticeBody"])
+            self.assertGreater(m["noticeBody"]["scrollHeight"], m["noticeBody"]["clientHeight"] + 200, "the body scrolls: %r" % m["noticeBody"])
+            self.assertGreater(q["union"]["t"], m["noticeBody"]["b"], "the passage starts scrolled out of the body's view: %r vs %r" % (q["union"], m["noticeBody"]))
+            self.assertEqual(q["boxes"], [], "a fragment scrolled out of its container draws no box over the content below: %r" % q)
+            self.assertEqual(m["boxCount"], 2, "one box per VISIBLE unread thread: %r" % m)
             two, five = m["threads"]["tid-1"], m["threads"]["tid-2"]
             self.assertGreaterEqual(two["lines"], 2, "the first passage wraps over at least two lines: %r" % two)
             self.assertGreaterEqual(five["lines"], 5, "the second passage wraps over at least five lines: %r" % five)
@@ -243,7 +299,9 @@ class ServedCommentOutline(unittest.TestCase):
                 self.assertEqual(th["markOutlines"], ["none"], "no fragment wears an outline of its own: %r" % th)
                 self.assertEqual(len(th["boxes"]), 1, "ONE box for the whole passage: %r" % th)
                 box, u = th["boxes"][0], th["union"]
-                self.assertEqual(box["outline"], "solid 1.5px " + want, "solid, in the tick's exact colour: %r" % box)
+                style, width, colour = box["outline"].split(" ", 2)
+                self.assertEqual((style, colour), ("solid", want), "solid, in the tick's exact colour: %r" % box)
+                self.assertTrue(1 <= float(width.rstrip("px")) <= 2, "the 1.5px rule, as the engine snaps it: %r" % box)
                 self.assertEqual(box["position"], "absolute", "positioned: the text never moves")
                 self.assertEqual(box["pointer"], "none", "hover and click land on the marks beneath")
                 self.assertTrue(box["parentIsTurn"] and box["sameTurn"], "a child of the anchor turn: %r" % box)
@@ -252,12 +310,24 @@ class ServedCommentOutline(unittest.TestCase):
                 self.assertGreaterEqual(box["r"], u["r"] + 0.5); self.assertGreaterEqual(box["b"], u["b"] + 0.5)
                 for side in ("l", "t", "r", "b"):
                     self.assertLess(abs(box[side] - u[side]), 4, "the box hugs the union on the %s side: %r vs %r" % (side, box, u))
+        # scrolled to the body's end (a scroll inside the pane, captured by the rail scheduler): the third thread's box
+        # appears on its passage, inside the body's rect, hugging the visible fragments
+        sc = r["scrolled"]
+        q, nb = sc["threads"]["tid-3"], sc["noticeBody"]
+        self.assertGreater(nb["scrollTop"], 0, nb)
+        self.assertEqual(len(q["boxes"]), 1, "the box follows the scrolled marks: %r" % q)
+        box = q["boxes"][0]
+        self.assertGreaterEqual(box["t"], nb["t"] - 1.5); self.assertLessEqual(box["b"], nb["b"] + 1.5)
+        self.assertGreaterEqual(box["l"], nb["l"] - 1.5); self.assertLessEqual(box["r"], nb["r"] + 1.5)
+        for side in ("l", "t", "r", "b"):
+            self.assertLess(abs(box[side] - q["union"][side]), 4, "the box hugs the now-visible passage on the %s side: %r vs %r" % (side, box, q["union"]))
+        self.assertEqual(sc["boxCount"], 3)
         a = r["afterRead"]
         self.assertTrue(a["popover"], "the click opened the thread: %r" % a)
         self.assertFalse(a["threads"]["tid-1"]["unread"], "read: the unread bit dropped on the click")
         self.assertEqual(a["threads"]["tid-1"]["boxes"], [], "…and its box went on the same pass: %r" % a["threads"]["tid-1"])
         self.assertEqual(len(a["threads"]["tid-2"]["boxes"]), 1, "the other thread keeps its box: %r" % a["threads"]["tid-2"])
-        self.assertEqual(a["boxCount"], 1)
+        self.assertEqual(a["boxCount"], 1, "the read thread's box gone, the scrolled-out one still clipped away: %r" % a)
 
 
 if __name__ == "__main__":
