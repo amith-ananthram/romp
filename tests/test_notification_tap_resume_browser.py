@@ -466,7 +466,10 @@ class ServedTapLanding(unittest.TestCase):
         ep_host = "push.example.net"
         for line in (r"\[push\] ack stage=shown sid=%s endpoint=%s" % (re.escape(SID_B[:8]), ep_host),
                      r"\[push\] ack stage=clicked sid=%s endpoint=%s" % (re.escape(SID_B[:8]), ep_host),
-                     r"\[reveal\] sw sid=%s wid=\S+: delivered" % re.escape(SID_B[:8]),
+                     # since the readiness gate (2026-09-10) a live tap reaches a pane that has said ready at once, and a tap
+                     # that arrives while the pane's ready push is still being built parks and is consumed when that ready
+                     # finishes: both roads land it, and the trail says which
+                     r"\[reveal\] sw sid=%s wid=\S+: (?:delivered|parked[\s\S]*?\[reveal\] sid=%s wid=\S+: consumed \S+ the pane's ready)" % (re.escape(SID_B[:8]), re.escape(SID_B[:8])),
                      r"\[push\] landed sid=%s endpoint=%s" % (re.escape(SID_B[:8]), ep_host)):
             self.assertRegex(klog, line, "the kernel logged it: %s" % klog[-2000:])
         # (the worker STARTS the shown ack before the click and the clicked ack before it tells the page, but every one
