@@ -125,6 +125,23 @@ function el(tag: string, cls?: string): HTMLElement {
   return e;
 }
 
+// ── the paint bracket ──────────────────────────────────────────────────────────────────────────────
+// Runs one pass of the viewer as a timed frame of the page's performance collector (perf-telemetry.ts; the
+// page publishes it as window.__rompPerf, federation.js on a kernel page and the pane's own bundle in VS Code),
+// under the type `fileview:<why>`; one pass is timed today, `paint`, the text body painted anew, in the file
+// view and the URL view alike. The viewer receives no frames of its own, so without this the cost of painting
+// a large document (marked, the sanitizer, the highlight, the link pass) reached the pane's minute row only as
+// a long animation frame attributed to whichever callback ran it, and `romp perf client` could not name the
+// viewer.
+// Counted under the pane that hosts the viewer (app chat or feed), with the main-thread-free sample the
+// collector takes after an outermost bracket. No collector on the page (a page without one, a stand-in), or a
+// slot holding something of another shape: the pass runs untimed, exactly as before.
+function perfTimed<T>(why: string, fn: () => T): T {
+  let p: any = null;
+  try { p = typeof window !== "undefined" ? (window as any).__rompPerf : null; } catch { p = null; }
+  return p && typeof p.timed === "function" ? p.timed("fileview:" + why, fn) : fn();
+}
+
 // ── text size (A−, A+, Ctrl/Cmd + wheel) ───────────────────────────────────────────────────────────
 // The viewer's text sizes, as percentages of the page's own size: a FIXED table with ends, not a free
 // multiplier, so the buttons, the wheel and the stored value all land on the same few sizes and a size can
@@ -881,8 +898,11 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
       return;
     }
     if (text === null || editing) return;   // loading, or the textarea owns the body right now
-    body.replaceChildren(rendered ? mdBlock(text, { kind: "file", path, sid: sid || null }) : codeBlock(text, path, true));
-    if (rendered) stampBodyWidth();           // a fresh root's tables take the width last reported (the property sits on the tables)
+    perfTimed("paint", () => {                // the paint, as one fileview:paint frame of the page's collector (perfTimed above)
+      if (text === null) return;              // never taken (the guard above): a let's narrowing does not reach into the closure
+      body.replaceChildren(rendered ? mdBlock(text, { kind: "file", path, sid: sid || null }) : codeBlock(text, path, true));
+      if (rendered) stampBodyWidth();         // a fresh root's tables take the width last reported (the property sits on the tables)
+    });
     if (rendered && pendingFrag) {
       const h = pendingFrag; pendingFrag = null;
       requestAnimationFrame(() => { if (wrap.isConnected) scrollToFragment(body, h); });
@@ -1283,11 +1303,14 @@ export function openUrlView(href: string): void {
     }
     textSize.sync();                                   // shown once the document's text is up
     if (text === null) return;                         // the loader holds the body until the bytes land
-    body.replaceChildren(fmt.md === "rendered"
-      ? mdBlock(text, { kind: "url", href: loc })      // relative refs resolve against where it LIVES
-      : codeBlock(text, parts.base, true));            // basename → langFor → markdown highlighting
-    landFragment();                                    // after the paint, and only a rendered one lands
-    if (fmt.md === "rendered") stampBodyWidth();       // a fresh root's tables take the width last reported
+    perfTimed("paint", () => {                         // the paint, as one fileview:paint frame of the page's collector (perfTimed above)
+      if (text === null) return;                       // never taken (the guard above): a let's narrowing does not reach into the closure
+      body.replaceChildren(fmt.md === "rendered"
+        ? mdBlock(text, { kind: "url", href: loc })    // relative refs resolve against where it LIVES
+        : codeBlock(text, parts.base, true));          // basename → langFor → markdown highlighting
+      landFragment();                                  // after the paint, and only a rendered one lands (it schedules the scroll)
+      if (fmt.md === "rendered") stampBodyWidth();     // a fresh root's tables take the width last reported
+    });
   };
   renderBody();
 
