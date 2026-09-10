@@ -6627,8 +6627,10 @@ class ViewBuilder(unittest.TestCase):
         try:
             km._alive_sessions = lambda now, tmux: [{"sid": "A", "mtime": 100}, {"sid": "B", "mtime": 50}]
             first = [s["sid"] for s in km._timeline_sessions(NOW, {}, live_only=True)]
-            # B now becomes the most-recently-active (its mtime jumps past A) — the order must NOT change
-            km._alive_sessions = lambda now, tmux: [{"sid": "A", "mtime": 100}, {"sid": "B", "mtime": 999}]
+            # B now becomes the most-recently-active (its mtime jumps past A), so the liveness read comes back
+            # newest-first, B ahead of A, the way _sessions sorts it. The saved order must win over that input
+            # order: a reader that handed the read through unsorted would return [B, A] here.
+            km._alive_sessions = lambda now, tmux: [{"sid": "B", "mtime": 999}, {"sid": "A", "mtime": 100}]
             second = [s["sid"] for s in km._timeline_sessions(NOW, {}, live_only=True)]
             self.assertEqual(first, ["A", "B"], "new sessions frozen newest-active-first, once")
             self.assertEqual(second, first, "activity (mtime) must not reorder existing lanes/tabs")
