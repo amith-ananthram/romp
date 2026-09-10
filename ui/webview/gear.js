@@ -139,6 +139,14 @@ var GEAR_HTML =
   '<option value=chat>The pane you clicked</option><option value=pane>The Files pane</option>' +
   '</select>' +
   '</span></div>' +
+  // the Files control itself (T317, the user 2026-09-10, who recalled a setting for it): the toggle at the bottom of
+  // the dashboard and the Files tab on a phone. Shown by default (today's behaviour). Off hides both, closes an open
+  // Files pane, and a file link set to open in the Files pane opens over the pane you clicked instead (the shell
+  // reads this store key and tells the panes: kernel.py _LANDING_COLLAPSE_JS, render.ts panesAvail).
+  '<label class=rs-row><input type=checkbox id=rs-filesctl checked>' +
+  '<span><b>Files control in the dashboard bar</b>' +
+  '<span class=rs-sub>The Files toggle at the bottom of the dashboard, and the Files tab on a phone. Off hides them and closes the Files pane if it is open; file links set to open in the Files pane then open over the pane you clicked.</span>' +
+  '</span></label>' +
   "<div class='rs-row' style='cursor:default'><span style='flex:1 1 auto;min-width:0'><b>Text scheme</b>" +
   "<span class=rs-sub>Chat text colors only. Each option previews its own tiers — prose, the dimmer tool text, code. (Solarized Light is omitted — its tiers are made for a light page and turn muddy here.)</span>" +
   "<div id=rs-chatscheme style='position:relative;margin-top:5px'></div>" +
@@ -263,7 +271,7 @@ function initGear(post) {
     cvm = document.getElementById('rs-conserve'),
     csg = document.getElementById('rs-suggestcompact'),
     dd = document.getElementById('rs-defaultdir'), gb = document.getElementById('rs-branch'),
-    tc = document.getElementById('rs-tabctx'), fl = document.getElementById('rs-filelink'),
+    tc = document.getElementById('rs-tabctx'), fl = document.getElementById('rs-filelink'), fc = document.getElementById('rs-filesctl'),
     sr = document.getElementById('rs-striprows'),
     dn = document.getElementById('rs-dense'),
     cs = document.getElementById('rs-chatscheme'),
@@ -282,7 +290,7 @@ function initGear(post) {
     fe = document.getElementById('rs-fileedit'),
     ths = document.getElementById('rs-thinksum'),
     ans = document.getElementById('rs-autonudge-split'), asub = document.getElementById('rs-autonudge-sub');
-  function load() { try { return Object.assign({ compact: true, colormap: 'aurora', subgoals: true, debug: false, backend: 'sdk', defaultDir: '', showBranch: false, tabCtx: 'over50', fileLinkPane: 'chat', stripGroupRows: true, denseChrome: false, collapseGaps: true, activeOnly: true }, JSON.parse(localStorage.getItem('romp:settings') || 'null')); } catch (e) { return { compact: true, colormap: 'aurora', subgoals: true, debug: false, backend: 'sdk', defaultDir: '', showBranch: false, tabCtx: 'over50', fileLinkPane: 'chat', stripGroupRows: true, denseChrome: false, collapseGaps: true, activeOnly: true }; } }
+  function load() { try { return Object.assign({ compact: true, colormap: 'aurora', subgoals: true, debug: false, backend: 'sdk', defaultDir: '', showBranch: false, tabCtx: 'over50', fileLinkPane: 'chat', filesControl: true, stripGroupRows: true, denseChrome: false, collapseGaps: true, activeOnly: true }, JSON.parse(localStorage.getItem('romp:settings') || 'null')); } catch (e) { return { compact: true, colormap: 'aurora', subgoals: true, debug: false, backend: 'sdk', defaultDir: '', showBranch: false, tabCtx: 'over50', fileLinkPane: 'chat', filesControl: true, stripGroupRows: true, denseChrome: false, collapseGaps: true, activeOnly: true }; } }
   // mirrors settings.ts tabCtxMode (this file can't import the TS module): the gauge shipped for a
   // few hours as a boolean toggle — false was an explicit hide, true the default nobody chose.
   function tabCtxMode(v) { return (v === 'always' || v === 'never') ? v : (v === false ? 'never' : 'over50'); }
@@ -307,6 +315,7 @@ function initGear(post) {
   if (dn) dn.addEventListener('change', function () { var s = load(); s.denseChrome = dn.checked; save(s); });
   if (tc) tc.addEventListener('change', function () { var s = load(); s.tabCtx = tc.value; save(s); });
   if (fl) fl.addEventListener('change', function () { var s = load(); s.fileLinkPane = fl.value; save(s); });   // webview-local pref read at click time (render.ts openPath)
+  if (fc) fc.addEventListener('change', function () { var s = load(); s.filesControl = fc.checked; save(s); });   // the shell hears the store change (its storage listener) and hides or shows the control (T317)
   // ── the settings' value-picker DROPDOWNS (T117, the user 2026-08-27, screenshot: the Chat
   // tabs and Text scheme pickers rendered every option always-expanded, and the description spans
   // ran off the card's right edge). Progressive disclosure: the CLOSED state is ONE row — the
@@ -1278,7 +1287,7 @@ function initGear(post) {
     // burned the whole 5-frame retry against a display:none pane, latched rs-pane-gone, and the
     // full-viewport fallback box blacked out every pane behind the modal.
     try { if (window.parent !== window) window.parent.postMessage({ romp: 'logUnseenQuery' }, '*'); } catch (e) { /* no shell to ask */ }   // T290: the Open log count
-    p.hidden = false; feedFull(true); setModalCls(true); var s = load(); cc.checked = !!s.compact; jix.checked = (s.showIndexJudges !== undefined ? !!s.showIndexJudges : !!s.debug); jtr.checked = (s.showTriageJudges !== undefined ? !!s.showTriageJudges : !!s.debug); if (gb) gb.checked = s.showBranch === true; if (sr) sr.checked = s.stripGroupRows !== false; if (dn) dn.checked = s.denseChrome === true; if (fl) fl.value = s.fileLinkPane === 'pane' ? 'pane' : 'chat'; if (tc) tc.value = tabCtxMode(s.tabCtx); tcPaint(); csPaint(); ttPaint(); if (cg) cg.checked = s.collapseGaps !== false; if (ao) ao.checked = s.activeOnly !== false; if (fc) fc.checked = s.collapsed === true; cmBuild(); cmPaint(s.colormap || 'aurora'); paintBackendOffer(tb ? tb.checked : false); if (dd) dd.value = s.defaultDir || ''; plFill(); fill(); }
+    p.hidden = false; feedFull(true); setModalCls(true); var s = load(); cc.checked = !!s.compact; jix.checked = (s.showIndexJudges !== undefined ? !!s.showIndexJudges : !!s.debug); jtr.checked = (s.showTriageJudges !== undefined ? !!s.showTriageJudges : !!s.debug); if (gb) gb.checked = s.showBranch === true; if (sr) sr.checked = s.stripGroupRows !== false; if (dn) dn.checked = s.denseChrome === true; if (fl) fl.value = s.fileLinkPane === 'pane' ? 'pane' : 'chat'; if (fc) fc.checked = (s.filesControl !== false); if (tc) tc.value = tabCtxMode(s.tabCtx); tcPaint(); csPaint(); ttPaint(); if (cg) cg.checked = s.collapseGaps !== false; if (ao) ao.checked = s.activeOnly !== false; if (fc) fc.checked = s.collapsed === true; cmBuild(); cmPaint(s.colormap || 'aurora'); paintBackendOffer(tb ? tb.checked : false); if (dd) dd.value = s.defaultDir || ''; plFill(); fill(); }
   if (g) g.onclick = function (e) { e.stopPropagation(); openSettings(); };   // hidden anchor; hosts open via the message below
   window.addEventListener('message', function (e) { if (e.data && e.data.romp === 'openSettings') openSettings(); });
   // The shortcuts row: the web shell (same-origin parent) gets the customize link — it opens the
