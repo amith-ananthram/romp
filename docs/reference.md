@@ -553,14 +553,14 @@ follows a repointed base interpreter) against the new interpreter's tag,
 rebuilds on any difference and says from what to what. A kernel that does come
 up on a Python the venv was not built for logs one line naming both tags, and
 each SDK session reports the mismatch and the remedy that fits: the
-`ROMP_PYTHON` pin when the venv's recorded interpreter still runs (the kernel
-checks by running it), the rebuild when it does not. `romp new` and the
-browser's create refuse with the same verdict, read from the disk at the moment
-of the request, so a venv rebuilt while the kernel runs is reported on both
-surfaces as set up after romp started, with the restart as the remedy. The
-Codex venv (`codexvenv`, built by `bin/romp-codex-setup`) follows the same
-pick and the same rebuild check, and the kernel adds only the site-packages
-built for its own tag from it as well.
+`ROMP_PYTHON` pin when the venv's recorded interpreter still runs as the
+venv's python (the kernel runs it and reads its version and build), the
+rebuild otherwise. `romp new` and the browser's create refuse with the same
+verdict, read from the disk at the moment of the request, so a venv rebuilt
+while the kernel runs is reported on both surfaces as set up after romp
+started, with the restart as the remedy. The Codex venv (`codexvenv`, built by
+`bin/romp-codex-setup`) follows the same pick and the same rebuild check, and
+the kernel adds only the site-packages built for its own tag from it as well.
 
 ### Service environment and credentials
 

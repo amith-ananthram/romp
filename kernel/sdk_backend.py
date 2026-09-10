@@ -2743,22 +2743,39 @@ def sdk_venv_has_sdk(state_dir, tag) -> bool:
         return False
 
 
-def interpreter_runs(path, timeout=5.0) -> bool:
-    """Does the interpreter at `path` start and exit cleanly (`-c pass`)? The test bin/romp-serve's
-    pick_python applies before following the venv's recorded interpreter, applied here for the same
-    reason: an executable file is not a working python. A uv-managed install that lost its shared
-    library or stdlib passes os.access and fails to run, and a mismatch text that prescribed a
-    ROMP_PYTHON pin to exactly that binary would have romp-serve exec it blindly into a respawn loop.
-    The probe is bounded the way the picker's is (the code first runs the interpreter and looks for
-    its exit; the clock only ends a probe that never answers): one that hangs or errors reads as not
-    running."""
+# The one-line program a python prints its venv tag with: the expression running_python_tag() evaluates
+# in this process, and the one bin/romp-sdk-setup's pytag runs in the setup script.
+_TAG_PROGRAM = ("import sys; print('%d.%d%s' % (sys.version_info[0], sys.version_info[1], "
+                "'t' if 't' in getattr(sys, 'abiflags', '') else ''))")
+_TAG_RE = re.compile(r"3\.\d+t?")
+
+
+def interpreter_tag(path, timeout=5.0) -> str:
+    """The tag (`3.12`, `3.14t`) the interpreter at `path` reports itself as when run, or "" when it does
+    not run as a python: not executable, a non-zero exit, a hang, or an answer that is not a tag. The
+    test bin/romp-serve's pick_python applies before following the venv's recorded interpreter (its
+    _runs_as reads sys.version_info and sys.abiflags from the candidate), applied here so the kernel's
+    verdict and the picker's agree on what "the venv's interpreter still runs" means: an executable file
+    is not a working python, and a working python is not the venv's unless it is the python the venv was
+    built for. A uv-managed install that lost its shared library or stdlib passes os.access and fails to
+    run; a `python3` an upgrade repointed runs and exits 0 as some other minor. A mismatch text that
+    prescribed a ROMP_PYTHON pin to either would have romp-serve exec it as given, into a respawn loop
+    or into the same mismatch after the restart. The probe runs the interpreter and reads what it prints
+    (the stripped last stdout line must be a whole tag, so a sitecustomize that prints ahead of it does
+    not defeat it and a script that prints anything else does not pass for a python), bounded the way
+    the picker's is: the clock only ends a probe that never answers."""
     if not path or not os.access(path, os.X_OK):
-        return False
+        return ""
     try:
-        return subprocess.run([path, "-c", "pass"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL, timeout=timeout).returncode == 0
+        res = subprocess.run([path, "-c", _TAG_PROGRAM], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, timeout=timeout)
     except Exception:
-        return False
+        return ""
+    if res.returncode != 0:
+        return ""
+    lines = res.stdout.decode("utf-8", "replace").strip().splitlines()
+    tag = lines[-1].strip() if lines else ""
+    return tag if _TAG_RE.fullmatch(tag) else ""
 
 
 def sdk_venv_interpreter(state_dir) -> str:
@@ -2807,7 +2824,7 @@ def sdk_venv_fingerprint(state_dir) -> tuple:
     return tuple(parts)
 
 
-def sdk_venv_verdict(state_dir, runs=None) -> dict:
+def sdk_venv_verdict(state_dir, probe=None) -> dict:
     """What the disk says about the SDK venv against THIS interpreter, read now. `kind` is one of
       none      no venv (or none with a lib/python3.*): the install remedy fits;
       broken    a venv for this python with no claude_agent_sdk in it (a half-built install): same remedy;
@@ -2815,16 +2832,18 @@ def sdk_venv_verdict(state_dir, runs=None) -> dict:
                 answer for this: the venv was built after it started (bin/romp-sdk-setup run while the
                 kernel ran, the 2026-09-06 recovery), and the remedy is the restart;
       mismatch  venv(s) for other python(s) only. bin/romp-serve's pick_python follows the venv's
-                interpreter, so this means ROMP_PYTHON chose another python, or the venv's own is gone or
-                will not run (2026-09-06: two hours of "isn't installed" over a venv that was present,
-                intact and built for the previous python). `interp` is the recorded interpreter and
-                `interp_runs` whether it actually starts (interpreter_runs; `runs` is the test seam), which
-                decides between the two remedies: point romp back at it, or rebuild for the one romp runs.
+                interpreter, so this means ROMP_PYTHON chose another python, or the venv's own is gone,
+                will not run, or is no longer the python the venv was built for (2026-09-06: two hours of
+                "isn't installed" over a venv that was present, intact and built for the previous python).
+                `interp` is the recorded interpreter and `interp_tag` the tag it reports when run
+                (interpreter_tag; "" when it does not run as a python; `probe` is the test seam), which
+                decides between the two remedies: point romp back at it when that tag is one the venv was
+                built for, or rebuild for the one romp runs.
     ONE function, so every surface that refuses (the session card, the boot log, the creation refusal)
     reads the same facts at the same moment."""
     running = running_python_tag()
     built = sdk_venv_built_for(state_dir)
-    v = {"kind": "none", "built": built, "running": running, "interp": "", "interp_runs": False}
+    v = {"kind": "none", "built": built, "running": running, "interp": "", "interp_tag": ""}
     if not built:
         return v
     if running in built:
@@ -2832,15 +2851,20 @@ def sdk_venv_verdict(state_dir, runs=None) -> dict:
         return v
     v["kind"] = "mismatch"
     v["interp"] = sdk_venv_interpreter(state_dir)
-    v["interp_runs"] = bool(v["interp"]) and bool((runs or interpreter_runs)(v["interp"]))
+    v["interp_tag"] = (probe or interpreter_tag)(v["interp"]) if v["interp"] else ""
     return v
 
 
 def _mismatch_remedy(v, then="then restart romp") -> str:
-    """The ONE remedy the disk supports for a mismatch verdict: the recorded interpreter still runs, so
-    point romp back at it; or it is gone or broken, so rebuild for the one romp runs. Never both, and
-    never a pin to an interpreter nothing has seen run."""
-    if v["interp_runs"]:
+    """The ONE remedy the disk supports for a mismatch verdict: the recorded interpreter still runs as
+    the venv's python, so point romp back at it; or it is gone, broken, or now another python, so
+    rebuild for the one romp runs. Never both, and never a pin to an interpreter nothing has seen run as
+    the venv's python. The test is the one the kernel applies to its own interpreter when it adds the
+    venv (_ensure_sdk_on_path: the running tag is one the venv's lib names), so a pin to an interpreter
+    that passes it brings up a kernel that matches the venv; a pin to a `python3` an upgrade repointed,
+    which runs and exits 0 as another minor, would have bin/romp-serve honor the pin as given and the
+    kernel show this same text again after the restart."""
+    if v["interp_tag"] and v["interp_tag"] in v["built"]:
         return "Set ROMP_PYTHON=%s in service.env, %s." % (v["interp"], then)
     return "Re-run bin/romp-sdk-setup to rebuild it for Python %s, %s." % (v["running"], then)
 
