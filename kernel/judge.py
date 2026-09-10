@@ -1904,10 +1904,10 @@ def _judge_env(tier, auth="login", model=None):
     env = dict(os.environ)
     for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
         env.pop(k, None)                             # billing is an explicit choice per call
-    for k in ("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK", "CLAUDE_CODE_DISABLE_FAST_MODE"):
-        env.pop(k, None)                             # the fast-mode org verdict is per call too (_fast_org_env for a
-        #                                              key-billed ask; a session's own verdict in this process's
-        #                                              environment says nothing about the judge's account)
+    env.pop("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK", None)   # the fast-mode org verdict is per call too (_fast_org_env
+    #   for a key-billed ask): a session's skip in this process's environment says nothing about the judge's account.
+    #   CLAUDE_CODE_DISABLE_FAST_MODE stays: set in service.env it is the OPERATOR's kill switch, which every judge
+    #   child honoured before and every session still does (a review finding on the add-on's first head).
     for k in list(env):                              # the 1Password CLI's own names never ride a judge child
         if k in _cred.OP_ENV_NAMES or k.startswith(_cred.OP_ENV_PREFIX):
             env.pop(k, None)

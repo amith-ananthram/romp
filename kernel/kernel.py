@@ -40583,26 +40583,37 @@ _JUDGE_FAST_TIERS = (("judgeFast", "judge-fast", "triage", _set_judge_fast, lamb
                      ("indexFast", "index-fast", "indexing", _set_index_fast, lambda: jd._index_model()))           # follow resolves
 
 
+_JUDGE_FAST_MIGRATED = "judge-fast-tiers.migrated"   # STATE marker: the carry-over below ran to completion (epoch seconds)
+
+
 def _migrate_judge_fast_tiers():
     """One-time carry-over from the single fast-mode flag (STATE/judge-fast alone, which ran every Opus call fast
-    whichever tier) to a flag per tier. On the first boot on this code, the boot that finds NEITHER new file, both
-    are written: when judge-fast is "on", each new tier gets "on" where its effective model can run fast and "off"
-    where it cannot, so an existing on keeps the behaviour it had; otherwise both get "off", the default they
-    already read as. The two files' existence is the done marker, so a Triage box ticked later never spreads to
-    the other tiers at the next restart (a review finding on the first cut, whose marker was the carried value).
-    The writes carry stamp 1, a value older than any gesture: a pick made on any machine, before or after this
-    boot, outranks them (a peer's propagated on/off is never stood down by a migration default)."""
+    whichever tier) to a flag per tier. On the first boot on this code, every new-tier file that is not yet written
+    gets a value: when judge-fast is "on", "on" where the tier's effective model can run fast and "off" where it
+    cannot, so an existing on keeps the behaviour it had; otherwise "off", the default it already read as. An
+    explicit marker (STATE/judge-fast-tiers.migrated) is written LAST and is the only done signal: a boot that
+    finds it does nothing, a boot that finds a file already written leaves that file alone and completes the rest
+    (a write that failed half-way completes on the next boot; a review finding on the add-on's first head, whose
+    marker was either file's existence, so a failed second write lost that tier's carry for good). A Triage box
+    ticked after the marker never spreads to the other tiers. The value writes carry stamp 1, older than any
+    gesture: a pick made on any machine, before or after this boot, outranks them."""
     try:
-        if (jd.STATE / "distill-fast").exists() or (jd.STATE / "index-fast").exists():
+        marker = jd.STATE / _JUDGE_FAST_MIGRATED
+        if marker.exists():
             return 0
         carry = jd._state_str("judge-fast", "off") == "on"
         n = 0
         for field, fname, word, setter, model_of in _JUDGE_FAST_TIERS[1:]:
+            if (jd.STATE / fname).exists():
+                continue                             # written already (a half-applied earlier boot): left as it is
             v = "on" if carry and jd.fast_capable(model_of()) else "off"
-            if setter(v, gt=1) is not None:
-                n += 1
-                if carry:
-                    sys.stderr.write("judges: fast mode carried over to the %s tier as %s (its model: %s)\n" % (word, v, model_of()))
+            if setter(v, gt=1) is None:
+                return n                             # the write failed (said by the setter): no marker, the next boot completes
+            n += 1
+            if carry:
+                sys.stderr.write("judges: fast mode carried over to the %s tier as %s (its model: %s)\n" % (word, v, model_of()))
+        jd.STATE.mkdir(parents=True, exist_ok=True)
+        _atomic_write(marker, str(int(time.time())))
         return n
     except Exception:
         sys.stderr.write("judge-fast migration: %s\n" % traceback.format_exc())

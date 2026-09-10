@@ -58,7 +58,7 @@ def _clear_state():
                 (jd.STATE / name).unlink()
             except OSError:
                 pass
-    for name in ("fast-refused.json",):
+    for name in ("fast-refused.json", "judge-fast-tiers.migrated"):
         try:
             (jd.STATE / name).unlink()
         except OSError:
@@ -229,7 +229,8 @@ class CarryOver(_Base):
         self.assertEqual((jd.STATE / "index-fast").read_text(), "off")
         self.assertEqual((jd.STATE / "judge-fast").read_text(), "on", "the triage flag is the old flag, untouched")
         self.assertEqual(err.getvalue().count("fast mode carried over"), 2)
-        self.assertEqual(km._migrate_judge_fast_tiers(), 0, "done once: the files' existence is the marker")
+        self.assertTrue((jd.STATE / "judge-fast-tiers.migrated").exists(), "the marker, written last")
+        self.assertEqual(km._migrate_judge_fast_tiers(), 0, "done once: the marker says so")
         self.assertEqual(km._setting_stored_gt("distill-fast"), 1, "a carried value is older than any gesture")
         self.assertEqual(km._set_distill_fast("off", gt=T_OLD), T_OLD, "a peer's earlier explicit off is not stood down by it")
 
@@ -244,7 +245,7 @@ class CarryOver(_Base):
         self.assertEqual(((jd.STATE / "distill-fast").read_text(), (jd.STATE / "index-fast").read_text()), ("off", "off"))
         self.assertEqual((km._setting_stored_gt("distill-fast"), km._setting_stored_gt("index-fast")), (1, 1), "older than any gesture")
         km._set_judge_fast("on")           # the user ticks only the Triage box...
-        self.assertEqual(km._migrate_judge_fast_tiers(), 0, "...and a restart carries nothing")
+        self.assertEqual(km._migrate_judge_fast_tiers(), 0, "...and a restart carries nothing: the marker stands")
         self.assertEqual((jd.STATE / "distill-fast").read_text(), "off")
         self.assertFalse(jd._tier_fast("distill", jd._distill_model()))
         # a real gesture from any machine, even one stamped before this boot, outranks the migration default
@@ -256,11 +257,31 @@ class CarryOver(_Base):
         self.assertEqual(km._migrate_judge_fast_tiers(), 2)
         self.assertEqual(((jd.STATE / "distill-fast").read_text(), (jd.STATE / "index-fast").read_text()), ("off", "off"))
 
-    def test_a_tier_already_written_stops_the_carry_over(self):
-        km._set_judge_fast("on"); km._set_index_fast("off")
-        self._pick("judgeModel", "opus")
-        self.assertEqual(km._migrate_judge_fast_tiers(), 0, "someone already chose per tier: nothing to carry")
-        self.assertFalse((jd.STATE / "distill-fast").exists())
+    def test_a_half_applied_carry_over_completes_on_the_next_boot(self):
+        # the first boot wrote distill-fast and died before index-fast and the marker (an OSError on the second
+        # write, a crash): the next boot leaves the written file alone, writes the missing one, then the marker
+        self._pick("judgeModel", "opus"); self._pick("indexModel", "opus")
+        km._set_judge_fast("on")
+        km._set_distill_fast("off", gt=1)          # what the failed boot left: written, no marker
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(km._migrate_judge_fast_tiers(), 1, "only the missing tier is written")
+        self.assertEqual((jd.STATE / "distill-fast").read_text(), "off", "the written file is left as it was")
+        self.assertEqual((jd.STATE / "index-fast").read_text(), "on", "the missing tier gets its carry")
+        self.assertTrue((jd.STATE / "judge-fast-tiers.migrated").exists())
+        self.assertEqual(km._migrate_judge_fast_tiers(), 0)
+
+    def test_a_failed_write_leaves_no_marker_so_the_next_boot_retries(self):
+        km._set_judge_fast("on")
+        with patch.object(km, "_set_index_fast", return_value=None), contextlib.redirect_stderr(io.StringIO()):
+            # the tier table binds the setters at import: patch the table's entry, not the module name
+            tiers = tuple((f, n, w, (km._set_distill_fast if n == "distill-fast" else (lambda v, gt=None: None)), m) for f, n, w, _s, m in km._JUDGE_FAST_TIERS)
+            with patch.object(km, "_JUDGE_FAST_TIERS", tiers):
+                self.assertEqual(km._migrate_judge_fast_tiers(), 1, "distill landed, index failed")
+        self.assertFalse((jd.STATE / "judge-fast-tiers.migrated").exists(), "no marker: not done")
+        self.assertFalse((jd.STATE / "index-fast").exists())
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(km._migrate_judge_fast_tiers(), 1, "the next boot completes the rest")
+        self.assertTrue((jd.STATE / "judge-fast-tiers.migrated").exists())
 
     def test_the_kernel_boots_through_it(self):
         with open(os.path.join(BIN, "romp-kernel")) as f:
@@ -458,12 +479,18 @@ class RunEndToEnd(_Base):
         self._run(fast, auth="key")
         self.assertEqual(self.asked, [None], "memoised: a judge call is not a connect")
         out, seen = self._run(fast, auth="login")
-        # ...and never from this process's own environment either: a session's verdict is not the judge's
+        # ...and never from this process's own environment either: a session's skip is not the judge's verdict. The
+        # operator's kill switch (CLAUDE_CODE_DISABLE_FAST_MODE in service.env) is another matter: it reaches every
+        # judge child, as it did before the per-tier boxes and as it reaches every session
         with patch.dict(os.environ, {"CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK": "1", "CLAUDE_CODE_DISABLE_FAST_MODE": "1"}):
             out, seen = self._run(fast, auth="login")
         self.assertNotIn("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK", seen["env"], "a login-billed call: the CLI's probe already asks the paying account")
-        self.assertNotIn("CLAUDE_CODE_DISABLE_FAST_MODE", seen["env"])
+        self.assertEqual(seen["env"].get("CLAUDE_CODE_DISABLE_FAST_MODE"), "1", "the operator's kill switch reaches the judge child")
         self.assertEqual(json.loads(seen["cmd"][seen["cmd"].index("--settings") + 1]), {"fastMode": True, "apiKeyHelper": ""})
+        with patch.dict(os.environ, {"CLAUDE_CODE_DISABLE_FAST_MODE": "1"}):
+            out, seen = self._run(fast, auth="key")
+        self.assertEqual(seen["env"].get("CLAUDE_CODE_DISABLE_FAST_MODE"), "1", "...on a key-billed call too, beside the org-check switch")
+        self.assertEqual(seen["env"].get("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"), "1")
         # fast off for the tier, or a model that cannot run it: no probe, no opt-in
         out, seen = self._run(fast, auth="key", model="sonnet")
         self.assertNotIn("--settings", seen["cmd"])
