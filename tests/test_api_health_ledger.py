@@ -65,8 +65,8 @@ class Fold(unittest.TestCase):
     def test_the_view_is_dense_oldest_first_ending_at_now_with_zeros_where_nothing_landed(self):
         led = {}
         now = 1_700_003_750.0      # 50 s into its minute bin, so an event 30 s ago sits in the same bin
+        sb.api_health_ledger_add(led, KEY, now - 30 - 600, "retry", "429")  # ten minutes back (events land in time order)
         sb.api_health_ledger_add(led, KEY, now - 30, "ok", "ok")            # this minute
-        sb.api_health_ledger_add(led, KEY, now - 30 - 600, "retry", "429")  # ten minutes back
         sb.api_health_ledger_add(led, KEY, now + 90, "ok", "ok")            # a clock that went back: a bin in the future
         v = sb.api_health_ledger_view(led[KEY], now)
         m = v["minute"]
@@ -82,6 +82,16 @@ class Fold(unittest.TestCase):
             self.assertEqual(set(v[name]) - {"binS", "from"}, set(sb.API_HEALTH_LEDGER_CLASSES))
         empty = sb.api_health_ledger_view(None, now)
         self.assertEqual(sum(empty["minute"]["ok"]), 0)
+        # review find: a bin PAST the event being folded (stamped before a clock step back) is dropped with the stale ones, so
+        # it never resurfaces as a phantom bar once the clock reaches it (and never reaches the state file from then on)
+        sb.api_health_ledger_add(led, KEY, now - 10, "ok", "ok")            # the first event after the step
+        self.assertNotIn(int((now + 90) // 60) * 60, led[KEY]["minute"], "the next add after the step dropped the future bin")
+        self.assertIn(int((now - 30) // 60) * 60, led[KEY]["minute"], "the neighbouring bins stay")
+        led2 = {}
+        sb.api_health_ledger_add(led2, KEY, now + 7200, "retry", "429")     # stamped while the clock was two hours fast
+        sb.api_health_ledger_add(led2, KEY, now, "ok", "ok")                # the first event after the step
+        self.assertEqual(sum(sb.api_health_ledger_view(led2[KEY], now + 7200)["minute"]["rateLimited"]), 0, "two hours later: no phantom 429")
+        self.assertEqual(sum(sb.api_health_ledger_view(led2[KEY], now + 7200)["hour"]["rateLimited"]), 0)
 
     def test_parse_skips_malformed_pieces_and_keeps_the_rest(self):
         raw = {KEY: {"minute": {"1700000000": [1, 0, 0, 0, 0], "x": [1], "1700000060": "nope", "1700000120": [1, 2]},
@@ -102,10 +112,11 @@ class Aggregator(unittest.TestCase):
         td = tempfile.TemporaryDirectory(); self.addCleanup(td.cleanup)
         ah = _ah(td.name)
         now = 1_700_090_000.0
-        ah.note_ok(now - 5, auth=AUTH, family=FAM, sid="s", message_id="m1")
-        ah.note_retry(now - 400, auth=AUTH, family=FAM, status=429, sid="s", turn=1)      # 6 min 40 s back: outside the minute tier
-        ah.note_retry(now - 5 * 3600, auth=AUTH, family=FAM, status=529, sid="s", turn=1)  # 5 h back: inside the day, outside the hour
+        # events land in time order, as they do in a running kernel
         ah.note_gaveup(now - 3 * 86400, auth=AUTH, family=FAM, status=None, category="connection", sid="s", turn=1)  # 3 days back: hour tier only
+        ah.note_retry(now - 5 * 3600, auth=AUTH, family=FAM, status=529, sid="s", turn=1)  # 5 h back: inside the day, outside the hour
+        ah.note_retry(now - 400, auth=AUTH, family=FAM, status=429, sid="s", turn=1)      # 6 min 40 s back: inside the hour
+        ah.note_ok(now - 5, auth=AUTH, family=FAM, sid="s", message_id="m1")
         b = ah.snapshot(now)["buckets"][KEY]
         led = b["ledger"]
         self.assertEqual(sorted(led), ["fiveMin", "hour", "minute"])
@@ -120,8 +131,8 @@ class Aggregator(unittest.TestCase):
         td = tempfile.TemporaryDirectory(); self.addCleanup(td.cleanup)
         ah = _ah(td.name)
         now = 1_700_090_000.0
-        ah.note_ok(now - 5, auth=AUTH, family=FAM, sid="s", message_id="m1")
         ah.note_retry(now - 4000, auth=AUTH, family=FAM, status=429, sid="s", turn=1)
+        ah.note_ok(now - 5, auth=AUTH, family=FAM, sid="s", message_id="m1")
         doc = json.loads((Path(td.name) / sb.API_HEALTH_STATE_FILE).read_text())
         self.assertIn("ledger", doc, "the minute's first event writes the file")
         self.assertEqual(doc["ledger"][KEY]["minute"][str(int((now - 5) // 60) * 60)], [1, 0, 0, 0, 0])
@@ -153,6 +164,30 @@ class Aggregator(unittest.TestCase):
         self.assertEqual(len(writes), 1)
         ah.note_ok(now + 61, auth=AUTH, family=FAM, sid="s", message_id="next")
         self.assertEqual(len(writes), 2, "the next minute's first event writes again")
+        # review find: two threads whose stamps straddle the boundary can land out of order; the rollover is monotone, so
+        # the earlier-stamped event landing after the later one does not write a third time (nor a fourth on the next)
+        ah.note_ok(now + 59.9, auth=AUTH, family=FAM, sid="s", message_id="late")
+        ah.note_ok(now + 62, auth=AUTH, family=FAM, sid="s", message_id="after")
+        self.assertEqual(len(writes), 2, "one write per new minute, whatever the order events land in")
+
+    def test_a_full_ledger_is_about_seventeen_kilobytes_in_the_file(self):
+        td = tempfile.TemporaryDirectory(); self.addCleanup(td.cleanup)
+        ah = _ah(td.name)
+        now = 1_700_090_000.0
+        for h in reversed(range(168)):                          # one event in every hourly bin of the week (oldest first) ...
+            ah.note_ok(now - h * 3600 - 1, auth=AUTH, family=FAM, sid="s", message_id="h%d" % h)
+        for f in reversed(range(288)):                          # ... every five-minute bin of the day ...
+            ah.note_retry(now - f * 300 - 2, auth=AUTH, family=FAM, status=429, sid="s", turn=1)
+        for m in reversed(range(60)):                           # ... and every minute bin of the hour
+            ah.note_retry(now - m * 60 - 3, auth=AUTH, family=FAM, status=529, sid="s", turn=1)
+        ah._write_state_locked()
+        with ah._lock:
+            n = sum(len(b) for b in ah._ledger[KEY].values())
+        self.assertLessEqual(n, 516)
+        self.assertGreater(n, 500, "every bin populated")
+        size = os.path.getsize(Path(td.name) / sb.API_HEALTH_STATE_FILE)
+        self.assertLess(size, 20 * 1024, "about 17 KB per bucket at the bound: %d bytes" % size)
+        self.assertGreater(size, 12 * 1024)
 
 
 if __name__ == "__main__":

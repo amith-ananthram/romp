@@ -455,6 +455,7 @@ await step("race", async () => {
     window.__pend = []; window.fetch = () => new Promise((res) => { window.__pend.push(res); }); });
   await enter(); await leave(); await enter();
   R.racePending = await ev(() => window.__pend.length);
+  R.fineDesc0 = await descOf();   // a fine frame, its read in flight: the description keeps a state word (the dot's)
   await ev(() => { window.__pend[0]({ ok: true, status: 200, json: () => Promise.resolve(window.__A) }); });
   await pause(80);
   R.raceAfterOld = await head();
@@ -495,7 +496,12 @@ await step("detail", async () => {
   await waitSel("#ah-tip .ah-range"); await page.waitForFunction(() => !!document.querySelector("#ah-tip .ah-bars.ah-big"), null, { timeout: 8000 });
   const chips = () => ev(() => Array.from(document.querySelectorAll("#ah-tip .ah-range .rsp-btn")).map((b) => ({ t: b.textContent, on: b.classList.contains("on"), act: b.getAttribute("data-act") })));
   const barsOf = () => ev(() => { const b = document.querySelector("#ah-tip .ah-bars.ah-big"); return b ? +b.getAttribute("data-bars") : 0; });
-  R.detail = { mode: await mode(), chips: await chips(), dayBars: await barsOf(), head: await head(),
+  // the stack: within one bar, the successes segment sits at the bottom (the largest y), the 429 segment on it, the 5xx on that
+  const stackOf = () => ev(() => { const b = document.querySelector("#ah-tip .ah-bars.ah-big"); if (!b) return null; const byX = {};
+    b.querySelectorAll("rect").forEach((r) => { (byX[r.getAttribute("x")] = byX[r.getAttribute("x")] || []).push(r); });
+    const col = Object.values(byX).find((a) => a.length >= 3) || Object.values(byX).find((a) => a.length >= 2); if (!col) return null;
+    return col.map((r) => ({ c: r.getAttribute("class").replace("ah-seg ah-seg-", ""), y: +r.getAttribute("y"), h: +r.getAttribute("height"), fill: getComputedStyle(r).fill })); });
+  R.detail = { mode: await mode(), chips: await chips(), dayBars: await barsOf(), head: await head(), stack: await stackOf(),
     legendAboveBars: await ev(() => { const l = document.querySelector("#ah-tip .ah-hist .ah-legend"), b = document.querySelector("#ah-tip .ah-hist .ah-bars"); return !!(l && b) && (l.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0; }),
     legendCount: await ev(() => document.querySelectorAll("#ah-tip .ah-legend").length) };
   await ev(() => { document.querySelector('#ah-tip [data-act="range:hour"]').click(); });
@@ -768,6 +774,7 @@ class ServedHistory(unittest.TestCase):
         self.assertEqual(R["racePending"], 2, "enter, leave, enter: two reads in flight")
         self.assertTrue(R["raceAfterOld"]["wait"], "the older answer landing first is dropped: the dots stay")
         self.assertEqual(R["raceAfterOld"]["word"], "", "and this machine's line still says what the frame alone says: nothing yet (no verdict word)")
+        self.assertEqual(R["fineDesc0"], "API health: Fine. Reading the details. Press Enter to open it.", "the description keeps the dot's state word meanwhile")
         self.assertEqual(R["raceAfterNew"]["word"], "30 successful requests", "the newer read's answer is what shows")
         self.assertFalse(R["raceAfterNew"]["wait"])
 
@@ -782,7 +789,7 @@ class ServedHistory(unittest.TestCase):
         self.assertEqual(h["title"], "API health", "one machine: no count")
         self.assertEqual(h["win"], "last 24 hours", "the ledger's day, named once at the top")
         self.assertIsNone(h["since"], "the frame is ok: no since on the line")
-        self.assertRegex(h["ago"], r"^(now|\d+ minutes? ago)$", "the read's age in words, never a clock stamp")
+        self.assertRegex(h["ago"], r"^read (now|\d+ minutes? ago)$", "the read's age in words on one clock, never a clock stamp")
         self.assertEqual(h["names"], ["History", "State changes"])
         self.assertEqual(h["legend"], ["429 = the API told us to slow down (rate limit)", "5xx = the API itself failed (server error)"],
                          "vertical: one line each, 429 then 5xx; no gray line when the range holds no such failure")
@@ -1072,6 +1079,13 @@ class ServedHistory(unittest.TestCase):
         self.assertEqual([c["on"] for c in d["chips"]], [False, True, False], "the day by default")
         self.assertEqual((d["dayBars"], d["head"]["big"]), (96, True), "the day: 96 quarter-hour bars, large")
         self.assertTrue(d["legendAboveBars"], "the detail names the colours under the chips, before the bars (a short window folded the bottom legend away)")
+        st = d["stack"]
+        self.assertIsNotNone(st, "a bar with several segments")
+        self.assertEqual([x["c"] for x in st][:2], ["ok", "rateLimited"], "successes at the bottom, 429 on them")
+        self.assertGreater(st[0]["y"], st[1]["y"], "the 429 segment sits above the successes")
+        self.assertAlmostEqual(st[0]["y"], st[1]["y"] + st[1]["h"], delta=0.2, msg="and touches it: stacked, not overlaid")
+        self.assertEqual(st[0]["fill"], "rgb(156, 210, 255)", "the accent fill, from the class rule")
+        self.assertEqual(st[1]["fill"], "rgb(229, 72, 77)", "the blocked red")
         self.assertEqual(d["legendCount"], 1, "once")
         self.assertEqual((d["hourBars"], d["hourOn"]), (60, True), "the hour: its 60 one-minute bins, the chip pressed")
         self.assertEqual(d["weekBars"], 168, "the week: its 168 hourly bins")

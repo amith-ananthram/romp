@@ -331,9 +331,13 @@ await step2('pressFocus', async () => {
     window.__rompApiHealth(window.__frame({ state: "paused", reason: "limit", text: "paused · usage limit · 1 waiting", since: 1700000010, seq: 12 }));
     document.getElementById("rail-api").focus(); });
   await page.keyboard.press("Enter");
+  // the open's read lands (this lab has no /api-health: the failure line) and re-renders the card; the focus reads
+  // below wait for that render rather than racing it (a CI flake on another PR read focus mid-render)
+  await page.waitForFunction(() => !!document.querySelector("#ah-tip .ah-err") || !!document.querySelector("#ah-tip .ah-bars"), null, { timeout: 8000 });
   await page.keyboard.press("Tab");
   R.pressFocusBefore = await active();
   await page.keyboard.press("Space");
+  await page.waitForFunction(() => { const b = document.querySelector("#ah-tip button[data-act=pause]"); return !!(b && b.disabled); }, null, { timeout: 8000 });
   R.pressSent = await page.evaluate(() => window.__sent3.map((o) => o.type + ":" + String(o.value)));
   R.pressFocusAfter = await active();
   R.pressButton = await page.evaluate(() => { const b = document.querySelector("#ah-tip button[data-act=pause]"); return { disabled: b.disabled, label: b.textContent }; });

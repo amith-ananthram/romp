@@ -1789,17 +1789,20 @@ its own colour only when present (429s in the blocked red, 5xx with 529 in the
 5xx magenta, no-connection and other-status failures in the label gray); no
 traffic reads as "no API traffic"; a machine whose sessions are waiting or
 whose kernel is paused shows that kernel's own words instead. The window the
-lines count is named once at the top: the ledger's last 24 hours, or an older
-kernel's longest window. There is no summary sentence: the lines do the work,
+lines count is named once at the top, this kernel's: the ledger's last 24
+hours (a peer still on an older kernel counts its own longest window, and its
+histogram says so). There is no summary sentence: the lines do the work,
 and a machine not reachable keeps its own line saying so. The word `unknown`
 stays in the document and appears nowhere on the dashboard. Under the lines,
 the **History** draws one stacked histogram per machine from the `ledger`:
 one bar per bin, successes in the accent, 429 attempts in red and 5xx in
 magenta stacked on them, and a gray band for no-connection and other-status
-failures only when the range holds any; one ceiling label, no peak figure; a
-vertical, left-justified legend with a swatch in each bar colour (429 on one
-line, 5xx below it, the gray line only when it applies); the age of the read
-in words ("now", "3 minutes ago"), recomputed at every repaint. The hover
+failures only when the range or a counted line holds any; one ceiling label,
+no peak figure; a vertical, left-justified legend with a swatch for each
+failure colour (429 on one line, 5xx below it, the gray line only when it
+applies; the accent band needs no row); the age of the read in words ("read
+now", "read 3 minutes ago"), the time since this machine's document landed
+measured on the browser's clock alone, recomputed at every repaint. The hover
 draws the last 24 hours as 96 quarter-hour bars. A click on the dot (or Enter)
 opens the detail, a centred modal in the spend modal's grammar: the same lines,
 the waiting sessions and the pause control, and one large histogram per machine
@@ -1843,12 +1846,14 @@ hours) and `hour` (168 hourly bins, the last 7 days), each tier an object with
 last bin the one holding `asOf`, zeros where nothing landed. The event ring
 holds only the windows' span, so this is what lets the popup show the day and
 the detail the week. Bounded: at most 516 bins per bucket, under about 100 KB
-per bucket in memory when every bin has traffic and about 10 KB in the state
-file; buckets (auth times family) are few. It is written to `api-health.json`
-with the state (on a transition, and on the first event of each minute, so a
-restart loses at most the current minute) and restored at boot, malformed
-pieces skipped and counted in the log. Additive: a reader that ignores it sees
-the document it always saw.
+per bucket in memory when every bin has traffic and about 17 KB in the state
+file (about 33 bytes a bin); buckets (auth times family) are few. A bin past
+the event being folded (a clock that stepped back left it) is dropped with the
+stale ones, so no phantom bar resurfaces when the clock reaches it. It is
+written to `api-health.json` with the state (on a transition, and on the first
+event of each new minute, monotone, so a restart loses at most the current
+minute) and restored at boot, malformed pieces skipped and counted in the log.
+Additive: a reader that ignores it sees the document it always saw.
 
 ### Derived state
 
@@ -2007,7 +2012,8 @@ is read. `host` is this kernel's own name, the one its peers know it by
 (`_self_host`): the popup's line for this machine carries it instead of "this
 machine". `hosts` is every attached
 machine's own frame as the tunnel supervisor last heard it (the fields above
-minus `sessions` and `seq`, which stay on their kernel), keyed by host name,
+minus `sessions`, `seq` and `host`, which stay on their kernel; the map's key
+is the name), keyed by host name,
 with `stale` true while that tunnel is not up; a kernel with no attached
 machines sends an empty map, and a kernel serving `GET /api-health/frame` to
 a peer sends its own frame without this map, so two kernels attached to each

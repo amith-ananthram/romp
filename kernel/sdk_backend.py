@@ -2147,7 +2147,7 @@ def api_health_series(events, now: float, window: int, bin_s: int = 60) -> dict:
 # hour buckets (T293): one-minute bins for the last hour, five-minute bins for the last 24 hours, hourly bins for the
 # last 7 days. Five counters per bin (successes, 429, 5xx with 529, no connection, another status). Bounded: at most
 # 60 + 288 + 168 = 516 bins per bucket, so under about 100 KB per bucket in memory when every bin has traffic and about
-# 10 KB in the state file; buckets (auth x family) are few. Persisted in api-health.json with the state and restored at
+# 17 KB in the state file (about 33 bytes a bin); buckets (auth x family) are few. Persisted in api-health.json with the state and restored at
 # boot, so a restart keeps the day's picture. Additive to the payload: a reader that ignores `ledger` sees the
 # document it always saw.
 API_HEALTH_LEDGER_TIERS = (("minute", 60, 60), ("fiveMin", 300, 288), ("hour", 3600, 168))   # name, seconds per bin, bins kept
@@ -2169,7 +2169,9 @@ def api_health_ledger_class(kind, cls) -> int:
 
 def api_health_ledger_add(ledger: dict, key: str, t: float, kind, cls) -> None:
     """Fold one event into every tier of `ledger[key]` ({tier: {binStart: [5 counts]}}) and drop the bins that fell
-    out of the tier's span. Pure over its arguments; the caller holds the aggregator's lock."""
+    out of the tier's span, and any bin MORE THAN ONE BIN past this event's (a clock that stepped back left it; the
+    event's own time is the best "now" there is; a neighbouring bin stays, since two threads' stamps can straddle a
+    boundary and land out of order). Pure over its arguments; the caller holds the aggregator's lock."""
     i = api_health_ledger_class(kind, cls)
     tiers = ledger.setdefault(key, {})
     for name, bin_s, keep in API_HEALTH_LEDGER_TIERS:
@@ -2180,8 +2182,9 @@ def api_health_ledger_add(ledger: dict, key: str, t: float, kind, cls) -> None:
             row = bins[start] = [0, 0, 0, 0, 0]
         row[i] += 1
         lo = start - (keep - 1) * bin_s          # the tier's span ends at this bin: older bins go, whatever their number,
-        for k in [k for k in bins if k < lo]:    # so sparse traffic keeps only the span's bins (never a sawtooth of stale ones)
-            del bins[k]
+        hi = start + bin_s                       # so sparse traffic keeps only the span's bins (never a sawtooth of stale ones);
+        for k in [k for k in bins if k < lo or k > hi]:   # a bin PAST this event's (stamped before a clock step back) goes too,
+            del bins[k]                          # or it would resurface as a phantom bar when the clock reaches it (review find)
 
 
 def api_health_ledger_view(tiers: dict | None, now: float) -> dict:
@@ -2655,9 +2658,10 @@ class ApiHealth:
             self._last_event_at = ev.t if self._last_event_at is None else max(self._last_event_at, ev.t)
             api_health_ledger_add(self._ledger, "%s|%s" % (ev.auth, ev.family), ev.t, ev.kind, ev.cls)
             minute = int(ev.t // 60)
-            if minute != self._ledger_minute:
-                # the ledger reaches disk on the minute's first event (at most once a minute, a few KB), so a restart
-                # loses at most the current minute's counts; a transition rewrites the same file anyway
+            if self._ledger_minute is None or minute > self._ledger_minute:
+                # the ledger reaches disk on a NEW minute's first event (monotone: two threads whose stamps straddle a
+                # boundary and land out of order do not write twice, review find), so a restart loses at most the
+                # current minute's counts; a transition rewrites the same file anyway
                 self._ledger_minute = minute
                 self._write_state_locked()
             if self._seq % 256 == 0:

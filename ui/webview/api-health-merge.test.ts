@@ -91,6 +91,9 @@ test("a machine whose tunnel is down or whose frame could not be read is named a
   assert.equal(down.machines[1].dot, "quiet");
   assert.equal(down.machines[1].text, "TESTHOST: not reachable, last seen rate limited · 2 waiting");
   assert.equal(mergeFrames(QUIET, { TESTHOST: { ...OK, stale: true } }).dot, "quiet", "nor does a fine frame heard before the drop block gray");
+  assert.equal(mergeFrames(QUIET, { TESTHOST: { ...OK, stale: true } }).machines[1].text, "TESTHOST: not reachable", "a fine last frame adds no verdict word");
+  const FINE = readHistory(doc({ ok: 12 }));
+  assert.equal(mergeFrames(OK, { TESTHOST: { ...OK, stale: true } }, { TESTHOST: FINE }).machines[1].text, "TESTHOST: not reachable, last seen 12 successful requests", "the counts when read, as every other line");
   const refused = mergeFrames(OK, { TESTHOST: { ...OK, stale: true, fault: "HTTP 403" } });
   assert.equal(refused.dot, "fine");
   assert.equal(refused.machines[1].text, "TESTHOST: could not read its API health (HTTP 403)");
@@ -211,6 +214,8 @@ test("the 5xx magenta is a token in both theme blocks of both sheets (theme pari
   assert.match(root, /--st-5xx-bg: #c026d3; --st-5xx-fg: #ffffff;/);
   assert.match(light, /--st-5xx-bg: #A21CAF; --st-5xx-fg: #ffffff;/);
   assert.match(FEED, /--st-5xx-bg: #A21CAF; --st-5xx-fg: #ffffff;/, "mirrored where the feed mirrors the blocked red");
-  assert.ok(KERNEL.includes(".ah-c-r5xx{color:var(--st-5xx-bg,#c026d3)}"), "a 5xx count wears the token");
-  assert.ok(KERNEL.includes("['serverErrors','var(--st-5xx-bg,#c026d3)']"), "and so does the 5xx band of the bars");
+  assert.ok(KERNEL.includes(".ah-sw-r5xx{background:var(--st-5xx-bg,#c026d3)}"), "the 5xx legend swatch wears the token");
+  assert.ok(KERNEL.includes(".ah-c-r5xx{color:#e879f9}") && KERNEL.includes("body.theme-light .ah-c-r5xx{color:#86198F}"), "a 5xx count's text is inked for each theme's tip (the chip colour as text sits under 4.5:1)");
+  assert.ok(KERNEL.includes(".ah-seg-serverErrors{fill:var(--st-5xx-bg,#c026d3)}"), "and so does the 5xx band of the bars (a class per segment, so the light theme can re-ink it)");
+  assert.ok(KERNEL.includes("body.theme-light .ah-seg-serverErrors{fill:#A21CAF}"), "the light palette's magenta on the bars");
 });

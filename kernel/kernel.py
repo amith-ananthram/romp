@@ -47563,6 +47563,12 @@ _LANDING_APIH_JS = """
 // local frame alone paints the dot and the popup says so in the kernel's own words
 var MERGE=window.__rompApiHealthMerge||null;
 var READINGS={};   // per host: the history reading (readHistory), null until read; the machine lines take it (the dot follows the frames)
+var LANDED=null;   // when this machine's document last landed, on THIS clock (Date.now): the read's age never compares two hosts' clocks
+var ageTimer=null; // while the tip or the detail is open, the age label alone is re-worded once a minute (a pinned detail must not say 'now' for ten minutes)
+function ageWords(){return LANDED&&MERGE?'read '+MERGE.agoWords((Date.now()-LANDED)/1000):'';}
+function ageTick(){var n=tip.querySelector('.ah-ago');if(n){var w=ageWords();if(w)n.textContent=w;}}
+function armAge(){if(!ageTimer)ageTimer=setInterval(ageTick,60000);}
+function disarmAge(){if(ageTimer){clearInterval(ageTimer);ageTimer=null;}}
 var moving=false;  // the readout is re-parenting the cell (moveApiCell): its blur and focus are not the user's
 var DOTWORD={fine:'fine',errors:'errors',quiet:'no traffic'};
 // the legend (T316, the user's design): vertical and left-justified, a swatch in each bar's colour, 429 on one line and
@@ -47652,7 +47658,8 @@ function hostsOf(m){return Object.keys((m&&m.hosts)||{}).sort();}
 // open keeps each machine's last answer until its new one lands. The newest read wins a race (histSeq).
 function load(fresh){var n=++histSeq,names=[''].concat(hostsOf(LAST)),by={};
 names.forEach(function(h){by[h]=(!fresh&&HIST&&HIST[h]&&!HIST[h].pending)?HIST[h]:{pending:true};});HIST=by;
-names.forEach(function(h){fetchDoc(h?'/remote/'+encodeURIComponent(h)+'/api-health':'/api-health').then(function(d){if(n!==histSeq)return;by[h]=d;
+if(fresh){READINGS={};LANDED=null;}   // a fresh show drops the last hover's counts with its rows: the frame's words stand until this read lands
+names.forEach(function(h){fetchDoc(h?'/remote/'+encodeURIComponent(h)+'/api-health':'/api-health').then(function(d){if(n!==histSeq)return;by[h]=d;if(h==='')LANDED=Date.now();
 READINGS=MERGE?MERGE.mergeHistories(by).readings:{};
 if(tip.style.display!=='block')return;if(held){dirty=true;return;}render();});});}
 // the merged view of the frame: the dot and one line per machine (worst state wins; per-host maps, nothing summed)
@@ -47680,19 +47687,19 @@ return dup?fam+' · '+(b.auth||key.split('|')[0]):fam;}
 // only when the range holds any; one ceiling label, no peak text; a tick at each quarter of the span in ago words. The
 // hover draws the day as 96 quarter-hour bars; the detail draws the chosen range, larger. Colours through the tokens
 // (fallbacks for a var-less harness). EVERY attribute quoted: this goes through innerHTML (the spend chart's lesson).
-var BAR_CLASSES=[['ok','var(--accent,#9cd2ff)'],['rateLimited','var(--st-blocked-bg,#e5484d)'],['serverErrors','var(--st-5xx-bg,#c026d3)'],['noStatus','var(--dim,#9aa4ad)'],['other','var(--dim,#9aa4ad)']];
+var BAR_CLASSES=['ok','rateLimited','serverErrors','noStatus','other'];   // the stack order; each fill is a CSS class per theme (.ah-seg-<class>)
 function niceTopAh(mx){var p=Math.pow(10,Math.floor(Math.log(mx)/Math.LN10)),m=mx/p;return (m<=1?1:m<=2?2:m<=5?5:10)*p;}   // a 1-2-5 ceiling at any magnitude
 function tickWords(sec){if(sec>=86400)return Math.round(sec/86400)+'d';if(sec>=3600)return Math.round(sec/3600)+'h';return Math.round(sec/60)+'m';}
 function sumArr(a){var t=0;(a||[]).forEach(function(v){t+=v||0;});return t;}
 function barsHTML(led,big){var n=led.ok.length,W=big?560:168,H=big?110:48,tot=[],mx=0;
-for(var i=0;i<n;i++){var v=0;BAR_CLASSES.forEach(function(c){v+=(led[c[0]]||[])[i]||0;});tot.push(v);if(v>mx)mx=v;}
+for(var i=0;i<n;i++){var v=0;BAR_CLASSES.forEach(function(c){v+=(led[c]||[])[i]||0;});tot.push(v);if(v>mx)mx=v;}
 if(mx<=0)return '';
 var top=niceTopAh(mx),slot=W/n,gap=Math.min(2,slot*0.3),bw=Math.max(0.8,slot-gap),PADT=4;
 var Y=function(v){return H-Math.max(0,Math.min(1,v/top))*(H-PADT);};
 var bars='';
 for(var i=0;i<n;i++){if(!(tot[i]>0))continue;var x=i*slot+gap/2,acc=0;
-BAR_CLASSES.forEach(function(c){var v=(led[c[0]]||[])[i]||0;if(!(v>0))return;var yb=Y(acc),yt=Y(acc+v);acc+=v;var hgt=Math.max(0.6,yb-yt);
-bars+='<rect class="ah-seg ah-seg-'+c[0]+'" x="'+x.toFixed(1)+'" y="'+(yb-hgt).toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+hgt.toFixed(1)+'" style="fill:'+c[1]+'"></rect>';});}
+BAR_CLASSES.forEach(function(c){var v=(led[c]||[])[i]||0;if(!(v>0))return;var yb=Y(acc),yt=Y(acc+v);acc+=v;var hgt=Math.max(0.6,yb-yt);
+bars+='<rect class="ah-seg ah-seg-'+c+'" x="'+x.toFixed(1)+'" y="'+(yb-hgt).toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+hgt.toFixed(1)+'"></rect>';});}
 var ty=Y(top),grid='<line x1="0" y1="'+ty.toFixed(1)+'" x2="'+W+'" y2="'+ty.toFixed(1)+'" stroke="rgba(255,255,255,0.10)" stroke-width="1" vector-effect="non-scaling-stroke"></line>',xlab='';
 // ticks at round ages for the span (45/30/15 min, 18/12/6 h, 6/4/2 d), the span itself at the left edge, now at the right
 var span=n*(led.binS||60),marks=span>=604800?[6*86400,4*86400,2*86400]:span>=86400?[18*3600,12*3600,6*3600]:[2700,1800,900];
@@ -47735,14 +47742,18 @@ return out;}
 // ledger) draws its 15-minute series the same way.
 function localFirst(a,b){return a===''?-1:b===''?1:(a<b?-1:a>b?1:0);}
 function ledgerOf(d,R){var led=MERGE?MERGE.documentLedger(d,R.tier):null;if(led&&R.per>1)led=MERGE.rebin(led,R.per);
-if(!led){var sr=MERGE?MERGE.documentSeries(d):null;if(sr)led={binS:sr.binS,from:sr.from,ok:sr.ok,rateLimited:sr.rateLimited,serverErrors:sr.serverErrors,noStatus:sr.noStatus,other:[]};}
+// an older kernel's document has no ledger: its 15-minute series draws instead, and is named as such (its span is not the range's)
+if(!led){var sr=MERGE?MERGE.documentSeries(d):null;if(sr)led={binS:sr.binS,from:sr.from,ok:sr.ok,rateLimited:sr.rateLimited,serverErrors:sr.serverErrors,noStatus:sr.noStatus,other:[],older:true};}
 return led;}
 function histHTML(){var loc=HIST&&HIST[''],R=RANGES[pinned?range:'day'];
-var ago=(loc&&!loc.error&&!loc.pending&&typeof loc.asOf==='number'&&MERGE)?'<span class="ru-tip-reset ah-ago">'+esc(MERGE.agoWords(Date.now()/1000-loc.asOf))+'</span>':'';
+// the read's age: the time since this machine's document LANDED, on this clock alone (the kernel's asOf is another host's clock)
+var ago=(loc&&!loc.error&&!loc.pending&&LANDED&&MERGE)?'<span class="ru-tip-reset ah-ago">'+esc(ageWords())+'</span>':'';
 var h='<div class="ru-tip-win ah-hist"><div class=ru-tip-name><span>History</span>'+ago+'</div>';
 var hs=HIST?Object.keys(HIST).sort(localFirst):[],many=hs.length>1,gray=false;
-// the gray legend line applies when any machine's range holds a no-connection or other-status failure: known up front
-hs.forEach(function(host){var d=HIST[host];if(!d||d.error||d.pending)return;var l=ledgerOf(d,R);if(l&&sumArr(l.noStatus)+sumArr(l.other)>0)gray=true;});
+// the gray legend line applies when any machine's drawn range OR any machine's counted line holds a no-connection or
+// other-status failure (the lines count the day whatever the range): known up front
+hs.forEach(function(host){var d=HIST[host];if(!d||d.error||d.pending)return;var l=ledgerOf(d,R);if(l&&sumArr(l.noStatus)+sumArr(l.other)>0)gray=true;
+var rd=READINGS[host];if(rd&&rd.counts&&(rd.counts.none+rd.counts.other)>0)gray=true;});
 if(pinned)h+=rangeHTML()+legendHTML(gray);   // the detail: the chips, then the colours named where the eye starts
 if(!HIST)return h+'<div class="rl-dots ah-wait"><i></i><i></i><i></i></div></div>';
 hs.forEach(function(host){var d=HIST[host],name=host||SELF();
@@ -47750,9 +47761,9 @@ hs.forEach(function(host){var d=HIST[host],name=host||SELF();
 if(d&&d.pending){h+=many?'<div class="ru-tip-row ah-mline"><i class=ah-dot data-dot=quiet></i><span class=ah-nm>'+esc(name)+'</span><span class="rl-dots ah-wait"><i></i><i></i><i></i></span></div>':'<div class="rl-dots ah-wait"><i></i><i></i><i></i></div>';return;}
 if(!d||d.error){h+='<div class="ah-line ah-err">Could not read the API history'+(many?' of '+esc(name):'')+': '+esc((d&&d.error)||'no answer')+'</div>';return;}
 if(many)h+='<div class="ru-tip-row ah-gname"><span class=ah-nm>'+esc(name)+'</span></div>';
-var led=ledgerOf(d,R),bars=led?barsHTML(led,pinned):'';
-if(!bars){h+='<div class="ah-line ru-tip-reset">no attempts in the '+esc(R.label)+'</div>';return;}
-h+=bars;});
+var led=ledgerOf(d,R),bars=led?barsHTML(led,pinned):'',span=(led&&led.older)?'last 15 min (an older kernel)':R.label;
+if(!bars){h+='<div class="ah-line ru-tip-reset">no attempts in the '+esc(span)+'</div>';return;}
+h+=bars;if(led.older)h+='<div class="ah-line ru-tip-reset">the last 15 min: an older kernel serves no longer history</div>';});
 if(!pinned)h+=legendHTML(gray);   // the hover: the legend under the bars
 var tr=(loc&&!loc.error&&!loc.pending)?transRows(loc):'';if(tr)h+='<div class="ru-tip-name ah-hname"><span>State changes'+(many?' \u00b7 '+esc(SELF()):'')+'</span></div>'+tr;
 return h+'</div>';}
@@ -47763,6 +47774,9 @@ return h+'</div>';}
 // failed read says so in the same words as the section's line
 function descText(){var tail=' Press Enter to open it.';var mg=merged();var m0=mg.machines[0];   // this machine's own line, its words alone
 var w=m0?(m0.parts||[]).map(function(p){return p.text;}).join(' \u00b7 '):'';
+// a fine frame says nothing in its line until the read lands, but the description is read once, at focus time, and needs
+// a state word: the dot's own (Fine, Errors, No traffic)
+if(!w){w=DOTWORD[mg.dot]||'';if(w)w=w.charAt(0).toUpperCase()+w.slice(1);}   // the kernel's own words keep their case
 if(w&&!/[.!?]$/.test(w))w+='.';
 var loc=HIST&&HIST[''];if(loc&&loc.error)return 'Could not read the API history: '+loc.error+'.'+tail;
 if(!HIST||(HIST['']&&HIST[''].pending))return 'API health: '+w+' Reading the details.'+tail;
@@ -47813,8 +47827,8 @@ try{if(n)n.focus();if(!n||document.activeElement!==n)tip.focus();}catch(e){}}}
 function show(ev){if(!LAST)return;lastX=(ev&&typeof ev.clientX==='number')?ev.clientX:null;
 try{window.__rompUsageTipHide&&window.__rompUsageTipHide();}catch(e){}   // the readout's tip yields while ours shows (the cell sits inside it)
 tip.classList.remove('ru-modal');tip.setAttribute('role','tooltip');tip.removeAttribute('aria-modal');
-tip.style.display='block';el.setAttribute('aria-describedby','ah-summary');load(true);render();}
-function hide(){tip.style.display='none';el.removeAttribute('aria-describedby');}
+tip.style.display='block';el.setAttribute('aria-describedby','ah-summary');load(true);render();armAge();}
+function hide(){tip.style.display='none';el.removeAttribute('aria-describedby');disarmAge();}
 function close(){hide();tip.classList.remove('ru-modal');back.classList.remove('on');pinned=false;
 window.__rompApiClose=null;if(back.onclick===close)back.onclick=null;
 // the refocus fires the cell's focus event, which would pop the hover right after Escape: skipFocus covers that one
@@ -47830,7 +47844,7 @@ function open(){if(!LAST)return;try{window.__rompUsageClose&&window.__rompUsageC
 var was=tip.style.display==='block';
 focusBack=document.activeElement;pinned=true;tip.classList.add('ru-modal');tip.style.left='';tip.style.top='';tip.style.maxHeight='';
 tip.setAttribute('role','dialog');tip.setAttribute('aria-modal','true');el.removeAttribute('aria-describedby');
-tip.style.display='block';render();back.classList.add('on');
+tip.style.display='block';render();back.classList.add('on');armAge();
 window.__rompApiClose=close;back.onclick=close;try{tip.focus();}catch(e){}if(!was)load();}
 // The listeners sit on the STABLE #rail-api cell; __rompApiHealth writes its children, never the cell.
 // a pointer arriving on a tip that focus already shows re-anchors it from the pointer and keeps its rows: the
@@ -50029,12 +50043,18 @@ def _landing():
             # T316: a machine line's pieces in their class colours (successes the accent, 429 the blocked red, 5xx the 5xx
             # magenta, no connection and other statuses the label gray), the vertical legend with swatches in the bar
             # colours, the stacked bars (the hover's small, the detail's large), the detail's range chips and width
-            ".ah-c-ok{color:var(--accent,#9cd2ff)}.ah-c-r429{color:var(--st-blocked-bg,#e5484d)}.ah-c-r5xx{color:var(--st-5xx-bg,#c026d3)}"
-            ".ah-c-none{color:var(--dim,#9aa4ad)}.ah-mline .ah-desc{opacity:1}.ah-mline .ah-c-plain{opacity:.85}"
+            # the counts' TEXT inks per theme (review find: the chip colours as text sit under 4.5:1 on the tip; the
+            # failure line's precedent is #ef6b6f dark / #B02A1C light): 429 the error-text red, 5xx a lighter magenta in
+            # the dark, a deeper one in the light; the swatches and the bars keep the chip colours
+            ".ah-c-ok{color:var(--accent,#9cd2ff)}.ah-c-r429{color:#ef6b6f}.ah-c-r5xx{color:#e879f9}"
+            ".ah-c-none{color:#9aa4ad}.ah-mline .ah-desc{opacity:1}.ah-mline .ah-c-plain{opacity:.85}"
             ".ah-win,.ah-ago{margin-left:auto}"
             ".ah-legend{display:flex;flex-direction:column;align-items:flex-start;gap:3px;margin-top:7px;opacity:.75}"
             ".ah-lrow{display:flex;align-items:center;gap:6px}.ah-lsw{width:8px;height:8px;border-radius:2px;flex:0 0 auto}"
-            ".ah-sw-ok{background:var(--accent,#9cd2ff)}.ah-sw-r429{background:var(--st-blocked-bg,#e5484d)}.ah-sw-r5xx{background:var(--st-5xx-bg,#c026d3)}.ah-sw-none{background:var(--dim,#9aa4ad)}"
+            ".ah-sw-r429{background:var(--st-blocked-bg,#e5484d)}.ah-sw-r5xx{background:var(--st-5xx-bg,#c026d3)}.ah-sw-none{background:#9aa4ad}"
+            # the bars' fills, one class per stack segment (the landing defines no --dim, so the gray is written out)
+            ".ah-seg-ok{fill:var(--accent,#9cd2ff)}.ah-seg-rateLimited{fill:var(--st-blocked-bg,#e5484d)}.ah-seg-serverErrors{fill:var(--st-5xx-bg,#c026d3)}"
+            ".ah-seg-noStatus,.ah-seg-other{fill:#9aa4ad}"
             ".ah-gname{margin-top:6px}.ah-bars.ah-big svg{height:110px}.ah-bars.ah-big{margin-bottom:12px}"
             ".ah-range{margin:4px 0 6px}"
             "#ah-tip.ru-modal{width:min(720px,92vw)}"
@@ -50472,6 +50492,11 @@ def _landing():
             # the failure line in the light theme's error-text red (styles.css --err #B02A1C, about 6.6:1 on white;
             # the dark line's #ef6b6f is 3.0:1 there)
             "body.theme-light .ah-err{color:#B02A1C}"
+            # T316, the light tip is white: the counts' inks (the clay accent, the light error red, a deep magenta 6.5:1, the
+            # light label gray 7.15:1), the swatches and the bars' fills in the light palette's chip colours
+            "body.theme-light .ah-c-ok{color:#C2410C}body.theme-light .ah-c-r429{color:#B02A1C}body.theme-light .ah-c-r5xx{color:#86198F}body.theme-light .ah-c-none{color:#5D574E}"
+            "body.theme-light .ah-sw-r5xx{background:#A21CAF}body.theme-light .ah-sw-none{background:#5D574E}"
+            "body.theme-light .ah-seg-ok{fill:#C2410C}body.theme-light .ah-seg-serverErrors{fill:#A21CAF}body.theme-light .ah-seg-noStatus,body.theme-light .ah-seg-other{fill:#5D574E}"
             "body.theme-light .ah-word{color:#1F1E1D}"
             "body.theme-light .ah-btn{background:#F1EAE2;border-color:rgba(0,0,0,0.12);color:#1F1E1D}"
             "body.theme-light .ah-row:hover{background:rgba(0,0,0,0.05)}"

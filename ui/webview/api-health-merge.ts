@@ -115,7 +115,7 @@ export function machineLine(host: string, f: HostFrame, reading?: Reading | null
   const words = f.state ? stateParts(f, reading) : [];
   let parts: Seg[];
   if (f.fault) parts = [{ text: "could not read its API health (" + f.fault + ")" + (words.length ? ", last seen " + joinParts(words) : ""), kind: "plain" }];
-  else if (f.stale) parts = [{ text: "not reachable, last seen " + (words.length ? joinParts(words) : "fine"), kind: "plain" }];
+  else if (f.stale) parts = [{ text: "not reachable" + (words.length ? ", last seen " + joinParts(words) : ""), kind: "plain" }];
   else parts = words;
   return { name, parts, text: name + (parts.length ? ": " + joinParts(parts) : "") };
 }

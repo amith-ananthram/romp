@@ -505,7 +505,10 @@ class Detail(unittest.TestCase):
         # T301: every attached host's document rides the same read, through the kernel's relay, kept per host
         self.assertIn("names.forEach(function(h){fetchDoc(h?", self.JS)
         self.assertIn("names.forEach(function(h){fetchDoc(h?'/remote/'+encodeURIComponent(h)+'/api-health':'/api-health')", self.JS)
-        self.assertNotIn("setInterval", self.JS)
+        # the one timer is the read-age label's minute tick (T316 review): it re-words one span while the tip or the detail is open
+        self.assertEqual(self.JS.count("setInterval("), 1)
+        self.assertIn("setInterval(ageTick,60000)", self.JS)
+        self.assertNotIn("fetch", self.JS[self.JS.index("function ageTick"):self.JS.index("function disarmAge")], "the tick reads nothing: nothing polls the history")
         self.assertNotIn("setTimeout", self.JS)
         self.assertIn("window.__rompApiHealth=function(m){", self.JS)
         self.assertIn("LAST=m;", self.JS)

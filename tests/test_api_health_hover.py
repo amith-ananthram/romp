@@ -674,7 +674,7 @@ class Script(unittest.TestCase):
         self.assertTrue(HIST, "the cell's script carries a History block")
         self.assertEqual(JS.count("fetch("), 1, "one read in the cell's script: the history's")
         self.assertIn("function load(fresh){var n=++histSeq,names=[''].concat(hostsOf(LAST)),by={};", HIST)
-        self.assertIn("tip.style.display='block';el.setAttribute('aria-describedby','ah-summary');load(true);render();}", JS,
+        self.assertIn("tip.style.display='block';el.setAttribute('aria-describedby','ah-summary');load(true);render();armAge();}", JS,
                       "show drops the last answer and reads")
         self.assertIn("var was=tip.style.display==='block';", JS)
         self.assertIn("window.__rompApiClose=close;back.onclick=close;try{tip.focus();}catch(e){}if(!was)load();}", JS,
@@ -686,7 +686,11 @@ class Script(unittest.TestCase):
 
     def test_no_timers_the_newest_read_wins_and_the_answer_paints_through_the_held_gate(self):
         self.assertNotIn("setTimeout", JS)
-        self.assertNotIn("setInterval", JS)
+        # the one timer is the read-age label's minute tick (T316 review: a pinned detail must not say 'now' for ten
+        # minutes): it re-words one span and never reads anything; nothing polls the history
+        self.assertEqual(JS.count("setInterval("), 1)
+        self.assertIn("function ageTick(){var n=tip.querySelector('.ah-ago');if(n){var w=ageWords();if(w)n.textContent=w;}}", JS)
+        self.assertNotIn("fetch", JS[JS.index("function ageTick"):JS.index("function disarmAge")], "the tick reads nothing")
         self.assertIn("window.addEventListener('focus',function(){winFocusEl=document.activeElement;requestAnimationFrame(function(){winFocusEl=null;});});", JS,
                       "the window-focus mark is cleared on the next animation frame, an event")
         # T301: one read per machine (this machine's document and every attached host's, each landing on its own), so one guard of each
@@ -708,13 +712,20 @@ class Script(unittest.TestCase):
         # in the 5xx magenta, a gray band for no-connection and other-status failures only when present), no peak text,
         # one ceiling label; the legend vertical with swatches, the gray line only when it applies; the as-of stamp an age
         self.assertIn("var h='<div class=\"ru-tip-win ah-hist\"><div class=ru-tip-name><span>History</span>'+ago+'</div>';", HIST)
-        self.assertIn("'<span class=\"ru-tip-reset ah-ago\">'+esc(MERGE.agoWords(Date.now()/1000-loc.asOf))+'</span>'", HIST, "this machine's asOf as an age, recomputed at each render")
+        self.assertIn("'<span class=\"ru-tip-reset ah-ago\">'+esc(ageWords())+'</span>'", HIST)
+        self.assertIn("function ageWords(){return LANDED&&MERGE?'read '+MERGE.agoWords((Date.now()-LANDED)/1000):'';}", JS,
+                      "the read's age: the time since this machine's document landed, one clock (review find: asOf is another host's clock)")
+        self.assertIn("if(h==='')LANDED=Date.now();", HIST)
+        self.assertNotIn("Date.now()/1000-loc.asOf", HIST, "never the browser's clock against the kernel's")
+        self.assertIn("if(fresh){READINGS={};LANDED=null;}", HIST, "a fresh show drops the last hover's counts with its rows")
+        self.assertIn("var rd=READINGS[host];if(rd&&rd.counts&&(rd.counts.none+rd.counts.other)>0)gray=true;", HIST, "the gray legend row follows the counted lines too")
+        self.assertIn("other:[],older:true}", HIST, "an older kernel's series is marked and named")
         self.assertNotIn("peak '+mx", HIST, "no peak text")
         self.assertNotIn("hms(loc.asOf)", HIST)
-        self.assertIn("var BAR_CLASSES=[['ok','var(--accent,#9cd2ff)'],['rateLimited','var(--st-blocked-bg,#e5484d)'],['serverErrors','var(--st-5xx-bg,#c026d3)'],['noStatus','var(--dim,#9aa4ad)'],['other','var(--dim,#9aa4ad)']];", HIST,
-                      "the stack order and the tokens: successes, 429, 5xx, then the gray classes")
-        self.assertIn("bars+='<rect class=\"ah-seg ah-seg-'+c[0]+'\" x=\"'+x.toFixed(1)+'\" y=\"'+(yb-hgt).toFixed(1)+'\" width=\"'+bw.toFixed(1)+'\" height=\"'+hgt.toFixed(1)+'\" style=\"fill:'+c[1]+'\"></rect>';", HIST,
-                      "one rect per class per bar, stacked bottom-up, every attribute quoted")
+        self.assertIn("var BAR_CLASSES=['ok','rateLimited','serverErrors','noStatus','other'];", HIST, "the stack order: successes, 429, 5xx, then the gray classes")
+        self.assertIn("bars+='<rect class=\"ah-seg ah-seg-'+c+'\" x=\"'+x.toFixed(1)+'\" y=\"'+(yb-hgt).toFixed(1)+'\" width=\"'+bw.toFixed(1)+'\" height=\"'+hgt.toFixed(1)+'\"></rect>';", HIST,
+                      "one rect per class per bar, stacked bottom-up, every attribute quoted, the fill a class per theme")
+        self.assertNotIn("style=\"fill:", HIST, "no inline fill: the light theme must be able to re-ink a segment")
         self.assertNotIn("<polyline", HIST, "no overlaid lines")
         self.assertIn("'<span class=ru-tip-gy style=\"top:'+(big?ty:ty/H*56).toFixed(0)+'px\">'+top+'</span><div class=ru-tip-gx>'+xlab+'</div></div>';}", HIST, "one ceiling label; the ticks under")
         self.assertIn("var LEGEND_ROWS=[['r429','429 = the API told us to slow down (rate limit)'],['r5xx','5xx = the API itself failed (server error)'],['none','gray = no connection, or another error']];", JS)
@@ -749,9 +760,27 @@ class Script(unittest.TestCase):
         self.assertIn("function SELF(){return (LAST&&LAST.host)||'this machine';}", JS, "this kernel's own name, from its frame")
         self.assertNotIn("ah-head", JS.split("function html(m,full)")[1].split("function anchor()")[0], "no head row in the card")
         html = km._landing()
-        for rule in (".ah-c-ok{color:var(--accent,#9cd2ff)}", ".ah-c-r429{color:var(--st-blocked-bg,#e5484d)}", ".ah-c-r5xx{color:var(--st-5xx-bg,#c026d3)}", ".ah-c-none{color:var(--dim,#9aa4ad)}",
-                     "#ah-tip.ru-modal{width:min(720px,92vw)}", ".ah-bars.ah-big svg{height:110px}"):
+        # the inks (review find: chip colours as text sit under 4.5:1; the failure line's #ef6b6f / #B02A1C is the precedent),
+        # each with its light twin; the bars' fills as classes with their light twins; the swatches keep the chip colours
+        for dark, light in ((".ah-c-ok{color:var(--accent,#9cd2ff)}", "body.theme-light .ah-c-ok{color:#C2410C}"),
+                            (".ah-c-r429{color:#ef6b6f}", "body.theme-light .ah-c-r429{color:#B02A1C}"),
+                            (".ah-c-r5xx{color:#e879f9}", "body.theme-light .ah-c-r5xx{color:#86198F}"),
+                            (".ah-c-none{color:#9aa4ad}", "body.theme-light .ah-c-none{color:#5D574E}"),
+                            (".ah-sw-r5xx{background:var(--st-5xx-bg,#c026d3)}", "body.theme-light .ah-sw-r5xx{background:#A21CAF}"),
+                            (".ah-sw-none{background:#9aa4ad}", "body.theme-light .ah-sw-none{background:#5D574E}"),
+                            (".ah-seg-ok{fill:var(--accent,#9cd2ff)}", "body.theme-light .ah-seg-ok{fill:#C2410C}"),
+                            (".ah-seg-serverErrors{fill:var(--st-5xx-bg,#c026d3)}", "body.theme-light .ah-seg-serverErrors{fill:#A21CAF}"),
+                            (".ah-seg-noStatus,.ah-seg-other{fill:#9aa4ad}", "body.theme-light .ah-seg-noStatus,body.theme-light .ah-seg-other{fill:#5D574E}")):
+            self.assertIn(dark, html, dark)
+            self.assertIn(light, html, "the light twin: " + light)
+        for rule in ("#ah-tip.ru-modal{width:min(720px,92vw)}", ".ah-bars.ah-big svg{height:110px}"):
             self.assertIn(rule, html)
+        # the read's age re-ticks once a minute while the tip or the detail is open, the label alone; cleared on close
+        self.assertIn("function armAge(){if(!ageTimer)ageTimer=setInterval(ageTick,60000);}", JS)
+        self.assertIn("function disarmAge(){if(ageTimer){clearInterval(ageTimer);ageTimer=null;}}", JS)
+        self.assertIn("load(true);render();armAge();}", JS, "armed on show")
+        self.assertIn("render();back.classList.add('on');armAge();", JS, "and on open")
+        self.assertIn("function hide(){tip.style.display='none';el.removeAttribute('aria-describedby');disarmAge();}", JS, "cleared on hide (close hides)")
 
     def test_the_tail_holds_four_rows_newest_first_in_plain_words_each_state_s_hold_and_a_restart_never_hidden(self):
         self.assertIn("var HIST_ROWS=4;", JS, "T301: a glance, not a log")
@@ -776,6 +805,7 @@ class Script(unittest.TestCase):
         # T301: the description is the head's plain words, a failed read said as such, and the read in flight named
         self.assertIn("function descText(){var tail=' Press Enter to open it.';var mg=merged();var m0=mg.machines[0];", HIST, "this machine's own line")
         self.assertIn("var w=m0?(m0.parts||[]).map(function(p){return p.text;}).join(' \u00b7 '):'';", HIST, "its words alone: the counts, or the kernel's own words")
+        self.assertIn("if(!w){w=DOTWORD[mg.dot]||'';if(w)w=w.charAt(0).toUpperCase()+w.slice(1);}", HIST, "a fine frame before its read: the dot's state word, so the description never lacks one")
         self.assertIn("var loc=HIST&&HIST[''];if(loc&&loc.error)return 'Could not read the API history: '+loc.error+'.'+tail;", HIST)
         self.assertIn("if(!HIST||(HIST['']&&HIST[''].pending))return 'API health: '+w+' Reading the details.'+tail;\nreturn 'API health: '+w+tail;}", HIST)
         self.assertNotIn("'unknown'", HIST.replace("unknown:'quiet'", ""), "the machine's word never reaches the description")
@@ -784,7 +814,7 @@ class Script(unittest.TestCase):
         self.assertIn("tip.classList.remove('ru-modal');tip.setAttribute('role','tooltip');tip.removeAttribute('aria-modal');", JS, "show: tooltip")
         self.assertIn("tip.setAttribute('role','dialog');tip.setAttribute('aria-modal','true');el.removeAttribute('aria-describedby');", JS, "open: dialog")
         self.assertEqual(JS.count("'aria-modal'"), 2, "set by open, removed by show, nowhere else")
-        self.assertIn("function hide(){tip.style.display='none';el.removeAttribute('aria-describedby');}", JS)
+        self.assertIn("function hide(){tip.style.display='none';el.removeAttribute('aria-describedby');disarmAge();}", JS)
         self.assertIn("el.addEventListener('blur',function(){if(moving)return;if(!pinned)hide();});", JS)
         self.assertIn("skipFocus=true;try{(fb&&fb.focus?fb:el).focus();}catch(e){}skipFocus=false;}", JS,
                       "the close's refocus fires the cell's focus event; the flag covers that one call")
