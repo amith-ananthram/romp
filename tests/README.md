@@ -102,7 +102,15 @@ child processes (kernels, git, a shell's `mktemp -d`), `mkstemp` files,
 `os.mkdir` paths — by pointing the process temp dir (`tempfile.tempdir` and
 `TMPDIR`, so every child inherits it) at one private `romp-tests-*` root under
 the system temp dir and removing the root when the run ends (before both, a
-full run left ~5,600 entries in `/tmp` and over a million had piled up). Still
+full run left ~5,600 entries in `/tmp` and over a million had piled up). A run
+that dies before that removal (pytest-timeout's `os._exit`, a killed shell)
+leaves the root standing, so conftest also writes an owner marker,
+`romp-tests-owner.json` naming the run's pid, into the root at mint time. The
+kernel's boot reconcile (`sweep_dead_test_roots` in `kernel/sdk_backend.py`)
+removes `romp-tests-*` roots under the system temp dir whose marker names a
+dead pid, renaming each to `<name>.sweeping` before deleting it so a partial
+delete leaves a tombstone the next boot finishes. A root without a marker (a
+foreign directory, a pre-marker root) is never touched by the sweep. Still
 clean up what you create — `with tempfile.TemporaryDirectory()`,
 `self.addCleanup(shutil.rmtree, ...)`, a `tearDownClass` for a class-level
 fixture — so a fixture is gone when its test is, not at exit; bats suites use
