@@ -15,8 +15,10 @@ SRC = open(os.path.join(os.path.dirname(HERE), "bin", "romp-kernel")).read()
 class RevealUnhidesThePane(unittest.TestCase):
     def test_the_reveal_helper_unhides_then_tab_switches(self):
         self.assertIn("function reveal(p){try{window.__rompPaneToggle&&window.__rompPaneToggle(p,true);}"
-                      "catch(e){}show(p);}", SRC,
-                      "un-hide FIRST (guarded — the collapse script parses later), then the mobile tab")
+                      "catch(e){}userSwitch(p);}", SRC,
+                      "un-hide FIRST (guarded: the collapse script parses later), then the mobile tab through userSwitch, "
+                      "which drops the file relay's remembered tab the way a tab tap does (tests/test_pane_state_broadcast.py)")
+        self.assertIn("function userSwitch(p){window.__rompFilesTabFrom=null;show(p);}", SRC)
 
     def test_both_reveal_arrivals_use_it(self):
         self.assertIn("if(m.romp==='reveal'&&m.pane)reveal(m.pane);", SRC,

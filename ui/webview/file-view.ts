@@ -490,9 +490,14 @@ export function closeFileView(): void {
  *  gesture: deciding on the fetched Content-Type would lose the gesture, and every browser would then
  *  block the tab. Every clicked file lands here, so this is the one place the choice lives; a relayed
  *  viewFile or a Reload has no gesture and opens the viewer directly. A BLOCKED popup falls through to
- *  the viewer, so the PDF is never unreachable, and a non-PDF is simply not the opener's business. */
-export function openFileClick(ev: MouseEvent | KeyboardEvent | null | undefined, path: string, sid?: string | null): void {
+ *  the viewer, so the PDF is never unreachable, and a non-PDF is simply not the opener's business.
+ *  `relay`: where a plain click goes when the hosting document routes it elsewhere (render.ts openPath
+ *  handing the open to the shell for the Files pane): the gesture is still read first, so a modified click
+ *  on a PDF takes its own tab whichever pane the plain click would have landed in. */
+export function openFileClick(ev: MouseEvent | KeyboardEvent | null | undefined, path: string, sid?: string | null,
+                              relay?: (path: string, sid: string | null) => void): void {
   if (wantsOwnTab(ev) && openPdfTab(path, sid ?? null)) return;
+  if (relay) { relay(path, sid ?? null); return; }
   openFileView(path, sid);
 }
 
@@ -500,11 +505,13 @@ export function openFileClick(ev: MouseEvent | KeyboardEvent | null | undefined,
  *  `opts.line`: a line the open should show (a `path:12` link inside another file, file-view-links.ts): the code
  *  view scrolls its row into view once the text lands; a markdown file opens in its Raw view for THIS open (the
  *  Rendered view has no rows), without touching the saved preference.
- *  `opts.frag`: a sibling link's `#fragment` (`[see](report.md#results)`) to land on after the first rendered paint. */
-export function openFileView(path: string, sid?: string | null, opts?: { line?: number | null; frag?: string | null }): void {
+ *  `opts.frag`: a sibling link's `#fragment` (`[see](report.md#results)`) to land on after the first rendered paint.
+ *  Returns whether the open happened: false when the dirty-edit guard kept the previous viewer, so a caller
+ *  that records the open (the Files pane's recent list) records only real ones. */
+export function openFileView(path: string, sid?: string | null, opts?: { line?: number | null; frag?: string | null }): boolean {
   // The replace path bypasses closeFileView, so it needs the same dirty ask: opening file B over an
   // edited-but-unsaved file A must not silently eat A's buffer.
-  if (document.getElementById("romp-fileview") && closeGuard && !closeGuard()) return;
+  if (document.getElementById("romp-fileview") && closeGuard && !closeGuard()) return false;
   closeGuard = null;
   editHooks = null;
   gitHooks = null;                                     // the replace path skips closeFileView — same drop
@@ -975,10 +982,10 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
     const w = window as any;
     if (w.__rompEditor) return res(w.__rompEditor);
     const self = Array.from(document.querySelectorAll("script[src]"))
-      .map((n) => (n as HTMLScriptElement).src).find((u) => /\/(render|feed)\.js/.test(u));
+      .map((n) => (n as HTMLScriptElement).src).find((u) => /\/(render|feed|files)\.js/.test(u));
     if (!self) return rej(new Error("no bundle script tag to derive the editor chunk URL from"));
     const sc = document.createElement("script");
-    sc.src = self.replace(/\/(render|feed)\.js/, "/editor-chunk.js");
+    sc.src = self.replace(/\/(render|feed|files)\.js/, "/editor-chunk.js");
     sc.onload = () => { const e = (window as any).__rompEditor; e ? res(e) : rej(new Error("editor chunk loaded but did not register")); };
     sc.onerror = () => { edChunk = null; rej(new Error("the editor bundle failed to load")); };
     document.head.appendChild(sc);
@@ -1167,6 +1174,7 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
     }
     body.replaceChildren(why);
   });
+  return true;
 }
 
 // Which fetch failures still deserve a Download offer? Exactly the ones that mean the file EXISTS:
@@ -1654,17 +1662,20 @@ function pdfBlock(objUrl: string, path: string): HTMLElement {
 }
 
 /** Bind the pane's WS poster and route saveFile + fileGitLink replies back to the open viewer.
- *  Called once, from the pane's boot (render.ts and feed.ts today — either document, one mechanism);
+ *  Called once, from the pane's boot (render.ts, feed.ts and files.ts: any document, one mechanism);
  *  every reply is reqId-guarded so one landing after a close or a replace-open touches nothing. The
- *  viewFile branch honors a shell's relay of a chat file-link click — nothing sends it since the
- *  viewer moved into the chat document, but a not-yet-reloaded shell page still might, and honoring
- *  it costs nothing. */
-export function initFileView(poster: (m: Record<string, unknown>) => void): void {
+ *  viewFile branch honors a shell's relay of a chat file-link click: the Files pane is its receiver
+ *  (kernel.py's landing shell forwards the click there with the session's identity), and a document
+ *  with a relay contract of its own passes `onRelay` and takes the relayed message whole instead of
+ *  the plain open (files.ts caches the identity for its chip and keeps its recent list). */
+export function initFileView(poster: (m: Record<string, unknown>) => void,
+                             onRelay?: (m: { path: string; sid?: unknown; identity?: unknown }) => void): void {
   post = poster;
   window.addEventListener("message", (e: MessageEvent) => {
     const m = e.data;
     if (!m) return;
     if (m.romp === "viewFile" && typeof m.path === "string" && m.path) {
+      if (onRelay) { onRelay(m); return; }   // this document's own contract (the Files pane) takes the message whole
       openFileView(m.path, typeof m.sid === "string" ? m.sid : null);
     } else if (m.type === "fileGitLink" && gitHooks && m.reqId === gitHooks.reqId) {
       const h = gitHooks; gitHooks = null;

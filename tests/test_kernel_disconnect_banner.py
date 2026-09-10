@@ -243,7 +243,9 @@ process.stdout.write(JSON.stringify({
         # disowns the socket's onclose, so it runs the close rule itself; without that, every silent cycle
         # re-armed from zero and the prompt never came). Nothing else. pane-shim-stale.test.ts RUNS the rule;
         # these pins hold its text.
-        self.assertIn("function armStale(why){stalePending=why;staleKa=0;}", js, "arming records the path, shows nothing")
+        self.assertIn("function armStale(why){if(NOSTALE)return;stalePending=why;staleKa=0;}", js,
+                      "arming records the path, shows nothing (a page with no pushed view, NOSTALE, never arms: the Files pane)")
+        self.assertIn("var NOSTALE=false;", js, "every pushed pane keeps the arm")
         self.assertNotIn("setTimeout(function(){staleTimer=0;raiseStale(why);},1000)", js, "the timer is gone")
         self.assertNotIn("staleTimer", js)
         self.assertIn('if(stalePending&&++staleKa>=2){var sw=stalePending;stalePending="";raiseStale(sw);}', js,

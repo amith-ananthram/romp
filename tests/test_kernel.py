@@ -7718,7 +7718,7 @@ class ServeSecurity(unittest.TestCase):
         self.assertNotIn("nav-typing", html)                           # the typing/dimming logic is gone
         # the wiring: maps each iframe id → its pane, toggles pane-focused exclusively, defaults to chat.
         # Fleet is its OWN pane now (the user 2026-06-24), so f-fleet maps to fleet-pane, not the chat pane.
-        self.assertIn("var PANE={'f-chat':'chat-pane','f-fleet':'fleet-pane','f-feed':'feed-pane','f-timeline':'tl-pane'}", html)
+        self.assertIn("var PANE={'f-chat':'chat-pane','f-fleet':'fleet-pane','f-feed':'feed-pane','f-files':'files-pane','f-timeline':'tl-pane'}", html)
         self.assertIn("classList.toggle('pane-focused'", html)
         self.assertIn("d.addEventListener('pointerdown',emit,true)", html)
         self.assertIn("d.addEventListener('focusin',emit,true)", html)
@@ -7825,6 +7825,28 @@ class ServeSecurity(unittest.TestCase):
         self.assertIn("window.addEventListener('romp:wsdown',function(){if(ready()){badge(true);}else{show();}});", body)   # T217: content → badge; empty pane → the sheet
         self.assertIn('dispatchEvent(new Event("romp:wsdown"))', body)            # shim fires it on close
         self.assertIn("function show(){o.classList.remove('gone')", body)         # kept in the DOM, not removed
+
+    def test_files_page_served(self):
+        # Files: /files serves the file viewer as its own pane, rendered by dist/files.js. It connects as its OWN
+        # app (app=files) with the shim's stale opt-out: the viewer is request/response (HTTP /file for the bytes,
+        # op replies to the sending client), never a feed consumer. The chat's styles.css supplies the viewer's
+        # dress; files-pane.css is inlined live for the layout and the pane-resident variant. No romp loader: an
+        # empty pane is not a loading state. The pane's own module is tests/test_files_pane.py.
+        import urllib.request
+        with urllib.request.urlopen("http://127.0.0.1:%d/files?token=testtok" % self.port, timeout=5) as r:
+            self.assertEqual(r.status, 200)
+            body = r.read().decode("utf-8", "replace")
+        self.assertIn("<body class=fileview-pane>", body)
+        self.assertIn("<div id=files-empty></div>", body)
+        self.assertIn("/dist/styles.css", body)
+        self.assertIn("/dist/federation.js", body)
+        self.assertIn("/dist/files.js", body)
+        self.assertLess(body.index("/dist/federation.js"), body.index("/dist/files.js"), "manager before the bundle")
+        self.assertIn("app=files", body)
+        self.assertIn("var NOSTALE=true;", body)   # no pushed view, so the "may be stale" prompt is never armed here
+        self.assertIn("body.fileview-pane #romp-fileview{", body, "files-pane.css is inlined live")
+        self.assertNotIn("id=pane-spin", body)
+        self.assertNotIn("rel=manifest", body)   # a pane, not an install target
 
     def test_landing_fleet_is_its_own_pane_toggled_from_the_rail(self):
         # Fleet is its OWN pane now (the user 2026-06-24): the old .show-fleet SWAP (Fleet living inside the

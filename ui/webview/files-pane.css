@@ -1,0 +1,42 @@
+/* The Files pane's layout styles (ui/webview/files.ts): the file VIEWER as a COLUMN of the dashboard
+   instead of a modal over another pane. bin/romp-kernel reads this file live for the /files page and
+   vscode-extension/esbuild.js bundles it to dist/files-pane.css. The viewer's own dress (.fileview-*, the
+   file browser, the code palette) comes from the chat's styles.css, linked before this file; the rules
+   here own the page layout, the pane-resident variant of the viewer, and the empty state. */
+html,body{margin:0;height:100%;background:var(--vscode-editor-background,#1e1e1e);
+color:var(--vscode-foreground,#cccccc);font-family:'Inter',var(--vscode-font-family,system-ui,-apple-system,'Segoe UI',sans-serif);
+font-size:13px;display:flex;flex-direction:column;overflow:hidden}
+/* The viewer FILLS the pane. The modal variant lives in styles.css and feed.css, byte-equal (the parity
+   test); this variant lives HERE so those two sheets stay mirrors. No backdrop, no card inset, no rounded
+   corners or shadow. position:relative rather than static keeps the viewer's z-index in force, so a viewer
+   opened from a file-browser row still paints above the browser's fixed overlay (the back button's path). */
+body.fileview-pane #romp-fileview{position:relative;inset:auto;flex:1 1 auto;min-height:0;background:none}
+body.fileview-pane .fileview{width:100%;height:100%;border:0;border-radius:0;box-shadow:none}
+/* The file BROWSER, reached from the viewer's directory link, fills the pane the same way: the chat sheet
+   dresses it as a centered card over a dimmed backdrop (styles.css #romp-filebrowse / .filebrowse), which in
+   a column floated in a dim pane. The backdrop stays fixed and goes clear; the card fills the backdrop. Its
+   z layer stays beneath the viewer's, so a file opened from a row still paints over the listing. */
+body.fileview-pane #romp-filebrowse{background:none}
+body.fileview-pane .filebrowse{width:100%;height:100%;border:0;border-radius:0;box-shadow:none}
+/* The empty state: what the pane is for, and the files most recently open here as re-open links. The rows
+   wear the viewer's own title-bar classes (.fileview-name / -dir / -base / -sess), so a path and its session
+   chip read exactly as they do in the bar above an open file. */
+#files-empty{flex:1 1 auto;min-height:0;overflow-y:auto;padding:26px 14px}
+#files-empty[hidden]{display:none}
+.fs-title{opacity:.7;text-align:center;line-height:1.5}
+.fs-hint{opacity:.55;text-align:center;line-height:1.5;font-size:11px;margin-top:4px}
+.fs-recent{margin:22px auto 0;max-width:560px}
+.fs-recent-head{font-size:11px;font-weight:650;opacity:.6;text-transform:uppercase;letter-spacing:.04em;padding:0 8px 4px}
+.fs-row{display:flex;align-items:center;gap:8px;min-width:0;padding:5px 8px;border-radius:6px;cursor:pointer}
+.fs-row:hover{background:var(--overlay-05,rgba(255,255,255,0.05))}
+/* Print: this sheet's own screen rules undone so a file prints as a document. The base sheet's print block
+   (styles.css, loaded first) keys on :root and body.fileview-open, which outrank the html,body rule above for
+   height, overflow and colour whatever the order; but it never touches html's display:flex, it cannot beat the
+   more specific .fileview size rule above (body.fileview-pane .fileview), and with no file open (no
+   fileview-open on the body) it does not apply at all. So the page and the viewer grow to the file's height,
+   the ink is black on white (keywords: this sheet holds no bare hex), and the empty state never prints, with
+   or without a file open (the base sheet hides it only under fileview-open). The viewer's position:relative
+   above stands in print too: in flow it prints as a block. */
+@media print{html,body{height:auto;overflow:visible;display:block;background:white;color:black}
+body.fileview-pane .fileview{width:auto;height:auto}
+#files-empty{display:none}}

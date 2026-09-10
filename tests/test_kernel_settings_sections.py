@@ -46,7 +46,7 @@ class SettingsSectionsTest(unittest.TestCase):
                     "id=rs-conserve", "id=rs-thinksum", "id=rs-fileedit"):
             self.assertTrue(h.index(">Sessions<") < h.index(rid) < h.index(">Chat<"), rid)
         # Chat: transcript prefs AND the comment defaults (comments are part of the chat)
-        for rid in ("id=rs-compact", "id=rs-dense", "id=rs-branch", "id=rs-striprows", "id=rs-cmtmodel", "id=rs-cmtfast"):
+        for rid in ("id=rs-compact", "id=rs-dense", "id=rs-branch", "id=rs-striprows", "id=rs-filelink", "id=rs-cmtmodel", "id=rs-cmtfast"):
             self.assertTrue(h.index(">Chat<") < h.index(rid) < h.index(">Sessions pane<"), rid)
         # Sessions pane, then Feed, then Colors
         self.assertTrue(h.index(">Sessions pane<") < h.index("id=rs-collapsegaps") < h.index(">Feed<"))

@@ -4,7 +4,7 @@ This guide covers how to use Romp and how its back end works.
 
 ## The Romp user interface
 
-Romp gathers all your Claude Code sessions into one interface, with four
+Romp gathers all your Claude Code sessions into one interface, with five
 complementary views of what the agents are doing:
 
 - **[The chat](#the-chat)** is the regular interface for talking to a coding
@@ -16,6 +16,8 @@ complementary views of what the agents are doing:
   chat.
 - **[The outline](#the-outline)** lists every session with its tasks, for
   reviewing what a session has done and searching across all of them.
+- **[Files](#files)** holds the file viewer in a column of its own, so a file
+  stays open beside the chat and the feed. Off by default.
 
 ### The chat
 
@@ -241,6 +243,19 @@ beneath. Open the outline to review what a session has worked through, or to
 find past work: the search box reaches every session, live or closed.
 
 ![The outline: each session's tasks as a tree](assets/guide/outline.png){ width="100%" }
+
+### Files
+
+The Files pane holds the file viewer in a column of its own, beside the chat
+and the feed, so an open file covers neither. While the pane is open, a file
+link clicked in the chat opens in it. When it is closed, the gear's **File
+links open in** setting decides where a link opens: over the pane you clicked
+(the default), or in the Files pane, which then opens and stays open; on a
+phone, closing the file takes you back to the tab you came from. Selecting a
+passage in the viewer puts the quote in the chat's composer, as it does from
+the viewer over the chat. When no file is open, the pane lists the files most
+recently opened in it; click one to open it again. The pane is off by default;
+the bottom bar turns it on, and on a phone it is a tab like the others.
 
 ## Automatic nudges
 

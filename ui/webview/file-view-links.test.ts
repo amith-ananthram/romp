@@ -796,7 +796,7 @@ test("source: the body's listener and its gesture: a drag-select opens nothing, 
 });
 
 test("source: a link's line scrolls the code view's row once the text lands, spent once; a line past the end says so in the viewer's notice and lands on the last row; a markdown file takes its Raw view for that open without saving the preference", () => {
-  assert.match(VIEW, /export function openFileView\(path: string, sid\?: string \| null, opts\?: \{ line\?: number \| null; frag\?: string \| null \}\): void \{/);
+  assert.match(VIEW, /export function openFileView\(path: string, sid\?: string \| null, opts\?: \{ line\?: number \| null; frag\?: string \| null \}\): boolean \{/);
   assert.match(VIEW, /const scrollToLine = \(n: number\) => \{\n\s*const rows = body\.querySelectorAll\("code\.hljs \.fv-cl"\);\n\s*if \(!rows\.length\) return;\n\s*if \(n > rows\.length\) noteBar\("Line " \+ n \+ " is past the end of this file, which has " \+ rows\.length \+ \(rows\.length === 1 \? " line" : " lines"\) \+ "; showing the last line\."\);\n\s*\(rows\[Math\.min\(Math\.max\(0, n - 1\), rows\.length - 1\)\] as HTMLElement\)\.scrollIntoView\(\{ block: "center" \}\);/);
   assert.match(VIEW, /let pendingLine: number \| null = opts && typeof opts\.line === "number" && opts\.line > 0 \? Math\.floor\(opts\.line\) : null;/);
   assert.match(VIEW, /text = t;\n\s*\/\/[^\n]*\n\s*if \(pendingLine !== null && isMd && fmt\.md === "rendered"\) fmt\.md = "raw";\n\s*renderBody\(\);\n\s*if \(pendingLine !== null\) \{ scrollToLine\(pendingLine\); pendingLine = null; \}/);

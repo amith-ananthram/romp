@@ -43,7 +43,7 @@ class PaneOrderParity(unittest.TestCase):
         self.assertEqual(_pane_seq(mtabs), _pane_seq(rail),
                          "one ordering, not two: #mtabs must list the panes exactly as the "
                          "desktop rail strip does (change one, both move)")
-        self.assertEqual(len(_pane_seq(rail)), 4, "all four panes present on both surfaces")
+        self.assertEqual(len(_pane_seq(rail)), 5, "all five panes present on both surfaces")
 
     def test_both_surfaces_render_from_the_one_constant(self):
         # the mechanism, not just the outcome: a future hand-edit of either HTML block back to a
