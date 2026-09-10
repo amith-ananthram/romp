@@ -5,8 +5,13 @@
 // stable caption); sixty pushes write the src zero times; the reconnect-class heal probes each parked URL once OFF the
 // DOM, a failed probe changes nothing, a successful one lands the picture on every parked img with that URL on the
 // page at that moment (a re-render during the probe included); a URL the kernel serves gets a bounded off-DOM probe on
-// the per-message path; and the chat's post-pass parks a re-rendered img with a remembered URL before the browser
-// fetches it. Every test builds its own state.
+// the per-message path, and that budget rides the URL, so a turn re-rendered on every push while it streams still gets
+// its three probes, a second img with the URL failing midway starts nothing over, a load clears the budget with the
+// memory (the URL failing again later starts afresh), and a heal that lands while a probe is pending is not undone by
+// that probe's failure; the reconnect-class heal probes every remembered URL, on the page or not (a turn evicted from
+// the rendered window, a closed tab); and the chat's post-pass parks a re-rendered img with a remembered URL before the
+// browser fetches it. The module remembers failed URLs for the page life, so fresh() heals every remembered URL off
+// the DOM through the public reconnect path before each test: every test starts with an empty memory.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -47,10 +52,18 @@ let fetchCalls = 0;
 (globalThis as any).fetch = () => { fetchCalls++; return Promise.reject(new Error("no fetch expected")); };
 
 const ORIGIN_URL = (n: string) => "http://127.0.0.1:1/home/user/notes-api/plots/" + n;   // a path the browser resolved against the page: no route serves it
-const SERVED_URL = "http://127.0.0.1:1/file?path=%2Fhome%2Fuser%2Fnotes-api%2Fplots%2Flatency.png&sid=11111111-2222-4333-8444-000000000001";
+const servedUrl = (n: string) => "http://127.0.0.1:1/file?path=%2Fhome%2Fuser%2Fnotes-api%2Fplots%2F" + n + "&sid=11111111-2222-4333-8444-000000000001";   // a URL the kernel answers
+const SERVED_URL = servedUrl("latency.png");
 function mdImg(url: string, alt: string): FakeEl { const img = new FakeEl("img"); img.src = url; img.alt = alt; img.srcWrites = 0; live.push(img); return img; }
 const fail = (img: FakeEl) => errorListener!({ target: img });
-async function fresh() { const P = await import("./preview"); P.installMdImgHeal(); assert.ok(errorListener); live.length = 0; probes.length = 0; return P; }
+async function fresh() {
+  const P = await import("./preview"); P.installMdImgHeal(); assert.ok(errorListener);
+  live.length = 0; probes.length = 0;
+  // the module remembers every failed URL for the page life; the reconnect heal probes each remembered URL off the DOM,
+  // and a load forgets it, so one heal with every probe answered clears the memory an earlier test left behind
+  P.refreshSettledPreviews(); for (const p of probes) (p as any).onload(); probes.length = 0;
+  return P;
+}
 
 test("a failed markdown image is parked: no src, the alt text stays, and sixty pushes write the src zero times", async () => {
   const P = await fresh();
@@ -120,6 +133,120 @@ test("a URL the kernel serves gets a BOUNDED off-DOM probe on the per-message pa
   assert.equal(probes.length, 4, "the reconnect-class heal still probes it");
   (probes[3] as any).onload();
   assert.equal(s.src, SERVED_URL, "…and the picture lands when the file is there");
+});
+
+test("a served URL's budget follows the URL: a turn rebuilt on every push while it streams still gets three probes, one per push", async () => {
+  // a streaming assistant turn is re-rendered on every push (the tail path removes the turn's nodes and rebuilds them),
+  // so the img that failed is detached by the time the next push arrives and the post-pass parks a fresh one; the
+  // budget must not die with the element
+  const P = await fresh();
+  const url = servedUrl("throughput.png");
+  let cur = mdImg(url, "Throughput");
+  let twin: FakeEl | null = null;
+  fail(cur);
+  for (let round = 1; round <= 3; round++) {
+    P.retryFailedPreviews();
+    assert.equal(probes.length, round, "push " + round + ": one detached probe");
+    P.retryFailedPreviews();
+    assert.equal(probes.length, round, "a push while that probe is pending fires no second one for the URL");
+    // the streaming re-render: the old img leaves the page, the post-pass parks the fresh one before any fetch
+    cur.isConnected = false;
+    const root = new FakeEl("body"); const next = new FakeEl("img"); next.src = url; next.alt = "Throughput"; root.children.push(next);
+    P.mdImgPostPass(root as unknown as ParentNode);
+    assert.equal(next.hasAttribute("src"), false, "the fresh img is parked at render");
+    next.srcWrites = 0; live.push(next); cur = next;
+    probes[probes.length - 1].onerror();
+    assert.equal(cur.srcWrites, 0, "a failed probe never touches the img on the page");
+    if (round === 2) {
+      // a second img with the URL, rendered before the first failure (the same figure in another view), fails now: the
+      // URL keeps the one attempt it has left rather than starting over at three
+      twin = mdImg(url, "Throughput"); fail(twin);
+      assert.equal(twin.hasAttribute("src"), false, "parked like the first");
+    }
+  }
+  P.retryFailedPreviews(); P.retryFailedPreviews();
+  assert.equal(probes.length, 3, "the budget is spent: no more per-message probes");
+  P.refreshSettledPreviews();
+  assert.equal(probes.length, 4, "the reconnect-class heal still probes it");
+  (probes[3] as any).onload();
+  assert.equal(cur.src, url, "the picture lands on the img that is on the page now");
+  assert.equal(cur.srcWrites, 1);
+  assert.equal(twin!.src, url, "…and on every other parked img with the URL");
+});
+
+test("a per-message probe that loads lands the picture on the img on the page now and clears the URL's budget with its memory; the URL failing again later starts afresh", async () => {
+  const P = await fresh();
+  const url = servedUrl("progress.png");
+  let cur = mdImg(url, "Progress");
+  fail(cur);
+  P.retryFailedPreviews();
+  assert.equal(probes.length, 1, "push 1: one detached probe");
+  // the streaming re-render while the probe is in flight: the old img leaves the page, the fresh one is parked at render
+  cur.isConnected = false;
+  const root = new FakeEl("body"); const next = new FakeEl("img"); next.src = url; next.alt = "Progress"; root.children.push(next);
+  P.mdImgPostPass(root as unknown as ParentNode);
+  assert.equal(next.hasAttribute("src"), false, "the fresh img is parked at render");
+  next.srcWrites = 0; live.push(next); cur = next;
+  (probes[0] as any).onload();                       // the file is there now
+  assert.equal(cur.src, url, "the picture lands on the img that is on the page now");
+  assert.equal(cur.srcWrites, 1);
+  assert.equal(cur._cls.has("md-img-failed"), false);
+  P.retryFailedPreviews(); P.retryFailedPreviews();
+  assert.equal(probes.length, 1, "a healed URL has no pending budget: the next pushes probe nothing");
+  P.refreshSettledPreviews();
+  assert.equal(probes.length, 1, "…and the reconnect heal has forgotten it");
+  // the same URL fails again later (a relay blip, a file moved away): the listener arms three attempts afresh and the
+  // first fires on the next push, nothing of the healed round lingering
+  const again = mdImg(url, "Progress");
+  fail(again);
+  assert.equal(again.hasAttribute("src"), false, "parked again");
+  P.retryFailedPreviews();
+  assert.equal(probes.length, 2, "the URL failing again later gets its per-message probe afresh");
+  assert.equal(probes[1].src, url);
+});
+
+test("a reconnect heal that lands while a per-message probe is pending stands: the stale failure re-arms nothing for the healed URL", async () => {
+  const P = await fresh();
+  const url = servedUrl("burndown.png");
+  const s = mdImg(url, "Burndown");
+  fail(s);
+  s.srcWrites = 0;
+  P.retryFailedPreviews();
+  assert.equal(probes.length, 1, "push 1: the per-message probe is in flight");
+  P.refreshSettledPreviews();                        // the socket came back meanwhile
+  assert.equal(probes.length, 2, "the reconnect heal probes the URL too");
+  (probes[1] as any).onload();                       // the reconnect probe answers first: healed
+  assert.equal(s.src, url, "the picture lands");
+  probes[0].onerror();                               // the older per-message probe's failure arrives afterwards
+  assert.equal(s.src, url, "a stale failure changes nothing on the page");
+  assert.equal(s.srcWrites, 1);
+  P.retryFailedPreviews(); P.retryFailedPreviews();
+  assert.equal(probes.length, 2, "the stale failure re-armed no attempt for a healed URL: the next pushes probe nothing");
+  P.refreshSettledPreviews();
+  assert.equal(probes.length, 2, "…and the reconnect heal has forgotten it");
+});
+
+test("the reconnect-class heal probes a remembered URL whose turn is outside the rendered window", async () => {
+  // the turn left the rendered window (or its tab was closed), so no parked img with the URL is on the page; the
+  // URL is still remembered, and until it heals a scroll-back parks the re-rendered img again for the page life
+  const P = await fresh();
+  const a = mdImg(ORIGIN_URL("evicted.png"), "Evicted");
+  fail(a);
+  a.isConnected = false;
+  P.refreshSettledPreviews();
+  assert.equal(probes.length, 1, "the URL is remembered even with no parked img on the page");
+  assert.equal(probes[0].src, ORIGIN_URL("evicted.png"));
+  probes[0].onerror();
+  probes.length = 0;
+  P.refreshSettledPreviews();
+  assert.equal(probes.length, 1, "still down: the next reconnect probes it again");
+  (probes[0] as any).onload();
+  const root = new FakeEl("body"); const back = new FakeEl("img"); back.src = ORIGIN_URL("evicted.png"); root.children.push(back);
+  P.mdImgPostPass(root as unknown as ParentNode);
+  assert.equal(back.src, ORIGIN_URL("evicted.png"), "on scroll-back the healed URL renders normally");
+  probes.length = 0;
+  P.refreshSettledPreviews();
+  assert.equal(probes.length, 0, "a healed URL is forgotten: the next reconnect has nothing to probe");
 });
 
 test("render.ts installs the listener once, parks known-failed URLs on its OWN markdown output only, and files the page's bundle build once per load", () => {
