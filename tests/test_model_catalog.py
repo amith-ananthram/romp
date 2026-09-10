@@ -26,7 +26,7 @@ from unittest.mock import Mock, patch
 import urllib.request
 from contextlib import redirect_stderr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -37,10 +37,10 @@ os.environ.pop("ROMP_STATE_DIR", None)
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 os.environ["ROMP_MODELS_URL"] = "http://127.0.0.1:9/v1/models"   # a dead port until a test points it at the fake
-SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
-km = SourceFileLoader("romp_kernel_mc", os.path.join(BIN, "romp-kernel")).load_module()
-sb = SourceFileLoader("romp_sdk_backend_mc", os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py")).load_module()
+load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+load_source("romp_judge", os.path.join(BIN, "romp-judge"))
+km = load_source("romp_kernel_mc", os.path.join(BIN, "romp-kernel"))
+sb = load_source("romp_sdk_backend_mc", os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py"))
 jd = km.jd
 
 # The rows a live account might see (2026-09-01 shape): a genuinely new version, dated snapshots, a

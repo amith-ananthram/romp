@@ -15,7 +15,7 @@ import json
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -23,7 +23,7 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
-km = SourceFileLoader("romp_kernel_t233", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_t233", os.path.join(BIN, "romp-kernel"))
 
 ENDED = "7a7a7a7a-1111-4222-8333-000000000233"   # the session the user ends
 KEPT = "7a7a7a7a-1111-4222-8333-000000000234"    # a session that stays

@@ -26,7 +26,7 @@ import time
 import threading
 import unittest
 from unittest import mock
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 import tempfile
 
 try:
@@ -46,8 +46,8 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-jd = SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
+load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+jd = load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 # Belt over conftest's suspenders. Under pytest, conftest.py rebinds XDG_STATE_HOME to a tempdir
 # before any test module imports — but a RAW `python3 tests/test_kernel_webpush.py` skips conftest,
 # and this file DELETES push state in _clear_push_state: on 2026-08-08 a raw run aimed that at the
@@ -59,7 +59,7 @@ _STATE_TD = tempfile.TemporaryDirectory()
 jd.STATE = Path(_STATE_TD.name)
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "test-token-DO-NOT-USE")
-km = SourceFileLoader("romp_kernel_webpush", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_webpush", os.path.join(BIN, "romp-kernel"))
 
 
 def _b64u(b):

@@ -6,7 +6,7 @@ guard — so a future tmux leak into the higher layers fails CI instead of silen
 import os
 import re
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 import tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -15,7 +15,7 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-sb = SourceFileLoader("romp_session_backend", os.path.join(BIN, "romp_session_backend.py")).load_module()
+sb = load_source("romp_session_backend", os.path.join(BIN, "romp_session_backend.py"))
 
 ABSTRACT = sorted(sb.SessionBackend.__abstractmethods__)
 

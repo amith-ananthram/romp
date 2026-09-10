@@ -10,7 +10,7 @@ import re
 import tempfile
 import types
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -18,7 +18,7 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
-sb = SourceFileLoader("romp_sdk_backend_t214", os.path.join(BIN, "..", "kernel", "sdk_backend.py")).load_module()
+sb = load_source("romp_sdk_backend_t214", os.path.join(BIN, "..", "kernel", "sdk_backend.py"))
 
 SID = "aaaa2141-0000-0000-0000-000000000001"
 

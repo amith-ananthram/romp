@@ -13,7 +13,7 @@ import json
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 from unittest import mock
 
@@ -25,8 +25,8 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 # conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-km = SourceFileLoader("romp_kernel_apih", os.path.join(BIN, "romp-kernel")).load_module()
-sb = SourceFileLoader("romp_sdk_backend_apih", os.path.join(BIN, "..", "kernel", "sdk_backend.py")).load_module()
+km = load_source("romp_kernel_apih", os.path.join(BIN, "romp-kernel"))
+sb = load_source("romp_sdk_backend_apih", os.path.join(BIN, "..", "kernel", "sdk_backend.py"))
 
 # A PRIVATE synthetic sid family for this module (never the shared 11111111-2222 placeholder, never real).
 SID = ["77777777-aaaa-4bbb-8ccc-00000000000%d" % i for i in range(1, 6)]

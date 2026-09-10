@@ -17,7 +17,7 @@ import urllib.request
 import urllib.error
 from contextlib import redirect_stderr
 from http.server import ThreadingHTTPServer
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -26,9 +26,9 @@ os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
-SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
-km = SourceFileLoader("romp_kernel_prw", os.path.join(BIN, "romp-kernel")).load_module()
+load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+load_source("romp_judge", os.path.join(BIN, "romp-judge"))
+km = load_source("romp_kernel_prw", os.path.join(BIN, "romp-kernel"))
 jd = km.jd
 
 SID = "11111111-2222-3333-4444-555555555555"
@@ -52,8 +52,8 @@ _MODS = {}
 def _backend_mod(which):
     """The real sdk_backend / codex_backend modules, loaded once for the tests that execute their readers."""
     if which not in _MODS:
-        _MODS[which] = SourceFileLoader("romp_%s_prw" % which,
-                                        os.path.join(os.path.dirname(BIN), "kernel", which + ".py")).load_module()
+        _MODS[which] = load_source("romp_%s_prw" % which,
+                                        os.path.join(os.path.dirname(BIN), "kernel", which + ".py"))
     return _MODS[which]
 
 

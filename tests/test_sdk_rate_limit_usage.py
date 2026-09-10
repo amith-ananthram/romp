@@ -13,7 +13,7 @@ import json
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,7 +23,7 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-sb = SourceFileLoader("romp_sdk_backend", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+sb = load_source("romp_sdk_backend", os.path.join(BIN, "romp_sdk_backend.py"))
 
 
 def _info(rate_limit_type, utilization, resets_at=None):
@@ -129,11 +129,11 @@ class RecordRateLimit(unittest.TestCase):
         # End-to-end: the SDK writer + the kernel reader agree on usage.json (no statusline in the loop).
         self.be._record_rate_limit(_info("five_hour", 0.10, 1782787200))
         self.be._record_rate_limit(_info("seven_day", 0.11, 1783364400))
-        SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-        SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
+        load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+        load_source("romp_judge", os.path.join(BIN, "romp-judge"))
         os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
         os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
-        km = SourceFileLoader("romp_kernel_rl", os.path.join(BIN, "romp-kernel")).load_module()
+        km = load_source("romp_kernel_rl", os.path.join(BIN, "romp-kernel"))
         saved = km.jd.STATE
         km.jd.STATE = self.state
         try:

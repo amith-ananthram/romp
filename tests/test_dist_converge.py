@@ -10,7 +10,7 @@ import os
 import tempfile
 import time
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -19,7 +19,7 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
 os.environ.pop("ROMP_DIST_DIR", None)   # the seam under test — must be absent at load
-km = SourceFileLoader("romp_kernel_distcv", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_distcv", os.path.join(BIN, "romp-kernel"))
 
 
 class DistConverge(unittest.TestCase):

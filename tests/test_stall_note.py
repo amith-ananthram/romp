@@ -11,7 +11,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 import os
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -19,7 +19,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-jd = SourceFileLoader("romp_judge_stall", str(ROOT / "kernel" / "judge.py")).load_module()
+jd = load_source("romp_judge_stall", str(ROOT / "kernel" / "judge.py"))
 
 FSID = "11111111-2222-3333-4444-555555555555"
 GID = FSID + ":g7"

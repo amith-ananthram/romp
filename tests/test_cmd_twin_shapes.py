@@ -13,13 +13,13 @@ import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
-em = SourceFileLoader("romp_em_twinshapes", os.path.join(BIN, "romp-event-model")).load_module()
+em = load_source("romp_em_twinshapes", os.path.join(BIN, "romp-event-model"))
 
 SID = "11111111-2222-3333-4444-555555555555"
 

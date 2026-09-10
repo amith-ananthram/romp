@@ -19,7 +19,7 @@ import json
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -27,7 +27,7 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-em = SourceFileLoader("romp_event_model_ismeta", os.path.join(BIN, "romp-event-model")).load_module()
+em = load_source("romp_event_model_ismeta", os.path.join(BIN, "romp-event-model"))
 
 SID = "11111111-2222-3333-4444-555555555555"
 MID = "1700000000.11111_22222.TESTHOST"
