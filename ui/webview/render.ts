@@ -9953,18 +9953,21 @@ function warnToast(msg: string): HTMLElement {
 }
 // A toast the page that follows a reload must not repeat: a refusal that reports a STATE rather than an event. The
 // staged sends' "Can't send yet" says the session's host is unreachable (hostIsDown, a remote host's tunnel) or its tab
-// is still being created (isProvisionalId); the staging refusals (stageComposer) say a picker is waiting on the
-// composer, an edit is in progress (to a past message, or to a queued one) or attachments are on the composer; the
-// branch jump's refusal (branchjump) says the session is not on this dashboard. The fresh page shows each state for
-// itself (the host mark and the staged strip; the picker, the attachments and the roster come back from the kernel and
-// the persisted drafts) or no longer has it (a provisional tab does not survive a reload; composerEdits and queuedEdits
-// are in memory alone, so no edit is in progress on a fresh page), so kept by persistNoticesForReload and shown again by
-// the page that follows, it would be redundant at best and false at worst. The mark keeps it out of the replay
-// (reload-notices.ts liveNotices reads only the toasts without it).
+// is still being created (isProvisionalId); the send into a tab whose create failed (sendComposer's deliver) says the
+// session never started; the queued edit's send (sendComposer, ahead of deliver) says the session cannot be reached, so
+// the edit was not sent; the staging refusals (stageComposer) say a picker is waiting on the composer, an edit is in
+// progress (to a past message, or to a queued one) or attachments are on the composer; the branch jump's refusal
+// (branchjump) says the session is not on this dashboard. The fresh page shows each state for itself (the host mark and
+// the staged strip; the picker, the attachments and the roster come back from the kernel and the persisted drafts) or no
+// longer has it (a provisional tab, pending or failed, does not survive a reload; composerEdits and queuedEdits are in
+// memory alone, so no edit is in progress on a fresh page, and a "send again" there would post the words as a new
+// message), so kept by persistNoticesForReload and shown again by the page that follows, it would be redundant at best
+// and false at worst. The mark keeps it out of the replay (reload-notices.ts liveNotices reads only the toasts without
+// it).
 // Toasts that report what HAPPENED to a send or a file stay unmarked, since what they say is as true after the reload
 // as before: the nack (the attachment was not saved, the held message not sent), the dismissal and the other-tab ack
-// (the held message not sent), the refusal on a disconnected host (this message was not sent and is still in the
-// composer).
+// (the held message not sent), the plain send's refusal on a disconnected host (this message was not sent and is still
+// in the composer, where the fresh page's persisted draft keeps it, and a send there sends it).
 function ephemeralWarnToast(msg: string): void { warnToast(msg).dataset.ephemeral = "1"; }
 
 // Tail-windowing (see the View comment): a fresh/rewound view renders only the
@@ -15806,9 +15809,12 @@ function setupComposer() {
       // message: the kernel would deliver it as text, skipping the routing every typed command gets (the
       // fire-alone park, the /model and /effort setters, the /clear confirm below), so the kernel refuses it
       // too; this mirror keeps the words in the box instead of round-tripping them.
+      // The refusal reports a state (an edit in progress on a session that cannot be reached), and the edit is in
+      // memory alone: on the page that follows a reload no edit is in progress and "send again" would post the
+      // words as a new message, so it does not ride one (ephemeralWarnToast).
       if (hostIsDown(activeId) || isProvisionalId(activeId)) {
         if (hostIsDown(activeId)) vscodeApi?.postMessage({ type: "redial", host: String(activeId).slice(0, String(activeId).indexOf(":")) });
-        warnToast("Can't reach the session right now, so the edit wasn't sent. It's still in the box: send again when the link is back.");
+        ephemeralWarnToast("Can't reach the session right now, so the edit wasn't sent. It's still in the box: send again when the link is back.");
         return;
       }
       if (SLASH_CMD_RE.test(typed)) { warnToast("A queued message cannot become a command. Cancel it with its ✕ and type the command."); return; }
@@ -15844,8 +15850,11 @@ function setupComposer() {
       if (isProvisionalId(sid)) {
         // a FAILED create's tab: there is no pending spawn to queue onto, and never a session to send
         // to — refuse loudly and leave the text exactly where it is (the box is the only copy)
+        // The refusal reports a state (a tab with no session behind it) that the page following a
+        // reload does not have, since a provisional tab does not survive one, so it does not ride one
+        // (ephemeralWarnToast).
         if (sid !== provisionalId) {
-          warnToast("“" + (sessions.get(sid)?.name || "this session") + "” never started, so there's "
+          ephemeralWarnToast("“" + (sessions.get(sid)?.name || "this session") + "” never started, so there's "
             + "nowhere to send this. It stays in the box — create the session again to use it.");
           return;
         }

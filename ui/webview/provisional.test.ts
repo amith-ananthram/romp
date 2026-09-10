@@ -110,8 +110,9 @@ test("creating a session opens the provisional tab instead of a modal", () => {
 test("a send on a provisional tab is HELD, not posted to a session that doesn't exist", () => {
   assert.match(RENDER, /provisionalQueue\.push\(text\);\s*\n\s*registerOptimistic\(sid, text, attached\.filter\(\(p\) => previewKind\(p\) === "img"\)\);/,
     "the dashed bubble goes up now — with its dragged-image thumbnails — romp has it, it is not delivered");
-  // a FAILED tab has no pending spawn to queue onto: refuse loudly, the box keeps the only copy
-  assert.match(RENDER, /if \(sid !== provisionalId\) \{\s*\n\s*warnToast\("“" \+ \(sessions\.get\(sid\)\?\.name \|\| "this session"\)/);
+  // a FAILED tab has no pending spawn to queue onto: refuse loudly, the box keeps the only copy. The refusal reports
+  // a state the page after a reload does not have, so it is ephemeral (executed in reload-notices.test.ts)
+  assert.match(RENDER, /if \(sid !== provisionalId\) \{\s*\n\s*ephemeralWarnToast\("“" \+ \(sessions\.get\(sid\)\?\.name \|\| "this session"\)/);
 });
 
 test("adoption flushes the held messages FOR REAL and carries the draft across", () => {
