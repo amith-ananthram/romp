@@ -13,8 +13,12 @@ queue:
   holding goes back into the queue under its own id. An older kernel's mirror (texts only) restores id-less
   copies, and a copy the backend itself queued (a death notice, the rename ping) carries none: text decides.
   Parked sends — a copy parked in the kernel's own FIFO (compaction, a usage-limit hold, a parked drive op) carries
-  NO id until it reaches the backend: the park's op is the three-field record the on-disk mirror and a dozen
-  readers pin, so the identity is minted where the copy enters the backend's queue. Stated as a gap.
+  the id the CLIENT minted at the press (send-pending.ts newPending posts it with the send; _send_or_park parks it
+  as the op's fourth slot and hands it to send() at the drain), so the chip, the bubble and the ✕ agree from the
+  press. A copy the kernel parks itself (a nudge, a re-delivery, an older mirror's three-slot record) carries none
+  until it reaches the backend, where send() mints one. The kernel takes a client's id only in its own echo form
+  and only when the session does not already hold it (a queued copy, a live echo, a parked op); otherwise it mints
+  as before. A cancel that names the id removes exactly that copy (tests/test_queued_copy_press_id.py).
   tmux — the CLI's queue-operation records carry timestamps but no ids: each copy carries its enqueue stamp and NO
   id (an id only the ledger copy wore would make the chat reject the tmux echo as another send's); nothing pairs the
   landed record (the kernel does not see the CLI take it), so the chat reads this route by text.
@@ -328,18 +332,91 @@ class TheChatCarriesTheIds(unittest.TestCase):
         q = [e for e in m["events"] if e.get("kind") == "queued"]
         self.assertEqual([(t["md"], t.get("qid"), t.get("qts")) for t in q[0]["texts"]], [("stamped only", None, 1_700_000_000_000)])
 
-    def test_a_parked_copy_carries_no_id_until_it_reaches_the_backend(self):
-        # the park's op is the three-field record the on-disk mirror and its readers pin: no identity rides it; the
-        # copy is identified where it enters the backend's queue (send()), and the chat reads a parked copy by text
+    def test_a_parked_copy_carries_the_id_it_was_pressed_with_and_a_kernel_parked_one_none_until_the_backend(self):
+        # the client mints the copy's id at the press and posts it with the send: parked, the op carries it as its
+        # fourth slot and the chip shows it, so the chat's bubble and its ✕ name the copy before the drain; at the
+        # drain the same id enters the backend's queue and keys the echo. A copy the kernel parks itself (a
+        # nudge, a re-delivery) has no press: it carries none until send() mints one.
         self.w.write(RUNNING)
+        pressed = "echo:" + "d" * 32
+        saved = km._compacting_now
+        km._compacting_now = lambda sid: True
+        try:
+            self.assertTrue(km._send_or_park(self.w.be, SID, "parked words", echo="human", qid=pressed))
+        finally:
+            km._compacting_now = saved
         km._park_op(SID, ("send", "parked words", None))
         m = self.w.build()
         q = [e for e in m["events"] if e.get("kind") == "queued"]
-        self.assertEqual([(x["md"], x.get("qid"), x.get("qts")) for x in q[0]["texts"]], [("parked words", None, None)])
-        km._deliver_send_batch(self.w.be, SID, [km._pending_ops[SID][0]])
+        self.assertEqual([(x["md"], x.get("qid"), x.get("qts")) for x in q[0]["texts"]],
+                         [("parked words", pressed, None), ("parked words", None, None)])
+        km._deliver_send_batch(self.w.be, SID, list(km._pending_ops[SID]))
+        km._pending_ops.pop(SID, None)
         meta = self.w.be.pending_queued_meta(SID)
-        self.assertEqual(meta[0]["md"], "parked words")
-        self.assertTrue(meta[0]["qid"] and meta[0]["qid"].startswith("echo:"), "…and gains one the moment it enters the backend's queue")
+        self.assertEqual([m_["md"] for m_ in meta], ["parked words", "parked words"])
+        self.assertEqual(meta[0]["qid"], pressed, "the copy enters the backend's queue under the id it was pressed with")
+        self.assertTrue(meta[1]["qid"] and meta[1]["qid"].startswith("echo:") and meta[1]["qid"] != pressed,
+                        "the kernel-parked copy gains a kernel-minted one there")
+        echoes = {a["uuid"] for a in self.w.be.live_atoms(SID) if a.get("_echo_text")}
+        self.assertIn(pressed, echoes, "the echo's uuid IS the pressed id")
+
+
+class TheSdkQueueTakesTheClientsId(unittest.TestCase):
+    """SdkBackend.send takes the id the client minted at the press and unqueue removes a copy BY that id: of two
+    same-text copies the one named leaves, and its echo (keyed by the same id) goes with it while the other's stays.
+    The handler's shape check reads this backend's queue and live echoes, so an id the session already holds is
+    refused and the kernel mints instead."""
+
+    def setUp(self):
+        self.w = _World()
+
+    def tearDown(self):
+        self.w.close()
+        km._pending_ops.pop(SID, None)
+
+    def test_send_keys_the_copy_and_its_echo_by_the_pressed_id(self):
+        a, b = "echo:" + "a" * 32, "echo:" + "b" * 32
+        self.assertTrue(self.w.be.send(SID, "same words", qid=a))
+        self.assertTrue(self.w.be.send(SID, "same words", qid=b))
+        self.assertEqual([(m["md"], m["qid"]) for m in self.w.be.pending_queued_meta(SID)], [("same words", a), ("same words", b)])
+        self.assertEqual({x["uuid"] for x in self.w.be.live_atoms(SID) if x.get("_echo_text")}, {a, b})
+
+    def test_unqueue_by_id_pops_the_named_copy_and_its_echo_leaving_the_same_text_other(self):
+        a, b = "echo:" + "a" * 32, "echo:" + "b" * 32
+        self.w.be.send(SID, "same words", qid=a)
+        self.w.be.send(SID, "same words", qid=b)
+        self.assertEqual(self.w.be.unqueue(SID, 0, "same words", qid=b), "same words", "a stale index and the shared words: the id wins")
+        self.assertEqual([m["qid"] for m in self.w.be.pending_queued_meta(SID)], [a])
+        self.assertEqual({x["uuid"] for x in self.w.be.live_atoms(SID) if x.get("_echo_text")}, {a},
+                         "the cancelled copy's echo went with it; the other copy's echo stays")
+        self.assertIsNone(self.w.be.unqueue(SID, 0, "same words", qid=b), "an id the queue no longer holds: a miss")
+        self.assertEqual([m["qid"] for m in self.w.be.pending_queued_meta(SID)], [a], "and nothing else was popped")
+        self.assertEqual(self.w.be.unqueue(SID, 0, "same words"), "same words", "an id-less cancel keeps the text path")
+        self.assertEqual(self.w.be.pending_queued(SID), [])
+
+    def test_unqueue_by_id_whose_echo_is_already_gone_leaves_the_same_text_neighbours_echo(self):
+        a, b = "echo:" + "a" * 32, "echo:" + "b" * 32
+        self.w.be.send(SID, "same words", qid=a)
+        self.w.be.send(SID, "same words", qid=b)
+        with self.w.be._live_lock:
+            self.w.be._live[SID].pop(b)                   # b's echo retired ahead of its copy
+        self.assertEqual(self.w.be.unqueue(SID, 0, "same words", qid=b), "same words")
+        self.assertEqual([m["qid"] for m in self.w.be.pending_queued_meta(SID)], [a])
+        self.assertEqual({x["uuid"] for x in self.w.be.live_atoms(SID) if x.get("_echo_text")}, {a},
+                         "the id said whose echo to drop, and it was gone: a's, the same-words neighbour's, stays")
+
+    def test_the_handler_takes_a_fresh_id_in_the_echo_form_and_refuses_one_the_session_holds(self):
+        fresh, queued, fed = "echo:" + "f" * 32, "echo:" + "1" * 32, "echo:" + "2" * 32
+        self.w.be.send(SID, "queued copy", qid=queued)
+        self.w.be.send(SID, "fed copy", qid=fed)
+        with self.w.s._lock:
+            self.w.s._pop_for_feed_locked()           # the CLI took the first: its echo is live, its id is in _fed_meta
+        self.assertEqual(km._client_qid({"qid": fresh}, SID, self.w.be), fresh)
+        self.assertIsNone(km._client_qid({"qid": queued}, SID, self.w.be), "held by the queue")
+        self.assertIsNone(km._client_qid({"qid": fed}, SID, self.w.be), "held by a live echo (fed, not landed)")
+        for bad in ("", "s-1", "echo:", "echo:" + "F" * 32, "echo:" + "f" * 8, "echo:" + "f" * 70, 7, None):
+            self.assertIsNone(km._client_qid({"qid": bad}, SID, self.w.be), repr(bad))
+        self.assertIsNone(km._client_qid({}, SID, self.w.be))
 
 
 class TheTmuxQueueCarriesStamps(unittest.TestCase):

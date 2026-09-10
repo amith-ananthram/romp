@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Chat file links are filesystem-VERIFIED, and shortened mentions are FIXED.
 
-The client linkifies path-shaped tokens by shape alone (render.ts CLICKABLE_PATH_RE), so a bare
+The client linkifies path-shaped tokens by shape alone (path-links.ts CLICKABLE_PATH_RE), so a bare
 `render.js` in a reply became a blue link that 404'd on click — the token resolved against the
 session's cwd, where no such file lives. The kernel is the machine with the filesystem, so at
 message-build time it resolves every shape-matched token in three tiers (exact stat; unique
@@ -192,7 +192,7 @@ class RepoListEdges(_Repo):
 
 
 class TokenizerParity(unittest.TestCase):
-    """The Python port and render.ts CLICKABLE_PATH_RE must agree on what a token IS — the map's keys
+    """The Python port and path-links.ts CLICKABLE_PATH_RE must agree on what a token IS — the map's keys
     are what the client looks up, so a tokenizer drift silently unlinks. The client side of the same
     fixture runs in chat-path-links.test.ts."""
 
