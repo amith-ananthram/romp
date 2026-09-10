@@ -17,7 +17,7 @@ Numbers that shaped the fold (this machine, 28.6k events, no profiler): before â
 
 import cProfile, io, json, os, pstats, sys, tempfile, time
 from datetime import datetime, timezone
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 repo = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -27,7 +27,7 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
 BIN = os.path.join(repo, "bin")
-km = SourceFileLoader("romp_kernel_bench", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_bench", os.path.join(BIN, "romp-kernel"))
 jd = km.jd                            # the kernel's OWN judge module: rebinding a second copy changes nothing
 
 SID = "11111111-2222-3333-4444-555555555555"

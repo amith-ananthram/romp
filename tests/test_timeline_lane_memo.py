@@ -30,7 +30,7 @@ import time
 import unittest
 from contextlib import redirect_stderr
 from datetime import datetime, timezone
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -39,7 +39,7 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-km = SourceFileLoader("romp_kernel_lane_memo", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_lane_memo", os.path.join(BIN, "romp-kernel"))
 
 SID = "11111111-2222-3333-4444-555555555555"
 NOW = 1_800_000_000
@@ -1027,6 +1027,64 @@ class NotHeld(LaneMemoBase):
         self.mint_store()
         self.build()
         self.assertEqual(self.outcomes()["miss"], 2, "a published store is a new input")
+
+    def test_a_faulted_store_is_derived_and_not_held(self):
+        """A store that cannot be read (goals None: build_timeline complained) shares no key with the lane that has
+        no store: _lane_segments derives NO marks for None, while the empty store still yields the captioner's and
+        the archiver's. Both keyed as "empty" once, so a lane whose unreadable store was then removed was served the
+        faulted build's empty marks until another input moved. A faulted store is derived and not held (the goals
+        stage complained: complain_skip), and the lane without a store derives on the next build."""
+        self.write_archive(self.now - 50, "retry loop")
+        store = km.jd.GOALDIR / (LIVE_SID + ".json")
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_text(json.dumps({"nodes": {}, "status": {}}))
+        store.chmod(0)                                 # unreadable: load_goals_shared raises, the boundary answers None
+        err = io.StringIO()
+        try:
+            with redirect_stderr(err):
+                tl1 = self.build()
+        finally:
+            store.chmod(0o600)
+        self.assertIn("goals failed", err.getvalue())
+        self.assertEqual(self.marks(tl1), [], "a faulted store: the lane's marks are missing, loudly")
+        self.assertEqual(self.outcomes(), {"hit": 0, "miss": 0, "live_tail": 0, "complain_skip": 1, "unshared_skip": 0})
+        self.assertEqual(self.stats()["entries"], 0)
+        store.unlink()                                 # no store now: load_goals' fresh private store, the empty key
+        tl2 = self.build()
+        self.assertEqual([m["x"] for m in self.marks(tl2, judge="archiver")], ["retry loop"],
+                         "derived, not served the faulted build's marks: the archiver's mark is this lane's")
+        self.assertEqual(self.outcomes(), {"hit": 0, "miss": 1, "live_tail": 0, "complain_skip": 1, "unshared_skip": 0})
+
+    def test_a_held_lane_whose_store_faults_is_derived(self):
+        """The reverse transition: a lane held with no store (the archiver's mark in its entry) whose store then
+        appears unreadable is derived, as a fresh derivation of a faulted store is (no marks), and not served the
+        entry's marks; the entry stands, and serves again once the store reads as absent."""
+        self.write_archive(self.now - 50, "retry loop")
+        tl1 = self.build()
+        self.assertEqual([m["x"] for m in self.marks(tl1, judge="archiver")], ["retry loop"])
+        self.assertEqual(self.stats()["entries"], 1)
+        store = km.jd.GOALDIR / (LIVE_SID + ".json")
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_text(json.dumps({"nodes": {}, "status": {}}))
+        store.chmod(0)
+        err = io.StringIO()
+        try:
+            with redirect_stderr(err):
+                tl2 = self.build()
+        finally:
+            store.chmod(0o600)
+        self.assertIn("goals failed", err.getvalue())
+        self.assertEqual(self.marks(tl2), [], "the store faulted: derived without marks, never the held entry's")
+        self.assertEqual(self.outcomes(), {"hit": 0, "miss": 1, "live_tail": 0, "complain_skip": 1, "unshared_skip": 0})
+        self.assertEqual(self.stats()["entries"], 1, "a skip stores nothing and drops nothing")
+        store.unlink()
+        tl3 = self.build()
+        self.assertEqual([m["x"] for m in self.marks(tl3, judge="archiver")], ["retry loop"],
+                         "no store again: the standing entry serves, and it equals a fresh derivation")
+        self.assertEqual(self.outcomes()["hit"], 1)
+        self.assertEqual(json.dumps(tl3["judging"][LIVE_SID]), json.dumps(tl1["judging"][LIVE_SID]),
+                         "the served frame is the first build's derivation, on the same inputs")
+        self.assertEqual(json.dumps(tl3["turns"][LIVE_SID]), json.dumps(tl1["turns"][LIVE_SID]))
 
     def test_a_lane_without_captions_hits_under_the_empty_rule(self):
         self.assertFalse((km.jd.CAPDIR / (LIVE_SID + ".jsonl")).exists())

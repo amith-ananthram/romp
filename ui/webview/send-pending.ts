@@ -19,7 +19,7 @@ import { markerLabel } from "./time-marker";
 // proves the kernel RECEIVED that one send (`received`, attributed per send like a landing). Nothing here
 // reads a clock for a press-time entry: the frame resident at the press is older than the send by
 // construction, so its anchor is recorded by identity; only a LATE stamp (stampBase) compares stamps to
-// order events.
+// order events, and there an event that wears the send's id outranks its stamp.
 //
 // WHERE THE BUBBLE IS DRAWN is not decided here (T252d, the user 2026-09-08): render.ts appends every
 // pending send as one bare group at the TAIL, below every event the kernel has shown, in send order — and
@@ -69,7 +69,8 @@ export type PendingSend = {
   text: string;        // the sent body, byte for byte — what the kernel echoes and the transcript lands
   body: string;        // `text` minus its image paths, whitespace-collapsed: an image send lands with the
                        //   paths rewritten to "[Image #N]" and stripped, so `text` itself can never match
-  ts: number;          // press time (ms) — the bubble's identity (the ✕ names it), never a lifetime
+  ts: number;          // press time (ms), never a lifetime: a ✕ that carries no id names its entry by it and the text
+                       //   (dropPending); the identity is `qid`, and a ✕ that carries one is read by it first
   at?: SendBase;       // the send's place in the events (stamped by the first reconcile after the press)
   late?: boolean;      // the press found NO resident frame for the session (a placeholder tab, still
                        //   loading), so the stamp is taken at the first frame — which may already hold this
@@ -238,6 +239,12 @@ const eventSecond = (e: TailEvent): number | null => {
   return isNaN(ms) ? null : Math.floor(ms / 1000);
 };
 
+/** Does a user event NAME the send: wear its id? The kernel's echo atom, delivered or flagged never-delivered
+ *  (its uuid IS the id); the landed atom (`qid`); a record of several sends one of whose blocks is this one
+ *  (`qids`). Never for an entry with no id. */
+const namesSend = (e: TailEvent, qid: string | undefined): boolean =>
+  !!qid && e.kind === "user" && (e.uuid === qid || e.qid === qid || (Array.isArray(e.qids) && e.qids.includes(qid)));
+
 /** Where this send sits among the kernel's events, read once at the first reconcile after the press.
  *
  *  At a PRESS-TIME stamp (the normal path) everything resident predates the send by construction — the
@@ -270,26 +277,39 @@ const eventSecond = (e: TailEvent): number | null => {
  *  transcript record, at or after that (T237b), and both reach the client as `ts = iso(t)`. The bound
  *  holds when the two clocks agree to the second: exactly for a client on the kernel's machine (the
  *  VS Code webview, the served page there), and for a phone as well as its clock is set. A client
- *  running BEHIND the kernel reads an older identical message stamped inside the skew as this send's;
- *  one running AHEAD reads this send's own copy as background, which is the pre-fix reading. The bound
- *  is confined to the late stamp because that is the only stamp that can meet the send's own records,
- *  and because at a press-time stamp it could only misfire (an identical message that landed within
- *  the press's second would read as this send's). */
+ *  running BEHIND the kernel reads an older identical message stamped inside the skew as this send's.
+ *  THE ID OUTRANKS THE CLOCK: the first user event that NAMES the send (namesSend: the echo, whose uuid
+ *  is the id; the landed atom, whose qid or qids carry it) is this send's whatever its stamp, and the
+ *  kernel showed the send there, so it and every event after it are after the send: the anchor is looked
+ *  for below it only, and none of them is background. Without this, a client running AHEAD of the kernel
+ *  read this send's own echo as background (our dashed bubble beside the kernel's echo until the landing;
+ *  a never-delivered verdict that never ended the bubble) and its own landing as its anchor (a bubble
+ *  that never ended). Below the first event that names the send, and throughout a frame that names it
+ *  nowhere, the stamp bound decides as before for records that carry no id (an older kernel, the tmux
+ *  route) or another send's id. The bound is confined to the late stamp because that is the only stamp
+ *  that can meet the send's own records, and because at a press-time stamp it could only misfire (an
+ *  identical message that landed within the press's second would read as this send's). */
 export function stampBase(events: TailEvent[], p: PendingSend, own: number = p.late ? 1 : 0): SendBase {
   const pressS = p.late ? Math.floor(p.ts / 1000) : Infinity;
   const beforeSend = (e: TailEvent): boolean => { const s = eventSecond(e); return s === null || s < pressS; };
+  // where the kernel first shows the send: a user event wearing its id (namesSend). The send is at least that
+  // old, so nothing from there on can be its anchor, whatever the stamps say (the id outranks the clock, above)
+  let firstNamed = events.length;
+  for (let i = 0; i < events.length; i++) if (namesSend(events[i], p.qid)) { firstNamed = i; break; }
   let after: string | null = null;
-  for (let i = events.length - 1; i >= 0; i--) if (stableUuid(events[i]) && beforeSend(events[i])) { after = events[i].uuid!; break; }
+  for (let i = firstNamed - 1; i >= 0; i--) if (stableUuid(events[i]) && beforeSend(events[i])) { after = events[i].uuid!; break; }
   const seen: string[] = [];
   let queued = 0;
-  // background is read by TEXT: nothing the frame held at the press can wear this send's id (minted at that
-  // press), and the text path, which reads any push where the id shows nowhere, must find these copies spoken
-  // for; read by id, an older echo or an older verdict after the anchor was background for no one, and the
-  // first push covered or retired the new send with it
+  // background is read by TEXT, below the first event that names the send: at a press-time stamp nothing the
+  // frame holds can wear this send's id (minted at that press), and at a late stamp the events from the one that
+  // names it on are the send's own or after it; the text path, which reads any push where the id shows nowhere,
+  // must find these copies spoken for; read by id, an older echo or an older verdict after the anchor was
+  // background for no one, and the first push covered or retired the new send with it
   const pv: PendingSend = { ...p, qid: undefined };
-  for (const e of events) {
+  for (let i = 0; i < events.length; i++) {
+    const e = events[i];
     if (e.kind === "queued") { queued += queuedCopies(e, pv); continue; }
-    if (e.kind !== "user" || !e.uuid || isOptimisticUuid(e.uuid) || !beforeSend(e)) continue;
+    if (e.kind !== "user" || !e.uuid || isOptimisticUuid(e.uuid) || !beforeSend(e) || i >= firstNamed) continue;
     const n = copiesIn(e, pv);
     for (let k = 0; k < n; k++) seen.push(e.uuid);   // once per COPY: a record of several sends is several
   }
@@ -495,23 +515,31 @@ export function reconcilePending(events: TailEvent[], list: PendingSend[]): Reco
   return r;
 }
 
-/** The entry a ✕ on a pending bubble removes: the one the bubble NAMES (`ts`, ridden on the ✕ as
- *  data-qts); or, for a ✕ on the KERNEL's own queued/parked copy, the entry that owns the copy's id
- *  (T252c), else the entry that copy covered by text on the last push (`cover`: a kernel that minted its
- *  own id for our send), and a copy wearing an id that neither is names another client's send, or the
- *  kernel's own, and removes nothing of ours; or, for a kernel copy with no id, the first pending send
- *  with that text, the one the kernel's first copy covers. Same-text entries carry different states (lost, received), and the
- *  first-with-the-text lookup the ✕ used for every bubble dropped the wrong one from a "not confirmed ·
- *  sending…" pair: the next push brought the dismissed bubble back and the other was gone without a
- *  gesture (2026-09-06 review, round 3). Returns the removed entry; undefined when none matched — a bubble
- *  whose entry a push already retired removes nothing, never a neighbour with the same text. */
+/** The entry a ✕ on a pending bubble removes. The id decides first, whenever the ✕ carries one (`qid`, ridden
+ *  as data-qid on OUR bubble and on the KERNEL's own queued/parked copy alike): the entry that owns the id
+ *  (T252c), else the entry that copy covered by text on the last push (`cover`: a kernel that minted its own
+ *  id for our send); an id that is neither names another client's send, or the kernel's own, and removes
+ *  nothing of ours, even when a same-text entry shares the ✕'s `ts`. The press time is not the identity: two
+ *  same-text sends registered in one synchronous loop share it when registerOptimistic's wall-clock reads, one
+ *  per send, fall in one millisecond (flushStaged posts each staged slash command and goal-cited item as its
+ *  own send; adoptProvisional posts each text a new session's tab held the same way), and reading `ts` and
+ *  text first made the ✕ on the second drop the FIRST, while the cancel it posted named the second's id and
+ *  the kernel removed exactly that copy: the client and the kernel then disagreed about which copy remained,
+ *  the survivor's bubble hid the other copy, and the next ✕ was answered with the miss. Only a ✕ that names
+ *  no id falls to the older readings: an id-less bubble (older data; newPending always mints one) names its
+ *  entry by `ts` and text, and an id-less kernel copy drops the first pending send with that text, the one
+ *  the kernel's first copy covers. Same-text entries carry different states (lost, received), and the
+ *  first-with-the-text lookup the ✕ once used for every bubble dropped the wrong one from a "not confirmed ·
+ *  sending…" pair: the next push brought the dismissed bubble back and the other was gone without a gesture
+ *  (2026-09-06 review). Returns the removed entry; undefined when none matched: a bubble whose entry a push
+ *  already retired removes nothing, never a neighbour with the same text. */
 export function dropPending(list: PendingSend[], text: string, ts?: number, qid?: string): PendingSend | undefined {
   let i = -1;
-  if (ts !== undefined) i = list.findIndex((p) => p.ts === ts && p.text === text);
-  else if (qid) {
+  if (qid) {
     i = list.findIndex((p) => p.qid === qid);
     if (i < 0) i = list.findIndex((p) => p.cover === qid);
-  } else i = list.findIndex((p) => p.text === text);
+  } else if (ts !== undefined) i = list.findIndex((p) => p.ts === ts && p.text === text);
+  else i = list.findIndex((p) => p.text === text);
   return i >= 0 ? list.splice(i, 1)[0] : undefined;
 }
 

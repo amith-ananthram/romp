@@ -23,7 +23,7 @@ import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from unittest import mock
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -32,7 +32,7 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-sb = SourceFileLoader("romp_sdk_backend", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+sb = load_source("romp_sdk_backend", os.path.join(BIN, "romp_sdk_backend.py"))
 
 
 class PureTranslation(unittest.TestCase):
@@ -288,7 +288,7 @@ class LiveTail(unittest.TestCase):
     def test_the_consumed_key_set_cannot_drift_from_the_file_adapter_s(self):
         # sdk_backend loads standalone (no event-model import), so the set is MIRRORED — this pin
         # is what keeps the two halves widening together.
-        em2 = SourceFileLoader("romp_event_model_drift", os.path.join(BIN, "romp-event-model")).load_module()
+        em2 = load_source("romp_event_model_drift", os.path.join(BIN, "romp-event-model"))
         self.assertEqual(sb.TUR_CONSUMED_KEYS, em2.TUR_CONSUMED_KEYS)
 
     def test_command_stdout_stream_becomes_a_turn_ENDING_assistant_atom(self):

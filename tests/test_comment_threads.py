@@ -10,6 +10,7 @@ order. All fixtures SYNTHETIC: invented text, placeholder UUIDs.
 """
 import contextlib
 import errno
+import io
 import json
 import os
 import shutil
@@ -17,7 +18,7 @@ import tempfile
 import time
 import unittest
 from datetime import datetime, timezone
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -29,10 +30,10 @@ os.environ.pop("ROMP_STATE_DIR", None)
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ["ROMP_TMUX_AVAILABLE"] = "1"
 os.environ["ROMP_SERVE_TOKEN"] = "testtok"
-em = SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-jd = SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
-km = SourceFileLoader("romp_kernel", os.path.join(BIN, "romp-kernel")).load_module()
-sb = SourceFileLoader("romp_sdk_backend_ct", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+em = load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+jd = load_source("romp_judge", os.path.join(BIN, "romp-judge"))
+km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
+sb = load_source("romp_sdk_backend_ct", os.path.join(BIN, "romp_sdk_backend.py"))
 
 km._limit_hold = lambda sid: None
 
@@ -444,6 +445,69 @@ class ThreadProjection(CommentBase):
             km._views_dirty[0] = 0.0
             km._built_thread.clear()
 
+    def test_a_signature_that_raises_on_the_thread_path_is_said_once_per_episode(self):
+        """One of the signature's component reads raising for a thread: the fault is written to stderr with
+        its traceback and filed as one refused bell row naming the thread, ONCE per fault episode (the chat
+        loop's rule for the same signature); a build is attempted every frame and nothing is stored while
+        the key cannot be taken. The same fault the next frame says nothing, a different fault is a new
+        episode, a signature that is taken ends it, and the same fault after that is said anew."""
+        self._seed_thread()
+        km._built_thread.clear()
+        km._views_dirty[0] = 0.0
+        saved = (km._watch_awaiting, km.build_session, list(km._SYNC_NOTICES), dict(km._chat_sig_faults))
+        del km._SYNC_NOTICES[:]
+        km._chat_sig_faults.clear()
+        fail = ["synthetic: the watch rows cannot be read"]
+        orig, real = saved[0], saved[1]
+        calls = []
+
+        def watch(sid):
+            if sid == THREAD and fail[0]:
+                raise OSError(fail[0])
+            return orig(sid)
+
+        km._watch_awaiting = watch
+        km.build_session = lambda sid, now, tm=None, **kw: (calls.append(sid), real(sid, now, tm, **kw))[1]
+
+        head = "push build: chat signature %s" % THREAD[:8]
+        seen = []
+
+        def frame():
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                km._comments_frame(PARENT)
+            seen.append(err.getvalue())
+            return seen[-1].count(head)
+        try:
+            self.assertEqual(frame(), 1, "the first frame says it")
+            self.assertIn(head + ": Traceback (most recent call last)", seen[-1], "...with the traceback")
+            self.assertIn(fail[0], seen[-1], "...naming the fault")
+            self.assertEqual(frame(), 0, "the second frame, same fault: not again")
+            self.assertEqual(frame(), 0)
+            self.assertEqual(calls.count(THREAD), 3, "a build is attempted every frame while the key cannot be taken")
+            self.assertNotIn(THREAD, km._built_thread, "nothing is stored")
+            self.assertEqual(len(km._SYNC_NOTICES), 1, "one episode, one bell row")
+            self.assertIn("thread-x", km._SYNC_NOTICES[-1]["text"], "the row names the thread")
+            self.assertEqual(km._SYNC_NOTICES[-1].get("kind"), "refused")
+            fail[0] = "synthetic: a different fault on the same thread"
+            self.assertEqual(frame(), 1, "a different fault is a new episode")
+            self.assertEqual(len(km._SYNC_NOTICES), 2)
+            fail[0] = ""
+            self.assertEqual(frame(), 0)
+            self.assertNotIn(THREAD, km._chat_sig_faults, "a signature that is taken ends the episode")
+            self.assertIn(THREAD, km._built_thread, "...and the build is cached like any other")
+            fail[0] = "synthetic: the watch rows cannot be read"
+            self.assertEqual(frame(), 1, "the same fault after a success is a new episode, said anew")
+        finally:
+            km._watch_awaiting = orig
+            km.build_session = real
+            del km._SYNC_NOTICES[:]
+            km._SYNC_NOTICES.extend(saved[2])
+            km._chat_sig_faults.clear()
+            km._chat_sig_faults.update(saved[3])
+            km._views_dirty[0] = 0.0
+            km._built_thread.clear()
+
     def test_projection_starts_after_the_cut_and_strips_the_frame(self):
         self._seed_thread()
         msgs = km._thread_messages(THREAD, "a1")
@@ -784,6 +848,34 @@ class ThreadProjection(CommentBase):
                                             aline(t + 140, "Cap it at two minutes.", "ca2", parent="cu2")], state="")
             self.assertEqual(th["queued"], 0, "landed → not held")
             self.assertFalse(th["replyOwed"])
+        finally:
+            self._State.live = []
+
+    def test_a_slash_sends_echo_is_landed_by_its_wrapper_record(self):
+        # a slash or skill command typed into the composer: the CLI records it as a <command-name> wrapper
+        # (no verbatim copy of the typed text), which parses to "/deploy staging now" with one space where
+        # the sender typed a space and two newlines. The held count reads the landing off that record;
+        # before, the echo was held forever and the thread owed a reply that had already come. The record
+        # lands in the SAME second as the send: a strictly later human turn would read the echo as
+        # overtaken (a loss, not held) whatever its text, and this case is about the landing rule alone.
+        t = self.now - 500
+        self._seed_thread(seen=self.now)
+        recs = self._thread_side(aline(t + 120, "Jitter prevents thundering herds.", "ca1", parent="cu1"))
+        echo = {"type": "user", "author": "human", "t": t + 130, "uuid": "echo:1", "_echo_text": "/deploy \n\nstaging now"}
+        wrap = lambda args: ("<command-message>deploy</command-message>\n<command-name>/deploy</command-name>\n"
+                             "<command-args>%s</command-args>\n<skill-format>true</skill-format>" % args)
+        try:
+            self._State.live = [echo]
+            th = self._frame_thread(recs, state="")
+            self.assertEqual(th["queued"], 1, "held until its record lands")
+            th = self._frame_thread(recs + [uline(t + 130, wrap("staging now"), "cc1", parent="ca1", meta=True),
+                                            aline(t + 140, "Deploying staging now.", "ca2", parent="cc1")], state="")
+            self.assertEqual(th["queued"], 0, "the wrapper record is this send's landing")
+            self.assertFalse(th["replyOwed"])
+            self._State.live = [echo]
+            th = self._frame_thread(recs + [uline(t + 130, wrap("production now"), "cc1", parent="ca1", meta=True),
+                                            aline(t + 140, "Deploying production now.", "ca2", parent="cc1")], state="")
+            self.assertEqual(th["queued"], 1, "another command's record is not this send's landing")
         finally:
             self._State.live = []
 

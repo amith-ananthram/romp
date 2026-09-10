@@ -27,7 +27,7 @@ import re
 import tempfile
 import unittest
 from datetime import datetime, timezone
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -38,8 +38,8 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-km = SourceFileLoader("romp_kernel_fed_echo", os.path.join(BIN, "romp-kernel")).load_module()
-sb = SourceFileLoader("romp_sdk_backend_fed_echo", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+km = load_source("romp_kernel_fed_echo", os.path.join(BIN, "romp-kernel"))
+sb = load_source("romp_sdk_backend_fed_echo", os.path.join(BIN, "romp_sdk_backend.py"))
 em = km.em
 
 SID = "1f3e5d7c-9b1a-4c2d-8e6f-0a1b2c3d4e5f"   # private synthetic sid (goal-store fixtures rule)
@@ -354,7 +354,11 @@ class OneTextRuleAcrossKernelAndBackend(unittest.TestCase):
     2026-09-06 the scan collapsed whitespace, the kernel stripped, and the prune compared raw — three
     rules, so a trailing-newline send was found yet never retired. One function now, imported by both
     modules; the property tested here is that the scan's match set for a record IS the kernel's key set
-    for the same record, and that an echo the scan would find retires through the real merge."""
+    for the same record, and that an echo the scan would find retires through the real merge. A raw
+    command WRAPPER record (<command-name>, <command-args>) is the one designed exception and is not
+    listed: the kernel keys the PARSED command atom, while the scan reads the raw record and derives the
+    same "/name args" itself (sdk_backend._command_invocation); that agreement is pinned through the real
+    parse in test_kernel_slash_echo_retire.BackendScanAgrees."""
 
     def setUp(self):
         self.w = _World()
@@ -382,6 +386,11 @@ class OneTextRuleAcrossKernelAndBackend(unittest.TestCase):
             uline(T0, "a\r\nb", "u9"),                                                  # a bare CR, preserved
             uline(T0, [{"type": "text", "text": "solo"}], "u9"),
             uline(T0, [{"type": "tool_result", "tool_use_id": "t", "content": "ok"}], "u9"),
+            uline(T0, "/deploy  staging\nnow", "u9"),                                   # slash-shaped: both add the command key
+            uline(T0, [{"type": "text", "text": "/deploy staging"}, {"type": "text", "text": "/rollback \n now"}], "u9"),
+            uline(T0, "/tmp/notes-api/api.py  is broken", "u9"),                         # a path: a plain message, no command key
+            # not listed: a raw <command-name> WRAPPER record. The kernel keys the parsed command atom and the
+            # scan derives "/name args" from the raw record itself (the class docstring; BackendScanAgrees pins it).
         ]
         for rec in recs:
             self.assertEqual(sb._landed_texts(rec), set(km._atom_user_texts(rec)), json.dumps(rec)[:120])

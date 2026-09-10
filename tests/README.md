@@ -3,8 +3,21 @@
 Every bug fix or feature change lands with a test (repo rule). Five suites:
 
 - **`test_*.py`** (pytest) — the Python pipeline: event model, judges, kernel,
-  backends, postal. They load the sources by file path via `SourceFileLoader`
-  (through the stable `bin/` names) and isolate state with `XDG_STATE_HOME`.
+  backends, postal. They load the sources by file path through the stable
+  `bin/` names with `from romp_load import load_source` (`tests/romp_load.py`,
+  which reaches `kernel/loadsource.py`) and isolate state with `XDG_STATE_HOME`.
+  The older `SourceFileLoader(...).load_module()` form is deprecated, with
+  removal documented for Python 3.15: `tools/loadsource-sweep.py` rewrites a
+  module still written that way (idempotent; `--check` reports without writing),
+  and `test_state_isolation_order.py` refuses the call by file and line, naming
+  that command. Both read the AST, so the idiom inside a string handed to a
+  child process is a hand edit; so is the `sys.path` line a module needs before
+  `from romp_load import load_source` when another test executes it by file
+  path from outside this directory (`smoke_codex_live.py` carries one). Name
+  every module `test_<stem>.py`: pytest also collects `<stem>_test.py`, but
+  unittest's discovery (`test*.py`), the state-isolation check and the fixture
+  scan in `test_postal_marker_form.py` take the `test_` prefix only, and
+  `test_state_isolation_order.py` pins that.
   Golden transcript fixtures: `test_romp_events_golden.py` + `fixtures/`.
   Run: `python3 -m pytest tests/ -q` (~20s; a stalled run is a hang, not slow).
   The `_HAVE_SDK`-gated classes in `test_sdk_backend.py` (OptionsAssembly, the
@@ -45,7 +58,16 @@ Every bug fix or feature change lands with a test (repo rule). Five suites:
   (`ROMP_CLI_SCOPE_MEMORY_MAX` and the others): the kernel hands them to every
   session's CLI and a tool shell inherits them, so a suite run from a session on
   a self-hosted install would otherwise see them at every backend construction
-  and in every exact argv pin.
+  and in every exact argv pin. `conftest.py` and `__init__.py` set
+  `ROMP_MANAGER_PORT`, `ROMP_KERNEL_PORT` and `ROMP_SERVE_PORT` to a dead port
+  (never unset: to every reader an absent variable means the live default), so
+  no test dials a live manager or kernel through an inherited value.
+  Any suite that starts the real `bin/romp-manager` also gives it a state
+  root of its own before its first `@test` (`unset ROMP_STATE_DIR` plus
+  `export XDG_STATE_HOME="$TEST_DIR/state"`, or an exported
+  `ROMP_STATE_DIR`), since the manager boots from its state root's
+  `kernels.json` and reads the serve token there; `bats-state-isolation.bats`
+  is the ratchet.
   Any test whose subject binds a loopback port picks it with `load
   free-port` + `free_port VAR...`, never a literal: a literal shared by two
   files collided within one run (`romp-manager-ensure.bats` once used
@@ -108,6 +130,14 @@ the developer's git configuration (CI has none), and the env identity outranks
 exports its own `GIT_AUTHOR_*` after the floor. `tests/test_tempdir_hygiene.py`
 and `tests/git-hermetic.bats` pin all of it.
 
+**A served-page class copies the built `vscode-extension/dist/` with
+`tests.dist_copy.copy_dist`, never `shutil.copytree`.** Under `pytest -n` a
+sibling class's build renames or removes its staging files
+(`.<name>.tmp-<pid>-<n>`, `stagingPath` in `esbuild.js`) between the listing
+and the copy, and a plain copytree raises `shutil.Error` before the class's
+first test; `copy_dist` skips that shape. `tests/test_dist_copy_staging.py`
+pins the copy and refuses a raw copytree of dist in any test module.
+
 **No test report shows a process-environment value or a credential-shaped
 token.** An assertion whose container is an environment mapping prints the
 whole mapping when it fails (`assertNotIn("X", os.environ)` renders every
@@ -139,6 +169,37 @@ assertion message; that report loses pytest's colour and source highlighting.
 One it leaves alone keeps pytest's own rendering.
 `tests/test_env_value_redaction.py` pins the rule, the write-time capture,
 the patterns, the scrub's cost and the hook end to end.
+
+**A lab kernel's environment is built from a list of names, and the file a
+relaunch reads from carries a shorter list.** Every module that boots a hermetic
+kernel (`bin/romp-kernel` under a lab's own `XDG_STATE_HOME`,
+`CLAUDE_CONFIG_DIR` and `ROMP_DIST_DIR`, at a free port with a synthetic serve
+token) builds its environment with `kernel_env` in `tests/test_ship_reship.py`,
+never from a copy of the runner's. A run from a shell on a machine running romp
+carries the live kernel's exports, and a lab kernel that inherited them exited
+when the live manager restarted (`ROMP_MANAGER_PID`, the kernel's parent-death
+watchdog), bound where the live kernel serves (`ROMP_SERVE_HOST`) and dialled
+the machine's postal bus, or started one that nothing stops. From the runner
+`kernel_env` takes `PATH`, `HOME`, the `XDG_*` names and, of the floor
+`tests/conftest.py` sets for the run's children, `TMPDIR`, `TMUX_TMPDIR`,
+`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM`, `ROMP_SERVICE_ENV_FILE`,
+`ROMP_SERVICE_ENV`, `ROMP_CLAUDE_BIN` and `ROMP_CLI_SCOPE`; over those go the
+lab's roots and seams, any seam the lab adds by keyword, and a postal bus of its
+own that is never started (`ROMP_POSTAL_PORT` at a free port,
+`ROMP_POSTAL_PEERS=0`, `ROMP_POSTAL_CLIENT_ONLY=1`). The served labs whose
+driver kills and relaunches the kernel (`test_ship_reship.py`,
+`test_dashboard_reload_served.py`) write the relaunch's command, environment and
+log to the lab's `cfg.json` through `relaunch_cfg`, and the environment in that
+file is narrowed once more by `relaunch_env`: the `ROMP_*` and `XDG_*` names,
+`CLAUDE_CONFIG_DIR`, `PATH`, `HOME`, `TMPDIR`, `TMUX_TMPDIR`,
+`GIT_CONFIG_GLOBAL` and `GIT_CONFIG_NOSYSTEM`, less the `ROMP_TESTS_*` names,
+which conftest exports for the run's own tests (such as
+`ROMP_TESTS_SYSTEM_TMPDIR` above) and no kernel reads. Nothing else a lab put in
+its kernel's environment reaches the file; each served lab plants a probe name
+in that environment and checks the written file for its absence. To give a lab
+kernel another name of the runner's, add the name to the list with its reason
+beside it. `LabKernelEnv` and `RelaunchEnv` in `tests/test_ship_reship.py` pin
+both functions; the served legs check the file itself.
 
 `fixtures/` must stay SYNTHETIC: invented prompts, placeholder UUIDs, hostname
 `TESTHOST` — never real session data.

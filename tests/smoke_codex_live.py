@@ -18,18 +18,21 @@ import os
 import sys
 import tempfile
 import time
-from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
+# tests/test_state_dir_override.py executes this file by path from the repository root, where
+# romp_load is not importable; a script run from tests/ has this directory on sys.path already.
+sys.path.insert(0, HERE)
+from romp_load import load_source  # noqa: E402
 
 RUNTIME_STATE = Path(os.environ.get("ROMP_STATE_DIR") or
                      str(Path(os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")) / "romp"))
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
-cb = SourceFileLoader("romp_codex_backend_live", os.path.join(ROOT, "kernel", "codex_backend.py")).load_module()
-em = SourceFileLoader("romp_event_model_live", os.path.join(ROOT, "bin", "romp-event-model")).load_module()
+cb = load_source("romp_codex_backend_live", os.path.join(ROOT, "kernel", "codex_backend.py"))
+em = load_source("romp_event_model_live", os.path.join(ROOT, "bin", "romp-event-model"))
 
 
 def until(fn, timeout, step=0.25, what=""):

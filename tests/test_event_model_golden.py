@@ -19,7 +19,7 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -30,7 +30,7 @@ GOLDEN = Path(HERE) / "fixtures" / "event-model-golden"
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-em = SourceFileLoader("romp_event_model", os.path.join(SCRIPTS, "romp-event-model")).load_module()
+em = load_source("romp_event_model", os.path.join(SCRIPTS, "romp-event-model"))
 
 NOW = 1781100000                      # fixed test clock — goldens depend on it
 SID = "11111111-2222-3333-4444-555555555555"      # the session's stable ROMP UUID

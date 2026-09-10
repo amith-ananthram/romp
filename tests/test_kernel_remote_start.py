@@ -6,7 +6,7 @@ kernel may be stopped on purpose, so the click is the consent. SYNTHETIC hosts; 
 import inspect
 import os
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 import tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -17,7 +17,7 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-km = SourceFileLoader("romp_kernel_start", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_start", os.path.join(BIN, "romp-kernel"))
 
 HOST = "TESTHOST"
 
@@ -102,6 +102,71 @@ class StartRemote(unittest.TestCase):
         km._start_remote(HOST)
         self.assertEqual(seen["status"], "starting", "the popover shows the boot phase, not stale no-kernel")
         self.assertTrue(seen["booting"])
+
+    def test_an_escaped_exception_releases_the_hold_and_parks_the_failure(self):
+        # Every planned failure returns through _fail; an exception a step lets escape is the exit
+        # nothing planned for. The hold must not outlive the call: while it stands the supervisor
+        # skips its status write and the no-kernel hint, so the row never reads up or no-kernel again,
+        # no rendered row shows a Start button, and only a kernel restart's load reset frees it.
+        def boom(h):
+            raise RuntimeError("stand-in step failed")
+        km._update_remote = boom
+        with self.assertRaises(RuntimeError):
+            km._start_remote(HOST)              # the exception still propagates to the route
+        r = km._remotes[HOST]
+        self.assertFalse(r["booting"], "the hold must not outlive the call")
+        self.assertEqual(r["status"], "no-kernel", "the row reads the settled state, so the popover shows Start again")
+        self.assertEqual(r["detail"], "Start on %s failed unexpectedly (RuntimeError): stand-in step failed" % HOST,
+                         "the popover row carries the failure, like every failed Start")
+        self.assertEqual(self.started, [], "the boot leg never ran; the update leg raised first")
+
+    def test_the_recovery_counter_moves_on_the_first_answered_pass_after_an_escaped_exception(self):
+        # _note_recovery skips its bump under the hold (T291b), so a hold left standing also froze the
+        # row's recovery counter; once the hold is released the first answered pass on the not-up row
+        # bumps once, the one recovery of that Start
+        def boom(h):
+            raise RuntimeError("stand-in step failed")
+        km._update_remote = boom
+        with self.assertRaises(RuntimeError):
+            km._start_remote(HOST)
+        r = km._remotes[HOST]
+        r["misses"] = 0
+        self.assertTrue(km._note_recovery(r, "up"), "no hold left standing to freeze the recovery counter")
+        self.assertEqual(r["upSeq"], 1)
+
+    def test_an_escaped_exception_in_the_boot_leg_releases_the_hold_too(self):
+        km._update_remote = lambda h: (True, "already up to date (abc1234)")
+        def boom(h):
+            raise RuntimeError()                # no message: the detail ends at the type
+        km._start_remote_kernel = boom          # kernel_up stays False, so the boot leg runs
+        with self.assertRaises(RuntimeError):
+            km._start_remote(HOST)
+        r = km._remotes[HOST]
+        self.assertFalse(r["booting"])
+        self.assertEqual(r["status"], "no-kernel")
+        self.assertEqual(r["detail"], "Start on %s failed unexpectedly (RuntimeError)" % HOST)
+
+    def test_an_exit_that_is_not_an_exception_releases_the_hold_too(self):
+        # except BaseException, not Exception: a SystemExit or KeyboardInterrupt in the handler thread
+        # releases the hold the same way, and the parked detail names the type
+        def boom(h):
+            raise SystemExit("stand-in exit")
+        km._update_remote = boom
+        with self.assertRaises(SystemExit):
+            km._start_remote(HOST)
+        r = km._remotes[HOST]
+        self.assertFalse(r["booting"], "the hold must not outlive a non-Exception exit either")
+        self.assertEqual(r["status"], "no-kernel")
+        self.assertEqual(r["detail"], "Start on %s failed unexpectedly (SystemExit): stand-in exit" % HOST)
+
+    def test_a_long_failure_message_is_stripped_and_cut_in_the_parked_detail(self):
+        def boom(h):
+            raise RuntimeError("  " + "x" * 400 + "  ")
+        km._update_remote = boom
+        with self.assertRaises(RuntimeError):
+            km._start_remote(HOST)
+        self.assertEqual(km._remotes[HOST]["detail"],
+                         "Start on %s failed unexpectedly (RuntimeError): %s" % (HOST, "x" * 160))
 
 
 class SupervisorRespectsBoot(unittest.TestCase):

@@ -15,7 +15,7 @@ Synthetic only — no real session data."""
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()   # isolate: importing the kernel must not touch live state
 os.environ.pop("ROMP_STATE_DIR", None)
@@ -23,7 +23,7 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
-km = SourceFileLoader("romp_kernel_model_live", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_model_live", os.path.join(BIN, "romp-kernel"))
 
 SID = "11111111-2222-3333-4444-555555555555"
 
@@ -180,11 +180,10 @@ class ModelLiveMidTurn(unittest.TestCase):
         # mis-parents its transcript breadcrumbs and the rest of that turn is read as a rewound branch by
         # romp and dropped by --resume (review of #923, 2026-09-04). Flipping the SDK is a one-line change
         # here once the CLI persists a mid-turn switch at the turn's tail — this pin is where that shows.
-        from importlib.machinery import SourceFileLoader as _L
         root = os.path.dirname(HERE)
-        base = _L("romp_session_backend_cap", os.path.join(root, "kernel", "session_backend.py")).load_module()
-        sdk = _L("romp_sdk_backend_cap", os.path.join(root, "kernel", "sdk_backend.py")).load_module()
-        codex = _L("romp_codex_backend_cap", os.path.join(root, "kernel", "codex_backend.py")).load_module()
+        base = load_source("romp_session_backend_cap", os.path.join(root, "kernel", "session_backend.py"))
+        sdk = load_source("romp_sdk_backend_cap", os.path.join(root, "kernel", "sdk_backend.py"))
+        codex = load_source("romp_codex_backend_cap", os.path.join(root, "kernel", "codex_backend.py"))
         self.assertFalse(base.SessionBackend.model_switches_live(None))
         self.assertFalse(sdk.SdkBackend.model_switches_live(None),
                          "the SDK parks a mid-turn pick until the CLI persists the switch correctly")
@@ -193,8 +192,7 @@ class ModelLiveMidTurn(unittest.TestCase):
     def test_the_real_sdk_backend_still_parks_a_pick_while_a_turn_is_open(self):
         # the rule read through the REAL backend's word: a fake wearing SdkBackend.model_switches_live parks
         # exactly as the pre-#923 kernel did, and the send typed after it chains behind in press order
-        from importlib.machinery import SourceFileLoader as _L
-        sdk = _L("romp_sdk_backend_cap2", os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py")).load_module()
+        sdk = load_source("romp_sdk_backend_cap2", os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py"))
         class _RealWord(_Sdk):
             def model_switches_live(self): return sdk.SdkBackend.model_switches_live(None)
         be = _RealWord()

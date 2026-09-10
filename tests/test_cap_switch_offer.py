@@ -11,7 +11,7 @@ import re
 import tempfile
 import time
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -19,7 +19,7 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
-km = SourceFileLoader("romp_kernel_capoffer", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_capoffer", os.path.join(BIN, "romp-kernel"))
 
 SID = "aaaa3008-0000-0000-0000-000000000001"
 ERR = {"text": "API Error 529 overloaded", "status": 529}

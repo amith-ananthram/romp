@@ -111,6 +111,9 @@ MOCK
     # names map under XDG_STATE_HOME (was polluting the REAL state dir).
     export HOME="$TEST_DIR/home"
     export XDG_STATE_HOME="$HOME/.local/state"
+    # ROMP_STATE_DIR outranks that floor, and a profiled kernel's sessions inherit it: the real managers
+    # the romp-manager tests start would boot from that root's kernels.json (tests/bats-state-isolation.bats).
+    unset ROMP_STATE_DIR
     mkdir -p "$HOME"
     cd "$WORK_DIR"
 }

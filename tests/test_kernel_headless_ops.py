@@ -21,7 +21,7 @@ import os
 import tempfile
 import unittest
 from unittest import mock
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -29,7 +29,7 @@ _STATE_TMP = tempfile.mkdtemp()
 os.environ["XDG_STATE_HOME"] = _STATE_TMP
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
-km = SourceFileLoader("romp_kernel_headless", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_headless", os.path.join(BIN, "romp-kernel"))
 
 # The ACCOUNT gate (_limit_hold: a usage limit / monthly spend cap parks every drive op, tested in
 # tests/test_kernel_limit_queue.py) is a SEPARATE axis from the compaction/busy gates this module
@@ -220,12 +220,11 @@ class HeadlessRoutes(unittest.TestCase):
 
 
 class CodexRuntimeSelection(unittest.TestCase):
+    # The kernel loads codex_backend.py through load_source (kernel/loadsource.py): patch that.
     def test_path_codex_does_not_override_managed_runtime(self):
         fake_mod = mock.Mock()
-        fake_loader = mock.Mock()
-        fake_loader.load_module.return_value = fake_mod
         with mock.patch.object(km, "_codex_backend", None), \
-             mock.patch.object(km, "SourceFileLoader", return_value=fake_loader), \
+             mock.patch.object(km, "load_source", return_value=fake_mod), \
              mock.patch.object(km.shutil, "which", return_value="/TESTBIN/codex"):
             backend = km._codex()
             self.assertIs(backend, fake_mod.CodexBackend.return_value)
@@ -238,9 +237,8 @@ class CodexRuntimeSelection(unittest.TestCase):
         # PATH is ignored, but the one explicit knob the judges already read (ROMP_CODEX_BIN) governs
         # sessions too — an opt-in, not the ambient PATH accident #929 closed (review fold, 2026-09-07)
         fake_mod = mock.Mock()
-        fake_loader = mock.Mock(); fake_loader.load_module.return_value = fake_mod
         with mock.patch.object(km, "_codex_backend", None), \
-             mock.patch.object(km, "SourceFileLoader", return_value=fake_loader), \
+             mock.patch.object(km, "load_source", return_value=fake_mod), \
              mock.patch.dict(km.os.environ, {"ROMP_CODEX_BIN": "/opt/codex/bin/codex"}), \
              mock.patch.object(km.shutil, "which", return_value="/TESTBIN/codex"):
             km._codex()
@@ -266,13 +264,11 @@ class SdkSingleFlight(unittest.TestCase):
 
         fake_mod = mock.Mock()
         fake_mod.SdkBackend = lambda *a, **k: FakeBackend()
-        fake_loader = mock.Mock()
-        fake_loader.load_module.return_value = fake_mod
         prev = km._sdk_backend
         try:
             km._sdk_backend = None
             results = [None] * 6
-            with mock.patch.object(km, "SourceFileLoader", return_value=fake_loader), \
+            with mock.patch.object(km, "load_source", return_value=fake_mod), \
                  mock.patch.object(km, "_ensure_sdk_on_path", return_value=True):
                 ts = [threading.Thread(target=lambda i=i: results.__setitem__(i, km._sdk()))
                       for i in range(6)]

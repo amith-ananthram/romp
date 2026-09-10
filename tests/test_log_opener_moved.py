@@ -15,10 +15,11 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 from tests.dist_copy import copy_dist
 
@@ -26,11 +27,14 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
 BIN = os.path.join(ROOT, "bin")
 EXT = os.path.join(ROOT, "vscode-extension")
+sys.path.insert(0, HERE)
+import test_ship_reship as _lab   # noqa: E402  the lab kernel's environment (the module, not its classes: an
+#                                   imported TestCase would be collected here a second time)
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
-km = SourceFileLoader("romp_kernel_logopener", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_logopener", os.path.join(BIN, "romp-kernel"))
 GEAR = open(os.path.join(ROOT, "ui", "webview", "gear.js")).read()
 PALETTE = open(os.path.join(ROOT, "ui", "webview", "palette-main.ts")).read()
 
@@ -128,10 +132,7 @@ class ServedOpener(unittest.TestCase):
         os.makedirs(state, exist_ok=True)
         cls.port = _free_port()
         cls.token = "testtok-logopener"
-        env = dict(os.environ, XDG_STATE_HOME=os.path.join(cls.lab, "xdg"), CLAUDE_CONFIG_DIR=os.path.join(cls.lab, "claude"),
-                   ROMP_MANAGER_PORT="1", ROMP_KERNEL_NO_OPEN="1", ROMP_SERVE_TOKEN=cls.token, ROMP_KERNEL_PORT=str(cls.port),
-                   ROMP_DIST_DIR=dist, ROMP_MODEL_CATALOG="off")
-        env.pop("ROMP_STATE_DIR", None)
+        env = _lab.kernel_env(cls.lab, os.path.join(cls.lab, "claude"), dist, cls.port, cls.token)
         cls.kernel = subprocess.Popen([os.path.join(BIN, "romp-kernel")], stdout=open(os.path.join(cls.lab, "kernel.log"), "w"),
                                       stderr=subprocess.STDOUT, env=env)
         import urllib.request

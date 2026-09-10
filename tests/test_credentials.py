@@ -20,7 +20,7 @@ import stat
 import tempfile
 import time
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -40,10 +40,10 @@ os.environ["ROMP_SERVICE_ENV"] = os.environ["ROMP_SERVICE_ENV_FILE"]
 for _n in ("ANTHROPIC_API_KEY", "ROMP_API_KEY_CMD", "ROMP_API_KEY_REF", "ANTHROPIC_AUTH_TOKEN",
            "CLAUDE_CODE_OAUTH_TOKEN", "ROMP_EXPECTED_AUTH", "CLAUDE_CODE_API_KEY_HELPER_TTL_MS"):
     os.environ.pop(_n, None)
-cred = SourceFileLoader("romp_credentials", os.path.join(ROOT, "kernel", "credentials.py")).load_module()
-sb = SourceFileLoader("romp_sdk_backend_cred", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
-jd = SourceFileLoader("romp_judge_cred", os.path.join(BIN, "romp-judge")).load_module()
-km = SourceFileLoader("romp_kernel_cred", os.path.join(BIN, "romp-kernel")).load_module()
+cred = load_source("romp_credentials", os.path.join(ROOT, "kernel", "credentials.py"))
+sb = load_source("romp_sdk_backend_cred", os.path.join(BIN, "romp_sdk_backend.py"))
+jd = load_source("romp_judge_cred", os.path.join(BIN, "romp-judge"))
+km = load_source("romp_kernel_cred", os.path.join(BIN, "romp-kernel"))
 
 SID = "11111111-2222-3333-4444-555555555555"
 HELPER_OUT = "synthetic-helper-output-1"          # not key-shaped on purpose: nothing may mistake it for one

@@ -22,9 +22,27 @@ same-user gate**. Same-user clients (the CLI, hooks, the bus, the VS Code
 extension) read the file and send it as an `X-Romp-Token` header; the browser
 presents it once as `?token=` (print the ready-made link with `romp url`, or
 paste the token into the login page a bare open of the dashboard serves) and
-rides an `HttpOnly` cookie afterwards. An Origin check additionally protects
-the browser surfaces against cross-site requests, including the WebSocket
-upgrade. The only token-exempt routes are the no-side-effect liveness probes:
+rides an `HttpOnly` cookie afterwards. That cookie authorizes only when the
+request's Origin is one the gate accepts: the dashboard's own origin (the
+`Host` the request arrived at, or the kernel's own port on `127.0.0.1` or
+`localhost`), the VS Code webview, or no `Origin` header at all. The check
+protects the browser surfaces, the WebSocket upgrade included, against
+cross-site requests. It is needed because cookies are scoped by host and
+**not by port** (RFC 6265 §8.5): every `http://127.0.0.1:<port>` page on your
+machine is same-site with the dashboard, so anything else you run on loopback
+(a dev server in a repo an agent cloned) would otherwise ride your cookie into
+`/ws`, which streams every session and accepts text to send into any of them. A
+request with no `Origin` header passes on its cookie because a same-origin
+navigation and non-browser clients send none; a page on another loopback port
+loading an `<img>` aimed at the kernel sends none either and still carries the
+cookie, which is why the hold behind `/busy?drain=1` arms only for an
+explicitly presented token (a request without one still gets the count and arms
+nothing): while a `romp refresh --quiet` waits for the sessions to finish their
+turns, that hold keeps every session from starting a new turn, a side effect no
+subresource load may trigger. A token presented explicitly, as `?token=` or
+`X-Romp-Token`, is accepted from any Origin: federated (cross-machine) calls
+need it, and a cross-site page cannot obtain it.
+The only token-exempt routes are the no-side-effect liveness probes:
 `/healthz`, `/version`, `/busy` on the kernel and `/ping` on the bus.
 
 The practical consequence: another local user on a **shared machine** cannot

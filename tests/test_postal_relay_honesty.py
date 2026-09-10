@@ -19,7 +19,7 @@ import os
 import tempfile
 import unittest
 import uuid
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 from tests.conftest import restore_env
@@ -29,7 +29,7 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()      # hermetic; constants resolve under here at import
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-pm = SourceFileLoader("romp_postal_relay", os.path.join(BIN, "romp-postal-service")).load_module()
+pm = load_source("romp_postal_relay", os.path.join(BIN, "romp-postal-service"))
 
 ALPHA = "11111111-2222-3333-4444-555555555555"
 GHOST = "99999999-8888-7777-6666-555555555555"

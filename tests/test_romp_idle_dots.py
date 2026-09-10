@@ -13,7 +13,7 @@ Run:  python3 tests/test_romp_idle_dots.py
 import os
 import sys
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 import tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -22,7 +22,7 @@ SCRIPTS = os.path.join(os.path.dirname(HERE), "bin")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-dots = SourceFileLoader("romp_idle_dots_t", os.path.join(SCRIPTS, "romp-idle-dots")).load_module()
+dots = load_source("romp_idle_dots_t", os.path.join(SCRIPTS, "romp-idle-dots"))
 
 NOW = 1_781_153_000
 STALE = NOW - 2_000          # well past STUCK_AFTER_SECS

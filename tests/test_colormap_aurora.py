@@ -4,7 +4,7 @@ options. This test verifies it exists, ramps, and actually holds its lightness (
 import math
 import os
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 import tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -15,8 +15,8 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-cm = SourceFileLoader("romp_colormap", os.path.join(BIN, "romp_colormap.py")).load_module()
-km = SourceFileLoader("romp_kernel", os.path.join(BIN, "romp-kernel")).load_module()
+cm = load_source("romp_colormap", os.path.join(BIN, "romp_colormap.py"))
+km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
 
 
 def _oklab_L(r, g, b):

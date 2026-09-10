@@ -9,13 +9,13 @@ import threading
 import time
 import unittest
 from http.server import ThreadingHTTPServer
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-pm = SourceFileLoader("romp_postal_peers", os.path.join(BIN, "romp-postal-service")).load_module()
+pm = load_source("romp_postal_peers", os.path.join(BIN, "romp-postal-service"))
 
 
 class PeerMode(unittest.TestCase):
@@ -138,7 +138,7 @@ if __name__ == "__main__":
 
 _B_STATE = tempfile.mkdtemp()
 os.environ["XDG_STATE_HOME"] = _B_STATE
-pmb = SourceFileLoader("romp_postal_peers_b", os.path.join(BIN, "romp-postal-service")).load_module()
+pmb = load_source("romp_postal_peers_b", os.path.join(BIN, "romp-postal-service"))
 
 
 class _TwoBusHarness(unittest.TestCase):
@@ -289,7 +289,7 @@ class TwoBusExchange(_TwoBusHarness):
 
 _C_STATE = tempfile.mkdtemp()
 os.environ["XDG_STATE_HOME"] = _C_STATE
-pmc = SourceFileLoader("romp_postal_peers_c", os.path.join(BIN, "romp-postal-service")).load_module()
+pmc = load_source("romp_postal_peers_c", os.path.join(BIN, "romp-postal-service"))
 
 
 class ThreeBusRelay(unittest.TestCase):
@@ -1926,7 +1926,7 @@ class RecallAfterTheCarry(_TwoBusHarness):
         env = os.environ.get("XDG_STATE_HOME")
         os.environ["XDG_STATE_HOME"] = str(pm.OUTBOX.parents[2])   # outbox → postal → romp → the XDG root
         try:
-            fresh = SourceFileLoader("romp_postal_peers_fresh", os.path.join(BIN, "romp-postal-service")).load_module()
+            fresh = load_source("romp_postal_peers_fresh", os.path.join(BIN, "romp-postal-service"))
         finally:
             os.environ["XDG_STATE_HOME"] = env
         self.assertEqual(fresh.OUTBOX, pm.OUTBOX, "the fresh bus reads the same store")

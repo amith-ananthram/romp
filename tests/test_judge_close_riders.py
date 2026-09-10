@@ -26,7 +26,7 @@ import shutil
 import tempfile
 import unittest
 from datetime import datetime, timezone
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -35,7 +35,7 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-jd = SourceFileLoader("romp_judge_close_riders", os.path.join(BIN, "romp-judge")).load_module()
+jd = load_source("romp_judge_close_riders", os.path.join(BIN, "romp-judge"))
 
 SID = "33333333-4444-5555-6666-777777777777"      # private synthetic sid — never the shared placeholder
 NOW = 1781100000
