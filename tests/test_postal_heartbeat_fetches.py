@@ -263,7 +263,8 @@ class Counting(unittest.TestCase):
         # is the only fetch (28 per 30 s poll on a box with 58 mailboxes, review 2026-09-06)
         self._dead_boxes(["ghost-a", "ghost-b", "ghost-c"])
         pm._sweep_orphans()
-        self.assertEqual(self.fetches, [False], "one listing for the whole sweep")
+        self.assertEqual(self.fetches, [True], "one listing for the whole sweep, thread rows included: a comment "
+                                               "thread's box is live while its row is (2026-09-10)")
 
     def test_recall_by_a_dead_name_fetches_once(self):
         dead = self._dead_boxes(["ghost-a", "ghost-b", "ghost-c"])
@@ -337,7 +338,8 @@ class Counting(unittest.TestCase):
             pm.deliver(WEB, "api", API, "synthetic reply", kind="coordinate")
             self.fetches.clear()
             pm._retry_pending()
-            self.assertEqual(self.fetches, [False], "one listing fetch for the whole pass, not one per marker")
+            self.assertEqual(self.fetches, [True], "one listing fetch for the whole pass, not one per marker; "
+                                                   "thread rows included so a thread's marker is retried")
             self.assertEqual(sorted(pushed), sorted([API, WEB]))
         finally:
             pm._push = saved_push
