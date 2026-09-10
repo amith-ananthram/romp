@@ -244,6 +244,19 @@ class DrainRows(unittest.TestCase):
                          [("drain.unjoined", SID, "web", 1, False)])
 
 
+class LedgerRotation(unittest.TestCase):
+    def test_a_full_ledger_rotates_to_one_predecessor(self):
+        d = Path(tempfile.mkdtemp())
+        with mock.patch.object(sb, "LEDGER_ROTATE_BYTES", 60):
+            for i in range(6):
+                sb.append_turn_row(d, {"t": i, "sid": SID})          # ~45 bytes a row: rotates every second row
+        cur = [json.loads(x) for x in (d / sb.TURNS_FILE).read_text().splitlines()]
+        prev = [json.loads(x) for x in (d / (sb.TURNS_FILE + ".1")).read_text().splitlines()]
+        self.assertEqual([r["t"] for r in cur], [4, 5])
+        self.assertEqual([r["t"] for r in prev], [2, 3], "the older predecessor is dropped, never a third file")
+        self.assertFalse((d / (sb.TURNS_FILE + ".2")).exists())
+
+
 class TurnLedgerRow(unittest.TestCase):
     def _sess(self, fed, first_out=None):
         s = object.__new__(sb.SdkSession)

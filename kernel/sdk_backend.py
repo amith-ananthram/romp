@@ -1528,12 +1528,20 @@ def append_resume_fork(state_dir: Path, sid: str, from_fsid: str, to_fsid: str, 
 SESSION_EVENTS_FILE = "session-events.jsonl"
 TURNS_FILE = "turns.jsonl"
 PROBLEM_ROW_MARK = " ;; problem-row "
+LEDGER_ROTATE_BYTES = 32 * 1024 * 1024   # a ledger past this size is rotated to <name>.1 (one predecessor kept),
+#                                          so the pair is bounded at twice this: at ~300 bytes a turn and a few
+#                                          thousand turns a day, turns.jsonl holds about a month; the reader reads both
 
 
 def _append_ledger_row(state_dir: Path, name: str, row: dict) -> None:
     try:
         p = Path(state_dir) / name
         p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if p.stat().st_size >= LEDGER_ROTATE_BYTES:
+                os.replace(p, p.with_name(p.name + ".1"))   # the older predecessor, if any, is dropped
+        except FileNotFoundError:
+            pass
         with open(p, "a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
             f.flush()
