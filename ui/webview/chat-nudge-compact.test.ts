@@ -1,5 +1,5 @@
 // A romp-injected NUDGE bubble is disclosed progressively (the user 2026-07-17: default compact, click
-// to expand — the standing UI principle, see CLAUDE.md Design): the bubble defaults to a one-line GIST
+// to expand — the standing UI principle, see ui/CLAUDE.md): the bubble defaults to a one-line GIST
 // with a caret, and clicking it swaps in the full markdown text. The open state is KEYED (nudge:<uuid>)
 // so an expanded nudge survives the chat's re-renders, exactly like tool folds. A nudge whose whole text
 // IS the gist gets no caret and no click affordance (never a dead-end fake expander). Source pins.
@@ -28,7 +28,7 @@ test("a romp bubble renders a one-line gist by default, full text behind a keyed
   // keyed open-state → an expanded nudge survives re-renders (the openFolds idiom)
   assert.match(fn, /const nkey = ev\.uuid \? "nudge:" \+ ev\.uuid : undefined;/);
   assert.match(fn, /applyFold\(bubble, "expanded", nkey\);/);
-  // the toggle rides the stable document.body delegate (click-safe across re-renders, CLAUDE.md) —
+  // the toggle rides the stable document.body delegate (click-safe across re-renders, ui/CLAUDE.md) —
   // never a per-render bubble listener
   assert.match(fn, /bubble\.dataset\.act = "nudgetoggle";/);
   assert.match(RENDER, /nudgetoggle: \(el\) => \{/);
@@ -42,7 +42,9 @@ test("the CSS swap: gist shown collapsed, full text shown expanded — never bot
   assert.match(CSS, /\.romp-bubble\.nudge-collapsible \{ cursor: pointer; \}/);
 });
 
-test("the progressive-disclosure principle is recorded in CLAUDE.md's Design section", () => {
-  const doc = fs.readFileSync(path.resolve(process.cwd(), "..", "CLAUDE.md"), "utf8");
+test("the progressive-disclosure principle is recorded in ui/CLAUDE.md", () => {
+  // The UI design rules live in ui/CLAUDE.md, the file that loads for work under ui/; the root
+  // CLAUDE.md points at it. This pins that the principle is written down where UI work reads it.
+  const doc = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "CLAUDE.md"), "utf8");
   assert.match(doc, /### Progressive disclosure is the UI's organizing principle/);
 });

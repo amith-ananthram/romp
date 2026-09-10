@@ -1,6 +1,6 @@
 // T226 (the user 2026-09-02, screenshot: in the light theme the settings' Theme select opened a
 // near-black card with dark-on-dark options — the way back to dark was unreadable). The menu
-// vocabulary (CLAUDE.md "Menus and dropdowns wear ONE vocabulary") had been pinned as LITERAL hex
+// vocabulary (ui/CLAUDE.md "Menus and dropdowns wear ONE vocabulary") had been pinned as LITERAL hex
 // in every inline menu string (the settings pickers, the tag menu), so the light block could never
 // reach it. The skin is TOKENS now — --menu-bg / --menu-fg / --menu-border / --menu-hover beside the
 // existing --radius-menu / --shadow-menu / --check-bg — defined in both theme blocks of both
@@ -46,7 +46,7 @@ const slice = (src: string, from: string, to: string) => {
 const norm = (s: string) => s.replace(/\s+/g, "").toLowerCase();
 
 const MENU_TOKENS = ["--menu-bg", "--menu-fg", "--menu-border", "--menu-hover", "--menu-ring", "--check-ring"];
-// the dark spec — the literals the CLAUDE.md rule always named, now the dark theme's token values
+// the dark spec — the literals the ui/CLAUDE.md rule always named, now the dark theme's token values
 const DARK = {
   "--menu-bg": "var(--vscode-menu-background, #252526)",
   "--menu-fg": "var(--vscode-menu-foreground, #cccccc)",
@@ -115,7 +115,7 @@ const SURFACES: Array<[string, string]> = [
   ["styles.css .ctx-swatch.sel", CHAT.slice(CHAT.indexOf("\n.ctx-swatch.sel {"), CHAT.indexOf("}", CHAT.indexOf("\n.ctx-swatch.sel {")))],
   ["kernel.py mobile session picker (#mlist)", KERNEL.slice(KERNEL.indexOf('"#mlist{display:none;'), KERNEL.indexOf('".mrow.ph'))],
   // the shell's bell popover (2026-09-05): rows + switch pills + the test button, up to the status-red
-  // refusal line (a STATUS colour, outside the menu vocabulary by the CLAUDE.md accent/status split)
+  // refusal line (a STATUS colour, outside the menu vocabulary by the ui/CLAUDE.md accent/status split)
   ["kernel.py bell popover (#rbell-pop)", KERNEL.slice(KERNEL.indexOf('"#rbell-back{'), KERNEL.indexOf('"#rbp-test-out.bad{'))],
   ["tag-menu.ts openTagMenu", slice(MENU, "export function openTagMenu", "export function tagMenuButton")],
   ["timeline menuStyleFor/menuCheckStyleFor", slice(TIMELINE, "const menuStyleFor", "let MENU_STYLE")],
@@ -173,8 +173,9 @@ test("the ✓ mark is themed through --check-bg on every surface: dark #1EA1EB, 
   }
 });
 
-test("the CLAUDE.md rule names the tokens and keeps the hex as the dark theme's values", () => {
-  const md = fs.readFileSync(path.resolve(process.cwd(), "..", "CLAUDE.md"), "utf8");
+test("the ui/CLAUDE.md rule names the tokens and keeps the hex as the dark theme's values", () => {
+  // the UI design rules live in ui/CLAUDE.md (the root CLAUDE.md points at it)
+  const md = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "CLAUDE.md"), "utf8");
   const rule = slice(md, "### Menus and dropdowns wear ONE vocabulary", "The romp accent is light blue");
   for (const tok of ["--menu-bg", "--menu-fg", "--menu-border", "--menu-hover", "--radius-menu", "--shadow-menu", "--check-bg"])
     assert.ok(rule.includes("`" + tok + "`"), "the rule names " + tok);
@@ -183,7 +184,7 @@ test("the CLAUDE.md rule names the tokens and keeps the hex as the dark theme's 
 });
 
 test("the sheets' reference menu rules wear the tokens too — one card, one hover, one ring (review round)", () => {
-  // .ctx-menu is the rule the CLAUDE.md text names as the spec; it and .meta-menu read --menu-bg/--menu-fg
+  // .ctx-menu is the rule the ui/CLAUDE.md text names as the spec; it and .meta-menu read --menu-bg/--menu-fg
   // (served dark: byte-identical — the token composes the VS Code colour they always followed).
   // .ctx-item:hover stays on --vscode-menu-selectionBackground BY DESIGN: the tab menu is "themed
   // like VS Code's own menus" and the served dark hover is its blue selection — the one sanctioned
@@ -213,7 +214,7 @@ test("the sheets' reference menu rules wear the tokens too — one card, one hov
 
 test("the shell DEFINES the menu tokens (it loads no sheet) and the bell popover reads them with the dark fallbacks", () => {
   // the shell's two theme blocks resolve the tokens to the SAME values the sheets' blocks do —
-  // dark byte-for-byte the CLAUDE.md literals, light the cream card — so the popover is one more
+  // dark byte-for-byte the ui/CLAUDE.md literals, light the cream card — so the popover is one more
   // wearer of the one vocabulary, not a third skin (2026-09-05)
   const dark = KERNEL.slice(KERNEL.indexOf('":root{--menu-bg:'), KERNEL.indexOf('}"', KERNEL.indexOf('":root{--menu-bg:')));
   for (const [tok, val] of Object.entries(DARK)) {
