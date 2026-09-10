@@ -18,11 +18,14 @@ import os
 import sys
 import tempfile
 import time
-from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
+# tests/test_state_dir_override.py executes this file by path from the repository root, where
+# romp_load is not importable; a script run from tests/ has this directory on sys.path already.
+sys.path.insert(0, HERE)
+from romp_load import load_source  # noqa: E402
 
 RUNTIME_STATE = Path(os.environ.get("ROMP_STATE_DIR") or
                      str(Path(os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")) / "romp"))

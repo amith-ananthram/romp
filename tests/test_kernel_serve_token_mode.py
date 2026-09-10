@@ -582,9 +582,10 @@ class ImportRefusalIsLoud(unittest.TestCase):
         loads = [("romp_event_model", os.path.join(BIN, "romp-event-model")),
                  ("romp_judge", os.path.join(BIN, "romp-judge")),
                  ("romp_kernel", os.path.join(BIN, "romp-kernel"))]   # the same three loads as this module's own
-        code = ("from importlib.machinery import SourceFileLoader\n"
+        code = ("import sys; sys.path.insert(0, %r)\n"          # the tests dir, where romp_load lives
+                "from romp_load import load_source\n"
                 "for name, path in %r:\n"
-                "    SourceFileLoader(name, path).load_module()\n" % (loads,))
+                "    load_source(name, path)\n" % (HERE, loads))
         r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=120)
         self.assertNotEqual(r.returncode, 0, "the import refuses to start the kernel; stderr:\n%s" % r.stderr[-2000:])
         self.assertIn("did NOT replace the serve token", r.stderr, "and says so, in the loader's own words")
