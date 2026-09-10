@@ -1889,6 +1889,17 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   color: var(--dim); background: transparent; border: 0; border-radius: 6px; padding: 0;
 }
 .queued-x:hover { color: var(--vscode-errorForeground, #f48771); background: rgba(255, 255, 255, 0.08); }
+/* EDITABLE — a ✎ beside the ✕ (the user 2026-09-08): a message that has not reached the session yet is still
+   the user's to change. Same corner, same dim-until-hover treatment; the ACCENT (not red) on its own hover — it
+   changes the message, it does not remove it. The bubble reserves room for both controls. */
+.queued-bubble.editable { padding-right: 52px; }
+.queued-edit {
+  position: absolute; top: 3px; right: 26px; width: 20px; height: 20px;
+  display: flex; align-items: center; justify-content: center;
+  font: inherit; font-size: 0.82em; line-height: 1; cursor: pointer;
+  color: var(--dim); background: transparent; border: 0; border-radius: 6px; padding: 0;
+}
+.queued-edit:hover { color: var(--accent); background: rgba(255, 255, 255, 0.08); }
 /* A notice romp itself queued (T243) wears the LANDED romp notice card nested inside the queued bubble: the
    dashed "you" dress comes off the wrapper (the card brings its own gray tone), and the ✕ moves inside the
    card's corner so it reads as the card's control. */
@@ -2999,6 +3010,9 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
   animation: path-load-spin 2.4s linear infinite; }   /* the calm mini-swirl spin, same as the awaiting glyphs */
 @keyframes path-load-spin { to { transform: rotate(-360deg); } }
 .path-img-loading { display: none; }   /* the <img> takes the spot the instant it has pixels */
+/* a markdown image whose fetch failed (T291c): parked with no src, so the browser shows the alt text as a stable
+   inline caption, dim and italic like the load note; nothing re-fetches it until a reconnect-class heal lands the picture */
+.md-img-failed { display: inline; font-size: 0.86em; font-style: italic; color: var(--dim); }
 @media (prefers-reduced-motion: reduce) { .path-load-spin { animation: none; } }
 /* the PDF card's label + filename (preview.ts previewFull's pdf branch) */
 .path-thumb-tag { font-size: 0.72em; font-weight: 700; letter-spacing: 0.04em; color: var(--accent); flex: 0 0 auto; }
@@ -3590,6 +3604,22 @@ body.filebrowse-open { overflow: hidden; }
   color: var(--dim); opacity: 0.55; user-select: none;
 }
 .fileview-wrap .fv-ct { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Links inside a shown file (file-view-links.ts): a URL opens a new tab, a path opens in the viewer. Light by
+   design (the user 2026-09-07): the token keeps the colour the highlight gave it, under a faint dotted underline
+   that turns solid on hover; nothing else in the view changes. A Markdown link whose target is a file keeps the
+   link ink the other Markdown links wear. Neither is draggable (-webkit-user-drag: none, with draggable=false on the
+   anchor) and both are selectable (user-select: text; Chromium starts no selection inside a link without it), so a
+   press-drag inside a path link selects its text as on plain text, a press held on a URL anchor and then dragged
+   selects too (Chromium's rule for a link: an immediate drag on one selects nothing), and neither starts the browser's
+   link drag; a click that arrives with the selection open finds the viewer's listener and the chat's opener yielding
+   to it (path-links.ts selectionOpenIn). Mirrored in styles.css and feed.css (fileview-parity.test.ts). */
+.fileview-body .file-uri-link, .fileview-body .fv-url { color: inherit; cursor: pointer; text-decoration: underline dotted; text-decoration-color: color-mix(in srgb, currentColor 35%, transparent); text-underline-offset: 2px; -webkit-user-drag: none; user-select: text; }
+.fileview-body .file-uri-link:hover, .fileview-body .fv-url:hover { text-decoration: underline; text-decoration-color: currentColor; }
+.fileview-md a.file-uri-link { color: var(--link); text-decoration: none; }
+.fileview-md a.file-uri-link:hover { text-decoration: underline; }
+/* A Markdown link with no target the viewer can follow (the sanitizer removed it; a section this document does not
+   have): dead, and it says so, since the title holds the reason (file-view-links.ts DEAD_LINK_CLASS). */
+.fileview-md a.fv-dead { color: inherit; opacity: 0.7; text-decoration: underline dotted; cursor: help; }
 
 /* ── text size and measure (file-view.ts textSizeControl) ── The A− / A+ buttons and Ctrl/Cmd + wheel over the
    body set `data-fv-text` on the viewer root to one of TEXT_SIZES; this table turns the step into the ONE
@@ -3814,3 +3844,62 @@ body.filebrowse-open { overflow: hidden; }
    Custom Highlight API (no DOM surgery — the turn list re-renders constantly). Accent-tinted like
    the focus family, never a status colour. */
 ::highlight(cite-span) { background-color: color-mix(in srgb, var(--accent) 30%, transparent); color: var(--text-bright); }
+
+/* COMPACT TABS AND AGENTS (the gear's denseChrome setting; the user 2026-09-08: on a phone, the tab strip and
+   the background-work panel left about three lines of transcript in view). Density only, under ONE body class
+   the settings applier toggles (dense-chrome.ts applyDenseChrome, run from applyChatScheme at startup and on
+   every settings change), so a gear flip repaints the strip and the panel at once through the cascade and
+   neither is rebuilt. Every rule here is scoped to body.dense-chrome and shadows a default written above; the
+   defaults themselves are untouched, and the trailing comment on each line records the value it shadows
+   (dense-chrome.test.ts pins both). Sizes reuse the sheet's own rungs: the tab's 0.86em is on the em ladder
+   (css-vocab.test.ts); the row's 11px and 10px sit one step under the panel's 0.92em and 0.82em (.bg-sum, .bg-since:
+   11.96px and 10.66px at the 13px base) and on the 10px floor. The group
+   header keeps its 0.82em: the next rung down, 0.72em, is 9.4px at the 13px base, under the 10px floor the
+   sheet's smallest labels sit at, and the sections wear one size (tab-groups.test.ts); its count inherits that
+   size and stays legible. Click targets after (dense-chrome-layout.test.ts measures them): a tab about 25px
+   tall (32px by default), and a group header the same, since #tabs stretches every item on a row to the tallest
+   (on its own it is about 25px, from 31px); a row about 20px (29px), or 24px with the open-transcript arrow,
+   which keeps its 18px. Off by default. Nothing here touches #tabbar itself: under the phone layout's media rule
+   (kernel.py _CHAT_MOBILE_CSS) the bar holds the session picker, not the strip, so on a phone only the panel
+   tightens. */
+body.dense-chrome .tab { gap: 3px; padding: 3px 5px; font-size: 0.86em; }              /* 4px; 6px 7px; 0.92em */
+/* a federated tab's host prefix is a 0.86em child of the label (host-prefix.ts hostNameNodes), so under the 0.86em tab
+   it would compound to 9.6px (0.86 x 0.86 x 13), under the 10px floor; 0.92em (on the ladder) puts it back at the
+   default's rendered 10.3px. The tab's other em child, .tab-close at 1.1em, stays above the floor on its own. */
+body.dense-chrome .tab .host-prefix { font-size: 0.92em; }                              /* 0.86em */
+/* the + keeps its glyph size: the dense .tab rule above (0,2,1) outranks .tab-add's own 1.1em (0,1,0), so the size
+   is restated; its height is still 25px because .tab-add pins its 18px line-height */
+body.dense-chrome .tab-add { padding: 3px 8px; font-size: 1.1em; }                      /* 6px 10px; 1.1em, restated */
+/* the tag control's floor is the + tab's rendered height, as by default (styles.css .tab-tagbox, tag-mounts.test.ts):
+   the 18px line + 2 x 3px dense padding + the 1px border; #tabs stretches every item on a row to the tallest, so
+   without this the row holding the + and the tag control would stay 31px beside 25px rows */
+body.dense-chrome .tab-tagbox { min-height: 25px; }                                     /* 31px */
+body.dense-chrome .tab-group-head { gap: 4px; padding: 3px 5px 3px 4px; }               /* 5px; 6px 7px 6px 6px */
+/* the untagged trail's divider (the inline layout, stripGroupRows off): its 1px line is the content area under fixed
+   gutters, so the 8px gutters sized for the 32px row would leave a 9px line in the 25px row; 6px keeps the default's
+   half-row proportion (about 13px). Scoped off the row break, which must keep no footprint; the width stays 13px,
+   so the tab drag's virtual layout (dragslot.ts) is unaffected */
+body.dense-chrome .tab-group-sep:not(.tab-group-break) { padding: 6px 6px; }            /* 8px 6px */
+/* the panel: the rows shrink; the header keeps its 12px, it is the panel's title */
+body.dense-chrome #bg-tasks { margin: 4px 10px 4px; }                                   /* 8px 10px 6px */
+body.dense-chrome .bg-fold-head { padding: 5px 11px; }                                  /* 7px 11px */
+/* the cap: about four rows while no row's details are open, the inner scroll .bg-list already has taking the rest.
+   Four 24px rows (3px + the 18px arrow + 3px; a row without the arrow is about 20px) plus the list's 4px of padding.
+   The :not(:has(.bg-task.open)) guard lifts the cap the moment a row's details open, so the panel's own
+   min(50vh, 340px) is the only bound on an open row and a command's output tail is never read through two nested
+   scrolls. The padding stays on the bare rule so it holds in both states. */
+body.dense-chrome .bg-list { padding: 2px 2px; }                                        /* 4px 2px */
+body.dense-chrome .bg-list:not(:has(.bg-task.open)) { max-height: 100px; }              /* no cap of its own; the panel's min(50vh, 340px) bounds it */
+body.dense-chrome .bg-group-head { padding: 3px 9px 1px; }                              /* 6px 9px 2px */
+body.dense-chrome .bg-head { gap: 6px; padding: 3px 9px; line-height: 1.3; }            /* 8px; 5px 9px; the body's 1.6 */
+body.dense-chrome .bg-sum { font-size: 11px; }                                          /* 0.92em */
+body.dense-chrome .bg-since { font-size: 10px; }                                        /* 0.82em */
+/* the trailing status word goes where the dot already says it: a row's caption IS its status (taskRowSpec and
+   awaitRowSpec: running, armed, completed, failed) and the dot wears that status's tint (.bg-task.bg-<status>
+   sets --bgt), so the word repeats the dot. A "timer" caption stays: its dot says only waiting. The label and
+   the open-transcript arrow stay. Hidden by the sheet, so the render path is unchanged and the word is back the
+   moment the setting goes off. */
+body.dense-chrome .bg-task.bg-running > .bg-head > .bg-status,
+body.dense-chrome .bg-task.bg-armed > .bg-head > .bg-status,
+body.dense-chrome .bg-task.bg-completed > .bg-head > .bg-status,
+body.dense-chrome .bg-task.bg-failed > .bg-head > .bg-status { display: none; }

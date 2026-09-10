@@ -92,9 +92,12 @@ test("wiring: every click on a PDF carries its gesture; modified → the tab, pl
     "the middle PRESS is cancelled: autoscroll (Firefox, Edge) starts on mousedown and would swallow the auxclick");
   assert.match(pf, /box\.onauxclick = \(ev\) => \{ if \(ev\.button !== 1\) return; ev\.stopPropagation\(\); openPdf\(path, sid, ev\); \};/,
     "a middle-click reaches the card as auxclick, never as click");
-  // the opener itself: synchronous, two-argument window.open — the gesture and the handle both matter
-  const opener = PREVIEW.slice(PREVIEW.indexOf("export function openPdfTab"), PREVIEW.indexOf("export function openPdf("));
-  assert.match(opener, /if \(previewKind\(path\) !== "pdf" \|\| !canPreview\(\)\) return false;/, "the kind check is the opener's own");
+  // the opener itself: synchronous, two-argument window.open — the gesture and the handle both matter. The tab is openFileTab's
+  // (any file, off the kernel's /file route; the viewer's links go through it too), and openPdfTab puts the kind check in front
+  const pdf = PREVIEW.slice(PREVIEW.indexOf("export function openPdfTab"), PREVIEW.indexOf("export function openPdf("));
+  assert.match(pdf, /if \(previewKind\(path\) !== "pdf"\) return false;\n\s*return openFileTab\(path, sid\);/, "the kind check is the PDF opener's own; the tab is the file opener's");
+  const opener = PREVIEW.slice(PREVIEW.indexOf("export function openFileTab"), PREVIEW.indexOf("export function openPdfTab"));
+  assert.match(opener, /if \(!canPreview\(\)\) return false;/, "the web-only gate");
   assert.match(opener, /const w = window\.open\(fileUrl\(path, sid\), "_blank"\);/);
   assert.doesNotMatch(opener, /"noopener/, "the noopener FEATURE makes window.open return null on success — the block signal would be lost");
   assert.match(opener, /if \(!w\) return false;[^\n]*\n\s+try \{ w\.opener = null; \}/, "…so the link is severed on the handle instead, before anything else");
@@ -107,7 +110,13 @@ test("wiring: every click on a PDF carries its gesture; modified → the tab, pl
   assert.equal((BROWSE.match(/openFileView\(/g) || []).length, 0, "file-browse.ts opens files through openFileClick only");
   const view = VIEW.slice(VIEW.indexOf("export function openFileView("));
   const body = view.slice(0, view.indexOf("\n}\n"));
-  assert.doesNotMatch(body, /openPdfTab|wantsOwnTab/, "openFileView itself opens in-app, whatever the path");
+  assert.doesNotMatch(body, /openPdfTab/, "openFileView itself opens in-app, whatever the path");
+  // the ONE gesture read inside openFileView is its links' listener (a Cmd/Ctrl- or middle-click on a link inside the shown file takes
+  // its own tab, file-view-links.test.ts); the open of the viewer's own file reads none
+  const linksAt = body.indexOf("const openLink = (x: HTMLElement, ev: MouseEvent) => {");
+  assert.ok(linksAt > 0, "the links' listener");
+  assert.doesNotMatch(body.slice(0, linksAt), /wantsOwnTab\(/, "no gesture read before the links' listener");
+  assert.doesNotMatch(body.slice(body.indexOf('body.addEventListener("auxclick"', linksAt)), /wantsOwnTab\(/, "none after it");
   // the file browser's rows and the chat's path pills hand their gesture over, middle button included
   assert.match(BROWSE, /list\.addEventListener\("click", \(ev\) => \{[\s\S]*?onAct\(row, ev\);/);
   assert.match(BROWSE, /const fileRowOf = \(ev: MouseEvent\) => \{[\s\S]*?row\.dataset\.act === "file" \? row : null;/,

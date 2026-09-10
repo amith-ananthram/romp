@@ -116,7 +116,16 @@ class Collector(unittest.TestCase):
         self.assertEqual(set(snap["goals"]), {"loads", "saves", "writes"}, "read through jd.goal_io_stats")
         # the three identity memos' readers land here (review find, 2026-09-08: they had no consumer)
         self.assertEqual(set(snap["memos"]), {"pass", "shared", "chain", "nudgeGate", "cleared", "courierSkip", "backref", "captions", "goalArchive", "plannerSkip",
-                                              "intrMarks", "statesOverlay"})
+                                              "bgTops", "liftGate", "intrMarks", "statesOverlay"})
+        self.assertEqual(set(snap["memos"]["bgTops"]), {"hit", "miss", "resolve", "walk", "walk_neg", "idx_build", "entries"},
+                         "the placed-launch memo (_bg_placed_tops): counters plus its occupancy")
+        for k, v in snap["memos"]["bgTops"].items():
+            self.assertIsInstance(v, int, k)
+        self.assertEqual(set(snap["memos"]["liftGate"]), {"skip", "load", "shared", "writer", "noop", "entries"},
+                         "the awaiting-lift gate: session-cycles skipped vs read, the probes the shared cache "
+                         "answered, the writer loads and the ones that filed nothing, plus its occupancy")
+        for k, v in snap["memos"]["liftGate"].items():
+            self.assertIsInstance(v, int, k)
         # the two memos the interrupt tick trims to its alive set: the interrupt-marks memo and the awaiting
         # overlay's states-log fold, each with its counters and its occupancy
         self.assertEqual(set(snap["memos"]["intrMarks"]), {"hit", "miss", "evict", "entries"})

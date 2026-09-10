@@ -51,6 +51,16 @@ A pull request number in a message, a card, or a note (`#123`, `PR #123`, or
 directory has as its `origin` remote; when that remote is not on GitHub, the number stays
 plain text.
 
+**A message that has not gone yet.** Send to a busy session and your message waits as a
+dashed bubble under an hourglass until the session takes it — while it compacts, while a
+turn runs, or in the beat before the kernel confirms the send. Until then it is still
+yours: the **✕** in its corner pulls it back into the composer, and the **✎** beside it loads
+the text into the composer under an editing pill, so you can change your mind without
+losing your place in the queue. Send replaces the message where it was, a follow-up keeps
+its context, and Esc or the pill's ✕ leaves it as it was. If the session takes the message
+before the edit lands, romp says so and gives your edited words back to the composer
+rather than sending them twice.
+
 **Opening a markdown document.** A markdown link in the chat opens in the file viewer,
 rendered, with **Raw** one click away — a path on the session's machine, or a link to a
 file served from the dashboard's own address (a published report, an evidence doc). Figures
@@ -101,6 +111,37 @@ way a paper opens from OpenReview: full size, and it stays open beside the dashb
 you keep working. If the browser blocks that new tab, the PDF opens inside the dashboard
 instead; a PDF too large to show offers a download in its place.
 
+**Links in a file.** Wherever the viewer shows a file's text, the links in that text work. A
+web address opens in a new browser tab. A file path opens that file in the viewer, in place of
+the one you were reading: a relative path such as `docs/guide.md` is taken from the folder of
+the file you are reading, an absolute or `~/` path as written, on the machine of the session the
+file belongs to, and a line written after the path (`src/app.py:12`, or `src/app.py#L12`)
+scrolls the code view to that line. A Markdown file opens in its Raw view for that one open, since
+the Rendered view has no lines; your Raw/Rendered choice is unchanged. A line past the end of the
+file lands on the last line, with a notice saying so. In a Markdown file, a `[link](target)`
+follows the same two rules: a web target opens a tab, a file target opens the file (a host with a
+port, `127.0.0.1:3000` or `api.example.com:8443`, is neither, and says so). A link to a section
+of another file (`report.md#results`) opens that file at the section. A link to a section of the
+same document scrolls to it when the document has a heading or an anchor by that name
+(`<a name="install">` included), and otherwise says so when you hover it; it scrolls under every
+click, since a section of the shown file has no tab of its own. One click does one thing: a plain
+click acts in the dashboard, and a Cmd-click (Ctrl on Windows and Linux) or a middle-click opens
+the link in a browser tab of its own. Inside a file the test for a path is stricter than the one
+a chat message gets: a path links only when it has a slash and a file extension, starts on its
+own, at the start of a line or after a space, a quote, a bracket, a comma, a semicolon, an
+equals sign, a pipe or Markdown's `*` (so `$HOME/docs/a.md`, `@scope/pkg/index.js` and
+`C:/Users/x.txt` stay text), is not part of a web address, does not start with a site name
+(`www.example.org/docs/index.html`), and is not the package an `import` statement or a
+`require()` call names, whether the statement fits one line or its `from` starts the next (a
+relative import such as `./app.css` still links, and so does a path after the English word
+"from" in prose, unless that line holds nothing but `from` and the
+quoted path). After a `*` the path must be the whole emphasised text, closed by a `*` of its
+own: `*docs/a.md*` and `**./scripts/setup.sh**` link; a glob's `**/docs/a.md`, an operand's
+`w*h/img.size` and the first path in `**docs/a.md and docs/b.md**` stay text. Web addresses and
+paths found in the text wear a dotted underline that turns solid under the pointer; a Markdown
+link that names a file keeps the ordinary link look. Selecting text across a link works as
+before, and a click that lands while text is selected inside a link opens nothing.
+
 **Tags and groups.** A tag is a named, colored set of sessions; a session can be in
 several. Right-click a tab and open **Tags** to add or remove them. Tags filter every
 surface (the tag button in the strip narrows the tabs to the tags you pick), and they group
@@ -140,6 +181,13 @@ not loaded yet.
 ![After a reconnect, the tab you were reading is back in full while the other tabs wait as skeletons](assets/guide/reconnect-skeleton-tabs.png){ width="32%" }
 ![Clicking a skeleton tab puts up the loader until its transcript arrives](assets/guide/reconnect-skeleton-click.png){ width="32%" }
 ![The clicked tab, loaded](assets/guide/reconnect-skeleton-loaded.png){ width="32%" }
+
+**On a small screen.** To keep more of the transcript in view, turn on the gear's
+**Compact tabs and agents** setting. It tightens the rows in the background-work panel above the
+composer (the one headed **Awaiting** or **In the background**) and shows about four of its rows,
+scrolling for the rest; the cap lifts while a row's details are open. Where the tab strip is showing,
+it also shrinks the tabs and group headers; on a phone the session picker stands in for the strip, so
+there the setting tightens the panel alone. Like the other chat settings, it is per browser.
 
 ### The feed
 

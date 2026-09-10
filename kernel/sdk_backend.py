@@ -4275,6 +4275,23 @@ class SdkSession:
             self._persist_queue()
         return item
 
+    def replace_queued(self, idx: int, text: str, expect: str | None = None) -> str | None:
+        """Replace the queued turn at `idx` IN PLACE — the chat's edit of a message that has not started
+        (the user 2026-09-08): same _pending position (the queue drains front-first, so the edited message
+        still goes where it would have), new words. `expect` verifies — and, on a shifted index,
+        re-locates — the exact old text UNDER the lock, exactly as unqueue does, so the input generator
+        consuming entries between the caller's snapshot and this swap can never rewrite the wrong
+        message. Returns the OLD text, or None on a miss: the entry is gone (fed to the CLI, where no
+        recall exists) and nothing was changed."""
+        with self._lock:
+            if expect is not None and not (0 <= idx < len(self._pending) and self._pending[idx] == expect):
+                idx = next((i for i, q in enumerate(self._pending) if q == expect), -1)
+            if not (0 <= idx < len(self._pending)):
+                return None
+            old, self._pending[idx] = self._pending[idx], text
+        self._persist_queue()
+        return old
+
     def _persist_queue(self):
         """Mirror _pending to the registry (reg['queue']) so queued turns survive a kernel death —
         the boot reconcile resumes any session whose persisted queue is non-empty and the __init__
@@ -9464,6 +9481,38 @@ class SdkBackend:
             self._persist_echoes(sid)                      # the canceled echo leaves the restart mirror too
             self._wake_push()                              # repaint without the echo so it stops reading as sent
         return text
+
+    def edit_queued(self, sid: str, idx: int, text: str, expect: str | None = None) -> str | None:
+        """Edit the queued turn at `idx` in place for an SDK session (the kernel's editQueued route) —
+        unqueue's twin: returns the OLD text, or None on a miss the caller surfaces loudly. The message's
+        optimistic echo (send()'s blue 'you' bubble, matched by its exact old text like unqueue does) is
+        re-worded too, so the live tail shows the edited message and the landing scan matches the record
+        the transcript will write. The kernel gates the chat's ✎ on the backend having `edit_queued`."""
+        with self._lock:
+            s = self.sessions.get(sid)
+        if not s:
+            return None
+        old = s.replace_queued(idx, text, expect)
+        if old is not None:
+            with self._live_lock:
+                for a in (self._live.get(sid) or {}).values():
+                    if a.get("_echo_text") != old:
+                        continue
+                    a["_echo_text"] = text
+                    m = a.get("message")
+                    if isinstance(m, dict):
+                        c = m.get("content")
+                        if isinstance(c, list):
+                            for b in c:
+                                if isinstance(b, dict) and b.get("type") == "text":
+                                    b["text"] = text
+                                    break
+                        elif isinstance(c, str):
+                            m["content"] = text
+                    break                                  # one echo per edited message
+            self._persist_echoes(sid)                      # the restart mirror carries the new words
+            self._wake_push()                              # repaint with them
+        return old
 
     def queue_recallable(self, sid: str) -> bool:
         """Can a ✕ on this session's queued bubble still win? False while a turn is running UN-HELD:

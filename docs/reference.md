@@ -1021,12 +1021,22 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `plannerSkip` counts the sessions the outer gate let through, not every
   planner skip: an idle session stops at the outer gate and appears in neither
   `skipped` nor `planned`. Outside a pass frame (`romp-judge --plan`) the
-  outer gate stamps nothing, and the inner gate does the skipping. The
-  compaction sweep after each judge pass evicts from `pass` and `shared` the
-  entries of stores no session in the discover window owns, so both stay
-  bounded by the live board; the courier's and the planner's change-gate
-  tables are pruned to the sessions each pass discovers, and the evidence
-  gate's stamps are cleared at a fixed cap. `intrMarks` is the interrupt-marks
+  outer gate stamps nothing, and the inner gate does the skipping. `liftGate`
+  is the awaiting lift's per-session inputs gate and two-phase read: `skip`
+  and `load` (session-cycles that took no store read against the ones that
+  read it, a probe on the shared read-only view), `shared` (probes the shared
+  cache answered), `writer` (session-ticks that loaded the writer's copy
+  because a lift was due) and `noop` (writer loads whose fresh decision filed
+  nothing, the store having moved between the probe and the load), and the
+  gauge `entries` (sessions remembered). `bgTops` is the placed-launch memo
+  behind the awaiting lift and the feed's background-task classification,
+  keyed on the parse object and the store object: `hit` and `miss` (calls
+  answered from the per-version map against looked up), `resolve` (launch ids
+  looked up on a miss, placed or not), `walk` and `walk_neg` (transcript
+  walks, and the walks that left a launch unresolved: an upper bound on what a
+  negative walk cache would save), `idx_build` (placement indexes built, one
+  per store object asked, a writer's private copy included) and the gauge
+  `entries` (sessions holding a map). `intrMarks` is the interrupt-marks
   memo behind the interrupt tick, the nudge tick and the feed's badge, one
   entry per (session, parse family) keyed on the parse object's identity and
   the machine-cut stamp (`hit`, `miss`, `evict` for entries released when a
@@ -1039,10 +1049,16 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `fail`: a read that failed on a file that exists, answered as no overlay,
   memoized nothing and named once per episode on the kernel's stderr;
   `evict`: entries dropped for sessions that left the alive set; and the
-  gauge `entries`). The interrupt tick drops from `intrMarks` and
-  `statesOverlay` the entries of sessions outside its alive set each cycle;
-  the `statesOverlay` cache is also cleared whole above 256 entries, a drop
-  `evict` does not count and `entries` shows.
+  gauge `entries`). The compaction sweep after each judge pass evicts from
+  `pass` and `shared` the entries of stores no session in the discover window
+  owns, so both stay bounded by the live board; the courier's and the
+  planner's change-gate tables are pruned to the sessions each pass discovers,
+  the evidence gate's stamps are cleared at a fixed cap, and the awaiting
+  lift's tick drops the gate's and the placed-launch memo's entries of
+  sessions that left the alive set. The interrupt tick drops from `intrMarks`
+  and `statesOverlay` the entries of sessions outside its alive set each
+  cycle; the `statesOverlay` cache is also cleared whole above 256 entries, a
+  drop `evict` does not count and `entries` shows.
 - `judge`: `passes`, `ms_sum`, `ms_last`, `ms_mean` (wall time; a pass waits
   on model calls), `cpu_ms_sum` (CPU time of the judge tier threads and every
   per-session worker they run; the workers' share is `cpu_ms_workers`).
@@ -1059,6 +1075,12 @@ goes where the manager's stderr goes: under systemd, `journalctl --user -u
 romp-manager -f | grep romp-perf`; under launchd (macOS), `tail -f
 ~/.local/state/romp/manager.log | grep romp-perf`. Setting `ROMP_PERF=1` in the
 kernel's environment still turns it on at start.
+
+The counters describe a running kernel. To time the same builders offline, on
+a copy of a state directory and with no live kernel, `tools/perf-bench.py`
+loads a checkout's kernel in-process and reports each builder's cost on
+real-sized data; two checkouts can run against one copy for a before-and-after
+comparison. Its module docstring is the reference.
 
 ## Browser-side performance telemetry
 
@@ -1151,8 +1173,10 @@ The two rows, as the kernel writes them (`t` its clock, `wid` the dashboard id):
   the cap, with the worst of those; `heap_mb` is
   `performance.memory.usedJSHeapSize` and is absent outside Chrome; `dom` is
   the element count; `visible` is the document's visibility, `hidden_pane`
-  the zero-viewport test the pane shim uses for a pane the shell has set to
-  `display:none`; `ua` is `chrome-desktop`, `safari-ios` or `other`.
+  the pane shim's test for a pane the shell has set to `display:none`: its
+  zero-viewport probe, or the word the pane published as
+  `window.__rompPaneHidden` from its own visibility events; `ua` is
+  `chrome-desktop`, `safari-ios` or `other`.
 - `{"t", "wid", "surface": "perf", "what": "slowframe", "data": {app, type, ms,
   dom, loaf?: {ms, blocking_ms, top: [{k, ms, inv}]}}}`. `type` is the frame
   as received on the wire and `ms` its whole synchronous handling, the
@@ -1187,6 +1211,12 @@ in progress in the same shape, plus a derived `p90_le` per type, `active`
 (the node test stand-ins) gets no telemetry and an unwrapped handler; every
 other browser API is behind a feature check, and nothing in the module throws
 into the pane.
+
+The telemetry describes what the panes did while people used them. To measure
+a pane change before and after on the same input, `tools/ui-bench.mjs` replays
+a recorded or synthetic frame stream into the real pane page in a headless
+Chromium and reports where the browser's time went; the "Measuring dashboard
+pane performance" section of CONTRIBUTING.md describes it.
 
 ## The API-health signal
 
