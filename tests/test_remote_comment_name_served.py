@@ -21,6 +21,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -34,6 +35,9 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
 BIN = os.path.join(ROOT, "bin")
 EXT = os.path.join(ROOT, "vscode-extension")
+sys.path.insert(0, HERE)
+import test_ship_reship as _lab   # noqa: E402  the lab kernel's environment (the module, not its classes: an
+#                                   imported TestCase would be collected here a second time)
 
 SID = "aaaaaaaa-1111-2222-3333-444444444444"
 REPLY = "Use exponential backoff with a jitter of ten percent."
@@ -131,13 +135,8 @@ def _kernel(lab, name, port, token, records=None, sid=None):
         proj = os.path.join(claude, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd)))
         os.makedirs(proj, exist_ok=True)
         Path(proj, sid + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
-    env = dict(os.environ, XDG_STATE_HOME=os.path.join(lab, name, "xdg"), CLAUDE_CONFIG_DIR=claude,
-               ROMP_MANAGER_PORT="1", ROMP_KERNEL_NO_OPEN="1", ROMP_SERVE_TOKEN=token,
-               ROMP_KERNEL_PORT=str(port), ROMP_DIST_DIR=os.path.join(lab, "dist"), ROMP_MODEL_CATALOG="off",
-               ROMP_HOST_NAME=name.upper(),
-               ROMP_POSTAL_PEERS="0")   # never the machine's shared postal bus (nor a bus spawned on its port)
-    for k in ("ROMP_STATE_DIR", "ROMP_API_KEY_CMD", "ANTHROPIC_API_KEY"):
-        env.pop(k, None)
+    env = _lab.kernel_env(os.path.join(lab, name), claude, os.path.join(lab, "dist"), port, token,
+                          ROMP_HOST_NAME=name.upper())
     log = os.path.join(lab, name + "-kernel.log")
     proc = subprocess.Popen([os.path.join(BIN, "romp-kernel")], stdout=open(log, "w"), stderr=subprocess.STDOUT, env=env)
     for _ in range(120):
