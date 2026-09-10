@@ -677,11 +677,15 @@ ports, so without this any other user could inject prompts into your live
 sessions. The token is 144-bit random and lives at
 `~/.local/state/romp/serve-token` with mode `0600` (readable only by your own
 user account). Local tools (the CLI, hooks, the bus, the editor extension) read
-that file and send it automatically, so you never type it. Only liveness probes
-(`/healthz`, `/version`, `/busy`, and the bus's `/ping`) are exempt.
+that file and send it automatically, so you never type it. Only two kinds of
+request skip the token: the liveness probes (`/healthz`, `/version`, `/busy`,
+and the bus's `/ping`), and the files a browser fetches without credentials
+when you add Romp to the Home Screen (`/manifest.webmanifest` and three icons
+under `/media/`). Those files are fixed (the app's name, colors and icon art)
+and read no session state.
 
-The kernel and the bus mint that file when it is missing, one mint between them
-under a sibling lock file, `serve-token.lock`. An existing token is never
+The kernel and the bus mint the token file when it is missing, one mint between
+them under a sibling lock file, `serve-token.lock`. An existing token is never
 replaced: a file left looser than `0600` is tightened at the next start (its
 value is kept, so every client stays valid), and a token that exists but cannot
 be read, or a symlink at that path, refuses to start instead of minting a

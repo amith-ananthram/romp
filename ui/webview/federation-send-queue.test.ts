@@ -374,3 +374,178 @@ test("the pending-settings flush rides the socket's open event, never a timer", 
   assert.ok(flushFn.length > 0, "flushPending exists");
   assert.doesNotMatch(flushFn, /setTimeout|setInterval/, "no timer anywhere in the flush");
 });
+
+// ── the pane's OWN bookkeeping (2026-09-10): a toast about a message the user never sent. dropWarn was added
+// so a GESTURE at an unreachable remote (creating a session there) gives feedback — but it fired for anything
+// routed to a host whose socket was not open, and the chat pane sends plenty on its own: on the phone, a fresh
+// page whose active tab was a remote session posted `activeTab` before the relay socket to that host had
+// opened, and the tap the user had just made (which had worked) was answered with a warning that "activeTab"
+// was not delivered. Bookkeeping now HOLDS on the conn like a setting (latest per key, flushed on the open,
+// one hostconn row) and never toasts; a gesture, and any UNKNOWN type, still toasts — a silent drop of
+// something that mattered is the worse failure. The classes are an explicit list (BOOKKEEPING), not a guess
+// from the type's name.
+import { BOOKKEEPING, bookkeepingKey, routeOutbound } from "./federation";
+
+const V = "66666666-7777-8888-9999-000000000000";
+
+test("activeTab to a host whose socket is not open is HELD, not toasted: no warn, no senddrop, one hold row, flushed on the open", () => {
+  withFed((fm, winEvents, localSends) => {
+    const sock = attach(fm, "TESTHOSTA");           // CONNECTING: the fresh page's relay, not open yet
+    fm.outbound({ type: "activeTab", id: "TESTHOSTA:" + U });
+    assert.equal(winEvents.filter((m) => m.type === "warn").length, 0, "no toast about a message the user never sent");
+    assert.equal(diags(localSends, "senddrop").length, 0, "held, not dropped");
+    assert.equal(diags(localSends, "sendqueue").length, 0, "not a setting's row either");
+    const hold = diags(localSends, "hostconn").filter((d) => d.data.ev === "hold");
+    assert.deepEqual(hold.map((d) => d.data), [{ host: "TESTHOSTA", ev: "hold", msgType: "activeTab", rs: 0 }],
+      "one hostconn row says the hold began, naming the host and the type");
+    assert.deepEqual(sock.sent, [], "nothing can ride a CONNECTING socket");
+    sock.open();
+    assert.deepEqual(sock.sent.map((s) => JSON.parse(s)), [{ type: "activeTab", id: U }],
+      "the open event itself delivers it, id bared for that host");
+    const open = diags(localSends, "hostconn").filter((d) => d.data.ev === "open").pop();
+    assert.deepEqual(open.data, { host: "TESTHOSTA", ev: "open", flushed: ["activeTab"] }, "the open row names what flushed, by type");
+  });
+});
+
+test("latest-wins: two activeTabs held while down deliver only the newest tab, and the hold row is written once", () => {
+  withFed((fm, winEvents, localSends) => {
+    const sock = attach(fm, "TESTHOSTA");
+    fm.outbound({ type: "activeTab", id: "TESTHOSTA:" + U });
+    fm.outbound({ type: "activeTab", id: "TESTHOSTA:" + V });   // the user moved on before the socket opened
+    assert.equal(diags(localSends, "hostconn").filter((d) => d.data.ev === "hold").length, 1,
+      "the row marks the not-held → held transition, not every message");
+    sock.open();
+    assert.deepEqual(sock.sent.map((s) => JSON.parse(s)), [{ type: "activeTab", id: V }], "the stale tab is never sent");
+    assert.equal(winEvents.filter((m) => m.type === "warn").length, 0);
+  });
+});
+
+test("a held needFull keys by SESSION: asks for two sessions both flush (a type-only key would leave one pane-side dedupe gagged)", () => {
+  withFed((fm) => {
+    const sock = attach(fm, "TESTHOSTA");
+    fm.outbound({ type: "needFull", id: "TESTHOSTA:" + U, why: "prefetch" });
+    fm.outbound({ type: "needFull", id: "TESTHOSTA:" + V, why: "gap" });
+    fm.outbound({ type: "needFull", id: "TESTHOSTA:" + U, why: "skeleton-click" });   // the same session again: one ask
+    sock.open();
+    assert.deepEqual(sock.sent.map((s) => JSON.parse(s)),
+      [{ type: "needFull", id: U, why: "skeleton-click" }, { type: "needFull", id: V, why: "gap" }]);
+  });
+});
+
+test("a pointer echo keys by TYPE: hovers while down hold one entry and flush only the newest (a leave clears)", () => {
+  withFed((fm, winEvents) => {
+    const sock = attach(fm, "TESTHOSTA");
+    fm.outbound({ type: "dotHover", sid: "TESTHOSTA:" + U, uuid: "a1", t: 1 });
+    fm.outbound({ type: "dotHover", sid: "TESTHOSTA:" + U, uuid: "a2", t: 2 });
+    fm.outbound({ type: "showAskPath", itemId: U + ":g1", sid: "TESTHOSTA:" + U, locate: false });
+    fm.outbound({ type: "showAskPath", itemId: U + ":g1", sid: "TESTHOSTA:" + U, off: true });
+    assert.equal(winEvents.filter((m) => m.type === "warn").length, 0, "a hover over a down host's card never toasts");
+    sock.open();
+    assert.deepEqual(sock.sent.map((s) => JSON.parse(s)), [
+      { type: "dotHover", sid: U, uuid: "a2", t: 2 },
+      { type: "showAskPath", itemId: U + ":g1", sid: U, off: true },
+    ]);
+  });
+});
+
+test("showAskPath's JUMP is the click itself, a gesture: it toasts and is never replayed; its hover glow holds", () => {
+  withFed((fm, winEvents, localSends) => {
+    const sock = attach(fm, "TESTHOSTA");
+    fm.outbound({ type: "showAskPath", itemId: U + ":g1", sid: "TESTHOSTA:" + U, locate: false, jump: true });
+    assert.equal(winEvents.filter((m) => m.type === "warn").length, 1, "the jump the user clicked did not land: say so");
+    assert.equal(diags(localSends, "senddrop").length, 1);
+    sock.open();
+    assert.deepEqual(sock.sent, [], "a jump minutes later would land the user somewhere they no longer asked for");
+  });
+});
+
+test("a gesture to a down host keeps the toast: sendMessage (routed by id) and createSession (explicit host)", () => {
+  withFed((fm, winEvents, localSends) => {
+    const s1 = attach(fm, "TESTHOSTA");
+    s1.open();
+    s1.readyState = 3;
+    fm.outbound({ type: "sendMessage", id: "TESTHOSTA:" + U, text: "hello" });
+    fm.outbound({ type: "createSession", host: "TESTHOSTA", name: "web", dir: "~/proj" });
+    const warns = winEvents.filter((m) => m.type === "warn").map((m) => m.text);
+    assert.equal(warns.length, 2);
+    assert.match(warns[0], /TESTHOSTA is unreachable .*“sendMessage” was not delivered/);
+    assert.match(warns[1], /TESTHOSTA is unreachable .*“createSession” was not delivered/);
+    assert.deepEqual(diags(localSends, "senddrop").map((d) => d.data.msgType), ["sendMessage", "createSession"]);
+    assert.equal(fm.conns.get("TESTHOSTA").pending.size, 0, "a gesture is never held for a later replay");
+  });
+});
+
+test("an UNKNOWN type to a down host toasts: the default is the loud arm, never a silent hold", () => {
+  withFed((fm, winEvents, localSends) => {
+    attach(fm, "TESTHOSTA");
+    fm.outbound({ type: "zzzNotAKnownType", id: "TESTHOSTA:" + U });
+    assert.equal(winEvents.filter((m) => m.type === "warn").length, 1);
+    assert.deepEqual(diags(localSends, "senddrop").map((d) => d.data.msgType), ["zzzNotAKnownType"]);
+    assert.equal(fm.conns.get("TESTHOSTA").pending.size, 0);
+  });
+});
+
+test("bookkeeping for a host this page holds NO connection to is dropped with a breadcrumb — no toast, nothing to hold it on", () => {
+  withFed((fm, winEvents, localSends) => {
+    fm.hostSeq.push("TESTHOSTB");                    // known from a frame, never dialed (no /tunnels row)
+    fm.outbound({ type: "activeTab", id: "TESTHOSTB:" + U });
+    assert.equal(winEvents.filter((m) => m.type === "warn").length, 0);
+    assert.deepEqual(diags(localSends, "senddrop").map((d) => d.data), [{ host: "TESTHOSTB", msgType: "activeTab", why: "no-conn" }]);
+  });
+});
+
+test("a held entry rides the re-dial like a setting, and a detach names the held TYPES it discards", () => {
+  withFed((fm, _win, localSends) => {
+    const s1 = attach(fm, "TESTHOSTA");
+    s1.open();
+    s1.readyState = 3;
+    fm.outbound({ type: "activeTab", id: "TESTHOSTA:" + U });
+    fm.outbound({ type: "needFull", id: "TESTHOSTA:" + V, why: "gap" });
+    const s2 = redial(fm, "TESTHOSTA");
+    s2.open();
+    assert.deepEqual(s2.types(), ["activeTab", "needFull"], "held bookkeeping flushes on the fresh socket's open");
+    fm.outbound({ type: "activeTab", id: "TESTHOSTA:" + V });   // live now
+    s2.readyState = 3;
+    fm.outbound({ type: "needFull", id: "TESTHOSTA:" + U, why: "gap" });
+    fm.closeRemote("TESTHOSTA");
+    const det = diags(localSends, "hostconn").filter((d) => d.data.ev === "detach").pop();
+    assert.deepEqual(det.data, { host: "TESTHOSTA", ev: "detach", pendingDropped: ["needFull"] },
+      "the detach row lists types, never composite keys (a key carries the sid)");
+  });
+});
+
+test("redial stays LOCAL with its host INTACT: the local kernel owns the tunnel, and a down host must not eat the ask with a toast", () => {
+  withFed((fm, winEvents, localSends) => {
+    attach(fm, "TESTHOSTA");                          // the tunnel is down: exactly when the composer asks for a redial
+    fm.outbound({ type: "redial", host: "TESTHOSTA" });
+    assert.deepEqual(localSends.filter((m) => m.type === "redial"), [{ type: "redial", host: "TESTHOSTA" }]);
+    assert.equal(winEvents.filter((m) => m.type === "warn").length, 0, "no toast about the redial on top of the refusal's own");
+    assert.equal(fm.conns.get("TESTHOSTA").pending.size, 0);
+    assert.deepEqual(routeOutbound({ type: "redial", host: "TESTHOSTA" }), [{ host: "", msg: { type: "redial", host: "TESTHOSTA" } }]);
+  });
+});
+
+test("the classes are an explicit list: every held type is in BOOKKEEPING, a gesture and an unknown type are not, and a key never leaks a type-only collision across sessions", () => {
+  for (const t of ["activeTab", "needFull", "needSlot", "loadOlder", "loadEpisode", "imgRequest", "commentSeen",
+                   "dotHover", "hoverHighlight", "showAskPath", "timelineHover", "dirComplete",
+                   "cardOpened", "locateDiag", "orderAudit"])
+    assert.ok(BOOKKEEPING.has(t), t + " is held, not toasted");
+  for (const t of ["sendMessage", "createSession", "openSession", "renameSession", "askClear", "askClearMany", "clearAll",
+                   "undoClear", "tagEdit", "editTag", "reviveSession", "interrupt", "stopTask", "cardNotify", "viewReadOnly",
+                   "requestSessions", "reply", "zzzNotAKnownType"])
+    assert.equal(bookkeepingKey({ type: t, id: U }), null, t + " is a gesture (or unknown): it toasts");
+  assert.notEqual(bookkeepingKey({ type: "needFull", id: U }), bookkeepingKey({ type: "needFull", id: V }), "one ask per session");
+  assert.equal(bookkeepingKey({ type: "activeTab", id: U }), bookkeepingKey({ type: "activeTab", id: V }), "one active tab per pane");
+  assert.equal(bookkeepingKey({ type: "showAskPath", sid: U, jump: true }), null, "the jump click is the gesture");
+  assert.equal(bookkeepingKey(null), null);
+  assert.equal(bookkeepingKey({ id: U }), null, "no type: the loud arm");
+});
+
+test("sendRemote consults the bookkeeping list AFTER the settings queue and BEFORE the drop arm — the drop arm is the default", () => {
+  const seg = FED.slice(FED.indexOf("private sendRemote"), FED.indexOf("private flushPending"));
+  const iSetting = seg.indexOf("KERNEL_SETTING.has(msg.type)");
+  const iBook = seg.indexOf("bookkeepingKey(msg)");
+  const iDrop = seg.indexOf("this.dropWarn(host, msg)");
+  assert.ok(iSetting > 0 && iBook > iSetting && iDrop > iBook, "settings, then bookkeeping, then the toast");
+  assert.doesNotMatch(seg, /startsWith\(|endsWith\(|\/\^|test\(msg\.type/, "the class is looked up, never guessed from the type's spelling");
+});

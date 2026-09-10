@@ -1735,6 +1735,50 @@ stop button's warning, and said once per fault episode in the error center;
 the automatic pass sends nothing whose record could not land, and the file
 keeps what it holds.
 
+Two files there record restarts. `restart-audit.jsonl` gets a row from
+whatever asks for one: `romp refresh`, the dashboard's restart button, the
+kernel's own update, and the manager before each SIGTERM it sends (action
+`manager-sigterm`, with a `trigger` naming what set it off: `restart`,
+`restart-all`, `refresh` for the stale-manager self-bounce, `stop` for any
+other). When a SIGTERM arrives, the kernel reads the last two hundred rows,
+newest first, for a request within the last 90 seconds (20 minutes for a
+request that asked to wait for a quiet window) and no older than its own
+start: a request that predates the process was delivered to the kernel before
+it, so the walk ends there, except for a quiet-window request, which the
+manager parks and delivers to whichever kernel is running when the window
+opens. A row with an action names the request. The kernel's own `signal` and
+`parent-gone` rows are verdicts a previous kernel filed on its exit, never a
+request, and are passed over. The manager's `manager-sigterm` row is a note
+that the manager sent the signal, not a request: it answers only when no
+request row written before it lies within the window and this kernel's
+lifetime, with `manager-sigterm: <trigger>` as the reason, and a note aimed at
+another kernel's pid is ignored. A row with no action (the `romp refresh` row)
+is skipped, and the manager's `restart-all` note written after it is what
+names the refresh; a `romp refresh --quiet` row is the parked deploy that
+holds the automatic converge until the window opens, and the note written at
+the window names its delivery the same way.
+
+When no row qualifies, the kernel writes a row with action `signal`: the signal
+name, its pid and its parent's pid, the manager pid it was started with,
+whether a manager restart was pending, `managerRequested: false`, and
+`managerStopped`. That last field is what the kernel can see of a service stop
+or restart, which signals the kernel and the manager at once: the manager's pid
+is already gone, or the manager's own stop note lands while the kernel drains
+or within half a second after (the note is written before the kill, so the
+wait bounds an event the kernel expects, not a guess). With `managerStopped:
+true` the reason reads `signal; the manager was stopped too (a service stop or
+restart)`; otherwise `signal, not requested through the manager`, which means
+no request was on record when the kernel read the file, not that the sender
+is known. The sender's pid is never recorded; a Python signal handler does not
+receive it. A kernel whose manager disappears writes a row with action
+`parent-gone` before it exits. `restart-cuts.jsonl` gets one row per exit
+naming the turns the drain cut and the reason: the audit row's `action:
+reason`, the `signal` row's reason, or `parent-gone: the manager exited; the
+kernel followed it`. A second SIGTERM during the drain is ignored; the first
+writes the row. The manager's log says `exited without a restart request
+(signal or crash); respawning` when a kernel exits that it did not ask to stop
+or restart.
+
 The two host registries there, `remotes.json` (attached and checked-in
 machines, each row with that machine's serve token) and `remotes-known.json`
 (machines remembered for re-attach, with the mail tier you set for each), are

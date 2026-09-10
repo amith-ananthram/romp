@@ -396,6 +396,29 @@ EOF
     [ "$status" -ne 0 ]
 }
 
+@test "romp-sdk-setup: a uv-built venv (home plus version_info, no executable) is followed and kept, not rebuilt" {
+    # uv writes `version_info = X.Y.Z` and neither `version =` nor `executable =`. Both readers in the script
+    # must take that key: pick_python, to follow the venv's interpreter, and venv_built_for, to read the tag
+    # it was built for; with either reading nothing, the run rebuilds a venv that already matches. The venv
+    # has no lib directory on purpose: with one, venv_built_for takes the tag from lib/python3.X and this
+    # case would hold with the cfg read gone.
+    VENV="$TEST_DIR/state/sdkvenv"; mkdir -p "$VENV/bin"
+    write_stub_py "$TEST_DIR/uvhome/python3.12" 3.12          # the venv's interpreter, off PATH
+    ln -s "$TEST_DIR/uvhome/python3.12" "$VENV/bin/python"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$VENV/bin/pip"; chmod +x "$VENV/bin/pip"
+    printf 'home = %s\nimplementation = CPython\nuv = 0.8.0\nversion_info = 3.12.3\ninclude-system-site-packages = false\n' \
+        "$TEST_DIR/uvhome" > "$VENV/pyvenv.cfg"
+    write_stub_py "$STUB/python3.14" 3.14                    # a newer python, first on PATH
+
+    PATH="$(bare_path)" run "$ROMP_DIR/bin/romp-sdk-setup"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"REBUILDING"* ]]
+    [[ "$output" != *"picking the newest python"* ]]         # pick_python followed the venv
+    run grep -q "venv-build" "$CALL_LOG"                     # last, and armed (see the twin above)
+    [ "$status" -ne 0 ]
+}
+
 @test "romp-sdk-setup: ROMP_PYTHON naming a missing interpreter is refused as such, not called a too-old python" {
     # The pin the docs recommend for service.env, after an OS upgrade removed what it named. The old
     # diagnosis was "best python found is <pin> (?) but claude-agent-sdk needs >= 3.10", and its remedy
