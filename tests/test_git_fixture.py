@@ -3,6 +3,7 @@
 background work, init_repo and forbid_background write the same keys into the repo, and a commit or a
 fetch through the runner spawns no maintenance or gc child, read off git's own trace. Synthetic content;
 hermetic temp dirs; this module loads no romp code."""
+import calendar
 import os
 import subprocess
 import tempfile
@@ -63,7 +64,8 @@ class Runner(unittest.TestCase):
             self.assertEqual(git(td, "config", "--get", "user.name", ident=("pair@TESTHOST", "pair")).stdout.strip(), "pair", "…and a pair does")
             env = dict(os.environ, GIT_AUTHOR_DATE="2026-01-02T03:04:05+0000", GIT_COMMITTER_DATE="2026-01-02T03:04:05+0000")
             git(td, "commit", "-qm", "two", "--allow-empty", env=env)
-            self.assertEqual(git(td, "log", "-1", "--format=%aI").stdout.strip(), "2026-01-02T03:04:05+00:00", "the env reaches git")
+            # compared as epoch seconds: git spells a zero offset in %aI as "+00:00" or "Z" depending on its version
+            self.assertEqual(git(td, "log", "-1", "--format=%at").stdout.strip(), str(calendar.timegm((2026, 1, 2, 3, 4, 5, 0, 0, 0))), "the env reaches git")
 
 
 class NoBackgroundWork(unittest.TestCase):
