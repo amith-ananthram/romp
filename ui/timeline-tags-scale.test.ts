@@ -168,8 +168,10 @@ const caption = (panel: any) => walk(panel._viewsDialog).find((n) => String(n.te
 const TGRID_PRE = "display:grid;grid-template-columns:max-content max-content max-content 1fr;";
 const tgridOf = (panel: any) => walk(panel._viewsDialog).find((n) => styleOf(n).startsWith(TGRID_PRE));
 const cardOf = (panel: any) => panel._viewsDialog.children[0];
-// the filter pills by their own style signature (the session rows' tag chips share the radius, not the padding)
-const chips = (panel: any) => walk(panel._viewsDialog).filter((n) => styleOf(n).startsWith("cursor:pointer;padding:1px 8px;border-radius:9px;font-size:0.82em;"));
+// the filter pills: the shared tag chip's signature (T321) plus the pointer they alone carry (the tag row's pill is the
+// same chip without it; the lane chips diverge after the size)
+const CHIP_PRE = "display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:9px;font-size:0.82em;border:1px solid ";
+const chips = (panel: any) => walk(panel._viewsDialog).filter((n) => styleOf(n).startsWith(CHIP_PRE) && styleOf(n).includes("cursor:pointer;"));
 // the folded summary: the pane label's row, [label, summary]
 const paneLines = (panel: any) => {
   const out: Record<string, any> = {};
@@ -1045,7 +1047,7 @@ test("executed: the folded summary names only tags that exist; a lens left with 
   // open, the matrix shows the same: no chip for zeta, alpha selected on Chat, nothing selected on Sessions
   caption(panel)._listeners.click();
   const open = paneLines(panel);
-  const sel = (k: string) => open[k].children[1].children.filter((c: any) => styleOf(c).includes("opacity:1;")).map((c: any) => c.textContent);   // selected = the wash and full opacity, never a weight (T321)
+  const sel = (k: string) => open[k].children[1].children.filter((c: any) => !styleOf(c).includes("opacity:")).map((c: any) => c.textContent);   // selected = the full chip; unselected wears the shared fade (T321)
   assert.deepEqual(sel("Chat"), ["alpha"]);
   assert.deepEqual(sel("Sessions"), [], "nothing selected: the same emptiness the folded line reports");
   assert.ok(!walk(panel._viewsDialog).some((n) => n.textContent === "zeta"), "no chip anywhere for the gone name");

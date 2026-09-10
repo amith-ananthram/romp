@@ -4665,8 +4665,9 @@ class TimelinePanel {
             }, 0);
           } else {
             const pill = pillCell.createSpan({ text: tg.name });
-            pill.setAttribute('style', 'display:inline-flex;align-items:center;padding:2px 9px;'
-              + 'border-radius:10px;border:1px solid ' + tc + ';color:' + tc + ';background:transparent;font-weight:400;'   // a tag is never bold (T321)
+            // the one tag chip (T321): the shared pill's bytes at the ROW's size (the inherit case: a row that sizes its chip
+            // drops the chip's own 0.82em, as the strip's group row does), so the table's row height is the row's own
+            pill.setAttribute('style', TAG_CHIP_STYLE.replace('font-size:0.82em;', '') + tc + ';color:' + tc + ';background:transparent;white-space:nowrap;font-weight:400;letter-spacing:normal;'
               + (gid && tg.ids.indexOf(gid) >= 0 ? 'outline:1px solid ' + OUTLINE_FG + ';outline-offset:2px;' : ''));
             // tag federation v2: a queued edit for an unreachable home is VISIBLE, never
             // gone-but-not-gone — the kernel stamps the cached remote entry with `pending`
@@ -4883,11 +4884,13 @@ class TimelinePanel {
             const pill = (text, selected, color, apply) => {
               const c2 = color || MODEL_FG;
               const s2 = cell.createSpan({ text });
-              s2.setAttribute('style', 'cursor:pointer;padding:1px 8px;border-radius:9px;font-size:0.82em;font-weight:400;'   // a tag is never bold (T321): selected is the wash and the full opacity
-                + 'border:1px solid ' + c2 + ';color:' + c2 + ';'
-                + (selected ? 'background:' + SEL_BG + ';opacity:1;' : 'background:transparent;opacity:0.6;'));
+              // the one tag chip (T321): selected = the full chip, unselected = the faded chip (the shared off fade and class),
+              // never a fill or a weight; the pointer is the only addition, this pill being a toggle
+              s2.setAttribute('style', TAG_CHIP_STYLE + c2 + ';color:' + c2 + ';background:transparent;white-space:nowrap;font-weight:400;letter-spacing:normal;cursor:pointer;'
+                + (selected ? '' : 'opacity:' + TAG_CHIP_OFF_OPACITY + ';'));
+              if (!selected) s2.classList.add(TAG_CHIP_OFF_CLASS);
               s2.addEventListener('mouseenter', () => { s2.style.opacity = '1'; });
-              s2.addEventListener('mouseleave', () => { if (!selected) s2.style.opacity = '0.6'; });
+              s2.addEventListener('mouseleave', () => { if (!selected) s2.style.opacity = TAG_CHIP_OFF_OPACITY; });
               s2.addEventListener('click', apply);
               return s2;
             };

@@ -133,9 +133,11 @@ test("drift pins: the inlined chip is the shared tagChip's pill up to the colour
     "…and the tail after the colour carries the shared weight and tracking (T321: never bold)");
   assert.match(MENU, /\+ "font-weight:400;letter-spacing:normal;"/, "the shared pill's own tail, the same bytes");
   // the dialog's two other tag pills (its own signatures: the drag cell's pill, the per-pane filter pills): never bold either (T321)
-  assert.match(SRC, /'border-radius:10px;border:1px solid ' \+ tc \+ ';color:' \+ tc \+ ';background:transparent;font-weight:400;'/, "the tag row's pill");
-  assert.match(SRC, /'cursor:pointer;padding:1px 8px;border-radius:9px;font-size:0.82em;font-weight:400;'/, "the filter pills");
-  assert.match(SRC, /\(selected \? 'background:' \+ SEL_BG \+ ';opacity:1;' : 'background:transparent;opacity:0\.6;'\)/, "selected is the wash and the full opacity, not a weight");
+  assert.match(SRC, /pill\.setAttribute\('style', TAG_CHIP_STYLE\.replace\('font-size:0\.82em;', ''\) \+ tc \+ ';color:' \+ tc \+ ';background:transparent;white-space:nowrap;font-weight:400;letter-spacing:normal;'/,
+    "the tag row's pill: the shared pill's bytes at the row's size (the inherit case)");
+  assert.match(SRC, /s2\.setAttribute\('style', TAG_CHIP_STYLE \+ c2 \+ ';color:' \+ c2 \+ ';background:transparent;white-space:nowrap;font-weight:400;letter-spacing:normal;cursor:pointer;'\s*\n\s*\+ \(selected \? '' : 'opacity:' \+ TAG_CHIP_OFF_OPACITY \+ ';'\)\);\s*\n\s*if \(!selected\) s2\.classList\.add\(TAG_CHIP_OFF_CLASS\);/,
+    "the filter pills: the shared pill plus the pointer; selected = the full chip, unselected = the shared fade and class, never a fill");
+  assert.doesNotMatch(SRC, /SEL_BG \+ ';opacity:1;'|padding:2px 9px|padding:1px 8px;border-radius:9px/, "no third or fourth pill shape in the pane");
   assert.doesNotMatch(SRC, /font-weight:650;'\s*\n?[^\n]*(tc|c2)\b/, "no bold left on a tag-coloured pill");
   // the view's other inlined chips carry the same tail: the dialog rows' lane chips, the [+] join options, the corner filter chips
   assert.match(SRC, /'color:' \+ tc \+ ';border:1px solid ' \+ tc \+ ';background:transparent;font-weight:400;letter-spacing:normal;'\);\s+\/\/ the one tag chip \(T321\)\n/, "the lane chips");
