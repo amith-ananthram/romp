@@ -121,10 +121,11 @@ var GEAR_HTML =
   '</select>' +
   "<div id=rs-tabctx-pick style='position:relative;margin-top:5px'></div>" +
   '</span></div>' +
-  // where a file clicked in the chat opens (render.ts openPath through file-route.ts): the hidden select is
+  // where a file or folder clicked in the chat opens (render.ts openPath and openBrowse through file-route.ts):
+  // the hidden select is
   // the value holder, selectPick below dresses it as a house menu like the other selects
   "<div class='rs-row' style='cursor:default'><span style='flex:1 1 auto;min-width:0'><b>File links open in</b>" +
-  '<span class=rs-sub>Where a file clicked in the chat opens. While the Files pane is open, the file opens there. When the pane is closed, this setting decides: over the pane you clicked, or in the Files pane, which then opens and stays open. Browser dashboard only: in VS Code file links open in the editor, and a chat tab opened on its own has no Files pane.</span>' +
+  '<span class=rs-sub>Where a file or folder clicked in the chat opens. While the Files pane is open, both open there. When the pane is closed, this setting decides: over the pane you clicked, or in the Files pane, which then opens and stays open. Browser dashboard only: in VS Code file links open in the editor, and a chat tab opened on its own has no Files pane.</span>' +
   "<select id=rs-filelink style='display:none'>" +
   '<option value=chat>The pane you clicked</option><option value=pane>The Files pane</option>' +
   '</select>' +

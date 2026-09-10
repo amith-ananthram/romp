@@ -53,7 +53,7 @@ import { injectedHead, type InjectedSource } from "./injected-source";
 import { subTabId, isSubId, subParts, subLabel, gistLines, stepLines, stepsNote, agentFoldLabel, subHeadParts, subWaitTail, openIconSvg, pinIconSvg, type SubMeta, type AgentGist, type AgentGistRow, type GistLine } from "./subagent-view";
 import { previewKind, previewFull, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal, mdImgPostPass, setLightboxNav, type LightboxNavEntry } from "./preview";
 import { openFileClick } from "./file-view";                  // a clicked file WITH its gesture (pdf-new-tab.test.ts)
-import { fileLinkRoute } from "./file-route";                 // where the click opens: here, or the Files pane (file-route.test.ts)
+import { fileLinkRoute, browseRoute, type BrowseRoute } from "./file-route";   // where a file or folder click opens: here, or the Files pane (file-route.test.ts, browse-route.test.ts)
 // initFileView rides its OWN line: the import above is pinned verbatim by file-view.test.ts
 import { initFileView, setFileViewIdentity, hostStub } from "./file-view";
 import { openUrlView } from "./file-view";                 // the URL mode of the same viewer (md-url-view.test.ts)
@@ -1399,7 +1399,8 @@ document.addEventListener("click", (e) => {
 // only when the setting names it; a relay only when a shell exists to relay to (framed). Standalone
 // /chat has no shell and no other pane, so the setting quietly means "here", the in-document modal.
 // The gate lives at THIS end deliberately: the shell forwards whatever arrives, so a message never
-// sent is a click that opens in place, and no setting check shell-side can swallow a click.
+// sent is a click that opens in place, and no setting check shell-side can swallow a click. A FOLDER
+// click walks the same ladder through browseRoute (openBrowse below), so a listing lands where a file would.
 //
 // panesOn is the shell's pane set as the shell last told it: {romp:"panes", on:{chat,feed,files,...}},
 // posted on every pane toggle (its apply(), the exact event of the set changing), on this iframe's
@@ -1440,24 +1441,50 @@ function onMiddleClick(a: HTMLElement, fn: (e: MouseEvent) => void): void {
   a.addEventListener("auxclick", (e) => { if (e.button !== 1) return; e.stopPropagation(); fn(e); });
 }
 
-// Surface the FILE BROWSER at `path` for the session: the shell brings the feed pane forward and the
-// browser overlay opens there (unlike openPath's in-pane viewer modal, the browser overlay lives in
-// the feed document). Web-only, and only when a shell exists to relay to; VS Code's affordances are
-// gated off at their call sites (the editor has its own explorer, and the webview can't reach the
-// kernel origin anyway).
-function openBrowse(path: string, sid?: string | null): void {
-  // PANE-LOCAL since 2026-08-24 (the user: it opened over the FEED cards — the wrong pane): the
-  // browser is a modal over the chat that launched it, the same document the viewer already uses —
-  // no shell lift, no pane juggling (the shell's browseClosed restore is a no-op here: it only
-  // fires when the shell itself lifted the feed). Web-only stands — the VS Code webview cannot
-  // reach the kernel origin, and the editor has its own explorer.
+// Where a FOLDER click opens right now: the file link's ladder asked for a browse (file-route.ts browseRoute),
+// read live at the click. One reader for the click (openBrowse) and one for the tab menu's sub-line, which
+// tells the person where Browse files will land, so the two cannot disagree.
+function browseRouteNow(): BrowseRoute {
   const web = location.protocol === "http:" || location.protocol === "https:";
-  if (!web) return;
-  openFileBrowse(path || ".", sid || activeId || null);
+  return browseRoute(web, settings.fileLinkPane, window.parent !== window, panesOn.files === true);
 }
-// (The old forwarder that relayed the viewer's directory-half {romp:'browseFiles'} ask to the shell
-// is gone with the move: initFileBrowse's own listener answers it in THIS document now.)
-initFileBrowse((m) => vscodeApi?.postMessage(m));
+// Surface the FILE BROWSER at `path` for the session: the folder shown under the chat, the system context
+// card's Directory row, a tab menu's Browse files, a chat-hosted viewer's directory link. The listing goes
+// where a file link would (the ladder above):
+//   "pane"   the Files pane is on screen, or the gear's "File links open in" names it: the listing opens IN
+//            that pane (files.ts hosts the same browser as a column); a closed pane comes forward and stays.
+//            The message names its target and carries the session's IDENTITY (name and colour, looked up the
+//            way openPath's viewFile looks it up, null when neither list names the sid) for the pane, which
+//            has no session list to name a picked file's session by. Fire-and-forget by nature: postMessage
+//            to a live parent never throws. A viewer up over this chat is left alone: the listing opens
+//            elsewhere, closing it would buy nothing here, and with unsaved edits it would cost a discard
+//            prompt the click never needed.
+//   "here"   the default while the pane is closed, and the only route without a shell (standalone /chat): the
+//            browser as a modal over this chat, as since 2026-08-24 (the user then: it opened over the FEED
+//            cards, the wrong pane). openFileBrowse closes a viewer up over this chat first ("browse" means
+//            the person wants the listing now, the browser's own rule), and a dirty-edit veto there stands
+//            the click down whole.
+//   "editor" VS Code: nothing here. asFolderLink gave the click openFolder instead (the editor has its own
+//            explorer, and the webview cannot reach the kernel origin).
+function openBrowse(path: string, sid?: string | null): void {
+  const route = browseRouteNow();
+  if (route === "editor") return;
+  const to = sid || activeId || null;
+  if (route === "here") { openFileBrowse(path || ".", to); return; }
+  const s = to ? (sessions.get(to) ?? tabMeta.get(to)) : undefined;
+  window.parent.postMessage({ romp: "browseFiles", path: path || ".", sid: to, pane: "pane",
+    identity: s && s.name ? { name: s.name, color: s.color ?? null } : null }, "*");
+}
+// The chat hosts its own browser instance for the "here" route, under its own contract (file-browse.ts
+// BrowseHost). A chat-hosted viewer's directory link posts browseFiles to THIS window (file-view.ts); onRelay
+// hands that ask to openBrowse, so it walks the same ladder as a folder click instead of always opening in
+// place. The chat never asks the shell to lift a pane for its browser, so its close owes the shell no restore
+// (shellRestore false: a browseClosed from here would consume a flag the FEED's relay armed and hide the feed
+// under its own browser). A pick in the chat's own listing opens the viewer here, the default.
+initFileBrowse((m) => vscodeApi?.postMessage(m), {
+  shellRestore: false,
+  onRelay: (m) => openBrowse(m.path, typeof m.sid === "string" ? m.sid : null),
+});
 
 // A clickable file name that opens the real file — in the editor (VS Code) or the in-pane viewer
 // modal (web). Shared open/navigate surface; see extension.ts's openFile handler and file-view.ts.
@@ -3412,11 +3439,13 @@ function asFolderLink(elem: HTMLElement, cwd: string, sid?: string): void {
   if (!cwd) return;
   // On the web a click BROWSES the folder in the dashboard (the user 2026-08-14) — the affordance
   // that works from every device, where OS-open acted on the KERNEL's machine (the wrong-machine
-  // class the 📎 picker and file links were cured of). OS-open survives on
-  // the row's right-click menu for the genuinely-local case (the contextmenu delegate below). In
-  // VS Code the browser overlay doesn't exist, so the click keeps opening the folder host-side.
+  // class the 📎 picker and file links were cured of). WHERE the listing opens is decided at the
+  // click, not here (openBrowse: the Files pane while it is on screen or the gear names it, else over
+  // this chat). OS-open survives on the row's right-click menu for the genuinely-local case (the
+  // contextmenu delegate below). In VS Code the browser overlay doesn't exist, so the click keeps
+  // opening the folder host-side.
   const web = location.protocol === "http:" || location.protocol === "https:";
-  elem.dataset.act = web ? "browseFiles" : "openFolder";   // pane-local browse needs no shell (2026-08-24)
+  elem.dataset.act = web ? "browseFiles" : "openFolder";   // the act names the intent; openBrowse routes it
   elem.dataset.cwd = cwd;
   if (sid) elem.dataset.id = sid;
   elem.classList.add("folder-link");
@@ -6501,16 +6530,20 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
     menu.appendChild(tagsItem);
   }
   // BROWSE FILES — at the BOTTOM behind its own divider (the user 2026-08-24: it is a different
-  // kind of thing from the toggles above), wearing the standard icon + sub-description dress, and
-  // opening PANE-LOCAL over this chat (openBrowse). Web-only: the VS Code webview cannot reach the
-  // kernel origin, and the editor has its own explorer.
+  // kind of thing from the toggles above), wearing the standard icon + sub-description dress. It opens
+  // where a folder click opens (openBrowse's ladder: the Files pane, or over this chat), and the sub-line
+  // names that place, read when the menu builds. Web-only: the VS Code webview cannot reach the kernel
+  // origin, and the editor has its own explorer.
   if (location.protocol === "http:" || location.protocol === "https:") {
     menu.appendChild(el("div", "ctx-sep"));
     const browse = el("div", "ctx-item ctx-item-toggle");
     browse.appendChild(ctxIcon("folder", false));
     const bodyEl = el("span", "ctx-item-body");
     const l = el("span", "ctx-item-label"); l.textContent = "Browse files"; bodyEl.appendChild(l);
-    const sb = el("span", "ctx-item-sub"); sb.textContent = "the session's working tree, in a viewer over this chat"; bodyEl.appendChild(sb);
+    const where = browseRouteNow();
+    const sb = el("span", "ctx-item-sub");
+    sb.textContent = "the session's working tree, " + (where === "pane" ? "in the Files pane" : "in a viewer over this chat");
+    bodyEl.appendChild(sb);
     browse.appendChild(bodyEl);
     browse.addEventListener("click", (ev) => {
       ev.stopPropagation(); dismissTabMenu();

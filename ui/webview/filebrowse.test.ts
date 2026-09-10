@@ -80,7 +80,9 @@ test("rows carry an honest verdict: download-only files are dimmed and download 
   assert.match(BROWSE, /if \(row\.dataset\.act === "dl"\) startDownload\(p\);/);
   assert.match(FEED_CSS, /\.fb-dlonly \.fb-name \{ color: var\(--dim\); \}/);
   // viewable files open through the EXISTING viewer — one leaf open action for the whole dashboard
-  assert.match(BROWSE, /if \(row\.dataset\.act === "file"\) \{ openFileClick\(ev, p, curSid\); return; \}/);   // with the row's click: a modified click on a PDF takes a browser tab
+  // with the row's click (a modified click on a PDF takes a browser tab), and the hosting document's own open
+  // beneath the gesture when it has one (BrowseHost.openFile, browse-route.test.ts)
+  assert.match(BROWSE, /if \(row\.dataset\.act === "file"\) \{ openFileClick\(ev, p, curSid, openPick \?\? undefined\); return; \}/);
 });
 
 test("clicks are delegated to stable roots and the cap is stated in-band", () => {
@@ -99,11 +101,12 @@ test("Escape closes the TOPMOST surface only, and Backspace walks up", () => {
 });
 
 test("every entry point is gated to where the click can land, and posts the one shell message", () => {
-  // chat: openBrowse is PANE-LOCAL (2026-08-24 — it used to relay to the shell and open over the
-  // FEED, the wrong pane): the browser opens over the chat that launched it, web-only, framed or not
-  assert.match(RENDER, /openFileBrowse\(path \|\| "\.", sid \|\| activeId \|\| null\);/);
-  assert.match(RENDER, /initFileBrowse\(\(m\) => vscodeApi\?\.postMessage\(m\)\);/, "the chat hosts its own browser instance");
-  assert.doesNotMatch(RENDER, /window\.parent\.postMessage\(\{ romp: "browseFiles"/, "no shell relay from the chat anymore");
+  // chat: openBrowse walks the file link's ladder at the click (file-route.ts browseRoute, browse-route.test.ts):
+  // in place over the chat for "here", handed up naming the Files pane for "pane", nothing in VS Code
+  assert.match(RENDER, /const route = browseRouteNow\(\);\n\s*if \(route === "editor"\) return;/);
+  assert.match(RENDER, /if \(route === "here"\) \{ openFileBrowse\(path \|\| "\.", to\); return; \}/);
+  assert.match(RENDER, /window\.parent\.postMessage\(\{ romp: "browseFiles", path: path \|\| "\.", sid: to, pane: "pane",/, "the pane route names its target");
+  assert.match(RENDER, /initFileBrowse\(\(m\) => vscodeApi\?\.postMessage\(m\), \{\n\s*shellRestore: false,/, "the chat hosts its own browser instance, under its own contract");
   // tab right-click menu row: bottom of the menu, behind a divider, icon + sub-description
   assert.match(RENDER, /l\.textContent = "Browse files"; bodyEl\.appendChild\(l\);/);
   // feed card menu row rides canPreview (web only — the VS Code webview can't reach the kernel
@@ -207,8 +210,8 @@ test("Browse files sits at the BOTTOM of the tab menu, behind a divider, wearing
             && menuBody.slice(0, browseAt).trimEnd().includes('menu.appendChild(el("div", "ctx-sep"));'),
     "a divider immediately precedes it — a different kind of thing");
   assert.match(menuBody.slice(browseAt - 400, browseAt), /ctxIcon\("folder", false\)/, "the folder icon");
-  assert.match(menuBody, /sb\.textContent = "the session's working tree, in a viewer over this chat";/,
-    "the standard sub-description line");
+  assert.match(menuBody, /sb\.textContent = "the session's working tree, " \+ \(where === "pane" \? "in the Files pane" : "in a viewer over this chat"\);/,
+    "the standard sub-description line, naming where the listing will open (browse-route.test.ts)");
   // …and the Billing submenu (the previous last item) now sits ABOVE it
   assert.ok(menuBody.indexOf('l.textContent = "Billing"') < browseAt, "Browse is last");
 });

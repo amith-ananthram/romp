@@ -17,16 +17,18 @@
 //     here exactly as it does over the chat (the kernel's 8-character stub when the relay carried none);
 //   * the relay is taken WHOLE (initFileView's onRelay), so the identity is cached before the open and the
 //     open enters the Recent list; the pane owes the shell nothing back, since it stays up.
-// The viewer's directory link opens the shared file browser in this document, as it does over the chat
-// (initFileBrowse, the default contract); a file picked from its rows opens the viewer over the listing. That
-// browser still posts {romp:"browseClosed"} up on its close, as it does over the chat; the shell acts on it
-// only while a feed-routed browse has turned the feed on (window.__rompFeedWasOff), so from this pane it is
-// inert. A contract of the pane's own for the browser comes with the folder route into this pane.
+//   * the shell's browseFiles relay ({romp:"browseFiles", path, sid, identity}: a folder clicked in the chat
+//     while this pane is on screen or the setting names it, render.ts openBrowse) opens the shared file BROWSER
+//     here, the listing as a column of its own (initFileBrowse's host contract, file-browse.ts BrowseHost). The
+//     identity it carries is cached the same way, so a file picked from the listing names its session in the
+//     chip, and the pick itself opens through openHere (BrowseHost.openFile), so it enters the Recent list. The
+//     viewer's directory link reaches the same browser, in this document. The browser owes the shell no
+//     browseClosed (shellRestore false): the pane stays up, and that message is the FEED's restore.
 // Close returns to the empty state, never to a hidden pane: closeFileView and closeFileBrowse only remove
 // their element, and the placeholder repaints when neither is up (a body childList observer, the event
 // itself, no polling), which also covers the browser's back path and the conflict Reload's replace.
 import { initFileView, openFileView, setFileViewIdentity, hostStub, type FileViewIdentity } from "./file-view";
-import { initFileBrowse } from "./file-browse";
+import { initFileBrowse, openFileBrowse } from "./file-browse";
 import { delegate } from "./actions";
 import { applyTheme } from "./theme";
 import { loadSettings, installSettingsSync, onExternalSettingsChange } from "./settings";
@@ -71,7 +73,7 @@ function paint(): void {
   if (open) return;
   const title = el("div", "fs-title"); title.textContent = "No file open";
   const hint = el("div", "fs-hint");
-  hint.textContent = "While this pane is open, a file clicked in the chat opens here. To open files here while it is closed, set File links open in to The Files pane in the gear.";
+  hint.textContent = "While this pane is open, a file or folder clicked in the chat opens here. To open them here while it is closed, set File links open in to The Files pane in the gear.";
   const out: HTMLElement[] = [title, hint];
   if (recent.length) {
     const list = el("div", "fs-recent");
@@ -111,8 +113,18 @@ setFileViewIdentity((id) => identities.get(id) ?? hostStub(id));
 initFileView((m) => vscodeApi?.postMessage(m), (m) => {
   openHere(m.path, typeof m.sid === "string" ? m.sid : null, asIdentity(m.identity));
 });
-// the viewer's directory link opens the file browser here, over this pane, as it does over the chat
-initFileBrowse((m) => vscodeApi?.postMessage(m));
+// the shared file browser, under this pane's contract (see the header): a relayed folder lists here with its
+// session's identity cached, a pick opens through openHere, and the close owes the shell nothing
+initFileBrowse((m) => vscodeApi?.postMessage(m), {
+  shellRestore: false,
+  onRelay: (m) => {
+    const sid = typeof m.sid === "string" ? m.sid : null;
+    const id = asIdentity(m.identity);
+    if (sid && id) identities.set(sid, id);
+    openFileBrowse(m.path || ".", sid);
+  },
+  openFile: (p, sid) => openHere(p, sid, null),
+});
 
 // re-open rows: delegated on the stable #files-empty (actions.ts), so a repaint mid-click still lands
 (() => {

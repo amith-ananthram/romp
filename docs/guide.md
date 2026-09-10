@@ -251,11 +251,16 @@ and the feed, so an open file covers neither. While the pane is open, a file
 link clicked in the chat opens in it. When it is closed, the gear's **File
 links open in** setting decides where a link opens: over the pane you clicked
 (the default), or in the Files pane, which then opens and stays open; on a
-phone, closing the file takes you back to the tab you came from. Selecting a
-passage in the viewer puts the quote in the chat's composer, as it does from
-the viewer over the chat. When no file is open, the pane lists the files most
-recently opened in it; click one to open it again. The pane is off by default;
-the bottom bar turns it on, and on a phone it is a tab like the others.
+phone, closing the file takes you back to the tab you came from. The folder
+shown under the chat (the session's working directory), the **Directory** row
+of the **System context** card and **Browse files** on a tab's right-click menu
+open a listing of that folder by the same rule: in this pane while it is open
+or when the setting names it, otherwise over the chat. Pick a file in the
+listing and it opens where the listing is. Selecting a passage in the viewer
+puts the quote in the chat's composer, as it does from the viewer over the
+chat. When no file is open, the pane lists the files most recently opened in
+it; click one to open it again. The pane is off by default; the bottom bar
+turns it on, and on a phone it is a tab like the others.
 
 ## Automatic nudges
 

@@ -74,8 +74,9 @@ test("the pane hosts the shared viewer and takes the shell's relay WHOLE: its ow
   assert.ok(relayBranch.indexOf("openFileView(m.path") >= 0, "the default open is present");
   assert.ok(relayBranch.indexOf(guard) < relayBranch.indexOf("openFileView(m.path"),
     "a document's own contract takes the message before the default open runs");
-  // the viewer's directory link opens the file browser in this document, as it does over the chat
-  assert.match(SRC, /initFileBrowse\(\(m\) => vscodeApi\?\.postMessage\(m\)\);/);
+  // the file browser is hosted here under the pane's own contract (browse-route.test.ts): a relayed folder lists
+  // here with its identity cached, a pick opens through openHere, and the close owes the shell nothing
+  assert.match(SRC, /initFileBrowse\(\(m\) => vscodeApi\?\.postMessage\(m\), \{\n\s*shellRestore: false,/);
   // not a feed consumer: no frame parsing of any kind
   assert.doesNotMatch(SRC, /m\.type === "feed"|feedDelta|ledgers|\.asks\b|needFullFeed/);
   assert.match(SRC, /vscodeApi\?\.postMessage\(\{ type: "ready" \}\)/, "the ready handshake, as every pane sends it");
