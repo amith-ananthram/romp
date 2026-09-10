@@ -180,16 +180,46 @@ def _codex_config(config_cls, codex_bin, state_dir=None):
                       config_overrides=overrides, **extra)
 
 
+def _running_python_tag():
+    """This interpreter as venv names its lib directory: `3.14`, or `3.14t` for a free-threaded build.
+    The twin of kernel.py's _running_python_tag and sdk_backend.running_python_tag; this module loads
+    on its own, so it carries its own copy."""
+    return "%d.%d%s" % (sys.version_info[0], sys.version_info[1],
+                        "t" if "t" in getattr(sys, "abiflags", "") else "")
+
+
+_CODEX_VENV_BUILT_FOR = []   # the tags a mismatched codexvenv was last seen built for: one stderr line per verdict
+
+
 def ensure_codex_sdk(state_dir):
-    """Make openai_codex importable: an already-installed copy wins, else the dedicated venv built
-    by bin/romp-codex-setup ($STATE/codexvenv — never system python). True when importable."""
+    """Make openai_codex importable: an already-installed copy wins, else the dedicated venv built by
+    bin/romp-codex-setup ($STATE/codexvenv, never system python), and of that venv ONLY the
+    site-packages built for the python this process runs (_running_python_tag), as kernel.py's
+    _ensure_sdk_on_path does for the SDK venv. The venv's compiled extensions are per-interpreter. Every
+    codexvenv/lib/python3.*/site-packages used to be inserted at sys.path[0] whatever the interpreter,
+    so a codexvenv built with a newer python (the picker before 2026-09-06 took the newest on PATH)
+    failed deep inside the import under the kernel's python, with an error naming a module rather than
+    the venv, and shadowed shared dependencies for every later lazy import in the process. A venv for
+    another tag adds nothing and is named on stderr once, with the remedy. True when importable."""
     import importlib.util
     import glob
+    global _CODEX_VENV_BUILT_FOR
     if importlib.util.find_spec("openai_codex"):
         return True
-    for sp in sorted(glob.glob(str(Path(state_dir) / "codexvenv" / "lib" / "python3.*" / "site-packages"))):
+    running = _running_python_tag()
+    found = sorted(glob.glob(str(Path(state_dir) / "codexvenv" / "lib" / "python3.*" / "site-packages")))
+    match = [sp for sp in found if Path(sp).parent.name == "python" + running]
+    for sp in match:
         if sp not in sys.path:
             sys.path.insert(0, sp)
+    if found and not match:
+        built = sorted(Path(sp).parent.name[len("python"):] for sp in found)
+        if built != _CODEX_VENV_BUILT_FOR:          # one line per verdict, not one per launch
+            _CODEX_VENV_BUILT_FOR = built
+            sys.stderr.write("codex-backend: codexvenv is built for python %s but the kernel runs %s: re-run "
+                             "bin/romp-codex-setup to rebuild it for %s\n" % (" and ".join(built), running, running))
+        return False
+    _CODEX_VENV_BUILT_FOR = []
     return importlib.util.find_spec("openai_codex") is not None
 
 

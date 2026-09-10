@@ -14534,7 +14534,9 @@ _SDK_MCP = Path(os.path.expanduser("~/.claude/romp-postal.mcp.json"))
 _SDK_PROMPT = Path(os.path.expanduser("~/.claude/romp-session-prompt.md"))
 # What a session-creation refusal says when the Agent SDK isn't provisioned. ONE string for the browser
 # toast and the `romp new` JSON, because they are the same sentence to the same person: nothing was
-# created, and here is the single command that fixes it. Names the remedy, not the missing module.
+# created, and here is the single command that fixes it. Names the remedy, not the missing module. Both
+# surfaces read it through _sdk_setup_hint, which asks the backend's venv verdict at request time and
+# hands this string over as the default for the verdicts where the install remedy fits.
 SDK_SETUP_HINT = ("Session not created: the Claude Code backend's Agent SDK isn't installed. "
                   "Run bin/romp-sdk-setup, then try again. (Claude Code (tmux) sessions still work.)")
 
@@ -14550,19 +14552,89 @@ def _claude_bin():
     return os.environ.get("ROMP_CLAUDE_BIN") or shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
 
 
+# The python tags the SDK venv on disk was built for, when NONE of them is the one this process runs;
+# [] otherwise. Set by _ensure_sdk_on_path, read by _sdk_import_notice (so the boot log does not add
+# an "install it" line over an installed venv) and by _sdk_setup_hint's fallback for a kernel whose
+# backend module never loaded. The surfaces a user reads (the session card, the creation refusal)
+# take their verdict from the backend at request time (SdkBackend.unavailable_verdict), not from here.
+_SDK_VENV_BUILT_FOR = []
+
+
+def _running_python_tag():
+    """This interpreter as venv names its lib dir: `3.14`, or `3.14t` for a free-threaded build (venv
+    appends the abi tag to the directory, lib/python3.14t). Matching on major.minor alone would make a
+    kernel on 3.14t refuse the venv that very interpreter built as a mismatch, and neither remedy it
+    names could exit that state. Twin of sdk_backend.running_python_tag, which cannot be imported
+    here: this runs before the backend module loads."""
+    return "%d.%d%s" % (sys.version_info[0], sys.version_info[1],
+                        "t" if "t" in getattr(sys, "abiflags", "") else "")
+
+
 def _ensure_sdk_on_path():
     """Make claude_agent_sdk importable by the kernel's interpreter. Prefer an already-installed
-    copy; otherwise add the dedicated venv's site-packages (built by bin/romp-sdk-setup with the
-    SAME python, so the ABI matches) — the SDK dependency lives under ~/.local/state/romp/sdkvenv and
-    never touches system python. Returns True when importable."""
+    copy; otherwise add the dedicated venv's site-packages (built by bin/romp-sdk-setup under
+    ~/.local/state/romp/sdkvenv, never touching system python), but ONLY the one built for the python
+    this process runs (_running_python_tag). The venv's compiled extensions are per-interpreter: adding
+    a 3.X venv to a 3.Y kernel fails deep inside the import with a message that blamed a missing
+    install (2026-09-06, when a newer python appeared on the machine between two respawns and every
+    SDK session died for two hours). A venv present for another version adds nothing and is named on
+    stderr, once, with both remedies (a log line; the user-facing surfaces name the one remedy the disk
+    supports, see SdkBackend.unavailable_verdict). Returns True when importable."""
     import importlib.util
     import glob
+    global _SDK_VENV_BUILT_FOR
     if importlib.util.find_spec("claude_agent_sdk"):
         return True
-    for sp in sorted(glob.glob(str(jd.STATE / "sdkvenv" / "lib" / "python3.*" / "site-packages"))):
+    running = _running_python_tag()
+    found = sorted(glob.glob(str(jd.STATE / "sdkvenv" / "lib" / "python3.*" / "site-packages")))
+    match = [sp for sp in found if Path(sp).parent.name == "python" + running]
+    for sp in match:
         if sp not in sys.path:
             sys.path.insert(0, sp)
+    if found and not match:
+        built = sorted(Path(sp).parent.name[len("python"):] for sp in found)
+        if built != _SDK_VENV_BUILT_FOR:          # one line per verdict, not one per caller
+            _SDK_VENV_BUILT_FOR = built
+            sys.stderr.write("sdk-backend: sdkvenv is built for python %s but the kernel runs %s: re-run "
+                             "bin/romp-sdk-setup to rebuild it for %s, or set ROMP_PYTHON to the venv's "
+                             "interpreter and restart romp\n" % (" and ".join(built), running, running))
+        return False
+    _SDK_VENV_BUILT_FOR = []
     return importlib.util.find_spec("claude_agent_sdk") is not None
+
+
+def _sdk_import_notice():
+    """The boot log's one line when claude_agent_sdk will not import, and _sdk_locked's gate: "not found,
+    run bin/romp-sdk-setup" ONLY when no venv mismatch explains it. A mismatch was already named by
+    _ensure_sdk_on_path, and a second line prescribing an install over an installed venv was the
+    misleading message of 2026-09-06. Returns whether the SDK is importable."""
+    ok = _ensure_sdk_on_path()
+    if not ok and not _SDK_VENV_BUILT_FOR:
+        sys.stderr.write("sdk-backend: claude_agent_sdk not found: run bin/romp-sdk-setup to "
+                         "enable the non-tmux backend (tmux sessions are unaffected)\n")
+    return ok
+
+
+def _sdk_setup_hint():
+    """The session-creation refusal (`romp new`, the browser's create) when _sdk_ready() is False. ONE
+    source of truth with the session card: the backend's venv verdict, read at request time
+    (SdkBackend.creation_refusal reads the same unavailable_verdict the card's launch_error does), so a
+    venv rebuilt while the kernel runs makes both say "restart romp", and a ROMP_PYTHON pin is named
+    only for an interpreter that was seen to run. Without a backend to ask (its module failed to load)
+    the fallback names a mismatch _ensure_sdk_on_path saw with the rebuild remedy alone, the one this
+    process can vouch for without a probe; otherwise the plain install hint."""
+    be = _sdk_backend
+    try:
+        if be and hasattr(be, "creation_refusal"):
+            return be.creation_refusal(default=SDK_SETUP_HINT)
+    except Exception:
+        pass
+    if _SDK_VENV_BUILT_FOR:
+        return ("Session not created: the Claude Code backend's Agent SDK was set up for Python %s, but romp "
+                "is running on Python %s. Re-run bin/romp-sdk-setup to rebuild it for Python %s, restart romp "
+                "and try again. (Claude Code (tmux) sessions still work.)"
+                % (" and ".join(_SDK_VENV_BUILT_FOR), _running_python_tag(), _running_python_tag()))
+    return SDK_SETUP_HINT
 
 
 def _sdk():
@@ -14595,16 +14667,15 @@ def _sdk_locked():
     global _sdk_backend
     if _sdk_backend is None:
         try:
-            if not _ensure_sdk_on_path():
-                sys.stderr.write("sdk-backend: claude_agent_sdk not found — run bin/romp-sdk-setup to "
-                                 "enable the non-tmux backend (tmux sessions are unaffected)\n")
-                # The backend is STILL built, deliberately: it owns the registry, the persisted queues and
-                # the chat those sessions render from, and dropping it would take the user's unsent
-                # messages off screen along with it. What it must not do is pretend to work — it detects
-                # the missing dep itself and reports every session as unable to start (launch_error), which
-                # is what puts this line in front of the user instead of only in the kernel log. Before
-                # that, a fresh install whose romp-sdk-setup had bailed looked like romp silently eating
-                # every message (the user 2026-07-28).
+            # The boot log's one line when the SDK will not import (_sdk_import_notice: "not found" only
+            # when no venv mismatch explains it). The backend is STILL built, deliberately: it owns the
+            # registry, the persisted queues and the chat those sessions render from, and dropping it
+            # would take the user's unsent messages off screen along with it. What it must not do is
+            # pretend to work: it detects the missing dep itself and reports every session as unable to
+            # start (launch_error), which is what puts this line in front of the user instead of only in
+            # the kernel log. Before that, a fresh install whose romp-sdk-setup had bailed looked like romp
+            # silently eating every message (the user 2026-07-28).
+            _sdk_import_notice()
             sbmod = load_source("romp_sdk_backend", HERE / "sdk_backend.py")
             # The backend claims the login tokens out of os.environ once (startup_auth_env), and the judges
             # read that same stash through this wire for their login-billed children. No key rides here:
@@ -50929,7 +51000,7 @@ class Handler(BaseHTTPRequestHandler):
                                       "application/json")
                 if be_req == "sdk":
                     if not _sdk_ready():          # see _sdk_ready — a built backend is not a working one
-                        return self._send(200, json.dumps({"ok": False, "error": SDK_SETUP_HINT}),
+                        return self._send(200, json.dumps({"ok": False, "error": _sdk_setup_hint()}),
                                           "application/json")
                     a = (b or {}).get("auth")
                     sid, extra = _create_sdk_session(nm, cwd, auth=(a if a in ("login", "key") else ""),
@@ -52360,7 +52431,7 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         # NEVER silently fall back to tmux (the user asked for SDK and got a mystery tmux
                         # session on a remote host without the venv, 2026-07-02). Say what's missing.
-                        client["send"](json.dumps({"type": "warn", "text": SDK_SETUP_HINT}))
+                        client["send"](json.dumps({"type": "warn", "text": _sdk_setup_hint()}))
                 elif msg.get("backend") == "codex":   # an OpenAI Codex thread (plans/codex-backend.md)
                     if _codex_ready():
                         try:

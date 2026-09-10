@@ -6815,6 +6815,35 @@ class ViewBuilder(unittest.TestCase):
         self.assertIn("romp-sdk-setup", warn["text"], "the warn names the fix")
         self.assertEqual(spawned, [], "no tmux fallback session is created")
 
+    def test_createSession_refusal_is_the_backends_verdict(self):
+        """The warn's text is what the backend says about its venv NOW (creation_refusal over the same
+        verdict the session card reads), not a fixed string: a venv built for another python, or one
+        rebuilt while the kernel ran, is named as such on this door too, with the kernel's plain install
+        hint handed over as the default for the verdicts where it fits."""
+        class _Unusable:
+            def available(self):
+                return False
+
+            def creation_refusal(self, default):
+                return "THE VERDICT: %s" % default
+        fake = _Unusable()
+        saved = km._sdk, km._sdk_backend, km._spawn_session, km._tmux_sessions
+        km._sdk, km._sdk_backend = (lambda: fake), fake
+        spawned = []
+        km._spawn_session = lambda nm, cwd: spawned.append(nm)
+        km._tmux_sessions = lambda: {}
+        sent = []
+        client = {"send": lambda s: sent.append(json.loads(s)), "app": "chat"}
+        try:
+            km.Handler._dispatch_ws(None, {"type": "createSession", "name": "sdlkless", "backend": "sdk"}, client)
+            time.sleep(0.05)
+        finally:
+            km._sdk, km._sdk_backend, km._spawn_session, km._tmux_sessions = saved
+        warn = next((m for m in sent if m.get("type") == "warn"), None)
+        self.assertIsNotNone(warn)
+        self.assertEqual(warn["text"], "THE VERDICT: " + km.SDK_SETUP_HINT)
+        self.assertEqual(spawned, [])
+
     def test_timeline_state_and_metadata_from_tmux(self):
         # live lanes take model/effort/context from tmux @claude-* vars; the STATE is the shared
         # _session_chip derivation (the user 2026-07-03) — an idle tmux 'waiting' reads as chip 'ready'.
@@ -7939,6 +7968,27 @@ class NewSessionRoute(unittest.TestCase):
             km._sdk, km._live_names = saved_sdk, saved_live
         self.assertFalse(body["ok"], "a backend that cannot import its SDK must refuse, not create")
         self.assertIn("romp-sdk-setup", body["error"])
+
+    def test_the_refusal_is_the_backends_verdict(self):
+        """`romp new`'s error is the backend's creation_refusal, read at request time over the same venv
+        verdict the session card shows (a venv for another python, or one rebuilt while the kernel ran, is
+        named as such here too); the kernel's plain install hint rides in as the default."""
+        class _Unusable:
+            def available(self):
+                return False
+
+            def creation_refusal(self, default):
+                return "THE VERDICT: %s" % default
+        fake = _Unusable()
+        saved = km._sdk, km._sdk_backend, km._live_names
+        km._sdk, km._sdk_backend, km._live_names = (lambda: fake), fake, (lambda t: {})
+        try:
+            code, body = self._post({"name": "api", "dir": tempfile.gettempdir()})
+        finally:
+            km._sdk, km._sdk_backend, km._live_names = saved
+        self.assertEqual(code, 200)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["error"], "THE VERDICT: " + km.SDK_SETUP_HINT)
 
     def test_existing_live_name_is_an_idempotent_ok(self):
         saved_live = km._live_names
