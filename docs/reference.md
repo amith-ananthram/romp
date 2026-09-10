@@ -1270,6 +1270,17 @@ frames it received is measured in the panes themselves, by
   keeps the function name in a key readable across rebuilds (the position
   still moves with any edit to the bundle); whitespace and syntax are still
   minified.
+- The dashboard shell (the top-level window that frames the panes) runs the
+  same collector under app `shell` with no frame types at all
+  (`ui/webview/shell-perf.ts`): Chromium reports a long animation frame to
+  the top-level document and never to the iframe whose script ran it, so a
+  pane script that blocked the main thread is attributed in the shell's row
+  (`chat.js:paintAll@9000`) and nowhere else. The row goes over the shell's
+  own socket; up to twenty rows are held, oldest dropped first, while that
+  socket is closed, and go ahead of the next row once it is open. A browser
+  that reports neither long animation frames nor long tasks gives the shell
+  nothing to observe, and an idle minute posts nothing, so no shell row
+  appears there.
 - Once a minute the pane posts ONE `clientDiag` row on the socket it already
   uses for breadcrumbs, only when something happened that minute (a frame
   arrived or a long frame was observed); the kernel appends it to
@@ -1295,14 +1306,14 @@ The two rows, as the kernel writes them (`t` its clock, `wid` the dashboard id):
   p50, p90, max} | null, loaf: {n, blocking_ms, worst_ms, top: [{k, ms, n,
   inv}], src}, slow: {sent, suppressed, suppressed_worst_ms}, heap_mb?, dom,
   visible, hidden_pane, ua}}`. `app` is the pane (`chat`, `feed`, `fleet`,
-  `timeline`); `since` is the minute's start on the browser's clock (epoch ms)
-  and `span_ms` its length (shorter than a minute when the page was
-  hidden or closed); `hist` is the 14 bucket counts; `free` is null when no
-  sample was taken; `loaf.top` is the five largest keys by summed duration,
-  `inv` the last invoker seen for each (`WebSocket.onmessage`,
-  `Window.requestAnimationFrame`, `DIV.onclick`), `src` is `loaf`, `longtask`
-  or `none`; `slow` counts the slowframe rows sent and the slow frames past
-  the cap, with the worst of those; `heap_mb` is
+  `timeline`), or `shell` for the top-level window; `since` is the minute's
+  start on the browser's clock (epoch ms) and `span_ms` its length (shorter
+  than a minute when the page was hidden or closed); `hist` is the 14 bucket
+  counts; `free` is null when no sample was taken; `loaf.top` is the five
+  largest keys by summed duration, `inv` the last invoker seen for each
+  (`WebSocket.onmessage`, `Window.requestAnimationFrame`, `DIV.onclick`),
+  `src` is `loaf`, `longtask` or `none`; `slow` counts the slowframe rows sent
+  and the slow frames past the cap, with the worst of those; `heap_mb` is
   `performance.memory.usedJSHeapSize` and is absent outside Chrome; `dom` is
   the element count; `visible` is the document's visibility, `hidden_pane`
   the pane shim's test for a pane the shell has set to `display:none`: its
@@ -1328,7 +1339,9 @@ entry; the top attributed keys with their invokers; the worst minute (the one
 with the most handler time: its span from the minute's start to the row's
 arrival at the kernel, frame counts and long frames); heap and DOM at the last
 sample; and the five slowest slow frames in the window with their attribution,
-plus how many more there were. An absent file or one without perf rows is
+plus how many more there were. The shell's row shows as one more pane of its
+dashboard: no frame types, the long frames it observed and the pane scripts
+they name. An absent file or one without perf rows is
 reported as no browser telemetry yet (the bundles predate it or no dashboard
 has loaded them: rebuild the bundles and reload the dashboard); perf rows all
 older than the window are reported with their age. `--json` prints the folded

@@ -50014,6 +50014,12 @@ def _landing():
             # bell panel's timestamps wear the same recency colours as every other "(Xm ago)" (the user
             # 2026-07-28). Loaded BEFORE the errs script, which reads it (with a dim fallback if absent).
             + ("<script src=/dist/age-color-global.js?v=%d></script>" % v) +
+            # the shell's performance collector (ui/webview/shell-perf.ts): Chromium reports a long animation
+            # frame to the top-level document, never to the iframe whose script ran it, so this page observes
+            # them and posts a minute row (app "shell") on its own socket (shellWS, window.__rompShellSend)
+            # for `romp perf client`. Early, so a long frame during the boot's own work is seen; the boot
+            # script runs first so the splash is not held behind a bundle fetch.
+            ("<script src=/dist/shell-perf.js?v=%d></script>" % v) +
             "<script>" + _LANDING_ERRS_JS + "</script>"
             "<script>" + _LANDING_USAGE_JS.replace("__ROMP_LOADER__", json.dumps(_loader_inner())) + "</script>"
             "<script>" + _LANDING_APIH_JS + "</script>"
