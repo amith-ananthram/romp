@@ -130,6 +130,23 @@ the developer's git configuration (CI has none), and the env identity outranks
 exports its own `GIT_AUTHOR_*` after the floor. `tests/test_tempdir_hygiene.py`
 and `tests/git-hermetic.bats` pin all of it.
 
+**A fixture that builds a throwaway git repository runs git through
+`tests/git_fixture.py`** (`from git_fixture import git, init_repo,
+forbid_background`, registered under the bare name like `romp_load`). Every
+command it runs carries `-c` flags that forbid background work
+(`maintenance.auto`, `maintenance.autoDetach`, `gc.auto`, `gc.autoDetach`,
+`core.fsmonitor`), `init_repo` writes the same keys into the repo's own config,
+and `forbid_background` does so for a clone or worktree the kernel will run git
+against: `git commit`, fetch and merge spawn `git maintenance run --auto`,
+which on recent git detaches from its parent and can still be writing into
+`.git` while the fixture's `TemporaryDirectory` removes the repo (the CI flake
+`Directory not empty: '.git'` from `rmtree`, 2026-09-10). A file keeps its own
+thin runner (its identity, timeout and return shape) and delegates the body;
+read-only git against the real checkout stays a plain `subprocess.run`.
+`tests/test_git_fixture.py` pins the runner with git's own trace: a commit
+through it, and a plain fetch in a `forbid_background` clone, spawn no
+maintenance or gc child.
+
 **A served-page class copies the built `vscode-extension/dist/` with
 `tests.dist_copy.copy_dist`, never `shutil.copytree`.** Under `pytest -n` a
 sibling class's build renames or removes its staging files

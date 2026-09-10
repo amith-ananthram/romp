@@ -11,9 +11,9 @@ Every verdict below is driven through a REAL throwaway git repo — the exact di
 dispatch names — never a mocked file list. Synthetic content only; hermetic state."""
 import json
 import os
-import subprocess
 import tempfile
 import unittest
+from git_fixture import GIT_C, GIT_NO_BACKGROUND, git, init_repo
 from romp_load import load_source
 from pathlib import Path
 
@@ -29,19 +29,13 @@ load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 km = load_source("romp_kernel_rclass", os.path.join(BIN, "romp-kernel"))
 
 
-# T298: every git the fixture runs forbids BACKGROUND work. `git commit` spawns `git maintenance run --auto`,
-# which on current git detaches from its parent (maintenance.autoDetach, on by default in recent git; older git's
-# `gc --auto` detached once it had work) and can still be writing into .git while tearDownClass removes the
-# temp repo — the CI flake "Directory not empty: '.git'" raised by TemporaryDirectory.cleanup's rmtree (the
-# Python 3.10 job, 2026-09-10). The repo's own config carries the same keys (setUpClass), so a git the KERNEL
-# runs against the repo obeys them too; fsmonitor is off for the same reason on hosts where it has a daemon.
-GIT_NO_BACKGROUND = {"maintenance.auto": "false", "maintenance.autoDetach": "false", "gc.auto": "0",
-                     "gc.autoDetach": "false", "core.fsmonitor": "false"}
-_GIT_C = [x for k, v in GIT_NO_BACKGROUND.items() for x in ("-c", "%s=%s" % (k, v))]
-
-
+# T298/T299: every git the fixture runs forbids BACKGROUND work, through the suite's shared runner
+# (tests/git_fixture.py, which explains why: `git commit` spawns `git maintenance run --auto`, which on recent
+# git detaches and can still be writing into .git while tearDownClass removes the temp repo — the CI flake
+# "Directory not empty: '.git'" from TemporaryDirectory.cleanup's rmtree, the Python 3.10 job, 2026-09-10).
+# init_repo writes the same keys into the repo's own config, so a git the KERNEL runs against it obeys them too.
 def _git(repo, *args, env=None):
-    r = subprocess.run(["git", "-C", str(repo)] + _GIT_C + list(args), capture_output=True, text=True, env=env)
+    r = git(repo, *args, env=env, check=False)
     assert r.returncode == 0, r.stderr
     return r.stdout.strip()
 
@@ -56,9 +50,7 @@ class RealDiffShapes(unittest.TestCase):
         cls.repo = repo
         for sub in ("kernel", "bin", "postal", "cli", "docs", "tests", "ui/webview"):
             (repo / sub).mkdir(parents=True)
-        _git(repo, "init", "-q")
-        for k, v in GIT_NO_BACKGROUND.items():   # T298: in the repo too, for any git run against it
-            _git(repo, "config", k, v)
+        init_repo(repo, "-q")   # T298: the no-background keys land in the repo too, for any git run against it
         _git(repo, "config", "user.email", "t@TESTHOST")
         _git(repo, "config", "user.name", "t")
         (repo / "kernel/mod.py").write_text('def f():\n    """doc."""\n    return 1  # one\n')
@@ -213,7 +205,7 @@ class RealDiffShapes(unittest.TestCase):
         # through the helper spawns none.
         for k, v in GIT_NO_BACKGROUND.items():
             self.assertEqual(_git(self.repo, "config", "--local", "--get", k), v, "the repo's config carries " + k)
-            self.assertIn("%s=%s" % (k, v), _GIT_C, "…and so does every helper invocation")
+            self.assertIn("%s=%s" % (k, v), GIT_C, "…and so does every runner invocation")
         self._reset()
         (self.repo / "docs/a.md").write_text("# docs, traced\n")
         with tempfile.NamedTemporaryFile("r", suffix=".log") as trace:
