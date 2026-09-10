@@ -16,6 +16,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
 import { StagedStack, quoteReplyBody, stagedRunBody, stagedPosts } from "./staged-messages";
+import { mintQid } from "./send-pending";   // the copy's id routeUserMessage mints per post, in the kernel's echo form
 
 const requireCjs = createRequire(__filename);
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
@@ -64,8 +65,9 @@ type Posted = { type: string; [k: string]: unknown };
 type FakeDocument = { activeElement: FakeEl | null; getElementById: (id: string) => FakeEl | null };
 type Hooks = {
   FakeEl: typeof FakeEl; document: FakeDocument;
-  StagedStack: typeof StagedStack; quoteReplyBody: typeof quoteReplyBody; stagedPosts: typeof stagedPosts;
-  posted: Posted[];                                                   // every vscodeApi.postMessage frame, in order
+  StagedStack: typeof StagedStack; quoteReplyBody: typeof quoteReplyBody; stagedPosts: typeof stagedPosts; mintQid: typeof mintQid;
+  posted: Posted[];                                                   // every vscodeApi.postMessage frame, in order, without the copy's id
+  qids: string[];                                                     // the id each kernel-bound frame carried (one per post), kept apart so the frames compare by body
   optimistic: { sid: string; text: string; imgPaths?: string[] }[];   // every registerOptimistic call
   persists: number; down: Set<string>; provisional: Set<string>; toasts: string[];
 };
@@ -89,8 +91,8 @@ function lift(): (hooks: Hooks) => Api {
     const document = H.document;
     const stagedMsgs = new H.StagedStack();
     const stagedOpen = new Set(), stagedCollapsed = new Set(), stagedScroll = new Map();
-    const quoteReplyBody = H.quoteReplyBody, stagedPosts = H.stagedPosts;
-    const vscodeApi = { postMessage: (m) => { H.posted.push(m); } };
+    const quoteReplyBody = H.quoteReplyBody, stagedPosts = H.stagedPosts, mintQid = H.mintQid;
+    const vscodeApi = { postMessage: (m) => { const { qid, ...frame } = m; if (qid !== undefined) H.qids.push(qid); H.posted.push(qid !== undefined ? frame : m); } };
     const registerOptimistic = (sid, text, imgPaths) => { H.optimistic.push({ sid, text, imgPaths }); };
     const persistDrafts = () => { H.persists++; };
     const hostIsDown = (id) => H.down.has(id); const isProvisionalId = (id) => H.provisional.has(id);
@@ -113,7 +115,7 @@ function world(): { H: Hooks; api: Api; strip: FakeEl; document: FakeDocument } 
   const strip = new FakeEl("div");
   const document: FakeDocument = { activeElement: null, getElementById: (id) => id === "composer-staged" ? strip : null };
   FakeEl.doc = document;
-  const H: Hooks = { FakeEl, document, StagedStack, quoteReplyBody, stagedPosts, posted: [], optimistic: [], persists: 0, down: new Set(), provisional: new Set(), toasts: [] };
+  const H: Hooks = { FakeEl, document, StagedStack, quoteReplyBody, stagedPosts, mintQid, posted: [], qids: [], optimistic: [], persists: 0, down: new Set(), provisional: new Set(), toasts: [] };
   return { H, api: lift()(H), strip, document };
 }
 const listOf = (strip: FakeEl): FakeEl => { const l = strip.querySelector(".staged-list"); assert.ok(l, "the strip holds a .staged-list"); return l; };
@@ -288,6 +290,11 @@ test("flushStaged routes the posts stagedPosts composes, one routeUserMessage ca
     { type: "sendMessage", id: A, text: "/compact" },
     { type: "sendMessage", id: A, text: stagedRunBody([Bn], { text: "done" }) },
   ]);
+  // every post carries the id routeUserMessage minted at the press, in the kernel's echo form, and no two posts
+  // share one: the kernel's copy, the bubble and its ✕ agree by that id (send-pending.ts mintQid)
+  for (const q of H.qids) assert.match(q, /^echo:[0-9a-f]{32}$/);
+  assert.equal(new Set(H.qids).size, H.qids.length, "one id per post");
+  assert.equal(H.qids.length, 6, "the three releases so far: one, one and four posts");
   // a command staged with a quote chip goes alone with its chip, and the chip wraps it as any quoted
   // message: the CLI reads that as prose, exactly as it did when every item was its own message
   H.posted.length = 0;

@@ -13,7 +13,7 @@ Run:  bin/romp-kernel   → opens http://127.0.0.1:29855
 """
 import copy
 import math
-import contextlib, json, os, queue, random, re, signal, socket, sys, time, threading, traceback, base64, bisect, errno, hashlib, hmac, struct, subprocess, shutil, shlex, http.client, uuid, tempfile, stat, gzip, collections, functools, fcntl
+import contextlib, json, os, queue, random, re, signal, socket, sys, time, threading, traceback, base64, bisect, errno, hashlib, hmac, struct, subprocess, shutil, shlex, http.client, uuid, tempfile, stat, gzip, collections, functools, fcntl, inspect
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from importlib.machinery import SourceFileLoader
@@ -13813,16 +13813,23 @@ def _comment_markers(sid):
 # alone starves; the client's frame-keyed re-post stays as the belt for a kernel restart that loses
 # this in-memory park). The typed transient nack keeps the client's optimistic mark alive meanwhile.
 ANCHOR_LAG_ERR = "that message isn't in the transcript yet; try again in a moment"
-_parked_creates = []                       # [{sid,uuid,exact,text,name,model,effort,fast,color,tries}]
+_parked_creates = []                       # [{sid,uuid,exact,text,name,model,effort,fast,color,createId,tries}]
 _PARK_MAX_TRIES = 30                       # pusher cycles (~15-90s) — past this the record isn't coming
-# A create's IDENTITY (T289): (parent sid, anchor uuid, passage, text) -> the thread it made. A lag-parked
-# create is retried by BOTH the pusher (above) and the client (its frame-keyed re-post), and a popover
-# whose ack was lost sends its create again; the second copy used to collide on its explicit name and
-# come back as the create door's refusal toast (the user 2026-09-09, on a remote session), or — with the
-# name now left to the kernel's default — would mint a SECOND thread for one comment. The memo answers a
-# repeat with the SAME thread's ack, and a parked copy is parked once. Bounded (oldest out), in memory:
-# a kernel restart forgets it, and the client's re-post after one creates exactly once.
-_recent_creates = {}                       # (sid, uuid, exact, text) -> tid
+# A create's IDENTITY (T289): the client's createId, minted by the popover at the send gesture and carried
+# by every re-post of it, under the parent sid -> the thread it made. A lag-parked create is retried by
+# BOTH the pusher (above) and the client (its frame-keyed re-post), and a popover whose ack was lost sends
+# its create again; the second copy used to collide on its explicit name and come back as the create
+# door's refusal toast (the user 2026-09-09, on a remote session), or, with the name now left to the
+# kernel's default, would mint a SECOND thread for one comment. The memo answers a repeat with the SAME
+# thread's ack, and a parked copy is parked once. The first cut keyed on the words (parent sid, anchor
+# uuid, passage, text), and so also answered a DELIBERATE second comment in the same words on the same
+# passage with the first thread: two acks, the second name nowhere on disk (review, 2026-09-09). The id
+# keys on the gesture instead; a frame from a client that sends none still keys on its words. A comment
+# the user posts again by hand while the first is still parked (after a viewer reload, or after the viewer
+# gave up at its own attempt bound) is a new gesture and lands as a second thread: a visible duplicate
+# the user can delete, where the words key lost the second comment silently. Bounded (oldest out), in
+# memory: a kernel restart forgets it, and the client's re-post after one creates exactly once.
+_recent_creates = {}                       # (sid, createId) or (sid, uuid, exact, text) -> tid
 _RECENT_CREATES_MAX = 256
 # The two doors that can run one create — the WS handler on a server thread and _retry_parked_creates on
 # the pusher — reserve the identity under ONE lock before creating (review, 2026-09-09): the pusher sends
@@ -13834,8 +13841,18 @@ _create_lock = threading.RLock()
 _inflight_creates = set()                  # keys whose _comment_create is running right now, either door
 
 
-def _create_key(sid, uuid, exact, text):
+def _create_key(sid, uuid, exact, text, create_id=""):
+    """What one create is remembered by: the gesture's own id when the frame carries one (a fresh comment
+    in the same words is a new id, a re-post is the same one), else its words. The two shapes never meet:
+    a stamped frame is not a repeat of an unstamped one, nor the other way round."""
+    cid = str(create_id or "")
+    if cid:
+        return (str(sid), cid)
     return (str(sid), str(uuid), str(exact), str(text))
+
+
+def _parked_key(pk):
+    return _create_key(pk["sid"], pk["uuid"], pk["exact"], pk["text"], pk.get("createId", ""))
 
 
 def _note_create(key, tid):
@@ -13866,8 +13883,7 @@ def _reserve_create(key):
         again = _repeat_create_tid(key)
         if again:
             return "repeat", again
-        if key in _inflight_creates or any(_create_key(pk["sid"], pk["uuid"], pk["exact"], pk["text"]) == key
-                                           for pk in _parked_creates):
+        if key in _inflight_creates or any(_parked_key(pk) == key for pk in _parked_creates):
             return "busy", None
         _inflight_creates.add(key)
         return "free", None
@@ -13887,7 +13903,7 @@ def _retry_parked_creates():
     if not _parked_creates:
         return
     for pk in list(_parked_creates):
-        key = _create_key(pk["sid"], pk["uuid"], pk["exact"], pk["text"])
+        key = _parked_key(pk)
         with _create_lock:
             if _repeat_create_tid(key):            # the client's re-post already made it: the park is moot
                 if pk in _parked_creates:
@@ -15401,7 +15417,7 @@ def _drive(msg, client):
         if _route_meta_command(be, sid, str(msg["text"]), client):
             _push_soon()
         else:
-            _send_or_park(be, sid, str(msg["text"]), echo="human"); _push_soon()  # idle → instant echo; SDK busy → queued bubble forwarded mid-turn + folded (but a SLASH COMMAND parks to fire alone at turn end — mid-turn it would land as text, not execute); tmux busy → held + merged at turn end
+            _send_or_park(be, sid, str(msg["text"]), echo="human", qid=_client_qid(msg, sid, be)); _push_soon()  # idle → instant echo; SDK busy → queued bubble forwarded mid-turn + folded (but a SLASH COMMAND parks to fire alone at turn end — mid-turn it would land as text, not execute); tmux busy → held + merged at turn end
     elif t == "rewindSend" and msg.get("uuid") and msg.get("text"):
         # Edit a past message (SDK sessions): rewind the conversation to just before it and send the
         # edited text as the branch's next turn. NO optimistic kernel echo — the edit lands mid-chat
@@ -15469,7 +15485,8 @@ def _drive(msg, client):
         # in the brief idle-send case; "human" for a typed follow-up → blue. Mid-compaction the whole send is
         # PARKED instead (queued bubble; delivered when compaction ends — _send_or_park).
         _send_or_park(be, sid, body,
-                      echo=("romp" if msg.get("nudge") else "human") if be is _TMUX else None)
+                      echo=("romp" if msg.get("nudge") else "human") if be is _TMUX else None,
+                      qid=_client_qid(msg, sid, be))
         if iid:                                           # optimistic: reopen the card NOW, before the judge pass
             _predict_working("followup", ids=[iid])       # instant cue to every feed view (chat-typed citation
             #                                               follow-ups included) — the reopen below is what the
@@ -15548,7 +15565,7 @@ def _drive(msg, client):
         # AUTHORITATIVE (the user 2026-07-20): ok:false means the op already ran/was delivered — the
         # client toasts the 'too late' text and reverts its optimistic composer restore, instead of
         # the old silent miss that read as a successful cancel.
-        err = _cancel_parked(sid, int(msg["park"]), str(msg.get("md") or ""))
+        err = _cancel_parked(sid, int(msg["park"]), str(msg.get("md") or ""), qid=_wire_qid(msg))
         client["send"](json.dumps({"type": "cancelResult", "ok": not err, "id": sid,
                                    "md": str(msg.get("md") or ""), "text": err or ""}))
         _push_soon()
@@ -15557,7 +15574,7 @@ def _drive(msg, client):
         # webview already refilled the composer with its text. ok:false = the message had already
         # forwarded into the CLI, where NO recall exists — say so loudly (the user 2026-07-20: the
         # silent miss showed the message as deleted while the CLI answered it anyway).
-        err = _cancel_backend_queued(be, sid, int(msg["idx"]), str(msg.get("md") or ""))
+        err = _cancel_backend_queued(be, sid, int(msg["idx"]), str(msg.get("md") or ""), qid=_wire_qid(msg))
         client["send"](json.dumps({"type": "cancelResult", "ok": not err, "id": sid,
                                    "md": str(msg.get("md") or ""), "text": err or ""}))
         _push_soon()
@@ -15567,11 +15584,14 @@ def _drive(msg, client):
         # tripped yet — so locate the send wherever it landed. The ws is ordered, so the send op was
         # processed before this cancel: the FIFO's md-relocate finds a parked one, a backend-queued
         # one is found by body, and neither means it already forwarded into the CLI — the one honest
-        # refusal, loud (the same cancelResult contract as the park/idx arms).
+        # refusal, loud (the same cancelResult contract as the park/idx arms). A ✕ that names the
+        # copy's id (the bubble's own, minted at the press) is exact in both queues: the id, not the
+        # body, says which of two same-text copies goes, and an id neither queue holds is the miss.
         md = str(msg["md"])
-        err = _cancel_parked(sid, -1, md)
+        qid = _wire_qid(msg)
+        err = _cancel_parked(sid, -1, md, qid=qid)
         if err and hasattr(be, "unqueue"):
-            err2 = _cancel_backend_queued(be, sid, -1, md)
+            err2 = _cancel_backend_queued(be, sid, -1, md, qid=qid)
             if err2 is None:
                 err = None
         if err:
@@ -15715,7 +15735,9 @@ def _drive(msg, client):
         # guess) and the fresh {type:"comments"} frame rides straight back, ahead of the pusher cycle.
         # A REPEAT of a create this kernel already completed (a client re-post after a lost ack or a
         # parked copy that landed) is the same comment: answer with the same thread, never a twin (T289).
-        key = _create_key(sid, msg["uuid"], msg["exact"], msg["text"])
+        # The repeat is known by the createId the popover minted at the send gesture, so a second comment
+        # in the same words on the same passage, a new id, is a new thread (review, 2026-09-09).
+        key = _create_key(sid, msg["uuid"], msg["exact"], msg["text"], msg.get("createId") or "")
         state, again = _reserve_create(key)
         if state == "repeat":
             sys.stderr.write("comment create repeated (%s): the same comment again, answered with thread %s\n"
@@ -15749,13 +15771,14 @@ def _drive(msg, client):
             # client re-posts the same create on every frame while the nack stands.
             if err == ANCHOR_LAG_ERR:
                 with _create_lock:
-                    if not any(_create_key(pk["sid"], pk["uuid"], pk["exact"], pk["text"]) == key for pk in _parked_creates):
+                    if not any(_parked_key(pk) == key for pk in _parked_creates):
                         _parked_creates.append({"sid": sid, "uuid": str(msg["uuid"]), "exact": str(msg["exact"]),
                                                 "text": str(msg["text"]), "name": str(msg.get("name") or ""),
                                                 "model": str(msg.get("model") or ""),
                                                 "effort": str(msg.get("effort") or ""),
                                                 "fast": str(msg.get("fast") or ""),
-                                                "color": str(msg.get("color") or ""), "tries": 0})
+                                                "color": str(msg.get("color") or ""),
+                                                "createId": str(msg.get("createId") or ""), "tries": 0})
             else:
                 client["send"](json.dumps({"type": "warn", "text": err}))
                 # the kernel log carries the refusal too (T289): a name refused at this door showed only
@@ -28002,7 +28025,7 @@ def _save_pending_ops():
             sys.stderr.write("pending-ops save: %s\n" % traceback.format_exc())
 
 
-_pending_ops = _load_pending_ops()   # sid -> [("send", text, echo) | ("model", v) | ("effort", v) | ("fast", v) | ("env", {…}) | ("cwd", path, busy_retries) | ("compact",), …] in park order
+_pending_ops = _load_pending_ops()   # sid -> [("send", text, echo[, qid]) | ("command", text, echo[, qid]) | ("model", v) | ("effort", v) | ("fast", v) | ("env", {…}) | ("cwd", path, busy_retries) | ("compact",), …] in park order
 
 
 _PATH_UNRESOLVED = object()   # _compacting_now's "no path was passed" sentinel — None is a real value (no transcript)
@@ -28450,7 +28473,7 @@ def _edit_miss_text(md):
             "and will be answered in the current turn")
 
 
-def _cancel_parked(sid, park, md):
+def _cancel_parked(sid, park, md, qid=None):
     """Remove ONE parked op — the queued bubble's ✕ (the user 2026-07-08). Verified by body text: if the
     park list shifted between the push and the click (ops applied / another cancel), the index alone
     would remove the WRONG op — re-locate by md. Returns None on success; when the op is GONE (it
@@ -28473,12 +28496,24 @@ def _cancel_parked(sid, park, md):
     backend is a cancel, and the redundant compaction must not run. The body re-locate skips that head
     slot too, so a STALE index for the second chip (a send ahead delivered between the push and the
     click) lands on the chip and not on the head it cannot take; with only the in-flight op listed it
-    finds nothing, the same miss as today."""
+    finds nothing, the same miss as today.
+
+    A ✕ that NAMES THE COPY (`qid`: the id the client minted at the press, riding the parked send as its fourth
+    slot, _send_or_park) is exact: it removes the op carrying that id whatever index or body the click carried,
+    and when no parked op carries it the answer is the miss (the send left the queue: drained, or with the
+    backend already), never a relocation onto another op wearing the same words. Two parked sends of the same
+    words, the first drained between the push that drew its bubble and the click: by body, the ✕ on the first
+    popped the second and answered ok. Only an id-less cancel (an older client, a kernel-parked op) keeps the
+    index/body reading, where the body is the only name the op has."""
     sid = str(sid)
     with _pending_ops_lock:
         ops = _pending_ops.get(sid) or []
         inflight_head = bool(ops) and ops[0] is _inflight_ops.get(sid)   # the head is with the backend this instant
-        if not (0 <= park < len(ops)) or (md and _parked_md(ops[park]) != md):
+        if qid:
+            park = next((j for j, op in enumerate(ops) if _op_qid(op) == qid), -1)
+            if park < 0:
+                return _cancel_miss_text(md)      # the id names no parked op: gone, never a same-words neighbour
+        elif not (0 <= park < len(ops)) or (md and _parked_md(ops[park]) != md):
             park = next((j for j, op in enumerate(ops)
                          if _parked_md(op) == md and not (j == 0 and inflight_head)), -1) if md else -1
             if park < 0:
@@ -28495,14 +28530,23 @@ def _cancel_parked(sid, park, md):
     return None
 
 
-def _cancel_backend_queued(be, sid, idx, md):
+def _cancel_backend_queued(be, sid, idx, md, qid=None):
     """unqueue with the same DRIFT GUARD as _cancel_parked: the click carries the bubble's body; if the
     backend queue moved between the push and the click (the input generator consumed the head), the raw
     index would cancel the WRONG message — re-locate by body. A client that sends no md (older bundle)
     keeps the raw-index behavior. Returns None on success; on a MISS — the message already forwarded to
     the CLI, where no recall exists — returns the 'too late' text for the caller to toast (the user
     2026-07-20). The exact text is re-verified INSIDE the backend's lock (unqueue's `expect`), so the
-    input generator racing this click can only turn it into a loud miss, never a wrong-message cancel."""
+    input generator racing this click can only turn it into a loud miss, never a wrong-message cancel.
+    `qid` (the copy's id, minted by the client at the press and carried by the queue entry) names the entry
+    exactly, on a backend whose unqueue takes the id (_takes_qid: SdkBackend): the backend re-locates by it
+    under its own lock (unqueue's `qid`), so of two entries wearing the same words the ✕ removes the one it was
+    pressed on, and an id the queue does not hold is the miss, never the index's or the body's neighbour. A
+    backend whose unqueue takes no id (a stand-in with the older signature) reads the index and body as before;
+    nothing is refused for carrying an id it cannot check."""
+    if qid and _takes_qid(getattr(be, "unqueue", None)):
+        got = be.unqueue(sid, -1, None, qid=qid)
+        return None if got is not None else _cancel_miss_text(md)
     try:
         pending = be.pending_queued(sid)
     except Exception:
@@ -28660,7 +28704,86 @@ def _is_slash_command(text):
     return bool(_SLASH_CMD_RE.match((text or "").strip()))
 
 
-def _send_or_park(be, sid, text, echo=None):
+# A copy's id as the client mints it at the press (send-pending.ts newPending): the kernel's own echo form,
+# "echo:" + hex, so isKernelEchoUuid on the client, the landed-record stamp's echo skip (build_session), the
+# re-queue's prefix test (sdk_backend _enqueue_with_id) and the echo-in-queue reading (_echo_queued_in) all
+# treat it as the kernel's. Bounded: the kernel mints 32 hex digits (uuid4().hex); a client id is admitted in
+# the same shape, never an arbitrary string that would ride the wire, the mirror and every chip.
+_CLIENT_QID_RE = re.compile(r"^echo:[0-9a-f]{16,64}$")
+
+
+def _wire_qid(msg):
+    """The copy id a ws message names (`qid`), or None when it carries none or one in another form. A cancel's
+    id only has to be looked up (an unknown id is the honest miss), so the shape is all a cancel checks."""
+    q = msg.get("qid") if isinstance(msg, dict) else None
+    return q if isinstance(q, str) and _CLIENT_QID_RE.match(q) else None
+
+
+def _client_qid(msg, sid, be):
+    """The id a client minted for ITS send at the press, admitted for the copy the kernel is about to queue or
+    park; or None, and the kernel mints one where the copy enters the backend's queue, as it does for every
+    copy it queues itself. Admitted only in the echo form (_wire_qid) AND when the session does not already
+    hold it: not on a parked op, not on a queued copy (pending_queued_meta) and not on a live echo (a fed copy
+    between the queue and its landing wears one): a forged or colliding id could otherwise name another
+    send's copy, and its ✕ would then cancel that one. Two clients never mint the same id (32 random hex
+    digits), so a refusal is a bug or a forgery and is logged (sid only: the text is the user's). Fails toward
+    the kernel's own id: a hold that cannot be checked refuses. After a refusal the client's bubble stands for a
+    copy the kernel identifies otherwise: its ✕ names an id neither queue holds and is answered with the miss
+    (never a relocation by body, _cancel_parked), the client drops its entry, and the copy then shows under the
+    kernel's id with its own ✕, which cancels it exactly."""
+    q = _wire_qid(msg)
+    if not q:
+        return None
+    held = False
+    with _pending_ops_lock:
+        held = any(_op_qid(op) == q for op in _pending_ops.get(str(sid)) or ())
+    if not held:
+        try:
+            metas = be.pending_queued_meta(sid) if hasattr(be, "pending_queued_meta") else None
+            held = any(isinstance(m, dict) and m.get("qid") == q for m in (metas or ()))
+            if not held and hasattr(be, "live_atoms"):
+                held = any(isinstance(a, dict) and a.get("uuid") == q for a in (be.live_atoms(sid) or ()))
+        except Exception:
+            held = True
+    if held:
+        sys.stderr.write("send: a client id the session already holds was refused, the kernel mints: %s\n" % sid)
+        return None
+    return q
+
+
+def _op_qid(op):
+    """The press-time id a parked send or command carries (its fourth slot, _send_or_park), or None: a kernel-
+    parked op (a re-delivery, a nudge, a three-slot record from a mirror written before the slot existed) has
+    none. Length-guarded like every reader of an optional slot; only the two kinds that carry text a client
+    pressed have one (a parked move's fourth slot is its turn sequence)."""
+    return op[3] if op[0] in ("send", "command") and len(op) > 3 and isinstance(op[3], str) and op[3] else None
+
+
+def _takes_qid(fn):
+    """True when a backend method receives the copy's id as `qid`: SdkBackend.send and SdkBackend.unqueue do;
+    TmuxBackend.send (the CLI holds its queue, whose copies carry stamps and no id), CodexBackend.send and a
+    stand-in with the older signature do not. Read from the signature, so the gate is the parameter that takes
+    the id and never a neighbouring capability (tmux exposes pending_queued_meta for the chat's stamps and takes
+    no id). None, or a signature that cannot be read, reads as not taking it: the text goes alone."""
+    if fn is None:
+        return False
+    try:
+        return "qid" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _send_with_id(be, sid, text, qid=None):
+    """be.send, with the copy's press-time id when one rode and the backend's send takes it (_takes_qid:
+    SdkBackend, whose queued copy and echo then wear the id the chat's bubble already has). A send that takes
+    no id (tmux, whose echo is the kernel's and whose queue is the CLI's; Codex; a stand-in) gets the text
+    alone, as before."""
+    if qid and _takes_qid(be.send):
+        return be.send(sid, text, qid=qid)
+    return be.send(sid, text)
+
+
+def _send_or_park(be, sid, text, echo=None, qid=None):
     """Deliver `text` now — or PARK it in the sid's FIFO. Park when: (a) the session is COMPACTING (the user
     2026-07-02: a mid-compaction send's live-tail echo opened a turn that KILLED the 'compacting' cue — a
     parked send lands no echo atom, so the cue stays and the send shows as a queued bubble in park order);
@@ -28699,9 +28822,21 @@ def _send_or_park(be, sid, text, echo=None):
     be slow (a Codex client connect takes seconds), during which no other handler's park and no drain pop
     may wait. Press order loses nothing: two handovers reach the backend in call order — a lock held across
     them would only have substituted lock-acquisition order — and a park behind an existing queue is atomic
-    with the check that found the queue."""
+    with the check that found the queue.
+
+    `qid` is the copy's IDENTITY when the client minted one at the press (send-pending.ts newPending, in the
+    kernel's own echo form; _client_qid admits it): parked, it rides the op as its fourth slot (_op_qid), so the
+    chip and its ✕ name the copy before the drain, and the drain hands the same id to the backend; handed over
+    now, it goes to a send that takes it (_send_with_id: SdkBackend, whose queued copy and echo then wear it) and
+    is left off for one that does not (tmux, whose queue is the CLI's; the copy is read by text). The op stays
+    the three-slot record when no id rides, so a mirror written before the slot existed and every reader that
+    indexes the first three slots are unchanged. Without it the copy was identified where it entered the
+    backend's queue, so a send parked during compaction, a usage-limit hold or behind a queue carried no id
+    until the drain and the chat read it by text."""
     cmd = _is_slash_command(text)
     op = ("command", text, echo) if cmd else ("send", text, echo)
+    if qid:
+        op = op + (qid,)
     if _compacting_now(sid) or _pending_ops.get(sid) or _limit_hold(sid):
         _park_op(sid, op)
         return True
@@ -28710,7 +28845,7 @@ def _send_or_park(be, sid, text, echo=None):
         return True
     if _park_behind_queue(sid, op):
         return True
-    if be.send(sid, text) is False:
+    if _send_with_id(be, sid, text, qid) is False:
         return None                                      # refused by the backend: not parked, not delivered
     if echo:
         _optimistic_echo(sid, text, author=echo)
@@ -28926,7 +29061,7 @@ def _deliver_send_batch(be, sid, run):
         return
     if _forwards_sends(be):
         for op in run:
-            be.send(sid, op[1])
+            _send_with_id(be, sid, op[1], _op_qid(op))   # under the id the press minted, when one rode the park
             if op[2]:
                 _optimistic_echo(sid, op[1], author=op[2])
         return
@@ -29135,7 +29270,7 @@ def _apply_pending_ops(now=None):
                         # send batch (or forwarded mid-turn) it reaches the model as text instead of executing
                         # (the user 2026-08-13: /autocompact absorbed mid-turn got a polite reply and no
                         # setting change). Echo stamped at fire time, like a delivered send.
-                        be.send(sid, op[1])
+                        _send_with_id(be, sid, op[1], _op_qid(op))
                     elif op[0] == "compact":
                         be.send(sid, "/compact")
                     elif op[0] == "model":
@@ -31181,9 +31316,13 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
         # the ✕ handshake (_parked_md/_cancel_parked verify it so a shifted queue never drops the wrong op).
         for j, op in enumerate(pending_ops):
             m = {"md": _parked_md(op), "park": j, "cancelable": True, **(_queued_romp_flags(op[1]) if op[0] == "send" else {})}
-            # a PARKED copy carries no identity until it reaches the backend (T252c): the park's op is the
-            # three-field record the on-disk mirror and its readers pin, and the identity is minted where the
-            # copy enters the backend's queue (SdkBackend.send) — until then the chat reads this copy by text
+            # a PARKED copy's identity is the id the client minted at the press, when one rode the park (the
+            # op's fourth slot, _send_or_park): the chat's bubble and its ✕ name the copy by it before the
+            # drain, and the drain hands the same id to the backend. A copy the kernel parked itself (a
+            # re-delivery, a nudge, an older mirror's three-slot record) carries none until it enters the
+            # backend's queue (SdkBackend.send mints one there); the chat reads that copy by text meanwhile
+            if _op_qid(op):
+                m["qid"] = _op_qid(op)
             if op[0] == "send":
                 goal, _, fu, ctx = _split_followup(op[1])
                 if fu:
@@ -32224,6 +32363,11 @@ def _compact_goal_store(fsid):
         except Exception:
             closed = False
         jd.rollup_status(store, closed)
+        # the rollup builds a fresh status dict and REPLACES store["status"] (judge.py rollup_status); the copy
+        # below pops from the dict the store holds now, so the archive gets the re-sealed root's cleared, as it
+        # does when the clear lands on the live card, and the live store keeps no entry for a node it no longer
+        # holds (the pre-rollup dict gave the archive completed, which kept the top listed under Show completed)
+        status = store.get("status", {})
     with jd._GOAL_ARCH_LOCK:                            # the archive is a blind RMW — see the lock's note
         arch = jd.load_goal_archive(fsid)
         a_nodes = arch.setdefault("nodes", {})

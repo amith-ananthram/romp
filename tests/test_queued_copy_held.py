@@ -281,6 +281,10 @@ class ServedQueuedCopyHeld(unittest.TestCase):
     def test_our_own_send_in_the_fed_gap_is_one_bubble(self):
         # the tail fix's review: with our copy gone from the queue (held by the pane) and the kernel's echo showing, the
         # echo cover skipped hiding the held copy — two bubbles for one message (three with the echo)
+        # Also the wire's half of the copy's identity, executed on the served page: the send posts an id minted at the
+        # press and our bubble's ✕ carries the same one. The kernel's frames here wear an id of the kernel's own (one
+        # that took none from the press), so the copies are read by text; the frames under the pressed id are the
+        # unit tests'.
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "text": "and also update the docstring"}, f)
@@ -298,7 +302,9 @@ class ServedQueuedCopyHeld(unittest.TestCase):
         print("T262M:", json.dumps(r))
         self.assertEqual(r["dropped"], 1, "the send was dropped at the socket: the pane's bubble is the only copy of ours")
         self.assertEqual((r["pressed"]["bubbles"], r["pressed"]["users"]), (1, 0), "our bubble at the press: %r" % r["pressed"])
-        self.assertEqual((r["queued"]["bubbles"], r["queued"]["users"]), (1, 0), "the kernel's queued copy hidden for ours: %r" % r["queued"])
+        self.assertRegex(r["posted"] or "", r"^echo:[0-9a-f]{32}$", "the send posted the copy's id, minted at the press in the kernel's echo form: %r" % (r["posted"],))
+        self.assertEqual(r["bubbleQid"], r["posted"], "our bubble's ✕ carries the id the send posted: %r" % ((r["bubbleQid"], r["posted"]),))
+        self.assertEqual((r["queued"]["bubbles"], r["queued"]["users"]), (1, 0), "the kernel's queued copy under an id of its own hidden for ours, by text: %r" % r["queued"])
         self.assertEqual(r["fed"]["total"], 1, "the fed gap: the echo hidden, the held copy hidden, ours the one bubble: %r" % r["fed"])
         self.assertEqual(r["fed2"]["total"], 1, "…and on the next push too: %r" % r["fed2"])
         self.assertEqual((r["landed"]["bubbles"], r["landed"]["users"]), (0, 1), "the landing takes the slot: %r" % r["landed"])
@@ -321,7 +327,7 @@ await page.addInitScript(() => {
   Object.defineProperty(WebSocket.prototype, "onmessage", { configurable: true, get() { return desc.get.call(this); },
     set(fn) { desc.set.call(this, (ev) => { if (window.__quiet) { try { const m = JSON.parse(ev.data); if (m && (m.type === "chatTail" || m.type === "update" || m.type === "session" || m.type === "status")) return; } catch (e) {} } return fn.call(this, ev); }); } });
   const orig = WebSocket.prototype.send;
-  WebSocket.prototype.send = function (d) { try { const m = JSON.parse(d); if (m && m.type === "sendMessage") { window.__dropped++; return; } } catch (e) {} return orig.call(this, d); };
+  WebSocket.prototype.send = function (d) { try { const m = JSON.parse(d); if (m && m.type === "sendMessage") { window.__dropped++; window.__posted = m.qid; return; } } catch (e) {} return orig.call(this, d); };
 });
 await page.goto(cfg.chat);
 await page.waitForSelector("#tabs .tab, #tabs [data-sid]", { timeout: 20000 });
@@ -344,7 +350,10 @@ await page.press("#composer-input", "Enter");
 await page.waitForSelector(".turn-queued", { timeout: 10000 });
 await page.waitForTimeout(300);
 const pressed = await measure();
-// the kernel lists our copy with its id → ours stays, the kernel's copy hidden
+// the id the send posted, and the id our bubble's ✕ carries: one id, minted at the press
+const posted = await page.evaluate(() => window.__posted);
+const bubbleQid = await page.evaluate(() => { const x = document.querySelector(".turn-queued .queued-x"); return x ? x.dataset.qid : null; });
+// a kernel that minted its own id for the copy (it took none from the press): our copy hidden for ours, by text
 await inject({ ...base, type: "update", events: [...base.events, { kind: "queued", texts: [{ md: cfg.text, qid: "echo:m9", qts: Date.now(), cancelable: true, idx: 0 }] }] });
 await page.waitForTimeout(400);
 const queued = await measure();
@@ -359,7 +368,7 @@ const fed2 = await measure();
 await inject({ ...base, type: "update", events: [...base.events, { kind: "user", md: cfg.text, uuid: "am9", ts: new Date().toISOString(), qid: "echo:m9", human: true }] });
 await page.waitForTimeout(400);
 const landed = await measure();
-fs.writeSync(1, "RESULT:" + JSON.stringify({ pressed, queued, fed, fed2, landed, dropped: await page.evaluate(() => window.__dropped) }) + "\n");
+fs.writeSync(1, "RESULT:" + JSON.stringify({ pressed, posted, bubbleQid, queued, fed, fed2, landed, dropped: await page.evaluate(() => window.__dropped) }) + "\n");
 await browser.close();
 process.exit(0);
 """

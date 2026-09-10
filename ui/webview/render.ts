@@ -41,7 +41,7 @@ import { titleWithKey, chordOf, effectiveChord, loadOverrides } from "./keybindi
 import { DEFAULT_CHORDS } from "./commands";
 import { NavHistory } from "./nav-history";
 import { StagedStack, quoteReplyBody, stagedPosts } from "./staged-messages";
-import { type PendingSend, type TailEvent, OPT_PREFIX, isOptimisticUuid, newPending, reconcilePending, queuedCopyToHide, dropPending, bareGroupLabel, sentAtLabel, pendingBody } from "./send-pending";
+import { type PendingSend, type TailEvent, OPT_PREFIX, isOptimisticUuid, newPending, mintQid, reconcilePending, queuedCopyToHide, dropPending, bareGroupLabel, sentAtLabel, pendingBody } from "./send-pending";
 import { reconcileHeld, heldAsQueued, type HeldCopy, type HeldQueued, type HeldMemory } from "./queued-held";
 import { reloadHoldReason } from "./reload-hold";
 import { liveNotices, keepReloadNotices, takeReloadNotices } from "./reload-notices";
@@ -77,7 +77,8 @@ import { durLabel } from "./duration";
 import { apiErrorReason } from "./api-error-reason";
 import { chatMdExtensions, userMdHtml } from "./chat-md";
 import { setTip, pruneTip } from "./tip";
-import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAnchorRange, sliceRanges, prunePending, type CommentThread } from "./comments";
+import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAnchorRange, sliceRanges, prunePending, newCommentCreate, commentCreateFrame,
+         type CommentThread, type CommentCreate } from "./comments";
 import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, chipLabel, chipTip, chipAria, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
 import { dragSlotIndex } from "./dragslot";
 import { perfFrameHandler } from "./perf-telemetry";
@@ -201,7 +202,7 @@ type ChatEvent = (
   // `held` DOES come from the kernel (_limit_hold): the queue is stuck on the ACCOUNT rather than on this
   // session — a usage limit or a monthly spend cap holds every send — so the head names what it is waiting
   // for, and how long is left when the API reported a reset (the user 2026-07-24).
-  | { kind: "queued"; texts: { md: string; followUp?: boolean; goal?: string; fuCtx?: string; idx?: number; park?: number; cancelable?: boolean; optimistic?: boolean; romp?: boolean; rompSystem?: boolean; rompAuto?: boolean; gist?: string; imgPaths?: string[]; lost?: string; qts?: number; qid?: string; hiddenByPending?: boolean; landing?: boolean }[]; ts?: string; uuid?: string; bare?: boolean; held?: { reason: string; resetsAt?: number | null; what: string; detail?: string } }   // imgPaths: an optimistic echo's dragged-image attachments → thumbnails, the landed form's own renderer (the user 2026-08-25); lost: client-only, the connection dropped after this unconfirmed send; qts: on OUR optimistic copy the pending entry's identity (its press time) so the ✕ removes ITS entry, on a kernel copy its enqueue stamp (T252c); qid: a kernel copy's identity, the ✕ drops the send that owns it (send-pending.ts)
+  | { kind: "queued"; texts: { md: string; followUp?: boolean; goal?: string; fuCtx?: string; idx?: number; park?: number; cancelable?: boolean; optimistic?: boolean; romp?: boolean; rompSystem?: boolean; rompAuto?: boolean; gist?: string; imgPaths?: string[]; lost?: string; qts?: number; qid?: string; hiddenByPending?: boolean; landing?: boolean }[]; ts?: string; uuid?: string; bare?: boolean; held?: { reason: string; resetsAt?: number | null; what: string; detail?: string } }   // imgPaths: an optimistic echo's dragged-image attachments → thumbnails, the landed form's own renderer (the user 2026-08-25); lost: client-only, the connection dropped after this unconfirmed send; qts: on OUR optimistic copy the pending entry's identity (its press time) so the ✕ removes ITS entry, on a kernel copy its enqueue stamp (T252c); qid: the copy's identity (T252c): minted at the press on OUR copy and posted with the send, so the kernel's copy wears the same one; the ✕ names it on both (send-pending.ts)
   // The turn stopped on an API error (event-based: transcript isApiErrorMessage). The session is BLOCKED
   // until retried — a red-dot card at the bottom with a Retry button (the user 2026-06-16).
   | { kind: "apiError"; text: string; status?: number; ts?: string; uuid?: string }
@@ -444,7 +445,10 @@ function reconcileOptimisticInner(s: Session): void {
   // `lost` rides along so the bubble can say "not confirmed" after a connection drop (markPendingLost).
   // `qts` is the entry's identity: the ✕ removes THAT entry, never the first with the same text (two
   // identical sends can sit in different states — one lost, one received).
-  const mk = (p: PendingSend) => ({ md: p.text, optimistic: true, cancelable: true, imgPaths: p.imgPaths, lost: p.lost, qts: p.ts });
+  // `qid` is the copy's identity on the kernel's side too (the id the press minted, posted with the send): the
+  // ✕ names it, so the kernel cancels exactly this copy, wherever the send landed and whatever else wears the
+  // same words.
+  const mk = (p: PendingSend) => ({ md: p.text, optimistic: true, cancelable: true, imgPaths: p.imgPaths, lost: p.lost, qts: p.ts, qid: p.qid });
   // ONE BARE dashed group at the TAIL, the sends in send order (T252d): below every event the kernel has
   // shown, where the model will read them; the landed atom, placed at its landing time, takes that same
   // position. No "N queued messages" header to claim what we can't back. A copy hidden out of a HELD kernel
@@ -546,10 +550,13 @@ function hideQueuedCopy(s: Session, p: PendingSend): { held?: Extract<ChatEvent,
   return { held: q.held || undefined };
 }
 
-// Record a composer send as in-flight and show its optimistic bubble NOW (before any kernel push).
-function registerOptimistic(id: string, text: string, imgPaths?: string[]): void {
+// Record a composer send as in-flight and show its optimistic bubble NOW (before any kernel push). `qid` is the
+// copy's id the caller minted at the press (mintQid) and posted with the send, so the kernel queues or parks the
+// copy under the id this bubble wears and the bubble, the kernel's chip and the ✕ agree from the press; a caller
+// that posts nothing (a provisional tab's send, held until the session exists) lets the entry mint its own.
+function registerOptimistic(id: string, text: string, imgPaths?: string[], qid?: string): void {
   const arr = pendingSent.get(id) || [];
-  const p = newPending(text, imgPaths);
+  const p = newPending(text, imgPaths, Date.now(), qid);
   arr.push(p);   // the anchor (`at`) is stamped by the reconcile just below
   pendingSent.set(id, arr);
   const s = sessions.get(id);
@@ -4261,7 +4268,7 @@ function renderQueued(ev: Extract<ChatEvent, { kind: "queued" }>): HTMLElement {
       if (t.park !== undefined) x.dataset.qpark = String(t.park);
       if (t.optimistic) x.dataset.qopt = "1";   // ✕ before confirmation → cancel-by-body (no park/idx yet)
       if (t.optimistic && t.qts !== undefined) x.dataset.qts = String(t.qts);   // OUR entry's identity: the ✕ removes this bubble's entry, not the first with its text
-      if (t.qid) x.dataset.qid = t.qid;   // the kernel's copy names its id (T252c): the ✕ drops the send that owns it (a kernel copy's own qts is its enqueue stamp, not an entry)
+      if (t.qid) x.dataset.qid = t.qid;   // the copy's id (T252c): on a kernel copy the ✕ drops the send that owns it (a kernel copy's own qts is its enqueue stamp, not an entry); on ours it rides the cancel, so the kernel removes exactly this copy
       if (isCmd) x.dataset.qcmd = "1";
       (x as any)._qmd = t.md;   // the bubble's body — the kernel's drift guard + the composer restore read it
       xHost.appendChild(x);
@@ -6898,8 +6905,9 @@ function adoptProvisional(realId: string): void {
   if (draft) drafts.set(realId, draft);    // set BEFORE the switch — setActive fills the box from drafts
   setActive(realId);
   for (const text of queued) {
-    vscodeApi?.postMessage({ type: "sendMessage", id: realId, text });
-    registerOptimistic(realId, text);      // …and the bubble carries over to the tab that now owns it
+    const qid = mintQid();                                  // the copy's id, minted here: the real send carries it…
+    vscodeApi?.postMessage({ type: "sendMessage", id: realId, text, qid });
+    registerOptimistic(realId, text, undefined, qid);       // …and the bubble carries over to the tab that now owns it, under the same id
   }
   if (draft) { persistDrafts(); const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null; if (ta) growComposer(ta); }
 }
@@ -8052,8 +8060,11 @@ function cmtLatchReleased(t: CommentThread, base: CmtLatch): boolean {
 // send; a TRANSIENT nack keeps the optimistic mark + latch alive and the create RE-POSTS when the
 // next session frame for the sid arrives (frames are built from the kernel's parse — a new frame IS
 // the parse catching up). Bounded by attempts, not time; a real refusal or the ack drops the hold.
-const cmtCreateInFlight = new Map<string, { sid: string; uuid: string; exact: string; text: string;
-  name: string; model: string; effort: string; fast: string; color: string; tries: number }>();
+// Keyed by the anchor: one create at a time per passage on this viewer. The held create carries the id
+// the send gesture minted, and every re-post sends it again (commentCreateFrame): the kernel answers a
+// repeat of a create it completed with the same thread, and tells a repeat from a fresh comment in the
+// same words by that id.
+const cmtCreateInFlight = new Map<string, CommentCreate>();
 const CMT_CREATE_MAX_TRIES = 12;
 
 function retryCmtCreates(sid: string): void {
@@ -8066,8 +8077,7 @@ function retryCmtCreates(sid: string): void {
       continue;
     }
     c.tries++;
-    vscodeApi?.postMessage({ type: "commentCreate", id: c.sid, uuid: c.uuid, exact: c.exact,
-      text: c.text, name: c.name, model: c.model, effort: c.effort, fast: c.fast, color: c.color });
+    vscodeApi?.postMessage(commentCreateFrame(c));         // the same gesture again: the same id
   }
 }
 
@@ -8816,12 +8826,10 @@ function commentSendFromPop(pop: HTMLElement): void {
     commentThreads.set(create.sid, [...cur0.filter((t) => t.tid !== synth.tid), synth]);
     cmtAwaitBase.set(synth.tid, { ...CMT_LATCH_ZERO });   // the SEND gesture latches the pulse — before any kernel round-trip (T102); released once a frame acknowledges the send (T237)
     applyCommentMarks(create.sid);
-    vscodeApi.postMessage({ type: "commentCreate", id: create.sid, uuid: create.uuid, exact: create.exact,
-      text, name: nm, model: create.model || "", effort: create.effort || "",
-      fast: create.fast || "", color: create.color || "" });
-    cmtCreateInFlight.set(create.uuid, { sid: create.sid, uuid: create.uuid, exact: create.exact,
-      text, name: nm, model: create.model || "", effort: create.effort || "",
-      fast: create.fast || "", color: create.color || "", tries: 0 });
+    // the gesture is stamped once, here; the hold re-posts the same frame while a transient nack stands
+    const held = newCommentCreate(create, text, nm);
+    vscodeApi.postMessage(commentCreateFrame(held));
+    cmtCreateInFlight.set(create.uuid, held);
     return;
   }
   const cur = openCommentThread();
@@ -13707,9 +13715,13 @@ function routeUserMessage(sid: string, text: string, cites: Citation[] | undefin
   // md (send-pending.ts): the quote branch echoes the COMPOSED body, which is byte-identical to what
   // lands (quoteReplyBody IS the send path); the follow-up echoes the typed words, which is what the
   // kernel ships as the landed event's md once it strips the goal wrapper (_split_followup).
-  if (goalCite?.itemId) { vscodeApi.postMessage({ type: "askFollowUp", itemId: goalCite.itemId, text, sid }); registerOptimistic(sid, text, imgPaths); }
-  else if (quoteCites.length) { const body = quoteReplyBody(quoteCites, text); vscodeApi.postMessage({ type: "sendMessage", id: sid, text: body }); registerOptimistic(sid, body, imgPaths); }
-  else { vscodeApi.postMessage({ type: "sendMessage", id: sid, text }); registerOptimistic(sid, text, imgPaths); }
+  // The copy's id is minted at the press and rides the post (`qid`), and the entry registered right after wears
+  // the same one: the kernel queues or parks the copy under it, so the two never have to be paired by text
+  // (send-pending.ts). The post still goes first: the paint that follows can never cost the send.
+  const qid = mintQid();
+  if (goalCite?.itemId) { vscodeApi.postMessage({ type: "askFollowUp", itemId: goalCite.itemId, text, sid, qid }); registerOptimistic(sid, text, imgPaths, qid); }
+  else if (quoteCites.length) { const body = quoteReplyBody(quoteCites, text); vscodeApi.postMessage({ type: "sendMessage", id: sid, text: body, qid }); registerOptimistic(sid, body, imgPaths, qid); }
+  else { vscodeApi.postMessage({ type: "sendMessage", id: sid, text, qid }); registerOptimistic(sid, text, imgPaths, qid); }
   // One breadcrumb per composer send (client-diag.jsonl): sid, when, how long, which route — never the
   // text. A send that "vanished" can then be traced from the press through the kernel's own logs
   // instead of reconstructed from memory.
@@ -16652,6 +16664,7 @@ setupSettings();
       const provisional = isProvisionalId(sidQ);
       if (provisional && qmd) forgetProvisionalSend(qmd);
       const msg: Record<string, unknown> = { type: "cancelQueued", id: sidQ, md: qmd };
+      if (el.dataset.qid) msg.qid = el.dataset.qid;   // the copy's id: the kernel cancels exactly this copy, in whichever queue it sits, never a same-words neighbour by index or body
       if (qmd && el.dataset.qopt !== "1") noteCancelledQueued(sidQ, qmd, el.dataset.qid || undefined);   // a kernel copy: never held once it vanishes (T262i)
       if (el.dataset.qidx !== undefined) msg.idx = Number(el.dataset.qidx);
       if (el.dataset.qpark !== undefined) msg.park = Number(el.dataset.qpark);
