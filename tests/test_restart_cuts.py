@@ -517,6 +517,26 @@ class UnrequestedSignal(unittest.TestCase):
         self.assertIs(row["managerStopped"], True)
         self.assertIs(row["managerRequested"], False, "still not a request: nobody asked the manager")
 
+    def test_a_closed_stderr_does_not_undo_the_service_stop_verdict(self):
+        # the helper's own log line comes AFTER the `signal` row lands and BEFORE the return, so a stderr
+        # that raises there must not carry the verdict away with it: _drain_and_exit would take its
+        # fallback, the plain wording, and the cut row would contradict the row already on disk. The
+        # case above drives a broken pipe (an OSError) through _graceful_term and then calls the helper
+        # alone asserting the return only; this one's stderr is a closed file object, whose write raises
+        # ValueError (the guard is for any exception, not one errno: a supervisor that reset the stream
+        # leaves that kind behind), and it asserts on the direct call that the audit row's managerStopped
+        # and reason agree with the verdict returned
+        closed = io.StringIO()
+        closed.close()
+        with mock.patch.dict(os.environ, {"ROMP_MANAGER_PID": str(self._dead_pid())}), \
+             mock.patch.object(km.sys, "stderr", closed):
+            reason = km._unrequested_signal_reason(signal.SIGTERM, wait=0, now=1000)
+        self.assertEqual(reason, km.SIGNAL_REASON_MANAGER_STOPPED)
+        rows = self._rows(self.AUDIT)
+        self.assertEqual(len(rows), 1)
+        self.assertIs(rows[0]["managerStopped"], True)
+        self.assertEqual(rows[0]["reason"], reason, "the verdict returned is the one the row carries")
+
     def test_the_managers_stop_note_landing_after_our_signal_is_the_service_stop_wording(self):
         # the manager writes its note BEFORE it kills, so a note that lands AFTER our signal did not
         # send it: the manager is going down alongside us (node's handler ran after ours)
