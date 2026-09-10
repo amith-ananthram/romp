@@ -2106,6 +2106,38 @@ def api_health_counts(events, now: float, window: int, uptime_s=None) -> dict:
             "rate5xx": None if r5xx is None else round(r5xx, 4)}
 
 
+def api_health_series(events, now: float, window: int, bin_s: int = 60) -> dict:
+    """Attempts per bin over (now - window, now], for the dashboard's graph (T301, the user 2026-09-10, who
+    wanted a storm visible at a glance instead of per-window percentages): `binS` seconds per bin, the last
+    bin ending at `now`, `from` the start of the first. Four parallel arrays, oldest first, one integer per
+    bin: `ok` (successful responses), `rateLimited` (429 attempts), `serverErrors` (529 and other 5xx attempts,
+    the rate5xx numerator), `noStatus` (connection-level failures: the offline class). Other-status errors
+    are counted in `other`. ADDITIVE to the payload (schema 1 unchanged): a reader that ignores it sees the
+    document it always saw. Pure: the same events at the same now give the same arrays."""
+    bin_s = max(1, int(bin_s))
+    n = max(1, int(-(-int(window) // bin_s)))       # ceil(window / bin_s) bins
+    start = now - n * bin_s
+    keys = ("ok", "rateLimited", "serverErrors", "noStatus", "other")
+    out = {k: [0] * n for k in keys}
+    for e in events:
+        if not (start < e.t <= now):
+            continue
+        i = min(n - 1, int((e.t - start) // bin_s))
+        if e.kind == "ok":
+            k = "ok"
+        elif e.cls == "429":
+            k = "rateLimited"
+        elif e.cls in ("529", "5xx"):
+            k = "serverErrors"
+        elif e.cls == "none":
+            k = "noStatus"
+        else:
+            k = "other"
+        out[k][i] += 1
+    out.update({"binS": bin_s, "from": round(start, 3)})
+    return out
+
+
 API_HEALTH_SEVERITY = {"unknown": 0, "healthy": 1, "recovering": 2, "degraded": 3, "thrashing": 4}
 API_HEALTH_RESTART_WHY = "kernel restarted: the event ring is empty"
 
@@ -2714,6 +2746,24 @@ class ApiHealth:
                 pass
 
     # ---- the read ----
+    def quiet(self, now: float | None = None) -> bool:
+        """No API event (attempt, response, give-up) inside the longest window ending at `now`: the rail's gray
+        dot (T301). A clock-derived answer, so the frame that carries it changes at the moment the last event
+        ages out of the window, which is an event of its own."""
+        now = time.time() if now is None else float(now)
+        with self._lock:
+            last = self._last_event_at
+        return last is None or (now - last) > max(api_health_config()["windows"])
+
+    def window_errors(self, now: float | None = None) -> int:
+        """Failed attempts (a retry or a give-up) inside the longest window ending at `now` (T301): the frame's
+        `errs`, so the rail's dot reads red for a storm the window still holds while no session waits, and clears
+        the cycle the last failure ages out. Clock-derived like quiet(): the frame that carries it changes then."""
+        now = time.time() if now is None else float(now)
+        lo = now - max(api_health_config()["windows"])
+        with self._lock:
+            return sum(1 for e in self._ring if e.kind != "ok" and lo < e.t <= now)
+
     def snapshot(self, now: float | None = None, uptime_s=None) -> dict:
         """The /api-health payload minus `bootId` (the kernel stamps that from /version's globals; `bootAt`
         is this aggregator's `boot_stamp`, the number every seeded stateSince and every restart row
@@ -2744,18 +2794,19 @@ class ApiHealth:
             auth, fam = (evs[0].auth, evs[0].family) if evs else (prev["auth"], prev["family"])
             st = api_health_state(evs, now, (prev["state"], prev["since"]) if prev else None, cfg)
             wins = {str(w): api_health_counts(evs, now, w, uptime_s) for w in cfg["windows"]}
+            series = api_health_series(evs, now, max(cfg["windows"]))   # the graph's per-minute bins (T301)
             last_err = None
             for e in reversed(evs):
                 if e.kind != "ok":
                     last_err = {"at": round(e.t, 3), "status": e.status, "category": e.category or None,
                                 "class": e.cls, "kind": e.kind}
                     break
-            derived.append((key, auth, fam, prev, st, wins, last_err))
+            derived.append((key, auth, fam, prev, st, wins, last_err, series))
         buckets = {}
         worst, worst_key = "unknown", None
         filed = False
         with self._lock:
-            for key, auth, fam, prev, st, wins, last_err in derived:
+            for key, auth, fam, prev, st, wins, last_err, series in derived:
                 cur = self._last_state.get(key)
                 if cur != prev:
                     rec = cur                    # a concurrent read filed this bucket first: its record stands
@@ -2773,7 +2824,7 @@ class ApiHealth:
                                 "state": rec["state"], "stateSince": round(rec["since"], 3),
                                 "evidence": rec["evidence"], "why": rec["why"],
                                 "transitions": list(self._by_bucket.get(key, ())),
-                                "lastError": last_err}
+                                "lastError": last_err, "series": series}
                 if API_HEALTH_SEVERITY[rec["state"]] > API_HEALTH_SEVERITY[worst] or worst_key is None:
                     worst, worst_key = rec["state"], key
             if filed:

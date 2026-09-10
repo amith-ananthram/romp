@@ -68,7 +68,7 @@ const R = await page.evaluate((SID) => {
   const R = { err: {} };
   window.__realShellSend = window.__rompShellSend;             // the page's own binding, before the steps stub it
   const step = (name, fn) => { try { fn(); } catch (e) { R.err[name] = String(e && e.stack || e); } };
-  const el = document.getElementById("rail-api"), txt = el.querySelector(".ah-text");
+  const el = document.getElementById("rail-api");   // T301: a dot alone, its state on data-dot; no text beside it
   const tip = () => document.getElementById("ah-tip");
   const back = document.getElementById("ru-back");
   const disp = (n) => getComputedStyle(n).display;
@@ -87,7 +87,7 @@ const R = await page.evaluate((SID) => {
   R.role = el.getAttribute("role"); R.tabindex = el.getAttribute("tabindex");
   // 2. the first frame reveals it and names the state for a screen reader
   window.__rompApiHealth(frame());
-  R.firstFrameDisplay = disp(el); R.firstFrameText = txt.textContent; R.ariaLabel = el.getAttribute("aria-label");
+  R.firstFrameDisplay = disp(el); R.firstFrameDot = el.getAttribute("data-dot"); R.firstFrameText = el.textContent.trim(); R.ariaLabel = el.getAttribute("aria-label");
   step('hover', () => {
   // 3. the hover surface is inert: no button, no data-act; a growing frame re-anchors it above the rail
   el.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false, clientX: el.getBoundingClientRect().left + 10 }));
@@ -112,6 +112,35 @@ const R = await page.evaluate((SID) => {
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   R.kbClosed = tip().style.display === "none" && !back.classList.contains("on");
   R.kbFocusBack = document.activeElement === el;
+  });
+  step('inside', () => {
+  // 4b. the cell sits inside the spend readout (T301 review): its click must not reach the readout's own click (the
+  // spend modal), the readout's tip yields while the dot's shows and comes back when the pointer slides onto the
+  // figures, and the readout's repaint (a move of the cell) keeps focus and a focus-shown hover
+  const ru = document.getElementById("rail-usage"); let bubbled = 0; ru.addEventListener("click", () => { bubbled++; });
+  let hid = 0, shown = 0; window.__rompUsageTipHide = () => { hid++; }; window.__rompUsageTipShow = () => { shown++; };
+  ru.appendChild(el);
+  el.click();
+  R.insideOpened = tip().style.display === "block" && tip().classList.contains("ru-modal"); R.insideBubbled = bubbled;
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  el.focus(); el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  R.insideKbOpened = tip().classList.contains("ru-modal"); R.insideKbBubbled = bubbled;
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  el.blur();
+  const hid0 = hid;   // the focus above showed the hover once already (and hid the readout's tip then)
+  el.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false, clientX: el.getBoundingClientRect().left + 10 }));
+  R.usageTipHidOnEnter = hid - hid0;
+  el.dispatchEvent(new MouseEvent("mouseleave", { relatedTarget: ru }));
+  R.usageTipBackOnLeave = shown; R.dotTipHiddenAfterLeave = tip().style.display === "none";
+  el.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false, clientX: el.getBoundingClientRect().left + 10 }));
+  el.dispatchEvent(new MouseEvent("mouseleave", { relatedTarget: document.body }));
+  R.usageTipBackOnLeaveOutside = shown;
+  el.focus();
+  R.focusShown = tip().style.display === "block" && !tip().classList.contains("ru-modal");
+  window.__rompApiCellMoving(true); document.body.appendChild(el); ru.appendChild(el); el.focus({ preventScroll: true }); window.__rompApiCellMoving(false);
+  R.movedKeptFocus = document.activeElement === el; R.movedKeptHover = tip().style.display === "block" && !tip().classList.contains("ru-modal");
+  el.blur();
+  R.blurHidesAfterMove = tip().style.display === "none";
   });
   step('usage', () => {
   // 5. an open usage modal is closed first, explicitly, so the shared backdrop never serves two modals
@@ -348,7 +377,7 @@ await step2('socket', async () => {
   await open(1);
   R.sock1Ready = (await sock(1)).sent;
   await feed(1, PAUSED);
-  R.sockPainted = await page.evaluate(() => document.getElementById("rail-api").querySelector(".ah-text").textContent);
+  R.sockPainted = await page.evaluate(() => document.getElementById("rail-api").getAttribute("data-dot"));
   await page.evaluate(() => { document.getElementById("rail-api").click(); });
   await press();
   R.sockPressSent = (await sock(1)).sent;
@@ -431,15 +460,17 @@ class ServedCell(unittest.TestCase):
         self.assertTrue(self.R["preFrameHidden"], "the markup ships the attribute")
         self.assertEqual(self.R["preFrameDisplay"], "none", "and the attribute must actually hide it: %r" % self.R)
         self.assertEqual(self.R["firstFrameDisplay"], "flex", "the first frame reveals the cell")
-        self.assertEqual(self.R["firstFrameText"], "overloaded · 1 waiting")
+        self.assertEqual(self.R["firstFrameDot"], "errors", "a degraded frame paints the errors dot (T301)")
+        self.assertEqual(self.R["firstFrameText"], "", "a dot alone: no word beside it")
 
     def test_the_driver_hit_no_script_error(self):
         self.assertEqual(self.R["err"], {})
 
-    def test_the_light_theme_gives_the_ok_dot_the_label_color(self):
-        # .ah-dot's dark label gray at .55 blends into the light rail (about 1.4:1), so the ok glyph would vanish
-        self.assertEqual(self.R["lightDot"], "rgb(93, 87, 78)", "errors: %r" % self.R.get("err"))
-        self.assertEqual(self.R["lightDotOpacity"], "0.55")
+    def test_the_light_theme_gives_the_fine_dot_its_accent(self):
+        # T301: an ok frame with no history read yet is the FINE dot, the theme's accent (the light clay, not the dark
+        # sky blue); the quiet gray (rgb(93, 87, 78), the light label colour) is pinned in tests/test_api_health_hosts.py
+        self.assertEqual(self.R["lightDot"], "rgb(194, 65, 12)", "errors: %r" % self.R.get("err"))
+        self.assertEqual(self.R["lightDotOpacity"], "1")
 
     def test_an_emptied_usage_cell_takes_no_gap(self):
         # renderRows empties #rail-usage on a login-only machine; as a zero-width flex item it would still pay the
@@ -448,7 +479,7 @@ class ServedCell(unittest.TestCase):
 
     def test_the_cell_is_a_keyboard_reachable_button_that_names_its_state(self):
         self.assertEqual((self.R["role"], self.R["tabindex"]), ("button", "0"))
-        self.assertEqual(self.R["ariaLabel"], "API overloaded · 1 waiting")
+        self.assertEqual(self.R["ariaLabel"], "API health: errors")
         self.assertTrue(self.R["kbOpened"], "Enter opens the pinned detail: %r" % self.R.get("err"))
         self.assertTrue(self.R["kbFocusInTip"], "focus moves into the detail")
         self.assertEqual(self.R["tipRole"], "dialog")
@@ -508,13 +539,32 @@ class ServedCell(unittest.TestCase):
         self.assertEqual(self.R["rowDead"], {"hintBefore": "", "open": True, "hint": "Not sent: the dashboard is disconnected. Try again."},
                          "errors: %r" % self.R.get("err"))
 
+    def test_a_click_inside_the_spend_readout_opens_the_detail_and_never_reaches_the_readout_s_own_click(self):
+        self.assertTrue(self.R["insideOpened"])
+        self.assertEqual(self.R["insideBubbled"], 0, "the click did not bubble to #rail-usage (the spend modal)")
+        self.assertTrue(self.R["insideKbOpened"])
+        self.assertEqual(self.R["insideKbBubbled"], 0)
+
+    def test_the_readout_s_tip_yields_to_the_dot_s_and_comes_back_when_the_pointer_slides_onto_the_figures(self):
+        self.assertEqual(self.R["usageTipHidOnEnter"], 1, "the dot's show hides the readout's tip")
+        self.assertEqual(self.R["usageTipBackOnLeave"], 1, "a leave onto the readout asks for its tip back")
+        self.assertTrue(self.R["dotTipHiddenAfterLeave"])
+        self.assertEqual(self.R["usageTipBackOnLeaveOutside"], 1, "a leave out of the readout asks for nothing")
+
+    def test_the_readout_s_repaint_moves_the_cell_without_losing_focus_or_a_focus_shown_hover(self):
+        self.assertTrue(self.R["focusShown"])
+        self.assertTrue(self.R["movedKeptFocus"], "focus is put back after the move")
+        self.assertTrue(self.R["movedKeptHover"], "the blur the move caused was not the user's")
+        self.assertTrue(self.R["blurHidesAfterMove"], "a real blur still hides it")
+
     def test_the_light_theme_keeps_the_head_dot_s_state_colors(self):
         # a bare light rule on the dot would outrank the state rules, so the detail's headline dot would read the
         # label gray while the rail's id-scoped dot kept amber and red
-        amber, red, gray = "rgb(230, 126, 34)", "rgb(229, 72, 77)", "rgb(93, 87, 78)"
-        self.assertEqual(self.R["lightDegraded"], {"rail": amber, "head": amber, "headOpacity": "1"}, "errors: %r" % self.R.get("err"))
+        # T301: degraded and paused are both the ERRORS dot (the blocked red); ok is the fine dot (the accent)
+        red, accent = "rgb(229, 72, 77)", "rgb(194, 65, 12)"
+        self.assertEqual(self.R["lightDegraded"], {"rail": red, "head": red, "headOpacity": "1"}, "errors: %r" % self.R.get("err"))
         self.assertEqual(self.R["lightPaused"], {"rail": red, "head": red})
-        self.assertEqual(self.R["lightOkHead"], {"head": gray, "headOpacity": "0.55"})
+        self.assertEqual(self.R["lightOkHead"], {"head": accent, "headOpacity": "1"})
 
     def test_the_driver_s_second_phase_hit_no_error(self):
         self.assertEqual(self.R["err2"], {})
@@ -557,7 +607,7 @@ class ServedCell(unittest.TestCase):
         self.assertEqual(R["shellSendRestored"], "function", "the shell's own send survives the driver's stubs")
         self.assertEqual(R["sockRedialed"], 2, "a close redials")
         self.assertEqual(R["sock1Ready"], [ready], "the open sends ready")
-        self.assertEqual(R["sockPainted"], "paused · usage limit · 1 waiting", "a frame on the socket paints the cell")
+        self.assertEqual(R["sockPainted"], "errors", "a frame on the socket paints the cell (T301: a paused frame is the errors dot)")
         self.assertEqual(R["sockPressSent"], [ready, pressed], "the press rode the real socket")
         self.assertEqual(R["sockAcked"], {"disabled": True, "label": "Stop all auto-retries", "acted": True, "hint": ""})
         self.assertEqual(R["sockDropped"], {"disabled": False, "label": "Resume all auto-retries", "acted": False,

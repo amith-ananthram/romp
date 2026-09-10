@@ -89,7 +89,8 @@ test("the web rail's API cell is numbers under a constant label — no spend bar
   // window cells' own grammar — the window's ONE display name, name-font, LEFT of its value, with
   // dollars AND tokens (the user 2026-08-09: no more '$12 5h' second vocabulary trailing the number)
   assert.ok(usageJS.includes("function apiCellHTML(live)"));
-  assert.ok(usageJS.includes("'<div class=ru-name>API</div>'"));
+  // T301: the API-health dot's slot follows the label (the stable #rail-api node moves into it); the label itself is unchanged
+  assert.ok(usageJS.includes("'<div class=ru-name>API</div><span class=ah-slot></span>'"));
   assert.ok(!usageJS.includes("_tail"), "no tail plumbing survives in the rail JS");
   // the month segment carries the version-skew caveat (T235b): a legacy host's calendar month is left
   // out of the rolling segment, and the segment's title says how many machines were not counted
