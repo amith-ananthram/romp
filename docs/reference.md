@@ -777,6 +777,26 @@ check whether each is still running before relaunching it. A kernel restart has
 never touched work a session deliberately detached: tmux servers, `setsid`
 children and other processes that outlive their shell.
 
+What the CLI itself does when its parent goes quiet was measured on Claude Code
+2.1.257 (2026-09-10, the restart-surviving sessions program's stage 3 probe, run
+against a throwaway config directory): a permission request (`can_use_tool`)
+waits for its answer with no expiry within ten minutes and the turn continues
+normally on a late answer; a hook callback waits 600 seconds by default, or the
+matcher's `timeout` seconds when one is set, then the CLI cancels the request
+(`control_cancel_request`), records a hook-timeout error as the tool's result
+and goes on with the turn; a second `initialize` on the same stdin is accepted
+and its hook table replaces the first; stdin end-of-file ends an idle CLI at
+once (0.02 s) and a busy one after its turn (a 30 s tool call ran to completion
+first); an unread stdout does not stall the CLI (the pipe's 64 kilobytes fill,
+the rest buffers inside the process, the turn completes); `--resume` takes no
+lock, and two processes on one session id both append to the one transcript;
+`claude --bg` runs an interactive session on a pseudo-terminal under a daemon
+that stays in the launcher's cgroup, and refuses `--print`, so a background
+session has no stream-json channel. `tests/test_cli_control_protocol_probe.py`
+re-checks the two facts that need no model call (the second initialize, the
+`--bg` refusal) when run with `ROMP_CLI_PROBE_LIVE=1` and a `claude` on PATH; it
+skips otherwise, as every test that would reach the live CLI must.
+
 A message the kernel cannot handle does not end the session's CLI. The kernel
 handles each streamed message on its own: when a handler raises, it logs the
 exception type and the failing frame (file, line and function, first on the line
