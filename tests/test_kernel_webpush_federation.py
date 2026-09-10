@@ -8,7 +8,7 @@ What these pin, by layer:
     only (never directed/isolated, never a row without the pair channel), over _peer_call.
   * the relay route — POST /push/relay is token-gated, judges the ORIGIN's trust tier at delivery
     time (unknown fails safe, with the reason on stderr — fail loudly), mirrors capped, wears the
-    origin the way every federated surface does (host-prefixed sid + title), and NEVER forwards
+    origin on the SID only (the title passes as the origin composed it), and NEVER forwards
     onward (a relayed event is terminal, so attachment cycles cannot echo).
   * the payload — a mirrored event omits `badge` (the origin kernel's count is not this kernel's),
     _push_notify omits the key for badge=None, and the worker applies setAppBadge to numeric
@@ -113,12 +113,12 @@ class PushForward(unittest.TestCase):
         _seed_remote("boxc", "isolated")                      # policy: never
         _seed_remote("boxd", "trusted", token="")             # no channel to speak through
         _seed_remote("boxe", "trusted", local_port=0)         # no channel to speak through
-        calls = self._run_forward([{"title": "romp: web", "body": "Needs you: x", "sid": "S1"}])
+        calls = self._run_forward([{"title": "Romp needs you: web", "body": "Needs you: x", "sid": "S1"}])
         self.assertEqual([c[0] for c in calls], ["boxa"])
         host, method, path, body = calls[0]
         self.assertEqual((method, path), ("POST", "/push/relay"))
         self.assertEqual(body["origin"], km._self_host())
-        self.assertEqual(body["events"], [{"title": "romp: web", "body": "Needs you: x", "sid": "S1"}])
+        self.assertEqual(body["events"], [{"title": "Romp needs you: web", "body": "Needs you: x", "sid": "S1"}])
 
     def test_no_events_or_no_peers_is_silent(self):
         self.assertEqual(self._run_forward([]), [])           # nothing fired
@@ -169,8 +169,8 @@ class RelayRoute(unittest.TestCase):
         # the subscriber's own kernel decides what reaches its devices, not the origin's switches
         # (#937 fold): master off drops everything, turn switch off drops the turn-kind events
         _seed_remote("boxa", "trusted")
-        card = {"title": "romp: web", "body": "Needs you", "sid": "s", "kind": "card"}
-        turn = {"title": "web", "body": "Done", "sid": "s", "kind": "turn"}
+        card = {"title": "Romp needs you: web", "body": "Needs you", "sid": "s", "kind": "card"}
+        turn = {"title": "Romp: web", "body": "Done", "sid": "s", "kind": "turn"}
         km._set_notify_all(False)
         status, parsed, pn, _, err = self._relay({"origin": "boxa", "events": [card, turn]})
         self.assertEqual((status, parsed["mirrored"]), (200, 0), "master off holds both")
@@ -180,41 +180,48 @@ class RelayRoute(unittest.TestCase):
         km._set_notify_turns(False)
         status, parsed, pn, _, err = self._relay({"origin": "boxa", "events": [card, turn]})
         self.assertEqual((status, parsed["mirrored"]), (200, 1), "turn switch off holds only the turn event")
-        pn.assert_called_once_with("romp: boxa:web", "Needs you", "boxa:s", kind="card", card_id="", host="boxa")
+        pn.assert_called_once_with("Romp needs you: web", "Needs you", "boxa:s", kind="card", card_id="", host="boxa")
 
-    def test_a_trusted_origin_mirrors_wearing_its_host_prefix(self):
+    def test_a_trusted_origin_mirrors_with_the_origin_on_the_sid_only(self):
         _seed_remote("boxa", "trusted")
-        ev = {"title": "romp: web", "body": "Needs you: fix the login flow", "sid": "11111111-2222"}
+        ev = {"title": "Romp needs you: web", "body": "Needs you: fix the login flow", "sid": "11111111-2222"}
         status, parsed, pn, _, err = self._relay({"origin": "boxa", "events": [ev]})
         self.assertEqual(status, 200)
         self.assertEqual(parsed, {"ok": True, "mirrored": 1})
-        # the origin rides the sid AND the title, the way every federated surface wears it —
-        # and badge is OMITTED (positional call, default None): the origin's count is not ours
-        pn.assert_called_once_with("romp: boxa:web", "Needs you: fix the login flow",
+        # the origin rides the SID (so a tap routes through the merged dashboard's tabs) and the
+        # `host` kwarg — never the words: the title reaches the phone exactly as the origin composed
+        # it (the user 2026-09-09: the session name alone, no "romp: <host>:" decoration — which
+        # kernel detected an event is romp's business). badge is OMITTED (positional call, default
+        # None): the origin's count is not ours
+        pn.assert_called_once_with("Romp needs you: web", "Needs you: fix the login flow",
                                    "boxa:11111111-2222", kind="card", card_id="", host="boxa")
+        title, body = pn.call_args[0][0], pn.call_args[0][1]
+        self.assertNotIn("boxa", title + body, "the host is not in the words the user reads")
         self.assertEqual(err, "")
 
-    def test_title_and_sid_surgery_is_tolerant(self):
+    def test_sid_surgery_is_tolerant_and_no_title_is_rewritten(self):
         _seed_remote("boxa", "trusted")
         evs = [{"title": "Custom shape", "body": "b", "sid": "already:prefixed"},
+               {"title": "romp: web", "body": "Needs you: x", "sid": "S1"},   # an older build's title: as-is, never grafted
                {"title": "", "body": "", "sid": "S"}]          # empty event: skipped, not an error
         status, parsed, pn, _, _ = self._relay({"origin": "boxa", "events": evs})
         self.assertEqual(status, 200)
-        self.assertEqual(parsed["mirrored"], 1)
-        pn.assert_called_once_with("Custom shape", "b", "already:prefixed", kind="card", card_id="", host="boxa")
+        self.assertEqual(parsed["mirrored"], 2)
+        self.assertEqual([c[0][:3] for c in pn.call_args_list],
+                         [("Custom shape", "b", "already:prefixed"), ("romp: web", "Needs you: x", "boxa:S1")])
 
     def test_kind_and_card_pass_through_with_the_origin_as_host(self):
         # the card id is a goal id — globally unique, never host-prefixed (federation.ts) — so the
         # merged feed finds it as-is; the sid wears the prefix and host names the origin outright
         _seed_remote("boxa", "trusted")
-        ev = {"title": "romp: web", "body": "Needs you: x", "sid": "11111111-2222",
+        ev = {"title": "Romp needs you: web", "body": "Needs you: x", "sid": "11111111-2222",
               "kind": "card", "cardId": "11111111-2222:g1"}
         status, parsed, pn, _, _ = self._relay({"origin": "boxa", "events": [ev]})
         self.assertEqual(parsed["mirrored"], 1)
-        pn.assert_called_once_with("romp: boxa:web", "Needs you: x", "boxa:11111111-2222",
+        pn.assert_called_once_with("Romp needs you: web", "Needs you: x", "boxa:11111111-2222",
                                    kind="card", card_id="11111111-2222:g1", host="boxa")
         # …and the payload that reaches the phone carries both, the deep link included
-        d = km._push_payload("romp: boxa:web", "Needs you: x", "boxa:11111111-2222",
+        d = km._push_payload("Romp needs you: web", "Needs you: x", "boxa:11111111-2222",
                              kind="card", card_id="11111111-2222:g1", host="boxa")["data"]
         self.assertEqual((d["sid"], d["host"], d["cardId"]), ("boxa:11111111-2222", "boxa", "11111111-2222:g1"))
         self.assertEqual(d["url"], "/?push-reveal=boxa%3A11111111-2222&push-card=11111111-2222%3Ag1")
@@ -223,9 +230,9 @@ class RelayRoute(unittest.TestCase):
         # trust is judged by origin, attached or not — the remembered table is the origin store
         km._known_note("boxb", "trusted")
         status, parsed, pn, _, _ = self._relay(
-            {"origin": "boxb", "events": [{"title": "romp: api", "body": "Completed: done", "sid": "S2"}]})
+            {"origin": "boxb", "events": [{"title": "Romp: api", "body": "Completed: done", "sid": "S2"}]})
         self.assertEqual(parsed, {"ok": True, "mirrored": 1})
-        pn.assert_called_once_with("romp: boxb:api", "Completed: done", "boxb:S2", kind="card", card_id="", host="boxb")
+        pn.assert_called_once_with("Romp: api", "Completed: done", "boxb:S2", kind="card", card_id="", host="boxb")
 
     def test_below_trusted_drops_loudly_and_never_buzzes(self):
         _seed_remote("boxa", "directed")

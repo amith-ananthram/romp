@@ -82,10 +82,18 @@ test("every pane document the dashboard composes carries the writer at load", ()
 test("every timeline menu marks itself for the writers' in-menu skip (T213)", () => {
   // an unmarked menu dies to its own echo the moment _menuHost lifts it into the shell document:
   // the count pin makes a NEW menu that forgets the mark fail here, not in the field
-  const creations = (TIMELINE.match(/\+ MENU_STYLE\);/g) || []).length;
+  // a menu is counted by its style string's `+ MENU_STYLE` whether the spec ENDS the string or a
+  // declaration of the menu's own follows it: the tag colour popover (2026-09-09) appends its 8px
+  // padding after the spec, because MENU_STYLE opens with the menu padding (4px) and in one style
+  // string the later declaration wins (the dialog card's comment tells the same story)
+  const creations = (TIMELINE.match(/\+ MENU_STYLE(?:\)|\s*\+\s*')/g) || []).length;
   const marks = (TIMELINE.match(/\.dataset\.rompMenu = '1'/g) || []).length;
-  assert.ok(creations >= 5, "the timeline's menus render through MENU_STYLE");
+  assert.ok(creations >= 6, "the timeline's menus render through MENU_STYLE (five menus and the colour popover)");
   assert.equal(marks, creations, "every MENU_STYLE menu carries data-romp-menu");
+  // the popover by name: it lives in the host document like the menus (_menuHost), so the shell's
+  // writer must see the mark or a press on a swatch echoes back and detaches it before its click
+  assert.match(TIMELINE, /z-index:1003;' \+ MENU_STYLE \+ 'padding:8px;'\);\s*\n\s*pop\.dataset\.rompMenu = '1';/,
+    "the tag colour popover marks itself the same way");
   assert.match(MENU, /menu\.dataset\.tagMenu = "1"/, "the shared menu marks itself too (its own key)");
   // both writers skip the marked subtrees with the SAME selector — one vocabulary, two mirrors
   for (const src2 of [MENU, TIMELINE])

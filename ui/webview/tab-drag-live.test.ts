@@ -48,13 +48,20 @@ test("the slot comes from the VIRTUAL layout — boundaries that cannot move und
   // may carry a horizontal margin, or the virtual row holds more than the real one and the slot
   // hops in a band at every wrap boundary (the separator's 6px gutters were margin: a 12px drift)
   assert.match(body, /\?\? t\.getBoundingClientRect\(\)\.width,\s*\n\s*br: isBreak\(t\) \|\| isBreak\(before\(t\)\) \}\)\);/);
-  // T264: the untagged trail's boundary is a zero-height ROW BREAK (the visible 13px separator is gone) —
-  // not a box in the real layout, so it joins the virtual one as a zero-width row opener (w: 0, br), and
-  // a header after a break opens a row too; the simulation then wraps exactly where the strip does
+  // T264 (under the one-group-per-row setting, on by default): the untagged trail's boundary is a zero-height
+  // ROW BREAK, not a box in the real layout, so it joins the virtual one as a zero-width row opener (w: 0, br),
+  // and a header after a break opens a row too; the simulation then wraps exactly where the strip does
   const brk = CSS.match(/^\.tab-group-break \{[^}]*\}/m)![0];
   assert.match(brk, /flex: 0 0 100%; height: 0; margin: 0; padding: 0;/, "the break spans the row and has no box of its own");
   assert.match(body, /w: isBreak\(t\) \? 0 : /, "…so it measures 0 in the virtual layout, never its full-row rect");
-  assert.doesNotMatch(CSS, /^\.tab-group-sep \{/m, "no separator rule remains to give the boundary a width");
+  // with the setting off the trail's boundary is the 13px divider, a real box the virtual layout measures by its
+  // rect, whose gutters are padding (a margin would drift the simulated row); its rule is scoped off the break
+  assert.doesNotMatch(CSS, /^\.tab-group-sep \{/m, "no unscoped separator rule: the break's boundary class gives it no box");
+  const sepM = CSS.match(/^\.tab-group-sep:not\(\.tab-group-break\) \{[^}]*\}/m);
+  assert.ok(sepM, "the divider's rule exists, scoped off the break");
+  const sep = sepM[0];
+  assert.match(sep, /width: 13px; padding: 8px 6px;/, "the divider's footprint is its box");
+  assert.doesNotMatch(sep, /margin/, "no margin on the divider: the virtual row holds what the real one holds");
   const head = CSS.match(/^\.tab-group-head \{[^}]*\}/m)![0];
   assert.doesNotMatch(head, /margin/, "headers carry no horizontal margin either");
   assert.match(body, /dragSlotIndex\(boxes, dragGeom\.containerW, dragGeom\.gapX, dragGeom\.rowH,/);

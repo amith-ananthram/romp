@@ -33,6 +33,17 @@ test("Compact transcript defaults ON (the user 2026-07-14): fresh installs read 
   assert.equal(DEFAULT_SETTINGS.compact, true);
 });
 
+// The tab strip's one-group-per-row layout (T264) is the default and a per-device pick: an explicit false
+// lets the groups follow one another across the strip and wrap as they need (render.ts renderTabs).
+test("stripGroupRows defaults ON: every tag group on its own row; an explicit false round-trips, and a store from before the key reads as on", () => {
+  assert.equal(DEFAULT_SETTINGS.stripGroupRows, true);
+  store["romp:settings"] = JSON.stringify({ stripGroupRows: false });
+  assert.equal(loadSettings().stripGroupRows, false, "the opt-out round-trips");
+  store["romp:settings"] = JSON.stringify({});
+  assert.equal(loadSettings().stripGroupRows, true, "a store from before the key reads as on");
+  delete store["romp:settings"];
+});
+
 // The settings change signal must cover every way a change can happen: another
 // same-origin tab (storage event), THIS document (the gear now lives in the same
 // page — same-document writes never fire storage), and another VS Code webview

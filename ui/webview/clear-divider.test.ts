@@ -27,16 +27,20 @@ test("the ChatEvent union carries both /clear kinds, dispatched to their rendere
   assert.match(RENDER, /if \(ev\.kind === "clear"\) return renderClear\(ev\);/);
 });
 
-test("renderClear is a collapsed notice card keyed on the boundary, in the notice-card family", () => {
+test("renderClear is a folded SESSION notice keyed on the boundary, built by the one builder (2026-09-08)", () => {
   assert.match(RENDER, /const key = "clear:" \+ \(ev\.uuid \|\| sid\)/);
-  assert.match(RENDER, /noticeCard\(\{ variant: "clear", chip: "cleared", head, body, collapsible: true, key \}\)/);
-  // collapsed by DEFAULT: nothing pre-seeds openFolds for a clear key — expansion is the user's click
+  assert.match(RENDER, /notice\(\{ src: "session", glyph: "clear", gist: "Conversation cleared — a fresh one starts here",/);
+  assert.match(RENDER, /body, key, tip: dropped\.length \? "dropped: " \+ dropped\.join\(", "\) : undefined \}\);/);
+  // folded by default: nothing pre-seeds the key open
   assert.doesNotMatch(RENDER, /openFolds\.add\("clear:/);
 });
 
 test("the pre-clear history lazy-loads once per boundary and renders through the shared renderers", () => {
   // fetch on FIRST expand only: cache + pending dedup guard the postMessage
-  assert.match(RENDER, /if \(episodeCache\.has\(key\) \|\| episodePendingKey\.get\(sid\) === key\) return;/);
+  // 2026-09-08: the fetch rides the delegated head toggle (noticeOpened), reading the body's data-clear-key/-sid —
+  // no per-node listener on the head (the tail rebuild destroyed it mid-press)
+  assert.match(RENDER, /if \(!key \|\| !sid \|\| episodeCache\.has\(key\) \|\| episodePendingKey\.get\(sid\) === key\) return;/);
+  assert.match(RENDER, /body\.dataset\.clearSid = sid;/);
   assert.match(RENDER, /vscodeApi\?\.postMessage\(\{ type: "loadEpisode", id: sid \}\)/);
   // the reply fills the card body in place, and re-renders serve from the cache
   assert.match(RENDER, /else if \(m\.type === "chatEpisode"\) chatEpisode\(m\);/);
@@ -49,16 +53,18 @@ test("the pre-clear history lazy-loads once per boundary and renders through the
 });
 
 test("renderClearing is the loader-dots in-progress element, and the chip family knows 'clearing'", () => {
-  assert.match(RENDER, /txt\.textContent = "Clearing conversation…";/);
-  assert.match(RENDER, /function renderClearing\(\): HTMLElement \{\n  const turn = el\("div", "turn turn-clearing"\);/);
+  // 2026-09-08: a slim live SESSION notice with the loader dots in its glyph slot (the romp severity: accent)
+  assert.match(RENDER, /function renderClearing\(\): HTMLElement \{[\s\S]{0,200}?notice\(\{ src: "session", glyph: noticeLiveGlyph\(metaDots\(\)\), sev: "romp", gist: "Clearing conversation…", live: true,/);
   assert.match(RENDER, /"clearing" \| "blocked"|clearing: "Clearing"/);   // ChipState + CHIP_LABEL entries
   assert.match(RENDER, /⟳ Clearing conversation…/);                       // statusline line, like compacting's
   assert.match(TL, /label: 'Clearing'/);                                  // timeline lane badge
 });
 
-test("the styles exist: quiet clear card, clearing line, nested episode scope", () => {
-  assert.match(CSS, /\.notice-card-clear \{ border-left-color: var\(--dim\); \}/);
-  assert.match(CSS, /\.clearing-line \{/);
+test("the styles exist: the quiet info severity, the live glyph slot, nested episode scope", () => {
+  // 2026-09-08: the clear card is an INFO notice (dim rail); the clearing row rides the wide live glyph slot
+  assert.match(CSS, /\.notice-sev-info\s+\{ --notice-rail: var\(--dim\);/);
+  assert.match(CSS, /\.notice-glyph\.notice-glyph-wide \{ width: auto; \}/);
+  assert.doesNotMatch(CSS, /\.notice-card-clear|\.clearing-line/);
   assert.match(CSS, /\.clear-episode \{/);
   assert.match(CSS, /\.clear-truncated \{/);
 });

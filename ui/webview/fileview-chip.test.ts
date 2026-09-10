@@ -12,6 +12,7 @@ class El {
   id = ""; title = ""; hidden = false; type = ""; disabled = false; tabIndex = -1; innerHTML = "";
   href = ""; target = ""; rel = ""; spellcheck = true; isConnected = true;
   style: Record<string, string> = {};
+  dataset: Record<string, string> = {};      // the viewer's text size rides the root as data-fv-text (textSizeControl)
   childNodes: Array<El | string> = [];
   private attrs = new Map<string, string>();
   private classes = new Set<string>();

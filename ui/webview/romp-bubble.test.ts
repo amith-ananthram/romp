@@ -22,7 +22,9 @@ test("a romp event renders the gray romp-bubble + a romp tag, NOT the blue or th
   assert.match(RENDER, /logo\.src = mediaSrc\("romp-swirl-glyph\.svg"\)/);
   assert.match(RENDER, /createTextNode\("romp"\)/);
   assert.doesNotMatch(RENDER, /tag\.textContent = "↯ romp"/, "the ↯ placeholder is gone");
-  assert.match(RENDER, /\(romp \? "romp-bubble" : tagged \? "romp-bubble tag-bubble" : injected \? "user-note" : "user-bubble"\)/);
+  // 2026-09-08 (the notice-vocabulary pass): a harness-injected line is a SYSTEM notice (its content div is the
+  // notice body's markdown class); the .user-note box is retired
+  assert.match(RENDER, /\(romp \? "romp-bubble" : tagged \? "romp-bubble tag-bubble" : injected \? "notice-md" : "user-bubble"\)/);
   // its own gray rail dot
   assert.match(RENDER, /dot\(romp \? "romp" : tagged \? "tag" : injected \? "ring" : "user"\)/);
   assert.match(RENDER, /"green" \| "ring" \| "user" \| "red" \| "romp"/, "the dot helper knows the romp variant");
@@ -36,18 +38,21 @@ test("the swirl LOGO is on EVERY romp bubble, next to the 'romp' tag (the user 2
   assert.match(RENDER, /const tag = el\("div", "romp-tag"\);\s*const logo = el\("img", "romp-tag-logo"\)[\s\S]*?tag\.appendChild\(logo\);\s*tag\.appendChild\(document\.createTextNode\("romp"\)\)/);
 });
 
-test("a postal card carries the romp swirl (postal is 'from romp' too — the user 2026-06-23)", () => {
-  assert.match(RENDER, /el\("img", "postal-service-romp-logo"\)/);
-  assert.match(RENDER, /rlogo\.src = mediaSrc\("romp-swirl-glyph\.svg"\)/);
-  assert.match(CSS, /\.postal-service-romp-logo \{/);
+test("a postal notice wears the peer's envelope glyph; the swirl is romp's OWN source glyph (2026-09-08)", () => {
+  // the notice-vocabulary pass: one glyph per SOURCE — a peer's mail is from the peer (envelope + its session chip),
+  // a romp notice is from romp (the swirl, the one non-stroke glyph)
+  assert.match(RENDER, /notice\(\{ src, glyph: "peer", gist: summaryText, meta: meta\.join\(" · "\) \|\| undefined, body, open: owed,/);
+  assert.match(RENDER, /if \(kind === "romp"\) \{\s*\n\s*const logo = el\("img"\) as HTMLImageElement;\s*\n\s*logo\.src = mediaSrc\("romp-swirl-glyph\.svg"\)/);
+  assert.doesNotMatch(CSS, /\.postal-service-romp-logo/);
 });
 
 test("the romp bubble is a gray, right-aligned bubble (inherits the non-injected right-align)", () => {
   // the turn carries 'romp' (no 'injected'), so .turn-user:not(.injected) right-aligns it
   assert.match(RENDER, /"turn turn-user" \+ \(romp \? " romp" : injected \? " injected" : ""\)/);
-  assert.match(CSS, /\.romp-bubble \{[\s\S]*?background: rgba\(255, 255, 255, 0\.08\)/);
+  // 2026-09-08: on the shared overlay tokens — the white-alpha wash vanished on the light theme's cream
+  assert.match(CSS, /\.romp-bubble \{[\s\S]*?background: var\(--overlay-05\); border: 1px solid var\(--overlay-10\);/);
   assert.match(CSS, /\.romp-tag \{/);
   // its rail dot is the swirl in a dark disc since 2026-07-23, matching the timeline's romp glyph —
   // the bubble stays gray, but the dot is no longer anonymous. Pinned in rail-line-hover.test.ts.
-  assert.match(CSS, /\.dot\.romp \{ background: #000; border: 1px solid #e8eef5; \}/);
+  assert.match(CSS, /\.dot\.romp \{ background: var\(--bg\); border: 1px solid var\(--fg\); \}/);   // tokenised 2026-09-08
 });
