@@ -25,17 +25,20 @@ import errno
 import io
 import json
 import os
+import shutil
 import tempfile
 import threading
 import time
 import unittest
 from importlib.machinery import SourceFileLoader
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
 
 # Hermetic state BEFORE the loads — they resolve their state root at import time, and only
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
+# That is the loads' import-time floor only: every test runs under a state root of its own (_own_state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
@@ -54,14 +57,42 @@ def store_tag(name):
     return next((t for t in km._timeline_views()["tags"] if t["name"] == name), None)
 
 
+def _own_state(test):
+    """A state root of the test's own, bound into the judge here and put back and removed by a cleanup on
+    the same test (a cleanup, so it runs after tearDown). The judge is ONE module object per process (a
+    SourceFileLoader load of a name already in sys.modules re-executes into that object), so jd.STATE is
+    shared with every module an xdist worker collected, and a fixture elsewhere that left it bound to a
+    removed directory reached this module: _atomic_write recreates the parent and a direct write_text does
+    not, so a test whose first touch of the views file is a write_text (a fixture written before any seed)
+    failed with FileNotFoundError when it ran first after such a fixture (LegacyStoreStampedOnce,
+    LegacyTagsStampedOnFirstRead, MigrationStampsTheArchivedTag, ReaderRestampKeepsTheDiskCap and
+    ReaderRestampUnwritableNamesTheDrop as classes, ReaderRestampUnwritable's read-only test alone). The
+    suite's shared-state check (tests/conftest.py, _shared_state_restored) fails the test that leaves such
+    a binding; a root per test makes this module independent of that check and of test order, and the
+    cleanup drops this root's entries from the two path-keyed caches. OwnStateRoot pins the shape."""
+    saved = km.jd.STATE
+    root = tempfile.mkdtemp()
+    km.jd._rebind_state(Path(root))
+    views = str(km._views_path())
+
+    def restore():
+        km._flags_cache.pop(views, None)
+        km._VIEWS_SEQ_FLOOR.pop(views, None)
+        km.jd._rebind_state(saved)
+        try:
+            os.chmod(root, 0o755)    # the unwritable-store tests leave the dir 0o555 if they fail before their finally
+        except OSError:
+            pass
+        shutil.rmtree(root, ignore_errors=True)
+    test.addCleanup(restore)
+    return Path(root)
+
+
 class _Wire(unittest.TestCase):
     """A dashboard's timeline socket, through the real dispatcher; every ack it receives is kept."""
 
     def setUp(self):
-        try:
-            km._views_path().unlink()
-        except OSError:
-            pass
+        _own_state(self)
         self.notices = []
         self._sync = km._sync_notice
         km._sync_notice = lambda text, ok=True: self.notices.append((text, ok))
@@ -72,10 +103,6 @@ class _Wire(unittest.TestCase):
 
     def tearDown(self):
         km._sync_notice = self._sync
-        try:
-            km._views_path().unlink()
-        except OSError:
-            pass
 
     @contextlib.contextmanager
     def real_notices(self):
@@ -110,6 +137,35 @@ class _Wire(unittest.TestCase):
                          "views": {"active": "all", "tags": [dict(WEB)]}})
         self.assertEqual((ack["type"], ack["ok"], ack["refused"]), ("viewsAck", True, []))
         return ack["views"]
+
+
+class OwnStateRoot(_Wire):
+    """_own_state: the binding an earlier test left behind decides nothing about where this module's
+    tests write, and comes back untouched afterwards. setUp leaves jd.STATE the way a neighbour's
+    tearDown can (bound to a temp root that has been removed, the prior root not put back) BEFORE
+    _Wire.setUp runs, so the helper is all that stands between a direct write_text and
+    FileNotFoundError; without it the test here fails as the legacy-fixture classes did. The root the
+    class found is registered as the FIRST cleanup, so it runs last and the class leaves jd.STATE as it
+    found it: the dangling binding is made inside the test and undone by it, which is what the suite's
+    shared-state check (tests/conftest.py, _shared_state_restored) requires of every test."""
+
+    def setUp(self):
+        found = km.jd.STATE
+        self.addCleanup(km.jd._rebind_state, found)    # registered first, so it runs last: the root found here
+                                                        # comes back after _own_state's own restore has run
+        gone = Path(tempfile.mkdtemp())
+        gone.rmdir()
+        km.jd._rebind_state(gone)                       # a temp root, removed, never put back
+        self.gone = gone
+        super().setUp()
+
+    def test_a_dangling_binding_left_by_an_earlier_test_is_not_inherited_by_a_direct_write(self):
+        p = km._views_path()
+        p.write_text(json.dumps({"active": "all", "tags": [dict(WEB)]}))   # a legacy fixture: write_text before any
+                                                                            # seed; FileNotFoundError under a dangling root
+        self.assertNotEqual(p.parent, self.gone, "the write landed under a root of this test's own, not the dangling one")
+        self.assertTrue(p.parent.is_dir(), "and that root exists")
+        self.assertIsNotNone(store_tag("web"), "and the reader reads the file back from it")
 
 
 class TargetedTagEdits(_Wire):
@@ -817,28 +873,23 @@ class Capability(_Wire):
 
     def setUp(self):
         super().setUp()
+        seen = set(km._UNKNOWN_OPS_SEEN)
+        self.addCleanup(lambda: (km._UNKNOWN_OPS_SEEN.clear(), km._UNKNOWN_OPS_SEEN.update(seen)))
         km._UNKNOWN_OPS_SEEN.clear()
-        # the `ready` arm sends its own tabOrder frame after the connect push, built from a live-session
-        # read; pinned empty so the frame goes out the same way with or without tmux on the box
-        self._tmux = km._tmux_sessions
-        km._tmux_sessions = lambda: {}
-
-    def tearDown(self):
-        km._tmux_sessions = self._tmux
-        super().tearDown()
 
     def test_ready_is_answered_with_the_caps_frame_after_the_pushes(self):
         self.handler._push_one = lambda c: self.sent.append({"type": "_pushed"})   # the connect push, in order
         km.Handler._dispatch_ws(self.handler, {"type": "ready"}, self.client)
         types = [m["type"] for m in self.sent]
         self.assertIn("caps", types)
-        self.assertLess(types.index("_pushed"), types.index("tabOrder"), "the handler's own tabOrder frame follows the push…")
-        self.assertLess(types.index("tabOrder"), types.index("caps"),
-                        "…and the caps frame follows both: the shim's stale banner clears on the first real frame "
+        self.assertLess(types.index("_pushed"), types.index("caps"),
+                        "the caps frame follows the push: the shim's stale banner clears on the first real frame "
                         "after a reconnect, which must stay the resync frame itself")
+        self.assertNotIn("tabOrder", types, "no strip from the handler itself: the connect push is the one source")
         caps = next(m for m in self.sent if m["type"] == "caps")
         self.assertEqual(caps, {"type": "caps", "caps": ["tagEdit"], "viewsSeq": None},
-                         "no store exists yet: no frame carried a seq and the store has none — viewsSeq is null, the key always present")
+                         "no store exists yet: the stubbed push carried no seq and the store has none; viewsSeq is null, "
+                         "the key always present")
         # a RE-SENT ready (the shim, on a reconnected socket) gets the caps again — the event a page
         # with writes in flight across the drop keys on
         n = len(self.sent)
@@ -893,30 +944,17 @@ class Capability(_Wire):
         enqueued, not from the store, which a write between the push and the caps frame moves on."""
         s0 = self.seed()["seq"]
 
-        def push(c):                                     # the connect push's tabOrder frame, then a write lands
+        def push(c):                                     # the connect push's tabOrder frame, then a write lands before caps
             km._send_client(c, ("taborder",), {"type": "tabOrder", "order": [], "tabs": [], "views": km._views_client()})
             self.assertIsNone(km._edit_tag(tid="gA", add=[SID2])[1])
         self.handler._push_one = push
-        # the `ready` arm then sends ITS OWN tabOrder frame, built after the push (so it carries the
-        # write above), on the raw socket; a second write lands the moment that frame is out — between
-        # the last frame the handler served and its caps frame
-        real_send = self.client["send"]
-
-        def send(raw):
-            real_send(raw)
-            m = json.loads(raw)
-            if m.get("type") == "tabOrder" and m["views"].get("seq") != s0:
-                self.assertIsNone(km._edit_tag(tid="gA", color="#123456")[1])
-        self.client["send"] = send
         caps = self._ready()
+        s1 = km._views_client()["seq"]
+        self.assertGreater(s1, s0, "the write moved the store on after the frame the push served")
         seqs = [m["views"]["seq"] for m in self.sent if m["type"] == "tabOrder"]
-        self.assertEqual(len(seqs), 2, "the stubbed push's frame and the handler's own")
-        s1 = seqs[1]
-        self.assertGreater(s1, s0, "the handler's own frame carries the first write")
-        s2 = km._views_client()["seq"]
-        self.assertGreater(s2, s1, "the second write moved the store on after every frame the handler served")
-        self.assertEqual(caps["viewsSeq"], s1, "the highest seq the handler's own frames served, not the store's current seq")
-        self.assertEqual([m["type"] for m in self.sent if m["type"] in ("tabOrder", "caps")], ["tabOrder", "tabOrder", "caps"])
+        self.assertEqual(seqs, [s0], "one strip, the connect push's, under the seq it was built with")
+        self.assertEqual(caps["viewsSeq"], s0, "the seq the push served, not the store's current seq")
+        self.assertEqual([m["type"] for m in self.sent if m["type"] in ("tabOrder", "caps")], ["tabOrder", "caps"])
 
     def test_a_pusher_thread_frame_enqueued_between_the_push_and_the_caps_is_not_what_the_caps_names(self):
         """The residual race the client cannot see: a pusher-thread frame built before a concurrent write
@@ -935,8 +973,7 @@ class Capability(_Wire):
         self.handler._push_one = push
         caps = self._ready()
         seqs = [m["views"]["seq"] for m in self.sent if m["type"] == "tabOrder"]
-        self.assertEqual(seqs, [s_new, served["seq"], s_new],
-                         "the stale frame went out after the connect push's and before the handler's own tabOrder")
+        self.assertEqual(seqs, [s_new, served["seq"]], "the stale frame went out after the connect push's, before the caps")
         self.assertEqual(caps["viewsSeq"], s_new, "the caps names the connect push's seq, never the pusher thread's")
         self.assertNotEqual(caps["viewsSeq"], served["seq"])
 
@@ -947,15 +984,8 @@ class Capability(_Wire):
         self.assertEqual(self._ready()["viewsSeq"], s0, "the skeleton carries views under `data`")
         self.handler._push_one = lambda c: km._send_client(c, ("working",), {"type": "working", "names": []})
         self.assertEqual(self._ready()["viewsSeq"], s0,
-                         "a push that served no views blob: the handler's own tabOrder frame carries the store's blob")
-        saved = km._ordered_alive
-        km._ordered_alive = lambda now, tmux: (_ for _ in ()).throw(RuntimeError("no live read"))
-        try:
-            self.assertEqual(self._ready()["viewsSeq"], s0,
-                             "…and when that frame cannot be built either, the store's current seq — the one the next "
-                             "push serves (null here left a page's gate armed at a pre-restore seq)")
-        finally:
-            km._ordered_alive = saved
+                         "a push that served no views blob: the store's current seq, the one the next push serves "
+                         "(null here left a page's gate armed at a pre-restore seq)")
         km._views_path().unlink()
         km._flags_cache.clear()
         self.assertIsNone(self._ready()["viewsSeq"], "no store at all: nothing has a seq, null")
@@ -970,6 +1000,7 @@ class Capability(_Wire):
         from pathlib import Path as _P
         s0 = self.seed()["seq"]
         tmp = _tf.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
         names = _P(tmp) / "names"
         names.mkdir()
         (names / SID1).write_text("web\t/proj/TESTHOST/app\t#1EA1EB\twhite\n")
@@ -985,8 +1016,8 @@ class Capability(_Wire):
             self.client["sent"] = {}
             caps = self._ready()
             tab = [m for m in self.sent if m["type"] == "tabOrder"]
-            self.assertEqual(len(tab), 2, "the real connect push's tabOrder frame, then the handler's own")
-            self.assertEqual([t["views"]["seq"] for t in tab], [s0, s0])
+            self.assertEqual(len(tab), 1, "the real connect push's tabOrder frame, the one strip a ready produces")
+            self.assertEqual([t["views"]["seq"] for t in tab], [s0])
             self.assertEqual(caps["viewsSeq"], s0)
             types = [m["type"] for m in self.sent]
             self.assertLess(types.index("tabOrder"), types.index("caps"))
@@ -999,24 +1030,92 @@ class Capability(_Wire):
         self.assertIn('else if(m.type==="unknownOp"&&panel.unknownOp)panel.unknownOp(m);', src)
 
 
+class ReadyStripSource(_Wire):
+    """The tab strip a chat page receives at `ready` comes from the connect push alone: _push lists
+    _chat_tab_sessions (every living session plus the dead ones the user reopened read-only) through the
+    ("taborder",) dedup slot. The ready arm used to send a second strip of its own, built from a second
+    liveness read of _ordered_alive (living sessions only). The client tears down every tab a later frame
+    omits unless that frame affirms it live (render.ts applyTabOrder, tab-order.ts), so the second strip
+    closed every kept-open tab the first had just listed, at every ready. And once that second strip went
+    through the same slot, a renderer whose socket was served a strip before its listener existed (the
+    pusher fires from accept) received NO strip at `ready` while the strip was unchanged: the connect push's
+    frame deduped against the pre-listener one, and so did the ready arm's own. `ready` now clears the slot
+    with the chat slots (_client_reset_chat_base), so the connect push's frame goes out. Synthetic sids."""
+
+    LIVE = "11111111-2222-3333-4444-555555555511"
+    DEAD = "11111111-2222-3333-4444-555555555512"
+
+    def setUp(self):
+        super().setUp()
+        self.client["app"] = "chat"                  # _push sends the strip to chat clients only
+        self.seed()                                  # a stamped store: every frame's views blob carries a seq
+        # the reads the ready arm made for a strip of its own: pinned, so should that strip return these tests
+        # fail the same way with or without tmux on this machine
+        saved = (km._tmux_sessions, km._ordered_alive)
+        km._tmux_sessions = lambda: {self.LIVE: {}}
+        km._ordered_alive = lambda now, tmux: [{"sid": self.LIVE, "name": "web", "path": "/nonexistent/live.jsonl"}]
+        self.addCleanup(lambda: setattr(km, "_tmux_sessions", saved[0]))
+        self.addCleanup(lambda: setattr(km, "_ordered_alive", saved[1]))
+
+    def _connect_push(self, order):
+        """The connect push's strip for `order`, the shape _push builds: the listed tabs' meta, LIVE affirmed."""
+        meta = [{"id": sid, "name": "web" if sid == self.LIVE else "api", "color": None} for sid in order]
+        return km._tab_order_frame(order, meta, {self.LIVE})
+
+    def _strips(self):
+        return [m for m in self.sent if m["type"] == "tabOrder"]
+
+    @staticmethod
+    def _torn_down(frames):
+        """The ids the client dismisses across `frames`, by applyTabOrder's rule: an id an earlier frame
+        listed that a later frame's order omits without affirming it live."""
+        listed, torn = set(), []
+        for fr in frames:
+            torn += sorted(listed - set(fr["order"]) - set(fr.get("live") or []))
+            listed |= set(fr["order"])
+        return torn
+
+    def test_a_kept_open_tab_the_connect_push_lists_is_never_omitted_by_a_frame_at_ready(self):
+        frame = self._connect_push([self.LIVE, self.DEAD])
+        self.handler._push_one = lambda c: km._send_client(c, ("taborder",), frame)
+        km.Handler._dispatch_ws(self.handler, {"type": "ready"}, self.client)
+        strips = self._strips()
+        self.assertTrue(strips, "the connect push's strip went out")
+        for fr in strips:
+            self.assertIn(self.DEAD, fr["order"], "every strip at ready lists the kept-open tab: %r" % (fr["order"],))
+        self.assertEqual(self._torn_down(strips), [], "no frame at ready closes a tab the connect push listed")
+
+    def test_ready_clears_the_tab_order_slot_so_the_connect_pushs_frame_goes_out(self):
+        frame = self._connect_push([self.LIVE, self.DEAD])
+        # the pusher fires from accept: this socket was served the strip before the bundle's listener existed
+        self.client["sent"] = {("taborder",): (km._dedup_sig(frame, json.dumps(frame)), time.time())}
+        self.handler._push_one = lambda c: km._send_client(c, ("taborder",), frame)
+        km.Handler._dispatch_ws(self.handler, {"type": "ready"}, self.client)
+        self.assertEqual(self._strips(), [frame],
+                         "exactly one strip, the connect push's, kept-open tab included: the slot was cleared at ready")
+
+    def test_an_unchanged_strip_still_reaches_a_renderer_served_before_its_listener_existed(self):
+        # no kept-open tab: a strip built from the kernel's own liveness read at ready would be identical to
+        # the connect push's, so with the slot armed neither frame went out and the page had no strip at all
+        frame = self._connect_push([self.LIVE])
+        self.client["sent"] = {("taborder",): (km._dedup_sig(frame, json.dumps(frame)), time.time())}
+        self.handler._push_one = lambda c: km._send_client(c, ("taborder",), frame)
+        km.Handler._dispatch_ws(self.handler, {"type": "ready"}, self.client)
+        self.assertEqual(self._strips(), [frame],
+                         "the renderer holds nothing: the strip goes out although this socket was sent the same bytes")
+
+
 class SetterReturnsRefusals(unittest.TestCase):
     """_set_timeline_views now RETURNS the refused rows (tid + name + plain reason); callers that
     ignored None keep ignoring a list."""
 
     def setUp(self):
-        try:
-            km._views_path().unlink()
-        except OSError:
-            pass
+        _own_state(self)
         self._sync = km._sync_notice
         km._sync_notice = lambda text, ok=True: None
 
     def tearDown(self):
         km._sync_notice = self._sync
-        try:
-            km._views_path().unlink()
-        except OSError:
-            pass
 
     def test_clean_writes_return_an_empty_list_and_stale_ones_the_rows(self):
         self.assertEqual(km._set_timeline_views({"active": "all", "tags": [dict(WEB)]}), [])
@@ -1241,6 +1340,7 @@ class SeqFloorOutlivesTheCacheEntry(_Wire):
         home = km.jd.STATE
         self.assertGreaterEqual(km._views_seq_floor(), s1, "the first store's floor is raised by its own writes")
         other = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, other, True)
         km.jd.STATE = Path(other)
         p2 = km._views_path()
         try:
@@ -1348,6 +1448,7 @@ class ReaderRestampUnwritable(_Wire):
 
     def setUp(self):
         super().setUp()
+        self.addCleanup(km._VIEWS_RESTAMP_ERR.__setitem__, 0, km._VIEWS_RESTAMP_ERR[0])
         km._VIEWS_RESTAMP_ERR[0] = None
 
     def test_a_read_only_state_dir_is_served_not_raised_and_logged_once(self):
@@ -2065,12 +2166,12 @@ class ReaderRestampUnwritableNamesTheDrop(_Wire):
 
     def setUp(self):
         super().setUp()
+        self.addCleanup(km._VIEWS_RESTAMP_ERR.__setitem__, 0, km._VIEWS_RESTAMP_ERR[0])
         km._VIEWS_RESTAMP_ERR[0] = None
         self._real_write = km._atomic_write
 
     def tearDown(self):
         km._atomic_write = self._real_write
-        km._VIEWS_RESTAMP_ERR[0] = None
         super().tearDown()
 
     def _file(self, n, **extra):
@@ -2398,22 +2499,11 @@ class AckErrorNamesThePostersRefusalFirst(_Wire):
 
 
 class BlobLessConnectPushCaps(_Wire):
-    """A connect push that serves NO views blob — a pane whose push carries none, on a socket where the
-    `ready` arm's own tabOrder frame could not be built either (its live read raised) — leaves the caps
-    frame nothing to name from the served frames. It then carries the STORE's current seq, the seq the
+    """A connect push that serves NO views blob (a pane whose push carries none) leaves the caps frame
+    nothing to name from the served frames. It then carries the STORE's current seq, the seq the
     next push serves, and is null only with no store at all: with null, after a restart over a store
     restored from an older copy, nothing re-armed the page's gate — the next pusher tabOrder (the
     store's older seq) was rejected and kept, and no second caps frame ever came."""
-
-    def setUp(self):
-        super().setUp()
-        self._saved = (km._tmux_sessions, km._ordered_alive)
-        km._tmux_sessions = lambda: {}
-        km._ordered_alive = lambda now, tmux: (_ for _ in ()).throw(RuntimeError("no live read"))   # the handler's own frame cannot be built
-
-    def tearDown(self):
-        km._tmux_sessions, km._ordered_alive = self._saved
-        super().tearDown()
 
     def _ready(self):
         km.Handler._dispatch_ws(self.handler, {"type": "ready"}, self.client)
@@ -2425,31 +2515,30 @@ class BlobLessConnectPushCaps(_Wire):
         s0 = self.seed()["seq"]
         self.handler._push_one = lambda c: km._send_client(c, ("working",), {"type": "working", "names": []})
         n = len(self.sent)                                             # the seed's own ack sits before this
-        with contextlib.redirect_stderr(io.StringIO()):
-            caps = self._ready()
+        caps = self._ready()
         self.assertEqual([m for m in self.sent[n:] if km._views_seq_of(m) is not None], [],
-                         "no frame of the connect push carried a views blob, and the handler's own frame was not built")
+                         "no frame of the connect push carried a views blob")
         self.assertEqual(caps["viewsSeq"], s0, "the store's current seq: the one the next push serves")
         # the pusher's next tabOrder carries the store's blob under that very seq, which the client's gate
         # adopts because the caps frame named it (the real pusher, through the test_tab_meta_push.py stubs)
         tmp = _tf.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
         names = _P(tmp) / "names"
         names.mkdir()
         (names / SID1).write_text("web\t/proj/TESTHOST/app\t#1EA1EB\twhite\n")
-        saved = (km.NAMES, km._mark_views_dirty, km._chat_tab_sessions, km._cached_feed, km._ordered_alive)
+        saved = (km.NAMES, km._tmux_sessions, km._mark_views_dirty, km._chat_tab_sessions, km._cached_feed)
         try:
             km.NAMES = names
+            km._tmux_sessions = lambda: {}
             km._mark_views_dirty = lambda: None
             km._chat_tab_sessions = lambda now, tmux: [{"sid": SID1, "name": "web", "path": os.path.join(tmp, "none.jsonl"),
                                                          "anchor": SID1}]
             km._cached_feed = lambda *a, **k: None
-            km._ordered_alive = self._saved[1]
             self.client["app"] = "chat"
             self.client["sent"] = {}
-            with contextlib.redirect_stderr(io.StringIO()):
-                km._push([self.client])
+            km._push([self.client])
         finally:
-            (km.NAMES, km._mark_views_dirty, km._chat_tab_sessions, km._cached_feed, km._ordered_alive) = saved
+            (km.NAMES, km._tmux_sessions, km._mark_views_dirty, km._chat_tab_sessions, km._cached_feed) = saved
         tab = [m for m in self.sent if m["type"] == "tabOrder"]
         self.assertEqual(len(tab), 1)
         self.assertEqual(tab[0]["views"]["seq"], s0)
@@ -2490,10 +2579,11 @@ class BlobLessConnectPushCaps(_Wire):
         self.assertEqual(self.notices, [])
 
 
-class WebBootWiring(unittest.TestCase):
+class WebBootWiring(_Wire):
     """The kernel-served timeline page: the inline _TIMELINE_BOOT twin of timeline-boot.ts exposes
     the targeted-edit bridge and routes both acks to the panel (timeline-boot.test.ts pins the two
-    bridge sets equal)."""
+    bridge sets equal). Reads the kernel's source only; a _Wire so it runs under a state root of its
+    own like every other class in the module."""
 
     def test_the_bridge_and_the_ack_dispatch(self):
         src = open(os.path.join(BIN, "romp-kernel")).read()

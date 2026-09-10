@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-"""T289: a comment CREATE is idempotent on its own identity (parent, anchor, passage, text).
+"""T289: a comment CREATE is idempotent on its own identity.
 
 A create parked for transcript lag is retried by BOTH the kernel (the pusher's _retry_parked_creates) and
 the client (its frame-keyed re-post), and a create whose ack was lost is sent again by the popover; before
 this the second copy either collided on its explicit name and was refused with the create toast the user
 saw, or, with the name now left to the kernel, would have minted a SECOND thread for one comment. The
-kernel remembers each create it completed by (parent sid, anchor uuid, passage, text) and answers a repeat
-with the SAME thread's ack; a lag-parked create is parked once. SYNTHETIC fixtures."""
+kernel remembers each create it completed and answers a repeat with the SAME thread's ack; a lag-parked
+create is parked once.
+
+The identity is the client's createId when the frame carries one: the popover mints it at the send gesture
+and every re-post of that gesture carries the same one, so a repeat is exactly a frame with an id the kernel
+has seen. Keyed on the words instead (parent sid, anchor uuid, passage, text), the memo also swallowed a
+DELIBERATE second comment in the same words on the same passage: one thread, two acks, the second name
+nowhere on disk (review of the memo, 2026-09-09). A frame without a createId still keys on the words.
+SYNTHETIC fixtures."""
 import contextlib
 import io
 import json
@@ -128,9 +135,12 @@ class CreateIsIdempotent(unittest.TestCase):
     def _warns(self):
         return [f["text"] for f in self.sent if f.get("type") == "warn"]
 
-    def _create(self, text="Why jitter at all?", uuid="a1", name=""):
-        return self._drive({"type": "commentCreate", "id": PARENT, "uuid": uuid, "exact": "exponential backoff",
-                            "text": text, "name": name})
+    def _create(self, text="Why jitter at all?", uuid="a1", name="", create_id=None):
+        msg = {"type": "commentCreate", "id": PARENT, "uuid": uuid, "exact": "exponential backoff",
+               "text": text, "name": name}
+        if create_id is not None:
+            msg["createId"] = create_id                 # the client's per-gesture stamp (absent from an older client)
+        return self._drive(msg)
 
     def _rows(self):
         return km._load_comments(PARENT).get("threads") or []
@@ -228,6 +238,134 @@ class CreateIsIdempotent(unittest.TestCase):
         rows = self._rows()
         self.assertEqual(len(rows), 2, "a second, open thread for the re-asked comment")
         self.assertEqual(self._warns(), [])
+
+    def test_a_fresh_gesture_in_the_same_words_on_the_same_passage_is_a_second_thread(self):
+        # the user posts a comment, takes the ack, and posts the SAME words on the same passage again under
+        # another name: two gestures, two comments. Keyed on the words alone the memo answered the second
+        # with the first thread's ack, and the second name was nowhere on disk (review, 2026-09-09).
+        self._create(name="first-look", create_id="g-1111")
+        first = self._acks()[-1]["tid"]
+        self._create(name="second-look", create_id="g-2222")
+        rows = self._rows()
+        self.assertEqual(len(rows), 2, "two gestures are two comments, whatever their words")
+        self.assertEqual(sorted(r["name"] for r in rows), ["first-look", "second-look"], "both names on disk")
+        acks = self._acks()
+        self.assertEqual(len(acks), 2)
+        self.assertNotEqual(acks[1]["tid"], first, "the second ack names the second thread")
+        self.assertEqual(self._warns(), [])
+
+    def test_a_retried_frame_with_the_same_create_id_is_one_thread_answered_twice(self):
+        # the re-post side of the same rule: a frame the client sends again (a lost ack, a lag retry) carries
+        # the id it minted at the gesture, and the kernel answers it with the thread that gesture made
+        self._create(create_id="g-1111"); self._create(create_id="g-1111")
+        self.assertEqual(len(self._rows()), 1, "one gesture, one thread")
+        acks = self._acks()
+        self.assertEqual(len(acks), 2, "the repeat is answered, so the popover adopts the thread")
+        self.assertEqual(acks[0]["tid"], acks[1]["tid"])
+        self.assertEqual(self._warns(), [])
+
+    def test_a_fresh_gesture_after_a_parked_create_landed_is_a_second_thread_and_its_repost_is_not(self):
+        # the parked copy carries the gesture's id through the pusher's retry: the client's re-post of THAT
+        # gesture is the same comment, and a new gesture in the same words a moment later is a new one
+        km._parked_creates.clear()
+        self._create(uuid="a9", create_id="g-1111")
+        self.assertEqual(len(km._parked_creates), 1)
+        p = Path(km._sessions(0)[0]["path"])
+        with p.open("a") as fh:
+            fh.write(json.dumps(aline(self.now - 300, "Add a jitter to the backoff.", "a9", parent="a1")) + "\n")
+        km._retry_parked_creates()
+        self.assertEqual(km._parked_creates, [])
+        landed = self._rows()
+        self.assertEqual(len(landed), 1)
+        self._create(uuid="a9", create_id="g-1111")   # the client's own re-post of the parked gesture
+        self.assertEqual(len(self._rows()), 1, "the re-post is the same comment")
+        self.assertEqual(self._acks()[-1]["tid"], landed[0]["tid"])
+        self._create(uuid="a9", create_id="g-2222")   # a new gesture, same words, same passage
+        rows = self._rows()
+        self.assertEqual(len(rows), 2, "a fresh gesture is a second thread")
+        self.assertNotEqual(self._acks()[-1]["tid"], landed[0]["tid"])
+        self.assertEqual(self._warns(), [])
+
+    def test_two_gestures_in_the_same_words_are_both_parked_while_the_anchor_lags(self):
+        # two comments posted before the anchor reached the transcript park separately and land as two
+        # threads; the same gesture posted twice still parks once
+        km._parked_creates.clear()
+        self._create(uuid="a9", create_id="g-1111"); self._create(uuid="a9", create_id="g-1111")
+        self.assertEqual(len(km._parked_creates), 1, "one parked copy for one gesture")
+        self._create(uuid="a9", create_id="g-2222")
+        self.assertEqual(len(km._parked_creates), 2, "a second gesture is its own parked create")
+        nacks = [f for f in self.sent if f.get("type") == "commentCreateFailed"]
+        self.assertEqual(len(nacks), 3)
+        self.assertTrue(all(n["transient"] for n in nacks))
+        p = Path(km._sessions(0)[0]["path"])
+        with p.open("a") as fh:
+            fh.write(json.dumps(aline(self.now - 300, "Add a jitter to the backoff.", "a9", parent="a1")) + "\n")
+        km._retry_parked_creates()
+        self.assertEqual(km._parked_creates, [])
+        self.assertEqual(len(self._rows()), 2, "both gestures landed as threads")
+        self.assertEqual(self._warns(), [])
+
+    def test_a_frame_without_a_create_id_still_keys_on_the_words(self):
+        # an older client sends no id: the words identity stands for it, and a stamped frame in the same
+        # words is not answered from the words memo (nor the other way round)
+        self._create(); self._create()
+        self.assertEqual(len(self._rows()), 1)
+        self._create(create_id="g-1111")
+        self.assertEqual(len(self._rows()), 2, "a stamped gesture is not a repeat of an unstamped one")
+        self._create()
+        self.assertEqual(len(self._rows()), 2, "and the unstamped repeat still answers from its own memo")
+        self.assertEqual(self._warns(), [])
+
+    def test_a_repost_of_a_parked_gesture_is_refused_at_the_door_before_the_create_runs(self):
+        # the busy nack for a re-post of a parked gesture comes from the reservation, which finds the parked
+        # copy by the gesture's id, so the create never runs a second time (compared by its words instead, a
+        # stamped re-post would go free, re-run the create into the lag and rely on the park-once check)
+        km._parked_creates.clear()
+        self._create(uuid="a9", create_id="g-1111")
+        self.assertEqual(len(km._parked_creates), 1)
+        real = km._comment_create
+        calls = []
+
+        def counting(*a, **k):
+            calls.append(a)
+            return real(*a, **k)
+        km._comment_create = counting
+        try:
+            self._create(uuid="a9", create_id="g-1111")
+        finally:
+            km._comment_create = real
+        self.assertEqual(calls, [], "the re-post is busy at the door; no second create")
+        nacks = [f for f in self.sent if f.get("type") == "commentCreateFailed"]
+        self.assertEqual(len(nacks), 2)
+        self.assertTrue(all(n["transient"] for n in nacks))
+        self.assertEqual(len(km._parked_creates), 1)
+        km._parked_creates.clear()
+
+    def test_a_repost_landing_between_the_doors_release_and_its_park_is_parked_once(self):
+        # the door releases its reservation before it parks, and the park-once check covers that window: a
+        # re-post of the same gesture on another server thread lands in it, runs the create into the lag and
+        # parks first; this door then finds that parked copy by the gesture's id and parks no twin (the other
+        # door runs whole inside the window here, in place of a second thread, so the order is exact)
+        km._parked_creates.clear()
+        real = km._release_create
+        raced = []
+
+        def release_then_race(key):
+            real(key)
+            if not raced:
+                raced.append(key)
+                self._create(uuid="a9", create_id="g-1111")
+        km._release_create = release_then_race
+        try:
+            self._create(uuid="a9", create_id="g-1111")
+        finally:
+            km._release_create = real
+        self.assertEqual(len(raced), 1)
+        self.assertEqual(len(km._parked_creates), 1, "one parked copy for one gesture, whichever door parked it")
+        nacks = [f for f in self.sent if f.get("type") == "commentCreateFailed"]
+        self.assertEqual(len(nacks), 2)
+        self.assertTrue(all(n["transient"] for n in nacks))
+        km._parked_creates.clear()
 
     def test_an_answered_repeat_is_said_in_the_kernel_log(self):
         self._create()

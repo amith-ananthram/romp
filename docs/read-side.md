@@ -252,7 +252,16 @@ position, so nothing moves on landing; the send time rides along as `sentAt` for
 the bubble's hover ("sent at HH:MM", shown once landed when it differs from the
 landing by more than a minute). No header, no cue. This supersedes the
 in-place-at-send-position rule of T252/T252b; the kernel's per-copy identities
-(T252c) stay and decide landing, cover and hiding. The CLI extracts
+(T252c) stay and decide landing, cover and hiding. The identity exists from the
+press: the client mints the copy's id (`qid`, in the kernel's echo form) and posts
+it with the send, the kernel parks the copy under it (the parked op's fourth slot)
+or queues it under it, and the ✕ names it, so the kernel cancels exactly the copy
+the bubble stands for, never a same-text neighbour by index or body. That holds
+wherever the copy carries the id: a parked send on any backend, and the SDK
+route's queue. A copy without one (the tmux route's queue, which the CLI holds)
+is still cancelled by index and body. Every copy the kernel queues itself (mail,
+a nudge, a re-delivery) is still minted an id where it enters the backend's
+queue. The CLI extracts
 no image paths on the stream-json route (its only image-path test belongs to the
 interactive composer's paste handler), so an image path in an SDK send lands as
 typed and the echo's text matches. `_path_bearing` and the extension set it tests

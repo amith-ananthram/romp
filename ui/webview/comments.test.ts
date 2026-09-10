@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { threadsByAnchor, threadBusy, threadStuck, replyOwed, agentCount, findExact, findAnchorRange, sliceRanges, prunePending,
-         type CommentThread } from "./comments";
+         newCommentCreate, commentCreateFrame, type CommentThread, type CommentCreate } from "./comments";
 import { compactDisplay } from "./compact";
 
 const th = (over: Partial<CommentThread>): CommentThread => ({
@@ -281,8 +281,11 @@ test("the create dialog pre-reads the kernel's default-comment trio and shows it
 test("fast rides the create end to end, resolved dialog > setting > inherit at the kernel", () => {
   // the chip is offered only where the effective model could run fast (no control that only toasts)
   assert.match(UI, /if \(canFast\(create\.model \|\| setDef\("model"\) \|\| st\?\.model \|\| ""\)\) metaRight\.append\(mkSel\("fast"\)\);/);
-  assert.match(UI, /fast: create\.fast \|\| "", color: create\.color \|\| "" \}\);/);
-  assert.match(UI, /fast: c\.fast, color: c\.color \}\);/);   // the in-flight retry keeps the pick (unchanged by the 2026-08-30 eager-all round)
+  // the dialog's picks ride the held create (newCommentCreate reads anchor.fast) and every frame built from it,
+  // the send's and the in-flight retry's alike; the builder is driven directly by the create-identity tests below
+  assert.match(UI, /const held = newCommentCreate\(create, text, nm\)/);
+  assert.match(UI, /vscodeApi\.postMessage\(commentCreateFrame\(held\)\)/);
+  assert.match(UI, /vscodeApi\?\.postMessage\(commentCreateFrame\(c\)\)/);
   assert.match(KERNEL, /def _comment_launch_prefs\(model="", effort="", fast=""\):/);
   assert.match(KERNEL, /model, effort, fast = _comment_launch_prefs\(model, effort, fast\)/);
   assert.match(KERNEL, /fast=str\(msg\.get\("fast"\) or ""\)/);       // the ws op hands it through…
@@ -358,7 +361,7 @@ test("the create dialog names the thread right there: prefilled <session>-commen
   assert.match(UI, /"New comment:"/);
   assert.match(UI, /if \(nameBox\) head\.append\(title, nameBox, closeBtn\);/);
   assert.match(UI, /send\.setAttribute\("aria-label", create \? "Comment" : "Send"\);/);   // the ➤ carries the word
-  assert.match(UI, /text, name: nm, model: create\.model \|\| "", effort: create\.effort \|\| "",\s*\n\s*fast: create\.fast \|\| "", color: create\.color \|\| ""/);
+  assert.match(UI, /const held = newCommentCreate\(create, text, nm\);\s*\n\s*vscodeApi\.postMessage\(commentCreateFrame\(held\)\);/);   // the anchor's picks ride the held create
   // the comment's own model/effort selectors reuse the statusline's /models-fed choices + menu skin
   assert.match(UI, /const metaRow = el\("div", "statusline cmt-meta-row"\);/);   // the chat statusline dress (2026-08-25 parity)
   assert.match(UI, /META_CHOICES\[kind\]/);
@@ -624,7 +627,7 @@ test("a create refused by parse lag holds its mark and retries on the frame even
   assert.match(KERNELSRC, /_retry_parked_creates\(\)   # lag-parked comment creates ride every pusher cycle \(T106\)/);
   assert.match(KERNELSRC, /_PARK_MAX_TRIES = 30/);
   // the client holds the payload at send and re-posts when a session frame proves the parse caught up
-  assert.match(UI, /cmtCreateInFlight\.set\(create\.uuid, \{ sid: create\.sid,/);
+  assert.match(UI, /cmtCreateInFlight\.set\(create\.uuid, held\);/);   // the held create is the stamped one the send posted
   assert.match(UI, /retryCmtCreates\(String\(msg\.id \|\| ""\)\);\s+\/\/ a session frame = the kernel re-parsed/);
   assert.match(UI, /const CMT_CREATE_MAX_TRIES = 12;/);
   // the ack retires the hold; a REAL refusal drops the synth honestly
@@ -702,4 +705,102 @@ test("a contentless open thread NEVER renders blank — the loader stays past th
   assert.match(body, /const slow = !cmtBootHolds\(th\.tid\);/);
   assert.match(body, /still opening — the thread's session is taking longer than usual…/);
   assert.match(body, /opening the thread…/);
+});
+
+// ── the create's identity: one id per send gesture, the same one on every re-post ─────────────────
+// The kernel remembers each create it completed and answers a repeat of it with the same thread's ack.
+// Keyed on the words (anchor, passage, text) that memo also swallowed a DELIBERATE second comment in the
+// same words on the same passage (review, 2026-09-09). The client stamps the gesture instead: the popover
+// mints a createId at the send and every re-post of that gesture carries it, so a repeat is a frame with
+// an id the kernel has seen and a fresh gesture never is.
+const ANCHOR = { sid: "aaaaaaaa-1111-2222-3333-444444444444", uuid: "a1", exact: "exponential backoff",
+                 model: "", effort: "", fast: "", color: "" };
+
+test("a send gesture mints its own create id; a second gesture in the same words on the same passage gets another", () => {
+  const first = newCommentCreate(ANCHOR, "fix this", "");
+  const second = newCommentCreate(ANCHOR, "fix this", "");
+  assert.ok(first.createId.length > 0, "the gesture is stamped");
+  assert.notEqual(first.createId, second.createId, "two gestures, two ids, whatever their words");
+  assert.equal(first.tries, 0, "the retry count starts at the send");
+});
+
+test("the create frame carries the id, and a re-post of the held create is the same frame", () => {
+  const held = newCommentCreate({ ...ANCHOR, model: "claude-opus-5", effort: "high", fast: "on", color: "#112233" },
+                                "why jitter?", "why-jitter");
+  const sent = commentCreateFrame(held);
+  assert.deepEqual(sent, { type: "commentCreate", id: ANCHOR.sid, uuid: "a1", exact: "exponential backoff",
+                           text: "why jitter?", name: "why-jitter", model: "claude-opus-5", effort: "high",
+                           fast: "on", color: "#112233", createId: held.createId });
+  held.tries++;                                                   // a transient nack armed the retry
+  assert.deepEqual(commentCreateFrame(held), sent, "a retry is the same gesture: the same id, the same words");
+});
+
+test("an anchor with no picks sends empty picks and an empty name for the kernel's default", () => {
+  const held = newCommentCreate({ sid: ANCHOR.sid, uuid: "a1", exact: "exponential backoff" }, "fix this", "");
+  const sent = commentCreateFrame(held);
+  assert.equal(sent.name, "");
+  assert.equal(sent.model, ""); assert.equal(sent.effort, ""); assert.equal(sent.fast, ""); assert.equal(sent.color, "");
+});
+
+test("the popover's send and its frame-keyed retry both post the held create's frame", () => {
+  const send = UI.slice(UI.indexOf("function commentSendFromPop("));
+  const sendBody = send.slice(0, send.indexOf("\nfunction ", 10));
+  assert.match(sendBody, /const held = newCommentCreate\(create, text, nm\)/, "the send mints the gesture's id");
+  assert.match(sendBody, /vscodeApi\.postMessage\(commentCreateFrame\(held\)\)/);
+  assert.match(sendBody, /cmtCreateInFlight\.set\(create\.uuid, held\)/, "the hold IS the stamped create");
+  const retry = UI.slice(UI.indexOf("function retryCmtCreates("));
+  const retryBody = retry.slice(0, retry.indexOf("\nfunction ", 10));
+  assert.match(retryBody, /vscodeApi\?\.postMessage\(commentCreateFrame\(c\)\)/, "the retry re-sends the held frame, id included");
+  assert.doesNotMatch(UI, /type: "commentCreate", id:/, "no hand-built create frame remains");
+});
+
+// ── executed: the frame-keyed retry (retryCmtCreates, lifted from render.ts) re-posts the held create's own frame ──
+function liftRetry(held: CommentCreate[]) {
+  const start = UI.indexOf("function retryCmtCreates(sid: string): void {");
+  assert.ok(start > 0, "the frame-keyed retry lives in retryCmtCreates");
+  const src = UI.slice(start, UI.indexOf("\n}\n", start) + 3).replace("(sid: string): void {", "(sid) {");
+  const boundM = /const CMT_CREATE_MAX_TRIES = (\d+);/.exec(UI);
+  assert.ok(boundM, "the attempt bound is a named constant");
+  const bound = Number(boundM[1]);
+  const posted: ReturnType<typeof commentCreateFrame>[] = [];
+  const dropped: string[] = [];
+  const toasts: string[] = [];
+  const prelude = `
+    const CMT_CREATE_MAX_TRIES = ${bound};
+    const vscodeApi = { postMessage: (m) => posted.push(m) };
+    const dropSynthThread = (sid, u) => dropped.push(u);
+    const warnToast = (t) => toasts.push(t);`;
+  const cmtCreateInFlight = new Map(held.map((c) => [c.uuid, c] as [string, CommentCreate]));
+  const fn = new Function("cmtCreateInFlight", "commentCreateFrame", "posted", "dropped", "toasts", "sid",
+                          prelude + "\n" + src + "\nretryCmtCreates(sid);");
+  return { run: (sid: string) => { fn(cmtCreateInFlight, commentCreateFrame, posted, dropped, toasts, sid); },
+           posted, dropped, toasts, bound };
+}
+
+test("the frame-keyed retry re-posts the held create's own frame: the id minted at the send, on every re-post", () => {
+  const held = newCommentCreate(ANCHOR, "fix this", "fix-this");
+  const stamped = held.createId;
+  held.tries = 1;                                                 // the transient nack armed the retry
+  const other = newCommentCreate({ ...ANCHOR, sid: "bbbbbbbb-1111-2222-3333-444444444444", uuid: "b1" }, "and here", "");
+  other.tries = 1;
+  const { run, posted, dropped, toasts } = liftRetry([held, other]);
+  run(ANCHOR.sid); run(ANCHOR.sid);                               // two session frames for the sid: two re-posts
+  assert.equal(posted.length, 2, "one re-post per frame, for this sid's create alone");
+  assert.deepEqual(posted.map((f) => f.createId), [stamped, stamped],
+                   "a re-post is the same gesture: the kernel answers it with the thread it made, never a twin");
+  assert.deepEqual(posted, [commentCreateFrame(held), commentCreateFrame(held)], "the held frame, whole, each time");
+  assert.equal(held.tries, 3);
+  assert.equal(other.tries, 1, "another session's create waits for its own frame");
+  assert.deepEqual([dropped, toasts], [[], []]);
+});
+
+test("a create the send has not heard back on is not re-posted, and one past the attempt bound is dropped with the toast", () => {
+  const fresh = newCommentCreate(ANCHOR, "fix this", "");           // tries 0: the send's own frame is out
+  const spent = newCommentCreate({ ...ANCHOR, uuid: "a2" }, "and this", "");
+  const lift = liftRetry([fresh, spent]);
+  spent.tries = lift.bound + 1;
+  lift.run(ANCHOR.sid);
+  assert.deepEqual(lift.posted, [], "the retry waits for a transient nack, and gives up past the bound");
+  assert.deepEqual(lift.dropped, ["a2"]);
+  assert.equal(lift.toasts.length, 1);
 });

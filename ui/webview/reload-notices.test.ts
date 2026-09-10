@@ -2,18 +2,20 @@
 // the last pending ship's retirement on the next task (render.ts endReloadHoldIfIdle, __rompReload.ended()), and the
 // nack, the dismissal or the other-tab ack raised in that same task is appended one task before the page goes: the
 // toast was never read, and the fresh page's loss toast reads shipsInFlight, which the retirement already emptied. So
-// render.ts keeps the
-// texts of the toasts on screen in this tab's sessionStorage on the core's synchronous hook and the fresh page shows
-// them once. The readings are pure and execute here; render.ts has import-time DOM side effects, so its wiring is
-// pinned to source the way reload-restore.test.ts pins the scroll record's. The served scenario (a nack on the last
-// ship across a kernel restart; the fresh page says it again, once) is tests/test_ship_reship.py
-// NackNoticeSurvivesReload. Synthetic only.
+// render.ts keeps the texts of the toasts on screen in this tab's sessionStorage on the core's synchronous hook and the
+// fresh page shows them once. The readings are pure and execute here. render.ts has import-time DOM side effects, so
+// its wiring is pinned to source the way reload-restore.test.ts pins the scroll record's, and the toast family with the
+// refusals that report a state is lifted out of it and executed over a fake DOM the way chat-exact-tail-exec.test.ts
+// lifts chatTail. The served scenario (a nack on the last ship across a kernel restart; the fresh page says it again,
+// once) is tests/test_ship_reship.py NackNoticeSurvivesReload. Synthetic only.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createRequire } from "node:module";
 import { RELOAD_NOTICES_KEY, liveNotices, keepReloadNotices, takeReloadNotices } from "./reload-notices";
 
+const requireCjs = createRequire(__filename);
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 
 const SEL = ".warn-toast:not([data-ephemeral]) .warn-toast-msg";
@@ -45,9 +47,11 @@ test("the toasts on screen read as their texts, in order, blanks dropped; none w
 });
 
 test("the reading asks for the toasts without the ephemeral mark: a refusal about a state the fresh page shows for itself stays behind", () => {
-  // the staged sends' "Can't send yet" reports a state (the host unreachable, the tab still being created), which the
-  // fresh page shows for itself; render.ts marks that toast where it is raised and the selector skips the mark. The
-  // mark's effect on a real DOM is executed by tests/test_ship_reship.py NackNoticeSurvivesReload.
+  // a refusal that reports a state (the staged sends' "Can't send yet": the host unreachable, the tab still being
+  // created; the staging refusals; the branch jump to a session not on this dashboard) is about something the fresh
+  // page shows for itself or no longer has; render.ts marks those toasts where they are raised (executed below) and the
+  // selector skips the mark. The mark's effect on a real DOM is executed by tests/test_ship_reship.py
+  // NackNoticeSurvivesReload.
   const asked: string[] = [];
   assert.deepEqual(liveNotices({ querySelectorAll: (sel: string) => { asked.push(sel); return [{ textContent: "kept" }]; } }), ["kept"]);
   assert.deepEqual(asked, [SEL]);
@@ -101,15 +105,168 @@ test("a store that refuses is left alone: nothing thrown from either side", () =
   assert.deepEqual(takeReloadNotices(broken), []);
 });
 
+// ── The refusals that report a state, executed ───────────────────────────────────────────────────────────────────────
+
+/** A slice of render.ts between two anchors, transpiled (TS to JS) with esbuild at run time and required dynamically so
+ *  the test bundle does not bundle esbuild itself (the chat-exact-tail-exec.test.ts pattern). `wrap` closes a slice
+ *  that is not a statement on its own (a property of an object literal) before it is transpiled. */
+function liftBetween(startAnchor: string, endAnchor: string, wrap: (ts: string) => string = (s) => s): string {
+  const a = RENDER.indexOf(startAnchor), b = RENDER.indexOf(endAnchor, a);
+  assert.ok(a > 0 && b > a, `anchors not found: ${startAnchor.slice(0, 40)} or ${endAnchor.slice(0, 40)} moved; re-anchor`);
+  return requireCjs("esbuild").transformSync(wrap(RENDER.slice(a, b)), { loader: "ts" }).code;
+}
+
+/** Enough of Element for the toast family and the reading: a class, a dataset, children, an id, and the container's
+ *  querySelectorAll for the reading's selector shape (.a:not([data-x]) .b), evaluated as the DOM would: a one-word
+ *  data attribute names its dataset key as is, whether it was set through dataset or setAttribute. */
+class FakeEl {
+  children: FakeEl[] = []; parent: FakeEl | null = null; dataset: Record<string, string> = {}; attrs: Record<string, string> = {};
+  textContent = ""; title = ""; id = "";
+  constructor(public tag: string, public className = "") {}
+  has(c: string): boolean { return this.className.split(/\s+/).includes(c); }
+  appendChild(c: FakeEl): FakeEl { c.parent?.removeChild(c); c.parent = this; this.children.push(c); return c; }
+  append(...cs: FakeEl[]): void { for (const c of cs) this.appendChild(c); }
+  removeChild(c: FakeEl): void { this.children = this.children.filter((x) => x !== c); c.parent = null; }
+  remove(): void { this.parent?.removeChild(this); }
+  setAttribute(k: string, v: string): void { this.attrs[k] = v; if (k.startsWith("data-")) this.dataset[k.slice(5)] = v; }
+  addEventListener(): void {}
+  querySelectorAll(sel: string): FakeEl[] {
+    const m = /^\.([\w-]+):not\(\[data-([\w-]+)\]\) \.([\w-]+)$/.exec(sel);
+    if (!m) throw new Error("unsupported selector " + sel);
+    return this.children.filter((c) => c.has(m[1]) && !(m[2] in c.dataset)).flatMap((c) => c.children.filter((s) => s.has(m[3])));
+  }
+}
+/** document as warnToast uses it: a body to append the container to, getElementById to find it again, a key listener. */
+function fakeDocument() {
+  const body = new FakeEl("body");
+  return { body, getElementById: (id: string) => body.children.find((c) => c.id === id) ?? null, addEventListener: () => {} };
+}
+
+/** The page state the lifted closures read: the composer (a typed draft, its citations, a picker waiting, an edit in
+ *  progress to a past message or to a queued one, attachments) and the session roster, with what each gesture did
+ *  recorded. The toasts' timers are recorded and not run, so a toast stays on screen for the reading. */
+function pageWorld(state: { ask?: "custom" | "text" | null; edit?: boolean; queuedEdit?: boolean; files?: string[]; sessions?: string[] }) {
+  return {
+    FakeEl, document: fakeDocument(), timers: [] as number[],
+    activeId: "web", ta: { value: "what did the tests say", style: {} as Record<string, string> },
+    composerCitations: new Map<string, { quote?: string }[]>(), ask: state.ask ?? null,
+    composerEdits: new Map<string, { uuid: string; orig: string }>(state.edit ? [["web", { uuid: "e1", orig: "the old text" }]] : []),
+    queuedEdits: new Map<string, { md: string }>(state.queuedEdit ? [["web", { md: "the queued text" }]] : []),
+    composerFiles: new Map<string, string[]>(state.files ? [["web", state.files]] : []),
+    staged: [] as [string, unknown][], persists: 0,
+    sessions: new Map<string, { id: string }>((state.sessions || []).map((id): [string, { id: string }] => [id, { id }])),
+    activated: [] as [string, string | undefined][],
+  };
+}
+type World = ReturnType<typeof pageWorld>;
+type Lifted = { stageComposer: () => void; branchjump: (elx: { dataset: Record<string, string> }) => void; warnToast: (msg: string) => FakeEl };
+
+/** warnToast and ephemeralWarnToast; stageComposer (the composer's staging, whose refusals say a picker is waiting on
+ *  the composer, an edit is in progress to a past or a queued message, attachments are on the composer); and the branch
+ *  jump's delegated handler (whose refusal says the session is not on this dashboard), lifted from render.ts and run
+ *  over the world. */
+function liftToastSites(): (w: World) => Lifted {
+  const toasts = liftBetween("function warnToast(msg: string): HTMLElement {", "// Tail-windowing (see the View comment)");
+  const stage = liftBetween("const stageComposer = () => {", "const sendComposer = (");
+  const jump = liftBetween("branchjump: (elx) => {", "// a below-response fork spot", (ts) => "const handlers = {\n" + ts + "};");
+  const prelude = `
+    const W = WORLD;
+    const document = W.document;
+    const el = (tag, cls) => new W.FakeEl(tag, cls);
+    const setTimeout = (fn, ms) => { W.timers.push(ms); return 0; };   // the fade and the removal are not run
+    let activeId = W.activeId;
+    const ta = W.ta;
+    const composerCitations = W.composerCitations;
+    const composerAnswersAsk = () => W.ask;
+    const composerEdits = W.composerEdits;
+    const queuedEdits = W.queuedEdits;
+    const composerFiles = W.composerFiles;
+    const stagedMsgs = { push: (id, s) => { W.staged.push([id, s]); } };
+    const renderComposerChips = () => {};
+    const drafts = new Map(), draftStartedAt = new Map();
+    let composerManualH = null;
+    const persistDrafts = () => { W.persists++; };
+    const renderStagedStrip = () => {};
+    const sessions = W.sessions;
+    const setActive = (sid, cut) => { W.activated.push([sid, cut]); };
+  `;
+  return new Function("WORLD", prelude + toasts + stage + jump + "\nreturn { stageComposer, branchjump: handlers.branchjump, warnToast };") as (w: World) => Lifted;
+}
+
+function page(state: Parameters<typeof pageWorld>[0]) {
+  const W = pageWorld(state);
+  const api = liftToastSites()(W);
+  const box = () => W.document.getElementById("warn-toasts");
+  const shown = () => (box()?.children || []).map((t) => t.children[0].textContent);
+  return { W, ...api, box, shown };
+}
+type Page = ReturnType<typeof page>;
+
+const NACK = "shot.png couldn't be saved on the kernel, so it was not attached. Your message was NOT sent.";
+
+test("staging with nothing owning the composer stages: the lifted composer is the real one, and it raises no toast", () => {
+  const p = page({});
+  p.stageComposer();
+  assert.deepEqual(p.W.staged, [["web", { text: "what did the tests say", cites: [] }]]);
+  assert.equal(p.W.ta.value, "", "the composer clears");
+  assert.equal(p.W.persists, 1);
+  assert.equal(p.box(), null, "no toast, so no container");
+});
+
+// The refusals that report a STATE rather than an event, raised through their real code paths. Each puts its toast on
+// screen for the person at the page and refuses the gesture; the reading skips it, because the fresh page shows that
+// state for itself (the picker, the attachments and the roster come back from the kernel and the persisted drafts) or
+// no longer has it (an edit in progress, to a past message or to a queued one, lives in memory alone, so a replay would
+// report an edit the fresh page has not got).
+const STATE_REFUSALS: { name: string; state: Parameters<typeof pageWorld>[0]; raise: (p: Page) => void; text: string; refused: (p: Page) => void }[] = [
+  { name: "staging while a picker waits on the composer", state: { ask: "text" }, raise: (p) => p.stageComposer(),
+    text: "A picker is waiting on this box", refused: (p) => assert.deepEqual(p.W.staged, [], "nothing staged") },
+  { name: "staging while an edit is in progress", state: { edit: true }, raise: (p) => p.stageComposer(),
+    text: "An edit replaces a past message", refused: (p) => assert.deepEqual(p.W.staged, [], "nothing staged") },
+  { name: "staging while an edit to a queued message is in progress", state: { queuedEdit: true }, raise: (p) => p.stageComposer(),
+    text: "This edit replaces a queued message", refused: (p) => assert.deepEqual(p.W.staged, [], "nothing staged") },
+  { name: "staging with attachments on the composer", state: { files: ["notes.md"] }, raise: (p) => p.stageComposer(),
+    text: "Attachments can't be staged", refused: (p) => assert.deepEqual(p.W.staged, [], "nothing staged") },
+  { name: "a branch jump to a session not on this dashboard", state: { sessions: ["web"] }, raise: (p) => p.branchjump({ dataset: { sid: "api" } }),
+    text: "That session isn't on this dashboard right now.", refused: (p) => assert.deepEqual(p.W.activated, [], "no switch") },
+];
+for (const r of STATE_REFUSALS) {
+  test(r.name + ": the refusal is on screen and refuses, and the reading skips it", () => {
+    const p = page(r.state);
+    r.raise(p);
+    const shown = p.shown();
+    assert.equal(shown.length, 1, "the refusal put its toast on screen");
+    assert.ok(shown[0].startsWith(r.text), shown[0]);
+    r.refused(p);
+    assert.equal(p.W.ta.value, "what did the tests say", "the draft stays where it was");
+    assert.deepEqual(liveNotices(p.box()), [], "a state the fresh page shows for itself, or no longer has, does not ride the reload");
+  });
+}
+
+test("a toast about what happened, raised beside the refusals, is read: the mark is on the state refusals alone", () => {
+  const p = page({ edit: true, sessions: ["web"] });
+  p.stageComposer();
+  p.warnToast(NACK);
+  p.branchjump({ dataset: { sid: "api" } });
+  assert.equal(p.shown().length, 3, "all three are on screen for the person at the page");
+  assert.deepEqual(liveNotices(p.box()), [NACK]);
+});
+
 // The wiring, pinned to source (render.ts executes nothing under node --test).
-test("render.ts: warnToast hands back its toast, and the send refusal about reachability is marked ephemeral where it is raised", () => {
+test("render.ts: warnToast hands back its toast, and the refusals about a state are marked ephemeral where they are raised", () => {
   assert.match(RENDER, /^function warnToast\(msg: string\): HTMLElement \{/m);
   assert.match(RENDER, /setTimeout\(\(\) => t\.remove\(\), 12000\);\n\s*return t;/);
   assert.match(RENDER, /^function ephemeralWarnToast\(msg: string\): void \{ warnToast\(msg\)\.dataset\.ephemeral = "1"; \}/m);
   assert.equal((RENDER.match(/dataset\.ephemeral/g) || []).length, 1, "marked in one place");
   assert.equal((RENDER.match(/ephemeralWarnToast\("Can't send yet — the session isn't reachable\. They stay staged\."\);/g) || []).length, 2,
     "the staged sends' refusal at both of its sites (the strip's Send now and the empty send)");
-  assert.equal((RENDER.match(/ephemeralWarnToast\(/g) || []).length, 3, "the definition and the two sites");
+  // the staging refusals (stageComposer) and the branch jump's: states the fresh page shows for itself or no longer has
+  assert.match(RENDER, /if \(composerAnswersAsk\(\)\) \{ ephemeralWarnToast\("A picker is waiting on this box/);
+  assert.match(RENDER, /if \(composerEdits\.has\(activeId\)\) \{ ephemeralWarnToast\("An edit replaces a past message/);
+  assert.match(RENDER, /if \(queuedEdits\.has\(activeId\)\) \{ ephemeralWarnToast\("This edit replaces a queued message\. Send it normally\."\); return; \}/);
+  assert.match(RENDER, /if \(\(composerFiles\.get\(activeId\) \|\| \[\]\)\.length\) \{ ephemeralWarnToast\("Attachments can't be staged/);
+  assert.match(RENDER, /if \(!sessions\.get\(sid\)\) \{ ephemeralWarnToast\("That session isn't on this dashboard right now\."\); return; \}/);
+  assert.equal((RENDER.match(/ephemeralWarnToast\(/g) || []).length, 8, "the definition, the two reachability sites and the five state refusals");
   // what the nack, the dismissal and the other-tab ack say stays true after the reload, so they ride it unmarked
   assert.match(RENDER, /warnToast\(m\.name \+ " couldn't be saved on the kernel, so it was not attached/);
   assert.match(RENDER, /warnToast\("The pending upload was dismissed — your held message was NOT sent\."\)/);

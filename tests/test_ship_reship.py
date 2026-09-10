@@ -29,6 +29,11 @@ The guards here:
     re-shipped file. Its nack retires the last pending ship, which lets the restart's held
     reload fire on the next task, and the notice the nack raised (the file was not saved, the
     held message not sent) must be shown again by the fresh page, once.
+  * RelaunchEnv, which runs everywhere: the relaunch stanza the lab writes to its cfg.json for the
+    driver's relaunch of the kernel carries only the environment the relaunched kernel needs, never
+    the runner's whole environment (a runner variable planted as a probe is absent; the lab's own
+    names, the run's private roots and its git isolation present); the served legs check the
+    written file itself.
 
 All fixtures synthetic.
 """
@@ -44,6 +49,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from tests.dist_copy import copy_dist
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -123,6 +131,32 @@ def _free_port():
     p = s.getsockname()[1]
     s.close()
     return p
+
+
+# The environment the driver hands the kernel it relaunches rides the lab's cfg.json, a file, so it carries only
+# the names the relaunched kernel needs here: ROMP_* and XDG_*, CLAUDE_CONFIG_DIR, PATH (bin/romp-kernel runs under
+# `env python3`) and HOME, plus what tests/conftest.py sets for every child of the run: TMPDIR and TMUX_TMPDIR, the
+# private roots its temp files and its tmux server live under, and GIT_CONFIG_GLOBAL and GIT_CONFIG_NOSYSTEM, which
+# keep the kernel's boot-time git (the build sha, the release-tag probe) off the developer's git configuration.
+# Never the runner's whole environment: on a machine whose shells carry API keys, a copy of os.environ in that file
+# holds them for the run. The lab's own kernel is started from this process and gets its environment by process,
+# as any child does; only what goes to the file is narrowed.
+RELAUNCH_ENV_PREFIXES = ("ROMP_", "XDG_")
+RELAUNCH_ENV_NAMES = frozenset(("CLAUDE_CONFIG_DIR", "PATH", "HOME", "TMPDIR", "TMUX_TMPDIR",
+                                "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"))
+
+
+def relaunch_env(env):
+    """The part of a lab kernel's environment `env` that a served lab writes to its cfg.json for the driver's
+    relaunch of the kernel."""
+    return {k: v for k, v in env.items() if k.startswith(RELAUNCH_ENV_PREFIXES) or k in RELAUNCH_ENV_NAMES}
+
+
+def relaunch_cfg(env, klog):
+    """cfg.relaunch, the stanza a served lab writes for the driver's relaunch of the kernel it kills: the command,
+    relaunch_env() of the lab kernel's environment `env`, and the log `klog` the first kernel writes. Both served
+    labs write their stanza through this, so RelaunchEnv covers what reaches the file."""
+    return {"cmd": os.path.join(BIN, "romp-kernel"), "env": relaunch_env(env), "log": klog}
 
 
 DRIVER = r"""
@@ -256,7 +290,7 @@ class _ShipLab(unittest.TestCase):
         if b.returncode != 0:
             raise unittest.SkipTest("esbuild failed here: " + (b.stderr or b.stdout)[-200:])
         dist = os.path.join(cls.lab, "dist")
-        shutil.copytree(os.path.join(EXT, "dist"), dist)
+        copy_dist(os.path.join(EXT, "dist"), dist)
         cls.state = os.path.join(cls.lab, "xdg", "romp")
         cwd = os.path.join(cls.lab, "proj")
         os.makedirs(os.path.join(cls.state, "names"), exist_ok=True)
@@ -292,14 +326,10 @@ class _ShipLab(unittest.TestCase):
         Path(cls.png).write_bytes(PNG)
         cls.port = _free_port()
         cls.token = "testtok-reship"
-        cls.env = dict(os.environ,
-                       XDG_STATE_HOME=os.path.join(cls.lab, "xdg"),
-                       CLAUDE_CONFIG_DIR=claude,
-                       ROMP_MANAGER_PORT="1", ROMP_KERNEL_NO_OPEN="1",
-                       ROMP_SERVE_TOKEN=cls.token, ROMP_KERNEL_PORT=str(cls.port),
-                       ROMP_DIST_DIR=dist,
-                       ROMP_MODEL_CATALOG="off")   # hermetic: the T222 catalog fetch must never reach the network
-        cls.env.pop("ROMP_STATE_DIR", None)
+        cls.env = cls.kernel_env(cls.lab, claude, dist, cls.port, cls.token)
+        # a stand-in for a key the runner's shell carries: the lab's kernel gets it by process environment with the
+        # rest of the runner's, and _run_driver checks that the cfg.json the driver reads never does
+        cls.env["RUNNER_SECRET_PROBE"] = "abc"
         cls.klog = os.path.join(cls.lab, "kernel.log")
         cls.kernel = subprocess.Popen([os.path.join(BIN, "romp-kernel")],
                                       stdout=open(cls.klog, "w"), stderr=subprocess.STDOUT, env=cls.env)
@@ -314,6 +344,21 @@ class _ShipLab(unittest.TestCase):
         else:
             cls.kernel.kill()
             raise unittest.SkipTest("hermetic kernel never served /healthz here")
+
+    @staticmethod
+    def kernel_env(lab, claude, dist, port, token):
+        """The lab kernel's environment: the runner's, with the lab's roots and seams over it. The kernel the lab
+        starts gets it by process; the driver's relaunch gets relaunch_env() of it, through the stanza
+        relaunch_cfg() writes to the lab's cfg.json."""
+        env = dict(os.environ,
+                   XDG_STATE_HOME=os.path.join(lab, "xdg"),
+                   CLAUDE_CONFIG_DIR=claude,
+                   ROMP_MANAGER_PORT="1", ROMP_KERNEL_NO_OPEN="1",
+                   ROMP_SERVE_TOKEN=token, ROMP_KERNEL_PORT=str(port),
+                   ROMP_DIST_DIR=dist,
+                   ROMP_MODEL_CATALOG="off")   # hermetic: the T222 catalog fetch must never reach the network
+        env.pop("ROMP_STATE_DIR", None)
+        return env
 
     @classmethod
     def tearDownClass(cls):
@@ -332,6 +377,13 @@ class _ShipLab(unittest.TestCase):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
             json.dump(cfg_obj, f)
+        # the file carries only what the driver and the relaunched kernel need: the probe the lab planted in its
+        # kernel's environment (checked first, so the file check cannot pass without it) must not be in it (names
+        # only in the report, never the values)
+        self.assertIn("RUNNER_SECRET_PROBE", sorted(self.env), "the lab plants the probe in its kernel's environment")
+        written = json.loads(Path(cfg).read_text(encoding="utf-8"))
+        self.assertNotIn("RUNNER_SECRET_PROBE", sorted(written.get("relaunch", {}).get("env", {})),
+                         "the lab's cfg.json carries a variable of the runner's environment the relaunch does not need")
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(driver_src)
@@ -361,13 +413,45 @@ class _ShipLab(unittest.TestCase):
         return r
 
 
+class RelaunchEnv(unittest.TestCase):
+    """The relaunch stanza a served lab writes to its cfg.json for the driver's relaunch of the kernel carries only
+    the environment the relaunched kernel needs, never the runner's whole environment: on a machine whose shells
+    carry API keys, a copy of os.environ in that file holds them for the run. No kernel and no browser, so this
+    runs everywhere; the served legs check the written file itself (_run_driver)."""
+
+    def test_a_runner_variable_never_reaches_the_relaunch_env_and_the_kernels_names_do(self):
+        lab = os.path.join(os.sep, "lab")
+        # the runner's shell: a stand-in for a key it carries, a live kernel's state export (it outranks the XDG root,
+        # and the lab removes it) and the floor tests/conftest.py sets for the run's children, planted here so the
+        # test asserts on values it chose rather than on conftest having set them
+        runner = {"RUNNER_SECRET_PROBE": "abc",
+                  "ROMP_STATE_DIR": os.path.join(lab, "live"),
+                  "TMPDIR": os.path.join(lab, "tmp"), "TMUX_TMPDIR": os.path.join(lab, "tmux"),
+                  "GIT_CONFIG_GLOBAL": os.path.join(lab, "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
+        with mock.patch.dict(os.environ, runner):
+            env = _ShipLab.kernel_env(lab, os.path.join(lab, "claude"), os.path.join(lab, "dist"), 4321, "testtok")
+        self.assertIn("RUNNER_SECRET_PROBE", sorted(env), "the lab's own kernel inherits the runner's environment, by process")
+        cfg = relaunch_cfg(env, os.path.join(lab, "kernel.log"))
+        self.assertEqual(cfg["cmd"], os.path.join(BIN, "romp-kernel"))
+        self.assertEqual(cfg["log"], os.path.join(lab, "kernel.log"))
+        out = cfg["env"]
+        names = sorted(out)
+        self.assertNotIn("RUNNER_SECRET_PROBE", names, "the relaunch reads the file: a runner variable must not be in it")
+        self.assertNotIn("ROMP_STATE_DIR", names, "a live kernel's export outranks the XDG root; the lab removes it")
+        for name in ("XDG_STATE_HOME", "CLAUDE_CONFIG_DIR", "ROMP_MANAGER_PORT", "ROMP_KERNEL_NO_OPEN", "ROMP_SERVE_TOKEN",
+                     "ROMP_KERNEL_PORT", "ROMP_DIST_DIR", "ROMP_MODEL_CATALOG", "PATH", "HOME"):
+            self.assertIn(name, names, "the relaunched kernel needs %s" % name)
+        self.assertEqual(out["XDG_STATE_HOME"], os.path.join(lab, "xdg"))
+        self.assertEqual(out["ROMP_KERNEL_PORT"], "4321")
+        for name in ("TMPDIR", "TMUX_TMPDIR", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"):
+            self.assertEqual(out.get(name), runner[name], "the run's %s reaches the relaunched kernel" % name)
+
+
 class ServedWedge(_ShipLab):
     def test_restart_between_ship_and_ack_reships_heals_and_releases_the_held_send(self):
         r = self._run_driver(DRIVER, {
             "url": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token),
-            "kernelPid": self.kernel.pid,
-            "relaunch": {"cmd": os.path.join(BIN, "romp-kernel"),
-                         "env": {k: v for k, v in self.env.items()}, "log": self.klog},
+            "kernelPid": self.kernel.pid, "relaunch": relaunch_cfg(self.env, self.klog),
             "file": self.png, "msg": "hold this message for the upload T215",
             "msg2": "a normal send after the restart T215",
             "shots": os.environ.get("SHIP_RESHIP_SHOTS", "")})
@@ -589,9 +673,7 @@ class NackNoticeSurvivesReload(_ShipLab):
     def test_the_nack_of_the_last_ship_is_shown_again_by_the_fresh_page_once(self):
         r = self._run_driver(DRIVER_NACK, {
             "url": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token),
-            "kernelPid": self.kernel.pid,
-            "relaunch": {"cmd": os.path.join(BIN, "romp-kernel"),
-                         "env": {k: v for k, v in self.env.items()}, "log": self.klog},
+            "kernelPid": self.kernel.pid, "relaunch": relaunch_cfg(self.env, self.klog),
             "file": self.png, "msg": "hold this message for the upload that will not save",
             "drops": os.path.join(self.state, "drops"),
             "probe": "probe: an ephemeral notice, which the fresh page must not repeat"})
