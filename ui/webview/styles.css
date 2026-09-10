@@ -1889,6 +1889,17 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   color: var(--dim); background: transparent; border: 0; border-radius: 6px; padding: 0;
 }
 .queued-x:hover { color: var(--vscode-errorForeground, #f48771); background: rgba(255, 255, 255, 0.08); }
+/* EDITABLE — a ✎ beside the ✕ (the user 2026-09-08): a message that has not reached the session yet is still
+   the user's to change. Same corner, same dim-until-hover treatment; the ACCENT (not red) on its own hover — it
+   changes the message, it does not remove it. The bubble reserves room for both controls. */
+.queued-bubble.editable { padding-right: 52px; }
+.queued-edit {
+  position: absolute; top: 3px; right: 26px; width: 20px; height: 20px;
+  display: flex; align-items: center; justify-content: center;
+  font: inherit; font-size: 0.82em; line-height: 1; cursor: pointer;
+  color: var(--dim); background: transparent; border: 0; border-radius: 6px; padding: 0;
+}
+.queued-edit:hover { color: var(--accent); background: rgba(255, 255, 255, 0.08); }
 /* A notice romp itself queued (T243) wears the LANDED romp notice card nested inside the queued bubble: the
    dashed "you" dress comes off the wrapper (the card brings its own gray tone), and the ✕ moves inside the
    card's corner so it reads as the card's control. */

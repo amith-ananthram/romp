@@ -15251,7 +15251,7 @@ def _drive(msg, client):
         return False
     t = msg.get("type")
     ID_OPS = ("sendMessage", "rewindSend", "rewindDelete", "interrupt", "compactSession", "dismissDialog", "answerAsk", "navAsk", "toggleAsk", "submitAsk",
-              "addCustomAsk", "cancelAsk", "askText", "cancelQueued", "dismissEcho", "apiRetry", "setModel", "setEffort", "setMode", "setFast",
+              "addCustomAsk", "cancelAsk", "askText", "cancelQueued", "dismissEcho", "apiRetry", "editQueued", "setModel", "setEffort", "setMode", "setFast",
               "setAuth", "endSession", "renameSession", "moveSession", "stopTask", "rewindFiles", "mcpAction", "forkSession",
               "commentCreate", "commentReply", "commentResolve", "commentDelete", "commentSeen", "commentPromote",
               "commentMerge")
@@ -15466,6 +15466,35 @@ def _drive(msg, client):
             # had already gone through, or never reached this kernel. sid only: the body is the user's text
             sys.stderr.write("queued-cancel miss: %s (body-only)\n" % sid)
         client["send"](json.dumps({"type": "cancelResult", "ok": not err, "id": sid,
+                                   "md": md, "text": err or ""}))
+        _push_soon()
+    elif t == "editQueued" and msg.get("park") is not None:
+        # ✎ on a PARKED message (the user 2026-09-08): replace its words in place — same slot, same
+        # follow-up context. The result frame is authoritative like the ✕'s: ok:false means the message
+        # left the queue meanwhile (or the chip is not a message), and the client hands the typed words
+        # back to the composer instead of leaving them nowhere.
+        err = _edit_parked(sid, int(msg["park"]), str(msg.get("md") or ""), str(msg.get("text") or ""))
+        client["send"](json.dumps({"type": "editResult", "ok": not err, "id": sid,
+                                   "md": str(msg.get("md") or ""), "text": err or ""}))
+        _push_soon()
+    elif t == "editQueued" and msg.get("idx") is not None and hasattr(be, "edit_queued"):
+        # ✎ on a backend-queue message: replaced under the backend's lock, drift-guarded by the body.
+        err = _edit_backend_queued(be, sid, int(msg["idx"]), str(msg.get("md") or ""), str(msg.get("text") or ""))
+        client["send"](json.dumps({"type": "editResult", "ok": not err, "id": sid,
+                                   "md": str(msg.get("md") or ""), "text": err or ""}))
+        _push_soon()
+    elif t == "editQueued" and msg.get("md"):
+        # ✎ at the OPTIMISTIC stage: no park/idx has round-tripped yet, so locate the send by body wherever
+        # it landed — the FIFO first, then the backend's queue (the ws is ordered: the send op was processed
+        # before this edit). Neither holding it means it already forwarded into the CLI: the honest refusal.
+        md = str(msg["md"])
+        new_text = str(msg.get("text") or "")
+        err = _edit_parked(sid, -1, md, new_text)
+        if err and hasattr(be, "edit_queued"):
+            err2 = _edit_backend_queued(be, sid, -1, md, new_text)
+            if err2 is None:
+                err = None
+        client["send"](json.dumps({"type": "editResult", "ok": not err, "id": sid,
                                    "md": md, "text": err or ""}))
         _push_soon()
     elif t == "dismissEcho" and hasattr(be, "dismiss_echo"):
@@ -28093,6 +28122,18 @@ def _cancel_miss_text(md):
             "and will be answered in the current turn")
 
 
+def _edit_miss_text(md):
+    """The user-facing 'too late' for an EDIT whose target already left the queue — the ✕'s twin
+    (_cancel_miss_text): once the session has the message there is no recall, so the words it answers
+    are the ones it got. The client hands the edited text back to the composer on this frame, so
+    nothing is lost and nothing is sent twice (the user 2026-09-08)."""
+    body = (md or "").strip()
+    if body.startswith("/"):
+        return "too late to edit %s — the session already has it" % body.split()[0]
+    return ("too late to edit — the message already reached the session as it was, "
+            "and will be answered in the current turn")
+
+
 def _cancel_parked(sid, park, md):
     """Remove ONE parked op — the queued bubble's ✕ (the user 2026-07-08). Verified by body text: if the
     park list shifted between the push and the click (ops applied / another cancel), the index alone
@@ -28157,6 +28198,101 @@ def _cancel_backend_queued(be, sid, idx, md):
         return _cancel_miss_text(md)
     got = be.unqueue(sid, idx, pending[idx])
     return None if got is not None else _cancel_miss_text(md)
+
+
+def _replace_followup_body(text, body):
+    """`text` with its user-visible BODY replaced by `body` and everything else kept byte for byte. A plain
+    send IS its body. A romp FOLLOW-UP keeps its leading goal-context quote and its trailing romp markers —
+    the follow-up judge reopens the goal off the romp-goal-id marker — so an edited follow-up still files
+    under its goal. The inverse of _split_followup's body read: _split_followup(_replace_followup_body(t,
+    b))[1] == b.strip(). The queued bubble's ✎ hands the kernel the BODY the bubble showed (the ✕'s drift
+    guard reads the same body), and the kernel keeps the wrapper the client never saw."""
+    body = (body or "").strip()
+    if not text or not _FOLLOWUP_GOAL_RE.search(text):
+        return body
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines) and lines[i].lstrip().startswith(">"):
+        i += 1
+    head = "\n".join(lines[:i])
+    rest = "\n".join(lines[i:])
+    # The trailing marker block, one comment at a time: a comment can never span another's close, so an
+    # inline <!-- x --> INSIDE the old body cannot anchor the tail and drag old words behind the new body
+    # (review find, 2026-09-08: the .*? form under re.S did exactly that). Of the block, only the WRAPPER's
+    # own markers survive (romp-note / romp-injected / romp-auto / romp-goal-id, _followup_body's tail): a
+    # marker that described the old BODY, like the Continue button's romp-canned, would make the typed
+    # replacement render as the canned gesture row, so it goes with the words it described.
+    cmt = r"<!--(?:(?!-->).)*-->"
+    m = re.search(r"((?:\s*%s)+\s*)$" % cmt, rest, flags=re.S)
+    keep = [c for c in re.findall(cmt, m.group(1), flags=re.S)
+            if re.match(r"<!--\s*romp-(?:note|injected|auto|goal-id)\b", c)] if m else []
+    return (head + "\n\n" if head else "") + body + ("\n\n" + "".join(keep) if keep else "")
+
+
+def _edit_parked(sid, park, md, text):
+    """Replace the BODY of one parked SEND in place — the queued bubble's ✎ (the user 2026-09-08). Same
+    slot in the FIFO (park order IS delivery order, so the edited message still goes where it would
+    have), same echo author, and a follow-up keeps its goal quote and markers (_replace_followup_body).
+    Verified by body text and refused on the in-flight head exactly as _cancel_parked is: the locate and
+    the swap are ONE step under the queue lock, so the drain cannot pop the head between them. Only a
+    send is editable — a command / compact / model chip has no words to change (cancel it and type it
+    again), and a non-send match is refused with its own sentence rather than the 'too late' one, which
+    would be a lie. Returns None on success, else the text for the client to toast. Logged like the
+    cancel: sid and kind, never the body, which is user text."""
+    sid = str(sid)
+    body = (text or "").strip()
+    if not body:
+        return "nothing to send — to drop the message, use its ✕"
+    if _is_slash_command(body):
+        # an edit swaps the WORDS of a ("send", ...) op and nothing else, so a command edited in would stay a
+        # send and reach the model as text, skipping the fire-alone park and the kernel-side setters every
+        # typed command gets (review find, 2026-09-08). The composer mirrors this refusal (SLASH_CMD_RE).
+        return "a queued message cannot become a command: cancel it with its ✕ and type the command"
+    with _pending_ops_lock:
+        ops = _pending_ops.get(sid) or []
+        inflight_head = bool(ops) and ops[0] is _inflight_ops.get(sid)   # the head is with the backend this instant
+        if not (0 <= park < len(ops)) or (md and _parked_md(ops[park]) != md):
+            park = next((j for j, op in enumerate(ops)
+                         if _parked_md(op) == md and not (j == 0 and inflight_head)), -1) if md else -1
+            if park < 0:
+                return _edit_miss_text(md)
+        if park == 0 and inflight_head:
+            return _edit_miss_text(md)            # too late, not a wrong-op rewrite
+        op = ops[park]
+        if op[0] != "send":
+            return "only a queued message can be edited — cancel this %s and type it again" % (
+                "command" if op[0] in ("command", "compact") else "change")
+        sys.stderr.write("parked-op edit: %s send\n" % sid)
+        ops[park] = ("send", _replace_followup_body(op[1], body)) + tuple(op[2:])
+        _save_pending_ops()
+    _mark_views_dirty()
+    return None
+
+
+def _edit_backend_queued(be, sid, idx, md, text):
+    """edit_queued with _cancel_backend_queued's DRIFT GUARD: re-locate the entry by body if the backend
+    queue moved between the push and the click, then replace it in place under the backend's lock
+    (edit_queued's `expect`), keeping a follow-up's wrapper. Returns None on success; on a MISS — the
+    message already forwarded to the CLI, where no recall exists — the 'too late' text to toast."""
+    body = (text or "").strip()
+    if not body:
+        return "nothing to send — to drop the message, use its ✕"
+    if _is_slash_command(body):
+        # replace_queued swaps the queued text in place, so SdkBackend.send's /compact and /clear cues would
+        # never fire for a command edited in; same refusal as _edit_parked (review find, 2026-09-08)
+        return "a queued message cannot become a command: cancel it with its ✕ and type the command"
+    try:
+        pending = be.pending_queued(sid)
+    except Exception:
+        pending = []
+    if md:
+        if not (0 <= idx < len(pending)) or _split_followup(pending[idx])[1] != md:
+            idx = next((i for i, q in enumerate(pending) if _split_followup(q)[1] == md), -1)
+    if not (0 <= idx < len(pending)):
+        return _edit_miss_text(md)
+    old = pending[idx]
+    got = be.edit_queued(sid, idx, _replace_followup_body(old, body), old)
+    return None if got is not None else _edit_miss_text(md)
 
 
 def _queue_recallable(be, sid):
