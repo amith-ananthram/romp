@@ -684,8 +684,8 @@ when you add Romp to the Home Screen (`/manifest.webmanifest` and three icons
 under `/media/`). Those files are fixed (the app's name, colors and icon art)
 and read no session state.
 
-The kernel and the bus mint that file when it is missing, one mint between them
-under a sibling lock file, `serve-token.lock`. An existing token is never
+The kernel and the bus mint the token file when it is missing, one mint between
+them under a sibling lock file, `serve-token.lock`. An existing token is never
 replaced: a file left looser than `0600` is tightened at the next start (its
 value is kept, so every client stays valid), and a token that exists but cannot
 be read, or a symlink at that path, refuses to start instead of minting a
