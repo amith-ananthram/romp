@@ -5970,20 +5970,24 @@ def _set_notify_session(sid, value):
         _write_state_json(jd.STATE / "session-flags.json", json.dumps(cur, sort_keys=True))
 
 
-def _prune_notify_cards(live_ids):
-    """Drop armed ids whose card is no longer in the feed (cleared/archived — the id never comes back).
-    Called from the feed-diff detector, so the write happens only on the event of a card leaving.
-    The reserved keys (the master, the turn-finished switch) are not cards and never prune; values
-    are kept as stored (False = a mute)."""
+def _prune_notify_cards(live_ids, gone_ids=()):
+    """Drop armed ids whose card is no longer in the feed (cleared/archived — the id never comes back),
+    and the `gone_ids` a caller names outright. Called from the feed-diff detector, so the write happens
+    only on the event of a card leaving; and from the compaction sweep (_notify_prev_forget_gone), which
+    has no build in hand, so it passes `live_ids` None (nothing pruned by absence) and names as `gone_ids`
+    the cards it just forgot from the notified snapshot: a session gone for good takes its cards' mutes
+    with it. The reserved keys (the master, the turn-finished switch) are not cards and never prune;
+    values are kept as stored (False = a mute)."""
     try:
         cur = _notify_cards_proved()   # PROVED: a fault must not prune against a fabricated {} and then
         #                                write the truncation over the user's real bell overrides
     except _StateUnreadable as e:
         _note_state_fault(e)                         # loud once per episode, not per pass
         return
-    gone = [i for i in cur if i not in live_ids and i not in _NOTIFY_RESERVED]
+    gone = {i for i in cur if i not in _NOTIFY_RESERVED
+            and (i in gone_ids or (live_ids is not None and i not in live_ids))}
     if gone:
-        kept = {i: cur[i] for i in cur if i in live_ids or i in _NOTIFY_RESERVED}
+        kept = {i: cur[i] for i in cur if i not in gone}
         try:
             _write_state_json(jd.STATE / "notify-cards.json", json.dumps(kept, sort_keys=True))
         except _StateUnwritable:
@@ -32414,6 +32418,7 @@ def _compact_goal_stores():
         jd._shared_evict_absent()                      # ...and the shared read-only views of removed stores
     except Exception:
         pass
+    owned = None                                   # the discovered sessions' sids, once the walk below lands
     try:
         # ...and, for the two memos that hold PARSED stores, the entries of stores no discovered session
         # owns: neither had a cap (review find, 2026-09-08). discover is cached behind the transcript
@@ -32424,6 +32429,15 @@ def _compact_goal_stores():
         _goals_memo_evict_unowned(owned)
     except Exception:
         sys.stderr.write("compact: memo eviction: %s\n" % traceback.format_exc())
+    if owned is not None:
+        try:
+            # ...and the notified-cards snapshot's entries for sessions GONE for good: neither alive, nor in
+            # that discover window, nor a dead tab kept open, the bound session-order.json wears. The build
+            # forgets a card only when its session renders without it, which such a session never does
+            # again (review find on the persist, 2026-09-10). Same rule as above: no owner list, no gone.
+            _notify_prev_forget_gone(owned)
+        except Exception:
+            sys.stderr.write("compact: notified snapshot: %s\n" % traceback.format_exc())
     try:
         paths = glob.glob(str(jd.GOALDIR / "*.json"))
     except Exception:
@@ -41730,12 +41744,19 @@ def _pure_feed(now, tmux):
 # STATE/notify-prev.json — {card id: {"column", "sid"}} for every stable card in a notified column, the
 # small subset the diff needs — written when it changes, read once at the first build of a life to seed
 # the memory. Two rules follow from the mechanism:
-#   * a card is forgotten (in memory and on disk) only when ITS OWN SESSION rendered this build without
-#     it — cleared, archived, folded away: the id never comes back. A session that did not render at
-#     all (not yet revived, dead, off the board) says nothing about its cards, so they stay remembered
-#     and its revival is silent. The roster is the build's `sessions` rows (the live tab strip, minus
-#     the dead read-only tabs the user kept open, which render no cards) plus the sessions the rendered
-#     cards themselves name. The bell overrides' prune rides the same event: a remembered card is not gone.
+#   * a card is forgotten (in memory and on disk) on one of TWO events. The build forgets it when ITS OWN
+#     SESSION rendered this build without it — cleared, archived, folded away: the id never comes back.
+#     A session that did not render at all (not yet revived, dead, off the board) says nothing about its
+#     cards, so they stay remembered and its revival is silent. The roster is the build's `sessions`
+#     rows (the live tab strip, minus the dead read-only tabs the user kept open, which render no cards)
+#     plus the sessions the rendered cards themselves name. The compaction sweep after each judge pass
+#     forgets it when its session is GONE for good: neither alive, nor with a transcript still in the
+#     discover window, nor a dead tab kept open (_notify_prev_forget_gone, the bound session-order.json
+#     already wears). Such a session never renders again, so the build alone kept its cards forever (a
+#     card cleared from the dashboard while its session was dead left the board without that session
+#     ever rendering without it). So the store holds the live board's notified cards plus those of the
+#     dead sessions still in the discover window, and no more. The bell overrides' prune rides both
+#     events: a remembered card is not gone, and a forgotten card's mutes go with it.
 #   * the FIRST boot of an install with no file yet seeds from the current board SILENTLY — announcing
 #     every card sitting in the columns of an existing install would be the very storm this fixes — and
 #     the next life is fully event-true. A card missing from an EXISTING file that sits in a notified
@@ -41768,6 +41789,10 @@ _NOTIFY_COLUMNS = ("needs_input", "completed")
 _NOTIFY_PREV = [None]
 _NOTIFY_PREV_DISK = [None]    # what notify-prev.json last held: a write happens only when the snapshot changes
 _NOTIFY_PREV_WRITE_FAULT = [None]   # the last write failure's text — said once per episode; a landed write clears it
+# The snapshot has two writers since the sweep's bound: the pusher's build (_feed_notifications, read to
+# swap) and the producer's compaction sweep (_notify_prev_forget_gone). Each holds this for its whole
+# read-modify-write, so neither publishes a snapshot built from the other's superseded one.
+_notify_prev_lock = threading.Lock()
 
 
 def _notify_prev_path():
@@ -41876,6 +41901,37 @@ def _notify_prev_write(snap):
     _NOTIFY_PREV_DISK[0] = snap
 
 
+def _notify_prev_forget_gone(owned):
+    """The compaction sweep's bound on the snapshot (review find on the persist, 2026-09-10): forget, in
+    memory and on disk, every remembered card whose session is GONE for good, and drop its bell overrides
+    with it. Gone means what it means for session-order.json (_gc_session_order): neither alive, nor with
+    a transcript still in the discover window (`owned`, the sweep's own discover set), nor a dead tab the
+    user kept open. The build forgets a card only when its session RENDERS without it, and a session
+    gone for good never renders again: its worktree deleted, never revived, its card cleared from the
+    dashboard while it was dead (a clear reads the goal store, not the session). So the build alone kept
+    such cards forever, and the bell store, pruned against the snapshot since the persist, kept their
+    mutes with them. A session merely dead-but-in-window keeps its cards remembered, so its revival
+    stays silent; the discover window slides forward only, so a forgotten card never flickers back.
+    Nothing to do before this life's first build: the file is not in memory yet, the first build seeds
+    it, and the next sweep bounds it. Returns how many cards were forgotten."""
+    if not _NOTIFY_PREV[0]:
+        return 0
+    known = set(_tmux_sessions()) | set(owned) | set(_kept_open)   # outside the lock: liveness may ask tmux
+    with _notify_prev_lock:
+        prev = _NOTIFY_PREV[0]
+        gone = {i for i, e in (prev or {}).items() if e.get("sid") not in known}
+        if not gone:
+            return 0
+        kept = {i: e for i, e in prev.items() if i not in gone}
+        _NOTIFY_PREV[0] = kept
+        _notify_prev_write(kept)
+        _prune_notify_cards(None, gone_ids=gone)     # a forgotten card's mutes go with it
+    sids = {prev[i].get("sid") for i in gone}
+    sys.stderr.write("[notify] forgot %d card%s of %d session%s gone for good\n"
+                     % (len(gone), "" if len(gone) == 1 else "s", len(sids), "" if len(sids) == 1 else "s"))
+    return len(gone)
+
+
 def _notify_title(name, needs_you=False):
     """The ONE title every notification wears — desktop, phone, test push, and a relayed event as
     its origin composed it (the user 2026-09-09, whose phone found the notifications too busy: a
@@ -41918,6 +41974,12 @@ def _feed_notifications(feed):
     can land ON the session that fired (the user 2026-08-08, whose first real push opened the app on a
     different session); itemId joined it 2026-09-06 so the same tap can also scroll the feed to the card
     itself."""
+    with _notify_prev_lock:                          # read to swap as one step: the sweep prunes the same snapshot
+        return _feed_notifications_diff(feed)
+
+
+def _feed_notifications_diff(feed):
+    """The diff itself, under the snapshot's lock (see _notify_prev_lock)."""
     prev = _NOTIFY_PREV[0]
     first_boot = False
     if prev is None:                                 # the first build of this kernel life
@@ -41937,7 +41999,8 @@ def _feed_notifications(feed):
     # render no cards), plus whichever session a rendered card names
     roster = ({str(s.get("sid") or "") for s in (feed.get("sessions") or []) if isinstance(s, dict)}
               - set(_kept_open)) | {str(a.get("sid") or "") for a in cur.values()}
-    nxt = {i: e for i, e in prev.items() if i not in cur and e.get("sid") not in roster}   # unrendered: remembered
+    nxt = {i: e for i, e in prev.items() if i not in cur and e.get("sid") not in roster}   # unrendered: remembered,
+    #                                                until the sweep finds the session gone for good (_notify_prev_forget_gone)
     now_t = int(feed.get("now") or time.time())   # the build's own moment: wall clock, like the journal's t
     entered = []                                     # (itemId, card, column, entry): the cards that ENTERED a column
     for iid, a in cur.items():

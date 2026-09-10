@@ -13,7 +13,10 @@ The snapshot now persists to STATE/notify-prev.json ({card id: {sid, column, ann
 announcedAt}}: the notified column the card was last seen in, and the column it was last announced
 for), seeds _NOTIFY_PREV at the first build of a life, and a card is forgotten only when its own
 session rendered without it: a session that did not render at all (not yet revived, dead) says
-nothing about its cards. The same night's ledger showed the other half: one card on a busy session
+nothing about its cards. The compaction sweep after each judge pass bounds the store the way
+session-order.json is bounded: a session neither alive, nor in the discover window, nor kept open is
+gone for good and never renders again, so the sweep forgets its cards, mutes and all (the build alone
+kept them forever). The same night's ledger showed the other half: one card on a busy session
 re-entering needs_input at every turn end with nothing from the user in between, pushed twelve times
 — so the same (card, column) pair is announced once, unless the other column was announced since or
 the user acted on the card since (the override journal). Both the desktop notice and the phone push
@@ -320,6 +323,39 @@ class PruneAndWriteDiscipline(_Base):
         self.boot(_feed(_card(WEB + ":g1", WEB, "completed"), sessions=[WEB]))
         self.assertEqual(self.disk(), {WEB + ":g1": _entry("completed", WEB),
                                        API + ":g1": _entry("needs_input", API)})
+
+    def test_the_compaction_sweep_forgets_the_cards_of_a_session_gone_for_good(self):
+        # The build forgets a card only when its session renders without it, and a session gone for good
+        # (worktree deleted, never revived, its card cleared while it was dead) never renders again: the
+        # file grew by its cards forever. The compaction sweep bounds the snapshot the way _gc_session_order
+        # bounds session-order.json: alive, or a transcript still in the discover window, or a dead tab
+        # kept open, else forgotten, mutes and all. A dead session still in the window keeps its cards
+        # remembered, so its revival stays silent.
+        GONE = "11111111-2222-4333-8444-555555555503"
+        KEPT = "11111111-2222-4333-8444-555555555504"
+        km._set_notify_card(GONE + ":g1", False, GONE)            # a mute the user set on the gone session's card
+        km._set_notify_card(API + ":g1", False, API)              # ...and one on api's, which stays
+        self.seed_disk({WEB + ":g1": _entry("completed", WEB), API + ":g1": _entry("needs_input", API),
+                        GONE + ":g1": _entry("needs_input", GONE), KEPT + ":g1": _entry("completed", KEPT)})
+        self.boot(_feed(_card(WEB + ":g1", WEB, "completed"), sessions=[WEB]))
+        saved = jd.discover, km._tmux_sessions
+        jd.discover = lambda now, window=None, forks=True: [(API, "/dev/null", None, "api")]   # api: dead, in the window
+        km._tmux_sessions = lambda: {WEB: {}}                     # web: alive
+        km._kept_open.add(KEPT)                                   # kept: a dead tab the user kept open
+        err = io.StringIO()
+        try:
+            with redirect_stderr(err):
+                km._compact_goal_stores()
+        finally:
+            jd.discover, km._tmux_sessions = saved
+            km._kept_open.discard(KEPT)
+        expect = {WEB + ":g1": _entry("completed", WEB), API + ":g1": _entry("needs_input", API),
+                  KEPT + ":g1": _entry("completed", KEPT)}
+        self.assertEqual(km._NOTIFY_PREV[0], expect, "gone from memory; alive, in-window and kept-open stay")
+        self.assertEqual(self.disk(), expect, "...and from the file")
+        self.assertIn("[notify] forgot 1 card of 1 session gone for good", err.getvalue())
+        self.assertNotIn(GONE + ":g1", km._notify_cards(), "its mute went with it")
+        self.assertEqual(km._notify_cards().get(API + ":g1"), False, "api has not rendered: the mute stays")
 
     def test_the_roster_falls_back_to_the_cards_own_sessions(self):
         # a payload with no `sessions` rows (the older fixtures): a session with a card rendered
