@@ -3472,7 +3472,7 @@ _atomic_lock = threading.Lock()
 _atomic_seq = [0]
 
 
-def _write_state_json(path, text, note=True):
+def _write_state_json(path, text, note=True, mode=None):
     """The ONE write door for the small JSON state files (session-flags, session-order, notify-cards,
     timeline-views): _atomic_write, with the publish's OSError turned into
     _StateUnwritable and the fault filed ONCE per episode on the path's registry (_note_state_fault, the
@@ -3484,10 +3484,11 @@ def _write_state_json(path, text, note=True):
     `note=False` raises the same _StateUnwritable but files NO notice and opens no write-fault episode:
     for a write that is housekeeping rather than a gesture (the views reader's re-stamp on read), where
     a failure is a log line the caller writes itself and the first GESTURE that fails is what the user
-    hears about (the views store's 2026-09-05 rule; the flags, order and bell stores never pass it)."""
+    hears about (the views store's 2026-09-05 rule; the flags, order and bell stores never pass it).
+    `mode` reaches _atomic_write: the notified-cards snapshot (notify-prev.json) publishes at 0600."""
     path = Path(path)
     try:
-        _atomic_write(path, text)
+        _atomic_write(path, text, mode=mode)
     except OSError as e:
         exc = _StateUnwritable(path, "write failed: %s" % _errno_text(e))
         if note:
@@ -6023,20 +6024,24 @@ def _set_notify_session(sid, value):
         _write_state_json(jd.STATE / "session-flags.json", json.dumps(cur, sort_keys=True))
 
 
-def _prune_notify_cards(live_ids):
-    """Drop armed ids whose card is no longer in the feed (cleared/archived — the id never comes back).
-    Called from the feed-diff detector, so the write happens only on the event of a card leaving.
-    The reserved keys (the master, the turn-finished switch) are not cards and never prune; values
-    are kept as stored (False = a mute)."""
+def _prune_notify_cards(live_ids, gone_ids=()):
+    """Drop armed ids whose card is no longer in the feed (cleared/archived — the id never comes back),
+    and the `gone_ids` a caller names outright. Called from the feed-diff detector, so the write happens
+    only on the event of a card leaving; and from the compaction sweep (_notify_prev_forget_gone), which
+    has no build in hand, so it passes `live_ids` None (nothing pruned by absence) and names as `gone_ids`
+    the cards it just forgot from the notified snapshot: a session gone for good takes its cards' mutes
+    with it. The reserved keys (the master, the turn-finished switch) are not cards and never prune;
+    values are kept as stored (False = a mute)."""
     try:
         cur = _notify_cards_proved()   # PROVED: a fault must not prune against a fabricated {} and then
         #                                write the truncation over the user's real bell overrides
     except _StateUnreadable as e:
         _note_state_fault(e)                         # loud once per episode, not per pass
         return
-    gone = [i for i in cur if i not in live_ids and i not in _NOTIFY_RESERVED]
+    gone = {i for i in cur if i not in _NOTIFY_RESERVED
+            and (i in gone_ids or (live_ids is not None and i not in live_ids))}
     if gone:
-        kept = {i: cur[i] for i in cur if i in live_ids or i in _NOTIFY_RESERVED}
+        kept = {i: cur[i] for i in cur if i not in gone}
         try:
             _write_state_json(jd.STATE / "notify-cards.json", json.dumps(kept, sort_keys=True))
         except _StateUnwritable:
@@ -13758,11 +13763,12 @@ def _comments_frame(sid, tmux=None):
                 # deliberate re-send repeat earlier texts, which read as "already in the transcript" and hid a
                 # send the CLI still held (round-5 review). A `dropped` echo (the backend adjudicated the send
                 # LOST — a reconnect with it in flight; the popover shows "never delivered") owes nothing.
-                user_atoms = [a for tr in turns for a in (tr.get("atoms") or []) if a.get("type") == "user"]
+                user_atoms = [(float(a.get("t") or 0), set(_atom_user_texts(a)))       # (stamp, its texts), built once per frame
+                              for tr in turns for a in (tr.get("atoms") or []) if a.get("type") == "user"]
                 def _landed(e):
-                    et = sb.echo_text_key(e.get("_echo_text"))
+                    keys = set(sb.echo_keys(e.get("_echo_text")))     # the plain key and, for a slash send, its words
                     since = float(e.get("t") or 0)                     # the send's own stamp: the record the CLI writes for
-                    return any(et in _atom_user_texts(a) for a in user_atoms if float(a.get("t") or 0) >= since)   # it is at or after it
+                    return any(t >= since and not keys.isdisjoint(texts) for t, texts in user_atoms)   # it is at or after it
                 floor = _human_turn_floor({"turns": turns}) if turns else 0
                 # `_landed` on the atom: the backend's boot/spawn scan read the landing off the transcript
                 # itself (sdk_backend._mark_dropped_echoes) — delivered, so nothing is held for it
@@ -21688,7 +21694,9 @@ def _start_remote(host):
       2. If the kernel still isn't answering (the up-to-date path), _start_remote_kernel + the same
          port wait attach's bootstrap uses.
     Refreshes the stored token after boot (a first-ever kernel just wrote its serve-token).
-    Returns (ok, detail); mirrors _update_remote's contract."""
+    Returns (ok, detail); mirrors _update_remote's contract. An exception that escapes any step after the
+    hold is set releases the hold through _fail (the row reads no-kernel, the failure as its detail) and
+    propagates."""
     host = str(host or "").strip()
     if not host:
         return False, "no host"
@@ -21705,28 +21713,42 @@ def _start_remote(host):
             if rr:
                 rr["status"], rr["detail"], rr["booting"] = "no-kernel", detail, False
         return False, detail
-    ok, detail = _update_remote(host)
-    if not ok:
-        return _fail(detail)
-    if not _remote_kernel_up(host, kport):
-        # the already-up-to-date path: nothing synced, so _update_remote (re)started nothing
-        started, d2 = _start_remote_kernel(host)
-        if not started:
-            return _fail(d2)
-        detail = detail + " + started the kernel"
-    deadline = time.time() + _BOOT_WAIT_S
-    while time.time() < deadline and not _remote_kernel_up(host, kport):
-        time.sleep(1.0)
-    if not _remote_kernel_up(host, kport):
-        return _fail("started romp on %s but its kernel port never answered — check its kernel.log" % host)
-    token = _fetch_remote_token(host)
-    with _remotes_lock:
-        rr = _remotes.get(host)
-        if rr and token:
-            rr["token"] = token
-        if rr:
-            rr["detail"], rr["booting"] = "", False   # healthy — the supervisor's next poll flips it to 'up'
-    return True, detail
+    try:
+        ok, detail = _update_remote(host)
+        if not ok:
+            return _fail(detail)
+        if not _remote_kernel_up(host, kport):
+            # the already-up-to-date path: nothing synced, so _update_remote (re)started nothing
+            started, d2 = _start_remote_kernel(host)
+            if not started:
+                return _fail(d2)
+            detail = detail + " + started the kernel"
+        deadline = time.time() + _BOOT_WAIT_S
+        while time.time() < deadline and not _remote_kernel_up(host, kport):
+            time.sleep(1.0)
+        if not _remote_kernel_up(host, kport):
+            return _fail("started romp on %s but its kernel port never answered — check its kernel.log" % host)
+        token = _fetch_remote_token(host)
+        with _remotes_lock:
+            rr = _remotes.get(host)
+            if rr and token:
+                rr["token"] = token
+            if rr:
+                rr["detail"], rr["booting"] = "", False   # healthy — the supervisor's next poll flips it to 'up'
+        return True, detail
+    except BaseException as e:
+        # Every planned failure returns through _fail and success clears the hold above; this is the exit
+        # nothing planned for. The hold must not outlive the call: while it stands the supervisor skips
+        # its status write, the no-kernel hint and (T291b) the recovery counter, so an escaped exception
+        # left the row unable to read up or no-kernel again, with no Start button and, while the label
+        # read starting, the popover's fast poll running, until a kernel restart's load reset freed it.
+        # Through _fail, not a bare flag clear: with only `booting` cleared the next pass writes
+        # no-kernel but keeps the stale "updating + starting the kernel" detail (a specific detail
+        # survives the hint), so the row parks the failure the way every other failed Start does. The
+        # route's answer is unchanged.
+        what = str(e).strip()[:160]
+        _fail("Start on %s failed unexpectedly (%s)%s" % (host, type(e).__name__, ": " + what if what else ""))
+        raise
 
 
 def _tunnel_supervisor():
@@ -28919,7 +28941,8 @@ def _is_slash_command(text):
 # "echo:" + hex, so isKernelEchoUuid on the client, the landed-record stamp's echo skip (build_session), the
 # re-queue's prefix test (sdk_backend _enqueue_with_id) and the echo-in-queue reading (_echo_queued_in) all
 # treat it as the kernel's. Bounded: the kernel mints 32 hex digits (uuid4().hex); a client id is admitted in
-# the same shape, never an arbitrary string that would ride the wire, the mirror and every chip.
+# the same shape, never an arbitrary string that would ride the wire, the mirror and every chip. Matched whole
+# (fullmatch): `$` alone admits a trailing newline, and an id with one is held nowhere, so it would be taken.
 _CLIENT_QID_RE = re.compile(r"^echo:[0-9a-f]{16,64}$")
 
 
@@ -28927,7 +28950,7 @@ def _wire_qid(msg):
     """The copy id a ws message names (`qid`), or None when it carries none or one in another form. A cancel's
     id only has to be looked up (an unknown id is the honest miss), so the shape is all a cancel checks."""
     q = msg.get("qid") if isinstance(msg, dict) else None
-    return q if isinstance(q, str) and _CLIENT_QID_RE.match(q) else None
+    return q if isinstance(q, str) and _CLIENT_QID_RE.fullmatch(q) else None
 
 
 def _client_qid(msg, sid, be):
@@ -30112,7 +30135,14 @@ def _atom_user_texts(a):
     sdk_backend.prune_live floors no echo (2026-09-06; before that the floor was narrowed to path-bearing
     echoes, 2026-07-20), so a genuinely dropped send stays visible. Per-block EXACT match, never a
     substring test: a bundled block is the very string that was
-    echoed, so this retires the delivered nudge without ever guessing about containment."""
+    echoed, so this retires the delivered nudge without ever guessing about containment.
+
+    A slash-shaped text also yields its command key (sb.command_text_key: the tokens joined by single
+    spaces). The CLI records a slash or skill send as a wrapper record, which the event model reads as a
+    command atom whose text is "/name args" with one space, whatever the sender typed between the name and
+    the arguments; the typed echo meets that atom under the command key whatever whitespace it carried
+    (2026-09-10). The backend's _landed_texts adds the same key to the raw records its landing scan reads,
+    so the two agree."""
     if a.get("type") != "user":
         return ()
     out = []
@@ -30126,7 +30156,22 @@ def _atom_user_texts(a):
                 t = sb.echo_text_key(b.get("text") or "")
                 if t and t != joined:
                     out.append(t)
+    for t in list(out):
+        ck = sb.command_text_key(t)
+        if ck and ck not in out:
+            out.append(ck)
     return tuple(out)
+
+
+def _echo_landed_in(text, tx_texts):
+    """Is an echo's text among `tx_texts`, the keys _atom_user_texts built? Under either of its keys
+    (sb.echo_keys: the plain key, and the command key when the echo is a slash send, whose record parses
+    to "/name args", which equals the typed text only when the typed whitespace already matches; the sets
+    carry that form). The membership test every kernel-side echo reader uses: build_session's queued
+    count, _merge_live_atoms' display dedup and _tmux_echo_prune; the thread's held count (_comments_frame)
+    asks the same keys against per-atom sets it builds once per frame. The SDK backend's prune_live and its
+    landing scan ask the same keys on their side."""
+    return any(k in tx_texts for k in sb.echo_keys(text))
 
 
 # Optimistic input echo for TMUX sends. The SDK backend echoes a composer message instantly via its own
@@ -30161,8 +30206,7 @@ def _tmux_echo_prune(sid, tx_uuids, tx_texts):
         return
 
     def _landed(a):
-        et = sb.echo_text_key(a.get("_echo_text"))
-        return a.get("uuid") in tx_uuids or (et and et in tx_texts)
+        return a.get("uuid") in tx_uuids or _echo_landed_in(a.get("_echo_text"), tx_texts)
     for k in [k for k, a in d.items() if _landed(a)]:
         d.pop(k, None)
     if not d:
@@ -30372,7 +30416,7 @@ def _merge_live_atoms(session, sid, shown_texts=()):
     # scan read the record off the transcript — the prune just retired it, and painting it once more would
     # show a delivered message as a pending bubble for one build)
     fresh = [a for a in live if a.get("uuid") not in tx_uuids
-             and not (a.get("_echo_text") and (a.get("_landed") or sb.echo_text_key(a["_echo_text"]) in hide))]
+             and not (a.get("_echo_text") and (a.get("_landed") or _echo_landed_in(a["_echo_text"], hide)))]
     if not fresh:
         return session
     # Reopen the turn ONLY for genuine live ASSISTANT work (a streaming reply), never for a lone input echo.
@@ -30768,7 +30812,7 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
         echo_floor = _human_turn_floor(parsed)
         for a in be.live_atoms(sid):
             et = sb.echo_text_key(a.get("_echo_text"))
-            if et and et not in already and et not in tx_user and not _echo_overtaken(a, echo_floor):
+            if et and et not in already and not _echo_landed_in(et, tx_user) and not _echo_overtaken(a, echo_floor):
                 queued = queued + [et]; already.add(et)
     session = parsed if path_override else _merge_live_atoms(parsed, sid, shown_texts=queued)
     events, by_tool = [], {}                  # by_tool: tool_use_id → its tool event (fill output later)
@@ -32756,6 +32800,7 @@ def _compact_goal_stores():
         jd._shared_evict_absent()                      # ...and the shared read-only views of removed stores
     except Exception:
         pass
+    owned = None                                   # the discovered sessions' sids, once the walk below lands
     try:
         # ...and, for the two memos that hold PARSED stores, the entries of stores no discovered session
         # owns: neither had a cap (review find, 2026-09-08). discover is cached behind the transcript
@@ -32766,6 +32811,15 @@ def _compact_goal_stores():
         _goals_memo_evict_unowned(owned)
     except Exception:
         sys.stderr.write("compact: memo eviction: %s\n" % traceback.format_exc())
+    if owned is not None:
+        try:
+            # ...and the notified-cards snapshot's entries for sessions GONE for good: neither alive, nor in
+            # that discover window, nor a dead tab kept open, the bound session-order.json wears. The build
+            # forgets a card only when its session renders without it, which such a session never does
+            # again (review find on the persist, 2026-09-10). Same rule as above: no owner list, no gone.
+            _notify_prev_forget_gone(owned)
+        except Exception:
+            sys.stderr.write("compact: notified snapshot: %s\n" % traceback.format_exc())
     try:
         paths = glob.glob(str(jd.GOALDIR / "*.json"))
     except Exception:
@@ -34210,13 +34264,14 @@ def build_feed(now, tmux=None):
             # clear its store-backed flag. Cards move on new information, never on activity boundaries.
             #
             # NO ECHO ARM (the user 2026-07-22): the flip used to ALSO ride the backend send-echo
-            # (echo_send_t), for a sub-second flip before the turn's atom lands in the cached parse. But a
-            # composer slash-command echo never retires — its expanded transcript form ("<command-name>…")
-            # doesn't text-match the raw echo, and the parser skips it from the human floor — so the stale
-            # echo pinned rejudging TRUE forever: the card sat in Working, idle, invisible to the nudge
-            # (which reads the still-blocked store). The latch arms only off the PARSE's plain-reply turn
-            # (a real transcript atom, never the echo), and the watermark clear is judge-driven, so the
-            # stranded-echo failure stays impossible.
+            # (echo_send_t), for a sub-second flip before the turn's atom lands in the cached parse. At the
+            # time a composer slash-command echo never retired (its transcript form is the "<command-name>"
+            # wrapper, which did not text-match the raw echo; since 2026-09-10 the echo lands under
+            # sb.command_text_key, see _echo_landed_in), and the parser skips it from the human floor, so
+            # the stale echo pinned rejudging TRUE forever: the card sat in Working, idle, invisible to the
+            # nudge (which reads the still-blocked store). The latch arms only off the PARSE's plain-reply
+            # turn (a real transcript atom, never the echo), and the watermark clear is judge-driven, so
+            # the stranded-echo failure stays impossible whatever an echo does.
             # The watermark that bounds the latch is the one covering THE BLOCK THE CARD SURFACES —
             # a descendant's, when the block rolled up (_block_check_floor above; the user 2026-07-31).
             _bct = _block_check_floor(nid)
@@ -36894,9 +36949,10 @@ def _dead_lane_marks(marks, t0):
 #             object every build (live_tail).
 #   goals     the store the loop reads seams from (_segs_seam) and nodes from (_derive_judging_marks): a FrozenStore
 #             by identity (load_goals_shared serves one per file version, so a publish or a journal append is a new
-#             object); a store with neither seams nor nodes, or None after a fault, as "empty", since the two
-#             fields read are empty whatever its identity; any other private store is not held (unshared_skip: a
-#             mutable store could change under the entry).
+#             object); a store with neither seams nor nodes as "empty", since the two fields read are empty
+#             whatever its identity; any other private store is not held (unshared_skip: a mutable store could
+#             change under the entry). None after a fault is derived and not held (complain_skip): the derivation
+#             skips the marks for it, so it is not the empty store, and a skip compares and stores no key.
 #   captions  _stat_key of captions/<sid>.jsonl, taken by build_timeline BEFORE _captions reads the file (_captions
 #             builds a new dict per call, so the file is the input). Stat before read: a row appended between the
 #             two is read by this build and held under the OLD key, so the next build's stat misses and derives
@@ -36914,16 +36970,16 @@ def _dead_lane_marks(marks, t0):
 #             reads it; a sentinel (the stat failed) matches nothing and nothing is stored under it.
 #   sid       the entry's key; the bars and marks carry it.
 # NOT inputs: the clock. The horizon (now - TL_HORIZON) and JUDGE_CAP_LIMIT are applied per build by
-# _judging_assemble, and nothing else in the segment part reads a time. A lane whose parse failed, or whose seams
-# or marks stage complained (the derivation's own try/excepts), is derived and not held (complain_skip). The held
-# bars are shared by identity into every later build's turns[sid], the bars wire cache and the delta parts, none
-# of which writes to them (_bind_message_execs mutates the messages only; _timeline_skeleton copies the frame),
-# and the held marks into `semantic`, which _run_judging only reads. Entries are dropped for lanes outside a full
-# build's lane set (_lanes_forget) and past _LANES_MEMO_MAX, the least recently served first; an entry whose parse
-# object is no longer the build's is dropped when seen, since it cannot hit again and it holds that parse; the
-# dead-lane populate pops a lane's entry when the lane dies (the entry holds the parse the populate releases). One
-# lock around get, put, evict and the counters; the derivation runs unlocked, so two threads deriving one lane both
-# store an exact entry and the last wins.
+# _judging_assemble, and nothing else in the segment part reads a time. A lane whose parse failed, whose goal store
+# faulted, or whose seams or marks stage complained (the derivation's own try/excepts), is derived and not held
+# (complain_skip). The held bars are shared by identity into every later build's turns[sid], the bars wire cache
+# and the delta parts, none of which writes to them (_bind_message_execs mutates the messages only;
+# _timeline_skeleton copies the frame), and the held marks into `semantic`, which _run_judging only reads. Entries
+# are dropped for lanes outside a full build's lane set (_lanes_forget) and past _LANES_MEMO_MAX, the least
+# recently served first; an entry whose parse object is no longer the build's is dropped when seen, since it cannot
+# hit again and it holds that parse; the dead-lane populate pops a lane's entry when the lane dies (the entry holds
+# the parse the populate releases). One lock around get, put, evict and the counters; the derivation runs unlocked,
+# so two threads deriving one lane both store an exact entry and the last wins.
 _lanes_memo = {}          # sid -> (session, goals_obj, caps_key, key, value, prompts); value = _lane_segments' tuple,
 #                           prompts its full_prompts map (T278b)
 _LANES_MEMO_MAX = 256
@@ -37081,12 +37137,18 @@ def _lane_memo(sid, parsed, session, goals, caps, cap_key, live, bft, parse_ok=T
     True on every call here. `parsed` is the _parse object and `session` the one after _merge_live_atoms, the
     same object unless a live tail was merged; `cap_key` is the captions file's _stat_key taken before _captions
     read it (None when the file could not be stat'd); `parse_ok` is False when the parse failed and `session` is the
-    empty stand-in. `full_prompts` (T278b) receives the lane's whole prompts by bar id, on a hit from the entry and on
-    a miss from the derivation, so the binder reads them either way."""
+    empty stand-in; `goals` is None when the store faulted (build_timeline complained), and such a lane is derived and
+    not held, as the dead-lane path derives and never caches one. `full_prompts` (T278b) receives the lane's whole
+    prompts by bar id, on a hit from the entry and on a miss from the derivation, so the binder reads them either way."""
     if isinstance(goals, jd.FrozenStore):
         gobj, gtag = goals, "shared"
     elif goals is None or (not goals.get("seams") and not goals.get("nodes")):
-        gobj, gtag = None, "empty"   # None: the store FAULTED (build_timeline complained); no seams, no marks
+        gobj, gtag = None, "empty"   # no seams, no nodes: the two fields read are empty whatever the store's identity.
+        #                              None (the store FAULTED: build_timeline complained) lands here too and is a skip
+        #                              below, so its key is never compared and never stored: _lane_segments derives NO
+        #                              marks for None while the empty store still yields the captioner's and the
+        #                              archiver's, and held under one key, a lane across a fault was served the other
+        #                              side's marks (review find on the memo, 2026-09-09)
     else:
         gobj, gtag = None, None
     if cap_key is not None:
@@ -37097,8 +37159,8 @@ def _lane_memo(sid, parsed, session, goals, caps, cap_key, live, bft, parse_ok=T
         ckey = None                  # rows read with no file to stat: this build's rows have no key, not held
     arch_key = jd._file_key(str(jd.STATE / "archive" / (sid + ".json")))   # BEFORE the derivation reads it
     key = (live, bft, tuple(_downtime), gtag, arch_key)
-    if not parse_ok:
-        skip = "complain_skip"
+    if not parse_ok or goals is None:
+        skip = "complain_skip"       # the parse or the goals stage complained: derived, said so, not held
     elif session is not parsed:
         skip = "live_tail"
     elif gtag is None:
@@ -42145,11 +42207,206 @@ def _pure_feed(now, tmux):
 # The master bell (bottom-right → notify-cards.json "*"), a session's bell (timeline lane / tab menu →
 # session-flags "notify") or a card's bell (right-click → notify-cards.json) arm OS-level notifications
 # — resolved most-specific-wins by _notify_card_effective — fired when an armed card ENTERS needs_input
-# (blocked on you) or completed. Detection diffs each fresh feed build against the previous one — the exact event
-# the columns move on, no separate heuristic — and the FIRST build after a kernel start is a silent
-# baseline: existing state is status, not news (the same policy as extension.ts freshNeedsYou). A card
-# re-entering needs_input later (a new block after an answer) notifies again by construction.
-_NOTIFY_PREV = [None]   # itemId -> column at the last build; None = baseline pending
+# (blocked on you) or completed. Detection diffs each fresh feed build against the remembered snapshot —
+# the exact event the columns move on, no separate heuristic. A card re-entering needs_input later (a
+# new block after an answer) notifies again by construction.
+#
+# THE SNAPSHOT PERSISTS (2026-09-10). _NOTIFY_PREV used to live in memory alone, and the first build of
+# a kernel life was a silent baseline (existing state is status, not news). But the sessions come back
+# one at a time after a restart — the SDK backend revives them — so that baseline saw a partial board,
+# and every card a later-revived session brought with it "appeared" already in needs_input or completed
+# and was announced AGAIN, on every restart. Auto-update restarts the kernel on every deploy; one
+# evening's ~8 restarts turned 8 cards into 30 phone pushes, one card twelve times. The event is the
+# card ENTERING the column, and a restart is not that event. So the snapshot lives in
+# STATE/notify-prev.json — {card id: {"column", "sid"}} for every stable card in a notified column, the
+# small subset the diff needs — written when it changes, read once at the first build of a life to seed
+# the memory. Two rules follow from the mechanism:
+#   * a card is forgotten (in memory and on disk) on one of TWO events. The build forgets it when ITS OWN
+#     SESSION rendered this build without it — cleared, archived, folded away: the id never comes back.
+#     A session that did not render at all (not yet revived, dead, off the board) says nothing about its
+#     cards, so they stay remembered and its revival is silent. The roster is the build's `sessions`
+#     rows (the live tab strip, minus the dead read-only tabs the user kept open, which render no cards)
+#     plus the sessions the rendered cards themselves name. The compaction sweep after each judge pass
+#     forgets it when its session is GONE for good: neither alive, nor with a transcript still in the
+#     discover window, nor a dead tab kept open (_notify_prev_forget_gone, the bound session-order.json
+#     already wears). Such a session never renders again, so the build alone kept its cards forever (a
+#     card cleared from the dashboard while its session was dead left the board without that session
+#     ever rendering without it). So the store holds the live board's notified cards plus those of the
+#     dead sessions still in the discover window, and no more. The bell overrides' prune rides both
+#     events: a remembered card is not gone, and a forgotten card's mutes go with it.
+#   * the FIRST boot of an install with no file yet seeds from the current board SILENTLY — announcing
+#     every card sitting in the columns of an existing install would be the very storm this fixes — and
+#     the next life is fully event-true. A card missing from an EXISTING file that sits in a notified
+#     column at boot is announced, once: it entered while no kernel was watching.
+#
+# THE SAME (CARD, COLUMN) IS ANNOUNCED ONCE (2026-09-10, the second half of the same night's ledger): a
+# card on a busy coordinating session left needs_input and came back at every turn end — the judges
+# re-filing the block, the unblocker's re-examination — with nothing from the user in between, and each
+# re-entry pushed again: one card, twelve pushes, no restart involved. Leaving a column and coming back
+# is not new information for the user unless something happened in between that is, so each entry
+# records the column it was last ANNOUNCED for (`announced`, with `announcedAt`) and a re-entry into
+# that same column is silent, with two exceptions, both from authoritative records:
+#   * the card was announced in the OTHER notified column since — needs_input → completed →
+#     needs_input is three distinct announcements; needs_input → working → needs_input is one;
+#   * the USER acted on the card since it was last announced — a resolve, a targeted reply, a cross-off
+#     or its undo, a re-distill — read from the per-session override journal (overrides/<sid>.jsonl),
+#     the durable record of every user gesture on a goal that load_goals replays; never the kernel's own
+#     rows there (a nudge/interrupt block, a romp-authored clear). A plain reply in the thread is not a
+#     gesture on the card and is not journaled, so a re-block after one stays silent: the user is in
+#     that thread already, and the board shows the card.
+# A working card keeps its announced mark in the store until its session renders without it, so the
+# rule holds across a restart too. The silent first-boot seed counts as told (the user has the board).
+# The desktop notice and the phone push both iterate the list this diff returns, so the one gate covers
+# both legs; _buzz_claim's one-buzz-per-turn-end rule sits after it, unchanged.
+_NOTIFY_COLUMNS = ("needs_input", "completed")
+# itemId -> {"sid", "column" (the notified column the card was last SEEN in, None while it sits in
+# working), "announced" (the column last announced, None if never), "announcedAt" (seconds)}; the
+# store holds a card while it is in a notified column or carries an announced mark. None = this life's
+# first build pending.
+_NOTIFY_PREV = [None]
+_NOTIFY_PREV_DISK = [None]    # what notify-prev.json last held: a write happens only when the snapshot changes
+_NOTIFY_PREV_WRITE_FAULT = [None]   # the last write failure's text — said once per episode; a landed write clears it
+# The snapshot has two writers since the sweep's bound: the pusher's build (_feed_notifications, read to
+# swap) and the producer's compaction sweep (_notify_prev_forget_gone). Each holds this for its whole
+# read-modify-write, so neither publishes a snapshot built from the other's superseded one.
+_notify_prev_lock = threading.Lock()
+
+
+def _notify_prev_path():
+    return jd.STATE / "notify-prev.json"        # resolved per call: tests redirect jd.STATE
+
+
+def _notify_prev_load():
+    """The snapshot the last kernel life left, or None when the install has none yet (a first boot: the
+    caller seeds silently). A file that exists but cannot be read, or torn bytes (moved aside by
+    _read_state_json, the evidence kept), reads as None too, with a [notify] line: this store is
+    bookkeeping the life rebuilds on its own, and treating it as absent costs one silent seed where a
+    raise would take the pusher down. Entries not of the shape _notify_prev_entry checks are skipped
+    and counted — an entry we cannot read is no memory of the card."""
+    p = _notify_prev_path()
+    try:
+        raw = _read_state_json(p, expect=dict)
+    except _StateUnreadable as e:
+        sys.stderr.write("[notify] %s — seeding silently from the current board instead\n" % e)
+        return None
+    if raw is None:
+        return None
+    out, bad = {}, 0
+    for iid, ent in raw.items():
+        ent = _notify_prev_entry(ent)
+        if ent is not None:
+            out[str(iid)] = ent
+        else:
+            bad += 1
+    if bad:
+        sys.stderr.write("[notify] %s: %d entr%s of an unknown shape skipped\n"
+                         % (p.name, bad, "y" if bad == 1 else "ies"))
+    return out
+
+
+def _notify_prev_entry(ent):
+    """One store entry, checked field by field, or None for a shape none of our writers produce: sid a
+    string; column a notified column or None (the card sits in working with an announced mark);
+    announced a notified column or None; announcedAt a number or None; and at least one of column /
+    announced set, else there is nothing to remember."""
+    if not isinstance(ent, dict) or not isinstance(ent.get("sid"), str):
+        return None
+    col, ann, at = ent.get("column"), ent.get("announced"), ent.get("announcedAt")
+    if col not in _NOTIFY_COLUMNS and col is not None:
+        return None
+    if ann not in _NOTIFY_COLUMNS and ann is not None:
+        return None
+    if at is not None and not isinstance(at, (int, float)):
+        return None
+    if col is None and ann is None:
+        return None
+    return {"sid": ent["sid"], "column": col, "announced": ann, "announcedAt": int(at) if at is not None else None}
+
+
+def _notify_user_acted_since(sid, iid, since):
+    """Did the user act ON this card after `since` (seconds)? Read from the per-session override journal
+    (overrides/<sid>.jsonl) — the durable, append-only record of every user gesture on a goal, the one
+    load_goals replays: a resolve, a targeted reply (followup), a cross-off or its undo, a re-distill.
+    The kernel's own rows there do not count: a nudge/interrupt `block`, a romp-authored `clear`
+    (src other than user), a `restore` payload (its `unclear` twin carries the gesture). Read on a
+    candidate re-entry only, so the cost is one small file per flap, never per build. A journal that
+    exists but cannot be read answers no, with a [notify] line — the silent side is the safe one here."""
+    if not sid:
+        return False
+    try:
+        _, lines = jd._journal_read(sid)
+    except OSError as e:
+        sys.stderr.write("[notify] overrides/%s.jsonl unreadable (%s) — reading the card as not acted on\n"
+                         % (sid, _errno_text(e)))
+        return False
+    for ln in lines:
+        try:
+            row = json.loads(ln)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("node") != iid:
+            continue
+        try:
+            t = int(row.get("t") or 0)
+        except (TypeError, ValueError):
+            continue
+        if t <= int(since or 0):
+            continue
+        op = row.get("op")
+        if op == "block" or (op == "clear" and row.get("src") != "user"):
+            continue
+        return True
+    return False
+
+
+def _notify_prev_write(snap):
+    """Publish the snapshot when it differs from what the file last held (a build that changes nothing
+    writes nothing). 0600 — no other reader needs it — through the one atomic write door. A failure
+    is a [notify] line once per episode, not the dashboard's not-saved notice (this is bookkeeping,
+    not a gesture the user is waiting on), and the next build retries."""
+    if snap == _NOTIFY_PREV_DISK[0]:
+        return
+    try:
+        _write_state_json(_notify_prev_path(), json.dumps(snap, sort_keys=True), note=False, mode=0o600)
+    except _StateUnwritable as e:
+        text = str(e)
+        if _NOTIFY_PREV_WRITE_FAULT[0] != text:
+            _NOTIFY_PREV_WRITE_FAULT[0] = text
+            sys.stderr.write("[notify] %s — the next kernel life may announce these cards again\n" % text)
+        return
+    _NOTIFY_PREV_WRITE_FAULT[0] = None
+    _NOTIFY_PREV_DISK[0] = snap
+
+
+def _notify_prev_forget_gone(owned):
+    """The compaction sweep's bound on the snapshot (review find on the persist, 2026-09-10): forget, in
+    memory and on disk, every remembered card whose session is GONE for good, and drop its bell overrides
+    with it. Gone means what it means for session-order.json (_gc_session_order): neither alive, nor with
+    a transcript still in the discover window (`owned`, the sweep's own discover set), nor a dead tab the
+    user kept open. The build forgets a card only when its session RENDERS without it, and a session
+    gone for good never renders again: its worktree deleted, never revived, its card cleared from the
+    dashboard while it was dead (a clear reads the goal store, not the session). So the build alone kept
+    such cards forever, and the bell store, pruned against the snapshot since the persist, kept their
+    mutes with them. A session merely dead-but-in-window keeps its cards remembered, so its revival
+    stays silent; the discover window slides forward only, so a forgotten card never flickers back.
+    Nothing to do before this life's first build: the file is not in memory yet, the first build seeds
+    it, and the next sweep bounds it. Returns how many cards were forgotten."""
+    if not _NOTIFY_PREV[0]:
+        return 0
+    known = set(_tmux_sessions()) | set(owned) | set(_kept_open)   # outside the lock: liveness may ask tmux
+    with _notify_prev_lock:
+        prev = _NOTIFY_PREV[0]
+        gone = {i for i, e in (prev or {}).items() if e.get("sid") not in known}
+        if not gone:
+            return 0
+        kept = {i: e for i, e in prev.items() if i not in gone}
+        _NOTIFY_PREV[0] = kept
+        _notify_prev_write(kept)
+        _prune_notify_cards(None, gone_ids=gone)     # a forgotten card's mutes go with it
+    sids = {prev[i].get("sid") for i in gone}
+    sys.stderr.write("[notify] forgot %d card%s of %d session%s gone for good\n"
+                     % (len(gone), "" if len(gone) == 1 else "s", len(sids), "" if len(sids) == 1 else "s"))
+    return len(gone)
 
 
 def _notify_title(name, needs_you=False):
@@ -42184,36 +42441,79 @@ def _system_notify(title, body):
 
 
 def _feed_notifications(feed):
-    """Diff this feed build against the last; return [(title, body, sid, itemId)] for every ARMED
-    card that newly entered needs_input or completed (including a card appearing already there —
-    work can surface blocked). Also advances the prev map and prunes armed ids whose card left the
-    feed. sid rides along so a push notification's tap can land ON the session that fired (the
-    user 2026-08-08, whose first real push opened the app on a different session); itemId joined
-    it 2026-09-06 so the same tap can also scroll the feed to the card itself."""
+    """Diff this feed build against the remembered snapshot; return [(title, body, sid, itemId)] for
+    every ARMED card that newly entered needs_input or completed — including a card appearing already
+    there in a session that rendered before without it (work can surface blocked), but NOT a card a
+    restart or a revival brings back in the column it was last announced in, and NOT a re-entry into
+    the column the card was last announced for unless the other column was announced since or the user
+    acted on the card since (the persisted snapshot above). Also advances the snapshot, in memory and
+    on disk, and prunes armed ids whose card left the feed. sid rides along so a push notification's tap
+    can land ON the session that fired (the user 2026-08-08, whose first real push opened the app on a
+    different session); itemId joined it 2026-09-06 so the same tap can also scroll the feed to the card
+    itself."""
+    with _notify_prev_lock:                          # read to swap as one step: the sweep prunes the same snapshot
+        return _feed_notifications_diff(feed)
+
+
+def _feed_notifications_diff(feed):
+    """The diff itself, under the snapshot's lock (see _notify_prev_lock)."""
     prev = _NOTIFY_PREV[0]
+    first_boot = False
+    if prev is None:                                 # the first build of this kernel life
+        prev = _notify_prev_load()
+        first_boot = prev is None
+        if first_boot:
+            prev = {}
+        else:
+            sys.stderr.write("[notify] seeded %d cards from disk\n" % len(prev))
+        _NOTIFY_PREV_DISK[0] = None if first_boot else dict(prev)
     cur = {}
     for a in feed.get("asks") or []:
         if a.get("provisional"):
             continue                                 # placeholder churn — not a stable card yet
         cur[str(a.get("itemId"))] = a
-    _NOTIFY_PREV[0] = {i: a.get("column") for i, a in cur.items()}
-    _prune_notify_cards(set(cur))
-    if prev is None:
-        return []                                    # baseline: existing state is status, not news
-    cards = _notify_cards()
-    out = []
+    # the sessions that RENDERED this build: the live roster minus the dead read-only tabs (they
+    # render no cards), plus whichever session a rendered card names
+    roster = ({str(s.get("sid") or "") for s in (feed.get("sessions") or []) if isinstance(s, dict)}
+              - set(_kept_open)) | {str(a.get("sid") or "") for a in cur.values()}
+    nxt = {i: e for i, e in prev.items() if i not in cur and e.get("sid") not in roster}   # unrendered: remembered,
+    #                                                until the sweep finds the session gone for good (_notify_prev_forget_gone)
+    now_t = int(feed.get("now") or time.time())   # the build's own moment: wall clock, like the journal's t
+    entered = []                                     # (itemId, card, column, entry): the cards that ENTERED a column
     for iid, a in cur.items():
-        col = a.get("column")
-        if col not in ("needs_input", "completed") or prev.get(iid) == col:
-            continue
-        if not _notify_card_effective(cards, iid, str(a.get("sid") or "")):
-            continue
-        needs_you = col == "needs_input"                # the card's column: the authoritative state, not the words
-        what = "Needs you" if needs_you else "Completed"
-        txt = str(a.get("text") or "").strip()
-        out.append((_notify_title(a.get("name") or "session", needs_you),
-                    "%s: %s" % (what, txt[:140] if txt else "a task changed state"),
-                    str(a.get("sid") or ""), iid))
+        col, sid, ent = a.get("column"), str(a.get("sid") or ""), prev.get(iid)
+        if col in _NOTIFY_COLUMNS:
+            e = {"sid": sid, "column": col,
+                 "announced": ent.get("announced") if ent else None,
+                 "announcedAt": ent.get("announcedAt") if ent else None}
+            nxt[iid] = e
+            if first_boot:
+                e["announced"], e["announcedAt"] = col, now_t     # the seed counts as told: the user has the board
+            elif ent is None or ent.get("column") != col:
+                entered.append((iid, a, col, e))
+        elif ent is not None and ent.get("announced"):
+            # in working now, but announced before: the mark is what keeps a return to that column silent
+            nxt[iid] = {"sid": sid, "column": None, "announced": ent["announced"], "announcedAt": ent.get("announcedAt")}
+    out = []
+    if not first_boot:
+        cards = _notify_cards()
+        for iid, a, col, e in entered:
+            if not _notify_card_effective(cards, iid, e["sid"]):
+                continue
+            if e["announced"] == col and not _notify_user_acted_since(e["sid"], iid, e["announcedAt"]):
+                continue                             # the same (card, column), told already, nothing of the user's since
+            e["announced"], e["announcedAt"] = col, now_t
+            needs_you = col == "needs_input"            # the card's column: the authoritative state, not the words
+            what = "Needs you" if needs_you else "Completed"
+            txt = str(a.get("text") or "").strip()
+            out.append((_notify_title(a.get("name") or "session", needs_you),
+                        "%s: %s" % (what, txt[:140] if txt else "a task changed state"),
+                        e["sid"], iid))
+    _NOTIFY_PREV[0] = nxt
+    _notify_prev_write(nxt)                          # after the marks: the file records what was told
+    _prune_notify_cards(set(cur) | set(nxt))         # a card still remembered is not gone
+    if first_boot:
+        sys.stderr.write("[notify] no snapshot on disk — seeded %d cards from the board silently\n" % len(nxt))
     return out
 
 
@@ -42805,24 +43105,47 @@ def _push_forward(events):
 # event yields on the phone (the desktop notice and the badge still fire — they are not the buzz).
 # Bell events never yield to EACH OTHER: two cards of one session moving in one build buzz twice,
 # exactly as before this rule existed.
+#
+# THE HUMAN'S TURNS ONLY (2026-09-10): a session running background subagents gets a harness-injected
+# user-role turn per completion (the task notification — origin.kind "task-notification"), reacts to
+# it, and that reaction's Stop stamps lastStopAt like any other end — ten buzzes in fifty minutes from
+# one coordinating session, none about anything the user had asked at that moment. The Stop hook stamps
+# WHO opened the turn beside the settle (lastTurnOpener, sdk_backend `_stop_hook`, from the two places
+# a turn can open: the feeder's pop — a fed text, the human's unless it carries the romp-injected
+# marker — and a stamped user atom the CLI streams while idle), and the tick skips an end whose opener
+# is not the human WITHOUT spending the buzz claim, so a bell event that turn raises keeps its buzz. A
+# registry without the field (an older ledger, a tmux session) reads as the human's: a missing fact
+# never drops the user's buzz.
 _TURN_PREV = {}      # sid -> turn-end key at the last tick; absent = baseline pending
 _PUSH_BUZZED = {}    # sid -> (turn-end key, "turn"|"bell") of the last phone buzz filed for it
 _TURN_BODY_CAP = 120
 
 
-def _turn_end_key(sid):
+def _turn_end_key(sid, reg=None):
     """The session's newest TURN-END as an opaque key, 0 when there is no settle evidence. Like
     _settle_event_key, the Stop hook's lastStopAt is primary; the fallback is stricter — only a
     STOPPED states/ transition ('waiting'/'idle') counts, because _last_state also moves when a
-    turn STARTS and a start must never read as an end here."""
+    turn STARTS and a start must never read as an end here. `reg`: the session's registry entry
+    when the caller already holds one (the tick reads it ONCE for this and the opener beside it)."""
     try:
-        t = int((_thread_reg(sid) or {}).get("lastStopAt") or 0)
+        t = int((reg if reg is not None else _thread_reg(sid) or {}).get("lastStopAt") or 0)
     except Exception:
         t = 0
     if t:
         return t
     val, vt = _last_natural_state(sid)          # the session's own settle — never the idle romp wrote for a Stop press
     return (vt or 0) if val in ("waiting", "idle") else 0
+
+
+def _turn_opener(reg):
+    """Who opened the turn `lastStopAt` closed, off the registry entry the Stop hook stamps it on
+    beside the settle: "human" (the composer's words, a queued message, a typed follow-up) or
+    "injected" (a harness-injected task notification / scheduled prompt / peer message, or romp's own
+    nudge, follow-up, notice or relayed mail). Anything else — the field absent (an older ledger, a
+    tmux session) or a value the hook never writes — reads "human": a missing fact never drops the
+    user's buzz."""
+    v = (reg or {}).get("lastTurnOpener") if isinstance(reg, dict) else None
+    return v if v in ("human", "injected") else "human"
 
 
 
@@ -42853,20 +43176,27 @@ def _first_line(text, cap=_TURN_BODY_CAP):
 
 def _turn_notify_tick(now, tmux):
     """One pusher-cycle pass over the live sessions: a session whose turn-end key MOVED since the
-    last pass finished a turn. Fires only with both switches on and the session unmuted; every
-    sighting advances the memo regardless, so switching the row on later never replays old ends."""
+    last pass finished a turn. Fires only with both switches on, the session unmuted, and the turn
+    the HUMAN's (_turn_opener — a subagent's task notification or a nudge opening a turn is not news
+    to them); every sighting advances the memo regardless, so switching the row on later never
+    replays old ends and a silent end is never replayed either."""
     fired = []
     for s in _alive_sessions(now, tmux):
         sid = str(s.get("sid") or "")
         if not sid:
             continue
-        key = _turn_end_key(sid)
+        reg = _thread_reg(sid)                           # one read: the settle and its opener are one Stop-hook write
+        key = _turn_end_key(sid, reg)
         prev = _TURN_PREV.get(sid)
         _TURN_PREV[sid] = key
         if prev is None or key == prev or not key:
             continue                                     # baseline / nothing new / no settle evidence
         if not (_notify_all_on() and _notify_turns_on() and _notify_session_effective(sid)):
             continue
+        if _turn_opener(reg) != "human":
+            continue                                     # the CLI or romp opened this turn (a subagent's task notification,
+            #                                              a scheduled prompt, a nudge): nobody asked the user anything, so
+            #                                              nothing to buzz about — and no claim spent, the bell event's is its own
         if not _buzz_claim(sid, key, "turn"):
             continue                                     # a bell event already buzzed for this turn end
         body = _first_line(_last_assistant_text(s.get("path") or "")) or "finished a turn"

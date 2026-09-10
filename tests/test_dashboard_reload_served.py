@@ -36,8 +36,8 @@ SID = "11111111-2222-4333-8444-000000000201"
 
 import sys
 sys.path.insert(0, HERE)
-import test_ship_reship as _lab   # noqa: E402  the served lab's cfg.relaunch stanza (the module, not its classes:
-#                                   an imported TestCase would be collected here a second time)
+import test_ship_reship as _lab   # noqa: E402  the lab kernel's environment and the cfg.relaunch stanza (the module,
+#                                   not its classes: an imported TestCase would be collected here a second time)
 
 
 def _free_port():
@@ -198,18 +198,11 @@ class ServedAutoReload(unittest.TestCase):
         Path(proj, SID + ".jsonl").write_text(_transcript(cwd, 60))   # long: overflows the pane several times over
         cls.port = _free_port()
         cls.token = "testtok-autoreload"
-        cls.env = dict(os.environ,
-                       XDG_STATE_HOME=os.path.join(cls.lab, "xdg"),
-                       CLAUDE_CONFIG_DIR=claude,
-                       ROMP_MANAGER_PORT="1", ROMP_KERNEL_NO_OPEN="1",
-                       ROMP_SERVE_TOKEN=cls.token, ROMP_KERNEL_PORT=str(cls.port),
-                       ROMP_DIST_DIR=dist, ROMP_MODEL_CATALOG="off",
-                       ROMP_WS_KEEPALIVE="2",                       # the dv rides the keepalive: keep the wait short
-                       ROMP_TMUX_SOCKET="romp-autoreload-%d" % cls.port)
-        cls.env.pop("ROMP_STATE_DIR", None)
-        cls.env.pop("ANTHROPIC_API_KEY", None)
-        # a stand-in for a key the runner's shell carries: the lab's kernel gets it by process environment with the
-        # rest of the runner's, and the cfg.json the driver reads must never carry it
+        cls.env = _lab.kernel_env(cls.lab, claude, dist, cls.port, cls.token,
+                                  ROMP_WS_KEEPALIVE="2",                       # the dv rides the keepalive: keep the wait short
+                                  ROMP_TMUX_SOCKET="romp-autoreload-%d" % cls.port)
+        # a name outside the relaunch list, planted in the lab kernel's environment so the check on the cfg.json the
+        # driver reads has something the file must not carry
         cls.env["RUNNER_SECRET_PROBE"] = "abc"
         cls.klog = os.path.join(cls.lab, "kernel.log")
         cls.kernel = subprocess.Popen([os.path.join(BIN, "romp-kernel")],
@@ -251,7 +244,7 @@ class ServedAutoReload(unittest.TestCase):
         self.assertIn("RUNNER_SECRET_PROBE", sorted(self.env), "the lab plants the probe in its kernel's environment")
         written = json.loads(Path(cfg).read_text(encoding="utf-8"))
         self.assertNotIn("RUNNER_SECRET_PROBE", sorted(written["relaunch"]["env"]),
-                         "the lab's cfg.json carries a variable of the runner's environment the relaunch does not need")
+                         "the lab's cfg.json carries a name of the lab kernel's environment outside the relaunch list")
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)

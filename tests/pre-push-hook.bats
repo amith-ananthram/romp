@@ -14,6 +14,11 @@
 # one is, even if a later commit removed it again. install-sh.bats exercises the
 # hook through a real `git push`; this file feeds it ref lines directly, so it
 # can model a remote and its remote-tracking refs the way a clone has them.
+#
+# The tip scan reads symlink TARGETS as well as regular files: git grep reads
+# regular-file blobs only, and a committed link's target is its blob content, so
+# a link pointing into a home directory is a leak the grep pass alone cannot see.
+# The added-lines pass sees a NEW link the way it sees any added line.
 
 ROMP_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 HOOK="$ROMP_DIR/.githooks/pre-push"
@@ -95,13 +100,30 @@ branch_inheriting_mains_leak() {
 }
 
 # ...and main redacts the leak (pushed), and the branch merges main: its own
-# earlier commit still has the leaky tree, but its tip is clean.
-main_redacts_and_branch_merges() {
+# earlier commit still has the leaky tree, but its tip is clean. The leak is
+# leak.txt unless a path is given.
+main_redacts_and_branch_merges() {   # [<path>]
     git -C "$REPO" checkout -q main
-    remove_file leak.txt "redact"
+    remove_file "${1:-leak.txt}" "redact"
     git -C "$REPO" push -q origin main
     git -C "$REPO" checkout -q feature
     git -C "$REPO" merge -q -m "merge main" main
+}
+
+# The same shape with a SYMLINK: main commits and pushes a link whose target is
+# a home path (a node_modules link made to run tests in a worktree, swept up by
+# a broad `git add`), and a branch cut from there inherits it. Leaves HEAD on
+# the branch; main has not yet removed the link.
+branch_inheriting_mains_symlink_leak() {
+    add_remote
+    commit_file base.txt "notes-api" "base"
+    ln -s /home/zzsynthuser/code/romp/vscode-extension/node_modules "$REPO/node_modules"
+    git -C "$REPO" add node_modules
+    git -C "$REPO" commit -qm "symlink leak"
+    LEAK_SHA="$(git -C "$REPO" rev-parse HEAD)"
+    git -C "$REPO" push -q origin main
+    git -C "$REPO" checkout -q -b feature
+    commit_file web.txt "the web session's work" "branch work"
 }
 
 @test "a clean commit passes" {
@@ -191,6 +213,94 @@ main_redacts_and_branch_merges() {
     [[ "$output" == *"ADDS a personal identifier"* ]]
     [[ "$output" == *"api.txt"* ]]
     [[ "$output" != *"leak.txt"* ]]       # main's commits were skipped, not re-flagged
+}
+
+# ── symlinks ──────────────────────────────────────────────────────────────
+# A committed symlink is a blob holding its target, and git grep reads
+# regular-file blobs only, so the tip pass reads each link's target itself. A
+# link into a home directory, made to run tests in a worktree and swept up by a
+# broad `git add`, reached a public branch while a git grep of its tree saw it
+# clean. The repo's own bin/ links are relative and must not trip it.
+
+@test "a branch that only INHERITED main's SYMLINK leak passes once its tip merged the removal" {
+    branch_inheriting_mains_symlink_leak
+    main_redacts_and_branch_merges node_modules
+    run_hook
+    [ "$status" -eq 0 ]
+}
+
+@test "the same branch is refused while its TIP still carries an inherited SYMLINK leak" {
+    branch_inheriting_mains_symlink_leak
+    run_hook
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"the tip of refs/heads/main"* ]]   # named as the tip, not as an introduction
+    [[ "$output" == *"SYMLINK TARGET"* ]]
+    [[ "$output" == *"node_modules -> /home/zzsynthuser/"* ]]
+    [[ "$output" != *"ADDS"* ]]                          # main published the link; the branch added nothing
+    [[ "$output" == *"merge the main that has since redacted it"* ]]
+}
+
+@test "a RELATIVE symlink with no identifier passes" {
+    # the repo's own bin/romp-* links have this shape
+    mkdir -p "$REPO/kernel" "$REPO/bin"
+    printf '%s\n' "x" > "$REPO/kernel/kernel.py"
+    ln -s ../kernel/kernel.py "$REPO/bin/romp-kernel"
+    git -C "$REPO" add kernel bin
+    git -C "$REPO" commit -qm "relative link"
+    run_hook
+    [ "$status" -eq 0 ]
+}
+
+@test "a NEW symlink at the tip is named with its link and target, by both passes" {
+    ln -s /home/ZZSynthUser/notes "$REPO/notes-link"      # mixed case: matched case-insensitively, like a file
+    git -C "$REPO" add notes-link
+    git -C "$REPO" commit -qm "symlink leak"
+    leak_sha="$(git -C "$REPO" rev-parse HEAD)"
+    run_hook
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"SYMLINK TARGET of notes-link -> /home/ZZSynthUser/notes"* ]]   # the tip pass
+    [[ "$output" == *"commit ${leak_sha:0:10} ADDS a personal identifier"* ]]   # and the commit that added it, as for a regular file
+    [[ "$output" == *"  notes-link"* ]]
+}
+
+@test "an identifier in an INTERMEDIATE commit's SYMLINK TARGET is caught by the added-lines pass" {
+    ln -s /home/zzsynthuser/x "$REPO/bad"
+    git -C "$REPO" add bad
+    git -C "$REPO" commit -qm "leak"
+    leak_sha="$(git -C "$REPO" rev-parse HEAD)"
+    remove_file bad "remove it"                   # tip is clean; history is not
+    run_hook
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"commit ${leak_sha:0:10} ADDS a personal identifier"* ]]   # a new link's target is an added line of that path
+    [[ "$output" == *"  bad"* ]]
+    [[ "$output" != *"SYMLINK TARGET"* ]]        # the tip has no link left to name
+}
+
+@test "a dot in a denylist entry matches only a dot, in a file and in a symlink target" {
+    # A hostname's dots are text, not "any character": every pass greps the
+    # denylist as fixed strings, the symlink pass the same as the other two.
+    printf 'nas.zzsynth.invalid\n' > "$STRINGS"
+    commit_file mounts.txt "share on /mnt/nasXzzsynthXinvalid/" "near miss in a file"
+    ln -s /mnt/nasXzzsynthXinvalid/share "$REPO/share"
+    git -C "$REPO" add share
+    git -C "$REPO" commit -qm "near miss in a link"
+    run_hook
+    [ "$status" -eq 0 ]
+}
+
+@test "a symlink whose blob cannot be read does not end the hook before its verdict" {
+    # Under set -e a failed `target=$(git cat-file ...)` would exit the hook with
+    # no message; such a link counts as empty and the other findings still print.
+    commit_file leak.txt "home is /home/zzsynthuser/code" "leak"
+    ln -s ../elsewhere "$REPO/link"
+    git -C "$REPO" add link
+    git -C "$REPO" commit -qm "link"
+    blob="$(git -C "$REPO" rev-parse HEAD:link)"
+    rm "$REPO/.git/objects/${blob:0:2}/${blob:2}"   # loose in a fresh repo; ls-tree still lists the entry
+    run_hook
+    [ "$status" -eq 1 ]                              # the hook's refusal; a set -e death exits 128
+    [[ "$output" == *"leak.txt"* ]]
+    [[ "$output" == *"BLOCKED"* ]]                   # the verdict was reached
 }
 
 # ── two remotes: a fork and the project it forked from ────────────────────
