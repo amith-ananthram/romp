@@ -14,8 +14,8 @@ conftest gives pytest, but neither covers `cd tests && python -m unittest test_x
 script run, so the per-module preamble is the primary defence and this test is the ratchet.
 
 The rule this file enforces, per tests/test_*.py module: if the module loads romp code (any
-SourceFileLoader call, or an import of the kernel/postal/cli packages), then BEFORE the first
-such load, at module top level, it must (a) assign os.environ["XDG_STATE_HOME"] (or
+load_source or SourceFileLoader call, or an import of the kernel/postal/cli packages), then BEFORE
+the first such load, at module top level, it must (a) assign os.environ["XDG_STATE_HOME"] (or
 ["ROMP_STATE_DIR"]) and (b) handle ROMP_STATE_DIR (assign it, or pop it — a live kernel exports
 it to its sessions, and it outranks the XDG floor). The canonical preamble:
 
@@ -25,8 +25,9 @@ it to its sessions, and it outranks the XDG floor). The canonical preamble:
     os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 
 Static AST scan, ordered by line number; every in-process load call counts as state-touching —
-SourceFileLoader and the importlib idioms (spec_from_file_location/exec_module/import_module/
-__import__) alike, since most bin/* files are or transitively load a STATE-resolving module, and
+load_source (tests/romp_load.py), SourceFileLoader and the importlib idioms
+(spec_from_file_location/exec_module/import_module/__import__) alike, since most bin/* files are or
+transitively load a STATE-resolving module, and
 the few that aren't pay two harmless lines rather than this test resolving targets. Out of scope by design: a subprocess
 spawned with a hand-built env= dict that carries the real HOME — env construction is dynamic and
 defeats static checking; the preamble covers the common case because a child spawned without
@@ -34,6 +35,7 @@ env= inherits the mutated os.environ.
 """
 import ast
 import os
+import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -48,11 +50,11 @@ PREAMBLE = (
 )
 
 ROOT_PACKAGES = {"kernel", "postal", "cli"}
-# Every in-process load form counts, not just the repo's usual SourceFileLoader: the
+# Every in-process load form counts, not just the repo's usual load_source and SourceFileLoader: the
 # spec_from_file_location + exec_module idiom (tests/test_colormap.py) aimed at a STATE-resolving
 # bin file would recreate the corruption with the ratchet silent otherwise.
-LOAD_CALLS = {"SourceFileLoader", "spec_from_file_location", "exec_module", "import_module",
-              "__import__"}
+LOAD_CALLS = {"load_source", "SourceFileLoader", "spec_from_file_location", "exec_module",
+              "import_module", "__import__"}
 
 
 def _is_environ_attr(node):
@@ -123,8 +125,23 @@ class StateIsolationOrder(unittest.TestCase):
             "These modules load romp code before making the state root hermetic — under a bare\n"
             "unittest or script run they operate on the REAL ~/.local/state/romp (which is how\n"
             "tests/test_kernel.py overwrote the real remotes.json on 2026-08-12). Put this at\n"
-            "module top level, above the first SourceFileLoader line:\n\n%s\n\n%s"
+            "module top level, above the first load_source or SourceFileLoader line:\n\n%s\n\n%s"
             % (PREAMBLE, "\n".join(bad)))
+
+    def test_scan_counts_a_load_source_call_as_a_load(self):
+        # tests/romp_load.py's load_source is a load like the others: a module that calls it before
+        # the floor must be caught, or the ratchet is blind to every module written that way
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "test_probe.py")
+            with open(path, "w") as f:
+                f.write('import os\n'
+                        'from romp_load import load_source\n'
+                        'km = load_source("romp_kernel_probe", "bin/romp-kernel")\n'
+                        'os.environ["XDG_STATE_HOME"] = "too late"\n')
+            first_load, first_set, rsd_handled = scan(path)
+        self.assertEqual(first_load, 3, "the load_source call is the module's first load")
+        self.assertEqual(first_set, 4)
+        self.assertIsNone(rsd_handled)
 
     def test_the_suite_wide_floors_stay_in_place(self):
         # The suspenders: conftest.py (pytest) and __init__.py (unittest package runs) each set the

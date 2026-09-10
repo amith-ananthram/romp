@@ -13,22 +13,25 @@ Run:  bin/romp-kernel   → opens http://127.0.0.1:29855
 """
 import copy
 import math
-import contextlib, json, os, queue, random, re, signal, socket, sys, time, threading, traceback, base64, bisect, errno, hashlib, hmac, struct, subprocess, shutil, shlex, http.client, uuid, tempfile, stat, gzip, collections, functools, fcntl, inspect
+import contextlib, json, os, queue, random, re, signal, socket, sys, time, threading, traceback, base64, bisect, errno, hashlib, hmac, struct, subprocess, shutil, shlex, http.client, uuid, tempfile, stat, gzip, collections, functools, fcntl, inspect, importlib.util
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from importlib.machinery import SourceFileLoader
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote, unquote, urlencode
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 BIN = ROOT / "bin"
-em = SourceFileLoader("romp_event_model", str(HERE / "event_model.py")).load_module()
-jd = SourceFileLoader("romp_judge", str(HERE / "judge.py")).load_module()
-cm = SourceFileLoader("romp_colormap", str(HERE / "colormap.py")).load_module()  # age → recency tint
-pal = SourceFileLoader("romp_palette", str(HERE / "palette.py")).load_module()  # session-identity palettes (selectable)
-ap = SourceFileLoader("romp_askparse", str(HERE / "askparse.py")).load_module()  # tmux-pane → live AskUserQuestion picker
-sb = SourceFileLoader("romp_session_backend", str(HERE / "session_backend.py")).load_module()  # the SessionBackend ABC
+_ls_spec = importlib.util.spec_from_file_location("romp_loadsource", str(HERE / "loadsource.py"))
+_ls_mod = importlib.util.module_from_spec(_ls_spec)
+_ls_spec.loader.exec_module(_ls_mod)
+load_source = _ls_mod.load_source   # file-path imports with load_module()'s sys.modules semantics (kernel/loadsource.py)
+em = load_source("romp_event_model", HERE / "event_model.py")
+jd = load_source("romp_judge", HERE / "judge.py")
+cm = load_source("romp_colormap", HERE / "colormap.py")  # age → recency tint
+pal = load_source("romp_palette", HERE / "palette.py")  # session-identity palettes (selectable)
+ap = load_source("romp_askparse", HERE / "askparse.py")  # tmux-pane → live AskUserQuestion picker
+sb = load_source("romp_session_backend", HERE / "session_backend.py")  # the SessionBackend ABC
 CHAT_VIEW = ROOT / "vscode-extension"               # the tuned UI, current in this worktree via `git merge main`
 # ROMP_DIST_DIR: test seam (romp-lab serves a COPY of the built bundles, so its rebuild simulations —
 # mtime bumps that must raise the reload banner — never touch the dist the LIVE kernel serves).
@@ -7334,7 +7337,7 @@ _REBUILT_FOR = [""]   # the checkout sha this RUNNING kernel already converged t
 def _restart_class(path):
     """Which RUNNING PROCESS a changed file's code lives in — "kernel", "bus", or "skip" (T216).
     Verified process boundaries, not guesses: the kernel process loads exactly kernel/*.py +
-    bin/romp-kernel in-process (every kernel module rides SourceFileLoader at import; judges run
+    bin/romp-kernel in-process (every kernel module is loaded by file path at import; judges run
     in-process too). postal/ is NEVER imported here — the bus is its own process with its own
     restart verb, and bouncing the kernel for a bus change restarts the WRONG thing. cli/ is
     loaded per `romp` invocation, never by this process — the next run picks it up. .md files
@@ -14602,7 +14605,7 @@ def _sdk_locked():
                 # is what puts this line in front of the user instead of only in the kernel log. Before
                 # that, a fresh install whose romp-sdk-setup had bailed looked like romp silently eating
                 # every message (the user 2026-07-28).
-            sbmod = SourceFileLoader("romp_sdk_backend", str(HERE / "sdk_backend.py")).load_module()
+            sbmod = load_source("romp_sdk_backend", HERE / "sdk_backend.py")
             # The backend claims the login tokens out of os.environ once (startup_auth_env), and the judges
             # read that same stash through this wire for their login-billed children. No key rides here:
             # romp holds none (credentials.py, 2026-09-08), and every child resolves Claude Code's own
@@ -14709,7 +14712,7 @@ def _codex():
     with _codex_lock:
         if _codex_backend is None:
             try:
-                cxmod = SourceFileLoader("romp_codex_backend", str(HERE / "codex_backend.py")).load_module()
+                cxmod = load_source("romp_codex_backend", HERE / "codex_backend.py")
                 _codex_backend = cxmod.CodexBackend(
                     jd.STATE, notify=_send_to_app,
                     poke=_wake_kernel, push=_pusher_wake.set,

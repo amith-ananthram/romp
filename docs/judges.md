@@ -514,4 +514,4 @@ permission/API-error floors: one interrupt at a time, the present event first.
   `STATE/judge-auth.json` (the per-session judge-auth-down latch; see
   "Billing" above).
 - Debugging: run the judge's own code against the live store
-  (`SourceFileLoader` on `kernel/judge.py`) rather than inferring from logs.
+  (loaded by file path from `kernel/judge.py`) rather than inferring from logs.
