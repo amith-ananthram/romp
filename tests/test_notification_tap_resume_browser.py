@@ -153,8 +153,11 @@ try { browser = await chromium.launch(); }
 catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
 const out = { reveals: [], ledger: [] };
 const context = await browser.newContext({ viewport: { width: 1100, height: 720 } });
-// T312 trace: in every frame, wrap the federation layer's inbound the moment it is published, so the order of
-// frames the chat pane processed at boot (tabOrder, sessions, the focus) and the active tab after each is on record
+// T312 trace: in every frame, wrap the federation layer's inbound the moment it is published (federation.ts assigns
+// window.__rompFed once, by plain assignment; every reader goes through the getter by truthiness, and before the
+// manager starts the getter answers undefined, so a page that never publishes reads as before). The order of frames
+// the chat pane processed at boot (tabOrder, sessions, the focus) and the active tab after each is on record; the
+// list grows for the page's life, which is seconds here
 await context.addInitScript(() => {
   const w = window; w.__frames = [];
   let fed = undefined;

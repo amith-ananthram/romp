@@ -1248,7 +1248,7 @@ class PushLedger(unittest.TestCase):
 def _fake_ws_client(app, wid):
     """Just enough of a _clients row for the reveal/badge paths: send() records the parsed JSON."""
     got = []
-    return {"app": app, "wid": wid, "alive": True,
+    return {"app": app, "wid": wid, "alive": True, "ready": True,   # ready: its bundle listens (the ready handler's stamp)
             "send": lambda s: got.append(json.loads(s))}, got
 
 
@@ -1322,22 +1322,41 @@ class RevealAiming(unittest.TestCase):
         self.assertEqual(mine_got, [{"type": "focus", "id": "SID-live", "live": True}])
         parked = km._PENDING_REVEAL[0]
         self.assertEqual((parked["sid"], parked["wid"]), ("SID-live", "W-phone"))
-        self.assertEqual(parked.get("sent"), [mine], "…and a copy stays parked, tagged with who got it")
+        self.assertEqual(len(parked.get("sent") or []), 1); self.assertIs(parked["sent"][0], mine, "…and a copy stays parked, tagged with who got it")
         # the pane answers (a pong, any message): the copy is retired, so a later ready never replays the tap
         km._reveal_proven(mine)
         self.assertIsNone(km._PENDING_REVEAL[0])
-        # the previous page's DEAD socket wears the same wid: its send fails, nothing is delivered, the park
-        # stands for the real pane's ready — the cold-start norm, unchanged
-        dead, _ = self._register("chat", "W-tablet")
-        dead["send"] = lambda s: (_ for _ in ()).throw(OSError("socket closed"))
+
+    def test_a_same_wid_socket_that_has_not_said_ready_is_no_target_and_its_ready_still_consumes(self):
+        """The review find on T312: a chat socket exists from its handshake, but until its bundle posts `ready`
+        it has no message listener (the ready handler's own paragraph: frames sent before it vanish), and the
+        kernel counts that ready message as an answer (_note_ws_inbound → _reveal_proven). Delivering a boot
+        reveal to such a socket lost the tap twice over: the frame vanished, and the ready retired the parked
+        copy before the handler could consume it. So a not-yet-ready socket is no target on any road: the park
+        stands, and the ready handler stamps the client and consumes."""
+        booting, heard = self._register("chat", "W-boot")
+        dropped = []
+        booting["ready"] = False          # registered at its handshake; the bundle is still loading
+        booting["send"] = lambda s: (heard if booting.get("ready") else dropped).append(json.loads(s))   # a frame before ready vanishes
         with mock.patch.object(km, "_tmux_sessions", return_value={"SID-live": {}}):
-            self.assertFalse(km._reveal_request("SID-live", "W-tablet", boot=True, via="link"))
-        self.assertEqual(km._PENDING_REVEAL[0], {"sid": "SID-live", "wid": "W-tablet"})
-        real, real_got = _fake_ws_client("chat", "W-tablet")
-        with mock.patch.object(km, "_tmux_sessions", return_value={"SID-live": {}}):
-            km._consume_pending_reveal(real)
-        self.assertEqual(real_got, [{"type": "focus", "id": "SID-live", "live": True}])
+            self.assertFalse(km._reveal_request("SID-live", "W-boot", boot=True, via="link"), "parked: nothing can hear it yet")
+            self.assertEqual(dropped, [], "nothing is sent to a pane that cannot listen")
+            self.assertEqual(km._PENDING_REVEAL[0], {"sid": "SID-live", "wid": "W-boot"})
+            # the pane's ready message arrives: _ws notes the inbound (an answer) BEFORE dispatching the handler…
+            km._note_ws_inbound(booting)
+            self.assertIsNotNone(km._PENDING_REVEAL[0], "…which must not retire a copy this pane never heard")
+            # …then the ready handler stamps the client and consumes the park
+            booting["ready"] = True
+            km._consume_pending_reveal(booting)
+        self.assertEqual(heard, [{"type": "focus", "id": "SID-live", "live": True}])
         self.assertIsNone(km._PENDING_REVEAL[0])
+        # a live (non-boot) tap to that same not-yet-ready socket parks too: the sw / ack / vanish roads had the
+        # same hole once the shell saw the socket up but before the bundle listened
+        with mock.patch.object(km, "_tmux_sessions", return_value={"SID-live": {}}):
+            booting["ready"] = False
+            self.assertFalse(km._reveal_request("SID-live", "W-boot", via="sw"))
+            self.assertEqual(dropped, [])
+            self.assertEqual(km._PENDING_REVEAL[0], {"sid": "SID-live", "wid": "W-boot"})
 
 
     def test_a_widless_park_matches_the_first_chat_pane(self):
