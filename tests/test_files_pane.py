@@ -251,7 +251,7 @@ class Shell(unittest.TestCase):
         _has(self, "document.body.classList.toggle('no-files-control',!ctl);", js)
         _has(self, "if(k==='files'&&!filesCtl())return;", js)
         _has(self, "return {romp:'panes',on:on,avail:{files:filesCtl()}};", js)
-        _has(self, "window.addEventListener('storage',apply);", js)   # the gear writes from another document: this is the event
+        _has(self, "window.addEventListener('storage',function(e){if(!e||!e.key||e.key===SK)reconcile();apply();});", js)   # the gear writes from another document: this is the event (a gear save re-reads the optional panes before the titles refresh)
         mob = km._LANDING_MOBILE_JS
         _has(self, "function show(p){if(p==='files'&&!filesCtlM())p='chat';", mob)
         # the gear's row, in the panes section beside "File links open in", shown by default; the chat's route reads the word
@@ -266,7 +266,8 @@ class Shell(unittest.TestCase):
         self.assertEqual(gear.count("fsc = document.getElementById("), 1)
         # the palette's entry for the pane is not listed while the control is hidden (re-read at every open)
         pal = (UI / "palette-main.ts").read_text()
-        _has(self, 'when: key === "files" ? () => !document.body.classList.contains("no-files-control") : undefined,', pal)
+        _has(self, 'when: key === "files" ? () => !document.body.classList.contains("no-files-control")', pal)
+        _has(self, ': optional.has(key) ? () => loadSettings().panes[key as keyof PaneSet]', pal)   # the optional panes' own predicate (the gear's Panes section) shares the ternary
         _has(self, "filter((c) => !c.hidden && (!c.when || c.when()))", (UI / "palette.ts").read_text())
         # a ?panes= bookmark stays a view: the forced close is never written over the stored set
         _has(self, "if(!ctl&&po.files){po.files=false;if(qp===null)saveP();}", js)

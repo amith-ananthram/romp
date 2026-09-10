@@ -8,6 +8,7 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { DEFAULT_CHORDS } from "./commands";
+import { loadSettings, OPTIONAL_PANES } from "./settings";
 
 const read = (f: string) => fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", f), "utf8");
 const PALETTE = read("palette.ts");
@@ -115,10 +116,40 @@ test("the new-session picker opens via the chat pane, revealed first (one code p
   assert.match(MAIN, /chatPost\(\{ type: "openPicker", toggle: true \}\)/);
 });
 
-test("a pane hidden in the gear (its iframe has no src) gets no palette command", () => {
-  // the shell never loads a pane this browser's gear hides (romp:settings.panes, the user 2026-09-10): its
-  // iframe keeps data-src and no src, and the toggle would refuse its key, so the command is not registered
-  assert.match(MAIN, /const frame = pane\("f-" \+ key\);\s*\n\s*if \(frame && !frame\.getAttribute\("src"\)\) continue;\s*\n\s*registerCommand\(\{\s*\n\s*id: "pane\." \+ label/);
+test("a pane hidden in the gear is not listed: a `when` predicate over the live setting, not a boot-time look at the iframe", () => {
+  // the shell never loads a pane this browser's gear hides (romp:settings.panes, the user 2026-09-10) and the
+  // toggle refuses its key, so its command must not be listed. The first cut read the iframe's src ONCE at boot,
+  // which left a pane enabled later without a command until a reload and a pane hidden later with a dead one;
+  // the predicate reads the store at every open instead (review, 2026-09-10)
+  assert.doesNotMatch(MAIN, /getAttribute\("src"\)\) continue;/, "no boot-time src check");
+  assert.match(MAIN, /import \{ loadSettings, OPTIONAL_PANES, type PaneSet \} from "\.\/settings";/);
+  assert.match(MAIN, /const optional = new Set<string>\(OPTIONAL_PANES\);/);
+  assert.match(MAIN, /: optional\.has\(key\) \? \(\) => loadSettings\(\)\.panes\[key as keyof PaneSet\]\s*\n\s*: undefined,/);
+  // the predicate is registered for every optional pane, the chat (required, never optional) gets none
+  assert.deepEqual([...OPTIONAL_PANES], ["timeline", "fleet", "feed"]);
+  assert.match(MAIN, /\[\["chat", "chat"\], \["timeline", "timeline"\], \["fleet", "outline"\], \["feed", "feed"\], \["files", "files"\]\]/);
+});
+
+test("the pane predicate's read flips with the gear's store: only an explicit false hides, a re-enable shows again", () => {
+  // the same reader (settings.ts loadSettings) the settings page writes through and the shell's reconcile
+  // mirrors, run against a stand-in store, so the palette's list follows a gear save without a reload
+  const store = new Map<string, string>();
+  const g = globalThis as any;
+  const had = "localStorage" in g, prev = g.localStorage;
+  g.localStorage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v); }, removeItem: (k: string) => { store.delete(k); } };
+  try {
+    const on = (key: "timeline" | "fleet" | "feed") => loadSettings().panes[key];
+    assert.equal(on("fleet"), true, "an empty store shows every optional pane");
+    store.set("romp:settings", JSON.stringify({ panes: { fleet: false } }));
+    assert.equal(on("fleet"), false, "hidden in the gear: the command drops out at the next open");
+    assert.equal(on("timeline"), true, "a sibling pane keeps its command");
+    store.set("romp:settings", JSON.stringify({ panes: { fleet: true } }));
+    assert.equal(on("fleet"), true, "re-enabled: the command is back without a reload");
+    store.set("romp:settings", JSON.stringify({ panes: { fleet: "no" } }));
+    assert.equal(on("fleet"), true, "a corrupt value reads as shown, the shell's optOn idiom");
+  } finally {
+    if (had) g.localStorage = prev; else delete g.localStorage;
+  }
 });
 
 test("built-in commands call the same globals the rail buttons use", () => {
@@ -215,6 +246,6 @@ test("the gear links the shortcuts dialog instead of carrying its own stale list
 // the command, re-read at every open (the gear's change in the feed iframe reaches the body class through the
 // shell's storage listener), so the list never offers a visible no-op.
 test("the Files pane command is listed only while its control shows: a `when` predicate the list re-reads at every open", () => {
-  assert.match(MAIN, /when: key === "files" \? \(\) => !document\.body\.classList\.contains\("no-files-control"\) : undefined,/);
+  assert.match(MAIN, /when: key === "files" \? \(\) => !document\.body\.classList\.contains\("no-files-control"\)\s*\n\s*: optional\.has\(key\)/);
   assert.match(PALETTE, /filter\(\(c\) => !c\.hidden && \(!c\.when \|\| c\.when\(\)\)\)/, "the list filters on it beside `hidden`");
 });

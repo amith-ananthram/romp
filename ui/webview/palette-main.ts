@@ -12,6 +12,7 @@ import { initShortcutsModal } from "./shortcuts-modal";
 import { chordMap, chordOf, dispatchable, displayChord, effectiveChord, keyHint, loadOverrides, titleWithKey, KEYS_EVENT } from "./keybindings";
 import { hostPrefix } from "./host-prefix";   // pure display helper — safe here (never federation.ts, which boots a manager on import)
 import { installMenuEcho } from "./tag-menu";   // model deps only (tag-lens/session-views) — no manager, no DOM cost
+import { loadSettings, OPTIONAL_PANES, type PaneSet } from "./settings";   // the gear's store, read at every palette open (no side effects at import)
 
 type SessionRow = { id: string; name: string; dir: string; bg: string };
 
@@ -138,19 +139,23 @@ installMenuEcho();
   registerCommand({ id: "kernel.restart", title: "Restart the romp kernel", run: () => { if (w.__rompRestart) w.__rompRestart(); } });
   // Pane toggles. The Outline pane's INTERNAL key stays 'fleet' (the pane controller's API);
   // the command speaks the user-facing name.
-  // A pane hidden from this browser's dashboard in the gear (romp:settings.panes, the user 2026-09-10) has
-  // an iframe with no src (the shell never loads it), so it gets no command: the toggle would refuse it
-  // anyway (its key is out of the controller's set) and a dead entry in the list is noise.
+  // A pane hidden from this browser's dashboard in the gear (romp:settings.panes, the user 2026-09-10) is not
+  // LISTED: the shell never loads its iframe and the toggle refuses its key (out of the controller's set), so a
+  // dead entry would be noise. The check is a `when` predicate over the live setting (settings.ts's reader, the
+  // same store the shell's reconcile reads), re-read at every open like the Files predicate below, never a
+  // boot-time look at the iframe's src: a pane enabled later gains its command with the gear save, and a pane
+  // hidden later loses it, no reload either way (review, 2026-09-10).
   const panes: Array<[string, string]> = [["chat", "chat"], ["timeline", "timeline"], ["fleet", "outline"], ["feed", "feed"], ["files", "files"]];
+  const optional = new Set<string>(OPTIONAL_PANES);
   for (const [key, label] of panes) {
-    const frame = pane("f-" + key);
-    if (frame && !frame.getAttribute("src")) continue;
     registerCommand({
       id: "pane." + label, title: "Show or hide the " + label + " pane",
       run: () => { if (w.__rompPaneToggle) w.__rompPaneToggle(key); },
       // the Files control hidden by its gear setting (T317): the shell's body wears no-files-control, the toggle refuses,
       // so the entry is not listed either (re-read at every open: the gear's change reaches the body class live)
-      when: key === "files" ? () => !document.body.classList.contains("no-files-control") : undefined,
+      when: key === "files" ? () => !document.body.classList.contains("no-files-control")
+        : optional.has(key) ? () => loadSettings().panes[key as keyof PaneSet]
+        : undefined,
     });
   }
 
