@@ -49324,7 +49324,7 @@ _LANDING_COLLAPSE_JS = """
   function apply(){
     var ctl=filesCtl();
     document.body.classList.toggle('no-files-control',!ctl);
-    if(!ctl&&po.files){po.files=false;saveP();}   // the control gone, its pane closes cleanly on the same apply
+    if(!ctl&&po.files){po.files=false;if(qp===null)saveP();}   // the control gone, its pane closes cleanly on the same apply; a ?panes= bookmark stays a view (never written over the stored set)
     // a phone left on the Files tab when the control goes: the tab bar's button is hidden, so the chat comes forward
     if(!ctl&&window.__rompMobileOn&&window.__rompMobileOn()&&document.body.getAttribute('data-tab')==='files'){try{window.__rompMobileTab&&window.__rompMobileTab('chat');}catch(e){}}
     document.body.classList.toggle('po-chat',!!po.chat);

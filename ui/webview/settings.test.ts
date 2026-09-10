@@ -125,6 +125,8 @@ test("File links open in defaults to the pane you clicked; the Files pane opt-in
   assert.equal(loadSettings().fileLinkPane, "chat", "a foreign stored value normalizes to the default");
   assert.equal(fileLinkPane("pane"), "pane");
   assert.equal(fileLinkPane("feed"), "chat", "no other target exists here");
+  assert.equal(fileLinkPane(undefined), "chat");
+  delete store["romp:settings"];
 });
 
 // The Files CONTROL's own setting (T317, the user 2026-09-10): whether the dashboard bar's Files toggle and the
@@ -142,6 +144,5 @@ test("the Files control shows by default; hiding it round-trips, and only the li
   assert.equal(loadSettings().filesControl, true, "a store written before the key shows the control");
   store["romp:settings"] = JSON.stringify({ filesControl: "no" });
   assert.equal(loadSettings().filesControl, true, "a foreign stored value shows it: only false hides");
-  assert.equal(fileLinkPane(undefined), "chat");
   delete store["romp:settings"];
 });

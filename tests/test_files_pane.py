@@ -248,7 +248,6 @@ class Shell(unittest.TestCase):
         js = km._LANDING_COLLAPSE_JS
         _has(self, "function filesCtl(){try{var st=JSON.parse(localStorage.getItem('romp:settings')||'null');return !(st&&st.filesControl===false);}catch(e){return true;}}", js)
         _has(self, "document.body.classList.toggle('no-files-control',!ctl);", js)
-        _has(self, "if(!ctl&&po.files){po.files=false;saveP();}", js)
         _has(self, "if(k==='files'&&!filesCtl())return;", js)
         _has(self, "return {romp:'panes',on:on,avail:{files:filesCtl()}};", js)
         _has(self, "window.addEventListener('storage',apply);", js)   # the gear writes from another document: this is the event
@@ -257,7 +256,19 @@ class Shell(unittest.TestCase):
         # the gear's row, in the panes section beside "File links open in", shown by default; the chat's route reads the word
         gear = (UI / "gear.js").read_text()
         _has(self, "<input type=checkbox id=rs-filesctl checked>", gear)
-        _has(self, "s.filesControl = fc.checked; save(s);", gear)
+        # the box has a NAME OF ITS OWN in the gear's one var list (review find: a second `fc` shadowed the feed's
+        # collapsed box, so the new row was dead and the feed box wrote this setting)
+        _has(self, "fsc = document.getElementById('rs-filesctl')", gear)
+        _has(self, "if (fsc) fsc.addEventListener('change', function () { var s = load(); s.filesControl = fsc.checked; save(s); });", gear)
+        _has(self, "if (fsc) fsc.checked = (s.filesControl !== false);", gear)
+        self.assertEqual(gear.count("fc = document.getElementById("), 1, "fc is the feed's collapsed box alone")
+        self.assertEqual(gear.count("fsc = document.getElementById("), 1)
+        # the palette's entry for the pane is not listed while the control is hidden (re-read at every open)
+        pal = (UI / "palette-main.ts").read_text()
+        _has(self, 'when: key === "files" ? () => !document.body.classList.contains("no-files-control") : undefined,', pal)
+        _has(self, "filter((c) => !c.hidden && (!c.when || c.when()))", (UI / "palette.ts").read_text())
+        # a ?panes= bookmark stays a view: the forced close is never written over the stored set
+        _has(self, "if(!ctl&&po.files){po.files=false;if(qp===null)saveP();}", js)
         self.assertLess(gear.index("id=rs-filelink"), gear.index("id=rs-filesctl"), "the row follows the file-link setting it qualifies")
         render = (UI / "render.ts").read_text()
         _has(self, "fileLinkRoute(settings.fileLinkPane, window.parent !== window, panesOn.files === true, panesAvail.files !== false)", render)

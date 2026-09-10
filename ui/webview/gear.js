@@ -271,7 +271,7 @@ function initGear(post) {
     cvm = document.getElementById('rs-conserve'),
     csg = document.getElementById('rs-suggestcompact'),
     dd = document.getElementById('rs-defaultdir'), gb = document.getElementById('rs-branch'),
-    tc = document.getElementById('rs-tabctx'), fl = document.getElementById('rs-filelink'), fc = document.getElementById('rs-filesctl'),
+    tc = document.getElementById('rs-tabctx'), fl = document.getElementById('rs-filelink'), fsc = document.getElementById('rs-filesctl'),
     sr = document.getElementById('rs-striprows'),
     dn = document.getElementById('rs-dense'),
     cs = document.getElementById('rs-chatscheme'),
@@ -315,7 +315,7 @@ function initGear(post) {
   if (dn) dn.addEventListener('change', function () { var s = load(); s.denseChrome = dn.checked; save(s); });
   if (tc) tc.addEventListener('change', function () { var s = load(); s.tabCtx = tc.value; save(s); });
   if (fl) fl.addEventListener('change', function () { var s = load(); s.fileLinkPane = fl.value; save(s); });   // webview-local pref read at click time (render.ts openPath)
-  if (fc) fc.addEventListener('change', function () { var s = load(); s.filesControl = fc.checked; save(s); });   // the shell hears the store change (its storage listener) and hides or shows the control (T317)
+  if (fsc) fsc.addEventListener('change', function () { var s = load(); s.filesControl = fsc.checked; save(s); });   // the shell hears the store change (its storage listener) and hides or shows the control (T317)
   // ── the settings' value-picker DROPDOWNS (T117, the user 2026-08-27, screenshot: the Chat
   // tabs and Text scheme pickers rendered every option always-expanded, and the description spans
   // ran off the card's right edge). Progressive disclosure: the CLOSED state is ONE row — the
@@ -1287,7 +1287,7 @@ function initGear(post) {
     // burned the whole 5-frame retry against a display:none pane, latched rs-pane-gone, and the
     // full-viewport fallback box blacked out every pane behind the modal.
     try { if (window.parent !== window) window.parent.postMessage({ romp: 'logUnseenQuery' }, '*'); } catch (e) { /* no shell to ask */ }   // T290: the Open log count
-    p.hidden = false; feedFull(true); setModalCls(true); var s = load(); cc.checked = !!s.compact; jix.checked = (s.showIndexJudges !== undefined ? !!s.showIndexJudges : !!s.debug); jtr.checked = (s.showTriageJudges !== undefined ? !!s.showTriageJudges : !!s.debug); if (gb) gb.checked = s.showBranch === true; if (sr) sr.checked = s.stripGroupRows !== false; if (dn) dn.checked = s.denseChrome === true; if (fl) fl.value = s.fileLinkPane === 'pane' ? 'pane' : 'chat'; if (fc) fc.checked = (s.filesControl !== false); if (tc) tc.value = tabCtxMode(s.tabCtx); tcPaint(); csPaint(); ttPaint(); if (cg) cg.checked = s.collapseGaps !== false; if (ao) ao.checked = s.activeOnly !== false; if (fc) fc.checked = s.collapsed === true; cmBuild(); cmPaint(s.colormap || 'aurora'); paintBackendOffer(tb ? tb.checked : false); if (dd) dd.value = s.defaultDir || ''; plFill(); fill(); }
+    p.hidden = false; feedFull(true); setModalCls(true); var s = load(); cc.checked = !!s.compact; jix.checked = (s.showIndexJudges !== undefined ? !!s.showIndexJudges : !!s.debug); jtr.checked = (s.showTriageJudges !== undefined ? !!s.showTriageJudges : !!s.debug); if (gb) gb.checked = s.showBranch === true; if (sr) sr.checked = s.stripGroupRows !== false; if (dn) dn.checked = s.denseChrome === true; if (fl) fl.value = s.fileLinkPane === 'pane' ? 'pane' : 'chat'; if (fsc) fsc.checked = (s.filesControl !== false); if (tc) tc.value = tabCtxMode(s.tabCtx); tcPaint(); csPaint(); ttPaint(); if (cg) cg.checked = s.collapseGaps !== false; if (ao) ao.checked = s.activeOnly !== false; if (fc) fc.checked = s.collapsed === true; cmBuild(); cmPaint(s.colormap || 'aurora'); paintBackendOffer(tb ? tb.checked : false); if (dd) dd.value = s.defaultDir || ''; plFill(); fill(); }
   if (g) g.onclick = function (e) { e.stopPropagation(); openSettings(); };   // hidden anchor; hosts open via the message below
   window.addEventListener('message', function (e) { if (e.data && e.data.romp === 'openSettings') openSettings(); });
   // The shortcuts row: the web shell (same-origin parent) gets the customize link — it opens the
