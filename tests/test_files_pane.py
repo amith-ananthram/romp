@@ -414,7 +414,9 @@ class BrowseRelay(unittest.TestCase):
     ui/webview/browse-route.test.ts. Synthetic only: placeholder sids, the notes-api demo world, TESTHOST."""
 
     SID = "11111111-2222-3333-4444-555555555555"
-    HEAD = "if(m.romp==='browseFiles'&&m.pane==='pane'){var fb=document.getElementById('f-files');"
+    # …or a browse ask naming no pane while the Feed pane is off in this browser (the gear's Panes section, the user
+    # 2026-09-10): the feed cannot be lifted, so the Files pane's arm takes it (tests/test_pane_state_broadcast.py RelayArms)
+    HEAD = "if(m.romp==='browseFiles'&&(m.pane==='pane'||!feedHere())){var fb=document.getElementById('f-files');"
     FEED = "else if(m.romp==='browseFiles'){var bf=document.getElementById('f-feed');"
     IDENTITY = {"name": "web", "color": {"bg": "#123456", "fg": "#ffffff"}}
 

@@ -288,7 +288,12 @@ global.matchMedia = (q) => ({ get matches() { return MATCHES; }, query: q, addEv
 global.requestAnimationFrame = (f) => 1;
 global.addEventListener = (ev, f) => { if (ev === 'message') MSGS.push(f); };   // the script's window-message arms (reveal, toggleFleet), driven below
 global.visualViewport = { height: 844, scale: 1, addEventListener: () => {} };
-global.WebSocket = class { constructor() { this.readyState = 0; } send() {} };
+const WSS = [], BADGES = [];   // the shell sockets the script dials; the icon badge calls (0 = cleared)
+global.WebSocket = class { constructor() { this.readyState = 0; WSS.push(this); } send() {} };
+Object.defineProperty(global, 'navigator', { configurable: true, value: {   // an installed app: badging exists (node's own navigator is getter-only)
+  setAppBadge: (n) => { BADGES.push(n); return Promise.resolve(); }, clearAppBadge: () => { BADGES.push(0); return Promise.resolve(); } } });
+let FEED_OFF = false;   // the gear's Panes section has the Feed pane off in this browser (the head script's reader, stubbed)
+global.__rompPaneEnabled = (k) => !(k === 'feed' && FEED_OFF);
 global.encodeURIComponent = (s) => s;
 global.location = { protocol: 'http:', host: 'TESTHOST:1' };
 global.sessionStorage = { getItem: () => 'wid1' };
@@ -343,6 +348,15 @@ TELLS.length = 0; BUTTONS.feed.hidden = true; window.__rompMobileTab('feed');
 out.hiddenTab = { tab: TAB, tells: TELLS.slice(), store: STORE['romp-mobile-tab'] };
 BUTTONS.feed.hidden = false; window.__rompMobileTab('feed');
 out.shownAgain = { tab: TAB };
+// the kernel's badge frame on the shell socket: the needs-you count paints the icon while the Feed pane is in this
+// dashboard; with the pane off here (the gear's Panes section) the same frame clears it instead
+const ws = WSS[0]; const frame = (m) => ws.onmessage({ data: JSON.stringify(m) });
+frame({ type: 'badge', n: 3 });
+FEED_OFF = true; frame({ type: 'badge', n: 4 });
+frame({ type: 'badge', n: 0 });
+FEED_OFF = false; frame({ type: 'badge', n: 2 });
+frame({ type: 'badge', n: 0 });
+out.badges = { sockets: WSS.length, calls: BADGES.slice() };
 console.log(JSON.stringify(out));
 """
 
@@ -394,6 +408,17 @@ class MobileScript(unittest.TestCase):
         self.assertEqual(self.out["hiddenTab"], {"tab": "fleet", "tells": [], "store": "fleet"}, "nothing moved, nothing told, nothing persisted")
         self.assertEqual(self.out["shownAgain"]["tab"], "feed", "unhidden, the same switch lands")
 
+    def test_the_badge_frame_paints_the_icon_only_while_the_feed_pane_is_here(self):
+        # the user 2026-09-10: the count is the feed's needs-you column; a browser with the Feed pane off in the
+        # gear's Panes section wears no badge from it. The kernel sends the frame as ever (nothing kernel-side
+        # changes); the shell clears the icon on it here, so a count set before the pane was hidden does not linger
+        b = self.out["badges"]
+        self.assertEqual(b["sockets"], 1, "one shell socket")
+        self.assertEqual(b["calls"], [3, 0, 0, 2, 0], "3 painted; 4 with the pane off clears; 0 clears; the pane back: 2 painted, 0 cleared")
+        js = km._LANDING_MOBILE_JS
+        self.assertIn("var bn=(window.__rompPaneEnabled&&!window.__rompPaneEnabled('feed'))?0:m.n;", js)
+        self.assertIn("try{(bn?navigator.setAppBadge(bn):navigator.clearAppBadge())['catch'](function(e){});}catch(e){}}", js)
+
     def test_the_hook_is_exported_for_the_relay(self):
         self.assertIn("window.__rompMobileTab=show;", km._LANDING_MOBILE_JS)
         # the mobile script parses BEFORE the collapse script (its boot show() finds no teller yet; the boot
@@ -419,6 +444,8 @@ global.addEventListener = (ev, f) => { if (ev === 'message') LISTENERS.push(f); 
 global.__rompPaneToggle = (k, on) => TOGGLES.push([k, on]);
 global.__rompMobileTab = (t) => TABS.push(t);
 global.__rompMobileOn = () => MOBILE;
+let FEED_OFF = false;   // the gear's Panes section has the Feed pane off in this browser (the head script's reader, stubbed)
+global.__rompPaneEnabled = (k) => !(k === 'feed' && FEED_OFF);
 const stub = () => ({ style: {}, classList: { add() {}, remove() {}, toggle() {}, contains: () => false }, appendChild() {}, setAttribute() {}, addEventListener() {}, remove() {} });
 global.document = {
   body: { classList: { toggle() {}, contains: (c) => c === 'po-chat' || c === 'po-feed' || c === 'po-timeline' },
@@ -482,6 +509,23 @@ send({ romp: 'openSettings' });
 out.gearAsk = snap(); reset();
 window.__rompOpenSettings();
 out.gearOpen = snap(); reset();
+// the Feed pane off in this browser (the gear's Panes section): a browse ask naming no pane takes the Files pane's
+// arm (the feed cannot be lifted), a browseClosed puts nothing back, and a phone gets the Files tab, not the feed's
+FEED_OFF = true;
+send({ romp: 'browseFiles', path: '/repo/notes-api', sid: SID });
+out.browseFeedOff = Object.assign(snap(), { wasOff: window.__rompFeedWasOff === undefined ? 'undef' : window.__rompFeedWasOff }); reset();
+window.__rompFeedWasOff = true;   // a browser lifted the feed, then the gear hid the pane before it closed
+send({ romp: 'browseClosed' });
+out.closedFeedOff = Object.assign(snap(), { wasOff: window.__rompFeedWasOff }); reset(); delete window.__rompFeedWasOff;
+MOBILE = true; TAB = 'chat';
+send({ romp: 'browseFiles', path: '/repo/notes-api', sid: SID });
+out.browseFeedOffPhone = snap(); reset(); MOBILE = false;
+FEED_OFF = false;
+window.__rompFeedWasOff = true;
+send({ romp: 'browseClosed' });
+out.closedFeedOn = Object.assign(snap(), { wasOff: window.__rompFeedWasOff }); reset(); delete window.__rompFeedWasOff;
+send({ romp: 'browseFiles', path: '/repo/notes-api', sid: SID });
+out.browseFeedOn = snap(); reset();
 console.log(JSON.stringify(out));
 """
 
@@ -571,6 +615,84 @@ class RelayArms(unittest.TestCase):
         self.assertEqual(b["files"], [])
         s = self.out["seed"]
         self.assertEqual(s["chat"], [{"type": "editorSelection", "text": "the auth check", "sid": SID, "src": "src/app.py:12"}])
+
+    def test_with_the_feed_pane_off_here_a_browse_ask_takes_the_files_pane_and_nothing_lifts_or_restores_the_feed(self):
+        # the user 2026-09-10: the Feed pane hidden in the gear's Panes section is not in this dashboard, so the browse
+        # relay cannot lift it; the ask goes to the one file browser the dashboard has, the Files pane, and the was-off
+        # restore (a flag set while the pane was still here) moves no pane. The kernel is not party to any of this.
+        b = self.out["browseFeedOff"]
+        self.assertEqual(b["files"], [{"romp": "browseFiles", "path": "/repo/notes-api", "sid": SID, "identity": None}], "the Files pane's arm takes it")
+        self.assertEqual(b["feed"], [], "nothing is posted into a pane that is not here")
+        self.assertEqual(b["toggles"], [["files", True]], "the Files pane comes forward; the feed is never lifted")
+        self.assertEqual(b["wasOff"], "undef", "no was-off flag: there is nothing to put back later")
+        self.assertEqual(b["tabs"], [], "desktop: no tab switch")
+        c = self.out["closedFeedOff"]
+        self.assertEqual(c["toggles"], [], "browseClosed with the pane off: no pane moves")
+        self.assertFalse(c["wasOff"], "…and the stale flag is dropped, never replayed")
+        p = self.out["browseFeedOffPhone"]
+        self.assertEqual(p["tabs"], ["files"], "a phone goes to the Files tab, not the feed's")
+        self.assertEqual(len(p["files"]), 1)
+        self.assertEqual(p["feed"], [])
+        # the pane back on: the feed's route is as it was, the restore included
+        self.assertEqual(self.out["closedFeedOn"]["toggles"], [["feed", False]])
+        self.assertFalse(self.out["closedFeedOn"]["wasOff"])
+        self.assertEqual(self.out["browseFeedOn"]["feed"], [{"romp": "browseFiles", "path": "/repo/notes-api", "sid": SID}])
+        self.assertEqual(self.out["browseFeedOn"]["files"], [])
+        # the source: the pane arm's head admits a pane-less ask while the feed is off here; the restore is guarded
+        js = km._LANDING_SETTINGS_JS
+        self.assertIn("if(m.romp==='browseFiles'&&(m.pane==='pane'||!feedHere())){var fb=document.getElementById('f-files');", js)
+        self.assertIn("if(feedHere())try{window.__rompPaneToggle&&window.__rompPaneToggle('feed',false);}catch(e){}}", js)
+        self.assertIn("function feedHere(){return !(window.__rompPaneEnabled&&!window.__rompPaneEnabled('feed'));}", js)
+
+
+# ── the head script's reader of the gear's Panes setting ─────────────────────────────────────────
+# window.__rompPaneEnabled(k): is pane k in this browser's dashboard at all (romp:settings.panes, the gear's
+# Panes section; only an explicit false hides). Every shell script that acts on the feed at an event asks it:
+# the badge frame, a Log entry's click, a notification's landing, a browse ask. Defined in the HEAD, before any
+# iframe or body script, and read from the store on every call.
+HELPER = ("window.__rompPaneEnabled=function(k){try{var s=JSON.parse(localStorage.getItem('romp:settings')||'{}'),p=s&&s.panes;"
+          "return !(p&&typeof p==='object'&&p[k]===false);}catch(e){return true;}};")
+_HELPER_DRIVER = r"""
+'use strict';
+const STORE = {};
+global.window = global;
+global.localStorage = { getItem: (k) => (k in STORE ? STORE[k] : null) };
+__HELPER__
+const ask = () => ['timeline', 'fleet', 'feed', 'chat'].map((k) => window.__rompPaneEnabled(k));
+const out = {};
+out.empty = ask();                                                       // no store: every pane shown
+STORE['romp:settings'] = JSON.stringify({ theme: 'dark' });              // an older store without panes
+out.older = ask();
+STORE['romp:settings'] = JSON.stringify({ panes: { feed: false } });     // the gear hid the feed
+out.feedOff = ask();
+STORE['romp:settings'] = JSON.stringify({ panes: { feed: 0, fleet: null, timeline: 'no' } });   // falsy but not false: shown
+out.falsy = ask();
+STORE['romp:settings'] = '{not json';                                    // a corrupt store: every pane shown
+out.corrupt = ask();
+STORE['romp:settings'] = JSON.stringify({ panes: 'feed' });              // a non-object panes value: shown
+out.notObject = ask();
+console.log(JSON.stringify(out));
+"""
+
+
+class PaneEnabledReader(unittest.TestCase):
+    def test_the_head_defines_it_before_any_iframe_and_the_scripts_ask_it(self):
+        html = km._landing()
+        self.assertEqual(html.count(HELPER), 1)
+        self.assertLess(html.index(HELPER), html.index("<iframe"), "defined in the head, before the first iframe")
+        self.assertLess(html.index(HELPER), html.index("<body"))
+        self.assertEqual(html.count("<script>"), 20, "the head's existing script carries it: no new script element")
+        for js in (km._LANDING_ERRS_JS, km._LANDING_MOBILE_JS, km._LANDING_REVEAL_JS, km._LANDING_SETTINGS_JS):
+            self.assertIn("window.__rompPaneEnabled&&!window.__rompPaneEnabled('feed')", js, "absent helper = every pane shown")
+
+    def test_only_an_explicit_false_hides_and_a_corrupt_store_hides_nothing(self):
+        out = _run(_HELPER_DRIVER.replace("__HELPER__", HELPER))
+        self.assertEqual(out["empty"], [True, True, True, True])
+        self.assertEqual(out["older"], [True, True, True, True])
+        self.assertEqual(out["feedOff"], [True, True, False, True])
+        self.assertEqual(out["falsy"], [True, True, True, True])
+        self.assertEqual(out["corrupt"], [True, True, True, True])
+        self.assertEqual(out["notObject"], [True, True, True, True])
 
 
 if __name__ == "__main__":

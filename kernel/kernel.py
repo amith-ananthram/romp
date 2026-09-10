@@ -47043,12 +47043,26 @@ del.addEventListener('click',function(ev){ev.stopPropagation();NOTES.splice(i,1)
 // to opening the session if the card is gone). The x keeps its own handler (stopPropagation above).
 if(n.tgt&&(n.tgt.itemId||n.tgt.sid)){row.className+=' link';row.title='Jump to this card';
 row.addEventListener('click',function(){close();
+// the Feed pane off in this browser (the gear's Panes section; feedHere below): there is no card here to scroll
+// to, and a pane that is not in the dashboard cannot be revealed, so the jump opens the SESSION in the chat, the
+// way a card's own session link does ({type:'openSession'} on the shell socket, whose wid aims the kernel's
+// reveal at this dashboard). A shell socket that is down says so in the Log rather than dropping the click.
+if(!feedHere()){jumpChat(n.tgt.sid||'');return;}
 try{window.__rompPaneToggle&&window.__rompPaneToggle('feed',true);}catch(e){}
 var f=document.getElementById('f-feed');
 try{f&&f.contentWindow&&f.contentWindow.postMessage({romp:'revealCard',itemId:n.tgt.itemId||'',sid:n.tgt.sid||''},'*');}catch(e){}});}
 row.appendChild(tx);row.appendChild(tm);row.appendChild(del);list.appendChild(row);})(NOTES[i],i);
 if(!shown){var e=document.createElement('div');e.className='rerr-empty';
 e.textContent=NOTES.length?'Nothing to show \\u2014 hidden by the filters above':'Nothing logged';list.appendChild(e);}}
+// the Feed pane is in this browser's dashboard (window.__rompPaneEnabled, the head script's reader of the gear's
+// Panes section; a shell without it shows every pane). With the pane off here, a card's Log entry (the feed's
+// badge mirror posts them with the card's itemId) is not logged, since no card is shown here to open, and a jump
+// opens the session in the chat instead. The kernel is not party to any of this: judging and task tracking
+// run unchanged, and another browser with the pane on sees every card.
+function feedHere(){return !(window.__rompPaneEnabled&&!window.__rompPaneEnabled('feed'));}
+function jumpChat(sid){if(!sid)return;var ok=false;
+try{ok=!!(window.__rompShellSend&&window.__rompShellSend({type:'openSession',id:sid}));}catch(e){}
+if(!ok)window.__rompNotify('locate','Could not open the session: the dashboard has no live connection to the kernel');}
 // One write path. A repeat of the NEWEST entry (same kind+text — e.g. a reconnect loop dropping over and
 // over) coalesces into it with a count instead of flooding the feed: event-exact, no time window.
 window.__rompNotify=function(kind,text,tgt){if(!text)return;
@@ -47057,10 +47071,13 @@ if(last&&last.kind===kind&&last.text===String(text)){last.n=(last.n||1)+1;last.t
 else{NOTES.push({kind:String(kind||'error'),text:String(text),t:Math.floor(Date.now()/1000),n:1,seen:false,tgt:tgt||null});
 if(NOTES.length>MAX)NOTES=NOTES.slice(-MAX);}
 save();paint();};
-// pane iframes can feed the center too; sid/itemId ride along as the entry's jump target
+// pane iframes can feed the center too; sid/itemId ride along as the entry's jump target. An entry naming a CARD
+// (itemId: the feed's badge mirror, a card still loaded in a pane hidden mid-page) is not this browser's while its
+// Feed pane is off (feedHere above); an entry naming only a session, or nothing, lands as ever.
 window.addEventListener('message',function(e){var m=e&&e.data;
-if(m&&m.romp==='notify'&&m.text)window.__rompNotify(m.kind||'error',m.text,
-(m.sid||m.itemId)?{sid:String(m.sid||''),itemId:String(m.itemId||'')}:null);});
+if(m&&m.romp==='notify'&&m.text){if(m.itemId&&!feedHere())return;
+window.__rompNotify(m.kind||'error',m.text,
+(m.sid||m.itemId)?{sid:String(m.sid||''),itemId:String(m.itemId||'')}:null);}});
 // Connection tracking (was the #romp-offline top banner). Only a VISIBLE pane counts (the user 2026-07-06):
 // a pane toggled OFF still holds a live socket (the Fleet pane is hidden by default, its iframe always
 // loaded), so a blip on a pane you can't even see shouldn't cry wolf while the chat pane you interact
@@ -48256,6 +48273,9 @@ if(held){dirty=true;return;}render();};
 # the modal's backdrop covers the full screen, and restores it on close.
 _LANDING_SETTINGS_JS = """
 (function(){
+// the Feed pane is in this browser's dashboard (window.__rompPaneEnabled, the head script's reader of the gear's
+// Panes section; a shell without it shows every pane): the browse relay below routes by it
+function feedHere(){return !(window.__rompPaneEnabled&&!window.__rompPaneEnabled('feed'));}
 // The ONE opener of the settings gear: it lives in the hidden #f-settings iframe (the served /settings page;
 // the user 2026-09-10 — it rode the feed pane before, which made that pane required). The rail's ⛭, the phone's
 // settings action and the message relay below all come here; the palette posts into the same iframe itself.
@@ -48305,8 +48325,10 @@ if(m.romp==='filesViewerClosed'){var back=window.__rompFilesTabFrom;window.__rom
 // The pane STAYS up, so none of the feed route's was-off flag or browseClosed restore below applies; on a
 // phone the tab the click came from is remembered, and the pane's own close edge (filesViewerClosed above)
 // puts the person back, exactly as the viewFile pane arm does. The forward waits for a Files page still
-// loading the same way. A browseFiles naming no pane is the feed's, the arm that follows.
-if(m.romp==='browseFiles'&&m.pane==='pane'){var fb=document.getElementById('f-files');
+// loading the same way. A browseFiles naming no pane is the feed's, the arm that follows, unless the Feed pane
+// is off in this browser (the gear's Panes section, feedHere below): a pane that is not in the dashboard cannot
+// be lifted, so the ask comes here, to the one file browser this dashboard has.
+if(m.romp==='browseFiles'&&(m.pane==='pane'||!feedHere())){var fb=document.getElementById('f-files');
   try{window.__rompPaneToggle&&window.__rompPaneToggle('files',true);}catch(e){}
   try{if(window.__rompMobileOn&&window.__rompMobileOn()){var curb=document.body.getAttribute('data-tab')||'chat';
     if(curb!=='files'){window.__rompFilesTabFrom=curb;window.__rompMobileTab&&window.__rompMobileTab('files');}}}catch(e){}
@@ -48334,9 +48356,11 @@ if(m.type==='editorSelection'&&typeof m.text==='string'){var fc=document.getElem
   // way the browseFiles arm does for the feed — desktop only; the phone's one-pane tab swap is untouched.
   if(!document.body.classList.contains('po-chat')){try{window.__rompPaneToggle&&window.__rompPaneToggle('chat',true);}catch(e){}}
   try{fc&&fc.contentWindow&&fc.contentWindow.postMessage(m,'*');}catch(e){}}
-// the browser owns the restore: browseClosed alone puts a brought-forward feed back the way it was
+// the browser owns the restore: browseClosed alone puts a brought-forward feed back the way it was. With the
+// Feed pane off in this browser there is nothing to put back (the pane is out of the toggle's set): the flag
+// is dropped and no pane moves, so a pane hidden in the gear while its browser was up cannot be re-toggled.
 if(m.romp==='browseClosed'&&window.__rompFeedWasOff){window.__rompFeedWasOff=false;
-  try{window.__rompPaneToggle&&window.__rompPaneToggle('feed',false);}catch(e){}}});
+  if(feedHere())try{window.__rompPaneToggle&&window.__rompPaneToggle('feed',false);}catch(e){}}});
 // The dashboard's one id (sessionStorage 'romp:wid') is minted by the HEAD script, before the parser reaches an
 // <iframe>, so no pane can connect ahead of it. It was minted here until 2026-09-09 — after the iframes — and
 // the chat pane's socket sometimes carried no wid, so a reveal aimed at this dashboard parked for good.
@@ -49181,9 +49205,12 @@ ws.onmessage=function(ev){var m;try{m=JSON.parse(ev.data);}catch(e){return;}
 if(m&&m.type==='ka'){if(m.dv&&window.__rompReload)window.__rompReload.noteDv(m.dv);}   // build drift on the shell's own keepalive (T265)
 else if(m&&m.type==='reveal'&&m.pane)reveal(m.pane);
 // the app-icon badge: setAppBadge only exists where badging works (installed apps) — everyone
-// else falls through silently, so this needs no capability gymnastics
+// else falls through silently, so this needs no capability gymnastics. The count is the feed's needs-you
+// column; with the Feed pane off in this browser (the gear's Panes section, window.__rompPaneEnabled) the
+// icon wears none: the frame still arrives (the kernel builds and counts as ever) and clears the badge here.
 else if(m&&m.type==='badge'&&'setAppBadge' in navigator){
-try{(m.n?navigator.setAppBadge(m.n):navigator.clearAppBadge())['catch'](function(e){});}catch(e){}}
+var bn=(window.__rompPaneEnabled&&!window.__rompPaneEnabled('feed'))?0:m.n;
+try{(bn?navigator.setAppBadge(bn):navigator.clearAppBadge())['catch'](function(e){});}catch(e){}}
 // the master bell toggled somewhere (this tab included) — repaint ours from the kernel's word
 else if(m&&m.type==='notifyAll'&&window.__rompNotifyAllPaint)window.__rompNotifyAllPaint(!!m.on);
 else if(m&&m.type==='notifyTurns'&&window.__rompNotifyTurnsPaint)window.__rompNotifyTurnsPaint(!!m.on);
@@ -49396,7 +49423,11 @@ function wid(){try{return sessionStorage.getItem('romp:wid')||'';}catch(e){retur
 function fail(e){try{window.__rompNotify&&window.__rompNotify('error','Could not open the session this notification was about: '+((e&&e.message)||e));}catch(err){}}
 function diag(what,data){try{window.__rompShellDiag&&window.__rompShellDiag(what,data);}catch(e){}}
 var feedReady=false,pendingCard=null,chatUp=false;   // chatUp: this page's own chat pane has reported its socket up (latched; the block above)
-function revealCard(itemId,sid){if(!feedReady){pendingCard={itemId:itemId,sid:sid};return;}
+// the Feed pane off in this browser (the gear's Panes section; window.__rompPaneEnabled, the head script's reader):
+// the card scroll has no feed to wait for (its iframe is never loaded, so its ready never comes), and the /reveal
+// land() posted before this call has already put the session in front in the chat, which is the whole landing here
+function revealCard(itemId,sid){if(window.__rompPaneEnabled&&!window.__rompPaneEnabled('feed'))return;
+if(!feedReady){pendingCard={itemId:itemId,sid:sid};return;}
 var f=document.getElementById('f-feed');
 try{f&&f.contentWindow&&f.contentWindow.postMessage({romp:'revealCard',itemId:itemId,sid:sid},'*');}catch(e){}}
 window.addEventListener('message',function(e){var m=e&&e.data;
@@ -49986,6 +50017,15 @@ def _landing():
             # shell's script count is pinned, and both must run before anything else does.
             "<script>try{if(!sessionStorage.getItem('romp:wid'))sessionStorage.setItem('romp:wid',"
             "(crypto.randomUUID?crypto.randomUUID():String(Math.random()).slice(2)));}catch(e){}"
+            # Is this pane in this browser's dashboard at all? The gear's Panes section (romp:settings.panes, per
+            # browser, settings.ts paneSet: only an explicit false hides; the pane controller's reconcile is the
+            # other reader) answered by ONE function every shell script asks at its event: the badge frame, a Log
+            # entry's click, a notification's landing, a browse ask. Read from the store on every call, never
+            # cached: the gear's save lands in the same store from the settings iframe, and the answer wanted is the
+            # one true at the event. Defined HERE, in the head, so no script runs before it exists (the reveal
+            # script lands a deep link at its own boot). A corrupt store reads as every pane shown, like reconcile.
+            "window.__rompPaneEnabled=function(k){try{var s=JSON.parse(localStorage.getItem('romp:settings')||'{}'),p=s&&s.panes;"
+            "return !(p&&typeof p==='object'&&p[k]===false);}catch(e){return true;}};"
             "if(navigator.standalone){document.documentElement.className+=' ios-standalone';"
             "var _vp=document.querySelector('meta[name=viewport]');"
             "_vp.setAttribute('content',_vp.getAttribute('content')+',viewport-fit=cover');}"
