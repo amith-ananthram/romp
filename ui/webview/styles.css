@@ -90,6 +90,9 @@ body.scheme-solarized-dark {
   --err: #c0392b;   /* unified with the awaiting/blocked red (the user 2026-06-24): one "needs you" red. API-error (--st-blocked-bg #e5484d) stays distinct. */
   --warn: #d7a23a;  /* the heads-up amber — "attention, not an error". Was referenced with fallbacks but never
                        defined (a phantom token) until 2026-08-26; mirrored in feed.css (own :root). */
+  /* the postal card's two KIND colours (T302): the pre-rewrite chip colours as text on the dark page (6.4:1 and
+     6.7:1); the light theme re-inks both (they read 2.2:1 and 2.1:1 on cream otherwise) */
+  --postal-delegate: #b08cff;  --postal-coordinate: #14b8a6;  --postal-question: var(--st-working-bg);
   /* THE romp accent — light blue (the user 2026-06-24). Use var(--accent) for accent/highlight chrome
      (selected toggles, in-progress loading dots, the Fleet pill, focus) — NOT for STATUS colors, which keep
      their own meaning (--st-working-bg yellow = working, --st-blocked-bg red, etc.). --accent-fg reads on it. */
@@ -222,6 +225,9 @@ body.theme-light {
   --hl-cmt: #67614f; --hl-title: #8C4A00; --hl-meta: #6E6455; --hl-attr: #7A5A20;   /* --hl-cmt from #6E675C (4.39:1 on a code block) to 4.86:1 */
   --box-bg: rgba(0, 0, 0, 0.03);
   --box-border: rgba(0, 0, 0, 0.12);
+  --postal-delegate: #6e3fd0;  --postal-coordinate: #0d6b64;  --postal-question: #7d5600;   /* 5.4:1, 5.3:1 and 5.5:1 on the
+                                                                                            cream page (T302); the working
+                                                                                            amber alone read 4.26:1 there */
   --err: #B02A1C;
   --accent: #C2410C; --accent-fg: #FFF8F2;
   --accent-wash: rgba(194, 65, 12, 0.10);
@@ -397,9 +403,15 @@ body.tabbar-resizing { cursor: ns-resize; user-select: none; }
    by construction; the uncoloured "(no tags)" chip lifts from --dim toward --fg, the old label's exact cue */
 .tab-group-head:hover .tab-group-chip, .tab-group-head:focus-visible .tab-group-chip { filter: brightness(1.3); }
 .tab-group-head:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-/* the section holding the active tab: unfoldable while active (no fold action on its header), so no
-   pointer cursor promising a click — it still drags to reorder the groups */
-.tab-group-head.holds-active { cursor: default; }
+/* the section holding the tab being read, open or folded: it folds like any other (its cursor promises the
+   click), and its header says whose it is by the tag's chip, accent-underlined (the chip is coloured by
+   identity inline, which a colour rule cannot reach; the underline is a property it never sets), so the
+   header that stands in for a folded-away tab is found by the same mark it wore while open. Distinct from
+   the hover lift (a fold cue) and from .snap-shown (the pane shows the section). */
+.tab-group-head.holds-active .tab-group-chip { text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: 2px; }
+/* the section whose sessions the pane is SHOWING at a glance (render.ts sets .snap-shown on its header): the
+   accent wash the picker's active row wears, on the header the chip's inline style never reaches */
+.tab-group-head.snap-shown { background: var(--accent-wash); }
 .tab-group-head.dragging { opacity: 0.45; }
 .tab-group-head.drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 /* the disclosure chevron: ▸ folded, turned down while open — the fold-caret idiom (a CSS transition on
@@ -1207,6 +1219,61 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
   animation: slash-spin 2.4s linear infinite; }
 @keyframes slash-spin { to { transform: rotate(-360deg); } }
 @media (prefers-reduced-motion: reduce) { .slash-spin { animation: none; } }
+
+/* ── @-mention autocomplete (the user 2026-09-07) ── the live sessions whose names match the "@query" at
+   the caret, floating just above the composer like the slash menu. A .ctx-menu card (the menu tokens and
+   size), one row per session: the name in its identity color, a remote host as the quiet .host-prefix
+   metadata. The highlighted row wears the menu's row wash, not the accent fill the slash menu uses: the
+   names carry their own colors and must stay readable on it. */
+.mention-pop { z-index: 120; max-height: 40vh; overflow-y: auto; min-width: 160px; }
+.mention-row { display: flex; align-items: center; gap: 7px; }
+.mention-row.sel { background: var(--menu-hover); }
+.mention-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+/* the matches the cap left out ("N more, keep typing"): the menu's sub-line dress, not a row (no wash, no pick) */
+.mention-more { padding: 4px 10px; font-size: 0.82em; opacity: 0.6; cursor: default; white-space: nowrap; }
+/* a sent message's "@name" that names a live session: the NAME, its "@" dropped, in the session's identity
+   colour (--chip-bg inline, the tab label's foreground idiom) on the awaiting chip's dark backing (the user
+   2026-09-10, who wanted the chip to look like the awaiting chip: no fill, no @). The backing, radius and
+   padding are .chip-peer-name's, declared in ONE rule with it (below, beside the status chips) so the two
+   chips cannot drift; the colour and the prose weight are this chip's own, and this rule sets no property
+   the shared one sets, so their order does not matter. No link: the title carries the session's state. */
+.mention-chip { display: inline-block; line-height: 1.35; font-weight: 600; color: var(--chip-bg, #fff); }
+
+/* A SECTION AT A GLANCE (tab-snapshot.ts, render.ts renderSnapshot): one row per session of a tab-strip
+   section, in the transcript's place. Two sizes only: the body size for the name and the now line, and
+   0.82em, the header's label size, for the heading, the flag word, the time and the note (labels match
+   labels, times match the strip's sub-lines). The heading wears the header's own dress (letter-spaced dim
+   label + the tag's swatch bar); a row is a real button with the one action hover (accent border + accent
+   wash) and the accent focus ring; the pip wears the tab's state colors by the tab's rule (the retrying
+   amber is the same status token the tab and the folded header's pip use); the name takes the session's
+   identity color inline. Tokens only, so it reads in every theme without a light override. */
+#tab-snapshot { padding: 6px 14px 14px; }
+.snap-head { display: flex; align-items: center; gap: 6px; margin: 4px 0 8px; font-size: 0.82em; font-weight: 600; letter-spacing: 0.04em; color: var(--dim); }
+.snap-swatch { flex: 0 0 auto; width: 3px; height: 12px; border-radius: 1px; background: var(--dim); }
+.snap-count { font-weight: 400; opacity: 0.7; }
+.snap-list { display: flex; flex-direction: column; gap: 2px; }
+.snap-row { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; width: 100%; min-width: 0; padding: 5px 8px; border: 1px solid transparent; border-radius: 6px;
+  background: none; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
+.snap-row:hover { border-color: var(--accent); background: var(--accent-wash); }
+.snap-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.snap-pip { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: transparent; }
+.snap-pip.working { background: var(--st-working-bg); }
+.snap-pip.blocked { background: var(--st-blocked-bg); }
+.snap-pip.awaiting { background: var(--st-awaiting-bg); }
+.snap-pip.retrying { background: var(--st-retrying-bg); }
+.snap-pip.compacting { background: var(--st-compacting-bg); }
+.snap-pip.waiting { background: var(--st-awaitbg-bg); }
+.snap-pip.unknown { box-shadow: inset 0 0 0 1.5px var(--dim); }
+.snap-sess { flex: 0 0 auto; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.snap-row.closed .snap-sess { text-decoration: line-through; opacity: 0.6; }
+.snap-row.loading .snap-sess { opacity: 0.6; }
+.snap-flag { flex: 0 0 auto; padding: 0 6px; border: 1px solid var(--box-border); border-radius: var(--radius-pill); font-size: 0.82em; color: var(--dim); }
+.snap-flag.needs { border-color: transparent; background: var(--st-blocked-bg); color: var(--st-blocked-fg); }
+.snap-now { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); }
+/* the row's second line: the session's own working note (render.ts fillSnapshotRow), the header's 0.82em in
+   the dim token a step quieter, one line, indented past the pip and its gap so it sits under the name */
+.snap-note { flex: 1 0 100%; min-width: 0; padding-left: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.82em; color: var(--dim); opacity: 0.7; }
+.snap-when { flex: 0 0 auto; font-size: 0.82em; font-variant-numeric: tabular-nums; color: var(--dim); }
 /* The two buttons are the SAME rounded square, exactly as tall as the one-line message box beside them
    (the user 2026-07-30, round 2: the first cut's circles sat taller than the resting box, and a rounded
    rectangle reads better than a full circle). The size is the input's own min-height calc written
@@ -1300,8 +1367,11 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 /* the awaiting chip's peer NAME wears the identity colour itself (the user 2026-08-26, round two —
    the dot retired). The backing is ~85% black: opaque enough that any colour reads on it regardless
    of the chip hue behind (their green-on-green case), translucent enough to keep the chip's flavor.
-   #fff default = the no-identity (cross-host) name stays legible on the dark backing. */
-.chip-peer-name { background: rgba(0, 0, 0, 0.85); color: #fff; border-radius: 7px; padding: 0 5px; margin-left: 1px; }
+   #fff default = the no-identity (cross-host) name stays legible on the dark backing. The backing, radius
+   and padding are ONE rule with the transcript's .mention-chip (the user 2026-09-10, who wanted a typed
+   @name to wear this chip's look): the two cannot drift; each sets its own colour and spacing. */
+.chip-peer-name, .mention-chip { background: rgba(0, 0, 0, 0.85); border-radius: 7px; padding: 0 5px; }
+.chip-peer-name { color: #fff; margin-left: 1px; }
 .chip-awaitingBg { background: var(--st-awaitbg-bg); color: var(--st-awaitbg-fg); }
 /* the Awaiting chip is a BUTTON (slice 2, 2026-09-05): click opens the awaiting box below. The UA
    button chrome is reset so it wears the chip exactly (.chip supplies size, weight, padding, radius);
@@ -1879,11 +1949,14 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 .turn-queued { display: flex; flex-direction: column; align-items: flex-end; padding: 6px 0 10px; gap: 5px; }
 .queued-head { display: inline-flex; align-items: center; gap: 5px; font-size: 0.82em; color: var(--dim); letter-spacing: 0.02em; }
 .queued-head .queued-icon { color: var(--accent); display: flex; }   /* wireframe hourglass in the accent blue */
-.queued-bubble {
+.queued-bubble, .notice.notice-slim.queued-bubble {   /* …and a SENT postal card whose message has not landed yet wears the
+                                                         same dress by the same class (T302): one provisional vocabulary */
   max-width: 72%; overflow-wrap: anywhere; display: flow-root;
   background: color-mix(in srgb, var(--you) 10%, transparent); border: 1px dashed color-mix(in srgb, var(--you) 65%, transparent);
   border-radius: 14px; padding: 7px 12px; color: var(--fg); opacity: 0.85;
 }
+.notice.notice-slim.queued-bubble { max-width: none; display: block; }   /* the notice keeps its row width and flex head; only the
+                                                                            dress is the bubble's (same specificity as the shared rule, later) */
 /* A CANCELABLE queued bubble carries an explicit ✕ (the user 2026-07-08 — the old whole-bubble click was
    undiscoverable and re-render-fragile). The bubble itself is no longer clickable; only the ✕ acts. It sits
    in the top-right corner (the bubble reserves padding for it) — dim until the bubble is hovered, red on
@@ -2186,9 +2259,10 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 
 /* ---------- postal cards (romp peer mail) + teammate messages ---------- */
 /* Both are THE notice since 2026-09-08 (renderPostalService / renderTeammate): a peer's mail wears its
-   identity colour on the rail + dot + the session chip in the SOURCE slot and a 6% wash of it (.notice-peer);
-   the intent and delivery state read as meta text; a teammate message is the plain notice under the
-   "teammate <name>" label (the dashed frame said what the label now says). One keyed fold each. */
+   identity colour on the rail + dot and on the peer's chip in the SOURCE slot, beside this session's own chip in
+   ITS colour (T302, the user 2026-09-10: no wash of either colour — a wash read as this session's); the kind is
+   coloured text and the delivery state an icon at the head's right edge; a teammate message is the plain notice
+   under the "teammate <name>" label (the dashed frame said what the label now says). One keyed fold each. */
 .dot.mail { background: var(--peer-bg, var(--dim)); border: none; }
 /* a session-name chip that navigates on click (sender/recipient name) */
 .chip-nav { cursor: pointer; }
@@ -2294,8 +2368,8 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 .notice-sev-needs > .notice:not(.notice-slim), .notice.notice-sev-needs:not(.notice-slim) {
   box-shadow: inset 3px 0 0 var(--st-awaiting-bg); }
 /* a peer's mail: a 6% wash of the peer's identity colour (the rail/dot take it inline) */
-.notice-peer > .notice:not(.notice-slim), .notice.notice-peer:not(.notice-slim) {
-  background: color-mix(in srgb, var(--notice-rail, transparent) 6%, var(--box-bg)); }
+/* (the peer-colour wash a postal card once wore is gone — T302, the user 2026-09-10: it read as THIS session's
+   colour. The two ends carry the colours now: the peer's chip and this session's chip in the head.) */
 .turn-notice { padding-top: 6px; padding-bottom: 6px; }
 .turn-notice > .dot, .turn-notice > .time-marker { top: 10px; }              /* slim: on the head line */
 .turn-notice.notice-boxed > .dot, .turn-notice.notice-boxed > .time-marker { top: 18px; }   /* boxed: past the border + padding */
@@ -2345,18 +2419,44 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    become "q…"). Scoped to the postal card: an API-error head carries a sentence-long meta and a compact notice-group
    head carries a whole gist there, and those must still yield to the actions beside them on a narrow pane. The head is
    the size container: on a phone-width one (under 360px) even the short words do not fit beside the gist's floor, and
-   there the meta yields again, to a floor of its own, inside the card instead of running out of it. */
+   there the GIST yields further, to a smaller floor, and the kind word stays whole (T302: the kind never truncates). */
 .turn-postal-service .notice-head { container-type: inline-size; }
 .turn-postal-service .notice-meta { flex: 0 0 auto; }
 @container (max-width: 360px) {
-  .turn-postal-service .notice-meta { flex: 0 1 auto; min-width: min(100%, 6ch); }
+  .turn-postal-service .notice-gist { min-width: min(100%, 4ch); }
 }
-/* a head-only postal line hides nothing behind a fold, so it may not hide anything behind an ellipsis either: a
-   one-liner that outgrows the head wraps, an unbroken token (a bare link) included (T294) */
-.turn-postal-service .notice-slim .notice-gist { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
+/* T302 (the user 2026-09-10): the interaction KIND is coloured TEXT in the meta slot — a chip reads as a tag now — in
+   the colours the old chips wore: delegation violet, coordination teal, question the working amber. */
+.postal-kind { font-weight: 600; }
+.postal-kind-delegate { color: var(--postal-delegate, #b08cff); }
+.postal-kind-coordinate { color: var(--postal-coordinate, #14b8a6); }
+.postal-kind-question { color: var(--postal-question, var(--st-working-bg)); }
+/* BOTH ENDS of a postal card in the head, each in its session's identity colour (the peer's chip as before, and this
+   session's own chip after it); a narrow head collapses this session's chip to its coloured dot, so both colours
+   still show where the words would not fit */
+.notice-src-ends { display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap; }
+@container (max-width: 520px) {
+  .turn-postal-service .notice-src-self { width: 10px; height: 10px; padding: 0; border-radius: 50%; align-self: center; overflow: hidden; }
+  .turn-postal-service .notice-src-self .notice-src-name { display: none; }
+}
+/* the DELIVERY STATE icon at the head's right edge (postal-state.ts for the map): dim for sent and delivered, the
+   accent for read, the heads-up amber for parked, the blocked red for bounced */
+.postal-delivery { flex: 0 0 auto; margin-left: auto; display: inline-flex; align-self: center; color: var(--dim); }
+.postal-delivery-read { color: var(--accent); }
+.postal-delivery-parked { color: var(--warn); }   /* the heads-up amber: waiting, not an error */
+.postal-delivery-bounced { color: var(--st-blocked-bg); }
+/* a postal card with NOTHING TO FOLD hides nothing behind a fold, so it may not hide anything behind an ellipsis
+   either: a one-liner that outgrows the head wraps, an unbroken token (a bare link) included (T294). Keyed on the
+   fold, not on slimness (T302): an incoming one-liner is boxed now and must wrap the same way. */
+.turn-postal-service .notice:not(.notice-collapsible) .notice-gist { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
 /* and its glyph sits on the FIRST line of the wrapped head (the centred glyph of a one-line head drifts to the
    middle of a three-line block otherwise); 4px is the centred offset within the head's own line */
-.turn-postal-service .notice-slim .notice-glyph { align-self: flex-start; margin-top: 4px; }
+.turn-postal-service .notice:not(.notice-collapsible) .notice-glyph { align-self: flex-start; margin-top: 4px; }
+/* …and so does the delivery icon at the right edge: on the first line, not centred over the wrapped block */
+.turn-postal-service .notice:not(.notice-collapsible) .postal-delivery { align-self: flex-start; margin-top: 4px; }
+/* a sent card in the provisional dress wears the bubble's border + padding: its rail dot and time marker sit where a
+   boxed card's do (T302 review) */
+.turn-postal-service.postal-provisional > .dot, .turn-postal-service.postal-provisional > .time-marker { top: 18px; }
 .notice-acts { flex: 0 0 auto; margin-left: auto; display: inline-flex; gap: 4px; align-self: center; }
 /* word buttons on the button vocabulary: the sm box, the T141 rest, pattern-A hover, the press cue */
 .notice-act { font-family: var(--sans); font-size: var(--btn-fs-sm); line-height: 1.4; padding: var(--btn-pad-sm);

@@ -94,6 +94,7 @@ CENSUS = {
     "_effort_changes": ("sig", "states"),
     "_effort_color": ("pure", "over the effort string and the colormap name"),
     "_effort_tone": ("pure", "over the effort string"),
+    "_feed_needs_input_of": ("sig", "needs", "the last feed build's needs-you set, as the boolean for this session (None and False share a value)"),
     "_fold_tasks": ("memo", "pure over the parse's turns (transcript, live); the per-turn memo is keyed on each turn's atoms and fingerprint"),
     "_genuine_queued": ("pure", "over a queued text"),
     "_git_branch": ("sig", "cwd"),
@@ -170,6 +171,7 @@ CENSUS = {
 # Attribute calls whose base is a module-level object or one of the backend locals build_session binds.
 DOTTED = {
     "Sessions.backend_for": ("sig", "reg", "ownership: the SDK backend owns a sid whose reg exists"),
+    "Sessions.working_note": ("sig", "note", "the working-note file (working/<sid>) by identity"),
     "jd.episode_rows": ("sig", "episodes"),
     "jd.episode_settles": ("sig", "episodes"),
     "jd.load_archive": ("sig", "archive"),
@@ -731,6 +733,35 @@ class Differential(_World):
         self.assertEqual(self.moved(d, e), ("cleared",))
         os.environ["ROMP_HOST_NAME"] = "otherhost"
         self.assertEqual(self.moved(e, self.sig()), ("host",))
+
+    def test_the_working_note_misses_under_note_and_its_clear_restores_the_signature(self):
+        # the ledger carries the session's postal working note (the section-at-a-glance row's second line); a
+        # note write touches no transcript, states file or store, so it is a component of its own, by identity
+        a = self.sig()
+        km._set_working_note(SID, "editing the notes-api tests")
+        b = self.sig()
+        self.assertEqual(self.moved(a, b), ("note",))
+        self.assertEqual(self.sig(), b, "byte-stable while the note stands: no rebuild per push")
+        km._set_working_note(SID, "")
+        self.assertEqual(self.sig(), a, "the clear (the kernel's idle-and-done lift, or the session's own) restores it")
+
+    def test_the_feed_verdict_misses_under_needs_only_as_a_verdict_on_this_session(self):
+        # the ledger carries the feed's per-session needs-you (needsInput); the set behind it is None until the
+        # first feed build since start, and a push builds the chat sessions before the feed, so the raw tri-state would
+        # give every tab a None on the first push and a False on the next: a whole-strip rebuild for a value the
+        # row reads the same. Only True is a verdict.
+        saved = km._feed_needs_input[0]
+        try:
+            km._feed_needs_input[0] = None
+            a = self.sig()
+            km._feed_needs_input[0] = frozenset()
+            self.assertEqual(self.sig(), a, "the first feed build, no card of this session under needs-you: nothing the row shows changed")
+            km._feed_needs_input[0] = frozenset([PEER])
+            self.assertEqual(self.sig(), a, "another session's card: not this tab's")
+            km._feed_needs_input[0] = frozenset([SID])
+            self.assertEqual(self.moved(a, self.sig()), ("needs",), "a card of this session under needs-you is the verdict that rebuilds")
+        finally:
+            km._feed_needs_input[0] = saved
 
     def test_the_billing_readers_move_acct(self):
         a = self.sig()

@@ -44,10 +44,10 @@ test("render.ts: every mover of #content is a writeScroll — scrollBy and scrol
   // outside #content (a comment popover's reply, found through userContentTarget's document fallback) scrolls its own
   // container the browser's way, and the #content arm is taken first
   assert.match(RENDER, /if \(cont && cont\.contains\(target\)\) scrollElInto\(cont, target, "start", "section-link"\);\s*\n\s*else target\.scrollIntoView\(\{ block: "start" \}\);/, "the section link");
-  // the scrollIntoView calls that remain are on OTHER scrollers (the tab strip, picker rows, the slash popup, the awaiting
-  // box, and the section link's else arm above, which the #content test keeps off the transcript)
+  // the scrollIntoView calls that remain are on OTHER scrollers (the tab strip, picker rows, the slash popup, the @-mention
+  // card, the awaiting box, and the section link's else arm above, which the #content test keeps off the transcript)
   const rest = RENDER.split("\n").filter((l) => /scrollIntoView\(/.test(l));
-  assert.equal(rest.length, 5, "five scrollIntoView calls remain, none on a #content child: " + rest.map((l) => l.trim().slice(0, 60)).join(" | "));
+  assert.equal(rest.length, 6, "six scrollIntoView calls remain, none on a #content child: " + rest.map((l) => l.trim().slice(0, 60)).join(" | "));
   for (const l of rest) if (!/else target\.scrollIntoView/.test(l)) assert.doesNotMatch(l, /target|el0|realign/, l);
 });
 

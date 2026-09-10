@@ -32,10 +32,12 @@ completed); the feed just paints columns. (Reflected in `docs/judges.md`.)
   manager's port (29855), and the front ends and tailscale serve attach unchanged.
 - **The UI is served by the kernel.** The front-end (the three panes) is `ui/`. A
   browser hits the kernel's port and gets it.
-- **The login service starts the supervisor**; `romp up` instead runs
-  `romp-manager` in the foreground (like `jupyter lab`), for machines without the
-  service or for watching it work. `romp refresh` restarts the kernel(s),
-  `romp status` reports them. The kernel binds loopback only; tailnet/phone reach is
+- **The login service starts the supervisor**; `romp up` starts that service,
+  or, on a machine without one, runs `romp-manager` in the foreground (like
+  `jupyter lab`; `romp up --foreground` forces that for watching it work).
+  `romp refresh` restarts the kernel(s), `romp down` stops them through the
+  service and keeps them stopped until `romp up`, `romp status` reports them.
+  The kernel binds loopback only; tailnet/phone reach is
   `tailscale serve` proxying to `127.0.0.1:29855` (there is no `0.0.0.0` opt-in
   door; the tailscale proxy carries the phone path). The UI itself is just a URL
   the kernel serves.
@@ -91,11 +93,13 @@ completed); the feed just paints columns. (Reflected in `docs/judges.md`.)
   for a reload or a tab the browser discarded; a `resent: true` copy of the
   `return` row means the kept socket proved dead and the row was re-filed onto
   the redial.
-  A redial declares itself (`reconnect=1` on the `/ws` URL); the kernel then
-  sends the active tab in full and lists every other session as a `skeleton` on
-  the tab strip with one small `status` frame each, and the chat pane loads a
-  skeleton on click or one at a time in idle, never while the tab is hidden; one
-  `skeleton` client-diag row (count, active) records the regime.
+  A redial declares itself (`reconnect=1` on the `/ws` URL) once the bundle's
+  ready has left on a socket; before that, or with the ready still queued, it
+  dials as a fresh page. The kernel then sends the active tab in full and lists
+  every other session as a `skeleton` on the tab strip with one small `status`
+  frame each, and the chat pane loads a skeleton on click or one at a time in
+  idle, never while the tab is hidden; one `skeleton` client-diag row (count,
+  active) records the regime.
 - **The Outline pane's ages run on the kernel's clock.** Its timestamps are the
   kernel's, so the pane never reads the browser's clock against them: it anchors
   on the frame's `now` paired with the moment that frame arrived from the wire

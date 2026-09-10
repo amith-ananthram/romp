@@ -20,7 +20,7 @@ test("the composer intercepts /mcp before it can reach the CLI", () => {
   assert.match(RENDER, /if \(\/\^\\\/mcp\\s\*\$\/\.test\(text\)\) \{/);
   assert.match(RENDER, /openMcpPanel\(sid\);/);
   // the box clears like any consumed command, and the draft with it
-  assert.match(RENDER, /ta\.value = ""; composerManualH = null; ta\.style\.height = "";\s*\n\s*drafts\.delete\(sid\); persistDrafts\(\);\s*\n\s*openMcpPanel\(sid\);/);
+  assert.match(RENDER, /clearBox\(\);\s*\n\s*drafts\.delete\(sid\); persistDrafts\(\);\s*\n\s*openMcpPanel\(sid\);/);   // clearBox: the composer's one clear path, so the menus see the box go empty
 });
 
 test("the panel reads the SDK's designed control requests through the kernel", () => {

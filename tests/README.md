@@ -124,8 +124,15 @@ stderr: `[tests] not removed at run end: <path>`, instead of the run ending
 green over it. The same conftest gives git no global or system config
 (`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM`) and a synthetic identity through
 `GIT_AUTHOR_*` / `GIT_COMMITTER_*`; bats suites that run git get the same from
-`load git-hermetic` + `git_hermetic` in `setup`. A fixture must not depend on
-the developer's git configuration (CI has none), and the env identity outranks
+`load git-hermetic` + `git_hermetic` in `setup`, with a global config file of
+the floor's own in place of none. That floor also forbids background git work:
+the five no-background keys of `tests/git_fixture.py` (below) ride the
+environment as `GIT_CONFIG_COUNT` pairs, inherited by every git a test, a script
+under test or a hook runs, and sit in the floor's global file, which receive-pack
+in a bare fixture remote reads (a push over a local path starts it without the
+pairs); so no detached `git maintenance` writes into a fixture repo while its
+teardown removes it. A fixture must not depend on the developer's git
+configuration (CI has none), and the env identity outranks
 `git config user.*` and `-c user.*` — a test that must pin a particular author
 exports its own `GIT_AUTHOR_*` after the floor. `tests/test_tempdir_hygiene.py`
 and `tests/git-hermetic.bats` pin all of it.

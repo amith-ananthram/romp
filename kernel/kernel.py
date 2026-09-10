@@ -183,7 +183,7 @@ def _process_stats():
 _CHAT_SIG_LABELS = ("transcript", "states", "store", "hold", "archive", "episodes", "reg", "gone", "tasks", "cut",
                     "live", "row", "clock", "backend", "ops", "limit", "retry", "bg", "watch", "stamp", "anchors",
                     "downtime", "names", "flags", "ncards", "colormap", "acct", "cleared", "host",
-                    "cwd", "claudemd", "fork",
+                    "cwd", "claudemd", "fork", "note", "needs",
                     "taskout", "pathlink", "postal")
 _CHAT_SIG_DEPS = ("taskout", "pathlink", "postal")
 
@@ -1137,7 +1137,7 @@ def _version_info():
             "commentEffort": jd._state_str("comment-effort", "session"),
             "commentFast": jd._state_str("comment-fast", "session"),
             "tmuxBackend": jd._state_str("tmux-backend", "off"),   # T288: "on" offers Claude Code (tmux) in the picker and the gear
-            "judgeFast": jd._state_str("judge-fast", "off"),   # RAW "on" | "off": Fast judging, the fast-mode opt-in on Opus judge calls
+            "judgeFast": jd._state_str("judge-fast", "off"),   # RAW "on" | "off": the judges' Fast mode box, the fast-mode opt-in on Opus judge calls
             # One dict with every kernel-side setting, lifted by a PEER kernel's /version poll onto its
             # /tunnels row so its gear can mark controls where machines disagree (the user 2026-08-14).
             # The top-level fields above stay: this tab's own gear and older kernels read those.
@@ -13427,7 +13427,7 @@ def _thread_messages(tsid, cut_uuid, floor_t=0):
     # romp's own injections are not the user's words: anything wearing the `<!-- romp-` marker
     # (nudges, notices) plus the boot reconcile's continuation text (marker-less by design) must
     # not render as a 'you' bubble in the popover
-    boot_nudge = getattr(sys.modules.get("romp_sdk_backend"), "BOOT_RESUME_NUDGE", None)
+    is_nudge = getattr(sys.modules.get("romp_sdk_backend"), "is_resume_nudge", None) or (lambda t: False)
     while u is not None and hops < 500000:
         if u == cut_uuid:
             break                                   # copied history starts here — the parent's, not the thread's
@@ -13448,7 +13448,7 @@ def _thread_messages(tsid, cut_uuid, floor_t=0):
                                                     # with one — the event model's own anchored test; prose that merely
                                                     # quotes a tag is the user's message): the CLI's bookkeeping, not
                                                     # something the user SAID — it must not owe a reply (T237 review)
-            if txt and txt != boot_nudge and not (r.get("type") == "user" and "<!-- romp-" in txt):
+            if txt and not is_nudge(txt) and not (r.get("type") == "user" and "<!-- romp-" in txt):
                 rows.append({"who": "you" if r.get("type") == "user" else "agent",
                              "text": txt[:4000],
                              "t": int(em.parse_z(r.get("timestamp")) or 0)})
@@ -18652,6 +18652,12 @@ def _remote_kernel_up(host, port):
         return False
 
 
+def _remote_down_detail(host):
+    """The bare boot's refusal for a host stopped by `romp down`: the one declined boot whose reason
+    attach_remote parks on the row even when the host already holds a token (see there)."""
+    return "romp is stopped on %s by romp down; not starting it (romp up there starts it)" % host
+
+
 def _start_remote_kernel(host):
     """Start the remote kernel: nohup romp-serve, found via the remote's OWN authority first — the
     repo-root file its kernel persists at boot (_persist_repo_root; ROMP_REPO_ROOT on the target
@@ -18660,7 +18666,10 @@ def _start_remote_kernel(host):
     ssh shell often lacks the user's PATH additions), then conventional clone locations. romp-serve
     itself picks the right python (its pick_python) and self-builds stale UI bundles, so a plain
     clone is enough. Returns (started, detail) — detail names everything the probe tried when romp
-    isn't installed there. KEEP the source order IN SYNC with _discover_remote_clone."""
+    isn't installed there. A host stopped by `romp down` (its down-by-romp marker in the state root) is
+    NOT booted: a bare kernel there would serve under a marker that says down and no manager would own
+    it; (False, why) names `romp up` on that host as the way to start it.
+    KEEP the source order IN SYNC with _discover_remote_clone."""
     cmd = ('S=""; SR="${ROMP_REPO_ROOT:-$(cat "${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}/repo-root" 2>/dev/null)}"; '
            'if [ -n "$SR" ] && [ -x "$SR/bin/romp-serve" ]; then S="$SR/bin/romp-serve"; fi; '
            'if [ -z "$S" ]; then S="$(command -v romp-serve || bash -lc "command -v romp-serve" 2>/dev/null || true)"; fi; '
@@ -18668,12 +18677,15 @@ def _start_remote_kernel(host):
            'if [ -x "$d/bin/romp-serve" ]; then S="$d/bin/romp-serve"; break; fi; done; fi; '
            'if [ -z "$S" ]; then echo NOROMP; exit 0; fi; '
            'LOGDIR="${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}"; mkdir -p "$LOGDIR"; '
+           'if [ -f "$LOGDIR/down-by-romp" ]; then echo DOWN; exit 0; fi; '
            'nohup "$S" >>"$LOGDIR/kernel.log" 2>&1 </dev/null & echo "STARTED:$S"')
     try:
         r = subprocess.run([SSH_BIN] + _SSH_OPTS + ["--", host, cmd], capture_output=True, text=True, timeout=25)
         out = (r.stdout or "").strip()
         if "STARTED" in out:
             return True, out.partition(":")[2]
+        if out == "DOWN":
+            return False, _remote_down_detail(host)
         if "NOROMP" in out:
             return False, ("romp not installed on %s — no repo-root state file (a kernel that has "
                            "run there writes one; ROMP_REPO_ROOT on that machine also works), no "
@@ -19206,8 +19218,14 @@ def attach_remote(host, kernel_port=None):
                 time.sleep(1.0)
             if not token:
                 token = _fetch_remote_token(host)  # the fresh kernel wrote its serve-token on startup
-        elif not token:
-            boot_detail = detail                   # applied below, AFTER _spawn_tunnel resets detail
+        elif not token or detail == _remote_down_detail(host):
+            # applied below, AFTER _spawn_tunnel resets detail. No token: the host never ran romp, and
+            # the detail is its next step, as before. The `romp down` refusal rides the row even when a
+            # token came back: a host attached before it was stopped still has its serve-token file,
+            # and the supervisor's generic no-kernel hint would otherwise stand where the stop and the
+            # way out belong. Every other declined boot on a host with a token keeps the old rule: the
+            # tunnel's own status speaks for it.
+            boot_detail = detail
     with _remotes_lock:
         r = _remotes.get(host)
         if r is None:                              # detached mid-fetch
@@ -19230,8 +19248,8 @@ def attach_remote(host, kernel_port=None):
             except Exception:
                 pass
             _spawn_tunnel(r)
-        if boot_detail and not token:
-            r["detail"] = boot_detail              # the popover's next step (e.g. "run bin/romp-host-setup")
+        if boot_detail:
+            r["detail"] = boot_detail              # the popover's next step ("run bin/romp-host-setup", the romp down refusal)
         pub = _remote_public(r)
     _remotes_save()
     _tunnel_wake.set()
@@ -21128,6 +21146,12 @@ def _update_remote(host, head=None):
         # which spawns a SUPERVISED kernel — UPGRADING the orphan to properly managed. ensure needs node; if it
         # can't run (or the port never returns) we relaunch romp-serve bare as a last resort so the host isn't
         # left dead. The port poll confirms whichever path brought it back.
+        # A host stopped by `romp down` (its down-by-romp marker in the state root, and no manager owning
+        # the kernel) is left stopped: ensure refuses on the marker, so the immediate path below would boot
+        # the bare fallback while `romp status` there still said down. The code is synced and nothing is
+        # killed or started; SYNCED:<sha>:DOWN says so, and `romp up` there boots the new code. The OWNED
+        # check comes first: a manager running beside a marker was started some way that did not clear
+        # it, and its kernel gets the normal immediate restart.
         'if [ ! -x "$R/bin/romp-serve" ]; then echo "NOLAUNCH:$NEW$K"; exit 0; fi; '
         # NEVER AN ANONYMOUS SIGTERM (T238, the T121 rule): a restart-audit row lands BEFORE whichever
         # restart happens, so the far kernel's cut row carries WHO and WHY (the p2p update, from this
@@ -21144,14 +21168,24 @@ def _update_remote(host, head=None):
         # or a bare kernel beside a crash-looping managed one, answers 202 and restarts nothing, which
         # would have turned this into a silent never-restart (review find). SYNCED:<sha>:MANAGED = the
         # manager bounced it; SYNCED:<sha>:FALLBACK = the kill path below ran (no owning manager
-        # reachable — node absent, no manager, or the polled kernel is bare).
-        'python3 -c "import json,time;print(json.dumps({\'t\':int(time.time()),\'action\':\'p2p-update\','
-        '\'reason\':\'from %s to %s\'}))" >>"$LOGDIR/restart-audit.jsonl" 2>/dev/null || true; '
+        # reachable: node absent, no manager, or the polled kernel is bare). A host stopped by `romp
+        # down` (its marker, below) is the exception: with no owning manager its branch exits without a
+        # restart, so a row written here would name a restart nobody made. The row is therefore written
+        # before the owning-manager check when the marker is absent, and inside the owned branch when
+        # it is present: a manager running beside a marker still gets its restart attributed, right
+        # before it is asked. One writer function for both sites.
+        'arow() { python3 -c "import json,time;print(json.dumps({\'t\':int(time.time()),\'action\':\'p2p-update\','
+        '\'reason\':\'from %s to %s\'}))" >>"$LOGDIR/restart-audit.jsonl" 2>/dev/null || true; }; '
+        '[ -f "$LOGDIR/down-by-romp" ] || arow; '
         'OWNED=0; if command -v node >/dev/null 2>&1 && [ -x "$R/bin/romp-manager" ]; then '
         'OWNED="$("$R/bin/romp-manager" status 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); '
         'print(1 if any(int(k.get(\'port\') or 0)==%d for k in (d.get(\'kernels\') or [])) else 0)" 2>/dev/null || echo 0)"; fi; '
         'if [ "$OWNED" = 1 ]; then '
+        # a manager owning the kernel beside a `romp down` marker (see above): its restart is attributed too
+        '[ ! -f "$LOGDIR/down-by-romp" ] || arow; '
         'if "$R/bin/romp-manager" restart-all >>"$LOGDIR/update.log" 2>&1; then echo "SYNCED:$NEW:MANAGED$K"; exit 0; fi; fi; '
+        # stopped on purpose (see above): synced, nothing restarted
+        'if [ -f "$LOGDIR/down-by-romp" ]; then echo "SYNCED:$NEW:DOWN$K"; exit 0; fi; '
         # LAST RESORT (no owning manager answering on this host): the immediate path below — audit row,
         # kill, then `ensure` upgrades the host to a supervised kernel.
         'python3 -c "import json,time;print(json.dumps({\'t\':int(time.time()),\'action\':\'p2p-update\','
@@ -21231,6 +21265,10 @@ def _update_remote(host, head=None):
             if mode == "FALLBACK":
                 return True, ("synced to %s + restarting now (no manager owns that kernel there — an "
                               "immediate restart)" % short)
+            if mode == "DOWN":
+                _unexpect()                   # nothing restarts: the host stays stopped on purpose
+                return True, ("synced to %s; %s is stopped by romp down, so nothing was restarted there "
+                              "(romp up on it starts the new code)" % (short, host))
             return True, "synced to %s + restarting" % short
         _unexpect()                       # nothing restarted: REFMISMATCH / DIVERGED / STATERR / DIRTYNOW / RESETFAIL / NOLAUNCH / error
         if tag == "REFMISMATCH":
@@ -21497,7 +21535,8 @@ def _restart_remote_kernel(host):
     to push but the process still has to come back on the new build of ITS own code. Same shape as
     _update_remote's step 3 (manager `ensure` so the restart stays supervised, the `romp-kern[e]l`
     self-match guard so pkill can't kill the apply shell, setsid so an ssh drop can't leave the host with
-    no kernel at all), minus every git step. Returns (ok, detail)."""
+    no kernel at all), minus every git step. Returns (ok, detail); a host stopped by `romp down` is
+    (False, why), since the restart asked for did not run."""
     with _remotes_lock:
         r = dict(_remotes.get(host) or {})
     if r.get("checkin_peer"):
@@ -21509,6 +21548,8 @@ def _restart_remote_kernel(host):
     apply_cmd = (
         'LOGDIR="${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}"; mkdir -p "$LOGDIR"; R=%s; '
         'if [ ! -x "$R/bin/romp-serve" ]; then echo NOLAUNCH; exit 0; fi; '
+        # a host stopped by `romp down` stays stopped: no audit row, no kill, no boot
+        'if [ -f "$LOGDIR/down-by-romp" ]; then echo DOWN; exit 0; fi; '
         # never an anonymous SIGTERM (T238): the far kernel's cut row names this explicit restart
         'python3 -c "import json,time;print(json.dumps({\'t\':int(time.time()),\'action\':\'remote-restart\','
         '\'reason\':\'requested from %s\'}))" >>"$LOGDIR/restart-audit.jsonl" 2>/dev/null || true; '
@@ -21542,6 +21583,8 @@ def _restart_remote_kernel(host):
             rr.pop("restartExpected", None)
     if out == "NOLAUNCH":
         return False, "found no romp/romp-serve launcher to restart the kernel"
+    if out == "DOWN":
+        return False, "%s is stopped by romp down; not restarting it (romp up there starts it)" % host
     return False, (_ssh_err(a.stderr) or out or "remote restart failed").strip()[:180]
 
 
@@ -21920,6 +21963,35 @@ def _mark_boot(kind):
         pass
 
 
+# ── going down (`romp down`) ─────────────────────────────────────────────────────
+# `romp down` stops this kernel through its supervisor (the login service, or the manager's /stop
+# when nothing supervises it), and asks the kernel to QUIESCE first via POST /down: hold new turn
+# starts, refuse new session creates, and wait a bounded time for the turns in flight to reach a
+# turn boundary, so the SIGTERM that follows cuts as little as possible. The kernel never exits
+# from that route: under the manager a kernel exit is a crash to respawn, so the stop has to come
+# top-down through the supervisor, and the route only makes the moment quiet. What the stop then
+# cuts resumes at the next start exactly as after `romp refresh` (the boot reconcile reads the
+# 'working' state tail, never anything written here).
+DOWN_WAIT_DEFAULT_S = 5.0     # the CLI's default `--wait`: a turn boundary in the next few seconds is caught
+DOWN_WAIT_MAX_S = 600.0       # a cap on the request, so a typo cannot hold a handler thread for an hour
+DOWN_HOLD_GRACE_S = 30.0      # the hold outlives the wait by this much: the supervisor stop lands on a
+#                               still-quiet kernel, and if no stop comes the lease lapses on its own
+# The refusal both create doors give. Its reader can be an AGENT (`romp new` inside a session prints
+# a 4xx body's error verbatim), and an agent told to run `romp up` would do so and undo a stop the
+# user made on purpose. So it states the fact and hands over no command: the person who stopped the
+# kernel knows how to start it.
+GOING_DOWN_REFUSAL = "the kernel is being stopped on purpose; a new session cannot start right now"
+
+
+def _going_down():
+    """True while POST /down's quiesce is in force. Reads the backend GLOBAL, never _sdk(): the
+    route must not construct a backend just to ask whether one is quiescing (the SIGTERM path's
+    rule). Both session-create doors (POST /new, the WS createSession op) refuse on this: a session
+    born now would die with the kernel seconds later, with the create read as a success."""
+    be = _sdk_backend
+    return bool(be) and hasattr(be, "quiescing") and be.quiescing()
+
+
 # The kernel's own rows ABOUT an exit (_audit_unrequested_signal, _audit_parent_gone): a verdict a previous
 # incarnation filed on itself, never a request for the next one's exit. _recent_restart_audit skips them.
 EXIT_VERDICT_ACTIONS = ("signal", "parent-gone")
@@ -21927,8 +21999,8 @@ EXIT_VERDICT_ACTIONS = ("signal", "parent-gone")
 
 def _audit_reason_text(rec):
     """The cut row's `reason` for an audit row (or "" for none): action, plus its reason when it has one.
-    A `manager-sigterm` note answers with its `trigger` (`restart`, `restart-all`, `refresh`, `stop`)
-    when it carries one, its `reason` otherwise, as _recent_restart_audit's walk reads it."""
+    A `manager-sigterm` note answers with its `trigger` (`restart`, `restart-all`, `refresh`, `cli-down`,
+    `stop`) when it carries one, its `reason` otherwise, as _recent_restart_audit's walk reads it."""
     if not isinstance(rec, dict):
         return ""
     action = str(rec.get("action") or "")
@@ -21969,8 +22041,8 @@ def _recent_restart_audit(window=90, now=None, started=None):
     """The restart-audit ROW (dict) that explains a SIGTERM arriving now, or None when there is none.
     The cut row joins it (its reason text, _audit_reason_text) and CONSUMES it (`auditT`, the row's t),
     so the same row never names a later cut too (_consumed_audit_t). Joins the cut row to WHO asked:
-    a deploy refresh, the kernel's self-update, the rail button. The walk is newest-first over the last
-    two hundred rows, within `window` seconds of now, with these rules:
+    a deploy refresh, the kernel's self-update, the rail button, a `romp down`. The walk is newest-first
+    over the last two hundred rows, within `window` seconds of now, with these rules:
       - a row whose action requested no restart (_NO_RESTART_ACTIONS: an in-place converge, a bus bounce,
         a session's own end-on-idle) is walked past wherever it sits: it writes an audit row but cuts no
         kernel, and reading only the last row named a real cut after it as the skip (T240 nit). A deep
@@ -22018,13 +22090,17 @@ def _recent_restart_audit(window=90, now=None, started=None):
         aged one is passed over, not the end of the walk, so a live quiet park beneath it is still read
         (a `signal` verdict with the manager alive, or another kernel's single stop, that aged past 90 s
         before the drift check read the park);
+      - a `down-failed` row (bin/romp, when a `romp down` did not stop the kernel) supersedes the `down`
+        beneath it: neither is the request for a signal that arrives later, and both are classified
+        before the bounds like the verdicts and notes above, so a park beneath them is still read;
       - a `manager-sigterm` row (bin/romp-manager auditSigterm, written before every SIGTERM it sends) is
         a mechanism note, not a request: it says the manager was the messenger, and its `trigger` names
-        what set it off (`restart`, `restart-all`, `refresh`, `stop`), so that is the label it answers
-        with (a note without one falls back to its `reason`). It never outranks a request row beneath it
-        within the window, answers only when no request is on record (a `romp-manager restart`, a service stop
-        that noted before it killed) and only from inside the window and this kernel's lifetime, and one
-        aimed at another kernel pid is not about us;
+        what set it off (`restart`, `restart-all`, `refresh`, `cli-down`, `stop`), so that is the label it
+        answers with (a note without one falls back to its `reason`). It never outranks a request row
+        beneath it within the window (a `down` followed by the manager's `cli-down` note reads as the
+        deliberate stop), answers only when no request is on record (a `romp-manager restart`, a service
+        stop that noted before it killed) and only from inside the window and this kernel's lifetime, and
+        one aimed at another kernel pid is not about us;
       - a row with no action is skipped, never taken as the answer. The CLI's `romp refresh` writes its
         caller-attribution row with no action field ({t, ppid, parent, sid, name, tty, tmux}), and taking
         that row's empty label as the verdict would file every deploy as an unrequested signal; the
@@ -22042,6 +22118,7 @@ def _recent_restart_audit(window=90, now=None, started=None):
         born = int(_STARTED if started is None else started)
         via_manager = None                                  # the newest manager-sigterm note about us, if any
         park_settled = False                                # a row above showed a parked quiet request delivered or dropped
+        down_superseded = False                             # a down-failed above: the down beneath it did not land
         for line in reversed(tail[-200:]):
             try:
                 rec = json.loads(line)
@@ -22069,6 +22146,11 @@ def _recent_restart_audit(window=90, now=None, started=None):
                 if ours and via_manager is None and t0 - rec["t"] <= window and rec["t"] >= born:
                     via_manager = rec                       # the answer only inside the window and this kernel's lifetime
                 continue
+            if action == "down-failed":
+                down_superseded = True
+                continue                                    # the stop did not land; never the request for a later signal
+            if action == "down" and down_superseded:
+                continue                                    # that stop did not land; this signal is not it
             # The bounds: only a row that can answer (a request, a park, an unlabeled row) reaches them.
             quiet = rec.get("when") == "quiet"
             win = max(window, RESTART_EXPECT_MAX_S) if quiet else window
@@ -26433,17 +26515,49 @@ def _postal_index():
     if hit is not None and hit[0] == key:
         return hit[1]
     idx = {}
+    later = {}                                        # mid -> its outcome rows, in log order (folded after the scan)
     for o in _messages_rows(p):                       # append-incremental rows (2026-09-03): a send no
         if not isinstance(o, dict):                   # longer re-decodes the whole log on the active tab
             continue
-        if o.get("ev") == "sent" and o.get("id"):
-            idx[o["id"]] = {"id": o["id"], "from": o.get("from", "?"), "fromId": o.get("from_id", ""),
-                            # the sender's host as the log stamped it: "" for this kernel's own sessions,
-                            # a peer's name for relayed mail — and None when the row carries NO field, a
-                            # row from before the field existed, whose sender could be either (2026-09-06)
-                            "fromHost": o.get("from_host"),
-                            "toId": o.get("to_id", ""), "body": o.get("body", ""), "kind": o.get("kind", ""),
-                            "t": o["t"] if isinstance(o.get("t"), (int, float)) else 0, "park": bool(o.get("park"))}
+        ev, mid = o.get("ev"), o.get("id")
+        if ev == "sent" and mid:
+            idx[mid] = {"id": mid, "from": o.get("from", "?"), "fromId": o.get("from_id", ""),
+                        # the sender's host as the log stamped it: "" for this kernel's own sessions,
+                        # a peer's name for relayed mail — and None when the row carries NO field, a
+                        # row from before the field existed, whose sender could be either (2026-09-06)
+                        "fromHost": o.get("from_host"),
+                        "toId": o.get("to_id", ""), "body": o.get("body", ""), "kind": o.get("kind", ""),
+                        "t": o["t"] if isinstance(o.get("t"), (int, float)) else 0, "park": bool(o.get("park"))}
+            continue
+        # The message's LATER outcomes ride the same record (T302): the sent card's delivery icon reads them.
+        # Each is the ledger's own event, never inferred — `exec` is the recipient's inbox drain consuming
+        # the message (a REAL read), `unexec` a claimed-then-rolled-back drain (not read after all),
+        # `relayed` the far host's end-to-end ack, `bounced` a return (with the refusal's why), `recall`
+        # the sender unsending it. Collected here and folded after the scan, the postal service's own
+        # reader's shape (_sent_receipts): deliver() publishes the file before it appends the sent row, and
+        # a drain can log its exec in that instant, so an outcome may sit BEFORE its sent row. Row order
+        # within one id still decides (exec then unexec is not read).
+        if mid and ev in ("exec", "unexec", "relayed", "bounced", "recall") and isinstance(o.get("t"), (int, float)):
+            later.setdefault(mid, []).append(o)
+    for mid, rows in later.items():
+        rec = idx.get(mid)
+        if rec is None:                               # an outcome for a message this log never sent
+            continue
+        for o in rows:
+            ev = o.get("ev")
+            if ev == "exec":
+                rec["read"] = o["t"]
+            elif ev == "unexec":
+                rec.pop("read", None)
+            elif ev == "relayed":
+                rec["relayed"] = o["t"]
+            elif ev == "bounced":
+                rec["bounced"] = o["t"]
+                why = str(o.get("why") or "")
+                if why:
+                    rec["bouncedWhy"] = re.sub(r"[\x00-\x1f\x7f]+", " ", why)[:200]
+            elif ev == "recall":
+                rec["recalled"] = o["t"]
     _postal_index_memo[0] = (key, idx, _postal_body_map(idx))
     return idx
 
@@ -26644,6 +26758,19 @@ def _hydrate_postal(events, index, sid=None, captions=None):
             cap = caption_for(rec["id"])
             if cap:
                 card["summary"] = cap
+            # the ledger's outcomes for this message (T302): the delivery icon moves after the send —
+            # read (the recipient consumed it), relayed (a far host acked), bounced (+ why), recalled;
+            # `remote` says the send crossed the peer bus, where the tool's "delivered" is only "handed
+            # to the relay". Only what the ledger holds; an empty receipt is not sent at all.
+            # — never on a send that ERRORED (status None): the body-keyed join would hand a refused send the
+            # outcomes of its retry with the same words, and a message that never left has no receipt.
+            receipt = {k: rec[k] for k in ("read", "relayed", "bounced", "recalled") if rec.get(k)}
+            if rec.get("bouncedWhy"):
+                receipt["why"] = rec["bouncedWhy"]
+            if str(rec.get("toId") or "").startswith("peer:"):
+                receipt["remote"] = True
+            if receipt and card.get("status") is not None:
+                card["receipt"] = receipt
         return card
     for ev in events:
         if ev.get("kind") == "tool" and _SEND_TOOL_RE.search(ev.get("name") or ""):
@@ -28032,6 +28159,17 @@ def _chat_build_sig(sess, tm=None, now=None, tmux=None, deps=None):
         # the sdk/ directory's mtime, which moves at turn rate; the per-sid value moves only when a fork of
         # THIS session appears, is promoted or is deleted).
         sig.append((_be.fork_children().get(sid) if _be and hasattr(_be, "fork_children") else None) or None)
+        # note: the session's postal working note (working/<sid>), by identity: the ledger carries its text
+        # (workingNote), and a `romp mail working` from a shell, a peer's forwarded write and the kernel's own
+        # idle-and-done lift all change it with no transcript, states or store write.
+        _np = _working_note_path(sid)
+        sig.append(_chat_ident(_np) if _np is not None else None)
+        # needs: the feed's per-session needs-you verdict the ledger carries (needsInput), as the boolean "a
+        # card of THIS session is filed under needs-you". The set behind it is None until the first feed build
+        # since start, and a push builds the chat sessions BEFORE the feed, so the raw tri-state would give
+        # every tab a None on the first push and a False on the next: one whole-strip rebuild for a value the
+        # row reads the same (needsInput === true). Only True is a verdict.
+        sig.append(_feed_needs_input_of(sid) is True)
         sig.extend(((), (), None) if deps is False else _chat_sig_deps(sid, deps))   # taskout, pathlink, postal
         return tuple(sig)
 
@@ -33017,7 +33155,21 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
     if _session_flag(sid, "hideFromFeed"):       # muted → out of task tracking: the ledger shows no goal tree / current task
         tree, current, recent_tops = [], None, []
     ledger = {"summary": arch.get("headline", ""), "tree": tree[:80],
-              "current": current, "recent": recent_tops}
+              "current": current, "recent": recent_tops,
+              # the postal working note (set_working: the session's claim to a branch and files, written for
+              # peer sessions), "" when none. The chat's section-at-a-glance view shows it as a row's second
+              # line. Kept for a muted session: it is the session's own statement, not a goal the judges track.
+              "workingNote": Sessions.working_note(sid),
+              # the FEED's per-session needs-you verdict: True when the last feed build filed a card of this
+              # session under needs_input (the column the feed's Blocked list is: a judge-filed block, a live
+              # prompt, an on-you API error), False when none, None before the first feed build since start.
+              # The section view's row reads it for its "needs you" word, so the two panes agree; the tab's own
+              # chip rule misses the common case (a session that asked and went idle). Read from the feed build
+              # rather than re-derived: the column's rule lives in build_feed with a dozen inputs. The feed
+              # builds AFTER the chat sessions in a push, so this trails the feed by one push cycle (the chat
+              # signature's `needs` component brings the change forward on the next one). A muted session has
+              # no cards, so it reads False.
+              "needsInput": _feed_needs_input_of(sid)}
     # work-timer base, in MILLISECONDS (render's elapsedMs does Date.now()ms - sinceEpoch; a seconds
     # value showed ~494,000h — the user's "400,000 hours" bug): the current open turn's start while
     # working, else the last activity; None when unknown (render then shows no timer).
@@ -39987,7 +40139,7 @@ def _client_reset_chat_base(client):
 # a laptop sleep, a network change) redials, and the kernel used to serve the new socket as a client that
 # holds nothing: a full session frame for EVERY tab — 17 frames, ~9 MB on the measured board — for ONE tab on
 # screen. The page still holds every session it had; it only needs the one it shows. So the shim declares the
-# redial (?reconnect=1: this page has opened a socket before), and the kernel sends that client the tab strip
+# redial (?reconnect=1: its bundle's ready has left on a socket), and the kernel sends that client the tab strip
 # with a `skeleton` list — every listed tab except the active one, cheapest transcript first — the active
 # tab's full session, and a small status frame per skeleton tab so its chip stays honest. A skeleton tab
 # loads on the user's click (activeTab / needFull) or on the client's idle prefetch (needFull), and any full
@@ -40821,7 +40973,7 @@ def _set_comment_fast(v, gt=None):   return _set_judge_state("comment-fast", v, 
 # ids and the protocol are unchanged. Rides the judge-knob machinery (validated, stamped, propagated to
 # every linked kernel: the 2026-08-14 gear rule, one value across machines).
 def _set_tmux_backend(v, gt=None):   return _set_judge_state("tmux-backend", v, {"on", "off"}, gt=gt)
-# Fast judging (the gear's Judges section): "on" runs every judge call whose model is Opus in the CLI's fast
+# Fast mode for the judges (the gear's box beside the Triage model picker): "on" runs every judge call whose model is Opus in the CLI's fast
 # mode (jd._judge_cmd adds the flag-settings opt-in per call; a call on any other model is untouched); off by
 # default. Fast mode bills Opus at a premium and draws on fast mode's own rate limits, so it is a deliberate
 # pick. Rides the judge-knob machinery: validated, stamped, propagated to every linked kernel.
@@ -40851,7 +41003,7 @@ _JUDGE_SETTING_FIELDS = (("judgeModel", _set_judge_model), ("indexModel", _set_i
                          ("commentModel", _set_comment_model), ("commentEffort", _set_comment_effort),
                          ("commentFast", _set_comment_fast),
                          ("tmuxBackend", _set_tmux_backend),   # T288: the tmux backend's offer, "on" | "off"
-                         ("judgeFast", _set_judge_fast))       # Fast judging, "on" | "off"
+                         ("judgeFast", _set_judge_fast))       # the judges' Fast mode, "on" | "off"
 
 # The per-field PICK STAMPS this leg carried from 2026-08-30 (each field's STATE-file mtime in a
 # body "stamps" dict, preserved by utime at the receiver — the distill-pick stomp fix) are
@@ -41212,9 +41364,33 @@ _img_cache = {}                                  # "path:mtime:size" → dataURL
 #      the actual bytes over HTTP (behind _authorize, like everything else) instead of a data-URL round
 #      trip — the browser lazy-loads, caches, and renders a PDF natively in the lightbox iframe. The
 #      allowlist is RENDERABLE media only; anything else 404s and the client shows a plain link. SVG is
-#      served as an image (an <img> never runs its scripts); the files are the user's own, written by
-#      their own agents, on their own machine.
+#      served as an image (an <img> never runs its scripts; a tab NAVIGATED to one is a document, which
+#      _media_policy_headers below sandboxes); the files are the user's own, written by their own agents,
+#      on their own machine.
 _PREVIEW_MIME = dict(_IMG_MIME, **{".pdf": "application/pdf"})
+
+
+def _media_policy_headers(mime):
+    """The extra headers a /file SUCCESS carries for its media type: `Content-Security-Policy: sandbox`
+    on image/svg+xml, nothing on anything else.
+
+    An SVG is the one type on the allowlist that is ALSO a document. Served to an <img> it is a picture
+    and its scripts never run; but the own-tab opener (ui/webview/preview.ts openFileTab) hands this route
+    ANY path on a modified click since the PDF-only gate came off, and a tab NAVIGATED to /file?path=x.svg
+    parses it as a page and runs its inline <script> at the kernel's origin, with the dashboard's session
+    cookie attached (the 1204 review, 2026-09-10). nosniff is no help there: the type is declared, and
+    image/svg+xml is the scriptable one. `sandbox` closes it: a sandboxed document runs no script and
+    gets an opaque origin, so it can reach nothing of the dashboard's. The <img> path is unaffected (no
+    document is created, so no policy is read), and the chat's thumbnails, the viewer's inline preview
+    and the lightbox keep rendering. Sent on EVERY svg success, all three shapes (HEAD, 206, 200), never
+    gated on _is_navigation: harmless on a fetch or an <img>, and closing the hole must not hinge on
+    Sec-Fetch headers a plain-http dashboard never sends (see _is_navigation). On the 200 it rides
+    BESIDE _send's frame-ancestors policy as a second header of the same name, which a browser enforces
+    in addition; the framing policy itself is untouched. The /remote/<host>/file relay rebuilds every
+    interpretation header from OUR mime (it never mirrors the remote's), so it restates this too."""
+    return {"Content-Security-Policy": "sandbox"} if mime == _IMG_MIME[".svg"] else {}
+
+
 _PREVIEW_MAX_BYTES = 50_000_000                  # a plot/report, not a dataset — bigger 413s (fail loudly)
 
 # ---- …and the SOURCE/TEXT half of the same route (the user 2026-08-08). Clicking a file link used to
@@ -43076,6 +43252,26 @@ _VIEW_STATS = {"feedBuild": 0, "feedServe": 0, "tlBuild": 0, "tlServe": 0,
                # would forge the bug signature above, or bury a pusher regression (review find, 2026-09-08)
                "feedJsonBuild": 0, "feedJsonServe": 0}
 _built_timeline = [None, None, 0.0, 0.0]          # [fleet_sig, payload, built_at, build_started_at]
+# The sids the LAST feed build filed under needs_input: the per-session form of the feed's Blocked column,
+# read by build_session's ledger (needsInput) so the chat's section-at-a-glance rows say "needs you" exactly
+# when the feed does. None until the first feed build since start (a chat client alone makes the push build
+# the feed, so that is one push cycle). Set by _cached_feed on every rebuild, from the same payload the badge
+# and the bells read (_needs_you_count), never re-derived.
+_feed_needs_input = [None]
+
+
+def _needs_input_sids(feed):
+    """The sids with a card in the feed's needs_input column: the filing rule the feed client maps
+    (feed.ts askColumn: it.column == "needs_input"), applied per session. Placeholders count too: the
+    Blocked list shows them."""
+    return frozenset(str(a.get("sid")) for a in (feed.get("asks") or [])
+                     if a.get("column") == "needs_input" and a.get("sid"))
+
+
+def _feed_needs_input_of(sid):
+    """build_session's read: True/False from the last feed build, None before the first one."""
+    sids = _feed_needs_input[0]
+    return None if sids is None else (str(sid) in sids)
 # Wire-form caches for the two heavy shared payloads (the 2026-08-10 CPU fix, round three): the last
 # (source-identity key, lazy serialization, dedup sig, per-entry split) for the feed and the timeline bars,
 # so an unchanged build is never re-serialized cycle after cycle (~357KB + ~1.65MB per cycle measured with
@@ -43210,6 +43406,7 @@ def _cached_feed(now, tmux, sig, connect=False):
     _PERF_STATS.build("feed", False, time.monotonic() - _t0)
     feed["buildId"] = bid
     _built_feed[:] = [sig, feed, time.time(), started]
+    _feed_needs_input[0] = _needs_input_sids(feed)        # the per-session needs-you the session ledgers read
     _badge = _needs_you_count(feed)
     _fired = _feed_notifications(feed)                    # armed bells: fresh builds are the transition event
     _buzzed = []
@@ -44092,23 +44289,22 @@ def _push_send_one(sub, payload):
     status, _detail = _push_post(sub, payload)
     return status not in _PUSH_DEAD_STATUSES
 
-# ── the push ledger: the kernel's record of what became of each push (2026-09-09; the tap made the OS's own
-# callback for a killed app 2026-09-10, and the vanished notification the live app's road the same day) ──
-# THE FINDING (2026-09-09/10, a real iPhone): the worker's `push` handler runs and its acks reach the kernel
-# (`[push] test … 201`, then `[push] ack stage=shown` a second later). A KILLED Home Screen app gets the tap as the
-# OS's own callback: an Apple endpoint gets a Declarative Web Push message (_push_declarative) whose `navigate` is
-# the deep link, iOS navigates the app to '/?push-reveal=<sid>[&push-card=<id>]&push-pid=<pid>' and the page lands
-# it by the link road, settling this row (POST /push/landed). A LIVE app (background or foreground) gets NOTHING: iOS
-# only foregrounds it — no navigation, NO notificationclick to the worker, and NO notificationclose either (zero
-# 'closed' acks, ever). The one thing the page can then read is the screen: registration.getNotifications() lists
-# what is still displayed, so a push the worker acked shown whose notification is GONE is read as tapped (the
-# 'vanish' road, _LANDING_REVEAL_JS).
-# THE TRADE-OFF, ACCEPTED (the user 2026-09-10): because iOS fires neither the click nor the close for a live app, a
-# swiped-away notification leaves exactly the evidence a tapped one leaves — gone from the screen — and lands on the
-# next foregrounding as if tapped. The user weighed that and decided a working background tap is worth an
-# occasional wrong landing after a swipe. This is their explicit call, not an oversight (the road shipped as
-# a1a9d4b5, was taken out over this very conflation, and is back by that decision). The foreground case stays
-# non-switching: no wake event reaches the page, so nothing moves until it next comes forward.
+# ── the push ledger: the kernel's record of what became of each push, and the roads a tap takes (2026-09-09/10) ──
+# THE FINDING (a real iPhone, 2026-09-09/10): the worker's `push` handler runs and its acks reach the kernel, but iOS
+# fires neither notificationclick nor notificationclose for a LIVE Home Screen web app; only a killed app's tap is
+# answered by iOS itself. So the tap has one road per state of the app, and nothing is inferred beyond them:
+#   KILLED     — the OS's own callback. An Apple endpoint is sent a Declarative Web Push message (_push_declarative)
+#                whose `navigate` is the deep link '/?push-reveal=<sid>[&push-card=<id>]&push-pid=<pid>'; iOS displays
+#                it, navigates the app there on a tap, and the page lands the link ('link', _LANDING_REVEAL_JS).
+#   BACKGROUND — iOS only foregrounds the app. The one thing the page can then read is the screen:
+#                registration.getNotifications() lists what is still displayed, so a push the worker acked shown whose
+#                notification is GONE is read as tapped ('vanish'). THE ACCEPTED TRADE-OFF (the user 2026-09-10): a
+#                swiped-away notification leaves exactly that evidence and lands on the next foregrounding as if tapped;
+#                they weighed it and took a working background tap over the occasional wrong landing after a swipe.
+#                Their explicit call, carried in full at the landing site (fromLedger in _LANDING_REVEAL_JS).
+#   FOREGROUND — nothing moves: no wake event reaches the page, so a row waits for the app's next coming-forward.
+#   A browser that dispatches notificationclick (Chrome; every non-Apple endpoint) lands the tap from the worker's own
+#   message ('sw'), or from the clicked row this ledger holds when that message reached no page ('ack').
 #
 # Every session-addressed push gets an unguessable `pid` in its routing block and a row here, and the worker tells
 # the kernel what became of it — POST /push/ack {pid, stage} for 'shown' (started before the show; on Apple, from
@@ -44117,14 +44313,14 @@ def _push_send_one(sub, payload):
 # EVERY row to THIS device nobody has settled, newest first, on boot / visible / pageshow / focus, and holds the
 # shown ones against the notifications still displayed. A clicked row lands (/reveal via 'ack'); EXACTLY ONE
 # vanished row lands, silently (/reveal via 'vanish'); anything else — two or more gone at once, everything still
-# displayed, rows never acked shown, a screen the page cannot read — shows NOTHING: no chip, no prompt (the user
+# displayed, rows never acked shown, a screen the page cannot read — shows NOTHING: no prompt, ever (the user
 # 2026-09-09). The page settles each row it is done with: POST /push/landed (the push landed, by whichever road —
 # the worker's message 'sw', the deep link 'link', 'ack', 'vanish'), /push/superseded (a NEWER notification for
 # the same session is still displayed — the notification tag is per session, so the show REPLACED this one's on
 # the screen: gone without a tap) or /push/dropped (vanished beside another landing, or one of several vanished at
 # once: spent, never a landing, and never left to inflate the next check's count). The kernel supersedes at the
 # shown ack too — the event itself: a shown ack for a session retires that session's older unsettled, untapped rows
-# on that device, with a line.
+# on that device, with a line. No 'closed' stage anywhere (the finding above).
 #
 # The ledger is small and kernel-owned: STATE/push-ledger.json, {rows: [...]} oldest first, the newest
 # PUSH_LEDGER_CAP rows per endpoint, 0600 (an endpoint is a capability URL, the subscription store's rule),
@@ -44140,7 +44336,7 @@ PUSH_LEDGER_CAP = 20            # rows kept per endpoint: the last few pushes to
 _PID_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")   # secrets.token_urlsafe(16) is 22 such characters; the routes admit nothing else
 _PUSH_ACK_MAX_BYTES = 2048      # the unauthenticated ack's body cap: {pid, stage, v} is well under 200 bytes
 _PUSH_STAGE_FIELD = {"shown": "shownAt", "clicked": "tappedAt", "landed": "landedAt", "superseded": "supersededAt", "dropped": "droppedAt"}
-_PUSH_ACK_STAGES = ("shown", "clicked")                     # what /push/ack admits: the worker's word on what became of a notification (no 'closed': iOS never reports one)
+_PUSH_ACK_STAGES = ("shown", "clicked")                     # what /push/ack admits: the worker's word on what became of a notification (no 'closed': the finding above)
 _PUSH_SETTLE_STAGES = ("landed", "superseded", "dropped")   # the page's routes, POST /push/<stage> {pid}: its word that a row is done with
 
 
@@ -44242,8 +44438,7 @@ def _push_unsettled(row):
 
 def _push_stage_of(row):
     """The strongest word the row carries: 'clicked' (the worker saw the tap), 'shown' (it showed the notification,
-    as far as anyone said) or 'sent' (no ack at all). No 'closed': iOS never reports a close, so none is ever on
-    record (the ledger block above)."""
+    as far as anyone said) or 'sent' (no ack at all)."""
     return "clicked" if row.get("tappedAt") else ("shown" if row.get("shownAt") else "sent")
 
 
@@ -44251,9 +44446,9 @@ def _push_pending(endpoint):
     """GET /push/pending: {rows: [...]} — EVERY row for `endpoint` that nobody has landed, superseded or dropped,
     NEWEST FIRST, each as the page reads it: {pid, sid, host, kind, cardId, name, stage, ageS}. stage is 'clicked'
     (the worker acked the tap: the page lands it via 'ack'), 'shown' (acked the show: the page holds it against the
-    notifications still displayed and lands the ONE that is gone via 'vanish' — the ledger block above has the
-    trade-off the user accepted) or 'sent' (no ack at all: nothing is known to have been displayed, so nothing of it
-    can have vanished). ageS counts from the newest stamp, clipped like every age the shell files. Every row, not
+    notifications still displayed and lands the ONE that is gone via 'vanish' — the ledger block above) or 'sent'
+    (no ack at all: nothing is known to have been displayed, so nothing of it can have vanished). ageS counts from
+    the newest stamp, clipped like every age the shell files. Every row, not
     the newest (2026-09-09: the newest unsettled row was a push for ANOTHER session, sent 40 s after the one the
     user tapped, and it was the one named); {rows: []} when there is none."""
     out = []
@@ -44281,9 +44476,9 @@ PUSH_LABEL_MAX = 80    # the shell's tab label, as a last-resort session name: d
 
 
 def _push_session_name(sid, label=""):
-    """The session name a push carries in its routing block (2026-09-09: the shell's offer chip names the
-    session a shown-but-untapped notification was about, and has nothing but the payload to name it from),
-    in _push_test's order of authority: a local session's from the names registry (_name_of); a federated
+    """The session name a push carries in its routing block (2026-09-09: the ledger row files it off the payload,
+    so the kernel's lines and the device trail can name the session a push was about), in _push_test's order of
+    authority: a local session's from the names registry (_name_of); a federated
     one's what its host calls it in the tunnel supervisor's snapshot of that host's /sessions
     (_remote_name_of), host-prefixed the way the merged dashboard shows it; then the caller's `label` (the
     shell's own tab text — display-only, clipped and flattened, never consulted ahead of the kernel's copy);
@@ -44354,9 +44549,8 @@ def _push_test(endpoint, sid="", host="", label=""):
         return {"ok": False, "status": 0, "detail": "this device isn't subscribed yet"}
     _vapid_keys()                                          # RuntimeError without cryptography → the route's 500
     if sid:
-        # ONE lookup names the session in both forms (#1157's _push_session_name is the authority; the
-        # pair-returning twin below it keeps the two from ever disagreeing): the body, the echoed
-        # `name` and the payload's routing block wear the host-prefixed form the merged dashboard
+        # ONE lookup names the session in both forms (_push_session_names, so the two can never
+        # disagree): the body, the echoed `name` and the payload's routing block wear the host-prefixed form the merged dashboard
         # shows, while the TITLE wears the session name alone (_notify_title: the host is not the
         # user's concern there — the tap carries the routing in `data`)
         name, bare_name = _push_session_names(sid, label)
@@ -44438,9 +44632,8 @@ def _push_payload(title, body, sid="", badge=None, kind="card", card_id="", host
 
 
 # ── Declarative Web Push for Apple endpoints (2026-09-10) ─────────────────────────────────────────
-# The tap as the OS's own callback (the ledger block above _push_ledger has the finding: a live Home Screen app on
-# iOS gets no notificationclick and no notificationclose, so nothing the worker or the screen could say was ever the
-# tap). Safari 18.4+ and iOS Home Screen web apps parse a push whose payload is the declarative JSON below, display
+# The tap for a KILLED app as the OS's own callback (the ledger block above _push_ledger has the finding). Safari
+# 18.4+ and iOS Home Screen web apps parse a push whose payload is the declarative JSON below, display
 # the notification themselves, and on a tap NAVIGATE the app to its `navigate` URL — the deep link the shell already
 # lands (_LANDING_REVEAL_JS, via 'link'). Every member here is verified, not guessed, against the W3C Push API
 # editor's draft ("Declarative push message": `web_push` must be 8030; `notification` with `title` and `navigate`
@@ -44722,8 +44915,8 @@ function ack(pid,stage){if(!pid)return Promise.resolve();try{return fetch('/push
 // TWO SHAPES REACH THIS HANDLER (2026-09-10). To an Apple endpoint the kernel sends a Declarative Web Push message
 // ({web_push:8030, notification:{title, body, navigate, tag, data[, silent]}, mutable:true[, app_badge]} — _push_declarative
 // in the kernel): a user agent that parses it (Safari 18.4+, an iOS Home Screen web app) DISPLAYS the notification itself,
-// and a tap NAVIGATES the app to `navigate` — the OS's own callback, where iOS dispatched no notificationclick to a live
-// app. `mutable` makes it hand this worker the parsed Notification as e.notification (the W3C draft and WebKit's
+// and a tap NAVIGATES the app to `navigate` — the OS's own callback (the ledger block above _push_ledger in the kernel).
+// `mutable` makes it hand this worker the parsed Notification as e.notification (the W3C draft and WebKit's
 // ServiceWorkerThread both dispatch it as a `push` event with a null data), so the worker acks 'shown' by the pid in its
 // data and shows NOTHING: the system is displaying it, and a second show would replace it. Feature-detected on
 // e.notification, never a user-agent sniff. Every other push arrives as e.data — the imperative shape to FCM/Mozilla, or
@@ -44772,9 +44965,9 @@ e.waitUntil(Promise.all(work));
 // EVERY MESSAGE WEARS A `diag` BLOCK (2026-09-08): the shell files it in client-diag.jsonl beside its own rows,
 // so one file says what the worker saw: how many window clients, how many top-level, which road it took, the
 // target's visibility. The pid rides too, so the page lands one push ONCE however many roads deliver it (the
-// message and the link can both carry the same tap) and settles the kernel's row. NO RELOAD ROAD (review find,
-// 2026-09-09, on #1127): visibilityState is not a liveness test, and no road of the worker's loads a page. No
-// kept tap, no stored tap, no fingerprint either (2026-09-10): a tap the worker did not see is not inferred.
+// message and the link can both carry the same tap) and settles the kernel's row. No reload road (visibilityState is
+// not a liveness test, and no road of the worker's loads a page), and nothing kept between events: a tap the worker
+// did not see is not inferred.
 self.addEventListener('notificationclick',function(e){
 var d=e.notification.data||{};var sid=d.sid||'',pid=String(d.pid||'');
 var acked=ack(pid,'clicked');   // THE ACK FIRST: the kernel's row says tapped before anything here can be cut short
@@ -44807,23 +45000,19 @@ def _sw_js():
 
 
 # ── landing a push tap on the session that fired ─────────────────────────────────────────────────
-# The cold-start half of notificationclick: the app was closed, the SW opened '/?push-reveal=sid',
-# and the shell POSTs /reveal {sid, wid} at boot — necessarily BEFORE its chat pane's WS exists, so
-# the focus cannot be sent yet. It parks here and is delivered on the exact event it was waiting
+# The cold-start half of a tap: the app was closed, the page opened on the deep link (the worker's
+# openWindow, or iOS's own navigate), and the shell POSTs /reveal {sid, wid} at boot — necessarily
+# BEFORE its chat pane's WS exists, so the focus cannot be sent yet. It parks here and is delivered on the exact event it was waiting
 # for: that window's chat pane saying "ready" (matched by wid — the per-dashboard id the shell
 # mints and every same-window pane shares — so a second dashboard's reload cannot steal it). One
 # slot, latest wins: two taps before a boot completes should land on the newer notification.
 # `sent` (2026-09-06): the clients a LIVE tap was already handed to while unproven — see
 # _reveal_request; a pong from one of them retires the slot, a redial's ready consumes it.
 _PENDING_REVEAL = [None]                     # {"sid": ..., "wid": ...[, "sent": [clients]]} or None
-# The roads a shell may name in /reveal's `via`, the log line's first word: the worker's message to a live window
-# ('sw' — a browser that dispatches notificationclick), the deep link the page opened on or was navigated to ('link' —
-# on Apple the OS's own tap callback for a killed app, the Declarative Web Push message's `navigate`; 2026-09-10), the
-# kernel's own ledger ('ack' — GET /push/pending said the worker had acked a tap no message or link delivered; the
-# ledger block above _push_ledger), and the vanished notification ('vanish' — a shown push whose notification is gone
-# from the screen, the one thing a LIVE iOS app leaves for the page to read; back 2026-09-10 by the user's call, with
-# the swipe-dismiss conflation accepted — the ledger block has it). 'store' and 'offer' — the kept entry and the chip —
-# are gone, and the route refuses them like any other word. Any other word the body carries is logged as 'other'
+# The roads a shell may name in /reveal's `via`, the log line's first word (the ledger block above _push_ledger has
+# the design): the worker's message to a live window ('sw'), the deep link the page opened on or was navigated to
+# ('link' — on Apple the OS's own tap callback for a killed app), the kernel's own clicked row ('ack') and the shown
+# push whose notification is gone from the screen ('vanish'). Any other word the body carries is logged as 'other'
 # (review find, 2026-09-09, on #1127: the word went from the request body straight into the line-oriented stderr
 # journal); a shell of a build before the field sends none, and that stays the bare line.
 _REVEAL_ROADS = frozenset({"sw", "link", "ack", "vanish"})
@@ -44869,15 +45058,11 @@ def _reveal_request(sid, wid, boot=False, via=""):
 
     One stderr line per tap, whatever became of it (2026-09-08: a phone's tap "did nothing" and
     nothing anywhere recorded whether it had even reached the kernel). `via` is the road the shell
-    says the tap took ('sw': the worker's message to a live window; 'link': the deep link the page opened
-    on or was navigated to — on Apple the OS's own tap callback, 2026-09-10; 'ack': the kernel's ledger
-    said the worker had acked a tap no message or link delivered; 'vanish': the ledger said the push was
-    shown and the screen no longer shows it — the one road a live iOS app leaves, 2026-09-10; the route
-    admits those four, _REVEAL_ROADS, and logs any other word as 'other'); _consume_pending_reveal and _reveal_proven log a
-    park's end the same way, so the journal
-    answers the next such report: no line — the worker never posted or opened; parked and never
-    consumed — the pane's ready never came for that wid; consumed — the pane got it. Ids clipped:
-    enough to match rows, not a transcript of anything."""
+    says the tap took (one of _REVEAL_ROADS; the route logs any other word as 'other');
+    _consume_pending_reveal and _reveal_proven log a park's end the same way, so the journal answers
+    the next such report: no line — the worker never posted or opened; parked and never consumed —
+    the pane's ready never came for that wid; consumed — the pane got it. Ids clipped: enough to
+    match rows, not a transcript of anything."""
     with _clients_lock:
         targets = [] if boot else [c for c in _clients if c["app"] == "chat" and (c.get("wid") or "") == wid]
     delivered, sent = False, []
@@ -45371,6 +45556,7 @@ def _shim(app, v=0, no_stale=False):
     return """
 %s
 (function(){/*shim-core*/var queue=[],ws=null,everConnected=false;
+var bundleReady=false,readyQueued=false;   // the BUNDLE's own {type:"ready"} has passed through send() on this page / is waiting in `queue` for an open (onopen clears it once the flush has carried it); the dial's reconnect term (connect) keys on both
 var queuedDiag=0,DIAG_QUEUE_MAX=20;   // clientDiag rows waiting in `queue` for a reconnect, capped (an outage must not pile up breadcrumbs); other queued messages are untouched
 var failedConnects=0,firstFailT=0;   // handshakes that never OPENED since the last open: reported as ONE wsconnfail row on the next open, never one wsclose per redial
 // This pane's DASHBOARD id. ?wid= when the host supplies one (the VS Code extension builds its own pane
@@ -45525,7 +45711,7 @@ function connect(){if(ws&&(ws.readyState===0||ws.readyState===1))return;   // on
 if(returnAt)returnRedialed=true;   // a dial inside a return window (whatever path led here) → the return-fresh row says so
 connT=Date.now();var proto=location.protocol==="https:"?"wss://":"ws://";
 var active="";try{var st0=JSON.parse(localStorage.getItem(SK)||"null");active=(st0&&st0.activeId)||"";}catch(e){}
-ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+(everConnected?"&reconnect=1":""));   // reconnect=1: this page has held a socket before, so it may already hold sessions — the kernel skeletons the tabs it is not looking at (2026-09-07)
+ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&!readyQueued)?"&reconnect=1":""));   // reconnect=1: this page has held a socket before AND its bundle has said ready AND that ready is not still waiting in the queue for this open, so it may already hold sessions; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own): both redials dial as a fresh page (2026-09-10)
 // onopen: flush the queue; a RECONNECT (after a drop) also PROMPTS a reload — the fresh socket resyncs live via
 // the kernel's next push, and the banner offers a full reload for anything a live push doesn't cover. This
 // replaced the old silent location.reload() (the user 2026-07-05: don't foist a reload; let me click). Narrowed by
@@ -45537,7 +45723,7 @@ ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponen
 // socket dropped (the pane's romp loader) needs the socket's RETURN as its event to come back down. The
 // first connect deliberately doesn't fire it — nothing is waiting on it, and the loader must stay up until
 // real content lands.
-ws.onopen=function(){lastRecv=Date.now();openT=lastRecv;openSock=this;netState("up");resumeProvisional=0;var wasReconn=everConnected;everConnected=true;for(var i=0;i<queue.length;i++)ws.send(queue[i]);queue=[];queuedDiag=0;
+ws.onopen=function(){lastRecv=Date.now();openT=lastRecv;openSock=this;netState("up");resumeProvisional=0;var wasReconn=everConnected;everConnected=true;for(var i=0;i<queue.length;i++)ws.send(queue[i]);readyQueued=false;queue=[];queuedDiag=0;
 try{if(window.__rompReload)window.__rompReload.ended();}catch(e){}   // T265: the flush is the ending event for the "sends" hold — a reload owed while a prompt sat in the queue goes now
 if(failedConnects){send({type:"clientDiag",surface:"pane-shim",what:"wsconnfail",data:{app:APP,attempts:failedConnects,firstFailMs:Date.now()-firstFailT}});failedConnects=0;firstFailT=0;}   // the redials that never opened since the last open, as ONE row: how many, and how long ago the first failed
 if(wasReconn){var ann=restartAnnounced&&Date.now()-restartAnnounced<30000;restartAnnounced=0;   // one-shot: spent here
@@ -45592,7 +45778,9 @@ if(inWin){d=eagerDial?0:250;eagerDial=false;}   // …so the FIRST such close re
 if(restartAnnounced&&Date.now()-restartAnnounced<30000)d=Math.min(d,250);   // an announced death keeps its tight redial
 setTimeout(connect,d);};   // the blind 1.5 s stays for unannounced drops outside any return window
 ws.onerror=function(){try{ws.close();}catch(e){}};}
-function send(m){var s=JSON.stringify(m);if(ws&&ws.readyState===1){ws.send(s);return;}
+function send(m){var s=JSON.stringify(m);if(m&&m.type==="ready")bundleReady=true;   // the bundle's listener is installed: from here a redial may declare itself (the dial term in connect)
+if(ws&&ws.readyState===1){ws.send(s);return;}
+if(m&&m.type==="ready")readyQueued=true;   // ...and this one waits for the open: the redial that carries it dials as a fresh page (onopen clears the bit after the flush)
 if(m&&m.type==="clientDiag"){if(queuedDiag>=DIAG_QUEUE_MAX)return;queuedDiag++;}   // breadcrumbs waiting for a reconnect are capped; everything else queues as before
 queue.push(s);}
 // ONE ordered dispatch FIFO per socket (the user 2026-09-07, whose dashboard froze on return to its tab): a tab
@@ -48711,30 +48899,29 @@ if(!isOn)testOut.textContent+=" Real notifications won't arrive until the main s
 
 # Landing a notification tap on what fired (the user 2026-08-08, whose first push opened a different
 # session; 2026-09-06, who wants the tap to come back to the romp already open and put them on the
-# session — and the card — that buzzed). Three roads, ONE activation path: each asks the KERNEL to
+# session — and the card — that buzzed). Four roads, ONE activation path: each asks the KERNEL to
 # aim the chat focus at THIS dashboard (POST /reveal {sid, wid, via[, boot]}) — never a focus posted
 # straight into the chat iframe, which could only ever address a tab that is already there. The kernel
 # answers a live session with the focus (chat pane connected → delivered now; not yet → parked for
 # that wid and consumed on the pane's ready — the exact event, no delay heuristics) and a dead or
-# unknown one with the revive prompt (_reveal_msg), so no sid ever ends in a silent no-op.
+# unknown one with the revive prompt (_reveal_msg), so no sid ever ends in a silent no-op. The roads,
+# and when each fires (the ledger block above _push_ledger has the finding they rest on):
 #  - 'link': the page opened on — or was navigated to — the kernel's deep link
-#    '/?push-reveal=<sid>[&push-card=<id>]&push-pid=<pid>'. On Apple this IS the tap (2026-09-10): the Declarative
-#    Web Push message's `navigate`, the OS's own callback for a KILLED app — the ledger block above _push_ledger has
-#    the finding: a live one gets no navigation, no notificationclick and no notificationclose, only the screen (the
-#    'vanish' road below). Read at boot AND on pageshow / popstate (a window the user agent navigates without
-#    a full load), stripped (history.replaceState) the moment it is read so a manual reload does not replay the
-#    jump. boot:true at boot: the page's chat pane is not connected yet, so the kernel must park for it rather than
-#    hand the focus to a same-wid socket the previous page left behind (the phone, 2026-09-06: iOS reopens the
-#    installed app's one window on the link and sessionStorage keeps the wid).
+#    '/?push-reveal=<sid>[&push-card=<id>]&push-pid=<pid>'. On Apple this IS the tap for a KILLED app: the Declarative
+#    Web Push message's `navigate`, the OS's own callback. Read at boot AND on pageshow / popstate (a window the user
+#    agent navigates without a full load), stripped (history.replaceState) the moment it is read so a manual reload
+#    does not replay the jump. boot:true at boot: the page's chat pane is not connected yet, so the kernel must park
+#    for it rather than hand the focus to a same-wid socket the previous page left behind (the phone, 2026-09-06: iOS
+#    reopens the installed app's one window on the link and sessionStorage keeps the wid).
 #  - 'sw': a browser that dispatches notificationclick (Chrome): the worker focused this window and posted
 #    {romp:'notificationClick', sid, host, kind, cardId, pid, diag}.
 #  - 'ack': the kernel's own ledger — GET /push/pending?endpoint=<this page's subscription> lists every unsettled
-#    push to this device; the ones the worker acked clicked (a tap whose message and link reached no page) land;
-#    asked on the events a page that came forward produces: boot, visible, pageshow, focus.
-#  - 'vanish' (2026-09-10, the user's call; the fromLedger comment below has the whole table and the trade-off): the
-#    same list's SHOWN rows, held against registration.getNotifications() — exactly ONE shown push whose
-#    notification is gone from the screen lands, silently. The one thing a LIVE iOS app leaves: it gets no
-#    navigation, no click and no close, only these events and the screen.
+#    push to this device; the ones the worker acked clicked (a tap whose message and link reached no page) land.
+#    Asked on the events a page that came forward produces: boot, visible, pageshow, focus.
+#  - 'vanish': the same list's SHOWN rows, held against registration.getNotifications() — exactly ONE shown push
+#    whose notification is gone from the screen lands, silently. The one thing a LIVE iOS app leaves for the page:
+#    no event reaches the worker or the page, only these events and the screen (the fromLedger comment below has
+#    the decision table and the trade-off the user accepted).
 #  The pid rides all four, so one push lands ONCE: the first road to land it settles the kernel's row (POST
 #  /push/landed) and the rest are dups. A card kind ALSO scrolls the feed to its card: {romp:'revealCard'} into the
 #  feed iframe — the same message the Log's bell entries post — but only once the feed has its cards, which it
@@ -48744,6 +48931,11 @@ if(!isOn)testOut.textContent+=" Real notifications won't arrive until the main s
 #  button (2026-09-06) and comes back to it exactly like a turn's; only a card kind adds the card scroll. A sid-less
 #  tap (a test pressed with no session in front) has nowhere to land. A /reveal the kernel refuses lands in the Log
 #  rather than vanishing.
+# THE KNOWN LIMITS, by the state of the app when the notification is tapped: KILLED lands natively (the link road);
+# BACKGROUND lands on the next coming-forward (the vanish road), and a swipe-dismiss lands the same way — the
+# accepted trade-off; FOREGROUND does not switch (no wake event reaches the page; the row lands the next time the app
+# comes forward, if the notification is gone by then). Nothing is shown or offered in any case: a tap lands or
+# nothing happens.
 # THE BOOT FLAG FOLLOWS THE CHAT PANE'S OWN SOCKET (review find, 2026-09-09, on #1127): every road posts boot:true
 # until this page's chat pane reports its socket up ({romp:'wsState',app:'chat',state:'up'}, the message the pane's
 # shim posts to the shell on every open) or has rendered its tabs (the tabs come over that very socket, and the
@@ -48757,9 +48949,6 @@ if(!isOn)testOut.textContent+=" Real notifications won't arrive until the main s
 # rows[, getNotifications, displayed, vanished][, superseded][, err]}, 'tap-pending-land' {sid8, ageS, dup} and
 # 'tap-vanish-land' {sid8, ageS} for the ledger check; 'reveal-post' {status, via, boot} with /reveal's answer.
 # Structure and clipped ids only, never text or a session id whole.
-# GONE (2026-09-10): the stored tap and its replay, the worker fingerprint with its sw-stale and sw-update rows,
-# the offer chip. (The vanished-notification road went with them that morning and came BACK the same day by the
-# user's call — the fromLedger comment below.)
 # Its own <script>, like every shell behaviour (test_kernel_mobile's count pin): a throw in the
 # bell's script must not strand a tap, and a bell that bails where the Push API is missing must
 # not take the deep-link half with it.
@@ -48829,7 +49018,7 @@ return r.getNotifications().then(function(ns){var d={};(ns||[]).forEach(function
 // per-session tag replaced its notification: /push/superseded, never a tap); 'sent' → nothing known displayed, so nothing
 // of it can have vanished. A link this page landed at the same time (linkSid — a killed app, navigated by iOS) or a
 // clicked row landed here is the newer word: whatever else vanished is dropped. A screen this page cannot read (no
-// getNotifications, or it throws) decides nothing. No chip, no prompt, no timer: a tap lands or nothing happens.
+// getNotifications, or it throws) decides nothing. No prompt, no timer: a tap lands or nothing happens.
 // THE KNOWN CONFLATION, AND THE USER'S CALL (2026-09-10): iOS fires neither notificationclick nor notificationclose for
 // a live Home Screen web app, so a notification the user SWIPED AWAY leaves exactly what a tapped one leaves — gone from
 // the screen — and lands here on the next foregrounding as if tapped. The user weighed that on 2026-09-10 and accepted
@@ -48855,7 +49044,7 @@ rows.forEach(function(r,i){if(r.stage!=='shown'||seen[r.pid]||d[r.pid])return;  
 if((r.sid in front)&&front[r.sid]<i){seen[r.pid]=1;superseded++;settle('superseded',r.pid);return;}   // a newer notification for the same session is on the screen: the tag replaced this one's — gone without a tap
 vanished.push(r);});}   // acked shown, gone from the screen: tapped, as far as this page can tell (or swiped — the accepted trade-off above)
 row.vanished=vanished.length;if(superseded)row.superseded=superseded;diag('tap-pending',row);
-if(landed||vanished.length!==1){vanished.forEach(function(v){seen[v.pid]=1;settle('dropped',v.pid);});return;}   // another road landed, or more than one gone at once: spent, silently — no chip, no prompt
+if(landed||vanished.length!==1){vanished.forEach(function(v){seen[v.pid]=1;settle('dropped',v.pid);});return;}   // another road landed, or more than one gone at once: spent, silently
 var v=vanished[0];seen[v.pid]=1;diag('tap-vanish-land',{sid8:v.sid.slice(0,8),ageS:v.ageS});
 land(v.sid,String(v.kind||''),String(v.cardId||''),via==='boot','vanish');settle('landed',v.pid);});});}
 // the worker's message (a browser that dispatches notificationclick: the tap focused this window, or opened it): its
@@ -49325,7 +49514,7 @@ def _landing():
             # minted by the body script, AFTER the iframes: on a fast origin the chat pane's shim read
             # sessionStorage and connected before that script ran, so its socket carried no wid, and a reveal
             # the kernel aimed at this dashboard's wid found no chat socket to deliver to — parked for a ready
-            # that never comes on a live page (2026-09-09, the served tap-resume test on localhost, two runs in
+            # that never comes on a live page (2026-09-09, the served tap test on localhost, two runs in
             # three; a phone's first-ever load runs the same race). Same <script> as the standalone flip: the
             # shell's script count is pinned, and both must run before anything else does.
             "<script>try{if(!sessionStorage.getItem('romp:wid'))sessionStorage.setItem('romp:wid',"
@@ -50289,8 +50478,6 @@ def _landing():
             "</div>"   # /.rail-acts
             "</div>"   # /.pane-rail (bottom bar)
             "</div>"
-            # (no "from the notification" chip here — the user 2026-09-09: a notification that was tapped lands, by
-            # the roads _LANDING_REVEAL_JS documents, and the shell never offers or guesses.)
             "<nav id=mtabs>"
             # the pane tabs, from _PANE_ORDER — the desktop rail's exact order (the user 2026-08-30:
             # mobile is a re-layout, never a re-ordering)
@@ -50767,6 +50954,8 @@ class Handler(BaseHTTPRequestHandler):
             if mime == "application/pdf":                     # the probe agrees with the GET (below) on the tab's name
                 self.send_header("Content-Disposition", _attachment_disposition(os.path.basename(fp), kind="inline"))
             self.send_header("X-Content-Type-Options", "nosniff")   # _send's guarantee, restated on the HEAD path
+            for k, v in _media_policy_headers(mime).items():        # sandbox on an SVG (see _media_policy_headers)
+                self.send_header(k, v)
             self.send_header("Cache-Control", "no-cache")
             if getattr(self, "_cors_origin", None):         # the chat's fetch-HEAD probe rides CORS too
                 self.send_header("Access-Control-Allow-Origin", self._cors_origin)
@@ -50795,6 +50984,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(raw)))
             self.send_header("Content-Range", "bytes %d-%d/%d" % (rng, size - 1, size))
             self.send_header("X-Content-Type-Options", "nosniff")
+            for k, v in _media_policy_headers(mime).items():        # sandbox on an SVG (see _media_policy_headers)
+                self.send_header(k, v)
             self.send_header("Cache-Control", "no-cache")
             if getattr(self, "_cors_origin", None):
                 self.send_header("Access-Control-Allow-Origin", self._cors_origin)
@@ -50822,6 +51013,7 @@ class Handler(BaseHTTPRequestHandler):
                               headers={"Last-Modified": lastmod, "X-Romp-Mtime-Ns": mtime_ns,
                                        "X-Romp-Text-Utf8": u8})
         extra = {"Last-Modified": lastmod, "X-Romp-Mtime-Ns": mtime_ns}
+        extra.update(_media_policy_headers(mime))            # sandbox on an SVG (see _media_policy_headers)
         if mime == "application/pdf":
             # INLINE, with the file's name (2026-09-06): a PDF opens in its own browser tab now (preview.ts
             # openPdfTab), and the browser titles that tab and names a Save from this header — without it
@@ -51631,6 +51823,56 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, FLEET_REPORT.read_text(), "application/json")
                 except OSError:
                     return self._send(200, json.dumps({"rows": []}), "application/json")
+            if u.path == "/down":
+                # `romp down`'s quiesce (see _going_down): body {"wait": seconds} holds new turn starts
+                # + creates and blocks until the in-flight count reaches 0 or `wait` runs out, then
+                # answers {quiet, busy, inflight[names], waited} so the CLI can say what the stop is
+                # about to cut. {"cancel": true} releases the hold (the stop did not happen). A WRITE
+                # that holds every session's turn starts, so it needs the EXPLICIT serve token
+                # (_write_token_ok) on top of the preamble's _authorize: the /busy?drain=1 rule.
+                # No SDK backend ever built: nothing to hold or wait for, quiet at once.
+                # Every 200 names this process's pid: `romp down` ends by SIGTERMing a kernel nothing
+                # above it stopped, and the pid it signals must come from a route the serve token
+                # gates. GET /version's pid is auth-exempt and vouches for nothing: a CLI aimed at
+                # the wrong port (an empty ROMP_KERNEL_PORT falls to the default) would take another
+                # kernel's pid from it and stop every session there. A pid given here was given
+                # under the caller's token, to a kernel the caller manages.
+                if not self._write_token_ok(q):
+                    return self._send(403, json.dumps({"ok": False, "error":
+                        "forbidden: /down needs the serve token (X-Romp-Token or ?token=)"}), "application/json")
+                try:
+                    b = json.loads(raw_body or b"{}")
+                except Exception:
+                    b = None
+                if not isinstance(b, dict):
+                    return self._send(400, json.dumps({"ok": False, "error":
+                        'body must be {"wait": seconds} or {"cancel": true}'}), "application/json")
+                be = _sdk_backend or None
+                if b.get("cancel") is True:
+                    if be is not None and hasattr(be, "cancel_quiesce"):
+                        be.cancel_quiesce()
+                    return self._send(200, json.dumps({"ok": True, "canceled": True, "pid": os.getpid()}),
+                                      "application/json")
+                wait = b.get("wait", DOWN_WAIT_DEFAULT_S)
+                if isinstance(wait, bool) or not isinstance(wait, (int, float)) or wait < 0 or wait > DOWN_WAIT_MAX_S:
+                    return self._send(400, json.dumps({"ok": False, "error":
+                        "wait must be a number of seconds in [0, %d]" % int(DOWN_WAIT_MAX_S)}), "application/json")
+                if be is None or not hasattr(be, "quiesce"):
+                    return self._send(200, json.dumps({"ok": True, "quiet": True, "busy": 0,
+                                                       "inflight": [], "waited": 0, "pid": os.getpid()}),
+                                      "application/json")
+                be.quiesce(float(wait) + DOWN_HOLD_GRACE_S)
+                # the wait ends on the EVENT the in-flight count reaches 0 (each poll reads the
+                # backend's own counters); `wait` is only its bound
+                t0 = time.monotonic()
+                busy = be.busy_count()
+                while busy and time.monotonic() - t0 < wait:
+                    time.sleep(min(0.25, max(0.01, wait - (time.monotonic() - t0))))
+                    busy = be.busy_count()
+                return self._send(200, json.dumps({
+                    "ok": True, "quiet": busy == 0, "busy": busy,
+                    "inflight": be.inflight_names() if busy else [],
+                    "waited": round(time.monotonic() - t0, 1), "pid": os.getpid()}), "application/json")
             if u.path == "/update-dismiss":
                 # the banner's Not-now, PERSISTED (the user 2026-08-31): the dismissal outlives the
                 # page and the kernel — event-keyed, a NEW sha/tag offers again. Body: {"tag": id}.
@@ -52000,7 +52242,7 @@ class Handler(BaseHTTPRequestHandler):
                 # a session could be FED without a browser (POST /send, postal) but never STOPPED — a
                 # runaway had no headless escape hatch. These mirror the WS handlers exactly (same
                 # backend calls, same chip/close events). Body: {"id"|"name": <session>}; remote
-                # sessions forward over their tunnel like /send.
+                # sessions forward over their tunnel like /send, and the far kernel's answer is the answer.
                 try:
                     b = json.loads(raw_body or b"{}")
                     who = str(b.get("id") or b.get("name") or "") if isinstance(b, dict) else ""
@@ -52011,8 +52253,23 @@ class Handler(BaseHTTPRequestHandler):
                 sid = _sid_of(who)
                 r = _host_for_sid(sid)
                 if r is not None:                               # remote session → forward over its -L tunnel
-                    _remote_forward(r, u.path, {"id": sid})
-                    return self._send(200, json.dumps({"ok": True}), "application/json")
+                    # The /send arm's shape, for the same reason: the first cut discarded the far kernel's
+                    # reply and answered ok:true, so `romp end` on a session whose tunnel had just dropped
+                    # printed ok while the runaway kept running; and it forwarded the id alone, so an
+                    # `--when-idle` end killed the far session mid-turn. The deferral crosses the wire, a
+                    # far kernel that doesn't answer is said so, its refusal comes back as itself, and its
+                    # reply — `deferred` and all — is what the caller reads.
+                    fwd = {"id": sid}
+                    if isinstance(b, dict) and b.get("when") == "idle":
+                        fwd["when"] = "idle"
+                    res = _remote_forward(r, u.path, fwd)
+                    if res is None:                             # the far kernel didn't answer — say so, never
+                        return self._send(200, json.dumps({"ok": False, "error":   # pretend it was done
+                            "the remote kernel for this session (%s) isn't answering — not %s"
+                            % (r.get("host", "?"), "interrupted" if u.path == "/interrupt" else "ended")}),
+                            "application/json")
+                    # its answer verbatim — a refusal, a plain ok, or an ok with `deferred` — never rewritten
+                    return self._send(200, json.dumps(res), "application/json")
                 be = Sessions.backend_for(sid)
                 if u.path == "/interrupt":
                     be.interrupt(sid)                           # Esc/stop AND settle idle (in the backend)
@@ -52048,6 +52305,9 @@ class Handler(BaseHTTPRequestHandler):
                 b, berr = _json_object_body(raw_body)
                 if berr:
                     return self._send(400, json.dumps({"ok": False, "error": berr}), "application/json")
+                if _going_down():             # `romp down` in progress: a session born now dies with the kernel
+                    return self._send(503, json.dumps({"ok": False, "error": GOING_DOWN_REFUSAL}),
+                                      "application/json")
                 nm = str((b or {}).get("name") or "").strip()
                 if not nm or not NAME_RE.match(nm):
                     return self._send(400, json.dumps({"ok": False, "error":
@@ -53579,6 +53839,8 @@ class Handler(BaseHTTPRequestHandler):
                         # AFTER the focus so the client sees the running session first.
                         client["send"](json.dumps({"type": "warn", "text":
                             '"%s" is already running; its tags were not changed — use the tab\'s Tags menu' % nm}))
+                elif _going_down():              # `romp down` in progress: the same refusal POST /new gives
+                    client["send"](json.dumps({"type": "warn", "text": GOING_DOWN_REFUSAL}))
                 elif _thread_name_refusal(nm, _thread_names()):   # a thread's name (or unverifiable): never mint a namesake tab (T223)
                     client["send"](json.dumps({"type": "warn", "text": _thread_name_refusal(nm, _thread_names())}))
                 elif msg.get("backend") == "sdk":   # non-tmux: drive via the Agent SDK
@@ -54001,7 +54263,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 _tell_stale_gesture(client, msg)
         elif msg and msg.get("type") == "setJudgeFast" and msg.get("enabled") is not None:
-            # gear "Fast judging": a checkbox, stored as on/off and read by the judges per call (jd._judge_fast).
+            # the gear's Fast mode box on the Triage model row: a checkbox, stored as on/off and read by the judges per call (jd._judge_fast).
             # The boolean is checked like its siblings' (_as_bool), and a malformed frame is refused with a
             # warn, unwritten; an applied pick fans out to every linked kernel under its gesture stamp.
             _jfe, ferr = _as_bool(msg.get("enabled"), "enabled")
@@ -54028,7 +54290,7 @@ class Handler(BaseHTTPRequestHandler):
         wid = (q.get("wid") or [""])[0]         # which DASHBOARD this pane belongs to → _send_to_view aims at one
         iid = (q.get("iid") or [""])[0]         # which page INSTANCE: a reconnect carrying it retires its old socket
         active = (q.get("active") or [""])[0]   # the tab this client is looking at → _push builds it FIRST
-        reconnect = (q.get("reconnect") or [""])[0] == "1"   # the shim's own statement: this page opened a socket before
+        reconnect = (q.get("reconnect") or [""])[0] == "1"   # the shim's own statement: this page opened a socket before and its bundle has said ready, with no ready waiting in its queue
         self.send_response(101)
         self.send_header("Upgrade", "websocket")
         self.send_header("Connection", "Upgrade")
@@ -54053,6 +54315,11 @@ class Handler(BaseHTTPRequestHandler):
             # The page held every session before its socket died, so the FIRST tabOrder sender to see this
             # flag skeletons the tabs it is not looking at (_resolve_reconnect); a full push for one tab on
             # screen was 17 session frames / 9 MB on the measured board (2026-09-07).
+            # The shim dials the term only once its bundle's ready has left on a socket with none still queued
+            # (everConnected&&bundleReady&&!readyQueued, 2026-09-10): a socket that died before the bundle said
+            # ready, or while its ready was queued, redials as a fresh page. What no shim bit sees: a ready that
+            # left on an open socket the kernel never processed, the socket dying before any frame came back,
+            # still redials with the term and is served skeletons that fill on click or the idle prefetch.
             client["reconnect"] = True
         _register_ws_client(client)
         if client.get("reconnect"):
@@ -54283,6 +54550,8 @@ class Handler(BaseHTTPRequestHandler):
             if status == 200 and mime == "application/pdf":   # the tab's name — OURS, from the requested path
                 self.send_header("Content-Disposition", _attachment_disposition(os.path.basename(rp), kind="inline"))
             self.send_header("X-Content-Type-Options", "nosniff")   # _send's guarantee, restated on the HEAD path
+            for k, v in _media_policy_headers(mime).items():        # the SVG sandbox, from OUR mime like the type
+                self.send_header(k, v)
             self.send_header("Cache-Control", "no-cache")
             if getattr(self, "_cors_origin", None):
                 self.send_header("Access-Control-Allow-Origin", self._cors_origin)
@@ -54299,6 +54568,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Content-Range", crange)
             self.send_header("X-Content-Type-Options", "nosniff")
+            for k, v in _media_policy_headers(mime).items():        # the SVG sandbox, from OUR mime like the type
+                self.send_header(k, v)
             self.send_header("Cache-Control", "no-cache")
             if getattr(self, "_cors_origin", None):
                 self.send_header("Access-Control-Allow-Origin", self._cors_origin)
@@ -54311,6 +54582,10 @@ class Handler(BaseHTTPRequestHandler):
         # and the Edit gate ride on them, and deriving them locally would lie about a remote disk.
         mirrored = {k: v for k, v in (("Last-Modified", lastmod), ("X-Romp-Mtime-Ns", r_ns),
                                       ("X-Romp-Text-Utf8", r_u8)) if v}
+        # …and the SVG sandbox is NOT mirrored but derived here from our mime, like the type and the
+        # disposition: the relay rebuilds every header that tells this browser how to interpret the bytes
+        # (_media_policy_headers has the hole), so the local route's policy has to be restated on this arm.
+        mirrored.update(_media_policy_headers(mime))
         if status == 200 and mime == "application/pdf":
             # A remote session's PDF opens in its own tab too (2026-09-06): the tab's title and a Save's name
             # come from this header — derived HERE from the requested basename, like the Content-Type, never

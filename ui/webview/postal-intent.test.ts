@@ -33,11 +33,12 @@ test("the DECLARED kind (ev.intent) drives the chip; the body-token parse is onl
   assert.match(RENDER, /intent\?: string;/);   // the event carries the declared kind
 });
 
-test("the intent reads as META text on the postal notice head — no coloured chip (2026-09-08)", () => {
-  // the notice-vocabulary pass: the three per-type colours (raw #b08cff / #14b8a6, the working yellow at 1.59:1 on
-  // cream) are retired; the label rides the head's meta slot beside the delivery state
-  assert.match(RENDER, /if \(intent\) meta\.push\(intent\.label\);/);
-  assert.match(RENDER, /else if \(ev\.status === "delivered"\) meta\.push\("delivered"\);/);
+test("the intent reads as coloured TEXT in the postal head's meta slot — no chip (2026-09-08; colours back as text, T302)", () => {
+  // the notice-vocabulary pass retired the chip; T302 (the user 2026-09-10) brings the three per-type colours back as
+  // TEXT colours on the word (a chip reads as a tag now): postal-state.ts kindLabel, postal-card.test.ts pins the rest.
+  // The word "delivered" left the meta for the delivery icon.
+  assert.match(RENDER, /const kind = kindLabel\(intent \? intent\.cls : null\);/);
+  assert.doesNotMatch(RENDER, /meta\.push\("delivered"\)/);
   assert.doesNotMatch(CSS, /\.postal-service-intent/);
-  assert.doesNotMatch(CSS, /#b08cff/);
+  assert.match(CSS, /\.postal-kind-delegate \{ color: var\(--postal-delegate, #b08cff\); \}/);
 });

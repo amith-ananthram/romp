@@ -14,7 +14,7 @@ function norm(s: string): string {
 // Strip the inline markdown the RENDERER consumed, so a span selected out of rendered text can still be
 // found in the source. Deliberately does NOT touch `_`: snake_case identifiers are far commoner in these
 // docs than underscore emphasis, and stripping them would break more matches than it fixes.
-function stripInline(line: string): string {
+export function stripInline(line: string): string {
   return line
     .replace(/^\s*(?:[#]{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+)/, "")   // block markers: heading, quote, list
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")                       // image → its alt text

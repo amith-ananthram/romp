@@ -56,7 +56,7 @@ class SettingsSectionsTest(unittest.TestCase):
         # Judges sit low: the six dropdowns between Judges and the bottom group
         self.assertTrue(h.index(">Judges<") < h.index("id=rs-judgemodel") < h.index(">Updates & debug<"))
         self.assertTrue(h.index(">Judges<") < h.index("id=rs-indexeffort") < h.index(">Updates & debug<"))
-        # Fast judging: a checkbox row among the judge picks, in the Judges section like the knobs it rides with
+        # Fast mode for the judges: a checkbox on the Triage model row, in the Judges section like the knobs it rides with
         self.assertTrue(h.index(">Judges<") < h.index("id=rs-judgefast") < h.index(">Updates & debug<"))
         self.assertNotIn("rs-oldest", h)
         # Updates & debug (the very bottom): auto-updates, the judge-SHOW toggles, analytics, version
@@ -103,16 +103,30 @@ class SettingsSectionsTest(unittest.TestCase):
                                 r"<span class=rs-sub>[^<]*</span><select id=" + sel)
         self.assertIn("#rsettings .rs-jrow select {", _gear_css_src())
 
-    def test_fast_judging_is_a_label_row_with_a_mixed_mark(self):
-        # a checkbox row in the shape of Fast comment threads (label + checkbox, the mixed mark beside the name),
-        # not an .rs-jrow: the one-line label + picker count above stays at nine
+    def test_fast_mode_for_the_judges_sits_on_the_triage_model_row(self):
+        # The user 2026-09-10: the box says Fast mode (the chat statusline's own word for it) and sits
+        # with the model, after the Triage model picker, not on a row of its own under a paragraph. Its
+        # label carries its own mixed mark; the row count above stays at nine (no .rs-jrow added).
         h = _gear_src()
-        self.assertIn("<label class='rs-row'><input type=checkbox id=rs-judgefast>", h)
-        self.assertIn("<span><b>Fast judging</b><span class=rs-mixed hidden></span>", h)
-        row = h[h.index("id=rs-judgefast"):]
-        row = row[:row.index("</label>")]
-        self.assertIn("Opus", row, "the copy says which calls the setting reaches")
-        self.assertIn("connected machine's kernel", row, "the copy says the pick follows to the other machines")
+        self.assertNotIn("Fast judging", h)
+        row = h[h.index("<b>Triage model "):]
+        row = row[:row.index("<b>Triage effort ")]
+        self.assertIn("<select id=rs-judgemodel></select>", row)
+        self.assertIn("<label class=rs-fastin id=rs-judgefast-wrap><input type=checkbox id=rs-judgefast>Fast mode"
+                      "<span class=rs-mixed hidden></span>", row)
+        self.assertLess(row.index("id=rs-judgemodel"), row.index("id=rs-judgefast"), "the box follows the picker")
+        self.assertIn("<span class=rs-sub id=rs-judgefast-sub>", row, "a row hint like its neighbours', swapped by the gate")
+        self.assertEqual(row.count("</div>"), 1, "one row: the box closes inside the Triage model row")
+        # the one-line hint: the Opus-only condition and the premium, and where the pick goes
+        hint = h[h.index("var JUDGEFAST_SUB = "):]
+        hint = hint[:hint.index(";\n")]
+        self.assertIn("Opus-only", hint)
+        self.assertIn("premium", hint)
+        self.assertIn("connected machine's kernel", hint, "the copy says the pick follows to the other machines")
+        # greyed with the reason while no judge tier is on Opus (the box is inert then: the opt-in rides only Opus calls)
+        self.assertIn("function judgeFastGate", h)
+        self.assertIn("var JUDGEFAST_SUB_OFF = \"Fast mode is Opus-only, and no judge tier is on Opus.", h)
+        self.assertIn("#rsettings .rs-fastin.rs-off {", _gear_css_src())
 
     def test_collapse_gaps_is_wired_to_the_shared_collapseGaps_setting(self):
         # the gear JS persists/loads romp:settings.collapseGaps; the timeline reads it (see romp-timeline-view.js)

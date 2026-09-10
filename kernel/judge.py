@@ -243,7 +243,7 @@ def _index_effort():  return _state_str("index-effort", "")
 def _judge_engine():  return _state_str("judge-engine", "claude")   # "claude" | "codex" — which model
 #   harness runs the judges (docs/codex.md §judges). "codex" lets a machine with no Claude login keep
 #   the board thinking: every judge becomes a one-shot `codex exec` billing the machine's codex login.
-def _judge_fast():    return _state_str("judge-fast", "off") == "on"   # gear "Fast judging": the CLI's fast-mode
+def _judge_fast():    return _state_str("judge-fast", "off") == "on"   # the gear's Fast mode box (Triage model row): the CLI's fast-mode
 #   opt-in rides every judge call whose model is Opus (_judge_cmd); off by default. Read per call, like the tiers.
 INDEX_EFFORT_DEFAULT = "low"   # the index tier's cost lever on models that take --effort (2026-09-01; see _judge_env)
 
@@ -861,7 +861,7 @@ def _judge_cmd(model, sys_prompt, effort=None, auth=None):
     # --settings still loads. Two keys can ride it:
     overlay = {}
     if _judge_fast() and _model_family_version(model)[0] == "opus":
-        # Fast judging (the gear's Judges section, off by default): the CLI refuses fast mode to a
+        # Fast mode for the judges (the gear's box beside the Triage model picker, off by default): the CLI refuses fast mode to a
         # non-interactive client unless the flag-settings layer carries this exact key, the same opt-in a
         # fast-picked session's launch uses (sdk_backend.flag_settings_path), and fast mode is an Opus-only
         # preview, so the key rides only a call whose model reads as the opus family: the bare alias or a
@@ -1501,7 +1501,7 @@ def _log_judge_usage(judge, tier, model, fsid, wrap, sent=None, recv=None):
                                 "cache_w": u.get("cache_creation_input_tokens"),
                                 "cache_r": u.get("cache_read_input_tokens"),
                                 "fast": wrap.get("fast_mode_state"),   # the CLI's word on whether fast mode engaged
-                                #   ("on" | "off" | "cooldown"; null when the envelope carries none): Fast judging's readback
+                                #   ("on" | "off" | "cooldown"; null when the envelope carries none): the judges' fast-mode readback
                                 "cost": wrap.get("total_cost_usd")}) + "\n")
     except Exception:
         pass
@@ -10083,7 +10083,13 @@ def _plan_session(fsid, path, now):
                 # this response is processed; the old unconditional _reopen below then UN-completed it, and a "blocked
                 # on you" reply re-blocked it — a completed→blocked flip, which must never happen. If the goal is
                 # already done, the nudge is moot (its "what's the status?" is answered by completion): record the
-                # unit processed and place NOTHING, leaving the completed goal completed.
+                # unit processed and place NOTHING, leaving the completed goal completed. "Done" here is the
+                # target's OWN verdict (nodeComplete) or its sticky settle — never all-children-done: rollup's
+                # is_complete retired that bottom-up rule (VERDICTS ONLY, the user 2026-07-15), so a top whose
+                # steps are all done but which carries no verdict of its own reads WORKING on the board, its
+                # nudge fires legitimately, and its reply must reach the planner. Reading it through
+                # _subtree_done discarded that reply here (nothing placed, plan_llm never called), after which
+                # the kernel's follow-up-failed path filed a procedural block with no brief (2026-09-10).
                 _nkids = {}
                 for _nid, _nd in store["nodes"].items():
                     _nkids.setdefault(_nd.get("parentId"), []).append(_nid)
@@ -10101,7 +10107,7 @@ def _plan_session(fsid, path, now):
                         _open_items.append(_x)
                     _stack.extend(_nkids.get(_x, []))
                 if (not _open_items and not _fold_node(store["nodes"][target])["held"]
-                        and (_subtree_done(store["nodes"], _nkids, target)
+                        and (store["nodes"][target].get("nodeComplete")
                              or store["nodes"][target].get("settledDone"))):
                     # (held check 2026-07-07: a user reopen no verdict has answered means the user asserted
                     # NOT done — an all-done subtree under it is exactly why they were asked; never moot.)

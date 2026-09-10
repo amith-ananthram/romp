@@ -53,6 +53,22 @@ A pull request number in a message, a card, or a note (`#123`, `PR #123`, or
 directory has as its `origin` remote; when that remote is not on GitHub, the number stays
 plain text.
 
+**Naming another session.** Type `@` and the first letters of a session's name in the
+message box, and the sessions whose names match are listed above it, twelve at most; when
+more match, the last row says how many, and more letters narrow the list. Arrow to one and
+press **⏎** or **Tab**, or click it, and `@name` goes into the message as plain text, the
+name the session's mail tools take. Which form goes in depends on the session you are
+writing to. When you write to a session on this machine, a session on another machine goes
+in as `@host:name`, the way this machine knows it. When you write to a session on another
+machine, every name goes in bare, because the dashboard cannot see what that machine calls
+its peers; if the bare name is ambiguous there, the session's mail tools refuse the send and
+list the candidates as `host:name`, and the session picks one. **Escape** closes the list
+without inserting, and it stays closed for that `@` until you delete it: more letters, or a
+caret move away and back, do not reopen it. In the sent message, a name that matches a live
+session is shown as a chip: the name without its `@`, in that session's color on a dark
+backing, the way the Awaiting chip names the session it waits on. Hover it for how that
+session is doing; the message itself still carries the `@name` you typed.
+
 **A message that has not gone yet.** Send to a busy session and your message waits as a
 dashed bubble under an hourglass until the session takes it — while it compacts, while a
 turn runs, or in the beat before the kernel confirms the send. Until then it is still
@@ -161,9 +177,10 @@ the tab and pick **Show when folded** under **Tags**;
 the header's count then leaves that tab out; when every tab in a section is set to
 show, the folded header shows the full count and its tooltip says nothing is hidden. Pick it
 again to fold the tab with the rest. A tab set to show when folded keeps that setting when its
-group is renamed. The section of the tab you are reading never
-folds (its header says so, and a click there changes nothing), and the `archived` section
-starts folded. Drag a header to reorder the groups, which
+group is renamed. The section of the tab you are reading folds like any other; its header marks
+that it holds the tab (the tag's name is underlined), and folded, the header stands in for the tab:
+focus lands on it, and the left and right arrows step from there. The `archived` section starts
+folded. Drag a header to reorder the groups, which
 reorders the tags on every surface (the timeline's tag table shows the same order). To move
 a tab into another group, right-click it and pick **Move to <tag>** under **Tags**: one click
 adds that tag and drops the tag of the group you right-clicked it in, leaving its other tags alone. The row's
@@ -172,6 +189,23 @@ button's menu, turns the sections off for this browser. Every group starts on it
 the gear's **One tag group per row in the tab strip** lets the groups follow one another across the
 strip and wrap as they need, with the untagged sessions behind a thin divider, so a strip with many
 tags stays short.
+
+**A section at a glance.** Clicking a header also shows the section in the transcript's place: one
+row per session, with its color, a dot for its state (yellow working, red stopped on a prompt or an
+API error only you can clear, amber retrying an API error on its own, teal compacting, green waiting
+on background work, none while it is idle), a **needs you** or **waiting** word, what it is doing
+now in a few words, and how long ago it last did anything. **Needs you** appears when the feed shows
+one of the session's cards under Blocked, or when the session is stopped on a prompt or an API error
+only you can clear; **waiting**, when it is waiting on background work. A session that asked a
+question and went quiet shows the word with no dot: the dot follows the session's own state, the
+word follows the feed. What it is doing now comes from its current task, else from the headline of
+its work so far, else from the last task it had; a session that has published a note of what it is
+working on shows the note as a quieter second line. Hover a row for its last message, shown without
+its formatting; click one to open that session, which also opens its section if the section is
+folded (with several tags, the first folded group of them). The rows update as the sessions work and
+change only when something about a session changes; the **needs you** word follows the feed, one
+refresh behind it at most. The transcript comes back when you pick a session, press Escape, or click
+that header again while its section is open and holds the tab you are reading.
 
 **Coming back after a dropped connection.** When the dashboard's link to the kernel
 drops and comes back (a laptop lid closed and opened, a network change, a phone that
@@ -392,6 +426,14 @@ the user interface at `127.0.0.1:29855`. You run it on your own machine, with no
 hosted service in between. Everything Romp stores stays local; the only traffic
 that leaves your machine is `claude` itself, both the agents' own model calls and
 the LLM calls in Romp's judge pipeline.
+
+The kernel runs as a login service, so it is up whenever you are logged in. To
+stop it on purpose, run `romp down`: it gives the agents a few seconds to
+finish the turn they are on, then stops the kernel and keeps it stopped, and
+`romp status` says so. `romp up` starts it again, and every session comes back
+with its history; a session that was cut mid-turn is told so, and when, and
+picks its work back up. `romp down --now` skips the wait; `romp down --wait 60`
+lengthens it.
 
 ### Linking kernels on other machines
 
@@ -677,10 +719,11 @@ quiet. A card that stops needing you and then needs you again is announced
 once, not at every turn, unless you acted on the card in between (answered
 it, resolved it, crossed it off) or it finished in the meantime.
 
-The handler that answers a tap lives on the phone, and the phone refreshes it
-whenever you open the app and whenever a notification arrives. If a tap ever
-opens Romp on the wrong session, close the app from the app switcher and open
-it again once.
+Tapping a notification brings Romp forward on the session it was about. On an
+iPhone with the app already open in the background, the switch happens as the
+app comes forward; a notification you swipe away instead is read the same way,
+so the next time you open the app it may land on that session. With the app in
+front, nothing moves until you next come back to it.
 
 The bell itself shows the state of the device you are looking at: lit when the
 main switch is on and this device is set up, and crossed out otherwise. Its
