@@ -1,8 +1,11 @@
 """TABS-FIRST (the user 2026-06-26): the tabOrder push carries name+color per tab so the client can paint the
-WHOLE strip as placeholders up front (no one-by-one pop-in). Both emit sites — the periodic/connect _push and
-the WS 'ready' handler — send a `tabs` list of {id, name, color} alongside the sid `order`.
+WHOLE strip as placeholders up front (no one-by-one pop-in). Every strip sender (_push, on its cycle and as
+the connect push a `ready` triggers; _push_session_now; _confirm_close_now) hands a `tabs` list of {id, name,
+color} alongside the sid `order` to _send_tab_order, the one frame builder's caller. The `ready` handler
+sends no strip of its own.
 """
 import inspect
+import json
 import os
 import unittest
 from importlib.machinery import SourceFileLoader
@@ -45,25 +48,36 @@ class TabsFirst(unittest.TestCase):
         self.assertEqual(frame["type"], "tabOrder")
         self.assertEqual(frame["selfHost"], km._self_host())
         self.assertEqual(sorted(frame), ["live", "order", "selfHost", "tabs", "type", "views"])
-        # the four senders share the one spelling — the pusher's tabs-first send, the off-cycle session push,
-        # the close confirmation and the WS 'ready' handler's connect-time frame all hand their order + meta +
+        # the three senders share the one spelling: the pusher's tabs-first send (the connect push a `ready`
+        # triggers included), the off-cycle session push and the close confirmation all hand their order + meta +
         # liveness to _send_tab_order, the builder's ONE caller (2026-09-07: it builds the frame per client,
-        # so a reconnecting client's skeleton list can ride it) — a fifth inline dict would drop the field again
+        # so a reconnecting client's skeleton list can ride it); a fourth inline dict would drop the field again
         text = open(KPATH).read()
         self.assertEqual(text.count('_send_client(c, ("taborder",), _tab_order_frame(tab_order, tab_meta, live, c))'), 1)
         self.assertEqual(text.count("_tab_order_frame(tab_order, tab_meta, live, c)"), 1, "the builder's one caller: _send_tab_order")
         self.assertEqual(text.count("_send_tab_order(c, tab_order, tab_meta, tmux)"), 3)
-        self.assertEqual(text.count("_send_tab_order(client, _o, _tabs, _tm)"), 1)
         self.assertEqual(text.count('{"type": "tabOrder"'), 1, "the literal lives in _tab_order_frame alone")
         self.assertIn("_send_tab_order(c, tab_order, tab_meta, tmux)", inspect.getsource(km._push_session_now))
         self.assertIn("_send_tab_order(c, tab_order, tab_meta, tmux)", inspect.getsource(km._confirm_close_now))
 
-    def test_connect_ready_handler_also_sends_tabs(self):
-        text = open(KPATH).read()
-        # 2026-09-07: the direct send goes through _send_tab_order too (one frame builder, one dedup slot)
-        self.assertIn('_send_tab_order(client, _o, _tabs, _tm)', text,
-                      "the WS 'ready' connect push also carries name+color tabs")
-        self.assertIn('_tabs = [{"id": s["sid"], "name": s.get("name", ""), "color": _name_color(s["sid"])}', text)
+    def test_connect_ready_handler_sends_no_tab_order_of_its_own(self):
+        # The strip a chat page gets at `ready` is the connect push's: _push lists living plus kept-open tabs
+        # through the ("taborder",) slot. The ready arm used to send a second strip from its own _ordered_alive
+        # read (living sessions only), and the client closes every tab a later frame omits without affirming it
+        # live, so every read-only reopened tab the push had just listed went down at each ready.
+        saved = (km._tmux_sessions, km._ordered_alive)    # the reads the ready arm made for a strip of its own: pinned, so
+        km._tmux_sessions = lambda: {}                    # should that strip return this test fails the same way with or
+        km._ordered_alive = lambda now, tmux: []          # without tmux on this machine
+        try:
+            sent = []
+            h = object.__new__(km.Handler)
+            h._push_one = lambda c: sent.append({"type": "_pushed"})   # the connect push, as a marker
+            client = {"app": "chat", "wid": "w1", "alive": True, "send": lambda s: sent.append(json.loads(s))}
+            km.Handler._dispatch_ws(h, {"type": "ready"}, client)
+        finally:
+            km._tmux_sessions, km._ordered_alive = saved
+        self.assertEqual([m["type"] for m in sent], ["_pushed", "caps"],
+                         "the connect push, then the caps frame: no strip from the handler itself")
 
     def test_name_color_shape_matches_the_client_color_type(self):
         # _name_color returns {bg,fg} or None — exactly the render.ts Color the placeholder applies.

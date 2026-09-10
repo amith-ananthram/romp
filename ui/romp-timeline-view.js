@@ -1334,12 +1334,19 @@ class TimelinePanel {
     // Obsidian leaf, where the tab never changed state). One catch-up draw per return, never one per frame.
     // Both are events; no timer polls for visibility. The observer is optional (Obsidian / a bare host may
     // lack it) — see _hiddenForPaint for what the hold keys on without it.
-    this._onVis = () => this._releasePaintHold();
+    // The same two events also publish this pane's hidden word for the kernel's pane shim (_publishPaneHidden),
+    // before the release runs.
+    this._paneIntersecting = null;   // the observer's last word (null: it has not spoken yet); one input of the pane's hidden word (_publishPaneHidden)
+    this._onVis = () => { this._publishPaneHidden(); this._releasePaintHold(); };
     if (typeof document !== 'undefined' && document.addEventListener) document.addEventListener('visibilitychange', this._onVis);
     this._io = null;
     if (typeof IntersectionObserver !== 'undefined') {
       try {
-        this._io = new IntersectionObserver((entries) => { if (entries.some((e) => e.isIntersecting)) this._releasePaintHold(); });
+        this._io = new IntersectionObserver((entries) => {
+          this._paneIntersecting = entries.some((e) => e.isIntersecting);
+          this._publishPaneHidden();
+          if (this._paneIntersecting) this._releasePaintHold();
+        });
         this._io.observe(this.wrap);
       } catch (e) { this._io = null; }
     }
@@ -1897,6 +1904,20 @@ class TimelinePanel {
   _hiddenForPaint() {
     if (this._io) return !this._isVisible();
     return typeof document !== 'undefined' && document.visibilityState === 'hidden';
+  }
+  // The pane's hidden word for the kernel's pane shim, which gates its stale banner on paneHidden(): a pane the
+  // user cannot see never raises it. The shim's own witness is the zero-viewport probe, which in Chromium misses a
+  // pane hidden after a first show (a display:none iframe keeps the size of its last show there), so every pane
+  // publishes what its own two measures say (document hidden OR the observer's last word) as
+  // window.__rompPaneHidden, and the shim says hidden when either its probe or a word of true says so
+  // (ui/webview/paint-gate.ts publishPaneHidden states the rule; this is the same publisher for a plain-JS host).
+  // Published on the hold's own events (visibilitychange, the observer's callback), never on a timer, and not
+  // before the observer has spoken: until then the pane has measured nothing and the probe decides.
+  _publishPaneHidden() {
+    if (typeof window === 'undefined') return;
+    if (this._paneIntersecting === null) return;
+    const docHidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+    window.__rompPaneHidden = docHidden || this._paneIntersecting === false;
   }
   // The paint hold's release (2026-09-07): the tab came back or the pane came into view. Repaint the held
   // frames as ONE catch-up — exactly what hideTip / _release do for their holds — and re-arm the live tick,

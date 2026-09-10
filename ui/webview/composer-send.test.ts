@@ -18,7 +18,7 @@ test("the composer markup includes a send button to the right of 📎", () => {
 
 test("⏎ and the send button share ONE sendComposer() path", () => {
   assert.match(RENDER, /const sendComposer = \(opts\?: \{ pastShipGate\?: boolean \}\) => \{/);   // the opts are the ship gate's re-entry door (composer-ship-gate.test.ts)
-  assert.match(RENDER, /vscodeApi\.postMessage\(\{ type: "sendMessage", id: sid, text \}\)/);   // routeUserMessage — one routing owner since the staged flush (2026-08-15)
+  assert.match(RENDER, /vscodeApi\.postMessage\(\{ type: "sendMessage", id: sid, text, qid \}\)/);   // routeUserMessage — one routing owner since the staged flush (2026-08-15)
   // Enter calls it (desktop only — the mobile guard is asserted separately below)
   assert.match(RENDER, /if \(e\.key === "Enter" && !e\.shiftKey && !isCoarsePointer\(\)\) \{\s*e\.preventDefault\(\);\s*sendComposer\(\);/);
   // the button calls it (mousedown keeps textarea focus on desktop; on a phone it blurs so the keyboard

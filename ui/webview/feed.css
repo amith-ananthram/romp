@@ -1535,6 +1535,22 @@ a.fileview-gh-note { border-style: dashed; }
   color: var(--dim); opacity: 0.55; user-select: none;
 }
 .fileview-wrap .fv-ct { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Links inside a shown file (file-view-links.ts): a URL opens a new tab, a path opens in the viewer. Light by
+   design (the user 2026-09-07): the token keeps the colour the highlight gave it, under a faint dotted underline
+   that turns solid on hover; nothing else in the view changes. A Markdown link whose target is a file keeps the
+   link ink the other Markdown links wear. Neither is draggable (-webkit-user-drag: none, with draggable=false on the
+   anchor) and both are selectable (user-select: text; Chromium starts no selection inside a link without it), so a
+   press-drag inside a path link selects its text as on plain text, a press held on a URL anchor and then dragged
+   selects too (Chromium's rule for a link: an immediate drag on one selects nothing), and neither starts the browser's
+   link drag; a click that arrives with the selection open finds the viewer's listener and the chat's opener yielding
+   to it (path-links.ts selectionOpenIn). Mirrored in styles.css and feed.css (fileview-parity.test.ts). */
+.fileview-body .file-uri-link, .fileview-body .fv-url { color: inherit; cursor: pointer; text-decoration: underline dotted; text-decoration-color: color-mix(in srgb, currentColor 35%, transparent); text-underline-offset: 2px; -webkit-user-drag: none; user-select: text; }
+.fileview-body .file-uri-link:hover, .fileview-body .fv-url:hover { text-decoration: underline; text-decoration-color: currentColor; }
+.fileview-md a.file-uri-link { color: var(--link); text-decoration: none; }
+.fileview-md a.file-uri-link:hover { text-decoration: underline; }
+/* A Markdown link with no target the viewer can follow (the sanitizer removed it; a section this document does not
+   have): dead, and it says so, since the title holds the reason (file-view-links.ts DEAD_LINK_CLASS). */
+.fileview-md a.fv-dead { color: inherit; opacity: 0.7; text-decoration: underline dotted; cursor: help; }
 
 /* ── text size and measure (file-view.ts textSizeControl) ── The A− / A+ buttons and Ctrl/Cmd + wheel over the
    body set `data-fv-text` on the viewer root to one of TEXT_SIZES; this table turns the step into the ONE

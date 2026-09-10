@@ -796,7 +796,7 @@ test("the title bar carries a session chip resolved from the sid — never inven
   assert.match(openFn, /bar\.appendChild\(name\); if \(sess\) bar\.appendChild\(sess\); bar\.appendChild\(acts\);/,
     "between the path and the actions");
   // the signatures every opener and the relay pin depend on are exactly as they were
-  assert.match(VIEW, /export function openFileView\(path: string, sid\?: string \| null, frag\?: string \| null\): void \{/);   // frag: a sibling link's fragment lands after the render
+  assert.match(VIEW, /export function openFileView\(path: string, sid\?: string \| null, opts\?: \{ line\?: number \| null; frag\?: string \| null \}\): void \{/);   // frag: a sibling link's fragment lands after the render
   assert.match(VIEW, /export function initFileView\(poster: \(m: Record<string, unknown>\) => void\): void \{/);
 });
 

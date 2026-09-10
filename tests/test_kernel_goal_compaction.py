@@ -308,6 +308,35 @@ class ClearedLedgerIsAuthoritativeAcrossTheCompaction(unittest.TestCase):
         junk = {"g448": 5, "g7": 6, foreign_sid + ":g1": 7}
         self.assertEqual(km._cleared_foreign(junk), [foreign_sid + ":g1"], "a bare node id with no session rides nowhere")
 
+    def test_the_foreign_id_list_skips_cleared_ids_that_name_no_session(self):
+        # Five id families in cleared.jsonl name no session (review find, 2026-09-09): "parked:<msgId>" and
+        # "quarantine:<mid>" key a message, and the "provisional:", "awaiting:" and "blocked:" + sid
+        # placeholders are re-listed every build whatever the clear log holds. Clear-all writes every listed
+        # card's id, so their rows arrive live, and the text before each id's last colon is a word, never a
+        # goals/ stem, so each read as foreign and rode every frame, local session or not. None of them names
+        # a session whose clear rows a kernel reads, so none rides; a remote session's "sid:gN" clear still does.
+        self._completed_top("g4")                    # SID has a store here, so its node's clear is local
+        foreign_sid = "11111111-2222-3333-4444-999999999909"
+        parked_msg = "aaaaaaaa-bbbb-cccc-dddd-000000000001"
+        quarantine_msg = "aaaaaaaa-bbbb-cccc-dddd-000000000002"
+        rows = [("parked:" + parked_msg, 300), ("quarantine:" + quarantine_msg, 301),
+                ("provisional:" + SID, 302), ("awaiting:" + SID, 303), ("blocked:" + SID, 304),
+                ("blocked:" + foreign_sid, 305), (foreign_sid + ":g1", 306), (self.g("g4"), 307)]
+        with (jd.STATE / "cleared.jsonl").open("a") as f:
+            for iid, t in rows:
+                f.write(json.dumps({"id": iid, "t": t, "op": "clear"}) + "\n")
+        km._CLEARED_MEMO["slot"] = None
+        self.assertEqual(km._cleared_foreign(km._cleared_ids()), [foreign_sid + ":g1"],
+                         "only the remote session's node clear rides; the message-keyed and placeholder rows and "
+                         "the local node stay off")
+        direct = {"parked:m1": 5, "quarantine:m2": 6, "blocked:" + SID: 7, foreign_sid + ":g1": 8}
+        self.assertEqual(km._cleared_foreign(direct), [foreign_sid + ":g1"],
+                         "the same over a direct dict: the prefixed ids stay off, the remote node clear rides")
+        many = {"blocked:11111111-2222-3333-4444-%012d" % i: 1_000 + i for i in range(600)}
+        many[foreign_sid + ":g1"] = 1
+        self.assertEqual(km._cleared_foreign(many), [foreign_sid + ":g1"],
+                         "six hundred placeholder clears newer than the remote clear do not crowd it out of the cap")
+
     def test_the_compaction_stamps_a_root_only_the_ledger_clears(self):
         self._completed_top("g4")
         with (jd.STATE / "cleared.jsonl").open("a") as f:                  # the ledger alone: no flag, no journal
