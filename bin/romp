@@ -651,10 +651,11 @@ EOF
     _romp_cmd "romp new --in <tag> <name>" -            "Put the new SDK or Codex session in a tag (repeatable; a new name creates the tag) — its tab lands in that group"
     _romp_cmd "romp new --no-inherit <name>" -          "Run from inside a session, a new session joins that session's tags by default; this starts it outside them"
     _romp_cmd "romp resume [<id>]"         -            "Resume a past conversation (full-screen picker; or an exact UUID)"
-    _romp_cmd "romp status"                romp-manager "Show manager + kernel status"
+    _romp_cmd "romp status"                romp-manager "Show manager + kernel status (a kernel stopped by romp down says so)"
     _romp_cmd "romp refresh"               romp-manager "Restart the postal bus + all romp kernels (picks up new code — run after an update)"
     _romp_cmd "romp update [host]"         romp-update  "Push this machine's committed romp to attached remotes and restart them"
-    _romp_cmd "romp up"                    romp-manager "Run the kernel manager in the foreground (rare — the login service runs it)"
+    _romp_cmd "romp down [--now] [--wait N]" romp-manager "Stop the kernel and keep it stopped until romp up; turns in flight get N seconds (default 5) to finish, --now skips the wait"
+    _romp_cmd "romp up [--foreground]"     romp-manager "Start the kernel manager: through the login service when installed, else in the foreground"
     _romp_cmd "romp version"               romp-version "Versions across the parts (tree, kernel, served vs built bundles)"
     _romp_cmd "romp spend-rebuild"         romp-spend-rebuild "Recount the spend ledger's token columns from the transcripts (dry run; --apply writes, dollars untouched)"
     _romp_cmd "romp uninstall"             romp-uninstall "Remove romp's installed footprint (--purge also deletes recorded state)"
@@ -773,6 +774,73 @@ _romp_token_cfg() {
     _t="$(_romp_token)"
     _e="${_t//\\/\\\\}"; _e="${_e//\"/\\\"}"
     printf 'header = "X-Romp-Token: %s"\n' "$_e"
+}
+
+# The romp state root: the marker `romp down` leaves lives here (down-by-romp: {t, cmd}), read by
+# `romp status` and `romp up`, by romp-service status, and by romp-manager's ensure and up.
+_romp_state_dir() { printf '%s' "${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}"; }
+
+# A `romp down` whose stop did not land: release the quiesce hold so turns resume now, not at the
+# lease's end, take the marker back, since a running kernel must not read as down on purpose, and put
+# the failure on the audit ledger. The `down` row went in before the stop, and the kernel's resume
+# notice reads the NEWEST row: left as it was, a later cut nobody recorded (an OOM, a hand restart)
+# would be reported to every cut turn as this romp down, on purpose. A `down-failed` row after it,
+# with the reason, says the stop did not happen. The third argument, when set, skips the cancel: no
+# hold was armed (a --now that found no kernel to ask, or no 200).
+_romp_down_release() {   # <state-dir> <kernel-port> <skip-cancel> <why>
+    [[ -z "$3" ]] && { _romp_token_cfg | curl -s -m 5 --config - -H 'Content-Type: application/json' \
+        -d '{"cancel": true}' -o /dev/null "http://127.0.0.1:$2/down" 2>/dev/null || true; }
+    rm -f "$1/down-by-romp"
+    _romp_restart_audit down-failed "" "$4"
+}
+
+# CALLER ATTRIBUTION for anything that stops or restarts the kernel (the user 2026-07-16): a refresh
+# cuts SDK turns, kills pickers and sprays restart notices, and on 2026-07-16 three staged-demo
+# teardowns were untraceable: kernel-downtime.jsonl has only {start,end}, agents leave no shell
+# history. Append who/where/when to restart-audit.jsonl BEFORE acting, so "who restarted the
+# kernel?" is one command (tail) instead of forensics. The kernel's SIGTERM path joins the newest
+# request row (its `action`, and `reason` if set) onto the restart-cut ledger, so a deliberate
+# `romp down` reads as one there too. The refresh row carries no action: it is the caller-attribution
+# row it has always been, and the manager's `restart-all` note written after it is what names a
+# refresh (the kernel's reader skips an unlabeled row). Best-effort: never blocks the restart or the
+# stop itself.
+_romp_restart_audit() {   # [action] [flag] [reason]   (flag --quiet: a PARKED restart; the row names it and the checkout sha)
+    {
+        local _ra_dir _ra_sid _ra_name="" _ra_sha=""
+        _ra_dir="$(_romp_state_dir)"
+        mkdir -p "$_ra_dir"
+        _ra_sid="${CLAUDE_CODE_SESSION_ID:-}"
+        [[ -n "$_ra_sid" && -f "$_ra_dir/names/$_ra_sid" ]] \
+            && _ra_name="$(cut -f1 "$_ra_dir/names/$_ra_sid" 2>/dev/null | head -1)"
+        # a quiet restart is parked at the manager: the kernel's drift check reads when + sha off this row
+        # to stand down for it (T240d), where before an immediate converge pre-empted the quiet window the
+        # flag asked for. The sha is the checkout this romp runs from, best-effort: no sha, no stand-down.
+        [[ "${2:-}" == "--quiet" ]] \
+            && _ra_sha="$(git -C "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)" rev-parse --short=8 HEAD 2>/dev/null || true)"
+        RA_ACTION="${1:-}" RA_WHEN="${2:-}" RA_REASON="${3:-}" RA_SHA="$_ra_sha" \
+        RA_PPID="$PPID" \
+        RA_PARENT="$(ps -o command= -p "$PPID" 2>/dev/null | head -1)" \
+        RA_TTY="$(tty 2>/dev/null || true)" \
+        RA_SID="$_ra_sid" RA_NAME="$_ra_name" \
+        python3 - >> "$_ra_dir/restart-audit.jsonl" <<'PYEOF'
+import json, os, time
+row = {"t": int(time.time())}
+if os.environ.get("RA_ACTION"):
+    row["action"] = os.environ["RA_ACTION"]         # a request row (down, down-failed); the refresh row has none
+row.update({"ppid": int(os.environ.get("RA_PPID") or 0),
+            "parent": os.environ.get("RA_PARENT") or "", "sid": os.environ.get("RA_SID") or "",
+            "name": os.environ.get("RA_NAME") or "", "tty": os.environ.get("RA_TTY") or "",
+            "tmux": os.environ.get("TMUX_PANE") or ""})
+if os.environ.get("RA_REASON"):
+    row["reason"] = os.environ["RA_REASON"]
+if os.environ.get("RA_WHEN") == "--quiet":
+    # a PARKED restart: the kernel's drift check reads when + sha to stand down for it (T240d)
+    row["when"] = "quiet"
+    if os.environ.get("RA_SHA"):
+        row["sha"] = os.environ["RA_SHA"]
+print(json.dumps(row))
+PYEOF
+    } 2>/dev/null || true
 }
 
 # `romp url` — print the tokened dashboard URL, nothing else (scripting/piping; bare `romp` is the
@@ -2212,62 +2280,318 @@ if [[ "${1:-}" == "debug" ]]; then
     exit 0
 fi
 
-# Kernel-MANAGER commands. The manager (bin/romp-manager) is the thin, durable supervisor — normally
+# Kernel-MANAGER commands. The manager (bin/romp-manager) is the thin, durable supervisor: normally
 # the login service runs it (romp-service; installed by install.sh), and front ends (VS Code, the web
-# dashboard, Obsidian) ATTACH rather than spawn. `romp up` is PURELY "run the manager, foreground" —
-# the actions are their OWN commands, none hidden under it (the user 2026-06-13):
-#   romp up          run the manager in the foreground (Ctrl+C stops it AND its kernels; rare — the login service owns this)
-#   romp refresh     restart EVERYTHING — the postal bus AND every kernel (picks up new code after an update)
-#   romp status      manager + kernel status
-# No `romp down`: `romp up` is foreground, so Ctrl+C stops it (the user 2026-06-13). The manager still
-# honors SIGINT/SIGTERM + a direct /stop for that path — there's just no romp command for it.
-# ROMP_MANAGER_BIN is the test seam (same pattern as ROMP_DASHBOARD_BIN / ROMP_POSTAL_BIN).
+# dashboard, Obsidian) ATTACH rather than spawn. The actions are their OWN commands, none hidden under
+# another (the user 2026-06-13):
+#   romp up          start the manager: through the login service when one is installed, else in the
+#                    foreground (Ctrl+C stops it AND its kernels); clears a `romp down` marker
+#   romp down        stop the kernel and keep it stopped until `romp up`
+#   romp refresh     restart EVERYTHING: the postal bus AND every kernel (picks up new code after an update)
+#   romp status      manager + kernel status; a kernel stopped by `romp down` says so
+# `romp down` has to go THROUGH the supervisor (romp-service stop): the manager exiting on its own is a
+# crash to Restart=always / KeepAlive, respawned within seconds, which is also why a foreground Ctrl+C
+# is no longer the way to stop it. A manager the service does not own (no login service installed, or
+# one installed but not running, and a foreground `romp up` beside it) is stopped through its own
+# /stop. The kernel port is probed last (GET /healthz): a kernel nothing above stopped (a bare
+# `romp-serve`, or one that outlived its manager) is stopped through its own door, a SIGTERM at the pid
+# it named on POST /down under THIS romp's serve token, and only when GET /version names the same pid.
+# A kernel that rejects the token is another romp's, and the command ends at once without touching
+# it, the marker, the service or the manager: a `romp down` aimed at a port it did not mean must never
+# take a 403 for "nothing answered", read the pid off the auth-exempt /version and SIGTERM another
+# romp's kernel, cutting every session there. Either way the command ends with a manager and a kernel
+# that no longer answer, or a loud failure naming the one that does. Before stopping it asks the
+# kernel to QUIESCE (POST /down): new turn starts and session creates hold, and the turns in flight
+# get up to --wait seconds (default 5) to reach a turn boundary; what is still mid-turn is cut, exactly
+# as under `romp refresh`, and the next start resumes it with its history (the boot reconcile). `--now`
+# skips the wait. The marker (STATE/down-by-romp) is what makes the stop deliberate to everything
+# else: `romp status` reports down-on-purpose instead of a crash, and `romp-manager ensure` (the
+# supervised start that `romp update <host>` and the remote restart run on a far host) will not bring
+# the kernel back while it exists.
+# ROMP_MANAGER_BIN / ROMP_SERVICE_BIN are the test seams (same pattern as ROMP_DASHBOARD_BIN / ROMP_POSTAL_BIN).
 case "${1:-}" in
-    up)        exec "${ROMP_MANAGER_BIN:-romp-manager}" up ;;
+    up)
+        shift
+        _up_fg=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --foreground) _up_fg=1 ;;
+                -h|--help)
+                    echo "usage: romp up [--foreground]"
+                    echo "  start the kernel manager: through the login service when one is installed, else in"
+                    echo "  the foreground. --foreground runs it in this terminal either way (Ctrl+C stops it"
+                    echo "  and its kernels). Undoes a \`romp down\`."
+                    exit 0 ;;
+                *) echo "romp up: unknown option '$1' (usage: romp up [--foreground])" >&2; exit 2 ;;
+            esac
+            shift
+        done
+        _up_state="$(_romp_state_dir)"
+        if [[ -f "$_up_state/down-by-romp" ]]; then
+            rm -f "$_up_state/down-by-romp"
+            echo "[romp] cleared the romp down marker; starting"
+        fi
+        # `--foreground` keeps the old behavior with a service installed (watching the manager's own
+        # log in a terminal); the manager refuses to start beside a running one either way.
+        if [[ -z "$_up_fg" ]]; then
+            if "${ROMP_SERVICE_BIN:-romp-service}" start; then
+                echo "[romp] the login service is starting the manager; \`romp status\` to check"
+                exit 0
+            else
+                _up_rc=$?
+                # 3 = no login service installed: run the manager in the foreground, as always;
+                # anything else is the service failing to start, already said loudly
+                [[ $_up_rc -eq 3 ]] || exit "$_up_rc"
+            fi
+        fi
+        exec "${ROMP_MANAGER_BIN:-romp-manager}" up ;;
+    down)
+        shift
+        _dn_now="" _dn_wait=5 _dn_quiesced=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --now)    _dn_now=1 ;;
+                --wait)   _dn_wait="${2:-}"; [[ $# -gt 1 ]] && shift ;;   # a bare --wait fails the check below
+                --wait=*) _dn_wait="${1#--wait=}" ;;
+                -h|--help)
+                    echo "usage: romp down [--now] [--wait <seconds>]"
+                    echo "  stop the kernel and keep it stopped until \`romp up\`. Turns in flight get --wait"
+                    echo "  seconds (default 5) to finish; --now skips the wait. Sessions resume with their"
+                    echo "  history at the next \`romp up\`."
+                    exit 0 ;;
+                *) echo "romp down: unknown option '$1' (usage: romp down [--now] [--wait <seconds>])" >&2; exit 2 ;;
+            esac
+            shift
+        done
+        # the bound is the kernel's (DOWN_WAIT_MAX_S, 600.0) on the value AS SENT: a rounded compare
+        # would let 600.4 through, which the kernel refuses with a 400 and the CLI would then turn into
+        # a stop with no wait. The value goes into the request body verbatim, and JSON has no leading
+        # zeros: 05, 0600 and 00.5 would pass a digits-only check and come back as the same 400
+        _dn_wait_int="${_dn_wait%%.*}" _dn_wait_frac=""
+        [[ "$_dn_wait" == *.* ]] && _dn_wait_frac="${_dn_wait#*.}"
+        if ! [[ "$_dn_wait" =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ]] || (( 10#$_dn_wait_int > 600 )) \
+            || { (( 10#$_dn_wait_int == 600 )) && [[ "$_dn_wait_frac" =~ [1-9] ]]; }; then
+            echo "romp down: --wait takes a number of seconds, 0 to 600 (got '$_dn_wait')" >&2; exit 2
+        fi
+        _dn_state="$(_romp_state_dir)"
+        _dn_kport="${ROMP_KERNEL_PORT:-29855}"
+        _dn_kalive() { [[ "$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$_dn_kport/healthz" 2>/dev/null)" == 200 ]]; }
+        # 1. quiesce, through the kernel's own route (see the block comment). The kernel keeps the
+        #    hold for the wait plus a grace, so the stop below lands on a still-quiet kernel; if the
+        #    stop never comes the hold lapses on its own. Under --now there is no wait, but the token
+        #    gate is the same door: when a kernel answers on the port, the request goes out with a
+        #    wait of 0 (the ask the probe makes anyway; a second wait-0 ask never shortens a hold),
+        #    and only a rejected token is reported. Without it a --now aimed at another romp's kernel
+        #    would stop this romp's own service and manager first, then take the marker back at the
+        #    probe's 401, and the kernel it had stopped would read as a crash. _dn_nocancel: a
+        #    failure below skips the release's cancel when no hold was armed here (--now with no
+        #    kernel answering, or an answer other than 200). The curl timeout is the wait plus the
+        #    time a turn boundary and the answer take to arrive, never the bound on the wait itself.
+        _dn_ask=1 _dn_nocancel="$_dn_now" _dn_qwait="$_dn_wait" _dn_qmax=$(( 10#$_dn_wait_int + 16 ))
+        if [[ -n "$_dn_now" ]]; then _dn_qwait=0 _dn_qmax=10; _dn_kalive || _dn_ask=""; fi
+        if [[ -n "$_dn_ask" ]]; then
+            _dn_out="$(_romp_token_cfg | curl -s -m "$_dn_qmax" --config - \
+                        -H 'Content-Type: application/json' -d "{\"wait\": $_dn_qwait}" \
+                        -w '\n%{http_code}' "http://127.0.0.1:$_dn_kport/down" 2>/dev/null)" || true
+            _dn_code="${_dn_out##*$'\n'}"
+            _dn_body="${_dn_out%$'\n'*}"
+            case "$_dn_code" in
+                200) _dn_quiesced=1 _dn_nocancel=""       # a hold is armed: a failure below releases it
+                     if [[ -z "$_dn_now" ]]; then         # --now asked for no wait, so there is none to report
+                         DN_BODY="$_dn_body" python3 - <<'PYEOF' || true
+import json, os
+try:
+    d = json.loads(os.environ.get("DN_BODY") or "{}")
+except Exception:
+    d = {}
+if d.get("quiet"):
+    print("[romp] quiet: no turn in flight (waited %ss)" % d.get("waited", 0))
+else:
+    names = ", ".join(str(n) for n in (d.get("inflight") or [])) or "?"
+    print("[romp] %s session(s) still mid-turn after %ss (%s); stopping anyway; they pick up where "
+          "they stopped at the next romp up" % (d.get("busy", "?"), d.get("waited", "?"), names))
+PYEOF
+                     fi ;;
+                000|"") [[ -n "$_dn_now" ]] || echo "[romp] the kernel isn't answering on :$_dn_kport; nothing to quiesce" ;;
+                404)    [[ -n "$_dn_now" ]] || echo "[romp] this kernel predates the quiesce route; stopping without waiting" ;;
+                401|403)
+                    # not ours: the kernel answering on this port does not know this romp's token, so
+                    # nothing below (marker, service, manager, the probe's signal) may act on it. The
+                    # `perf` verb reads a refused token the same way. Loud, and out.
+                    echo "romp down: the kernel on :$_dn_kport is not the one this romp manages (it rejected the serve token); not touching it. Check ROMP_KERNEL_PORT and the state dir" >&2
+                    exit 1 ;;
+                *)      [[ -n "$_dn_now" ]] || echo "[romp] quiesce failed (HTTP $_dn_code); stopping without waiting" >&2 ;;
+            esac
+        fi
+        # 2. the marker (atomic: temp + mv), then the audit row, AFTER the wait, so the kernel's
+        #    SIGTERM path finds it inside its join window and the cut ledger names the cause. The
+        #    marker's cmd carries the flags; the row names the action alone.
+        mkdir -p "$_dn_state"
+        _dn_cmd="romp down${_dn_now:+ --now}"
+        [[ -z "$_dn_now" && "$_dn_wait" != "5" ]] && _dn_cmd="$_dn_cmd --wait $_dn_wait"
+        DN_CMD="$_dn_cmd" python3 -c 'import json,os,time; print(json.dumps({"t": int(time.time()), "cmd": os.environ["DN_CMD"]}))' \
+            > "$_dn_state/down-by-romp.tmp" && mv -f "$_dn_state/down-by-romp.tmp" "$_dn_state/down-by-romp"
+        _romp_restart_audit down
+        # 3. stop through the supervisor. 3 = no login service installed, 4 = installed but not running:
+        #    either way the manager, if one runs, is outside the service (a foreground `romp up`, a hand
+        #    `romp-manager up`) and step 4 stops it through its own /stop. Any other failure is the
+        #    service refusing to stop, and the kernel is most likely still up.
+        _dn_rc=0
+        "${ROMP_SERVICE_BIN:-romp-service}" stop || _dn_rc=$?
+        case $_dn_rc in
+            0|3|4) ;;
+            *)
+                _romp_down_release "$_dn_state" "$_dn_kport" "$_dn_nocancel" "the login service did not stop"
+                echo "romp down: the login service did not stop; the kernel keeps running" >&2
+                exit 1 ;;
+        esac
+        # 4. whatever the service did, "down" is checked against the manager itself, never taken from
+        #    the service's word: one may still answer on the control port (started outside the service,
+        #    or one the service did not take down). Stop it through its own /stop, then poll, bounded,
+        #    for it to leave: the manager answers /stop first and exits once its kernels have left, or
+        #    once the grace it grants them (SHUTDOWN_GRACE_MS, 5s, then SIGKILL) has run out, so the
+        #    poll's bound is that grace plus the exit.
+        _dn_mport="${ROMP_MANAGER_PORT:-7432}"
+        _dn_mgr=""
+        if "${ROMP_MANAGER_BIN:-romp-manager}" status >/dev/null 2>&1; then
+            _dn_mgr=1
+            "${ROMP_MANAGER_BIN:-romp-manager}" down >/dev/null 2>&1 || true
+            for _ in $(seq 1 28); do
+                "${ROMP_MANAGER_BIN:-romp-manager}" status >/dev/null 2>&1 || break
+                sleep 0.25
+            done
+        fi
+        if _dn_st="$("${ROMP_MANAGER_BIN:-romp-manager}" status 2>/dev/null)"; then
+            # still answering: the stop did not land. Release the hold, take the marker back (it would
+            # report a running kernel as down on purpose) and name what is still up and where.
+            _dn_pid="$(DN_ST="$_dn_st" python3 -c 'import json, os; print((json.loads(os.environ["DN_ST"]).get("manager") or {}).get("pid") or "")' 2>/dev/null || true)"
+            _romp_down_release "$_dn_state" "$_dn_kport" "$_dn_nocancel" "a manager still answers on :$_dn_mport${_dn_pid:+ (pid $_dn_pid)}"
+            echo "romp down: a manager is still running on :$_dn_mport${_dn_pid:+ (pid $_dn_pid)} after being asked to stop; the kernel keeps running. Stop it by hand, then run romp down again" >&2
+            exit 1
+        fi
+        # 5. the kernel itself, last: the manager's absence is not the kernel's. Two kernels answer on
+        #    the port with no manager to speak for them: a bare one (`nohup romp-serve`, what the
+        #    dashboard's remote Start and the update and restart fallbacks leave on a host with no
+        #    manager) and one that outlived its manager's stop. GET /healthz (auth-exempt) says whether
+        #    anything is there. The pid to signal comes from POST /down under this romp's token, which
+        #    the kernel gates and answers with its pid, and only when the auth-exempt GET /version
+        #    names the same pid; see the ownership block below. The stop door is the manager's own:
+        #    SIGTERM, which the kernel turns into a bounded drain and a cut-ledger row
+        #    (_graceful_term). A kernel that step 3 or 4 already stopped gets that drain's time before
+        #    it is asked again, since a second SIGTERM inside the drain writes a second, emptier ledger
+        #    row over the first: the poll ends on the event the port closes, bounded by the drain. One
+        #    that still answers after its own drain time has passed is the same loud failure as a
+        #    lingering manager.
+        _dn_kstop="" _dn_kpid=""
+        if [[ "$_dn_rc" -eq 0 || -n "$_dn_mgr" ]]; then
+            for _ in $(seq 1 12); do _dn_kalive || break; sleep 0.25; done
+        fi
+        _dn_pid_of() {   # the pid a JSON body on stdin names (a positive int), or nothing
+            python3 -c 'import json, sys; p = (json.load(sys.stdin) or {}).get("pid"); print(p if isinstance(p, int) and not isinstance(p, bool) and p > 0 else "")' 2>/dev/null || true
+        }
+        if _dn_kalive; then
+            # OWNERSHIP, at the moment of signaling. The pid comes from POST /down under this romp's
+            # serve token, a route the kernel gates and answers with its pid, never from the
+            # auth-exempt GET /version alone: /version answers any local process, so it proves
+            # neither that the kernel is this romp's nor that it quiesced (the block comment above).
+            # The ask is the quiesce with no wait, the same ask step 1 makes under --now, and a second
+            # quiesce never shortens a hold step 1 armed. A 401/403 is another romp's kernel. A 200
+            # without a pid is a kernel from before the field; a /version pid that differs is a kernel
+            # other than the one that answered. None of these is signaled: the hold is released, the
+            # marker taken back, the reason named. Every curl here ends in `|| true`: under `set -euo
+            # pipefail` a kernel that leaves between the /healthz poll above and these lines (its own
+            # exit, or the end of the drain a stop above began) makes curl exit non-zero, and without
+            # the guard the command would die with curl's code: no line, the marker left in place, no
+            # down-failed row. A kernel that is gone by now is "no answer" or "names no pid" below,
+            # and takes the documented refusal.
+            _dn_cout="$(_romp_token_cfg | curl -s -m 10 --config - -H 'Content-Type: application/json' \
+                        -d '{"wait": 0}' -w '\n%{http_code}' "http://127.0.0.1:$_dn_kport/down" 2>/dev/null)" || true
+            _dn_ccode="${_dn_cout##*$'\n'}"
+            _dn_cpid="" _dn_why=""
+            [[ "$_dn_ccode" == 200 ]] && _dn_cpid="$(printf '%s' "${_dn_cout%$'\n'*}" | _dn_pid_of)"
+            _dn_vout="$(curl -s -m 2 "http://127.0.0.1:$_dn_kport/version" 2>/dev/null)" || true
+            _dn_vpid="$(printf '%s' "$_dn_vout" | _dn_pid_of)"
+            case "$_dn_ccode" in
+                401|403)
+                    _romp_down_release "$_dn_state" "$_dn_kport" 1 "the kernel on :$_dn_kport rejected the serve token"
+                    echo "romp down: the kernel on :$_dn_kport is not the one this romp manages (it rejected the serve token); not touching it. Check ROMP_KERNEL_PORT and the state dir" >&2
+                    exit 1 ;;
+                200)    if [[ -z "$_dn_cpid" ]]; then
+                            _dn_why="it answered POST /down without naming its pid"
+                        elif [[ "$_dn_cpid" != "$_dn_vpid" ]]; then
+                            _dn_vsays="names no pid"; [[ -n "$_dn_vpid" ]] && _dn_vsays="says pid $_dn_vpid"
+                            _dn_why="it named pid $_dn_cpid on POST /down but GET /version $_dn_vsays"
+                        fi ;;
+                000|"") _dn_why="POST /down got no answer" ;;
+                *)      _dn_why="POST /down answered HTTP $_dn_ccode, not a 200 naming its pid" ;;
+            esac
+            if [[ -n "$_dn_why" ]]; then
+                # a 200 armed a hold (the confirmation's own, under --now too): release it
+                _dn_rel_skip="$_dn_nocancel"; [[ "$_dn_ccode" == 200 ]] && _dn_rel_skip=""
+                _romp_down_release "$_dn_state" "$_dn_kport" "$_dn_rel_skip" "the kernel on :$_dn_kport was not confirmed as this romp's ($_dn_why)"
+                echo "romp down: the kernel on :$_dn_kport was not confirmed as the one this romp manages ($_dn_why); not touching it. Check ROMP_KERNEL_PORT and the state dir" >&2
+                exit 1
+            fi
+            _dn_kpid="$_dn_cpid"
+            # the poll ends on the event the port closes; its bound is the kernel's own drain (about
+            # 2s in _graceful_term) with room for the exit
+            if kill -TERM "$_dn_kpid" 2>/dev/null; then
+                for _ in $(seq 1 24); do _dn_kalive || break; sleep 0.25; done
+            fi
+            if _dn_kalive; then
+                _romp_down_release "$_dn_state" "$_dn_kport" "" "a kernel still answers on :$_dn_kport (pid $_dn_kpid)"
+                echo "romp down: the kernel on :$_dn_kport (pid $_dn_kpid) is still running after being asked to stop; turns resume. Stop it by hand, then run romp down again" >&2
+                exit 1
+            fi
+            _dn_kstop=1
+        fi
+        if [[ -n "$_dn_kstop" ]]; then
+            case "$_dn_rc:$_dn_mgr" in
+                3:|4:) echo "[romp] down: a kernel was running on :$_dn_kport (pid $_dn_kpid) with no manager; stopped it. \`romp up\` starts it again" ;;
+                *)     echo "[romp] down: the kernel on :$_dn_kport (pid $_dn_kpid) outlived the stop and was stopped directly; \`romp up\` starts it again" ;;
+            esac
+            exit 0
+        fi
+        # "nothing was running" is never said of a kernel that answered the quiesce a moment ago
+        case "$_dn_rc:$_dn_mgr:$_dn_quiesced" in
+            0::*)      echo "[romp] down; \`romp up\` starts it again" ;;
+            0:1:*)     echo "[romp] down: the login service stopped, and so did a manager running outside it; \`romp up\` starts it again" ;;
+            *:1:*)     echo "[romp] down: the manager and its kernels are stopping; \`romp up\` starts them again" ;;
+            3::1|4::1) echo "[romp] down: the kernel on :$_dn_kport answered the quiesce but has since gone (no login service installed or running, no manager on :$_dn_mport); \`romp up\` starts it again" ;;
+            3::)       echo "[romp] nothing was running (no login service installed, no manager on :$_dn_mport); the auto-start stays held until \`romp up\`" ;;
+            4::)       echo "[romp] nothing was running (the login service was already stopped, no manager on :$_dn_mport); the auto-start stays held until \`romp up\`" ;;
+        esac
+        exit 0 ;;
     refresh)   # restart EVERYTHING (the user 2026-06-29): the postal bus too, not just the kernels — the bus
                # is a separate long-lived singleton the manager doesn't own, so a kernel-only refresh left it
                # serving stale code. Bounce the bus first (best-effort), then exec the kernel restart.
-               #
-               # CALLER ATTRIBUTION (the user 2026-07-16): a refresh is fleet-wide (cuts SDK turns, kills
-               # pickers, sprays restart notices), and on 2026-07-16 three staged-demo teardowns were
-               # untraceable — kernel-downtime.jsonl has only {start,end}, agents leave no shell history.
-               # Append who/where/when to restart-audit.jsonl BEFORE acting, so "who restarted the
-               # kernel?" is one command (tail) instead of forensics. Best-effort: never blocks the
-               # restart itself.
-               {
-                   _ra_dir="${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}"
-                   mkdir -p "$_ra_dir"
-                   _ra_sid="${CLAUDE_CODE_SESSION_ID:-}"
-                   _ra_name=""
-                   [[ -n "$_ra_sid" && -f "$_ra_dir/names/$_ra_sid" ]] \
-                       && _ra_name="$(cut -f1 "$_ra_dir/names/$_ra_sid" 2>/dev/null | head -1)"
-                   RA_PPID="$PPID" \
-                   RA_PARENT="$(ps -o command= -p "$PPID" 2>/dev/null | head -1)" \
-                   RA_TTY="$(tty 2>/dev/null || true)" \
-                   RA_SID="$_ra_sid" RA_NAME="$_ra_name" RA_WHEN="${2:-}" \
-                   RA_SHA="$(git -C "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)" rev-parse --short=8 HEAD 2>/dev/null || true)" \
-                   python3 - >> "$_ra_dir/restart-audit.jsonl" <<'PYEOF'
-import json, os, time
-row = {"t": int(time.time()), "ppid": int(os.environ.get("RA_PPID") or 0),
-       "parent": os.environ.get("RA_PARENT") or "", "sid": os.environ.get("RA_SID") or "",
-       "name": os.environ.get("RA_NAME") or "", "tty": os.environ.get("RA_TTY") or "",
-       "tmux": os.environ.get("TMUX_PANE") or ""}
-if os.environ.get("RA_WHEN") == "--quiet":
-    # a PARKED restart: the kernel's drift check reads when + sha to stand down for it (T240d) —
-    # without them an immediate converge pre-empted the quiet window this flag asked for
-    row["when"] = "quiet"
-    if os.environ.get("RA_SHA"):
-        row["sha"] = os.environ["RA_SHA"]
-print(json.dumps(row))
-PYEOF
-               } 2>/dev/null || true
+               _romp_restart_audit "" "${2:-}"   # who asked (see the helper), before acting; --quiet rides along
                "${ROMP_POSTAL_BIN:-romp-postal-service}" restart >/dev/null 2>&1 || true
                # Deploys bounce IMMEDIATELY, cutting in-flight turns (T160 — the parked
                # quiet window cost minutes per push; boot reconcile resumes cut turns with
                # their history). `romp refresh --quiet` defers to the next quiet window
                # explicitly (no SDK turn in flight, drain lease held, backstop-capped).
                exec "${ROMP_MANAGER_BIN:-romp-manager}" restart-all "${2:-}" ;;
-    status)    exec "${ROMP_MANAGER_BIN:-romp-manager}" status ;;
+    status)
+        _st_marker="$(_romp_state_dir)/down-by-romp"
+        [[ -f "$_st_marker" ]] || exec "${ROMP_MANAGER_BIN:-romp-manager}" status
+        # a `romp down` marker: a running manager (started some other way) still wins and shows as
+        # usual; a manager that does not answer is DOWN ON PURPOSE: say when and how to start it,
+        # and exit 0 (a health check must not read a deliberate stop as a failure)
+        if "${ROMP_MANAGER_BIN:-romp-manager}" status 2>/dev/null; then exit 0; fi
+        _st_when="$(python3 - "$_st_marker" 2>/dev/null <<'PYEOF' || true
+import json, sys, time
+try:
+    t = int(json.load(open(sys.argv[1])).get("t") or 0)
+except Exception:
+    t = 0
+if t:
+    fmt = "%H:%M" if time.strftime("%Y-%m-%d", time.localtime(t)) == time.strftime("%Y-%m-%d") else "%Y-%m-%d %H:%M"
+    print(time.strftime(fmt, time.localtime(t)))
+PYEOF
+)"
+        echo "down (romp down${_st_when:+ at $_st_when}; romp up to start)"
+        exit 0 ;;
 esac
 
 # NB: there's no `romp rename` / `romp a` command. Rename from inside tmux
