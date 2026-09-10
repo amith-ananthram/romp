@@ -28683,7 +28683,8 @@ def _is_slash_command(text):
 # "echo:" + hex, so isKernelEchoUuid on the client, the landed-record stamp's echo skip (build_session), the
 # re-queue's prefix test (sdk_backend _enqueue_with_id) and the echo-in-queue reading (_echo_queued_in) all
 # treat it as the kernel's. Bounded: the kernel mints 32 hex digits (uuid4().hex); a client id is admitted in
-# the same shape, never an arbitrary string that would ride the wire, the mirror and every chip.
+# the same shape, never an arbitrary string that would ride the wire, the mirror and every chip. Matched whole
+# (fullmatch): `$` alone admits a trailing newline, and an id with one is held nowhere, so it would be taken.
 _CLIENT_QID_RE = re.compile(r"^echo:[0-9a-f]{16,64}$")
 
 
@@ -28691,7 +28692,7 @@ def _wire_qid(msg):
     """The copy id a ws message names (`qid`), or None when it carries none or one in another form. A cancel's
     id only has to be looked up (an unknown id is the honest miss), so the shape is all a cancel checks."""
     q = msg.get("qid") if isinstance(msg, dict) else None
-    return q if isinstance(q, str) and _CLIENT_QID_RE.match(q) else None
+    return q if isinstance(q, str) and _CLIENT_QID_RE.fullmatch(q) else None
 
 
 def _client_qid(msg, sid, be):
