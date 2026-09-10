@@ -3673,9 +3673,21 @@ def _quarantine_put(origin, m, to_id, via="", wire_id=None):
         tmp = QUARANTINE / (mid + ".tmp")
         tmp.write_text(json.dumps(rec))
         tmp.rename(QUARANTINE / (mid + ".json"))      # atomic publish (the kernel may be reading the dir)
+        _refusal_over("quarantine")                   # a hold landed: the next refusal here is a new episode
         _log("quarantine: held %s from %s -> %s (directed)" % (mid, origin, rec["to"]))
         return True
-    except OSError:
+    except OSError as e:
+        # No card says this (the kernel only reads the dir), so the log says it on every refusal, and
+        # the USER hears it once per episode as a bell row, the way deliver() says a refused publish:
+        # the directed arm answers 'retry', so the sender re-relays the message every exchange while
+        # its receipt reads carried, and a store that stays unwritable would otherwise be a lasting
+        # fault with no surface anyone watches. Keyed on the one store; the next hold that lands re-arms it.
+        text = "quarantine %s from %s: the hold could not be written (%s) — nothing held" % (mid, origin, e)
+        if _REFUSAL_SAID.get("quarantine"):
+            _log(text)
+        else:
+            _REFUSAL_SAID["quarantine"] = True
+            _refused_notice(text + "; the sender holds the text and re-relays until the store can be written")
         return False
 
 def quarantine_list():
@@ -3869,9 +3881,19 @@ def _relay_in(host, m, token_proven=False):
                 _log("relay %s from %s: local delivery refused (%s) — the sender re-relays" % (mid, host, e))
                 return "retry", None
         elif trust == "directed":
-            _quarantine_put(origin, m, match[0]["id"], via=host, wire_id=to_id)   # HELD for human approve/deny/edit;
-            #                                                                        never injects; remembers whether
-            #                                                                        the wire chose a sid (approve is id-strict then)
+            # HELD for human approve/deny/edit; never injects; remembers whether the wire chose a sid
+            # (approve is id-strict then). The hold is a file named by the mid, so an id that cannot
+            # name one is refused for good: 'retry' would have the sender re-relay it every exchange.
+            if not _safe_id(mid):
+                return "bounce", {"mid": mid, "why": "the message id is malformed; it cannot be held for approval"}
+            if not _quarantine_put(origin, m, match[0]["id"], via=host, wire_id=to_id):
+                # the hold did not land (said by _quarantine_put, with the OSError's cause).
+                # Acking here told the sender 'delivered' for mail nothing holds, and marking the mid
+                # seen deduped its re-relay away: lost on both ends, no record. Silence instead, as
+                # the trusted arm's refused delivery: the sender's outbox keeps it parked and
+                # re-relays it next exchange, and the hold lands once the store writes again.
+                _log("relay %s from %s: the hold could not be written — the sender re-relays" % (mid, host))
+                return "retry", None
         # else isolated → drop: ack so the sender stops resending, but deliver nothing (no communication).
         # An isolated host normally never peers at all (the kernel forces its notify down), so this is a
         # defensive backstop for the checkin-peer path where the mobile dials our /peer-exchange.
