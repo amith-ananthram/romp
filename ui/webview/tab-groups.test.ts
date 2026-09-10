@@ -338,7 +338,8 @@ test("the picker's Tags row is for SDK and Codex sessions: disabled behind a not
     "the create handler sends none for tmux, through the same predicate");
   assert.doesNotMatch(RENDER, /const tags = backend === "sdk"/, "no second, SDK-only copy of the rule");
   assert.match(RENDER, /:not\(\.picker-host\):not\(\.picker-auth\):not\(\.picker-tags\) \.picker-be-opt\.sel/, "a selected tag chip never reads as the backend pick");
-  assert.match(CSS, /\.picker-tags\.disabled \.picker-be-opt \{ opacity: 0\.45; cursor: default; pointer-events: none; \}/);
+  assert.match(CSS, /\.picker-tags\.disabled \.picker-be-opt \{ filter: grayscale\(1\); cursor: default; pointer-events: none; \}/,
+    "greyed, not faded: the off chip keeps its own 0.45 as the only fade (T321)");
 });
 
 test("headers are click-safe: data-act on the node, the action on the stable #tabs delegate, one render path via the event", () => {
@@ -380,7 +381,7 @@ test("the picker's Tags row: prefilled from the ACTIVE tab, visible and editable
   assert.match(RENDER, /const tgWrap = el\("div", "picker-backend picker-tags"\);/);
   assert.match(RENDER, /const preset = new Set\(activeId \? unions\.filter\(\(u\) => u\.members\.includes\(activeId!\)\)\.map\(\(u\) => u\.name\) : \[\]\);/,
     "the active tab's tags pre-select — never a silent inherit");
-  assert.match(RENDER, /b\.addEventListener\("click", \(\) => b\.classList\.toggle\("sel"\)\);/, "multi-select: each chip on its own");
+  assert.match(RENDER, /b\.addEventListener\("click", \(\) => \{ b\.classList\.toggle\("sel"\); paintPickerTagChip\(b, u\); \}\);/, "multi-select: each chip on its own, repainted as the shared chip (T321)");
   assert.match(RENDER, /\.\.\.\(tags\.length \? \{ tags \} : \{\}\) \}\);/, "absent when nothing is picked (the kernel's not-asked contract)");
   assert.match(RENDER, /tgWrapEl\.style\.display = pick \|\| !unions\.length \? "none" : "";/, "hidden with no tags to offer, and in pick-mode");
 });
@@ -393,7 +394,7 @@ test("the section chrome is a LABEL's (the user 2026-09-06): the surface's sub-l
   assert.match(CSS, /\.tab-group-count \{ opacity: 0\.7; \}/, "the count inherits the header's size — no em nested inside an em");
   // T251 (the user 2026-09-07): the swatch+name pair retired for THE CHIP the tag wears everywhere —
   // the shared tag-menu builder's pill, bold like the name it replaces, sized by the header
-  assert.match(CSS, /\.tab-group-chip \{ flex: 0 0 auto; font-weight: 600; line-height: 1\.2; \}/);
+  assert.match(CSS, /\.tab-group-chip \{ flex: 0 0 auto; line-height: 1\.2; \}/, "no weight on the host: the chip is 400 everywhere (T321)");
   assert.doesNotMatch(CSS, /\.tab-group-swatch|\.tab-group-name \{/, "the bar and the plain name are gone");
   assert.doesNotMatch(CSS, /\.tab-group-dot/, "the dot is gone");
   const sizes = new Set(Array.from(CSS.matchAll(/\n\.tab-group-[^{\n]*\{[^}]*font-size: ([^;]+);/g)).map((m) => m[1]));
@@ -1665,13 +1666,13 @@ test("executed: the pin persists with the fold state under romp:tabgroups, survi
 test("the toggle is a row in the tab menu's Tags flyout beside the Move-to rows: the home tag's chip, ✓ when on, per-section copy, the fold's own write and render path; the views adoption carries the pins across a rename (source pins)", () => {
   const fly = RENDER.slice(RENDER.indexOf('const sub = el("div", "ctx-menu ctx-sub ctx-sub-tags");'), RENDER.indexOf("// New tag… — an inline input"));
   const pin = fly.slice(fly.indexOf("// SHOW WHEN FOLDED"));
-  assert.ok(fly.indexOf('lb.textContent = "Move to " + g.name') < fly.indexOf("// SHOW WHEN FOLDED"), "after the Move-to rows, before New tag…");
+  assert.ok(fly.indexOf('lb.append("Move to ", named())') < fly.indexOf("// SHOW WHEN FOLDED"), "after the Move-to rows, before New tag…");
   assert.match(pin, /if \(home\) \{\s*\n\s*const sec = sectionRef\(home\);\s*\n\s*const on = isPinned\(tabGroups\(\), sec, id\);/,
     "only with a home tag (there is no fold to show through otherwise); the section as the plan keys it (sectionRef: name and local id); the store read with the unions (the migration)");
   assert.doesNotMatch(pin, /isPinned\(tabGroups\(\), home\.name|togglePinned\(tabGroups\(\), home\.name|home\.localId, id\)|readTabGroups\(\)/,
     "never the bare name or the bare id, and never a store read without the unions on a path that writes");
   assert.match(pin, /const row = el\("div", "ctx-item ctx-item-toggle ctx-item-pin" \+ \(on \? " current" : ""\)\);/, "the menus' ✓ mark when on");
-  assert.match(pin, /chip\.style\.background = home\.color \|\| "var\(--dim\)"; row\.appendChild\(chip\);/, "the home tag's chip, like its neighbors");
+  assert.doesNotMatch(pin, /ctx-tag-dot|chip\.style\.background/, "no swatch on the row (T321): the sub-line names the home tag in words, and a tag shows only as the one chip");
   assert.match(pin, /lb\.textContent = "Show when folded";/);
   assert.match(pin, /sb2\.textContent = on \? `stays on the strip while \$\{home\.name\} is folded` : `keep this tab on the strip while \$\{home\.name\} is folded`;/,
     "the copy speaks of the home section alone — and the write is per section, so it is the whole truth");

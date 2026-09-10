@@ -6515,9 +6515,11 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
         sub.replaceChildren();
         for (const g of holding()) {                             // one chip per NAME — never a host prefix
           const row = el("div", "ctx-item ctx-item-toggle");
-          const chip = el("span", "ctx-tag-dot"); chip.style.background = g.color || "var(--dim)"; row.appendChild(chip);
           const bodyE = el("span", "ctx-item-body");
-          const lb = el("span", "ctx-item-label"); lb.textContent = g.name; bodyE.appendChild(lb);
+          const lb = el("span", "ctx-item-label");
+          const chip = tagChip(g.name, g.color || null, { inheritSize: true });   // the one tag chip (T321): the row's label IS the tag, at the label's size
+          chip.classList.add("ctx-tag-chip");
+          lb.appendChild(chip); bodyE.appendChild(lb);
           row.appendChild(bodyE);
           if (g.pending) {
             // a create still in flight: the row shows, and takes no gesture until the ack names the
@@ -6548,11 +6550,12 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
         const home = home0 && !home0.pending ? home0 : undefined;
         for (const g of others) {
           const row = el("div", "ctx-item ctx-item-toggle");
-          const chip = el("span", "ctx-tag-dot"); chip.style.background = g.color || "var(--dim)"; row.appendChild(chip);
           const bodyE = el("span", "ctx-item-body");
           const lb = el("span", "ctx-item-label");
+          // the tag inside the sentence is the chip (T321): no swatch-and-name pair anywhere a tag shows
+          const named = () => { const c = tagChip(g.name, g.color || null, { inheritSize: true }); c.classList.add("ctx-tag-chip"); return c; };
           if (home) {
-            lb.textContent = "Move to " + g.name; bodyE.appendChild(lb);
+            lb.append("Move to ", named()); bodyE.appendChild(lb);
             row.appendChild(bodyE);
             const plus = el("button", "ctx-tag-x ctx-tag-plus") as HTMLButtonElement;
             plus.type = "button"; plus.textContent = "+"; plus.title = "add this tag too — the session keeps its other tags";
@@ -6560,7 +6563,7 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
             row.appendChild(plus);
             row.addEventListener("click", (e2) => { e2.stopPropagation(); moveUnion(home, g); build(); sb.textContent = subText(); });
           } else {
-            lb.textContent = "+ " + g.name; bodyE.appendChild(lb);
+            lb.append("+ ", named()); bodyE.appendChild(lb);
             row.appendChild(bodyE);
             row.addEventListener("click", (e2) => { e2.stopPropagation(); editUnion(g, { add: [id] }); build(); sb.textContent = subText(); });
           }
@@ -6586,8 +6589,7 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
           const on = isPinned(tabGroups(), sec, id);
           sub.appendChild(el("div", "ctx-sep"));
           const row = el("div", "ctx-item ctx-item-toggle ctx-item-pin" + (on ? " current" : ""));
-          const chip = el("span", "ctx-tag-dot"); chip.style.background = home.color || "var(--dim)"; row.appendChild(chip);
-          const bodyE = el("span", "ctx-item-body");
+          const bodyE = el("span", "ctx-item-body");   // no swatch (T321): the sub-line names the home tag in words
           const lb = el("span", "ctx-item-label"); lb.textContent = "Show when folded"; bodyE.appendChild(lb);
           const sb2 = el("span", "ctx-item-sub");
           sb2.textContent = on ? `stays on the strip while ${home.name} is folded` : `keep this tab on the strip while ${home.name} is folded`;
@@ -7408,6 +7410,14 @@ function backendTakesTags(be: string): boolean { return be === "sdk" || be === "
 // the Tags row is for SDK and Codex sessions (tab groups, 2026-09-04): on the tmux pick the row stays
 // in place but disabled behind a short note, and the create handler sends no `tags`. Without this a
 // chip prefilled from a tagged active tab turns every terminal create into a refusal.
+// The Tags row's option paints as the tag chip itself (T321, the user 2026-09-10): the thin border in the tag's own
+// colour that the tab strip, the feed and the outline draw, and on versus off by the visual the tag toggles already
+// use, the faded chip (tagChip's `off`, TAG_CHIP_OFF_CLASS at 0.45), never a dot and never the Backend row's accent
+// fill. The `sel` class on the button stays the state the create reads; the chip is repainted from it on each click.
+function paintPickerTagChip(b: HTMLButtonElement, u: { name: string; color?: string | null }): void {
+  b.replaceChildren(tagChip(u.name, u.color, { inheritSize: true, off: !b.classList.contains("sel") }));
+}
+
 function syncPickerTags(): void {
   const wrap = document.querySelector("#picker .picker-tags") as HTMLElement | null;
   if (!wrap) return;
@@ -7910,12 +7920,11 @@ function openPicker(pick = false, prompt?: string, allowNew = false) {
     for (const u of unions) {
       const b = el("button", "picker-be-opt" + (preset.has(u.name) ? " sel" : "")) as HTMLButtonElement;
       b.type = "button"; b.dataset.tag = u.name;
-      const d = el("span", "picker-tag-dot"); d.style.background = u.color || "var(--dim)"; b.appendChild(d);
-      b.appendChild(document.createTextNode(u.name));
+      paintPickerTagChip(b, u);   // the tag chip every surface draws, full when selected, faded when not (T321)
       b.title = preset.has(u.name)
         ? `the session you are looking at is in ${u.name} — the new one joins it too unless you unpick this`
         : `put the new session in ${u.name}`;
-      b.addEventListener("click", () => b.classList.toggle("sel"));   // multi-select: each chip on its own
+      b.addEventListener("click", () => { b.classList.toggle("sel"); paintPickerTagChip(b, u); });   // multi-select: each chip on its own
       tgWrapEl.insertBefore(b, tgWrapEl.querySelector(".picker-tags-note"));   // chips before the tmux note
     }
     syncPickerTags();   // the backend toggle was just reset to the gear default above
