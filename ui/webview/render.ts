@@ -13600,12 +13600,15 @@ window.addEventListener("romp:hostRelayUp", (e) => {
   refreshSettledPreviews();
   // …and the tab this pane is LOOKING AT, when that host owns it (T246, the user 2026-09-07): the relay's
   // open is the moment the remote kernel holds a FRESH client for this pane — after that kernel restarted,
-  // one with no active tab at all. Its pusher keys only a client's active tab on the live change key (the
-  // backend's stream, its queue, the snapshot row); every other session is served from the file-stat
-  // cache, so the session the user was watching streamed nothing until their next send moved a file
-  // input. The pane shim's local socket re-arms the LOCAL kernel with its ?active= connect hint on every
-  // dial; the relay has no hint, so the same fact is re-sent here as the activeTab message every tab
-  // switch sends (notifyActive; routeOutbound strips the host prefix). Decision in relay-active.ts.
+  // one with no active tab at all. Its pusher builds and flushes a client's active tab first; every tab is
+  // served from its cached build while its complete signature (_chat_build_sig: the backend's live tail,
+  // its queue, the snapshot row, every side file) holds. Under the key of the time, which keyed no
+  // in-memory input for a background tab, the session the user was watching streamed nothing until their
+  // next send moved a file input; today a missing hint costs the watched tab its place at the head of the
+  // build order and the first flush. The pane shim's local socket re-arms the LOCAL kernel with its ?active=
+  // connect hint on every dial; the relay has no hint, so the same fact is re-sent here as the activeTab
+  // message every tab switch sends (notifyActive; routeOutbound strips the host prefix). Decision in
+  // relay-active.ts.
   if (activeTabToReannounce(activeId, h)) notifyActive();
 });
 

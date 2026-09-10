@@ -8452,7 +8452,9 @@ def _auto_resume_session_retry(now, tmux):
                 changed = True
                 sys.stderr.write("retry-suppress: re-armed session %s — a successful turn landed\n" % sid)
     if changed:
-        _mark_views_dirty()      # the flag lives in a file the fleet sig doesn't watch → dirty-rebuild the chat status
+        _mark_views_dirty()      # the chat signature's retry component carries the flag; this cycle's push already
+                                 # ran, so the mark's wake starts the next cycle at once and its chat build ships the
+                                 # re-armed status; the feed and timeline the mark busts read no retry state
 
 
 def _mark_auto_nudged(gid, turn_id, count, arm_atoms=None, at=None):
@@ -15597,7 +15599,8 @@ def _drive(msg, client):
                                                           # already aborted any in-flight CLI retry; this stops the relapse
         if err:                                           # …and a stop that did NOT land is said, the rewind ops' warn-toast
             client["send"](json.dumps({"type": "warn", "text": err}))   # idiom (fail loudly; the interrupt itself happened)
-        _mark_views_dirty()                               # the stamp lives in memory — no sig sees it
+        _mark_views_dirty()                               # the chat signature's clock component carries the stamp; the
+                                                          # mark busts the feed and timeline and wakes the pusher
     elif t in ("compact", "compactSession"):
         # Mid-turn (or behind an existing queue) the click PARKS as a queued /compact chip and fires when
         # the turn ends (the user 2026-07-02, who saw the icon blink with nothing happening while working — now
@@ -28794,7 +28797,8 @@ def _park_op(sid, op):
     list); the pusher wake comes AFTER the release, so the cycle it brings finds the lock free."""
     with _pending_ops_lock:
         _park_op_locked(sid, op)
-    _mark_views_dirty()               # the queue lives in memory — no sig sees it; the woken push renders the chip
+    _mark_views_dirty()               # the chat signature's ops component carries the queue; the mark busts the feed
+                                      # and timeline, and the wake renders the chip now
 
 
 def _park_op_locked(sid, op):
@@ -29008,7 +29012,8 @@ def _move_now(be, sid, path, tries, wid):
         _move_failed(sid, nm, wid, res)
         return res
     _commands_for_cwd(_cwd_of(sid))          # the new folder's slash commands warm before the next "/"
-    _mark_views_dirty()                       # the cwd lives in names/ — no sig sees it; rebuild past the sig
+    _mark_views_dirty()                       # the chat signature's cwd component (and the names digest) carries the
+                                              # move; the mark busts the feed and timeline, and the wake pushes now
     _push_soon()
     _send_to_view("chat", {"type": "moved", "id": sid, "name": nm, "cwd": _tilde(_cwd_of(sid))}, wid)
     return res
@@ -29891,7 +29896,9 @@ def _apply_pending_ops(now=None):
                     _pending_ops.pop(sid, None)
             if changed:
                 _save_pending_ops()           # every delivery/drop shrinks the disk mirror too
-                _mark_views_dirty()           # the queue shrank (in-memory) → rebuild past the sig so chips retire
+                _mark_views_dirty()           # the queue shrank (in-memory): the chat signature's ops component carries
+                                              # it; the mark busts the feed and timeline, and this cycle's push, which
+                                              # follows the drain, retires the chips
     finally:
         _live_scope.usage = _UNSET
         _live_scope.spend_pause = None
