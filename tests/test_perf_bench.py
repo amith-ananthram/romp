@@ -9,9 +9,10 @@ flag, and --compare prints deltas. The sessions' directory is a real git
 checkout with a fabricated GitHub origin, as every real state's is: the chat build's path-link git
 queries (rev-parse, ls-files) reach the tripwire's allow list, which a plain directory never
 exercised; the `remote get-url` pair the list also admits is checked in-process below. The tool is
-driven as a subprocess with the same env recipe a person would use, so nothing here loads romp code
-in-process; the tool module itself is loaded for direct checks of its fake client's frame labelling
-and of the tripwire's allow rule (its import pulls in only the standard library)."""
+driven as a subprocess with the env recipe a person would use plus the load_module() deprecation
+promoted to an error (LOAD_MODULE_DEPRECATION_AS_ERROR), so nothing here loads romp code in-process;
+the tool module itself is loaded for direct checks of its fake client's frame labelling and of the
+tripwire's allow rule (its import pulls in only the standard library)."""
 import atexit
 import contextlib
 import copy
@@ -256,8 +257,19 @@ def build_synthetic(root, web_turns=WEB_TURNS, age_api_days=0):
     return str(state), str(claude)
 
 
+# The tool loads the kernel and its SDK backend by file path. Every child here runs with the load_module()
+# deprecation promoted to an error (the message alone, so no other warning is promoted): a load through the
+# deprecated call, removed in Python 3.15, fails the run, where Python's default filters would let it pass
+# in silence (the warning is raised from importlib's own frame, which the default ignore covers). The filter
+# is appended to the process environment's PYTHONWARNINGS, whose own filters stay (the later filter wins for
+# this message); a PYTHONWARNINGS in env_extra replaces the variable, as every env_extra key does, so a test
+# that passes one includes this constant.
+LOAD_MODULE_DEPRECATION_AS_ERROR = "error:the load_module() method is deprecated:DeprecationWarning"
+
+
 def run_tool(args, env_extra=None, timeout=300):
     env = {k: v for k, v in os.environ.items() if k not in MANAGER_VARS}
+    env["PYTHONWARNINGS"] = ",".join(f for f in (env.get("PYTHONWARNINGS"), LOAD_MODULE_DEPRECATION_AS_ERROR) if f)
     env.update(env_extra or {})
     return subprocess.run([sys.executable, TOOL] + list(args), capture_output=True, text=True, env=env, timeout=timeout)
 
@@ -730,6 +742,46 @@ class PerfBench(unittest.TestCase):
         self.assertEqual(out["repo"], os.path.realpath(scratch))
         self.assertNotIn("benchmarks", out)
         self.assertEqual(out["error"], "this kernel lacks _live_scope; the harness does not know how to drive it")
+
+    def test_the_tool_loads_the_kernel_clean_under_the_load_module_deprecation_as_an_error(self):
+        # the kernel and its SDK backend are loaded by file path; with the load_module() deprecation promoted
+        # to an error in the child, both loads run clean and the run ends on the tool's own refusal of the
+        # planted kernel, not on the warning (the filter names the message, so nothing else is promoted)
+        scratch = self._scratch_root("perf-bench-loader-")
+        os.makedirs(os.path.join(scratch, "kernel"))
+        with open(os.path.join(scratch, "kernel", "kernel.py"), "w") as f:
+            f.write("x = 1\n")
+        open(os.path.join(scratch, "kernel", "sdk_backend.py"), "w").close()
+        r = run_tool(["--state", self.state, "--claude-dir", self.claude, "--repo", scratch, "--iters", "1"],
+                     env_extra={"PYTHONWARNINGS": LOAD_MODULE_DEPRECATION_AS_ERROR})
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("this kernel lacks _live_scope", r.stderr)
+        self.assertNotIn("DeprecationWarning", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_an_sdk_backend_the_kernel_already_loaded_is_not_executed_again(self):
+        # the kernel loads its SDK backend under the fixed name romp_sdk_backend, and load_source executes a
+        # name already in sys.modules again, into the same module object; the tool reuses the module the
+        # kernel registered rather than loading the file a second time. The planted kernel registers its
+        # backend at import, and the backend appends a line to a marker on every execution.
+        scratch = self._scratch_root("perf-bench-backend-once-")
+        marker = os.path.join(scratch, "executions")
+        os.makedirs(os.path.join(scratch, "kernel"))
+        with open(os.path.join(scratch, "kernel", "kernel.py"), "w") as f:
+            f.write("import importlib.util, os, sys\n"
+                    "_spec = importlib.util.spec_from_file_location(\n"
+                    "    'romp_sdk_backend', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sdk_backend.py'))\n"
+                    "_mod = importlib.util.module_from_spec(_spec)\n"
+                    "sys.modules['romp_sdk_backend'] = _mod\n"
+                    "_spec.loader.exec_module(_mod)\n")
+        with open(os.path.join(scratch, "kernel", "sdk_backend.py"), "w") as f:
+            f.write("with open(%r, 'a') as f:\n    f.write('executed\\n')\n" % marker)
+        r = run_tool(["--state", self.state, "--claude-dir", self.claude, "--repo", scratch, "--iters", "1"])
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("this kernel lacks _live_scope", r.stderr)   # both loads ran; the planted kernel was refused after them
+        self.assertNotIn("Traceback", r.stderr)
+        with open(marker) as f:
+            self.assertEqual(f.read(), "executed\n")
 
     def pb_mirror_ignore(self):
         return load_source("perf_bench_mirror_under_test", TOOL).MIRROR_IGNORE
