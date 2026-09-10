@@ -1913,6 +1913,26 @@ def _refresh_model_catalog(reason, _async=True):
     return True
 
 
+def _model_catalog_boot(_async=True):
+    """The catalog at kernel boot (T296, the user 2026-09-10): install the last fetched list, and fetch from
+    the Models API ONLY when no cache exists (an install's first boot). The fetch runs Claude Code's
+    apiKeyHelper, which on some boxes is a password-manager read that raises a desktop prompt; a boot is
+    a clock, not an event, and several deploy converges a day each put up a prompt nobody answered and
+    timed out. With a cache the list serves as is and refreshes on the designed trigger alone, the
+    staleness event (_note_unknown_model: an unknown claude-* id from a reg or a pick, once per id per
+    kernel life). One stderr line says so, naming the cache's fetch time; /version's modelCatalog reads
+    "cache" until an event refreshes it. Returns whether a fetch started."""
+    n = _load_model_catalog_cache()
+    if n:
+        fetched = _catalog_status.get("fetchedAt")
+        when = (datetime.fromtimestamp(int(fetched), timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                if isinstance(fetched, (int, float)) and fetched else "an unknown time")
+        sys.stderr.write("model catalog (boot): serving the cached list (%d id(s), fetched %s); it refreshes when a "
+                         "session reports a model it lacks, not at boot\n" % (n, when))
+        return False
+    return _refresh_model_catalog("boot", _async=_async)
+
+
 def _note_unknown_model(mid):
     """The staleness EVENT: a claude-* version id reached a set path or the pick store and the merged
     list does not know it — exactly when a hand-updated table used to go quietly stale. Fires ONE
@@ -14700,11 +14720,12 @@ def _sdk_locked():
             # apiKeyHelper itself.
             jd._LOGIN_AUTH_ENV_FN = sbmod.startup_auth_env   # the login tokens the backend claimed at boot; romp
             #                                                  holds no key to wire (credentials.py, 2026-09-08)
-            # T222: the live model catalog — the last fetched list installs before any picker asks,
-            # then the BOOT event refreshes it (async; the key is claimable from here on)
+            # T222: the live model catalog — the last fetched list installs before any picker asks; a
+            # first boot with no cache fetches (async; the key is claimable from here on), every later boot
+            # serves the cache and leaves the refresh to the staleness event (T296: the fetch runs the
+            # apiKeyHelper, a desktop prompt on some boxes, and boot is not an event)
             try:
-                _load_model_catalog_cache()
-                _refresh_model_catalog("boot")
+                _model_catalog_boot()
             except Exception:
                 sys.stderr.write("model catalog boot: %s\n" % traceback.format_exc())
             _sdk_backend = sbmod.SdkBackend(
