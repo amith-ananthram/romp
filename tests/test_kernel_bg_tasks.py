@@ -604,6 +604,43 @@ class OneRowPerAgentAcrossTheHookAndTheStream(unittest.TestCase):
                           ("toolu_03", None, "Running the docs build")],
                          "only an AGENT row's desc wears the CLI's prefix; a shell task's description is the user's own words")
 
+    def test_a_subagents_own_command_nests_under_the_agent_by_the_ledgers_acting_agent(self):
+        # 2026-09-10, on the REAL _bg_live_norm: one live agent whose background test chunk registered under
+        # the parent's task list (one list per session). The launch ledger's entry for the Bash carries the
+        # hook's agent_id (the acting agent), so the command is the AGENT's wait, nested under its row and
+        # stoppable (a lifecycle-set task); the session's own count is one agent, breakdown "1 agent".
+        saved_reg = km._thread_reg
+        km._thread_reg = lambda sid: {"bgLedger": [{"tid": "b3333", "toolUseId": "toolu_03", "tool": "bash",
+                                                    "desc": "run the parser test chunk", "armedAt": 110,
+                                                    "agentId": self.A1, "src": "hook"}]}
+        try:
+            self._snap([{"type": "general-purpose", "since": 100, "agentId": self.A1}],
+                       [{"toolUseId": "toolu_01", "taskId": self.A1, "type": "local_agent", "since": 98,
+                         "desc": "Running Check the exporter for banned words", "lastTool": ""},
+                        {"toolUseId": "toolu_03", "taskId": "b3333", "type": "local_bash", "since": 110,
+                         "desc": "run the parser test chunk", "lastTool": ""}])
+            aw = km._session_awaiting(self.SID, None, True)
+        finally:
+            km._thread_reg = saved_reg
+        self.assertEqual((aw["kind"], aw["count"], aw["why"]), ("agents", 1, "1 background agent still working"))
+        self.assertEqual(aw["items"], [{"kind": "agents", "id": "toolu_01", "label": "Check the exporter for banned words",
+                                        "since": 98, "agentId": self.A1, "stoppable": True,
+                                        "waits": [{"kind": "commands", "id": "toolu_03", "label": "run the parser test chunk",
+                                                   "since": 110, "stoppable": True}]}])
+        self.assertEqual(aw["tasks"], ["Check the exporter for banned words"])
+
+    def test_a_command_with_no_ledger_owner_and_no_agent_file_stays_beside_the_agent(self):
+        # the same two tasks, the ledger silent and no transcript to consult (path None): never a guess
+        self._snap([{"type": "general-purpose", "since": 100, "agentId": self.A1}],
+                   [{"toolUseId": "toolu_01", "taskId": self.A1, "type": "local_agent", "since": 98,
+                     "desc": "Running Check the exporter for banned words", "lastTool": ""},
+                    {"toolUseId": "toolu_03", "taskId": "b3333", "type": "local_bash", "since": 110,
+                     "desc": "run the parser test chunk", "lastTool": ""}])
+        aw = km._session_awaiting(self.SID, None, True)
+        self.assertEqual((aw["kind"], aw["count"]), ("mixed", 2))
+        self.assertEqual([it["kind"] for it in aw["items"]], ["agents", "commands"])
+        self.assertTrue(all(it.get("stoppable") for it in aw["items"]), "every lifecycle-set row is stoppable")
+
     def test_the_transcript_scan_path_carries_the_acks_agent_id(self):
         # source 0.75 (a live CLI with no lifecycle set — tmux): the async ack names the agent; the row
         # must carry it so the same join works there

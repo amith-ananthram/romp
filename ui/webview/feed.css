@@ -634,6 +634,12 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
    .fmodal-warn-cap vocabulary, shown only when more than one group is on the card */
 .ftask-group { font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.06em; color: var(--dim); margin: 4px 0 1px; }
 .ftask-group:first-child { margin-top: 1px; }
+/* NESTED rows (2026-09-10): what an awaited agent is itself waiting on, indented under its row; the first
+   led by a small dim "waiting on" (the .ftask-group rung), the rest by its blank twin so the marks align;
+   a nested row's own deeper waits are counted in .ftask-deeper (dim, same size as the text). */
+.fcheck.ftask-sub { padding-left: 1.2em; }
+.ftask-waits-on { flex: 0 0 auto; width: 5.4em; text-align: right; font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.06em; color: var(--dim); white-space: nowrap; align-self: center; }
+.ftask-deeper { color: var(--dim); }
 
 /* "Followed up" — optimistic reopen pending the judge's re-file (judges delegation, 2026-06-17); blue pill */
 .fask-followedup { flex: 0 0 auto; font-size: 0.66em; font-weight: 700; letter-spacing: 0.04em;

@@ -21,7 +21,7 @@ test("the swirl element is built in the body, right after the distiller line, an
 });
 
 test("the swirl is driven by spinFor's caption — shown when there is one, else hidden", () => {
-  assert.match(FEED, /import \{ spinFor, awaitWord, groupRows, GROUP_TITLE, ROW_KIND_OF_LEGACY, type AwaitRow \} from "\.\/spin-caption";/);   // the rows' vocabulary too (slice 2)
+  assert.match(FEED, /import \{ spinFor, awaitWord, groupRows, waitsNote, GROUP_TITLE, ROW_KIND_OF_LEGACY, type AwaitRow \} from "\.\/spin-caption";/);   // the rows' vocabulary too (slice 2)
   assert.match(FEED, /const spin = spinFor\(it, distillPending\(dCompleted, dBlocked, it\.summary, it\.blockSummary, !!it\.blocked\),/);
   assert.match(FEED, /const spinCaption = spin\.caption, spinTip = spin\.tip, awaitingBg = spin\.awaitingBg;/);
   assert.match(FEED, /import \{ distillText, distillInputs, applyDistillLine, distillPending, distillStaleNote \} from "\.\/distiller-line";/);
@@ -48,7 +48,7 @@ test("a bg-task wait wears the compact 'Awaiting task' pill that expands the tas
   assert.match(FEED, /pillLbl\.append\(\.\.\.durNodes\(it\.awaiting && it\.awaiting\.since\)\);\s*\/\/ the waited time, live/);   // appended after the (possibly coloured) word since slice 2
   assert.match(FEED, /taskBtn\.onclick = pick\("tasks"\);/);
   // expanded rows render in the checklist spot, same view as Sub-goals, the swirl as each row's mark
-  assert.match(FEED, /if \(choice === "tasks"\) \{[\s\S]*?el\("div", "fcheck ftask"\)[\s\S]*?ftask-swirl/);
+  assert.match(FEED, /if \(choice === "tasks"\) \{[\s\S]*?el\("div", "fcheck ftask" \+ \(sub \? " ftask-sub" : ""\)\)[\s\S]*?ftask-swirl/);   // + the nested-row marker (2026-09-10)
   assert.match(CSS, /\.fask-taskbtn \{ display: inline-flex/);
   assert.match(CSS, /\.ftask-swirl\.fask-awaiting-swirl/);
 });

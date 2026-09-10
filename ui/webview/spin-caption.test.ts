@@ -167,7 +167,7 @@ test("a settled card displaced to Working loses its line but never its caption",
 const FEED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "feed.ts"), "utf8");
 
 test("feed.ts routes the card's swirl through spinFor and keeps no inline copy of the ladder", () => {
-  assert.match(FEED, /import \{ spinFor, awaitWord, groupRows, GROUP_TITLE, ROW_KIND_OF_LEGACY, type AwaitRow \} from "\.\/spin-caption";/);   // slice 2: the rows' vocabulary rides the same import
+  assert.match(FEED, /import \{ spinFor, awaitWord, groupRows, waitsNote, GROUP_TITLE, ROW_KIND_OF_LEGACY, type AwaitRow \} from "\.\/spin-caption";/);   // slice 2: the rows' vocabulary rides the same import
   // the elapsed readout reaches the OTHER two awaiting surfaces through the same helper: the
   // "Awaiting task" pill and the "Awaiting <peer>" chip (the user 2026-08-23). That helper is durNodes —
   // waitedSuffix's rule (" · " + the duration for a known start, nothing otherwise) rendered as a stamped

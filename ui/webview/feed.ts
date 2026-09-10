@@ -15,7 +15,7 @@ import { delegate } from "./actions";
 import { paintHeld, paintReleased, publishPaneHidden } from "./paint-gate";
 import { linkifyPrRefs, setLinkedText, senderPrRepo, installPrLinkOpener } from "./pr-links";
 import { cardInputsKey, cardNeedsUpdate, type GateEnv } from "./feed-card-gate";
-import { spinFor, awaitWord, groupRows, GROUP_TITLE, ROW_KIND_OF_LEGACY, type AwaitRow } from "./spin-caption";
+import { spinFor, awaitWord, groupRows, waitsNote, GROUP_TITLE, ROW_KIND_OF_LEGACY, type AwaitRow } from "./spin-caption";
 import { onlyTag, matchesOnly } from "./only-filter";
 import { searchMatches, searchSids } from "./feed-search";
 import { TagLens, lensAll, lensLabel, lensVisible, lensUnions } from "./tag-lens";
@@ -1725,29 +1725,40 @@ function applySections(a: any, it: AskItem, distillShown: boolean): void {
       // shows (agents / commands / watches / peers), labels only — the chat's box carries the controls
       const groups = groupRows(taskRows);
       const peerByName = new Map(pillPeers.map((p) => [p.name, p]));
+      // one row; `sub` = a NESTED row (what the agent above it is itself waiting on, kernel `waits`,
+      // 2026-09-10): indented, the first under its agent led by a small dim "waiting on", the rest by its
+      // blank twin so the marks align; a nested row with waits of its own says their count in its label —
+      // one level drawn, like the chat's box. Labels only here; the chat box carries the controls.
+      const taskRow = (r: AwaitRow, sub: "first" | "rest" | null): HTMLElement => {
+        const row = el("div", "fcheck ftask" + (sub ? " ftask-sub" : ""));
+        if (sub) { const on = el("span", "ftask-waits-on" + (sub === "first" ? "" : " ftask-waits-blank")); on.textContent = sub === "first" ? "waiting on" : ""; row.appendChild(on); }
+        const tri = el("span", "fcheck-tri empty");
+        const mark = el("span", "fcheck-mark");
+        mark.appendChild(el("span", "fask-awaiting-swirl ftask-swirl"));
+        const txt = el("span", "fcheck-text");
+        const p = r.kind === "peer" ? peerByName.get(r.label || "") : undefined;
+        if (p) {
+          // a peer row names the session the way the awaiting box does: identity colour, quiet host prefix,
+          // click opens the session (the standard session-chip gesture)
+          txt.replaceChildren(...hostPartsNodes(p.host, p.name));
+          if (p.color && p.color.bg) txt.style.color = p.color.bg;
+          if (p.sid) {
+            const sid = p.sid;
+            txt.title = "waiting on " + p.name + " — click opens the session";
+            txt.style.cursor = "pointer";
+            txt.onclick = (ev: Event) => { ev.stopPropagation(); vscodeApi?.postMessage({ type: "openSession", id: sid }); };
+          }
+        } else txt.textContent = r.label || r.kind;
+        const deeper = sub ? waitsNote(r) : "";
+        if (deeper) { const dp = el("span", "ftask-deeper"); dp.textContent = " · waiting on " + deeper; txt.appendChild(dp); }
+        row.append(tri, mark, txt);
+        return row;
+      };
       for (const g of groups) {
         if (groups.length > 1) { const gh = el("div", "ftask-group"); gh.textContent = GROUP_TITLE[g.kind] || "Other"; cl.appendChild(gh); }
         for (const r of g.rows) {
-          const row = el("div", "fcheck ftask");
-          const tri = el("span", "fcheck-tri empty");
-          const mark = el("span", "fcheck-mark");
-          mark.appendChild(el("span", "fask-awaiting-swirl ftask-swirl"));
-          const txt = el("span", "fcheck-text");
-          const p = r.kind === "peer" ? peerByName.get(r.label || "") : undefined;
-          if (p) {
-            // a peer row names the session the way the awaiting box does: identity colour, quiet host prefix,
-            // click opens the session (the standard session-chip gesture)
-            txt.replaceChildren(...hostPartsNodes(p.host, p.name));
-            if (p.color && p.color.bg) txt.style.color = p.color.bg;
-            if (p.sid) {
-              const sid = p.sid;
-              txt.title = "waiting on " + p.name + " — click opens the session";
-              txt.style.cursor = "pointer";
-              txt.onclick = (ev: Event) => { ev.stopPropagation(); vscodeApi?.postMessage({ type: "openSession", id: sid }); };
-            }
-          } else txt.textContent = r.label || r.kind;
-          row.append(tri, mark, txt);
-          cl.appendChild(row);
+          cl.appendChild(taskRow(r, null));
+          ((r.waits || []).filter((w) => w && w.kind)).forEach((w, i) => cl.appendChild(taskRow(w, i === 0 ? "first" : "rest")));
         }
       }
       cl.style.display = cl.children.length ? "" : "none";

@@ -1,7 +1,13 @@
 <!-- SYNTHETIC fixture: the chat pane's #bg-tasks box in the MIXED case (plans/subagent-transcripts.md
      slice 2, 2026-09-05), in BOTH turn states (2026-09-06), one above the other — the same four rows grouped
      by kind under small dim headers (Agents / Commands / Watches), each row wearing its own kind's affordances
-     (the agent rows' open-transcript arrow + Stop, the command row's Stop + fold caret, the watch row's Cancel):
+     (the agent rows' open-transcript arrow + Stop, the command row's Stop + fold caret, the watch row's Cancel).
+     NESTED waits (2026-09-10): under the first agent, what THAT agent is itself waiting on — its own background
+     test chunk and a subagent of its own — as indented sub-rows in the same vocabulary, the first led by a small
+     dim "waiting on", the second by its blank twin (dots aligned); the nested agent's own deeper wait is counted
+     in its label ("· waiting on 1 command") rather than drawn. The header still reads 4: the top level counts
+     what the SESSION waits on; the nested rows are the agent's. Stop rides the nested rows (stoppable: the
+     lifecycle set's task), no fold caret (no tracked task lends an output tail).
        * IDLE: the box wears the await-green border and dot, the header reads "Awaiting 4 · 2 agents · 1 command
          · 1 watch", the idle note closes the list, and the statusline beneath carries the Awaiting chip as a
          BUTTON reading "Awaiting 4".
@@ -15,10 +21,10 @@
      dispatch description (no agent type, no "Running " prefix: the status word beside it already says
      running), with the open-transcript arrow. The small uppercase captions between the two are fixture-only.
        tools/ui-verify/shot.sh --css ui/webview/styles.css --body tools/ui-verify/fixtures/awaiting-rows-chat.html \
-           --out /tmp/awaiting-shots/chat-dark.png --size 760x700 --extra-css 'body{background:var(--bg);padding-top:10px}'
+           --out /tmp/awaiting-shots/chat-dark.png --size 760x820 --extra-css 'body{background:var(--bg);padding-top:10px}'
        …and with --body-class "theme-light chat-theme-<name>" for the light theme. The height matters: the
        box caps at min(50vh, 340px), so each box needs ~270px of viewport to show whole (the idle box's natural
-       height is ~262px, the working one ~240px); 700px shows both as a real pane would.
+       height is ~262px, the working one ~240px; the two nested rows add ~30px each); 820px shows both as a real pane would.
 -->
 <div id="content" style="flex:0 0 auto"></div>
 <div style="padding:2px 12px 0;font-size:10px;line-height:1.6;letter-spacing:.04em;text-transform:uppercase;font-weight:600;color:var(--dim)">idle — the chip reads Awaiting</div>
@@ -28,6 +34,12 @@
     <div class="bg-group-head">Agents</div>
     <div class="bg-task bg-running">
       <div class="bg-head" data-act="bg-toggle"><span class="bg-dot"></span><span class="bg-sum">Map the notes-api parser</span><span class="tool-open-agent bg-open-agent" role="button"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3.5H4a1 1 0 0 0-1 1V12a1 1 0 0 0 1 1h7.5a1 1 0 0 0 1-1V9"/><path d="M9.5 3h3.5v3.5"/><path d="M13 3 7.5 8.5"/></svg></span><span class="bg-since">· 12m</span><span class="bg-status">running</span><button class="bg-stop">Stop</button><span class="bg-caret">▸</span></div>
+    </div>
+    <div class="bg-task bg-running bg-sub">
+      <div class="bg-head bg-flat"><span class="bg-waits-on">waiting on</span><span class="bg-dot"></span><span class="bg-sum">Run the parser test chunk</span><span class="bg-since">· 3m</span><span class="bg-status">running</span><button class="bg-stop">Stop</button></div>
+    </div>
+    <div class="bg-task bg-running bg-sub">
+      <div class="bg-head bg-flat"><span class="bg-waits-on bg-waits-blank"></span><span class="bg-dot"></span><span class="bg-sum">Check the fixture loader</span><span class="bg-deeper">· waiting on 1 command</span><span class="tool-open-agent bg-open-agent" role="button"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3.5H4a1 1 0 0 0-1 1V12a1 1 0 0 0 1 1h7.5a1 1 0 0 0 1-1V9"/><path d="M9.5 3h3.5v3.5"/><path d="M13 3 7.5 8.5"/></svg></span><span class="bg-since">· 1m</span><span class="bg-status">running</span><button class="bg-stop">Stop</button></div>
     </div>
     <div class="bg-task bg-running">
       <div class="bg-head bg-flat"><span class="bg-dot"></span><span class="bg-sum">Audit the exporter's retries</span><span class="tool-open-agent bg-open-agent" role="button"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3.5H4a1 1 0 0 0-1 1V12a1 1 0 0 0 1 1h7.5a1 1 0 0 0 1-1V9"/><path d="M9.5 3h3.5v3.5"/><path d="M13 3 7.5 8.5"/></svg></span><span class="bg-since">· 4m</span><span class="bg-status">running</span></div>
@@ -53,6 +65,12 @@
     <div class="bg-group-head">Agents</div>
     <div class="bg-task bg-running">
       <div class="bg-head" data-act="bg-toggle"><span class="bg-dot"></span><span class="bg-sum">Map the notes-api parser</span><span class="tool-open-agent bg-open-agent" role="button"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3.5H4a1 1 0 0 0-1 1V12a1 1 0 0 0 1 1h7.5a1 1 0 0 0 1-1V9"/><path d="M9.5 3h3.5v3.5"/><path d="M13 3 7.5 8.5"/></svg></span><span class="bg-since">· 12m</span><span class="bg-status">running</span><button class="bg-stop">Stop</button><span class="bg-caret">▸</span></div>
+    </div>
+    <div class="bg-task bg-running bg-sub">
+      <div class="bg-head bg-flat"><span class="bg-waits-on">waiting on</span><span class="bg-dot"></span><span class="bg-sum">Run the parser test chunk</span><span class="bg-since">· 3m</span><span class="bg-status">running</span><button class="bg-stop">Stop</button></div>
+    </div>
+    <div class="bg-task bg-running bg-sub">
+      <div class="bg-head bg-flat"><span class="bg-waits-on bg-waits-blank"></span><span class="bg-dot"></span><span class="bg-sum">Check the fixture loader</span><span class="bg-deeper">· waiting on 1 command</span><span class="tool-open-agent bg-open-agent" role="button"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3.5H4a1 1 0 0 0-1 1V12a1 1 0 0 0 1 1h7.5a1 1 0 0 0 1-1V9"/><path d="M9.5 3h3.5v3.5"/><path d="M13 3 7.5 8.5"/></svg></span><span class="bg-since">· 1m</span><span class="bg-status">running</span><button class="bg-stop">Stop</button></div>
     </div>
     <div class="bg-task bg-running">
       <div class="bg-head bg-flat"><span class="bg-dot"></span><span class="bg-sum">Audit the exporter's retries</span><span class="tool-open-agent bg-open-agent" role="button"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3.5H4a1 1 0 0 0-1 1V12a1 1 0 0 0 1 1h7.5a1 1 0 0 0 1-1V9"/><path d="M9.5 3h3.5v3.5"/><path d="M13 3 7.5 8.5"/></svg></span><span class="bg-since">· 4m</span><span class="bg-status">running</span></div>
