@@ -11,7 +11,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from unittest import mock
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -22,7 +22,7 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-km = SourceFileLoader("romp_kernel", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
 
 SID = "11111111-2222-3333-4444-555555555555"
 SID2 = "22222222-3333-4444-5555-666666666666"
@@ -228,8 +228,7 @@ class HighSlotSwitches(SessionColor):
         import importlib
         sdk = km.sdk_backend if hasattr(km, "sdk_backend") else None
         if sdk is None:
-            from importlib.machinery import SourceFileLoader as _L
-            sdk = _L("romp_sdk_pal", os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py")).load_module()
+            sdk = load_source("romp_sdk_pal", os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py"))
         bg, fg = sdk.pick_identity_color(sid)
         i = zlib.crc32(sid.encode()) % len(bgs)
         self.assertGreaterEqual(i, 9)

@@ -43,7 +43,7 @@ import unittest
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -52,7 +52,7 @@ os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
-km = SourceFileLoader("romp_kernel_citrust", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_citrust", os.path.join(BIN, "romp-kernel"))
 
 BODY = {"host": "TESTHOST", "kernelPort": 29855, "busPort": 25302, "token": "peertok"}
 

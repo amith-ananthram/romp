@@ -18,7 +18,7 @@ import json
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -29,7 +29,7 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
 os.environ["ROMP_MANAGER_PORT"] = "1"
-km = SourceFileLoader("romp_kernel_pressid", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_pressid", os.path.join(BIN, "romp-kernel"))
 
 # the account gate and the tmux prompt hold are separate axes (tests/test_kernel_limit_queue.py,
 # tests/test_kernel_parked_ops_liveness.py): off here, so a park is a park for the reason under test

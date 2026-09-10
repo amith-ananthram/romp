@@ -6,7 +6,7 @@ connects. Source pins on build_session + the SDK backend."""
 import inspect
 import os
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 import tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -17,7 +17,7 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-km = SourceFileLoader("romp_kernel_efr", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_efr", os.path.join(BIN, "romp-kernel"))
 BACKEND_SRC = open(os.path.join(BIN, "romp_sdk_backend.py")).read()
 
 
@@ -58,8 +58,7 @@ class EffortReconnect(unittest.TestCase):
         self.assertIn("write_sdk_default(self.state_dir, effort=value)", BACKEND_SRC)
         # …and the seed round-trips through the defaults store (behavioral, hermetic state dir)
         import tempfile as _tf
-        from importlib.machinery import SourceFileLoader as _SFL
-        sb = _SFL("romp_sdk_backend_efr", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+        sb = load_source("romp_sdk_backend_efr", os.path.join(BIN, "romp_sdk_backend.py"))
         td = _tf.mkdtemp()
         sb.write_sdk_default(td, effort="ultracode")
         d = sb.read_sdk_defaults(td)

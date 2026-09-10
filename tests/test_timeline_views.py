@@ -16,16 +16,16 @@ import tempfile
 import threading
 import time
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "bin")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
-SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
+load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
-km = SourceFileLoader("romp_kernel_tv", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_tv", os.path.join(BIN, "romp-kernel"))
 jd = km.jd
 
 G1 = {"id": "g1", "name": "pool", "color": "#DD42FF", "members": ["s2", "s3"]}

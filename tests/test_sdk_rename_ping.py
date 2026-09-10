@@ -15,7 +15,7 @@ import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 from unittest import mock
 
@@ -23,7 +23,7 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-sb = SourceFileLoader("romp_sdk_backend_renameping", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+sb = load_source("romp_sdk_backend_renameping", os.path.join(BIN, "romp_sdk_backend.py"))
 
 SID = "aaaaaaaa-1111-2222-3333-444444444444"
 SRC = open(os.path.join(BIN, "romp_sdk_backend.py")).read()

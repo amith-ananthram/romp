@@ -15,7 +15,7 @@ import os
 import tempfile
 import threading
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from types import SimpleNamespace
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -30,9 +30,9 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 os.environ["ROMP_MANAGER_PORT"] = "1"             # a dead port, never an inherited live one
 os.environ["ROMP_MODEL_CATALOG"] = "off"          # never the Models API from a test
-km = SourceFileLoader("romp_kernel_codex_echo_merge", os.path.join(BIN, "romp-kernel")).load_module()
-cb = SourceFileLoader("romp_codex_backend_echo_merge",
-                      os.path.join(ROOT, "kernel", "codex_backend.py")).load_module()
+km = load_source("romp_kernel_codex_echo_merge", os.path.join(BIN, "romp-kernel"))
+cb = load_source("romp_codex_backend_echo_merge",
+                      os.path.join(ROOT, "kernel", "codex_backend.py"))
 
 T0 = 1781100000
 

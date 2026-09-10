@@ -12,7 +12,7 @@ import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -21,11 +21,11 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-em = SourceFileLoader("romp_em_skill", os.path.join(BIN, "romp-event-model")).load_module()
-SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
+em = load_source("romp_em_skill", os.path.join(BIN, "romp-event-model"))
+load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
-km = SourceFileLoader("romp_kernel_skill", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_skill", os.path.join(BIN, "romp-kernel"))
 jd = km.jd
 
 SID = "11111111-2222-3333-4444-555555555555"
@@ -146,7 +146,7 @@ class LiveTwin(unittest.TestCase):
     """romp_sdk_backend.msg_to_atom classifies the STREAM copy identically — it was the expanded live box."""
 
     def test_stream_skill_content_gets_the_flagged_atom(self):
-        sb = SourceFileLoader("romp_sdk_backend_skill", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+        sb = load_source("romp_sdk_backend_skill", os.path.join(BIN, "romp_sdk_backend.py"))
 
         class TextBlock:
             def __init__(self, text):
@@ -165,7 +165,7 @@ class LiveTwin(unittest.TestCase):
         self.assertIsNone(a["message"]["stop_reason"])
 
     def test_stream_v2_shape_classifies_by_parent_tool_use_id(self):
-        sb = SourceFileLoader("romp_sdk_backend_skill2", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+        sb = load_source("romp_sdk_backend_skill2", os.path.join(BIN, "romp_sdk_backend.py"))
 
         class TextBlock:
             def __init__(self, text):
@@ -191,7 +191,7 @@ class LiveTwin(unittest.TestCase):
         self.assertIsNone(b)
 
     def test_note_skill_tool_ids_collects_from_the_stream(self):
-        sb = SourceFileLoader("romp_sdk_backend_skill3", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+        sb = load_source("romp_sdk_backend_skill3", os.path.join(BIN, "romp_sdk_backend.py"))
         ids = set()
         sb._note_skill_tool_ids({"type": "assistant", "message": {"content": [
             {"type": "tool_use", "id": "t1", "name": "Skill", "input": {}},

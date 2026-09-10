@@ -14,16 +14,16 @@ import os
 import sys
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
-em = SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-jd = SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
+em = load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+jd = load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
-km = SourceFileLoader("romp_kernel", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
 
 SID = "11111111-2222-3333-4444-999999999901"     # private synthetic sid: this module owns its states file
 NOW = 1781100000
@@ -253,7 +253,7 @@ class BackendOwnsIsMemoized(unittest.TestCase):
     SID = "11111111-2222-3333-4444-999999999921"
 
     def test_a_owns_reads_the_reg_once_per_file_version(self):
-        sb = SourceFileLoader("romp_sdk_backend_stage0", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+        sb = load_source("romp_sdk_backend_stage0", os.path.join(BIN, "romp_sdk_backend.py"))
         be = sb.SdkBackend(tempfile.mkdtemp(), "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None)
         self.assertFalse(be.owns(self.SID), "no reg yet")
         sb.write_reg(be.state_dir, self.SID, {"sid": self.SID, "name": "web", "cwd": "/tmp", "alive": True})
@@ -277,7 +277,7 @@ class BackendOwnsIsMemoized(unittest.TestCase):
         # read_reg returns None on ANY OSError (EMFILE/EIO/EACCES), not only a missing file; caching that
         # as "not ours" latched a live session's backend False until its reg was rewritten (review find on
         # #933, 2026-09-07). A transient failure must not be cached; the next call re-reads.
-        sb = SourceFileLoader("romp_sdk_backend_stage0_t", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+        sb = load_source("romp_sdk_backend_stage0_t", os.path.join(BIN, "romp_sdk_backend.py"))
         be = sb.SdkBackend(tempfile.mkdtemp(), "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None)
         sb.write_reg(be.state_dir, self.SID, {"sid": self.SID, "name": "web", "cwd": "/tmp", "alive": True})
         self.assertTrue(be.owns(self.SID))
@@ -661,7 +661,7 @@ class PerBuildReadersAreCached(_StateSandbox):
             except OSError: pass
 
     def test_c_the_live_tail_revision_moves_on_every_mutation(self):
-        sb = SourceFileLoader("romp_sdk_backend_stage0b", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+        sb = load_source("romp_sdk_backend_stage0b", os.path.join(BIN, "romp_sdk_backend.py"))
         be = sb.SdkBackend(tempfile.mkdtemp(), "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None)
         sid = self.SID
         r0 = be.live_rev(sid)
@@ -685,7 +685,7 @@ class PerCycleStoreReadersAreCached(_StateSandbox):
         """Upstream's tail reader (c84165d4) superseded this branch's memoized one: every caller wants the
         newest record, and it is read backwards from the end of the file rather than by a forward walk of a
         log that only grows. Pinned here as the contract the liveness snapshot relies on."""
-        sb = SourceFileLoader("romp_sdk_backend_stage0c", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+        sb = load_source("romp_sdk_backend_stage0c", os.path.join(BIN, "romp_sdk_backend.py"))
         sd = tempfile.mkdtemp()
         p = os.path.join(sd, "states", self.SID + ".jsonl")
         os.makedirs(os.path.dirname(p))

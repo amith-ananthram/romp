@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -22,7 +22,7 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
-km = SourceFileLoader("romp_kernel_autoreload", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_autoreload", os.path.join(BIN, "romp-kernel"))
 
 # The browser the core thinks it runs in. `var` at module scope shadows node's globals; the core's own
 # `document.addEventListener` calls land in LISTENERS so a scenario can emit the gesture events by name.

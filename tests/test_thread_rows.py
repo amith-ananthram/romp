@@ -9,7 +9,7 @@ import tempfile
 import threading
 import unittest
 import urllib.request
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from unittest import mock
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -19,11 +19,11 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
+load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "test-token-DO-NOT-USE")
-km = SourceFileLoader("romp_kernel", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
 
 PARENT = "11111111-2222-3333-4444-555555555555"
 PARENT_NAME = "web"
@@ -65,7 +65,7 @@ class RealListingSplit(unittest.TestCase):
         # boot reconcile inside the test process) and never the shared km.jd.STATE (a module object
         # every later test module's load re-points at its own tempdir)
         from pathlib import Path
-        sb = SourceFileLoader("romp_sdk_backend_rows", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+        sb = load_source("romp_sdk_backend_rows", os.path.join(BIN, "romp_sdk_backend.py"))
         root = Path(tempfile.mkdtemp())
         be = sb.SdkBackend(root, "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None)
         _mk_thread(PARENT, TSID, name="web-comment-1", root=root)
@@ -327,7 +327,7 @@ class ThreadWakePinsStand(unittest.TestCase):
         """Wake a dormant thread registered on `model` through a hermetic backend INSTANCE wired the
         kernel's way; returns (the model the spawned session got, the model the reg holds after)."""
         from pathlib import Path
-        sb = SourceFileLoader("romp_sdk_backend_rows", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+        sb = load_source("romp_sdk_backend_rows", os.path.join(BIN, "romp_sdk_backend.py"))
         root = Path(tempfile.mkdtemp())
         be = sb.SdkBackend(root, "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None)
         be.thread_wake_model = self._kernel_wired_hook()

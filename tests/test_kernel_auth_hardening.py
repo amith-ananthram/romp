@@ -25,7 +25,7 @@ import time
 import unittest
 from http.client import HTTPMessage
 from http.server import ThreadingHTTPServer
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 import tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -35,12 +35,12 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
+load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "test-token-DO-NOT-USE")
-km = SourceFileLoader("romp_kernel", os.path.join(BIN, "romp-kernel")).load_module()
-sb = SourceFileLoader("romp_sdk_backend_authhard", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
+sb = load_source("romp_sdk_backend_authhard", os.path.join(BIN, "romp_sdk_backend.py"))
 
 TOK = km.TOKEN
 
@@ -189,6 +189,20 @@ class CookieDoesNotBypassOrigin(unittest.TestCase):
                                   "Origin": "http://127.0.0.1:%d" % km.PORT,
                                   "Host": "127.0.0.1:%d" % km.PORT})
         self.assertTrue(ok)
+
+    def test_cookie_still_authorizes_the_kernels_own_loopback_origin_under_another_host(self):
+        # the kernel's own origin reached under its other loopback name: a page served at
+        # http://127.0.0.1:<port> whose request arrives with Host localhost:<port>, or the reverse.
+        # The Host string no longer matches the Origin, so same-origin-by-Host does not apply and
+        # the gate's own-loopback branch is the one that accepts (the case SECURITY.md names as the
+        # kernel's own port on 127.0.0.1 or localhost); it fails when that branch is removed.
+        for origin, host in (("http://127.0.0.1:%d" % km.PORT, "localhost:%d" % km.PORT),
+                             ("http://localhost:%d" % km.PORT, "127.0.0.1:%d" % km.PORT)):
+            with self.subTest(origin=origin, host=host):
+                ok, _, why = _auth(headers={"Cookie": "romp_token=" + TOK,
+                                            "Origin": origin, "Host": host})
+                self.assertTrue(ok, "the kernel's own loopback origin authorizes the cookie under "
+                                    "either of its names: " + why)
 
     def test_cookie_still_authorizes_the_vscode_webview(self):
         ok, _, _ = _auth(headers={"Cookie": "romp_token=" + TOK,

@@ -21,7 +21,7 @@ import os
 import tempfile
 import unittest
 from unittest import mock
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -29,7 +29,7 @@ _STATE_TMP = tempfile.mkdtemp()
 os.environ["XDG_STATE_HOME"] = _STATE_TMP
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
-km = SourceFileLoader("romp_kernel_headless", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_headless", os.path.join(BIN, "romp-kernel"))
 
 # The ACCOUNT gate (_limit_hold: a usage limit / monthly spend cap parks every drive op, tested in
 # tests/test_kernel_limit_queue.py) is a SEPARATE axis from the compaction/busy gates this module

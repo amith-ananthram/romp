@@ -15,17 +15,17 @@ import tempfile
 import time
 import unittest
 from unittest import mock
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "bin")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
-em = SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-jd = SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
+em = load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+jd = load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
-km = SourceFileLoader("romp_kernel_bgfold", os.path.join(BIN, "romp-kernel")).load_module()
-sb = SourceFileLoader("romp_sdk_backend_bgfold", os.path.join(BIN, "..", "kernel", "sdk_backend.py")).load_module()
+km = load_source("romp_kernel_bgfold", os.path.join(BIN, "romp-kernel"))
+sb = load_source("romp_sdk_backend_bgfold", os.path.join(BIN, "..", "kernel", "sdk_backend.py"))
 
 SID = "11111111-2222-3333-4444-555555555555"
 PEER = "11111111-2222-3333-4444-666666666666"

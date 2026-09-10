@@ -15,14 +15,14 @@ seams now hold, all pinned here:
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-ps = SourceFileLoader("romp_postal_sender_identity",
-                      os.path.join(BIN, "romp-postal-service")).load_module()
+ps = load_source("romp_postal_sender_identity",
+                      os.path.join(BIN, "romp-postal-service"))
 
 
 class FromDisplay(unittest.TestCase):

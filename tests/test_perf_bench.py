@@ -22,7 +22,7 @@ import os
 import pwd
 import re
 import shutil
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from types import SimpleNamespace
 import subprocess
 import sys
@@ -358,7 +358,7 @@ class PerfBench(unittest.TestCase):
         cc = {k: set(v) for k, v in self._out()["cold_caches"].items()}
         for layer, need in EXPECTED_COLD_CACHES.items():
             self.assertTrue(need <= cc[layer], "%s: %s emptied before each cold sample (emptied: %s)" % (layer, sorted(need), sorted(cc[layer])))
-        pb = SourceFileLoader("perf_bench_caches_under_test", TOOL).load_module()
+        pb = load_source("perf_bench_caches_under_test", TOOL)
         self.assertTrue(cc["kernel"] <= set(pb.COLD_KERNEL_CACHES) | {"_chat_fold"}, "every kernel cache emptied is one the tool names")
         self.assertTrue(cc["event_model"] <= {n for n, _lock in pb.COLD_EM_CACHES})
 
@@ -426,7 +426,7 @@ class PerfBench(unittest.TestCase):
     def test_fake_client_labels_direct_delta_frames_by_their_slot(self):
         # the static fixture never changes between pushes, so no delta frame reaches a fake client in the
         # run above; this drives the client's send() directly with the three frame shapes it can see
-        pb = SourceFileLoader("perf_bench_under_test", TOOL).load_module()
+        pb = load_source("perf_bench_under_test", TOOL)
         c = pb.fake_client(SimpleNamespace(), "timeline")      # no _perf_slot: a keyed label is str(key)
         delta = '{"type": "delta", "slot": "bars", "base": 3, "rev": 4, "coll": {}}'
         c["send"](delta)                                        # _send_slot_delta: send() directly, no curSlot
@@ -568,7 +568,7 @@ class PerfBench(unittest.TestCase):
         # the census fingerprints directories and link targets too: a directory the kernel creates (its
         # mkdir sites on STATE subdirectories) or a link it retargets is a write into the copy, and one
         # that records files only would report it as 0 changed, 0 new, 0 removed
-        pb = SourceFileLoader("perf_bench_fingerprint_under_test", TOOL).load_module()
+        pb = load_source("perf_bench_fingerprint_under_test", TOOL)
         root = self._scratch_root("perf-bench-fp-")
         os.makedirs(os.path.join(root, "sdk"))
         Path(root, "sdk", "a.json").write_text("{}")
@@ -585,7 +585,7 @@ class PerfBench(unittest.TestCase):
 
     def test_install_cwd_map_wraps_nothing_without_rules(self):
         # the default run pays no extra frame per _proj_dir call; with a rule the wrapper counts its hits
-        pb = SourceFileLoader("perf_bench_cwdmap_under_test", TOOL).load_module()
+        pb = load_source("perf_bench_cwdmap_under_test", TOOL)
         real = lambda d: "proj:" + str(d)
         jd = SimpleNamespace(_proj_dir=real)
         self.assertEqual(pb.install_cwd_map(jd, []), [])
@@ -732,7 +732,7 @@ class PerfBench(unittest.TestCase):
         self.assertEqual(out["error"], "this kernel lacks _live_scope; the harness does not know how to drive it")
 
     def pb_mirror_ignore(self):
-        return SourceFileLoader("perf_bench_mirror_under_test", TOOL).load_module().MIRROR_IGNORE
+        return load_source("perf_bench_mirror_under_test", TOOL).MIRROR_IGNORE
 
     def _planted_kernel(self, plant):
         """A copy of this checkout's kernel/ with one line planted inside _push's try block, right after its
@@ -810,7 +810,7 @@ class Tripwire(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.pb = SourceFileLoader("perf_bench_tripwire_under_test", TOOL).load_module()
+        cls.pb = load_source("perf_bench_tripwire_under_test", TOOL)
         cls.root = tempfile.mkdtemp(prefix="perf-bench-tripwire-")
         cls.repo = os.path.join(cls.root, "notes-api")
         os.makedirs(cls.repo)
@@ -878,7 +878,7 @@ class Recorders(unittest.TestCase):
     the kernel lacks is still an error, since the real function would otherwise stay in place."""
 
     def setUp(self):
-        self.pb = SourceFileLoader("perf_bench_recorders_under_test", TOOL).load_module()
+        self.pb = load_source("perf_bench_recorders_under_test", TOOL)
         saved = pwd.getpwnam, pwd.getpwuid                 # install_guards counts these process-wide
         self.addCleanup(lambda: (setattr(pwd, "getpwnam", saved[0]), setattr(pwd, "getpwuid", saved[1])))
         saved_start = threading.Thread.start               # and wraps this
@@ -1002,7 +1002,7 @@ class InProcessChecks(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.pb = SourceFileLoader("perf_bench_checks_under_test", TOOL).load_module()
+        cls.pb = load_source("perf_bench_checks_under_test", TOOL)
 
     def _tmp(self, prefix):
         d = tempfile.mkdtemp(prefix=prefix)

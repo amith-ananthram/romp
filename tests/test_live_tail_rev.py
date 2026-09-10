@@ -17,7 +17,7 @@ import os
 import tempfile
 import types
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -27,8 +27,8 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 # conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-km = SourceFileLoader("romp_kernel_livetailrev", os.path.join(BIN, "romp-kernel")).load_module()
-sb = SourceFileLoader("romp_sdk_backend_livetailrev", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+km = load_source("romp_kernel_livetailrev", os.path.join(BIN, "romp-kernel"))
+sb = load_source("romp_sdk_backend_livetailrev", os.path.join(BIN, "romp_sdk_backend.py"))
 ek = km.sb.echo_text_key                          # the one text key both backends prune by
 
 SID = "77777777-8888-9999-aaaa-bbbbbbbbbbb1"      # this module's own synthetic sids: nothing else writes under them
