@@ -78,6 +78,39 @@ class JournalRules(unittest.TestCase):
         self.assertEqual([(o, r["n"]) for o, r in sh.read_journal_dir(d, 0)], [(7, 7), (8, 8), (9, 9), (10, 10)])
         self.assertEqual([o for o, _ in sh.read_journal_dir(d, 9)], [9, 10])
 
+    def test_a_failed_raw_write_leaves_nothing_behind_and_the_numbering_holds(self):
+        # the commit-5 review's finding a: a buffered handle kept a failed write's bytes and landed them later at a
+        # stale position; the journal now writes unbuffered and truncates back to the last good position
+        d = tempfile.mkdtemp(); j = sh.Journal(d)
+        j.append({"type": "assistant", "n": 0})
+        real = j._fh
+        class Raw:
+            def __init__(self): self.failed = False
+            def write(self, b):
+                if not self.failed:
+                    self.failed = True
+                    raise OSError(28, "no space left on device")
+                return real.write(b)
+            def fileno(self): return real.fileno()
+            def seek(self, *a): return real.seek(*a)
+            def tell(self): return real.tell()
+            def close(self): return real.close()
+        j._fh = Raw()
+        size_before = os.path.getsize(j._path(0))
+        with self.assertRaises(OSError):
+            j.append({"type": "assistant", "n": 1})
+        self.assertEqual((j.next_offset, len(j._index), os.path.getsize(j._path(0))), (1, 1, size_before), "nothing moved on the failure")
+        j.append({"type": sh.GAP_TYPE, "offset": 1})          # the writer's gap marker takes offset 1
+        j.append({"type": "assistant", "n": 2})
+        self.assertEqual([(o, r["n"]) for o, r in j.read_from(0)], [(0, 0), (2, 2)], "the marker is skipped, the numbering holds")
+        self.assertEqual([(o, r["n"]) for o, r in sh.read_journal_dir(d, 0)], [(0, 0), (2, 2)], "the orphan reader agrees")
+        # finding b: a marker that fails too becomes a zero-length index entry; index and offsets stay in lockstep
+        j.note_gap(3)
+        j.append({"type": "result", "n": 4})
+        self.assertEqual(j.next_offset, 5); self.assertEqual(len(j._index), 5)
+        self.assertEqual([(o, r["n"]) for o, r in j.read_from(2)], [(2, 2), (4, 4)])
+        self.assertEqual([(o, r["n"]) for o, r in j.read_from(3, 5)], [(4, 4)], "a replay spanning the hole reads past it")
+
     def test_a_replay_read_is_bounded_by_its_end(self):
         # finding 2: the replay covers the records that existed when the attach began; later ones follow from the
         # live backlog, so a drain that yields during the replay cannot send a record twice
@@ -504,6 +537,70 @@ class HostProcess(unittest.TestCase):
             lease = self._lease()
             self.assertEqual(sb.lease_state(lease, time.time()), "valid", "beats kept it fresh: t=%r now=%r" % (lease.get("t"), time.time()))
         self.assertGreater(lease["t"], spec_t if (spec_t := 0) else 0)
+
+    def test_a_double_journal_fault_never_breaks_a_later_attach(self):
+        # finding b: an unrecorded gap used to leave the index short of the offsets; the next replay across it
+        # raised inside the host's client loop and the kernel read a bare EOF
+        host, sock, spec = self._start(_test_journal_fault_at=1, _test_journal_gap_fault=True)
+        k, _ = self._attach(sock)
+        k.send({"t": "in", "data": self._user("hi sleep=0.2")})
+        k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result")
+        k.send({"t": "detach"}); k.close()
+        deadline = time.time() + 10
+        while time.time() < deadline and not any(r["kind"] == "journal-gap-unrecorded" for r in self._hostlog()):   # loop-ok
+            time.sleep(0.05)
+        k2, hello = self._attach(sock, ack=-1, pid=4343)
+        k2.send({"t": "ping"}); k2.recv_until(lambda f: f.get("t") == "pong")
+        offs = [f["offset"] for f in k2.outs()]
+        self.assertEqual(offs, [o for o in range(hello["journal"]["next"]) if o != 1], "everything but the hole replayed, no fault, no EOF")
+        self.assertNotIn("client-loop-failed", [r["kind"] for r in self._hostlog()])
+        self.assertIsNone(host.poll())
+        k2.close()
+
+    def test_an_attach_while_the_writer_lags_sends_the_unwritten_records_from_memory(self):
+        # finding c: records read but not yet journaled were neither replayed nor backlogged
+        host, sock, spec = self._start(_test_journal_delay_s=0.5)
+        k, _ = self._attach(sock)
+        for i in range(3):
+            k.send({"t": "in", "data": self._user("turn%d sleep=0.05" % i)})
+        first = k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result")
+        k.send({"t": "detach"}); k.close()
+        k2, hello = self._attach(sock, ack=-1, pid=4343)
+        deadline = time.time() + 20
+        while time.time() < deadline and sum(1 for f in k2.outs() if f["data"].get("type") == "result") < 3:   # loop-ok
+            k2.send({"t": "ping"}); k2.recv_until(lambda f: f.get("t") == "pong")
+            time.sleep(0.1)
+        offs = [f["offset"] for f in k2.outs()]
+        self.assertEqual(offs, list(range(len(offs))), "every record once, in order, whether from disk, memory or the backlog")
+        self.assertGreaterEqual(hello["journal"]["next"], 4, "the hello counted records the writer had not landed yet")
+        k2.close()
+
+    def test_an_end_right_after_a_line_lets_the_line_reach_the_cli_first(self):
+        # finding d: `end` used to close stdin ahead of lines still queued on the pump
+        host, sock, spec = self._start()
+        k, _ = self._attach(sock)
+        k.send({"t": "in", "data": self._user("last words sleep=0.1")})
+        k.send({"t": "end", "grace": 20})
+        ex = k.recv_until(lambda f: f.get("t") == "exit", timeout=15)
+        self.assertEqual(ex["cause"], "end")
+        self.assertIn("last words", open(self.fake_log).read(), "the queued line reached the CLI before its stdin closed")
+        self.assertEqual(sum(1 for f in k.outs() if f["data"].get("type") == "result"), 1, "and its turn ran to its result")
+        k.close()
+
+    def test_an_open_request_whose_journal_write_failed_is_still_re_sent_on_attach(self):
+        # finding e: the re-send came from the journal, which skips a gap; it comes from the parked table now
+        host, sock, spec = self._start(_test_journal_fault_at=2)      # 0 init, 1 assistant, 2 the permission request
+        k, _ = self._attach(sock)
+        k.send({"t": "in", "data": self._user("please ask=permission after=0.3 sleep=0.2")})
+        req = k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "control_request")
+        self.assertEqual(req["offset"], 2)
+        k.send({"t": "ack", "offset": 1}); k.send({"t": "ping"}); k.recv_until(lambda f: f.get("t") == "pong")
+        k.close()
+        k2, hello = self._attach(sock, ack=1, pid=4343)
+        self.assertEqual(hello["parked"], [req["data"]["request_id"]])
+        again = k2.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "control_request")
+        self.assertEqual(again["data"]["request_id"], req["data"]["request_id"], "re-sent from the table although its journal write failed")
+        k2.close()
 
     @unittest.skipUnless(SDK_SITE, "the SDK venv is not on this machine; the pipe transport covered the host")
     def test_the_sdk_transport_drives_the_fake_cli_the_same_way(self):

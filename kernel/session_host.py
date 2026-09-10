@@ -52,6 +52,7 @@ READER_BEHIND_RECORDS = 5000     # records read but not yet on disk before the h
 ACK_NONE = -1
 EXIT_FLUSH_S = 2.0               # how long the exiting host waits for an attached kernel to take its last frames
 GAP_TYPE = "romp-journal-gap"     # a record the journal could not write: a marker keeps the numbering, readers skip it
+END_SENTINEL = object()          # on the stdin pump: close the CLI's stdin after everything queued before it
 
 # The neutral answer the host gives a parked hook callback when no kernel returned in time, PER EVENT
 # KIND: the empty output, which is what romp's own hook callbacks return when they have nothing to say
@@ -82,7 +83,7 @@ SPEC_HOST_KEYS = ("sid", "name", "version", "hook_timeout_s", "hook_self_answer_
                   "state_dir", "protocol", "reader_behind_records")
 # Testing seams the spec may carry (never set by the kernel): a delay per journal write, an offset whose
 # write raises. They exist so the reader-behind fault and the journal-fault path can be driven in a test.
-SPEC_TEST_KEYS = ("_test_journal_delay_s", "_test_journal_fault_at")
+SPEC_TEST_KEYS = ("_test_journal_delay_s", "_test_journal_fault_at", "_test_journal_gap_fault")
 
 
 def encode_frame(obj: dict) -> bytes:
@@ -147,6 +148,7 @@ class Journal:
         self.acked = ACK_NONE
         self._index: list[tuple[int, int]] = []       # offset -> (segment first offset, byte position)
         self._seg_last: dict[int, int] = {}           # segment first offset -> last offset in it
+        self.gaps: set = set()                        # offsets with no bytes on disk (a double write failure)
         self._seg = 0
         self._fh = None
         self._pos = 0
@@ -159,16 +161,33 @@ class Journal:
         if self._fh is not None:
             self._fh.close()
         self._seg = first
-        self._fh = open(self._path(first), "ab")
+        # UNBUFFERED: a write that fails leaves nothing pending in a buffer to land later at a stale position
+        # (a buffered handle keeps the bytes of a failed flush and writes them on the next one; the commit-5
+        # review's finding a)
+        self._fh = open(self._path(first), "ab", buffering=0)
         self._pos = self._fh.tell()
 
     def append(self, record: dict) -> int:
-        """Append one record; returns its offset. Flushed to the OS on every append (a kernel that
-        attaches reads the file the host writes). Raises on a write failure: the caller decides."""
+        """Append one record; returns its offset. Written straight to the file (unbuffered), so a kernel that
+        attaches reads what the host wrote. Raises on a write failure, and then NOTHING has moved: the
+        segment is truncated back to the last good position and no index, position or offset changed; the
+        caller decides (the writer task notes a gap)."""
         line = (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8")
         off = self.next_offset
-        self._fh.write(line)
-        self._fh.flush()
+        try:
+            written = 0
+            while written < len(line):          # loop-ok: a raw write may be partial; bounded by the line's length
+                n = self._fh.write(line[written:])
+                if not n:
+                    raise OSError("short write to the journal")
+                written += n
+        except Exception:
+            try:
+                os.ftruncate(self._fh.fileno(), self._pos)
+                self._fh.seek(self._pos)
+            except Exception:
+                pass
+            raise
         self._index.append((self._seg, self._pos))
         self._seg_last[self._seg] = off
         self._pos += len(line)
@@ -176,6 +195,17 @@ class Journal:
         if record.get("type") == "result":
             self._turn_boundary()
         return off
+
+    def note_gap(self, off: int) -> None:
+        """A record whose write failed twice (the record and its gap marker): the index gains a ZERO-LENGTH
+        entry at the current position and the offset advances, so index and offsets stay in lockstep (a
+        reader skips the entry; the commit-5 review's finding b)."""
+        if off != self.next_offset:
+            return
+        self._index.append((self._seg, self._pos))
+        self._seg_last[self._seg] = off
+        self.gaps.add(off)
+        self.next_offset = off + 1
 
     def _turn_boundary(self) -> None:
         # rotate when the current segment is past its size; drop segments the kernel has fully acknowledged
@@ -200,32 +230,42 @@ class Journal:
         return sorted(set(self._seg_last) | {self._seg})
 
     def read_from(self, offset: int, end: int | None = None):
-        """Yield (offset, record) from `offset` up to but excluding `end` (default: the current end), from the
-        files. `end` bounds a replay to the records that existed when the attach began: what arrives during
-        the replay follows from the live backlog, so no record is sent twice. A record whose segment was
-        deleted (acknowledged long ago) is skipped: the caller asked for less than it acknowledged."""
+        """Yield (offset, record) for every record from `offset` up to `end` (exclusive; the live count when
+        None), by the index: each record is read at its recorded position, so a gap (an unrecorded one, a
+        zero-length index entry, or a written gap marker) is skipped without disturbing the numbering. A
+        record whose segment was deleted (acknowledged long ago) is skipped too."""
         offset = max(0, int(offset))
         stop = self.next_offset if end is None else min(int(end), self.next_offset)
-        while offset < stop:
-            seg, pos = self._index[offset]
-            p = self._path(seg)
-            if not p.exists():
-                offset = self._seg_last.get(seg, offset) + 1 if seg in self._seg_last else offset + 1
-                continue
-            with open(p, "rb") as fh:
-                fh.seek(pos)
-                for line in fh:
-                    if offset >= stop:
-                        return
-                    try:
-                        rec = json.loads(line)
-                    except ValueError:
-                        rec = None
-                    if rec is not None and rec.get("type") != GAP_TYPE:
-                        yield offset, rec
+        fh, cur_seg = None, None
+        try:
+            while offset < stop:
+                if offset in self.gaps:
                     offset += 1
-                    if offset < stop and self._index[offset][0] != seg:
-                        break
+                    continue
+                seg, pos = self._index[offset]
+                if seg != cur_seg:
+                    if fh is not None:
+                        fh.close()
+                    cur_seg = seg
+                    try:
+                        fh = open(self._path(seg), "rb")
+                    except OSError:
+                        fh = None
+                if fh is None:
+                    offset += 1
+                    continue
+                fh.seek(pos)
+                line = fh.readline()
+                try:
+                    rec = json.loads(line) if line.strip() else None
+                except ValueError:
+                    rec = None
+                if rec is not None and rec.get("type") != GAP_TYPE:
+                    yield offset, rec
+                offset += 1
+        finally:
+            if fh is not None:
+                fh.close()
 
     def close(self) -> None:
         if self._fh is not None:
@@ -480,6 +520,8 @@ class SessionHost:
         self._server = None
         self._stop = None
         self._read_count = 0            # records read off the CLI (the writer task journals them in order)
+        self._unwritten: dict = {}      # offset -> record read but not yet on disk (sent from memory on an attach)
+        self._journal_gap_offsets: set = set()   # offsets whose record never reached the journal (a gap marker or nothing)
         self._journal_q: asyncio.Queue | None = None
         self._journal_faults = 0
         self._reader_behind_noted = False
@@ -555,6 +597,7 @@ class SessionHost:
                 off = self._read_count
                 self._read_count = off + 1
                 try:
+                    self._unwritten[off] = msg
                     self._journal_q.put_nowait((off, msg))
                     self._track(msg, off)
                     if self._read_count - self.journal.next_offset > self.reader_behind_records and not self._reader_behind_noted:
@@ -584,9 +627,11 @@ class SessionHost:
     async def _journal_writer(self) -> None:
         """The one writer of the journal, off the reader's path. A write that raises (a full disk, a bad
         descriptor) is a `journal-write-failed` row and a fault frame, and the reading and the live
-        forwarding go on: a journal fault is never the CLI's death."""
+        forwarding go on: a journal fault is never the CLI's death. A record read but not yet written sits in
+        `_unwritten` until it lands, so an attach can send it from memory instead of waiting for the disk."""
         delay = float(self.spec.get("_test_journal_delay_s") or 0)
         fault_at = self.spec.get("_test_journal_fault_at")
+        gap_fault = bool(self.spec.get("_test_journal_gap_fault"))
         while True:
             item = await self._journal_q.get()
             if item is None:
@@ -596,28 +641,28 @@ class SessionHost:
                 await asyncio.sleep(delay)
             try:
                 if fault_at is not None and int(fault_at) == off:
-                    raise OSError(28, "test: no space left on device")
+                    raise OSError(28, "test seam: the journal write fails at offset %d" % off)
                 got = self.journal.append(msg)
                 if got != off:
                     self.log("journal-offset-drift", expected=off, got=got)
             except Exception as e:
                 self._journal_faults += 1
                 self.log("journal-write-failed", offset=off, error=type(e).__name__, at=self._where(e))
+                self._journal_gap_offsets.add(off)
                 if self.attached is not None:
                     self._send(self.attached, {"t": "fault", "kind": "journal-write-failed", "text": type(e).__name__})
                 # keep the numbering with a gap marker (readers skip it): the record is lost to replay, the live
-                # kernel already has it; a marker that fails too leaves the count advanced and says so
+                # kernel already has it; a marker that fails too becomes a zero-length index entry, so index and
+                # offsets stay in lockstep and no later replay can trip over the hole
                 try:
+                    if gap_fault:
+                        raise OSError(28, "test seam: the gap marker write fails too")
                     self.journal.append({"type": GAP_TYPE, "offset": off, "error": type(e).__name__})
                 except Exception as e2:
                     self.log("journal-gap-unrecorded", offset=off, error=type(e2).__name__)
-                    self.journal.next_offset = max(self.journal.next_offset, off + 1)
-
-    async def _journal_settled(self, upto: int, timeout: float = 5.0) -> None:
-        """Wait (bounded) until the writer has journaled every record read before `upto`."""
-        deadline = time.time() + timeout
-        while self.journal.next_offset < upto and time.time() < deadline:   # loop-ok: bounded, on the writer's progress
-            await asyncio.sleep(0.01)
+                    self.journal.note_gap(off)
+            finally:
+                self._unwritten.pop(off, None)
 
     def _track(self, msg: dict, off: int) -> None:
         """Bookkeeping per message: the fsid from the init, the turn count, open requests."""
@@ -675,8 +720,9 @@ class SessionHost:
                 await self._end(END_GRACE_DEFAULT_S, "eof-grace")
 
     async def _end(self, grace: float, cause: str) -> None:
-        """Close the CLI's stdin and wait up to `grace`; a second `end` with a SHORTER grace pulls the
-        deadline in (the minimum wins), a longer one changes nothing."""
+        """Graceful end: close the CLI's stdin (through the stdin pump, so every line queued before it is
+        written first: an answer followed by a kill must reach the CLI) and let the CLI finish. A second end
+        with a shorter grace pulls the deadline in; a longer one never pushes it out."""
         deadline = self.now() + float(grace)
         if self.ending is not None:
             if deadline < self.ending[0]:
@@ -685,10 +731,7 @@ class SessionHost:
             return
         self.ending = (deadline, cause)
         self.log("end-requested", cause=cause, graceS=float(grace))
-        try:
-            await self.transport.end_input()
-        except Exception as e:
-            self.log("end-input-failed", error=type(e).__name__)
+        self._stdin_q.put_nowait(END_SENTINEL)
 
     # ── the socket ──
     def _send(self, writer, frame: dict) -> None:
@@ -752,6 +795,11 @@ class SessionHost:
                         return
         except (ConnectionResetError, asyncio.IncompleteReadError, BrokenPipeError):
             pass
+        except Exception as e:
+            # a fault in the host's own handling of this kernel (never the CLI's): say so on the socket and in the
+            # log, close this connection, keep the host and its CLI (the commit-5 review's finding b)
+            self.log("client-loop-failed", error=type(e).__name__, at=self._where(e))
+            self._send(writer, {"t": "fault", "kind": "host-fault", "text": "%s at %s" % (type(e).__name__, self._where(e))})
         finally:
             if attached_here and self.attached is writer:
                 self.log("kernel-lost", kernelPid=(self.kernel or {}).get("pid"))
@@ -774,31 +822,39 @@ class SessionHost:
             ack = int(frame.get("ack", ACK_NONE))
         except (TypeError, ValueError):
             ack = ACK_NONE
-        # the replay covers exactly the records read before this moment; what arrives meanwhile queues in the
-        # live backlog and follows in order, so a drain that yields cannot send a record twice
-        await self._journal_settled(self._read_count)
-        self._replay_end = self._read_count
+        # Attached FIRST, so every record the reader takes from here on goes to the live backlog; the replay
+        # covers the records read before this moment: from the journal as far as the writer has landed them,
+        # from memory (`_unwritten`) for the rest. No settle wait, nothing dropped, no record twice (the
+        # commit-5 review's finding c).
         self.attached = writer
         self._replaying = True
         self._live_backlog = []
+        read_at_attach = self._read_count
+        self._replay_end = read_at_attach
         self.parked.attached()
-        self.log("attached", kernelPid=self.kernel.get("pid"), ack=ack, next=self._replay_end)
+        self.log("attached", kernelPid=self.kernel.get("pid"), ack=ack, next=read_at_attach)
         self._send(writer, {"t": "hello", "protocol": PROTOCOL_VERSION,
                             "host": {"pid": os.getpid(), "start": self.lease_api["proc_start"](os.getpid()) or "", "version": self.version},
                             "cli": {"pid": self.cli_pid, "start": self.cli_start, "fsid": self.fsid},
-                            "journal": {"next": self._replay_end}, "parked": self.parked.ids(),
+                            "journal": {"next": read_at_attach}, "parked": self.parked.ids(),
                             "inflight": self.inflight,      # the open turns, so an attaching kernel knows it is mid-turn
                             "exited": self.exit_info is not None})
         n = 0
-        for off, rec in self.journal.read_from(ack + 1, self._replay_end):
+        journaled = min(self.journal.next_offset, read_at_attach)
+        for off, rec in self.journal.read_from(ack + 1, journaled):
             self._send(writer, {"t": "out", "offset": off, "data": rec})
             n += 1
             if n % 200 == 0:
                 await writer.drain()
-        # every request still open is sent again, whatever the acknowledged offset says: a kernel that received
-        # it and died never answered, and the new kernel's Query must see it to answer it
+        for off in range(max(ack + 1, journaled), read_at_attach):
+            rec = self._unwritten.get(off)
+            if rec is not None:
+                self._send(writer, {"t": "out", "offset": off, "data": rec})
+        # every request still open is sent again FROM THE TABLE, whatever the acknowledged offset says and
+        # whether or not its journal write landed: a kernel that received it and died never answered, and the
+        # new kernel's Query must see it to answer it (findings 4 and e)
         for off, rec in self.parked.records():
-            if off <= ack:
+            if off <= ack or off in self._journal_gap_offsets:
                 self._send(writer, {"t": "out", "offset": off, "data": rec})
         for off, rec in self._live_backlog:
             self._send(writer, {"t": "out", "offset": off, "data": rec})
@@ -827,11 +883,18 @@ class SessionHost:
         self._stdin_q.put_nowait(data if data.endswith("\n") else data + "\n")
 
     async def _stdin_pump(self) -> None:
-        """The one writer of the CLI's stdin: a full pipe blocks this task alone, never the socket reader."""
+        """The one writer of the CLI's stdin: a full pipe blocks this task alone, never the socket reader. The
+        end sentinel closes stdin in its turn, after every line queued ahead of it."""
         while True:
             data = await self._stdin_q.get()
             if data is None:
                 return
+            if data is END_SENTINEL:
+                try:
+                    await self.transport.end_input()
+                except Exception as e:
+                    self.log("end-input-failed", error=type(e).__name__)
+                continue
             try:
                 await self.transport.write(data)
             except Exception as e:
