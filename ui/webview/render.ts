@@ -35,7 +35,9 @@ import { newSkeletonState, applyTabOrderSkeleton, onStatus, onFull, onDismiss, o
 import { reconcileTabOrder, adoptArrival } from "./tab-order";
 import { writeViewOrder } from "./view-order";
 import { planStrip, readTabGroups, writeTabGroups, setSectionCollapsed, sectionRef, isPinned, setPinned, prunePinned, reachableFrom, headWords,
-         followAdoption, reorderTagOrder, TABGROUPS_KEY, TABGROUPS_EVENT, type TabSection } from "./tab-groups";
+         followAdoption, reorderTagOrder, homeSectionOf, neighborOfFolded, TABGROUPS_KEY, TABGROUPS_EVENT, type TabSection, type StripItem } from "./tab-groups";
+import { snapshotModel, snapshotHeading, rowWords, type SnapModel, type SnapRow } from "./tab-snapshot";
+import { rowStillOpen, installSnapshotEscape, reconcileRows } from "./tab-snapshot-view";
 import { tabStateClass, tabDotClass, tabDotTitle, sectionPip, sectionPipMembers, sectionPipTitle } from "./tab-state";
 import { titleWithKey, chordOf, effectiveChord, loadOverrides } from "./keybindings";
 import { DEFAULT_CHORDS } from "./commands";
@@ -63,6 +65,8 @@ import { initFileBrowse, openFileBrowse } from "./file-browse";   // the browser
 import { pastedFilePath } from "./paste-path";
 import { insertAtCaret } from "./composer-insert";
 import { hostNameNodes, hostPartsNodes, hostPrefix, hostOf, hostIsDown, hostDownNote } from "./host-prefix";
+import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionToken, insertMention, mentionKeyAction, mentionSegments } from "./composer-mention";   // the @-mention card's rules, pure; the DOM is setupComposer's mention block and markMentions
+import type { MentionCandidate, MentionQuery } from "./composer-mention";
 import { defaultCommentName, defaultBreakoutName, defaultForkName, nameToSend } from "./comment-name";
 import { followReader, keepPlaceAcrossShow, followTail, atBottomDist, followBoxBelow, followTailShrink } from "./scroll-keep";
 import { retainLiveOmitted } from "./tab-order";
@@ -92,6 +96,7 @@ import { reconcileRewindPass, type RewindEvent } from "./rewind-reconcile";
 import { watchChatVisibility, browserChatVisibilityDeps } from "./chat-visibility";
 import type { PaneHiddenHost } from "./paint-gate";
 import { gistOf, collapseWs, postalHead } from "./gist";   // the shared gist rule + the postal head (T294)
+import { kindLabel, deliveryOf, deliveryTitle, type PostalDelivery, type PostalDeliveryState, type PostalReceipt } from "./postal-state";   // the postal card's kind word + delivery state (T302)
 
 for (const [name, lang] of Object.entries({
   bash, sh: bash, shell: bash, python, py: python, javascript, js: javascript,
@@ -183,7 +188,8 @@ type ChatEvent = (
       mid?: string;      // postal message id (joins feed-modal handoff hovers to this card)
       t?: number;        // epoch seconds (incoming)
       park?: boolean;
-      status?: "delivered" | "parked"; // outgoing
+      status?: "delivered" | "parked"; // outgoing, as stamped at send time
+      receipt?: PostalReceipt;         // outgoing: the ledger's later outcomes, joined by message id (read / relayed / bounced / recalled / remote)
       ts?: string;
       uuid?: string;
     }
@@ -944,9 +950,16 @@ function assertPeekFor(id: string): void {
 }
 function tabInView(id: string): boolean { return id === peekId || chatVisible(id); }
 // TAB SECTIONS (tab-groups.ts): the ids the last render folded away under a collapsed section
-// header. Keyboard cycling walks the VISIBLE order, and a folded tab is not visible — the active
-// tab's section never renders folded, so the active id is always in it.
+// header. Keyboard cycling walks the VISIBLE order, and a folded tab is not visible. The active tab's
+// section folds like any other, so the active id can be folded away too: its header is then its
+// stand-in (focusActiveTab lands there, the arrows step from its position through neighborOfFolded over
+// the last plan's items, kept here for both), and the pane shows the section at a glance
+// (renderSnapshot) instead of a transcript whose tab is nowhere on the strip.
 let collapsedTabIds = new Set<string>();
+// the strip plan the last render painted (planStrip's items): what the stand-in rules and the section view
+// read between renders (which header holds a folded-away id, which tab is next to it, which section a
+// pick of one opens: unfoldSectionOf's per-holder rule)
+let lastStripItems: StripItem[] = [];
 /** Every tab the strip knows — the kernel's order plus any pushed tab not yet in it (a placeholder):
  *  the "does this session still exist" of the pin prune (tab-groups.ts prunePinned). */
 function knownTabIds(): Set<string> { return new Set<string>([...order, ...tabMeta.keys()]); }
@@ -1155,7 +1168,7 @@ const draftStartedAt = new Map<string, number>();
 // 2026-06-16). Empty/false → explicit done (full disc).
 interface LedgerTreeNode { id: string; text: string; depth: number; done: boolean; blocked: boolean; t?: number; mt?: number; current: boolean; derived?: boolean; cleared?: boolean; onpath?: boolean; promptAnchorUuid?: string | null; anchorUuid?: string | null; children?: string[]; summary?: string | null; blockSummary?: string | null; _rec?: number; }   // summary/blockSummary = the distiller's takeaway / decision brief, revealed by the row's ⊕ expander; _rec = render-stamped subtree-rolled-up recency
 interface LedgerRecent { text: string; t: number; }   // tab-hover "Recent": up-to-5 most-recent TOP tasks across live + archive, any status (the user 2026-06-30)
-interface Ledger { summary: string; tree?: LedgerTreeNode[]; current?: { t?: number } | null; recent?: LedgerRecent[]; }
+interface Ledger { summary: string; tree?: LedgerTreeNode[]; current?: { t?: number } | null; recent?: LedgerRecent[]; workingNote?: string; needsInput?: boolean | null; }   // two fields the kernel's build_session puts on the ledger for the section-at-a-glance view (tab-snapshot.ts): workingNote, the session's postal working note (the row's second line); needsInput, the feed's needs-you verdict for the session from the kernel's last feed build (null before the first), the row's "needs you" word. Both optional on the wire: a remote host's older kernel sends neither
 const ledgers = new Map<string, Ledger | null>();
 
 function el(tag: string, cls?: string): HTMLElement {
@@ -3207,6 +3220,7 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
         // summary, command stdout — shares this branch and stays on the assistant grammar
         bubble.innerHTML = kind === "user" ? userMd(ev.md) : md(ev.md);
         linkifyFileUris(bubble, imgPaths, ev.spacePaths, ev.pathLinks, ev.pathPins);   // bare file:// URLs in a message → clickable (open in the host's default app)
+        if (kind === "user") markMentions(bubble);   // in the user's own bubble a typed "@name" that names a live session wears that session's color; a harness note is not the user naming a session
       }
       // images, IN the bubble (part of his message): thumbnail + open/copy caption;
       // a literal path in the typed text becomes the same open-link inline.
@@ -4297,6 +4311,7 @@ function renderQueued(ev: Extract<ChatEvent, { kind: "queued" }>): HTMLElement {
       xHost = rb;   // the ✕ in the bubble's corner, as a landed bubble would wear it — never floating in the wrapper's gap
     }
     if (!t.romp && !isCmd) bubble.innerHTML = userMd(t.md);   // the user's words, newlines kept — byte-for-byte what the landed bubble shows
+    if (!t.romp && !isCmd) markMentions(bubble);   // and a typed @name chipped, as the landed bubble wears it (renderEventInner). A statement of its own, not a brace around both: tests pin the line above verbatim (chat-md, queued-indicator)
     // An optimistic echo's dragged images render as THUMBNAILS, not just their trailing paths (the
     // user 2026-08-25: composer preview → path-only provisional → thumbnail landing flashed). Same
     // machinery end to end: userImage with the landed form's exact "path:" shape — buildPathImg's
@@ -4739,7 +4754,9 @@ function setPeerDot(peerEl: HTMLElement, on: boolean) {
   else if (!on && has) prev!.remove();
 }
 function refreshPostalDots() {
-  document.querySelectorAll(".notice-src-chip").forEach((p) => setPeerDot(p as HTMLElement, workingSet.has((p.textContent || "").trim())));
+  // the PEER chips only: this session's own end (.notice-src-self) shows its state elsewhere, and a dot that
+  // arrives with the next working frame and leaves on the next rebuild would only flap (T302 review)
+  document.querySelectorAll(".notice-src-chip:not(.notice-src-self)").forEach((p) => setPeerDot(p as HTMLElement, workingSet.has((p.textContent || "").trim())));
 }
 
 
@@ -4763,25 +4780,70 @@ function postalServiceIntent(body: string | undefined): { label: string; cls: st
   return m ? (POSTAL_INTENTS[m[1].toUpperCase()] || null) : null;
 }
 
+// The delivery-state icon at the postal head's right edge (T302, the user 2026-09-10): the way messaging apps
+// show sent / delivered / read. One check = sent (handed to the relay), two dim checks = delivered (in the
+// recipient's inbox, or the far host's ack), two coloured checks = read (the recipient consumed it: the
+// ledger's own exec event, never inferred), a clock = parked, a red mark = bounced, a return arrow = recalled.
+// Each carries a worded title with the clock. States and words: postal-state.ts.
+const DELIVERY_GLYPHS: Record<PostalDeliveryState, string> = {
+  sent: '<path d="M3 8.6 L6.4 12 L13 5"/>',
+  delivered: '<path d="M1.6 8.6 L4.8 11.8 L10.2 5.4"/><path d="M6.6 11.6 L14.4 5.4"/>',
+  read: '<path d="M1.6 8.6 L4.8 11.8 L10.2 5.4"/><path d="M6.6 11.6 L14.4 5.4"/>',
+  parked: '<circle cx="8" cy="8" r="5.6"/><path d="M8 4.8 V8.2 L10.4 9.6"/>',
+  bounced: '<path d="M4.5 4.5 L11.5 11.5"/><path d="M11.5 4.5 L4.5 11.5"/>',
+  recalled: '<path d="M6.6 4.6 L3.2 8 L6.6 11.4"/><path d="M3.2 8 H10 A2.8 2.8 0 0 0 12.8 5.2"/>',
+};
+function clockOf(epochS: number): string {
+  return new Date(epochS * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+function deliveryIcon(d: PostalDelivery): HTMLElement {
+  const span = el("span", "postal-delivery postal-delivery-" + d.state);
+  span.dataset.state = d.state;
+  span.innerHTML = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" '
+    + 'stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">' + DELIVERY_GLYPHS[d.state] + "</svg>";
+  const title = deliveryTitle(d, clockOf);
+  setTip(span, title);                       // the pane's styled tip on hover…
+  span.setAttribute("role", "img");          // …and the same words for a screen reader: a labelled span is announced
+  span.setAttribute("aria-label", title);    //    only with an image role (the icon has no text)
+  return span;
+}
+
 function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>): HTMLElement {
-  // SOURCE = "from"/"to" + the house session chip naming the peer (the ONE coloured element in the notice
-  // vocabulary — the peer's identity colour, as the tab wears it); click the name → that session's tab
-  const chip = el("span", "notice-src-chip");
-  chip.textContent = ev.peer;
-  if (ev.color) { chip.style.setProperty("--peer-bg", ev.color.bg); chip.style.setProperty("--peer-fg", ev.color.fg); }
-  makeSessionChip(chip, ev.peer);
-  setPeerDot(chip, workingSet.has(ev.peer));   // working dot before the peer name if that session is working
-  const src = el("span");
+  // BOTH ENDS in the head, each in its session's colour (T302, the user 2026-09-10, after seeing old and new
+  // renderings): "from <peer> to <this session>" for incoming, "to <peer> from <this session>" for sent — the
+  // peer's chip in the peer's identity colour, this session's chip in its own, and NO wash of either colour on
+  // the card (a wash read as this session's colour). Click a name → that session's tab.
+  const peer = el("span", "notice-src-chip");
+  peer.textContent = ev.peer;
+  if (ev.color) { peer.style.setProperty("--peer-bg", ev.color.bg); peer.style.setProperty("--peer-fg", ev.color.fg); }
+  makeSessionChip(peer, ev.peer);
+  setPeerDot(peer, workingSet.has(ev.peer));   // working dot before the peer name if that session is working
+  // the session that OWNS the transcript being built (a comment popover's parent, a subagent viewer's session),
+  // the same chain every other owner lookup in this file uses; an id the tab set does not know draws no own end
+  const ownId = renderingOwnerSid ?? renderingSid ?? activeId;
+  const own = ownId && sessions.has(ownId) ? sessions.get(ownId) : undefined;
+  const src = el("span", "notice-src-ends");
   src.appendChild(document.createTextNode(ev.direction === "in" ? "from " : "to "));
-  src.appendChild(chip);
-  // interaction type (delegation / coordination / question) + delivery state, as META text — prefer the
-  // sender's DECLARED kind (send_message's `kind` param, surfaced by the kernel); the old leading-token
-  // parse of the body is only a legacy fallback now that the kind rides as an explicit field
+  src.appendChild(peer);
+  if (own && ownId) {
+    // this session's own end: its name (the host label muted, as the tab wears it) in its identity colour; a
+    // narrow head collapses it to its coloured dot (the container query in styles.css) — both colours still show
+    const self = el("span", "notice-src-chip notice-src-self");
+    const nm = el("span", "notice-src-name"); nm.append(...hostNameNodes(own.name, ownId));
+    self.appendChild(nm);
+    self.title = own.name;
+    if (own.color) { self.style.setProperty("--peer-bg", own.color.bg); self.style.setProperty("--peer-fg", own.color.fg); }
+    src.appendChild(document.createTextNode(ev.direction === "in" ? " to " : " from "));
+    src.appendChild(self);
+  }
+  // the interaction KIND as coloured text, never a chip (chips read as tags now): Delegation / Coordination /
+  // Question in the kind's colour — prefer the sender's DECLARED kind (send_message's `kind` param, surfaced by
+  // the kernel); the old leading-token parse of the body is only a legacy fallback. The postal meta is rigid,
+  // so the word is never truncated.
   const intent = (ev.intent && POSTAL_INTENTS[ev.intent.toUpperCase()]) || postalServiceIntent(ev.body);
-  const meta: string[] = [];
-  if (intent) meta.push(intent.label);
-  if (ev.park || ev.status === "parked") meta.push("parked");
-  else if (ev.status === "delivered") meta.push("delivered");
+  const kind = kindLabel(intent ? intent.cls : null);
+  let meta: HTMLElement | undefined;
+  if (kind && intent) { meta = el("span", "postal-kind postal-kind-" + intent.cls); meta.textContent = kind; }
   // Gist: ALWAYS a one-line summary, the incoming caption, else the first line of the message CLIPPED (gist.ts
   // postalHead), with the full message one click deeper whenever the gist does not carry all of it (the user
   // 2026-06-16; T294, the user 2026-09-10, whose one-paragraph sent card had no fold at all). KEYED (the user
@@ -4791,10 +4853,25 @@ function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>)
   if (fullMd) { body = el("div", "notice-md md"); body.innerHTML = md(fullMd, postalRepoFor(ev)); highlight(body); }
   // an incoming QUESTION opens by default: a reply is owed, and the whole ask is what you need to read
   const owed = !!intent && intent.cls === "question" && ev.direction === "in";
-  const turn = notice({ src, glyph: "peer", gist: summaryText, meta: meta.join(" · ") || undefined, body, open: owed,
+  const turn = notice({ src, glyph: "peer", gist: summaryText, meta, body, open: owed,
                         key: "postal:" + (ev.mid || ev.uuid || ""), rail: ev.color ? ev.color.bg : undefined,
-                        cls: "turn-postal-service postal-service-" + ev.direction + " notice-peer",
-                        tip: intent ? "interaction type: " + intent.label : undefined });
+                        cls: "turn-postal-service postal-service-" + ev.direction,
+                        tip: kind ? "interaction type: " + kind.toLowerCase() : undefined });
+  // the delivery state: an icon at the head's right edge, and — while the message has not landed (handed to the
+  // relay, or parked for an unreachable host) — the SAME provisional dress the user's own pending send wears
+  // (the queued bubble's class and tokens, the T302 amendment): solid again once the receipt says delivered,
+  // relayed or read; bounced keeps its red mark. Incoming: only a parked clock (it waited while you were offline).
+  const delivery = deliveryOf(ev);
+  if (delivery) {
+    turn.querySelector(".notice-head")?.appendChild(deliveryIcon(delivery));
+    if (ev.direction === "out" && (delivery.state === "sent" || delivery.state === "parked")) {
+      turn.querySelector(".notice")?.classList.add("queued-bubble");
+      turn.classList.add("postal-provisional");   // the bubble's border + padding move the head line: the rail dot follows
+    }
+  }
+  // an INCOMING message keeps its box (border + rail) even when its one line carries the whole message and there
+  // is nothing to fold; a SENT one stays the slim line (the ruling's density rule for the two directions)
+  if (ev.direction === "in") { turn.classList.add("notice-boxed"); turn.querySelector(".notice")?.classList.remove("notice-slim"); }
   if (ev.mid) turn.dataset.mid = ev.mid;   // joins feed-modal handoff hovers to this card
   return turn;
 }
@@ -5252,8 +5329,8 @@ function releaseTabStrip(): void {
 // against a real accessibility tree): the chevron, the color bar and the pip are decoration
 // (aria-hidden — the caret glyph was read aloud before the name), the header's name is an aria-label
 // in words (name and count, plus the pip's phrase when it wears one), so nothing runs into it
-// unplanned; and the header holding the active tab is a labeled group, not a button — it takes no
-// action and no focus, and "button, expanded" promised both.
+// unplanned; and the header holding the active tab is the same button as the rest, marked current: it
+// folds like any other, and folded it is the hidden tab's stand-in.
 function makeGroupHead(sec: TabSection, collapsed: boolean, holdsActive: boolean, hidden: readonly string[]): HTMLElement {
   // the untagged trail (unlabeled by the user's ruling): a row of its own under the one-group-per-row
   // setting, else behind a divider
@@ -5261,33 +5338,57 @@ function makeGroupHead(sec: TabSection, collapsed: boolean, holdsActive: boolean
   const name = sec.name;
   const head = el("div", "tab-group-head" + (collapsed ? " collapsed" : "") + (holdsActive ? " holds-active" : ""));
   head.dataset.group = name;
-  // The section holding the ACTIVE tab is UNFOLDABLE while it is active — planStrip renders it open
-  // whatever the store says (keyboard focus must never land on a hidden node) — so its header carries
-  // NO fold action: a click there used to store folded=true that could not render, so "click to fold
-  // this group" did nothing visible on every click and then bit when the user switched tabs.
-  // group-active is a no-op the delegate still flashes (the click is acknowledged); the header still
-  // drags to reorder the groups. Every other header derives the click from the state it RENDERED
-  // (data-folded), never from the store.
-  head.dataset.act = holdsActive ? "group-active" : "toggle-group";
+  // Every header folds, the one holding the ACTIVE tab too: folded, that header is the hidden tab's stand-in
+  // (focusActiveTab lands on it, the arrows step from it) and the pane shows the section at a glance, so no
+  // keyboard focus lands on a hidden node. The click derives the next fold state from the one it RENDERED
+  // (data-folded), never from the store, and the delegate (toggle-group) also shows the section in the pane.
+  head.dataset.act = "toggle-group";
   head.dataset.folded = collapsed ? "1" : "0";
+  // `shown`: the pane is showing this section, whatever the fold: the one bit the header's mark, its words
+  // (headWords) and its own way back are derived from
+  const shown = snapView === name;
+  if (shown) head.classList.add("snap-shown");
+  // THE WAY BACK: the header whose section the pane shows, OPEN, holding the tab being read, is the click that
+  // put the section in the pane; a second click puts the transcript back (show-transcript, leaveSnapshot)
+  // instead of folding the section under its reader. Derived from the rendered state, as the fold is, and
+  // the title says which click this is. Escape does the same from anywhere.
+  const back = shown && !collapsed && holdsActive;
+  if (back) head.dataset.act = "show-transcript";
   const total = sec.ids.length;
-  const words = headWords(name, total, hidden.length, collapsed, holdsActive);
+  const words = headWords(name, total, hidden.length, collapsed, holdsActive, back, shown);
   head.title = words.title;
   let spoken = words.label;
-  if (holdsActive) {
-    // no fold action and no tab stop (a stop that does nothing is noise in the tab order), so not a
-    // button either: a labeled group, read once, promising nothing
-    head.setAttribute("role", "group");
-  } else {
-    // a label the keyboard can fold: Enter or Space go through the same click → delegate path as the
-    // pointer.
-    head.setAttribute("role", "button");
-    head.setAttribute("aria-expanded", collapsed ? "false" : "true");
-    head.tabIndex = 0;
-    head.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); head.click(); }
-    });
-  }
+  // a label the keyboard can fold: Enter or Space go through the same click → delegate path as the pointer
+  head.setAttribute("role", "button");
+  // not a disclosure while its press puts the transcript back (`back`): "expanded" would promise a fold that
+  // press never does, so the state is left off and the label (headWords) names the action instead
+  if (!back) head.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  // the header holding the tab being read says so to assistive tech as well as by its mark (the chip
+  // accent-underlined): the tab itself may be folded out of the tree
+  if (holdsActive) head.setAttribute("aria-current", "true");
+  head.tabIndex = 0;
+  head.addEventListener("keydown", (e) => {
+    // THE STAND-IN's keys (the active tab folded away, and THIS header the one planStrip marked for it: with
+    // several folded holders only the first is marked, wears aria-current and the chip's mark, and is where
+    // neighborOfFolded steps from, so only it answers as the tab): what a focused tab answers. The arrows
+    // step to the neighbouring tab on the strip from the header's place, focus following (onTabKey's rule;
+    // the window's arrows do the same when focus is elsewhere). Enter drops back into the message box while
+    // the transcript shows and the box takes input (the mirror of the box's Escape, which lands here); with
+    // the box disabled (the section view up, a closed session) Enter presses the header as Space does. Space
+    // always presses: fold or open with the section in the pane (toggle-group), or the transcript back
+    // (show-transcript). Any other header: the arrows bubble to the window's handler (they step the ACTIVE
+    // tab, focus staying put) and Enter presses, as on any button.
+    const aid = activeId;
+    const standIn = holdsActive && !!aid && collapsedTabIds.has(aid) && sec.ids.includes(aid);
+    if (aid && standIn && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+      e.preventDefault();
+      const nb = neighborOfFolded(lastStripItems, aid, e.key === "ArrowRight" ? 1 : -1);
+      if (nb) { setActive(nb); focusActiveTab(); }
+      return;
+    }
+    if (e.key === "Enter" && standIn && !snapView && focusComposerOrAsk()) { e.preventDefault(); return; }
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); head.click(); }
+  });
   // The header's order mirrors the feed's grouped headers (T284, the user 2026-09-09: the caret sat
   // beside the chip at the left; the feed's Working / Blocked / Completed headers and its session
   // headers put the name at the left and the caret with its count together at the RIGHT): the tag's
@@ -5674,6 +5775,7 @@ function scheduleAppendActive(): void {
 }
 
 function renderTabs() {
+  mentionRosterChanged();   // the @-mention card and the transcript's chips follow the WHOLE roster, ahead of the strip's own guards and its visible-tabs signature
   if (renameActive) { renderPendingAfterRename = true; return; }
   if (tabPointerHeld) { renderPendingWhilePressed = true; return; }   // don't destroy a tab mid-click (see tabPointerHeld)
   const bar = document.getElementById("tabs");
@@ -5718,8 +5820,9 @@ function renderTabs() {
   // section's tabs, and the untagged trail (the sessions in no tag) on its own line, or behind a
   // divider with the one-group-per-row setting off (tab-groups.ts owns the rule). A folded section
   // renders its header alone, with the count and a pip when a member is working or blocked, so the
-  // gist survives the fold (progressive disclosure). The ACTIVE tab's section never renders folded —
-  // keyboard focus must never land on a hidden node — and visibleOrder() drops the folded ids so ←/→
+  // gist survives the fold (progressive disclosure). The ACTIVE tab's section folds like any other: its
+  // header is then the hidden tab's stand-in (focus, the arrows) and the pane shows the section at a
+  // glance (renderSnapshot); the keyboard walk (visibleOrder()) drops the folded ids so ←/→
   // skip them. DESKTOP ONLY: on the phone layout (phoneLayout — the kernel page's own media rule) the
   // plan is the flat strip, since the phone's session list is scraped from every rendered tab and has
   // no header to unfold. A create in flight (the provisional tab) sections under the tags its request
@@ -5728,11 +5831,14 @@ function renderTabs() {
   const plan = planStrip(visibleIds, unions, readTabGroups(unions), activeId, phoneLayout(),
                          provisionalId ? { id: provisionalId, tags: provisionalTags } : null);
   collapsedTabIds = plan.folded;
+  lastStripItems = plan.items;   // before the skip below: the section view (stripAftermath, renderSnapshot) and the folded stand-in read the plan from here on either path
   // AN UNCHANGED STRIP IS NOT REBUILT. The signature is every input the loop below and the controls after
   // it paint: the active and peek tabs, the ids and the visible ids in order, whether the active tab is in
   // view (the all-hidden blank reads it), the strip plan — each section's tag, color and members, whether
   // it is folded or holds the active tab, and the members its folded header stands in for (the header's
-  // chip, count and pip read those; the pip's state and names come from the per-id records) — and per
+  // chip, count and pip read those; the pip's state and names come from the per-id records), the section
+  // the pane shows at a glance (snapView: a header's mark, its way-back act and its words derive from it,
+  // and leaveSnapshot changes it with no fold change), and per
   // visible id either a placeholder's meta or the session's name, color, state and its tab class, faded,
   // context and its tint, viewer flag, host-down mark and note; plus the context-gauge setting, the
   // one-group-per-row setting (the row breaks and the trail's boundary read it), the theme
@@ -5750,6 +5856,7 @@ function renderTabs() {
     activeId, peekId, ids, visibleIds, activeId ? tabInView(activeId) : null, plan.items,
     settings.tabCtx, settings.stripGroupRows, settings.theme, settings.colormap, titleWithKey("Open a session", "session.new"),
     surfaceLens(effViews(), "chat"), unions,
+    snapView,   // the section whose view the pane shows (makeGroupHead: the header's mark and its way-back act)
     visibleIds.map((id) => {
       const s = sessions.get(id), down = hostIsDown(id), note = down ? hostDownNote(id) : "";
       if (renderKind(skeletonTabs, id, !!s) === "skeleton") {                                              // makeSkeletonTab's reads:
@@ -5964,11 +6071,24 @@ function renderTabs() {
   // (The collapse caret moved OFF the tab bar into the #ledger strip's title row — the strip now always
   // shows the session title + caret, expanding to goals / working-on / done. See renderLedger. 2026-06-16)
 }
-/** What follows a strip render whether or not the strip was rebuilt: the no-sessions placeholder and the
- *  all-hidden blank. Both are idempotent, and both read live state a skipped rebuild must not leave behind:
- *  the active view is built lazily, so it can appear between two renders whose strips are equal. */
+/** What follows a strip render whether or not the strip was rebuilt: the no-sessions placeholder, the section
+ *  view's refresh (its rows read session state the strip's signature does not carry: a member's last event,
+ *  its working note), and the all-hidden blank. All are idempotent, and all read live state a skipped
+ *  rebuild must not leave behind: the active view is built lazily, so it can appear between two renders
+ *  whose strips are equal. */
 function stripAftermath(visibleIds: readonly string[], ids: readonly string[]): void {
   syncNoSessionsPlaceholder(visibleIds.length, ids.length);
+  // the section view follows the push (renderTabs runs on every one): a no-op when nothing a row shows has
+  // changed (snapshotModel's same-object return). The section GONE from the plan (its tag deleted or
+  // renamed, its last member hidden or moved out, sectioning turned off) is the event that ends the view:
+  // renderSnapshot clears snapView and hides the host, and the pane goes back to the active session's
+  // transcript HERE (showActive, which re-enables the composer), because no other caller follows a push
+  // with showActive. A row that held focus is hidden with the host, so focus goes to the active tab, as
+  // after the user's own Escape (snapshotHoldsFocus, read before renderSnapshot hides it).
+  const shown = snapView;
+  const held = shown ? snapshotHoldsFocus() : false;
+  if (snapView) renderSnapshot();
+  if (shown && !snapView) { showActive(); if (held) focusActiveTab(); }
   // Hiding the LAST visible session must also blank its transcript: a strip with no tabs cannot sit
   // over a hidden session's live chat (the ghost would show exactly what the hide asked to put away).
   // Restored the moment anything is visible again — the placeholder owns the empty state meanwhile.
@@ -6563,7 +6683,9 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
 // repaint per connect/drop, not per poll (the user 2026-07-29).
 window.addEventListener("romp-hosts", () => { renderTabs(); });
 window.addEventListener("mousedown", (e) => { if (ctxMenuEl && !ctxMenuEl.contains(e.target as Node)) dismissTabMenu(); }, true);
-window.addEventListener("keydown", (e) => { if (e.key === "Escape") dismissTabMenu(); }, true);
+// an Escape that closed the menu says so on the event (preventDefault), so the section view's own Escape
+// (installSnapshotEscape, armed at this same capture phase, later in the listener order) yields to it
+window.addEventListener("keydown", (e) => { if (e.key === "Escape" && ctxMenuEl) { dismissTabMenu(); e.preventDefault(); } }, true);
 window.addEventListener("scroll", dismissTabMenu, true);
 window.addEventListener("blur", () => dismissTabMenu());
 
@@ -6638,10 +6760,14 @@ function onTabKey(e: KeyboardEvent) {
   if (!activeId || !order.length) return;
   if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
     e.preventDefault();
+    const dir = e.key === "ArrowRight" ? 1 : -1;
     const ord = visibleOrder();                 // never cycle onto a view-hidden session
     const i = ord.indexOf(activeId);
-    if (i < 0) return;
-    const dir = e.key === "ArrowRight" ? 1 : -1;
+    if (i < 0) {                                // the active tab is folded away: step from its header's place
+      const nb = neighborOfFolded(lastStripItems, activeId, dir);
+      if (nb) { setActive(nb); focusActiveTab(); }
+      return;
+    }
     setActive(ord[(i + dir + ord.length) % ord.length]);
     focusActiveTab();
   } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
@@ -6659,7 +6785,20 @@ function onTabKey(e: KeyboardEvent) {
 }
 function focusActiveTab() {
   const bar = document.getElementById("tabs");
-  (bar?.querySelector(`.tab[data-id="${activeId}"]`) as HTMLElement | null)?.focus();
+  const tab = bar?.querySelector(`.tab[data-id="${activeId}"]`) as HTMLElement | null;
+  if (tab) { tab.focus(); return; }
+  // the active tab is folded away under its section: the header is its stand-in (tab-groups.ts)
+  const home = activeId ? homeSectionOf(lastStripItems, activeId) : null;
+  if (!home || home.name === null || !bar) return;
+  Array.from(bar.querySelectorAll<HTMLElement>(".tab-group-head")).find((h) => h.dataset.group === home.name)?.focus();
+}
+/** Open a section that puts a folded-away tab on screen: a session pick names the tab, so its tab must be on
+ *  screen. Per holder, since a session under several tags has a copy under each and every copy's fold stands on
+ *  its own (T264b): the first folded holder in the strip's order opens. The store write notifies
+ *  (TABGROUPS_EVENT) and the listener re-renders the strip. */
+function unfoldSectionOf(id: string): void {
+  const holder = lastStripItems.find((it) => "head" in it && it.head.name !== null && it.folded && it.head.ids.includes(id));
+  if (holder && "head" in holder && holder.head.name !== null) writeTabGroups(setSectionCollapsed(tabGroups(), holder.head.name, false));
 }
 // "Enter to start typing" lands on whatever's actually showing below the transcript: when a live
 // AskUserQuestion picker is up the PICKER CARD owns the keyboard (↑/↓ step the options, Enter confirms), so
@@ -6699,11 +6838,18 @@ window.addEventListener("keydown", (e) => {
   if (document.querySelector(".picker-overlay")) return;   // #picker / #confirm open
   if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
     if (!activeId || order.length < 2) return;
+    const dir = e.key === "ArrowRight" ? 1 : -1;
     const ord = visibleOrder();                 // never cycle onto a view-hidden session
     const i = ord.indexOf(activeId);
-    if (i < 0) return;
+    if (i < 0) {
+      // the active tab folded away under its section header (tab-groups.ts): the header is its stand-in,
+      // so the step starts from the header's place on the strip (onTabKey's and cycleTab's rule). A
+      // view-hidden active id is not on the strip at all: nothing to step from, as before.
+      const nb = collapsedTabIds.has(activeId) ? neighborOfFolded(lastStripItems, activeId, dir) : null;
+      if (nb) { e.preventDefault(); setActive(nb); }
+      return;
+    }
     e.preventDefault();
-    const dir = e.key === "ArrowRight" ? 1 : -1;
     setActive(ord[(i + dir + ord.length) % ord.length]);
   } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
     const content = document.getElementById("content");
@@ -10759,6 +10905,212 @@ function runPrebuild(deadline: IdleDeadline): void {
   renderingOwnerSid = savedOwnerSid;
 }
 
+// A SECTION AT A GLANCE (tab-snapshot.ts owns the model). `snapView` is the section the pane is showing:
+// page state like the peek, never stored. A header click sets it (the #tabs delegate's toggle-group), any
+// session pick clears it (setActive), Escape and the header's second click leave it (leaveSnapshot). The
+// host is ONE stable node under #content, made once with its delegate installed once (the click-safe rule:
+// the rows are rebuilt from every push that changes one), and `snapModel` is the last model painted:
+// snapshotModel hands it back unchanged when no row differs, and then only the "ago" texts are refreshed
+// in place, so a push that changed nothing moves nothing.
+let snapView: string | null = null;
+let snapModel: SnapModel | null = null;
+// The reader's place in the hidden transcript, held across the view. The host is a child of #content, so
+// while the view shows the pane's scroll is the view's, and the #content scroll listener (scroll-keep.ts
+// followReader, which makes the saved spot follow the reader) would record the reveal's clamp and every
+// scroll of a long list as the ACTIVE view's saved spot; leaving would then land at the bottom or on the
+// list's offset instead of the line being read. Captured from the view once, in the synchronous pass that
+// hides the views (showActive's branch: the clamp's scroll event is only queued by then, so the fields
+// still hold the reader's spot); written back when the view hides (hideSnapshot, every exit path), before
+// landActive reads the spot.
+let snapKeep: { v: View; scrollTop: number; stick: boolean } | null = null;
+function snapshotHost(): HTMLElement | null {
+  let host = document.getElementById("tab-snapshot");
+  if (host) return host;
+  const content = document.getElementById("content");
+  if (!content) return null;
+  host = el("div", "tab-snapshot");
+  host.id = "tab-snapshot";
+  host.setAttribute("role", "region");
+  host.style.display = "none";
+  content.appendChild(host);
+  // a row opens its session: setActive unfolds the section when the tab is folded away and clears
+  // snapView; focus follows onto the tab (the strip's own select does the same)
+  delegate(host, { open: (node) => {
+    const id = node.dataset.id;
+    if (!id) return;
+    // A ROW WHOSE SESSION LEFT MID-PRESS: click safety keeps the pressed row until the release, so a session
+    // dismissed between mousedown and mouseup is still under the click, and setActive on its id would put up
+    // an "opening…" loader, composer enabled, for a session that never arrives (the strip's meta lingers
+    // until the next tabOrder frame). The row's session must still be on the strip (tab-snapshot-view.ts
+    // rowStillOpen); otherwise nothing moves. The removal is that frame's event, and the release's flush
+    // (releaseTabStrip → renderTabs → renderSnapshot) repaints the rows without it.
+    if (!rowStillOpen(snapModel?.rows.find((r) => r.id === id), sessions.has(id), tabMeta.has(id), closingTabs.has(id))) return;
+    setActive(id); focusActiveTab();
+  } });
+  // CLICK-SAFE (ui/CLAUDE.md): the rows are rebuilt by renderTabs on every push that changes one, and a rebuild
+  // between mousedown and mouseup leaves the click with no row under it. A press on the view latches the
+  // STRIP's hold (tabPointerHeld): renderTabs, and renderSnapshot's own rebuild, wait for the release
+  // (pointerup / pointercancel / blur on the window, releaseTabStrip's one path), and the deferred flush
+  // repaints the strip and the view together. One latch for two surfaces one gesture can span.
+  host.addEventListener("pointerdown", () => { tabPointerHeld = true; });
+  return host;
+}
+function hideSnapshot(): void {
+  const host = document.getElementById("tab-snapshot");
+  if (host) host.style.display = "none";
+  snapModel = null;
+  // the transcript comes back where the reader left it, not where the view's scrolls put the spot (snapKeep)
+  if (snapKeep) { snapKeep.v.scrollTop = snapKeep.scrollTop; snapKeep.v.stick = snapKeep.stick; snapKeep = null; }
+}
+/** Whether keyboard focus is on the view (a row a keyboard user Tabbed or arrowed onto). THE EXIT HANDS
+ *  FOCUS ON: leaving hides the host (hideSnapshot, display none), and hiding the focused element drops focus
+ *  to body (the browser's focus fixup); nothing else would put it anywhere, so the user's Escape would leave
+ *  them on body, arrows and Enter dead until a click. The strip's own refocus reads the strip (bar.contains),
+ *  which the host, under #content, is not in. So each exit reads this BEFORE its hide, since after it
+ *  activeElement is already body, and when it was on the view hands focus to the active tab once the
+ *  transcript is back: where the composer's own Escape puts it, and a row pick (tab mode: arrows switch
+ *  sessions, Enter drops into the message box). Focus anywhere else is left alone. */
+function snapshotHoldsFocus(): boolean {
+  const host = document.getElementById("tab-snapshot");
+  return !!host && !!document.activeElement && host.contains(document.activeElement);
+}
+/** Back to the active session's transcript without picking a session. Two gestures land here: Escape while
+ *  the view shows (below), and a click on the header whose section the pane shows when the section is open
+ *  and holds the tab being read (show-transcript: the click that put the section in the pane, undone).
+ *  Nothing about "active" moves: renderTabs drops the header's snap-shown mark, showActive puts the
+ *  transcript back and re-enables the composer. A row that held focus is hidden with the host, so focus goes
+ *  to the active tab (snapshotHoldsFocus, read before the hide). */
+function leaveSnapshot(): void {
+  if (!snapView) return;
+  const held = snapshotHoldsFocus();
+  snapView = null;
+  renderTabs();
+  showActive();
+  if (held) focusActiveTab();
+}
+// ESCAPE LEAVES THE VIEW, and yields to every layer that owns its own Escape: two phases on the window
+// (tab-snapshot-view.ts installSnapshotEscape). Armed at capture, while this page's layers are still on the
+// page to be seen: the menus (the tab menu's closer, registered before this one, runs first and marks the
+// Escape it consumed), the picker and confirm overlays, the pane's own panels, the full-pane surfaces, a
+// comment thread, a citation preview; a typing target keeps its Escape (a rename box, a dialog's field; the
+// composer is disabled under the view). Decided at bubble, after the SHELL's Escape chain (on this frame's
+// document at capture, kernel.py _LANDING_ESC_JS) has closed, marked and stopped an Escape aimed at one of
+// its panels, which live in the shell document, out of this page's sight (the log, usage and network
+// panels). Nothing else claims Escape while the view shows: the transcript is hidden.
+installSnapshotEscape(window, {
+  showing: () => !!snapView,
+  typing: isTypingTarget,
+  layerOpen: () => !!(ctxMenuEl || metaMenuEl || citePreviewEl || openCommentKey || document.querySelector(".picker-overlay"))
+    || !!document.querySelector("#rsettings:not([hidden]), #ra-back:not([hidden])")
+    || !!(document.getElementById("romp-fileview") || document.getElementById("romp-filebrowse") || document.getElementById("romp-lightbox")),
+  leave: leaveSnapshot,
+});
+/** Paint (or refresh) the view of `snapView`. False when that section is not on the strip any more: snapView
+ *  is cleared and the caller shows the transcript; the section's absence is the event. */
+function renderSnapshot(): boolean {
+  if (!snapView) return false;
+  const head = lastStripItems.find((it) => "head" in it && it.head.name === snapView);
+  if (!head || !("head" in head)) { snapView = null; hideSnapshot(); return false; }
+  const host = snapshotHost();
+  if (!host) return false;
+  const now = Date.now() / 1000;
+  const next = snapshotModel(head.head, (id) => sessions.get(id) ?? null, (id) => ledgers.get(id) ?? null, snapModel, (id) => tabMeta.get(id) ?? null);
+  if (next === snapModel && host.childElementCount) {
+    // nothing a row shows changed: the times tick in place, the DOM stands
+    for (const w of host.querySelectorAll<HTMLElement>(".snap-when[data-t]")) {
+      const t = Number(w.dataset.t); if (!t) continue;
+      w.textContent = agehms(now - t) + " ago"; w.style.color = ageColorReadable(now - t);
+    }
+    host.style.display = "";
+    return true;
+  }
+  // a rebuild while a row is pressed would drop the click (the strip's rule, tabPointerHeld): showActive can
+  // land here mid-press (the active tab's payload arriving), so the rebuild waits for the release: the flush
+  // renders the strip, and the strip renders this. The times above still ticked in place: no node was lost.
+  if (tabPointerHeld && host.childElementCount) { renderPendingWhilePressed = true; return true; }
+  snapModel = next;
+  const words = snapshotHeading(next.name, next.rows.length);
+  host.setAttribute("aria-label", words.label);
+  // THE ROWS UPDATE IN PLACE, KEYED BY SESSION ID (tab-snapshot-view.ts reconcileRows). The heading and the
+  // list are made once, with the host's first paint; from then on the heading's parts are patched and the
+  // rows reconciled: a standing row keeps its node (fillSnapshotRow rewrites its parts), a row that came is
+  // made, one that went is removed, a reordered one moved. The strip keeps focus across its rebuild by
+  // re-focusing the active tab; the rows keep it by keeping their nodes: sameRow folds lastT and lastMsg, so
+  // the model changes on nearly every push while a member works, and a wholesale replaceChildren would
+  // destroy the button the user had Tabbed onto (focus to body, Enter dead) and dismiss a hover's title.
+  let list = host.querySelector<HTMLElement>(":scope > .snap-list");
+  if (!list) {
+    const h = document.createElement("h2"); h.className = "snap-head";
+    // the heading's own bar (snap-swatch) and the name: the strip's header wears the tag chip; this heading
+    // keeps a bar + name pair, whose parts the patch below rewrites in place (the rows' rule: nothing is remade)
+    const sw = el("span", "snap-swatch"); sw.setAttribute("aria-hidden", "true");
+    h.append(sw, el("span", "snap-name"), el("span", "snap-count"));
+    list = el("div", "snap-list"); list.setAttribute("role", "list");
+    host.replaceChildren(h, list);
+  }
+  const part = (cls: string) => host.querySelector<HTMLElement>(".snap-head > ." + cls)!;
+  part("snap-swatch").style.background = next.color || "";
+  part("snap-name").textContent = next.name;
+  part("snap-count").textContent = words.count;
+  // a MOVED row: insertBefore detaches and re-attaches its node, which blurs it (the browser's focus fixup); the
+  // same event puts focus back on it (the strip's refocus rule, by node instead of by id). A row GONE from under
+  // focus (its session left the section): the row now in its place takes it, the last when it was last, so a
+  // removal does not drop the keyboard user to body either.
+  const focused = document.activeElement as HTMLElement | null;
+  const focusedAt = focused && list.contains(focused) ? Array.from(list.children).indexOf(focused.closest(".snap-item")!) : -1;
+  reconcileRows<SnapRow, Element>(list, next.rows, (n) => n.getAttribute("data-id"), (r) => snapshotRowNode(r, now), (n, r) => fillSnapshotRow(n.firstElementChild as HTMLElement, r, now));
+  if (focused && list.contains(focused)) { if (document.activeElement !== focused) focused.focus(); }
+  else if (focusedAt >= 0 && list.children.length) list.children[Math.min(focusedAt, list.children.length - 1)].querySelector<HTMLElement>(".snap-row")?.focus();
+  host.style.display = "";
+  return true;
+}
+// One row: a real button (Tab reaches it, Enter opens) carrying data-act="open" for the host's delegate, in an
+// item that carries the row's key (the session id) for the keyed update. The button is the node that stands
+// across rebuilds (focus and the title are its), so a made row and a patched row take their parts from the one
+// fillSnapshotRow.
+function snapshotRowNode(r: SnapRow, now: number): HTMLElement {
+  const item = el("div", "snap-item"); item.setAttribute("role", "listitem");
+  item.dataset.id = r.id;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  item.appendChild(btn);
+  fillSnapshotRow(btn, r, now);
+  return item;
+}
+// The row's attributes and parts, written onto its button: on a made row once, on a standing row at every
+// model change (the classes rewritten whole, the parts emptied and appended in order). The parts reuse the
+// strip's vocabulary: the tab's state colors on the pip (tab-state.ts's rule, tab-snapshot.ts rowState), the
+// session's identity color on its name, the remote "host:" prefix as quiet metadata (host-prefix.ts), and
+// the age color the tab tip gives its times.
+function fillSnapshotRow(btn: HTMLElement, r: SnapRow, now: number): void {
+  btn.className = "snap-row" + (r.closed ? " closed" : "") + (r.loading ? " loading" : "");
+  btn.dataset.act = "open"; btn.dataset.id = r.id;
+  const words = rowWords(r);
+  btn.setAttribute("aria-label", words.label);
+  btn.title = words.title;
+  btn.replaceChildren();
+  const pip = el("span", "snap-pip" + (r.pip ? " " + r.pip : "")); pip.setAttribute("aria-hidden", "true");   // a dot says nothing aloud: its phrase rides the label
+  btn.appendChild(pip);
+  const name = el("span", "snap-sess"); name.replaceChildren(...hostNameNodes(r.name, r.id));
+  if (r.color) name.style.color = r.color.bg;
+  btn.appendChild(name);
+  if (r.needsYou) { const f = el("span", "snap-flag needs"); f.textContent = "needs you"; btn.appendChild(f); }
+  else if (r.waiting) { const f = el("span", "snap-flag"); f.textContent = "waiting"; btn.appendChild(f); }
+  const nowEl = el("span", "snap-now"); nowEl.textContent = r.loading ? "opening…" : r.now; btn.appendChild(nowEl);
+  if (r.lastT) {
+    const when = el("span", "snap-when"); when.dataset.t = String(r.lastT);
+    when.textContent = agehms(now - r.lastT) + " ago"; when.style.color = ageColorReadable(now - r.lastT);
+    btn.appendChild(when);
+  }
+  if (r.note) {
+    // the session's own note (the postal working note, its claim to a branch and files; tab-snapshot.ts
+    // noteLine): a quieter second line under the now line, never in its place. Appended last, so the
+    // wrapping row puts it under the first line's parts; spoken by the label (rowWords), like the flag
+    const note = el("span", "snap-note"); note.textContent = r.note; note.setAttribute("aria-hidden", "true");
+    btn.appendChild(note);
+  }
+}
+
 // `keep` (review find, 2026-09-08): a caller that must EMPTY the view before showing it (rerenderAll on a
 // settings change) captures the reader's anchor first and hands it here — by the time this runs there is
 // no DOM left to capture from and the emptied box no longer overflows. undefined = capture here.
@@ -10771,6 +11123,36 @@ function showActive(keep?: { uuid: string; y: number } | null) {
   renderLiveAsk(); // swap in the active session's pending picker (or hide if none)
   renderBgTasks(); // swap in the active session's background-task box (or hide if none)
   let empty = document.getElementById("empty-state");
+  // A SECTION AT A GLANCE: while snapView names a section, the pane shows its sessions instead of any
+  // transcript: every view hidden, the composer disabled with a placeholder that says what to do (a message
+  // typed here has no session to go to), the statusline blank (updateStatusline). activeId is untouched: the
+  // kernel's active hint, the MRU and the drafts still point at the session being read, and its header wears
+  // the mark. renderSnapshot answers false when the section is gone from the strip (a tag deleted, its last
+  // member hidden): then the transcript.
+  if (snapView && renderSnapshot()) {
+    for (const v of views.values()) v.el.style.display = "none";
+    // the reader's place (snapKeep; once per visit): the hide above only queues the clamp's scroll event, so the
+    // view's fields still hold what the reader's last scroll recorded
+    const av = activeId ? views.get(activeId) : null;
+    if (av && !snapKeep) snapKeep = { v: av, scrollTop: av.scrollTop, stick: av.stick };
+    // THE ACTIVE CHANGED UNDER THE VIEW: the session being read closed while the view showed (dismissSession
+    // hands activeId to the MRU survivor and comes back here with snapView set), so the held spot names a view
+    // followReader no longer writes to. The old view gets its spot back and the new active's is held from now,
+    // read before the view's next scroll event: leaving lands the survivor where its reader left it.
+    if (av && snapKeep && snapKeep.v !== av) {
+      snapKeep.v.scrollTop = snapKeep.scrollTop; snapKeep.v.stick = snapKeep.stick;
+      snapKeep = { v: av, scrollTop: av.scrollTop, stick: av.stick };
+    }
+    document.getElementById("tab-loading")?.remove();
+    if (empty) empty.style.display = "none";
+    const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
+    if (ta) { ta.disabled = true; ta.placeholder = "Pick a session above to write to it"; }
+    const sendBtn = document.getElementById("composer-send") as HTMLButtonElement | null;
+    if (sendBtn) sendBtn.disabled = true;
+    updateStatusline();
+    return;
+  }
+  hideSnapshot();
   const s = activeId ? liveSession(activeId) : null;
   if (!s) {
     for (const v of views.values()) v.el.style.display = "none";
@@ -10796,6 +11178,13 @@ function showActive(keep?: { uuid: string; y: number } | null) {
       else wait.appendChild(rompLoaderInner("opening " + what + "…"));
       content.appendChild(wait);
       if (empty) empty.style.display = "none";
+      // a pick that lands here from the section view (a row's "opening…" session): the view disabled the box
+      // with its own placeholder, and this branch never touched the composer, so the box takes input for the
+      // picked session again; the first session frame's showActive sets its closed/live state
+      const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
+      if (ta) { ta.disabled = false; ta.placeholder = composerRestingPlaceholder(); }
+      const sendBtn = document.getElementById("composer-send") as HTMLButtonElement | null;
+      if (sendBtn) sendBtn.disabled = false;
       // …and ask for it NOW. Every path that lands on a skeleton active comes through here — the click
       // (setActive), the teardown's MRU fallback (dismissSession), a strip that re-lists the tab we are on
       // (noteSkeletonTabOrder) — and nothing else would load it: the idle prefetch skips the active tab by
@@ -11975,7 +12364,7 @@ function renderBgTasks() {
   const host = document.getElementById("bg-tasks");
   if (!host) return;
   host.replaceChildren();
-  const s = activeId ? liveSession(activeId) : null;
+  const s = activeId && !snapView ? liveSession(activeId) : null;   // (snapView: the pane shows a section, not this session)
   const tasks: BgTask[] = (s && s.bgTasks && s.bgTasks.tasks) || [];
   // Keyed on CONTENT, never the chip state (the user 2026-08-30, paraphrased: even while working, anything
   // the session has in flight shows at the chat bottom). The rows ride awaitingItems in both turn states;
@@ -12332,7 +12721,7 @@ function renderLiveAsk() {
   // inline "add your own" field, and the NORMAL composer becomes that field (see composerAnswersAsk /
   // sendComposer). So you keep every control in view and can still type a free-text answer.
   if (footer) footer.style.display = "";
-  if (!activeId || skeletonTabs.ids.has(activeId) || !liveAsks.has(activeId)) {   // a skeleton's pre-outage picker is stale — hidden until the tab loads (2026-09-07)
+  if (!activeId || skeletonTabs.ids.has(activeId) || !liveAsks.has(activeId) || snapView) {   // a skeleton's pre-outage picker is stale — hidden until the tab loads (2026-09-07); snapView: the pane shows a section, not this session
     host.style.display = "none";
     liveTextValue = "";
     setComposerAskMode();   // no picker → the composer's normal placeholder + behavior
@@ -13393,6 +13782,7 @@ function updateStatusline() {
   const sl = document.getElementById("statusline");
   const s = activeId ? liveSession(activeId) : null;
   if (!sl) return;
+  if (snapView) { sl.replaceChildren(); return; }   // the pane shows a section, not a session: no session's chip
   if (activeId && !s) {
     // the tab is a loading placeholder (its session payload hasn't arrived) — the statusline said
     // whatever the PREVIOUS tab said, or a spawn stub's "Working" over a broken clock (the user
@@ -14089,8 +14479,7 @@ function fireRewindDelete(sid: string, uuid: string): void {
 function cancelComposerEdit(sid: string): void {
   if (!composerEdits.delete(sid)) return;
   if (sid !== activeId) return;
-  const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
-  if (ta) { ta.value = ""; composerManualH = null; ta.style.height = ""; }
+  clearComposerBox?.();   // the composer's one clear path: the menus see the message box go empty
   drafts.delete(sid); persistDrafts();
   renderComposerChips(sid);
 }
@@ -14574,10 +14963,15 @@ function noteMru(id: string): void {
 // "now", the sessions map for liveness, and a land that pre-seeds the per-tab scroll restore (views)
 // BEFORE setActive — so the entering tab's own restore applies the remembered spot — then re-asserts
 // it once the pane is visible (a same-tab jump returns early from setActive and needs the direct set).
+// While the section at a glance shows, #content's scroll is the view's list, not the reader's spot in
+// the hidden transcript: "now" records the spot the view holds for the active tab (snapKeep), so a pick
+// from the view leaves a trail entry that walks back to the line being read (tab-snapshot-pane.test.ts).
 const navHist = new NavHistory({
   now: () => {
     const c = document.getElementById("content");
-    return activeId && c ? { sid: activeId, top: c.scrollTop } : null;
+    if (!activeId || !c) return null;
+    const kept = snapKeep && snapKeep.v === views.get(activeId) ? snapKeep.scrollTop : null;   // the view up: the held spot
+    return { sid: activeId, top: kept ?? c.scrollTop };
   },
   alive: (sid) => sessions.has(sid),
   apply: (spot) => {
@@ -14602,7 +14996,16 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
     const p = subParts(id);
     if (p) { openSubagentView(p.parentId, p.agentId, null); return; }
   }
-  if (activeId === id && anchor == null && anchorT == null) return; // already active, nothing to do
+  // A session pick ends the section view (the header put it up; the pick names a session) and brings the
+  // picked tab on screen: a tab folded away under its header (a row of the view, a feed deep link, the
+  // arrows from the header) opens its section, since the gesture named that session.
+  const leavingSnap = snapView !== null;
+  snapView = null;
+  if (collapsedTabIds.has(id)) unfoldSectionOf(id);   // per holder: see unfoldSectionOf
+  if (activeId === id && anchor == null && anchorT == null) {   // already active, nothing to do…
+    if (leavingSnap) { renderTabs(); showActive(); }             // …except put its transcript back
+    return;
+  }
   navHist.record();   // every real navigation records the spot being LEFT (the user 2026-08-14: Ctrl+M / Ctrl+, walk the trail)
   closeMetaMenu(); // an open model/effort menu targets the tab we're leaving
   // a comment popover belongs to its parent session's view — leaving that session closes it (the
@@ -14649,7 +15052,11 @@ function cycleTab(dir: number) {
   const ord = visibleOrder();                   // never cycle onto a view-hidden session
   if (ord.length < 2 || !activeId) return;
   const i = ord.indexOf(activeId);
-  if (i < 0) return;
+  if (i < 0) {                                  // folded away: step from its header's place (onTabKey's rule)
+    const nb = neighborOfFolded(lastStripItems, activeId, dir > 0 ? 1 : -1);
+    if (nb) setActive(nb);
+    return;
+  }
   setActive(ord[(i + dir + ord.length) % ord.length]);
 }
 
@@ -15882,6 +16289,117 @@ function growComposer(ta: HTMLTextAreaElement) {
 // a one-line description, an optional argument hint, and any aliases.
 interface SlashCmd { name: string; description?: string; argumentHint?: string; aliases?: string[]; }
 
+// Re-rank an OPEN @-mention card against the current roster (set by setupComposer). Null before the
+// composer is wired, and a no-op while no card is up. mentionRosterChanged calls it on every roster change.
+let refreshMentionCard: (() => void) | null = null;
+// Empty the message box (set by setupComposer): the ONE path every clear takes, so the @-mention card and
+// the slash menu see it go empty. A bare `ta.value = ""` fires no input event, so with the card up a Send
+// click or Cmd/Ctrl+Enter would leave it open over the emptied composer, where the next Enter inserts a stale
+// "@name ". cancelComposerEdit clears from outside the composer's closure through it.
+let clearComposerBox: (() => void) | null = null;
+
+// The roster as the @-mention surfaces see it: every session the webview holds, hidden ones included, by
+// id, name, color and state. renderTabs compares it on every kernel push; a change re-ranks the open card
+// and re-dresses the transcript's chips, and a NAME the roster did not hold before re-marks the bubbles, so
+// a peer whose frame lands after the active transcript rendered gets its chip (the connect push sends the
+// active tab first). The strip's own signature covers the visible tabs only, so a session in another view
+// renamed, recolored or changing state would never reach these surfaces through it. The cost is one JSON
+// row per session per push, nothing at dozens of sessions, and on a change one query per view for the chips
+// once any chip exists (mentionChipsMade: a transcript with no chip is never walked). A subagent viewer is a
+// tab, not a session (s.sub): nothing behind it takes mail, so its row names nothing here or on the card.
+let mentionRosterSig = "";
+let mentionNames = new Set<string>();
+let mentionChipsMade = 0;   // chips markMentions has made, ever; zero means no view holds one to re-dress
+function mentionRosterChanged(): void {
+  const rows: unknown[] = [];
+  const names = new Set<string>();
+  for (const [id, s] of sessions) {
+    rows.push([id, s.name, s.color?.bg, s.color?.fg, s.status.state]);
+    if (s.status.state !== "closed" && !s.sub && s.name) names.add(s.name);
+  }
+  const sig = JSON.stringify(rows);
+  if (sig === mentionRosterSig) return;
+  mentionRosterSig = sig;
+  refreshMentionCard?.();
+  refreshMentionChips();
+  let fresh = false;
+  for (const n of names) if (!mentionNames.has(n)) { fresh = true; break; }
+  mentionNames = names;
+  if (fresh) remarkMentions();
+}
+
+// A chip's dress from the session it names: the identity color and, as its title, the name and the state.
+// The chip is keyed by the session's id (data-sid) and re-dressed on every roster change, so a rename or a
+// state change reaches a chip rendered long before (the sent text itself stays as typed). A session gone
+// reads Closed and keeps its last color, so the reader still sees who was meant.
+function dressMentionChip(chip: HTMLElement, s: Session | null): void {
+  if (!s) { chip.title = (chip.textContent || "").replace(/^@/, "") + " · " + CHIP_LABEL.closed; return; }
+  if (s.color) { chip.style.setProperty("--chip-bg", s.color.bg); chip.style.setProperty("--chip-fg", s.color.fg); }
+  chip.title = s.name + " · " + (CHIP_LABEL[s.status.state] || s.status.state);
+}
+function refreshMentionChips(): void {
+  if (!mentionChipsMade) return;
+  const byName = new Map<string, Session>();
+  for (const s of sessions.values()) if (s.status.state !== "closed" && !s.sub && s.name) byName.set(s.name, s);
+  for (const v of views.values()) {
+    for (const chip of Array.from(v.el.querySelectorAll<HTMLElement>(".mention-chip[data-sid]"))) {
+      let s = sessions.get(chip.dataset.sid || "") || null;
+      // The keyed session gone, or closed, while a live one carries the name: the text names THAT one now (the
+      // name is what postal resolves), so the chip re-keys as soon as the namesake is live. Membership in the map
+      // is not the test: a closed session stays in it until its tab is dismissed, and a chip keyed on that would
+      // read "Closed" beside a live namesake, then flip when the tab went, with nothing new about the mention.
+      if (!s || s.status.state === "closed") {
+        const again = byName.get((chip.textContent || "").replace(/^@/, ""));
+        if (again) { chip.dataset.sid = again.id; s = again; }
+      }
+      dressMentionChip(chip, s);
+    }
+  }
+}
+// Mark again every bubble that carries an "@" outside a chip (data-mentions, set when it rendered): a name
+// that was plain text because its session's frame had not landed yet becomes a chip. Idempotent: text
+// already inside a chip is skipped, so a chip is never wrapped twice.
+function remarkMentions(): void {
+  for (const v of views.values()) for (const b of Array.from(v.el.querySelectorAll<HTMLElement>("[data-mentions]"))) markMentions(b);
+}
+
+// A typed "@name" that names a live session wears that session's identity color (the user 2026-09-07):
+// the reader sees who was meant, and a hover says how that session is doing. A quiet chip, the tab's
+// own dress, with no link behavior; a word that names nothing stays plain text. Text nodes only, never
+// inside code, a fenced block, a link or a chip already made, so a path or an email address is left
+// alone. The same boundary rule as the composer's trigger (composer-mention.ts mentionSegments). Exact
+// names only: postal's direct match is exact, so a hand-typed "@API" for the session "api" is not a name
+// its mail tools would take, and the chip must not say it is. The user's own bubbles: the landed one and
+// the optimistic echo of a send (renderEventInner, the echo's paint), never a harness note.
+function markMentions(root: HTMLElement): void {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const texts: Text[] = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if ((n.nodeValue || "").includes("@") && !n.parentElement?.closest("code, pre, a, .mention-chip")) texts.push(n as Text);
+  }
+  if (!texts.length) return;
+  root.dataset.mentions = "1";   // a bubble remarkMentions revisits when a new name joins the roster
+  const live = new Map<string, Session>();
+  for (const s of sessions.values()) if (s.status.state !== "closed" && !s.sub && s.name) live.set(s.name, s);
+  if (!live.size) return;
+  const lookup = (w: string) => live.get(w) || null;
+  for (const t of texts) {
+    const segs = mentionSegments(t.nodeValue || "", lookup);
+    if (!segs.some((sg) => sg.hit)) continue;
+    const frag = document.createDocumentFragment();
+    for (const sg of segs) {
+      if (!sg.hit) { frag.appendChild(document.createTextNode(sg.text)); continue; }
+      const chip = el("span", "mention-chip");
+      chip.textContent = sg.text;
+      chip.dataset.sid = sg.hit.id;
+      dressMentionChip(chip, sg.hit);
+      frag.appendChild(chip);
+      mentionChipsMade++;
+    }
+    t.replaceWith(frag);
+  }
+}
+
 // Composer: Enter sends the message to the active session as its next prompt,
 // Shift+Enter inserts a newline; the box auto-grows a few lines.
 function setupComposer() {
@@ -15908,7 +16426,7 @@ function setupComposer() {
     stagedMsgs.push(activeId, { text: typed, cites: (composerCitations.get(activeId) || []).slice() });
     composerCitations.delete(activeId); renderComposerChips(activeId);   // the chips now live on the staged item
     drafts.delete(activeId); draftStartedAt.delete(activeId);
-    ta.value = ""; composerManualH = null; ta.style.height = "";
+    clearBox();
     persistDrafts();
     renderStagedStrip(activeId, { reveal: "last" });   // the new item is the one event that moves the list: show it
   };
@@ -15964,7 +16482,7 @@ function setupComposer() {
     if (askRoute) {
       if (askRoute === "custom") addCustomLiveAsk(typed); else sendTextLiveAsk(typed);
       drafts.delete(activeId); draftStartedAt.delete(activeId); persistDrafts();
-      ta.value = ""; composerManualH = null; ta.style.height = "";
+      clearBox();
       return;
     }
     // EDIT mode → a rewindSend: branch the conversation from just before the edited message. No
@@ -15980,7 +16498,7 @@ function setupComposer() {
       const s = liveSession(activeId);
       if (s) { reconcileRewind(s); appendActive(); }   // paint the overlay NOW (stale → window re-render)
       drafts.delete(activeId); draftStartedAt.delete(activeId); persistDrafts();
-      ta.value = ""; composerManualH = null; ta.style.height = "";
+      clearBox();
       return;
     }
     // A QUEUED-message edit → editQueued: the entry is replaced in place, kernel-side. No registerOptimistic
@@ -16056,7 +16574,7 @@ function setupComposer() {
         histWalk.delete(sid);                         // …and the history walk starts fresh
         if (attached.length) { composerFiles.delete(sid); if (sid === activeId) renderComposerFiles(sid); }
         drafts.delete(sid); draftStartedAt.delete(sid); persistDrafts();
-        ta.value = ""; composerManualH = null; ta.style.height = "";
+        clearBox();
         return;
       }
       lastSent.set(activeId, text);   // remembered for a possible Ctrl+C restore
@@ -16086,9 +16604,7 @@ function setupComposer() {
       histWalk.delete(sid);                         // …and the history walk starts fresh
       if (attached.length) { composerFiles.delete(sid); if (sid === activeId) renderComposerFiles(sid); }   // the strip emptied into this message
       drafts.delete(activeId); draftStartedAt.delete(activeId); persistDrafts();   // sent — no draft to restore on a later switch-back
-      ta.value = "";
-      composerManualH = null;   // a drag-expanded box snaps back to one line after a send (the user 2026-07-07)
-      ta.style.height = "";
+      clearBox();   // a drag-expanded box snaps back to one line after a send (the user 2026-07-07)
       // The box is empty again, so a live picker re-takes it: send your pre-question draft, then just type the
       // answer (the user 2026-07-16). Repaints the "answering" tint that draftPredatesAsk had suppressed.
       setComposerAskMode();
@@ -16102,7 +16618,7 @@ function setupComposer() {
     // the SDK's control requests instead — status, enable/disable, reconnect. Intercepted here, the
     // one point that sees a command before it runs (the /clear precedent below).
     if (/^\/mcp\s*$/.test(text)) {
-      ta.value = ""; composerManualH = null; ta.style.height = "";
+      clearBox();
       drafts.delete(sid); persistDrafts();
       openMcpPanel(sid);
       return;
@@ -16339,6 +16855,198 @@ function setupComposer() {
   ta.addEventListener("blur", () => window.setTimeout(closeSlash, 120));   // close when leaving (a row's mousedown keeps focus, so it fires only on a real leave)
   window.addEventListener("resize", positionSlash);
 
+  // ── @-MENTION autocomplete (the user 2026-09-07): an "@" opening a word, plus one or more characters,
+  // lists the live sessions whose names match (composer-mention.ts holds the rules and runs under test;
+  // this is the DOM). A pick puts "@name " in place of the typed query, plain text, the name an agent's
+  // mail tools take, so the receiving agent reads it literally. The card sits just ABOVE the composer,
+  // left-aligned with it, like the slash menu: a textarea exposes no caret geometry short of a mirror
+  // element, and the composer is one to a few lines tall, so its top edge is never far from the caret.
+  // It never takes focus: rows pick on mousedown, through ONE listener on the card itself, so a repaint
+  // between mousedown and mouseup (a kernel push renaming a session) cannot lose the pick (the click-safe
+  // rule); the row's index resolves against the list painted at that moment.
+  let mPop: HTMLElement | null = null;
+  let mItems: MentionCandidate[] = [];
+  let mMore: string | null = null;      // the "N more, keep typing" row when the cap left matches out
+  let mSel = 0;
+  let mAt: MentionQuery | null = null;   // the token the open card is about
+  // Escape latches the card closed for THIS "@" (its index in the text) until that "@" is gone, the slash
+  // menu's rule: typing more of the same query after an Esc must not re-pop it, and neither may a caret
+  // that leaves the token and comes back. The latch holds on the bare "@" too (the query backspaced away
+  // and retyped is the same "@"; the slash latch holds on a bare "/"), and it follows the "@" through
+  // edits before it (Home, a word, End: the same token, still dismissed), so only deleting the "@", or
+  // the whitespace that opens its word, re-arms.
+  let mDismissedAt = -1;
+  let mLatchText = "";     // the text as the latch last saw it; the diff against it is how the latch follows its "@"
+  // an IME composition in progress: its keystrokes and its interim text are the IME's, not the card's
+  let mComposing = false;
+  // the sessions a mention can name: every live session the webview knows, the one being written to
+  // excluded by rankMentions; hidden (background) sessions included, since mail reaches them like any other;
+  // a closed session, a tab still being created and a subagent viewer (a read-only tab, s.sub, with no
+  // session behind it) cannot take mail, so none of them is listed
+  const mentionRoster = (): MentionCandidate[] => {
+    const out: MentionCandidate[] = [];
+    for (const [id, s] of sessions) {
+      if (s.status.state === "closed" || s.sub || isProvisionalId(id)) continue;
+      out.push({ id, name: s.name, color: s.color });
+    }
+    return out;
+  };
+  const closeMention = () => { if (mPop) { mPop.remove(); mPop = null; } mItems = []; mMore = null; mAt = null; };
+  const positionMention = () => {
+    if (!mPop) return;
+    const r = ta.getBoundingClientRect();
+    mPop.style.left = r.left + "px";
+    mPop.style.maxWidth = Math.max(r.width, 220) + "px";
+    mPop.style.bottom = (window.innerHeight - r.top + 6) + "px";   // just ABOVE the composer, like the slash menu
+  };
+  // the "@query" the caret ends right now, or null; a selection is not a caret (Ctrl+A, Shift+Home, a drag)
+  const caretMention = (): MentionQuery | null =>
+    ta.selectionStart === ta.selectionEnd ? mentionQuery(ta.value, ta.selectionStart) : null;
+  // is the "@" the Escape latch is about still at `start`, opening a word? A bare "@" counts: the guide says the
+  // list stays closed for that "@" until it is deleted, not until its query is.
+  const mentionAtOpens = (text: string, start: number): boolean =>
+    start >= 0 && start < text.length && text[start] === "@" && (start === 0 || /\s/.test(text[start - 1]));
+  // Keep the latch on its "@" as the text changes. The textarea hands over no edit deltas, so each read diffs
+  // the text against the last one seen: the edit replaced prev[start, oldEnd) with the text between the same
+  // start and its new end. Wholly before the "@", it moved the "@" by what it added or removed; covering the
+  // "@", it deleted it; wholly after, the "@" stands. Then the "@" must still open a word where it sits, or the
+  // latch is off. The region comes from the caret when it can: after an edit the caret sits at the edit's end,
+  // and the text after the caret is then what followed the region, so the edit ends at the caret and starts at
+  // the smallest edit consistent with that (a longer one retyped identical text, which reads as unchanged). A
+  // caret elsewhere (an undo restores a selection) falls back to the longest common prefix and suffix, which
+  // alone reads a deletion beside repeated text as the later of the two ("@b @bb" less "@b " or less " @b" is
+  // "@bb" either way, and the later region is the "@" itself). The diff reads the text, not the keystrokes: a
+  // selection replaced by text that puts an "@" back where the old one stood reads as that "@", unchanged,
+  // as the reader sees it.
+  const followLatch = (text: string, caret: number): void => {
+    const prev = mLatchText;
+    mLatchText = text;
+    if (mDismissedAt < 0 || text === prev) return;
+    const max = Math.min(prev.length, text.length);
+    let p = 0;
+    while (p < max && prev[p] === text[p]) p++;
+    let s = 0;
+    while (s < max - p && prev[prev.length - 1 - s] === text[text.length - 1 - s]) s++;
+    let start = p, oldEnd = prev.length - s;
+    const caretEnd = caret + prev.length - text.length;   // where an edit ending at the caret ended in prev
+    if (caretEnd >= 0 && prev.slice(caretEnd) === text.slice(caret)) { oldEnd = caretEnd; start = Math.min(p, caret, oldEnd); }
+    if (oldEnd <= mDismissedAt) mDismissedAt += text.length - prev.length;
+    else if (start <= mDismissedAt) mDismissedAt = -1;
+    if (!mentionAtOpens(text, mDismissedAt)) mDismissedAt = -1;
+  };
+  const pickMention = (c: MentionCandidate) => {
+    // The card is about mAt; the pick replaces the token the caret ends NOW, and the two must agree. Splicing
+    // the cached token against a caret the card had not followed would repeat the draft between them ("ask
+    // @ro", Ctrl+A, Enter would give "ask @romp ask @ro"). The selectionchange listener below closes the card
+    // on such a move, but it is asynchronous, so a pick can land first: then there is nothing to replace.
+    const at = caretMention();
+    if (!at || !mAt || at.start !== mAt.start || at.query !== mAt.query) { closeMention(); return; }
+    const token = mentionToken(c, activeId);
+    const caret = ta.selectionStart;
+    closeMention();
+    ta.focus();
+    // Through the browser's own editing command where it works, so the pick sits on the textarea's undo
+    // stack (Ctrl+Z puts the typed "@ro" back) and fires the input event the draft bookkeeping listens to;
+    // assigning ta.value drops the undo history, so that is the fallback, with the same input event
+    // dispatched by hand. execCommand is deprecated, but every engine keeps it for exactly this and reports
+    // false where it does not apply.
+    ta.setSelectionRange(at.start, caret);
+    let done = false;
+    try { done = typeof document.execCommand === "function" && document.execCommand("insertText", false, token); } catch { done = false; }
+    if (done && ta.value.slice(at.start, at.start + token.length) !== token) done = false;
+    if (!done) {
+      const next = insertMention(ta.value, at, caret, token);
+      ta.value = next.text;
+      ta.setSelectionRange(next.caret, next.caret);
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  };
+  const paintMention = () => {
+    if (!mPop) return;
+    mPop.replaceChildren();
+    mItems.forEach((c, i) => {
+      const row = el("div", "ctx-item mention-row" + (i === mSel ? " sel" : ""));
+      row.dataset.idx = String(i);
+      row.setAttribute("role", "option");
+      row.setAttribute("aria-selected", i === mSel ? "true" : "false");
+      const nm = el("span", "mention-name");
+      nm.replaceChildren(...hostNameNodes(c.name, c.id));   // a remote "host:" prefix renders as quiet metadata
+      if (c.color?.bg) nm.style.color = c.color.bg;   // the name in the session's identity color, the tab's own dress
+      row.appendChild(nm);
+      row.addEventListener("mousemove", () => { if (mSel !== i) { mSel = i; paintMention(); } });   // hover highlights; the pick is the card's listener
+      mPop!.appendChild(row);
+    });
+    // the matches the cap left out, counted, so a narrower query is the visible way to them (not a row: no pick)
+    if (mMore) { const more = el("div", "mention-more"); more.textContent = mMore; mPop.appendChild(more); }
+    positionMention();
+    (mPop.querySelector(".mention-row.sel") as HTMLElement | null)?.scrollIntoView({ block: "nearest" });
+  };
+  const openMention = () => {
+    if (mPop) return;
+    mPop = el("div", "ctx-menu mention-pop");
+    mPop.id = "mention-pop";
+    mPop.setAttribute("role", "listbox");
+    mPop.addEventListener("mousedown", (ev) => {
+      ev.preventDefault();   // the textarea keeps focus and its caret
+      const row = (ev.target as HTMLElement | null)?.closest?.(".mention-row") as HTMLElement | null;
+      const i = row ? Number(row.dataset.idx) : -1;
+      if (i >= 0 && i < mItems.length) pickMention(mItems[i]);
+    });
+    document.body.appendChild(mPop);
+  };
+  const updateMention = () => {
+    if (mComposing) return;                                    // the IME owns the text until compositionend, which runs this again
+    followLatch(ta.value, ta.selectionStart);                  // the Esc latch stands while its "@" does, wherever an edit moved it
+    const at = caretMention();
+    if (!at) { closeMention(); return; }                       // no "@query" at the caret (a space typed, the caret moved, a selection): closed
+    if (mDismissedAt === at.start) { closeMention(); return; }   // Esc'd this "@": no card for it until it is gone
+    const all = rankMentions(at.query, mentionRoster(), activeId);
+    const items = all.slice(0, MENTION_MAX_ROWS);
+    if (!items.length) { closeMention(); return; }             // nothing matches: no card, the "@word" is ordinary text
+    // The highlight follows the SESSION, not the row number: a roster re-rank under an open card (a rename, a
+    // session gone or arrived; pushes land every few seconds) would move a different name under the kept index,
+    // and an Enter within reaction time would pick it. A new query starts at the best match; a highlighted
+    // session that left the list falls back to the first row.
+    const same = !!mAt && mAt.start === at.start && mAt.query === at.query;
+    const keep = same ? mItems[mSel]?.id : undefined;
+    const idx = keep ? items.findIndex((c) => c.id === keep) : -1;
+    mSel = idx >= 0 ? idx : 0;
+    mAt = at; mItems = items; mMore = mentionMoreNote(all.length);
+    openMention();
+    paintMention();
+  };
+  refreshMentionCard = () => { if (mPop) updateMention(); };
+  // Empty the message box: the one path for every clear (a send, a stage, a picker answer, an edit, /mcp, a
+  // cancelled edit), so the menus see it go empty; see clearComposerBox. The drag height snaps back with it.
+  const clearBox = () => {
+    ta.value = ""; composerManualH = null; ta.style.height = "";
+    updateSlash(); updateMention();
+  };
+  clearComposerBox = clearBox;
+  // ↑/↓/⏎/Tab/Esc while the card is OPEN; true when the key was the card's, so the composer's own
+  // Enter-to-send, history and Escape-to-tabs handlers below do not also fire. A modifier passes through,
+  // and so does every key of an IME composition: Enter commits the IME's text and the arrows walk its
+  // candidates there (the type-from-anywhere handler's rule).
+  const mentionKey = (e: KeyboardEvent): boolean => {
+    if (e.isComposing || e.keyCode === 229) return false;
+    const act = mentionKeyAction(e.key, !!mPop, mSel, mItems.length, e.shiftKey || e.ctrlKey || e.metaKey || e.altKey);
+    if (!act) return false;
+    e.preventDefault();
+    if (act.kind === "move") { mSel = act.sel; paintMention(); }
+    else if (act.kind === "pick") pickMention(mItems[act.sel]);
+    else { mDismissedAt = mAt ? mAt.start : -1; closeMention(); }
+    return true;
+  };
+  // A caret move without an edit changes which token the caret ends. selectionchange fires on the text
+  // control itself for every one (a click, Home/End, PageUp, Ctrl+A, a drag) in every current engine,
+  // asynchronously, so the card follows the caret wherever it goes; an allowlist of arrow, Home and End
+  // keyups would miss Ctrl+A and PageUp.
+  ta.addEventListener("selectionchange", updateMention);
+  ta.addEventListener("compositionstart", () => { mComposing = true; });
+  ta.addEventListener("compositionend", () => { mComposing = false; updateMention(); });
+  ta.addEventListener("blur", () => window.setTimeout(closeMention, 120));   // a row's mousedown keeps focus, so this fires only on a real leave
+  window.addEventListener("resize", positionMention);
+
   // ── PROMPT HISTORY (the user 2026-08-16): ↑ with the caret on the box's FIRST line recalls the
   // session's previously SENT prompts, shell-style; ↓ on the last line walks forward again, and
   // walking past the newest restores the draft you were typing (stashed on the first ↑). History is
@@ -16357,6 +17065,7 @@ function setupComposer() {
   };
   ta.addEventListener("keydown", (e) => {
     if (slashKey(e)) return;   // the slash menu owns ↑/↓/⏎/Tab/Esc while it's open
+    if (mentionKey(e)) return;   // and so does the @-mention card: Enter picks a session here, it never sends
     // ↑/↓ recall history ONLY from an EMPTY box (the user 2026-08-17, tightening the first cut's
     // first-line rule: any text already in the box — even one character — means a draft in progress,
     // and arrows must never hijack it). Once a walk is ACTIVE the recalled text is the walk's own, so
@@ -16432,6 +17141,11 @@ function setupComposer() {
     // Shift+Enter, and the software return key should just return. Mobile sends with the explicit Send
     // button only (the user 2026-07-15). Desktop keeps ⏎ send / ⇧⏎ newline. The `!isCoarsePointer()` guard
     // lets Enter fall through to the textarea's native newline on touch.
+    // An IME's commit Enter (isComposing; keyCode 229 on engines that report the composition that way) is the
+    // composition's, not a send or a stage. The mention card declines it above so the IME can take it, and so
+    // must the two Enter branches here, or the commit sends the half-composed text (the type-from-anywhere
+    // handler's guard). Left to the browser, the keystroke commits the text.
+    if (e.key === "Enter" && (e.isComposing || e.keyCode === 229)) return;
     // ⌘⏎ / Ctrl+⏎ stages (the user 2026-08-15) — and focus STAYS in the box, because the whole point
     // is highlighting the next spot and typing again. Checked before the plain-Enter send below.
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.shiftKey) {
@@ -16453,6 +17167,7 @@ function setupComposer() {
     if (!recalling && activeId) histWalk.delete(activeId);
     growComposer(ta);
     updateSlash();   // open/refresh/close the slash-command menu as the leading "/token" changes
+    updateMention();   // and the @-mention card as the "@query" at the caret changes (typing narrows; a space closes)
     // keep the per-tab draft (and its persisted copy) current as you type, so a reload restores it
     if (activeId) {
       const had = draftStartedAt.has(activeId);
@@ -17101,17 +17816,21 @@ setupSettings();
     // is consistent: tab focused → Enter drops into the message box; Escape there returns to the tabs.
     select: (el) => { const id = el.dataset.id; if (id) { setActive(id); focusActiveTab(); } },
     // a section header (tab groups): fold or open that group — the new state is the opposite of the
-    // one the header RENDERED (data-folded), never a toggle of the stored bit: the active tab's
-    // section renders open whatever the store says, so a stored toggle there inverted the click. The
-    // write notifies (TABGROUPS_EVENT) and the listener re-renders — one render path for a local
-    // toggle and a sibling pane's alike.
+    // one the header RENDERED (data-folded), never a toggle of the stored bit (a header can render a
+    // state the store does not hold). The write notifies (TABGROUPS_EVENT) and the listener re-renders:
+    // one render path for a local toggle and a sibling pane's alike. The same click shows the section at
+    // a glance in the transcript's place (snapView; showActive paints it), open or folded: the user
+    // looks at the group they just folded or opened, and a session pick puts a transcript back.
     "toggle-group": (el) => {
       const name = el.dataset.group;
-      if (name) writeTabGroups(setSectionCollapsed(tabGroups(), name, el.dataset.folded !== "1"));
+      if (!name) return;
+      snapView = name;
+      writeTabGroups(setSectionCollapsed(tabGroups(), name, el.dataset.folded !== "1"));
+      showActive();
     },
-    // the header of the section holding the ACTIVE tab (makeGroupHead): unfoldable while active, so
-    // the click stores nothing — the delegate's flash is the whole acknowledgement
-    "group-active": () => { /* acknowledged by the flash; nothing to store */ },
+    // the header whose section the pane shows, open and holding the tab being read (makeGroupHead): a
+    // second click puts the transcript back
+    "show-transcript": () => leaveSnapshot(),
     close: (el) => {
       const id = el.dataset.id;
       if (id && isSubId(id)) { closeSubagentView(id); return; }   // a subagent viewer: nothing to end, just close

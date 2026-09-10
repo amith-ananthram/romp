@@ -459,8 +459,9 @@ permission/API-error floors: one interrupt at a time, the present event first.
 
 - Toggles: `CLOSER_ON`, `GROUPER_ON`, `DISTILLER_ON`, `CONSOLIDATE_ON`.
   Models: `STATE/judge-model` (triage), `STATE/index-model`.
-  Fast judging: `STATE/judge-fast` (`on` | `off`, off by default; read per
-  call, and the fast-mode opt-in rides only a call whose model is Opus).
+  Fast mode for the judges (the gear's Fast mode box beside the Triage model
+  picker): `STATE/judge-fast` (`on` | `off`, off by default; read per call, and
+  the fast-mode opt-in rides only a call whose model is Opus).
   Pool width: `STATE/judge-concurrency` (the gear's Judge concurrency, 1..16,
   read fresh each pass; empty = `ROMP_JUDGE_CONCURRENCY` as read at load,
   else 6). Every pool reads it at call time (`_conc`, or `_judge_concurrency()`

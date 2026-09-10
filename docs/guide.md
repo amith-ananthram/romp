@@ -53,6 +53,20 @@ A pull request number in a message, a card, or a note (`#123`, `PR #123`, or
 directory has as its `origin` remote; when that remote is not on GitHub, the number stays
 plain text.
 
+**Naming another session.** Type `@` and the first letters of a session's name in the
+message box, and the sessions whose names match are listed above it, twelve at most; when
+more match, the last row says how many, and more letters narrow the list. Arrow to one and
+press **⏎** or **Tab**, or click it, and `@name` goes into the message as plain text, the
+name the session's mail tools take. Which form goes in depends on the session you are
+writing to. When you write to a session on this machine, a session on another machine goes
+in as `@host:name`, the way this machine knows it. When you write to a session on another
+machine, every name goes in bare, because the dashboard cannot see what that machine calls
+its peers; if the bare name is ambiguous there, the session's mail tools refuse the send and
+list the candidates as `host:name`, and the session picks one. **Escape** closes the list
+without inserting, and it stays closed for that `@` until you delete it: more letters, or a
+caret move away and back, do not reopen it. In the sent message, a name that matches a live
+session is shown as a chip in that session's color.
+
 **A message that has not gone yet.** Send to a busy session and your message waits as a
 dashed bubble under an hourglass until the session takes it — while it compacts, while a
 turn runs, or in the beat before the kernel confirms the send. Until then it is still
@@ -160,9 +174,10 @@ the tab and pick **Show when folded** under **Tags**;
 the header's count then leaves that tab out; when every tab in a section is set to
 show, the folded header shows the full count and its tooltip says nothing is hidden. Pick it
 again to fold the tab with the rest. A tab set to show when folded keeps that setting when its
-group is renamed. The section of the tab you are reading never
-folds (its header says so, and a click there changes nothing), and the `archived` section
-starts folded. Drag a header to reorder the groups, which
+group is renamed. The section of the tab you are reading folds like any other; its header marks
+that it holds the tab (the tag's name is underlined), and folded, the header stands in for the tab:
+focus lands on it, and the left and right arrows step from there. The `archived` section starts
+folded. Drag a header to reorder the groups, which
 reorders the tags on every surface (the timeline's tag table shows the same order). To move
 a tab into another group, right-click it and pick **Move to <tag>** under **Tags**: one click
 adds that tag and drops the tag of the group you right-clicked it in, leaving its other tags alone. The row's
@@ -171,6 +186,23 @@ button's menu, turns the sections off for this browser. Every group starts on it
 the gear's **One tag group per row in the tab strip** lets the groups follow one another across the
 strip and wrap as they need, with the untagged sessions behind a thin divider, so a strip with many
 tags stays short.
+
+**A section at a glance.** Clicking a header also shows the section in the transcript's place: one
+row per session, with its color, a dot for its state (yellow working, red stopped on a prompt or an
+API error only you can clear, amber retrying an API error on its own, teal compacting, green waiting
+on background work, none while it is idle), a **needs you** or **waiting** word, what it is doing
+now in a few words, and how long ago it last did anything. **Needs you** appears when the feed shows
+one of the session's cards under Blocked, or when the session is stopped on a prompt or an API error
+only you can clear; **waiting**, when it is waiting on background work. A session that asked a
+question and went quiet shows the word with no dot: the dot follows the session's own state, the
+word follows the feed. What it is doing now comes from its current task, else from the headline of
+its work so far, else from the last task it had; a session that has published a note of what it is
+working on shows the note as a quieter second line. Hover a row for its last message, shown without
+its formatting; click one to open that session, which also opens its section if the section is
+folded (with several tags, the first folded group of them). The rows update as the sessions work and
+change only when something about a session changes; the **needs you** word follows the feed, one
+refresh behind it at most. The transcript comes back when you pick a session, press Escape, or click
+that header again while its section is open and holds the tab you are reading.
 
 **Coming back after a dropped connection.** When the dashboard's link to the kernel
 drops and comes back (a laptop lid closed and opened, a network change, a phone that

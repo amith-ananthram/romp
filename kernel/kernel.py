@@ -183,7 +183,7 @@ def _process_stats():
 _CHAT_SIG_LABELS = ("transcript", "states", "store", "hold", "archive", "episodes", "reg", "gone", "tasks", "cut",
                     "live", "row", "clock", "backend", "ops", "limit", "retry", "bg", "watch", "stamp", "anchors",
                     "downtime", "names", "flags", "ncards", "colormap", "acct", "cleared", "host",
-                    "cwd", "claudemd", "fork",
+                    "cwd", "claudemd", "fork", "note", "needs",
                     "taskout", "pathlink", "postal")
 _CHAT_SIG_DEPS = ("taskout", "pathlink", "postal")
 
@@ -1137,7 +1137,7 @@ def _version_info():
             "commentEffort": jd._state_str("comment-effort", "session"),
             "commentFast": jd._state_str("comment-fast", "session"),
             "tmuxBackend": jd._state_str("tmux-backend", "off"),   # T288: "on" offers Claude Code (tmux) in the picker and the gear
-            "judgeFast": jd._state_str("judge-fast", "off"),   # RAW "on" | "off": Fast judging, the fast-mode opt-in on Opus judge calls
+            "judgeFast": jd._state_str("judge-fast", "off"),   # RAW "on" | "off": the judges' Fast mode box, the fast-mode opt-in on Opus judge calls
             # One dict with every kernel-side setting, lifted by a PEER kernel's /version poll onto its
             # /tunnels row so its gear can mark controls where machines disagree (the user 2026-08-14).
             # The top-level fields above stay: this tab's own gear and older kernels read those.
@@ -26391,17 +26391,49 @@ def _postal_index():
     if hit is not None and hit[0] == key:
         return hit[1]
     idx = {}
+    later = {}                                        # mid -> its outcome rows, in log order (folded after the scan)
     for o in _messages_rows(p):                       # append-incremental rows (2026-09-03): a send no
         if not isinstance(o, dict):                   # longer re-decodes the whole log on the active tab
             continue
-        if o.get("ev") == "sent" and o.get("id"):
-            idx[o["id"]] = {"id": o["id"], "from": o.get("from", "?"), "fromId": o.get("from_id", ""),
-                            # the sender's host as the log stamped it: "" for this kernel's own sessions,
-                            # a peer's name for relayed mail — and None when the row carries NO field, a
-                            # row from before the field existed, whose sender could be either (2026-09-06)
-                            "fromHost": o.get("from_host"),
-                            "toId": o.get("to_id", ""), "body": o.get("body", ""), "kind": o.get("kind", ""),
-                            "t": o["t"] if isinstance(o.get("t"), (int, float)) else 0, "park": bool(o.get("park"))}
+        ev, mid = o.get("ev"), o.get("id")
+        if ev == "sent" and mid:
+            idx[mid] = {"id": mid, "from": o.get("from", "?"), "fromId": o.get("from_id", ""),
+                        # the sender's host as the log stamped it: "" for this kernel's own sessions,
+                        # a peer's name for relayed mail — and None when the row carries NO field, a
+                        # row from before the field existed, whose sender could be either (2026-09-06)
+                        "fromHost": o.get("from_host"),
+                        "toId": o.get("to_id", ""), "body": o.get("body", ""), "kind": o.get("kind", ""),
+                        "t": o["t"] if isinstance(o.get("t"), (int, float)) else 0, "park": bool(o.get("park"))}
+            continue
+        # The message's LATER outcomes ride the same record (T302): the sent card's delivery icon reads them.
+        # Each is the ledger's own event, never inferred — `exec` is the recipient's inbox drain consuming
+        # the message (a REAL read), `unexec` a claimed-then-rolled-back drain (not read after all),
+        # `relayed` the far host's end-to-end ack, `bounced` a return (with the refusal's why), `recall`
+        # the sender unsending it. Collected here and folded after the scan, the postal service's own
+        # reader's shape (_sent_receipts): deliver() publishes the file before it appends the sent row, and
+        # a drain can log its exec in that instant, so an outcome may sit BEFORE its sent row. Row order
+        # within one id still decides (exec then unexec is not read).
+        if mid and ev in ("exec", "unexec", "relayed", "bounced", "recall") and isinstance(o.get("t"), (int, float)):
+            later.setdefault(mid, []).append(o)
+    for mid, rows in later.items():
+        rec = idx.get(mid)
+        if rec is None:                               # an outcome for a message this log never sent
+            continue
+        for o in rows:
+            ev = o.get("ev")
+            if ev == "exec":
+                rec["read"] = o["t"]
+            elif ev == "unexec":
+                rec.pop("read", None)
+            elif ev == "relayed":
+                rec["relayed"] = o["t"]
+            elif ev == "bounced":
+                rec["bounced"] = o["t"]
+                why = str(o.get("why") or "")
+                if why:
+                    rec["bouncedWhy"] = re.sub(r"[\x00-\x1f\x7f]+", " ", why)[:200]
+            elif ev == "recall":
+                rec["recalled"] = o["t"]
     _postal_index_memo[0] = (key, idx, _postal_body_map(idx))
     return idx
 
@@ -26602,6 +26634,19 @@ def _hydrate_postal(events, index, sid=None, captions=None):
             cap = caption_for(rec["id"])
             if cap:
                 card["summary"] = cap
+            # the ledger's outcomes for this message (T302): the delivery icon moves after the send —
+            # read (the recipient consumed it), relayed (a far host acked), bounced (+ why), recalled;
+            # `remote` says the send crossed the peer bus, where the tool's "delivered" is only "handed
+            # to the relay". Only what the ledger holds; an empty receipt is not sent at all.
+            # — never on a send that ERRORED (status None): the body-keyed join would hand a refused send the
+            # outcomes of its retry with the same words, and a message that never left has no receipt.
+            receipt = {k: rec[k] for k in ("read", "relayed", "bounced", "recalled") if rec.get(k)}
+            if rec.get("bouncedWhy"):
+                receipt["why"] = rec["bouncedWhy"]
+            if str(rec.get("toId") or "").startswith("peer:"):
+                receipt["remote"] = True
+            if receipt and card.get("status") is not None:
+                card["receipt"] = receipt
         return card
     for ev in events:
         if ev.get("kind") == "tool" and _SEND_TOOL_RE.search(ev.get("name") or ""):
@@ -27990,6 +28035,17 @@ def _chat_build_sig(sess, tm=None, now=None, tmux=None, deps=None):
         # the sdk/ directory's mtime, which moves at turn rate; the per-sid value moves only when a fork of
         # THIS session appears, is promoted or is deleted).
         sig.append((_be.fork_children().get(sid) if _be and hasattr(_be, "fork_children") else None) or None)
+        # note: the session's postal working note (working/<sid>), by identity: the ledger carries its text
+        # (workingNote), and a `romp mail working` from a shell, a peer's forwarded write and the kernel's own
+        # idle-and-done lift all change it with no transcript, states or store write.
+        _np = _working_note_path(sid)
+        sig.append(_chat_ident(_np) if _np is not None else None)
+        # needs: the feed's per-session needs-you verdict the ledger carries (needsInput), as the boolean "a
+        # card of THIS session is filed under needs-you". The set behind it is None until the first feed build
+        # since start, and a push builds the chat sessions BEFORE the feed, so the raw tri-state would give
+        # every tab a None on the first push and a False on the next: one whole-strip rebuild for a value the
+        # row reads the same (needsInput === true). Only True is a verdict.
+        sig.append(_feed_needs_input_of(sid) is True)
         sig.extend(((), (), None) if deps is False else _chat_sig_deps(sid, deps))   # taskout, pathlink, postal
         return tuple(sig)
 
@@ -32762,7 +32818,21 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
     if _session_flag(sid, "hideFromFeed"):       # muted → out of task tracking: the ledger shows no goal tree / current task
         tree, current, recent_tops = [], None, []
     ledger = {"summary": arch.get("headline", ""), "tree": tree[:80],
-              "current": current, "recent": recent_tops}
+              "current": current, "recent": recent_tops,
+              # the postal working note (set_working: the session's claim to a branch and files, written for
+              # peer sessions), "" when none. The chat's section-at-a-glance view shows it as a row's second
+              # line. Kept for a muted session: it is the session's own statement, not a goal the judges track.
+              "workingNote": Sessions.working_note(sid),
+              # the FEED's per-session needs-you verdict: True when the last feed build filed a card of this
+              # session under needs_input (the column the feed's Blocked list is: a judge-filed block, a live
+              # prompt, an on-you API error), False when none, None before the first feed build since start.
+              # The section view's row reads it for its "needs you" word, so the two panes agree; the tab's own
+              # chip rule misses the common case (a session that asked and went idle). Read from the feed build
+              # rather than re-derived: the column's rule lives in build_feed with a dozen inputs. The feed
+              # builds AFTER the chat sessions in a push, so this trails the feed by one push cycle (the chat
+              # signature's `needs` component brings the change forward on the next one). A muted session has
+              # no cards, so it reads False.
+              "needsInput": _feed_needs_input_of(sid)}
     # work-timer base, in MILLISECONDS (render's elapsedMs does Date.now()ms - sinceEpoch; a seconds
     # value showed ~494,000h — the user's "400,000 hours" bug): the current open turn's start while
     # working, else the last activity; None when unknown (render then shows no timer).
@@ -40565,7 +40635,7 @@ def _set_comment_fast(v, gt=None):   return _set_judge_state("comment-fast", v, 
 # ids and the protocol are unchanged. Rides the judge-knob machinery (validated, stamped, propagated to
 # every linked kernel: the 2026-08-14 gear rule, one value across machines).
 def _set_tmux_backend(v, gt=None):   return _set_judge_state("tmux-backend", v, {"on", "off"}, gt=gt)
-# Fast judging (the gear's Judges section): "on" runs every judge call whose model is Opus in the CLI's fast
+# Fast mode for the judges (the gear's box beside the Triage model picker): "on" runs every judge call whose model is Opus in the CLI's fast
 # mode (jd._judge_cmd adds the flag-settings opt-in per call; a call on any other model is untouched); off by
 # default. Fast mode bills Opus at a premium and draws on fast mode's own rate limits, so it is a deliberate
 # pick. Rides the judge-knob machinery: validated, stamped, propagated to every linked kernel.
@@ -40595,7 +40665,7 @@ _JUDGE_SETTING_FIELDS = (("judgeModel", _set_judge_model), ("indexModel", _set_i
                          ("commentModel", _set_comment_model), ("commentEffort", _set_comment_effort),
                          ("commentFast", _set_comment_fast),
                          ("tmuxBackend", _set_tmux_backend),   # T288: the tmux backend's offer, "on" | "off"
-                         ("judgeFast", _set_judge_fast))       # Fast judging, "on" | "off"
+                         ("judgeFast", _set_judge_fast))       # the judges' Fast mode, "on" | "off"
 
 # The per-field PICK STAMPS this leg carried from 2026-08-30 (each field's STATE-file mtime in a
 # body "stamps" dict, preserved by utime at the receiver — the distill-pick stomp fix) are
@@ -40956,9 +41026,33 @@ _img_cache = {}                                  # "path:mtime:size" → dataURL
 #      the actual bytes over HTTP (behind _authorize, like everything else) instead of a data-URL round
 #      trip — the browser lazy-loads, caches, and renders a PDF natively in the lightbox iframe. The
 #      allowlist is RENDERABLE media only; anything else 404s and the client shows a plain link. SVG is
-#      served as an image (an <img> never runs its scripts); the files are the user's own, written by
-#      their own agents, on their own machine.
+#      served as an image (an <img> never runs its scripts; a tab NAVIGATED to one is a document, which
+#      _media_policy_headers below sandboxes); the files are the user's own, written by their own agents,
+#      on their own machine.
 _PREVIEW_MIME = dict(_IMG_MIME, **{".pdf": "application/pdf"})
+
+
+def _media_policy_headers(mime):
+    """The extra headers a /file SUCCESS carries for its media type: `Content-Security-Policy: sandbox`
+    on image/svg+xml, nothing on anything else.
+
+    An SVG is the one type on the allowlist that is ALSO a document. Served to an <img> it is a picture
+    and its scripts never run; but the own-tab opener (ui/webview/preview.ts openFileTab) hands this route
+    ANY path on a modified click since the PDF-only gate came off, and a tab NAVIGATED to /file?path=x.svg
+    parses it as a page and runs its inline <script> at the kernel's origin, with the dashboard's session
+    cookie attached (the 1204 review, 2026-09-10). nosniff is no help there: the type is declared, and
+    image/svg+xml is the scriptable one. `sandbox` closes it: a sandboxed document runs no script and
+    gets an opaque origin, so it can reach nothing of the dashboard's. The <img> path is unaffected (no
+    document is created, so no policy is read), and the chat's thumbnails, the viewer's inline preview
+    and the lightbox keep rendering. Sent on EVERY svg success, all three shapes (HEAD, 206, 200), never
+    gated on _is_navigation: harmless on a fetch or an <img>, and closing the hole must not hinge on
+    Sec-Fetch headers a plain-http dashboard never sends (see _is_navigation). On the 200 it rides
+    BESIDE _send's frame-ancestors policy as a second header of the same name, which a browser enforces
+    in addition; the framing policy itself is untouched. The /remote/<host>/file relay rebuilds every
+    interpretation header from OUR mime (it never mirrors the remote's), so it restates this too."""
+    return {"Content-Security-Policy": "sandbox"} if mime == _IMG_MIME[".svg"] else {}
+
+
 _PREVIEW_MAX_BYTES = 50_000_000                  # a plot/report, not a dataset — bigger 413s (fail loudly)
 
 # ---- …and the SOURCE/TEXT half of the same route (the user 2026-08-08). Clicking a file link used to
@@ -42820,6 +42914,26 @@ _VIEW_STATS = {"feedBuild": 0, "feedServe": 0, "tlBuild": 0, "tlServe": 0,
                # would forge the bug signature above, or bury a pusher regression (review find, 2026-09-08)
                "feedJsonBuild": 0, "feedJsonServe": 0}
 _built_timeline = [None, None, 0.0, 0.0]          # [fleet_sig, payload, built_at, build_started_at]
+# The sids the LAST feed build filed under needs_input: the per-session form of the feed's Blocked column,
+# read by build_session's ledger (needsInput) so the chat's section-at-a-glance rows say "needs you" exactly
+# when the feed does. None until the first feed build since start (a chat client alone makes the push build
+# the feed, so that is one push cycle). Set by _cached_feed on every rebuild, from the same payload the badge
+# and the bells read (_needs_you_count), never re-derived.
+_feed_needs_input = [None]
+
+
+def _needs_input_sids(feed):
+    """The sids with a card in the feed's needs_input column: the filing rule the feed client maps
+    (feed.ts askColumn: it.column == "needs_input"), applied per session. Placeholders count too: the
+    Blocked list shows them."""
+    return frozenset(str(a.get("sid")) for a in (feed.get("asks") or [])
+                     if a.get("column") == "needs_input" and a.get("sid"))
+
+
+def _feed_needs_input_of(sid):
+    """build_session's read: True/False from the last feed build, None before the first one."""
+    sids = _feed_needs_input[0]
+    return None if sids is None else (str(sid) in sids)
 # Wire-form caches for the two heavy shared payloads (the 2026-08-10 CPU fix, round three): the last
 # (source-identity key, lazy serialization, dedup sig, per-entry split) for the feed and the timeline bars,
 # so an unchanged build is never re-serialized cycle after cycle (~357KB + ~1.65MB per cycle measured with
@@ -42954,6 +43068,7 @@ def _cached_feed(now, tmux, sig, connect=False):
     _PERF_STATS.build("feed", False, time.monotonic() - _t0)
     feed["buildId"] = bid
     _built_feed[:] = [sig, feed, time.time(), started]
+    _feed_needs_input[0] = _needs_input_sids(feed)        # the per-session needs-you the session ledgers read
     _badge = _needs_you_count(feed)
     _fired = _feed_notifications(feed)                    # armed bells: fresh builds are the transition event
     _buzzed = []
@@ -50514,6 +50629,8 @@ class Handler(BaseHTTPRequestHandler):
             if mime == "application/pdf":                     # the probe agrees with the GET (below) on the tab's name
                 self.send_header("Content-Disposition", _attachment_disposition(os.path.basename(fp), kind="inline"))
             self.send_header("X-Content-Type-Options", "nosniff")   # _send's guarantee, restated on the HEAD path
+            for k, v in _media_policy_headers(mime).items():        # sandbox on an SVG (see _media_policy_headers)
+                self.send_header(k, v)
             self.send_header("Cache-Control", "no-cache")
             if getattr(self, "_cors_origin", None):         # the chat's fetch-HEAD probe rides CORS too
                 self.send_header("Access-Control-Allow-Origin", self._cors_origin)
@@ -50542,6 +50659,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(raw)))
             self.send_header("Content-Range", "bytes %d-%d/%d" % (rng, size - 1, size))
             self.send_header("X-Content-Type-Options", "nosniff")
+            for k, v in _media_policy_headers(mime).items():        # sandbox on an SVG (see _media_policy_headers)
+                self.send_header(k, v)
             self.send_header("Cache-Control", "no-cache")
             if getattr(self, "_cors_origin", None):
                 self.send_header("Access-Control-Allow-Origin", self._cors_origin)
@@ -50569,6 +50688,7 @@ class Handler(BaseHTTPRequestHandler):
                               headers={"Last-Modified": lastmod, "X-Romp-Mtime-Ns": mtime_ns,
                                        "X-Romp-Text-Utf8": u8})
         extra = {"Last-Modified": lastmod, "X-Romp-Mtime-Ns": mtime_ns}
+        extra.update(_media_policy_headers(mime))            # sandbox on an SVG (see _media_policy_headers)
         if mime == "application/pdf":
             # INLINE, with the file's name (2026-09-06): a PDF opens in its own browser tab now (preview.ts
             # openPdfTab), and the browser titles that tab and names a Save from this header — without it
@@ -53748,7 +53868,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 _tell_stale_gesture(client, msg)
         elif msg and msg.get("type") == "setJudgeFast" and msg.get("enabled") is not None:
-            # gear "Fast judging": a checkbox, stored as on/off and read by the judges per call (jd._judge_fast).
+            # the gear's Fast mode box on the Triage model row: a checkbox, stored as on/off and read by the judges per call (jd._judge_fast).
             # The boolean is checked like its siblings' (_as_bool), and a malformed frame is refused with a
             # warn, unwritten; an applied pick fans out to every linked kernel under its gesture stamp.
             _jfe, ferr = _as_bool(msg.get("enabled"), "enabled")
@@ -54034,6 +54154,8 @@ class Handler(BaseHTTPRequestHandler):
             if status == 200 and mime == "application/pdf":   # the tab's name — OURS, from the requested path
                 self.send_header("Content-Disposition", _attachment_disposition(os.path.basename(rp), kind="inline"))
             self.send_header("X-Content-Type-Options", "nosniff")   # _send's guarantee, restated on the HEAD path
+            for k, v in _media_policy_headers(mime).items():        # the SVG sandbox, from OUR mime like the type
+                self.send_header(k, v)
             self.send_header("Cache-Control", "no-cache")
             if getattr(self, "_cors_origin", None):
                 self.send_header("Access-Control-Allow-Origin", self._cors_origin)
@@ -54050,6 +54172,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Content-Range", crange)
             self.send_header("X-Content-Type-Options", "nosniff")
+            for k, v in _media_policy_headers(mime).items():        # the SVG sandbox, from OUR mime like the type
+                self.send_header(k, v)
             self.send_header("Cache-Control", "no-cache")
             if getattr(self, "_cors_origin", None):
                 self.send_header("Access-Control-Allow-Origin", self._cors_origin)
@@ -54062,6 +54186,10 @@ class Handler(BaseHTTPRequestHandler):
         # and the Edit gate ride on them, and deriving them locally would lie about a remote disk.
         mirrored = {k: v for k, v in (("Last-Modified", lastmod), ("X-Romp-Mtime-Ns", r_ns),
                                       ("X-Romp-Text-Utf8", r_u8)) if v}
+        # …and the SVG sandbox is NOT mirrored but derived here from our mime, like the type and the
+        # disposition: the relay rebuilds every header that tells this browser how to interpret the bytes
+        # (_media_policy_headers has the hole), so the local route's policy has to be restated on this arm.
+        mirrored.update(_media_policy_headers(mime))
         if status == 200 and mime == "application/pdf":
             # A remote session's PDF opens in its own tab too (2026-09-06): the tab's title and a Save's name
             # come from this header — derived HERE from the requested basename, like the Content-Type, never

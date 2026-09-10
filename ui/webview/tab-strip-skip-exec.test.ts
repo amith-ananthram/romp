@@ -101,6 +101,11 @@ function lift(): (hooks: Hooks) => Api {
     const auditTabOrder = () => {}; const onlyTag = () => H.only; const matchesOnly = (name, only) => name.includes(only);
     const tabInView = (id) => id === peekId || !H.hidden.has(id);
     const setActive = () => {}; const setTimeout = () => 0;
+    // the section-at-a-glance view's readers on the strip, inert: the plan the view reads (lastStripItems), the
+    // section the pane shows (snapView, null: no view open, so stripAftermath's follow does nothing), and the
+    // view's own painter and focus probe (never reached while snapView is null)
+    let lastStripItems = [], snapView = null;
+    const renderSnapshot = () => false; const snapshotHoldsFocus = () => false; const showActive = () => {};
     const titleWithKey = () => H.keyHint; const surfaceLens = () => H.lens; const effViews = () => null; const viewTagUnion = () => H.unions;
     const hostIsDown = (id) => H.down.has(id); const hostDownNote = (id) => H.notes[id] ?? "";
     function makePlaceholderTab(id) { const t = el("div", "tab tab-placeholder"); t.dataset.id = id; H.placeholders++; return t; }
@@ -112,6 +117,7 @@ function lift(): (hooks: Hooks) => Api {
     const tabGroups = () => readTabGroups(H.unions); const writeTabGroups = () => {};
     const phoneLayout = () => H.phone;
     const tabStateClass = H.tabStateClass, tabDotClass = H.tabDotClass, tabDotTitle = H.tabDotTitle, sectionPip = H.sectionPip, sectionPipMembers = H.sectionPipMembers, sectionPipTitle = H.sectionPipTitle;   // tabDotClass: the state-dot slot every tab carries (the tab-strip fix, 2026-09-08); tabDotTitle: what the slot says on hover
+    const mentionRosterChanged = () => {};   // the @-mention roster hook at the top of renderTabs: not the strip's (composer-mention-pane.test.ts)
     function makeGroupHead(sec, folded, active, hidden) {
       const h = el("div", "tab-group-head" + (folded ? " collapsed" : ""));
       h.dataset.group = String(sec.name);

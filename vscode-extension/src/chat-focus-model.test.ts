@@ -43,7 +43,7 @@ test("Enter from the bare chat area (no focused control) drops into the message 
   // gated on activeElement === body so it never steals Enter from a control/tab/the live-ask card, and it
   // hooks no clicks → highlighting + expanding folds are unaffected
   const i = SRC.indexOf('window.addEventListener("keydown"', SRC.indexOf("NAV_SCROLL_STEP"));
-  const block = SRC.slice(i, i + 2800);   // the tail grew a hold line (T236: the hand-over note stands the default down)
+  const block = SRC.slice(i, i + 3600);   // the tail grew a hold line (T236: the hand-over note stands the default down) and the arrows' folded-away branch (the header as the active tab's stand-in)
   assert.match(block, /e\.key === "Enter"/);
   assert.match(block, /const ae = document\.activeElement;\s*if \(ae && ae !== document\.body\) return;/);
   assert.match(block, /if \(focusComposerOrAsk\(\)\) e\.preventDefault\(\);/);

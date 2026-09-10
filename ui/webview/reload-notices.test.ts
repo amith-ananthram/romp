@@ -207,6 +207,7 @@ function liftToastSites(): (w: World) => Lifted {
     const renderComposerChips = () => {};
     const drafts = new Map(), draftStartedAt = new Map();
     let composerManualH = null;
+    const clearBox = () => { ta.value = ""; composerManualH = null; ta.style.height = ""; };   // the composer's one clear path; its menu refreshes are not lifted (composer-mention-pane.test.ts)
     const persistDrafts = () => { W.persists++; };
     const renderStagedStrip = () => {};
     const sessions = W.sessions;
