@@ -2177,12 +2177,16 @@ sweep summary of every boot that had a session to reconcile: `sessions`, `resume
 as the boot's process listing stood: `fsid`, `pids`, `n`), `crash.heal` and
 `crash.loop` (`attempt`), `drain.unjoined` (a session the drain's bound left
 closing: `inflight`, `reaped`), and the lease work's `lease.*` kinds. Every kind
-but the boot summary is also a problem-ring entry (the bell and error center
-show its prose) and a kernel-log line of the form `<prose> ;; problem-row
-{json}`, the same object after the marker, so a log reader parses it with a
-split on the marker. `GET /session-events?since=<epoch s>&limit=<n>`
-(token-gated) returns the rows newest first since the stamp (default this
-kernel's boot; at most 1000), each with `host`, and `count`, this kernel's
+but the boot summary carries `text` and is also a kernel-log line of the form
+`<prose> ;; problem-row {json}`, the same object after the marker, so a log
+reader parses it with a split on the marker; every kind but the boot summary
+and `drain.unjoined` (written as the kernel exits, when the bell has no reader)
+is a problem-ring entry too (the bell and error center show its prose).
+`GET /session-events?since=<epoch s>&limit=<n>` (token-gated) returns the rows
+newest first since the stamp (default this kernel's boot in whole seconds, the
+resolution every row's `t` has and the `bootAt` the response names, so the
+default rows and `count` are one predicate but for the boot summary and the
+`limit` cap; at most 1000), each with `host`, and `count`, this kernel's
 problems since its boot, never a sum across kernels. `turns.jsonl` gets one
 row per settled turn: `t`, `sid`, `name`, `fedT` (the feed pop, when the text
 left the queue for the CLI's stdin, at millisecond resolution), `firstOutT`

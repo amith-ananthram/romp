@@ -15109,9 +15109,14 @@ def _session_event_rows(since=0.0, limit=200, tail=SESSION_EVENTS_TAIL):
     CLIs holding one conversation, a crash heal or loop, a session the drain left closing, and the boot
     sweep's summary), newest first, rows with t >= `since`, at most `limit`, each carrying `host` (this
     kernel's own name, _self_host) so a federated shell merges per-host maps and never sums across kernels.
-    `count` is the problems since THIS kernel's boot on THIS host: every row at or after _STARTED except the
-    boot summary (reconcile.boot, which every boot writes). Reads the file's tail only; a missing or
-    unreadable ledger is ([], 0)."""
+    `count` is the problems since THIS kernel's boot on THIS host: every row at or after int(_STARTED) except
+    the boot summary (reconcile.boot, which every boot writes). The route's default `since` is that same whole
+    second, the resolution every row's `t` has (append_session_event stamps it to the second), so the default
+    rows and `count` are one predicate but for the boot summary and the `limit` cap (`count` is uncapped). A
+    row the previous kernel stamped in this kernel's boot second (its drain rows are written as it exits, and
+    the manager spawns the next kernel on that exit) is therefore both listed and counted here: whole seconds
+    are what the rows have, and /version's `started` and the response's `bootAt` name that same second. Reads
+    the file's tail only; a missing or unreadable ledger is ([], 0)."""
     path = jd.STATE / "session-events.jsonl"
     try:
         lines = path.read_text(encoding="utf-8").splitlines()[-int(tail):]
@@ -52023,14 +52028,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps(out), "application/json", cache="no-cache")
             if p == "/session-events":
                 # T304: the session-event ledger for the dashboard's "sessions gone wrong" cue and `romp
-                # restart-metrics` (_session_event_rows): ?since=<epoch s> (default this kernel's boot),
+                # restart-metrics` (_session_event_rows): ?since=<epoch s> (default this kernel's boot in
+                # whole seconds, int(_STARTED), for a missing and for an unparseable value alike: every row's
+                # `t` is stamped to the second, and `count` and `bootAt` below use that same second, so the
+                # default rows and `count` are one predicate but for the boot summary and the `limit` cap;
+                # the float _STARTED here left a row stamped in the boot second counted and unlisted),
                 # ?limit=<n> (default 200, at most 1000). AUTHED like /api-health, by the plain _authorize:
-                # session names ride it. `count` is this kernel's alone, never a cross-kernel sum (a federated
-                # shell keeps per-host maps; every row names its host for that merge).
+                # session names ride it. `count` is this kernel's alone, never a cross-kernel sum (a
+                # federated shell keeps per-host maps; every row names its host for that merge).
+                raw_since = (q.get("since") or [""])[0]
                 try:
-                    since = float((q.get("since") or [""])[0] or _STARTED)
+                    since = float(raw_since) if raw_since else int(_STARTED)
                 except ValueError:
-                    since = float(_STARTED)
+                    since = int(_STARTED)
                 try:
                     limit = max(1, min(1000, int((q.get("limit") or [""])[0] or 200)))
                 except ValueError:

@@ -1515,10 +1515,12 @@ def append_resume_fork(state_dir: Path, sid: str, from_fsid: str, to_fsid: str, 
 #                          "sid": romp sid when about a session, "name": its name then, ...flat fields}.
 #                         Kinds this file writes: reconcile.boot (the sweep's summary, every boot, ledger only),
 #                         reconcile.orphan-reaped, reconcile.scope-stopped, reconcile.duplicate-cli, crash.heal,
-#                         crash.loop, drain.unjoined. Every kind that IS a problem also lands on the backend's
-#                         problem ring (the dashboard's bell and error center) as its prose, and on the kernel
-#                         log as `<prose> ;; problem-row {json}` so a log reader parses the same object with
-#                         `line.rsplit(PROBLEM_ROW_MARK, 1)[1]`.
+#                         crash.loop, drain.unjoined. Every kind but the boot summary is written through
+#                         problem_row: its row carries the prose as `text`, and the kernel log gets
+#                         `<prose> ;; problem-row {json}` so a log reader parses the same object with
+#                         `line.rsplit(PROBLEM_ROW_MARK, 1)[1]`. Every one of those but drain.unjoined also
+#                         lands on the backend's problem ring (the dashboard's bell and error center) as its
+#                         prose; the drain rows are written as the kernel exits, when the ring has no reader.
 #   turns.jsonl           one row per settled turn (SdkSession._turn_ledger_row): the event stamps the latency
 #                         and redo-cost figures read. Every stamp is an EVENT's time: fedT is the feed pop
 #                         (the turn left the queue for the CLI's stdin), firstOutT the first streamed work atom,
@@ -9568,10 +9570,15 @@ class SdkBackend:
                 pass                                     # exited between the join and the reap — fine
             except Exception:
                 self._log("drain: reap failed for %s: %s" % (s.name, traceback.format_exc()))
-        for s in unjoined:   # T304: the sessions the bound left closing, one ledger row each (the cut row's
-            #                 `unjoined` is the count alone); the process is exiting, so the ring is not asked
-            append_session_event(self.state_dir, "drain.unjoined", sid=s.sid, name=s.name,
-                                 inflight=int(bool(getattr(s, "inflight", 0))), reaped=(s.sid in reaped_sids))
+        for s in unjoined:   # T304: the sessions the bound left closing, one problem row each (the cut row's
+            #                 `unjoined` is the count alone): the row with its prose as `text` and the
+            #                 kernel-log line a reader parses, like every kind but the boot summary. ring=False:
+            #                 the process is exiting, so the bell has no reader left for the ring entry
+            problem_row(self.state_dir,
+                        "drain: session %s was still closing when the shutdown's wait ran out%s"
+                        % (s.name, "; its claude process was ended" if s.sid in reaped_sids else ""),
+                        "drain.unjoined", sid=s.sid, name=s.name, log=self._log, ring=False,
+                        inflight=int(bool(getattr(s, "inflight", 0))), reaped=(s.sid in reaped_sids))
         if sessions:
             names = [s.name for s in unjoined]
             self._log("drain: stopped %d session(s), %d in-flight turn(s) interrupted%s%s"
