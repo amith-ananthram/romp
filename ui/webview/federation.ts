@@ -401,8 +401,12 @@ export function mergeHostOrder(perHost: Record<string, readonly string[]>, hostS
  *  Absent `arrivedAt` (a caller with no wire), no `nowAt` is set and the pane anchors on its own arrival. */
 /** Apply the viewer's foreign cleared ids (bare, from the local payload) over REMOTE rows of a merged feed:
  *  remote asks/items they name are dropped; remote archived tops they name read cleared, rolled down to the
- *  subtree (the live tree's top-only cross-off). Rewrites `merged.asks`/`merged.items` and each remote ledger
- *  entry's archivedTops with fresh row objects; the host payloads' own rows are not mutated. No-op without ids. */
+ *  subtree (the live tree's top-only cross-off), except a cleared top whose only completion is the copied
+ *  status, which leaves the list with its subtree, as the owning kernel's overlay (_ledger_cleared_overlay)
+ *  drops it: a cleared flag rolls up to status cleared, so a copied "completed" beside a clear is a stale copy,
+ *  not a completion. A top with its own verdict (`derived` false) or a takeaway (a non-blank `summary`) stays
+ *  listed and reads cleared. Rewrites `merged.asks`/`merged.items` and each remote ledger entry's archivedTops
+ *  with fresh row objects; the host payloads' own rows are not mutated. No-op without ids. */
 export function applyViewerClears(merged: any, ledgers: any[], clearedForeign: any): void {
   const foreign = new Set<string>(Array.isArray(clearedForeign) ? clearedForeign.filter((x: any) => typeof x === "string") : []);
   if (!foreign.size) return;
@@ -417,14 +421,23 @@ export function applyViewerClears(merged: any, ledgers: any[], clearedForeign: a
     if (!l || !remote(l.sid)) return;
     const tops = l.ledger?.archivedTops;
     if (!Array.isArray(tops) || !tops.length) return;
-    let rootCleared = false, changed = false;
-    const out = tops.map((n: any) => {
-      if (n?.depth === 0) rootCleared = !!n.cleared || (typeof n.id === "string" && foreign.has(n.id));
+    let rootCleared = false, drop = false, changed = false;
+    const out: any[] = [];
+    for (const n of tops) {
+      if (n?.depth === 0) {
+        rootCleared = !!n.cleared || (typeof n.id === "string" && foreign.has(n.id));
+        // The owning kernel's rule, read from the same projection fields: at depth 0 `derived` means the copied
+        // status or a summary, never an ancestor (a root has none), so derived with a blank summary is a root
+        // whose only completion is the copied status. Cleared, it is dropped rather than marked; the viewer's
+        // ids stand in for the rows the owning kernel's own overlay would have read, so the outcome matches.
+        drop = rootCleared && !!n.derived && !String(n.summary || "").trim();
+      }
+      if (drop) { changed = true; continue; }   // a dropped root's descendants follow it in the flat list; they go with it
       const c = !!n?.cleared || (typeof n?.id === "string" && foreign.has(n.id)) || (n?.depth !== 0 && rootCleared);
-      if (c === !!n?.cleared) return n;
+      if (c === !!n?.cleared) { out.push(n); continue; }
       changed = true;
-      return { ...n, cleared: c };
-    });
+      out.push({ ...n, cleared: c });
+    }
     // a fresh ENTRY too, never the host payload's own object: the merge pushed those by reference
     if (changed) ledgers[i] = { ...l, ledger: { ...l.ledger, archivedTops: out } };
   });
@@ -500,8 +513,11 @@ export function mergeHostFeeds(perHost: Record<string, any>, hostSeq: readonly s
   // gesture taken while the owner was unreachable, a ledger copied between machines, an older client). The
   // local payload carries those ids (kernel: clearedForeign, bare); a remote ask or item they name is
   // dropped, and a remote archived top they name reads cleared, its subtree with it, exactly as the owning
-  // kernel's own overlay would have read them. Local rows are untouched: the local kernel already applied
-  // its ledger to them.
+  // kernel's own overlay would have read them: a cleared top whose only completion is the copied status
+  // leaves the list with its subtree (the kernel's _ledger_cleared_overlay drops it, since a cleared flag
+  // rolls up to status cleared and the copied "completed" is a stale copy); one with its own verdict or a
+  // takeaway stays listed, struck through. Local rows are untouched: the local kernel already applied its
+  // ledger to them.
   applyViewerClears(merged, ledgers, local.clearedForeign);
   if (anyLedgers) merged.ledgers = ledgers;
   else delete merged.ledgers;

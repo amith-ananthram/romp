@@ -903,8 +903,8 @@ test("a hovered session header is one (column, session) row: the same session's 
   const rightOf = (h: El) => (win.innerWidth - h.getBoundingClientRect().right) + "px";
   assert.notEqual(rightOf(hw), rightOf(hb));
   hw.dispatchEvent(new Event("mouseenter"));                     // the pointer rests on the Working row
-  await dispatch(frame([...four, g1c]));                         // a push while it is held: one more web card, in Completed
   try {
+    await dispatch(frame([...four, g1c]));                       // a push while it is held: one more web card, in Completed
     assert.equal(card("g1c"), null, "the payload is queued, not rendered");
     assert.ok(badged(hb), "the same session's Blocked header carries its in-row badge");
     assert.ok(!badged(hw), "never inside the hovered row");
@@ -945,6 +945,50 @@ test("a hovered header's gate releases through its ghost: a Clear that takes the
     ha.dispatchEvent(new Event("mouseleave"));                   // the pointer leaves the ghost
     await settle();
     assert.ok(card("g1d"), "the ghost's mouseleave released the gate: the queued frame applied");
+  } finally {                                                    // on a failure too, so the next test inherits neither
+    win.dispatchEvent(new Event("blur"));                        // a held gate (the backstop release) nor a cleared g2
+    await settle();
+    mock.timers.tick(700);                                        // the cleared card's collapse and the ghost's exit end
+    await dispatch(frame([g1, card("g3")._it]));                  // the kernel confirms the clear (g2 absent)
+    await dispatch(frame([g1, g2it, card("g3")._it]));            // g2 back where it was, under a fresh api header
+  }
+  assert.equal(body.querySelectorAll(".sess-exit").length, 0);
+  assert.ok(card("g2"));
+});
+
+test("a session header's Clear all releases the gate its row holds: the queued frame applies from the click, with no pointer leave and no render", async () => {
+  // Clear all sits on the header row, so the pointer that clicks it is resting on the row, and the row holds the
+  // hover-freeze gate from its mouseenter. The click turns the row into a pointer-inert ghost (reduced motion
+  // removes it outright), and neither fires a mouseleave of its own; a card's Clear dispatches a synthetic
+  // mouseleave for exactly this reason. Without the header's own dispatch, the kernel's confirmation of the
+  // clear and every push behind it stayed queued until a later local render healed the stale hold, or a
+  // window blur. No timer advances before the release is asserted: the 180 ms finalize's render would heal
+  // the hold on its own (the stand-in's :hover matches nothing), and the point is the click, not the heal.
+  const ha = body.querySelector(`.feed-sess-head[data-fsid="${API}"]`)!;   // api heads one run: its one card, g2
+  assert.ok(!ha.classList.contains("sess-exit"));
+  const g2it = card("g2")._it;                                   // the object g2 was painted from (its column too)
+  const g1d = cardOf("g1d", WEB, "web", "#3366cc", "Document the notes-api health route", "working");
+  ha.dispatchEvent(new Event("mouseenter"));                     // the pointer rests on api's header row, over its Clear all
+  try {
+    await dispatch(frame([g1, g2it, card("g3")._it, g1d]));      // a push while it is held: one more web card
+    assert.equal(card("g1d"), null, "the payload is queued");
+    // the click takes the path a real one takes: the delegate on the stable columns root, with the row's Clear
+    // all as its target. The stand-in's events do not bubble, so the click is dispatched on the root with the
+    // button shadowing its target; the delegate resolves the button by its data-act and reads its data-fsid.
+    const cols = body.byId("feed-cols")!;
+    const btn = (ha as any)._clear as El;
+    const postedBefore = posted.length;
+    const click = new Event("click");
+    Object.defineProperty(click, "target", { value: btn });
+    cols.dispatchEvent(click);
+    const clears = posted.slice(postedBefore).filter((m) => m.type === "askClearMany");
+    assert.deepEqual(clears.map((m) => [m.sid, m.itemIds]), [[API, ["g2"]]], "the click cleared the session's one card");
+    assert.ok(card("g2").classList.contains("dismissing"));
+    assert.ok(ha.classList.contains("sess-exit"), "the header ghosts in the same click");
+    assert.equal(card("g1d"), null, "the release waits for the click's own handlers to finish");
+    await settle();                                                // the flush is a microtask after the click's handlers
+    assert.ok(card("g1d"), "the click released the gate: the queued frame applied with no pointer leave and no render");
+    assert.equal(body.byId("freeze-headnote"), null, "nothing pending: the hint came off");
   } finally {                                                    // on a failure too, so the next test inherits neither
     win.dispatchEvent(new Event("blur"));                        // a held gate (the backstop release) nor a cleared g2
     await settle();

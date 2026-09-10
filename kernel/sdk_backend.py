@@ -52,15 +52,18 @@ _pal = _SFL("romp_palette", str(Path(__file__).resolve().parent / "palette.py"))
 # the module reads Claude Code's apiKeyHelper for the kernel's two calls and checks the boot environment.
 _cred = sys.modules.get("romp_credentials") or _SFL(
     "romp_credentials", str(Path(__file__).resolve().parent / "credentials.py")).load_module()
-# The by-text KEY RULE (session_backend.echo_text_key): the one normalization under which an input echo's
-# text is compared with a transcript record's, shared with the kernel's _atom_user_texts so the landing
-# scan below can never find what prune_live cannot retire. The kernel's own copy of that module when it
-# is loaded (the same idiom as _cred above); otherwise the file is loaded under its OWN module name:
-# the kernel loads it as romp_session_backend and TmuxBackend subclasses that copy's ABC, and
-# re-executing the source into that module object would rebind the class out from under the subclass.
-echo_text_key = (sys.modules.get("romp_session_backend") or _SFL(
-    "romp_session_backend_keys", str(Path(__file__).resolve().parent / "session_backend.py")).load_module()
-).echo_text_key
+# The by-text KEY RULES (session_backend.echo_text_key, and command_text_key for a slash send): the one
+# normalization under which an input echo's text is compared with a transcript record's, shared with the
+# kernel's _atom_user_texts so the landing scan below can never find what prune_live cannot retire. The
+# kernel's own copy of that module when it is loaded (the same idiom as _cred above); otherwise the file
+# is loaded under its OWN module name: the kernel loads it as romp_session_backend and TmuxBackend
+# subclasses that copy's ABC, and re-executing the source into that module object would rebind the class
+# out from under the subclass.
+_keys = (sys.modules.get("romp_session_backend") or _SFL(
+    "romp_session_backend_keys", str(Path(__file__).resolve().parent / "session_backend.py")).load_module())
+echo_text_key = _keys.echo_text_key
+command_text_key = _keys.command_text_key
+echo_keys = _keys.echo_keys                  # both keys of a text, the "either key" rule written once
 
 
 def _bin_on_path_env(environ) -> dict:
@@ -972,6 +975,25 @@ _SKILL_MD_CAP = 16000
 _IMG_ECHO_RE = re.compile(r"^\[Image:[^\]]*\]$")
 
 
+def _command_invocation(text):
+    """(name, display) for a slash-command WRAPPER record's text, or None. `name` is the <command-name>
+    value with its leading slash; `display` is the "/name args" the file adapter and msg_to_atom show for
+    it (the arguments outer-stripped, one space between). The tag is read anchored, or anywhere inside a
+    record that BEGINS with a command wrapper (_CMD_WRAP_RE), never from prose that quotes it. Read by
+    msg_to_atom for the live atom and by _landed_texts for the landing scan, so the scan finds a slash
+    send under exactly the text the kernel's prune retires its echo by."""
+    mcmd = _COMMAND_NAME_RE.match(text) or (_COMMAND_NAME_ANY_RE.search(text)
+                                            if _CMD_WRAP_RE.match(text) else None)
+    if not mcmd:
+        return None
+    name = mcmd.group(1).strip() or "/?"
+    if not name.startswith("/"):
+        name = "/" + name
+    margs = _COMMAND_ARGS_RE.search(text)
+    args = (margs.group(1).strip() if margs else "")
+    return name, name + ((" " + args) if args else "")
+
+
 def _note_skill_tool_ids(atom, ids):
     """Collect Skill tool_use block ids from a streamed ASSISTANT atom into `ids` — the live twin's
     anchor set for the newer skill-instructions shape (2026-07-10): the payload UserMessage carries
@@ -1035,15 +1057,9 @@ def msg_to_atom(msg, sid, fsid, t, skill_tool_ids=()):
             return None
         text = " ".join(b.get("text", "") for b in content
                         if isinstance(b, dict) and b.get("type") == "text")
-        mcmd = _COMMAND_NAME_RE.match(text) or (_COMMAND_NAME_ANY_RE.search(text)
-                                                if _CMD_WRAP_RE.match(text) else None)
-        if mcmd:                                     # the command INVOCATION → the command-flagged user atom
-            name = mcmd.group(1).strip() or "/?"
-            if not name.startswith("/"):
-                name = "/" + name
-            margs = _COMMAND_ARGS_RE.search(text)
-            args = (margs.group(1).strip() if margs else "")
-            disp = name + ((" " + args) if args else "")
+        cmd = _command_invocation(text)
+        if cmd:                                      # the command INVOCATION → the command-flagged user atom
+            name, disp = cmd
             return {"type": "user", "uuid": u, "session_id": sid, "t": t, "fsid": fsid, "parentUuid": None,
                     "author": "human", "command": name,
                     "message": {"role": "user", "content": [{"type": "text", "text": disp}]}}
@@ -4198,7 +4214,14 @@ class SdkSession:
         same-text landing — the review of the first cut). Memoised per record uuid, so every rebuild answers
         the same. The kernel's own ECHO atom is refused outright (its uuid is the copy's id, minted at the
         send): it is the visible copy between the feed and the CLI's record, and asked as a landing it took
-        the fed entry the real landing needed."""
+        the fed entry the real landing needed.
+
+        A slash send is paired under command_text_key as well (2026-09-10): its record is the CLI's
+        wrapper, which the kernel reads as "/name args" with one space, whatever the sender typed between
+        the name and the arguments, so the fed copy's typed text equals it only when its whitespace
+        already matches. Without the second key the landing of a copy typed with a newline before the
+        arguments carried no id, and the chat's own pending bubble, which retires by id once it has
+        latched the copy's, stayed at the tail after the command had run."""
         if not uuid_ or str(uuid_).startswith("echo:"):
             return [None] * len(texts)
         with self._lock:
@@ -4206,10 +4229,10 @@ class SdkSession:
                 return list(self._landed_qid[uuid_])
             hits = []
             for text in texts:
-                key = echo_text_key(text)
+                keys = set(echo_keys(text))            # the plain key and, for a slash send, its words
                 hit = None
                 for i, f in enumerate(self._fed_meta):
-                    if echo_text_key(f["text"]) != key:
+                    if keys.isdisjoint(echo_keys(f["text"])):
                         continue
                     if t is not None and float(t) < f["t"] - 2:
                         continue                           # stamped before the feed: not this copy's landing
@@ -7169,7 +7192,13 @@ def _landed_texts(rec: dict) -> set:
     each text block: romp bundles its injected messages as several blocks in one record). Two record
     shapes carry user text: a native USER record, and the queued_command ATTACHMENT a mid-turn splice
     leaves, whose prompt is a plain string or a content-block list (the SDK injection path; event_model
-    reads it the same way). Anything else → empty."""
+    reads it the same way). Anything else → empty.
+
+    A slash send's own record is the WRAPPER the CLI writes for it (<command-name>, <command-args>), never
+    the typed text: it lands the send as the "/name args" the event model reads it as (_command_invocation,
+    the same reading msg_to_atom gives the live atom). Every text here also yields its slash-send key
+    (command_text_key), as the kernel's _atom_user_texts does, so the scan and the prune agree on the same
+    records (2026-09-10)."""
     out: set = set()
     typ = rec.get("type")
     if typ == "user":
@@ -7194,6 +7223,14 @@ def _landed_texts(rec: dict) -> set:
         cb = echo_text_key(b)
         if cb:
             out.add(cb)
+    if typ == "user":
+        cmd = _command_invocation(" ".join(blocks))
+        if cmd:
+            out.add(echo_text_key(cmd[1]))
+    for k in list(out):
+        ck = command_text_key(k)
+        if ck:
+            out.add(ck)
     return out
 
 
@@ -9622,6 +9659,11 @@ class SdkBackend:
         # substring also matched CONTENT that merely mentions the marker — a typed follow-up quoting a
         # card summary about romp-injected echoed as a GRAY romp card.
         injected = "<!-- romp-injected -->" in text
+        # No `command` flag, even for a typed slash command: that flag marks the CLI's OWN feedback atoms
+        # (msg_to_atom's streamed wrapper and stdout, _ack_cmd_chip's picker chip), which owe no landing,
+        # are retired by the human floor, never mirrored across a restart, never flagged lost or
+        # re-delivered. A typed slash send is a message the CLI takes and records (as its wrapper), so its
+        # echo keeps the full lifecycle and lands under command_text_key; flagging it would hide its loss.
         echo = {
             "type": "user", "uuid": key, "session_id": sid, "t": sent_t, "parentUuid": None,
             "author": "romp" if injected else "human", "_echo_text": text,
@@ -9880,7 +9922,11 @@ class SdkBackend:
         echo_text_key's, the same rule the kernel's _atom_user_texts keys prune_live's by-text retire
         with, so a found echo is always one the prune can retire: the joined text or any one text block
         EQUAL to the send — never a substring, or a found-but-never-pruned echo would ride the tail
-        forever. `off` / `fsid` are the echo's send-time transcript mark (_transcript_mark): the file's
+        forever. A slash send is matched under command_text_key as well (its words; the kernel keys the
+        parsed command atom the same way): its own record is the CLI's wrapper, which _landed_texts reads
+        as the "/name args" the event model shows, never as the typed text, so until 2026-09-10 a typed
+        "/name" followed by a newline and its arguments read as never landed here and was re-delivered at
+        the next spawn, running the command twice. `off` / `fsid` are the echo's send-time transcript mark (_transcript_mark): the file's
         byte size when the send was made, and the fsid it was measured on. The scan starts THERE — every
         record that can land this send is at or after it, however much the session wrote afterwards —
         rather than at a fixed distance from EOF, which read a landed send whose record sat more than
@@ -9895,7 +9941,9 @@ class SdkBackend:
             reg = read_reg(self.state_dir, sid) or {}
             cur = str(reg.get("lastSid") or sid)
             path = transcript_path(reg.get("cwd") or "", cur)
-            want = echo_text_key(text)
+            # the plain key and, for a slash send, its words (echo_keys): the send's own record is the
+            # CLI's wrapper, which _landed_texts reads as "/name args" the way the kernel's prune does
+            want = set(echo_keys(text))
             floor = int(t or 0)
             start = 0
             if (isinstance(off, int) and not isinstance(off, bool) and fsid is not None
@@ -9910,7 +9958,7 @@ class SdkBackend:
                         rec = json.loads(raw.decode(errors="replace"))
                     except ValueError:
                         continue
-                    if not isinstance(rec, dict) or want not in _landed_texts(rec):
+                    if not isinstance(rec, dict) or not (want & _landed_texts(rec)):
                         continue
                     ts = _record_epoch(rec.get("timestamp"))
                     if floor and ts is not None and ts < floor:
@@ -11582,7 +11630,11 @@ class SdkBackend:
         The by-text comparison is keyed by echo_text_key on BOTH sides (2026-09-06): the kernel builds
         `tx_user_texts` from _atom_user_texts, and the echo's text is keyed the same way here — before,
         the raw text was compared against stripped keys, so an echo whose text carried a trailing
-        newline never retired. An echo the boot/spawn scan already FOUND (`_landed`, recorded by
+        newline never retired. A slash send is compared under command_text_key too (2026-09-10): the CLI
+        records it as a wrapper whose parsed atom reads "/name args" with one space, whatever the sender
+        typed between the name and the arguments, and the kernel keys that atom both ways; without this a
+        typed echo whose whitespace differed from that form (a newline before the arguments) never
+        retired, though its turn ran. An echo the boot/spawn scan already FOUND (`_landed`, recorded by
         _mark_dropped_echoes from a direct read of the transcript and mirrored to the reg) retires
         without the comparison at all: that is its exit when the two texts cannot meet, since a found
         echo is neither flagged nor dismissable.
@@ -11600,12 +11652,14 @@ class SdkBackend:
         # held. A plain set (older callers) keeps the unfloored match.
         text_t = tx_user_texts if isinstance(tx_user_texts, dict) else None
         def _by_text(a, et):
-            key = echo_text_key(et)
-            if not key:
+            # the plain key and, for a slash send, its words (echo_keys): the CLI records the send as a
+            # wrapper whose parsed atom reads "/name args", and the kernel keys that atom both ways
+            keys = echo_keys(et)
+            if not keys:
                 return False
             if text_t is None:
-                return key in tx_user_texts
-            return key in text_t and float(text_t[key] or 0) >= float(a.get("t") or 0)
+                return any(k in tx_user_texts for k in keys)
+            return any(k in text_t and float(text_t[k] or 0) >= float(a.get("t") or 0) for k in keys)
         echo_removed = False
         vanished = 0
         with self._live_lock:

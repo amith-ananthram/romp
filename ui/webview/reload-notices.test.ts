@@ -5,10 +5,11 @@
 // render.ts keeps the texts of the toasts on screen in this tab's sessionStorage on the core's synchronous hook and the
 // fresh page shows them once. The readings are pure and execute here. render.ts has import-time DOM side effects, so
 // its wiring is pinned to source the way reload-restore.test.ts pins the scroll record's, and the toast family with the
-// refusals that report a state (the staging refusals, the branch jump's, the send into a tab whose create failed, the
-// queued edit's send on a session that cannot be reached) is lifted out of it and executed over a fake DOM the way
-// chat-exact-tail-exec.test.ts lifts chatTail. The served scenario (a nack on the last ship across a kernel restart; the
-// fresh page says it again, once) is tests/test_ship_reship.py NackNoticeSurvivesReload. Synthetic only.
+// refusals that report a state (the staging refusals, the branch jump's, the send on a disconnected host, the send into
+// a tab whose create failed, the queued edit's send on a session that cannot be reached) is lifted out of it and
+// executed over a fake DOM the way chat-exact-tail-exec.test.ts lifts chatTail. The served scenario (a nack on the last
+// ship across a kernel restart; the fresh page says it again, once) is tests/test_ship_reship.py
+// NackNoticeSurvivesReload. Synthetic only.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -50,11 +51,11 @@ test("the toasts on screen read as their texts, in order, blanks dropped; none w
 
 test("the reading asks for the toasts without the ephemeral mark: a refusal about a state the fresh page shows for itself stays behind", () => {
   // a refusal that reports a state (the staged sends' "Can't send yet": the host unreachable, the tab still being
-  // created; the send into a tab whose create failed; the queued edit's send on a session that cannot be reached; the
-  // staging refusals; the branch jump to a session not on this dashboard) is about something the fresh page shows for
-  // itself or no longer has; render.ts marks those toasts where they are raised (executed below) and the
-  // selector skips the mark. The mark's effect on a real DOM is executed by tests/test_ship_reship.py
-  // NackNoticeSurvivesReload.
+  // created; the plain send on a disconnected host; the send into a tab whose create failed; the queued edit's send on
+  // a session that cannot be reached; the staging refusals; the branch jump to a session not on this dashboard) is
+  // about something the fresh page shows for itself or no longer has; render.ts marks those toasts where they are
+  // raised (executed below) and the selector skips the mark. The mark's effect on a real DOM is executed by
+  // tests/test_ship_reship.py NackNoticeSurvivesReload.
   const asked: string[] = [];
   assert.deepEqual(liveNotices({ querySelectorAll: (sel: string) => { asked.push(sel); return [{ textContent: "kept" }]; } }), ["kept"]);
   assert.deepEqual(asked, [SEL]);
@@ -147,14 +148,16 @@ function fakeDocument() {
 
 /** The page state the lifted closures read: the composer (a typed draft, its citations, a picker waiting, an edit in
  *  progress to a past message or to a queued one, attachments), the session roster, the reach of the active session's
- *  host (hostDown) and the active tab when it is provisional (tab: "pending", a create still in flight, so its id is the
- *  pending provisional id; "failed", a create that failed, so no create is pending), with what each gesture did
- *  recorded. The toasts' timers are recorded and not run, so a toast stays on screen for the reading. */
+ *  host (hostDown), whether the active session lives on another host (remote: its id wears the host prefix, lab:web,
+ *  the shape the disconnected-host refusal names the host from) and the active tab when it is provisional (tab:
+ *  "pending", a create still in flight, so its id is the pending provisional id; "failed", a create that failed, so no
+ *  create is pending), with what each gesture did recorded. The toasts' timers are recorded and not run, so a toast
+ *  stays on screen for the reading. */
 function pageWorld(state: { ask?: "custom" | "text" | null; edit?: boolean; queuedEdit?: boolean; files?: string[]; sessions?: string[];
-                            hostDown?: boolean; tab?: "pending" | "failed" }) {
-  const activeId = state.tab ? mintProvisionalId("web") : "web";
+                            hostDown?: boolean; remote?: boolean; tab?: "pending" | "failed" }) {
+  const activeId = state.tab ? mintProvisionalId("web") : state.remote ? "lab:web" : "web";
   const roster = (state.sessions || []).map((id): [string, { id: string; name: string }] => [id, { id, name: id }]);
-  if (state.tab) roster.push([activeId, { id: activeId, name: "web" }]);
+  if (state.tab || state.remote) roster.push([activeId, { id: activeId, name: "web" }]);
   return {
     FakeEl, document: fakeDocument(), timers: [] as number[],
     activeId, ta: { value: "what did the tests say", style: {} as Record<string, string> },
@@ -167,22 +170,26 @@ function pageWorld(state: { ask?: "custom" | "text" | null; edit?: boolean; queu
     activated: [] as [string, string | undefined][],
     hostDown: !!state.hostDown, posted: [] as { type: string }[], editsApplied: 0,
     isProvisionalId, provisionalId: state.tab === "pending" ? activeId : null, provisionalQueue: [] as string[],
+    lastSent: new Map<string, string>(),
   };
 }
 type World = ReturnType<typeof pageWorld>;
 type Lifted = { stageComposer: () => void; branchjump: (elx: { dataset: Record<string, string> }) => void; warnToast: (msg: string) => FakeEl;
-                provisionalSend: (sid: string, text: string, attached: string[]) => void; queuedEditSend: (typed: string) => void };
+                deliver: (sid: string, text: string, attached: string[]) => void; queuedEditSend: (typed: string) => void };
 
 /** warnToast and ephemeralWarnToast; stageComposer (the composer's staging, whose refusals say a picker is waiting on
  *  the composer, an edit is in progress to a past or a queued message, attachments are on the composer); the branch
- *  jump's delegated handler (whose refusal says the session is not on this dashboard); the provisional branch of the
- *  send's deliver (whose refusal says the tab's session never started); and the send's queued-edit branch (whose
- *  refusal says the session cannot be reached, so the edit was not sent), lifted from render.ts and run over the world. */
+ *  jump's delegated handler (whose refusal says the session is not on this dashboard); the refusing head of the send's
+ *  deliver (the disconnected-host branch, whose refusal says the host is disconnected and asks for a re-dial, and the
+ *  provisional branch, whose refusal says the tab's session never started), through the first step of a send that
+ *  passed both guards (lastSent remembers the text), so a refusal that fell through would show as a remembered send;
+ *  and the send's queued-edit branch (whose refusal says the session cannot be reached, so the edit was not sent),
+ *  lifted from render.ts and run over the world. */
 function liftToastSites(): (w: World) => Lifted {
   const toasts = liftBetween("function warnToast(msg: string): HTMLElement {", "// Tail-windowing (see the View comment)");
   const stage = liftBetween("const stageComposer = () => {", "const sendComposer = (");
   const jump = liftBetween("branchjump: (elx) => {", "// a below-response fork spot", (ts) => "const handlers = {\n" + ts + "};");
-  const send = liftBetween("if (isProvisionalId(sid)) {", "lastSent.set(activeId, text);", (ts) => "const provisionalSend = (sid, text, attached) => {\n" + ts + "};");
+  const send = liftBetween("if (hostIsDown(sid)) {", "// The STAGED run and this message go together", (ts) => "const deliver = (sid, text, attached) => {\n" + ts + "};");
   const qsend = liftBetween("const qedit = queuedEdits.get(activeId);", "const sid = activeId;   // the session this send", (ts) => "const queuedEditSend = (typed) => {\n" + ts + "};");
   const prelude = `
     const W = WORLD;
@@ -205,6 +212,7 @@ function liftToastSites(): (w: World) => Lifted {
     const sessions = W.sessions;
     const setActive = (sid, cut) => { W.activated.push([sid, cut]); };
     const isProvisionalId = W.isProvisionalId, provisionalId = W.provisionalId, provisionalQueue = W.provisionalQueue;
+    const lastSent = W.lastSent;
     const registerOptimistic = () => {}, previewKind = () => null, renderComposerFiles = () => {};
     const sendOnShip = new Set(), histWalk = new Map();
     const hostIsDown = () => W.hostDown;
@@ -215,7 +223,7 @@ function liftToastSites(): (w: World) => Lifted {
     const restoreHeldDraft = () => {};
   `;
   return new Function("WORLD", prelude + toasts + stage + jump + send + qsend
-    + "\nreturn { stageComposer, branchjump: handlers.branchjump, warnToast, provisionalSend, queuedEditSend };") as (w: World) => Lifted;
+    + "\nreturn { stageComposer, branchjump: handlers.branchjump, warnToast, deliver, queuedEditSend };") as (w: World) => Lifted;
 }
 
 function page(state: Parameters<typeof pageWorld>[0]) {
@@ -240,10 +248,12 @@ test("staging with nothing owning the composer stages: the lifted composer is th
 
 // The refusals that report a STATE rather than an event, raised through their real code paths. Each puts its toast on
 // screen for the person at the page and refuses the gesture; the reading skips it, because the fresh page shows that
-// state for itself (the picker, the attachments and the roster come back from the kernel and the persisted drafts) or
-// no longer has it (an edit in progress, to a past message or to a queued one, lives in memory alone, so a replay would
-// report an edit the fresh page has not got, and its "send again" would post the words as a new message; a provisional
-// tab does not survive a reload, so a replay would name a session the fresh page does not show).
+// state for itself (the picker, the attachments and the roster come back from the kernel and the persisted drafts; the
+// host's reach comes back from the kernel's tunnel health and is shown as the tab mark and the transcript foot, and the
+// re-dial the disconnected-host refusal speaks of is posted by the gesture, never by a replay) or no longer has it (an
+// edit in progress, to a past message or to a queued one, lives in memory alone, so a replay would report an edit the
+// fresh page has not got, and its "send again" would post the words as a new message; a provisional tab does not
+// survive a reload, so a replay would name a session the fresh page does not show).
 const STATE_REFUSALS: { name: string; state: Parameters<typeof pageWorld>[0]; raise: (p: Page) => void; text: string; refused: (p: Page) => void }[] = [
   { name: "staging while a picker waits on the composer", state: { ask: "text" }, raise: (p) => p.stageComposer(),
     text: "A picker is waiting on this box", refused: (p) => assert.deepEqual(p.W.staged, [], "nothing staged") },
@@ -255,8 +265,17 @@ const STATE_REFUSALS: { name: string; state: Parameters<typeof pageWorld>[0]; ra
     text: "Attachments can't be staged", refused: (p) => assert.deepEqual(p.W.staged, [], "nothing staged") },
   { name: "a branch jump to a session not on this dashboard", state: { sessions: ["web"] }, raise: (p) => p.branchjump({ dataset: { sid: "api" } }),
     text: "That session isn't on this dashboard right now.", refused: (p) => assert.deepEqual(p.W.activated, [], "no switch") },
-  { name: "a send into a tab whose create failed", state: { tab: "failed" }, raise: (p) => p.provisionalSend(p.W.activeId, p.W.ta.value, []),
-    text: "“web” never started, so there's nowhere to send this.", refused: (p) => assert.deepEqual(p.W.provisionalQueue, [], "nothing queued") },
+  { name: "a send while the session's host is unreachable", state: { remote: true, hostDown: true }, raise: (p) => p.deliver(p.W.activeId, p.W.ta.value, []),
+    text: "lab is disconnected, so this wasn't sent.", refused: (p) => {
+      assert.deepEqual(p.W.posted.map((m) => m.type), ["redial"], "a re-dial of the host is asked for and nothing is sent");
+      assert.deepEqual(p.W.provisionalQueue, [], "nothing queued");
+      assert.equal(p.W.lastSent.size, 0, "nothing was remembered as sent");
+    } },
+  { name: "a send into a tab whose create failed", state: { tab: "failed" }, raise: (p) => p.deliver(p.W.activeId, p.W.ta.value, []),
+    text: "“web” never started, so there's nowhere to send this.", refused: (p) => {
+      assert.deepEqual(p.W.provisionalQueue, [], "nothing queued");
+      assert.equal(p.W.lastSent.size, 0, "nothing was remembered as sent");
+    } },
   { name: "a queued edit sent while the session's host is unreachable", state: { queuedEdit: true, hostDown: true }, raise: (p) => p.queuedEditSend(p.W.ta.value),
     text: "Can't reach the session right now, so the edit wasn't sent.", refused: (p) => {
       assert.deepEqual(p.W.posted.map((m) => m.type), ["redial"], "a re-dial is asked for and no edit is posted");
@@ -310,10 +329,12 @@ test("render.ts: warnToast hands back its toast, and the refusals about a state 
   // a session that cannot be reached (the edit lives in memory alone): states the fresh page no longer has
   assert.match(RENDER, /if \(sid !== provisionalId\) \{\n\s*ephemeralWarnToast\("“" \+ \(sessions\.get\(sid\)\?\.name \|\| "this session"\) \+ "” never started, so there's "/);
   assert.match(RENDER, /if \(hostIsDown\(activeId\) \|\| isProvisionalId\(activeId\)\) \{\n\s*if \(hostIsDown\(activeId\)\) vscodeApi\?\.postMessage\(\{ type: "redial"[^\n]*\n\s*ephemeralWarnToast\("Can't reach the session right now, so the edit wasn't sent\./);
-  assert.equal((RENDER.match(/ephemeralWarnToast\(/g) || []).length, 10, "the definition, the two reachability sites and the seven state refusals");
-  // what the nack, the dismissal, the other-tab ack and the plain send's refusal on a disconnected host say stays true
-  // after the reload (the message is in the box on the fresh page too, and a send there sends it), so they ride it unmarked
-  assert.match(RENDER, /warnToast\(host \+ " is disconnected, so this wasn't sent\. It's still in the box/);
+  // the plain send's refusal on a disconnected host: the host's reach is a state the fresh page reads from the kernel's
+  // tunnel health (the tab mark, the transcript foot), and the re-dial that makes "re-dialing now" true is posted by
+  // the gesture, never by a replay
+  assert.match(RENDER, /if \(hostIsDown\(sid\)\) \{\n\s*const host = String\(sid\)\.slice\(0, String\(sid\)\.indexOf\(":"\)\);\n(\s*\/\/[^\n]*\n)*\s*vscodeApi\?\.postMessage\(\{ type: "redial", host \}\);\n(\s*\/\/[^\n]*\n)*\s*ephemeralWarnToast\(host \+ " is disconnected, so this wasn't sent\. It's still in the box/);
+  assert.equal((RENDER.match(/ephemeralWarnToast\(/g) || []).length, 11, "the definition, the two reachability sites and the eight state refusals");
+  // what the nack, the dismissal and the other-tab ack say stays true after the reload, so they ride it unmarked
   assert.match(RENDER, /warnToast\(m\.name \+ " couldn't be saved on the kernel, so it was not attached/);
   assert.match(RENDER, /warnToast\("The pending upload was dismissed — your held message was NOT sent\."\)/);
   assert.match(RENDER, /warnToast\("attachments finished uploading on another tab — the held message was not sent; review it there\."\)/);
