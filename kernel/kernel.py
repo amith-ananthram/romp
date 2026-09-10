@@ -16576,6 +16576,11 @@ class TmuxBackend(sb.SessionBackend):
     def live_atoms(self, sid):
         return _tmux_echo_atoms(str(sid))
 
+    def live_rev(self, sid):
+        """The sid's echo-store revision (_tmux_echo_rev): the chat-build signature's live-tail component for
+        a tmux session, the twin of SdkBackend.live_rev. 0 until the first echo, one more per change."""
+        return _tmux_echo_rev.get(str(sid), 0)
+
     def prune_live(self, sid, tx_uuids, tx_user_texts=(), human_floor=0):
         # The floor never PRUNES a plain tmux echo: it must SURVIVE a later turn to keep a dropped send
         # visible, so retirement stays text/uuid-only. It does SETTLE it — an echo the transcript has
@@ -16603,6 +16608,7 @@ class TmuxBackend(sb.SessionBackend):
                 continue
             if (uuid is not None and k == uuid) or (t is not None and int(a.get("t") or 0) == t):
                 d.pop(k, None)
+                _tmux_echo_bump(str(sid))                 # the dismissal is a change to the tail
                 if not d:
                     _tmux_echo.pop(str(sid), None)
                 return a.get("_echo_text")
@@ -16937,6 +16943,23 @@ class Sessions:
                 sys.stderr.write("codex live_sessions merge: %s\n" % traceback.format_exc())
         _unify_model_labels(out)
         return out
+
+    @staticmethod
+    def live_rev(sid, be=None):
+        """The revision of the sid's live tail (the atoms live_atoms merges ahead of the transcript) as a
+        value that changes on every change to the tail (an add, a prune, a settle mark, a dismiss, a flag
+        write, a reworded echo) and only then, so the chat-build signature can key a tab on its tail
+        without hashing the atoms per cycle. The SDK and tmux backends count (SdkBackend.live_rev via
+        _touch_live; TmuxBackend.live_rev via _tmux_echo_bump). A backend with no counter (the Codex
+        backend, whose live_atoms builds fresh dicts from a short per-session list; a test fake) answers
+        with the tail's serialized value instead: exact, and small for the list-shaped tails those keep.
+        `be`: the owning backend when the caller already resolved it (the chat-build signature)."""
+        if be is None:
+            be = Sessions.backend_for(sid)
+        fn = getattr(be, "live_rev", None)
+        if fn is not None:
+            return fn(str(sid))
+        return json.dumps(be.live_atoms(str(sid)), sort_keys=True, default=str)
 
     # coordination — the working-note ("what I'm working on" ownership claim list_agents shows) lives in ONE
     # backend-agnostic kernel store (working/<sid> files), so both backends publish it and the postal bus
@@ -30176,6 +30199,19 @@ def _echo_landed_in(text, tx_texts):
 # turn lands. A SUCCESSFUL send's echo prunes when the turn writes; a DROPPED send's echo PERSISTS, so the
 # lost message stays visible (no response) instead of vanishing silently.
 _tmux_echo = {}                                       # sid -> {key -> synthetic user atom}
+_tmux_echo_rev = {}                                   # sid -> the store's revision, advanced by _tmux_echo_bump at
+#                                                       every change to the sid's echoes (an add, a prune, a settle
+#                                                       mark, a dismiss): the chat-build signature's live-tail
+#                                                       component for tmux sids (Sessions.live_rev), the twin of
+#                                                       SdkBackend._touch_live
+
+
+def _tmux_echo_bump(sid):
+    """Advance the sid's echo-store revision (_tmux_echo_rev), after the write it records. Only a change calls
+    it (an add, a pop, a `dropped` mark); a prune or settle that touched nothing leaves the revision alone,
+    so a chat build's own merge never moves the signature under it (the SDK backend's _touch_live rule)."""
+    _tmux_echo_rev[sid] = _tmux_echo_rev.get(sid, 0) + 1
+
 
 def _tmux_echo_add(sid, text, author="human"):
     key = "echo:" + uuid.uuid4().hex
@@ -30185,6 +30221,7 @@ def _tmux_echo_add(sid, text, author="human"):
         # Matches the real transcript atom's author so the optimistic echo reads identically until it lands.
         "author": author, "_echo_text": text,
         "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
+    _tmux_echo_bump(sid)
 
 def _tmux_echo_atoms(sid):
     return list(_tmux_echo.get(sid, {}).values())
@@ -30202,8 +30239,11 @@ def _tmux_echo_prune(sid, tx_uuids, tx_texts):
 
     def _landed(a):
         return a.get("uuid") in tx_uuids or _echo_landed_in(a.get("_echo_text"), tx_texts)
-    for k in [k for k, a in d.items() if _landed(a)]:
+    gone = [k for k, a in d.items() if _landed(a)]
+    for k in gone:
         d.pop(k, None)
+    if gone:
+        _tmux_echo_bump(sid)                              # the tail changed; a prune that retired nothing is no change
     if not d:
         _tmux_echo.pop(sid, None)
 
@@ -30263,6 +30303,7 @@ def _tmux_echo_settle(sid, human_floor, still_queued=()):
         return
     owed = {t.strip() for t in still_queued if isinstance(t, str)}
     path_bearing = getattr(sys.modules.get("romp_sdk_backend"), "_path_bearing", None)
+    changed = False
     for k in list(d.keys()):
         a = d[k]
         if not _echo_overtaken(a, human_floor):
@@ -30271,8 +30312,12 @@ def _tmux_echo_settle(sid, human_floor, still_queued=()):
             continue                                     # still owed by the queue ledger → waiting, not lost
         if path_bearing is not None and path_bearing(a.get("_echo_text") or ""):
             d.pop(k, None)
-        else:
+            changed = True
+        elif not a.get("dropped"):
             a["dropped"] = True
+            changed = True                               # a mark already made is no change
+    if changed:
+        _tmux_echo_bump(sid)
     if not d:
         _tmux_echo.pop(sid, None)
 

@@ -509,12 +509,17 @@ class ActiveTabIsServedOnAnExactKey(_StateSandbox):
             km._tmux_echo_add(self.SID, "please also fix the header")
             s2 = km._active_chat_sig(self.sess, self.tm, NOW)
             self.assertNotEqual(s1, s2, "the echo the build renders is in the key")
-            for a in km._tmux_echo.get(self.SID, {}).values():
-                a["dropped"] = True                               # the pane dropped the keystroke: rendered differently
+            t = km._tmux_echo_atoms(self.SID)[0]["t"]
+            km._tmux_echo_settle(self.SID, human_floor=t + 5)     # the pane dropped the keystroke: marked, rendered differently
+            self.assertTrue(km._tmux_echo_atoms(self.SID)[0].get("dropped"))
             s3 = km._active_chat_sig(self.sess, self.tm, NOW)
             self.assertNotEqual(s2, s3, "…and so is its dropped flag")
-            km._tmux_echo.pop(self.SID, None)                     # dismissed
-            self.assertEqual(km._active_chat_sig(self.sess, self.tm, NOW), s1, "back to the world before the send")
+            self.assertEqual(km._TMUX.dismiss_echo(self.SID, t=t), "please also fix the header")   # dismissed
+            s4 = km._active_chat_sig(self.sess, self.tm, NOW)
+            self.assertNotEqual(s3, s4, "the dismissal is a change too")
+            # the tmux echo store counts its changes (TmuxBackend.live_rev, the SDK backend's rule), so the key
+            # never returns to an earlier value: one rebuild per change, never a stale hit
+            self.assertNotEqual(s4, s1)
         finally:
             km._sdk = saved_sdk
             km._tmux_echo.pop(self.SID, None)
