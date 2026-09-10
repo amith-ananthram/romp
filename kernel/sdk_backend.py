@@ -3396,10 +3396,14 @@ def _is_kernel_cmd(cmd: str) -> bool:
     return False
 
 
-def find_orphan_clis(ps_lines: list[str], lastsids: list[str], own_pid: int) -> list[int]:
+def find_orphan_clis(ps_lines: list[str], lastsids: list[str], own_pid: int, leases: list[dict] | None = None,
+                     now: float | None = None, start=None, version: str = "") -> list[int]:
     """PIDs of ORPHANED SDK-driven `claude` CLIs holding one of OUR sessions (--resume/--session-id
-    in either flag spelling, + the stream-json mark — see _cli_carries_sid). Orphaned = its PARENT
-    is not a live romp kernel (absent from the listing, or a process that is not a kernel): a live
+    in either flag spelling, + the stream-json mark — see _cli_carries_sid). With `leases` (the
+    session leases on disk, list_leases) the verdict is lease_census's: a CLI with a VALID lease is
+    owned by its holder whatever its parent, and a CLI with no valid lease and no live kernel parent is
+    an orphan (T305; the rules and the anomaly rows are documented there). Without leases, the
+    parentage rule below stands alone. Orphaned = its PARENT is not a live romp kernel (absent from the listing, or a process that is not a kernel): a live
     SDK CLI is always a child of the kernel that spawned it, so only a dead kernel's leftover — a
     zombie writer that would fight the resume for the transcript — has any other parent. The parent
     check is load-bearing: matching on the command line alone let a duplicate backend's reconcile
@@ -3420,6 +3424,8 @@ def find_orphan_clis(ps_lines: list[str], lastsids: list[str], own_pid: int) -> 
     a full service restart, which empties the unit's cgroup (systemd's default KillMode=control-group),
     ever ended such a CLI. The definition now names the property the ppid-1 check approximated. Pure
     (takes PS_ARGV's `ps -axwwo pid=,ppid=,command=` lines) so tests need no live processes."""
+    if leases is not None:
+        return lease_census(ps_lines, lastsids, own_pid, leases, now=now, start=start, version=version)["orphans"]
     procs: dict[int, tuple[int, str]] = {}    # pid -> (ppid, command), in listing order
     for ln in ps_lines:
         parts = ln.strip().split(None, 2)
@@ -3469,6 +3475,216 @@ def duplicate_clis(ps_lines: list[str], lastsids: list[str]) -> dict[str, list[i
             seen.setdefault(s, []).append(int(parts[0]))
     return {s: pids for s, pids in seen.items() if len(pids) > 1}
 
+
+# ── SESSION OWNERSHIP LEASES (T305, stage 1 of sessions that survive a kernel restart) ─────────────
+# Who owns a running CLI used to be answered by parentage: a live SDK CLI was a child of the kernel that
+# spawned it, so "parent is a live romp kernel" meant owned and anything else meant an orphan to reap.
+# That fact is wrong the moment a CLI is re-parented on purpose — a wrapper or a debugger between the
+# kernel and the CLI, or (stage 4 of the same program) a per-session host process that outlives the
+# kernel — and the reaper then kills a live session at the next boot. Ownership is now a LEASE: one file
+# per session under STATE/leases/, written by whoever holds the CLI (this kernel, in this stage; the host
+# in stage 4) the moment it knows the CLI's pid, refreshed on a heartbeat, and removed when the holder
+# ends the CLI on purpose. A lease is VALID when its heartbeat is fresh, its holder is alive and its CLI
+# is alive — each process named by pid AND start time, never pid alone (a pid is reused; a start time is
+# not). A CLI with a valid lease is owned by whoever holds it, whatever its parent is; a CLI with no
+# valid lease and no live kernel parent is an orphan. The precedent is the deploy-drain hold below
+# (refresh_drain_hold / DRAIN_HOLD_TTL): a lease the holder refreshes and a fresh boot reads, never a
+# latch. Its cadence is that hold's, exactly: the manager's parked poll refreshes the drain hold every
+# ~3 s and the hold lasts 12 s (four beats), so it outlives a missed beat and not a dead holder; the
+# lease beats every LEASE_HEARTBEAT_S and is fresh for LEASE_TTL_S, the same two numbers. Holder
+# identity is the primary check (a crashed kernel's leases are invalid at the next boot because their
+# holder is gone, so its CLIs are reaped exactly as before and the transcript keeps one writer); the
+# heartbeat is the second line, against a holder that is alive but wedged.
+LEASE_DIR = "leases"
+LEASE_HEARTBEAT_S = 3.0      # the drain hold's poll cadence
+LEASE_TTL_S = 12.0           # DRAIN_HOLD_TTL: four beats, outlives a missed beat, not a dead holder
+
+LEASE_ANOMALIES = ("lease.cli-without-lease",   # an SDK CLI of ours with no valid lease, kept because a live kernel parents it
+                   "lease.no-live-process",     # a lease whose pid is gone, or now names another process
+                   "lease.holder-gone",         # a live CLI whose lease holder is gone (a crashed kernel): reaped
+                   "lease.stale-heartbeat",     # a live CLI whose holder lives but stopped beating: reaped
+                   "lease.version-skew")        # a valid lease written by another code version (owned, reported)
+# Every anomaly is a PROBLEM ROW through problem_row above (the T304 helper): prose on the ring, prose plus the
+# JSON object on the kernel-log line, one JSON line in session-events.jsonl. Two CLIs on one conversation are
+# the boot sweep's own row (reconcile.duplicate-cli, duplicate_clis), filed once, not again here.
+
+
+def proc_start(pid: int, run=None) -> str | None:
+    """The process's start-time identity as text: /proc/<pid>/stat field 22 (clock ticks since boot)
+    where there is a procfs, else `ps -o lstart=` (macOS). None when the pid is gone. Writer and reader
+    run on the same box, so the two forms never meet; a fake pid above pid_max reads None on both."""
+    if os.path.isdir("/proc"):
+        t = _read_starttime(pid)
+        return None if t is None else str(t)
+    run = run or subprocess.run
+    try:
+        out = run(["ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return None
+    out = (out or "").strip()
+    return out or None
+
+
+def lease_path(state_dir, sid: str) -> Path:
+    return Path(state_dir) / LEASE_DIR / (str(sid) + ".json")
+
+
+def write_lease(state_dir, lease: dict) -> None:
+    """Write one session's lease atomically (writer-unique temp + os.replace, as write_reg does: the
+    outgoing and the incoming kernel may touch one sid's files at a restart)."""
+    p = lease_path(state_dir, lease["sid"])
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name("%s.%d.%s.tmp" % (p.name, os.getpid(), uuid.uuid4().hex[:8]))
+    try:
+        tmp.write_text(json.dumps(lease, sort_keys=True))
+        os.replace(tmp, p)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def read_lease(state_dir, sid: str) -> dict | None:
+    """The session's lease as written, or None when there is none (or it does not parse)."""
+    try:
+        d = json.loads(lease_path(state_dir, sid).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict) or not d.get("sid"):
+        return None
+    return d
+
+
+def remove_lease(state_dir, sid: str) -> bool:
+    """Drop the session's lease; True when a file was removed."""
+    try:
+        os.unlink(lease_path(state_dir, sid))
+        return True
+    except OSError:
+        return False
+
+
+def list_leases(state_dir) -> list[dict]:
+    """Every parseable lease under STATE/leases/, in name order. A file that does not parse is skipped
+    (a half-written temp is never a `.json`; a corrupt one is nobody's claim)."""
+    d = Path(state_dir) / LEASE_DIR
+    out = []
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return out
+    for n in names:
+        if not n.endswith(".json"):
+            continue
+        lease = read_lease(state_dir, n[:-len(".json")])
+        if lease is not None:
+            out.append(lease)
+    return out
+
+
+def lease_state(lease: dict, now: float, start=None) -> str:
+    """Why a lease does or does not hold: 'valid', or the first failing check in the order a reader
+    should report it — 'no-live-process' (its CLI pid is gone or now names another process),
+    'holder-gone' (the holder's pid is gone or reused), 'stale-heartbeat' (the holder lives but has
+    not beaten within LEASE_TTL_S). Identity is pid plus start time on both processes; `start` is the
+    identity reader (proc_start), a seam for tests with fake pids. A lease missing a field fails the
+    check that needs it."""
+    start = start or proc_start
+    try:
+        pid, pstart = int(lease.get("pid")), str(lease.get("start") or "")
+    except (TypeError, ValueError):
+        return "no-live-process"
+    if not pstart or start(pid) != pstart:
+        return "no-live-process"
+    holder = lease.get("holder") if isinstance(lease.get("holder"), dict) else {}
+    try:
+        hpid, hstart = int(holder.get("pid")), str(holder.get("start") or "")
+    except (TypeError, ValueError):
+        return "holder-gone"
+    if not hstart or start(hpid) != hstart:
+        return "holder-gone"
+    try:
+        beat = float(lease.get("t") or 0)
+    except (TypeError, ValueError):
+        beat = 0.0
+    if now - beat > LEASE_TTL_S:
+        return "stale-heartbeat"
+    return "valid"
+
+
+def lease_census(ps_lines: list[str], lastsids: list[str], own_pid: int, leases: list[dict],
+                 now: float | None = None, start=None, version: str = "") -> dict:
+    """The ownership verdict over a PS_ARGV listing and the leases on disk. Returns
+    {"orphans": [pid…], "owned": {pid: reason}, "dead_leases": [sid…], "problems": [row…]} where a
+    problem row is a flat dict with `kind` (LEASE_ANOMALIES), `cliPid`, `fsid`, `sid`, `text`, ready for
+    problem_row. Rules, per SDK CLI carrying one of OUR conversation ids (the stream-json mark plus
+    _cli_carries_sid, as before):
+      * a VALID lease naming its pid (lease_state) → owned by that lease's holder, whoever it is; a
+        lease from another code `version` is owned and reported (the deploy-week skew the monitors count);
+      * else a direct child of `own_pid` → owned: the window between this kernel's spawn and its
+        connect-time lease write is by design, and not a row;
+      * else a child of a live romp kernel (_is_kernel_cmd) → owned and REPORTED (`cli-without-lease`):
+        the previous code version's kernel wrote no leases, and its sessions survive the upgrade boot
+        exactly as they did before leases existed;
+      * else an ORPHAN, reported with its lease's failing check when it has a lease (`holder-gone`,
+        `stale-heartbeat`, or `no-live-process` when the lease's identity no longer matches the pid).
+    A lease naming no live CLI at all is `no-live-process` and listed in `dead_leases` for removal. Two
+    CLIs on one conversation id are each judged by their own rule (the boot sweep files that event itself,
+    reconcile.duplicate-cli). Pure on its inputs."""
+    now = time.time() if now is None else now
+    start = start or proc_start
+    procs: dict[int, tuple[int, str]] = {}
+    for ln in ps_lines:
+        parts = ln.strip().split(None, 2)
+        if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        procs[int(parts[0])] = (int(parts[1]), parts[2])
+    clis = {pid: (ppid, cmd) for pid, (ppid, cmd) in procs.items()
+            if _SDK_CLI_MARK in cmd and _cli_carries_sid(cmd, lastsids)}
+    by_pid: dict[int, dict] = {}
+    for lease in leases:
+        try:
+            by_pid.setdefault(int(lease.get("pid")), lease)
+        except (TypeError, ValueError):
+            continue
+    states = {pid: lease_state(lease, now, start) for pid, lease in by_pid.items()}
+    problems: list[dict] = []
+    def row(kind, text, pid=None, lease=None, fsid=None):
+        problems.append({"kind": kind, "text": text, "cliPid": pid,
+                         "sid": (lease or {}).get("sid"), "fsid": fsid or (lease or {}).get("fsid")})
+    orphans: list[int] = []
+    owned: dict[int, str] = {}
+    for pid, (ppid, cmd) in clis.items():
+        lease = by_pid.get(pid)
+        fsid = cli_sid_of(cmd, lastsids)
+        if lease is not None and states.get(pid) == "valid":
+            owned[pid] = "lease"
+            if version and str(lease.get("version") or "") != version:
+                row("lease.version-skew", "lease of session %s (pid %d) was written by code version %s; this kernel runs %s"
+                    % (str(lease.get("sid") or "")[:8], pid, lease.get("version") or "unknown", version), pid, lease)
+            continue
+        if ppid == own_pid:
+            owned[pid] = "own-child"
+            continue
+        parent = procs.get(ppid)
+        if parent is not None and _is_kernel_cmd(parent[1]):
+            owned[pid] = "kernel-child"
+            row("lease.cli-without-lease", "CLI pid %d on conversation %s is a live kernel's child (pid %d) with no valid lease; kept, not reaped"
+                % (pid, (fsid or "")[:8], ppid), pid, lease, fsid)
+            continue
+        orphans.append(pid)
+        if lease is not None:
+            why = states.get(pid)
+            row("lease." + why, "CLI pid %d of session %s has a lease that does not hold (%s); reaped as an orphan"
+                % (pid, str(lease.get("sid") or "")[:8], why.replace("-", " ")), pid, lease, fsid)
+    for pid, lease in by_pid.items():
+        if pid in clis:
+            continue
+        row("lease.no-live-process", "lease of session %s names pid %d, which is not a live CLI of that session; lease dropped"
+            % (str(lease.get("sid") or "")[:8], pid), pid, lease)
+    dead = [str(lease.get("sid")) for pid, lease in by_pid.items() if pid not in clis]
+    return {"orphans": orphans, "owned": owned, "dead_leases": dead, "problems": problems}
 
 # ENDING A CUT TURN'S WHOLE TREE (T276, the user 2026-09-08). Reaping the orphaned CLI alone left its Bash
 # tool's processes alive: a stress harness's 32 busy loops and a benchmark's 11 (setsid'd from tool shells,
@@ -3577,13 +3793,30 @@ def _read_ppid(pid: int) -> int | None:
         return None
 
 
-def find_session_cli(ps_lines: list[str], sids: list[str], parent_pid: int) -> int | None:
-    """The LIVE CLI pid holding one of `sids` as a child of `parent_pid` (this kernel), or None.
+def find_session_cli(ps_lines: list[str], sids: list[str], parent_pid: int, lease: dict | None = None,
+                     start=None) -> int | None:
+    """The LIVE CLI pid holding one of `sids` as a child of `parent_pid` (this kernel), or None. With
+    the session's `lease` (T305), the lease's pid comes first: when the listing shows it as an SDK CLI
+    carrying one of `sids` and its start time still matches the lease (`start`, proc_start), that is the
+    session's CLI whatever its parent — a re-parented CLI is reachable by the escalation. Otherwise the
+    child scan below stands.
     The interrupt escalation's (and the drain reap's) target: same signature match as
     find_orphan_clis (_cli_carries_sid + the stream-json mark) but the OPPOSITE parent check — it
     may only signal our own child, never a tmux CLI (no mark), never another kernel's, never an
     orphan (a CLI whose parent is no live kernel — the reaper's territory). Pure (takes
     PS_ARGV's `ps -axwwo pid=,ppid=,command=` lines) so tests need no live processes."""
+    if lease:
+        start = start or proc_start
+        try:
+            lpid, lstart = int(lease.get("pid")), str(lease.get("start") or "")
+        except (TypeError, ValueError):
+            lpid, lstart = None, ""
+        for ln in ps_lines:
+            parts = ln.strip().split(None, 2)
+            if len(parts) < 3 or not parts[0].isdigit() or int(parts[0]) != lpid:
+                continue
+            if _SDK_CLI_MARK in parts[2] and _cli_carries_sid(parts[2], sids) and lstart and start(lpid) == lstart:
+                return lpid
     for ln in ps_lines:
         parts = ln.strip().split(None, 2)
         if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
@@ -5685,6 +5918,7 @@ class SdkSession:
                     # create, the ready chip landing at 5-12s with the cycle).
                     self.backend._push_session(self.sid)
                     self._connected.set()   # the control channel exists from here (move() waits on this)
+                    self.backend._lease_open(self, client)   # ownership by lease (T305): pid + start time, heartbeat
                     self._seed_spend_watermarks()   # a fresh CLI process starts its cumulative counters at
                     #   zero, or at what it restores from the resumed transcript's cost-state record
                     # The CLI is demonstrably up, so any recorded launch failure is HISTORY — clear it
@@ -5771,6 +6005,10 @@ class SdkSession:
                     # silent by design. Without this the only trace is a kernel stderr line nobody reads.
                     self.backend._record_launch_error(self, e)
                 raise
+            finally:
+                # the client has closed (the SDK's own close ends the process), or never opened: the
+                # lease is dropped either way — only a kernel DEATH leaves one behind (T305)
+                self.backend._lease_close(self)
             if self.ended or not self._reconnect:
                 break        # drain ended on its own (process exit) or we're shutting down → done
 
@@ -8079,9 +8317,13 @@ class SdkBackend:
     def __init__(self, state_dir, claude_bin: str, notify, poke=None, push=None,
                  push_session=None,
                  mcp_config: str | None = None, append_prompt_path: str | None = None,
-                 log=None, reconcile: bool = False, boot_at=None):
+                 log=None, reconcile: bool = False, boot_at=None, code_version=None):
         self.state_dir = Path(state_dir)
         self.claude_bin = claude_bin
+        self.code_version = str(code_version or "")   # the kernel's git sha, stamped on every lease this kernel
+        #                                               writes (lease_census reports a skew as lease.version-skew)
+        self._leases: dict = {}            # sid -> (session, lease dict): the leases this kernel holds (T305)
+        self._lease_thread = None          # the heartbeat, started at the first lease, ends when none are held
         self.thread_wake_model = None      # kernel-installed: model_id -> replacement or None, consulted
         #                                    ONLY when a comment THREAD is explicitly woken (T223 rider) —
         #                                    the catalog lives in the kernel; the backend never imports it
@@ -8334,16 +8576,106 @@ class SdkBackend:
         except Exception as e:
             self._log("awaiting heal (%s): %s" % (sid[:8], e))
 
+    # ── session ownership leases (T305): see the module-level LEASE_* block ──────────────────────
+    def _lease_holder(self) -> dict:
+        """This kernel as a lease holder: its pid and start-time identity."""
+        return {"pid": os.getpid(), "start": proc_start(os.getpid()) or ""}
+
+    def _lease_open(self, sess, client) -> None:
+        """The SDK connect just handed us a CLI: write the session's lease and start the heartbeat if it
+        is not running. The CLI's pid is the SDK transport's subprocess (the one designed handle: the
+        SDK exposes no pid accessor, so the transport's process object is read directly, and a
+        transport that has none is said loudly — the session then runs unleased and the boot reaper
+        judges it by parentage, as before leases)."""
+        pid = None
+        try:
+            pid = client._transport._process.pid
+        except AttributeError:
+            pid = None
+        if not pid:
+            self._log("lease (%s): the SDK transport exposes no CLI pid; the session runs unleased and a boot "
+                      "judges it by parentage" % sess.name, problem=True)
+            return
+        start = proc_start(int(pid))
+        if start is None:
+            self._log("lease (%s): CLI pid %d has no readable start time; the session runs unleased" % (sess.name, pid),
+                      problem=True)
+            return
+        now = time.time()
+        lease = {"sid": str(sess.sid), "fsid": str(sess.resume_sid or sess.sid), "name": str(sess.name),
+                 "pid": int(pid), "start": start, "holder": self._lease_holder(), "version": self.code_version,
+                 "spawnedAt": int(now), "t": now}
+        with self._lock:
+            self._leases[str(sess.sid)] = (sess, lease)
+            if self._lease_thread is None or not self._lease_thread.is_alive():
+                # started UNDER the lock: an unstarted thread reads as not alive, so a second session
+                # connecting in the first's write window would otherwise adopt it too and both would call
+                # start() on one Thread (RuntimeError out of the connect; the review of T305, 2026-09-10)
+                self._lease_thread = threading.Thread(target=self._lease_beat_loop, name="sdk-lease-beat", daemon=True)
+                self._lease_thread.start()
+        try:
+            write_lease(self.state_dir, lease)
+        except Exception as e:
+            self._log("lease (%s): write failed: %s" % (sess.name, e), problem=True)
+
+    def _lease_close(self, sess) -> None:
+        """The CLI is gone or being ended on purpose (the session's client closed, a drain reap): drop
+        the lease. Idempotent; a session that never held one is a no-op."""
+        with self._lock:
+            self._leases.pop(str(sess.sid), None)
+        remove_lease(self.state_dir, sess.sid)
+
+    def _lease_beat_once(self, now: float | None = None) -> int:
+        """Refresh every held lease's heartbeat (and its conversation id, which a /clear or a fork
+        moves). Returns how many were held."""
+        now = time.time() if now is None else now
+        with self._lock:
+            items = list(self._leases.values())
+        for sess, lease in items:
+            err = None
+            with self._lock:
+                held = self._leases.get(str(sess.sid))
+                if held is None or held[1] is not lease:
+                    continue          # closed since the snapshot: its file is gone and must stay gone (a rewrite
+                #                       would file a false no-live-process row at the next boot; the T305 review)
+                lease["t"] = now
+                lease["fsid"] = str(sess.resume_sid or sess.sid)
+                try:                  # the write sits under the lock so a close can never slip between the
+                    write_lease(self.state_dir, lease)   # membership check and the file landing
+                except Exception as e:
+                    err = e
+            if err is not None:
+                self._log("lease (%s): heartbeat write failed: %s" % (sess.name, err), problem=True)
+        return len(items)
+
+    def _lease_beat_loop(self) -> None:
+        """The heartbeat thread: one beat every LEASE_HEARTBEAT_S while any lease is held; exits when
+        none is (the next _lease_open starts a new one)."""
+        while True:
+            time.sleep(LEASE_HEARTBEAT_S)
+            if self._lease_beat_once() == 0:
+                with self._lock:
+                    if not self._leases:
+                        self._lease_thread = None
+                        return
+
+    def _lease_problem(self, prob: dict, sid_of: dict) -> None:
+        """File one lease_census anomaly as a problem row (the ring, the kernel log, the ledger)."""
+        sid = prob.get("sid") or sid_of.get(str(prob.get("fsid") or ""))
+        problem_row(self.state_dir, prob.get("text") or prob.get("kind"), prob["kind"], sid=sid, log=self._log,
+                    cliPid=prob.get("cliPid"), fsid=prob.get("fsid"))
+
     def _session_cli_pid(self, session) -> int | None:
-        """The live CLI pid for `session` — a child of THIS kernel resuming its sid (or lastSid, the
-        fork-tracking twin) — for the interrupt escalation's signal. ps-scan through the pure
-        find_session_cli matcher, so the signal can only ever land on our own child. None (logged by
+        """The live CLI pid for `session` — its LEASED CLI when the lease's pid is still that process
+        (T305: a re-parented CLI is reachable), else a child of THIS kernel resuming its sid (or lastSid,
+        the fork-tracking twin) — for the interrupt escalation's signal. ps-scan through the pure
+        find_session_cli matcher, so the signal can only ever land on our own CLI. None (logged by
         the caller) when no such process exists."""
         try:
             ps = subprocess.run(PS_ARGV, capture_output=True, text=True, timeout=10)
             reg = read_reg(self.state_dir, session.sid) or {}
             sids = [session.sid, str(reg.get("lastSid") or "")]
-            return find_session_cli(ps.stdout.splitlines(), sids, os.getpid())
+            return find_session_cli(ps.stdout.splitlines(), sids, os.getpid(), lease=read_lease(self.state_dir, session.sid))
         except Exception as e:
             self._log("session cli pid (%s): %s" % (session.name, e))
             return None
@@ -8440,8 +8772,10 @@ class SdkBackend:
         forced = signal_all(signal.SIGKILL, True) if any(alive(p) for p in targets) else 0
         return {"scope": unit if stopped else None, "signaled": signaled, "forced": forced, "tree": len(targets) - 1}
 
-    def _stop_leftover_scopes(self, lastsids: list[str], run=None) -> int:
-        """Stop the session scopes of OUR sessions whose CLI is not a live child of this kernel (T276):
+    def _stop_leftover_scopes(self, lastsids: list[str], run=None, owned=()) -> int:
+        """Stop the session scopes of OUR sessions whose CLI is not OWNED — `owned` is lease_census's
+        set of owned pids (a valid lease, or a live kernel's child; T305) — and not a live child of this
+        kernel (T276):
         a scope outlives its CLI when a tool's setsid children keep running — exactly the loops the
         pid-only reap left behind once their shells had died and re-parented. Every process in the
         scope belongs to that session by construction. A unit whose pid is this kernel's own child
@@ -8458,8 +8792,9 @@ class SdkBackend:
         stopped = 0
         for unit in session_scope_units(listing.splitlines(), lastsids):
             sp = scope_pid(unit)
-            if sp is not None and (sp == os.getpid() or (self._pid_alive(sp) and _read_ppid(sp) == os.getpid())):
-                continue            # this kernel's live session
+            if sp is not None and (sp in owned or sp == os.getpid()
+                                   or (self._pid_alive(sp) and _read_ppid(sp) == os.getpid())):
+                continue            # an owned CLI's scope, or this kernel's live session
             try:
                 run(["systemctl", "--user", "stop", unit], capture_output=True, text=True, timeout=SCOPE_STOP_TIMEOUT)
                 stopped += 1
@@ -8522,7 +8857,20 @@ class SdkBackend:
                                                                                  ", ".join(str(p) for p in pids)),
                                     "reconcile.duplicate-cli", log=self._log, sid=r0.get("sid"), name=r0.get("name"),
                                     fsid=fsid, pids=",".join(str(p) for p in pids), n=len(pids))
-                    for pid in find_orphan_clis(ps_lines, lastsids, os.getpid()):
+                    # Ownership by lease (T305): a CLI with a valid lease is owned whatever its parent; every
+                    # anomaly is a problem row (lease_census documents the rules and the kinds)
+                    leases = list_leases(self.state_dir)
+                    census = lease_census(ps_lines, lastsids, os.getpid(), leases, version=self.code_version)
+                    sid_of = {str(r.get("lastSid")): str(r.get("sid")) for r in alive if r.get("lastSid")}
+                    for prob in census["problems"]:
+                        self._lease_problem(prob, sid_of)
+                    lease_by_pid = {}
+                    for lease in leases:
+                        try:
+                            lease_by_pid.setdefault(int(lease.get("pid")), lease)
+                        except (TypeError, ValueError):
+                            pass
+                    for pid in census["orphans"]:
                         if pid == os.getpid():
                             continue
                         # the CLI AND its tree (T276): its scope unit, then every process still under it
@@ -8542,8 +8890,16 @@ class SdkBackend:
                                         signaled=res.get("signaled"), forced=res.get("forced"), tree=res.get("tree"))
                         except (ProcessLookupError, PermissionError):
                             pass
-                    # …and the scopes whose CLI already died but whose children live on
-                    scopes_stopped = self._stop_leftover_scopes(lastsids)
+                        if pid in lease_by_pid:            # the lease that did not hold goes with its CLI
+                            remove_lease(self.state_dir, lease_by_pid[pid]["sid"])
+                    for sid in census["dead_leases"]:      # a lease naming no live CLI is nobody's claim
+                        remove_lease(self.state_dir, sid)
+                    # …and the scopes whose CLI already died but whose children live on (an owned CLI's stays)
+                    scopes_stopped = self._stop_leftover_scopes(lastsids, owned=set(census["owned"]))
+                    if census["owned"] or census["problems"]:
+                        by_lease = sum(1 for why in census["owned"].values() if why == "lease")
+                        self._log("boot reconcile: %d CLI(s) owned (%d by lease), %d lease anomaly(ies) filed"
+                                  % (len(census["owned"]), by_lease, len(census["problems"])))
                 except Exception:
                     self._log("boot reconcile: orphan reap failed: %s" % traceback.format_exc())
             resumed, restored, notified = 0, 0, 0
@@ -8934,6 +9290,7 @@ class SdkBackend:
                     kill(pid, signal.SIGKILL)            # a wedged CLI still never outlives us
                 reaped.append("%s(pid %d)" % (s.name, pid))
                 reaped_sids.add(s.sid)
+                self._lease_close(s)                     # ended on purpose: the lease goes with it
             except ProcessLookupError:
                 pass                                     # exited between the join and the reap — fine
             except Exception:
@@ -9647,9 +10004,9 @@ class SdkBackend:
             with self._problem_lock:
                 hit = None
                 if key is not None:
-                    for row in reversed(self._problems):
-                        if row.get("key") == key:
-                            hit = row
+                    for entry in reversed(self._problems):
+                        if entry.get("key") == key:
+                            hit = entry
                             break
                 if hit is not None:
                     hit["count"] = int(hit.get("count") or 1) + 1

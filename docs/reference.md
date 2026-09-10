@@ -951,6 +951,33 @@ re-checks the two facts that need no model call (the second initialize, the
 `--bg` refusal) when run with `ROMP_CLI_PROBE_LIVE=1` and a `claude` on PATH; it
 skips otherwise, as every test that would reach the live CLI must.
 
+Who owns a running CLI is a lease, not its parent process. The kernel writes
+`leases/<sid>.json` under the state directory the moment the SDK connect hands
+it a CLI: the CLI's pid and start time, the kernel's own pid and start time as
+the holder, the kernel's code version, and a heartbeat the kernel refreshes
+every three seconds while the CLI runs; the lease holds for twelve seconds past
+its last beat (the deploy drain hold's cadence: four beats, so it outlives a
+missed beat and not a dead holder). The lease is removed when the CLI's client
+closes, so only a kernel death leaves one behind. A lease is valid when its beat
+is fresh, its holder is alive and its CLI is alive, each identified by pid and
+start time together, never pid alone. The boot reaper reads the leases: a CLI
+with a valid lease is owned by its holder whatever its parent, so a CLI
+re-parented by a wrapper or a debugger (and, later, one kept by a per-session
+host) survives the boot; a CLI parented to a live kernel without a lease is kept
+and reported, so the sessions of a kernel from before leases survive the upgrade
+boot; every other CLI of ours is an orphan and is ended with its tree. Since the
+kernel is the holder, a crashed kernel's leases are invalid at the next boot and
+its CLIs are reaped as before, keeping one writer per transcript. The scope sweep
+spares an owned CLI's scope, and the interrupt escalation signals the leased CLI
+first, so a re-parented CLI is still stoppable. Every anomaly the census meets (a
+CLI without a lease, a lease without a live process or holder, a stale
+heartbeat, a lease from another code version) is a problem row: prose in the
+error center, the same prose with a JSON object on the kernel log line, and one
+JSON line in `session-events.jsonl` under the state directory, the shape the
+restart monitors read. Two CLIs on one conversation is the boot sweep's own row
+there. The CLI takes no lock on a transcript it resumes, so the one writer per
+conversation is entirely the lease's to keep.
+
 A message the kernel cannot handle does not end the session's CLI. The kernel
 handles each streamed message on its own: when a handler raises, it logs the
 exception type and the failing frame (file, line and function, first on the line
