@@ -1185,8 +1185,7 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
    stay primary and rows never wrap. */
 .fsm-chips { flex: 1 1 auto; min-width: 0; margin-left: 8px; text-align: right;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
-.fsm-chip-tag { display: inline-block; font-style: normal; padding: 0 6px; margin-left: 4px;
-  border: 1px solid var(--dim); border-radius: 9px; font-size: 0.82em; color: var(--dim); }
+.fsm-chip-tag { margin-left: 4px; }   /* the chip's look is tagChip's own (T321); the sheet spaces it */
 /* the VIEW MENU (the user 2026-08-24): the sort + layout controls live behind one monochrome ordering
    glyph now (NOT a gear — the strip's ⛭ sits right below this footer on the kernel page). The popup
    wears the shared .ctx-menu vocabulary (chrome defined with the card menus below); these rules add
