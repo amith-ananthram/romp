@@ -93,10 +93,6 @@ ROMP_INJECT_RE = re.compile(r"<!--\s*romp-injected\s*-->")
 # romp-injected; an atom carrying it gets atom["rompAuto"]=True for the timeline/chat to mark.
 # Comment form only, same reason as ROMP_INJECT_RE (content mentioning the marker must not match).
 ROMP_AUTO_RE = re.compile(r"<!--\s*romp-auto\s*-->")
-# romp-SYSTEM: a kernel STATUS notice romp injects on its own (a restart or crash resume notice) — untargeted, no
-# goal, and worded identically every time. Read here for SEGMENT IDENTITY (see _segment_id): a segment such a notice
-# opens must not key on its text, or every restart in a session would alias to one segment (T318, 2026-09-10).
-ROMP_SYSTEM_RE = re.compile(r"<!--\s*romp-system\s*-->")
 # A sender-declared RENDER HINT on an injected message (the user 2026-08-15): auto-generated text — a
 # kickoff template, a scripted brief — carries `<!-- romp-tag: <label> -->` (romp send --tag, or the
 # marker appended by hand) so the chat shows it as machine-sent under that label instead of posing it
@@ -2465,17 +2461,20 @@ def _segment_id(rompuuid, seg_t, atoms, trigger_uuid):
     atom-uuid key there would MISS its own echo. Hash the content, or — only when there is none — the
     anchor atom's identity.
 
-    A segment opened by a MACHINE MARKER is keyed by its anchor atom's uuid too (T318, 2026-09-10): romp's
-    own untargeted injections (a kernel restart or crash notice, romp-system; an auto-nudge, romp-auto) and
-    the CLI's own stop record ('[Request interrupted by user…]', is_interrupt_record). Each is worded
-    identically every time, so a content hash gave every such segment in a session the same hash and the
-    timestamp-invariant _seg_key aliased them all (one session held 19 restart-notice segments and 25 stop
-    records under three keys): a card whose recorded segments held one such segment resolved to whichever
-    the parse saw last, and its summary click landed hours away from the work it described. None of these
-    has a composer echo to drift against (romp and the CLI write them, not the composer), so the uuid is
-    stable across the judge and render parses, exactly as for a text-less seam. A follow-up the USER typed
-    into a card rides romp-injected too but not romp-system, and keeps its content hash: it does have an
-    echo."""
+    A segment opened by a MACHINE-WRITTEN trigger is keyed by its anchor atom's uuid too (T318, 2026-09-10):
+    anything romp injected itself (the romp-injected marker: a kernel restart or crash notice, an auto-nudge,
+    the retry message, the compaction suggestion, a Nudge-button follow-up) and the CLI's own stop record
+    ('[Request interrupted by user…]', is_interrupt_record). Most of these are worded identically every time,
+    so a content hash gave every such segment in a session the same hash and the timestamp-invariant _seg_key
+    aliased them all (one session held 19 restart-notice segments and 25 stop records under three keys): a
+    card whose recorded segments held one such segment resolved to whichever the parse saw last, and its
+    summary click landed hours away from the work it described. Keying them by uuid is safe on the echo
+    axis for a different reason than for typed prompts: every recorded key (a placement, a trail, a seam, a
+    caption) is written by the judge from the TRANSCRIPT parse and the kernel only looks up, and a romp
+    send's optimistic echo is hidden the moment its record lands, so the echo-time id and the landed id
+    never coexist in anything recorded. A follow-up the USER typed into a card carries no romp-injected
+    marker (only the Nudge button's does) and keeps its content hash, since its echo and its record must
+    share a key while both are on screen."""
     text = ""
     anchor = None
     if trigger_uuid:
@@ -2486,9 +2485,9 @@ def _segment_id(rompuuid, seg_t, atoms, trigger_uuid):
     if not text and atoms:
         anchor = anchor or atoms[0]
         text = _text_of(_content(atoms[0].get("message")))
-    machine_marker = bool(text) and bool(ROMP_SYSTEM_RE.search(text) or ROMP_AUTO_RE.search(text)
-                                        or (anchor is not None and is_interrupt_record(anchor)))
-    basis = (text if not machine_marker else "") or (anchor or {}).get("uuid") \
+    machine_written = bool(text) and bool(ROMP_INJECT_RE.search(text)
+                                         or (anchor is not None and is_interrupt_record(anchor)))
+    basis = (text if not machine_written else "") or (anchor or {}).get("uuid") \
         or next((a.get("uuid") for a in atoms if a.get("uuid")), "")   # first uuid-bearing atom if the anchor has none
     h = hashlib.sha1(basis.encode("utf-8", "replace")).hexdigest()[:8]
     return "%s:%d:%s" % (rompuuid, seg_t, h)

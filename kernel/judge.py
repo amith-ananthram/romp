@@ -473,6 +473,12 @@ JUDGE_FAIL_CAP = 3                       # the same rule for every other retryin
 #                                          planner (PLAN_PARSE_RETRIES) and distiller/briefer (DISTILL_FAIL_CAP)
 #                                          already had their own.
 PLACEMENTS_V = 13                        # placements-identity schema version (plan P2, the user 2026-07-06).
+#                                          v13 (T318, 2026-09-10): a segment opened by a machine-written trigger (a romp
+#                                          injection, the CLI's stop record) keys on its anchor atom's uuid. Recorded
+#                                          ids from before (trails, seam keys, caption rows into such segments) are NOT
+#                                          remapped: their lookups miss and the card falls to its fallback tiers, which
+#                                          is where those anchors already were wrong; a one-time remap by exact `t`
+#                                          in _migrate_placements would be the follow-up if that ever matters.
 #                                          v12 (2026-09-08, T252d): an ABSORBED atom (a mid-turn send the CLI
 #                                          spliced in) is placed at its LANDING time, not its send time, so
 #                                          every absorbed segment whose landing differs from its send changes

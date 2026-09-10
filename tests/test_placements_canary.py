@@ -129,7 +129,7 @@ RECORDS = [
 # boundary does not arm the replay dedup).
 EXPECTED_SEG_IDS = [
     SID + ":1780000000:ca8d36fd",
-    SID + ":1780000120:f03c5f4f",
+    SID + ":1780000120:b9c69e54",
     SID + ":1780000240:686c9d66",
     SID + ":1780000330:f3320ed1",
     SID + ":1780000350:26e8f145",   # att2: sent at T0+340, placed at its T0+350 landing (v12, T252d)
@@ -154,7 +154,7 @@ EXPECTED_ATOM_UUIDS = [
 # continuation work — a5 chains through the boundary — and predates this block.)
 EXPECTED_UNITS = [
     (SID + ":1780000000:ca8d36fd", "work", True),
-    (SID + ":1780000120:f03c5f4f", "nudge", False),
+    (SID + ":1780000120:b9c69e54", "nudge", False),
     (SID + ":1780000240:686c9d66", "work", True),
     (SID + ":1780000330:f3320ed1", "work", True),
     (SID + ":1780000350:26e8f145", "work", True),
@@ -222,10 +222,12 @@ class PlacementIdentityCanary(unittest.TestCase):
         # set again (tests/test_event_model_golden.py EclipsedChainSelection covers the pick).
         # v12 (2026-09-08, T252d): absorbed atoms placed at their landing time — att2's id and the atom set
         # above re-pinned with the bump.
-        # v13 (2026-09-10, T318): a segment opened by romp's own system notice or auto-nudge keys on its anchor
-        # atom's uuid, not its (identical every time) text; this fixture carries no such notice, so every pinned
-        # id is UNCHANGED — the bump seals sessions whose restart-notice segments aliased under one key
-        # (tests/test_restart_notice_segments.py covers the derivation and the card anchors it protects).
+        # v13 (2026-09-10, T318): a segment opened by a machine-written trigger (a romp injection: restart or
+        # crash notice, auto-nudge, retry, compaction suggestion, Nudge-button follow-up; or the CLI's stop record)
+        # keys on its anchor atom's uuid, not its (identical every time) text; this fixture's u2 is romp-injected
+        # but its id is pinned as it now derives, and the rest carry no such trigger — the bump seals sessions
+        # whose restart-notice and stop-record segments aliased under one key (tests/test_restart_notice_segments.py
+        # covers the derivation and the card anchors it protects).
         self.assertEqual(jd.PLACEMENTS_V, 13, "EXPECTED_SEG_IDS was pinned under PLACEMENTS_V=13 — "
                          "re-pin the ids and this version together, in the same commit")
 

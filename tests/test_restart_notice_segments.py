@@ -6,9 +6,10 @@ timestamp-invariant lookup key (_seg_key = session id plus that hash) treated th
 that key, to whichever restart-notice segment the parse saw last, so its summary click landed on an
 assistant turn hours after the work the summary described). A romp system notice (or an auto-nudge)
 carries no user content and has no composer echo to drift against, so its segment is keyed by its anchor
-atom's uuid, exactly as a text-less seam already is. Two cut turns, two identical notices: distinct ids,
-distinct keys, and the card's anchors stay inside its own segments. SYNTHETIC fixtures only: a private
-synthetic sid, invented text, placeholder uuids."""
+atom's uuid, exactly as a text-less seam already is; so is every other segment a machine wrote the trigger of
+(any romp injection: the retry message, an auto-nudge; the CLI's stop record). Two cut turns, two identical
+notices: distinct ids, distinct keys, and the card's anchors stay inside its own segments. SYNTHETIC fixtures
+only: a private synthetic sid, invented text, placeholder uuids."""
 import json
 import os
 import re
@@ -55,6 +56,8 @@ def aline(t, text, uuid, parent=None):
                         "stop_reason": "end_turn"}}
 
 
+RETRY = "retry\n\n<!-- romp-injected -->"                                        # the kernel's fixed retry message
+AUTO = "<!-- romp-injected --><!-- romp-auto -->[romp] Where does the outline work stand? <!-- romp-goal-id: g1 -->"
 RECORDS = [
     uline(T0, ASK, "u1"),
     aline(T0 + 60, WORK1, "a1", "u1"),
@@ -64,6 +67,15 @@ RECORDS = [
     uline(T0 + 1800, "[Request interrupted by user]", "c2", "a2", ps="sdk"),  # the second cut
     uline(T0 + 1810, NOTICE, "n2", "c2", ps="sdk"),                           # the SAME notice text again
     aline(T0 + 1900, WORK3, "a3", "n2"),
+    # the other machine-written triggers, each worded identically twice: romp's retry and an auto-nudge
+    uline(T0 + 2500, RETRY, "r1", "a3", ps="sdk"),
+    aline(T0 + 2510, "Retrying the last step as asked; the outline module still builds clean.", "a4", "r1"),
+    uline(T0 + 2600, RETRY, "r2", "a4", ps="sdk"),
+    aline(T0 + 2610, "Retried once more; the same result, so the talk-through stands as written.", "a5", "r2"),
+    uline(T0 + 2700, AUTO, "an1", "a5", ps="sdk"),
+    aline(T0 + 2710, "The outline work stands where the talk-through left it: three calls are still yours.", "a6", "an1"),
+    uline(T0 + 2800, AUTO, "an2", "a6", ps="sdk"),
+    aline(T0 + 2810, "Still standing where it was; nothing new to build until you decide the three calls.", "a7", "an2"),
 ]
 
 
@@ -82,14 +94,12 @@ class RestartNoticeSegments(unittest.TestCase):
         names = td / "names"
         names.mkdir()
         (names / SID).write_text("web\t%s\t#abcdef\n" % str(cdir))
-        self.saved = (jd.NAMES, jd.PROJECTS, jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR, jd.STATE,
-                      km.NAMES, km._tmux_sessions, km._GLOBAL_CLAUDE_MD, jd.gist_llm)
+        self.saved = (jd.STATE, jd.PROJECTS, km.NAMES, km._tmux_sessions, km._GLOBAL_CLAUDE_MD, jd.gist_llm)
         jd.gist_llm = lambda p: ""
         km._autonudge_cache.clear()
         km._GLOBAL_CLAUDE_MD = td / "no-global-claude.md"
-        jd.NAMES, jd.PROJECTS = names, proj
-        jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR = td / "captions", td / "archive", td / "goals"
-        jd.STATE = td
+        jd._rebind_state(td)          # STATE and every dir derived from it (names, captions, archive, goals…), the house way
+        jd.PROJECTS = proj
         km.NAMES = names
         km._tmux_sessions = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "",
                                            "effort": "", "context": None, "compactPct": None,
@@ -100,8 +110,8 @@ class RestartNoticeSegments(unittest.TestCase):
         self.segs = [sg for turn in s["turns"] for sg in jd._segs(turn, st0)]
 
     def tearDown(self):
-        (jd.NAMES, jd.PROJECTS, jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR, jd.STATE,
-         km.NAMES, km._tmux_sessions, km._GLOBAL_CLAUDE_MD, jd.gist_llm) = self.saved
+        state, jd.PROJECTS, km.NAMES, km._tmux_sessions, km._GLOBAL_CLAUDE_MD, jd.gist_llm = self.saved
+        jd._rebind_state(state)
         km._autonudge_cache.clear()
         self.td.cleanup()
 
@@ -116,12 +126,19 @@ class RestartNoticeSegments(unittest.TestCase):
         # the ask keeps a content-keyed id (drift-invariant across a composer echo), as every typed prompt does
         u1 = self._seg_of("u1")
         self.assertEqual(u1["id"].rsplit(":", 1)[1], __import__("hashlib").sha1(ASK.encode()).hexdigest()[:8])
-        # a notice segment is keyed by its anchor atom's uuid, like a text-less seam
-        self.assertEqual(n1["id"].rsplit(":", 1)[1], __import__("hashlib").sha1(b"n1").hexdigest()[:8])
-        # …and so is the CLI's own stop record, worded identically at every cut
+        # a notice segment is keyed by its anchor atom's uuid, like a text-less seam…
+        h = lambda u: __import__("hashlib").sha1(u.encode()).hexdigest()[:8]
+        self.assertEqual(n1["id"].rsplit(":", 1)[1], h("n1"))
+        # …and so is the CLI's own stop record, worded identically at every cut (each opens its own segment: the
+        # assistant turn before it had ended, and the record ends the turn it opens)
         c1, c2 = self._seg_of("c1"), self._seg_of("c2")
-        if c1["id"] != n1["id"] and c2["id"] != n2["id"]:   # the stop record opens its own segment in this parse
-            self.assertNotEqual(jd._seg_key(c1["id"]), jd._seg_key(c2["id"]), "two identical stop records must not share a key")
+        self.assertEqual(c1["id"].rsplit(":", 1)[1], h("c1")); self.assertEqual(c2["id"].rsplit(":", 1)[1], h("c2"))
+        self.assertNotEqual(jd._seg_key(c1["id"]), jd._seg_key(c2["id"]), "two identical stop records must not share a key")
+        # …and every other trigger romp wrote: the fixed retry message and an auto-nudge, each sent twice
+        for a, b in (("r1", "r2"), ("an1", "an2")):
+            sa, sb = self._seg_of(a), self._seg_of(b)
+            self.assertEqual(sa["id"].rsplit(":", 1)[1], h(a), "%s keys on its own uuid" % a)
+            self.assertNotEqual(jd._seg_key(sa["id"]), jd._seg_key(sb["id"]), "%s and %s must not share a key" % (a, b))
 
     def test_the_cards_anchors_stay_inside_its_own_segments(self):
         u1, n1, n2 = self._seg_of("u1"), self._seg_of("n1"), self._seg_of("n2")
