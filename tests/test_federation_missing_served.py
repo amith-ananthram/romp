@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 import time
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 try:
@@ -33,7 +33,7 @@ os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 # the kernel refuses to boot with a retired key variable or a 1Password name in its environment (kernel/credentials.py
 # check_boot_environment): the lab's kernel env is scrubbed by the kernel's own rule, read from the module itself
-_cred = SourceFileLoader("romp_credentials_fedmissing", os.path.join(ROOT, "kernel", "credentials.py")).load_module()
+_cred = load_source("romp_credentials_fedmissing", os.path.join(ROOT, "kernel", "credentials.py"))
 SID_A = "11111111-2222-4333-8444-000000000701"
 SID_B = "11111111-2222-4333-8444-000000000702"
 SID_C = "11111111-2222-4333-8444-000000000703"
