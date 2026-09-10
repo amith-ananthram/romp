@@ -39,11 +39,52 @@ const { chromium } = require('playwright');
     backdrop: getComputedStyle(document.getElementById('rsp-back')).backgroundColor,
     windows: Array.from(document.querySelectorAll('#rsp-panel .ru-tip-fleetspend .ru-tip-row .ru-tip-k')).map((e) => e.textContent),
     notes: Array.from(document.querySelectorAll('#rsp-panel .rsp-note')).map((e) => e.textContent),
-    xlabels: Array.from(document.querySelectorAll('#rsp-chart .ru-tip-gx span')).map((e) => e.textContent).join(''),
+    xlabels: Array.from(document.querySelectorAll('#rsp-chart .ru-tip-gx span')).map((e) => e.textContent),
     ylabels: Array.from(document.querySelectorAll('#rsp-chart .ru-tip-gy')).map((e) => e.textContent),
     railOpacity: getComputedStyle(document.getElementById('rail-usage')).opacity,
   }));
   if (shots) { await pg.screenshot({ path: shots + '-dark.png' }); const ch = await pg.$('#rsp-chart'); if (ch) await ch.screenshot({ path: shots + '-chart.png' }); }
+  // T293: the crosshair. Hover the chart clear of every bar (its top 2px: the tallest bar stops at the 6px pad) at a
+  // fraction of its width and read the hairline, the stamp and the tooltip's rows; the marks must take no pointer
+  // events and move nothing under the pointer
+  const hBefore = await pg.evaluate(() => document.getElementById('rsp-chart').getBoundingClientRect().height);
+  const week = await pg.evaluate(() => ({ label: document.querySelector('#rsp-panel [data-act="range:hours"]').textContent }));
+  const xhProbe = async (fx, fy, scroll) => {
+    const r = await pg.evaluate((scroll) => { const s = document.querySelector('#rsp-chart svg'); if (scroll === 'top') document.getElementById('rsp-panel').scrollTop = 0; else s.scrollIntoView({ block: 'center' }); const b = s.getBoundingClientRect(); return { x: b.x, y: b.y, w: b.width, h: b.height }; }, scroll || 'center');
+    await pg.mouse.move(r.x + r.w * fx, r.y + r.h * fy);
+    await pg.waitForTimeout(60);
+    return pg.evaluate(() => {
+      const line = document.querySelector('#rsp-chart .rsp-xh'), st = document.querySelector('#rsp-chart .rsp-xh-stamp'), t = document.getElementById('rsp-tip');
+      const rows = t ? Array.from(t.querySelectorAll('.rsp-tip-row')).map((r) => ({ name: r.querySelector('span').textContent, v: r.querySelector('b').textContent, dot: r.querySelector('i').style.backgroundColor, on: r.classList.contains('on') })) : [];
+      const more = t && t.querySelector('.rsp-tip-more'); const head = t && t.querySelector('.rsp-tip-h');
+      return { lineShown: !!line && line.style.display !== 'none', x1: line ? line.getAttribute('x1') : null, stamp: st ? st.textContent : null, stampShown: !!st && st.style.display !== 'none',
+        flip: !!st && st.classList.contains('flip'), lineInert: line ? getComputedStyle(line).pointerEvents : null, stampInert: st ? getComputedStyle(st).pointerEvents : null,
+        stampFont: st ? getComputedStyle(st).fontSize : null, tipShown: !!t && t.style.display === 'block', tipInert: t ? getComputedStyle(t).pointerEvents : null,
+        head: head ? head.textContent : null, rows, more: more ? more.textContent : null, chartH: document.getElementById('rsp-chart').getBoundingClientRect().height,
+        stampLeft: st ? st.getBoundingClientRect().left : null, gyRight: (() => { const g = document.querySelector('#rsp-chart .ru-tip-gy'); return g ? g.getBoundingClientRect().right : null; })(),
+        tipRect: t ? (() => { const b = t.getBoundingClientRect(); return { top: b.top, bottom: b.bottom, left: b.left, right: b.right }; })() : null,
+        stampRect: st ? (() => { const b = st.getBoundingClientRect(); return { top: b.top, bottom: b.bottom, left: b.left, right: b.right }; })() : null };
+    });
+  };
+  const xh = await xhProbe(0.69, 0.01);   // a recorded bucket: the fixture's ledger holds the last 60 hours of the 168
+  if (shots) { await pg.screenshot({ path: shots + '-xh-7day-dark.png' }); await pg.evaluate(() => document.body.classList.add('theme-light')); await pg.waitForTimeout(120); await pg.screenshot({ path: shots + '-xh-7day-light.png' }); await pg.evaluate(() => document.body.classList.remove('theme-light')); }
+  const xhRight = await xhProbe(0.9, 0.01);   // another bucket: the line follows; near the right edge the stamp flips to its left
+  xh.movedX1 = xhRight.x1; xh.flip = xhRight.flip;
+  const xhLeft = await xhProbe(0.005, 0.01);   // the first bucket: unflipped, and the stamp starts past the ceiling label
+  xh.flipLeft = xhLeft.flip; xh.stampLeft = xhLeft.stampLeft; xh.gyRight = xhLeft.gyRight;
+  await pg.mouse.move(5, 400); await pg.waitForTimeout(60);
+  const xhAfter = await pg.evaluate(() => { const line = document.querySelector('#rsp-chart .rsp-xh'), st = document.querySelector('#rsp-chart .rsp-xh-stamp'), t = document.getElementById('rsp-tip'); return { line: line ? line.style.display : null, stamp: st ? st.style.display : null, tip: t ? t.style.display : null }; });
+  // the 1-day view: an hourly stamp too; then back to the 7-day view the rest of the run expects
+  await pg.click('#rsp-panel [data-act="range:day"]');
+  await pg.waitForFunction(() => document.querySelector('#rsp-panel [data-act="range:day"]').classList.contains('on'), null, { timeout: 5000 });
+  const xhDay = await xhProbe(0.5, 0.01);
+  if (shots) { await pg.screenshot({ path: shots + '-xh-1day-dark.png' }); await pg.evaluate(() => document.body.classList.add('theme-light')); await pg.waitForTimeout(120); await pg.screenshot({ path: shots + '-xh-1day-light.png' }); await pg.evaluate(() => document.body.classList.remove('theme-light')); }
+  await pg.setViewportSize({ width: 1200, height: 820 }); await pg.waitForTimeout(250);   // a rebuild under a still pointer takes the tooltip down with the svg
+  const afterResize = await pg.evaluate(() => { const t = document.getElementById('rsp-tip'), line = document.querySelector('#rsp-chart .rsp-xh'), st = document.querySelector('#rsp-chart .rsp-xh-stamp'); return { tip: t ? t.style.display : null, line: line ? line.style.display : null, stamp: st ? st.style.display : null }; });
+  await pg.setViewportSize({ width: 1280, height: 820 }); await pg.waitForTimeout(250);
+  await pg.mouse.move(5, 400);
+  await pg.click('#rsp-panel [data-act="range:hours"]');
+  await pg.waitForFunction(() => document.querySelector('#rsp-panel [data-act="range:hours"]').classList.contains('on'), null, { timeout: 5000 });
   // T247f: "your order"
   await pg.click('#rsp-panel [data-act="order:yours"]');
   await pg.waitForFunction(() => document.querySelector('#rsp-panel [data-act="order:yours"]').classList.contains('on'), null, { timeout: 5000 });
@@ -73,6 +114,13 @@ const { chromium } = require('playwright');
     ylabels: Array.from(document.querySelectorAll('#rsp-chart .ru-tip-gy')).map((e) => e.textContent),
     xlabels: Array.from(document.querySelectorAll('#rsp-chart .ru-tip-gx span')).map((e) => e.textContent),
   }));
+  const xhDays = await xhProbe(0.9, 0.01);   // T293: the daily view's stamp is a date; dozens of sessions fold into one line
+  await pg.mouse.move(5, 400); await pg.waitForTimeout(60);
+  // a short window with the card unscrolled: no room below the pointer, so the box goes above the CHART, clear of the stamp (review find)
+  await pg.setViewportSize({ width: 1280, height: 600 }); await pg.waitForTimeout(250);
+  const xhShort = await xhProbe(0.9, 0.85, 'top');
+  await pg.mouse.move(5, 5); await pg.waitForTimeout(60);
+  await pg.setViewportSize({ width: 1280, height: 820 }); await pg.waitForTimeout(250);
   // hover the TALLEST segment (a sliver has no reliable hit box); measured in the page, scrolled into view
   const bb = await pg.evaluate(() => {
     let best = null;
@@ -88,6 +136,7 @@ const { chromium } = require('playwright');
   await pg.mouse.move(bb2.x + bb2.width / 2, bb2.y + bb2.height / 2);
   await pg.waitForFunction(() => { const t = document.getElementById('rsp-tip'); return t && t.style.display === 'block'; }, null, { timeout: 5000 });
   const tip = await pg.evaluate(() => document.getElementById('rsp-tip').textContent);
+  const tipOn = await pg.evaluate(() => { const on = document.querySelector('#rsp-tip .rsp-tip-row.on span'); const line = document.querySelector('#rsp-chart .rsp-xh'); return { name: on ? on.textContent : null, lineShown: !!line && line.style.display !== 'none' }; });
   if (shots) await pg.screenshot({ path: shots + '-days-tokens.png' });
   await pg.mouse.move(5, 5);
   if (shots) {
@@ -158,7 +207,7 @@ const { chromium } = require('playwright');
     const names = [];
     for (const [, p] of byIdx) { const r = p.getBoundingClientRect(); if (r.height < 1) continue;
       p.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: r.x + r.width / 2, clientY: r.y + r.height / 2 }));
-      const t = document.getElementById('rsp-tip'); if (t && t.style.display === 'block') { const parts = t.textContent.split(' · '); names.push((parts[1] || '').trim()); } }
+      const t = document.getElementById('rsp-tip'); if (t && t.style.display === 'block') { const on = t.querySelector('.rsp-tip-row.on span'); names.push(on ? on.textContent.trim() : ''); } }
     const t = document.getElementById('rsp-tip'); if (t) t.style.display = 'none';
     return names;
   });
@@ -197,6 +246,6 @@ const { chromium } = require('playwright');
     first: (document.querySelector('#rsp-panel .rsp-tbl tbody tr') || {}).textContent || '' }));
   await pg.click('#rsp-panel [data-act="order:spend"]');   // restore the default for whoever runs next
   const mobile = { railHidden, panelOpened: true, modalOpened: true, btn, panelHint , persisted };
-  console.log(JSON.stringify({ merge, yourOrder, hoverHint, hiddenBefore, loaderSeen, out, days, tip, hiddenAfter, hiddenAfterTap, hiddenAfterDrag, lightErr, lightBtn, dim, timeout, mobile, errs }));
+  console.log(JSON.stringify({ merge, yourOrder, hoverHint, hiddenBefore, loaderSeen, out, days, tip, tipOn, xh, xhAfter, xhDay, xhDays, xhShort, afterResize, week, hBefore, hiddenAfter, hiddenAfterTap, hiddenAfterDrag, lightErr, lightBtn, dim, timeout, mobile, errs }));
   await b.close();
 })().catch((e) => { console.error(e); process.exit(1); });

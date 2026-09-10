@@ -771,7 +771,8 @@ export function refreshSettledPreviews(): void {
 // bubble but do capture); previews' own <img>s are skipped: their machinery (budgets, resume, chips) owns those.
 const mdImgFailed = new Set<string>();             // URLs that failed this page life: a re-render parks them before any fetch
 const mdImgProbe = new Map<string, number>();      // served URLs with per-message attempts left: the budget rides the URL, not the img
-const mdImgProbing = new Set<string>();            // served URLs with a per-message probe in flight: one at a time per URL
+const mdImgProbing = new Map<string, number>();    // served URLs with a per-message probe in flight, by that probe's token: one at a time per URL
+let mdImgProbeSeq = 0;                             // the tokens: a failure counts only for the probe whose token is still the URL's
 let mdImgHealOn = false;
 function parkMdImg(img: HTMLImageElement, url: string): void {
   mdImgFailed.add(url);
@@ -823,15 +824,20 @@ function probeMdImgUrl(u: string, onFail?: () => void): void {
 /** The per-message path for the served URLs with attempts left: one detached probe per URL per push, the next armed
  *  only once the previous has failed (a push while it is pending fires nothing), whatever img carries the URL now and
  *  whether or not one is on the page (the probe is off the DOM; a load re-queries the page). Run from
- *  retryFailedPreviews, so it rides the kernel-message event like the figure previews' own retries. */
+ *  retryFailedPreviews, so it rides the kernel-message event like the figure previews' own retries. Each probe holds a
+ *  token, and its failure counts only while that token is still the URL's: a load of the URL by any probe retires it,
+ *  and the URL may since have failed again with a fresh budget and a newer probe in flight, so a stale failure spends
+ *  nothing and clears nothing (a bare in-flight check is not enough: the newer probe has re-marked the URL). */
 function retryMdImgProbes(): void {
   for (const [u, left] of Array.from(mdImgProbe.entries())) {
     if (mdImgProbing.has(u)) continue;
-    mdImgProbing.add(u);
+    const token = ++mdImgProbeSeq;
+    mdImgProbing.set(u, token);
     probeMdImgUrl(u, () => {
+      if (mdImgProbing.get(u) !== token) return;   // retired by a load meanwhile: the fresh budget and any newer probe stand
       mdImgProbing.delete(u);
-      if (left > 1 && mdImgFailed.has(u)) mdImgProbe.set(u, left - 1);   // still down: one attempt spent
-      else mdImgProbe.delete(u);                                          // spent (or healed meanwhile): the reconnect heal alone from here
+      if (left > 1) mdImgProbe.set(u, left - 1);    // still down: one attempt spent
+      else mdImgProbe.delete(u);                     // spent: the reconnect heal alone from here
     });
   }
 }

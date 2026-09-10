@@ -347,7 +347,7 @@ class ViewBuilder(unittest.TestCase):
                       {"id": "3", "subject": "c", "activeForm": None, "status": "pending"}]
         saved = (km._read_task_store, km._fold_tasks)
         km._read_task_store = lambda fsid, fold=None: [dict(t) for t in live_store]
-        km._fold_tasks = lambda session: [dict(t) for t in stale_fold]
+        km._fold_tasks = lambda session, sid=None: [dict(t) for t in stale_fold]
         try:
             todo = next(e for e in km.build_session(SID, NOW)["events"] if e["kind"] == "todo")
         finally:
@@ -362,7 +362,7 @@ class ViewBuilder(unittest.TestCase):
         # ERROR — it does NOT quietly show the lossy fold (which could be wrong, the whole bug).
         saved = (km._read_task_store, km._fold_tasks)
         km._read_task_store = lambda fsid, fold=None: None            # store unreadable
-        km._fold_tasks = lambda session: [{"id": "1", "subject": "a", "activeForm": None, "status": "pending"}]
+        km._fold_tasks = lambda session, sid=None: [{"id": "1", "subject": "a", "activeForm": None, "status": "pending"}]
         try:
             todo = next(e for e in km.build_session(SID, NOW)["events"] if e["kind"] == "todo")
         finally:
@@ -374,7 +374,7 @@ class ViewBuilder(unittest.TestCase):
         # a done/absent list is a non-event — an unreadable store there is not worth alarming on, so no card.
         saved = (km._read_task_store, km._fold_tasks)
         km._read_task_store = lambda fsid, fold=None: None
-        km._fold_tasks = lambda session: [{"id": "1", "subject": "a", "activeForm": None, "status": "completed"}]
+        km._fold_tasks = lambda session, sid=None: [{"id": "1", "subject": "a", "activeForm": None, "status": "completed"}]
         try:
             kinds = [e["kind"] for e in km.build_session(SID, NOW)["events"]]
         finally:
@@ -386,7 +386,7 @@ class ViewBuilder(unittest.TestCase):
         # stale transcript fold — no card, and NO error (the store was read fine, it's just empty).
         saved = (km._read_task_store, km._fold_tasks)
         km._read_task_store = lambda fsid, fold=None: []              # authoritative-empty (cleared / none)
-        km._fold_tasks = lambda session: [{"id": "1", "subject": "a", "activeForm": None, "status": "pending"}]
+        km._fold_tasks = lambda session, sid=None: [{"id": "1", "subject": "a", "activeForm": None, "status": "pending"}]
         try:
             kinds = [e["kind"] for e in km.build_session(SID, NOW)["events"]]
         finally:
@@ -445,11 +445,11 @@ class ViewBuilder(unittest.TestCase):
         saved = (km._read_task_store, km._fold_tasks)
         km._read_task_store = lambda fsid, fold=None: None            # store unresolvable, as in the repro
         try:
-            km._fold_tasks = lambda session: real_fold(bg)
+            km._fold_tasks = lambda session, sid=None: real_fold(bg)
             kinds = [e["kind"] for e in km.build_session(SID, NOW)["events"]]
-            km._fold_tasks = lambda session: real_fold(batch)
+            km._fold_tasks = lambda session, sid=None: real_fold(batch)
             kinds_batch = [e["kind"] for e in km.build_session(SID, NOW)["events"]]
-            km._fold_tasks = lambda session: real_fold(mixed)
+            km._fold_tasks = lambda session, sid=None: real_fold(mixed)
             todo = [e for e in km.build_session(SID, NOW)["events"] if e["kind"] == "todo"]
         finally:
             (km._read_task_store, km._fold_tasks) = saved
@@ -1364,6 +1364,35 @@ class ViewBuilder(unittest.TestCase):
         lost = [e for e in events if e["kind"] == "user" and e.get("md") == stale]
         self.assertEqual(len(lost), 1, "it stays on screen — the loss must not vanish silently")
         self.assertTrue(lost[0].get("undelivered"), "and reads as never delivered, with the dismiss affordance")
+
+    def test_tmux_slash_sends_echo_is_not_counted_as_queued_once_its_wrapper_record_lands(self):
+        # A slash or skill command typed while the session is busy: the CLI records it as a <command-name>
+        # wrapper (no verbatim copy of the typed text), which parses to "/deploy staging now" with one space
+        # where the sender typed a space and two newlines. The queued count reads the landing off that record
+        # under the command key; before, the echo counted as queued for as long as the turn ran. The record lands
+        # in the SAME second as the send: a strictly later human turn would settle the echo as overtaken (a
+        # loss, not a queued message) whatever its text, and this case is about the count's landing rule.
+        typed = "/deploy \n\nstaging now"
+        wrap = ("<command-message>deploy</command-message>\n<command-name>/deploy</command-name>\n"
+                "<command-args>staging now</command-args>\n<skill-format>true</skill-format>")
+        with self.tpath.open("a") as f:
+            f.write(json.dumps(dict(uline(NOW - 10, wrap, "uCmd", parent="a2"), isMeta=True, promptId="p1")) + "\n")
+            f.write(json.dumps(aline(NOW - 5, "Deploying staging now.", "aCmd", "uCmd", tools=("Bash",), stop="tool_use")) + "\n")
+        km._parse_cache.clear()
+        self.assertTrue(km._session_working(km._parse(str(self.tpath), SID, NOW)["turns"]),
+                        "precondition: the turn the command started is still running, so an unlanded echo counts as queued")
+        km._tmux_echo.pop(SID, None)
+        km._tmux_echo_add(SID, typed)
+        for echo_atom in km._tmux_echo[SID].values():
+            echo_atom["t"] = NOW - 10                    # sent in the second its record landed
+        try:
+            events = km.build_session(SID, NOW)["events"]
+        finally:
+            km._tmux_echo.pop(SID, None)
+        qmsgs = [m["md"] for e in events if e["kind"] == "queued" for m in e["texts"]]
+        self.assertNotIn(typed, qmsgs, "the wrapper record is this send's landing: nothing waits in the queue")
+        shown = [e.get("md") for e in events if e["kind"] == "user" and e.get("md") in (typed, "/deploy staging now")]
+        self.assertEqual(shown, ["/deploy staging now"], "the command shows once, as its record, never as a pending echo")
 
     def test_tmux_send_while_IDLE_echoes_as_a_sent_bubble_not_queued(self):
         # the gate: when the session is IDLE (default fixture ends on an ended turn), the SAME echo is a
@@ -6598,8 +6627,10 @@ class ViewBuilder(unittest.TestCase):
         try:
             km._alive_sessions = lambda now, tmux: [{"sid": "A", "mtime": 100}, {"sid": "B", "mtime": 50}]
             first = [s["sid"] for s in km._timeline_sessions(NOW, {}, live_only=True)]
-            # B now becomes the most-recently-active (its mtime jumps past A) — the order must NOT change
-            km._alive_sessions = lambda now, tmux: [{"sid": "A", "mtime": 100}, {"sid": "B", "mtime": 999}]
+            # B now becomes the most-recently-active (its mtime jumps past A), so the liveness read comes back
+            # newest-first, B ahead of A, the way _sessions sorts it. The saved order must win over that input
+            # order: a reader that handed the read through unsorted would return [B, A] here.
+            km._alive_sessions = lambda now, tmux: [{"sid": "B", "mtime": 999}, {"sid": "A", "mtime": 100}]
             second = [s["sid"] for s in km._timeline_sessions(NOW, {}, live_only=True)]
             self.assertEqual(first, ["A", "B"], "new sessions frozen newest-active-first, once")
             self.assertEqual(second, first, "activity (mtime) must not reorder existing lanes/tabs")
