@@ -17,6 +17,15 @@ setup() {
     export CALL_LOG="$TEST_DIR/calls.log"
     export ROMP_NO_SERVICE=1 ROMP_NO_SDK=1 ROMP_NO_EXT=1
     export ROMP_INSTALL_TOKEN_TRIES=1
+    # A shell inside a running romp inherits the service's interpreter pin; with it set, romp-sdk-setup
+    # skips every stub below and builds a REAL venv (network pip and all) into the temp state dir.
+    unset ROMP_PYTHON
+    # The state root is this test's own (the setup scripts read ROMP_STATE_DIR first, and a kernel
+    # exports it to its sessions), and no port here may reach a live kernel or manager: the manager
+    # port is poisoned to a dead value and the kernel port's two spellings are unset.
+    export ROMP_STATE_DIR="$TEST_DIR/state"
+    export ROMP_MANAGER_PORT=1
+    unset ROMP_KERNEL_PORT ROMP_SERVE_PORT
     export ROMP_GITHOOK_DIR="$TEST_DIR/githooks"
     # Keep vscode-extension/install.sh's app-bundle probe inside the sandbox: on a
     # dev mac, /Applications really contains editors, and finding one would send
@@ -243,6 +252,264 @@ EOF
 
     [ "$status" -eq 0 ]
     grep -q "venv-rebuild" "$CALL_LOG"
+}
+
+# ── a venv built for one interpreter, a kernel about to run another ──────────
+# pick_python follows the venv's pyvenv.cfg, so romp-sdk-setup only ever rebuilds for a different
+# interpreter when ROMP_PYTHON says so or the recorded one is gone. Both are deliberate interpreter
+# changes with a running kernel still on the old one: say so LOUDLY (2026-09-06: a silent mismatch
+# took every SDK session down for two hours).
+
+# The stub interpreter for these tests: answers romp-sdk-setup's probes as a 3.12, and stands in for
+# `python -m venv` by laying down a pip and a python that read stdin and exit 0.
+write_stub_312() {
+    cat > "$STUB/python3.12" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-m" ] && [ "${2:-}" = "venv" ]; then
+  echo "venv-rebuild $3" >> "$CALL_LOG"
+  mkdir -p "$3/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$3/bin/pip"
+  printf '#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n' > "$3/bin/python"
+  chmod +x "$3/bin/pip" "$3/bin/python"
+  printf 'home = %s\nversion = 3.12.0\nexecutable = %s\n' "$STUB" "$STUB/python3.12" > "$3/pyvenv.cfg"
+  exit 0
+fi
+case "$*" in
+  *"version_info >= (3, 10)"*) exit 0 ;;
+  *'print("%d.%d%s"'*)         echo "3.12"; exit 0 ;;
+  *'print("%d.%d"'*)           echo "3.12"; exit 0 ;;
+  *"import ensurepip"*)        exit 0 ;;
+esac
+exit 0
+EOF
+    chmod +x "$STUB/python3.12"
+}
+
+@test "romp-sdk-setup: ROMP_PYTHON naming a different interpreter rebuilds the venv and says so loudly" {
+    VENV="$TEST_DIR/state/sdkvenv"; mkdir -p "$VENV/bin" "$TEST_DIR/oldpy"
+    # the venv as built for a 3.11 that is still on the machine: its python answers the version probe
+    printf '#!/usr/bin/env bash\ncase "$*" in *print*) echo 3.11 ;; esac\nexit 0\n' > "$TEST_DIR/oldpy/python3.11"
+    chmod +x "$TEST_DIR/oldpy/python3.11"
+    ln -s "$TEST_DIR/oldpy/python3.11" "$VENV/bin/python"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$VENV/bin/pip"; chmod +x "$VENV/bin/pip"
+    printf 'home = %s\nversion = 3.11.9\nexecutable = %s\n' "$TEST_DIR/oldpy" "$TEST_DIR/oldpy/python3.11" > "$VENV/pyvenv.cfg"
+    write_stub_312
+
+    PATH="$(bare_path)" ROMP_PYTHON="$STUB/python3.12" run "$ROMP_DIR/bin/romp-sdk-setup"
+
+    [ "$status" -eq 0 ]
+    grep -q "venv-rebuild" "$CALL_LOG"
+    [[ "$output" == *"REBUILDING"* ]]                 # not a one-word aside
+    [[ "$output" == *"3.11"* && "$output" == *"3.12"* ]]   # from what, to what
+    [[ "$output" == *"restart romp"* ]]               # the running kernel is still on the old one
+}
+
+@test "romp-sdk-setup: without ROMP_PYTHON it follows the venv's interpreter and does NOT rebuild" {
+    # The agree-by-construction case: the recorded interpreter is present, so a re-run (say, to
+    # upgrade the SDK) keeps the venv's python even with a newer one first on PATH.
+    VENV="$TEST_DIR/state/sdkvenv"; mkdir -p "$VENV/bin" "$TEST_DIR/oldpy"
+    cat > "$TEST_DIR/oldpy/python3.11" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"version_info >= (3, 10)"*) exit 0 ;;
+  *'print("%d.%d%s"'*)         echo "3.11"; exit 0 ;;
+  *'print("%d.%d"'*)           echo "3.11"; exit 0 ;;
+  -)                           cat >/dev/null; echo "stub: claude-agent-sdk ready (python 3.11)" ;;
+esac
+exit 0
+EOF
+    chmod +x "$TEST_DIR/oldpy/python3.11"
+    ln -s "$TEST_DIR/oldpy/python3.11" "$VENV/bin/python"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$VENV/bin/pip"; chmod +x "$VENV/bin/pip"
+    printf 'home = %s\nversion = 3.11.9\nexecutable = %s\n' "$TEST_DIR/oldpy" "$TEST_DIR/oldpy/python3.11" > "$VENV/pyvenv.cfg"
+    write_stub_312                                    # a newer 3.12 first on PATH
+
+    PATH="$(bare_path)" run "$ROMP_DIR/bin/romp-sdk-setup"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"REBUILDING"* ]]
+    [[ "$output" == *"python 3.11"* ]]                # the ready line names the venv's own interpreter
+    run grep -q "venv-rebuild" "$CALL_LOG"     # last, and armed: `run` replaces $output, and a bare
+    [ "$status" -ne 0 ]                        # `!` mid-test asserts nothing in bats
+}
+
+@test "romp-sdk-setup: a venv whose interpreter is gone is rebuilt for the fallback pick, loudly" {
+    VENV="$TEST_DIR/state/sdkvenv"; mkdir -p "$VENV/bin"
+    ln -s "$TEST_DIR/gone/python3.11" "$VENV/bin/python"      # dangling: the interpreter was removed
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$VENV/bin/pip"; chmod +x "$VENV/bin/pip"
+    printf 'home = %s\nversion = 3.11.9\nexecutable = %s\n' "$TEST_DIR/gone" "$TEST_DIR/gone/python3.11" > "$VENV/pyvenv.cfg"
+    write_stub_312
+
+    PATH="$(bare_path)" run "$ROMP_DIR/bin/romp-sdk-setup"
+
+    [ "$status" -eq 0 ]
+    grep -q "venv-rebuild" "$CALL_LOG"
+    [[ "$output" == *"$TEST_DIR/gone/python3.11"* ]]  # pick_python's own line: what it could not run
+    [[ "$output" == *"REBUILDING"* ]]
+    [[ "$output" == *"3.11"* && "$output" == *"3.12"* ]]   # the cfg's version, not a bare "?"
+}
+
+@test "romp-sdk-setup: the rebuild check reads the venv's record, never its live bin/python (a repointed unversioned base rebuilds)" {
+    # The venv was built under ROMP_PYTHON=<prefix>/python3 when that was a 3.12, so bin/python is a
+    # symlink to the UNVERSIONED base. A distro upgrade has since repointed python3 at 3.14: the symlink
+    # answers 3.14, lib/ is still python3.12. Asking bin/python saw a match and skipped the rebuild, and
+    # the session card's remedy (re-run this script) then changed nothing.
+    VENV="$TEST_DIR/state/sdkvenv"; mkdir -p "$VENV/bin" "$VENV/lib/python3.12/site-packages"
+    write_stub_py "$TEST_DIR/usr/python3" 3.14
+    ln -s "$TEST_DIR/usr/python3" "$VENV/bin/python"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$VENV/bin/pip"; chmod +x "$VENV/bin/pip"
+    printf 'home = %s\nversion = 3.12.4\nexecutable = %s\n' "$TEST_DIR/usr" "$TEST_DIR/usr/python3.12" > "$VENV/pyvenv.cfg"
+
+    PATH="$(bare_path)" ROMP_PYTHON="$TEST_DIR/usr/python3" run "$ROMP_DIR/bin/romp-sdk-setup"
+
+    [ "$status" -eq 0 ]
+    grep -q "venv-build 3.14 $VENV" "$CALL_LOG"
+    [[ "$output" == *"REBUILDING"* ]]
+    [[ "$output" == *"for python 3.14 ("* && "$output" == *"built for python 3.12."* ]]
+    [ -d "$VENV/lib/python3.14" ] && [ ! -d "$VENV/lib/python3.12" ]
+}
+
+@test "romp-sdk-setup: a free-threaded build of the same minor is another tag (3.14 to 3.14t rebuilds; 3.14t again does not)" {
+    # venv names the lib directory python3.14t and the kernel keys its match on that tag, so a compare on
+    # X.Y alone kept a python3.14 venv for a 3.14t kernel and reported it ready
+    VENV="$TEST_DIR/state/sdkvenv"; mkdir -p "$VENV/bin" "$VENV/lib/python3.14/site-packages"
+    write_stub_py "$TEST_DIR/py/python3.14" 3.14
+    write_stub_py "$TEST_DIR/py/python3.14t" 3.14 t
+    ln -s "$TEST_DIR/py/python3.14" "$VENV/bin/python"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$VENV/bin/pip"; chmod +x "$VENV/bin/pip"
+    printf 'home = %s\nversion = 3.14.0\nexecutable = %s\n' "$TEST_DIR/py" "$TEST_DIR/py/python3.14" > "$VENV/pyvenv.cfg"
+
+    PATH="$(bare_path)" ROMP_PYTHON="$TEST_DIR/py/python3.14t" run "$ROMP_DIR/bin/romp-sdk-setup"
+
+    [ "$status" -eq 0 ]
+    grep -q "venv-build 3.14t $VENV" "$CALL_LOG"
+    [[ "$output" == *"REBUILDING"* ]]
+    [[ "$output" == *"for python 3.14t ("* && "$output" == *"built for python 3.14."* ]]
+    [ -d "$VENV/lib/python3.14t" ]
+
+    # the venv the 3.14t build just made is its own: a re-run keeps it
+    : > "$CALL_LOG"
+    PATH="$(bare_path)" ROMP_PYTHON="$TEST_DIR/py/python3.14t" run "$ROMP_DIR/bin/romp-sdk-setup"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"REBUILDING"* ]]
+    run grep -q "venv-build" "$CALL_LOG"                     # last, and armed (see the twin above)
+    [ "$status" -ne 0 ]
+}
+
+@test "romp-sdk-setup: a uv-built venv (home plus version_info, no executable) is followed and kept, not rebuilt" {
+    # uv writes `version_info =` (X.Y for one of its managed interpreters, X.Y.Z for a system python) and
+    # neither `version =` nor `executable =`. Both readers in the script must take that key, and its X.Y
+    # prefix from either shape (this cfg carries the longer one): pick_python, to follow the venv's
+    # interpreter, and venv_built_for, to read the tag it was built for; with either reading nothing, the
+    # run rebuilds a venv that already matches. The venv has no lib directory on purpose: with one,
+    # venv_built_for takes the tag from lib/python3.X and this case would hold with the cfg read gone.
+    VENV="$TEST_DIR/state/sdkvenv"; mkdir -p "$VENV/bin"
+    write_stub_py "$TEST_DIR/uvhome/python3.12" 3.12          # the venv's interpreter, off PATH
+    ln -s "$TEST_DIR/uvhome/python3.12" "$VENV/bin/python"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$VENV/bin/pip"; chmod +x "$VENV/bin/pip"
+    printf 'home = %s\nimplementation = CPython\nuv = 0.8.0\nversion_info = 3.12.3\ninclude-system-site-packages = false\n' \
+        "$TEST_DIR/uvhome" > "$VENV/pyvenv.cfg"
+    write_stub_py "$STUB/python3.14" 3.14                    # a newer python, first on PATH
+
+    PATH="$(bare_path)" run "$ROMP_DIR/bin/romp-sdk-setup"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"REBUILDING"* ]]
+    [[ "$output" != *"picking the newest python"* ]]         # pick_python followed the venv
+    run grep -q "venv-build" "$CALL_LOG"                     # last, and armed (see the twin above)
+    [ "$status" -ne 0 ]
+}
+
+@test "romp-sdk-setup: ROMP_PYTHON naming a missing interpreter is refused as such, not called a too-old python" {
+    # The pin the docs recommend for service.env, after an OS upgrade removed what it named. The old
+    # diagnosis was "best python found is <pin> (?) but claude-agent-sdk needs >= 3.10", and its remedy
+    # (install a newer python) changed nothing while the pin pointed at a dead path.
+    PATH="$(bare_path)" ROMP_PYTHON="$TEST_DIR/no-such/python3.12" run "$ROMP_DIR/bin/romp-sdk-setup"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"ROMP_PYTHON=$TEST_DIR/no-such/python3.12"* ]]
+    [[ "$output" == *"not an executable interpreter"* ]]
+    [[ "$output" != *"needs >= 3.10"* ]]
+    [ ! -e "$TEST_DIR/state/sdkvenv" ]
+}
+
+# ── romp-codex-setup: the Codex venv is built with the kernel's interpreter too ──────────────────
+# The kernel imports codexvenv's site-packages in-process (ensure_codex_sdk), so this venv has the same
+# contract as the SDK venv: built with the python romp-serve will run. tests/romp-serve.bats pins the
+# three picker copies byte for byte, and these tests exercise the script end to end.
+
+# A stub python that claims one X.Y (and, with a third argument `t`, a free-threaded build): answers
+# pick_python's minor check for that X.Y only, the >= 3.10 gate, the version and tag prints and the
+# ensurepip probe, and stands in for `python -m venv` by laying down a pip and a python that exit 0
+# (the python's cat reads /dev/null, never the caller's stdin: romp-codex-setup runs it once with no
+# heredoc, and a bats run from a terminal would otherwise hang there until that stdin closed), plus the
+# tagged lib/python3.X{t} directory a real venv has, logging which python built which venv.
+write_stub_py() {   # $1 path, $2 the X.Y it claims, [$3 abi suffix: t]
+    mkdir -p "$(dirname "$1")"
+    cat > "$1" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "-m" ] && [ "\${2:-}" = "venv" ]; then
+  echo "venv-build $2${3:-} \$3" >> "\$CALL_LOG"
+  mkdir -p "\$3/bin" "\$3/lib/python$2${3:-}/site-packages"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "\$3/bin/pip"
+  printf '#!/usr/bin/env bash\ncat >/dev/null </dev/null\nexit 0\n' > "\$3/bin/python"
+  chmod +x "\$3/bin/pip" "\$3/bin/python"
+  printf 'version = $2.0\nexecutable = $1\n' > "\$3/pyvenv.cfg"
+  exit 0
+fi
+case "\$*" in
+  *"version_info >= (3, 10)"*) exit 0 ;;
+  *'print("%d.%d%s"'*)         echo "$2${3:-}"; exit 0 ;;   # before the version_info catch-all: the probes name it too
+  *'print("%d.%d"'*)           echo "$2"; exit 0 ;;
+  *"(${2%%.*}, ${2#*.})"*)     exit 0 ;;
+  *version_info*)              exit 1 ;;
+esac
+exit 0
+EOF
+    chmod +x "$1"
+}
+
+@test "romp-codex-setup: ROMP_PYTHON naming a missing interpreter is refused as such, not called a too-old python" {
+    PATH="$(bare_path)" ROMP_PYTHON="$TEST_DIR/no-such/python3.12" run "$ROMP_DIR/bin/romp-codex-setup"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"ROMP_PYTHON=$TEST_DIR/no-such/python3.12"* ]]
+    [[ "$output" == *"not an executable interpreter"* ]]
+    [[ "$output" != *"needs >= 3.10"* ]]
+    [ ! -e "$TEST_DIR/state/codexvenv" ]
+}
+
+@test "romp-codex-setup: builds its venv with the SDK venv's interpreter (the kernel's), not the newest python on PATH" {
+    # A codexvenv built with the newest python while the kernel runs the SDK venv's 3.11 would fail at
+    # import under the kernel exactly as the SDK venv did on 2026-09-06.
+    mkdir -p "$TEST_DIR/state/sdkvenv"
+    printf 'home = %s\nversion = 3.11.9\nexecutable = %s\n' "$TEST_DIR/oldpy" "$TEST_DIR/oldpy/python3.11" \
+        > "$TEST_DIR/state/sdkvenv/pyvenv.cfg"
+    write_stub_py "$TEST_DIR/oldpy/python3.11" 3.11          # the SDK venv's interpreter, off PATH
+    write_stub_py "$STUB/python3.12" 3.12                    # a newer python, first on PATH
+
+    PATH="$(bare_path)" run "$ROMP_DIR/bin/romp-codex-setup"
+
+    [ "$status" -eq 0 ]
+    grep -q "venv-build 3.11 $TEST_DIR/state/codexvenv" "$CALL_LOG"
+    [[ "$output" == *"creating venv at $TEST_DIR/state/codexvenv (python: $TEST_DIR/oldpy/python3.11)"* ]]
+    grep -q "executable = $TEST_DIR/oldpy/python3.11" "$TEST_DIR/state/codexvenv/pyvenv.cfg"
+    run grep -q "venv-build 3.12" "$CALL_LOG"                # last, and armed (see the sdk-setup twin)
+    [ "$status" -ne 0 ]
+}
+
+@test "romp-codex-setup: the rebuild check reads the venv's record, never its live bin/python" {
+    # the same repointed-base case as the SDK venv's: bin/python answers the new version, lib/ is the old
+    VENV="$TEST_DIR/state/codexvenv"; mkdir -p "$VENV/bin" "$VENV/lib/python3.12/site-packages"
+    write_stub_py "$TEST_DIR/usr/python3" 3.14
+    ln -s "$TEST_DIR/usr/python3" "$VENV/bin/python"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$VENV/bin/pip"; chmod +x "$VENV/bin/pip"
+    printf 'home = %s\nversion = 3.12.4\nexecutable = %s\n' "$TEST_DIR/usr" "$TEST_DIR/usr/python3.12" > "$VENV/pyvenv.cfg"
+
+    PATH="$(bare_path)" ROMP_PYTHON="$TEST_DIR/usr/python3" run "$ROMP_DIR/bin/romp-codex-setup"
+
+    [ "$status" -eq 0 ]
+    grep -q "venv-build 3.14 $VENV" "$CALL_LOG"
+    [[ "$output" == *"REBUILDING the Codex venv for python 3.14 ("* && "$output" == *"built for python 3.12."* ]]
+    [ -d "$VENV/lib/python3.14" ] && [ ! -d "$VENV/lib/python3.12" ]
 }
 
 # ── installs ship a PRODUCTION bundle ────────────────────────────────────────

@@ -7,14 +7,14 @@ fixtures SYNTHETIC."""
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
-km = SourceFileLoader("romp_kernel_jlview", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_jlview", os.path.join(BIN, "romp-kernel"))
 
 S_LOGIN = "aaaa2828-0000-0000-0000-000000000001"   # authLive says login
 S_KEY = "aaaa2828-0000-0000-0000-000000000002"     # authLive says key → untouched by the window

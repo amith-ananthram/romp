@@ -16,7 +16,7 @@ import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -25,11 +25,11 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
-km = SourceFileLoader("romp_kernel_chatfold", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_chatfold", os.path.join(BIN, "romp-kernel"))
 jd = km.jd                                      # the kernel's OWN judge module (a second load would rebind nothing)
 # a SECOND kernel instance for the deep replay: its fold cache is cleared before every build (always the
 # full path) while the first keeps folding fold on fold — the assembly replay's emi/emr arrangement
-kmr = SourceFileLoader("romp_kernel_chatfold_ref", os.path.join(BIN, "romp-kernel")).load_module()
+kmr = load_source("romp_kernel_chatfold_ref", os.path.join(BIN, "romp-kernel"))
 MODS = (km, kmr)
 
 SID = "11111111-2222-3333-4444-555555555555"
@@ -142,7 +142,12 @@ class Sess:
         os.utime(self.tpath, None)
 
     def build(self, mod=None):
-        return (mod or km).build_session(SID, self.now, self.tm)
+        m = mod or km
+        m._live_scope.names = m._names_snapshot()   # the pusher's names scope, as _pusher_cycle sets it: the fold's
+        try:                                        # sealed postal cards are verified from it (a build without the
+            return m.build_session(SID, self.now, self.tm)   # scope seals them unverified, see PostalCards)
+        finally:
+            m._live_scope.names = None
 
 
 def _dump(m):
@@ -410,7 +415,10 @@ class PostalCards(_Fold):
 
     def test_a_caption_rewritten_after_the_seal_refreshes_the_card(self):
         # the judge writes a LIVE caption under an id it later overwrites with the final one: a card
-        # sealed complete between the two must not keep the live gloss forever
+        # sealed complete between the two must not keep the live gloss forever. The caption is one of the
+        # values the sealed cards are keyed on (2026-09-09), so the card refreshes from the caption's change
+        # in _msg_summaries() alone: no judge generation is bumped here, and no transcript, log or states
+        # file changes
         s = self.s
         self._log()
         caps = {self.MID: "peer: tests green (live)"}
@@ -423,14 +431,16 @@ class PostalCards(_Fold):
         inc = self.equiv("card sealed with the live caption")
         card = next(ev for ev in inc["events"] if ev.get("kind") == "postal-service")
         self.assertEqual(card.get("summary"), "peer: tests green (live)")
+        self.assertEqual(km._chat_fold_get(SID)["postal_deps"], ((self.MID, "peer: tests green (live)", None, None),),
+                         "the entry records the values its card embeds: mid, caption, the sender's name and colour")
         caps[self.MID] = "peer: api tests green"          # the FINAL caption lands
-        for m in MODS:
-            m._judge_gen[0] += 1
-        n0 = km._CHAT_FOLD_STATS.get("g:postal", 0)
+        n0, g0 = km._CHAT_FOLD_STATS.get("g:postal", 0), km._chat_postal_stats["gate"]
         inc2 = self.equiv("caption rewritten")
         self.assertGreater(km._CHAT_FOLD_STATS.get("g:postal", 0), n0)
+        self.assertGreater(km._chat_postal_stats["gate"], g0, "the gate re-hydrated the sealed card")
         card2 = next(ev for ev in inc2["events"] if ev.get("kind") == "postal-service")
         self.assertEqual(card2.get("summary"), "peer: api tests green")
+        self.assertEqual(km._chat_fold_get(SID)["postal_deps"], ((self.MID, "peer: api tests green", None, None),))
 
     # ── the seal keeps only REAL postal Bash events raw (2026-09-06) ──────────────────────────────────
     def _bash_turn(self, i, command, result="ok\n"):
@@ -445,9 +455,9 @@ class PostalCards(_Fold):
         """Every _hydrate_postal call build_session makes from here on, as the event lists it was handed."""
         calls = []
         orig = km._hydrate_postal
-        def counting(events, index, sid=None):
+        def counting(events, index, sid=None, captions=None):
             calls.append(list(events))
-            return orig(events, index, sid)
+            return orig(events, index, sid, captions=captions)
         km._hydrate_postal = counting
         self.addCleanup(setattr, km, "_hydrate_postal", orig)
         return calls
@@ -498,12 +508,13 @@ class PostalCards(_Fold):
         self.assertEqual(len(calls), 2, "a judge pass with nothing postal sealed adds no hydration")
         self.assertEqual(km._CHAT_FOLD_STATS.get("g:postal", 0), n_postal, "and filed no postal demotion")
 
-    def test_a_bash_send_stays_raw_and_is_rehydrated_when_the_judges_run(self):
+    def test_a_bash_send_stays_raw_and_is_rehydrated_when_the_log_moves(self):
         # The `romp mail send` twin of the caption-rewrite test above: the send is the one Bash event the
-        # seal keeps raw in this transcript, and a judge pass re-hydrates exactly it, so its card can pick up the recipient's
-        # caption. The card's caption itself is pinned at the hydrator level (PostalRelevance): build_session
-        # stores a Bash input as JSON, which _cli_send_card does not unwrap, so no card renders here (a
-        # limit that predates this change and is not widened by it).
+        # seal keeps raw. Its rendering depends on the message log alone (no card renders here: build_session
+        # stores a Bash input as JSON, which _cli_send_card does not unwrap, a limit that predates this
+        # change), so a judge pass re-hydrates nothing and a log append re-hydrates exactly it. The commit
+        # reuses the sealed cards and hydrates only raw events new since the seal, so a warm build makes one
+        # hydration, the tail pass (it made two before, the second over the whole sealed raw list).
         s = self.s
         self._log()
         for m in MODS:
@@ -518,17 +529,26 @@ class PostalCards(_Fold):
         self.assertEqual(len(raw), 1, "the send, and only the send, rides the entry raw")
         self.assertEqual((raw[0]["kind"], raw[0]["name"]), ("tool", "Bash"))
         self.assertIsNotNone(km._cli_send_match(raw[0]), "kept by the matcher the card renders from")
+        self.assertEqual(km._chat_fold_get(SID)["postal_deps"], (None,), "a raw event that did not hydrate: the log alone")
         calls = self._count_hydrate()
+        h0, g0, c0 = km._chat_postal_stats["hit"], km._chat_postal_stats["gate"], km._chat_postal_stats["commit_new"]
         s.build()
-        # the tail pass, plus the re-commit hydrating the entry's raw list (the send alone)
-        self.assertEqual([len(c) == 1 and c[0] is raw[0] for c in calls], [False, True])
+        self.assertEqual(len(calls), 1, "the tail pass only: the commit reuses the sealed cards")
+        self.assertEqual((km._chat_postal_stats["hit"], km._chat_postal_stats["gate"], km._chat_postal_stats["commit_new"]),
+                         (h0 + 1, g0, c0))
         for m in MODS:
             m._judge_gen[0] += 1
         s.build()
-        # the gate re-hydrates the sealed send against the new captions, then the tail pass and the re-commit
-        self.assertEqual([len(c) == 1 and c[0] is raw[0] for c in calls[2:]], [True, False, True])
-        self.assertEqual(len(calls), 5)
-
+        self.assertEqual(len(calls), 2, "a judge pass re-hydrates nothing: the send embeds no judge-written value")
+        self.assertEqual((km._chat_postal_stats["hit"], km._chat_postal_stats["gate"]), (h0 + 2, g0))
+        # the log gains a row: the index the send would join moved, so the sealed send is re-hydrated
+        with open(jd.STATE / "timeline" / "messages.jsonl", "a") as f:
+            f.write(json.dumps({"ev": "sent", "id": self.MID + "b", "from": "web", "from_id": SID, "to_id": self.PEER,
+                                "body": "the api tests are green now", "kind": "coordinate", "t": s.t}) + "\n")
+        s.build()
+        self.assertEqual([len(c) == 1 and c[0] is raw[0] for c in calls[2:]], [True, False], "the gate, then the tail pass")
+        self.assertEqual((km._chat_postal_stats["hit"], km._chat_postal_stats["gate"]), (h0 + 2, g0 + 1))
+        self.assertEqual(km._chat_postal_stats["commit_new"], c0, "nothing new was sealed, so nothing new was hydrated")
 
 class PostalRelevance(_Fold):
     """_chat_postal_relevant decides what the fold keeps raw; _hydrate_postal decides what renders. The

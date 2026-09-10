@@ -14,8 +14,8 @@ conftest gives pytest, but neither covers `cd tests && python -m unittest test_x
 script run, so the per-module preamble is the primary defence and this test is the ratchet.
 
 The rule this file enforces, per tests/test_*.py module: if the module loads romp code (any
-SourceFileLoader call, or an import of the kernel/postal/cli packages), then BEFORE the first
-such load, at module top level, it must (a) assign os.environ["XDG_STATE_HOME"] (or
+load_source or SourceFileLoader call, or an import of the kernel/postal/cli packages), then BEFORE
+the first such load, at module top level, it must (a) assign os.environ["XDG_STATE_HOME"] (or
 ["ROMP_STATE_DIR"]) and (b) handle ROMP_STATE_DIR (assign it, or pop it — a live kernel exports
 it to its sessions, and it outranks the XDG floor). The canonical preamble:
 
@@ -25,15 +25,26 @@ it to its sessions, and it outranks the XDG floor). The canonical preamble:
     os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 
 Static AST scan, ordered by line number; every in-process load call counts as state-touching —
-SourceFileLoader and the importlib idioms (spec_from_file_location/exec_module/import_module/
-__import__) alike, since most bin/* files are or transitively load a STATE-resolving module, and
+load_source (tests/romp_load.py), SourceFileLoader and the importlib idioms
+(spec_from_file_location/exec_module/import_module/__import__) alike, since most bin/* files are or
+transitively load a STATE-resolving module, and
 the few that aren't pay two harmless lines rather than this test resolving targets. Out of scope by design: a subprocess
 spawned with a hand-built env= dict that carries the real HOME — env construction is dynamic and
 defeats static checking; the preamble covers the common case because a child spawned without
 env= inherits the mutated os.environ.
+
+Two more rules over the same directory live in this module, because they read the same file list.
+Every module loads through load_source: `SourceFileLoader(...).load_module()` warns on Python 3.10
+and later with removal documented for 3.15, tools/loadsource-sweep.py rewrites a module still
+written that way, and test_no_test_module_uses_the_removed_loader refuses the idiom by file and
+line, naming that command. Every pytest module is named test_<stem>.py, never <stem>_test.py:
+pytest's default collection takes both spellings, but unittest's discovery (test*.py), the
+state-isolation check above and tests/test_postal_marker_form.py's fixture scan take the test_
+prefix only, so a module under the other name would run with none of the three reading it.
 """
 import ast
 import os
+import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -48,15 +59,42 @@ PREAMBLE = (
 )
 
 ROOT_PACKAGES = {"kernel", "postal", "cli"}
-# Every in-process load form counts, not just the repo's usual SourceFileLoader: the
+# Every in-process load form counts, not just the repo's usual load_source and SourceFileLoader: the
 # spec_from_file_location + exec_module idiom (tests/test_colormap.py) aimed at a STATE-resolving
 # bin file would recreate the corruption with the ratchet silent otherwise.
-LOAD_CALLS = {"SourceFileLoader", "spec_from_file_location", "exec_module", "import_module",
-              "__import__"}
+LOAD_CALLS = {"load_source", "SourceFileLoader", "spec_from_file_location", "exec_module",
+              "import_module", "__import__"}
+
+# The files tools/loadsource-sweep.py never rewrites and test_no_test_module_uses_the_removed_loader
+# never reads: the suite's own plumbing (the loader helper, the two state floors, the report hook's
+# pattern table), none of which loads romp code by path. tests/test_loadsource_sweep.py pins this
+# tuple to the tool's SKIP, so a helper added to one list is added to the other.
+LOADER_SKIP = ("romp_load.py", "conftest.py", "__init__.py", "credential_patterns.py")
+
+
+# The ports the suite floors poison to a dead value (never popped: to every reader an absent variable
+# means the live default), in tests/conftest.py for pytest and tests/__init__.py for unittest runs.
+DEAD_PORTS = ("ROMP_MANAGER_PORT", "ROMP_KERNEL_PORT", "ROMP_SERVE_PORT")
 
 
 def _is_environ_attr(node):
     return isinstance(node, ast.Attribute) and node.attr == "environ"
+
+
+def _sets_env_to(stmt, name, value):
+    """Is `stmt` the statement os.environ[name] = value? (Set, not setdefault.)"""
+    if not (isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Constant) and stmt.value.value == value):
+        return False
+    return any(isinstance(t, ast.Subscript) and _is_environ_attr(t.value)
+               and isinstance(t.slice, ast.Constant) and t.slice.value == name for t in stmt.targets)
+
+
+def _is_autouse_fixture(fn):
+    """Is `fn` decorated @pytest.fixture(autouse=True)?"""
+    return any(isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute) and d.func.attr == "fixture"
+               and any(kw.arg == "autouse" and isinstance(kw.value, ast.Constant) and kw.value.value is True
+                       for kw in d.keywords)
+               for d in fn.decorator_list)
 
 
 def _environ_key(node):
@@ -65,6 +103,16 @@ def _environ_key(node):
         if isinstance(node.slice, ast.Constant):
             return node.slice.value
     return None
+
+
+def removed_loader_sites(tree):
+    """The line of every `<expr>.load_module()` call in a parsed module, in source order. The call is
+    what Python removes; SourceFileLoader itself stays (kernel/loadsource.py builds on it), so an
+    import kept for another purpose is not flagged. tools/loadsource-sweep.py's leftovers() is the
+    same scan, pinned equal by tests/test_loadsource_sweep.py."""
+    return sorted(node.lineno for node in ast.walk(tree)
+                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                  and node.func.attr == "load_module")
 
 
 def scan(path):
@@ -123,19 +171,118 @@ class StateIsolationOrder(unittest.TestCase):
             "These modules load romp code before making the state root hermetic — under a bare\n"
             "unittest or script run they operate on the REAL ~/.local/state/romp (which is how\n"
             "tests/test_kernel.py overwrote the real remotes.json on 2026-08-12). Put this at\n"
-            "module top level, above the first SourceFileLoader line:\n\n%s\n\n%s"
+            "module top level, above the first load_source or SourceFileLoader line:\n\n%s\n\n%s"
             % (PREAMBLE, "\n".join(bad)))
+
+    def test_scan_counts_a_load_source_call_as_a_load(self):
+        # tests/romp_load.py's load_source is a load like the others: a module that calls it before
+        # the floor must be caught, or the ratchet is blind to every module written that way
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "test_probe.py")
+            with open(path, "w") as f:
+                f.write('import os\n'
+                        'from romp_load import load_source\n'
+                        'km = load_source("romp_kernel_probe", "bin/romp-kernel")\n'
+                        'os.environ["XDG_STATE_HOME"] = "too late"\n')
+            first_load, first_set, rsd_handled = scan(path)
+        self.assertEqual(first_load, 3, "the load_source call is the module's first load")
+        self.assertEqual(first_set, 4)
+        self.assertIsNone(rsd_handled)
+
+    def test_no_test_module_uses_the_removed_loader(self):
+        """Every module here loads by load_source (tests/romp_load.py). SourceFileLoader.load_module()
+        warns on Python 3.10 and later and its removal is documented for 3.15, so a module still
+        written that way (a branch from before the conversion) fails here by file and line, with the
+        command that rewrites it, instead of surviving as a warning until the interpreter removes the
+        call. Outside the scan's reach, by construction, and a hand edit each: the idiom inside a
+        string (a child-process snippet), and the sys.path line a module needs before `from romp_load
+        import load_source` when another test executes it by file path from outside this directory
+        (tests/smoke_codex_live.py, under tests/test_state_dir_override.py's child)."""
+        stale = []
+        for fn in sorted(os.listdir(HERE)):
+            if not fn.endswith(".py") or fn in LOADER_SKIP:
+                continue
+            tree = ast.parse(open(os.path.join(HERE, fn)).read(), filename=fn)
+            stale.extend("%s:%d calls load_module()" % (fn, lineno) for lineno in removed_loader_sites(tree))
+        self.assertFalse(stale,
+            "These modules still use SourceFileLoader.load_module(), deprecated with removal documented\n"
+            "for Python 3.15. Run tools/loadsource-sweep.py and commit the result:\n%s" % "\n".join(stale))
+
+    def test_every_pytest_module_is_named_test_stem(self):
+        """pytest's default python_files collects test_*.py and *_test.py alike, but unittest's
+        discovery (test*.py), the state-isolation check above and tests/test_postal_marker_form.py's
+        fixture scan take the test_ prefix only. A module named <stem>_test.py therefore runs under
+        pytest and is read by none of those three: a state-root or fixture mistake there would fail
+        nothing. The convention is test_<stem>.py, and this holds it."""
+        stray = sorted(fn for fn in os.listdir(HERE)
+                       if fn.endswith("_test.py") and not fn.startswith("test_"))
+        self.assertFalse(stray,
+            "These modules are collected by pytest but skipped by unittest's discovery, the state-isolation\n"
+            "check and the fixture scan (each takes test_*.py only). Rename each to test_<stem>.py:\n%s"
+            % "\n".join(stray))
 
     def test_the_suite_wide_floors_stay_in_place(self):
         # The suspenders: conftest.py (pytest) and __init__.py (unittest package runs) each set the
         # XDG floor and drop an inherited ROMP_STATE_DIR override. Pin them so neither is silently
-        # deleted or loses the pop.
+        # deleted or loses the pop. The same two files poison the manager's control port and the
+        # kernel's port (both spellings) to a dead value: to every reader an ABSENT variable means the
+        # live default (bin/romp-manager's control port; kernel.py's PORT, postal_service.py's
+        # KERNEL_BASE, bin/romp's per-subcommand port and hooks/romp-wake.sh all default to 29855), so
+        # a pop is not safe and only a set value is. Pinned on the source, as the floors above are:
+        # every module is collected before any test runs, and several set the same values at import,
+        # so a run-time read cannot tell the import-time floor from a module's own set. conftest.py's
+        # two halves are pinned apart, as tests/test_cli_scope_floor.py pins the cli-scope floor: the
+        # module-level statement covers collection, and the autouse fixture's re-assert covers the run
+        # phase against a module-level write in a test file (which also executes at collection).
+        bodies = {}
         for fn in ("conftest.py", "__init__.py"):
             src = open(os.path.join(HERE, fn)).read()
             self.assertIn('os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp', src,
                           "%s must keep the temp XDG_STATE_HOME floor" % fn)
             self.assertIn('os.environ.pop("ROMP_STATE_DIR", None)', src,
                           "%s must keep dropping an inherited ROMP_STATE_DIR override" % fn)
+            bodies[fn] = ast.parse(src, filename=fn).body
+            for var in DEAD_PORTS:
+                self.assertTrue(any(_sets_env_to(stmt, var, "1") for stmt in bodies[fn]),
+                                '%s must set os.environ["%s"] = "1" at module level: absent means the live default'
+                                % (fn, var))
+        fixtures = [node for node in bodies["conftest.py"]
+                    if isinstance(node, ast.FunctionDef) and _is_autouse_fixture(node)]
+        self.assertTrue(fixtures, "conftest.py has no autouse fixtures at all")
+        for var in DEAD_PORTS:
+            self.assertTrue(any(any(_sets_env_to(stmt, var, "1") for stmt in fx.body) for fx in fixtures),
+                            'no autouse fixture in conftest.py re-asserts os.environ["%s"] = "1": one test '
+                            "module's import-time write would otherwise hold for every test after it" % var)
+
+
+class DeadPortsHoldPerTest(unittest.TestCase):
+    """The run-time half of the port floor, under pytest only: conftest.py's autouse fixture writes the
+    three dead ports before every test, so a value a test file writes at module or class level cannot
+    outlive collection or class setup. setUpClass writes a second dead port; pytest sets a class up
+    before its function-scoped fixtures run, so the fixture's re-assert lands between that write and the
+    read below, which therefore tells the fixture from any module's own import-time set (the source pins
+    above cannot). A bare unittest run has no fixture and nothing to check, so the test skips there."""
+    OTHER_DEAD_PORT = "2"   # any value but the floor's shows the re-assert; a dead one dials nothing if it is missing
+
+    @classmethod
+    def setUpClass(cls):
+        cls._saved = {var: os.environ.get(var) for var in DEAD_PORTS}
+        for var in DEAD_PORTS:
+            os.environ[var] = cls.OTHER_DEAD_PORT
+
+    @classmethod
+    def tearDownClass(cls):
+        for var, val in cls._saved.items():
+            if val is None:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = val
+
+    def test_the_dead_ports_hold_while_this_test_runs(self):
+        if "PYTEST_CURRENT_TEST" not in os.environ:
+            self.skipTest("conftest.py's per-test re-assert exists under pytest only")
+        for var in DEAD_PORTS:
+            self.assertEqual(os.environ.get(var), "1", "%s is not re-asserted per test" % var)
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ import time
 import unittest
 from http.client import HTTPMessage
 from http.server import ThreadingHTTPServer
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 import tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -35,12 +35,12 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
+load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "test-token-DO-NOT-USE")
-km = SourceFileLoader("romp_kernel", os.path.join(BIN, "romp-kernel")).load_module()
-sb = SourceFileLoader("romp_sdk_backend_authhard", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
+sb = load_source("romp_sdk_backend_authhard", os.path.join(BIN, "romp_sdk_backend.py"))
 
 TOK = km.TOKEN
 
@@ -60,6 +60,12 @@ def _serve_get(path, headers=None):
 
     Asserting on a route's position in the source cannot catch a route served on the wrong side of
     the gate; asking the handler is the only thing that can."""
+    status, _sent, body = _serve_get_full(path, headers)
+    return status, body
+
+
+def _serve_get_full(path, headers=None):
+    """_serve_get with the response headers too: (status, {header: value}, body)."""
     h = km.Handler.__new__(km.Handler)
     h.client_address = ("127.0.0.1", 0)
     h.headers = dict(headers or {})
@@ -82,7 +88,7 @@ def _serve_get(path, headers=None):
     h.end_headers = lambda: None
     h.log_message = lambda *a: None
     h.do_GET()
-    return captured.get("status"), h.wfile.getvalue().decode("utf-8", "replace")
+    return captured.get("status"), captured.get("headers", {}), h.wfile.getvalue().decode("utf-8", "replace")
 
 
 def _auth(peer="127.0.0.1", headers=None, token=None):
@@ -190,6 +196,20 @@ class CookieDoesNotBypassOrigin(unittest.TestCase):
                                   "Host": "127.0.0.1:%d" % km.PORT})
         self.assertTrue(ok)
 
+    def test_cookie_still_authorizes_the_kernels_own_loopback_origin_under_another_host(self):
+        # the kernel's own origin reached under its other loopback name: a page served at
+        # http://127.0.0.1:<port> whose request arrives with Host localhost:<port>, or the reverse.
+        # The Host string no longer matches the Origin, so same-origin-by-Host does not apply and
+        # the gate's own-loopback branch is the one that accepts (the case SECURITY.md names as the
+        # kernel's own port on 127.0.0.1 or localhost); it fails when that branch is removed.
+        for origin, host in (("http://127.0.0.1:%d" % km.PORT, "localhost:%d" % km.PORT),
+                             ("http://localhost:%d" % km.PORT, "127.0.0.1:%d" % km.PORT)):
+            with self.subTest(origin=origin, host=host):
+                ok, _, why = _auth(headers={"Cookie": "romp_token=" + TOK,
+                                            "Origin": origin, "Host": host})
+                self.assertTrue(ok, "the kernel's own loopback origin authorizes the cookie under "
+                                    "either of its names: " + why)
+
     def test_cookie_still_authorizes_the_vscode_webview(self):
         ok, _, _ = _auth(headers={"Cookie": "romp_token=" + TOK,
                                   "Origin": "vscode-webview://0p9m1abc"})
@@ -212,6 +232,7 @@ class ResponseHardeningHeaders(unittest.TestCase):
         self.assertIn('"X-Content-Type-Options", "nosniff"', src)
         self.assertIn('"X-Frame-Options", "SAMEORIGIN"', src)
         self.assertIn("frame-ancestors 'self'", src)
+        self.assertIn('"Referrer-Policy", "same-origin"', src)   # executed by TokenLeavesTheUrl below
 
     def test_remote_relay_derives_its_own_mime_and_discards_the_remotes(self):
         # the /remote/<host>/file relay must decide the Content-Type from the requested extension
@@ -224,6 +245,92 @@ class ResponseHardeningHeaders(unittest.TestCase):
         # the type must not be READ from the remote (a comment may still name it as "never this")
         self.assertNotIn("ctype = resp.getheader", src)
         self.assertNotIn('resp.status, resp.getheader("Content-Type")', src)
+
+
+# The shell's head <script> (the wid mint, the iOS-standalone flip, the address scrub) against stubs of
+# the few browser globals it touches. ROMP_TEST_HREF is the URL the page opened on; REPLACED records
+# every history.replaceState. navigator is a getter-only global in node, so it is defined, not
+# assigned; crypto is left as node's own (the mint's randomUUID).
+_HEAD_HARNESS = r"""
+'use strict';
+const REPLACED = [];
+global.window = global;
+global.sessionStorage = { getItem: () => null, setItem() {} };
+global.document = { documentElement: { className: '' }, querySelector: () => null };
+Object.defineProperty(global, 'navigator', { configurable: true, value: { standalone: false } });
+global.location = { href: process.env.ROMP_TEST_HREF };
+global.history = { replaceState: (s, t, u) => REPLACED.push(u) };
+"""
+_HEAD_DRIVER = "\nconsole.log(JSON.stringify(REPLACED));\n"
+
+
+def _head_script(html):
+    """The shell's FIRST <script>: the head script, before <body> (tests/test_per_viewer_focus.py pins
+    the wid mint there)."""
+    i = html.index("<script>") + len("<script>")
+    return html[i:html.index("</script>", i)]
+
+
+def _run_head_script(href):
+    """node runs the harness + the shell's head script, booting on `href`; returns the replaceState URLs."""
+    import subprocess
+    env = dict(os.environ, ROMP_TEST_HREF=href)
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+        f.write(_HEAD_HARNESS + _head_script(km._landing()) + _HEAD_DRIVER)
+        path = f.name
+    try:
+        r = subprocess.run(["node", path], capture_output=True, text=True, timeout=30, env=env)
+    finally:
+        os.unlink(path)
+    assert r.returncode == 0, "the head script threw: " + r.stderr[:800]
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+class TokenLeavesTheUrl(unittest.TestCase):
+    """The token a browser presents as ?token= is spent by the response that serves the page: that
+    response turns it into the cookie every later request rides. The URL copy must not outlive it: a
+    document URL is what a Referer carries, what a same-origin iframe reads as document.referrer and
+    what the address bar shows. Two guards, both executed: the shell drops the param from its address
+    in its head script, before the manifest link or the first iframe can make a request, and every
+    page the kernel serves declares Referrer-Policy: same-origin, so no browser default decides
+    whether a cross-origin load (an <img> in a transcript) learns the page URL."""
+
+    def test_the_shell_drops_the_token_from_its_address_before_any_request(self):
+        cases = (
+            # the token goes; the other params and the hash stay, in the same document (no reload)
+            ("http://localhost:7777/?token=abc&keep=1#frag", ["/?keep=1#frag"]),
+            # nothing to drop, nothing rewritten (a reload after the scrub lands here)
+            ("http://localhost:7777/?keep=1#frag", []),
+            # the token alone leaves the bare path, no dangling '?'
+            ("http://localhost:7777/?token=abc", ["/"]),
+            # a push deep link survives for the reveal script, which strips its own params later in the body
+            ("http://localhost:7777/?token=abc&push-reveal=S1", ["/?push-reveal=S1"]),
+            # the rest of the query is re-serialized by URLSearchParams, so a comma comes back as %2C;
+            # the shell's panes reader goes through searchParams.get, which decodes it
+            ("http://localhost:7777/?token=abc&panes=chat,feed#frag", ["/?panes=chat%2Cfeed#frag"]),
+        )
+        for href, replaced in cases:
+            with self.subTest(href=href):
+                self.assertEqual(_run_head_script(href), replaced)
+        # ...and it runs in the head: ahead of the install manifest's fetch and of the first pane
+        html = km._landing()
+        scrub = html.index("searchParams['delete']('token')")
+        self.assertLess(scrub, html.index("</script>"), "inside the head script, not a script of its own")
+        self.assertLess(scrub, html.index("<link rel=manifest"))
+        self.assertLess(scrub, html.index("<iframe"))
+
+    def test_every_page_the_kernel_serves_carries_referrer_policy_same_origin(self):
+        # the shell on its token bootstrap: the response that sets the cookie is the one whose page
+        # then drops the token from its address; a pane page a user can open bare; a static asset
+        status, sent, _ = _serve_get_full("/?token=" + TOK)
+        self.assertEqual(status, 200)
+        self.assertTrue(sent.get("Set-Cookie", "").startswith("romp_token="), "the bootstrap response")
+        self.assertEqual(sent.get("Referrer-Policy"), "same-origin")
+        for path in ("/chat", "/media/romp-swirl-glyph.svg"):
+            with self.subTest(path=path):
+                status, sent, _ = _serve_get_full(path, headers={"X-Romp-Token": TOK})
+                self.assertEqual(status, 200)
+                self.assertEqual(sent.get("Referrer-Policy"), "same-origin")
 
 
 class _DrainSpy:

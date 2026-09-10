@@ -17,7 +17,9 @@
 // bubble's own entry; (13) a stamp taken late reads the events' own times. Round 4: (14) a late stamp
 // presumes the frame's newest queued copy of its text is its own (the queued bubble carries no stamp).
 // T252c gave every kernel copy an id; now (15) the id is the CLIENT's, minted at the press and posted with the
-// send, so the kernel's copies wear it from their first appearance and nothing is latched by text.
+// send, so the kernel's copies wear it from their first appearance and nothing is latched by text. And (16) at
+// a late stamp an event that NAMES the send (wears its id) is this send's whatever its stamp: the id outranks
+// the clock.
 // The decisions are executed through send-pending.ts; the DOM half is pinned in render.ts/styles.css.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
@@ -660,6 +662,91 @@ test("two back-to-back sends the CLI took as ONE record retire both bubbles; a t
     "…but were one ever shipped with blocks, its copies would be read the same way (by text: the entry's own id shows nowhere in it, the view reconcilePending reads such a push with)");
 });
 
+// ── (16) at a late stamp the send's id outranks the clock ────────────────────────────────────────
+
+test("a late stamp reads an event that NAMES the send as this send's, whatever its stamp: a client clock ahead of the kernel", () => {
+  const isoAt = (s: number) => new Date(s * 1000).toISOString();   // kernel.py iso(t): ISO-8601 UTC, whole seconds
+  const pressMs = T0 + 200;                                          // the press, on the client's clock
+  const S = Math.floor(pressMs / 1000);
+  const late = (): PendingSend => ({ ...newPending(TEXT, undefined, pressMs), late: true });   // registerOptimistic, no resident session
+  const step: TailEvent = { kind: "assistant", md: "…", uuid: "a1", ts: isoAt(S - 10) };
+  // The client's clock runs a second ahead of the kernel's, so the kernel stamps this send's own records at
+  // S - 1, BEFORE the press's second: read by stamp alone, every one of them is background. Each record below
+  // wears the send's id (newPending minted it, so the echo's uuid is built from the entry), and the id decides.
+  // (a) the kernel's echo, whose uuid IS the id
+  let list = [late()];
+  let p = list[0];
+  let r = reconcilePending([step, { kind: "user", md: TEXT, uuid: p.qid!, ts: isoAt(S - 1) }], list);
+  assert.deepEqual(p.at?.seen, [], "the echo wears this send's id: not background, whatever its stamp");
+  assert.equal(p.at?.after, "a1");
+  assert.deepEqual([r.inject.length, r.echoHide], [1, [1]], "the echo covers ours and is hidden: one bubble, not two");
+  assert.equal(p.received, true, "the kernel has this send");
+  // (b) the landed atom, wearing the id
+  list = [late()]; p = list[0];
+  r = reconcilePending([step, { kind: "user", md: TEXT, uuid: "u-landed", ts: isoAt(S - 1), qid: p.qid }], list);
+  assert.equal(p.at?.after, "a1", "the send's own landing is not its anchor");
+  assert.deepEqual(r.landed.map((l) => l.idx), [1], "it is the landing: the bubble ends, instead of never ending");
+  // (c) the same, with a reply after it stamped inside the same skew
+  list = [late()]; p = list[0];
+  r = reconcilePending([step, { kind: "user", md: TEXT, uuid: "u-landed", ts: isoAt(S - 1), qid: p.qid }, { kind: "assistant", md: "done", uuid: "a2", ts: isoAt(S - 1) }], list);
+  assert.equal(p.at?.after, "a1", "nothing at or after the send's own record anchors it, whatever its stamp");
+  assert.deepEqual(r.landed.map((l) => l.idx), [1]);
+  // (d) the landing as the frame's only event
+  list = [late()]; p = list[0];
+  r = reconcilePending([{ kind: "user", md: TEXT, uuid: "u-landed", ts: isoAt(S - 1), qid: p.qid }], list);
+  assert.equal(p.at?.after, null, "no anchor: the frame holds nothing before the send");
+  assert.deepEqual(r.landed.map((l) => l.idx), [0]);
+  // (e) a record of several sends, one of whose blocks wears the id
+  list = [late()]; p = list[0];
+  r = reconcilePending([step, { kind: "user", md: TEXT + " " + TEXT, blocks: [TEXT, TEXT], qids: [p.qid!, "echo:" + "f".repeat(32)], uuid: "uXY", ts: isoAt(S - 1) }], list);
+  assert.equal(p.at?.after, "a1");
+  assert.deepEqual(r.landed.map((l) => l.idx), [1]);
+  // (f) the kernel's never-delivered verdict: the echo wearing the id, flagged
+  list = [late()]; p = list[0];
+  r = reconcilePending([step, { kind: "user", md: TEXT, uuid: p.qid!, ts: isoAt(S - 1), undelivered: true }], list);
+  assert.deepEqual(r.lost, [p], "the verdict on this send is read, not filed as an old bubble");
+  // (g) a same-text record AFTER the one that names the send, stamped inside the same skew, is after the
+  // send too: neither background nor the anchor
+  list = [late()]; p = list[0];
+  r = reconcilePending([step, { kind: "user", md: TEXT, uuid: "u-landed", ts: isoAt(S - 1), qid: p.qid }, { kind: "user", md: TEXT, uuid: "u-after", ts: isoAt(S - 1) }], list);
+  assert.equal(p.at?.after, "a1");
+  assert.deepEqual(p.at?.seen, [], "nothing from the send's own record on is background, whatever its stamp");
+  assert.deepEqual(r.landed.map((l) => l.idx), [1]);
+  // (h) two records naming the send (the kernel shows one per send; the rule is stated for the first): the
+  // FIRST bounds the frame
+  list = [late()]; p = list[0];
+  r = reconcilePending([step, { kind: "user", md: TEXT, uuid: p.qid!, ts: isoAt(S - 1) }, { kind: "user", md: TEXT, uuid: "u-landed", ts: isoAt(S - 1), qid: p.qid }], list);
+  assert.equal(p.at?.after, "a1");
+  assert.deepEqual(p.at?.seen, [], "the first record naming the send bounds the background, not the last");
+  // The stamp bound still decides for a record that carries no id, or another send's, and for an entry
+  // that names nothing:
+  // (i) a same-text record wearing ANOTHER send's id, stamped early, is background by text
+  list = [late()]; p = list[0];
+  r = reconcilePending([step, { kind: "user", md: TEXT, uuid: "u-other", ts: isoAt(S - 1), qid: "echo:" + "e".repeat(32) }], list);
+  assert.equal(p.at?.after, "u-other");
+  assert.deepEqual(p.at?.seen, ["u-other"]);
+  assert.deepEqual([r.keep.length, r.inject.length], [1, 1]);
+  // (j) an id-less record stamped early (an older kernel, the tmux route) is background
+  list = [late()]; p = list[0];
+  r = reconcilePending([step, { kind: "user", md: TEXT, uuid: "u-old", ts: isoAt(S - 1) }], list);
+  assert.equal(p.at?.after, "u-old");
+  assert.deepEqual(p.at?.seen, ["u-old"]);
+  assert.deepEqual([r.keep.length, r.inject.length], [1, 1]);
+  // (k) only the kernel's USER records name the send: every event carries a uuid, and one of another kind
+  // that wore the id (no kernel event does) would neither bound the frame nor anchor the send
+  list = [late()]; p = list[0];
+  r = reconcilePending([step, { kind: "assistant", md: "…", uuid: p.qid!, ts: isoAt(S - 5) }, { kind: "user", md: TEXT, uuid: "u-old", ts: isoAt(S - 1) }], list);
+  assert.equal(p.at?.after, "u-old", "an event of another kind names nothing: the stamp bound alone decides");
+  assert.deepEqual(p.at?.seen, ["u-old"]);
+  // (l) an entry with no id (older data; newPending always mints one) names nothing: a same-text id-less
+  // record stamped early is background for it, never its landing
+  list = [{ ...late(), qid: undefined }]; p = list[0];
+  r = reconcilePending([step, { kind: "user", md: TEXT, uuid: "u-old", ts: isoAt(S - 1) }], list);
+  assert.equal(p.at?.after, "u-old", "an entry with no id names nothing: the stamp bound alone decides");
+  assert.deepEqual(p.at?.seen, ["u-old"]);
+  assert.equal(r.keep.length, 1);
+});
+
 // ── (T252c, second review) identity decides where the frame SHOWS it; text decides where it does not ──────
 
 test("two identical identified sends the CLI took as one record both retire on that landing (T252c second review)", () => {
@@ -766,6 +853,27 @@ test("newPending mints the send's id at the press, in the kernel's echo form, un
   assert.deepEqual(list, [p]);
   assert.equal(dropPending(list, "x", undefined, q.qid), undefined, "an id no entry owns removes nothing");
   assert.deepEqual(list, [p]);
+});
+
+test("our bubble's ✕ carries the press time AND the id: the id decides, never the first same-text entry pressed in the same millisecond", () => {
+  // two same-text sends registered in one synchronous loop can share a Date.now() stamp and differ only by id:
+  // flushStaged posts each staged slash command and goal-cited item as its own send, and adoptProvisional posts each
+  // text a new session's tab held the same way. The ✕ on OUR bubble rides both (data-qts and data-qid), and the id is
+  // the identity.
+  const p = newPending("x", undefined, T0), q = newPending("x", undefined, T0);
+  assert.notEqual(p.qid, q.qid);
+  const list = [p, q];
+  assert.equal(dropPending(list, "x", T0, q.qid), q, "our bubble's ✕ carries the press time and the id: the id decides, never the first entry with the text and the millisecond");
+  assert.deepEqual(list, [p]);
+  assert.equal(dropPending(list, "x", T0, q.qid), undefined, "an id no entry owns removes nothing, not the same-text neighbour pressed in the same millisecond");
+  assert.deepEqual(list, [p]);
+  // the cancel the kernel answers names the same id, so the entry the client drops is the copy the kernel removes
+  // (an id-first drop that misses leaves the neighbour for ITS own ✕); an id-less bubble, older data, still names
+  // its entry by the press time and the text, never a same-text neighbour pressed at another time
+  const r = newPending("x", undefined, T0 + 1);
+  list.push(r);
+  assert.equal(dropPending(list, "x", T0), p);
+  assert.deepEqual(list, [r]);
 });
 
 test("the ✕ on a kernel copy the kernel identified otherwise drops the send it covered by text on the last push, and nothing when it covered none of ours", () => {

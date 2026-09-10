@@ -517,6 +517,51 @@ Run `romp-service install` again after changing one. The service unit bakes in
 whatever is set at install time, so a renumbered port that only lives in your
 shell leaves the supervised manager on the old one, and the two collide.
 
+### The kernel's Python
+
+The kernel and its Agent SDK venv (`sdkvenv` under the state directory) must
+run the same Python: the venv's compiled extensions import into the kernel
+process. The match is on the tag venv names its `lib` directory with (`3.14`,
+or `3.14t` for a free-threaded build), not on the version alone, so a
+free-threaded build's venv matches that build and no other. `bin/romp-serve`
+picks the interpreter in this order: `ROMP_PYTHON` if set, refused with one
+line when it is not an executable interpreter (a pin naming a removed path
+used to reach the exec and crash-loop the manager); otherwise the interpreter
+the venv's `pyvenv.cfg` records, if it still runs and still reports the venv's
+tag, the recorded X.Y plus the build its `lib` directory names (an upgrade
+that repoints `python3` leaves the recorded path runnable while the venv is
+stale); otherwise another interpreter of that same minor and the same build on
+`PATH` or in `~/.local/bin`, which the venv still matches, with a line saying
+so (`python3.14t` and then `python3.14` for a free-threaded venv; the build is
+read from `sys.abiflags`, not from the file name, because uv's free-threaded
+install links `python3.14` to `python3.14t`); otherwise the newest `pythonX.Y`
+on `PATH` or in `~/.local/bin`, the rule for a machine with no venv yet, with a
+line saying the venv must be rebuilt for it. So installing a newer Python does
+not change what the kernel runs at its next restart. On a machine that runs
+romp as a service, pin it anyway: `ROMP_PYTHON=/usr/bin/python3.12` in
+`service.env` makes the choice explicit and holds if the venv is deleted or
+rebuilt. Pin the versioned path, not `python3`, which an upgrade repoints.
+
+Moving romp to another Python, whether another version or the free-threaded
+build of the same one, takes four steps, and skipping any one of them leaves a
+kernel that cannot start sessions: set `ROMP_PYTHON` to the new interpreter in
+`service.env`, run `bin/romp-sdk-setup` with the same value, run the test
+suite on that interpreter, then restart the manager. The setup script compares
+the venv's record (the version `pyvenv.cfg` holds plus the tag of its
+`lib/python3.X` directory, never the venv's own `bin/python`, a symlink that
+follows a repointed base interpreter) against the new interpreter's tag,
+rebuilds on any difference and says from what to what. A kernel that does come
+up on a Python the venv was not built for logs one line naming both tags, and
+each SDK session reports the mismatch and the remedy that fits: the
+`ROMP_PYTHON` pin when the venv's recorded interpreter still runs as the
+venv's python (the kernel runs it and reads its version and build), the
+rebuild otherwise. `romp new` and the browser's create refuse with the same
+verdict, read from the disk at the moment of the request, so a venv rebuilt
+while the kernel runs is reported on both surfaces as set up after romp
+started, with the restart as the remedy. The Codex venv (`codexvenv`, built by
+`bin/romp-codex-setup`) follows the same pick and the same rebuild check, and
+the kernel adds only the site-packages built for its own tag from it as well.
+
 ### Service environment and credentials
 
 The manager runs as a login service (launchd on macOS, systemd --user on
@@ -662,7 +707,10 @@ token included. Its output must be one non-empty line with no whitespace, at
 most 16 KiB; a trailing newline is forgiven. A helper that fails is a problem
 row in the Log panel in static words. With no helper configured the catalog
 serves its cached list, or its built-in one, and the kernel log says why at
-each refresh attempt (boot, and once per model id it does not know); the
+each refresh attempt (an install's first boot, when no cache exists, and once
+per model id it does not know; a boot with a cache serves it, says so with the
+cache's fetch time, and never runs the helper: the helper can be a desktop
+prompt, and a boot is not an event); the
 pickers still work, and Claude Code's own alias table still tracks each
 family's newest. The fast-mode probe then leaves the CLI's own check standing
 and says nothing.
@@ -973,6 +1021,31 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `push.*` stages count every push, including the one a connecting page gets,
   so they can add up to more than `push`.
 - `builds`: `chat`, `feed`, `timeline`, each with `cached`, `built`, `ms`.
+  Every chat tab, the watched one included, is served from its cached build
+  while one complete per-session signature holds: one component per input the
+  build reads (the transcript and states files, the session's goal store and
+  its journal and archive, the task store, the backend's live tail by
+  revision, its queue and brackets, the liveness row, the clock crossings the
+  payload renders, the parked ops, the account hold behind a queued bubble,
+  the retry state, the live background-task rows, the watches, the awaiting
+  stamp, the shared files, the cwd's branch and repository, the instruction
+  files, and the files and postal values the last build embedded). `chat`
+  also carries `active_built` and `bg_built` (rebuilds of the watched tab
+  against rebuilds of a background tab), `moved` (builds not cached because
+  an input moved while they ran; the next cycle builds them again) and
+  `bg_miss`, a map from each labelled component of that signature
+  (`transcript`, `states`, `store`, `hold`, `archive`, `episodes`, `reg`,
+  `gone`, `tasks`, `cut`, `live`, `row`, `clock`, `backend`, `ops`, `limit`,
+  `retry`, `bg`, `watch`, `stamp`, `anchors`, `downtime`, `names`, `flags`,
+  `ncards`, `colormap`, `acct`, `cleared`, `host`, `cwd`, `claudemd`, `fork`,
+  `taskout`, `pathlink`, `postal`, plus `cold` for a tab with no cached
+  build and `nosig` for one whose signature could not be taken) to the
+  background rebuilds it caused. A rebuild with several moved components
+  counts under each, so the map's sum can exceed `bg_built`. One session's
+  goal-store publish moves that session's `store` component and no other
+  tab's; the judge-pass generation busts the feed and timeline caches only.
+  `romp perf` prints the split and the non-zero causes after the chat
+  average, and the moved count when it is non-zero.
 - `sends`: `full`, `delta`, `deduped`, each a map from slot name (`chat`,
   `feed`, `bars`, `taborder`, ...) to `count` and `bytes`. A deduplicated frame
   was built and compared, then not sent.
@@ -1069,6 +1142,37 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   gauge `entries`; `segs_hit` and `segs_miss` count the segments served and
   derived. `dead_serve`, `dead_miss` and `dead_failed_serve` are the dead-lane
   memo's outcomes on the same block, so one block carries every lane.
+  Four memos cover the chat build's per-build fixed costs, each keyed on the
+  inputs it reads and evicted by the pusher with the tab set (a comment thread
+  built this cycle is kept, like its fold prefix). `chatMergeSets` is the
+  live-tail merge's memo of the sets it derives from a parsed transcript (the
+  uuids and user texts the transcript already holds, and the newest human
+  turn's time), one entry per session keyed on the parsed session object's
+  identity and shared by the chat, feed and timeline builds of one cycle:
+  `hit` and `miss` (merges served against derived) and the gauge `entries`
+  (a session neither shown as a tab nor alive is dropped). `chatPostal` is
+  the chat fold's memo of a tab's sealed postal cards, keyed on the values
+  the cards embed from outside the transcript (the message log's identity
+  and, per card, its caption and its peer's name and colour): `gate` (gate
+  checks that re-hydrated a tab's sealed cards because one of those values
+  moved, or because the entry was sealed outside the pusher's names snapshot
+  and had to be verified), `hit` (checks that verified the sealed cards from
+  their recorded values without hydrating), and `commit_new` (raw postal
+  events hydrated at fold commits; each is hydrated once, when it is first
+  sealed). Before this memo every judge pass re-hydrated every tab's sealed
+  cards, although a caption is the only judge-written value a card carries.
+  `chatLedger` is the chat build's memo of a session's goal-tree walk and
+  live roots, keyed on the parsed transcript's identity, the store's
+  identity and seams, `cleared.jsonl`'s identity and the warm-anchor table's
+  per-session revision: `hit` and `miss`, `bypass_live` (a build that merged
+  live atoms: the last turn's segments differ from the parse's),
+  `bypass_hold` (an armed rewind hold filters a store copy per build),
+  `bypass_empty` (a store with no nodes), `evict` (entries dropped for tabs
+  no longer shown) and the gauge `entries`. `chatFoldTasks` is the per-turn
+  memo of the transcript's task fold, keyed per session on each turn's atoms
+  list and fingerprint: `hit` and `miss` count turns served from the memo
+  against turns scanned, so a build of a working session with one moved turn
+  is one miss, plus the gauge `entries` (sessions held).
 - `judge`: `passes`, `ms_sum`, `ms_last`, `ms_mean` (wall time; a pass waits
   on model calls), `cpu_ms_sum` (CPU time of the judge tier threads and every
   per-session worker they run; the workers' share is `cpu_ms_workers`).
@@ -1633,6 +1737,60 @@ read-only disk) is told to the gesture that asked, the gear's toast or the
 stop button's warning, and said once per fault episode in the error center;
 the automatic pass sends nothing whose record could not land, and the file
 keeps what it holds.
+
+Two files there record restarts. `restart-audit.jsonl` gets a row from
+whatever asks for one: `romp refresh`, the dashboard's restart button, the
+kernel's own update, and the manager before each SIGTERM it sends (action
+`manager-sigterm`, with a `trigger` naming what set it off: `restart`,
+`restart-all`, `refresh` for the stale-manager self-bounce, `stop` for any
+other). When a SIGTERM arrives, the kernel reads the last two hundred rows,
+newest first, for a request within the last 90 seconds (20 minutes for a
+request that asked to wait for a quiet window) and no older than its own
+start: a request that predates the process was delivered to the kernel before
+it, so the walk ends there, except for a quiet-window request, which the
+manager parks and delivers to whichever kernel is running when the window
+opens. A row with an action names the request. The kernel's own `signal` and
+`parent-gone` rows are verdicts a previous kernel filed on its exit, never a
+request, and are passed over. The manager's `manager-sigterm` row is a note
+that the manager sent the signal, not a request: it answers only when no
+request row written before it lies within the window and this kernel's
+lifetime, with `manager-sigterm: <trigger>` as the reason, and a note aimed at
+another kernel's pid is ignored. Verdicts and notes are passed over wherever
+they sit, an aged one included: one older than the window or older than this
+kernel never ends the walk, so a quiet-window request beneath it is still
+read. A row with no action (the `romp refresh` row) is skipped, and the
+manager's `restart-all` note written after it is what names the refresh; a
+`romp refresh --quiet` row is the parked deploy that holds the automatic
+converge until the window opens, and the note written at the window names its
+delivery the same way. A SIGTERM that reaches a kernel with a quiet-window
+request parked and no manager note for its pid (a note naming no pid counts as
+its own) is not that request's delivery: the kernel files a `signal` row and
+leaves the request on record for the kernel the window will restart.
+
+When no row qualifies, the kernel writes a row with action `signal`: the signal
+name, its pid and its parent's pid, the manager pid it was started with,
+whether a manager restart was pending, `managerRequested: false`, and
+`managerStopped`. That last field is what the kernel can see of a service stop
+or restart, which signals the kernel and the manager at once: the manager's pid
+is already gone, or the manager's own stop note lands while the kernel drains
+or within half a second after (the note is written before the kill, so the
+wait bounds an event the kernel expects, not a guess). With `managerStopped:
+true` the reason reads `signal; the manager was stopped too (a service stop or
+restart)`; otherwise `signal, not requested through the manager`, which means
+no request was on record when the kernel read the file, not that the sender
+is known. The sender's pid is never recorded; a Python signal handler does not
+receive it. A kernel whose manager disappears writes a row with action
+`parent-gone` before it exits. `restart-cuts.jsonl` gets one row per exit
+naming the turns the drain cut and the reason: the audit row's `action:
+reason`, the `signal` row's reason, or `parent-gone: the manager exited; the
+kernel followed it`. When the helper that files the `signal` row fails (a
+`ROMP_MANAGER_PID` the kernel cannot use as a pid), no `signal` row is written,
+and the cut row carries the plain `signal, not requested through the manager`
+verdict plus a `reasonError` naming the fault, so the missing row is explained
+on disk. A second SIGTERM during the drain is ignored; the first
+writes the row. The manager's log says `exited without a restart request
+(signal or crash); respawning` when a kernel exits that it did not ask to stop
+or restart.
 
 The two host registries there, `remotes.json` (attached and checked-in
 machines, each row with that machine's serve token) and `remotes-known.json`

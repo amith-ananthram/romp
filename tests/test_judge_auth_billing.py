@@ -35,7 +35,7 @@ import os
 import tempfile
 import time
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -51,7 +51,7 @@ os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 os.environ["ROMP_SERVICE_ENV_FILE"] = os.path.join(os.environ["XDG_STATE_HOME"], "no-such-service.env")
 os.environ["ROMP_SERVICE_ENV"] = os.environ["ROMP_SERVICE_ENV_FILE"]
-jd = SourceFileLoader("romp_judge_authbill", os.path.join(BIN, "romp-judge")).load_module()
+jd = load_source("romp_judge_authbill", os.path.join(BIN, "romp-judge"))
 
 AMBIENT = "synthetic-ambient-value"       # what a credential variable carries when a test stages one to
                                           # assert it is stripped; nothing under test validates the shape
@@ -544,7 +544,7 @@ class KernelWiringAndFloorPins(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.km = SourceFileLoader("romp_kernel_authbill", os.path.join(BIN, "romp-kernel")).load_module()
+        cls.km = load_source("romp_kernel_authbill", os.path.join(BIN, "romp-kernel"))
 
     def test_the_kernel_wires_the_login_tokens_and_no_key(self):
         import inspect

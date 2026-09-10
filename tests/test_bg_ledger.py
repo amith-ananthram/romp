@@ -10,7 +10,7 @@ import os
 import tempfile
 import time
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -18,7 +18,7 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
-sb = SourceFileLoader("romp_sdk_backend_ledger", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+sb = load_source("romp_sdk_backend_ledger", os.path.join(BIN, "romp_sdk_backend.py"))
 
 SID = "11111111-2222-3333-4444-000000000031"
 
@@ -201,7 +201,7 @@ class KernelSeamEnrichesTheStream(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.km = SourceFileLoader("romp_kernel_ledger", os.path.join(BIN, "romp-kernel")).load_module()
+        cls.km = load_source("romp_kernel_ledger", os.path.join(BIN, "romp-kernel"))
 
     def setUp(self):
         self.km._tmux_sessions_saved = self.km._tmux_sessions

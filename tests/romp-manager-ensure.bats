@@ -30,6 +30,14 @@ FAKE
     chmod +x "$BIN/tmux"
     export PATH="$BIN:$PATH"
     tmux_private_socket_dir "$TEST_DIR"   # also floors ROMP_CLI_SCOPE=0: no real scope on the user manager
+    # The manager's state root is private too. With neither variable set STATE_ROOT is the live
+    # ~/.local/state/romp, and `up` boots from that root's kernels.json: the fake launcher below runs
+    # once per kernel registered there, each handed the registry entry's stateDir, and the drain
+    # poll's token is read from that root's serve-token. ROMP_STATE_DIR outranks the XDG floor and a
+    # profiled kernel's sessions inherit it, so it is dropped, not shadowed (tests/bats-state-isolation.bats
+    # keeps both lines in every suite that starts the real manager).
+    unset ROMP_STATE_DIR
+    export XDG_STATE_HOME="$TEST_DIR/state"; mkdir -p "$XDG_STATE_HOME"
     # Fake kernel launcher: stay alive without binding a real port (we assert on the
     # manager's control endpoint, not a live kernel).
     FAKE="$TEST_DIR/fake-serve"

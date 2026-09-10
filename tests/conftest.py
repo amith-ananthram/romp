@@ -132,6 +132,14 @@ os.environ["CLAUDE_CONFIG_DIR"] = _CLAUDE_CONFIG
 # but _run_main_update maps absent to the DEFAULT port — the live one — so only a dead value is
 # safe against every consumer. Import-time, so collection-time code is floored too.
 os.environ["ROMP_MANAGER_PORT"] = "1"
+# The kernel's port, both spellings, for the same reason: kernel/kernel.py resolves PORT from
+# ROMP_KERNEL_PORT at import and postal/postal_service.py builds KERNEL_BASE from it at import, bin/romp
+# reads it in every kernel subcommand and hooks/romp-wake.sh at every wake, and bin/romp-manager reads
+# ROMP_SERVE_PORT first; each maps an absent variable to the DEFAULT port, the live kernel's, so a test
+# that dials "the kernel" through an inherited or absent value reaches the developer's own. A test that
+# starts a kernel of its own passes the port it picked, as the ones that do already do.
+os.environ["ROMP_KERNEL_PORT"] = "1"
+os.environ["ROMP_SERVE_PORT"] = "1"
 
 # No test may read the REAL service.env (2026-09-04; the reason changed on 2026-09-08): the kernel's boot
 # check (kernel/credentials.py) reads the manager env file for retired provider lines, so on a machine whose
@@ -220,8 +228,12 @@ def _dead_manager_port():
     """The import-time poison above covers collection, but a module-level env write in a test file
     ALSO executes during collection — so one module's write (or pop) would otherwise hold for the
     entire run phase, erasing the floor for every test after it. Re-assert per test: no
-    module-level write can outlive collection against this."""
+    module-level write can outlive collection against this. The kernel's port, both spellings, is
+    re-asserted the same way; a test that needs a port of its own sets it in setUp or passes it
+    to the process it starts."""
     os.environ["ROMP_MANAGER_PORT"] = "1"
+    os.environ["ROMP_KERNEL_PORT"] = "1"
+    os.environ["ROMP_SERVE_PORT"] = "1"
     yield
 
 
@@ -327,7 +339,7 @@ def _stub_place_llm(monkeypatch):
 
 
 # No test may leave the shared judge or a call-time environment seam changed (2026-09-09). kernel.py
-# loads the judge as SourceFileLoader("romp_judge", ...).load_module(), and load_module re-executes
+# loads the judge as load_source("romp_judge", ...) (kernel/loadsource.py), which re-executes
 # into the module object already in sys.modules under that name, so every kernel-loading test
 # module's km.jd is ONE process-wide object. A test that rebinds jd.STATE to a temp dir and removes
 # that dir in tearDown without restoring the prior value leaves every later STATE reader in the

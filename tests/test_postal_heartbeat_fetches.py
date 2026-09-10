@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -38,7 +38,7 @@ Path(_SESS).write_text(json.dumps([
     {"id": THREAD, "name": "web-t1", "dir": "", "state": "working", "working": "", "lastSid": "",
      "thread": True, "parent": WEB}]))
 os.environ["ROMP_SESSIONS_FILE"] = _SESS
-pm = SourceFileLoader("romp_postal_hb_fetches", os.path.join(BIN, "romp-postal-service")).load_module()
+pm = load_source("romp_postal_hb_fetches", os.path.join(BIN, "romp-postal-service"))
 
 
 class Counting(unittest.TestCase):

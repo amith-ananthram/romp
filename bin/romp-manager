@@ -212,6 +212,56 @@ const QUIET_POLL_MS = Number(process.env.ROMP_QUIET_POLL_MS) || 3000;
 const BUSY_MISS_LIMIT = Number(process.env.ROMP_BUSY_MISS_LIMIT) || 3;
 const QUIET_MAX_DEFER_MS = Number(process.env.ROMP_QUIET_MAX_DEFER_MS) || 15 * 60 * 1000;
 
+// The manager's own note of a SIGTERM it is about to send, in the SAME restart-audit.jsonl the
+// requesters (bin/romp refresh, the kernel's self-update, the dashboard button) write and the
+// kernel's exit handler reads. Without it a `romp-manager restart` or a service stop reaches the kernel with no
+// row on disk, indistinguishable from a stray kill, and the kernel's "no request on record" verdict
+// (kernel/kernel.py _unrequested_signal_reason) would name the manager's own kills wrongly. Aux
+// kernels read the file under their own state root, so the row goes where that kernel will look.
+// Best-effort: never blocks the kill.
+//
+// MECHANISM NOTES, NOT INTENTS. A manager-sigterm row says the manager was the messenger; who
+// asked is the requester's own row, written before it (bin/romp's refresh row, the kernel's
+// self-update). A reader after the newest intent therefore SKIPS manager-sigterm rows rather than
+// stopping at the newest row (kernel/kernel.py _recent_restart_audit does; any reader that takes
+// only the newest row must do the same). `trigger` names what set the SIGTERM off, so the row is
+// legible on its own:
+//   restart      one kernel, POST /restart (the dashboard button, `romp-manager restart`)
+//   restart-all  every kernel, POST /restart-all (`romp refresh`), at once or at the quiet window
+//   refresh      the stale-manager self-bounce: kernels stopped so the supervisor respawns the new manager
+//   stop         any other stop: a service stop by hand, Ctrl+C on the foreground manager, POST /stop
+// `reason` stays what the manager does next: `restart` (respawn) or `stop` (reap).
+function auditSigterm(spec, pid, reason, trigger) {
+  const t = Math.floor(Date.now() / 1000);
+  try {
+    const root = (spec && spec.stateDir) || STATE_ROOT;
+    fs.mkdirSync(root, { recursive: true });
+    fs.appendFileSync(path.join(root, 'restart-audit.jsonl'),
+      JSON.stringify({ t, action: 'manager-sigterm', kernel: spec.id, pid, reason, trigger: trigger || reason }) + '\n');
+  } catch (e) { /* a lost note, not a lost restart */ }
+  return t;
+}
+
+// The trigger of a stop nobody labeled (SIGINT/SIGTERM to the manager, POST /stop): a service stop
+// by hand, Ctrl+C, a front end's stop. Decided at stop time, once per shutdown, so every kernel's
+// row names the same cause.
+function stopTrigger() { return 'stop'; }
+
+// The exit handler's verdict (pure, exported for tests): what to log and whether to respawn. A
+// kernel we asked to stop is reaped; one we SIGTERMed for a restart keeps the plain respawn line;
+// one that exited with NEITHER on record (a signal from elsewhere, or a crash) says so, because
+// that is the exit worth a second look: a direct SIGTERM to the kernel pid used to be logged like
+// any requested restart, and a respawn that lands on a different python takes every session down.
+function exitLine(rec, code, sig, delay) {
+  const id = rec.spec.id;
+  if (rec.stopping) return { respawn: false, line: `kernel '${id}' stopped` };
+  const how = `code=${code} sig=${sig || '-'}`;
+  const n = `[#${rec.restarts}]`;
+  if (rec.requested) return { respawn: true, line: `kernel '${id}' exited (${how}); respawning in ${delay}ms ${n}` };
+  return { respawn: true,
+    line: `kernel '${id}' (pid ${rec.child && rec.child.pid}) exited without a restart request (signal or crash); respawning in ${delay}ms (${how}) ${n}` };
+}
+
 function spawnKernel(spec) {
   // SPAWN-TIME RE-READ (the --refresh stale-manager incident): re-resolve this kernel's profile from
   // kernels.json at EVERY spawn — a config edit lands on the kernel's next restart, never waiting on
@@ -233,18 +283,19 @@ function spawnKernel(spec) {
     restarts: prev ? prev.restarts : 0,
     quickCrashes: prev ? prev.quickCrashes : 0,
     startedAt: Date.now(), stopping: false,
+    requested: null,          // when restartKernel SIGTERMed this child (exitLine: asked vs not)
   });
   log(`kernel '${spec.id}' → :${spec.port} (pid ${child.pid})`);
   child.on('error', (e) => log(`kernel '${spec.id}' spawn error: ${e.message}`));
   child.on('exit', (code, sig) => {
     const cur = kernels.get(spec.id);
     if (!cur || cur.child !== child) return;                 // already superseded by a fresh spawn
-    if (cur.stopping) { kernels.delete(spec.id); log(`kernel '${spec.id}' stopped`); return; }
+    if (cur.stopping) { kernels.delete(spec.id); log(exitLine(cur, code, sig, 0).line); return; }
     cur.restarts++;
     // crash-loop? back off. A healthy run (uptime ≥ QUICK_CRASH_MS) resets the counter.
     cur.quickCrashes = (Date.now() - cur.startedAt) < QUICK_CRASH_MS ? cur.quickCrashes + 1 : 0;
     const delay = Math.min(cur.quickCrashes * 1000, MAX_BACKOFF_MS);
-    log(`kernel '${spec.id}' exited (code=${code} sig=${sig || '-'}) — respawning in ${delay}ms [#${cur.restarts}]`);
+    log(exitLine(cur, code, sig, delay).line);
     setTimeout(() => {
       const c = kernels.get(spec.id);
       if (c && c.child === child && !c.stopping) spawnKernel(spec);   // still ours & not asked to stop
@@ -278,7 +329,7 @@ function restartGate(st, now, opts) {
 const STORM_OPTS = { coalesceMs: RESTART_COALESCE_MS, stormWindowMs: STORM_WINDOW_MS,
   stormMax: STORM_MAX, stormCooldownMs: STORM_COOLDOWN_MS };
 
-function restartKernel(id) {
+function restartKernel(id, trigger = 'restart') {
   const rec = kernels.get(id);
   if (!rec) return false;
   rec._rs = rec._rs || { last: null, history: [] };
@@ -290,20 +341,22 @@ function restartKernel(id) {
       log(`kernel '${id}': RESTART STORM — ${rec._rs.history.length}+ restarts in ${STORM_WINDOW_MS / 1000}s; holding to 1 per ${STORM_COOLDOWN_MS / 1000}s + this log. Something is spamming /restart (a refresh loop / concurrent \`romp refresh\`?).`);
       rec._stormLogged = true;
     }
-    if (!rec._pending) rec._pending = setTimeout(() => { rec._pending = null; restartKernel(id); }, Math.max(50, g.scheduleIn));
+    if (!rec._pending) rec._pending = setTimeout(() => { rec._pending = null; restartKernel(id, trigger); }, Math.max(50, g.scheduleIn));
     return true;
   }
   rec._stormLogged = false;
   rec.stopping = false;          // ensure the exit handler RESPAWNS rather than reaps
+  rec.requested = Date.now();    // ...and knows this exit was asked for (exitLine)
+  auditSigterm(rec.spec, rec.child.pid, 'restart', trigger);   // the row BEFORE the signal: the kernel reads it on SIGTERM
   rec.child.kill('SIGTERM');     // the exit handler spawns a fresh one (romp-serve rebuilds if stale)
   return true;
 }
 
 // Restart EVERY kernel the manager owns — the `romp refresh` action (loops the registry, not just
 // 'main'). Returns the ids it kicked, so the caller can report them.
-function restartAll() {
+function restartAll(trigger = 'restart-all') {
   const ids = [...kernels.keys()];
-  for (const id of ids) restartKernel(id);
+  for (const id of ids) restartKernel(id, trigger);
   return ids;
 }
 
@@ -315,7 +368,7 @@ function restartAllOrSelf() {
   if (managerStale() && process.env.ROMP_SUPERVISED) {
     const ids = [...kernels.keys()];
     log('manager binary changed since start — exiting for a supervised respawn (the fresh manager brings every kernel up on the new defaults)');
-    shutdownAll(0);
+    shutdownAll(0, 'refresh');
     return { self: true, ids };
   }
   if (managerStale()) {
@@ -566,21 +619,23 @@ function queueQuietRestart(mode) {
   return 1;
 }
 
-function stopKernel(id) {
+function stopKernel(id, trigger) {
   const rec = kernels.get(id);
   if (!rec) return false;
   rec.stopping = true;
+  auditSigterm(rec.spec, rec.child.pid, 'stop', trigger || stopTrigger());   // the row BEFORE the signal
   rec.child.kill('SIGTERM');
   return true;
 }
 
 let shuttingDown = false;
-function shutdownAll(exitCode) {
+function shutdownAll(exitCode, trigger) {
   if (shuttingDown) return;
   shuttingDown = true;
   clearPendingQuiet();           // never let a deferred refresh respawn what we're stopping
-  log('shutting down — stopping all kernels');
-  for (const id of kernels.keys()) stopKernel(id);
+  const trig = trigger || stopTrigger();   // once, so every kernel's row names the same cause
+  log(`shutting down: stopping all kernels (${trig})`);
+  for (const id of kernels.keys()) stopKernel(id, trig);
   // give the kernels a moment to exit, then go regardless
   setTimeout(() => process.exit(exitCode || 0), 800);
 }
@@ -918,7 +973,10 @@ module.exports = { restartGate, quietGate, quietTick, loadSpecs, specEnv, fileSt
                    kernelToken, fetchBusy, resetDrainNotices, queueQuietRestart, clearPendingQuiet,
                    tmuxStartArgv, scopedStartFailure, commandOnPath, TMUX_START_ARGV,
                    placementFromCgroup, tmuxServerPlacement, bareEnsuredLine, TMUX_SERVER_PID_ARGV,
-                   withoutOpCredentials, retiredCredentialNames, retiredCredentialMessage };
+                   withoutOpCredentials, retiredCredentialNames, retiredCredentialMessage, exitLine, auditSigterm,
+                   // the SIGTERM wiring, for tests that seed `kernels` with a stand-in child or point
+                   // ROMP_SERVE_BIN at a stand-in launcher
+                   restartKernel, restartAll, restartAllOrSelf, stopKernel, shutdownAll, stopTrigger, spawnKernel, kernels };
 if (require.main === module) {
   const cmd = process.argv[2];
   // `restart-all` (the `romp refresh` deploy path) bounces IMMEDIATELY by default (T160, the user

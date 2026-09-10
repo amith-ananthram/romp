@@ -12,7 +12,7 @@ import os
 import tempfile
 import time
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -21,7 +21,7 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
-km = SourceFileLoader("romp_kernel_spenddetail", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_spenddetail", os.path.join(BIN, "romp-kernel"))
 
 WEB, API, TESTS = ("11111111-2222-3333-4444-000000000001", "11111111-2222-3333-4444-000000000002",
                    "11111111-2222-3333-4444-000000000003")
@@ -276,7 +276,7 @@ class SpendDetail(unittest.TestCase):
         # T247b review find: the recorder rounds the bucket sum and each sid's sum independently (6
         # places), so a fully attributed bucket can carry a +1e-6..+6e-6 dollar residue with zero token
         # residue — 28 of 113 live hour buckets did — and the presence test on the unrounded residues
-        # hung a hatched "unattributed" chip with no bars on the 8-day view. Below the rounding grain
+        # hung a hatched "unattributed" chip with no bars on the hourly view. Below the rounding grain
         # a residue is zero: no stack, no row.
         hours, days = {}, {}
         for n in range(0, 40):
@@ -631,11 +631,28 @@ class SpendDetail(unittest.TestCase):
         self.assertIn("var SP_PREFS_KEY='romp:spendModal';", js)
         # T247g: three ranges and the merge toggle, persisted with the rest
         self.assertIn('data-act=range:day>1 day ', js)
-        self.assertIn('data-act=range:hours>8 days ', js)
+        self.assertIn('data-act=range:hours>7 days ', js)   # T293: 7 days over 168 hourly buckets (the ledger's 192 keep a day of slack)
+        self.assertNotIn('8 days', js)
         self.assertIn('data-act=range:days>90 days ', js)
         self.assertIn('data-act=merge:toggle>merge by tag</button>', js)
         self.assertIn("JSON.stringify({range:SP.range,measure:SP.measure,order:SP.order,merge:SP.merge})", js)
         self.assertIn("localStorage.getItem('romp:vieworder')", js, "the viewer's arrangement is the strip's own key")
+        # T293 (the user 2026-09-09): the hover crosshair — a pointer-inert hairline inside the svg at the pointer's
+        # bucket, a stamp naming the bucket in words placed out of the flow (nothing moves under the pointer), and the
+        # tooltip listing that bucket's sessions in spend order; all three leave with the pointer. The pure functions
+        # are executed by ui/webview/spend-crosshair.test.ts; the served-page test hovers the real chart.
+        self.assertIn("var SP_RANGE_BUCKETS={day:24,hours:168};", js)
+        self.assertIn("xh.setAttribute('class','rsp-xh');", js)
+        self.assertIn("stamp.className='rsp-xh-stamp'", js)
+        self.assertIn("svgEl.onpointerleave=xhHide;", js, "the line, the stamp and the tooltip leave with the pointer")
+        self.assertIn(".rsp-xh{stroke:rgba(255,255,255,0.45);stroke-width:1;pointer-events:none}", html)
+        self.assertIn(".rsp-xh-stamp{position:absolute;top:4px;transform:translateX(6px);font-size:10px;line-height:1;padding:3px 5px;border-radius:3px;"
+                      "background:rgba(30,30,30,0.88);color:#cfd6dd;pointer-events:none;white-space:nowrap}", html,
+                      "the stamp: out of the flow, the surface's 10px annotation size, no pointer events")
+        self.assertIn("body.theme-light .rsp-xh{", html, "a light step for the hairline")
+        self.assertIn("body.theme-light .rsp-xh-stamp{", html, "…and for the stamp")
+        self.assertIn(".rsp-tip-row i{", html, "a row's dot wears its stack's colour")
+        self.assertNotIn("function spTipShow(", js, "the one-segment tip is gone: the bucket tooltip serves a bar too")
         # the landing page loads no stylesheet, so the strip's two rules are inlined as a TWIN; this pins the
         # twin's declarations against the source so the two cannot drift
         import re as _re

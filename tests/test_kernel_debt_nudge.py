@@ -9,7 +9,7 @@ releases the asker's wait. All fixtures SYNTHETIC (placeholder UUIDs, the notes-
 import json
 import os
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 import tempfile
 
@@ -20,7 +20,7 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-km = SourceFileLoader("romp_kernel_debt", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_debt", os.path.join(BIN, "romp-kernel"))
 
 DEBTOR = "11111111-2222-3333-4444-555555555555"     # the idle session that owes replies
 ASKER = "66666666-7777-8888-9999-000000000000"      # the live peer parked on the wait

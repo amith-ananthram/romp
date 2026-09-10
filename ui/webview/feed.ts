@@ -4393,7 +4393,12 @@ function clearSessionCards(sid: string): void {
     if (turns.has(tid) && ((g as any)._g as AskGroup | undefined)?.sid === sid) leaving.push([g, () => groupEls.get(tid) === g, () => groupEls.delete(tid)]);
   }
   for (const [c] of leaving) { c.dispatchEvent(new MouseEvent("mouseleave")); c.classList.add("dismissing"); }
-  for (const [key, head] of Array.from(sessHeadEls)) if (head.getAttribute("data-fsid") === sid) startSessHeadExit(key, head);
+  // The header row holds the hover-freeze gate too, and its Clear all sits on the row: the pointer that clicked it
+  // is resting on the row by construction. The ghost is pointer-inert (and reduced motion removes the row outright),
+  // so no mouseleave of its own ever fires; dispatch the synthetic one, as the card loop above does, so the release
+  // comes from the click and the kernel's confirmation of the clear applies at once instead of queueing behind
+  // the hold. freezeLeave ignores a key it does not hold, so the session's headers in the other columns are safe.
+  for (const [key, head] of Array.from(sessHeadEls)) if (head.getAttribute("data-fsid") === sid) { head.dispatchEvent(new MouseEvent("mouseleave")); startSessHeadExit(key, head); }
   clearedStack.push(members.slice());   // one batch: one Undo brings the whole session back
   for (const m of members) pendingCleared.add(m.itemId);
   vscodeApi?.postMessage({ type: "askClearMany", itemIds: ids, sid });   // ONE kernel batch (see above)

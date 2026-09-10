@@ -1248,7 +1248,21 @@ print("stages    jobs %s   push %s  (chat %s  feed %s  timeline %s  send %s)"
 parts = []
 for k in ("chat", "feed", "timeline", "feedJson"):     # feedJson: GET /feed.json's own reads, apart from the pusher's feed
     built, cached, ms = dl("builds", k, "built"), dl("builds", k, "cached"), dl("builds", k, "ms")
-    parts.append("%s %d built / %d cached%s" % (k, built, cached, (" (%.0f ms avg)" % (ms / built)) if built else ""))
+    split = ""
+    if k == "chat":
+        # the chat builder's attribution: rebuilds of the watched tab against background tabs whose signature
+        # moved, then per signature component the background rebuilds it caused; a kernel from before the
+        # split reports neither field and prints the line as before
+        active, bg = dl("builds", k, "active_built"), dl("builds", k, "bg_built")
+        moved = dl("builds", k, "moved")             # builds not cached because an input moved while they ran
+        if active or bg:
+            labels = sorted(((b.get("builds") or {}).get("chat") or {}).get("bg_miss") or {})
+            causes = ", ".join("%s %d" % (lab, dl("builds", k, "bg_miss", lab)) for lab in labels
+                               if dl("builds", k, "bg_miss", lab))
+            split = "; %d watched, %d background%s%s" % (active, bg, (": " + causes) if causes else "",
+                                                          ("; %d moved" % moved) if moved else "")
+    parts.append("%s %d built / %d cached%s"
+                 % (k, built, cached, (" (%.0f ms avg%s)" % (ms / built, split)) if built else ""))
 print("builds    " + "   ".join(parts))
 parts = []
 for kind in ("full", "delta", "deduped"):

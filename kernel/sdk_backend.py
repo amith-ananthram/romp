@@ -45,22 +45,29 @@ from pathlib import Path
 # The tmux launcher picks the first unused colour; for an SDK session we pick deterministically by a
 # stable hash of the sid (the launcher's own fallback when all are taken), so the session gets a
 # consistent colour without cross-backend "used" bookkeeping.
-from importlib.machinery import SourceFileLoader as _SFL
-_pal = _SFL("romp_palette", str(Path(__file__).resolve().parent / "palette.py")).load_module()
+import importlib.util
+_HERE = Path(__file__).resolve().parent
+_ls_spec = importlib.util.spec_from_file_location("romp_loadsource", str(_HERE / "loadsource.py"))
+_ls_mod = importlib.util.module_from_spec(_ls_spec)
+_ls_spec.loader.exec_module(_ls_mod)
+load_source = _ls_mod.load_source   # file-path imports with load_module()'s sys.modules semantics (kernel/loadsource.py)
+_pal = load_source("romp_palette", _HERE / "palette.py")
 # How romp reaches an API credential (credentials.py: stdlib only, loaded the same way as event_model so
 # the standalone judges and the kernel share one copy). romp holds no key of its own since 2026-09-08:
 # the module reads Claude Code's apiKeyHelper for the kernel's two calls and checks the boot environment.
-_cred = sys.modules.get("romp_credentials") or _SFL(
-    "romp_credentials", str(Path(__file__).resolve().parent / "credentials.py")).load_module()
-# The by-text KEY RULE (session_backend.echo_text_key): the one normalization under which an input echo's
-# text is compared with a transcript record's, shared with the kernel's _atom_user_texts so the landing
-# scan below can never find what prune_live cannot retire. The kernel's own copy of that module when it
-# is loaded (the same idiom as _cred above); otherwise the file is loaded under its OWN module name:
-# the kernel loads it as romp_session_backend and TmuxBackend subclasses that copy's ABC, and
-# re-executing the source into that module object would rebind the class out from under the subclass.
-echo_text_key = (sys.modules.get("romp_session_backend") or _SFL(
-    "romp_session_backend_keys", str(Path(__file__).resolve().parent / "session_backend.py")).load_module()
-).echo_text_key
+_cred = sys.modules.get("romp_credentials") or load_source("romp_credentials", _HERE / "credentials.py")
+# The by-text KEY RULES (session_backend.echo_text_key, and command_text_key for a slash send): the one
+# normalization under which an input echo's text is compared with a transcript record's, shared with the
+# kernel's _atom_user_texts so the landing scan below can never find what prune_live cannot retire. The
+# kernel's own copy of that module when it is loaded (the same idiom as _cred above); otherwise the file
+# is loaded under its OWN module name: the kernel loads it as romp_session_backend and TmuxBackend
+# subclasses that copy's ABC, and re-executing the source into that module object would rebind the class
+# out from under the subclass.
+_keys = (sys.modules.get("romp_session_backend")
+         or load_source("romp_session_backend_keys", _HERE / "session_backend.py"))
+echo_text_key = _keys.echo_text_key
+command_text_key = _keys.command_text_key
+echo_keys = _keys.echo_keys                  # both keys of a text, the "either key" rule written once
 
 
 def _bin_on_path_env(environ) -> dict:
@@ -972,6 +979,25 @@ _SKILL_MD_CAP = 16000
 _IMG_ECHO_RE = re.compile(r"^\[Image:[^\]]*\]$")
 
 
+def _command_invocation(text):
+    """(name, display) for a slash-command WRAPPER record's text, or None. `name` is the <command-name>
+    value with its leading slash; `display` is the "/name args" the file adapter and msg_to_atom show for
+    it (the arguments outer-stripped, one space between). The tag is read anchored, or anywhere inside a
+    record that BEGINS with a command wrapper (_CMD_WRAP_RE), never from prose that quotes it. Read by
+    msg_to_atom for the live atom and by _landed_texts for the landing scan, so the scan finds a slash
+    send under exactly the text the kernel's prune retires its echo by."""
+    mcmd = _COMMAND_NAME_RE.match(text) or (_COMMAND_NAME_ANY_RE.search(text)
+                                            if _CMD_WRAP_RE.match(text) else None)
+    if not mcmd:
+        return None
+    name = mcmd.group(1).strip() or "/?"
+    if not name.startswith("/"):
+        name = "/" + name
+    margs = _COMMAND_ARGS_RE.search(text)
+    args = (margs.group(1).strip() if margs else "")
+    return name, name + ((" " + args) if args else "")
+
+
 def _note_skill_tool_ids(atom, ids):
     """Collect Skill tool_use block ids from a streamed ASSISTANT atom into `ids` — the live twin's
     anchor set for the newer skill-instructions shape (2026-07-10): the payload UserMessage carries
@@ -1035,15 +1061,9 @@ def msg_to_atom(msg, sid, fsid, t, skill_tool_ids=()):
             return None
         text = " ".join(b.get("text", "") for b in content
                         if isinstance(b, dict) and b.get("type") == "text")
-        mcmd = _COMMAND_NAME_RE.match(text) or (_COMMAND_NAME_ANY_RE.search(text)
-                                                if _CMD_WRAP_RE.match(text) else None)
-        if mcmd:                                     # the command INVOCATION → the command-flagged user atom
-            name = mcmd.group(1).strip() or "/?"
-            if not name.startswith("/"):
-                name = "/" + name
-            margs = _COMMAND_ARGS_RE.search(text)
-            args = (margs.group(1).strip() if margs else "")
-            disp = name + ((" " + args) if args else "")
+        cmd = _command_invocation(text)
+        if cmd:                                      # the command INVOCATION → the command-flagged user atom
+            name, disp = cmd
             return {"type": "user", "uuid": u, "session_id": sid, "t": t, "fsid": fsid, "parentUuid": None,
                     "author": "human", "command": name,
                     "message": {"role": "user", "content": [{"type": "text", "text": disp}]}}
@@ -2614,6 +2634,16 @@ CRASH_RESUME_NUDGE = (
     "<!-- romp-gist: resumed after its process died mid-turn -->")
 
 
+def fed_text_opener(text: str) -> str:
+    """Who a text we FEED the CLI speaks for: "injected" when it carries the romp-injected marker (a nudge,
+    a follow-up romp wrote, a restart or rename notice, relayed mail, the retry line: everything romp puts
+    into a session on its own), "human" otherwise (the composer's words, a queued message, a typed
+    follow-up, a button's /command). The COMMENT FORM only, the rule send()'s echo authoring and the event
+    model's ROMP_INJECT_RE follow: prose that merely mentions the marker is the user's. Feeds the turn-
+    opener stamp (SdkSession._note_turn_opener), whose reader is the kernel's turn-finished push."""
+    return "injected" if "<!-- romp-injected -->" in (text or "") else "human"
+
+
 # A CLI that cannot even START says so on the way out — and the ONE cause that reliably does this is the
 # account being out of usage: `claude` refuses the handshake and exits with the limit in its own words
 # ("You've hit your session limit · resets 1:10pm (America/Los_Angeles)"). romp used to swallow that
@@ -2683,6 +2713,206 @@ def usage_fallback_notice(name, msg) -> str:
     return ("spend (%s): a paid turn's tokens were recorded from the main loop alone (no subagent or sidechain "
             "tokens; the dollars are unaffected): the CLI emitted no modelUsage on the result. Said once per "
             "session." % name)
+
+
+def running_python_tag() -> str:
+    """This interpreter as a venv names its lib dir: `3.14`, or `3.14t` for a free-threaded build. venv
+    appends the abi tag to the directory (lib/python3.14t), so a comparison on major.minor alone would
+    make a kernel on 3.14t refuse the venv that very interpreter built as a mismatch. The twin of
+    kernel.py's _running_python_tag, which runs before this module loads."""
+    return "%d.%d%s" % (sys.version_info[0], sys.version_info[1],
+                        "t" if "t" in getattr(sys, "abiflags", "") else "")
+
+
+def sdk_venv_built_for(state_dir) -> list:
+    """The python tags (`3.12`, `3.14t`) the SDK venv under `state_dir` has site-packages for, [] with no
+    venv."""
+    try:
+        lib = Path(state_dir) / "sdkvenv" / "lib"
+        return sorted(p.name[len("python"):] for p in lib.glob("python3.*") if (p / "site-packages").is_dir())
+    except Exception:
+        return []
+
+
+def sdk_venv_has_sdk(state_dir, tag) -> bool:
+    """Whether the venv's site-packages for `tag` holds the claude_agent_sdk package itself."""
+    try:
+        return (Path(state_dir) / "sdkvenv" / "lib" / ("python" + tag) / "site-packages" / "claude_agent_sdk"
+                / "__init__.py").is_file()
+    except Exception:
+        return False
+
+
+# The one-line program a python prints its venv tag with: the expression running_python_tag() evaluates
+# in this process, and the one bin/romp-sdk-setup's pytag runs in the setup script.
+_TAG_PROGRAM = ("import sys; print('%d.%d%s' % (sys.version_info[0], sys.version_info[1], "
+                "'t' if 't' in getattr(sys, 'abiflags', '') else ''))")
+_TAG_RE = re.compile(r"3\.\d+t?")
+
+
+def interpreter_tag(path, timeout=5.0) -> str:
+    """The tag (`3.12`, `3.14t`) the interpreter at `path` reports itself as when run, or "" when it does
+    not run as a python: not executable, a non-zero exit, a hang, or an answer that is not a tag. The
+    test bin/romp-serve's pick_python applies before following the venv's recorded interpreter (its
+    _runs_as reads sys.version_info and sys.abiflags from the candidate), applied here so the kernel's
+    verdict and the picker's agree on what "the venv's interpreter still runs" means: an executable file
+    is not a working python, and a working python is not the venv's unless it is the python the venv was
+    built for. A uv-managed install that lost its shared library or stdlib passes os.access and fails to
+    run; a `python3` an upgrade repointed runs and exits 0 as some other minor. A mismatch text that
+    prescribed a ROMP_PYTHON pin to either would have romp-serve exec it as given, into a respawn loop
+    or into the same mismatch after the restart. The probe runs the interpreter and reads what it prints
+    (the stripped last stdout line must be a whole tag, so a sitecustomize that prints ahead of it does
+    not defeat it and a script that prints anything else does not pass for a python), bounded the way
+    the picker's is: the clock only ends a probe that never answers."""
+    if not path or not os.access(path, os.X_OK):
+        return ""
+    try:
+        res = subprocess.run([path, "-c", _TAG_PROGRAM], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, timeout=timeout)
+    except Exception:
+        return ""
+    if res.returncode != 0:
+        return ""
+    lines = res.stdout.decode("utf-8", "replace").strip().splitlines()
+    tag = lines[-1].strip() if lines else ""
+    return tag if _TAG_RE.fullmatch(tag) else ""
+
+
+def sdk_venv_interpreter(state_dir) -> str:
+    """The interpreter the venv's pyvenv.cfg records: `executable` (python >= 3.11), else `home` plus the
+    version line (`version` from venv, `version_info` from uv). "" when there is no cfg or it names none."""
+    try:
+        lines = (Path(state_dir) / "sdkvenv" / "pyvenv.cfg").read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return ""
+    kv = {}
+    for line in lines:
+        if "=" in line:
+            k, v = line.split("=", 1)
+            kv[k.strip()] = v.strip()
+    if kv.get("executable"):
+        return kv["executable"]
+    m = re.match(r"(\d+\.\d+)", kv.get("version") or kv.get("version_info") or "")
+    if kv.get("home") and m:
+        return os.path.join(kv["home"], "python" + m.group(1))
+    return ""
+
+
+def sdk_venv_fingerprint(state_dir) -> tuple:
+    """Everything sdk_venv_verdict reads, as one cheap tuple: the lib/python3.* dirs and whether each
+    holds the SDK, pyvenv.cfg's mtime, and the recorded interpreter's identity (path, mtime, size).
+    Equal fingerprints mean an equal verdict, so a caller on a hot path (every card render asks
+    launch_error) re-derives the verdict, and re-runs the interpreter probe, only when the disk changed."""
+    root = Path(state_dir) / "sdkvenv"
+    parts = []
+    try:
+        for p in sorted((root / "lib").glob("python3.*")):
+            if (p / "site-packages").is_dir():
+                parts.append((p.name, (p / "site-packages" / "claude_agent_sdk" / "__init__.py").is_file()))
+    except Exception:
+        pass
+    try:
+        parts.append(("cfg", (root / "pyvenv.cfg").stat().st_mtime_ns))
+    except Exception:
+        parts.append(("cfg", None))
+    interp = sdk_venv_interpreter(state_dir)
+    try:
+        st = os.stat(interp) if interp else None
+        parts.append(("interp", interp, st.st_mtime_ns if st else None, st.st_size if st else None))
+    except Exception:
+        parts.append(("interp", interp, None, None))
+    return tuple(parts)
+
+
+def sdk_venv_verdict(state_dir, probe=None) -> dict:
+    """What the disk says about the SDK venv against THIS interpreter, read now. `kind` is one of
+      none      no venv (or none with a lib/python3.*): the install remedy fits;
+      broken    a venv for this python with no claude_agent_sdk in it (a half-built install): same remedy;
+      present   a venv for this python WITH the SDK in it. A process that could not import the SDK has one
+                answer for this: the venv was built after it started (bin/romp-sdk-setup run while the
+                kernel ran, the 2026-09-06 recovery), and the remedy is the restart;
+      mismatch  venv(s) for other python(s) only. bin/romp-serve's pick_python follows the venv's
+                interpreter, so this means ROMP_PYTHON chose another python, or the venv's own is gone,
+                will not run, or is no longer the python the venv was built for (2026-09-06: two hours of
+                "isn't installed" over a venv that was present, intact and built for the previous python).
+                `interp` is the recorded interpreter and `interp_tag` the tag it reports when run
+                (interpreter_tag; "" when it does not run as a python; `probe` is the test seam), which
+                decides between the two remedies: point romp back at it when that tag is one the venv was
+                built for, or rebuild for the one romp runs.
+    ONE function, so every surface that refuses (the session card, the boot log, the creation refusal)
+    reads the same facts at the same moment."""
+    running = running_python_tag()
+    built = sdk_venv_built_for(state_dir)
+    v = {"kind": "none", "built": built, "running": running, "interp": "", "interp_tag": ""}
+    if not built:
+        return v
+    if running in built:
+        v["kind"] = "present" if sdk_venv_has_sdk(state_dir, running) else "broken"
+        return v
+    v["kind"] = "mismatch"
+    v["interp"] = sdk_venv_interpreter(state_dir)
+    v["interp_tag"] = (probe or interpreter_tag)(v["interp"]) if v["interp"] else ""
+    return v
+
+
+def _mismatch_remedy(v, then="then restart romp") -> str:
+    """The ONE remedy the disk supports for a mismatch verdict: the recorded interpreter still runs as
+    the venv's python, so point romp back at it; or it is gone, broken, or now another python, so
+    rebuild for the one romp runs. Never both, and never a pin to an interpreter nothing has seen run as
+    the venv's python. The test is the one the kernel applies to its own interpreter when it adds the
+    venv (_ensure_sdk_on_path: the running tag is one the venv's lib names), so a pin to an interpreter
+    that passes it brings up a kernel that matches the venv; a pin to a `python3` an upgrade repointed,
+    which runs and exits 0 as another minor, would have bin/romp-serve honor the pin as given and the
+    kernel show this same text again after the restart."""
+    if v["interp_tag"] and v["interp_tag"] in v["built"]:
+        return "Set ROMP_PYTHON=%s in service.env, %s." % (v["interp"], then)
+    return "Re-run bin/romp-sdk-setup to rebuild it for Python %s, %s." % (v["running"], then)
+
+
+def sdk_unavailable_text(state_dir, verdict=None, started_missing=True) -> str:
+    """The session card's text when claude_agent_sdk will not import, from the venv verdict (read now
+    unless the caller passes one). SDK_MISSING_TEXT when nothing on disk says otherwise. A venv for
+    ANOTHER python makes the install claim false and the fix different, so the text says what happened
+    and gives the one remedy the disk supports. A venv for THIS python holding the SDK, in a process that
+    found none at construction (`started_missing`), was built after romp started: the restart is the
+    remedy, and "isn't installed" would send the user back to the command they just ran. In a process
+    that HAD the SDK at construction the same disk state means the import itself broke, and the install
+    text with its rebuild is right."""
+    v = verdict or sdk_venv_verdict(state_dir)
+    if v["kind"] == "present" and started_missing:
+        return ("romp's Agent SDK backend was set up for Python %s after romp started, so this session can't "
+                "run yet. Its messages are being kept, not sent. Restart romp to use it. tmux-backed sessions "
+                "are unaffected." % v["running"])
+    if v["kind"] != "mismatch":
+        return SDK_MISSING_TEXT
+    return ("romp's Agent SDK backend was set up for Python %s, but romp is running on Python %s, so this "
+            "session can't run. Its messages are being kept, not sent. %s tmux-backed sessions are unaffected."
+            % (" and ".join(v["built"]), v["running"], _mismatch_remedy(v)))
+
+
+# The plain session-creation refusal, the same words as the kernel's SDK_SETUP_HINT (which the kernel
+# passes in as `default`, so the two never drift apart in the process that matters).
+SDK_SETUP_REFUSAL = ("Session not created: the Claude Code backend's Agent SDK isn't installed. "
+                     "Run bin/romp-sdk-setup, then try again. (Claude Code (tmux) sessions still work.)")
+
+
+def sdk_creation_refusal(verdict, default=SDK_SETUP_REFUSAL) -> str:
+    """The session-creation refusal (`romp new`, the browser's create) for a venv verdict: the same
+    facts as sdk_unavailable_text, in the voice of a session that does not exist yet. Built HERE, next
+    to the card's text and from the same verdict, so the two surfaces cannot tell different stories
+    (after a rebuild while the kernel ran, `romp new` would say "isn't installed" while the card said
+    mismatch, and a refusal built from the kernel's own reading named a ROMP_PYTHON pin without
+    checking the interpreter existed). `default` is the plain install refusal (the kernel passes its own
+    SDK_SETUP_HINT, the same words) for the verdicts where the install remedy fits."""
+    v = verdict
+    if v["kind"] == "present":
+        return ("Session not created: the Claude Code backend's Agent SDK was set up for Python %s after romp "
+                "started. Restart romp, then try again. (Claude Code (tmux) sessions still work.)" % v["running"])
+    if v["kind"] != "mismatch":
+        return default
+    return ("Session not created: the Claude Code backend's Agent SDK was set up for Python %s, but romp is "
+            "running on Python %s. %s (Claude Code (tmux) sessions still work.)"
+            % (" and ".join(v["built"]), v["running"], _mismatch_remedy(v, then="restart romp and try again")))
 
 
 # What the SDK puts on ProcessError.stderr when NOBODY registered an options.stderr callback: it does
@@ -3870,6 +4100,16 @@ class SdkSession:
         # _cli_working mirrors the last lifecycle state we persisted so the live stream can re-assert
         # 'working' if a stamp ever falls behind actual output, with no reliance on feed-vs-result counting.
         self._cli_working = False
+        # WHO OPENED the turn in flight — "human" (any fed text without the romp-injected marker: the
+        # composer's words, a queued message, a typed follow-up, a button's /command) or "injected" (romp's
+        # own feed — a nudge, a follow-up, a restart notice, relayed mail — or a turn the CLI opened by
+        # itself: a background task's notification, a scheduled prompt, a peer's channel message, told by
+        # the streamed record's origin stamp). None until an open is seen. Set at the two places a turn can
+        # open (the feeder's pop; _forward's stamped user atom while idle — see _note_turn_opener), stamped
+        # beside lastStopAt by the Stop hook as lastTurnOpener, and read by the kernel's turn-finished push,
+        # which buzzes the phone for the human's turns only (the user 2026-09-10: ten buzzes in fifty minutes
+        # from one session reacting, turn after turn, to its own background subagents' completions).
+        self._turn_opener = None
         self._skill_tool_ids = set()   # Skill tool_use ids seen on THIS stream → classify their injected
         #                                instructions payload (parent_tool_use_id link) as a skillMd atom
         self.since = 0
@@ -4178,7 +4418,14 @@ class SdkSession:
         same-text landing — the review of the first cut). Memoised per record uuid, so every rebuild answers
         the same. The kernel's own ECHO atom is refused outright (its uuid is the copy's id, minted at the
         send): it is the visible copy between the feed and the CLI's record, and asked as a landing it took
-        the fed entry the real landing needed."""
+        the fed entry the real landing needed.
+
+        A slash send is paired under command_text_key as well (2026-09-10): its record is the CLI's
+        wrapper, which the kernel reads as "/name args" with one space, whatever the sender typed between
+        the name and the arguments, so the fed copy's typed text equals it only when its whitespace
+        already matches. Without the second key the landing of a copy typed with a newline before the
+        arguments carried no id, and the chat's own pending bubble, which retires by id once it has
+        latched the copy's, stayed at the tail after the command had run."""
         if not uuid_ or str(uuid_).startswith("echo:"):
             return [None] * len(texts)
         with self._lock:
@@ -4186,10 +4433,10 @@ class SdkSession:
                 return list(self._landed_qid[uuid_])
             hits = []
             for text in texts:
-                key = echo_text_key(text)
+                keys = set(echo_keys(text))            # the plain key and, for a slash send, its words
                 hit = None
                 for i, f in enumerate(self._fed_meta):
-                    if echo_text_key(f["text"]) != key:
+                    if keys.isdisjoint(echo_keys(f["text"])):
                         continue
                     if t is not None and float(t) < f["t"] - 2:
                         continue                           # stamped before the feed: not this copy's landing
@@ -5008,6 +5255,7 @@ class SdkSession:
                     self.since = int(time.time())    # a new turn starts now (mid-turn forwards keep the turn's clock)
                     self._interrupted = False        # a fresh turn → clear any stale interrupt flag
                     self._intr_level = 0             #   ...and its escalation episode (a new stop starts polite)
+                self._note_turn_opener(fed_text_opener(item), fresh)   # who this turn is for (the Stop hook stamps it)
                 if item.startswith(RENAME_PING_HEAD):
                     self._ping_feeding = True       # hold feeds until this turn's first streamed message
                 self._mark("working")
@@ -5354,6 +5602,17 @@ class SdkSession:
             return "\n".join(self._stderr_tail)
         except Exception:
             return ""
+
+    def _note_turn_opener(self, opener: str, fresh: bool) -> None:
+        """Record who opened, or joined, the turn in flight (see _turn_opener in __init__). A HUMAN text
+        always makes the turn theirs: from idle it opens one; mid-turn the CLI splices it in at the next
+        tool boundary and answers it there, so the person asked during the turn and its end IS news to
+        them. An INJECTED opener counts only from idle (`fresh`): a nudge fed into the human's running turn,
+        or a task notification the CLI folds into it, does not take the turn from them. Never reset at the
+        settle: the next open overwrites, and the Stop hook (which runs BEFORE the ResultMessage) reads the
+        turn it is closing."""
+        if fresh or opener == "human":
+            self._turn_opener = opener
 
     def _mark(self, state: str) -> None:
         """Persist a lifecycle STATE to states/<sid>.jsonl AND track whether the CLI is producing.
@@ -6362,9 +6621,14 @@ class SdkSession:
             self.backend._log("stop hook (%s): bg-ledger reconcile failed: %s" % (self.name, e))
         # The turn-end EVENT itself, durable and kernel-readable (2026-08-29, for the nudge layer's
         # memo re-arm and any consumer that needs "this session settled a turn at T" as a fact
-        # rather than an inference from transcript mtimes — romp_cards' round keys on it).
+        # rather than an inference from transcript mtimes — romp_cards' round keys on it). Beside it,
+        # in the SAME write so a reader never pairs one turn's settle with another's opener, WHO opened
+        # the turn (2026-09-10, see _turn_opener): the kernel's turn-finished push buzzes the phone for
+        # the human's turns only. No open seen (a session object born mid-turn at a kernel restart, a
+        # CLI that stamps no origin) reads "human" — fail OPEN on the buzz, never silently drop it.
         try:
-            self.backend._update_reg(self.sid, lastStopAt=int(time.time()))
+            self.backend._update_reg(self.sid, lastStopAt=int(time.time()),
+                                     lastTurnOpener=getattr(self, "_turn_opener", None) or "human")
         except Exception:
             pass
         # delete-while-busy: the turn this delete interrupted has ENDED — complete the arm here,
@@ -7132,7 +7396,13 @@ def _landed_texts(rec: dict) -> set:
     each text block: romp bundles its injected messages as several blocks in one record). Two record
     shapes carry user text: a native USER record, and the queued_command ATTACHMENT a mid-turn splice
     leaves, whose prompt is a plain string or a content-block list (the SDK injection path; event_model
-    reads it the same way). Anything else → empty."""
+    reads it the same way). Anything else → empty.
+
+    A slash send's own record is the WRAPPER the CLI writes for it (<command-name>, <command-args>), never
+    the typed text: it lands the send as the "/name args" the event model reads it as (_command_invocation,
+    the same reading msg_to_atom gives the live atom). Every text here also yields its slash-send key
+    (command_text_key), as the kernel's _atom_user_texts does, so the scan and the prune agree on the same
+    records (2026-09-10)."""
     out: set = set()
     typ = rec.get("type")
     if typ == "user":
@@ -7157,6 +7427,14 @@ def _landed_texts(rec: dict) -> set:
         cb = echo_text_key(b)
         if cb:
             out.add(cb)
+    if typ == "user":
+        cmd = _command_invocation(" ".join(blocks))
+        if cmd:
+            out.add(echo_text_key(cmd[1]))
+    for k in list(out):
+        ck = command_text_key(k)
+        if ck:
+            out.add(ck)
     return out
 
 
@@ -7396,10 +7674,11 @@ class SdkBackend:
         #                                           writes come from kernel AND loop threads)
         self._pending_ask: dict[str, bool] = {}   # sid -> has an ask awaiting answer
         self._live: dict[str, dict] = {}          # sid -> {key -> atom}: the in-memory LIVE TAIL (ahead of disk)
-        self._live_rev: dict[str, int] = {}       # sid -> count of changes to its live tail (add/edit/drop) —
-        #                                           the exact "the live tail moved" event the kernel's active-tab
-        #                                           cache keys on (2026-09-03); bumped by _touch_live at every
-        #                                           mutation site, never read as a value beyond equality
+        self._live_rev: dict[str, int] = {}       # sid -> count of changes to its live tail (add/edit/drop/flag):
+        #                                           the exact "the live tail moved" event the kernel's chat-build
+        #                                           signature keys every tab on (Sessions.live_rev); bumped by
+        #                                           _touch_live once per mutating call, never read as a value
+        #                                           beyond equality
         # THE LIVE-TAIL LOCK (2026-09-06). `_live` and every per-sid dict inside it are shared by the
         # kernel thread (send, recall, dismiss_echo, the pusher's live_atoms/prune_live) and each
         # session's loop thread (_forward, the settle's retire_live_work, _mark_dropped_echoes at
@@ -7451,9 +7730,13 @@ class SdkBackend:
         # The dependency check, done ONCE here: absent → every session this backend owns reports the same
         # launch error (launch_error), instead of each one silently dying at its own lazy import.
         self._sdk_missing = not sdk_importable()
+        # The venv verdict every refusing surface reads (unavailable_verdict): re-derived from the disk
+        # at request time, cached on its fingerprint, so a venv built for another python is named as
+        # such rather than as a missing install, and a venv built AFTER this check names the restart.
+        self._venv_verdict_cache = None
         if self._sdk_missing and log:
-            self._log("claude_agent_sdk is NOT importable — every SDK session will report itself unable to "
-                      "start (run bin/romp-sdk-setup). tmux sessions are unaffected.", problem=True)
+            self._log("claude_agent_sdk is NOT importable: every SDK session will report itself unable to "
+                      "start. %s" % self.unavailable_text(), problem=True)
         # Per-session transient scopes (see cli_scope_supported): ONE verdict per backend, cached here;
         # _options reads it at every connect. The probe runs here, never per session.
         self.cli_scope = cli_scope_supported(log=self._log)
@@ -8169,6 +8452,30 @@ class SdkBackend:
         user created a session from the browser, got no error at all, and got a session that could never
         run (the user 2026-07-28)."""
         return not self._sdk_missing
+
+    def unavailable_verdict(self) -> dict:
+        """The disk's verdict on the SDK venv against this interpreter (sdk_venv_verdict), read at
+        REQUEST time. The one source every refusing surface consults: the session card (launch_error)
+        and the kernel's creation refusal (_sdk_setup_hint) read this function, so a rebuild while the
+        kernel runs moves both to "restart romp" together instead of one saying "isn't installed" while
+        the other says mismatch. Cached on the venv's on-disk fingerprint, so a card render costs a few
+        stats and the interpreter probe runs once per disk state."""
+        fp = sdk_venv_fingerprint(self.state_dir)
+        cached = self._venv_verdict_cache
+        if cached is not None and cached[0] == fp:
+            return cached[1]
+        v = sdk_venv_verdict(self.state_dir)
+        self._venv_verdict_cache = (fp, v)
+        return v
+
+    def unavailable_text(self) -> str:
+        """The session card's text for a backend whose SDK did not import at construction, from the
+        verdict as it stands now (sdk_unavailable_text)."""
+        return sdk_unavailable_text(self.state_dir, verdict=self.unavailable_verdict(), started_missing=True)
+
+    def creation_refusal(self, default=SDK_SETUP_REFUSAL) -> str:
+        """The session-creation refusal from the same verdict the card reads (sdk_creation_refusal)."""
+        return sdk_creation_refusal(self.unavailable_verdict(), default=default)
 
     def busy_breakdown(self):
         """(in-flight, background): how many SDK sessions have a turn IN FLIGHT, and how many OTHERS
@@ -9482,13 +9789,16 @@ class SdkBackend:
         if text is not None:
             with self._live_lock:                          # find + pop + the sid-level pop, one step
                 live = self._live.get(sid) or {}
+                popped = False
                 if qid:
-                    live.pop(qid, None)                    # the cancelled copy's own echo, by the shared key; already gone: nothing else
+                    popped = live.pop(qid, None) is not None   # the cancelled copy's own echo, by the shared key; already gone: nothing else
                 else:
                     for k, a in list(live.items()):
                         if a.get("_echo_text") == text:
-                            live.pop(k, None)              # one echo per canceled message
+                            popped = live.pop(k, None) is not None   # one echo per canceled message
                             break
+                if popped:
+                    self._touch_live(sid)                  # the tail changed: the chat signature's live component
                 if not live and self._live.get(sid) is live:
                     self._live.pop(sid, None)
             self._persist_echoes(sid)                      # the canceled echo leaves the restart mirror too
@@ -9522,6 +9832,7 @@ class SdkBackend:
                                     break
                         elif isinstance(c, str):
                             m["content"] = text
+                    self._touch_live(sid)                  # the reworded echo is a change to the tail (see _touch_live)
                     break                                  # one echo per edited message
             self._persist_echoes(sid)                      # the restart mirror carries the new words
             self._wake_push()                              # repaint with them
@@ -9585,6 +9896,11 @@ class SdkBackend:
         # substring also matched CONTENT that merely mentions the marker — a typed follow-up quoting a
         # card summary about romp-injected echoed as a GRAY romp card.
         injected = "<!-- romp-injected -->" in text
+        # No `command` flag, even for a typed slash command: that flag marks the CLI's OWN feedback atoms
+        # (msg_to_atom's streamed wrapper and stdout, _ack_cmd_chip's picker chip), which owe no landing,
+        # are retired by the human floor, never mirrored across a restart, never flagged lost or
+        # re-delivered. A typed slash send is a message the CLI takes and records (as its wrapper), so its
+        # echo keeps the full lifecycle and lands under command_text_key; flagging it would hide its loss.
         echo = {
             "type": "user", "uuid": key, "session_id": sid, "t": sent_t, "parentUuid": None,
             "author": "romp" if injected else "human", "_echo_text": text,
@@ -9765,6 +10081,8 @@ class SdkBackend:
                 elif seen:
                     a["_landed"] = True                    # the verdict, for prune_live and the next boot
                     landed.add(a["_echo_text"])
+                    with self._live_lock:
+                        self._touch_live(sid)              # a flag write outside the lock: still a change to the tail
         if redeliver:
             # The LIVE-session caller (a fresh spawn's _run) must deliver through the session's
             # own queue: there the in-memory _pending is authoritative and its very next
@@ -9818,7 +10136,8 @@ class SdkBackend:
             a["dropped"] = True
             if hasattr(self, "forget_fed"):
                 self.forget_fed(sid, a.get("uuid"))   # its landing will never come (T252c)
-            self._touch_live(sid)
+            with self._live_lock:
+                self._touch_live(sid)                  # a flag write outside the lock: still a change to the tail
             self._log("%s: a send never reached its CLI (the process died holding it) — kept in the chat "
                       "as never-delivered: %.80r" % (sid[:8], a["_echo_text"]), problem=True)
         self._persist_echoes(sid)
@@ -9843,7 +10162,11 @@ class SdkBackend:
         echo_text_key's, the same rule the kernel's _atom_user_texts keys prune_live's by-text retire
         with, so a found echo is always one the prune can retire: the joined text or any one text block
         EQUAL to the send — never a substring, or a found-but-never-pruned echo would ride the tail
-        forever. `off` / `fsid` are the echo's send-time transcript mark (_transcript_mark): the file's
+        forever. A slash send is matched under command_text_key as well (its words; the kernel keys the
+        parsed command atom the same way): its own record is the CLI's wrapper, which _landed_texts reads
+        as the "/name args" the event model shows, never as the typed text, so until 2026-09-10 a typed
+        "/name" followed by a newline and its arguments read as never landed here and was re-delivered at
+        the next spawn, running the command twice. `off` / `fsid` are the echo's send-time transcript mark (_transcript_mark): the file's
         byte size when the send was made, and the fsid it was measured on. The scan starts THERE — every
         record that can land this send is at or after it, however much the session wrote afterwards —
         rather than at a fixed distance from EOF, which read a landed send whose record sat more than
@@ -9858,7 +10181,9 @@ class SdkBackend:
             reg = read_reg(self.state_dir, sid) or {}
             cur = str(reg.get("lastSid") or sid)
             path = transcript_path(reg.get("cwd") or "", cur)
-            want = echo_text_key(text)
+            # the plain key and, for a slash send, its words (echo_keys): the send's own record is the
+            # CLI's wrapper, which _landed_texts reads as "/name args" the way the kernel's prune does
+            want = set(echo_keys(text))
             floor = int(t or 0)
             start = 0
             if (isinstance(off, int) and not isinstance(off, bool) and fsid is not None
@@ -9873,7 +10198,7 @@ class SdkBackend:
                         rec = json.loads(raw.decode(errors="replace"))
                     except ValueError:
                         continue
-                    if not isinstance(rec, dict) or want not in _landed_texts(rec):
+                    if not isinstance(rec, dict) or not (want & _landed_texts(rec)):
                         continue
                     ts = _record_epoch(rec.get("timestamp"))
                     if floor and ts is not None and ts < floor:
@@ -11454,6 +11779,17 @@ class SdkBackend:
             self._touch_live(sess.sid)
         if vanished:
             self._note_live_tail_race("_evict_live_overflow")
+        # A user atom the CLI streams WHILE IDLE, wearing an injected provenance stamp, is a turn the CLI
+        # opened by itself — a background task's notification, a scheduled prompt, a peer's channel
+        # message — never the composer's words: a fed text is not replayed on the stream
+        # (replay-user-messages stays off, see _options), so its opener was noted at the feeder's pop.
+        # Only the CLI's own stamp says so (atom["origin"], msg_to_atom); a stamp-less user atom (a tool
+        # result) or a "human" stamp says nothing. Judged BEFORE the working re-assert below, and only
+        # while nothing is in flight: the same stamp arriving mid-turn is a splice into the running turn,
+        # which keeps its opener (see SdkSession._note_turn_opener).
+        okind = (atom.get("origin") or {}).get("kind") if atom.get("type") == "user" else None
+        if okind and okind != "human" and not getattr(sess, "inflight", 0) and not sess._cli_working:
+            sess._note_turn_opener("injected", True)
         # The stream is the AUTHORITATIVE busy signal: a genuine WORK atom (streamed assistant/tool
         # output — not an input echo, not a /model-style command line) means the CLI is producing RIGHT
         # NOW, so re-assert 'working' if a prior state write settled ahead of it (e.g. a separate turn
@@ -11488,15 +11824,33 @@ class SdkBackend:
         threading.Thread(target=run, name="sdk-push-session", daemon=True).start()
 
     def _touch_live(self, sid: str) -> None:
-        """Record that `sid`'s live tail changed (see _live_rev)."""
-        revs = getattr(self, "_live_rev", None)          # a bare __new__ backend (tests drive prune_live on one)
-        if revs is None:                                 # has no counters yet: mint them rather than raise
+        """Record that `sid`'s live tail changed: advance its revision (`_live_rev[sid]`), the integer the
+        kernel's chat-build signature folds for the tail (Sessions.live_rev). A tab whose in-memory tail
+        changed rebuilds because this moved, and one whose tail did not is served from its cache without
+        anyone hashing the atoms. Called with `_live_lock` HELD, AFTER the change it records: the write
+        first, then the revision, so a reader that took the revision before its read and stored it misses
+        on its next check; the other order could pair a new revision with the old atoms and never heal.
+
+        THE RULE: every site that adds, replaces, pops, flags or REWORDS an atom in `_live` calls this,
+        once per call that changed something: _stash_live, _forward (its eviction included), unqueue (the
+        cancelled copy's echo), edit_queued (the echo's new words), dismiss_echo, prune_live,
+        retire_live_work, and the two flag writes _mark_dropped_echoes makes outside the lock (each takes
+        the lock for its bump). tests/test_live_tail_rev.py pins the set by source, so a new queue or echo
+        mutator that touches `_live` fails that census until it bumps. Only a CHANGE bumps: a prune that
+        retired nothing, a settle over echoes already marked, a queue miss and every read leave the
+        revision where it was. The chat build itself prunes on every merge, so a bump per CALL would move
+        every build's own signature under it. A bare __new__ backend (tests drive prune_live on one) has
+        no counters yet: mint them rather than raise."""
+        revs = getattr(self, "_live_rev", None)
+        if revs is None:
             revs = self._live_rev = {}
         revs[sid] = revs.get(sid, 0) + 1
 
     def live_rev(self, sid: str) -> int:
-        """How many times `sid`'s live tail has changed this process — equality means nothing moved."""
-        return getattr(self, "_live_rev", {}).get(sid, 0)
+        """The sid's live-tail revision (see _touch_live): 0 until the tail first changes, then one more per
+        change. Equality means nothing moved. Read under the live-tail lock, like the atoms it counts."""
+        with self._live_lock:
+            return (getattr(self, "_live_rev", None) or {}).get(sid, 0)
 
     def live_atoms(self, sid: str) -> list:
         """The session's in-memory live-tail atoms (newest last), for build_session to merge ahead of disk."""
@@ -11534,7 +11888,11 @@ class SdkBackend:
         The by-text comparison is keyed by echo_text_key on BOTH sides (2026-09-06): the kernel builds
         `tx_user_texts` from _atom_user_texts, and the echo's text is keyed the same way here — before,
         the raw text was compared against stripped keys, so an echo whose text carried a trailing
-        newline never retired. An echo the boot/spawn scan already FOUND (`_landed`, recorded by
+        newline never retired. A slash send is compared under command_text_key too (2026-09-10): the CLI
+        records it as a wrapper whose parsed atom reads "/name args" with one space, whatever the sender
+        typed between the name and the arguments, and the kernel keys that atom both ways; without this a
+        typed echo whose whitespace differed from that form (a newline before the arguments) never
+        retired, though its turn ran. An echo the boot/spawn scan already FOUND (`_landed`, recorded by
         _mark_dropped_echoes from a direct read of the transcript and mirrored to the reg) retires
         without the comparison at all: that is its exit when the two texts cannot meet, since a found
         echo is neither flagged nor dismissable.
@@ -11552,14 +11910,17 @@ class SdkBackend:
         # held. A plain set (older callers) keeps the unfloored match.
         text_t = tx_user_texts if isinstance(tx_user_texts, dict) else None
         def _by_text(a, et):
-            key = echo_text_key(et)
-            if not key:
+            # the plain key and, for a slash send, its words (echo_keys): the CLI records the send as a
+            # wrapper whose parsed atom reads "/name args", and the kernel keys that atom both ways
+            keys = echo_keys(et)
+            if not keys:
                 return False
             if text_t is None:
-                return key in tx_user_texts
-            return key in text_t and float(text_t[key] or 0) >= float(a.get("t") or 0)
+                return any(k in tx_user_texts for k in keys)
+            return any(k in text_t and float(text_t[k] or 0) >= float(a.get("t") or 0) for k in keys)
         echo_removed = False
         vanished = 0
+        changed = False
         with self._live_lock:
             d = self._live.get(sid)
             if not d:
@@ -11576,7 +11937,10 @@ class SdkBackend:
                     echo_removed = echo_removed or bool(et and not a.get("command"))
                     if d.pop(k, None) is None:
                         vanished += 1
-                    self._touch_live(sid)
+                    else:
+                        changed = True
+            if changed:
+                self._touch_live(sid)      # once per call that retired something (see _touch_live)
             if not d and self._live.get(sid) is d:
                 self._live.pop(sid, None)
         if vanished:
@@ -11633,9 +11997,11 @@ class SdkBackend:
                     except Exception:
                         self._log("orphan-reply persist failed: %s" % traceback.format_exc())
         with self._live_lock:
+            changed = False
             for k, _a in work:
-                d.pop(k, None)
-                self._touch_live(sid)
+                changed = (d.pop(k, None) is not None) or changed
+            if changed:
+                self._touch_live(sid)      # once per settle that retired something (see _touch_live)
             if not d and self._live.get(sid) is d:
                 self._live.pop(sid, None)
 
@@ -11772,12 +12138,17 @@ class SdkBackend:
         broken, the queue is simply parked until the window resets (kernel _limit_hold), and the message
         they typed is still there. Anything else is a real failure and gets the plain error card."""
         # A missing dependency gets the REMEDY as its text, not the raw ModuleNotFoundError: "No module
-        # named 'claude_agent_sdk'" tells a user nothing about what to run.
+        # named 'claude_agent_sdk'" tells a user nothing about what to run. The remedy is the venv
+        # verdict's, read from the disk now (a venv for another python is named as such, not as a
+        # missing install); a venv for this python in a process that HAD the SDK at construction is not
+        # a late build but a broken import, so `started_missing` carries the construction-time check.
         dep = isinstance(exc, ImportError)
         # A provider failure happened before a new CLI existed. The previous
         # connection's stderr must not replace it or turn it into a quota hold.
         tail = "" if dep or isinstance(exc, _cred.CredentialError) else sess.stderr_tail()
-        text = SDK_MISSING_TEXT if dep else launch_failure_text(exc, tail)
+        text = (sdk_unavailable_text(self.state_dir, verdict=self.unavailable_verdict(),
+                                     started_missing=self._sdk_missing)
+                if dep else launch_failure_text(exc, tail))
         rec = {"text": text, "at": int(time.time()), "limit": is_launch_limit(text), "dep": dep}
         try:
             self._update_reg(sess.sid, launchError=rec)
@@ -11811,9 +12182,10 @@ class SdkBackend:
         it for the chat's error card and for the usage-limit queue hold (see SessionBackend.launch_error).
 
         A MISSING SDK outranks any per-session record: it is true of every session immediately, needs no
-        session to have died to be known, and it is the actionable one."""
+        session to have died to be known, and it is the actionable one. Its text is the venv verdict's,
+        read at request time (unavailable_text), so a venv rebuilt while the kernel runs says restart."""
         if self._sdk_missing:
-            return {"text": SDK_MISSING_TEXT, "at": 0, "limit": False, "dep": True}
+            return {"text": self.unavailable_text(), "at": 0, "limit": False, "dep": True}
         try:
             rec = (read_reg(self.state_dir, str(sid)) or {}).get("launchError")
         except Exception:

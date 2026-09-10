@@ -78,7 +78,7 @@ import { apiErrorReason } from "./api-error-reason";
 import { chatMdExtensions, userMdHtml } from "./chat-md";
 import { setTip, pruneTip } from "./tip";
 import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAnchorRange, sliceRanges, prunePending, newCommentCreate, commentCreateFrame,
-         type CommentThread, type CommentCreate } from "./comments";
+         pickMarkToOpen, type CommentThread, type CommentCreate } from "./comments";
 import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, chipLabel, chipTip, chipAria, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
 import { dragSlotIndex } from "./dragslot";
 import { perfFrameHandler } from "./perf-telemetry";
@@ -8412,6 +8412,25 @@ function styleCommentMark(m: HTMLElement, th: CommentThread): void {
     : "thread: click to open";
 }
 
+/** The marks under a click, innermost first: the clicked mark, then each enclosing mark.cmt-hl outward.
+ *  Two threads on the same passage NEST (the user 2026-09-10: one selection commented on twice within
+ *  seconds; ensureCommentMark re-finds the identical range and wraps the second mark inside the first),
+ *  and the delegate hands the click to the innermost — so cmtopen picks over the whole chain
+ *  (pickMarkToOpen), with each mark's unread bit read from the thread store, the source styleCommentMark
+ *  paints the ring from, so the ring you click is the thread that opens. */
+function markChain(start: HTMLElement, sid: string): { el: HTMLElement; tid: string; unread: boolean }[] {
+  const threads = commentThreads.get(sid) || [];
+  const out: { el: HTMLElement; tid: string; unread: boolean }[] = [];
+  for (let m = start.closest("mark.cmt-hl") as HTMLElement | null; m;
+       m = (m.parentElement?.closest("mark.cmt-hl") as HTMLElement | null) || null) {
+    const tid = m.dataset.tid;
+    if (!tid) continue;
+    const th = threads.find((t) => t.tid === tid);
+    out.push({ el: m, tid, unread: !!th?.unread && th.status === "open" });
+  }
+  return out;
+}
+
 /** The comment's identity color (the user 2026-08-17): one of the session palette's colors,
  *  DISTINCT from the parent session's and, where the palette allows, from every open tab's —
  *  the same standing-out rule _pick_identity_color applies to new sessions, decided client-side
@@ -9957,21 +9976,23 @@ function warnToast(msg: string): HTMLElement {
 }
 // A toast the page that follows a reload must not repeat: a refusal that reports a STATE rather than an event. The
 // staged sends' "Can't send yet" says the session's host is unreachable (hostIsDown, a remote host's tunnel) or its tab
-// is still being created (isProvisionalId); the send into a tab whose create failed (sendComposer's deliver) says the
-// session never started; the queued edit's send (sendComposer, ahead of deliver) says the session cannot be reached, so
-// the edit was not sent; the staging refusals (stageComposer) say a picker is waiting on the composer, an edit is in
-// progress (to a past message, or to a queued one) or attachments are on the composer; the branch jump's refusal
-// (branchjump) says the session is not on this dashboard. The fresh page shows each state for itself (the host mark and
-// the staged strip; the picker, the attachments and the roster come back from the kernel and the persisted drafts) or no
-// longer has it (a provisional tab, pending or failed, does not survive a reload; composerEdits and queuedEdits are in
-// memory alone, so no edit is in progress on a fresh page, and a "send again" there would post the words as a new
-// message), so kept by persistNoticesForReload and shown again by the page that follows, it would be redundant at best
-// and false at worst. The mark keeps it out of the replay (reload-notices.ts liveNotices reads only the toasts without
-// it).
+// is still being created (isProvisionalId); the plain send's refusal on a disconnected host (sendComposer's deliver)
+// says the same host is unreachable and that romp is re-dialing it; the send into a tab whose create failed (deliver
+// too) says the session never started; the queued edit's send (sendComposer, ahead of deliver) says the session cannot
+// be reached, so the edit was not sent; the staging refusals (stageComposer) say a picker is waiting on the composer,
+// an edit is in progress (to a past message, or to a queued one) or attachments are on the composer; the branch jump's
+// refusal (branchjump) says the session is not on this dashboard. The fresh page shows each state for itself (the host
+// mark and the transcript foot, from the kernel's tunnel health, which the page reads afresh into a disconnected set
+// that starts empty; the staged strip; the picker, the attachments and the roster come back from the kernel and the
+// persisted drafts, the refused message among them) or no longer has it (a provisional tab, pending or failed, does not
+// survive a reload; composerEdits and queuedEdits are in memory alone, so no edit is in progress on a fresh page, and a
+// "send again" there would post the words as a new message), so kept by persistNoticesForReload and shown again by the
+// page that follows, it would be redundant at best and false at worst; a replay also posts no redial, so the
+// disconnected-host refusal's "re-dialing now" would not be true there. The mark keeps it out of the replay
+// (reload-notices.ts liveNotices reads only the toasts without it).
 // Toasts that report what HAPPENED to a send or a file stay unmarked, since what they say is as true after the reload
 // as before: the nack (the attachment was not saved, the held message not sent), the dismissal and the other-tab ack
-// (the held message not sent), the plain send's refusal on a disconnected host (this message was not sent and is still
-// in the composer, where the fresh page's persisted draft keeps it, and a send there sends it).
+// (the held message not sent).
 function ephemeralWarnToast(msg: string): void { warnToast(msg).dataset.ephemeral = "1"; }
 
 // Tail-windowing (see the View comment): a fresh/rewound view renders only the
@@ -10739,6 +10760,15 @@ function showActive(keep?: { uuid: string; y: number } | null) {
     } else { empty.style.display = ""; }
     document.body.style.removeProperty("--active-accent"); // no session → neutral window border
     updateStatusline();
+    // Take the leaving tab's go-to-bottom and reply chips down with it. They were measured against ITS transcript,
+    // and a tab left at the top of a long one fires none of the chips' events on the switch: no scroll clamp
+    // (scrollTop is 0 and stays 0) and no #content resize (the pane's height is the body minus its siblings; hiding
+    // the views changes only its scroll extent). Left up, a stale chip is a click into the wrong tab: the reply
+    // chip's anchor is looked up in the entering tab's view and lands as the couldn't-locate toast when the full
+    // arrives. With no live session under the active tab, updateJumpBtn's gate hides its chip without a measure and
+    // re-reads the reply chips, whose own gate hides them and clears their signature. The branch's last statement,
+    // after its state is settled (skeleton-tabs-wiring.test.ts pins the order).
+    updateJumpBtn();
     return;
   }
   document.getElementById("tab-loading")?.remove();   // the payload landed — the real view takes over in place
@@ -11138,6 +11168,11 @@ jumpBtn.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none"
 function updateJumpBtn(): void {
   const c = document.getElementById("content");
   if (!c || c.clientHeight <= 0) { jumpBtn.hidden = true; return; }   // hidden pane measures 0 — no chip
+  // No live session under the active tab (a loading or skeleton tab's loader, or the no-sessions copy): nothing to
+  // go to the bottom of, so the set decides before the measure does. The loader's min-height (60vh, styles.css)
+  // overflows a pane under 60vh + 18px, and the measure alone would paint the chip over it (skeleton-tabs-wiring.test.ts).
+  // The reply chips still get their re-read: their own gate hides them over a loader and clears their signature.
+  if (!liveSession(activeId)) { jumpBtn.hidden = true; updateReplyChips(); return; }
   const off = c.scrollHeight > c.clientHeight + 2 && !atBottom(c);   // the chip: shown the moment the reader leaves the true bottom
   jumpBtn.hidden = !off;
   if (off) jumpBtn.style.bottom = (Math.max(0, window.innerHeight - c.getBoundingClientRect().bottom) + 8) + "px";
@@ -13569,12 +13604,15 @@ window.addEventListener("romp:hostRelayUp", (e) => {
   refreshSettledPreviews();
   // …and the tab this pane is LOOKING AT, when that host owns it (T246, the user 2026-09-07): the relay's
   // open is the moment the remote kernel holds a FRESH client for this pane — after that kernel restarted,
-  // one with no active tab at all. Its pusher keys only a client's active tab on the live change key (the
-  // backend's stream, its queue, the snapshot row); every other session is served from the file-stat
-  // cache, so the session the user was watching streamed nothing until their next send moved a file
-  // input. The pane shim's local socket re-arms the LOCAL kernel with its ?active= connect hint on every
-  // dial; the relay has no hint, so the same fact is re-sent here as the activeTab message every tab
-  // switch sends (notifyActive; routeOutbound strips the host prefix). Decision in relay-active.ts.
+  // one with no active tab at all. Its pusher builds and flushes a client's active tab first; every tab is
+  // served from its cached build while its complete signature (_chat_build_sig: the backend's live tail,
+  // its queue, the snapshot row, every side file) holds. Under the key of the time, which keyed no
+  // in-memory input for a background tab, the session the user was watching streamed nothing until their
+  // next send moved a file input; today a missing hint costs the watched tab its place at the head of the
+  // build order and the first flush. The pane shim's local socket re-arms the LOCAL kernel with its ?active=
+  // connect hint on every dial; the relay has no hint, so the same fact is re-sent here as the activeTab
+  // message every tab switch sends (notifyActive; routeOutbound strips the host prefix). Decision in
+  // relay-active.ts.
   if (activeTabToReannounce(activeId, h)) notifyActive();
 });
 
@@ -15887,7 +15925,11 @@ function setupComposer() {
         // the refusal itself is DEMAND: ask the kernel to re-dial that host's tunnel right now,
         // so "romp is re-dialing" below is literally true at the moment it is read (2026-08-16)
         vscodeApi?.postMessage({ type: "redial", host });
-        warnToast(host + " is disconnected, so this wasn't sent. It's still in the box — romp is "
+        // The refusal reports a state (the host's reach): the page that follows a reload reads it from the kernel's
+        // tunnel health and shows it as the tab mark and the transcript foot, a replay posts no redial to make
+        // "re-dialing now" true, and the message is in the persisted draft. So it does not ride one
+        // (ephemeralWarnToast).
+        ephemeralWarnToast(host + " is disconnected, so this wasn't sent. It's still in the box — romp is "
           + "re-dialing the link now; send again when it's back.");
         return;
       }
@@ -16767,9 +16809,14 @@ setupSettings();
     // every popover BUTTON below: the popover's conversation refreshes on comments frames, and a
     // per-render listener would eat the mid-press click (the click-safety rule).
     cmtopen: (elx) => {
-      const tid = elx.dataset.tid;
-      if (!tid || !activeId) return;
-      const r = elx.getBoundingClientRect();
+      if (!activeId) return;
+      // the ring you click opens the thread that owns the ring (the user 2026-09-10): two threads on one
+      // passage nest their marks, the delegate lands on the innermost, and the outer thread's unread ring
+      // could never be opened from itself — pick over the chain instead (markChain / pickMarkToOpen)
+      const chain = markChain(elx, activeId);
+      const tid = pickMarkToOpen(chain);
+      if (!tid) return;
+      const r = (chain.find((m) => m.tid === tid)?.el || elx).getBoundingClientRect();
       openCommentPopover(activeId, tid, Math.min(r.left, window.innerWidth - 380), r.bottom + 6);
     },
     cmtclose: () => closeCommentPop(),

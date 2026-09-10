@@ -23,7 +23,7 @@ import tempfile
 import time
 import unittest
 from datetime import datetime, timezone
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -34,9 +34,9 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-jd = SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
-km = SourceFileLoader("romp_kernel", os.path.join(BIN, "romp-kernel")).load_module()
+load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+jd = load_source("romp_judge", os.path.join(BIN, "romp-judge"))
+km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
 
 PARENT = "aaaaaaaa-1111-2222-3333-444444444444"
 
@@ -89,6 +89,15 @@ class CreateIsIdempotent(unittest.TestCase):
         jd._discover_cache.clear()
         jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
         km._thread_msgs_cache.clear()
+        # the create memos start empty as well (review, 2026-09-09): the tests reuse the same create ids
+        # under one parent sid, so an id a previous test noted would name a thread id this test's fresh
+        # store can hold too, and a fresh gesture here would be answered as a repeat; random thread ids
+        # keep that from happening by chance today, and the clears make the order not matter. The noted
+        # creates are the memo a passing test leaves behind; the in-flight set and the parked list are
+        # empty at the end of every passing test, so their clears keep a test that failed part-way from
+        # failing the next one too. Under the lock every writer of the three memos takes.
+        with km._create_lock:
+            km._recent_creates.clear(); km._inflight_creates.clear(); km._parked_creates.clear()
         self.now = int(time.time())
         cdir = str(Path(self._td) / "work")
         self.proj = jd._proj_dir(cdir)

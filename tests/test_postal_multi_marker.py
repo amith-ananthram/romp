@@ -17,14 +17,14 @@ that rather than re-scanning. Synthetic only (placeholder UUIDs, invented text, 
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()   # hermetic BEFORE any romp code loads
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-em = SourceFileLoader("romp_event_model_multimark", os.path.join(BIN, "romp-event-model")).load_module()
-jd = SourceFileLoader("romp_judge_multimark", os.path.join(BIN, "romp-judge")).load_module()
+em = load_source("romp_event_model_multimark", os.path.join(BIN, "romp-event-model"))
+jd = load_source("romp_judge_multimark", os.path.join(BIN, "romp-judge"))
 
 BOB, ALICE = "sid-bob-1111", "sid-alice-2222"
 MID_BOB = "1781100000.111_222.TESTHOST"

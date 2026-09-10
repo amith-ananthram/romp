@@ -32,7 +32,7 @@ import time
 import unittest
 from contextlib import redirect_stderr
 from unittest import mock
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -42,7 +42,7 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-km = SourceFileLoader("romp_kernel_parkedlock", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_parkedlock", os.path.join(BIN, "romp-kernel"))
 
 # The ACCOUNT gate is a separate axis (tests/test_kernel_limit_queue.py); pinned off so the real
 # machine's usage.json can never make these tests park for a reason none of them is about.

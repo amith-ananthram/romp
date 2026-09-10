@@ -150,9 +150,11 @@ tag order, each with a header in the tag's color, and the untagged sessions on a
 own at the end. A session with several tags appears under each of them; every copy is the same
 session (click either to open it, and closing either ends it). Each header shows the tag's color and name, then a chevron and a
 member count. Click a header, or press Enter on it, to fold its section down to the header
-alone; the count then says how many tabs are folded away, and a small dot after it says when
-one of them is working or waiting on you (hover it for their names). To keep one tab visible
-while its section is folded, right-click the tab and pick **Show when folded** under **Tags**;
+alone; the count then says how many tabs are folded away, and a small dot after it shows when
+one of them is busy or needs you: red when one is blocked or waiting on you, otherwise gold
+when one is working, otherwise amber when one hit an API error and is retrying on its own
+(hover it for their names). To keep one tab visible while its section is folded, right-click
+the tab and pick **Show when folded** under **Tags**;
 the header's count then leaves that tab out; when every tab in a section is set to
 show, the folded header shows the full count and its tooltip says nothing is hidden. Pick it
 again to fold the tab with the rest. A tab set to show when folded keeps that setting when its
@@ -632,10 +634,12 @@ switches indented under it, and a button:
   main switch off, the row says the device is set up but nothing arrives until
   the main switch is on.
 - **Also when a turn finishes**, also under it, adds a notification every time
-  any session finishes a turn, with the session's name and the first line of
-  what it said. With many sessions running this is a lot of buzzing, so it is
-  off unless you want it. A turn that ends by asking you something buzzes once,
-  not twice.
+  any session finishes a turn you started, with the session's name and the
+  first line of what it said. Turns a session starts on its own, such as
+  reacting to one of its background agents finishing, or to a reminder, stay
+  quiet: nothing there was waiting on you. With many sessions running this is
+  still a lot of buzzing, so it is off unless you want it. A turn that ends by
+  asking you something buzzes once, not twice.
 - **Send a test notification** sends one notification to the device you are
   holding, whatever the switches say, and prints the push service's answer under
   the button, so you can see at once whether the phone is set up or why it is
@@ -644,6 +648,13 @@ switches indented under it, and a button:
   tab, tap the notification, and check that it brings you back. With the main
   switch off, the answer adds that real notifications will not arrive until it
   is on.
+
+A restart of the kernel (an update deploys one) announces nothing by itself.
+What Romp has told you about is written down beside its other state, so the
+cards already waiting on you or already finished when it comes back stay
+quiet. A card that stops needing you and then needs you again is announced
+once, not at every turn, unless you acted on the card in between (answered
+it, resolved it, crossed it off) or it finished in the meantime.
 
 The handler that answers a tap lives on the phone, and the phone refreshes it
 whenever you open the app and whenever a notification arrives. If a tap ever
@@ -666,11 +677,15 @@ ports, so without this any other user could inject prompts into your live
 sessions. The token is 144-bit random and lives at
 `~/.local/state/romp/serve-token` with mode `0600` (readable only by your own
 user account). Local tools (the CLI, hooks, the bus, the editor extension) read
-that file and send it automatically, so you never type it. Only liveness probes
-(`/healthz`, `/version`, `/busy`, and the bus's `/ping`) are exempt.
+that file and send it automatically, so you never type it. Only two kinds of
+request skip the token: the liveness probes (`/healthz`, `/version`, `/busy`,
+and the bus's `/ping`), and the files a browser fetches without credentials
+when you add Romp to the Home Screen (`/manifest.webmanifest` and three icons
+under `/media/`). Those files are fixed (the app's name, colors and icon art)
+and read no session state.
 
-The kernel and the bus mint that file when it is missing, one mint between them
-under a sibling lock file, `serve-token.lock`. An existing token is never
+The kernel and the bus mint the token file when it is missing, one mint between
+them under a sibling lock file, `serve-token.lock`. An existing token is never
 replaced: a file left looser than `0600` is tightened at the next start (its
 value is kept, so every client stays valid), and a token that exists but cannot
 be read, or a symlink at that path, refuses to start instead of minting a

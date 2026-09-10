@@ -25,13 +25,15 @@ queue:
 
 SYNTHETIC fixtures only: a private synthetic sid, the notes-api demo world, hostname-free.
 """
+import contextlib
+import io
 import json
 import os
 import tempfile
 import time
 import unittest
 from datetime import datetime, timezone
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -40,8 +42,8 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
-km = SourceFileLoader("romp_kernel_qid", os.path.join(BIN, "romp-kernel")).load_module()
-sb = SourceFileLoader("romp_sdk_backend_qid", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+km = load_source("romp_kernel_qid", os.path.join(BIN, "romp-kernel"))
+sb = load_source("romp_sdk_backend_qid", os.path.join(BIN, "romp_sdk_backend.py"))
 
 SID = "5a6b7c8d-1e2f-4a3b-9c4d-5e6f7a8b9c0d"   # private synthetic sid (goal-store fixtures rule)
 T0 = 1_800_000_000
@@ -291,6 +293,34 @@ class TheChatCarriesTheIds(unittest.TestCase):
         landed = [e for e in m["events"] if e.get("kind") == "user" and e.get("md") == fed_text and not str(e.get("uuid", "")).startswith("echo:")]
         self.assertEqual([e.get("qid") for e in landed], [qid])
 
+    def test_a_slash_sends_wrapper_record_carries_the_typed_copys_id(self):
+        # A slash or skill command typed into the composer with its arguments on the next line: the CLI
+        # records it as a <command-name> wrapper (no verbatim copy of the typed text), which the kernel reads
+        # as "/deploy staging now" with one space. The chat's own pending bubble retires by id once it has
+        # latched the copy's, so the landed event must carry it although the texts differ in whitespace;
+        # and the kernel's echo, the other visible copy, retires on the same record (2026-09-10).
+        live = self.w.now - T0
+        self.w.write(RUNNING, shift=live)
+        typed = "/deploy \n\nstaging now"
+        self.assertTrue(self.w.be.send(SID, typed))
+        [qid] = [m["qid"] for m in self.w.be.pending_queued_meta(SID)]
+        with self.w.s._lock:
+            self.w.s._pop_for_feed_locked()
+        wrap = ("<command-message>deploy</command-message>\n<command-name>/deploy</command-name>\n"
+                "<command-args>staging now</command-args>\n<skill-format>true</skill-format>")
+        recs = RUNNING + [dict(uline(T0 + 55, wrap, "c1", "tr1"), isMeta=True, promptId="p1"),
+                          dict(uline(T0 + 55, "Base directory for this skill: /tmp/notes-api/.claude/skills/deploy\n\nDeploy the service.",
+                                     "c2", "c1"), isMeta=True, promptId="p1"),
+                          aline(T0 + 75, "Deploying staging now.", "a3", "c2")]
+        self.w.write(recs, shift=live)
+        m = self.w.build()
+        landed = [e for e in m["events"] if e.get("kind") == "user" and e.get("md") == "/deploy staging now"
+                  and not str(e.get("uuid", "")).startswith("echo:")]
+        self.assertEqual([e.get("qid") for e in landed], [qid], "the wrapper's event carries the typed copy's id")
+        echoes = [e for e in m["events"] if str(e.get("uuid", "")).startswith("echo:")]
+        self.assertEqual(echoes, [], "the kernel's echo retired on the same record")
+        self.assertNotIn(SID, self.w.be._live, "…and left the live store")
+
     def test_a_two_block_record_carries_both_copies_ids(self):
         live = self.w.now - T0
         self.w.write(RUNNING, shift=live)
@@ -365,7 +395,8 @@ class TheSdkQueueTakesTheClientsId(unittest.TestCase):
     """SdkBackend.send takes the id the client minted at the press and unqueue removes a copy BY that id: of two
     same-text copies the one named leaves, and its echo (keyed by the same id) goes with it while the other's stays.
     The handler's shape check reads this backend's queue and live echoes, so an id the session already holds is
-    refused and the kernel mints instead."""
+    refused and the kernel mints instead; a queue read or a live-echo read that raises refuses too, and the line it
+    logs names the session alone."""
 
     def setUp(self):
         self.w = _World()
@@ -414,9 +445,40 @@ class TheSdkQueueTakesTheClientsId(unittest.TestCase):
         self.assertEqual(km._client_qid({"qid": fresh}, SID, self.w.be), fresh)
         self.assertIsNone(km._client_qid({"qid": queued}, SID, self.w.be), "held by the queue")
         self.assertIsNone(km._client_qid({"qid": fed}, SID, self.w.be), "held by a live echo (fed, not landed)")
-        for bad in ("", "s-1", "echo:", "echo:" + "F" * 32, "echo:" + "f" * 8, "echo:" + "f" * 70, 7, None):
+        for bad in ("", "s-1", "echo:", "echo:" + "F" * 32, "echo:" + "f" * 8, "echo:" + "f" * 70, "echo:" + "f" * 32 + "\n", 7, None):
             self.assertIsNone(km._client_qid({"qid": bad}, SID, self.w.be), repr(bad))
         self.assertIsNone(km._client_qid({}, SID, self.w.be))
+
+    def test_the_handler_refuses_a_fresh_id_when_the_hold_cannot_be_checked_and_names_the_sid_only(self):
+        # fails toward the kernel's own id: a queue read or a live-echo read that raises is taken as "held", the
+        # client's id is refused, and the stderr line names the session and nothing the client sent (the id, the words)
+        fresh = "echo:" + "f" * 32
+        msg = {"qid": fresh, "md": "private words"}
+
+        def boom(*a, **k):
+            raise RuntimeError("queue unreadable")
+
+        real_meta, real_atoms = self.w.be.pending_queued_meta, self.w.be.live_atoms
+        try:
+            self.w.be.pending_queued_meta = boom
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertIsNone(km._client_qid(msg, SID, self.w.be), "the queue could not be read")
+            self.assertIn(SID, err.getvalue())
+            self.assertNotIn(fresh, err.getvalue())
+            self.assertNotIn("private words", err.getvalue())
+            self.w.be.pending_queued_meta = lambda sid: []
+            self.w.be.live_atoms = boom
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertIsNone(km._client_qid(msg, SID, self.w.be), "the live echoes could not be read")
+            self.assertIn(SID, err.getvalue())
+            self.assertNotIn(fresh, err.getvalue())
+            self.assertNotIn("private words", err.getvalue())
+            self.assertNotIn("queue unreadable", err.getvalue(), "the fault's text is not the line's either")
+        finally:
+            self.w.be.pending_queued_meta, self.w.be.live_atoms = real_meta, real_atoms
+        self.assertEqual(km._client_qid(msg, SID, self.w.be), fresh, "the same id is taken once both reads answer")
 
 
 class TheTmuxQueueCarriesStamps(unittest.TestCase):

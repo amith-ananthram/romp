@@ -5,7 +5,7 @@ Drives OpenAI Codex sessions through the official openai-codex Python SDK's sync
 (JSON-RPC to `codex app-server` over stdio) and materializes each thread as Claude-transcript-shaped
 JSONL via kernel/codex_events.ThreadNormalizer, so romp's entire read side parses Codex sessions
 unchanged. Duck-types the SessionBackend ABC exactly like SdkBackend does (the kernel loads backends
-via SourceFileLoader; a conformance test asserts every abstract method exists).
+by file path; a conformance test asserts every abstract method exists).
 
 Shape of the machine:
 - ONE CodexClient per backend — the app-server hosts many threads, unlike Claude's one-CLI-per-
@@ -34,20 +34,24 @@ import threading
 import time
 import traceback
 import uuid as uuidlib
-from importlib.machinery import SourceFileLoader
+import importlib.util
 from pathlib import Path
 
 HERE = Path(os.path.dirname(os.path.realpath(__file__)))
-_events = SourceFileLoader("romp_codex_events", str(HERE / "codex_events.py")).load_module()
-_runtime = SourceFileLoader("romp_codex_runtime", str(HERE / "codex_runtime.py")).load_module()
+_ls_spec = importlib.util.spec_from_file_location("romp_loadsource", str(HERE / "loadsource.py"))
+_ls_mod = importlib.util.module_from_spec(_ls_spec)
+_ls_spec.loader.exec_module(_ls_mod)
+load_source = _ls_mod.load_source   # file-path imports with load_module()'s sys.modules semantics (kernel/loadsource.py)
+_events = load_source("romp_codex_events", HERE / "codex_events.py")
+_runtime = load_source("romp_codex_runtime", HERE / "codex_runtime.py")
 # The by-text KEY RULE (session_backend.echo_text_key): the one normalization under which an input echo's
 # text is compared with a transcript record's, shared with the kernel's _atom_user_texts and
 # SdkBackend.prune_live, so an echo whose text carries a trailing newline still lands. The kernel's own
 # copy of that module when it is loaded (kernel.py loads it as romp_session_backend, and TmuxBackend
 # subclasses that copy's ABC); otherwise the file is loaded under its OWN module name, as sdk_backend
 # does, so re-executing the source never rebinds the ABC out from under a subclass.
-echo_text_key = (sys.modules.get("romp_session_backend") or SourceFileLoader(
-    "romp_session_backend_keys", str(HERE / "session_backend.py")).load_module()).echo_text_key
+echo_text_key = (sys.modules.get("romp_session_backend")
+                 or load_source("romp_session_backend_keys", HERE / "session_backend.py")).echo_text_key
 
 SDK_PIN = "openai-codex==0.144.4"     # bin/romp-codex-setup installs exactly this into codexvenv
 SETUP_HINT = ("Session not created: the Codex backend isn't installed. "
@@ -176,16 +180,46 @@ def _codex_config(config_cls, codex_bin, state_dir=None):
                       config_overrides=overrides, **extra)
 
 
+def _running_python_tag():
+    """This interpreter as venv names its lib directory: `3.14`, or `3.14t` for a free-threaded build.
+    The twin of kernel.py's _running_python_tag and sdk_backend.running_python_tag; this module loads
+    on its own, so it carries its own copy."""
+    return "%d.%d%s" % (sys.version_info[0], sys.version_info[1],
+                        "t" if "t" in getattr(sys, "abiflags", "") else "")
+
+
+_CODEX_VENV_BUILT_FOR = []   # the tags a mismatched codexvenv was last seen built for: one stderr line per verdict
+
+
 def ensure_codex_sdk(state_dir):
-    """Make openai_codex importable: an already-installed copy wins, else the dedicated venv built
-    by bin/romp-codex-setup ($STATE/codexvenv — never system python). True when importable."""
+    """Make openai_codex importable: an already-installed copy wins, else the dedicated venv built by
+    bin/romp-codex-setup ($STATE/codexvenv, never system python), and of that venv ONLY the
+    site-packages built for the python this process runs (_running_python_tag), as kernel.py's
+    _ensure_sdk_on_path does for the SDK venv. The venv's compiled extensions are per-interpreter. Every
+    codexvenv/lib/python3.*/site-packages used to be inserted at sys.path[0] whatever the interpreter,
+    so a codexvenv built with a newer python (the picker before 2026-09-06 took the newest on PATH)
+    failed deep inside the import under the kernel's python, with an error naming a module rather than
+    the venv, and shadowed shared dependencies for every later lazy import in the process. A venv for
+    another tag adds nothing and is named on stderr once, with the remedy. True when importable."""
     import importlib.util
     import glob
+    global _CODEX_VENV_BUILT_FOR
     if importlib.util.find_spec("openai_codex"):
         return True
-    for sp in sorted(glob.glob(str(Path(state_dir) / "codexvenv" / "lib" / "python3.*" / "site-packages"))):
+    running = _running_python_tag()
+    found = sorted(glob.glob(str(Path(state_dir) / "codexvenv" / "lib" / "python3.*" / "site-packages")))
+    match = [sp for sp in found if Path(sp).parent.name == "python" + running]
+    for sp in match:
         if sp not in sys.path:
             sys.path.insert(0, sp)
+    if found and not match:
+        built = sorted(Path(sp).parent.name[len("python"):] for sp in found)
+        if built != _CODEX_VENV_BUILT_FOR:          # one line per verdict, not one per launch
+            _CODEX_VENV_BUILT_FOR = built
+            sys.stderr.write("codex-backend: codexvenv is built for python %s but the kernel runs %s: re-run "
+                             "bin/romp-codex-setup to rebuild it for %s\n" % (" and ".join(built), running, running))
+        return False
+    _CODEX_VENV_BUILT_FOR = []
     return importlib.util.find_spec("openai_codex") is not None
 
 

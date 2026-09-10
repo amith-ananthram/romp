@@ -3399,8 +3399,10 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
 .cmt-tick:hover { opacity: 1; }
 .cmt-tick.resolved { opacity: 0.3; }
 /* an UNREAD thread's tick shouts (the user 2026-08-23): full width, taller, double-ringed — the old
-   faint glow read as a rendering artifact, not as "new here" */
-.cmt-tick.unread { width: 10px; height: 6px; right: 0; opacity: 1;
+   faint glow read as a rendering artifact, not as "new here". It also stacks ABOVE its read siblings:
+   two threads on one passage share a `top`, and the later-painted read tick covered the unread one
+   (the user 2026-09-10) */
+.cmt-tick.unread { width: 10px; height: 6px; right: 0; opacity: 1; z-index: 1;
   box-shadow: 0 0 0 1.5px var(--bg), 0 0 0 3px color-mix(in srgb, var(--cmt-hl) 85%, transparent); }
 /* a WRITING thread's tick wears the same await-green as the passage (the user 2026-08-24: the
    marching-ants crawl — the "spinning dots" — is retired; the state COLOR is the in-flight cue,

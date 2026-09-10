@@ -15,7 +15,7 @@ import sys
 import tempfile
 import json
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -24,8 +24,8 @@ ROOT = os.path.dirname(HERE)
 # Hermetic state BEFORE the loads (same floor as test_event_model_golden.py).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
-em = SourceFileLoader("romp_event_model", os.path.join(ROOT, "bin", "romp-event-model")).load_module()
-cx = SourceFileLoader("romp_codex_events", os.path.join(ROOT, "kernel", "codex_events.py")).load_module()
+em = load_source("romp_event_model", os.path.join(ROOT, "bin", "romp-event-model"))
+cx = load_source("romp_codex_events", os.path.join(ROOT, "kernel", "codex_events.py"))
 
 NOW = 1781100000                                   # fixed test clock
 TID = "01911111-2222-7333-8444-555555555555"       # synthetic Codex thread id (UUIDv7-shaped)

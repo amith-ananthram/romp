@@ -17,7 +17,7 @@ import threading
 import unittest
 import urllib.request
 from http.server import ThreadingHTTPServer
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 import tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -27,15 +27,15 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-jd = SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
+load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+jd = load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "test-token-DO-NOT-USE")
 os.environ["ROMP_MANAGER_PORT"] = "1"   # dead port → _restart_this_kernel audits, then its dial is
 #   refused (its except: pass). NEVER pop: pytest imports this module at COLLECTION, so a pop here
 #   would erase conftest's suite-wide floor before any test runs — and an ABSENT var is the one
 #   unsafe state (_run_main_update maps absent to the DEFAULT port: the live manager).
-km = SourceFileLoader("romp_kernel", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
 
 def _audit_path():
     return jd.STATE / "restart-audit.jsonl"   # at CALL time — peer test modules rebind jd.STATE

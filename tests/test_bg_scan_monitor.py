@@ -19,14 +19,14 @@ import json
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()   # hermetic BEFORE any romp code loads
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-em = SourceFileLoader("romp_event_model_t", os.path.join(ROOT, "kernel", "event_model.py")).load_module()
+em = load_source("romp_event_model_t", os.path.join(ROOT, "kernel", "event_model.py"))
 
 TS = "2026-01-01T00:00:00.000Z"
 T0 = em.parse_z(TS)

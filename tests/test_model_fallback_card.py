@@ -6,7 +6,7 @@ the first learn never mints. SYNTHETIC fixtures."""
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -15,10 +15,10 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-jd = SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
-sb = SourceFileLoader("romp_sdk_backend",
-                      os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py")).load_module()
+load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+jd = load_source("romp_judge", os.path.join(BIN, "romp-judge"))
+sb = load_source("romp_sdk_backend",
+                      os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py"))
 
 SID = "11111111-2222-3333-4444-555555555555"
 

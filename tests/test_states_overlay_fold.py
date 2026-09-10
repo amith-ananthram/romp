@@ -26,7 +26,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from datetime import datetime, timezone
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -35,10 +35,10 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 # conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-em = SourceFileLoader("romp_event_model_sov", os.path.join(BIN, "romp-event-model")).load_module()
-SourceFileLoader("romp_judge_sov", os.path.join(BIN, "romp-judge")).load_module()
+em = load_source("romp_event_model_sov", os.path.join(BIN, "romp-event-model"))
+load_source("romp_judge_sov", os.path.join(BIN, "romp-judge"))
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
-km = SourceFileLoader("romp_kernel_sov", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_sov", os.path.join(BIN, "romp-kernel"))
 jd = km.jd
 
 # Sids of this module's own (the goal-store fixtures rule): the override journal is per sid and shared by
@@ -260,11 +260,12 @@ class OverlayFold(_State):
         km._states_overlay_forget({SID})
         self.assertEqual(km._states_overlay_report()["evict"], 1, "nothing left to drop: no count")
 
-    def test_forget_also_drops_a_departed_sids_stranded_failed_episode(self):
-        # A read that fails pops the cache entry (fold_records), so a sid whose LAST read before it left the
-        # alive set failed sits only in _states_overlay_failed, never in _states_overlay_cache: the loop
-        # over the cache alone would never reach it, and nothing else reads a departed sid's file again to
-        # end the episode the ordinary way.
+    def test_a_departed_sids_open_episode_survives_the_forget_and_is_named_once(self):
+        # A fail pops the cache entry (fold_records), so a sid whose read failed sits only in
+        # _states_overlay_failed. Its file is still read after the sid leaves the alive set: build_session
+        # serves a dead session kept open as a read-only tab and the scroll-back handler for any sid, and
+        # GET /classify answers for any sid, none of them gated on liveness. The stderr line is one per
+        # episode for every reader, so the forget must not reset the latch; only a good read ends the episode.
         self.check([{"t": 100, "awaiting": True, "why": "x"}], {"t": 100, "awaiting": True, "why": "x"})
         # the shared reader serves an UNCHANGED file's records on an identity hit without opening it, so a
         # permission flip alone is not a read attempt: the file grows first, then becomes unreadable
@@ -273,14 +274,51 @@ class OverlayFold(_State):
         try:
             if os.access(self.states_path(), os.R_OK):
                 self.skipTest("this user reads through mode 000 (root)")
-            self.assertIsNone(km._states_awaiting_overlay(SID), "the read failed: no overlay")
+            err = io.StringIO()
+            with redirect_stderr(err):
+                self.assertIsNone(km._states_awaiting_overlay(SID), "the read failed: no overlay")
+                km._states_overlay_forget(set())              # SID leaves the alive set with the episode open
+                self.assertIsNone(km._states_awaiting_overlay(SID), "a kept-open tab's rebuild reads it again")
+                km._states_overlay_forget(set())              # the next tick's forget
+                self.assertIsNone(km._states_awaiting_overlay(SID))
+            self.assertEqual(err.getvalue().count("unreadable"), 1,
+                             "one stderr line per episode, whatever the forget did between the reads")
+            st = km._states_overlay_report()
+            self.assertEqual((st["fail"], st["entries"]), (3, 0), "every read counted, none memoized")
+            self.assertIn(str(self.states_path()), km._states_overlay_failed, "the forget leaves the open episode alone")
         finally:
             os.chmod(self.states_path(), 0o644)
-        self.assertIn(str(self.states_path()), km._states_overlay_failed, "the open episode is recorded")
-        self.assertNotIn(str(self.states_path()), km._states_overlay_cache, "a fail pops the cache entry too")
-        km._states_overlay_forget(set())                       # SID leaves the alive set with the episode still open
-        self.assertNotIn(str(self.states_path()), km._states_overlay_failed,
-                         "forget retires the stranded episode along with the cache entry")
+        self.assertEqual(km._states_awaiting_overlay(SID), ref_overlay(SID), "readable again: the walk's answer")
+        self.assertNotIn(str(self.states_path()), km._states_overlay_failed, "a good read ends the episode")
+
+    def test_the_failed_set_is_cleared_whole_above_its_cap(self):
+        # The forget leaves a departed sid's path in the set, so the set is bounded the way the fold cache is:
+        # cleared whole above 256 paths (fold_records), never per path. At 256 nothing is cleared.
+        seeded = {os.path.join(self.td, "states", "cap-%d.jsonl" % i) for i in range(256)}
+        with km._STATES_OVERLAY_LOCK:
+            km._states_overlay_failed.update(seeded)
+        self.check([{"t": 100, "awaiting": True, "why": "x"}], {"t": 100, "awaiting": True, "why": "x"})
+        self.append_state({"t": 200, "state": "idle"})
+        os.chmod(self.states_path(), 0)
+        try:
+            if os.access(self.states_path(), os.R_OK):
+                self.skipTest("this user reads through mode 000 (root)")
+            err = io.StringIO()
+            with redirect_stderr(err):
+                self.assertIsNone(km._states_awaiting_overlay(SID))
+            self.assertEqual(km._states_overlay_failed, seeded | {str(self.states_path())},
+                             "256 paths is the cap, not above it: nothing cleared, the failing path enters")
+            self.assertEqual(err.getvalue().count("unreadable"), 1)
+            # 257 paths now: the next fail clears the set whole, and a clear ends every open episode at once,
+            # so the same unreadable file is named a second time on that read, as the fold cache re-folds
+            # after its own clear
+            with redirect_stderr(err):
+                self.assertIsNone(km._states_awaiting_overlay(SID))
+            self.assertEqual(km._states_overlay_failed, {str(self.states_path())},
+                             "above the cap the set is cleared whole, then the failing path re-enters")
+            self.assertEqual(err.getvalue().count("unreadable"), 2, "the clear ended the episode; the next fail opens one")
+        finally:
+            os.chmod(self.states_path(), 0o644)
 
     def test_the_report_has_the_documented_shape(self):
         st = km._states_overlay_report()
@@ -407,6 +445,38 @@ class InterruptTickRetires(unittest.TestCase):
             km._has_tmux = saved
         self.assertEqual(km._states_overlay_cache, {}, "the live session left: its entry goes")
         self.assertEqual(km._states_overlay_report()["entries"], 0)
+
+    def test_the_tick_leaves_a_departed_sids_open_fail_episode_alone(self):
+        # A dead session's states file is still read after the tick drops its fold entry: build_session
+        # serves a dead session kept open as a read-only tab and the scroll-back handler for any sid, and
+        # GET /classify answers for any sid, none of them gated on liveness. The stderr line is one per
+        # episode for every reader, so the tick's forget must not reset the latch for a sid outside its alive
+        # set; a good read is what ends the episode.
+        self._write_states(DEAD, [{"t": T0, "awaiting": True, "why": "a build"}])
+        self.assertEqual(km._states_awaiting_overlay(DEAD), {"t": T0, "awaiting": True, "why": "a build"})
+        dead_path = jd.STATE / "states" / (DEAD + ".jsonl")
+        # the shared reader serves an UNCHANGED file's records on an identity hit without opening it, so a
+        # permission flip alone is not a read attempt: the file grows first, then becomes unreadable
+        with open(dead_path, "a") as f:
+            f.write(json.dumps({"t": T0 + 1, "state": "idle"}) + "\n")
+        os.chmod(dead_path, 0)
+        try:
+            if os.access(dead_path, os.R_OK):
+                self.skipTest("this user reads through mode 000 (root)")
+            err = io.StringIO()
+            with redirect_stderr(err):
+                self.assertIsNone(km._states_awaiting_overlay(DEAD), "the read failed: no overlay")
+            self.assertEqual(err.getvalue().count("unreadable"), 1, "the episode opens with one line")
+            km._interrupt_block_tick(NOW, self.tmux)                    # DEAD is outside the tick's alive set
+            self.assertIn(str(dead_path), km._states_overlay_failed, "the forget leaves the open episode alone")
+            with redirect_stderr(err):
+                self.assertIsNone(km._states_awaiting_overlay(DEAD), "a kept-open tab's rebuild reads it again")
+            self.assertEqual(err.getvalue().count("unreadable"), 1, "the second read names nothing: the episode is open")
+        finally:
+            os.chmod(dead_path, 0o644)
+        self.assertEqual(km._states_awaiting_overlay(DEAD), {"t": T0, "awaiting": True, "why": "a build"},
+                         "readable again: folded from record 0")
+        self.assertNotIn(str(dead_path), km._states_overlay_failed, "a good read ends the episode")
 
 
 class IntrMarksReport(unittest.TestCase):

@@ -13,8 +13,9 @@ opt-in test that borrows the operator's apiKeyHelper command from their own sett
 
 Source pins in the style of test_supervised_floor.py, the floor observed from inside a test, from a
 module loaded under it, and from a subprocess whose shell exports a value of its own; the saved
-location observed from inside a test, from a subprocess whose shell exports the root it saves, and
-from one whose shell already carries a saved value."""
+location observed from inside a test, from a subprocess whose shell exports the root it saves, from
+one whose shell exports no root and is handed the settings dir under a synthetic HOME, and from one
+whose shell already carries a saved value."""
 import importlib.util
 import os
 import shutil
@@ -22,7 +23,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -32,16 +33,18 @@ os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 
-# Run by a child pytest under conftest (`-p tests.conftest`) whose shell exports synthetic Claude roots:
-# one generated test, which passes only if the child's saved value is the one the case expects of that
-# shell while CLAUDE_CONFIG_DIR is the floor, neither root the shell exported.
+# Run by a child pytest under conftest (`-p tests.conftest`) whose shell exports synthetic Claude roots,
+# or a synthetic HOME and no root: one generated test, which passes only if the child's saved value is
+# the one the case expects of that shell and CLAUDE_CONFIG_DIR is the floor, which is neither the saved
+# value nor anything the shell exported.
 SAVED_LOCATION_CASE = '''\
 import os
 
 
-def test_the_saved_location_is_the_expected_one_and_the_floor_is_neither_exported_root():
+def test_the_saved_location_is_the_expected_one_and_the_floor_is_neither_it_nor_anything_exported():
     expected, exported = %r, %r
     assert os.environ["ROMP_TESTS_REAL_CLAUDE_CONFIG_DIR"] == expected
+    assert os.environ["CLAUDE_CONFIG_DIR"] != expected
     assert os.environ["CLAUDE_CONFIG_DIR"] not in exported
 '''
 
@@ -70,7 +73,7 @@ class ClaudeConfigFloor(unittest.TestCase):
     def test_a_module_loaded_under_the_floor_resolves_its_projects_root_inside_it(self):
         # the judge computes PROJECTS at import: a test that imports it and writes a project dir lands
         # inside the floor, never under the real ~/.claude/projects (the incident's shape)
-        jd = SourceFileLoader("romp_judge_claude_cfg_floor", os.path.join(ROOT, "bin", "romp-judge")).load_module()
+        jd = load_source("romp_judge_claude_cfg_floor", os.path.join(ROOT, "bin", "romp-judge"))
         self.assertEqual(Path(jd.PROJECTS), Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects")
         self.assertTrue(_under_the_run_root(jd.PROJECTS), str(jd.PROJECTS))
         d = jd._proj_dir("/TESTDIR/notes-api")
@@ -103,19 +106,25 @@ class ClaudeConfigFloor(unittest.TestCase):
 
     def _saved_location_seen_by_a_child(self, shell, expected, extra=()):
         """Runs SAVED_LOCATION_CASE under a child pytest that loads conftest as a plugin. `shell` is
-        what the child's shell exports on top of this process's environment, with the saved value
-        cleared unless `shell` carries one; `expected` is the saved value the generated test asserts;
-        `extra` is appended to the child's command line."""
+        what the child's shell exports on top of this process's environment (a None value clears that
+        variable from the child's shell instead), with the saved value cleared unless `shell` carries
+        one; `expected` is the saved value the generated test asserts; `extra` is appended to the
+        child's command line."""
+        exported = tuple(value for value in shell.values() if value is not None)
         case = tempfile.mkdtemp(prefix="romp-claude-floor-case-")
         self.addCleanup(shutil.rmtree, case, ignore_errors=True)
         with open(os.path.join(case, "test_saved_location.py"), "w") as f:
-            f.write(SAVED_LOCATION_CASE % (expected, tuple(shell.values())))
+            f.write(SAVED_LOCATION_CASE % (expected, exported))
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
         for var in ("ROMP_TESTS_REAL_CLAUDE_CONFIG_DIR", "PYTEST_ADDOPTS", "PYTEST_PLUGINS",
                     "PYTEST_DISABLE_PLUGIN_AUTOLOAD", "PYTEST_CURRENT_TEST", "PYTEST_XDIST_WORKER",
                     "PYTEST_XDIST_WORKER_COUNT"):
             env.pop(var, None)
-        env.update(shell)
+        for var, value in shell.items():
+            if value is None:
+                env.pop(var, None)
+            else:
+                env[var] = value
         r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "tests.conftest",
                             *extra, os.path.join(case, "test_saved_location.py")],
                            env=env, capture_output=True, text=True, timeout=180, cwd=ROOT)
@@ -129,6 +138,20 @@ class ClaudeConfigFloor(unittest.TestCase):
         floor itself, and the live move test would skip for want of auth on every machine."""
         handed = os.path.join(tempfile.gettempdir(), "synthetic-claude-root-handed-to-the-run")
         self._saved_location_seen_by_a_child({"CLAUDE_CONFIG_DIR": handed}, expected=handed)
+
+    def test_the_saved_location_is_the_home_settings_dir_when_the_shell_exports_no_root(self):
+        """A shell that exports no CLAUDE_CONFIG_DIR at all (a developer's, and CI's) is handed the
+        default settings dir, .claude under HOME, and the save must record that one: a child pytest
+        whose shell carries no root and a synthetic HOME passes the generated test only if the saved
+        value is that home's .claude and CLAUDE_CONFIG_DIR is neither that value nor the home. A conftest
+        that floored HOME ahead of the save, or saved after the CLAUDE_CONFIG_DIR floor, would record a
+        run-private directory instead, and the live move test would skip for want of auth on every
+        machine that never exported the variable; one that never floored a shell exporting no root
+        would leave CLAUDE_CONFIG_DIR at the saved value."""
+        home = tempfile.mkdtemp(prefix="romp-claude-floor-home-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        self._saved_location_seen_by_a_child({"CLAUDE_CONFIG_DIR": None, "HOME": home},
+                                             expected=os.path.join(home, ".claude"))
 
     def test_a_saved_value_the_shell_already_carries_survives_the_import(self):
         """An xdist worker imports conftest in an environment the controller has already floored and

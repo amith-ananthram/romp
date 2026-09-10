@@ -33,7 +33,7 @@ import tempfile
 import time
 import types
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -45,8 +45,8 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 # conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-km = SourceFileLoader("romp_kernel_apih_hover", os.path.join(BIN, "romp-kernel")).load_module()
-sb = SourceFileLoader("romp_sdk_backend_apih_hover", os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py")).load_module()
+km = load_source("romp_kernel_apih_hover", os.path.join(BIN, "romp-kernel"))
+sb = load_source("romp_sdk_backend_apih_hover", os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py"))
 
 SID = "88888888-aaaa-4bbb-8ccc-000000000001"     # this module's private synthetic sid
 KEY_MATERIAL = "test-key-material-" + "h" * 28    # invented; not shaped like any provider's key
@@ -267,21 +267,14 @@ class OneClock(unittest.TestCase):
 
         fake = types.SimpleNamespace(SdkBackend=_Recorder, startup_auth_env=lambda *a, **k: {})
 
-        class _Loader:
-            def __init__(self, name, path):
-                pass
-
-            def load_module(self):
-                return fake
-
-        names = ("_sdk_backend", "SourceFileLoader", "_ensure_sdk_on_path", "_load_model_catalog_cache",
+        names = ("_sdk_backend", "load_source", "_ensure_sdk_on_path", "_load_model_catalog_cache",
                  "_refresh_model_catalog", "_claude_bin", "_mark_boot", "_sdk_problem")
         saved = {n: getattr(km, n) for n in names}
         saved_jd = (km.jd._LOGIN_AUTH_ENV_FN, km.jd._USAGE_REFRESH_FN)
         problems = []
         try:
             km._sdk_backend = None
-            km.SourceFileLoader = _Loader
+            km.load_source = lambda name, path: fake
             km._ensure_sdk_on_path = lambda: True
             km._load_model_catalog_cache = lambda: None
             km._refresh_model_catalog = lambda why: None
