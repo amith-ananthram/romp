@@ -49,6 +49,9 @@ body.rs-lifted.rs-pane-gone::before { display: none; }
 #rsettings .rs-sec-first { border-top: 0; margin-top: 7px; padding-top: 0; }
 #rsettings .rs-row { display: flex; align-items: flex-start; gap: 8px; padding: 2px 0 6px; cursor: pointer; position: relative; }
 #rsettings .rs-row input { margin: 3px 0 0; flex: 0 0 auto; cursor: pointer; }
+/* a hidden row or section header (the Panes section off the dashboard's own page): the author display
+   rules above would otherwise defeat the UA [hidden]{display:none} (the #rsettings[hidden] precedent) */
+#rsettings .rs-row[hidden], #rsettings .rs-sec[hidden] { display: none; }
 /* two checkboxes side by side on one row (the Judges sets) — each half keeps the .rs-row look */
 #rsettings .rs-judges { display: flex; gap: 18px; }
 #rsettings .rs-judges .rs-half { flex: 1 1 0; min-width: 0; }

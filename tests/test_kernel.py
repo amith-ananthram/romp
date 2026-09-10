@@ -7926,7 +7926,7 @@ class ServeSecurity(unittest.TestCase):
         # For back-compat the chat tab bar / Fleet foot still post {romp:'toggleFleet'}; the shell routes that
         # to the same pane toggle (window.__rompPaneToggle('fleet',to?)). The old floating button stays gone.
         html = km._landing()
-        self.assertIn("<iframe id=f-fleet src=/fleet>", html)
+        self.assertIn("<iframe id=f-fleet data-src=/fleet>", html)   # data-src: an optional pane, loaded where the gear shows it (2026-09-10)
         self.assertIn("<div class=pane id=fleet-pane>", html)      # Fleet is a real pane, not an overlay
         self.assertNotIn("chat-fleet-toggle", html)               # the floating shell button is removed
         self.assertNotIn("show-fleet", html)                      # the swap mechanism is gone entirely

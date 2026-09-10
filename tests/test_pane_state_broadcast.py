@@ -59,27 +59,37 @@ def _run(js):
 # chat and timeline on, the Outline and the Files pane off, the way the served body class starts.
 _COLLAPSE_HARNESS = r"""
 'use strict';
-const POSTED = {}, LOADS = {}, CLS = new Set(['po-chat', 'po-feed', 'po-timeline']), STORE = {};
+const POSTED = {}, LOADS = {}, CLS = new Set(['po-chat', 'po-feed', 'po-timeline']), STORE = {}, STORAGE = [], SETS = {}, TABS = [];
 const KEYS = __KEYS__;
+// the served markup: the chat and the Files pane carry src, the optional panes carry data-src (the controller
+// copies it to src for a pane this browser shows)
 const frames = {};
-KEYS.forEach((k) => { frames['f-' + k] = {
+KEYS.forEach((k) => { const attrs = (k === 'chat' || k === 'files') ? { src: '/' + k } : { 'data-src': '/' + k }; frames['f-' + k] = {
+  attrs,
+  getAttribute: (a) => (a in attrs ? attrs[a] : null),
+  setAttribute: (a, v) => { attrs[a] = v; SETS[k] = (SETS[k] || 0) + 1; },
   contentWindow: { postMessage: (m) => { (POSTED[k] = POSTED[k] || []).push(JSON.parse(JSON.stringify(m))); } },
   addEventListener: (ev, f) => { if (ev === 'load') (LOADS[k] = LOADS[k] || []).push(f); } }; });
+// one button per pane stands for its rail button AND its phone tab (both are found by data-pane)
+const BTNS = {};
+KEYS.forEach((k) => { BTNS[k] = { hidden: false, title: '', getAttribute: (a) => (a === 'data-pane' ? k : null), classList: { toggle() {} }, addEventListener() {} }; });
 let TAB = 'chat', MOBILE = false;
 global.window = global;
 global.localStorage = { getItem: (k) => (k in STORE ? STORE[k] : null), setItem: (k, v) => { STORE[k] = v; } };
 global.location = { search: '' };
 global.URLSearchParams = class { get() { return null; } };
 global.Event = class { constructor(t) { this.type = t; } };
-global.addEventListener = () => {};
+global.addEventListener = (ev, f) => { if (ev === 'storage') STORAGE.push(f); };
 global.dispatchEvent = () => true;
 global.document = {
   body: { classList: { toggle: (c, on) => { if (on) CLS.add(c); else CLS.delete(c); }, contains: (c) => CLS.has(c) },
           getAttribute: (a) => (a === 'data-tab' ? TAB : null) },
-  querySelectorAll: () => [],
+  querySelectorAll: (sel) => { if (sel === '.rail-btn[data-pane]') return KEYS.map((k) => BTNS[k]); const m = /data-pane=(\w+)/.exec(sel); return m && BTNS[m[1]] ? [BTNS[m[1]]] : []; },
   getElementById: (id) => frames[id] || null,
 };
 window.__rompMobileOn = () => MOBILE;
+window.__rompMobileTab = (t) => { TABS.push(t); TAB = t; };
+__SEED__
 """
 _COLLAPSE_DRIVER = r"""
 const counts = () => Object.fromEntries(KEYS.map((k) => [k, (POSTED[k] || []).length]));
@@ -108,7 +118,7 @@ class Broadcast(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.keys = [k for k, _ in km._PANE_ORDER]
-        cls.out = _run(_COLLAPSE_HARNESS.replace("__KEYS__", json.dumps(cls.keys)) + km._LANDING_COLLAPSE_JS + _COLLAPSE_DRIVER)
+        cls.out = _run(_COLLAPSE_HARNESS.replace("__KEYS__", json.dumps(cls.keys)).replace("__SEED__", "") + km._LANDING_COLLAPSE_JS + _COLLAPSE_DRIVER)
 
     def test_the_boot_apply_tells_every_pane_the_set_as_the_flags_stand(self):
         self.assertEqual(self.out["boot"]["counts"], {k: 1 for k in self.keys}, "one message per pane at boot")
@@ -154,6 +164,118 @@ class Broadcast(unittest.TestCase):
             self.assertIn("<iframe id=f-%s " % k, html, "no iframe for pane key %r" % k)
 
 
+# ── the optional panes (the user 2026-09-10) ──────────────────────────────────────────────────────
+# The gear's Panes section (romp:settings.panes) hides Sessions (timeline), the Outline (fleet) or the Feed
+# from this browser's dashboard altogether. The controller reads it at boot and on the storage event: a pane
+# off there leaves po and KEYS (togglePane refuses it, the broadcast omits it), wears hidden on its rail
+# button and phone tab, and never gets its src (the markup carries data-src); a pane on gets its src once.
+_OPT_DRIVER = r"""
+const counts = () => Object.fromEntries(KEYS.map((k) => [k, (POSTED[k] || []).length]));
+const last = (k) => (POSTED[k] || []).slice(-1)[0];
+const src = () => Object.fromEntries(KEYS.map((k) => [k, frames['f-' + k].getAttribute('src')]));
+const hidden = () => Object.fromEntries(KEYS.map((k) => [k, BTNS[k].hidden]));
+const out = {};
+out.boot = { counts: counts(), chat: last('chat'), src: src(), hidden: hidden(), cls: CLS.has('po-feed'), tabs: TABS.slice(), sets: Object.assign({}, SETS) };
+window.__rompPaneToggle('feed', true);           // the rail cannot bring a pane back that the gear took out
+out.refused = { counts: counts(), cls: CLS.has('po-feed'), chat: last('chat') };
+window.__rompPaneToggle('files', true);          // the other panes toggle as ever, and the set persisted omits the hidden one
+out.files = { chat: last('chat'), store: JSON.parse(STORE['romp-panes'] || 'null') };
+// the gear turns the feed back on: its save lands here as a storage event for romp:settings
+STORE['romp:settings'] = JSON.stringify({ panes: { feed: true } });
+STORAGE.forEach((f) => f({ key: 'romp:settings' }));
+out.enabled = { counts: counts(), chat: last('chat'), feed: last('feed'), src: src(), hidden: hidden(), cls: CLS.has('po-feed'), sets: Object.assign({}, SETS) };
+(LOADS.feed || []).forEach((f) => f());          // the feed page loads now, after the shell: it hears the set on its load
+out.loaded = { counts: counts(), feed: last('feed') };
+// and off again, then on: the src is never reassigned (no reload of a live pane), the flag it had comes back
+STORE['romp:settings'] = JSON.stringify({ panes: { feed: false } });
+STORAGE.forEach((f) => f({ key: 'romp:settings' }));
+out.off = { chat: last('chat'), cls: CLS.has('po-feed'), hidden: hidden(), src: src() };
+STORE['romp:settings'] = JSON.stringify({ panes: {} });
+STORAGE.forEach((f) => f({ key: 'romp:settings' }));
+out.back = { chat: last('chat'), cls: CLS.has('po-feed'), sets: Object.assign({}, SETS) };
+// a storage event for another key re-applies but does not re-read the panes
+STORE['romp:settings'] = JSON.stringify({ panes: { fleet: false } });
+STORAGE.forEach((f) => f({ key: 'romp-pane-grow' }));
+out.otherKey = { chat: last('chat'), hidden: hidden() };
+STORAGE.forEach((f) => f({ key: null }));       // a cleared store is read again
+out.cleared = { chat: last('chat'), hidden: hidden() };
+console.log(JSON.stringify(out));
+"""
+
+
+class OptionalPanes(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.keys = [k for k, _ in km._PANE_ORDER]
+        # this browser hid the Feed pane in the gear, and a phone was left on the Feed tab
+        seed = "STORE['romp:settings'] = JSON.stringify({ panes: { feed: false } }); TAB = 'feed';"
+        cls.out = _run(_COLLAPSE_HARNESS.replace("__KEYS__", json.dumps(cls.keys)).replace("__SEED__", seed) + km._LANDING_COLLAPSE_JS + _OPT_DRIVER)
+
+    def test_a_pane_hidden_in_the_gear_is_not_in_the_dashboard_at_boot(self):
+        b = self.out["boot"]
+        self.assertEqual(b["chat"]["on"], {"chat": True, "timeline": True, "fleet": False, "files": False}, "the broadcast omits the hidden pane's key")
+        self.assertEqual(b["counts"], {"chat": 1, "timeline": 1, "fleet": 1, "feed": 0, "files": 1}, "the hidden pane is told nothing (it has no document)")
+        self.assertEqual(b["src"], {"chat": "/chat", "timeline": "/timeline", "fleet": "/fleet", "feed": None, "files": "/files"},
+                         "the shown optional panes load from data-src; the hidden one never gets a src")
+        self.assertEqual(b["hidden"], {"chat": False, "timeline": False, "fleet": False, "feed": True, "files": False}, "its rail button and phone tab are hidden")
+        self.assertFalse(b["cls"], "no po-feed body class: the column is not shown")
+        self.assertEqual(b["tabs"], ["chat"], "a phone left on the hidden pane's tab goes back to the chat")
+        self.assertEqual(b["sets"], {"timeline": 1, "fleet": 1}, "src set once per shown pane")
+
+    def test_the_rail_toggle_refuses_a_hidden_pane_and_the_persisted_set_omits_it(self):
+        r = self.out["refused"]
+        self.assertEqual(r["counts"]["chat"], 1, "no re-apply, no broadcast: nothing changed")
+        self.assertFalse(r["cls"])
+        f = self.out["files"]
+        self.assertEqual(f["chat"]["on"], {"chat": True, "timeline": True, "fleet": False, "files": True})
+        self.assertNotIn("feed", f["store"], "romp-panes persists the set without the hidden key")
+
+    def test_enabling_in_the_gear_loads_the_pane_and_restores_its_button_tab_and_key(self):
+        e = self.out["enabled"]
+        self.assertEqual(e["src"]["feed"], "/feed", "the storage event copies data-src to src")
+        self.assertEqual(e["hidden"]["feed"], False)
+        self.assertTrue(e["cls"], "the pane comes back with its default flag (on)")
+        self.assertEqual(e["chat"]["on"], {"chat": True, "timeline": True, "fleet": False, "feed": True, "files": True}, "the broadcast carries the key again")
+        self.assertEqual(e["counts"]["feed"], 1, "the re-apply's broadcast reaches the iframe element (the page is still loading)")
+        l = self.out["loaded"]
+        self.assertEqual(l["counts"]["feed"], 2, "and its own load re-tells it, like any pane that boots after the shell")
+        self.assertEqual(l["feed"]["on"]["feed"], True)
+
+    def test_off_again_hides_without_unloading_and_on_again_never_reassigns_the_src(self):
+        o = self.out["off"]
+        self.assertNotIn("feed", o["chat"]["on"])
+        self.assertFalse(o["cls"])
+        self.assertTrue(o["hidden"]["feed"])
+        self.assertEqual(o["src"]["feed"], "/feed", "a loaded pane keeps its document until the next dashboard load")
+        b = self.out["back"]
+        self.assertTrue(b["cls"], "the flag it had comes back")
+        self.assertEqual(b["chat"]["on"]["feed"], True)
+        self.assertEqual(b["sets"], {"timeline": 1, "fleet": 1, "feed": 1}, "src was set exactly once per pane across the whole run")
+
+    def test_only_the_settings_key_or_a_cleared_store_re_reads_the_panes(self):
+        self.assertEqual(self.out["otherKey"]["hidden"]["fleet"], False, "a storage event for another key does not re-read")
+        self.assertIn("fleet", self.out["otherKey"]["chat"]["on"])
+        self.assertEqual(self.out["cleared"]["hidden"]["fleet"], True, "a cleared store (key null) is read again")
+        self.assertNotIn("fleet", self.out["cleared"]["chat"]["on"])
+
+    def test_the_markup_and_the_mechanism(self):
+        html = km._landing()
+        for k in ("fleet", "feed", "timeline"):
+            self.assertIn("<iframe id=f-%s data-src=/%s>" % (k, k), html, "the optional pane is served without a src")
+            self.assertNotIn("<iframe id=f-%s src=" % k, html)
+        self.assertIn("<iframe id=f-chat class=m-on src=/chat>", html, "the chat is required and loads at once")
+        self.assertIn("<iframe id=f-files src=/files>", html, "the Files pane keeps its rail toggle, not this switch")
+        js = km._LANDING_COLLAPSE_JS
+        self.assertIn("OPT=['timeline','fleet','feed']", js)
+        self.assertIn("SK='romp:settings'", js)
+        self.assertIn("on[k]=p[k]!==false", js, "only an explicit false hides (settings.ts paneSet)")
+        self.assertIn("f.setAttribute('src',f.getAttribute('data-src'))", js)
+        self.assertIn("KEYS=ALL.filter(function(k){return k in po;})", js)
+        self.assertLess(js.index("reconcile();   // the optional panes"), js.index("\n  apply();\n"), "reconciled before the first apply")
+        self.assertIn(".rail-btn[hidden]{display:none}", html, "the author display:flex would otherwise defeat hidden")
+        self.assertIn("#mtabs button[hidden]{display:none}", html)
+
+
 # ── the mobile script ─────────────────────────────────────────────────────────────────────────────
 _MOBILE_HARNESS = r"""
 'use strict';
@@ -175,8 +297,8 @@ const pane = (id) => ({ id, classList: { toggle: (c, on) => { TOGGLES.push([id, 
   contentWindow: { addEventListener: () => {} }, addEventListener: () => {} });
 const PANES = {};
 ['f-chat', 'f-fleet', 'f-feed', 'f-files', 'f-timeline'].forEach((id) => { PANES[id] = pane(id); });
-const TAPS = {};
-const button = (key) => ({ getAttribute: (a) => (a === 'data-pane' ? key : null), classList: { toggle() {} },
+const TAPS = {}, BUTTONS = {};
+const button = (key) => BUTTONS[key] || (BUTTONS[key] = { hidden: false, getAttribute: (a) => (a === 'data-pane' ? key : null), classList: { toggle() {} },
   addEventListener: (ev, f) => { if (ev === 'click') TAPS[key] = f; } });
 const BAR = { offsetHeight: 44, querySelectorAll: (sel) => (sel === 'button[data-pane]' ? [button('chat'), button('feed'), button('files')] : []) };
 global.document = {
@@ -216,6 +338,11 @@ window.__rompFilesTabFrom = 'chat'; arrive({ romp: 'toggleFleet', to: 'chat' });
 out.pill = { tab: TAB, from: window.__rompFilesTabFrom };
 window.__rompFilesTabFrom = 'chat'; arrive({ romp: 'toggleFleet' });
 out.pillOutline = { tab: TAB, from: window.__rompFilesTabFrom };
+// a tab the pane controller hid (its pane is off in the gear's Panes section): not a place to go
+TELLS.length = 0; BUTTONS.feed.hidden = true; window.__rompMobileTab('feed');
+out.hiddenTab = { tab: TAB, tells: TELLS.slice(), store: STORE['romp-mobile-tab'] };
+BUTTONS.feed.hidden = false; window.__rompMobileTab('feed');
+out.shownAgain = { tab: TAB };
 console.log(JSON.stringify(out));
 """
 
@@ -260,6 +387,12 @@ class MobileScript(unittest.TestCase):
         self.assertEqual(self.out["reveal"], {"tab": "feed", "from": None, "listeners": 1})
         self.assertEqual(self.out["pill"], {"tab": "chat", "from": None})
         self.assertEqual(self.out["pillOutline"], {"tab": "fleet", "from": None})
+
+    def test_a_hidden_tab_is_skipped(self):
+        # the pane controller hides the tab of a pane this browser does not show (the gear's Panes section, the
+        # user 2026-09-10); a switch to it (a stale romp-mobile-tab, a reveal) must not land on a blank pane
+        self.assertEqual(self.out["hiddenTab"], {"tab": "fleet", "tells": [], "store": "fleet"}, "nothing moved, nothing told, nothing persisted")
+        self.assertEqual(self.out["shownAgain"]["tab"], "feed", "unhidden, the same switch lands")
 
     def test_the_hook_is_exported_for_the_relay(self):
         self.assertIn("window.__rompMobileTab=show;", km._LANDING_MOBILE_JS)

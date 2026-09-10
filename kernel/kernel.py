@@ -49133,7 +49133,8 @@ var F={chat:document.getElementById('f-chat'),fleet:document.getElementById('f-f
 // bell's `.on`, the class _LANDING_PUSH_JS paints from the master + this device's subscription and the
 // slash rule keys on, until the next paint event. A tab or a reveal decides which pane shows, nothing else.
 var B=bar.querySelectorAll('button[data-pane]'),KT='romp-mobile-tab';
-function show(p){if(!F[p])return;document.body.setAttribute('data-tab',p);for(var k in F)if(F[k])F[k].classList.toggle('m-on',k===p);   // a pane this shell lacks is skipped, never a TypeError
+function show(p){if(!F[p])return;for(var i=0;i<B.length;i++)if(B[i].getAttribute('data-pane')===p&&B[i].hidden)return;   // a tab the controller hid (its pane is off in the gear's Panes section) is not a place to go
+document.body.setAttribute('data-tab',p);for(var k in F)if(F[k])F[k].classList.toggle('m-on',k===p);   // a pane this shell lacks is skipped, never a TypeError
 for(var i=0;i<B.length;i++)B[i].classList.toggle('on',B[i].getAttribute('data-pane')===p);
 try{localStorage.setItem(KT,p);}catch(e){}
 // a tab switch changes what is on screen: re-tell the panes (the collapse script's broadcast; absent only
@@ -49610,11 +49611,13 @@ _STALE_JS = (
 # ({romp:'panes',on:{key:bool}} into every pane iframe on every apply, on each iframe's load, and, from
 # _LANDING_MOBILE_JS, on a mobile tab switch or layout flip; the keys are _PANE_ORDER's, baked in below like
 # the bell's PN map): the chat routes file links by it. Defined after _PANE_ORDER because the string is built
-# from it at import.
+# from it at import. Since 2026-09-10 it also reads the gear's Panes section (romp:settings.panes, per browser,
+# ui/webview/settings.ts paneSet): a pane hidden THERE is not in this dashboard at all (reconcile below),
+# where the rail toggle only hides a loaded one.
 _LANDING_COLLAPSE_JS = """
 (function(){
-  var PK='romp-panes',po={chat:true,fleet:false,feed:true,timeline:true,files:false};
-  try{var s=JSON.parse(localStorage.getItem(PK)||'null');if(s)po=Object.assign(po,s);}catch(e){}
+  var PK='romp-panes',po={chat:true,fleet:false,feed:true,timeline:true,files:false},DEF=Object.assign({},po),stored={};
+  try{var s=JSON.parse(localStorage.getItem(PK)||'null');if(s){stored=s;po=Object.assign(po,s);}}catch(e){}
   var qp=new URLSearchParams(location.search).get('panes');
   if(qp!==null){po={chat:false,fleet:false,feed:false,timeline:false,files:false};qp.split(',').forEach(function(k){k=k.trim();if(k in po)po[k]=true;});}
   function saveP(){try{localStorage.setItem(PK,JSON.stringify(po));}catch(e){}}
@@ -49638,6 +49641,32 @@ _LANDING_COLLAPSE_JS = """
   function tell(f,m){try{f&&f.contentWindow&&f.contentWindow.postMessage(m,'*');}catch(e){}}
   function broadcast(){var m=panesMsg();KEYS.forEach(function(k){tell(document.getElementById('f-'+k),m);});}
   window.__rompPanesTell=broadcast;   // the mobile script re-tells on a tab switch / layout flip
+  // The OPTIONAL panes (the user 2026-09-10): the gear's Panes section (romp:settings.panes, per browser,
+  // settings.ts paneSet: only an explicit false hides) says whether Sessions (timeline), the Outline (fleet)
+  // and the Feed are in this dashboard AT ALL, a different thing from the rail toggle, which hides a loaded
+  // pane. A pane off there is not a pane here: its key leaves po and KEYS (so togglePane refuses it, apply()
+  // drops its body class, and the pane-set broadcast omits it), its rail button and phone tab wear hidden,
+  // and its iframe, served with data-src in place of src, is never loaded (no document, no socket, nothing
+  // built for it); a phone left on its tab goes back to the chat. A pane on gets its src from data-src ONCE
+  // (a src is never reassigned: no reload of a live pane), the rail flag it had (this page's, else the
+  // stored one, else the default) and its button and tab back. Runs at boot before the first apply, and
+  // again on the storage event a gear save raises in this window (the gear is the settings iframe, a
+  // same-origin document, so its localStorage write fires here). The chat is required and not listed; the
+  // Files pane is not optional here (its rail toggle is its off switch). The kernel is not told and does
+  // not care: judging and task tracking run the same with the Feed pane off in a browser.
+  var ALL=KEYS.slice(),OPT=['timeline','fleet','feed'],SK='romp:settings',held={};
+  function optOn(){var on={};OPT.forEach(function(k){on[k]=true;});
+    try{var s=JSON.parse(localStorage.getItem(SK)||'{}'),p=s&&s.panes;if(p&&typeof p==='object')OPT.forEach(function(k){on[k]=p[k]!==false;});}catch(e){}
+    return on;}
+  function flagOf(k){return (k in held)?held[k]:(k in stored)?!!stored[k]:DEF[k];}
+  function reconcile(){var on=optOn();
+    OPT.forEach(function(k){var en=on[k],f=document.getElementById('f-'+k);
+      if(en){if(f&&!f.getAttribute('src')&&f.getAttribute('data-src'))f.setAttribute('src',f.getAttribute('data-src'));
+        if(!(k in po)){po[k]=flagOf(k);delete held[k];}}
+      else if(k in po){held[k]=po[k];delete po[k];}
+      Array.prototype.forEach.call(document.querySelectorAll('.rail-btn[data-pane='+k+'],#mtabs button[data-pane='+k+']'),function(b){b.hidden=!en;});
+      if(!en&&document.body.getAttribute('data-tab')===k&&window.__rompMobileTab)window.__rompMobileTab('chat');});
+    KEYS=ALL.filter(function(k){return k in po;});}
   function apply(){
     document.body.classList.toggle('po-chat',!!po.chat);
     document.body.classList.toggle('po-fleet',!!po.fleet);
@@ -49660,10 +49689,11 @@ _LANDING_COLLAPSE_JS = """
   window.__rompPaneToggle=togglePane;
   Array.prototype.forEach.call(document.querySelectorAll('.rail-btn[data-pane]'),function(b){
     b.addEventListener('click',function(){togglePane(b.getAttribute('data-pane'));});});
+  reconcile();   // the optional panes this browser shows, before the first apply (the body class ships with the defaults)
   apply();
-  KEYS.forEach(function(k){var f=document.getElementById('f-'+k);if(f)f.addEventListener('load',function(){tell(f,panesMsg());});});   // wired after the boot apply: both orders (iframe first / shell first) are covered
+  ALL.forEach(function(k){var f=document.getElementById('f-'+k);if(f)f.addEventListener('load',function(){tell(f,panesMsg());});});   // wired after the boot apply: both orders (iframe first / shell first) are covered; every iframe, since a pane enabled later loads later
   window.addEventListener('romp:keys',apply);   // a rebind (or palette-main's boot nudge) refreshes the titles
-  window.addEventListener('storage',apply);     // …including one made in another tab
+  window.addEventListener('storage',function(e){if(!e||!e.key||e.key===SK)reconcile();apply();});     // …including one made in another tab; a gear save (romp:settings, or a cleared store) re-reads the optional panes first
 })();
 """
 
@@ -50074,6 +50104,10 @@ def _landing():
             "padding:4px 9px;border-radius:5px;border:1px solid transparent;cursor:pointer;user-select:none;display:flex;align-items:center;"
             "justify-content:center;transition:color .1s,background .1s,border-color .1s}"
             ".rail-btn:hover{color:#cfe6ff;background:rgba(255,255,255,0.06)}"
+            # a pane hidden from this browser in the gear (romp:settings.panes) has no rail button: the controller
+            # sets hidden, and the author display:flex above would defeat the UA's [hidden]{display:none} without
+            # this rule (the #mtabs button[hidden] idiom below)
+            ".rail-btn[hidden]{display:none}"
             ".rail-btn.on{color:var(--accent);background:rgba(156,210,255,0.12);border-color:rgba(156,210,255,0.35)}"
             # the ↻ refresh + ⛭ settings actions sit in .rail-acts, pinned to the RIGHT (margin-left:auto on the
             # wrapper) of the bottom bar and ALWAYS visible — settings (⛭, last in the DOM) at the far right.
@@ -50851,9 +50885,14 @@ def _landing():
             "<div class=row>"
             "<div class=pane id=chat-pane><iframe id=f-chat class=m-on src=/chat></iframe></div>"
             "<div class=gv id=gv-a></div>"
-            "<div class=pane id=fleet-pane><iframe id=f-fleet src=/fleet></iframe></div>"
+            # the OPTIONAL panes (the Outline, the Feed, and the Sessions band below) are served with data-src, not
+            # src: the gear's Panes section (romp:settings.panes, per browser; the user 2026-09-10) says whether
+            # this browser shows each at all, and the pane controller (_LANDING_COLLAPSE_JS reconcile) copies
+            # data-src to src once for a pane it shows. A pane it does not show never loads: no document, no
+            # socket, nothing built for it. The chat is required (src) and the Files pane keeps its rail toggle.
+            "<div class=pane id=fleet-pane><iframe id=f-fleet data-src=/fleet></iframe></div>"
             "<div class=gv id=gv-b></div>"
-            "<div class=pane id=feed-pane><iframe id=f-feed src=/feed></iframe></div>"
+            "<div class=pane id=feed-pane><iframe id=f-feed data-src=/feed></iframe></div>"
             "<div class=gv id=gv-c></div>"
             "<div class=pane id=files-pane><iframe id=f-files src=/files></iframe></div>"
             "</div>"
@@ -50861,7 +50900,7 @@ def _landing():
             # the timeline BOTTOM BAND: full-width below the pane row, with a row-resize gutter above it. Both
             # are hidden (CSS) unless po-timeline (the rail's Timeline toggle).
             "<div class=gh id=gh></div>"
-            "<div class=pane id=tl-pane><iframe id=f-timeline src=/timeline></iframe></div>"
+            "<div class=pane id=tl-pane><iframe id=f-timeline data-src=/timeline></iframe></div>"
             # pane rail as a BOTTOM BAR (the user 2026-07-05): the toolbar runs horizontally across the very
             # bottom of .col, BELOW the timeline band. A SCROLLABLE group (.rail-scroll) — Chat / Timeline / Outline /
             # Feed toggles (this rail order is user-chosen, the user 2026-07-05, independent of the panes' layout

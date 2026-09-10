@@ -151,6 +151,25 @@ var GEAR_HTML =
   '<span><b>Fast comment threads</b><span class=rs-mixed hidden></span>' +
   "<span class=rs-sub>Start new comment threads in fast mode (Opus-only research preview). If the thread's model can't run it, the thread still opens on that model at normal speed, with a notice. Off = same as the session. Follows to every connected machine's kernel.</span>" +
   '</span></label>' +
+  // Panes (the user 2026-09-10): which optional panes this browser's dashboard shows at all. The chat is
+  // required and not listed; the rows are Sessions, Outline and Feed (the rail's own words for the panes
+  // keyed timeline, fleet and feed), on by default. A pane off here is not in the dashboard: no rail button,
+  // no phone tab, no palette command, its iframe never given a src (nothing loads, no socket). The kernel
+  // keeps judging and tracking every session regardless; this is where THIS browser looks. The section is
+  // for the dashboard's own gear (ownPage): the VS Code panels have no dashboard, so initGear hides it there.
+  '<div class=rs-sec id=rs-panes-sec>Panes</div>' +
+  '<label class="rs-row rs-panes-row"><input type=checkbox id=rs-pane-timeline checked>' +
+  '<span><b>Sessions</b>' +
+  '<span class=rs-sub>The lanes across the bottom: every session\'s turns, judging and messages on one time axis. Off, the band and its button are gone from this browser.</span>' +
+  '</span></label>' +
+  '<label class="rs-row rs-panes-row"><input type=checkbox id=rs-pane-fleet checked>' +
+  '<span><b>Outline</b>' +
+  '<span class=rs-sub>The by-session goal trees, with search across sessions. Off, the column and its button are gone from this browser.</span>' +
+  '</span></label>' +
+  '<label class="rs-row rs-panes-row"><input type=checkbox id=rs-pane-feed checked>' +
+  '<span><b>Feed</b>' +
+  '<span class=rs-sub>The cards: what needs you, what is in progress, what shipped. Off, the column and its button are gone from this browser; tracking carries on and the other browsers and devices are unaffected.</span>' +
+  '</span></label>' +
   '<div class=rs-sec>Sessions pane</div>' +  '<label class=rs-row><input type=checkbox id=rs-activeonly checked>' +
   '<span><b>Show active sessions only</b>' +
   '<span class=rs-sub>Only draw lanes for sessions with work in the visible time range, so idle sessions do not take up room. They stay in the chat, and a lane reappears the moment you zoom or pan to a stretch where it did something.</span>' +
@@ -285,6 +304,7 @@ function initGear(post, opts) {
     jf = document.getElementById('rs-judgefast'), df = document.getElementById('rs-distillfast'), xf = document.getElementById('rs-indexfast'),   // T300: one per tier
     tb = document.getElementById('rs-tmuxbackend'), bkn = document.getElementById('rs-backend-note'),
     fe = document.getElementById('rs-fileedit'),
+    pn = { timeline: document.getElementById('rs-pane-timeline'), fleet: document.getElementById('rs-pane-fleet'), feed: document.getElementById('rs-pane-feed') },
     ths = document.getElementById('rs-thinksum'),
     ans = document.getElementById('rs-autonudge-split'), asub = document.getElementById('rs-autonudge-sub');
   function load() { try { return Object.assign({ compact: true, colormap: 'aurora', subgoals: true, debug: false, backend: 'sdk', defaultDir: '', showBranch: false, tabCtx: 'over50', fileLinkPane: 'chat', stripGroupRows: true, denseChrome: false, collapseGaps: true, activeOnly: true }, JSON.parse(localStorage.getItem('romp:settings') || 'null')); } catch (e) { return { compact: true, colormap: 'aurora', subgoals: true, debug: false, backend: 'sdk', defaultDir: '', showBranch: false, tabCtx: 'over50', fileLinkPane: 'chat', stripGroupRows: true, denseChrome: false, collapseGaps: true, activeOnly: true }; } }
@@ -312,6 +332,12 @@ function initGear(post, opts) {
   if (dn) dn.addEventListener('change', function () { var s = load(); s.denseChrome = dn.checked; save(s); });
   if (tc) tc.addEventListener('change', function () { var s = load(); s.tabCtx = tc.value; save(s); });
   if (fl) fl.addEventListener('change', function () { var s = load(); s.fileLinkPane = fl.value; save(s); });   // webview-local pref read at click time (render.ts openPath)
+  // the optional panes: the whole set is rewritten from the three boxes on every change (a missing key reads
+  // as shown everywhere, settings.ts paneSet), and the shell hears the save as a storage event
+  function panesOf(s) { var p = (s && s.panes && typeof s.panes === 'object') ? s.panes : {}; return { timeline: p.timeline !== false, fleet: p.fleet !== false, feed: p.feed !== false }; }
+  Object.keys(pn).forEach(function (k) { if (pn[k]) pn[k].addEventListener('change', function () { var s = load(); var p = panesOf(s); p[k] = pn[k].checked; s.panes = p; save(s); }); });
+  // the section is the dashboard's: VS Code's panels have no dashboard shell to hide a pane from
+  if (!ownPage) Array.prototype.forEach.call(document.querySelectorAll('#rs-panes-sec,.rs-panes-row'), function (el) { el.hidden = true; });
   // ── the settings' value-picker DROPDOWNS (T117, the user 2026-08-27, screenshot: the Chat
   // tabs and Text scheme pickers rendered every option always-expanded, and the description spans
   // ran off the card's right edge). Progressive disclosure: the CLOSED state is ONE row — the
@@ -1284,7 +1310,7 @@ function initGear(post, opts) {
     // burned the whole 5-frame retry against a display:none pane, latched rs-pane-gone, and the
     // full-viewport fallback box blacked out every pane behind the modal.
     try { if (window.parent !== window) window.parent.postMessage({ romp: 'logUnseenQuery' }, '*'); } catch (e) { /* no shell to ask */ }   // T290: the Open log count
-    p.hidden = false; feedFull(true); setModalCls(true); var s = load(); cc.checked = !!s.compact; jix.checked = (s.showIndexJudges !== undefined ? !!s.showIndexJudges : !!s.debug); jtr.checked = (s.showTriageJudges !== undefined ? !!s.showTriageJudges : !!s.debug); if (gb) gb.checked = s.showBranch === true; if (sr) sr.checked = s.stripGroupRows !== false; if (dn) dn.checked = s.denseChrome === true; if (fl) fl.value = s.fileLinkPane === 'pane' ? 'pane' : 'chat'; if (tc) tc.value = tabCtxMode(s.tabCtx); tcPaint(); csPaint(); ttPaint(); if (cg) cg.checked = s.collapseGaps !== false; if (ao) ao.checked = s.activeOnly !== false; if (fc) fc.checked = s.collapsed === true; cmBuild(); cmPaint(s.colormap || 'aurora'); paintBackendOffer(tb ? tb.checked : false); if (dd) dd.value = s.defaultDir || ''; plFill(); fill(); }
+    p.hidden = false; feedFull(true); setModalCls(true); var s = load(); cc.checked = !!s.compact; jix.checked = (s.showIndexJudges !== undefined ? !!s.showIndexJudges : !!s.debug); jtr.checked = (s.showTriageJudges !== undefined ? !!s.showTriageJudges : !!s.debug); if (gb) gb.checked = s.showBranch === true; if (sr) sr.checked = s.stripGroupRows !== false; if (dn) dn.checked = s.denseChrome === true; if (fl) fl.value = s.fileLinkPane === 'pane' ? 'pane' : 'chat'; if (tc) tc.value = tabCtxMode(s.tabCtx); tcPaint(); csPaint(); ttPaint(); if (cg) cg.checked = s.collapseGaps !== false; if (ao) ao.checked = s.activeOnly !== false; (function (p) { Object.keys(pn).forEach(function (k) { if (pn[k]) pn[k].checked = p[k]; }); })(panesOf(s)); if (fc) fc.checked = s.collapsed === true; cmBuild(); cmPaint(s.colormap || 'aurora'); paintBackendOffer(tb ? tb.checked : false); if (dd) dd.value = s.defaultDir || ''; plFill(); fill(); }
   if (g) g.onclick = function (e) { e.stopPropagation(); openSettings(); };   // hidden anchor; hosts open via the message below
   window.addEventListener('message', function (e) { if (e.data && e.data.romp === 'openSettings') openSettings(); });
   // The shortcuts row: the web shell (same-origin parent) gets the customize link — it opens the

@@ -8,7 +8,7 @@ const store: Record<string, string> = {};
   setItem: (k: string, v: string) => { store[k] = v; },
   removeItem: (k: string) => { delete store[k]; },
 };
-import { loadSettings, saveSettings, DEFAULT_SETTINGS, fileLinkPane } from "./settings";
+import { loadSettings, saveSettings, DEFAULT_SETTINGS, fileLinkPane, paneSet, OPTIONAL_PANES } from "./settings";
 
 test("loadSettings returns defaults when nothing is stored", () => {
   delete store["romp:settings"];
@@ -126,5 +126,28 @@ test("File links open in defaults to the pane you clicked; the Files pane opt-in
   assert.equal(fileLinkPane("pane"), "pane");
   assert.equal(fileLinkPane("feed"), "chat", "no other target exists here");
   assert.equal(fileLinkPane(undefined), "chat");
+  delete store["romp:settings"];
+});
+
+// The optional dashboard panes (the user 2026-09-10): Sessions (key timeline), Outline (key fleet) and Feed
+// can be hidden from the dashboard in the gear, per browser. All shown by default, so a dashboard that never
+// opens the section is unchanged; only an explicit stored false hides a pane (a missing key, a store from
+// before the setting, or a corrupt value reads as shown), and every key is present after a load so the
+// shell's controller (_LANDING_COLLAPSE_JS) never has to guess. The chat is required and not listed.
+test("the optional panes default to shown, a hide round-trips, and only an explicit false hides (the user 2026-09-10)", () => {
+  assert.deepEqual(DEFAULT_SETTINGS.panes, { timeline: true, fleet: true, feed: true });
+  assert.deepEqual([...OPTIONAL_PANES], ["timeline", "fleet", "feed"], "the chat is required and is not an optional pane");
+  delete store["romp:settings"];
+  assert.deepEqual(loadSettings().panes, { timeline: true, fleet: true, feed: true }, "a fresh install shows every pane");
+  saveSettings({ panes: { timeline: true, fleet: true, feed: false } });
+  assert.deepEqual(loadSettings().panes, { timeline: true, fleet: true, feed: false }, "hiding the feed survives a reload");
+  store["romp:settings"] = JSON.stringify({ compact: true });
+  assert.deepEqual(loadSettings().panes, { timeline: true, fleet: true, feed: true }, "a store from before the key shows every pane");
+  store["romp:settings"] = JSON.stringify({ panes: { feed: false } });
+  assert.deepEqual(loadSettings().panes, { timeline: true, fleet: true, feed: false }, "a partial set fills the missing panes in as shown");
+  store["romp:settings"] = JSON.stringify({ panes: "purple" });
+  assert.deepEqual(loadSettings().panes, { timeline: true, fleet: true, feed: true }, "a corrupt value costs nothing but the preference");
+  assert.deepEqual(paneSet({ timeline: 0, fleet: "no", feed: null }), { timeline: true, fleet: true, feed: true }, "falsy but not false is not a hide");
+  assert.deepEqual(paneSet(undefined), { timeline: true, fleet: true, feed: true });
   delete store["romp:settings"];
 });

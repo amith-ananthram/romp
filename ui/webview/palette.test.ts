@@ -115,6 +115,12 @@ test("the new-session picker opens via the chat pane, revealed first (one code p
   assert.match(MAIN, /chatPost\(\{ type: "openPicker", toggle: true \}\)/);
 });
 
+test("a pane hidden in the gear (its iframe has no src) gets no palette command", () => {
+  // the shell never loads a pane this browser's gear hides (romp:settings.panes, the user 2026-09-10): its
+  // iframe keeps data-src and no src, and the toggle would refuse its key, so the command is not registered
+  assert.match(MAIN, /const frame = pane\("f-" \+ key\);\s*\n\s*if \(frame && !frame\.getAttribute\("src"\)\) continue;\s*\n\s*registerCommand\(\{\s*\n\s*id: "pane\." \+ label/);
+});
+
 test("built-in commands call the same globals the rail buttons use", () => {
   for (const g of ["__rompOpenErrs", "__rompOpenNet", "__rompUsagePanel", "__rompRestart", "__rompPaneToggle"]) {
     assert.ok(MAIN.includes(g), g + " missing from palette-main.ts");

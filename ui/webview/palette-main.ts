@@ -138,8 +138,13 @@ installMenuEcho();
   registerCommand({ id: "kernel.restart", title: "Restart the romp kernel", run: () => { if (w.__rompRestart) w.__rompRestart(); } });
   // Pane toggles. The Outline pane's INTERNAL key stays 'fleet' (the pane controller's API);
   // the command speaks the user-facing name.
+  // A pane hidden from this browser's dashboard in the gear (romp:settings.panes, the user 2026-09-10) has
+  // an iframe with no src (the shell never loads it), so it gets no command: the toggle would refuse it
+  // anyway (its key is out of the controller's set) and a dead entry in the list is noise.
   const panes: Array<[string, string]> = [["chat", "chat"], ["timeline", "timeline"], ["fleet", "outline"], ["feed", "feed"], ["files", "files"]];
   for (const [key, label] of panes) {
+    const frame = pane("f-" + key);
+    if (frame && !frame.getAttribute("src")) continue;
     registerCommand({
       id: "pane." + label, title: "Show or hide the " + label + " pane",
       run: () => { if (w.__rompPaneToggle) w.__rompPaneToggle(key); },

@@ -61,11 +61,13 @@ function withCls(el) {
   return el;
 }
 const EL = {};
-['rail-errs', 'merr', 'rerr-back', 'rerr-list', 'rerr-clear', 'rerr-x', 'rerr-fgrid', 'f-feed'].forEach((id) => {
+['rail-errs', 'merr', 'rerr-back', 'rerr-list', 'rerr-clear', 'rerr-x', 'rerr-fgrid', 'f-feed', 'f-settings'].forEach((id) => {
   EL[id] = withCls(mkEl(id));
 });
 const POSTED = [];   // what the shell posts into the feed iframe (revealCard)
 EL['f-feed'].contentWindow = { postMessage: (msg) => POSTED.push(msg) };
+const SETTINGS_POSTED = [];   // what it posts into the settings iframe: the unread count for the gear's Open log button (the gear's own page since 2026-09-10)
+EL['f-settings'].contentWindow = { postMessage: (msg) => SETTINGS_POSTED.push(msg) };
 const TOGGLES = [];  // window.__rompPaneToggle calls (revealing the feed pane on a jump)
 EL['rail-errs']._num = mkEl('');   // the <text class=rerr-n> INSIDE each bell svg (the in-bell count)
 EL['merr']._num = mkEl('');
@@ -146,7 +148,8 @@ out.jump = { linky: jumpRow.className.indexOf('link') >= 0 };
 jumpRow.fire('click');
 out.jump.closed = EL['rerr-back'].hidden;
 out.jump.posted = POSTED.filter((m) => m.romp === 'revealCard').pop() || null;   // paint() also posts the unread count (T290)
-out.unseenPosts = POSTED.filter((m) => m.romp === 'logUnseen').map((m) => m.n);
+out.unseenPosts = SETTINGS_POSTED.filter((m) => m.romp === 'logUnseen').map((m) => m.n);
+out.unseenToFeed = POSTED.filter((m) => m.romp === 'logUnseen').length;   // none: the feed page hosts no gear
 out.jump.toggles = TOGGLES.join('|');
 // …while a kernel-minted entry (no target) is not clickable
 out.plainRowLinky = EL['rerr-list'].children[1].className.indexOf('link') >= 0;
@@ -262,6 +265,7 @@ class ErrorCenterExecutes(unittest.TestCase):
         # the unread count rides into the feed pane for the gear's Open log button (T290): the drop posted a 1,
         # opening the Log (everything seen) posted a 0
         self.assertIn(1, self.out["unseenPosts"]); self.assertIn(0, self.out["unseenPosts"])
+        self.assertEqual(self.out["unseenToFeed"], 0, "the count rides into the settings iframe (the gear's own page), not the feed")
         self.assertIn("feed:true", a["toggles"], "the feed pane is revealed for the jump")
         self.assertFalse(self.out["plainRowLinky"], "a kernel-minted entry with no target is not a link")
 

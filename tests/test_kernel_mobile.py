@@ -169,7 +169,9 @@ class LandingShell(unittest.TestCase):
         # carries id=f-timeline inside #tl-pane, and the old stale-id splitter bug must not regress.
         html = km._landing()
         self.assertIn("id=f-timeline", html)                      # the iframe carries this id
-        self.assertIn("<div class=pane id=tl-pane><iframe id=f-timeline src=/timeline></iframe></div>", html)
+        # data-src, not src (the user 2026-09-10): the band is an optional pane, loaded by the pane controller
+        # only where this browser's gear shows it (tests/test_pane_state_broadcast.py OptionalPanes)
+        self.assertIn("<div class=pane id=tl-pane><iframe id=f-timeline data-src=/timeline></iframe></div>", html)
         self.assertNotIn("getElementById('t')", km._LANDING_JS)   # the stale id is gone
 
     def test_mobile_switcher_is_isolated_in_its_own_script(self):
