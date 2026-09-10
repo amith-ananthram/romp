@@ -1058,7 +1058,17 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   sessions that left the alive set. The interrupt tick drops from `intrMarks`
   and `statesOverlay` the entries of sessions outside its alive set each
   cycle; the `statesOverlay` cache is also cleared whole above 256 entries, a
-  drop `evict` does not count and `entries` shows.
+  drop `evict` does not count and `entries` shows. `lanes` is the timeline's
+  per-lane segment memo: a live lane's bars, segment ends, last activity,
+  compaction markers and judging marks, held while its parsed transcript and
+  goal store are the previous build's objects and its captions file, archive
+  file, branch clip and the host's recorded suspensions stand. One outcome per
+  live lane per bars build: `hit`, `miss`, `live_tail` (a live tail was merged,
+  so the lane was derived and not held), `complain_skip` (the parse or a stage
+  failed) and `unshared_skip` (a private store with content); `evict` and the
+  gauge `entries`; `segs_hit` and `segs_miss` count the segments served and
+  derived. `dead_serve`, `dead_miss` and `dead_failed_serve` are the dead-lane
+  memo's outcomes on the same block, so one block carries every lane.
 - `judge`: `passes`, `ms_sum`, `ms_last`, `ms_mean` (wall time; a pass waits
   on model calls), `cpu_ms_sum` (CPU time of the judge tier threads and every
   per-session worker they run; the workers' share is `cpu_ms_workers`).
