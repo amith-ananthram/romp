@@ -46,7 +46,7 @@ test("the gear posts kernel ops through ONE shared channel (never re-acquires th
   assert.ok(!GEAR.includes("acquireVsCodeApi"), "a second acquire throws in a real webview");
   for (const op of ["setAutoNudge", "setJudgeModel", "setIndexModel", "setJudgeEffort", "setIndexEffort", "setJudgeConcurrency",
     "setDistillModel", "setDistillEffort", "setCommentModel", "setCommentEffort", "setCommentFast", "setTmuxBackend",
-    "setJudgeFast", "setFileEditing", "setColormap", "setPalette", "setDefaultDir", "browseDir"])
+    "setJudgeFast", "setDistillFast", "setIndexFast", "setFileEditing", "setColormap", "setPalette", "setDefaultDir", "browseDir"])
     assert.ok(GEAR.includes(`'${op}'`), `gear must post ${op}`);
 });
 
@@ -55,8 +55,8 @@ test("Fast mode for the judges is a kernel setting: a stamped emitter under its 
     "the click posts the kernel's designed message with the gesture stamp minted in the literal");
   assert.ok(GEAR.includes("jf.checked = v.judgeFast === 'on'"),
     "the checkbox shows the kernel's persisted answer (RAW on/off), never a page default");
-  assert.match(GEAR, /STALE_LABELS = \{[\s\S]*?'judge-fast': 'Fast mode \(judges\)'/,
-    "a stood-down gesture toasts under the control's own name");
+  assert.match(GEAR, /STALE_LABELS = \{[\s\S]*?'judge-fast': 'Fast mode \(triage judges\)'/,
+    "a stood-down gesture toasts under the control's own name (T300: one box per tier, named by its tier)");
   assert.match(GEAR, /STALE_TYPE = \{[\s\S]*?'judge-fast': 'setJudgeFast'/,
     "the store maps to its message type (the toast's Apply anyway whitelist)");
   assert.match(GEAR, /\['judgeFast', jf\]/, "the row carries the mixed mark where machines disagree");
@@ -79,9 +79,10 @@ test("the judges' fast-mode box sits on the Triage model row in the chat's words
   // the gate, mirroring cmtFastGate: the opt-in rides only a call whose model is Opus, so with no tier on
   // Opus the box is inert; the gear greys it and the hint says why, instead of a dead control
   assert.ok(GEAR.includes("function judgeFastGate"), "the availability gate must exist");
-  assert.ok(GEAR.includes("jf.disabled = !can"), "the box disables when no tier is on Opus");
-  assert.ok(GEAR.includes("sub.textContent = can ? JUDGEFAST_SUB : JUDGEFAST_SUB_OFF"), "the hint says why while greyed");
-  assert.ok(GEAR.includes("if (dis === 'triage') dis = tri;"), "distilling on Follow triage counts as the triage pick");
+  // T300: one box per tier, each greyed on ITS tier's effective model (gear-judge-fast.test.ts holds the rest)
+  assert.ok(GEAR.includes("t.box.disabled = !can;"), "a box disables when its tier is not on Opus");
+  assert.ok(GEAR.includes("sub.textContent = !can ? JUDGEFAST_SUB_OFF : (r ? judgeFastSubRefused(t.word, r) : JUDGEFAST_SUB)"), "the hint says why while greyed");
+  assert.ok(GEAR.includes("v === 'triage' ? (jm ? (jm.value || '') : '') : v"), "distilling on Follow triage counts as the triage pick");
   for (const store of ["judge-model", "index-model", "distill-model"])
     assert.match(GEAR, new RegExp("gclock\\.stamp\\('" + store + "'\\) \\}\\); judgeFastGate\\(\\);"), `a ${store} pick re-runs the gate`);
   assert.match(GEAR, /cmtFastGate\(false\);\n\s*judgeFastGate\(\);/, "fill() re-checks availability after the tiers are set");

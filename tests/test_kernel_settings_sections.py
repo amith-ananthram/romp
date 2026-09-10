@@ -125,7 +125,13 @@ class SettingsSectionsTest(unittest.TestCase):
         self.assertIn("connected machine's kernel", hint, "the copy says the pick follows to the other machines")
         # greyed with the reason while no judge tier is on Opus (the box is inert then: the opt-in rides only Opus calls)
         self.assertIn("function judgeFastGate", h)
-        self.assertIn("var JUDGEFAST_SUB_OFF = \"Fast mode is Opus-only, and no judge tier is on Opus.", h)
+        self.assertIn("var JUDGEFAST_SUB_OFF = \"Fast mode is Opus-only, and this tier is not on Opus.", h)
+        # T300: the same box follows the Distilling and Indexing pickers, each greyed on ITS tier's effective model
+        for sel, tier in (("rs-distillmodel", "distillfast"), ("rs-indexmodel", "indexfast")):
+            row = h[h.index("<select id=%s></select>" % sel):]
+            row = row[:row.index("</div>")]
+            self.assertIn("<label class=rs-fastin id=rs-%s-wrap><input type=checkbox id=rs-%s>Fast mode<span class=rs-mixed hidden></span>" % (tier, tier), row)
+            self.assertIn("<span class=rs-sub id=rs-%s-sub>" % tier, row)
         self.assertIn("#rsettings .rs-fastin.rs-off {", _gear_css_src())
 
     def test_collapse_gaps_is_wired_to_the_shared_collapseGaps_setting(self):
