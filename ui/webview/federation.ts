@@ -84,6 +84,59 @@ const KERNEL_SETTING = new Set(["setAutoNudge", "setJudgeModel", "setIndexModel"
                                 "setCommentModel", "setCommentEffort", "setCommentFast",
                                 "setTmuxBackend"]);   // T288: the tmux backend's offer, one value across machines
 
+// ── what a send to a host whose relay socket is NOT open does, by message class (2026-09-10) ─────────
+// Three classes, decided by an EXPLICIT list — never guessed from the type's spelling at run time:
+// - a KERNEL_SETTING (above) queues on the conn, latest per type, and flushes on the socket's open;
+// - the pane's own BOOKKEEPING (this map) queues the same way, latest per KEY, and never toasts. These
+//   are messages the pane emits on its own — a hint, a fetch it dedupes itself, a read watermark, a
+//   metric row, a pointer position — so the user made no gesture that this message is the outcome of,
+//   and a toast about it names a message they never sent (the user 2026-09-10: on the phone, a fresh
+//   page whose active tab was a remote session posted activeTab before the relay socket to that host had
+//   opened, and the tap they had just made, which had in fact worked, was answered with a warning that
+//   "activeTab" was not delivered). HELD rather than dropped because the drop is what gagged the pane:
+//   needFull's awaitingFull, imgRequest's imgRequested, loadEpisode's episodePendingKey and loadOlder's
+//   loadingOlder each hold their re-ask until a reply lands, and a dead socket's never does;
+// - everything else is a GESTURE — the message IS the action (sendMessage, createSession, renameSession,
+//   askClear, a tag edit…) and the remote kernel doing it is the whole point, so a drop is said to the
+//   user (dropWarn's toast) and never replayed later (a stale action can be worse than a dropped one).
+//   An UNKNOWN type takes this arm too: a toast about a message that did not matter costs a glance; a
+//   silent drop of one that did loses the thread.
+// The value is the queue KEY, so "latest wins per key" mirrors the settings queue's per-type dedupe with
+// the granularity each message needs: one active tab per pane, so activeTab keys by type alone and the
+// newest supersedes; a fetch keys by what it fetches, so asks for two sessions both stand (a type-only
+// key would flush one and leave the other's pane-side dedupe holding forever); a pointer position keys
+// by type, since only the newest means anything and a leave clears; a metric or audit row keys by type,
+// so a long outage holds one row and not an unbounded backlog — a row lost to an outage is a metric,
+// never a gesture. A key function may answer null for an INSTANCE that is a gesture after all: the
+// feed's showAskPath is the card hover's glow, but with `jump` it is the click that lands the chat on
+// that card, and a jump minutes later would put the user somewhere they no longer asked to be.
+const K = "\u001f";   // the key separator: a control character no session id, path or slot name contains
+export const BOOKKEEPING: ReadonlyMap<string, (m: any) => string | null> = new Map<string, (m: any) => string | null>([
+  ["activeTab",      ()  => "activeTab"],                          // render.ts notifyActive: the tab this pane is looking at
+  ["needFull",       (m) => "needFull" + K + m.id],                // render.ts requestFullSession: a session's re-send (gap / nobase / skeleton / prefetch)
+  ["needSlot",       (m) => "needSlot" + K + m.slot],              // fleet.ts: a view slot's re-send after a rejected delta
+  ["loadOlder",      (m) => "loadOlder" + K + m.id],               // render.ts: the head's older page on a scroll-up or a deep link into it
+  ["loadEpisode",    (m) => "loadEpisode" + K + m.id],             // render.ts noticeOpened: a clear notice's conversation on first expand
+  ["imgRequest",     (m) => "imgRequest" + K + m.id + K + m.path], // render.ts: an inline image's bytes, asked on render
+  ["commentSeen",    (m) => "commentSeen" + K + m.id + K + m.tid], // render.ts: a thread's read watermark as its popover opens or a reply lands in it
+  ["dotHover",       ()  => "dotHover"],                           // render.ts: the chat's hovered dot (a bare dotHover is the leave)
+  ["hoverHighlight", ()  => "hoverHighlight"],                     // feed.ts: the hovered card's rows on the timeline
+  ["showAskPath",    (m) => (m.jump ? null : "showAskPath")],      // feed.ts: the hovered / pinned card's path glow (`off` clears); `jump` is the click
+  ["timelineHover",  ()  => "timelineHover"],                      // timeline-boot.ts: the hovered lane segment (`off` clears, broadcast)
+  ["dirComplete",    ()  => "dirComplete"],                        // render.ts: the + picker's typed-ahead path query (its reply carries reqId; a stale one is dropped there)
+  ["cardOpened",     ()  => "cardOpened"],                         // feed.ts: the open-metric row
+  ["locateDiag",     ()  => "locateDiag"],                         // render.ts: a chat landing attempt's audit row
+  ["orderAudit",     ()  => "orderAudit"],                         // render.ts auditTabOrder: a tab-order permutation's audit row
+]);
+
+/** The key a held bookkeeping message dedupes under on the conn's queue, or null when the message is a
+ *  gesture (an instance the list's function declines, a type not listed, or no type at all): the loud arm. */
+export function bookkeepingKey(msg: any): string | null {
+  if (!msg || typeof msg !== "object" || typeof msg.type !== "string") return null;
+  const f = BOOKKEEPING.get(msg.type);
+  return f ? f(msg) : null;
+}
+
 /** Return a COPY of an inbound message with every session-id field prefixed by `host`. The local host
  *  ("") is the identity transform, so local messages are untouched. Unknown fields pass through. */
 export function prefixInbound(host: string, msg: any): any {
@@ -273,6 +326,12 @@ export function stripHost(host: string, id: string): string {
 
 export function routeOutbound(msg: any, knownHosts?: ReadonlySet<string>): Route[] {
   if (!msg || typeof msg !== "object") return [{ host: LOCAL, msg }];
+
+  // redial ALWAYS stays LOCAL, `host` INTACT: it asks the kernel THIS page talks to for a fresh dial of its
+  // tunnel to `host` (the composer's refusal on a downed host, render.ts). The explicit-host rule below
+  // carried it to that very host — down, so it dropped with a toast about "redial" on top of the refusal's
+  // own copy — with the field stripped, which the kernel's handler requires (2026-09-10).
+  if (msg.type === "redial") return [{ host: LOCAL, msg }];
 
   // an explicit `host` field wins (the + modal's createSession picks the target kernel): route there with
   // the field stripped — the kernel's handlers are host-blind.
@@ -775,11 +834,18 @@ interface Conn {
   lastRecv: number; // epoch ms of the last frame on the CURRENT socket (keepalives count); 0 = none yet
   resumeProvisional: number; // the `resume` stamp lastRecv rests on until a frame confirms it (the watchdog runs at REMOTE_PROVISIONAL_MS meanwhile); 0 = confirmed, or no stamp
   connT: number;    // when the current socket's connect() attempt started — the watchdog's reference point
-  // KERNEL_SETTING messages that arrived while this host's socket was down, newest per type only —
-  // flushed on the socket's open event (sendRemote/flushPending). Bounded by construction: at most
-  // one entry per setting type. Lives on the CONN, not the socket, so it survives every re-dial —
-  // the onclose retry, the poll's, and the liveness watchdog's abandon-and-dial (watchdog()).
+  // KERNEL_SETTING messages (newest per type) and the pane's own BOOKKEEPING (newest per key, see
+  // BOOKKEEPING) that arrived while this host's socket was down — flushed on the socket's open event
+  // (sendRemote/flushPending). Bounded by construction: one entry per setting type, per bookkeeping
+  // key. Lives on the CONN, not the socket, so it survives every re-dial — the onclose retry, the
+  // poll's, and the liveness watchdog's abandon-and-dial (watchdog()).
   pending: Map<string, any>;
+}
+
+/** The TYPES held on a conn's queue, for the hostconn rows (flush-halt's `held`, detach's `pendingDropped`):
+ *  a bookkeeping key carries the sid it is per, and the journal names what, not which. */
+function pendingTypes(c: Conn): string[] {
+  return [...c.pending.values()].map((m) => (m && typeof m.type === "string" ? m.type : ""));
 }
 
 export class FederationManager {
@@ -1317,9 +1383,12 @@ export class FederationManager {
   //   time, which would forge freshness onto an hours-old pick. Queueing is journaled (`sendqueue`),
   //   so a later disagreement between machines is attributable to this tab holding the pick while
   //   the host was down, and to the older pick of the same type it replaced;
-  // - anything else keeps its behavior (replaying an arbitrary action minutes later can be worse
-  //   than dropping it — a deliberate non-goal) but the drop lands a client-diag breadcrumb naming
-  //   the type and host, beside the existing warn toast: a drop is never silent.
+  // - the pane's own BOOKKEEPING (the BOOKKEEPING list, above) holds the same way, latest per key, and
+  //   never toasts: the user sent nothing for a toast to be about (2026-09-10);
+  // - anything else — a GESTURE, or an unknown type — keeps its behavior (replaying an arbitrary action
+  //   minutes later can be worse than dropping it — a deliberate non-goal) but the drop lands a
+  //   client-diag breadcrumb naming the type and host, beside the existing warn toast: a drop is never
+  //   silent.
   private sendRemote(host: string, msg: any): void {
     const c = this.conns.get(host);
     if (c && c.ws && c.ws.readyState === 1) {
@@ -1336,6 +1405,18 @@ export class FederationManager {
       this.diag("sendqueue", { host, msgType: msg.type, gt: typeof msg.gt === "number" ? msg.gt : 0,
                                rs: c.ws ? c.ws.readyState : -1,
                                ...(prev ? { superseded: typeof prev.gt === "number" ? prev.gt : true } : {}) });
+      return;
+    }
+    const key = bookkeepingKey(msg);
+    if (key !== null) {
+      // the pane's own bookkeeping (BOOKKEEPING): held for the open, never toasted — the user sent
+      // nothing for a toast to be about. A host this page holds no conn for (known from a frame, never
+      // dialed, or detached since) has nothing to hold it on: dropped with the breadcrumb alone. Journaled
+      // once per KEY, at the not-held → held transition, in the hostconn family: a hover held per pointer
+      // move would otherwise write a row per move; the open row names everything that flushed.
+      if (!c) { this.diag("senddrop", { host, msgType: msg.type, why: "no-conn" }); return; }
+      if (!c.pending.has(key)) this.diag("hostconn", { host, ev: "hold", msgType: msg.type, rs: c.ws ? c.ws.readyState : -1 });
+      c.pending.set(key, msg);
       return;
     }
     this.diag("senddrop", { host, msgType: (msg && msg.type) || "" });
@@ -1357,22 +1438,24 @@ export class FederationManager {
   private flushPending(conn: Conn): string[] {
     if (!conn.pending.size || !conn.ws || conn.ws.readyState !== 1) return [];
     const flushed: string[] = [];
-    for (const [t, m] of conn.pending) {   // deleting the current entry mid-iteration is spec-safe on a Map
+    for (const [k, m] of conn.pending) {   // deleting the current entry mid-iteration is spec-safe on a Map
       try {
         conn.ws.send(JSON.stringify(m));
       } catch (e) {
-        this.diag("hostconn", { host: conn.host, ev: "flush-halt", flushed: [...flushed], held: [...conn.pending.keys()] });
+        this.diag("hostconn", { host: conn.host, ev: "flush-halt", flushed: [...flushed], held: pendingTypes(conn) });
         break;
       }
-      conn.pending.delete(t);
-      flushed.push(t);
+      conn.pending.delete(k);
+      flushed.push(m && typeof m.type === "string" ? m.type : k);   // by TYPE: a bookkeeping key carries the sid it is per
     }
     return flushed;
   }
 
-  // A route to a host whose socket isn't open would otherwise VANISH — creating a session on an
+  // A GESTURE routed to a host whose socket isn't open would otherwise VANISH — creating a session on an
   // unreachable remote gave no feedback at all (the user 2026-07-10). Surface the drop as a local
   // `warn` (render.ts toasts it), naming the host and the action so the user knows what didn't land.
+  // Only for a gesture: the pane's own bookkeeping is held instead (BOOKKEEPING), since a toast about a
+  // message the user never sent reads as a failure of the tap they did make (2026-09-10).
   private dropWarn(host: string, msg: any): void {
     window.dispatchEvent(new MessageEvent("message", { data: { type: "warn",
       text: `${host} is unreachable (its kernel isn't answering) — “${(msg && msg.type) || "action"}” was not delivered` } }));
@@ -1537,7 +1620,7 @@ export class FederationManager {
     // /tunnels no longer lists it → its cards drop NOW. A detach also discards any settings still
     // queued for the host (the user removed it from the mesh; a later reattach re-syncs through the
     // gear's mixed marks) — named in the breadcrumb, because a drop is never silent.
-    this.diag("hostconn", c.pending.size ? { host, ev: "detach", pendingDropped: [...c.pending.keys()] }
+    this.diag("hostconn", c.pending.size ? { host, ev: "detach", pendingDropped: pendingTypes(c) }
                                          : { host, ev: "detach" });
     c.closed = true;
     try {

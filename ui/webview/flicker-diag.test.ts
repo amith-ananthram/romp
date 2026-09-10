@@ -40,7 +40,8 @@ test("federation: every remote socket open/close/detach posts a hostconn breadcr
   const relayAt = onopen.indexOf('"romp:hostRelayUp"');
   assert.ok(flushAt >= 0 && crumbAt > flushAt && relayAt > crumbAt, "onopen order: flush, breadcrumb, relay-up dispatch");
   assert.match(FED, /this\.diag\("hostconn", \{ host: conn\.host, ev: "close", code: ev\.code, clean: ev\.wasClean, detached: conn\.closed \}\);/);
-  assert.match(FED, /this\.diag\("hostconn", c\.pending\.size \? \{ host, ev: "detach", pendingDropped: \[\.\.\.c\.pending\.keys\(\)\] \}\s*\n\s*: \{ host, ev: "detach" \}\);/);
+  // …by TYPE (pendingTypes): a held bookkeeping entry's queue key carries the sid it is per (2026-09-10)
+  assert.match(FED, /this\.diag\("hostconn", c\.pending\.size \? \{ host, ev: "detach", pendingDropped: pendingTypes\(c\) \}\s*\n\s*: \{ host, ev: "detach" \}\);/);
   // breadcrumbs ride the LOCAL kernel socket into the same client-diag journal the feed writes
   assert.match(FED, /s\(\{ type: "clientDiag", surface: "federation", what, data \}\);/);
 });
