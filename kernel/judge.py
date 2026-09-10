@@ -474,7 +474,8 @@ JUDGE_FAIL_CAP = 3                       # the same rule for every other retryin
 #                                          already had their own.
 PLACEMENTS_V = 13                        # placements-identity schema version (plan P2, the user 2026-07-06).
 #                                          v13 (T318, 2026-09-10): a segment opened by a machine-written trigger (a romp
-#                                          injection, the CLI's stop record) keys on its anchor atom's uuid. Recorded
+#                                          injection, the CLI's stop record, a scheduled task's fired prompt) keys on its
+#                                          anchor atom's uuid; the tasks memo (tasks_for) steps to v7 with it. Recorded
 #                                          ids from before (trails, seam keys, caption rows into such segments) are NOT
 #                                          remapped: their lookups miss and the card falls to its fallback tiers, which
 #                                          is where those anchors already were wrong; a one-time remap by exact `t`
@@ -3222,7 +3223,8 @@ def tasks_for(fsid, leaf, files, now):
     cf = PCACHE / (fsid + ".json")
     try:
         o = json.loads(cf.read_text())
-        if o.get("key") == key and o.get("v") == 6:    # v6 = absorbed atoms placed at their landing time, so their seg ids moved (T252d, 2026-09-08);
+        if o.get("key") == key and o.get("v") == 7:    # v7 = machine-written triggers key their segment on the anchor uuid, so those seg ids moved (T318, 2026-09-10; with PLACEMENTS_V 13);
+            #                                             v6 = absorbed atoms placed at their landing time, so their seg ids moved (T252d, 2026-09-08);
             #                                             v5 = absorbed SDK-injection atoms carry real text (2026-07-06); older caches regenerate
             return o["tasks"]
     except Exception:
@@ -3242,7 +3244,7 @@ def tasks_for(fsid, leaf, files, now):
     try:
         PCACHE.mkdir(parents=True, exist_ok=True)
         tmp = cf.with_suffix(".tmp.%d" % os.getpid())
-        tmp.write_text(json.dumps({"key": key, "v": 6, "tasks": tasks}))
+        tmp.write_text(json.dumps({"key": key, "v": 7, "tasks": tasks}))
         tmp.rename(cf)
     except Exception:
         pass

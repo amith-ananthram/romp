@@ -2463,8 +2463,10 @@ def _segment_id(rompuuid, seg_t, atoms, trigger_uuid):
 
     A segment opened by a MACHINE-WRITTEN trigger is keyed by its anchor atom's uuid too (T318, 2026-09-10):
     anything romp injected itself (the romp-injected marker: a kernel restart or crash notice, an auto-nudge,
-    the retry message, the compaction suggestion, a Nudge-button follow-up) and the CLI's own stop record
-    ('[Request interrupted by user…]', is_interrupt_record). Most of these are worded identically every time,
+    the retry message, the compaction suggestion, a Nudge-button follow-up), the CLI's own stop record
+    ('[Request interrupted by user…]', is_interrupt_record), and a SCHEDULED task's fired prompt (origin
+    subkind scheduled-trigger, or its preamble on an unstamped record: the CLI fires the stored prompt
+    verbatim every interval, with no time or task id interpolated). Most of these are worded identically every time,
     so a content hash gave every such segment in a session the same hash and the timestamp-invariant _seg_key
     aliased them all (one session held 19 restart-notice segments and 25 stop records under three keys): a
     card whose recorded segments held one such segment resolved to whichever the parse saw last, and its
@@ -2485,8 +2487,11 @@ def _segment_id(rompuuid, seg_t, atoms, trigger_uuid):
     if not text and atoms:
         anchor = anchor or atoms[0]
         text = _text_of(_content(atoms[0].get("message")))
-    machine_written = bool(text) and bool(ROMP_INJECT_RE.search(text)
-                                         or (anchor is not None and is_interrupt_record(anchor)))
+    origin = (anchor or {}).get("origin")
+    machine_written = bool(text) and bool(
+        ROMP_INJECT_RE.search(text) or SCHEDULED_PREAMBLE_RE.match(text)
+        or (isinstance(origin, dict) and origin.get("kind") == "task-notification" and origin.get("subkind") == "scheduled-trigger")
+        or (anchor is not None and is_interrupt_record(anchor)))
     basis = (text if not machine_written else "") or (anchor or {}).get("uuid") \
         or next((a.get("uuid") for a in atoms if a.get("uuid")), "")   # first uuid-bearing atom if the anchor has none
     h = hashlib.sha1(basis.encode("utf-8", "replace")).hexdigest()[:8]

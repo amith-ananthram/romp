@@ -7,7 +7,8 @@ that key, to whichever restart-notice segment the parse saw last, so its summary
 assistant turn hours after the work the summary described). A romp system notice (or an auto-nudge)
 carries no user content and has no composer echo to drift against, so its segment is keyed by its anchor
 atom's uuid, exactly as a text-less seam already is; so is every other segment a machine wrote the trigger of
-(any romp injection: the retry message, an auto-nudge; the CLI's stop record). Two cut turns, two identical
+(any romp injection: the retry message, an auto-nudge; the CLI's stop record; a scheduled task's fired prompt,
+stamped by its origin or read from its preamble). Two cut turns, two identical
 notices: distinct ids, distinct keys, and the card's anchors stay inside its own segments. SYNTHETIC fixtures
 only: a private synthetic sid, invented text, placeholder uuids."""
 import json
@@ -45,9 +46,12 @@ def iso(t):
     return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-def uline(t, text, uuid, parent=None, ps="typed"):
-    return {"type": "user", "timestamp": iso(t), "uuid": uuid, "parentUuid": parent,
-            "promptSource": ps, "message": {"role": "user", "content": text}}
+def uline(t, text, uuid, parent=None, ps="typed", origin=None):
+    r = {"type": "user", "timestamp": iso(t), "uuid": uuid, "parentUuid": parent,
+         "promptSource": ps, "message": {"role": "user", "content": text}}
+    if origin:
+        r["origin"] = origin
+    return r
 
 
 def aline(t, text, uuid, parent=None):
@@ -58,6 +62,11 @@ def aline(t, text, uuid, parent=None):
 
 RETRY = "retry\n\n<!-- romp-injected -->"                                        # the kernel's fixed retry message
 AUTO = "<!-- romp-injected --><!-- romp-auto -->[romp] Where does the outline work stand? <!-- romp-goal-id: g1 -->"
+SCHEDULED = ("[SCHEDULED TASK - AUTOMATED FIRING OF A CONFIGURED PROMPT]\n"
+             "This turn was started automatically by a schedule, not typed live by the user.\n"
+             "The content below is the stored prompt of a scheduled task on this account.\n\n"
+             "Sweep the outline module for stale references and report.")          # the CLI fires it verbatim each interval
+SCHED_ORIGIN = {"kind": "task-notification", "subkind": "scheduled-trigger"}
 RECORDS = [
     uline(T0, ASK, "u1"),
     aline(T0 + 60, WORK1, "a1", "u1"),
@@ -76,6 +85,15 @@ RECORDS = [
     aline(T0 + 2710, "The outline work stands where the talk-through left it: three calls are still yours.", "a6", "an1"),
     uline(T0 + 2800, AUTO, "an2", "a6", ps="sdk"),
     aline(T0 + 2810, "Still standing where it was; nothing new to build until you decide the three calls.", "a7", "an2"),
+    # a scheduled task fired twice: stamped by the CLI's origin (s1, s2), and unstamped, read from the preamble (p1, p2)
+    uline(T0 + 3600, SCHEDULED, "s1", "a7", ps="sdk", origin=SCHED_ORIGIN),
+    aline(T0 + 3610, "Swept the outline module: two stale references, both in the talk-through section.", "a8", "s1"),
+    uline(T0 + 7200, SCHEDULED, "s2", "a8", ps="sdk", origin=SCHED_ORIGIN),
+    aline(T0 + 7210, "Swept again: the two stale references are still there; nothing new since the last sweep.", "a9", "s2"),
+    uline(T0 + 10800, SCHEDULED, "p1", "a9", ps="sdk"),
+    aline(T0 + 10810, "Swept once more without a stamp on the firing; the same two references remain.", "a10", "p1"),
+    uline(T0 + 14400, SCHEDULED, "p2", "a10", ps="sdk"),
+    aline(T0 + 14410, "The fourth sweep finds the two references fixed; the module reads clean now.", "a11", "p2"),
 ]
 
 
@@ -134,8 +152,9 @@ class RestartNoticeSegments(unittest.TestCase):
         c1, c2 = self._seg_of("c1"), self._seg_of("c2")
         self.assertEqual(c1["id"].rsplit(":", 1)[1], h("c1")); self.assertEqual(c2["id"].rsplit(":", 1)[1], h("c2"))
         self.assertNotEqual(jd._seg_key(c1["id"]), jd._seg_key(c2["id"]), "two identical stop records must not share a key")
-        # …and every other trigger romp wrote: the fixed retry message and an auto-nudge, each sent twice
-        for a, b in (("r1", "r2"), ("an1", "an2")):
+        # …and every other machine-written trigger: romp's fixed retry message and an auto-nudge, each sent twice, and
+        # a scheduled task's prompt fired twice, stamped by its origin (s1, s2) and unstamped, read from its preamble (p1, p2)
+        for a, b in (("r1", "r2"), ("an1", "an2"), ("s1", "s2"), ("p1", "p2")):
             sa, sb = self._seg_of(a), self._seg_of(b)
             self.assertEqual(sa["id"].rsplit(":", 1)[1], h(a), "%s keys on its own uuid" % a)
             self.assertNotEqual(jd._seg_key(sa["id"]), jd._seg_key(sb["id"]), "%s and %s must not share a key" % (a, b))

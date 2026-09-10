@@ -223,7 +223,8 @@ class PlacementIdentityCanary(unittest.TestCase):
         # v12 (2026-09-08, T252d): absorbed atoms placed at their landing time — att2's id and the atom set
         # above re-pinned with the bump.
         # v13 (2026-09-10, T318): a segment opened by a machine-written trigger (a romp injection: restart or
-        # crash notice, auto-nudge, retry, compaction suggestion, Nudge-button follow-up; or the CLI's stop record)
+        # crash notice, auto-nudge, retry, compaction suggestion, Nudge-button follow-up; the CLI's stop record; a
+        # scheduled task's fired prompt)
         # keys on its anchor atom's uuid, not its (identical every time) text; this fixture's u2 is romp-injected
         # but its id is pinned as it now derives, and the rest carry no such trigger — the bump seals sessions
         # whose restart-notice and stop-record segments aliased under one key (tests/test_restart_notice_segments.py
