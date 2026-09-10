@@ -1529,8 +1529,9 @@ class ViewBuilder(unittest.TestCase):
             "rompUuid": SID, "seq": 2, "lastNode": top, "nodes": nodes,
             "placements": placements, "status": status}))
         km._task_seg_cache.clear()
-        km._BG_TOPS_CACHE.clear()          # both classifier caches key on store/transcript file stats —
-        km._SESSION_STAMP_CACHE.clear()    # cleared so a same-stat rewrite can't serve a stale verdict
+        km._BG_TOPS_CACHE.clear()          # the launch-segment positives, the (parse, store)-keyed placement
+        km._SESSION_STAMP_CACHE.clear()    # memo and the stat-keyed stamp read: cleared so an earlier fixture's
+        #                                    answer under this sid, or a same-stat rewrite, serves nothing here
         saved = km._tmux_sessions
         km._tmux_sessions = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
                                            "context": None, "compactPct": None, "color": None,
