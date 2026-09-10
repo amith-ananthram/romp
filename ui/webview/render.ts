@@ -10735,6 +10735,15 @@ function showActive(keep?: { uuid: string; y: number } | null) {
     } else { empty.style.display = ""; }
     document.body.style.removeProperty("--active-accent"); // no session → neutral window border
     updateStatusline();
+    // Take the leaving tab's go-to-bottom and reply chips down with it. They were measured against ITS transcript,
+    // and a tab left at the top of a long one fires none of the chips' events on the switch: no scroll clamp
+    // (scrollTop is 0 and stays 0) and no #content resize (the pane's height is the body minus its siblings; hiding
+    // the views changes only its scroll extent). Left up, a stale chip is a click into the wrong tab: the reply
+    // chip's anchor is looked up in the entering tab's view and lands as the couldn't-locate toast when the full
+    // arrives. With no live session under the active tab, updateJumpBtn's gate hides its chip without a measure and
+    // re-reads the reply chips, whose own gate hides them and clears their signature. The branch's last statement,
+    // after its state is settled (skeleton-tabs-wiring.test.ts pins the order).
+    updateJumpBtn();
     return;
   }
   document.getElementById("tab-loading")?.remove();   // the payload landed — the real view takes over in place
@@ -11134,6 +11143,11 @@ jumpBtn.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none"
 function updateJumpBtn(): void {
   const c = document.getElementById("content");
   if (!c || c.clientHeight <= 0) { jumpBtn.hidden = true; return; }   // hidden pane measures 0 — no chip
+  // No live session under the active tab (a loading or skeleton tab's loader, or the no-sessions copy): nothing to
+  // go to the bottom of, so the set decides before the measure does. The loader's min-height (60vh, styles.css)
+  // overflows a pane under 60vh + 18px, and the measure alone would paint the chip over it (skeleton-tabs-wiring.test.ts).
+  // The reply chips still get their re-read: their own gate hides them over a loader and clears their signature.
+  if (!liveSession(activeId)) { jumpBtn.hidden = true; updateReplyChips(); return; }
   const off = c.scrollHeight > c.clientHeight + 2 && !atBottom(c);   // the chip: shown the moment the reader leaves the true bottom
   jumpBtn.hidden = !off;
   if (off) jumpBtn.style.bottom = (Math.max(0, window.innerHeight - c.getBoundingClientRect().bottom) + 8) + "px";
