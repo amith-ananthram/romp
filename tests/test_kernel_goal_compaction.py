@@ -344,6 +344,77 @@ class ClearedLedgerIsAuthoritativeAcrossTheCompaction(unittest.TestCase):
         self.assertTrue(second[self.g("g5a")]["cleared"], "and rolls down to the subtree")
         self.assertFalse(first[self.g("g5")]["cleared"], "the cached rows themselves are not mutated")
 
+    def test_an_archive_from_before_the_reseal_fix_does_not_list_a_status_only_root_the_ledger_clears(self):
+        # the archive shape an older compaction wrote for a root only the ledger cleared: the re-seal's clear verdict
+        # set the flag and left nodeComplete False, and the copy took the status dict bound before the rollup,
+        # "completed" (the rollup gives a cleared flag precedence, so that pair is a stale copy by construction);
+        # nothing rewrites an archived status, and the root's ledger row persists. g11 is the control: completed
+        # by its own verdict, then cleared, the shape the previous test pins as listed and struck through.
+        jd.GOALARCHDIR.mkdir(parents=True, exist_ok=True)
+        (jd.GOALARCHDIR / (SID + ".json")).write_text(json.dumps({
+            "rompUuid": SID,
+            "nodes": {self.g("g10"): _node(self.g("g10"), None, cleared=True, t=100, mt=100),
+                      self.g("g10a"): _node(self.g("g10a"), self.g("g10"), cleared=True, t=100, mt=100),
+                      self.g("g11"): _node(self.g("g11"), None, nodeComplete=True, t=100, mt=100)},
+            "status": {self.g("g10"): "completed", self.g("g11"): "completed"}}))
+        first = km._fleet_archived_tops(SID)
+        self.assertEqual({n["id"] for n in first if n["depth"] == 0}, {self.g("g10"), self.g("g11")},
+                         "premise: with an empty ledger both roots list on the copied values, and the cache is primed")
+        with (jd.STATE / "cleared.jsonl").open("a") as f:                  # the rows every such root has
+            for n in ("g10", "g11"):
+                f.write(json.dumps({"id": self.g(n), "t": 200, "op": "clear"}) + "\n")
+        km._CLEARED_MEMO["slot"] = None
+        second = km._fleet_archived_tops(SID)
+        self.assertEqual([n["id"] for n in second], [self.g("g11")],
+                         "a root whose only completion is a copied status the ledger clears is a stale copy of a "
+                         "clear: gone from Show completed, its subtree with it")
+        self.assertTrue(second[0]["cleared"], "a root completed by its own verdict keeps its struck-through row")
+        self.assertIn(self.g("g10"), {n["id"] for n in first}, "the cached rows themselves are not mutated")
+        self._fresh_process()
+        self.assertEqual([n["id"] for n in km._fleet_archived_tops(SID)], [self.g("g11")],
+                         "the uncached projection agrees")
+
+    def test_only_a_status_only_root_is_dropped_a_takeaway_or_its_own_verdict_keeps_the_row(self):
+        # five shapes side by side, newest first in the flat list. g12: the flag a pass save erased, the copied
+        # status "completed", the ledger row the clear left (the shape from before the compaction re-sealed such
+        # a root), a whitespace summary (no takeaway, as the qualification reads it): status-only, dropped with
+        # its child. g13: cleared, no status, a distiller takeaway written before the clear: it qualifies through
+        # the summary and stays listed struck through, as it does when the clear lands on the live card. g14:
+        # completed by its own verdict, nothing clears it: listed, not cleared, its child intact, so the drop
+        # ends at the next root. g15: a copied "completed" and nothing clearing it, no flag, no row: listed with
+        # its child while the ledger holds other rows (the drop is for CLEARED status-only roots). g16: the
+        # copied flag on, a copied "completed", no ledger row: dropped with its child on the flag alone, and
+        # the drop of the last root runs to the end of the list.
+        jd.GOALARCHDIR.mkdir(parents=True, exist_ok=True)
+        (jd.GOALARCHDIR / (SID + ".json")).write_text(json.dumps({
+            "rompUuid": SID,
+            "nodes": {self.g("g12"): _node(self.g("g12"), None, summary="  ", t=300, mt=300),
+                      self.g("g12a"): _node(self.g("g12a"), self.g("g12"), t=300, mt=300),
+                      self.g("g13"): _node(self.g("g13"), None, cleared=True, summary="what shipped", t=200, mt=200),
+                      self.g("g14"): _node(self.g("g14"), None, nodeComplete=True, t=100, mt=100),
+                      self.g("g14a"): _node(self.g("g14a"), self.g("g14"), nodeComplete=True, t=100, mt=100),
+                      self.g("g15"): _node(self.g("g15"), None, t=50, mt=50),
+                      self.g("g15a"): _node(self.g("g15a"), self.g("g15"), t=50, mt=50),
+                      self.g("g16"): _node(self.g("g16"), None, cleared=True, t=25, mt=25),
+                      self.g("g16a"): _node(self.g("g16a"), self.g("g16"), cleared=True, t=25, mt=25)},
+            "status": {self.g("g12"): "completed", self.g("g14"): "completed",
+                       self.g("g15"): "completed", self.g("g16"): "completed"}}))
+        with (jd.STATE / "cleared.jsonl").open("a") as f:                  # the rows the two clears left
+            for n in ("g12", "g13"):
+                f.write(json.dumps({"id": self.g(n), "t": 400, "op": "clear"}) + "\n")
+        km._CLEARED_MEMO["slot"] = None
+        rows = km._fleet_archived_tops(SID)
+        self.assertEqual([n["id"] for n in rows],
+                         [self.g("g13"), self.g("g14"), self.g("g14a"), self.g("g15"), self.g("g15a")],
+                         "the cleared status-only roots and their children are gone; the takeaway root, the verdict "
+                         "root and the uncleared status-only root stay")
+        by = {n["id"]: n for n in rows}
+        self.assertTrue(by[self.g("g13")]["cleared"], "a cleared root with a takeaway lists struck through")
+        self.assertFalse(by[self.g("g14")]["cleared"] or by[self.g("g14a")]["cleared"],
+                         "an uncleared root and its subtree are untouched by the drop before them")
+        self.assertFalse(by[self.g("g15")]["cleared"] or by[self.g("g15a")]["cleared"],
+                         "a status-only root nothing clears stays listed, not cleared, while the ledger holds other rows")
+
 
 if __name__ == "__main__":
     unittest.main()

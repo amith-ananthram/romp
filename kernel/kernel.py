@@ -29609,7 +29609,9 @@ def _fleet_archived_tops(sid, cap=20):
     hierarchy, not just show a flat row (the user 2026-06-29). The Fleet filters depth==0 for the roots and
     merges the rest into its node map. "Completed" top = explicitly nodeComplete, rolled up to status
     'completed', or carries a distiller takeaway (summary). mtime-cached on the archive file (changes only on
-    a sweep), so this is ~free on the feed hot path. Caps the number of TOPS (each keeps its full subtree)."""
+    a sweep), so this is ~free on the feed hot path. Caps the number of TOPS (each keeps its full subtree).
+    A cleared top whose only completion is that copied status leaves the list (_ledger_cleared_overlay drops
+    it: a stale copy of a clear, not a completion)."""
     p = jd.GOALARCHDIR / (sid + ".json")
     try:
         mt = p.stat().st_mtime
@@ -29674,16 +29676,35 @@ def _ledger_cleared_overlay(rows):
     """The archive projection with cleared.jsonl applied over the node flags (2026-09-09): an archived top the
     ledger clears reads cleared whatever its copied flag says (a racing pass save could have erased it), and
     its subtree follows, the roll-down the live tree's top-only cross-off has. Applied AFTER the mtime cache,
-    so a clear that lands later than the archive's last write shows on the next build."""
+    so a clear that lands later than the archive's last write shows on the next build.
+
+    A cleared root whose only completion is the copied status is DROPPED with its subtree, not marked. A cleared
+    flag rolls up to status cleared (rollup_status gives it precedence), so a copied "completed" beside a clear
+    is a stale copy: a compaction that copied the status dict bound before its re-seal's rollup (the re-seal's
+    clear verdict leaves nodeComplete False, so the copied status was the root's only completion); or a
+    completion the rollup derived without a verdict (an umbrella, a settled store) whose root the ledger then
+    cleared, among them a root whose flag a pass save erased before compactions re-sealed such a root (a root
+    with its own done verdict keeps nodeComplete through that erasure and stays listed, struck through). A
+    clear on the live card rolls such a top to cleared before the copy and it never qualifies; this
+    reads an older archive the same way. A root completed by its own verdict (nodeComplete) stays listed and
+    reads cleared; a root that carries a distiller takeaway qualifies through the summary and stays listed, as
+    it does after a live-card clear. Read from the projection's fields: at depth 0 `derived` means the copied
+    status or a summary, never an ancestor (a root has none), so derived with no summary is status-only. The
+    drop sits behind the early return, so it acts only while the ledger holds a live row; every such root has
+    its own (the re-seal requires it, an undo removes the row and restores the node, nothing prunes the file),
+    and a ledger emptied by hand leaves the root listed struck through. The subtree drop relies on the flat
+    list's order (a root, then its descendants, up to the next depth-0 row), the invariant the roll-down reads."""
     vc = _cleared_ids()
     if not vc:
         return rows
-    out, root_cleared = [], False
+    out, root_cleared, drop = [], False, False
     for n in rows:
         if n.get("depth") == 0:
             root_cleared = bool(n.get("cleared")) or n.get("id") in vc
-            out.append(dict(n, cleared=root_cleared) if root_cleared != bool(n.get("cleared")) else n)
-        else:
+            drop = root_cleared and bool(n.get("derived")) and not (n.get("summary") or "").strip()
+            if not drop:
+                out.append(dict(n, cleared=root_cleared) if root_cleared != bool(n.get("cleared")) else n)
+        elif not drop:                                   # a dropped root's descendants follow it; they go with it
             c = bool(n.get("cleared")) or n.get("id") in vc or root_cleared
             out.append(dict(n, cleared=c) if c != bool(n.get("cleared")) else n)
     return out
