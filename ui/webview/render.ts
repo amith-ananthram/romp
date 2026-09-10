@@ -72,6 +72,8 @@ import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionT
 import type { MentionCandidate, MentionQuery } from "./composer-mention";
 import { defaultCommentName, defaultBreakoutName, defaultForkName, nameToSend } from "./comment-name";
 import { followReader, keepPlaceAcrossShow, followTail, atBottomDist, followBoxBelow, followTailShrink, reshowStick } from "./scroll-keep";
+import { phParts } from "./composer-placeholder";   // the resting placeholder names the session (2026-09-09)
+import { badgeSpec } from "./session-badge";   // the statusline badge names the session (2026-09-09)
 import { retainLiveOmitted } from "./tab-order";
 import { userTurnShows } from "./user-turn-content";
 import { ScrollDiagBudget, classifyScroll, scrollWriteRow, tailChangeRow, tailLabel, spacerRow, readScrollDiagCap, summarizeTailMutations, tailMutRow, unitChangeRow, unitChanges, boxChanges, boxLabel, BOX_FROM_TAIL } from "./scroll-write";
@@ -6198,6 +6200,7 @@ function setSessionColor(id: string, bg: string) {
   const meta = tabMeta.get(id);
   if (meta) meta.color = color;
   renderTabs();
+  if (id === activeId) { syncComposerPh(); updateStatusline(); }   // the box's name and the badge wear the new colour on this very click
   // OPTIMISTIC cross-pane echo (the user 2026-08-08): the tabs repaint on this very click, but the
   // FEED kept the old colour until the kernel's next feed rebuild pushed — a second or two. Tell the
   // other panes kernel-free, on the same host-matched pair settings sync rides: the browser's
@@ -11508,6 +11511,7 @@ function showActive(keep?: { uuid: string; y: number } | null) {
   // tint the whole-window border with the active session's identity color
   if (s.color && s.color.bg) document.body.style.setProperty("--active-accent", s.color.bg);
   else document.body.style.removeProperty("--active-accent");
+  syncComposerPh();   // the box names the session it now messages, in that session's colour
   syncHostOfflineFoot();   // the tab we just switched to may sit on an unreachable host
   touchMru(activeId!); // record activation order so close returns to the previous tab
   const v = ensureView(activeId!);
@@ -12960,6 +12964,55 @@ function composerRestingPlaceholder(): string {
   return "Message this session…  (⏎ send · ⇧⏎ newline · ⌘⏎ stage · ↑ history · / for commands)";
 }
 
+// ── the resting placeholder names the session (the user 2026-09-09) ────────────────────────────────────
+// "Message this session…" reads "Message <name>…", the name BOLD and in the session's identity colour — the
+// colour its tab label and timeline lane wear — so the box says who you are about to message; with the chat
+// split into columns every column is a different session behind a same-looking box. A native placeholder is
+// plain text, so the styled form is an OVERLAY (#composer-ph) painted over the empty box exactly where the
+// first line of text would sit; the native placeholder stays for assistive tech and goes transparent beneath
+// it (.ph-on). It mirrors whatever the placeholder says (composer-placeholder.ts): the resting forms take the
+// name, the closed notice and a picker's "add your own answer…" show natively, and the overlay hides the
+// moment the box holds text. Re-synced by every writer of the box's value or placeholder — never polled.
+function syncComposerPh(): void {
+  const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
+  const box = document.getElementById("composer");
+  if (!ta || !box) return;
+  let ph = document.getElementById("composer-ph");
+  if (!ph) {
+    ph = el("div", ""); ph.id = "composer-ph"; ph.setAttribute("aria-hidden", "true"); box.appendChild(ph);
+    // The box's LAYOUT moves the textarea too, not only its value: a quote chip seeded by a highlight, a dropped
+    // file or a staged note adds a row above it (the user 2026-09-10: the name overlay sat on top of the chip
+    // row). Every such change resizes #composer, so its ResizeObserver re-places the overlay — event-based,
+    // whatever code path added the row. The overlay is absolutely positioned, so re-placing it never resizes
+    // the box back (no observer loop).
+    try { new ResizeObserver(() => syncComposerPh()).observe(box); } catch (e) { /* tests: no ResizeObserver in the DOM shim */ }
+  }
+  // the session's name and colour: the LIVE session when its tab is loaded, else what the strip itself knows of the
+  // tab (tabMeta: a skeleton's or a placeholder's name and colour) — never a stale pre-outage session (skeleton-tabs-wiring)
+  const live = liveSession(activeId);
+  const meta = activeId ? tabMeta.get(activeId) : undefined;
+  const colorBg = (live?.color?.bg || meta?.color?.bg) || null;
+  const parts = phParts(ta.placeholder, live?.name || meta?.name || "");
+  const show = parts.kind === "named" && !ta.value && !ta.disabled && ta.offsetParent !== null;
+  ph.style.display = show ? "" : "none";
+  ta.classList.toggle("ph-on", show);
+  if (!show || parts.kind !== "named") return;
+  ph.replaceChildren();
+  ph.appendChild(document.createTextNode(parts.before));
+  const nm = el("b", "composer-ph-name"); nm.textContent = parts.name;
+  if (colorBg) nm.style.color = colorBg; else nm.style.removeProperty("color");
+  ph.appendChild(nm);
+  ph.appendChild(document.createTextNode(parts.after));
+  // where the box's own first line sits: inside its border and padding, in its font (offsets are relative to
+  // #composer, the overlay's positioned parent)
+  const cs = getComputedStyle(ta);
+  const num = (v: string) => parseFloat(v) || 0;
+  ph.style.left = (ta.offsetLeft + num(cs.borderLeftWidth) + num(cs.paddingLeft)) + "px";
+  ph.style.top = (ta.offsetTop + num(cs.borderTopWidth) + num(cs.paddingTop)) + "px";
+  ph.style.width = Math.max(0, ta.clientWidth - num(cs.paddingLeft) - num(cs.paddingRight)) + "px";
+  ph.style.fontFamily = cs.fontFamily; ph.style.fontSize = cs.fontSize; ph.style.lineHeight = cs.lineHeight;
+}
+
 // How a message typed into the NORMAL composer should be routed while a live picker is up — the picker's
 // dropped inline "add your own" field, now served by the composer (the user 2026-07-09). null → no active
 // free-text path, so the composer sends a normal message as usual (a permission Allow/Deny prompt, or an
@@ -12998,6 +13051,7 @@ function setComposerAskMode() {
     ta.placeholder = composerRestingPlaceholder();
     ta.classList.remove("answering");
   }
+  syncComposerPh();
 }
 
 // Render the widget matching the active session's pending prompt. It lives at the BOTTOM of the transcript
@@ -14106,6 +14160,16 @@ function updateStatusline() {
     sl.appendChild(ro);
     return;
   }
+  // The session's own badge FIRST (the user 2026-09-09): its name on its identity colour — the colour its
+  // tab label and timeline lane wear — with the name in black, so the line reads "<session> · Working" and a
+  // glance at any chat column says which session it is. Built from the same record as the chips beside it.
+  const bs = settings.showSessionBadge === true ? badgeSpec(s) : null;   // an opt-in (Settings → Chat → Show session badge; off by default, the maintainers 2026-09-10): the composer's placeholder names the session already
+  if (bs) {
+    const b = el("span", "chip chip-session"); b.textContent = bs.text;
+    if (bs.bg) b.style.background = bs.bg;
+    b.title = bs.text;   // the full name when the chip clips a long one
+    sl.appendChild(b);
+  }
   // Left: the state chip — WORKING gets a sine color-pulse + elapsed timer; idle
   // states get the plain chip (no timer). Right: model + effort · ctx%, always.
   if (s.status.state === "working") {
@@ -14570,7 +14634,10 @@ function flushStaged(sid: string, typed?: { text: string; cites?: Citation[]; im
   return run.length;
 }
 
-function renderStagedStrip(id: string | null, opts?: { reveal?: "last" }): void {
+  // every exit path re-places the name overlay: a row above the textarea coming or going moves the box's first line
+  // (the user 2026-09-10); the ResizeObserver on #composer is the backstop, this is the exact event
+  function renderStagedStrip(id: string | null, opts?: { reveal?: "last" }): void { renderStagedStripInner(id, opts); syncComposerPh(); }
+  function renderStagedStripInner(id: string | null, opts?: { reveal?: "last" }): void {
   const strip = document.getElementById("composer-staged");
   if (!strip) return;
   // the list's scroll position survives the rebuild: expanding or discarding an item re-renders the
@@ -14912,7 +14979,8 @@ function fireRewindDelete(sid: string, uuid: string): void {
 function cancelComposerEdit(sid: string): void {
   if (!composerEdits.delete(sid)) return;
   if (sid !== activeId) return;
-  clearComposerBox?.();   // the composer's one clear path: the menus see the message box go empty
+    clearComposerBox?.();   // the composer's one clear path: the menus see the message box go empty
+    syncComposerPh();       // …and the name overlay comes back over the emptied box (2026-09-09)
   drafts.delete(sid); persistDrafts();
   renderComposerChips(sid);
 }
@@ -14921,7 +14989,10 @@ function cancelComposerEdit(sid: string): void {
 // with the cited title + an ✕; clicking the ✕ dismisses it, clicking the pill itself opens an AUDIT preview
 // of the exact prompt romp will send (the user 2026-07-01). It lives ABOVE the textarea (a textarea can't
 // host inline DOM), so it reads as attached-but-separate context, not typed text.
-function renderComposerChips(id: string | null): void {
+// every exit path re-places the name overlay: a row above the textarea coming or going moves the box's first line
+// (the user 2026-09-10); the ResizeObserver on #composer is the backstop, this is the exact event
+function renderComposerChips(id: string | null): void { renderComposerChipsInner(id); syncComposerPh(); }
+function renderComposerChipsInner(id: string | null): void {
   const strip = document.getElementById("composer-chips");
   if (!strip) return;
   closeCitePreview();   // the chip is being rebuilt (or removed) → drop any open audit popover for the old chip
@@ -14981,7 +15052,10 @@ function renderComposerChips(id: string | null): void {
 // imgRequest data-URL flow in the VS Code webview (the sandbox can't reach the kernel origin) — and any
 // other file wears a compact ext + name chip. Click opens the file (the same openFile the path links
 // use); the ✕ removes just that attachment. Rendered per session, like the citation chips beside it.
-function renderComposerFiles(id: string | null): void {
+// every exit path re-places the name overlay: a row above the textarea coming or going moves the box's first line
+// (the user 2026-09-10); the ResizeObserver on #composer is the backstop, this is the exact event
+function renderComposerFiles(id: string | null): void { renderComposerFilesInner(id); syncComposerPh(); }
+function renderComposerFilesInner(id: string | null): void {
   const strip = document.getElementById("composer-files");
   if (!strip) return;
   // the held-send state rides the send button (see sendOnShip): dimmed + titled while a "wait for
@@ -16509,7 +16583,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   else if (m.type === "renamed" && m.id && typeof m.name === "string") {
     notePendingMeta(pendingTabMeta, m.id, { name: m.name });   // kernel truth — hold it against a push built pre-rename
     const s = sessions.get(m.id);
-    if (s && s.name !== m.name) { s.name = m.name; renderTabs(); }
+    if (s && s.name !== m.name) { s.name = m.name; renderTabs(); if (m.id === activeId) { syncComposerPh(); updateStatusline(); } }   // the box and the badge name the session as it is now called
   }
   else if (m.type === "droppedPath" && typeof m.path === "string") {   // host-saved drop/paste/pick → a thumbnail, not path text (the user 2026-08-04)
     const ackShip = typeof m.shipId === "string" && m.shipId ? m.shipId : undefined;
@@ -16719,6 +16793,7 @@ function growComposer(ta: HTMLTextAreaElement) {
   ta.style.height = "auto";
   const cap = composerManualH ?? 120;                      // dragged cap, else the default ~6-line cap
   ta.style.height = Math.min(ta.scrollHeight, cap) + "px";
+  syncComposerPh();   // every programmatic write of the box's value comes through here: the overlay follows the box
 }
 
 // One slash command from the kernel's /commands (the Agent SDK's get_server_info): the name (no leading "/"),
@@ -17096,6 +17171,7 @@ function setupComposer() {
   try {
     new ResizeObserver(() => {
       if (ta.placeholder.startsWith("Message this session…")) ta.placeholder = composerRestingPlaceholder();
+      syncComposerPh();
     }).observe(ta);
   } catch (e) { /* tests: no ResizeObserver in the DOM shim */ }
 
@@ -17572,6 +17648,7 @@ function setupComposer() {
     }
   });
   ta.addEventListener("input", () => {
+    syncComposerPh();   // typed text hides the overlay; an emptied box shows it again
     // a MANUAL edit ends any history walk (the user 2026-08-17): the text becomes an ordinary
     // draft, and recall stays away from drafts. The recall's own synthetic dispatch is fenced.
     if (!recalling && activeId) histWalk.delete(activeId);

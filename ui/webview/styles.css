@@ -1332,6 +1332,12 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 }
 #composer-input:disabled { opacity: 0.55; cursor: not-allowed; }
 #composer-input::placeholder { color: var(--dim); }
+/* the resting placeholder names the session (the user 2026-09-09): an overlay over the empty box, the name bold in
+   the session's identity colour (its tab label's); the native placeholder beneath it goes transparent while it
+   shows, and stays for assistive tech. Positioned and sized by render.ts syncComposerPh from the box's own metrics. */
+#composer-ph { position: absolute; pointer-events: none; color: var(--dim); white-space: pre; overflow: hidden; text-overflow: ellipsis; box-sizing: border-box; z-index: 1; }
+#composer-ph .composer-ph-name { font-weight: 600; }
+#composer-input.ph-on::placeholder { color: transparent; }
 /* A box grown past the height cap scrolls — and the scrollbar's TRACK paints square into the rounded
    right corners (the user 2026-07-30, on a multi-line box). A thin bar on a transparent track keeps the
    corners round; the thumb alone floats inside the box. */
@@ -1374,6 +1380,9 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
   font-size: 0.7em; font-weight: 700; letter-spacing: 0.07em;
   padding: 3px 10px; border-radius: 11px;
 }
+/* the session badge (the user 2026-09-09): the session's name on its identity colour (render.ts sets the fill from
+   the same colour the tab label wears), the text black by request; the neutral fill is for a session not yet coloured */
+.chip-session { color: #000; background: var(--box-border); max-width: 14em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip-working { background: var(--st-working-bg); color: var(--st-working-fg); }
 /* blocked = API error: red chip; the TAB itself goes dashed-red (above), no dot — it isn't working. */
 .chip-blocked { background: var(--st-blocked-bg); color: var(--st-blocked-fg); }
