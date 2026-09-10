@@ -15,12 +15,17 @@ chat file-link click into it. The kernel side, pinned here:
   mobile wiring, and the _PANE_ORDER label "Files"; the viewFile relay's pane arm, which brings the
   pane forward and forwards the click, identity included, into it. The arms are executed under node
   in tests/test_pane_state_broadcast.py; this module pins the served pages and the kernel's shape.
+- the browseFiles relay's pane branch (BrowseRelay below, executed under node): a folder clicked in the
+  chat while the Files pane is on screen, or while the gear names it, posts browseFiles up with
+  pane:'pane', and the shell brings the pane forward and forwards the ask, identity included, the way
+  the viewFile branch does; a browseFiles naming no pane still takes the feed's route.
 
 Synthetic fixtures only (the notes-api demo world, placeholder sids); nothing here mints a goal.
 """
 import json
 import os
 import re
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -280,7 +285,7 @@ class Relay(unittest.TestCase):
 
     def test_the_feeds_browse_relay_is_untouched(self):
         js = km._LANDING_SETTINGS_JS
-        _has(self, "if(m.romp==='browseFiles'){var bf=document.getElementById('f-feed');", js)
+        _has(self, "else if(m.romp==='browseFiles'){var bf=document.getElementById('f-feed');", js)
         _has(self, "try{window.__rompMobileTab&&window.__rompMobileTab('feed');}catch(e){}   // phone: one pane at a time", js)
         _has(self, "if(m.romp==='browseClosed'&&window.__rompFeedWasOff){window.__rompFeedWasOff=false;", js)
 
@@ -297,13 +302,240 @@ class Relay(unittest.TestCase):
 
     def test_the_gear_and_the_guide_say_the_open_pane_wins(self):
         gear = (UI / "gear.js").read_text()
-        _has(self, "While the Files pane is open, the file opens there.", gear)
+        _has(self, "While the Files pane is open, both open there.", gear)
         _has(self, "<option value=chat>The pane you clicked</option><option value=pane>The Files pane</option>", gear)
         guide = (Path(ROOT) / "docs" / "guide.md").read_text()
         _has(self, "### Files\n", guide)
         _has(self, "While the pane is open, a file link clicked in the chat opens in it.", guide.replace("\n", " "))
         self.assertLess(guide.index("### The outline"), guide.index("### Files"))
         self.assertLess(guide.index("### Files"), guide.index("## Automatic nudges"))
+
+
+# ── the browseFiles relay's pane branch, executed ──────────────────────────────────────────────────
+# The whole settings script runs under node against a fake window and document (the harness
+# tests/test_pane_state_broadcast.py RelayArms uses, copied so this module loads on its own); the one message
+# listener it registers is driven with the asks the chat posts, and what the shell forwards into each pane
+# iframe, toggles and switches is read back. `mobile` answers __rompMobileOn; `tab` is the tab showing.
+_ARMS_HARNESS = r"""
+'use strict';
+const LISTENERS = [], TOGGLES = [], TABS = [];
+const POSTED = { 'f-files': [], 'f-feed': [], 'f-chat': [] };
+let MOBILE = false, TAB = 'chat', FILES_READY = 'complete', FILES_LOADS = [];
+const frame = (id) => ({ contentWindow: { postMessage: (m) => POSTED[id].push(JSON.parse(JSON.stringify(m))) },
+  contentDocument: { get readyState() { return id === 'f-files' ? FILES_READY : 'complete'; } },
+  addEventListener: (ev, f) => { if (ev === 'load' && id === 'f-files') FILES_LOADS.push(f); },
+  removeEventListener: (ev, f) => { if (id === 'f-files') FILES_LOADS = FILES_LOADS.filter((g) => g !== f); } });
+global.window = global;
+global.addEventListener = (ev, f) => { if (ev === 'message') LISTENERS.push(f); };
+global.__rompPaneToggle = (k, on) => TOGGLES.push([k, on]);
+global.__rompMobileTab = (t) => TABS.push(t);
+global.__rompMobileOn = () => MOBILE;
+const stub = () => ({ style: {}, classList: { add() {}, remove() {}, toggle() {}, contains: () => false }, appendChild() {}, setAttribute() {}, addEventListener() {}, remove() {} });
+global.document = {
+  body: { classList: { toggle() {}, contains: (c) => c === 'po-chat' || c === 'po-feed' || c === 'po-timeline' },
+          getAttribute: (a) => (a === 'data-tab' ? TAB : null), appendChild() {} },
+  getElementById: (id) => (id in POSTED ? frame(id) : null),
+  createElement: stub, documentElement: { style: { setProperty() {} } },
+  querySelectorAll: () => [], querySelector: () => null, addEventListener() {},
+};
+global.localStorage = { getItem: () => null, setItem() {} };
+global.sessionStorage = { getItem: () => 'wid1', setItem() {} };
+global.location = { protocol: 'http:', host: 'TESTHOST:1', search: '', reload() {} };
+global.fetch = () => new Promise(() => {});
+global.setTimeout = () => 0; global.setInterval = () => 0; global.clearTimeout = () => {};
+global.Event = class { constructor(t) { this.type = t; } };
+"""
+_BROWSE_DRIVER = r"""
+const send = (m) => LISTENERS.forEach((f) => f({ data: m }));
+const snap = () => ({ toggles: TOGGLES.slice(), tabs: TABS.slice(), files: POSTED['f-files'].slice(), feed: POSTED['f-feed'].slice(),
+  chat: POSTED['f-chat'].slice(), from: window.__rompFilesTabFrom === undefined ? 'undef' : window.__rompFilesTabFrom,
+  feedWasOff: window.__rompFeedWasOff === undefined ? 'undef' : window.__rompFeedWasOff });
+const reset = () => { TOGGLES.length = 0; TABS.length = 0; for (const k in POSTED) POSTED[k].length = 0; delete window.__rompFilesTabFrom; delete window.__rompFeedWasOff; };
+const SID = '__SID__';
+const identity = { name: 'web', color: { bg: '#123456', fg: '#ffffff' } };
+const out = { listeners: LISTENERS.length };
+send({ romp: 'browseFiles', pane: 'pane', path: '/repo/notes-api', sid: SID, identity });
+out.desktop = snap(); reset();
+send({ romp: 'browseFiles', pane: 'pane', path: '.', sid: 'TESTHOST:' + SID });
+out.bare = snap(); reset();
+MOBILE = true; TAB = 'chat';
+send({ romp: 'browseFiles', pane: 'pane', path: '/repo/notes-api', sid: SID, identity });
+out.phone = snap();
+send({ romp: 'filesViewerClosed' });
+out.phoneClosed = snap();
+send({ romp: 'filesViewerClosed' });
+out.phoneClosedAgain = snap(); reset();
+TAB = 'files';
+send({ romp: 'browseFiles', pane: 'pane', path: '/repo/notes-api', sid: SID });
+out.already = snap(); reset();
+MOBILE = false;
+send({ romp: 'browseFiles', path: '/repo/notes-api', sid: SID });
+out.noPane = snap(); reset();
+send({ romp: 'browseFiles', pane: 'feed', path: '/repo/notes-api', sid: SID, identity });
+out.otherPane = snap(); reset();
+// the Files page is still loading when the ask arrives: the forward waits for the iframe's load, once
+FILES_READY = 'loading';
+send({ romp: 'browseFiles', pane: 'pane', path: '/repo/notes-api', sid: SID, identity });
+out.early = { toggles: TOGGLES.slice(), files: POSTED['f-files'].slice(), waiting: FILES_LOADS.length };
+FILES_READY = 'complete'; FILES_LOADS.slice().forEach((f) => f());
+out.loaded = { files: POSTED['f-files'].slice(), waiting: FILES_LOADS.length };
+FILES_LOADS.slice().forEach((f) => f());
+out.reloaded = { files: POSTED['f-files'].slice() }; reset();
+// the viewFile pane branch beside it is untouched
+send({ romp: 'viewFile', pane: 'pane', path: '/repo/notes-api/src/app.py', sid: SID, identity });
+out.view = snap(); reset();
+console.log(JSON.stringify(out));
+"""
+
+
+def _run_node(js):
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+        f.write(js)
+        path = f.name
+    try:
+        r = subprocess.run(["node", path], capture_output=True, text=True, timeout=30)
+    finally:
+        os.unlink(path)
+    assert r.returncode == 0, "the shell script threw: " + r.stderr[:1200]
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+class BrowseRelay(unittest.TestCase):
+    """The shell's browseFiles relay gains a pane branch: a folder clicked in the chat (the folder under the
+    chat, the system-context card's Directory row, a tab menu's Browse files, a chat-hosted viewer's
+    directory link) posts {romp:'browseFiles', pane, path, sid, identity} with the file link's own verdict
+    (ui/webview/file-route.ts browseRoute, read at the click in render.ts openBrowse), and 'pane' brings the
+    Files pane forward and forwards the ask, identity included, into #f-files, where files.ts opens the file
+    browser as a column. The pane stays up, so none of the feed route's was-off / browseClosed restore
+    applies; on a phone the pane's own close edge (filesViewerClosed) puts the person back, exactly as the
+    viewFile pane branch does. A browseFiles naming no pane, or any other value, is the feed's as before.
+    The arm runs here under node; the chat's end and the pane's contract run in
+    ui/webview/browse-route.test.ts. Synthetic only: placeholder sids, the notes-api demo world, TESTHOST."""
+
+    SID = "11111111-2222-3333-4444-555555555555"
+    HEAD = "if(m.romp==='browseFiles'&&m.pane==='pane'){var fb=document.getElementById('f-files');"
+    FEED = "else if(m.romp==='browseFiles'){var bf=document.getElementById('f-feed');"
+    IDENTITY = {"name": "web", "color": {"bg": "#123456", "fg": "#ffffff"}}
+
+    @classmethod
+    def setUpClass(cls):
+        js = km._LANDING_SETTINGS_JS.replace("__ROMP_BOOT__", json.dumps("boot-1")).replace("__ROMP_LOADER__", json.dumps(""))
+        cls.out = _run_node(_ARMS_HARNESS + js + _BROWSE_DRIVER.replace("__SID__", cls.SID))
+
+    @staticmethod
+    def _code(js):
+        return "\n".join(l for l in js.splitlines() if not l.lstrip().startswith("//"))
+
+    def test_the_pane_branch_brings_the_files_pane_forward_and_forwards_the_ask_with_the_identity(self):
+        self.assertEqual(self.out["listeners"], 1, "the one message listener")
+        d = self.out["desktop"]
+        self.assertEqual(d["files"], [{"romp": "browseFiles", "path": "/repo/notes-api", "sid": self.SID, "identity": self.IDENTITY}],
+                         "the ask, whole, into the Files pane")
+        self.assertEqual(d["toggles"], [["files", True]], "the Files pane comes forward; the feed is not touched")
+        self.assertEqual(d["feed"], [], "nothing reaches the feed")
+        self.assertEqual(d["chat"], [])
+        self.assertEqual(d["tabs"], [], "desktop: no mobile tab switch (the column is already visible)")
+        self.assertEqual(d["from"], "undef", "and nothing to remember")
+        self.assertEqual(d["feedWasOff"], "undef", "none of the feed route's restore is armed")
+        # no identity on the ask: the forward carries null (never undefined), and the pane falls to the stub; a
+        # remote session's prefixed sid rides through untouched, and "." (the session's cwd) is passed as is
+        b = self.out["bare"]
+        self.assertEqual(b["files"], [{"romp": "browseFiles", "path": ".", "sid": "TESTHOST:" + self.SID, "identity": None}])
+
+    def test_phone_the_files_tab_comes_forward_and_the_panes_close_edge_puts_the_person_back_once(self):
+        p = self.out["phone"]
+        self.assertEqual(p["tabs"], ["files"])
+        self.assertEqual(p["from"], "chat", "the tab the click came from is remembered")
+        self.assertEqual(p["toggles"], [["files", True]], "the desktop bring-forward still runs (keeps po in step)")
+        self.assertEqual(len(p["files"]), 1)
+        c = self.out["phoneClosed"]
+        self.assertEqual(c["tabs"], ["files", "chat"], "close: back to the remembered tab")
+        self.assertIsNone(c["from"], "and the memory is consumed")
+        self.assertEqual(self.out["phoneClosedAgain"]["tabs"], ["files", "chat"], "a second close with nothing remembered switches nothing")
+        a = self.out["already"]
+        self.assertEqual(a["tabs"], [], "already on the Files tab: nothing to switch")
+        self.assertEqual(a["from"], "undef", "and nothing to remember")
+        self.assertEqual(len(a["files"]), 1, "the ask is still forwarded")
+
+    def test_a_browse_naming_no_pane_or_another_pane_takes_the_feeds_route_exactly_as_before(self):
+        for key in ("noPane", "otherPane"):
+            n = self.out[key]
+            self.assertEqual(n["feed"], [{"romp": "browseFiles", "path": "/repo/notes-api", "sid": self.SID}], key + ": forwarded into the feed, path and sid only")
+            self.assertEqual(n["files"], [], key + ": the Files pane hears nothing")
+            self.assertEqual(n["tabs"], ["feed"], key + ": the feed's browser still switches a phone to the Feed tab")
+            self.assertEqual(n["toggles"], [], key + ": the feed is on, so nothing to bring forward")
+            self.assertEqual(n["from"], "undef", key + ": the Files route's memory is not touched")
+
+    def test_an_ask_before_the_files_page_has_loaded_is_delivered_on_its_load_once(self):
+        e = self.out["early"]
+        self.assertEqual(e["toggles"], [["files", True]], "the pane still comes forward at once")
+        self.assertEqual(e["files"], [], "nothing is posted into a document that cannot hear it yet")
+        self.assertEqual(e["waiting"], 1, "one load listener holds the ask")
+        l = self.out["loaded"]
+        self.assertEqual(len(l["files"]), 1, "the load delivers it")
+        self.assertEqual(l["files"][0]["path"], "/repo/notes-api")
+        self.assertEqual(l["waiting"], 0, "and the listener is gone")
+        self.assertEqual(len(self.out["reloaded"]["files"]), 1, "a later reload of the pane does not replay it")
+
+    def test_the_view_file_pane_branch_beside_it_is_untouched(self):
+        v = self.out["view"]
+        self.assertEqual(v["files"], [{"romp": "viewFile", "path": "/repo/notes-api/src/app.py", "sid": self.SID, "identity": self.IDENTITY}])
+        self.assertEqual(v["toggles"], [["files", True]])
+
+    def test_the_pane_branch_precedes_the_feed_branch_and_names_no_feed_token(self):
+        js = km._LANDING_SETTINGS_JS
+        _has(self, self.HEAD, js)
+        _has(self, self.FEED, js)
+        self.assertLess(js.index(self.HEAD), js.index(self.FEED), "the pane branch first; the feed's is its else")
+        self.assertEqual(js.count("m.romp==='browseFiles'"), 2, "the two branches, and no third")
+        branch = self._code(js.split(self.HEAD)[1].split(self.FEED)[0])
+        _has(self, "window.__rompPaneToggle&&window.__rompPaneToggle('files',true)", branch)
+        _has(self, "if(curb!=='files'){window.__rompFilesTabFrom=curb;window.__rompMobileTab&&window.__rompMobileTab('files');}", branch)
+        _has(self, "postMessage({romp:'browseFiles',path:m.path,sid:m.sid,identity:m.identity||null},'*')", branch)
+        self.assertEqual(branch.count("postMessage("), 1, "one forward, carrying the whole ask")
+        _has(self, "fb.addEventListener('load',onceb)", branch, "an early ask waits for the Files page's load")
+        for tok in ("__rompFeedWasOff", "browseClosed", "'f-feed'", "__rompMobileTab('feed')"):
+            _lacks(self, tok, branch, tok + " belongs to the feed route")
+        # the feed branch's body is as it was: the lift, the remembered was-off flag, the phone tab, the forward
+        feed = js.split(self.FEED)[1].split("if(m.type==='editorSelection'")[0]
+        _has(self, "if(!document.body.classList.contains('po-feed')){window.__rompFeedWasOff=true;", feed)
+        _has(self, "try{window.__rompMobileTab&&window.__rompMobileTab('feed');}catch(e){}   // phone: one pane at a time", feed)
+        _has(self, "postMessage({romp:'browseFiles',path:m.path,sid:m.sid},'*')", feed)
+        _lacks(self, "identity", self._code(feed), "the feed resolves its own identity")
+        # the comment above the pane branch names the ladder, the gesture and the phone's way back
+        lines = js.split(self.HEAD)[0].rstrip("\n").split("\n")
+        start = len(lines)
+        while start > 0 and lines[start - 1].lstrip().startswith("//"):
+            start -= 1
+        comment = "\n".join(lines[start:])
+        for tok in ("file-route.ts", "gesture", "filesViewerClosed"):
+            _has(self, tok, comment, "the comment names " + tok)
+
+    def test_the_two_ends_agree_on_the_message(self):
+        # the chat names its target and carries the session's identity (render.ts openBrowse); the pane caches the
+        # identity, opens the browser, routes a pick through its own open, and owes the shell no browseClosed
+        render = (UI / "render.ts").read_text()
+        _has(self, 'window.parent.postMessage({ romp: "browseFiles", path: path || ".", sid: to, pane: "pane",', render)
+        _has(self, "browseRoute(web, settings.fileLinkPane, window.parent !== window, panesOn.files === true)", render)
+        files = (UI / "files.ts").read_text()
+        _has(self, "shellRestore: false,", files)
+        _has(self, "if (sid && id) identities.set(sid, id);", files)
+        _has(self, 'openFileBrowse(m.path || ".", sid);', files)
+        _has(self, "openFile: (p, sid) => openHere(p, sid, null),", files)
+        browse = (UI / "file-browse.ts").read_text()
+        _has(self, "if (!shellRestore) return;", browse)
+        route = (UI / "file-route.ts").read_text()
+        _has(self, "export function browseRoute(web: boolean, pane: unknown, framed: boolean, filesOpen: boolean): BrowseRoute {", route)
+        _has(self, 'export type BrowseRoute = FileRoute | "editor";', route)
+
+    def test_the_gear_and_the_guide_name_the_folder(self):
+        gear = (UI / "gear.js").read_text()
+        _has(self, "Where a file or folder clicked in the chat opens. While the Files pane is open, both open there.", gear)
+        _has(self, "<option value=chat>The pane you clicked</option><option value=pane>The Files pane</option>", gear, "the options are unchanged")
+        guide = (Path(ROOT) / "docs" / "guide.md").read_text().replace("\n", " ")
+        _has(self, "open a listing of that folder by the same rule: in this pane while it is open or when the setting names it, otherwise over the chat.", guide)
+        _has(self, "Pick a file in the listing and it opens where the listing is.", guide)
+        _has(self, "While the pane is open, a file link clicked in the chat opens in it.", guide, "the file sentence stands")
 
 
 if __name__ == "__main__":

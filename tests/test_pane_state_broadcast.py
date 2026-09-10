@@ -16,7 +16,8 @@ against a fake window and document, and the messages they post are read back: th
 the mobile script (__rompMobileOn, __rompMobileTab, the re-tell, and the switches the person makes, a tab
 tap, a reveal, the chat header's Outline pill, which drop the relay's remembered tab) and the settings
 listener's arms (viewFile with pane:'pane', filesViewerClosed, and the browseFiles arm the feed's browser
-keeps).
+keeps; that arm's Files-pane branch, a browseFiles with pane:'pane', runs in tests/test_files_pane.py
+BrowseRelay).
 Synthetic only: placeholder sids, the notes-api demo world, TESTHOST.
 """
 import json

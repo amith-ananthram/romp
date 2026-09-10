@@ -45334,7 +45334,9 @@ def _fleet_page():
 # opt-out (no resync frame will ever come). ui/webview/files.ts renders it; it loads the chat's styles.css
 # for the viewer's dress. Its layout CSS lives in ui/webview/files-pane.css, ONE file, read live here and
 # bundled into the VS Code VSIX by vscode-extension/esbuild.js, so the two hosts cannot drift. No
-# _pane_spin: an empty pane is not a loading state.
+# _pane_spin: an empty pane is not a loading state. The shell's viewFile and browseFiles relays
+# (_LANDING_SETTINGS_JS) bring the pane forward and forward a chat's file or folder click into it, with the
+# session's identity, when the click routes there (render.ts openPath and openBrowse, ui/webview/file-route.ts).
 def _files_page():
     try:
         files_css = (UI / "webview" / "files-pane.css").read_text()
@@ -46898,12 +46900,29 @@ if(m.romp==='viewFile'&&m.pane==='pane'){var ff=document.getElementById('f-files
 // desktop in between makes the return a no-op, never a stale switch later.
 if(m.romp==='filesViewerClosed'){var back=window.__rompFilesTabFrom;window.__rompFilesTabFrom=null;
   if(back&&window.__rompMobileOn&&window.__rompMobileOn()){try{window.__rompMobileTab&&window.__rompMobileTab(back);}catch(e){}}}
-// "Browse files" from any pane surfaces the FILE BROWSER in the FEED pane, which is a different
+// A folder clicked in the chat (the folder under the transcript, the system context card's Directory row, a
+// tab menu's Browse files, a chat-hosted viewer's directory link; render.ts openBrowse) walks the file link's
+// ladder (ui/webview/file-route.ts browseRoute) and, routed to the FILES pane (the pane is on screen, or the
+// gear's "File links open in" names it), posts browseFiles up with pane:'pane'. The shell brings that pane
+// forward, the click being the one gesture that moves it, and forwards the ask with the session's identity
+// the chat resolved (files.ts caches it, so a file picked from the listing names its session in the chip).
+// The pane STAYS up, so none of the feed route's was-off flag or browseClosed restore below applies; on a
+// phone the tab the click came from is remembered, and the pane's own close edge (filesViewerClosed above)
+// puts the person back, exactly as the viewFile pane arm does. The forward waits for a Files page still
+// loading the same way. A browseFiles naming no pane is the feed's, the arm that follows.
+if(m.romp==='browseFiles'&&m.pane==='pane'){var fb=document.getElementById('f-files');
+  try{window.__rompPaneToggle&&window.__rompPaneToggle('files',true);}catch(e){}
+  try{if(window.__rompMobileOn&&window.__rompMobileOn()){var curb=document.body.getAttribute('data-tab')||'chat';
+    if(curb!=='files'){window.__rompFilesTabFrom=curb;window.__rompMobileTab&&window.__rompMobileTab('files');}}}catch(e){}
+  var fwdb=function(){try{fb&&fb.contentWindow&&fb.contentWindow.postMessage({romp:'browseFiles',path:m.path,sid:m.sid,identity:m.identity||null},'*');}catch(e){}};
+  var rdb='';try{rdb=(fb&&fb.contentDocument)?fb.contentDocument.readyState:'';}catch(e){}
+  if(fb&&rdb!=='complete'){var onceb=function(){fb.removeEventListener('load',onceb);fwdb();};fb.addEventListener('load',onceb);}else fwdb();}
+// A browse ask naming no pane surfaces the FILE BROWSER in the FEED pane, which is a different
 // document — so the shell relays it. If the feed pane is toggled off we turn it on for the duration
 // and remember to put it back, so the browser never costs the user their layout. (File VIEWS need
 // none of this since 2026-08-15: the viewer is a modal over whatever document clicked, so it never
 // touches the panes and has nothing to restore; a view routed to the Files pane is the arm above.)
-if(m.romp==='browseFiles'){var bf=document.getElementById('f-feed');
+else if(m.romp==='browseFiles'){var bf=document.getElementById('f-feed');
   if(!document.body.classList.contains('po-feed')){window.__rompFeedWasOff=true;
     try{window.__rompPaneToggle&&window.__rompPaneToggle('feed',true);}catch(e){}}
   try{window.__rompMobileTab&&window.__rompMobileTab('feed');}catch(e){}   // phone: one pane at a time
@@ -48258,7 +48277,8 @@ _LANDING_COLLAPSE_JS = """
   // shell still hears the current set (the focus ring's "wire now + on every (re)load", _LANDING_FOCUS_JS),
   // and from _LANDING_MOBILE_JS on a tab switch or a layout flip (what is on screen changed with no toggle).
   // The chat routes a file-link click by it (ui/webview/file-route.ts fileLinkRoute: an OPEN Files pane takes
-  // the click whatever the "File links open in" setting says, since the pane being open IS the intent).
+  // the click whatever the "File links open in" setting says, since the pane being open IS the intent), and a
+  // folder click the same way (browseRoute, render.ts openBrowse).
   var KEYS=""" + json.dumps([k for k, _ in _PANE_ORDER]) + """;
   // on[k] is "this pane is on screen", not the po flag: in the mobile layout (one tab at a time, the po-*
   // classes ignored, _LANDING_MOBILE_JS) it is the current tab, so a po.files left true by a desktop session
