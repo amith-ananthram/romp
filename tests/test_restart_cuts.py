@@ -8,6 +8,7 @@ kernel cannot do: count in-session watchers/Claude-side workflows (invisible her
 watch primitive is the fix), and un-write the CLI's own interrupted-by-user transcript stamps
 (romp never rewrites CLI transcripts; romp's own records already distinguish machine cuts).
 Hermetic state; synthetic sids only."""
+import errno
 import json
 import os
 import signal
@@ -401,6 +402,37 @@ class UnrequestedSignal(unittest.TestCase):
         self.assertEqual(cuts[0]["auditT"], t, "the cut row records the note's t as the audit row it consumed")
         self.assertEqual(km._consumed_audit_t(), t)
 
+    def test_a_stderr_that_refuses_the_write_keeps_the_cut_row_agreeing_with_the_signal_row(self):
+        # the kernel runs on the manager's stdio, and a stream that is gone (a reset journal stream, a
+        # closed tty) makes every stderr write raise (EPIPE). _unrequested_signal_reason files the `signal`
+        # row, logs a line, and returns the reason; the line is best-effort. Were it not, the raise would
+        # leave _drain_and_exit its fallback, the plain unrequested verdict, on a cut row whose `signal`
+        # row says the manager was stopped: two records of one exit disagreeing. So the manager pid here
+        # is a reaped child's (stopped), and the cut row must carry the verdict the row does. The cut row
+        # also carries a drainError (the drain's own stderr writes raise under the same stream); that is
+        # not asserted
+        class Gone:
+            def write(self, s):
+                raise OSError(errno.EPIPE, "Broken pipe")
+
+            def flush(self):
+                pass
+        with mock.patch.dict(os.environ, {"ROMP_MANAGER_PID": str(self._dead_pid())}), \
+             mock.patch("sys.stderr", Gone()):
+            self._fire()
+        rows = self._rows(self.AUDIT)
+        self.assertEqual([r["action"] for r in rows], ["signal"])
+        self.assertIs(rows[0]["managerStopped"], True)
+        cuts = self._rows(km.RESTART_CUTS_FILE)
+        self.assertEqual(len(cuts), 1, "the cut row is written whatever stderr does")
+        self.assertEqual(cuts[0]["reason"], km.SIGNAL_REASON_MANAGER_STOPPED,
+                         "the cut row carries the verdict the signal row does, not the fallback")
+        self.AUDIT.unlink()
+        with mock.patch.dict(os.environ, {"ROMP_MANAGER_PID": str(self._dead_pid())}), \
+             mock.patch("sys.stderr", Gone()):
+            self.assertEqual(km._unrequested_signal_reason(signal.SIGTERM, wait=0), km.SIGNAL_REASON_MANAGER_STOPPED,
+                             "the reason comes back with the log line lost, not the other way round")
+
     def test_a_second_sigterm_mid_drain_does_not_write_a_second_row(self):
         # a service stop signals the kernel, then the manager's shutdownAll signals it again while the
         # first handler drains; the second invocation returns and the first finishes: ONE cut row
@@ -748,32 +780,60 @@ class RequestOnRecord(unittest.TestCase):
                       {"t": 1010, "action": "parent-gone", "pid": os.getpid() + 100000, "reason": km.PARENT_GONE_REASON},
                       {"t": 1010, "action": "signal", "pid": os.getpid() + 100000, "managerStopped": True,
                        "reason": km.SIGNAL_REASON_MANAGER_STOPPED}):
-            with self.subTest(above=above["action"] + ":" + str(above.get("trigger") or above.get("reason"))):
-                self._write({"t": 1000, "action": "kernel-asks-manager-restart-all", "reason": "self-update",
-                             "when": "quiet"}, above)
-                self.assertEqual(self._reason(now=1080, started=1003), "")
+            for now, started in ((1080, 1003), (1101, 1003), (1080, 1011)):
+                with self.subTest(above=above["action"] + ":" + str(above.get("trigger") or above.get("reason")),
+                                  now=now, started=started):
+                    self._write({"t": 1000, "action": "kernel-asks-manager-restart-all", "reason": "self-update",
+                                 "when": "quiet"}, above)
+                    self.assertEqual(self._reason(now=now, started=started), "",
+                                     "settled wherever the row sits: inside the bounds, past the window, or before this kernel")
         # a stop note for THIS kernel above the park: the manager is stopping us, and that note is the answer
         self._write({"t": 1000, "action": "kernel-asks-manager-restart-all", "reason": "self-update", "when": "quiet"},
                     {"t": 1010, "action": "manager-sigterm", "kernel": "main", "pid": os.getpid(),
                      "reason": "stop", "trigger": "stop"})
         self.assertEqual(self._reason(now=1080, started=1003), "manager-sigterm: stop")
+        self.assertEqual(self._reason(now=1101, started=1003), "", "a note older than the window is not this exit's")
+        self.assertEqual(self._reason(now=1080, started=1011), "", "nor is one from before this kernel started")
 
     def test_a_quiet_request_survives_a_stop_of_one_other_kernel(self):
         # POST /stop naming one kernel (a dynamic kernel under this root has no root of its own) writes a
         # `stop` note with trigger `stop` for that pid and leaves the manager's park armed; the row cannot be
         # told from the stop that took every kernel down, so the park stays on record, and so does a stray
         # kill of the predecessor with the manager alive. The held converge self-heals at the backstop bound;
-        # a released one would cut the turns the quiet window was to spare
+        # a released one would cut the turns the quiet window was to spare. The row above settles nothing
+        # wherever it sits: a note or a verdict is classified before the 90 s window and the start bound end
+        # the walk, so one older than the window (now=1101) or older than this kernel (started=1011) is
+        # passed over and the park beneath it is still read
         for above in ({"t": 1010, "action": "manager-sigterm", "kernel": "k29900", "pid": os.getpid() + 100000,
                        "reason": "stop", "trigger": "stop"},
                       {"t": 1010, "action": "signal", "pid": os.getpid() + 100000, "managerStopped": False,
                        "reason": km.SIGNAL_REASON_UNREQUESTED}):
-            with self.subTest(above=above["action"]):
-                self._write({"t": 1000, "action": "kernel-asks-manager-restart-all", "reason": "self-update",
-                             "when": "quiet"}, above)
-                self.assertEqual(self._reason(now=1080, started=1003), "kernel-asks-manager-restart-all: self-update")
-                self.assertEqual(km._recent_restart_audit(window=90, now=1080, started=1003)["t"], 1000,
-                                 "the park the drift stand-down reads")
+            for now, started in ((1080, 1003), (1101, 1003), (1080, 1011)):
+                with self.subTest(above=above["action"], now=now, started=started):
+                    self._write({"t": 1000, "action": "kernel-asks-manager-restart-all", "reason": "self-update",
+                                 "when": "quiet"}, above)
+                    self.assertEqual(self._reason(now=now, started=started),
+                                     "kernel-asks-manager-restart-all: self-update")
+                    self.assertEqual((km._recent_restart_audit(window=90, now=now, started=started) or {}).get("t"),
+                                     1000, "the park the drift stand-down reads")
+
+    def test_a_park_this_kernel_filed_is_its_own_past_a_settling_row_at_any_age(self):
+        # the kernel that filed a quiet converge (started 900, park at 1000) sees another kernel's restart
+        # noted above it at 1010 (POST /restart of that kernel): the note is classified before the bounds and
+        # settles a PREDECESSOR's park only, so the row stays this kernel's own request inside the window
+        # (now=1080, as before) and past it (now=1101, where a note older than 90 s used to end the walk
+        # and the same park read as nothing on record). The same rows for a kernel started after the park
+        # are a predecessor's park settled by the restart above it, at either age
+        park = {"t": 1000, "action": "main-converge", "tag": "restart", "when": "quiet", "sha": "1111111"}
+        note = {"t": 1010, "action": "manager-sigterm", "kernel": "k29900", "pid": os.getpid() + 100000,
+                "reason": "restart", "trigger": "restart"}
+        self._write(park, note)
+        for now in (1080, 1101):
+            with self.subTest(now=now):
+                self.assertEqual(self._reason(now=now, started=900), "main-converge")
+                self.assertEqual(km._recent_restart_audit(window=90, now=now, started=900), park)
+                self.assertEqual(self._reason(now=now, started=1003), "",
+                                 "a predecessor's park, settled by the restart noted above it")
 
     def test_a_previous_kernels_verdict_rows_are_never_the_request(self):
         # the kernel's own `signal` and `parent-gone` rows have an action and the OLD pid; with the bound
