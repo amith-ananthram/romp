@@ -3010,6 +3010,9 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
   animation: path-load-spin 2.4s linear infinite; }   /* the calm mini-swirl spin, same as the awaiting glyphs */
 @keyframes path-load-spin { to { transform: rotate(-360deg); } }
 .path-img-loading { display: none; }   /* the <img> takes the spot the instant it has pixels */
+/* a markdown image whose fetch failed (T291c): parked with no src, so the browser shows the alt text as a stable
+   inline caption, dim and italic like the load note; nothing re-fetches it until a reconnect-class heal lands the picture */
+.md-img-failed { display: inline; font-size: 0.86em; font-style: italic; color: var(--dim); }
 @media (prefers-reduced-motion: reduce) { .path-load-spin { animation: none; } }
 /* the PDF card's label + filename (preview.ts previewFull's pdf branch) */
 .path-thumb-tag { font-size: 0.72em; font-weight: 700; letter-spacing: 0.04em; color: var(--accent); flex: 0 0 auto; }
