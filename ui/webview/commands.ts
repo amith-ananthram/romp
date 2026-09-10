@@ -27,6 +27,9 @@ export const DEFAULT_CHORDS: Record<string, string> = {
   // hotkeys.json, verified 2026-08-14), where "Ctrl" is the Control key on every platform.
   "chat.navBack": "Ctrl+M",
   "chat.navForward": "Ctrl+,",
+  // the editor convention for a split (VS Code's Cmd/Ctrl+\); closing a split stays unbound — Cmd+W is
+  // the browser's tab close, and a mis-aimed close of a column costs a re-split, so the palette owns it
+  "chat.split": "Mod+\\",
 };
 
 const commands = new Map<string, PaletteCommand>();

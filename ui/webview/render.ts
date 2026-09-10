@@ -6296,7 +6296,7 @@ function setSessionColor(id: string, bg: string) {
 
 // Small inline-SVG icon for the tab menu's toggle items (trusted constant markup; `off` slashes + dims it,
 // matching the timeline lane toggles). 16-unit viewBox; currentColor so .ctx-icon/.off set the tint.
-function ctxIcon(kind: "feed" | "mail" | "bell" | "bill" | "folder" | "tag" | "pencil", off: boolean): HTMLElement {
+function ctxIcon(kind: "feed" | "mail" | "bell" | "bill" | "folder" | "tag" | "pencil" | "split", off: boolean): HTMLElement {
   const span = el("span", "ctx-icon" + (off ? " off" : ""));
   const slash = off ? '<line x1="1.6" y1="14.4" x2="14.4" y2="1.6"/>' : "";
   const body = kind === "feed"
@@ -6309,6 +6309,8 @@ function ctxIcon(kind: "feed" | "mail" | "bell" | "bill" | "folder" | "tag" | "p
           ? '<path d="M2 4.5 A1.2 1.2 0 0 1 3.2 3.3 L6.2 3.3 L7.6 4.9 L12.8 4.9 A1.2 1.2 0 0 1 14 6.1 L14 11.5 A1.2 1.2 0 0 1 12.8 12.7 L3.2 12.7 A1.2 1.2 0 0 1 2 11.5 Z"/>'  // folder (browse files)
         : kind === "tag"
           ? '<path d="M2 3.4 A1.4 1.4 0 0 1 3.4 2 L7.6 2 A1.4 1.4 0 0 1 8.6 2.4 L13.6 7.4 A1.4 1.4 0 0 1 13.6 9.4 L9.4 13.6 A1.4 1.4 0 0 1 7.4 13.6 L2.4 8.6 A1.4 1.4 0 0 1 2 7.6 Z"/><circle cx="5.4" cy="5.4" r="1.1"/>'  // luggage tag (session tags)
+        : kind === "split"
+          ? '<rect x="2" y="3" width="5" height="10" rx="1"/><rect x="9" y="3" width="5" height="10" rx="1"/>'  // two columns side by side (open in a new split)
         : kind === "pencil"
           ? '<path d="M3 13 L3.6 10.4 L10.8 3.2 A1.3 1.3 0 0 1 12.8 5.2 L5.6 12.4 Z"/><line x1="9.8" y1="4.2" x2="11.8" y2="6.2"/>'  // pencil (rename)
           : '<path d="M8 2 C5.9 2.2 4.7 3.8 4.7 5.8 L4.7 8 L3.4 9.9 L12.6 9.9 L11.3 8 L11.3 5.8 C11.3 3.8 10.1 2.2 8 2 Z"/><path d="M6.6 11.6 A1.5 1.5 0 0 0 9.4 11.6"/>';  // bell (system notifications)
@@ -6352,6 +6354,27 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
     mv.appendChild(bodyEl);
     mv.addEventListener("click", (ev) => { ev.stopPropagation(); dismissTabMenu(); showMovePrompt(id); });
     menu.appendChild(mv);
+  }
+  // Open in new split (the user 2026-09-08, who wanted several sessions open at once instead of tabbing):
+  // another chat column beside the last one, opened on this session. The shell makes the column
+  // (_LANDING_SPLIT_JS) and hands it a focus; this pane only asks. Shell-hosted only — standalone and
+  // VS Code have no row to split — and only a shell that carries the split script.
+  const shellCanSplit = (() => {   // a shell with the split script, and one that can take another column right now (the cap, the phone)
+    try { const p = window.parent as any; return inRompShell() && typeof p.__rompSplitChat === "function" && (typeof p.__rompCanSplit !== "function" || !!p.__rompCanSplit()); }
+    catch (e) { return false; }
+  })();
+  if (shellCanSplit) {
+    const split = el("div", "ctx-item ctx-item-toggle");
+    split.appendChild(ctxIcon("split", false));
+    const bodyEl = el("span", "ctx-item-body");
+    const l = el("span", "ctx-item-label"); l.textContent = "Open in new split"; bodyEl.appendChild(l);
+    const sb = el("span", "ctx-item-sub"); sb.textContent = "another chat column beside this one, on this session"; bodyEl.appendChild(sb);
+    split.appendChild(bodyEl);
+    split.addEventListener("click", (ev) => {
+      ev.stopPropagation(); dismissTabMenu();
+      try { window.parent.postMessage({ romp: "openSplit", sid: id }, "*"); } catch (e) { /* no shell to ask */ }
+    });
+    menu.appendChild(split);
   }
   // Colors join Rename in the AESTHETIC section (the user 2026-08-24, the final by-kind grouping:
   // [Rename + colors] / [feed, mail, bell, billing, Tags] / [Browse]). The swatch row itself is
@@ -7305,6 +7328,20 @@ function revealSelfPane(): void {
     if (window.parent && window.parent !== window) window.parent.postMessage({ romp: "reveal", pane: "chat" }, "*");
   } catch (e) { /* standalone page — no shell to ask */ }
 }
+// Split screen (the user 2026-09-08): the kernel aims a focus at the DASHBOARD, so every chat column's socket
+// receives it, and the feed's click echo reaches every column's storage listener. The shell says which column
+// a session-focus belongs to (__rompChatTarget: the column already showing that session, else the one the
+// user last worked in, else the first) and the others stand down. Standalone and VS Code have no shell and
+// always act, exactly as before.
+function focusIsOurs(sid: string): boolean {
+  try {
+    if (!window.parent || window.parent === window) return true;
+    const t = (window.parent as any).__rompChatTarget;
+    if (typeof t !== "function") return true;   // a shell without the split script (an older page): one column
+    const f = t(sid);
+    return !f || f === window.frameElement;
+  } catch (e) { return true; }   // cross-origin parent (VS Code) — not the romp shell
+}
 
 // Full-screen bridge (the user 2026-07-05): the picker is rendered inside the /chat iframe, so its
 // position:fixed;inset:0 only covered the chat PANE — on a short pane the session list couldn't scroll.
@@ -7320,7 +7357,11 @@ function revealSelfPane(): void {
 // VS Code) falls back to that hiding via .pane-gone.
 function liftPaneRect(): DOMRect | null {
   try {
-    const p = window.parent?.document?.getElementById("chat-pane");
+    // THIS column's pane (split screen, the user 2026-09-08): a later column that measured #chat-pane pinned its
+    // transcript at the FIRST column's rect — the 2026-08-08/09 black-hole family in a new form. frameElement is
+    // the iframe the shell wrapped in a .pane; the id lookup stays as the fallback it always was.
+    const own = window.frameElement ? (window.frameElement as HTMLElement).parentElement : null;
+    const p = own || window.parent?.document?.getElementById("chat-pane");
     return p ? p.getBoundingClientRect() : null;
   } catch (e) { return null; }   // cross-origin parent (VS Code) — no shell pane to measure
 }
@@ -16364,6 +16405,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   else if (m.type === "update") update(m);
   else if (m.type === "wsup") { onSocketUp(skeletonTabs); skeletonDiagArmed = true; reholdQueuedEditors(); }   // the shim's socket-flip marker, in FRAME order: the dead socket's frames may still be draining from the FIFO when onopen fires (review find 2026-09-07)
   else if (m.type === "status") statusOnly(m);
+  else if (m.type === "focus" && !m.own && !focusIsOurs(m.id)) { /* another chat column's (split screen): the shell named the column it belongs to; `own` is the shell's hand-over to THIS new column */ }
   else if (m.type === "focus") {
     revealSelfPane();   // every focus is someone jumping HERE — on mobile, come forward (incl. from a remote kernel)
     closingTabs.delete(m.id);   // an explicit reveal outranks a pending close-suppression: closing a tab and
@@ -16613,6 +16655,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
         closeTabLocally(m.id);   // same optimistic drop as the in-page ✕ — this path used to sit and wait
       });
   }
+  else if (m.type === "confirmRevive" && m.id && !m.own && !focusIsOurs(m.id)) { /* another chat column's prompt (split screen) — one dialog, not one per column; `own` is addressed to this column */ }
   else if (m.type === "confirmRevive" && m.id) {
     revealSelfPane();   // the dead-session prompt is drawn in THIS pane — useless if the pane isn't showing
     const nm = String(m.name || "");
@@ -18023,6 +18066,7 @@ window.addEventListener("storage", (e) => {
     const v = JSON.parse(e.newValue);
     const sid = typeof v.sid === "string" ? v.sid : "";
     if (!sid || (!sessions.has(sid) && !tabMeta.has(sid))) return;
+    if (!focusIsOurs(sid)) return;   // another chat column's (split screen): the echo reaches every column's listener
     revealSelfPane();
     closingTabs.delete(sid);
     assertPeekFor(sid);
