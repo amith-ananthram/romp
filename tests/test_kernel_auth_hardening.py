@@ -190,6 +190,20 @@ class CookieDoesNotBypassOrigin(unittest.TestCase):
                                   "Host": "127.0.0.1:%d" % km.PORT})
         self.assertTrue(ok)
 
+    def test_cookie_still_authorizes_the_kernels_own_loopback_origin_under_another_host(self):
+        # the kernel's own origin reached under its other loopback name: a page served at
+        # http://127.0.0.1:<port> whose request arrives with Host localhost:<port>, or the reverse.
+        # The Host string no longer matches the Origin, so same-origin-by-Host does not apply and
+        # the gate's own-loopback branch is the one that accepts (the case SECURITY.md names as the
+        # kernel's own port on 127.0.0.1 or localhost); it fails when that branch is removed.
+        for origin, host in (("http://127.0.0.1:%d" % km.PORT, "localhost:%d" % km.PORT),
+                             ("http://localhost:%d" % km.PORT, "127.0.0.1:%d" % km.PORT)):
+            with self.subTest(origin=origin, host=host):
+                ok, _, why = _auth(headers={"Cookie": "romp_token=" + TOK,
+                                            "Origin": origin, "Host": host})
+                self.assertTrue(ok, "the kernel's own loopback origin authorizes the cookie under "
+                                    "either of its names: " + why)
+
     def test_cookie_still_authorizes_the_vscode_webview(self):
         ok, _, _ = _auth(headers={"Cookie": "romp_token=" + TOK,
                                   "Origin": "vscode-webview://0p9m1abc"})
