@@ -973,15 +973,31 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `push.*` stages count every push, including the one a connecting page gets,
   so they can add up to more than `push`.
 - `builds`: `chat`, `feed`, `timeline`, each with `cached`, `built`, `ms`.
-  `chat` also carries `active_built` and `bg_built` (rebuilds of the watched
-  tab, served while its exact key holds, against rebuilds of a background tab
-  whose signature moved) and `bg_miss`, a map from each labelled component of
-  the chat-build signature (`transcript`, `states`, `judge_gen`, `tasks`,
-  `cut`, `row`, plus `cold` for a tab with no cached build and `nosig` for
-  one whose signature could not be taken) to the background rebuilds it
-  caused. A rebuild with several moved components counts under each, so the
-  map's sum can exceed `bg_built`. `romp perf` prints the split and the
-  non-zero causes after the chat average.
+  Every chat tab, the watched one included, is served from its cached build
+  while one complete per-session signature holds: one component per input the
+  build reads (the transcript and states files, the session's goal store and
+  its journal and archive, the task store, the backend's live tail by
+  revision, its queue and brackets, the liveness row, the clock crossings the
+  payload renders, the parked ops, the account hold behind a queued bubble,
+  the retry state, the live background-task rows, the watches, the awaiting
+  stamp, the shared files, the cwd's branch and repository, the instruction
+  files, and the files and postal values the last build embedded). `chat`
+  also carries `active_built` and `bg_built` (rebuilds of the watched tab
+  against rebuilds of a background tab), `moved` (builds not cached because
+  an input moved while they ran; the next cycle builds them again) and
+  `bg_miss`, a map from each labelled component of that signature
+  (`transcript`, `states`, `store`, `hold`, `archive`, `episodes`, `reg`,
+  `gone`, `tasks`, `cut`, `live`, `row`, `clock`, `backend`, `ops`, `limit`,
+  `retry`, `bg`, `watch`, `stamp`, `anchors`, `downtime`, `names`, `flags`,
+  `ncards`, `colormap`, `acct`, `cleared`, `host`, `cwd`, `claudemd`, `fork`,
+  `taskout`, `pathlink`, `postal`, plus `cold` for a tab with no cached
+  build and `nosig` for one whose signature could not be taken) to the
+  background rebuilds it caused. A rebuild with several moved components
+  counts under each, so the map's sum can exceed `bg_built`. One session's
+  goal-store publish moves that session's `store` component and no other
+  tab's; the judge-pass generation busts the feed and timeline caches only.
+  `romp perf` prints the split and the non-zero causes after the chat
+  average, and the moved count when it is non-zero.
 - `sends`: `full`, `delta`, `deduped`, each a map from slot name (`chat`,
   `feed`, `bars`, `taborder`, ...) to `count` and `bytes`. A deduplicated frame
   was built and compared, then not sent.
