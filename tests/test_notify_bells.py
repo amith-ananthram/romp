@@ -284,7 +284,8 @@ class NotifyTitle(unittest.TestCase):
         # _notify_title; no producer composes a "romp: …" title of its own, and the relay no longer
         # rewrites the title it is handed (it used to graft "romp: <origin>:" onto it)
         import inspect
-        for fn in (km._feed_notifications, km._turn_notify_tick, km._push_test):
+        # the card leg's body lives in _feed_notifications_diff (the wrapper only takes the snapshot's lock)
+        for fn in (km._feed_notifications_diff, km._turn_notify_tick, km._push_test):
             self.assertIn("_notify_title(", inspect.getsource(fn), fn.__name__)
         src = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertNotIn('"romp: %s"', src, "no producer composes a title of its own")
