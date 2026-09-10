@@ -10516,12 +10516,20 @@ class SdkBackend:
         return s._clearing
 
     def kill(self, sid: str) -> bool:
-        with self._reg_lock:                       # the alive flip must not lose to an RMW snapshot
-            reg = self._reg_for_flip(sid)
-            if reg:
-                reg["alive"] = False
-                write_reg(self.state_dir, sid, reg)
-        s = self.sessions.pop(sid, None)
+        # The flip and the pop run under _lock, the lock _ensure holds from its alive read through the
+        # insert and start, so a kill that lands mid-revive waits for the session being built and then
+        # pops THAT one. Outside it (review find, 2026-09-10), a kill arriving while _ensure was
+        # constructing popped nothing, and _ensure then inserted and started a CLI for a reg the flip
+        # had just marked dead: a running claude process with no tab, no listing and nothing left that
+        # could stop it (a cron-armed session the producer revives at the instant of a Kill). Lock
+        # order is _ensure's own, _lock → _reg_lock; shutdown runs outside the lock, conserve_close's shape.
+        with self._lock:
+            with self._reg_lock:                   # the alive flip must not lose to an RMW snapshot
+                reg = self._reg_for_flip(sid)
+                if reg:
+                    reg["alive"] = False
+                    write_reg(self.state_dir, sid, reg)
+            s = self.sessions.pop(sid, None)
         if s:
             s.shutdown()
         self._poke()
