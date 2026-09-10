@@ -98,7 +98,7 @@ test("a staged chip clips IN BOUNDS with an ellipsis and expands on click (the u
   // the flex label could never shrink (no min-width:0), so long texts ran off the pane edge with no
   // ellipsis; expanded, the same label wraps to the full text — the context-fold idiom
   assert.match(STYLES, /\.staged-chip \.composer-chip-label \{ flex: 1 1 auto; max-width: 100%; min-width: 0; \}/);
-  assert.match(STYLES, /\.staged-chip\.open \.staged-row \.composer-chip-label \{ white-space: pre-wrap; overflow: visible; \}/);
+  assert.match(STYLES, /\.staged-chip\.open \.staged-row \.composer-chip-label \{ white-space: pre-wrap; overflow: visible; overflow-wrap: anywhere; \}/);
   // the affordance is visibly CHROME, not message text: dim, parenthesized, at the line's end
   assert.match(STYLES, /\.staged-expand \{ flex: 0 0 auto; color: var\(--dim\); font-size: 0\.86em; \}/);
   assert.match(RENDER, /hint\.textContent = open \? "\(collapse\)" : "\(click to expand\)";/);   // the tail names the gesture (the user 2026-08-16)
@@ -113,6 +113,6 @@ test("a staged chip clips IN BOUNDS with an ellipsis and expands on click (the u
   assert.match(RENDER, /el\("div", "composer-chip staged-cite"/);
   assert.match(STYLES, /\.staged-cite \{ min-width: 0; max-width: 100%; cursor: pointer; \}/);
   assert.match(RENDER, /cite\.addEventListener\("click", \(ev\) => \{\s*\n\s*ev\.stopPropagation\(\);/);
-  assert.match(STYLES, /\.staged-cite\.open \.composer-chip-label \{ white-space: pre-wrap; overflow: visible; \}/);
+  assert.match(STYLES, /\.staged-cite\.open \.composer-chip-label \{ white-space: pre-wrap; overflow: visible; overflow-wrap: anywhere; \}/);
 });
 

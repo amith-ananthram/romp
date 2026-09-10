@@ -18,9 +18,11 @@ test("chat: 'retrying' is a ChipState with an 'API retrying…' label, an amber 
   assert.match(S, /if \(st === "retrying"\) return "tab-retrying";/);
   assert.match(RENDER, /const stateCls = tabStateClass\(s\.status\);\s*\n\s*if \(stateCls\) tab\.classList\.add\(stateCls\);/);
   // amber chip, distinct from working-yellow / blocked-red
-  assert.match(CSS, /\.chip-retrying \{ background: #e67e22/);
+  // 2026-09-08: the amber is a TOKEN now (--st-retrying-bg/-fg, both themes) — it sat raw in seven rules
+  assert.match(CSS, /--st-retrying-bg: #e67e22; --st-retrying-fg: #2a1500;/);
+  assert.match(CSS, /\.chip-retrying \{ background: var\(--st-retrying-bg\); color: var\(--st-retrying-fg\); \}/);
   // amber dashed tab ring (same dashed treatment as awaiting, but amber, no fill)
-  assert.match(CSS, /\.tab\.tab-retrying \{ --state: #e67e22; \}/);
+  assert.match(CSS, /\.tab\.tab-retrying \{ --state: var\(--st-retrying-bg\); \}/);
   assert.match(CSS, /\.tab\.tab-awaiting, \.tab\.tab-blocked, \.tab\.tab-retrying \{ outline: 2px dashed/);
 });
 

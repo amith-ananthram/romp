@@ -107,7 +107,7 @@ test("the kernel's never-delivered verdict ends the entry — its bubble carries
   assert.equal(r.lost.length, 1);
   assert.equal(r.inject.length, 0, "never a 'sending…' bubble beside a 'never delivered' one");
   // the kernel's undelivered bubble is the resend path: copy to composer / dismiss (undelivered-echo.test.ts)
-  assert.match(RENDER, /re\.dataset\.act = "echorestore";/);
+  assert.match(RENDER, /noticeAct\("copy to composer", "echorestore",/);   // a notice word button since 2026-09-08
 });
 
 test("a connection drop marks unconfirmed sends 'not confirmed' — an event, and reversible by a confirmation", () => {

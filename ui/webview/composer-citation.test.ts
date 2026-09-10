@@ -10,6 +10,7 @@ import * as path from "node:path";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const FEED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "feed.ts"), "utf8");
+const STAGED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "staged-messages.ts"), "utf8");   // quoteReplyBody lives here
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
 const SKELETON = fs.readFileSync(path.resolve(process.cwd(), "src", "page-skeleton.ts"), "utf8");
 
@@ -55,9 +56,10 @@ test("Backspace at the start of the box deletes the citation like a character", 
 
 test("sending with a GOAL citation routes as an askFollowUp (reopen) and consumes the chip", () => {
   // the three routing branches live in routeUserMessage since the staged flush (2026-08-15) — ONE
-  // owner for the live send and the staged release; deliver feeds it activeId as the sid
+  // owner for the live send and the staged release; deliver hands the typed message to flushStaged, which
+  // routes every post of the release through it with sid (the active session) as the sid
   assert.match(RENDER, /const cites = composerCitations\.get\(activeId\);/);
-  assert.match(RENDER, /routeUserMessage\(activeId, text, cites, attached\.filter\(\(p\) => previewKind\(p\) === "img"\)\);/);   // + the echo's thumbnail paths (2026-08-25)
+  assert.match(RENDER, /flushStaged\(sid, \{ text, cites, imgPaths: attached\.filter\(\(p\) => previewKind\(p\) === "img"\) \}\);/);   // + the echo's thumbnail paths (2026-08-25)
   assert.match(RENDER, /if \(goalCite\?\.itemId\) \{ vscodeApi\.postMessage\(\{ type: "askFollowUp", itemId: goalCite\.itemId, text, sid, qid \}\); registerOptimistic\(sid, text, imgPaths, qid\); \}/);
   assert.match(RENDER, /else \{ vscodeApi\.postMessage\(\{ type: "sendMessage", id: sid, text, qid \}\); registerOptimistic\(sid, text, imgPaths, qid\); \}/);
   assert.match(RENDER, /if \(cites\) \{ composerCitations\.delete\(activeId\); renderComposerChips\(activeId\); \}/);
@@ -72,7 +74,8 @@ test("a citation follow-up carries its SID, so a reply to a REMOTE card reaches 
   // still flashed to Working (the kernel's cardPredict fires before any of that) and snapped back on the
   // ok:false ack, so the only visible trace was a bounce.
   assert.match(RENDER, /if \(goalCite\?\.itemId\) \{ vscodeApi\.postMessage\(\{ type: "askFollowUp", itemId: goalCite\.itemId, text, sid, qid \}\); registerOptimistic\(sid, text, imgPaths, qid\); \}/);
-  assert.match(RENDER, /routeUserMessage\(activeId, text, cites, attached\.filter\(\(p\) => previewKind\(p\) === "img"\)\);/);   // deliver's sid IS the active session
+  assert.match(RENDER, /const sid = activeId;   \/\/ the session this send \(and any confirm below\) was armed for/);   // deliver's sid IS the active session
+  assert.match(RENDER, /flushStaged\(sid, \{ text, cites, imgPaths: attached\.filter\(\(p\) => previewKind\(p\) === "img"\) \}\);/);
   // every OTHER card-addressed op already routes this way — the citation follow-up was the lone omission
   assert.match(FEED, /type: "askClear", itemId: it\.itemId, sid: it\.sid/);
   assert.match(FEED, /type: "askFollowUp", itemId: tgt \? tgt\.itemId : fbId, title: tgt \? tgt\.title : fbTitle, text: txt, sid: fbSid/);
@@ -211,8 +214,9 @@ test("quote chips send a plain message wrapped by quoteReplyBody — never askFo
   assert.match(RENDER, /else if \(quoteCites\.length\) \{ const body = quoteReplyBody\(quoteCites, text\); vscodeApi\.postMessage\(\{ type: "sendMessage", id: sid, text: body, qid \}\); registerOptimistic\(sid, body, imgPaths, qid\); \}/);
   // the wrap: one section per stacked chip (lead-in + the highlighted text as a markdown quote block), in
   // strip order, then the typed message — a single chip composes byte-identically to the pre-stack form
-  // a context-only body (staged with an empty box) carries no dangling blank tail
-  assert.match(RENDER, /return text \? sections\.join\("\\n\\n"\) \+ "\\n\\n" \+ text : sections\.join\("\\n\\n"\);/);
+  // a context-only body (staged with an empty box) carries no dangling blank tail. The function lives in
+  // staged-messages.ts now (the staged release composes from it too) and its test executes it.
+  assert.match(STAGED, /return quoted && text \? quoted \+ "\\n\\n" \+ text : quoted \|\| text;/);
   // the chip's audit preview shows the SAME composed body — the whole outgoing message, every stacked
   // quote, whichever chip was clicked — client-side (no /followup-preview fetch)
   assert.match(RENDER, /body\.textContent = quoteReplyBody\(cites\.filter\(\(c\) => c\.quote\), draft \|\| "\(your message\)"\);/);
@@ -267,7 +271,7 @@ test("a VS Code EDITOR highlight seeds the same chip, labeled + wrapped with its
   assert.match(RENDER, /const i = list\.findIndex\(\(c\) => !!c\.src\);\s*\n\s*if \(i >= 0\) list\[i\] = chip; else list\.push\(chip\);/);
   // the chip title leads with the origin; the wrap lead-in points at the code, not the conversation
   assert.match(RENDER, /const title = \(src \? src \+ " — " \+ snip : snip\)\.slice\(0, 140\);/);
-  assert.match(RENDER, /const lead = c\.src \? "Replying to this highlighted code \(" \+ c\.src \+ "\):" : "Replying to this part of the conversation:";/);
+  assert.match(STAGED, /const lead = c\.src \? "Replying to this highlighted code \(" \+ c\.src \+ "\):" : "Replying to this part of the conversation:";/);
 });
 
 test("deselecting in the editor (editorSelectionCleared) drops the editor chip, scoped + focus-safe (the user 2026-07-14)", () => {

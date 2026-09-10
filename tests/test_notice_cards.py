@@ -44,6 +44,25 @@ class MarkersCarryRompSystem(unittest.TestCase):
                       "2026-07-08: content merely mentioning romp-system must not flip the card kind)")
         self.assertIn('"retry\\n\\n<!-- romp-injected -->"', src, "Retry stays a plain nudge bubble (no marker)")
 
+    def test_every_system_notice_template_carries_a_gist(self):
+        # 2026-09-08: each [romp] mechanics notice names its one-line head in a <!-- romp-gist --> marker, APPENDED
+        # (the rename ping is detected by its leading head, the interrupt causes by their leading sentences)
+        sdk = SourceFileLoader("romp_sdk_backend_nc2", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+        for name in ("BOOT_RESUME_NUDGE", "ASK_DIED_NOTICE", "CRASH_RESUME_NUDGE"):
+            text = getattr(sdk, name)
+            self.assertRegex(text, r"<!-- romp-gist: [^>]+ -->$", name + " ends with its gist marker")
+            self.assertTrue(text.startswith("<!-- romp-injected --><!-- romp-system -->[romp]"), name + " keeps its leading head")
+        lost = sdk.task_death_notice([{"desc": "watch the suite"}])
+        self.assertIn("<!-- romp-gist: 1 background task cut off when the process ended -->", lost)
+        self.assertEqual(km._romp_system_gist(lost), "1 background task cut off when the process ended")
+        for verdict, frag in (("merged", "merged"), ("closed", "closed without merging"), ("failed", "failed check"), ("ghfail", "dropped")):
+            self.assertIn("<!-- romp-gist: ", km._pr_watch_notice(verdict, "notes-api", 12))
+            self.assertIn(frag, km._romp_system_gist(km._pr_watch_notice(verdict, "notes-api", 12)))
+        for kind in ("met", "timeout", "soft", "execfail"):
+            self.assertIsNotNone(km._romp_system_gist(km._watch_notice(kind, {"note": "the suite is green", "id": "w1"})), kind)
+        # the same lift the user-event build uses serves a QUEUED copy of the notice (T243)
+        self.assertEqual(km._queued_romp_flags(sdk.BOOT_RESUME_NUDGE).get("gist"), "resumed after a romp restart cut its turn")
+
 
 class BuildSessionRompSystemFlag(unittest.TestCase):
     """build_session sets ev['rompSystem'] on a romp message carrying the marker, and NOT on a plain nudge —
@@ -100,6 +119,27 @@ class BuildSessionRompSystemFlag(unittest.TestCase):
         sysev = next(e for e in self._user_events() if e.get("rompSystem"))
         self.assertTrue(sysev.get("romp"), "a romp SYSTEM notice is still authored romp")
         self.assertTrue(sysev.get("rompSystem"), "and flagged as a system notice → its own card")
+
+    def test_a_system_notice_carries_its_user_facing_gist(self):
+        # 2026-09-08 (the notice-vocabulary pass): the chat's head for a romp SYSTEM notice is the kernel's GIST,
+        # never the agent-facing body's first sentence ("Re-read the tail… pick the work back up") — the emitter
+        # writes <!-- romp-gist --> beside its other markers and build_session lifts it beside rompSystem
+        self._write([("u1", None, "typed", "start"),
+                     ("u2", "u1a", "sdk",
+                      "<!-- romp-injected --><!-- romp-system -->[romp] The romp kernel restarted; resumed. "
+                      "Re-read the tail and carry on.<!-- romp-gist: resumed after a romp restart cut its turn -->")])
+        sysev = next(e for e in self._user_events() if e.get("rompSystem"))
+        self.assertEqual(sysev.get("gist"), "resumed after a romp restart cut its turn")
+
+    def test_a_system_notice_without_a_gist_marker_has_no_gist_field(self):
+        # a notice recorded before gists shipped: the field is absent (the chat falls back to the first line);
+        # prose merely MENTIONING romp-gist is not a marker (comment form only, like every romp marker)
+        self._write([("u1", None, "typed", "start"),
+                     ("u2", "u1a", "sdk",
+                      "<!-- romp-injected --><!-- romp-system -->[romp] The romp kernel restarted; resumed. "
+                      "(nothing here says romp-gist: in a comment)")])
+        sysev = next(e for e in self._user_events() if e.get("rompSystem"))
+        self.assertNotIn("gist", sysev)
 
     def test_a_plain_nudge_is_not_flagged(self):
         self._write([("u1", None, "typed", "start"),

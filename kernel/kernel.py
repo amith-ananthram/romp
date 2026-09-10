@@ -399,7 +399,8 @@ class _PerfStats:
         for key, read in (("pass", _goals_memo_report), ("shared", jd.shared_store_stats),
                           ("chain", jd.chain_memo_stats), ("courierSkip", jd.courier_skip_stats),
                           ("backref", jd.backref_memo_stats), ("captions", jd.captions_memo_stats),
-                          ("goalArchive", jd.goal_archive_memo_stats), ("plannerSkip", jd.planner_skip_stats)):
+                          ("goalArchive", jd.goal_archive_memo_stats), ("plannerSkip", jd.planner_skip_stats),
+                          ("liftGate", _lift_gate_report), ("bgTops", _bg_tops_report)):
             try:
                 memos[key] = read()
             except Exception:
@@ -3005,14 +3006,16 @@ def _clear_unresolved_live_note(sid):
 
 
 def _tab_order_frame(order, tabs, live, c=None):
-    """The ONE tabOrder frame shape (T258) for its four senders (the pusher's tabs-first send, _push_session_now,
-    _confirm_close_now, and the WS 'ready' handler's connect-time frame), all of which go through
+    """The ONE tabOrder frame shape (T258) for its three senders (the pusher's tabs-first send, which is also the
+    connect push a `ready` triggers, _push_session_now and _confirm_close_now), all of which go through
     _send_tab_order: the shared order, the tabs meta, the viewer's views blob, `live` — the sids the kernel
     affirms are LIVE this build (raw tmux/SDK liveness, independent of whether discover could resolve each
     one's transcript) — and `selfHost`, this kernel's own name (_self_host). The pane keeps a live sid on the
     strip even if this frame's `order` omits it: a transient read failure that drops a session from the order
-    is not a close (render.ts applyTabOrder). The chat reads a postal card's sender host against `selfHost`
-    (its postalSenderHost). The session frame carries the name too, but only a LOCAL session's frame teaches
+    is not a close (render.ts applyTabOrder). That rule is why the WS `ready` handler sends no strip of its own:
+    a frame built there from _ordered_alive (living only) omitted every kept-open read-only tab the connect push
+    had just listed, and the pane closed them all at each ready. The chat reads a postal card's sender host against
+    `selfHost` (its postalSenderHost). The session frame carries the name too, but only a LOCAL session's frame teaches
     it, so a dashboard whose kernel runs no sessions of its own — every session attached from elsewhere —
     never learned it until the + picker was opened, and a remote card stamped with this kernel's name stayed
     plain text (review find, 2026-09-06). Every chat client receives a tabOrder frame, first of all on connect
@@ -3681,8 +3684,8 @@ def _ordered(sessions):
 
 
 def _ordered_alive(now, tmux):
-    """Living sessions in the shared, persisted order (see _ordered). Kept as the source for the tab-order
-    push on connect; chat tabs AND timeline lanes resolve the SAME order through _ordered, in lockstep."""
+    """Living sessions in the shared, persisted order (see _ordered): chat tabs AND timeline lanes resolve the
+    SAME order through _ordered, in lockstep."""
     return _ordered(_alive_sessions(now, tmux))
 
 
@@ -7836,23 +7839,72 @@ def _retry_paused_on():
         return False
 
 
-def _set_retry_paused(paused, reason=""):
+# How many times this kernel wrote the pause file since boot: the apiHealth frame's `seq`. A press on the
+# bottom bar's detail pause button writes the file, and the frame that follows carries a moved seq even when
+# the cycle's auto-pause re-engaged the same state within the same second, so the shell can tell the frame
+# that answers its press from one that predates it (_LANDING_APIH_JS pendSeq). An event counter, never a
+# clock: two cycles over an unwritten file read the same seq.
+_RETRY_PAUSE_SEQ = [0]
+
+
+def _set_retry_paused(paused, reason="", bills="", lifted_at=None):
     # Record WHEN a pause began: the auto-resume floor. Only a successful response AFTER this instant proves
     # the API recovered (an old success from before the outage doesn't). No `t` when un-pausing.
     # `reason` (the user 2026-07-14): "spend" when a monthly spend cap auto-engaged the pause, so the card
-    # shows "raise your cap" instead of a reset countdown; "" for a manual Stop or a rate-window pause.
+    # shows "raise your cap" instead of a reset countdown; "limit" when an account-wide usage window did, so
+    # the bottom bar's API cell can name it without a clock comparison; "" for a manual Stop.
+    # `bills`: for a spend pause, the billing the capped session was on, "login" or "key" (_bills_login of its
+    # live row). The lift rule reads it (_auto_resume_retry): a cap is on ONE account, so only a session on
+    # that billing can show it serving again.
+    # `liftedAt` / `supersedes`: un-pausing a SPEND pause, by the lift rule or by the user's Resume, records
+    # the time of the EVIDENCE that lifted it and the floor (`t`) of the pause it cleared. That is the spend
+    # engage's stand-down rule (_spend_capped_session): a spendLimit record older than liftedAt was already
+    # outranked by the evidence that lifted the pause, and romp never clears such a record on its own (a spend
+    # cap is on-you: _fire_api_retry sends no retry; only a human prompt to the capped session clears
+    # _api_error), so re-engaging on it put the pause back the cycle after every lift, alternating at the
+    # streaming session's output cadence and settling ON once it idled. The memory rides every later write,
+    # paused or not, until a newer spend ruling replaces it: a limit pause that engages and lifts in between
+    # must not forget it. A limit or manual pause's un-pause records nothing (its evidence, the usage report
+    # or a transcript mtime, says nothing about a spend record), and an un-pause over an already-unpaused
+    # file keeps what it finds (the write moves seq only).
+    # `lifted_at` is the evidence's own time: for the lift rule, the `t` of the assistant output record that
+    # lifted the pause (_api_last_output_t), NOT the lift cycle's clock. The cycle runs up to a pusher period
+    # after the output, and a record from a SECOND capped session written in that gap (after the output,
+    # before the cycle) is new information the lift never saw; stamped with the cycle's time, the floor would
+    # have skipped it until that session's next attempt. The user's Resume passes none and records its own
+    # instant: the gesture is the evidence, and a record stamped in the same second reads as older (the CLI
+    # stamps whole seconds) and waits for that session's next attempt, since re-engaging over the gesture
+    # would be the worse error. `supersedes` is informational (the Log and a hand read of the file): nothing
+    # reads it.
+    try:
+        prev = json.loads((jd.STATE / "retry-paused.json").read_text())
+        if not isinstance(prev, dict):
+            prev = {}
+    except Exception:
+        prev = {}
     d = {"paused": bool(paused)}
     if paused:
         d["t"] = time.time()
         if reason:
             d["reason"] = reason
+        if bills:
+            d["bills"] = bills
+    elif prev.get("paused") and prev.get("reason") == "spend":
+        d["liftedAt"] = float(lifted_at) if lifted_at else time.time()
+        d["supersedes"] = float(prev.get("t") or 0)
+    if "liftedAt" not in d and prev.get("liftedAt"):
+        d["liftedAt"] = prev["liftedAt"]
+        d["supersedes"] = prev.get("supersedes", 0)
+    _RETRY_PAUSE_SEQ[0] += 1
     _atomic_write(jd.STATE / "retry-paused.json", json.dumps(d))
     _mark_views_dirty()   # the queued bubble renders this hold; every writer publishes the flip (review 2026-09-05)
 
 
 def _retry_pause_reason():
-    """Why the current global pause engaged ("spend" for a monthly spend cap), or "" (manual / rate
-    window). Rides the globalRetryPaused push so the card can name the cause."""
+    """Why the current global pause engaged ("spend" for a monthly spend cap, "limit" for a usage window),
+    or "" (manual). Rides the globalRetryPaused push so the card can name the cause; the API health frame
+    reads it too. A pause file written for a limit before the reason was recorded carries none and reads
+    manual."""
     try:
         return str(json.loads((jd.STATE / "retry-paused.json").read_text()).get("reason") or "")
     except Exception:
@@ -7865,6 +7917,42 @@ def _retry_pause_ts():
         return float(json.loads((jd.STATE / "retry-paused.json").read_text()).get("t") or 0)
     except Exception:
         return 0.0
+
+
+def _retry_pause_bills():
+    """Which billing the session that engaged the current SPEND pause was on, "login" or "key", or "" when
+    the file records none (a limit or manual pause, or a spend pause written before the billing was
+    recorded). _auto_resume_retry's spend rule reads it; "" there takes any session's fresh output."""
+    try:
+        return str(json.loads((jd.STATE / "retry-paused.json").read_text()).get("bills") or "")
+    except Exception:
+        return ""
+
+
+def _retry_pause_lifted_at():
+    """The time of the evidence that last un-paused a SPEND pause (the output record that lifted it, or the
+    user's Resume), or 0 when none is on record. The spend engage's stand-down floor: a spendLimit record
+    older than this was already outranked (_spend_capped_session). Survives later pauses and lifts of other
+    reasons (_set_retry_paused carries it). Assumes a monotone wall clock, as the pause floor `t` does: after
+    a backward clock step a record stamped in the corrected clock reads as older than the lift until the
+    clock passes it, and the lift rule's own `out_t > t` is suppressed the same way. Clamping this to now
+    would not help: every record's stamp is at or before now, so a record is older than min(liftedAt, now)
+    exactly when it is older than liftedAt. Only the record's identity, not its stamp, could order it against
+    the lift across a step."""
+    try:
+        return float(json.loads((jd.STATE / "retry-paused.json").read_text()).get("liftedAt") or 0)
+    except Exception:
+        return 0.0
+
+
+def _account_limited():
+    """The ACCOUNT-WIDE usage windows the report says are at 100% with their reset still ahead: the 5h and
+    7d keys of _usage().limited, never fable (model-scoped). The ONE authority for the limit pause's two
+    edges: _auto_pause_on_limit engages while this is non-empty and _auto_resume_retry lifts once it is
+    empty, so the pause holds exactly as long as the report says the limit does and lifts at the reset with
+    no session having to serve first. Raises what _usage raises; both callers treat no reading as no change."""
+    lim = (_usage() or {}).get("limited") or {}
+    return [k for k, v in lim.items() if v and k != "fable"]
 
 
 def _retry_resume_at():
@@ -7912,8 +8000,9 @@ def _auto_pause_on_limit():
     """Hitting an ACCOUNT-WIDE usage limit (5h Session or 7d Weekly at 100%) auto-engages the global retry-pause
     (the user 2026-07-01): retrying into a rate-limited account just burns failed requests, so stop the
     auto-retry AND the judges (both gate on this flag) until the window resets. _auto_resume_retry clears it the
-    moment a session serves a request again — which, while the account is genuinely limited, can't happen, so
-    the pause holds exactly as long as the limit does. Idempotent: only writes when it isn't already paused.
+    cycle the same report stops naming a limited window (the reset passed, or a fresh reading came in under
+    100%: _account_limited is the one authority for both edges), so the pause holds exactly as long as the
+    report says the limit does. Idempotent: only writes when it isn't already paused.
 
     Fable-5 is DELIBERATELY excluded (the user 2026-07-03): its window is MODEL-scoped (the included Fable-5
     weekly allowance), not account-wide, so exhausting it does NOT stop the account from serving the models romp
@@ -7924,29 +8013,46 @@ def _auto_pause_on_limit():
     'distilling', no background/summary). A Fable-only session that hits the wall is surfaced per-session
     (api-error → blocked), which is where a model-scoped limit belongs. fable=100% no longer lights the top
     banner either (the user 2026-07-04: it popped every refresh for the 7-day window and wasn't actionable) —
-    only the rail's passive third bar shows it (see _usage().limited); it pauses nothing and warns nothing."""
+    only the rail's passive third bar shows it (see _usage().limited); it pauses nothing and warns nothing.
+
+    No stand-down is needed on this edge: both edges read the report, so a re-engage after a lift needs a
+    reading that names a window again, never a record the lift already outranked. The spend twin acts on a
+    transcript record that outlives its lift, and stands down on it (_spend_capped_session's `after`)."""
     try:
-        u = _usage()
+        account = _account_limited()                     # 5h / 7d only: fable is model-scoped
     except Exception:
         return
-    lim = (u or {}).get("limited") or {}
-    account = [k for k, v in lim.items() if v and k != "fable"]     # 5h / 7d only — fable is model-scoped
     if account and not _retry_paused_on():
-        _set_retry_paused(True)
+        _set_retry_paused(True, reason="limit")     # latched at the event: the API cell's 'paused, usage limit'
+        #                                               (not re-derived from _retry_resume_at's clock compare)
         sys.stderr.write("retry-pause: auto-engaged — usage limit reached (%s) → auto-retry + judges paused until reset\n"
                          % ",".join(account))
         # no inline push: _set_retry_paused marked the views dirty and woke the pusher, whose next cycle
         # carries the flip in its globalRetryPaused frame (see _auto_resume_retry)
 
 
-def _spend_capped_session(now, tmux):
-    """The first alive session sitting blocked on a MONTHLY SPEND CAP error, or None. Account-wide by
-    nature (the cap is on the account, so every session hits it), so one is enough to pause everything."""
+def _spend_capped_session(now, tmux, after=0):
+    """The first alive session sitting blocked on a MONTHLY SPEND CAP error whose record is not older than
+    `after`, or None. Account-wide by nature (the cap is on the account, so every session hits it), so one is
+    enough to pause everything. `after` is the last spend lift's instant (_retry_pause_lifted_at): a record
+    written before it was already outranked by the output that lifted the pause (or by the user's Resume), and
+    a writer whose evidence predates the ruling stands down. A record at or after it is new information and
+    engages again. Compared as they are, no truncation: `after` is the lifting output's own `t` for the lift
+    rule (whole seconds, the CLI's stamp, like the record's), so a record in the same second as that output
+    reads as new, and the record that engaged the pause never ties (it predates the pause floor, which the
+    output postdates). Truncating both sides to whole seconds against a liftedAt stamped with the lift
+    CYCLE's clock would read a second capped session's record from the second before that cycle as stale
+    though it postdated the lift's evidence. A record with no readable time (t 0) is not proof of staleness
+    and counts."""
+    floor = float(after or 0)
     for s in _alive_sessions(now, tmux):
         p = s.get("path")
         if p:
             e = _api_error(p)
             if e and e.get("spendLimit"):
+                t = float(e.get("t") or 0)
+                if floor and 0 < t < floor:
+                    continue                             # already ruled on: the lift's evidence is newer
                 return s
     return None
 
@@ -7959,16 +8065,45 @@ def _auto_pause_on_spend_limit(now, tmux):
     (isApiErrorMessage → _api_error.spendLimit), not the usage report, because the cap is a BILLING limit
     the /usage windows don't carry. Pausing stops BOTH the auto-retry AND the judges (they gate on this
     flag) — correct, since a capped account fails every model call. _auto_resume_retry clears it the moment
-    a session serves a request again (which can't happen until the cap lifts), so it holds exactly as long
-    as the cap does. reason='spend' → the card shows 'raise your cap', not a reset countdown. Idempotent."""
+    a session on the capped billing serves a request again (which can't happen until the cap lifts), so it
+    holds exactly as long as the cap does. reason='spend' → the card shows 'raise your cap', not a reset
+    countdown. Idempotent.
+
+    Stand-down: the capped session's record outlives the lift. A spend cap is on-you, so romp sends it no
+    retry and only a human prompt to that session clears _api_error; the lift reads another session's output
+    on the same billing and leaves the record standing. Engaging on it again the next cycle put the pause
+    back after every lift (alternating at the streaming session's output cadence, then stuck ON once it
+    idled, gating the judges and the idle-queue drives until someone prompted the capped session). So the
+    engage reads the last spend lift's instant off the pause file (_retry_pause_lifted_at) and skips records
+    older than it; a NEW spendLimit record, written after the lift, engages with a new floor."""
     if _retry_paused_on():
         return
-    if _spend_capped_session(now, tmux) is not None:
-        _set_retry_paused(True, reason="spend")
-        sys.stderr.write("retry-pause: auto-engaged — monthly spend limit reached → auto-retry + judges "
-                         "paused until the cap is raised (claude.ai/settings/usage)\n")
+    capped = _spend_capped_session(now, tmux, after=_retry_pause_lifted_at())
+    if capped is not None:
+        # which billing the cap is on, from the capped session's live row: the lift rule accepts fresh output
+        # from that billing only, so a session on the other account cannot lift a cap it never hit and
+        # re-engage it here the next cycle (the pause file flapped every cycle in a login-plus-key install
+        # while one session streamed past the other's cap)
+        live = tmux if isinstance(tmux, dict) else {}
+        bills = "login" if _bills_login(live.get(str(capped.get("sid") or ""))) else "key"
+        _set_retry_paused(True, reason="spend", bills=bills)
+        sys.stderr.write("retry-pause: auto-engaged: monthly spend limit reached (%s billing); auto-retry + judges "
+                         "paused until the cap is raised (claude.ai/settings/usage)\n" % bills)
         # no inline push: _set_retry_paused marked the views dirty and woke the pusher, whose next cycle
         # carries the flip in its globalRetryPaused frame (see _auto_resume_retry)
+
+
+def _bills_login(tm):
+    """Whether a live-map row's session bills the machine LOGIN (the account a usage limit is on): the CLI's
+    own authLive report first, the registry's auth next; a row with neither (a tmux session, an SDK session
+    before its init landed) can only be billing the login when this machine holds no key at all
+    (_auth_key_present: an apiKeyHelper is configured), and is taken as billing a key otherwise. The spend
+    pause reads it at both edges (_auto_pause_on_spend_limit records the capped session's billing;
+    _auto_resume_retry's spend rule compares a candidate's against it)."""
+    a = str((tm or {}).get("authLive") or (tm or {}).get("auth") or "")
+    if a:
+        return a == "login"
+    return not _auth_key_present()
 
 
 def _auto_resume_retry(now, tmux):
@@ -7979,9 +8114,36 @@ def _auto_resume_retry(now, tmux):
     killed EVERY judge (the tier is gated on `not _retry_paused_on()`), turning the storm's fix into a
     permanent outage the user had to infer.
 
-    Event-based recovery signal: a live session that is NOT currently blocked on an API error AND has written
-    fresh transcript output since the pause began (mtime past the pause floor) is proof the account can serve
-    requests again. Clearing re-enables both auto-retry and the judges together.
+    Three lift rules, one per reason, each keyed on the event that engaged it:
+
+    - limit: the usage REPORT, the same reading that engaged it (_account_limited). The pause holds while
+      the report names a 5h/7d window at 100% with its reset ahead, and lifts the cycle it stops: the
+      reset passed, or a fresh reading came in under it. No session's output lifts it while the report
+      still reads limited. The mtime rule lifted it on any session's fresh transcript, and a key-billed
+      session's streaming (or a human prompt) flipped the file every cycle while the window held; a rule
+      keyed on a login-billed session's fresh assistant output could never fire after the reset: the login
+      sessions the limit blocked are the ones whose auto-retry this pause gates (_fire_api_retry), key-billed
+      sessions are rightly skipped, so the pause, the judges and the idle-queue drives stayed off until a
+      human prompted or clicked Resume. Output under a still-limited report is not a lift either: with extra
+      usage on, the login account is served at 100%, and a lift on that output was re-engaged the next
+      cycle, the pause file (so the bottom bar's API cell) flipping at the output cadence. A login turn's
+      END refreshes the report (get_usage rides turn ends; _usage_poll_tick every 15 min), which is how a
+      served account reaches this edge. A still-limited account whose reading was stale re-engages through
+      its next error record and the refreshed report, with a new floor.
+    - spend: fresh ASSISTANT output (_api_last_output_t, never the mtime a prompt moves too) from a live
+      session on the SAME billing the capped session was on (_retry_pause_bills, recorded at the engage;
+      the capped session itself qualifies once it serves). A cap is on one account, and in a login-plus-key
+      install a session on the other account streams straight through it: the old mtime rule counted that,
+      _auto_pause_on_spend_limit re-engaged the pause the next cycle while the capped session sat on its
+      record, and the file flipped every cycle. A file with no billing recorded takes any session's fresh
+      output. The lift leaves the capped session's record standing (nothing but a human prompt clears a
+      spend record), so the un-pause records the lifting output's own time as liftedAt (the evidence, not
+      the cycle's clock, so a record written between the two counts as new) and the engage stands down on
+      records older than it: one lift, no re-engage, until a NEW record.
+    - manual: any live session, not blocked on an API error, whose transcript mtime passed the pause floor
+      (the user's own words above, unchanged).
+
+    Clearing re-enables both auto-retry and the judges together.
 
     Delivery (the two auto-pause siblings above do the same): no inline push from this thread.
     _set_retry_paused ends in _mark_views_dirty, which stamps the dirty mark and sets _pusher_wake, so
@@ -7997,28 +8159,53 @@ def _auto_resume_retry(now, tmux):
     if not _retry_paused_on():
         return
     floor = _retry_pause_ts()
+    reason = _retry_pause_reason()
+    if reason == "limit":
+        try:
+            if _account_limited():
+                return                                   # the window holds: nothing a session writes outranks the report
+        except Exception:
+            return                                       # no reading: no change (the engage side reads nothing either)
+        _lift_retry_pause(now, "the usage window reset")
+        return
+    bills = _retry_pause_bills() if reason == "spend" else ""
+    live = tmux if isinstance(tmux, dict) else {}
     for s in _alive_sessions(now, tmux):
         path = s.get("path")
         if not path or _api_error(path):                 # still blocked on an API error → not proof of recovery
             continue
-        try:
-            fresh = os.stat(path).st_mtime > floor       # wrote something new since the pause → a served request
-        except OSError:
-            continue
+        evidence = None
+        if reason == "spend":
+            if bills and ("login" if _bills_login(live.get(str(s.get("sid") or ""))) else "key") != bills:
+                continue                                 # the other account: says nothing about this cap
+            out_t = _api_last_output_t(path)
+            fresh = out_t > floor                        # the API's own answer, after the pause
+            evidence = out_t                             # ... and the stand-down floor the un-pause records
+        else:
+            try:
+                fresh = os.stat(path).st_mtime > floor   # wrote something new since the pause → a served request
+            except OSError:
+                continue
         if fresh:
-            _set_retry_paused(False)
-            sys.stderr.write("retry-pause: auto-cleared — session %s recovered → judges + auto-retry resume\n"
-                             % s.get("sid", "?"))
-            try:                                         # recovery edge → re-arm cards the judges gave up on
-                rearmed = jd.rearm_failed_summaries(now)  # while degraded, so their summaries/briefs retry now
-                if rearmed:
-                    sys.stderr.write("distiller: re-armed %d given-up card(s) after recovery\n" % rearmed)
-                    _mark_views_dirty()                  # a store write the cards show, after the flag's stamp
-            except Exception:
-                sys.stderr.write("rearm-failed-summaries: %s\n" % traceback.format_exc())
-            # no inline push: _set_retry_paused marked the views dirty and woke the pusher; its next cycle
-            # carries globalRetryPaused=false (docstring)
+            _lift_retry_pause(now, "session %s recovered" % s.get("sid", "?"), lifted_at=evidence)
             return
+
+
+def _lift_retry_pause(now, why, lifted_at=None):
+    """Clear the global retry-pause on a recovery edge (_auto_resume_retry's three rules land here): the flag
+    flip and the re-arm of the cards the judges gave up on while degraded. No inline push and no wake of its
+    own: _set_retry_paused ends in _mark_views_dirty, which wakes the pusher, and its next cycle carries
+    globalRetryPaused=false (the caller's docstring). `lifted_at` is the spend rule's evidence time, recorded
+    as the file's liftedAt (_set_retry_paused); the other rules pass none."""
+    _set_retry_paused(False, lifted_at=lifted_at)
+    sys.stderr.write("retry-pause: auto-cleared (%s): judges + auto-retry resume\n" % why)
+    try:                                                 # recovery edge → re-arm cards the judges gave up on
+        rearmed = jd.rearm_failed_summaries(now)         # while degraded, so their summaries/briefs retry now
+        if rearmed:
+            sys.stderr.write("distiller: re-armed %d given-up card(s) after recovery\n" % rearmed)
+            _mark_views_dirty()                          # a store write the cards show, after the flag's stamp
+    except Exception:
+        sys.stderr.write("rearm-failed-summaries: %s\n" % traceback.format_exc())
 
 
 # ── Per-session auto-retry suppression (the user 2026-07-06) ───────────────────────────────────────
@@ -9530,6 +9717,20 @@ def _sid_inputs_fp(sid, path, extra=()):
 
 
 _lift_seen = {}   # sid -> the inputs fingerprint the awaiting lift last ruled on — see _lift_spent_awaiting
+_lift_gate_stats = {"skip": 0, "load": 0, "shared": 0, "writer": 0, "noop": 0}   # /perf memos.liftGate, see _lift_gate_report
+
+
+def _lift_gate_report():
+    """The gate's counters plus its occupancy, for /perf: `skip` session-cycles that took no read, `load` the
+    ones that read the store (phase 1 of _lift_spent_awaiting), `shared` the phase-1 reads the shared
+    read-only cache answered (the rest were load_goals' own store: no file, an unreadable journal, the cache
+    off), `writer` the phase-2 writer loads: one per session-tick that loaded the writer's copy because a
+    lift was due (a tick filing two lifts on one session counts once; the `noop` ones count too), `noop`
+    the writer loads whose fresh decision filed nothing (the store moved between the probe and the load),
+    `entries` sids remembered."""
+    out = dict(_lift_gate_stats)
+    out["entries"] = len(_lift_seen)
+    return out
 
 
 def _lift_spent_awaiting(now, tmux):
@@ -9546,18 +9747,34 @@ def _lift_spent_awaiting(now, tmux):
     awaiting flavors are untouched: we lift only when this goal DID dispatch background work of its own by
     stamp time, every one of those has come back, and at least one came back AFTER the stamp's anchor —
     a return already sitting in a turn the stamping judge had audited can't be what the stamp waits on
-    (see the loop's _returned_after note, 2026-08-16). A stamp naming a CI run, a scheduled check-back or a
-    peer handoff owns no such dispatches, so it never matches and keeps its stamp — those still rely on the
-    6h awaiting wake (_wake_goal, in the nudge tick's goal walk), which is exactly the case a timer is the
-    only tool for. A kind=job stamp that DOES own dispatches (the standard shape: a watcher armed over an
-    external computation) lifts only on their REAL terminal records: a watcher dying with a restart or
+    (see _lift_decisions' _returned_after note, 2026-08-16). A stamp naming a CI run, a scheduled check-back
+    or a peer handoff owns no such dispatches, so it never matches and keeps its stamp — those still rely on
+    the 6h awaiting wake (_wake_goal, in the nudge tick's goal walk), which is exactly the case a timer is
+    the only tool for. A kind=job stamp that DOES own dispatches (the standard shape: a watcher armed over
+    an external computation) lifts only on their REAL terminal records: a watcher dying with a restart or
     expiring is the CARRIER going, not the job returning — before this, the watcher's silent death lifted
     the stamp while the slurm job ran on (the user 2026-08-15; the wake stays the backstop).
 
     Dormant sessions are skipped: their tasks died with their CLI, so the death notice is the truth there,
-    not a lift (same rule as _session_awaiting's source 0.75)."""
+    not a lift (same rule as _session_awaiting's source 0.75).
+
+    TWO-PHASE READ. Every rule lives in _lift_decisions, which decides and writes nothing. Phase 1 runs it
+    on the shared read-only view (jd.load_goals_shared_or_fault: one parse per store version for every
+    reader; the fingerprint is recorded before the probe, as before). Most stamped sessions end there: the
+    dispatch is still out, so nothing is due and no writer load happens. Before this, every alive session
+    whose fingerprint moved paid a private load_goals (a full read plus the journal replay) to decide
+    nothing. Phase 2 runs only when phase 1 found a lift due: the writer's copy is loaded
+    (jd.load_goals_or_fault), the decision is made AGAIN on that copy, and that second decision is what
+    record_verdict files and save_goals publishes, never the first. The frozen view is never written to and
+    never reaches save_goals (both would raise), and the copy a lift is written on is the copy it was
+    decided on: a writer that publishes between the probe and the load (the closer re-placing the deciding
+    launch under another card) costs one writer load that decides nothing (`noop`), never a lift from a
+    stale decision. After the loop, the gate entries and the placed-launch memo's entries of sids that
+    left the alive set are dropped: nothing to gate, nothing to place for."""
+    seen = set()
     for s in _alive_sessions(now, tmux):
         sid = s["sid"]
+        seen.add(sid)
         try:
             if tmux.get(sid) is None:                 # dormant → its tasks died with the CLI, don't rule
                 continue
@@ -9585,275 +9802,335 @@ def _lift_spent_awaiting(now, tmux):
                                          tuple(sorted((str(t.get("id") or ""), bool(em._bg_expired(t, now)))
                                                       for t in every if isinstance(t, dict) and t.get("status") == "running"))))
             if gate is not None and _lift_seen.get(sid) == gate:
-                continue
+                _lift_gate_stats["skip"] += 1
+                continue                              # the same inputs were ruled on last cycle
+            _lift_gate_stats["load"] += 1
             _lift_seen[sid] = gate                    # recorded now; a ruling that RAISES forgets it below,
-            store, fault = jd.load_goals_or_fault(sid)   # so the next cycle retries instead of skipping
-            if fault is not None:                     # its row is filed; forget the gate so the next cycle
-                _lift_seen.pop(sid, None)             # retries this session, and go on to the others
+            #                                           so the next cycle retries instead of skipping
+            # PHASE 1, the probe: the shared read-only view. A FrozenStore is the cache's answer; anything
+            # else is load_goals' own store handed through (no file, an unreadable journal, the cache off).
+            # A read FAULT (the file exists and did not read) comes back as (None, fault) through the
+            # boundary, its row filed once per episode: forget the gate so the next cycle retries this
+            # session, and go on to the others.
+            store, fault = jd.load_goals_shared_or_fault(sid)
+            if fault is not None:
+                _lift_seen.pop(sid, None)
                 continue
             if store.get("_unread"):                  # the store read but its journal did not (the mark):
                 _lift_seen.pop(sid, None)             # not a ruling on the files; the next cycle retries
-            nodes = store.get("nodes") or {}
-            stamped = [nd for nd in nodes.values()
-                       if nd.get("awaitingWhy") and nd.get("awaitingAt") and not nd.get("rolledUp")]
-            # A stamped node the roll-down folded under a RESOLVED ancestor: its card's story ended, but
-            # the stamp survives invisibly (every reader skips rolledUp) — lift it explicitly so the
-            # diary says why it went, instead of an unretired wait no surface can show (the user
-            # 2026-07-27). Guarded on the diary so an unmaterialized lift never re-fires each tick.
-            rolled = [nd for nd in nodes.values()
-                      if nd.get("awaitingWhy") and nd.get("rolledUp")
-                      and not _last_awaiting_is_lift(nd)]
+            if isinstance(store, jd.FrozenStore):
+                _lift_gate_stats["shared"] += 1
+            if not _lift_decisions(sid, s, store, now, tmux):
+                continue                              # nothing due (no candidate, or the common stamped case:
+                #                                       the dispatch still out): no writer load
+            # PHASE 2, the write: a fresh private copy, decided on again, and only its own decisions filed.
+            # The same boundary: a fault between the probe and this load forgets the gate and retries, and
+            # so does a copy that loaded without its journal (the mark, as on the probe above).
+            _lift_gate_stats["writer"] += 1
+            wstore, wfault = jd.load_goals_or_fault(sid)
+            if wfault is not None:
+                _lift_seen.pop(sid, None)
+                continue
+            if wstore.get("_unread"):
+                _lift_seen.pop(sid, None)
+            wnodes = wstore.get("nodes") or {}
             changed = False
-            for nd in rolled:
-                if jd.record_verdict(store, nd, "romp", "awaiting", _lift_ev_t(nd, now), lift=True):
-                    changed = True
-
-            def _top_of(x):
-                seen = set()
-                while x in nodes and nodes[x].get("parentId") is not None and x not in seen:
-                    seen.add(x); x = nodes[x]["parentId"]
-                return x
-            # SUPERSEDED PEER-WAIT LIFT (the user 2026-08-24): a peer's reply at/after a kind=peer (or
-            # kindless) stamp's WRITE time already ends that wait at every read — _goal_awaiting_stamp_full
-            # hides the stamp from the card and the chip, and the nudge walk (which reads the same
-            # predicate) then never arms the 6h wake. But that supersede was read-time only: it filed
-            # NOTHING, so the stamp sat invisibly forever — the closer was never re-nominated (its
-            # filed-since gate needs a diary row newer than closerLookT, and the newest row was the stamp
-            # itself), the plain-nudge fire gate read the RAW fields and vetoed every fire, and a LIVE
-            # session's Working card wore the quiet floor ("Paused — resumes when its wait ends")
-            # indefinitely — three live specimens on one board, one ~14h, breaking the recorded 2026-08-22
-            # promise that every Working card is nudged/woken until it lands (_dead_wait_block's docstring).
-            # File the lift the readers already act on: the reply is the wait's designed exact ending event
-            # (the reader's own rule), the lift row re-arms the closer's filed-since nomination (a re-audit
-            # can re-stamp a still-real wait with a fresh write time that out-orders the answer — the
-            # designed self-correction the read-only supersede promised but never delivered), and the
-            # ledger drop re-engages the nudge ladder exactly like the dispatch arms below. Peer-scoped
-            # exactly like the reader (job/agents/task/timer stamps stand through mail); DORMANT sessions
-            # never reach here (the sweep's own gate above) — the dead-wait conversion reads the stamp RAW
-            # on purpose (2026-08-23) and owns that ending.
-            answered = _peer_answered(sid)
-            for nd in (list(stamped) if answered[0] else ()):
-                reply_t = _peer_stamp_superseded(nd, answered)   # the superseding reply's time, or 0
-                if not reply_t:
+            for nid, top, drop_rec, end_ev in _lift_decisions(sid, s, wstore, now, tmux):
+                nd = wnodes.get(nid)
+                if nd is None:
                     continue
-                # the reply IS the evidence this lift rules on: journal it as the horizon, so a later
-                # closer assert on evidence newer than the reply stands whatever this row's arrival
-                if jd.record_verdict(store, nd, "romp", "awaiting", _lift_ev_t(nd, now), lift=True,
-                                     end_ev=reply_t):
+                # `end_ev` is the EVIDENCE HORIZON the decision ruled on (record_verdict end_ev, 2026-09-07:
+                # the superseding reply's time, the newest in-harness ending, the newest cited return; None
+                # for a rolled-up lift), journaled so a later closer assert on evidence newer than it stands
+                # whatever this row's arrival, and so the stand-down compares evidence to evidence
+                if jd.record_verdict(wstore, nd, "romp", "awaiting", _lift_ev_t(nd, now), lift=True,
+                                     end_ev=end_ev):
                     changed = True
-                    stamped.remove(nd)
-                    _drop_auto_nudge_rec(_top_of(nd.get("id")))
-            if not stamped:
-                if changed:
-                    jd.rollup_status(store, False)
-                    jd.save_goals(sid, store)
-                    _mark_views_dirty()
-                continue
-            every = _bg_scan_all_cached(s["path"])
-            # the backend's lifecycle set (present-but-empty is AUTHORITATIVE — _bg_live_norm's own
-            # rule) and the CLI epoch it (re)started at: the restart-orphan reconciliation evidence
-            snap = tmux.get(sid) or {}
-            reg_ids = ({str(t.get("toolUseId") or "") for t in snap.get("bgTasks") or []
-                        if isinstance(t, dict)} if "bgTasks" in snap else None)
-            sp = _sdk_spawned_at(sid) or 0
-            # the launch ledger's stop tombstones (sdk_backend's bgLedgerEnded): a TaskStop suppresses
-            # the task notification, so the transcript never learns the Monitor ended — the hook did
-            tombs = ((_thread_reg(sid).get("bgLedgerEnded") or []) if reg_ids is not None else [])
-            if not every and reg_ids is None:
-                if changed:
-                    jd.rollup_status(store, False)
-                    jd.save_goals(sid, store)
-                    _mark_views_dirty()
-                continue
-            # RESTART-ORPHAN reconciliation (the user 2026-08-24): a kernel/backend restart kills
-            # tracked subagents and workflows WITH the claude process — the terminal record never
-            # lands, the transcript pairing shows them "running" forever, and the stamp orphaned
-            # (16h of "awaiting agents" over an empty registry, nothing reconciling). A
-            # transcript-"running" task ABSENT from a PRESENT lifecycle set died with its process;
-            # its return event IS the backend's (re)spawn — an exact event, not a timer. kind=job
-            # stays registry-blind below: the watcher dying is the carrier going, not the job
-            # returning.
-            dead = (set() if reg_ids is None else
-                    {t.get("id") for t in every
-                     if t.get("status") == "running" and t.get("id") and str(t.get("id")) not in reg_ids})
-            # a monitor past its recorded lifetime ceiling counts as RETURNED even with no terminal
-            # record (its CLI died mid-watch; the notification can never arrive) — see em._bg_expired
-            running = {t.get("id") for t in every
-                       if t.get("status") == "running" and not em._bg_expired(t, now)
-                       and t.get("id") not in dead}
-            # kind=job: expiry is not a return (see docstring) — only a real terminal record lifts
-            running_job = {t.get("id") for t in every if t.get("status") == "running"}
-            placed = _bg_placed_tops(sid, s["path"], [t.get("id") for t in every])
-            for nd in stamped:
-                born = nd.get("t") or 0
-                top = _top_of(nd.get("id"))
-                # The dispatches this goal owns. Placement is authoritative when the judge has spoken:
-                # a task placed under ANOTHER card can never retire this stamp (the user 2026-07-27:
-                # unrelated returns were lifting CI-wait stamps — one lifted the same minute it was
-                # re-asserted). The time window survives only for placement-unknown launches (the
-                # conservative pre-verdict shape): launched during the goal's life, at or before the
-                # stamp it explains — bounded by when that stamp was WRITTEN, not by its turn-trigger
-                # anchor, which the launches of that very turn all postdate (see _stamp_written_at).
-                horizon = _stamp_written_at(nd)
-                own = []
-                for t in every:
-                    p = placed.get(t.get("id"))
-                    if p is not None:
-                        if p == top:
-                            own.append(t)             # the goal's own thread, before OR after the stamp:
-                            #                           anything of its own still out keeps the wait honest
-                    elif born <= (t.get("t") or 0) <= horizon:
-                        own.append(t)
-                if not own:                           # nothing dispatched → not a background wait; leave it
-                    # …EXCEPT a stamp standing over an authoritatively EMPTY in-harness world: the
-                    # backend's lifecycle set present and empty, no live subagents, nothing running in
-                    # the transcript. Two shapes, one writer:
-                    #  - kind=agents (the user 2026-08-24): an agents-kind wait ends with task
-                    #    notifications, and with no dispatch recorded ANYWHERE no such event can ever
-                    #    arrive — the shape a closer mints when it misreads peer sessions as agents,
-                    #    orphaned for good the moment a restart clears the world it described. Same
-                    #    evidence-postdates-anchor rule as every lift: the (re)spawn must be newer than
-                    #    the stamp's anchor — or the transcript itself shows NOTHING running at all
-                    #    (2026-08-25 audit: the misread-peer-as-agents shape needs no respawn to prove
-                    #    the notification can never arrive; the pairing already did).
-                    #  - kind=task/job (2026-09-05): a closer stamped a top kind=job for a Monitor plus
-                    #    a background command the session ITSELF was running, the planner placed both
-                    #    launches on a sibling top, and this skip kept the stamp 17 hours over an empty
-                    #    registry with nothing pending anywhere (the wake below it never reached it —
-                    #    nudges off, top all-delegated). The deciding event is the LAST in-harness item
-                    #    ENDING after the stamp (_bg_ended_after: a terminal record, a Monitor's recorded
-                    #    ceiling, the launch ledger's stop tombstone, or the CLI respawn that killed
-                    #    everything) — a world already empty when the judge stamped is a wait on
-                    #    something the registry cannot see (a CI run), and stays the dead-man's. An
-                    #    ARMED kernel watch for this sid (a PR watch) is a carrier still running: its
-                    #    delivery is the ending, so the stamp stands. The owned-dispatch job rule below
-                    #    ("the watcher dying is the carrier going") is untouched: it needs a dispatch of
-                    #    the goal's OWN to protect, and this branch has none.
-                    _kind, _anchor0 = nd.get("awaitingKind"), nd.get("awaitingAt") or 0
-                    _empty = reg_ids is not None and not reg_ids and not snap.get("subagents") and not running
-                    # `_ended` = the newest in-harness ending this lift cites — its EVIDENCE HORIZON
-                    # (record_verdict end_ev, 2026-09-07). An agents lift resting on no recorded ending
-                    # at all (a stamp over a transcript where nothing ever ran, no respawn past the
-                    # anchor: the misread-peers-as-agents shape) rules "the authoritative registry shows
-                    # nothing running NOW and nothing ever ended", so the registry read's moment is what
-                    # it ruled through, the dead-man lift's own choice for the same shape of ruling
-                    # (_wake_goal), and journaled as read, never floored to the second: the gates compare
-                    # a horizon against raw evidence times, and int(now) disowned an assert triggered in
-                    # the read's own second. Journaling none instead (review find, 2026-09-08) left the gates
-                    # reading the row's anchor, which disowns nothing: a lagging closer's re-assert from a
-                    # segment triggered inside (anchor, lift) stood, the next pass re-lifted on the same
-                    # empty world, and every re-lift re-armed the nudge ladder: a permanent flap on no
-                    # new information, where main's arrival compare had suppressed the re-assert.
-                    _ended, _lift = 0, False
-                    if _empty and _kind == "agents" \
-                            and (sp > _anchor0 or not any(t.get("status") == "running" for t in every)):
-                        _ended = _bg_ended_after(every, tombs, sp, _anchor0, now, kind=_kind) or now
-                        _lift = True
-                    elif _empty and _kind in ("task", "job") and not _kernel_watch_armed(sid):
-                        # endings are measured from the stamp's WRITE time (_stamp_written_at), not
-                        # the audited turn's trigger: an item that returned mid-turn, before the
-                        # closer even wrote the stamp, is not the world emptying after it (review
-                        # find on #936, 2026-09-07)
-                        _ended = _bg_ended_after(every, tombs, sp, _stamp_written_at(nd), now, kind=_kind)
-                        _lift = bool(_ended)
-                    if _lift and jd.record_verdict(store, nd, "romp", "awaiting", _lift_ev_t(nd, now),
-                                                   lift=True, end_ev=_ended):
-                        changed = True
+                    if drop_rec:
+                        # The lift is NEW INFORMATION for the escalation ladder: the wait this goal's last
+                        # nudge/wake episode ended on has returned. Drop the goal's spent ledger record
+                        # (failed/moot/answered alike) so the next tick can re-engage — an idle session
+                        # never produces the genuine turn the arm-key dedup otherwise waits for, and a
+                        # latched record left its cards in Working forever (2026-08-16). Event-keyed and
+                        # bounded: record_verdict lifts a given stamp exactly once.
                         _drop_auto_nudge_rec(top)
-                    continue
-                live_set = running_job if nd.get("awaitingKind") == "job" else running
-                if any(t.get("id") in live_set for t in own):
-                    continue                          # at least one is genuinely still out
-                # The lift's event is a return the stamp was WAITING ON — one that landed after the
-                # stamp's ANCHOR (endT past the audited turn's trigger; a launch past it necessarily
-                # returned past it too; a kindless expiry "returns" at its recorded deadline). A
-                # dispatch already terminal in a turn the stamping judge had ALREADY AUDITED can't
-                # evidence the wait's end: the judge stamped knowing that completion, so the wait is
-                # about something else, and the goal keeps its stamp + 6h wake like any dispatch-less
-                # wait. The boundary is the anchor, NOT the write time (`horizon`): the write postdates
-                # the whole audited turn, so testing against it would also disown mid-turn and
-                # audit-lag returns the judge never saw (the suite pins those as lifting). Without
-                # this, a stamp about external cluster work lifted the same minute it was written off
-                # a workflow hours dead — and the lift row then MOOTED the nudge-failure evaluation,
-                # parking the card in Working with no reviver left (an idle experiment session,
-                # 2026-08-16).
-                _anchor = nd.get("awaitingAt") or 0
-
-                def _return_ev(t):
-                    # the evidence time of this dispatch's RETURN, the ONE conditioning both the "did
-                    # anything return after the anchor" test and the horizon this lift journals read
-                    # (review find, 2026-09-08: two hand-kept copies had drifted, and the older one still
-                    # counted an UNSPENT ceiling, so a dead watcher whose ceiling lay ahead lifted off a
-                    # horizon older than the anchor it retracted). A terminal record's endT; for a task
-                    # the pairing still shows running, the respawn that killed it (dead) or its recorded
-                    # ceiling once that has PASSED (expired); the launch as the floor (a launch past the
-                    # anchor returned past it). A ceiling that has not passed is never evidence: the
-                    # completion path leaves `deadline` in place, so a watcher that fired early carries a
-                    # FUTURE ceiling, and folding it unconditionally pushed the horizon past the clock;
-                    # a min() floor then journaled the tick time, arrival by another name.
-                    ev = max(t.get("endT") or 0, t.get("t") or 0)
-                    if t.get("status") == "running":
-                        if t.get("id") in dead:
-                            ev = max(ev, sp)
-                        if em._bg_expired(t, now):
-                            ev = max(ev, t.get("deadline") or 0)
-                    return ev
-
-                def _returned_after(t):
-                    return _return_ev(t) > _anchor
-                if not any(_returned_after(t) for t in own):
-                    continue
-                # THE STAND-DOWN RULE, joined (the 2026-08-19 audit): a writer whose evidence
-                # predates the diary yields — but only on a RE-ASSERT. The flap's signature is the
-                # closer re-affirming the wait AFTER a prior lift of this same stamp: everything
-                # this lift can cite (returns that preceded that lift) was already ruled on once,
-                # so lifting again off it produced the observed 2-3 second stamp↔lift flaps that
-                # reset the nudge ladder (fires 5s after a lift, three first-nudges in 21 minutes —
-                # the session had re-armed a watcher the ownership window cannot see). A FIRST
-                # stamp keeps the designed audit-lag lift: the write postdates the whole audited
-                # turn, and returns the judge never saw must still lift (the suite pins those).
-                _aw = [e for e in (nd.get("log") or []) if e.get("kind") == "awaiting"]
-                # the RE-ASSERT test asks about the diary's write order — was the wait re-affirmed after
-                # the lift was FILED — so arrival is the right timebase for these two…
-                _last_lift = max((e.get("at") or e.get("ev_t") or 0 for e in _aw if e.get("lift")), default=0)
-                _last_assert = max((e.get("at") or e.get("ev_t") or 0 for e in _aw if not e.get("lift")), default=0)
-                # …but the EVIDENCE test compares evidence to evidence: the newest return this lift can
-                # cite against the newest evidence any prior lift RULED ON (its journaled horizon,
-                # jd._wait_end_ev), never that lift's arrival. Read as arrival, a lift filed late for
-                # evidence up to T_ev claimed everything before its filing, so a return landing between
-                # T_ev and the filing was never citable and the stamp stayed on new information
-                # (2026-09-07). `<=`: a return AT the horizon is the very return that lift cited.
-                _horizon = max((jd._wait_end_ev(e) for e in _aw if e.get("lift")), default=0)
-                _evidence = max((_return_ev(t) for t in own), default=0)   # conditioned as _returned_after
-                if _last_lift and _last_assert > _last_lift and _evidence <= _horizon:
-                    continue                          # every citable return was already ruled on by that
-                    #                                   lift — re-lifting off it is the flap. A return
-                    #                                   NEWER than the last lift is new information even
-                    #                                   when the re-assert's WRITE postdates it by seconds:
-                    #                                   the closer's audit segment ended before the return
-                    #                                   landed (2026-08-25 audit — a watcher's stamp written
-                    #                                   17s after its merge notification stood 9.5h because
-                    #                                   write-time was read as the epistemic boundary)
-                # this lift's own horizon: the newest return it cites — the very `_evidence` the gate
-                # above measured, so what a lift journals is by construction what its stand-down compares
-                if jd.record_verdict(store, nd, "romp", "awaiting", _lift_ev_t(nd, now), lift=True,
-                                     end_ev=_evidence):
-                    changed = True
-                    # The lift is NEW INFORMATION for the escalation ladder: the wait this goal's last
-                    # nudge/wake episode ended on has returned. Drop the goal's spent ledger record
-                    # (failed/moot/answered alike) so the next tick can re-engage — an idle session
-                    # never produces the genuine turn the arm-key dedup otherwise waits for, and a
-                    # latched record left its cards in Working forever (2026-08-16). Event-keyed and
-                    # bounded: record_verdict lifts a given stamp exactly once.
-                    _drop_auto_nudge_rec(top)
-            if changed:
-                jd.rollup_status(store, False)
-                jd.save_goals(sid, store)
-                _mark_views_dirty()
-
+            if not changed:
+                _lift_gate_stats["noop"] += 1        # the store moved between the probe and the load
+                continue
+            jd.rollup_status(wstore, False)
+            jd.save_goals(sid, wstore)
+            _mark_views_dirty()
         except Exception:
             _lift_seen.pop(sid, None)                 # a raised ruling is not a ruling — re-run next cycle
             sys.stderr.write("awaiting-lift (session %s): %s\n" % (sid or "?", traceback.format_exc()))
+    for sid in [k for k in _lift_seen if k not in seen]:
+        del _lift_seen[sid]                           # the sid left the alive set: nothing to gate
+    for cache in (_BG_TOPS_CACHE, _PLACEMENT_IDX):    # ...and nothing to place for: release the pinned parse
+        for sid in list(cache):                       # list(): the handler threads fill these concurrently
+            if sid not in seen:
+                cache.pop(sid, None)
+
+
+def _lift_candidates(store):
+    """(stamped, rolled): the (node key, node) pairs one lift tick can rule on, from the store alone. The
+    KEY is what a decision names and what phase 2 resolves on the writer's copy, so a node whose `id`
+    field differs from its key is still found there rather than dropped as a no-op. `stamped` carries a
+    live awaiting stamp; `rolled` is a stamped node the roll-down left under a resolved ancestor whose
+    newest awaiting row is not yet a lift."""
+    nodes = store.get("nodes") or {}
+    stamped = [(nid, nd) for nid, nd in nodes.items()
+               if nd.get("awaitingWhy") and nd.get("awaitingAt") and not nd.get("rolledUp")]
+    # A stamped node the roll-down folded under a RESOLVED ancestor: its card's story ended, but the
+    # stamp survives invisibly (every reader skips rolledUp) — lift it explicitly so the diary says why
+    # it went, instead of an unretired wait no surface can show (the user 2026-07-27). Guarded on the
+    # diary so an unmaterialized lift never re-fires each tick.
+    rolled = [(nid, nd) for nid, nd in nodes.items()
+              if nd.get("awaitingWhy") and nd.get("rolledUp")
+              and not _last_awaiting_is_lift(nd)]
+    return stamped, rolled
+
+
+def _lift_decisions(sid, s, store, now, tmux):
+    """The lifts due for one alive session, decided on `store` and written NOWHERE: [(nid, top, drop_rec,
+    end_ev)], one per stamp the tick would retire. `top` is the node's top ancestor; `drop_rec` says whether
+    the goal's spent nudge record goes with the lift (the rolled-up arm drops none); `end_ev` is the
+    EVIDENCE HORIZON the decision ruled on (record_verdict end_ev: the superseding reply's time, the newest
+    in-harness ending, the newest cited return; None for a rolled-up lift, which cites no ending). Every rule
+    of the lift lives here, and the verdict gate is consulted read-only: jd.may_apply is exactly the gate
+    record_verdict asks before it appends, so a decision here is a record_verdict that would have returned
+    True. A decision is a function of (the store, the transcript's task pairing, the backend snapshot, the
+    postal wait maps, now) and of nothing this function writes, so _lift_spent_awaiting can run it on the
+    shared read-only view to learn whether a lift is due, then again on the writer's copy it loads, and file
+    the second run's decisions on that copy (the docstring there). Placement is read from the SAME store
+    object through _bg_placed_tops, so the stamps ruled on and the launches placed come from one version."""
+    out = []
+    nodes = store.get("nodes") or {}
+    stamped, rolled = _lift_candidates(store)
+    if not (stamped or rolled):
+        return out                                    # nothing to rule on: no peer read, no scan
+    for nid, nd in rolled:
+        if jd.may_apply(store, nd, "romp", "awaiting", _lift_ev_t(nd, now)):
+            out.append((nid, None, False, None))
+
+    def _top_of(x):
+        seen = set()
+        while x in nodes and nodes[x].get("parentId") is not None and x not in seen:
+            seen.add(x); x = nodes[x]["parentId"]
+        return x
+    # SUPERSEDED PEER-WAIT LIFT (the user 2026-08-24): a peer's reply at/after a kind=peer (or
+    # kindless) stamp's WRITE time already ends that wait at every read — _goal_awaiting_stamp_full
+    # hides the stamp from the card and the chip, and the nudge walk (which reads the same
+    # predicate) then never arms the 6h wake. But that supersede was read-time only: it filed
+    # NOTHING, so the stamp sat invisibly forever — the closer was never re-nominated (its
+    # filed-since gate needs a diary row newer than closerLookT, and the newest row was the stamp
+    # itself), the plain-nudge fire gate read the RAW fields and vetoed every fire, and a LIVE
+    # session's Working card wore the quiet floor ("Paused — resumes when its wait ends")
+    # indefinitely — three live specimens on one board, one ~14h, breaking the recorded 2026-08-22
+    # promise that every Working card is nudged/woken until it lands (_dead_wait_block's docstring).
+    # File the lift the readers already act on: the reply is the wait's designed exact ending event
+    # (the reader's own rule), the lift row re-arms the closer's filed-since nomination (a re-audit
+    # can re-stamp a still-real wait with a fresh write time that out-orders the answer — the
+    # designed self-correction the read-only supersede promised but never delivered), and the
+    # ledger drop re-engages the nudge ladder exactly like the dispatch arms below. Peer-scoped
+    # exactly like the reader (job/agents/task/timer stamps stand through mail); DORMANT sessions
+    # never reach here (the sweep's own gate) — the dead-wait conversion reads the stamp RAW
+    # on purpose (2026-08-23) and owns that ending.
+    answered = _peer_answered(sid)
+    for nid, nd in (list(stamped) if answered[0] else ()):
+        reply_t = _peer_stamp_superseded(nd, answered)   # the superseding reply's time, or 0
+        if not reply_t:
+            continue
+        # the reply IS the evidence this lift rules on: journal it as the horizon, so a later
+        # closer assert on evidence newer than the reply stands whatever this row's arrival
+        if jd.may_apply(store, nd, "romp", "awaiting", _lift_ev_t(nd, now)):
+            out.append((nid, _top_of(nid), True, reply_t))
+            stamped.remove((nid, nd))
+    if not stamped:
+        return out
+    every = _bg_scan_all_cached(s["path"])
+    # the backend's lifecycle set (present-but-empty is AUTHORITATIVE — _bg_live_norm's own
+    # rule) and the CLI epoch it (re)started at: the restart-orphan reconciliation evidence
+    snap = tmux.get(sid) or {}
+    reg_ids = ({str(t.get("toolUseId") or "") for t in snap.get("bgTasks") or []
+                if isinstance(t, dict)} if "bgTasks" in snap else None)
+    sp = _sdk_spawned_at(sid) or 0
+    # the launch ledger's stop tombstones (sdk_backend's bgLedgerEnded): a TaskStop suppresses
+    # the task notification, so the transcript never learns the Monitor ended — the hook did
+    tombs = ((_thread_reg(sid).get("bgLedgerEnded") or []) if reg_ids is not None else [])
+    if not every and reg_ids is None:
+        return out
+    # RESTART-ORPHAN reconciliation (the user 2026-08-24): a kernel/backend restart kills
+    # tracked subagents and workflows WITH the claude process — the terminal record never
+    # lands, the transcript pairing shows them "running" forever, and the stamp orphaned
+    # (16h of "awaiting agents" over an empty registry, nothing reconciling). A
+    # transcript-"running" task ABSENT from a PRESENT lifecycle set died with its process;
+    # its return event IS the backend's (re)spawn — an exact event, not a timer. kind=job
+    # stays registry-blind below: the watcher dying is the carrier going, not the job
+    # returning.
+    dead = (set() if reg_ids is None else
+            {t.get("id") for t in every
+             if t.get("status") == "running" and t.get("id") and str(t.get("id")) not in reg_ids})
+    # a monitor past its recorded lifetime ceiling counts as RETURNED even with no terminal
+    # record (its CLI died mid-watch; the notification can never arrive) — see em._bg_expired
+    running = {t.get("id") for t in every
+               if t.get("status") == "running" and not em._bg_expired(t, now)
+               and t.get("id") not in dead}
+    # kind=job: expiry is not a return (see docstring) — only a real terminal record lifts
+    running_job = {t.get("id") for t in every if t.get("status") == "running"}
+    placed = _bg_placed_tops(sid, s["path"], [t.get("id") for t in every], store=store)
+    for nid, nd in stamped:
+        born = nd.get("t") or 0
+        top = _top_of(nid)
+        # The dispatches this goal owns. Placement is authoritative when the judge has spoken:
+        # a task placed under ANOTHER card can never retire this stamp (the user 2026-07-27:
+        # unrelated returns were lifting CI-wait stamps — one lifted the same minute it was
+        # re-asserted). The time window survives only for placement-unknown launches (the
+        # conservative pre-verdict shape): launched during the goal's life, at or before the
+        # stamp it explains — bounded by when that stamp was WRITTEN, not by its turn-trigger
+        # anchor, which the launches of that very turn all postdate (see _stamp_written_at).
+        horizon = _stamp_written_at(nd)
+        own = []
+        for t in every:
+            p = placed.get(t.get("id"))
+            if p is not None:
+                if p == top:
+                    own.append(t)             # the goal's own thread, before OR after the stamp:
+                    #                           anything of its own still out keeps the wait honest
+            elif born <= (t.get("t") or 0) <= horizon:
+                own.append(t)
+        if not own:                           # nothing dispatched → not a background wait; leave it
+            # …EXCEPT a stamp standing over an authoritatively EMPTY in-harness world: the
+            # backend's lifecycle set present and empty, no live subagents, nothing running in
+            # the transcript. Two shapes, one writer:
+            #  - kind=agents (the user 2026-08-24): an agents-kind wait ends with task
+            #    notifications, and with no dispatch recorded ANYWHERE no such event can ever
+            #    arrive — the shape a closer mints when it misreads peer sessions as agents,
+            #    orphaned for good the moment a restart clears the world it described. Same
+            #    evidence-postdates-anchor rule as every lift: the (re)spawn must be newer than
+            #    the stamp's anchor — or the transcript itself shows NOTHING running at all
+            #    (2026-08-25 audit: the misread-peer-as-agents shape needs no respawn to prove
+            #    the notification can never arrive; the pairing already did).
+            #  - kind=task/job (2026-09-05): a closer stamped a top kind=job for a Monitor plus
+            #    a background command the session ITSELF was running, the planner placed both
+            #    launches on a sibling top, and this skip kept the stamp 17 hours over an empty
+            #    registry with nothing pending anywhere (the wake below it never reached it —
+            #    nudges off, top all-delegated). The deciding event is the LAST in-harness item
+            #    ENDING after the stamp (_bg_ended_after: a terminal record, a Monitor's recorded
+            #    ceiling, the launch ledger's stop tombstone, or the CLI respawn that killed
+            #    everything) — a world already empty when the judge stamped is a wait on
+            #    something the registry cannot see (a CI run), and stays the dead-man's. An
+            #    ARMED kernel watch for this sid (a PR watch) is a carrier still running: its
+            #    delivery is the ending, so the stamp stands. The owned-dispatch job rule below
+            #    ("the watcher dying is the carrier going") is untouched: it needs a dispatch of
+            #    the goal's OWN to protect, and this branch has none.
+            _kind, _anchor0 = nd.get("awaitingKind"), nd.get("awaitingAt") or 0
+            _empty = reg_ids is not None and not reg_ids and not snap.get("subagents") and not running
+            # `_ended` = the newest in-harness ending this lift cites — its EVIDENCE HORIZON
+            # (record_verdict end_ev, 2026-09-07). An agents lift resting on no recorded ending
+            # at all (a stamp over a transcript where nothing ever ran, no respawn past the
+            # anchor: the misread-peers-as-agents shape) rules "the authoritative registry shows
+            # nothing running NOW and nothing ever ended", so the registry read's moment is what
+            # it ruled through, the dead-man lift's own choice for the same shape of ruling
+            # (_wake_goal), and journaled as read, never floored to the second: the gates compare
+            # a horizon against raw evidence times, and int(now) disowned an assert triggered in
+            # the read's own second. Journaling none instead (review find, 2026-09-08) left the gates
+            # reading the row's anchor, which disowns nothing: a lagging closer's re-assert from a
+            # segment triggered inside (anchor, lift) stood, the next pass re-lifted on the same
+            # empty world, and every re-lift re-armed the nudge ladder: a permanent flap on no
+            # new information, where main's arrival compare had suppressed the re-assert.
+            _ended, _lift = 0, False
+            if _empty and _kind == "agents" \
+                    and (sp > _anchor0 or not any(t.get("status") == "running" for t in every)):
+                _ended = _bg_ended_after(every, tombs, sp, _anchor0, now, kind=_kind) or now
+                _lift = True
+            elif _empty and _kind in ("task", "job") and not _kernel_watch_armed(sid):
+                # endings are measured from the stamp's WRITE time (_stamp_written_at), not
+                # the audited turn's trigger: an item that returned mid-turn, before the
+                # closer even wrote the stamp, is not the world emptying after it (review
+                # find on #936, 2026-09-07)
+                _ended = _bg_ended_after(every, tombs, sp, _stamp_written_at(nd), now, kind=_kind)
+                _lift = bool(_ended)
+            if _lift and jd.may_apply(store, nd, "romp", "awaiting", _lift_ev_t(nd, now)):
+                out.append((nid, top, True, _ended))
+            continue
+        live_set = running_job if nd.get("awaitingKind") == "job" else running
+        if any(t.get("id") in live_set for t in own):
+            continue                          # at least one is genuinely still out
+        # The lift's event is a return the stamp was WAITING ON — one that landed after the
+        # stamp's ANCHOR (endT past the audited turn's trigger; a launch past it necessarily
+        # returned past it too; a kindless expiry "returns" at its recorded deadline). A
+        # dispatch already terminal in a turn the stamping judge had ALREADY AUDITED can't
+        # evidence the wait's end: the judge stamped knowing that completion, so the wait is
+        # about something else, and the goal keeps its stamp + 6h wake like any dispatch-less
+        # wait. The boundary is the anchor, NOT the write time (`horizon`): the write postdates
+        # the whole audited turn, so testing against it would also disown mid-turn and
+        # audit-lag returns the judge never saw (the suite pins those as lifting). Without
+        # this, a stamp about external cluster work lifted the same minute it was written off
+        # a workflow hours dead — and the lift row then MOOTED the nudge-failure evaluation,
+        # parking the card in Working with no reviver left (an idle experiment session,
+        # 2026-08-16).
+        _anchor = nd.get("awaitingAt") or 0
+
+        def _return_ev(t):
+            # the evidence time of this dispatch's RETURN, the ONE conditioning both the "did
+            # anything return after the anchor" test and the horizon this lift journals read
+            # (review find, 2026-09-08: two hand-kept copies had drifted, and the older one still
+            # counted an UNSPENT ceiling, so a dead watcher whose ceiling lay ahead lifted off a
+            # horizon older than the anchor it retracted). A terminal record's endT; for a task
+            # the pairing still shows running, the respawn that killed it (dead) or its recorded
+            # ceiling once that has PASSED (expired); the launch as the floor (a launch past the
+            # anchor returned past it). A ceiling that has not passed is never evidence: the
+            # completion path leaves `deadline` in place, so a watcher that fired early carries a
+            # FUTURE ceiling, and folding it unconditionally pushed the horizon past the clock;
+            # a min() floor then journaled the tick time, arrival by another name.
+            ev = max(t.get("endT") or 0, t.get("t") or 0)
+            if t.get("status") == "running":
+                if t.get("id") in dead:
+                    ev = max(ev, sp)
+                if em._bg_expired(t, now):
+                    ev = max(ev, t.get("deadline") or 0)
+            return ev
+
+        def _returned_after(t):
+            return _return_ev(t) > _anchor
+        if not any(_returned_after(t) for t in own):
+            continue
+        # THE STAND-DOWN RULE, joined (the 2026-08-19 audit): a writer whose evidence
+        # predates the diary yields — but only on a RE-ASSERT. The flap's signature is the
+        # closer re-affirming the wait AFTER a prior lift of this same stamp: everything
+        # this lift can cite (returns that preceded that lift) was already ruled on once,
+        # so lifting again off it produced the observed 2-3 second stamp↔lift flaps that
+        # reset the nudge ladder (fires 5s after a lift, three first-nudges in 21 minutes —
+        # the session had re-armed a watcher the ownership window cannot see). A FIRST
+        # stamp keeps the designed audit-lag lift: the write postdates the whole audited
+        # turn, and returns the judge never saw must still lift (the suite pins those).
+        _aw = [e for e in (nd.get("log") or []) if e.get("kind") == "awaiting"]
+        # the RE-ASSERT test asks about the diary's write order — was the wait re-affirmed after
+        # the lift was FILED — so arrival is the right timebase for these two…
+        _last_lift = max((e.get("at") or e.get("ev_t") or 0 for e in _aw if e.get("lift")), default=0)
+        _last_assert = max((e.get("at") or e.get("ev_t") or 0 for e in _aw if not e.get("lift")), default=0)
+        # …but the EVIDENCE test compares evidence to evidence: the newest return this lift can
+        # cite against the newest evidence any prior lift RULED ON (its journaled horizon,
+        # jd._wait_end_ev), never that lift's arrival. Read as arrival, a lift filed late for
+        # evidence up to T_ev claimed everything before its filing, so a return landing between
+        # T_ev and the filing was never citable and the stamp stayed on new information
+        # (2026-09-07). `<=`: a return AT the horizon is the very return that lift cited.
+        _horizon = max((jd._wait_end_ev(e) for e in _aw if e.get("lift")), default=0)
+        _evidence = max((_return_ev(t) for t in own), default=0)   # conditioned as _returned_after
+        if _last_lift and _last_assert > _last_lift and _evidence <= _horizon:
+            continue                          # every citable return was already ruled on by that
+            #                                   lift — re-lifting off it is the flap. A return
+            #                                   NEWER than the last lift is new information even
+            #                                   when the re-assert's WRITE postdates it by seconds:
+            #                                   the closer's audit segment ended before the return
+            #                                   landed (2026-08-25 audit — a watcher's stamp written
+            #                                   17s after its merge notification stood 9.5h because
+            #                                   write-time was read as the epistemic boundary)
+        # this lift's own horizon: the newest return it cites — the very `_evidence` the gate
+        # above measured, so what a lift journals is by construction what its stand-down compares
+        if jd.may_apply(store, nd, "romp", "awaiting", _lift_ev_t(nd, now)):
+            out.append((nid, top, True, _evidence))
+    return out
 
 
 _PREV_ALIVE = None                       # last tick's alive sids — a sid LEAVING is the death event
@@ -14232,7 +14509,17 @@ def _sdk_locked():
                 mcp_config=(str(_SDK_MCP) if _SDK_MCP.exists() else None),
                 append_prompt_path=(str(_SDK_PROMPT) if _SDK_PROMPT.exists() else None),
                 log=lambda m: sys.stderr.write("sdk-backend: %s\n" % m),
-                reconcile=True)   # boot reconcile: reap orphaned CLIs, resume cut turns, deliver persisted queues
+                reconcile=True,   # boot reconcile: reap orphaned CLIs, resume cut turns, deliver persisted queues
+                # the API-health aggregator's boot clock: this kernel's own _STARTED, which the aggregator
+                # truncates to the millisecond (the precision of every stamp in the payload) and serves as
+                # /api-health's bootAt, so a bucket the boot seeded is unknown since the kernel's own start
+                # and the hover's head, divider and restart row name one time (the aggregator's own clock would
+                # run seconds later: this backend is built after the boot's imports, migrations and warm-up).
+                # The float, never int(): truncated to the second boundary BEFORE the process started, the seed
+                # would sort under a row the previous kernel filed in that same second, and the tail would read
+                # the old kernel's last state as current above the restart row. /version's `started` is the
+                # same start in whole seconds.
+                boot_at=_STARTED)
             # a limit-shaped judge error envelope pokes ONE exact usage poll (get_usage rides turn
             # ends, so an idle fleet's usage.json goes stale — measured ~15h — and the rate gate is
             # only as good as that file); the backend picks any live login session to ask
@@ -15057,7 +15344,7 @@ def _drive(msg, client):
         return False
     t = msg.get("type")
     ID_OPS = ("sendMessage", "rewindSend", "rewindDelete", "interrupt", "compactSession", "dismissDialog", "answerAsk", "navAsk", "toggleAsk", "submitAsk",
-              "addCustomAsk", "cancelAsk", "askText", "cancelQueued", "dismissEcho", "apiRetry", "setModel", "setEffort", "setMode", "setFast",
+              "addCustomAsk", "cancelAsk", "askText", "cancelQueued", "dismissEcho", "apiRetry", "editQueued", "setModel", "setEffort", "setMode", "setFast",
               "setAuth", "endSession", "renameSession", "moveSession", "stopTask", "rewindFiles", "mcpAction", "forkSession",
               "commentCreate", "commentReply", "commentResolve", "commentDelete", "commentSeen", "commentPromote",
               "commentMerge")
@@ -15276,6 +15563,35 @@ def _drive(msg, client):
             # had already gone through, or never reached this kernel. sid only: the body is the user's text
             sys.stderr.write("queued-cancel miss: %s (body-only)\n" % sid)
         client["send"](json.dumps({"type": "cancelResult", "ok": not err, "id": sid,
+                                   "md": md, "text": err or ""}))
+        _push_soon()
+    elif t == "editQueued" and msg.get("park") is not None:
+        # ✎ on a PARKED message (the user 2026-09-08): replace its words in place — same slot, same
+        # follow-up context. The result frame is authoritative like the ✕'s: ok:false means the message
+        # left the queue meanwhile (or the chip is not a message), and the client hands the typed words
+        # back to the composer instead of leaving them nowhere.
+        err = _edit_parked(sid, int(msg["park"]), str(msg.get("md") or ""), str(msg.get("text") or ""))
+        client["send"](json.dumps({"type": "editResult", "ok": not err, "id": sid,
+                                   "md": str(msg.get("md") or ""), "text": err or ""}))
+        _push_soon()
+    elif t == "editQueued" and msg.get("idx") is not None and hasattr(be, "edit_queued"):
+        # ✎ on a backend-queue message: replaced under the backend's lock, drift-guarded by the body.
+        err = _edit_backend_queued(be, sid, int(msg["idx"]), str(msg.get("md") or ""), str(msg.get("text") or ""))
+        client["send"](json.dumps({"type": "editResult", "ok": not err, "id": sid,
+                                   "md": str(msg.get("md") or ""), "text": err or ""}))
+        _push_soon()
+    elif t == "editQueued" and msg.get("md"):
+        # ✎ at the OPTIMISTIC stage: no park/idx has round-tripped yet, so locate the send by body wherever
+        # it landed — the FIFO first, then the backend's queue (the ws is ordered: the send op was processed
+        # before this edit). Neither holding it means it already forwarded into the CLI: the honest refusal.
+        md = str(msg["md"])
+        new_text = str(msg.get("text") or "")
+        err = _edit_parked(sid, -1, md, new_text)
+        if err and hasattr(be, "edit_queued"):
+            err2 = _edit_backend_queued(be, sid, -1, md, new_text)
+            if err2 is None:
+                err = None
+        client["send"](json.dumps({"type": "editResult", "ok": not err, "id": sid,
                                    "md": md, "text": err or ""}))
         _push_soon()
     elif t == "dismissEcho" and hasattr(be, "dismiss_echo"):
@@ -19326,17 +19642,21 @@ def _pr_watch_notice(verdict, repo, pr, detail="", replay=False, ended_owner="")
            else "you asked romp to watch")
     if verdict == "merged":
         body = "[romp] The pull request %s has MERGED: %s. This watch is done." % (who, ref)
+        gist = "pull request %s merged" % ref
     elif verdict == "closed":
         body = ("[romp] The pull request %s was CLOSED without merging: %s. "
                 "This watch is done." % (who, ref))
+        gist = "pull request %s closed without merging" % ref
     elif verdict == "failed":
         body = ("[romp] The pull request %s has a FAILED check (%s): %s. "
                 "It will not land on its own — it needs your attention. This watch is done."
                 % (who, detail or "a check", ref))
+        gist = "pull request %s has a failed check" % ref
     else:   # the loud gh-failure retire
         body = ("[romp] romp could not read %s (gh said: %s) after several tries, so this watch was "
                 "dropped — check `gh auth status` on this machine and re-register with `romp watch-pr` "
                 "if you still need it." % (ref, detail or "an unknown error"))
+        gist = "the watch on pull request %s was dropped" % ref
     if ended_owner:
         body += " That session has ended, so this comes to you as the escalation contact named for it."
     if replay:
@@ -19344,6 +19664,9 @@ def _pr_watch_notice(verdict, repo, pr, detail="", replay=False, ended_owner="")
     # romp-injected: the chat classifies by MARKER, never by prose (T130) — without it this notice
     # rendered as a generic tagged machine message instead of wearing the romp attribution the
     # nudges wear; romp-system marks the mechanics-notice family; the tag stays as the shape's id.
+    # romp-gist is the one-line user-facing head the chat shows (2026-09-08, see sdk_backend); it
+    # closes the prose line so the marker tail below stays LAST (test_pr_watch pins the tail's end).
+    body += _romp_gist(gist)
     return body + "\n\n<!-- romp-injected --><!-- romp-system --><!-- romp-tag: pr-watch -->"
 
 
@@ -19845,6 +20168,8 @@ def _watch_notice(kind, row, detail=""):
     watch service, like the pr-watch and restart notices). PURE for the voice test. The session's
     own `note` leads when present — the user's words for what they were waiting on."""
     what = row.get("note") or ("`%s`" % str(row.get("cmd") or "")[:120])
+    gist = {"met": "the condition it was watching now holds", "timeout": "a watch timed out without holding",
+            "soft": "still watching past the requested bound"}.get(kind, "a watch command could not run")
     if kind == "met":
         body = ("[romp] The condition you asked romp to watch now HOLDS: %s. This watch is done."
                 % what)
@@ -19865,7 +20190,8 @@ def _watch_notice(kind, row, detail=""):
         body = ("[romp] The watch command could not run at all (%s): %s. This watch was dropped — "
                 "fix the command and re-register with `romp watch`."
                 % (detail or "exec failed", what))
-    # same marker discipline as the pr-watch notice above (T130)
+    # same marker discipline as the pr-watch notice above (T130); the gist closes the prose line, the tail stays last
+    body += _romp_gist(gist)
     return body + "\n\n<!-- romp-injected --><!-- romp-system --><!-- romp-tag: watch -->"
 
 
@@ -22688,9 +23014,28 @@ def _genuine_queued(text):
     return not ("romp-msg-id" in t or t.startswith("####################") or "\U0001F4EC" in t)
 
 
+# A [romp] mechanics notice's ONE-LINE, user-facing head (2026-09-08): `<!-- romp-gist: … -->`, written by the
+# notice's emitter beside its other markers (sdk_backend BOOT_RESUME_NUDGE & co., _pr_watch_notice,
+# _watch_notice) and lifted here into ev["gist"], so the chat never has to show the agent-facing body's first
+# sentence as a head. Comment form only, like every other romp marker: prose merely mentioning a gist is not one.
+ROMP_GIST_RE = re.compile(r"<!--\s*romp-gist:\s*(.*?)\s*-->")
+
+
+def _romp_gist(text):
+    """The marker an emitter appends to a romp SYSTEM notice — the head the chat shows for it."""
+    return "<!-- romp-gist: %s -->" % str(text or "").replace("-->", "").strip()
+
+
+def _romp_system_gist(text):
+    """The lifted gist of a romp SYSTEM notice, or None when the notice predates gists (the chat falls back to
+    the first line then, as it always did)."""
+    m = ROMP_GIST_RE.search(text or "")
+    return m.group(1) if m else None
+
+
 def _queued_romp_flags(text):
-    """The flags a LANDED romp-injected message gets from its markers (romp / rompSystem / rompAuto — see the
-    user-event build), read off a QUEUED text so the client can draw the same gray romp notice grammar for a
+    """The flags a LANDED romp-injected message gets from its markers (romp / rompSystem / rompAuto / gist — see
+    the user-event build), read off a QUEUED text so the client can draw the same gray romp notice grammar for a
     notice romp itself queued (T243, the user 2026-09-07: a queued watch notice wore the user's own pending
     bubble). The markers stay in the text; the client hides them the way the landed card does."""
     t = text or ""
@@ -22699,6 +23044,9 @@ def _queued_romp_flags(text):
         out["romp"] = True
     if "<!-- romp-system -->" in t:
         out["rompSystem"] = True
+        g = _romp_system_gist(t)
+        if g:
+            out["gist"] = g
     if "<!-- romp-auto -->" in t:
         out["rompAuto"] = True
     return out
@@ -22950,6 +23298,7 @@ def _undelivered_wake_tail(path):
 
 
 _api_err_cache = {}           # path -> ((mtime, size), err|None)
+_api_last_failed_cache = {}   # path -> ((mtime, size), err|None, out_t): _api_last_failed's own (the latch)
 
 
 _SESSION_STAMP_CACHE = {}    # sid -> ((goals mtime,size, overrides mtime,size), ((gid, at, why, kind), stamped tops)) — see _session_stamp_read
@@ -23799,68 +24148,159 @@ def _seg_of_tool_uses(ps, store, tool_ids):
     return found
 
 
-_BG_TOPS_CACHE = {}    # sid -> ((transcript stat, goals stat, overrides stat, tid tuple), {tid: top})
+_BG_TOPS_CACHE = {}    # sid -> (parse object, store object, {tid: top or None}), see _bg_placed_tops
+_PLACEMENT_IDX = {}    # sid -> (store object, {jd._seg_key(placement key): its first value in dict order})
+_bg_tops_stats = {"hit": 0, "miss": 0, "resolve": 0, "walk": 0, "walk_neg": 0, "idx_build": 0}
+_BG_TOPS_STATS_LOCK = threading.Lock()   # the counters are bumped from the pusher and the handler threads
 
 
-def _bg_placed_tops(sid, path, tids):
+def _bg_tops_bump(key, n=1):
+    with _BG_TOPS_STATS_LOCK:
+        _bg_tops_stats[key] += n
+
+
+def _bg_tops_report():
+    """The memo's counters plus its occupancy, for /perf (memos.bgTops): `hit` calls answered from the
+    per-version map, `miss` calls that looked up at least one tid, `resolve` tids looked up on a miss (placed
+    or not), `walk` transcript walks (_seg_of_tool_uses) and `walk_neg` the walks that left at least one
+    asked tid unresolved (an upper bound on what a negative walk cache would save: such a cache, keyed per
+    parse to stay exact, saves only the re-walks under one parse), `idx_build` placement indexes built (one
+    per store object asked, a writer's private copy included), and the gauge `entries` (sids holding a
+    map)."""
+    with _BG_TOPS_STATS_LOCK:
+        out = dict(_bg_tops_stats)
+    out["entries"] = len(_BG_TOPS_CACHE)
+    return out
+
+
+def _placement_index(placements):
+    """{jd._seg_key(k): v} over a store's placements, the FIRST key in dict order winning (setdefault): for
+    any looked-up key that normalizes to a seg key, exactly the value jd._placement_of's scan returns for
+    it, a None-valued retired entry included."""
+    idx = {}
+    for k, v in placements.items():
+        idx.setdefault(jd._seg_key(k), v)
+    return idx
+
+
+def _placed_via_index(placements, idx, seg_id):
+    """jd._placement_of(placements, seg_id) answered from _placement_index: the exact key when it is
+    present (its value, None included, the scan never runs), else the normalized key's first match."""
+    if seg_id in placements:
+        return placements[seg_id]
+    return idx.get(jd._seg_key(seg_id))
+
+
+def _bg_placed_tops(sid, path, tids, store=None):
     """{tid: owning top node id} for the live background-task launches the JUDGE has PLACED: launch
-    tool_use id → the transcript segment holding it (_seg_of_tool_uses via _task_seg_cache — a launch's
-    segment never changes) → the store's placement for that segment → the placed node's top ancestor.
+    tool_use id -> the transcript segment holding it (_seg_of_tool_uses via _task_seg_cache: a launch's
+    segment never changes) -> the store's placement for that segment, under the four suffixes
+    jd._placement_of accepts, read from a per-store index (_placement_index) -> the placed node's top
+    ancestor.
 
     A tid ABSENT from the result is a launch the judge hasn't spoken for yet (segment unparsed or
-    unplaced, no goal store, unreadable evidence) — the AWAITED-conservative default every consumer
-    keys on. Cached on the transcript + goal-store + override-journal file stats and the tid set (the
-    _session_stamp_read pattern): an idle session hits this every render, and load_goals is a full
-    read + override replay."""
+    unplaced, no goal store, unreadable evidence): the AWAITED-conservative default every consumer
+    keys on.
+
+    The answer is a function of (the parse object, the store object, the _task_seg_cache positives, which
+    rest on the standing "a launch's segment never changes" assumption), and the memo is keyed on exactly
+    those two objects: _BG_TOPS_CACHE[sid] = (ps, store, {tid: top or None}) holds every tid asked so far
+    under one (parse, store) pair, a hit iff both objects in hand ARE the entry's. Identity, not a stat: the
+    awaiting lift asks with every task id the transcript records and the feed with the live ids, a subset
+    that is often empty, so one map answers both and the feed's ask never evicts the lift's fill; and a
+    stat is not the version: a rewrite that keeps the mtime and the byte count is served stale under a
+    stat key, and a stat taken beside a read can describe a version the read did not see (a publish
+    between the two records one version's identity under another's placements, so a launch the closer
+    moved under another card still reads as this goal's own).
+    _parse returns one object per transcript version and load_goals_shared one FrozenStore per store
+    version, so identity is the version. `store`: the caller's own store (a caller deciding on a store
+    hands it in, so the placement it reads and the stamps it rules on come from one object); None reads
+    through load_goals_shared. A store that is not the shared cache's FrozenStore (no file, the cache off,
+    an unreadable journal, a writer's private copy) is computed on and never published as an entry.
+    _PLACEMENT_IDX[sid] = (store, index) is keyed on the store object alone, so the writer's copy misses it
+    harmlessly. While the shared cache is off (_SHARED_OFF: a reader wrote to a shared view, a judge-errors
+    row names the site, off until the kernel restarts) every store=None call is a full load_goals and
+    nothing is memoized; acceptable because that state is a loud error, not a mode the kernel runs in.
+
+    Threads: the pusher and the handler threads (build_session, _session_awaiting) both run this. An entry
+    is read into locals once, a fill builds a NEW dict from it and publishes a NEW tuple; nothing writes
+    into an entry in place, so a reader holding the old tuple keeps a consistent (ps, store, map). Entries
+    are dropped when a session asks with no live tids and the pinned parse is no longer the transcript's
+    current one (below: the pin the bound is for), and when the sid leaves the alive set (the awaiting
+    lift's end-of-tick prune, _lift_spent_awaiting)."""
     sid = str(sid)
     tids = tuple(sorted(t for t in tids if t))
     if not tids or not path:
+        # Nothing to answer. The feed, chat and timeline builds ask here with an EMPTY live set for a
+        # session whose tasks all returned, several times per cycle, while the lift's ask (every task id
+        # the transcript records) is what filled the entry; evicting on every empty ask would make the lift
+        # miss every cycle and re-walk the transcript. Release the pinned parse only when it is no longer
+        # the transcript's current parse: _parse answers _parse_cache[path][1] on a hit, so an entry whose
+        # parse IS that object costs no memory beyond the parse every build holds anyway, and one whose
+        # parse is not (the transcript was re-parsed, or nothing is cached) is the stale pin the bound is
+        # for.
+        ent = _BG_TOPS_CACHE.get(sid)
+        cur = _parse_cache.get(path) if path else None
+        if ent is None or cur is None or ent[0] is not cur[1]:
+            _BG_TOPS_CACHE.pop(sid, None)
+            _PLACEMENT_IDX.pop(sid, None)
         return {}
     try:
-        st = os.stat(path)
-        tkey = (st.st_mtime, st.st_size)
-    except OSError:
-        tkey = None
-    try:
-        gs = (jd.GOALDIR / (sid + ".json")).stat()
-        gkey = (gs.st_mtime, gs.st_size)
-    except Exception:
-        return {}                                    # no store yet → nothing placed
-    try:
-        ostt = (jd._overrides_dir() / (sid + ".jsonl")).stat()
-        okey = (ostt.st_mtime, ostt.st_size)
-    except Exception:
-        okey = None                                  # no override journal is normal
-    key = (tkey, gkey, okey, tids)
-    hit = _BG_TOPS_CACHE.get(sid)
-    if hit and hit[0] == key:
-        return hit[1]
-    out = {}
-    try:
+        if store is None and not os.path.exists(str(jd.GOALDIR / (sid + ".json"))):
+            return {}                                # no store yet -> nothing placed: no parse, no fallback load
         ps = _parse(path, sid, time.time())
-        store = jd.load_goals(sid)
-        nodes = (store or {}).get("nodes") or {}
+        if store is None:
+            store = jd.load_goals_shared(sid)
+        ent = _BG_TOPS_CACHE.get(sid)
+        known = ent[2] if (ent is not None and ent[0] is ps and ent[1] is store) else None
+        if known is not None and all(t in known for t in tids):
+            _bg_tops_bump("hit")
+            return {t: known[t] for t in tids if known[t] is not None}
+        _bg_tops_bump("miss")
+        nodes = store.get("nodes") or {}
         placements = store.get("placements") or {}
-        need = [t for t in tids if (sid, t) not in _task_seg_cache]
+        shared = isinstance(store, jd.FrozenStore)
+        pidx = _PLACEMENT_IDX.get(sid)
+        if pidx is not None and pidx[0] is store:
+            idx = pidx[1]
+        else:
+            idx = _placement_index(placements)
+            _bg_tops_bump("idx_build")
+            if shared:
+                _PLACEMENT_IDX[sid] = (store, idx)
+        todo = tids if known is None else tuple(t for t in tids if t not in known)
+        need = [t for t in todo if (sid, t) not in _task_seg_cache]
         if need and ps and nodes:
-            for tid, sgid in _seg_of_tool_uses(ps, store, need).items():
+            found = _seg_of_tool_uses(ps, store, need)
+            for tid, sgid in found.items():
                 _task_seg_cache[(sid, tid)] = sgid
-        for tid in tids:
+            _bg_tops_bump("walk")
+            if len(found) < len(need):
+                _bg_tops_bump("walk_neg")
+        fill = dict(known) if known is not None else {}
+        for tid in todo:
+            fill[tid] = None
             sgid = _task_seg_cache.get((sid, tid))
             if not sgid:
-                continue                             # unresolvable launch → unplaced (see docstring)
-            nid = next((v for v in (jd._placement_of(placements, sgid + suf)
-                                    for suf in ("", "#live", "#p", "#d")) if v), None)
-            seen = set()                             # placed node → its top ancestor (cycle-guarded)
+                continue                             # unresolvable launch -> unplaced (see docstring)
+            nid = None
+            for suf in ("", "#live", "#p", "#d"):
+                v = _placed_via_index(placements, idx, sgid + suf)
+                if v:
+                    nid = v
+                    break
+            seen = set()                             # placed node -> its top ancestor (cycle-guarded)
             while nid in nodes and nodes[nid].get("parentId") is not None and nid not in seen:
                 seen.add(nid)
                 nid = nodes[nid]["parentId"]
             if nid in nodes:
-                out[tid] = nid
+                fill[tid] = nid
+        _bg_tops_bump("resolve", len(todo))
+        if shared:
+            _BG_TOPS_CACHE[sid] = (ps, store, fill)  # a new tuple, never a write into the old one
+        return {t: fill[t] for t in tids if fill[t] is not None}
     except Exception:
-        return {}                                    # unreadable evidence → nothing placed (conservative)
-    _BG_TOPS_CACHE[sid] = (key, out)
-    return out
+        return {}                                    # unreadable evidence -> nothing placed (conservative)
 
 
 def _bg_owner_tops(fsid, path, tasks):
@@ -24692,21 +25132,33 @@ def _spend_dialog_showing(pane):
 _API_ERR_TAIL_WINDOW = int(os.environ.get("ROMP_API_ERR_TAIL_WINDOW", "262144"))
 
 
-def _api_error_scan(path, start):
-    """One pass of _api_error's classification from byte `start` to EOF → (err, decided).
+def _api_error_pass(path, start):
+    """One pass from byte `start` to EOF answering BOTH transcript readers at once
+    -> (err, decided, latched, decided_latched, out_t).
 
-    The loop is _api_error's original whole-file scan, UNCHANGED (one dedent) except that each of its
-    three `err = ...` sites now also sets `decided`. That flag is the window's own proof of sufficiency:
-    True iff this pass saw a record that ASSIGNS the verdict (an isApiErrorMessage assistant record,
-    fresh assistant output, or a genuine user prompt) — exactly the record the whole-file scan's result
-    depends on, since everything before it is overwritten. False means the window started too late and
-    the caller must widen; True means this window's answer IS the whole file's answer.
+    err / decided are _api_error's. The loop is _api_error's original whole-file scan, changed only at its three
+    `err = ...` sites (each also sets `decided`, and the two assistant sites set `latched`, `decided_latched` and
+    `out_t`) and at the refusal branch, which marks both dicts. `decided` is the window's own proof of
+    sufficiency: True iff this pass saw a record that ASSIGNS the verdict (an isApiErrorMessage assistant
+    record, fresh assistant output, or a genuine user prompt), exactly the record the whole-file scan's result
+    depends on, since everything before it is overwritten. False means the window started too late and the
+    caller must widen; True means this window's answer IS the whole file's answer.
 
-    A non-zero `start` lands mid-line, so the first partial line is dropped. model_refusal_* records
-    land a few records AFTER the error they annotate and only mutate an err already set, so they need no
-    special handling: with their error out of window nothing is assigned, and the caller widens."""
+    latched / decided_latched are _api_last_failed's (the bottom bar's API health cell): the same verdict with
+    the user branch inert, so a genuine prompt neither clears nor decides it and an error record holds until
+    fresh ASSISTANT output, through romp's own injected RETRY_MSG and through a human prompt alike (neither is
+    information about the API; the API's answer is). An assistant record decides both, so decided_latched
+    implies decided. out_t is the newest assistant OUTPUT record's timestamp while that record is the newest
+    assistant record, else 0: the spend pause's recovery signal (_auto_resume_retry).
+
+    A non-zero `start` lands mid-line, so the first partial line is dropped. model_refusal_* records land a
+    few records AFTER the error they annotate and only mutate an err already set, so they need no special
+    handling: with their error out of window nothing is assigned, and the caller widens."""
     err = None
     decided = False
+    latched = None
+    decided_latched = False
+    out_t = 0
     with open(path, errors="replace") as f:
         if start > 0:
             f.seek(start)
@@ -24729,42 +25181,47 @@ def _api_error_scan(path, start):
                     # "prompt is too long" is NOT a transient API error (the user 2026-06-29): it means the
                     # context needs compacting → it's on YOU. Flag it so it (and only it) blocks; other API
                     # errors are transient (auto-retry recovers them) and stay in Working.
-                    decided = True
-                    err = {"text": text, "status": o.get("apiErrorStatus"),
-                           "category": o.get("error") or "unknown",
-                           # the error RECORD's identity — a new failed attempt writes a new record,
-                           # so this uuid IS the error episode (one auto-retry per episode, apiRetry)
-                           "uuid": o.get("uuid"),
-                           "tooLong": "too long" in text.lower(),
-                           # a spend cap is on YOU (raise it), like tooLong — but ALSO stops the
-                           # auto-retry entirely (no reset to wait out); see _auto_pause_on_spend_limit
-                           "spendLimit": _is_spend_limit(text),
-                           # a model's own allowance is spent — on YOU too (switch model / add
-                           # credits), and the auto-retry keeps running only because the window does
-                           # eventually reset; see _is_model_limit
-                           "modelLimit": _is_model_limit(text),
-                           # a dead credential (no login / refused key) — on YOU, never auto-retried;
-                           # see _is_auth_error (per-session auth, the user 2026-08-08)
-                           "authErr": _is_auth_error(text),
-                           # the error's parent = the refused/failed USER message — kept so the
-                           # system model_refusal_* record below can link itself to THIS episode
-                           "parentUuid": o.get("parentUuid"),
-                           # a safeguards refusal is deterministic on the same input — on YOU
-                           # (rewrite the ask or drop the thread), never auto-retried; see
-                           # _is_refusal_text, and the system-record event path below (the user
-                           # 2026-08-15, after one refused prompt drew 12 auto-retries in ~6min)
-                           "refusal": _is_refusal_text(text)}
+                    decided = decided_latched = True
+                    out_t = 0                             # the newest assistant record is a failure again
+                    err = latched = {"text": text, "status": o.get("apiErrorStatus"),
+                                     "category": o.get("error") or "unknown",
+                                     # the error RECORD's identity — a new failed attempt writes a new record,
+                                     # so this uuid IS the error episode (one auto-retry per episode, apiRetry)
+                                     "uuid": o.get("uuid"),
+                                     # the record's own time, the event stamp the API health frame's `since`
+                                     # carries (never the clock, so an unchanged world serializes identically)
+                                     "t": int(em.parse_z(o.get("timestamp")) or 0),
+                                     "tooLong": "too long" in text.lower(),
+                                     # a spend cap is on YOU (raise it), like tooLong — but ALSO stops the
+                                     # auto-retry entirely (no reset to wait out); see _auto_pause_on_spend_limit
+                                     "spendLimit": _is_spend_limit(text),
+                                     # a model's own allowance is spent — on YOU too (switch model / add
+                                     # credits), and the auto-retry keeps running only because the window does
+                                     # eventually reset; see _is_model_limit
+                                     "modelLimit": _is_model_limit(text),
+                                     # a dead credential (no login / refused key) — on YOU, never auto-retried;
+                                     # see _is_auth_error (per-session auth, the user 2026-08-08)
+                                     "authErr": _is_auth_error(text),
+                                     # the error's parent = the refused/failed USER message — kept so the
+                                     # system model_refusal_* record below can link itself to THIS episode
+                                     "parentUuid": o.get("parentUuid"),
+                                     # a safeguards refusal is deterministic on the same input — on YOU
+                                     # (rewrite the ask or drop the thread), never auto-retried; see
+                                     # _is_refusal_text, and the system-record event path below (the user
+                                     # 2026-08-15, after one refused prompt drew 12 auto-retries in ~6min)
+                                     "refusal": _is_refusal_text(text)}
                 elif (isinstance(c, list) and any(isinstance(b, dict)
                         and b.get("type") in ("text", "tool_use", "thinking") for b in c)) \
                         or (isinstance(c, str) and c.strip()):
-                    decided = True
-                    err = None                            # fresh assistant output → recovered
+                    decided = decided_latched = True
+                    err = latched = None                  # fresh assistant output → recovered
+                    out_t = int(em.parse_z(o.get("timestamp")) or 0)
             elif t == "user":
                 c = (o.get("message") or {}).get("content")
                 is_tool_result = isinstance(c, list) and any(
                     isinstance(b, dict) and b.get("type") == "tool_result" for b in c)
-                if not is_tool_result:                    # a genuine prompt (e.g. a retry) clears it
-                    decided = True
+                if not is_tool_result:                    # a genuine prompt (e.g. a retry) clears _api_error's
+                    decided = True                        # verdict and decides it; the latch ignores it
                     err = None
             elif t == "system" and o.get("subtype") in ("model_refusal_no_fallback",
                                                         "model_refusal_fallback"):
@@ -24777,9 +25234,62 @@ def _api_error_scan(path, start):
                 # parent in 2 of 13 refusal records of one storm — and deliberately not
                 # record-alone: the CLI also omits this record for some refusal errors, which is
                 # why the text signature above stays co-equal rather than a legacy fallback.
-                if err is not None and o.get("parentUuid") == err.get("parentUuid"):
-                    err["refusal"] = True
-    return err, decided
+                for d in (err, latched):                  # the same dict when both still hold the episode
+                    if d is not None and o.get("parentUuid") == d.get("parentUuid"):
+                        d["refusal"] = True
+    return err, decided, latched, decided_latched, out_t
+
+
+def _api_error_scan(path, start, user_clears=True):
+    """_api_error_pass for ONE reader -> (err, decided): _api_error's verdict by default, the latch's with
+    user_clears=False. The differential tests read the scan through this name; the kernel reads the pass."""
+    err, decided, latched, decided_latched, _ = _api_error_pass(path, start)
+    return (err, decided) if user_clears else (latched, decided_latched)
+
+
+def _api_stat_key(path):
+    """The (mtime, size) both transcript caches key on, or None when the file cannot be stat'ed."""
+    try:
+        st = os.stat(path)
+        return (st.st_mtime, st.st_size)
+    except OSError:
+        return None
+
+
+_API_UNDECIDED = object()   # _api_error_read's latch slot when the read stopped before an assistant record
+
+
+def _api_error_read(path, key, latch):
+    """The tail-first widening read behind BOTH readers, filling both caches from ONE pass: without it,
+    _api_last_failed would re-read and re-parse the same tail _api_error had just scanned, for every active
+    session, every cycle. `latch` names the verdict the caller needs decided: _api_error's decides at the
+    newest prompt or assistant record and keeps exactly the offsets it always read; the latch's needs an
+    assistant record. Whatever this read settled (or proved by reaching byte 0) is cached for both, so the
+    pusher's second question about the same transcript in the same cycle is a cache hit.
+    -> (err, latched, out_t); latched is _API_UNDECIDED when a non-latch read stopped before an assistant
+    record (the latch's own read then widens, rarely: a tail of prompts longer than the window)."""
+    size = key[1]
+    # TAIL-FIRST: the pusher calls this per session per push, and the old whole-file read cost
+    # O(transcript) on EVERY append — the same unamortized shape the assembly fold retired for the
+    # event-model parse, left behind here. Widen 4x until a pass reports it saw the deciding record.
+    win = max(1, _API_ERR_TAIL_WINDOW)   # a knob of 0 or less would never widen (0*4 stays 0): clamp, don't spin
+    while True:
+        start = size - win if win < size else 0
+        err, decided, latched, decided_latched, out_t = _api_error_pass(path, start)
+        whole = start <= 0
+        if whole or decided_latched or (decided and not latch):
+            break
+        win *= 4
+    if len(_api_err_cache) > 256:
+        _api_err_cache.clear()
+    _api_err_cache[path] = (key, err)                     # decided, or the whole file: final either way
+    if decided_latched or whole:
+        if len(_api_last_failed_cache) > 256:
+            _api_last_failed_cache.clear()
+        _api_last_failed_cache[path] = (key, latched, out_t)
+    else:
+        latched = _API_UNDECIDED
+    return err, latched, out_t
 
 
 def _api_error(path):
@@ -24789,37 +25299,57 @@ def _api_error(path):
     model_not_found) but that flag is the invariant, so detection is exact, not a text heuristic (the
     user 2026-06-16). The session is blocked iff such a record is the LAST productive thing in the
     transcript: a later genuine user prompt (a retry) or fresh assistant output (an internal retry that
-    succeeded) clears it. Returns {text,status,category} or None. Event-based; cached by (mtime,size)
-    like _parse, since build_session/build_feed call it per push."""
-    try:
-        st = os.stat(path)
-        key = (st.st_mtime, st.st_size)
-        size = st.st_size
-    except OSError:
-        key = None
-        size = 0
+    succeeded) clears it. Returns {text,status,category,...} or None. Event-based; cached by (mtime,size)
+    like _parse, since build_session/build_feed call it per push. One read serves this and the latch
+    (_api_error_read)."""
+    key = _api_stat_key(path)
     hit = _api_err_cache.get(path)
     if hit is not None and key is not None and hit[0] == key:
         return hit[1]
-    err = None
+    if key is None:
+        return None
     try:
-        # TAIL-FIRST: the pusher calls this per session per push, and the old whole-file read cost
-        # O(transcript) on EVERY append — the same unamortized shape the assembly fold retired for the
-        # event-model parse, left behind here. Widen 4x until a pass reports it saw the deciding record.
-        win = max(1, _API_ERR_TAIL_WINDOW)   # a knob of 0 or less would never widen (0*4 stays 0): clamp, don't spin
-        while True:
-            start = size - win if win < size else 0
-            err, decided = _api_error_scan(path, start)
-            if decided or start <= 0:
-                break
-            win *= 4
+        return _api_error_read(path, key, latch=False)[0]
     except OSError:
         return None
-    if key is not None:
-        if len(_api_err_cache) > 256:
-            _api_err_cache.clear()
-        _api_err_cache[path] = (key, err)
-    return err
+
+
+def _api_last_failed(path):
+    """The session's newest API error record if no ASSISTANT OUTPUT has followed it, else None: _api_error's
+    latched sibling (the bottom bar's API health cell). Same tail-first widening, its own (mtime, size)
+    cache, one difference: a user prompt does not clear the record. _api_error answers 'is this session
+    blocked right now', and a retry prompt rightly un-blocks it; but romp's own auto-retry IS a user prompt
+    (RETRY_MSG), so a count keyed on _api_error read '1 waiting', 'ok', '1 waiting' on every rung of
+    RETRY_BACKOFF during an outage. The API's own answer, output or a new error record, is the only event
+    that moves this. Returns the pass's err dict (with `t`, the record's time) or None."""
+    key = _api_stat_key(path)
+    hit = _api_last_failed_cache.get(path)
+    if hit is not None and key is not None and hit[0] == key:
+        return hit[1]
+    if key is None:
+        return None
+    try:
+        return _api_error_read(path, key, latch=True)[1]
+    except OSError:
+        return None
+
+
+def _api_last_output_t(path):
+    """The timestamp of the session's newest ASSISTANT OUTPUT record while that record is the newest
+    assistant record (the latch is clear), else 0: a user prompt is not output, a tool result is not output,
+    and an error record after it means no fresh answer stands. Kept beside the latch by the same read, so
+    the pusher pays nothing extra for it. The spend pause lifts on this (_auto_resume_retry), never on the
+    transcript's mtime, which a prompt moves too."""
+    key = _api_stat_key(path)
+    hit = _api_last_failed_cache.get(path)
+    if hit is not None and key is not None and hit[0] == key:
+        return hit[2]
+    if key is None:
+        return 0
+    try:
+        return _api_error_read(path, key, latch=True)[2]
+    except OSError:
+        return 0
 
 
 def _suppress_kernel_driven_ask(sid, ask, now=None):
@@ -27780,6 +28310,18 @@ def _cancel_miss_text(md):
             "and will be answered in the current turn")
 
 
+def _edit_miss_text(md):
+    """The user-facing 'too late' for an EDIT whose target already left the queue — the ✕'s twin
+    (_cancel_miss_text): once the session has the message there is no recall, so the words it answers
+    are the ones it got. The client hands the edited text back to the composer on this frame, so
+    nothing is lost and nothing is sent twice (the user 2026-09-08)."""
+    body = (md or "").strip()
+    if body.startswith("/"):
+        return "too late to edit %s — the session already has it" % body.split()[0]
+    return ("too late to edit — the message already reached the session as it was, "
+            "and will be answered in the current turn")
+
+
 def _cancel_parked(sid, park, md, qid=None):
     """Remove ONE parked op — the queued bubble's ✕ (the user 2026-07-08). Verified by body text: if the
     park list shifted between the push and the click (ops applied / another cancel), the index alone
@@ -27865,6 +28407,101 @@ def _cancel_backend_queued(be, sid, idx, md, qid=None):
         return _cancel_miss_text(md)
     got = be.unqueue(sid, idx, pending[idx])
     return None if got is not None else _cancel_miss_text(md)
+
+
+def _replace_followup_body(text, body):
+    """`text` with its user-visible BODY replaced by `body` and everything else kept byte for byte. A plain
+    send IS its body. A romp FOLLOW-UP keeps its leading goal-context quote and its trailing romp markers —
+    the follow-up judge reopens the goal off the romp-goal-id marker — so an edited follow-up still files
+    under its goal. The inverse of _split_followup's body read: _split_followup(_replace_followup_body(t,
+    b))[1] == b.strip(). The queued bubble's ✎ hands the kernel the BODY the bubble showed (the ✕'s drift
+    guard reads the same body), and the kernel keeps the wrapper the client never saw."""
+    body = (body or "").strip()
+    if not text or not _FOLLOWUP_GOAL_RE.search(text):
+        return body
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines) and lines[i].lstrip().startswith(">"):
+        i += 1
+    head = "\n".join(lines[:i])
+    rest = "\n".join(lines[i:])
+    # The trailing marker block, one comment at a time: a comment can never span another's close, so an
+    # inline <!-- x --> INSIDE the old body cannot anchor the tail and drag old words behind the new body
+    # (review find, 2026-09-08: the .*? form under re.S did exactly that). Of the block, only the WRAPPER's
+    # own markers survive (romp-note / romp-injected / romp-auto / romp-goal-id, _followup_body's tail): a
+    # marker that described the old BODY, like the Continue button's romp-canned, would make the typed
+    # replacement render as the canned gesture row, so it goes with the words it described.
+    cmt = r"<!--(?:(?!-->).)*-->"
+    m = re.search(r"((?:\s*%s)+\s*)$" % cmt, rest, flags=re.S)
+    keep = [c for c in re.findall(cmt, m.group(1), flags=re.S)
+            if re.match(r"<!--\s*romp-(?:note|injected|auto|goal-id)\b", c)] if m else []
+    return (head + "\n\n" if head else "") + body + ("\n\n" + "".join(keep) if keep else "")
+
+
+def _edit_parked(sid, park, md, text):
+    """Replace the BODY of one parked SEND in place — the queued bubble's ✎ (the user 2026-09-08). Same
+    slot in the FIFO (park order IS delivery order, so the edited message still goes where it would
+    have), same echo author, and a follow-up keeps its goal quote and markers (_replace_followup_body).
+    Verified by body text and refused on the in-flight head exactly as _cancel_parked is: the locate and
+    the swap are ONE step under the queue lock, so the drain cannot pop the head between them. Only a
+    send is editable — a command / compact / model chip has no words to change (cancel it and type it
+    again), and a non-send match is refused with its own sentence rather than the 'too late' one, which
+    would be a lie. Returns None on success, else the text for the client to toast. Logged like the
+    cancel: sid and kind, never the body, which is user text."""
+    sid = str(sid)
+    body = (text or "").strip()
+    if not body:
+        return "nothing to send — to drop the message, use its ✕"
+    if _is_slash_command(body):
+        # an edit swaps the WORDS of a ("send", ...) op and nothing else, so a command edited in would stay a
+        # send and reach the model as text, skipping the fire-alone park and the kernel-side setters every
+        # typed command gets (review find, 2026-09-08). The composer mirrors this refusal (SLASH_CMD_RE).
+        return "a queued message cannot become a command: cancel it with its ✕ and type the command"
+    with _pending_ops_lock:
+        ops = _pending_ops.get(sid) or []
+        inflight_head = bool(ops) and ops[0] is _inflight_ops.get(sid)   # the head is with the backend this instant
+        if not (0 <= park < len(ops)) or (md and _parked_md(ops[park]) != md):
+            park = next((j for j, op in enumerate(ops)
+                         if _parked_md(op) == md and not (j == 0 and inflight_head)), -1) if md else -1
+            if park < 0:
+                return _edit_miss_text(md)
+        if park == 0 and inflight_head:
+            return _edit_miss_text(md)            # too late, not a wrong-op rewrite
+        op = ops[park]
+        if op[0] != "send":
+            return "only a queued message can be edited — cancel this %s and type it again" % (
+                "command" if op[0] in ("command", "compact") else "change")
+        sys.stderr.write("parked-op edit: %s send\n" % sid)
+        ops[park] = ("send", _replace_followup_body(op[1], body)) + tuple(op[2:])
+        _save_pending_ops()
+    _mark_views_dirty()
+    return None
+
+
+def _edit_backend_queued(be, sid, idx, md, text):
+    """edit_queued with _cancel_backend_queued's DRIFT GUARD: re-locate the entry by body if the backend
+    queue moved between the push and the click, then replace it in place under the backend's lock
+    (edit_queued's `expect`), keeping a follow-up's wrapper. Returns None on success; on a MISS — the
+    message already forwarded to the CLI, where no recall exists — the 'too late' text to toast."""
+    body = (text or "").strip()
+    if not body:
+        return "nothing to send — to drop the message, use its ✕"
+    if _is_slash_command(body):
+        # replace_queued swaps the queued text in place, so SdkBackend.send's /compact and /clear cues would
+        # never fire for a command edited in; same refusal as _edit_parked (review find, 2026-09-08)
+        return "a queued message cannot become a command: cancel it with its ✕ and type the command"
+    try:
+        pending = be.pending_queued(sid)
+    except Exception:
+        pending = []
+    if md:
+        if not (0 <= idx < len(pending)) or _split_followup(pending[idx])[1] != md:
+            idx = next((i for i, q in enumerate(pending) if _split_followup(q)[1] == md), -1)
+    if not (0 <= idx < len(pending)):
+        return _edit_miss_text(md)
+    old = pending[idx]
+    got = be.edit_queued(sid, idx, _replace_followup_body(old, body), old)
+    return None if got is not None else _edit_miss_text(md)
 
 
 def _queue_recallable(be, sid):
@@ -30157,6 +30794,9 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
                                     ev["rompSystem"] = True  #   distinctly → its OWN notice card, not a nudge bubble.
                                     #   Comment form only (the user 2026-07-08): content merely MENTIONING
                                     #   romp-system must not flip the card kind (same class as ROMP_INJECT_RE).
+                                    g = _romp_system_gist(text)   # the notice's user-facing head (2026-09-08)
+                                    if g:
+                                        ev["gist"] = g
                             if imgs:
                                 ev["images"] = imgs
                             events.append(ev)
@@ -31065,10 +31705,17 @@ def build_episode(sid, now):
 _CLEARED_MEMO = {"slot": None}     # (key, parsed set) or None: the clear log's stat taken BEFORE the read, and the set read under it
 _CLEARED_STATS = {"served": 0, "derived": 0}   # bumped from the pusher AND socket threads (undo, connect-time builds) with
 #                                                no lock: a lost count under a race is tolerated, these are diagnostics only
+# The id families cleared.jsonl holds that name no session (review find, 2026-09-09), each built for the feed:
+# "parked:<msgId>" and "quarantine:<mid>" key a message, and "provisional:", "awaiting:" and "blocked:" + sid are
+# the placeholders build_feed re-lists every build whatever the clear log holds. The footer's Clear-all (the
+# clearAll handler) clears every ask build_feed lists, these included, so their rows arrive live and, the log being
+# append-only, accumulate. An explicit list rather than a shape test on the stem: the goals/ stems are the ground
+# truth for a session id and any uuid text is a valid one; a new family that keys no session is added here.
+_CLEARED_NO_SESSION = ("parked:", "quarantine:", "provisional:", "awaiting:", "blocked:")
 
 
 def _cleared_foreign(cleared):
-    """The ledger's ids that belong to no local session: no goal store and no archive here for the id's sid. A
+    """The cleared ids that name a session with no goal store and no archive here. A
     merged board routes a card's gestures to the owning kernel by id, but a viewer's ledger can still hold a
     remote card's clear (a gesture taken while the owner was unreachable, a ledger copied between machines,
     an older client), and the owning kernel's archive projection reads only its own ledger; so the viewer's
@@ -31082,8 +31729,15 @@ def _cleared_foreign(cleared):
         except OSError:
             pass
     # newest first under the cap (T287: a cut by id text dropped yesterday's clears on a long ledger), and only
-    # ids that name a session (a bare node id a mis-stripped route once recorded matches no card anywhere)
-    foreign = [i for i in cleared if ":" in i and i.rsplit(":", 1)[0] not in local]
+    # ids that name a session (a bare node id a mis-stripped route once recorded matches no card anywhere).
+    # The prefixed families are skipped as well (review find, 2026-09-09): the text before their last colon is a
+    # word, never a goals/ stem, so each read as foreign and rode every frame, local or not, and one Clear-all on
+    # a board of placeholders crowded a remote session's clears out of the cap. None names a session whose clear
+    # rows a kernel reads: a parked or quarantine id keys a message, so this kernel cannot tell its own from a
+    # remote one (after delivery or a decision the record is gone, the row is not), and no kernel honors a clear
+    # row for a placeholder, so no overlay could apply one. Only "sid:gN" ids ride.
+    foreign = [i for i in cleared if ":" in i and not i.startswith(_CLEARED_NO_SESSION)
+               and i.rsplit(":", 1)[0] not in local]
     foreign.sort(key=lambda i: (-(cleared.get(i) or 0), i))
     return foreign[:500]
 
@@ -37370,14 +38024,18 @@ def _client_reset_chat_base(client):
     rarer live), the `ready` dispatch died in the handler's generic except, and the _push_one repair this
     exists for was skipped for that pane, once per renderer life. The same lock serializes the two — and
     _send_chat holds it across its read-decide-send-write, so a pusher chat send lands as a whole either
-    before the reset (its slot and tail entry are cleared, _push_one re-sends) or after it."""
+    before the reset (its slot and tail entry are cleared, _push_one re-sends) or after it.
+    The ("taborder",) slot goes too: a renderer that just evaluated holds no tab strip either, and the pusher
+    fires from accept, so this socket may have been sent the strip before the bundle's listener existed;
+    with the slot kept, the connect push's strip at `ready` was deduped against that one for _DEDUP_REPOST_S
+    (an unchanged strip: the same signature) and the page had no tabs until the strip changed."""
     with _client_lock(client):
         client.get("echat", {}).clear()
         # …and the reconnect skeleton set (2026-09-07): a renderer that just evaluated holds NOTHING, so there
         # is nothing it could lazily reload — every tab must arrive whole, and the status slots go with the set
         client.pop("skeleton", None); client.pop("skeletonOrder", None); client.pop("reconnect", None)
         snt = client.get("sent", {})
-        for k in [k for k in snt if isinstance(k, tuple) and k and k[0] in ("chat", "status")]:
+        for k in [k for k in snt if isinstance(k, tuple) and k and k[0] in ("chat", "status", "taborder")]:
             snt.pop(k, None)
 
 
@@ -37431,10 +38089,10 @@ def _skeleton_for(c, act, chat_list):
 
 def _resolve_reconnect(c, chat_list):
     """Consume a client's reconnect flag and fix its skeleton set — ONCE, by the first tabOrder sender that sees
-    it (the pusher, _push_session_now, _confirm_close_now, ready), so no strip can reach a reconnecting client
-    before its set exists: a close confirmation landing in the gap before the pusher's first pass would
-    otherwise paint the page's stale sessions as loaded tabs. No active hint (no localStorage) → the kernel
-    cannot know what the page shows → no set → today's full push (fail safe)."""
+    it (the pusher, the connect push a `ready` triggers included, _push_session_now, _confirm_close_now), so no
+    strip can reach a reconnecting client before its set exists: a close confirmation landing in the gap before
+    the pusher's first pass would otherwise paint the page's stale sessions as loaded tabs. No active hint (no
+    localStorage) → the kernel cannot know what the page shows → no set → today's full push (fail safe)."""
     # ATOMIC under the client's slot lock, flag to set (review find 2026-09-07): with the pop and the stats outside
     # it, a second strip sender racing this one popped False, sent a keyless strip and a FULL for some sid, and
     # this sender then wrote a set still naming that sid — held whole by the client yet served only status frames
@@ -40652,6 +41310,22 @@ def _pure_feed(now, tmux):
 _NOTIFY_PREV = [None]   # itemId -> column at the last build; None = baseline pending
 
 
+def _notify_title(name, needs_you=False):
+    """The ONE title every notification wears — desktop, phone, test push, and a relayed event as
+    its origin composed it (the user 2026-09-09, whose phone found the notifications too busy: a
+    lowercase "romp: web" over a body that had to carry the kind read like a subtitle). Two shapes
+    and no third: an event that needs the user is "Romp needs you: <session>"; everything else — a
+    completion, a turn end, the test — is "Romp: <session>". The body is the event's own and stays
+    as it was; the kind is decided by the CALLER from authoritative state (a card's column), never
+    from the body text. `name` is the session's name and nothing more: no host prefix, no sid, no
+    decoration — the tap carries the routing in the payload's `data`, and which machine a session
+    runs on is not the user's concern in the words they read. With no name (a sid-less test) the
+    title is the bare wordmark."""
+    name = " ".join(str(name if name is not None else "").split())
+    head = "Romp needs you" if needs_you else "Romp"
+    return "%s: %s" % (head, name) if name else head
+
+
 def _system_notify(title, body):
     """Best-effort OS notification (macOS osascript; notify-send elsewhere) — fire-and-forget Popen so the
     pusher thread never blocks on it; never raises."""
@@ -40692,9 +41366,10 @@ def _feed_notifications(feed):
             continue
         if not _notify_card_effective(cards, iid, str(a.get("sid") or "")):
             continue
-        what = "Needs you" if col == "needs_input" else "Completed"
+        needs_you = col == "needs_input"                # the card's column: the authoritative state, not the words
+        what = "Needs you" if needs_you else "Completed"
         txt = str(a.get("text") or "").strip()
-        out.append(("romp: %s" % (a.get("name") or "session"),
+        out.append((_notify_title(a.get("name") or "session", needs_you),
                     "%s: %s" % (what, txt[:140] if txt else "a task changed state"),
                     str(a.get("sid") or ""), iid))
     return out
@@ -40720,6 +41395,170 @@ def _badge_push(n):
         return
     _BADGE_LAST[0] = n
     _send_to_app("shell", {"type": "badge", "n": n})
+
+
+# ── The bottom bar's API health cell: one glance answers 'is the API serving my sessions', beside the usage
+# readout. Built from what the kernel already owns: the merged live map's retrying state (the SDK api_retry
+# storm), each alive transcript's LATCHED newest API error (_api_last_failed) and the global retry-pause
+# file, never from the /api-health ratio machine (threshold-and-hold transitions evaluated at read time) and
+# never from a clock: every field moves on one named event (a retry frame, an isApiErrorMessage record,
+# fresh assistant output, a pause set or lifted, a session leaving the roster), so an unchanged world
+# serializes identically and sends nothing.
+#
+# States: ok; degraded, with a class word by plurality over the affected sessions, 429 rate limited /
+# 529 overloaded / offline (this machine cannot reach the API) / errors, and the count waiting
+# (retrying + stopped on an error record); paused, red, with the pause's latched reason (limit / spend /
+# manual), outranking every degraded reading since nothing retries and the judges are gated too.
+# On-you failures (tooLong / modelLimit / authErr / refusal) do NOT count: they already wear red on that
+# session's tab and card, and the cell answers for the API, not for the session. A spend cap counts,
+# and engages the spend pause in the same cycle anyway. The web shell's rail only, for now; the VS Code
+# strip twin (strip.ts apiCell's sibling, with a --st-retrying token) and the phone's Usage-modal section
+# (no rail on the phone) are named follow-ups.
+_APIH_TEXT = {                 # the ONE table of rail words: the rail, the detail header and the tests read `text`
+    "ok": "ok",
+    "429": "rate limited",
+    "529": "overloaded",
+    "offline": "offline",
+    "errors": "errors",
+    "limit": "paused · usage limit",
+    "spend": "paused · spend cap",
+    "manual": "paused by you",
+}
+_APIH_ORDER = ("429", "529", "offline", "errors")   # the fixed tie order for the plurality class
+
+
+def _apih_status(status):
+    """The wire's status as a positive int, or None (bools, blanks, zeros and non-digits are no status)."""
+    if isinstance(status, bool):
+        return None
+    if isinstance(status, (int, float)):
+        return int(status) if int(status) > 0 else None
+    if isinstance(status, str) and status.strip().isdigit():
+        return int(status.strip()) or None
+    return None
+
+
+def _apih_class(status, category="", network_down=None):
+    """One affected session's class for the rail: "429" | "529" | "offline" | "errors". A kernel-local
+    twin of sdk_backend.api_health_status_class collapsed to the four rail words (tests pin agreement on the
+    shared statuses): its 5xx / other / none all read "errors" here, except a no-status attempt the CLI
+    flagged is_network_down, which is this machine's connectivity, not the API: "offline". Only a retrying
+    row can say offline: a transcript error record carries no network flag."""
+    st = _apih_status(status)
+    if st is not None:
+        if st == 429:
+            return "429"
+        if st == 529:
+            return "529"
+        return "errors"
+    cat = str(category or "").strip().lower()
+    if cat == "rate_limit":
+        return "429"
+    if cat == "overloaded":
+        return "529"
+    if cat in ("server_error", "authentication_failed", "billing_error", "invalid_request"):
+        return "errors"
+    return "offline" if network_down is True else "errors"
+
+
+def _api_health_frame(now, tmux):
+    """The apiHealth shell frame for this cycle (the block comment above says what it reads). `tmux` is
+    the cycle's merged live map (Sessions.live()). Every timestamp is an event stamp, a record's time, the
+    storm turn's start (SdkSession.since moves once per fresh turn, not per attempt) or the pause's t, never
+    the clock, so two cycles over the same world return equal dicts and _api_health_push sends nothing.
+    Rows sort by (since, sid) so the roster's mtime order cannot reshuffle an unchanged world into a send.
+    Nothing from retryInfo but status and networkDown: attempt / retryAt tick per attempt. `seq` counts
+    pause-file writes, an event, so a write that put the same state back still yields a new frame."""
+    paused = _retry_paused_on()
+    reason = ""
+    pause_t = 0
+    if paused:
+        r = _retry_pause_reason()
+        reason = r if r in ("limit", "spend") else "manual"
+        pause_t = int(_retry_pause_ts() or 0)
+    rows = []
+    n_tmux = 0
+    live = tmux if isinstance(tmux, dict) else {}
+    for s in _alive_sessions(now, tmux):
+        sid = str(s.get("sid") or "")
+        if not sid:
+            continue
+        if Sessions.backend_for(sid) is _TMUX:
+            n_tmux += 1                                # transcript-only coverage: the detail says so
+        tm = live.get(sid) or {}
+        if tm.get("state") == "retrying":              # the SDK api_retry storm: set per frame, cleared
+            info = tm.get("retryInfo") if isinstance(tm.get("retryInfo"), dict) else {}   # when output resumes
+            status = info.get("status")
+            row = {"kind": "retrying", "cls": _apih_class(status, "", info.get("networkDown")),
+                   "since": int(tm.get("since") or 0)}
+        else:
+            path = s.get("path")
+            e = _api_last_failed(path) if path else None
+            if not e or e.get("tooLong") or e.get("modelLimit") or e.get("authErr") or e.get("refusal"):
+                continue                               # nothing latched, or an on-you failure (the session's own)
+            status = e.get("status")
+            # The word follows the LIVE state: a turn open on the retry prompt (romp's own, or a human's) with
+            # no api_retry frame yet, or a tmux session's whole internal retry, reads 'retrying', not
+            # 'stopped'. The latch only keeps the row counted; since stays the record's time.
+            kind = "retrying" if tm.get("state") == "working" else "blocked"
+            row = {"kind": kind, "cls": _apih_class(status, e.get("category"), None),
+                   "since": int(e.get("t") or 0)}
+        row.update({"sid": sid, "name": s.get("name") or sid[:8], "color": _name_color(sid),
+                    "status": _apih_status(status), "suppressed": _session_retry_suppressed(sid)})
+        rows.append(row)
+    rows.sort(key=lambda r: (r["since"], r["sid"]))
+    cls = ""
+    if rows:
+        counts = {}
+        for r in rows:
+            counts[r["cls"]] = counts.get(r["cls"], 0) + 1
+        cls = max(_APIH_ORDER, key=lambda c: (counts.get(c, 0), -_APIH_ORDER.index(c)))
+    n = len(rows)
+    if paused:
+        state = "paused"
+        text = _APIH_TEXT[reason] + (" · %d waiting" % n if n else "")
+        since = pause_t
+    elif rows:
+        state = "degraded"
+        text = "%s · %d waiting" % (_APIH_TEXT[cls], n)
+        since = min((r["since"] for r in rows if r["since"]), default=0)
+    else:
+        state, text, since = "ok", _APIH_TEXT["ok"], 0
+    return {"type": "apiHealth", "state": state, "cls": cls, "reason": reason, "text": text,
+            "waiting": n, "retrying": sum(1 for r in rows if r["kind"] == "retrying"),
+            "blocked": sum(1 for r in rows if r["kind"] == "blocked"),
+            "since": since, "tmux": n_tmux, "sessions": rows,
+            # the pause file's write count (_RETRY_PAUSE_SEQ): a press on the detail's pause button writes it,
+            # so the frame after the press differs from every frame before it even when the auto-pause put
+            # the same state back within the same second; the shell clears its acknowledgment on that
+            "seq": _RETRY_PAUSE_SEQ[0]}
+
+
+# The last apiHealth frame the shells heard, as its sorted serialization (None = nothing since boot): the
+# _BADGE_LAST pattern. The frame holds no clock, so the whole string is the change key.
+_APIH_LAST = [None]
+
+
+def _api_health_push(frame):
+    """Send the frame to every connected shell when it CHANGED, else nothing. No per-client repost (the
+    _send_client 60 s re-send would repeat an identical frame): a shell that connects gets the last frame
+    from the ready handler (_apih_resend)."""
+    s = json.dumps(frame, sort_keys=True)
+    if s == _APIH_LAST[0]:
+        return
+    _APIH_LAST[0] = s
+    _send_to_app("shell", frame)
+
+
+def _apih_resend(client):
+    """A shell that just sent `ready` paints its API cell from the last frame, verbatim, so an identical
+    frame cannot pulse the cell (the client diffs state and text before touching the DOM). Chat and pane
+    clients get nothing: only the shell owns the rail."""
+    if client.get("app") == "shell" and _APIH_LAST[0] is not None:
+        try:
+            client["send"](_APIH_LAST[0])
+        except Exception:
+            pass
 
 
 # ── Web Push: the same bell events, delivered to the phone (plans/ios-app.md proposal 2; the user
@@ -40903,18 +41742,30 @@ def _push_session_name(sid, label=""):
     (_remote_name_of), host-prefixed the way the merged dashboard shows it; then the caller's `label` (the
     shell's own tab text — display-only, clipped and flattened, never consulted ahead of the kernel's copy);
     then the short id. "" for no session."""
+    return _push_session_names(sid, label)[0]
+
+
+def _push_session_names(sid, label=""):
+    """_push_session_name's lookup, returning BOTH forms as a (name, bare) pair: `name` host-prefixed
+    for a federated session the way the merged dashboard shows it, `bare` the session's own name with
+    no host in front — what _notify_title puts in a notification's title (the user 2026-09-09: which
+    machine a session runs on is not their concern in the words they read; the tap carries the
+    routing). One lookup for both so a body and its title can never name two different sessions.
+    The label and short-id stand-ins are shared: neither has a host to strip. ("", "") for no session."""
     sid = str(sid or "")
     if not sid:
-        return ""
+        return "", ""
     label = " ".join(str(label or "").split())[:PUSH_LABEL_MAX]
     if ":" in sid:
-        pfx, bare = sid.split(":", 1)
-        rn = _remote_name_of(pfx, bare)
+        pfx, bare_sid = sid.split(":", 1)
+        rn = _remote_name_of(pfx, bare_sid) or ""
         name = ("%s:%s" % (pfx, rn)) if rn else ""
     else:
-        bare = sid
-        name = _name_of(bare) or ""
-    return name or label or bare[:8]
+        bare_sid = sid
+        rn = _name_of(bare_sid) or ""
+        name = rn
+    stand_in = label or bare_sid[:8]
+    return (name or stand_in), (rn or stand_in)
 
 
 def _push_test(endpoint, sid="", host="", label=""):
@@ -40943,9 +41794,9 @@ def _push_test(endpoint, sid="", host="", label=""):
     (_remote_name_of), worn host-prefixed the way the merged dashboard shows it. When the kernel
     truly has no name — a host not polled yet, a kernel too old to file names — the shell's
     `label` stands in: the active tab's own text, the user's UI text and nothing more, so it is
-    clipped and flattened here and never consulted ahead of the kernel's own copy. Neither → the
-    short id, as before."""
-    sid, host, name = str(sid or ""), str(host or ""), ""
+    clipped and flattened (_push_session_names) and never consulted ahead of the kernel's own copy.
+    Neither → the short id, as before."""
+    sid, host, name, bare_name = str(sid or ""), str(host or ""), "", ""
     # One stderr line per test push (2026-09-08: a phone's test tap brought romp forward and nothing more,
     # and the journal could not say whether the test had carried a session at all — this route logged nothing).
     # The session's id clipped, the endpoint's host only: enough to match the shell's client-diag row.
@@ -40957,11 +41808,16 @@ def _push_test(endpoint, sid="", host="", label=""):
         return {"ok": False, "status": 0, "detail": "this device isn't subscribed yet"}
     _vapid_keys()                                          # RuntimeError without cryptography → the route's 500
     if sid:
-        name = _push_session_name(sid, label)
+        # ONE lookup names the session in both forms (#1157's _push_session_name is the authority; the
+        # pair-returning twin below it keeps the two from ever disagreeing): the body, the echoed
+        # `name` and the payload's routing block wear the host-prefixed form the merged dashboard
+        # shows, while the TITLE wears the session name alone (_notify_title: the host is not the
+        # user's concern there — the tap carries the routing in `data`)
+        name, bare_name = _push_session_names(sid, label)
         body = "Test notification — tap to come back to %s." % name
     else:
         body = "Test notification — this device is set up."
-    payload = json.dumps(_push_payload("romp", body, sid=sid, kind="test", host=host, name=name)).encode()
+    payload = json.dumps(_push_payload(_notify_title(bare_name), body, sid=sid, kind="test", host=host, name=name)).encode()
     status, detail = _push_post(sub, payload)
     print("[push] test sid=%s endpoint=%s: %s" % (_tag, _ep_host, status), file=sys.stderr)
     ok = 200 <= status < 300
@@ -41092,7 +41948,7 @@ def _push_forward(events):
 
 # ── the turn-finished push (the bell popover's third row, 2026-09-05) ─────────────────────────────
 # With the master AND the turn switch on, every session's turn end buzzes the subscribed phones:
-# {title: the session's name, body: the first line of what it said, sid}. The EVENT is the session's
+# {title: "Romp: <the session's name>" (_notify_title), body: the first line of what it said, sid}. The EVENT is the session's
 # recorded settle — the Stop hook's `lastStopAt` stamp (SDK sessions) or the states/ 'waiting'/'idle'
 # transition the Stop hook writes (tmux) — read per pusher cycle, which the very same settle wakes
 # (/tick, the backend's poke). No timer, no transcript-mtime inference. The first sight of a session
@@ -41172,8 +42028,9 @@ def _turn_notify_tick(now, tmux):
         if not _buzz_claim(sid, key, "turn"):
             continue                                     # a bell event already buzzed for this turn end
         body = _first_line(_last_assistant_text(s.get("path") or "")) or "finished a turn"
-        title = str(s.get("name") or _name_of(sid) or sid[:8])
-        _push_notify(title, body, sid, kind="turn", name=title)     # badge omitted: the count rides its own push; the title IS the name
+        sname = str(s.get("name") or _name_of(sid) or sid[:8])
+        title = _notify_title(sname)                             # a turn end is never a needs-you
+        _push_notify(title, body, sid, kind="turn", name=sname)  # badge omitted: the count rides its own push; the routing block carries the name the title wears
         fired.append({"title": title, "body": body, "sid": sid, "kind": "turn"})   # the kind rides to peers too, so their tap lands the same way
     if fired:
         _push_forward(fired)                             # peers' phones hear it too, the bell-event way
@@ -41704,6 +42561,10 @@ def _pusher_cycle_jobs(now, tmux, any_client):
         _auto_resume_retry(now, tmux)
     except Exception:
         sys.stderr.write("auto-resume-retry: %s\n" % traceback.format_exc())
+    try:                                  # the bottom bar's API health cell: built AFTER this cycle's pause
+        _api_health_push(_api_health_frame(now, tmux))   # decisions, every cycle (a connecting shell gets a
+    except Exception:                     # current frame), sent only when it changed
+        sys.stderr.write("api-health-frame: %s\n" % traceback.format_exc())
     try:                                  # a per-session interrupt-suppressed retry re-arms once that thread lands a clean turn
         _auto_resume_session_retry(now, tmux)
     except Exception:
@@ -41939,7 +42800,19 @@ try{window.dispatchEvent(new Event("romp:wsfresh"));}catch(e){}}   // the pane's
 // checked at RAISE time (there is no event for a CSS display flip). The hidden pane still reconnects in
 // the background; if it is shown again while genuinely stale, its watchdog re-raises within one tick,
 // now visible, and the resync retires it exactly as before.
-function paneHidden(){try{return window.parent!==window&&(window.innerWidth===0||window.innerHeight===0);}catch(e){return false;}}
+// That probe is one of TWO witnesses, and this reads their union (ui/webview/paint-gate.ts states the rule). In
+// Chromium the probe is right for a pane hidden SINCE LOAD only: a display:none iframe keeps the size of its last
+// show there, so it misses every pane the shell hides after the user has looked at it, the phone shell's every
+// tab switch. The pane's own visibility code holds the two measures that do not miss it (document.hidden and its
+// IntersectionObserver) and publishes their union as window.__rompPaneHidden on its own events (paint-gate.ts
+// publishPaneHidden for the feed and Outline panes, ui/webview/chat-visibility.ts for the chat page, the
+// timeline's _publishPaneHidden; never a timer; nothing until the observer has spoken). Firefox is the mirror
+// image: a display:none iframe's viewport reads 0 (the probe is right) but its IntersectionObserver does not run,
+// so the word stays at its last verdict. So hidden is EITHER witness at raise time, the probe or a published
+// word of true, and never the word first. A standalone page (a bare /chat or /feed, no shell) reads the same word:
+// its own reload bar (selfStale) is held while the page's tab is hidden, and if the connection is still stale on
+// the return, the foreground redial's arm raises it, now visible.
+function paneHidden(){try{return (window.parent!==window&&(window.innerWidth===0||window.innerHeight===0))||window.__rompPaneHidden===true;}catch(e){return false;}}
 // every raise (and every hidden-pane suppression) leaves a clientDiag breadcrumb naming the pane, the
 // PATH that raised (reconnect/foreground), the socket state and the quiet gap — so the next "the banner
 // keeps flapping" report is diagnosable from client-diag.jsonl instead of re-hypothesized (the user
@@ -42753,15 +43626,25 @@ function shown(id){var p=document.getElementById(id);return p&&getComputedStyle(
 window.__rompGrowFair=function(k){if(k==='timeline')return;var v=PANES.filter(shown).map(function(id){return grow[key(id)];});
 var avg=v.length?v.reduce(function(a,b){return a+b;},0)/v.length:50;setGrow(k,avg);
 try{localStorage.setItem(GK,JSON.stringify(grow));}catch(e){}};
+// A drag moves a LANDING LINE and the panes take their widths ONCE, at release. A grow write re-lays out the row
+// and with it every same-origin pane document in that frame, so writing the pair on every mousemove cost one
+// relayout of every pane per pointer step, a cost that grows with what the panes hold (seconds a step once a pane
+// holds a large document). So mousemove only positions #gv-ghost, a fixed line over the row where the divider will
+// land, and mouseup writes the two grows and persists them. The pair is resolved before the drag classes go on, so
+// a grab with no pair leaves no col-resize cursor behind.
+var ghost=document.getElementById('gv-ghost');
 function gutter(gid,leftPick,rightId){var h=document.getElementById(gid);if(!h)return;
-h.addEventListener('mousedown',function(e){e.preventDefault();document.body.classList.add('drag','dragv');
+h.addEventListener('mousedown',function(e){e.preventDefault();
+var L=document.getElementById(leftPick()),R=document.getElementById(rightId);if(!L||!R)return;
+document.body.classList.add('drag','dragv');
 PANES.forEach(function(id){if(shown(id))setGrow(key(id),document.getElementById(id).offsetWidth);});
-var L=document.getElementById(leftPick()),R=document.getElementById(rightId);
-if(!L||!R)return;var wL=L.offsetWidth,wR=R.offsetWidth,sum=wL+wR,sx=e.clientX,mn=Math.min(120,sum*0.25);
-function mv(ev){var nL=Math.max(mn,Math.min(sum-mn,wL+(ev.clientX-sx)));setGrow(key(L.id),nL);setGrow(key(R.id),sum-nL);}
-function up(){document.body.classList.remove('drag','dragv');try{localStorage.setItem(GK,JSON.stringify(grow));}catch(e){}
+var wL=L.offsetWidth,wR=R.offsetWidth,sum=wL+wR,sx=e.clientX,mn=Math.min(120,sum*0.25),nL=wL,lx=L.getBoundingClientRect().left,rr=row.getBoundingClientRect();
+function show(){if(!ghost)return;ghost.style.top=rr.top+'px';ghost.style.height=rr.height+'px';ghost.style.left=(lx+nL)+'px';ghost.style.display='block';}
+function mv(ev){nL=Math.max(mn,Math.min(sum-mn,wL+(ev.clientX-sx)));show();}
+function up(){document.body.classList.remove('drag','dragv');if(ghost)ghost.style.display='none';
+setGrow(key(L.id),nL);setGrow(key(R.id),sum-nL);try{localStorage.setItem(GK,JSON.stringify(grow));}catch(e){}
 window.removeEventListener('mousemove',mv);window.removeEventListener('mouseup',up);}
-window.addEventListener('mousemove',mv);window.addEventListener('mouseup',up);});}
+show();window.addEventListener('mousemove',mv);window.addEventListener('mouseup',up);});}
 gutter('gv-a',function(){return 'chat-pane';},'fleet-pane');
 gutter('gv-b',function(){return document.body.classList.contains('po-fleet')?'fleet-pane':'chat-pane';},'feed-pane');
 tf&&tf.addEventListener('load',function(){autosize();
@@ -43035,7 +43918,8 @@ if(window.__rompKeysClose&&window.__rompKeysClose()){closed=true;}
 else{var sp=document.getElementById('rsp-back');
 if(sp&&!sp.hidden&&window.__rompCloseSpend){window.__rompCloseSpend();closed=true;}
 else{var ru=document.getElementById('ru-back');
-if(ru&&ru.classList.contains('on')&&window.__rompUsageClose){window.__rompUsageClose();closed=true;}
+if(ru&&ru.classList.contains('on')&&window.__rompApiClose){window.__rompApiClose();closed=true;}
+else if(ru&&ru.classList.contains('on')&&window.__rompUsageClose){window.__rompUsageClose();closed=true;}
 else{var er=document.getElementById('rerr-back');
 if(er&&!er.hidden&&window.__rompCloseErrs){window.__rompCloseErrs();closed=true;}
 else{var bp=document.getElementById('rbell-back');
@@ -43437,6 +44321,7 @@ tip.style.top=Math.max(6,r.top-tip.offsetHeight-8)+'px';}
 // Pulls fresh first so the numbers aren't a stale boot snapshot; any tap or Escape dismisses.
 window.__rompUsagePanel=function(){
 function openIt(){var h=tipHTML();if(!h)return;
+try{window.__rompApiClose&&window.__rompApiClose();}catch(e){}   // one modal on #ru-back at a time (the API detail does the same)
 // the deeper level is one tap away here too (T247): the rail — and its click — do not exist on a
 // phone, and a compact view must never dead-end (progressive disclosure)
 tip.innerHTML=h+'<div class=ru-tip-more><button class=rsp-btn id=ru-bysession>By session \u2192</button></div>';   // its own row, the hover's button size (T247b review: inside .ru-tip-age it read as a 10px annotation at .55)
@@ -43752,6 +44637,305 @@ pull(false);                                     // fill on load, independent of
 // VERTICAL bars when the left rail ran out of height. The bars are HORIZONTAL in the bottom bar now and only
 // ~text-height tall, so they always fit — nothing to degrade.)
 window.addEventListener('message',function(e){var m=e.data;if(m&&m.romp==='usage')render(m.usage);});})();
+"""
+
+
+# The bottom bar's API health cell: one dot and one word beside the usage readout, painted from the kernel's
+# apiHealth shell push (_api_health_frame), the reading on hover, the detail with its actions pinned on click
+# (or Enter / Space: the cell is a keyboard button). The cell and the frame's reading render ONLY from the last
+# pushed frame, no fetch, no timer: the frame moves on events, and the cell repaints only when its state or text
+# changed, so the ready re-send of an identical frame cannot pulse it. The hover's History section (the user
+# 2026-09-08, who wanted the cell's hover to carry some history the way the spend hover does) is the ONE read:
+# GET /api-health, the designed signal (docs/reference.md "The API-health signal"), fetched when the hover or the
+# detail opens and again when a frame lands on an open one. The signal derives its state at read time by design,
+# so the read is the observation; the frame stays byte-identical and its dedupe untouched. The detail card is
+# built in the usage tip's grammar and shares its skin (#ah-tip sits beside #ru-tip in every selector) and its
+# backdrop (#ru-back, one modal at a time).
+# The web shell's rail only, for now; the VS Code strip twin (strip.ts apiCell's sibling, with a --st-retrying
+# token) and the phone's Usage-modal section (no rail on the phone) are named follow-ups.
+_LANDING_APIH_JS = """
+(function(){var el=document.getElementById('rail-api');if(!el)return;
+var txt=el.querySelector('.ah-text');
+var tip=document.createElement('div');tip.id='ah-tip';tip.style.display='none';
+tip.setAttribute('role','tooltip');tip.setAttribute('aria-label','API health');tip.tabIndex=-1;document.body.appendChild(tip);
+// what the cell is described by while the hover shows (aria-describedby): a SHORT visually-hidden summary, refreshed
+// when the read lands, never the tip's whole text (the tip runs to hundreds of characters of rows, and at focus time,
+// when assistive tech reads the description, it would be the loader's markup); Enter reaches the rest
+var desc=document.createElement('span');desc.id='ah-summary';desc.className='ah-vh';document.body.appendChild(desc);
+var back=document.getElementById('ru-back');
+if(!back){back=document.createElement('div');back.id='ru-back';document.body.appendChild(back);}
+// LAST: the newest frame. pinned: the detail is the modal. held / dirty: a PRIMARY pointer is down over the detail
+// and a frame arrived meanwhile (painted on release). pending: a pause press awaiting the frame that answers it (1 =
+// stop sent, 0 = resume sent, null = none); pendSeq: the pause file's write count (frame.seq) when it was pressed,
+// so the frame that answers is the one whose seq moved. hint: the last failed send's reason, shown under the
+// button. lastX: where the hover anchored, so a re-anchor keeps its place. focusBack: where focus returns when the
+// detail closes.
+var LAST=null,pinned=false,held=false,dirty=false,pending=null,pendSeq=null,hint='',lastX=null,focusBack=null;
+// HIST: the last /api-health answer, {error} for a failed read, null before the first; histSeq keys the paint to the
+// newest read so an older answer landing last is dropped. skipFocus: the dialog's close refocuses the cell, and that
+// focus event must not pop the hover. winFocusEl: the element that held focus when the window's own focus event
+// fired, cleared on the next animation frame (an event, not a timer). When the window regains system focus the
+// browser re-dispatches focus on the active element in that same task (the cell keeps focus after Escape by
+// design), which is not the user reaching for the cell: the cell's focus is skipped only when the cell WAS that
+// element. Chromium fires the same window event whenever the focused FRAME changes, and the shell's panes are
+// iframes, so a Tab out of a pane onto the cell (its keyboard path here) arrives under the mark too; the recorded
+// element is then the document's body (the pane's host is cleared before the event fires), never the cell, and the
+// hover shows. No timer anywhere: the show is the event.
+var HIST=null,histSeq=0,skipFocus=false,winFocusEl=null;
+window.addEventListener('focus',function(){winFocusEl=document.activeElement;requestAnimationFrame(function(){winFocusEl=null;});});
+var RESTART_WHY='kernel restarted: the event ring is empty';   // sdk_backend.API_HEALTH_RESTART_WHY: the row the boot files
+var HIST_ROWS=6;
+function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+function hm(ep){return new Date(ep*1000).toTimeString().slice(0,5);}
+function hms(ep){return new Date(ep*1000).toTimeString().slice(0,8);}
+// a stamp from another day carries its date (a quiet tail can span days): '09-07 14:02'
+function hmd(ep){var d=new Date(ep*1000),n=new Date();if(d.toDateString()===n.toDateString())return hm(ep);
+return ('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2)+' '+hm(ep);}
+function dur(s){s=Math.max(0,Math.round(s));if(s<60)return s+' s';var m=Math.round(s/60);if(m<60)return m+' min';
+var h=Math.floor(m/60);m-=h*60;if(h<24)return h+' h'+(m?' '+m+' min':'');var d=Math.floor(h/24);h-=d*24;return d+' d'+(h?' '+h+' h':'');}
+function pct(r){return (r==null?0:Math.round(r*100))+'%';}
+function pl(n,w){n=n||0;return n+' '+w+(n===1?'':'s');}
+// The plain-words pause reasons and the ok line: the kernel's `text` is the headline, these say what it means.
+var PAUSE={limit:'Auto-retry and the judges are paused until your usage limit resets.',
+spend:'Auto-retry and the judges are paused: you have reached the monthly spend limit. Raise it at claude.ai/settings/usage.',
+manual:'Auto-retry and the judges are paused: you stopped them.'};
+var OK='No session is waiting on the API. Auto-retry and the judges are running.';
+var RESUME='Resume all auto-retries',STOP='Stop all auto-retries';   // the chat card's own words
+var NOTSENT='Not sent: the dashboard is disconnected. Try again.';
+var LOST='Connection lost before the answer arrived. When it is back, the button shows the current state.';
+function clsWords(r){if(r.cls==='429')return '429 rate limited';if(r.cls==='529')return '529 overloaded';
+if(r.cls==='offline')return 'offline';return 'error'+(r.status?' '+r.status:'');}
+// The pause control. A press is acknowledged at once (disabled, flipped label, .romp-acted) and STAYS so across
+// frames until the one that answers it: an in-flight pre-press frame must not repaint an enabled button.
+function btnHTML(m){if(pending!==null)return '<button class="ah-btn romp-acted" disabled data-act=pause data-val='+pending+'>'+(pending?RESUME:STOP)+'</button>';
+var v=m.state==='paused'?0:(m.waiting>0?1:-1);if(v<0)return '';
+return '<button class=ah-btn data-act=pause data-val='+v+'>'+(v?STOP:RESUME)+'</button>'+(hint?'<div class=ah-hint>'+esc(hint)+'</div>':'');}
+// A pinned row is a keyboard button too (role, tabindex; Enter / Space run it from the keydown below).
+function rowHTML(r,full){var bg=r.color&&r.color.bg?esc(r.color.bg):'';
+return '<div class="ru-tip-row ah-row'+(full?'':' ah-ro')+'"'+(full?' role=button tabindex=0 data-act=reveal data-sid="'+esc(r.sid)+'"':'')+'>'
++(bg?'<i class=ah-sw style="background:'+bg+'"></i><span class=ah-nm style="color:'+bg+'">':'<i class=ah-sw></i><span class=ah-nm>')+esc(r.name)+'</span>'
++'<span class=ah-desc>'+(r.kind==='retrying'?'retrying':'stopped')+' · '+clsWords(r)+(r.since?' · since '+hm(r.since):'')
++(r.suppressed?' · auto-retry off for this session (you interrupted it)':'')+'</span></div>';}
+// -- History: GET /api-health at show time. The shell authenticates the way its other fetches do (the romp_token
+// cookie; a same-origin GET sends no Origin, which _origin_ok accepts). A failed read is said in the section, in
+// place of the rows: never stale numbers, never silence. Painted through the same held / dirty gate as a frame.
+// fresh=true (a show) drops the last answer first, so a hover never paints an earlier hover's numbers while its
+// own read is in flight. A frame on an open card re-reads behind the stamped answer the card shows, and a pin from
+// hidden behind the last hover's answer (its as-of says when it was read; the dots only before the first answer):
+// the card the user opened is not blanked for the read's duration, on purpose.
+function load(fresh){var n=++histSeq;if(fresh)HIST=null;
+fetch('/api-health',{cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
+.then(function(d){if(n!==histSeq)return;HIST=(d&&d.buckets)?d:{error:'malformed answer'};
+if(tip.style.display!=='block')return;if(held){dirty=true;return;}render();},
+function(e){if(n!==histSeq)return;HIST={error:String((e&&e.message)||e)};
+if(tip.style.display!=='block')return;if(held){dirty=true;return;}render();});}
+// a bucket's name for the card: its model family, plus its auth label when another bucket shares the family
+function bname(d,key){var b=(d.buckets||{})[key]||{},fam=b.family||key.split('|')[1]||key,dup=false;
+Object.keys(d.buckets||{}).forEach(function(k){if(k!==key&&((d.buckets[k]||{}).family||'')===fam)dup=true;});
+return dup?fam+' · '+(b.auth||key.split('|')[0]):fam;}
+// one window row in the spend hover's grammar: the label (with its caveat when the window outreaches the kernel's
+// uptime, the way the rolling month says 'complete since'), then the figures. The figures are the window's totals,
+// said in the window's tense ('retried', never 'retrying': the live set is the Sessions waiting list above).
+// `requests` counts attempts WITH a status and the shares are over it; a connection-level failure has none
+// (`noStatus`, outside that sum), so a window is quiet only when every count is zero, and its no-status attempts
+// are named when there are any (an offline window would otherwise read 'no attempts' and hide its give-ups). A mixed
+// window counts every attempt once and says how many of them had no status, with the shares' base named beside them:
+// '15 attempts, 7 of them without a status · 25% 429 · 0% 5xx of the other 8'.
+function winRow(w,c,up){var lab=(w%60===0?(w/60)+' min':w+' s');if(c&&c.complete===false&&typeof up==='number')lab+=' · kernel up '+dur(up);
+var v,rq=(c&&c.requests)||0,ns=(c&&c.noStatus)||0;if(!c||!(rq||ns||c.gaveUp||c.sessionsRetrying))v='no attempts';
+else{v=rq?(pl(rq+ns,'attempt')+(ns?', '+ns+' of them without a status':'')+' · '+pct(c.rate429)+' 429 · '+pct(c.rate5xx)+' 5xx'+(ns?' of the other '+(rq===1?'one':rq):'')):(pl(ns,'attempt')+' without a status');
+v+=' · '+(c.gaveUp||0)+' gave up · '+pl(c.sessionsRetrying,'session')+' retried';}
+return '<div class="ru-tip-row ah-hrow"><span class=ru-tip-k>'+esc(lab)+'</span><span class=ru-tip-v>'+esc(v)+'</span></div>';}
+// the newest HIST_ROWS transitions, newest first: the time, the state entered (with its bucket when there are
+// several), and how long it held (until the same bucket's next transition; 'so far' for the current one, a flag and
+// never a stamp comparison: the transition the hover's own read files carries that read's asOf as its time, and the
+// state it closed must not read 'so far' beside it). A row the boot filed says so; where the tail crosses this
+// kernel's bootAt with no such row shown above the crossing (the bucket was already unknown at shutdown, so the boot
+// filed nothing), a divider names the restart, and takes no slot: the cap counts transitions. Any restart row above
+// suppresses it, not only the one right above, so one restart is one mark whatever sits between. bootAt is the
+// backend's own seed stamp (the start to the millisecond, or one millisecond past a row the previous kernel filed at
+// or after it), so every restored row is before it and the restart rows sit at it. Every bucket comes back unknown
+// at a restart, so a hold from before the boot ends at the boot and is never 'so far'; a bucket the boot seeded
+// carries that same boot clock as its stateSince, so the head and the tail name one time. Never hidden.
+function transRows(d){var rows=(d.transitions||[]).slice().sort(function(a,b){return b.t-a.t;});
+var multi=Object.keys(d.buckets||{}).length>1,now=d.asOf,boot=d.bootAt,hasBoot=typeof boot==='number',out='',crossed=false,sawRestart=false,shown=0;
+for(var i=0;i<rows.length&&shown<HIST_ROWS;i++){var r=rows[i],restart=r.why===RESTART_WHY,pre=hasBoot&&r.t<boot;
+if(!crossed&&pre){crossed=true;
+if(!sawRestart){out+='<div class="ru-tip-row ah-hrow ah-boot"><span class=ru-tip-k>'+hmd(boot)+'</span><span class=ah-hword>kernel restarted</span></div>';}}
+var end=now,cur=true;for(var j=i-1;j>=0;j--)if(rows[j].bucket===r.bucket){end=rows[j].t;cur=false;break;}
+if(pre&&end>boot){end=boot;cur=false;}
+var word=(multi?bname(d,r.bucket)+' ':'')+r.to+(restart?' · kernel restarted':'');
+out+='<div class="ru-tip-row ah-hrow"><span class=ru-tip-k>'+hmd(r.t)+'</span><span class=ah-hword>'+esc(word)+'</span><span class=ru-tip-v>'+dur(end-r.t)+(cur?' so far':'')+'</span></div>';
+if(restart)sawRestart=true;shown++;}
+return out;}
+function histHTML(){var h='<div class="ru-tip-win ah-hist"><div class=ru-tip-name><span>History</span>'
++((HIST&&!HIST.error&&typeof HIST.asOf==='number')?'<span class=ru-tip-reset>as of '+hms(HIST.asOf)+'</span>':'')+'</div>';
+if(!HIST)return h+'<div class="rl-dots ah-wait"><i></i><i></i><i></i></div></div>';
+if(HIST.error)return h+'<div class="ah-line ah-err">Could not read the API history: '+esc(HIST.error)+'</div></div>';
+var d=HIST,ov=d.overall||{},key=ov.worstBucket,b=key?(d.buckets||{})[key]:null,nb=Object.keys(d.buckets||{}).length,st=ov.state||'unknown';
+// since is the bucket's stateSince as the backend files it: a bucket the boot seeded is unknown since the kernel's
+// own start (SdkBackend seeds the aggregator with the boot clock the payload serves as bootAt), so the head, the
+// tail's divider and the boot's row name one time with no branch here
+var since=b?b.stateSince:0;
+h+='<div class="ru-tip-row ah-head"><i class=ah-dot data-state='+esc(st)+'></i><span class=ah-word>'+esc(st)+'</span>'
++((nb>1&&b)?'<span class=ah-hsub>'+esc(bname(d,key))+' · worst of '+nb+' buckets</span>':'')
++(since?'<span class=ah-since>since '+hmd(since)+'</span>':'')+'</div>';
+if(b&&b.why)h+='<div class="ah-line ru-tip-reset">'+esc(b.why)+'</div>';
+if(!b)h+='<div class=ah-line>No API traffic seen'+(typeof d.bootAt==='number'?' since the kernel started at '+hmd(d.bootAt):' yet')+'.</div>';
+else ((d.config&&d.config.windows)||[60,300,900]).forEach(function(w){h+=winRow(w,(b.windows||{})[String(w)],d.uptimeS);});
+var tr=transRows(d);if(tr)h+='<div class="ru-tip-name ah-hname"><span>State changes</span></div>'+tr;
+return h+'</div>';}
+// the cell's description while the hover shows: the state word and its since, then how to reach the rest. Before the
+// answer lands it carries the state word the frame already put on the cell (assistive tech reads the description once,
+// at focus time, and the landed text replaces it with nothing to announce the change: a loading line with no state
+// word would leave a screen-reader user with none) and says the read is in flight; the landed line adds the since; a
+// failed read says so in the same words as the section's line
+function descText(){var tail=' Press Enter to open it.';if(!HIST)return 'History: '+((LAST&&LAST.text)||'unknown')+'. Reading the details.'+tail;
+if(HIST.error)return 'Could not read the API history: '+HIST.error+'.'+tail;
+var ov=HIST.overall||{},key=ov.worstBucket,b=key?(HIST.buckets||{})[key]:null;
+return 'History: '+(ov.state||'unknown')+((b&&b.stateSince)?' since '+hmd(b.stateSince):'')+'.'+tail;}
+// full=false is the HOVER: the same reading with no controls. The hover sits under pointer-events:none and hides
+// on mouseleave, so a button there could not be honored; the click is where the actions live.
+function html(m,full){var h='<div class=ru-tip-win><div class=ru-tip-name><span>API · this machine</span></div>'
++'<div class="ru-tip-row ah-head"><i class=ah-dot data-state='+esc(m.state)+'></i><span class=ah-word>'+esc(m.text)+'</span>'
++(m.since?'<span class=ah-since>since '+hm(m.since)+'</span>':'')+'</div>';
+if(m.state==='paused')h+='<div class=ah-line>'+(PAUSE[m.reason]||PAUSE.manual)+'</div>';
+else if(m.state==='ok')h+='<div class=ah-line>'+OK+'</div>';
+if(full)h+=btnHTML(m);
+h+='</div>';
+var rows=m.sessions||[];
+if(rows.length){h+='<div class=ru-tip-win><div class=ru-tip-name><span>Sessions waiting</span></div>';
+rows.forEach(function(r){h+=rowHTML(r,full);});h+='</div>';}
+h+=histHTML();
+if(m.tmux>0)h+='<div class="ru-tip-win ah-line">'+(m.tmux===1?'1 tmux session is seen through its transcript only':m.tmux+' tmux sessions are seen through their transcripts only')
++', so a retry in progress there shows only when it fails or recovers.</div>';
+if(full)h+='<div class="ru-tip-row ah-foot"><span class=ah-link role=button tabindex=0 data-act=usage>Usage and spend</span><span class=ah-link role=button tabindex=0 data-act=log>Log</span></div>';
+return h;}
+// The hover anchors above the rail, centered on the cursor, as the usage tip's showTip does; a re-render re-anchors
+// from the same x, since new rows change the height and the tip hangs ABOVE the rail. Measured AFTER a reset: a
+// fixed element's shrink-to-fit width is taken against where it last sat, so a tip measured at its old left comes
+// out narrower than its rows and sits flush with the viewport's edge (at 830 px wide: a wrapped row and no margin).
+// The height is capped to the room above the rail (6 px margin, 8 px gap; #ah-tip clips), so a short window clips
+// the section's oldest rows instead of clamping the top to 6 and spilling over the rail and the cell; open() clears
+// the cap, and the pinned card keeps .ru-modal's own scroll pane.
+function anchor(){var r=el.getBoundingClientRect();var x=(typeof lastX==='number')?lastX:(r.left+r.width/2);
+tip.style.left='0px';tip.style.top='0px';tip.style.maxHeight=Math.max(0,r.top-14)+'px';
+var w=tip.offsetWidth,h=tip.offsetHeight;
+tip.style.left=Math.max(6,Math.min(window.innerWidth-w-6,x-w/2))+'px';
+tip.style.top=Math.max(6,r.top-h-8)+'px';}
+// A re-render replaces the card's nodes, so a focused control would fall to the page body and the next Tab would
+// leave the dialog: the same control (by act and sid) takes focus again in the new markup, else the card does.
+function focusKey(n){return (n&&n.getAttribute)?(n.getAttribute('data-act')||'')+'|'+(n.getAttribute('data-sid')||''):'';}
+function render(){if(!LAST)return;var a=document.activeElement,key=(pinned&&a&&a!==tip&&tip.contains(a))?focusKey(a):null;
+tip.innerHTML=html(LAST,pinned);if(!pinned)anchor();desc.textContent=descText();
+if(key!==null){var n=null,all=tip.querySelectorAll('[data-act]');for(var i=0;i<all.length;i++)if(focusKey(all[i])===key){n=all[i];break;}
+try{if(n)n.focus();if(!n||document.activeElement!==n)tip.focus();}catch(e){}}}
+// The shown, unpinned tip is a TOOLTIP (the role, the cell described by the short summary, no aria-modal): a keyboard
+// user who Tabs onto the cell must not meet a modal dialog their focus sits outside of. open() makes it the dialog.
+function show(ev){if(!LAST)return;lastX=(ev&&typeof ev.clientX==='number')?ev.clientX:null;
+tip.classList.remove('ru-modal');tip.setAttribute('role','tooltip');tip.removeAttribute('aria-modal');
+tip.style.display='block';el.setAttribute('aria-describedby','ah-summary');load(true);render();}
+function hide(){tip.style.display='none';el.removeAttribute('aria-describedby');}
+function close(){hide();tip.classList.remove('ru-modal');back.classList.remove('on');pinned=false;
+window.__rompApiClose=null;if(back.onclick===close)back.onclick=null;
+// the refocus fires the cell's focus event, which would pop the hover right after Escape: skipFocus covers that one
+// call (the handler runs synchronously inside .focus(), so the flag is reset as soon as the call returns)
+var fb=focusBack;focusBack=null;skipFocus=true;try{(fb&&fb.focus?fb:el).focus();}catch(e){}skipFocus=false;}
+// A click PINS the detail as a centered modal over the dimmed dashboard (the usage modal's own backdrop and
+// pattern); Escape lands via _LANDING_ESC_JS (shell AND pane documents), the backdrop tap closes too. An open
+// usage modal is closed FIRST, explicitly: the two share #ru-back, and its one handler must belong to one modal.
+// Focus moves into the detail and comes back to the cell (or wherever it was) on close. A pin reads only when the
+// tip was hidden: a hover's read, landed or in flight, is this same document, so a click after the pointer's
+// mouseenter (or a tap after its compat mouseenter) costs one read and keeps its answer.
+function open(){if(!LAST)return;try{window.__rompUsageClose&&window.__rompUsageClose();}catch(e){}
+var was=tip.style.display==='block';
+focusBack=document.activeElement;pinned=true;tip.classList.add('ru-modal');tip.style.left='';tip.style.top='';tip.style.maxHeight='';
+tip.setAttribute('role','dialog');tip.setAttribute('aria-modal','true');el.removeAttribute('aria-describedby');
+tip.style.display='block';render();back.classList.add('on');
+window.__rompApiClose=close;back.onclick=close;try{tip.focus();}catch(e){}if(!was)load();}
+// The listeners sit on the STABLE #rail-api cell; __rompApiHealth writes its children, never the cell.
+// a pointer arriving on a tip that focus already shows re-anchors it from the pointer and keeps its rows: the
+// document did not change, so no re-read and no flash to the loader's dots
+el.addEventListener('mouseenter',function(ev){if(pinned)return;
+if(tip.style.display==='block'){if(typeof ev.clientX==='number')lastX=ev.clientX;anchor();return;}show(ev);});
+el.addEventListener('mouseleave',function(){if(!pinned)hide();});
+// keyboard focus shows the hover as the pointer does (the tooltip pattern) and blur hides it; a pinned detail is
+// unmoved, a hover the pointer already opened is left where it anchored, and a focus the browser re-dispatches
+// because the window regained focus while the cell already held it (winFocusEl) is not the user reaching for the cell
+el.addEventListener('focus',function(){if(skipFocus||winFocusEl===el||pinned||tip.style.display==='block')return;show(null);});
+el.addEventListener('blur',function(){if(!pinned)hide();});
+el.addEventListener('click',function(){if(pinned)close();else open();});
+// Escape on the focused cell dismisses the hover that focus showed, without moving focus (content shown on focus
+// must be dismissible in place); the pinned dialog's Escape lands via _LANDING_ESC_JS, inert while no modal is on
+el.addEventListener('keydown',function(ev){if(ev.key==='Escape'){if(!pinned&&tip.style.display==='block'){ev.preventDefault();hide();}return;}
+if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();if(pinned)close();else open();}});
+// Click-safe across a frame (ui/CLAUDE.md): a frame that lands while a pointer is DOWN over the detail is painted
+// on release, never under the press, so the pressed button survives to its click. A PRIMARY release inside the
+// detail is followed by the click, so the flush waits for it (a swap between mouseup and click would detach the
+// target); a release anywhere else flushes at once. Only a primary press arms the defer: no click follows a right
+// or middle button (auxclick and contextmenu do), so a frame deferred under one would stay unpainted until the
+// next frame changed something while the cell already showed the new world. Event-based, no timer.
+tip.addEventListener('pointerdown',function(ev){if(ev.button===0)held=true;});
+function flush(){if(dirty){dirty=false;if(tip.style.display==='block')render();}}
+function release(ev){if(!held)return;held=false;if(ev&&ev.type==='pointerup'&&ev.button===0&&ev.target&&tip.contains(ev.target))return;flush();}
+document.addEventListener('pointerup',release);
+document.addEventListener('pointercancel',release);
+// The detail's actions are DELEGATED on the stable #ah-tip node via data-act: a click, or Enter / Space on a
+// focused row or footer link (the button's own keys fire its click natively, so the key path skips it).
+function actOf(n){while(n&&n!==tip&&!(n.getAttribute&&n.getAttribute('data-act')))n=n.parentNode;return (n&&n!==tip)?n:null;}
+function run(t){var act=t.getAttribute('data-act');
+if(act==='pause'){var v=t.getAttribute('data-val')==='1';
+// focus moves to the dialog BEFORE the button is disabled: a disabled element cannot hold focus, so it would fall
+// to the page body, where the Tab trap below (a listener on the card) no longer sees the keys and a Shift+Tab
+// walks out of the aria-modal dialog. The card is where open() lands focus too; the answering frame's re-render
+// leaves it there (render restores a focused CONTROL only), and the first Tab reaches the first control.
+try{tip.focus();}catch(e){}
+t.disabled=true;t.textContent=v?RESUME:STOP;t.classList.add('romp-acted');pending=v?1:0;pendSeq=LAST?LAST.seq:null;hint='';   // acknowledged before any round trip
+// the shell socket carries the same op the chat card sends; the handler marks the views dirty, and the next
+// cycle's frame answers (its seq moved: the press wrote the pause file). A dead socket says so instead of a
+// silent no-op (fail loudly): the label and the un-pressed styling come back, and the reason sits under the button.
+if(!(window.__rompShellSend&&window.__rompShellSend({type:'setGlobalRetryPaused',value:v}))){pending=null;hint=NOTSENT;dirty=true;}}
+else if(act==='reveal'){var sid=t.getAttribute('data-sid')||'';
+// the feed's own session links post openSession (feed.ts openOrReviveSession) on a socket that carries this
+// dashboard's wid, and the shell socket carries it too (shellWS), so the kernel aims the focus at THIS
+// dashboard's chat alone (_reveal_chat_for), never at every open window's. No pane is toggled here, so nothing
+// about the layout is persisted.
+if(window.__rompShellSend&&window.__rompShellSend({type:'openSession',id:sid}))close();else{hint=NOTSENT;dirty=true;}}
+else if(act==='usage'){close();try{window.__rompUsagePanel&&window.__rompUsagePanel();}catch(e){}}
+else if(act==='log'){close();try{window.__rompOpenErrs&&window.__rompOpenErrs();}catch(e){}}}
+tip.addEventListener('click',function(ev){var t=actOf(ev.target);if(t)run(t);flush();});
+// Keyboard inside the dialog: Tab and Shift+Tab cycle within the card (a focus trap: the page behind a modal is
+// not where Tab should go; Escape is the way out, via _LANDING_ESC_JS). The card itself (tabindex -1) is where
+// focus lands on open, so the first Tab reaches the first control and the first Shift+Tab the last.
+function controls(){var out=[],all=tip.querySelectorAll('[tabindex="0"],button');for(var i=0;i<all.length;i++)if(!all[i].disabled)out.push(all[i]);return out;}
+tip.addEventListener('keydown',function(ev){if(!pinned)return;
+if(ev.key==='Tab'){var f=controls(),i=f.indexOf(document.activeElement);
+if(!f.length){ev.preventDefault();return;}
+if(ev.shiftKey){if(i<=0){ev.preventDefault();f[f.length-1].focus();}}
+else if(i<0||i===f.length-1){ev.preventDefault();f[0].focus();}
+return;}
+if(ev.key!=='Enter'&&ev.key!==' ')return;var t=actOf(ev.target);if(!t||t.tagName==='BUTTON')return;
+ev.preventDefault();run(t);flush();});
+// The shell socket closed (shellWS's onclose, before its redial). A press acknowledged on that socket can no longer be
+// answered: its frame would have come on the socket that died. The redial's ready handler re-sends the last frame
+// VERBATIM (_apih_resend), so a press the kernel never received would otherwise keep the button disabled and relabeled
+// across the reconnect, through closing and reopening the detail, until some unrelated pause write moved the seq.
+// So the acknowledgment clears here, with the reason under the button; if the kernel DID take the press, the re-sent
+// frame's seq has moved and it repaints the truth either way. Painted on release under a held pointer, like a frame.
+window.__rompApiSocketLost=function(){if(pending===null)return;pending=null;pendSeq=null;hint=LOST;
+if(tip.style.display!=='block')return;if(held){dirty=true;return;}render();};
+window.__rompApiHealth=function(m){if(!m||!m.state)return;LAST=m;hint='';   // a frame means the socket is alive
+// the frame that answers a press: the press wrote the pause file, so the kernel's seq moved past the one we saw (a
+// frame from before the press carries that one and keeps the acknowledgment). Whatever state it brings is the
+// truth the button reads, paused again included: a limit or spend pause re-engages within the cycle, and a rule
+// that cleared only on a frame whose state matched the press would leave a Resume disabled and mislabeled for the window.
+if(pending!==null&&(m.seq==null||m.seq!==pendSeq))pending=null;
+if(el.hidden)el.hidden=false;   // the first frame reveals the cell (a kernel that sends none shows nothing)
+if(el.getAttribute('data-state')!==m.state||txt.textContent!==m.text){el.setAttribute('data-state',m.state);txt.textContent=m.text;el.setAttribute('aria-label','API '+m.text);}
+if(tip.style.display!=='block')return;   // an open detail re-renders from the new frame, nothing else does
+load();   // and re-reads the history: the world changed
+if(held){dirty=true;return;}render();};
+})();
 """
 
 
@@ -44496,6 +45680,10 @@ function shellDiag(what,data){var m={type:'clientDiag',surface:'shell',what:what
 if(shellSock&&shellSock.readyState===1){try{shellSock.send(JSON.stringify(m));}catch(e){}}
 else if(diagQ.length<DIAGQ_MAX)diagQ.push(m);}
 window.__rompShellDiag=shellDiag;
+// the bottom bar's API health detail sends its ops (the pause button's setGlobalRetryPaused, a row's openSession)
+// on the shell socket, whose wid aims a reveal at THIS dashboard; false when no socket is open, so the button can
+// say so instead of dropping the op (_LANDING_APIH_JS). Reads shellSock, which each dial replaces.
+window.__rompShellSend=function(o){try{if(shellSock&&shellSock.readyState===1){shellSock.send(JSON.stringify(o));return true;}}catch(e){}return false;};
 function wid(){try{return sessionStorage.getItem('romp:wid')||'';}catch(e){return '';}}
 // Pin the shell to the TRUE visible viewport. body{height:100dvh} alone left a dead slab below the
 // Chat/Feed/Timeline bar on real Android Chrome — dvh didn't track the painted area (the user 2026-06-19).
@@ -44610,9 +45798,13 @@ try{(m.n?navigator.setAppBadge(m.n):navigator.clearAppBadge())['catch'](function
 // the master bell toggled somewhere (this tab included) — repaint ours from the kernel's word
 else if(m&&m.type==='notifyAll'&&window.__rompNotifyAllPaint)window.__rompNotifyAllPaint(!!m.on);
 else if(m&&m.type==='notifyTurns'&&window.__rompNotifyTurnsPaint)window.__rompNotifyTurnsPaint(!!m.on);
+// the bottom bar's API health cell: one frame, painted by _LANDING_APIH_JS (sent on change + on ready)
+else if(m&&m.type==='apiHealth'&&window.__rompApiHealth)window.__rompApiHealth(m);
 // the boot check found a newer romp release — raise the update banner on every open dashboard
 else if(m&&m.type==='updateAvail'&&window.__rompUpdateOffer)window.__rompUpdateOffer(m.cur||'',m.tag||'',m.drift||'',m.boot||'',m.state||'');};
-ws.onclose=function(){if(shellSock===ws)shellSock=null;setTimeout(shellWS,2000);};}catch(e){}}
+// the API health detail's pause acknowledgment rides this socket: a press it carried cannot be answered now (the
+// redial's ready re-sends the last frame verbatim), so the detail is told before the redial (_LANDING_APIH_JS)
+ws.onclose=function(){try{window.__rompApiSocketLost&&window.__rompApiSocketLost();}catch(e){}if(shellSock===ws)shellSock=null;setTimeout(shellWS,2000);};}catch(e){}}
 shellWS();
 var last='chat';try{var s=localStorage.getItem(KT);if(s&&F[s])last=s;}catch(e){}show(last);
 })();
@@ -45736,6 +46928,10 @@ def _landing():
             # a glance (used ahead of elapsed = burning too fast) — then the used-% readout. All inline on one row;
             # the windows sit side-by-side. Full detail (elapsed %, reset countdown, age) stays in the hover panel.
             "#rail-usage{flex:0 0 auto;display:flex;flex-direction:row;align-items:center;gap:16px}"
+            # renderRows empties the cell on a login-only machine (no bars, no spend); as a zero-width flex
+            # item it still paid .rail-scroll's gap on both sides, so the API cell beside it sat 28px from
+            # the pane buttons instead of 16px. Empty means gone.
+            "#rail-usage:empty{display:none}"
             ".ru-w{display:flex;flex-direction:row;align-items:center;gap:7px;cursor:default}"
             ".ru-name{font:600 10px 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color:#9aa4ad;letter-spacing:.02em;white-space:nowrap}"
             ".ru-bars{display:flex;flex-direction:column;gap:2px;flex:0 0 auto}"   # used bar stacked over elapsed bar
@@ -45746,6 +46942,50 @@ def _landing():
             # the tooltip, labelled "last known" and faded, which is honest because it says what it is.
             ".ru-tip-row.ru-unk i{opacity:.3}.ru-tip-row.ru-unk .ru-tip-k,.ru-tip-row.ru-unk .ru-tip-v{color:#8a97a6}"
             ".ru-pct{font:600 10px 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color:#cfe6ff;font-variant-numeric:tabular-nums;white-space:nowrap}"
+            # the API health cell. The dot wears STATUS hexes, never var(--accent): the label gray at .55 for
+            # ok (a healthy API costs no attention), the tab-retrying amber for degraded, the API-error red
+            # (--st-blocked-bg) for paused. The word is .ru-pct's declaration byte for byte (no new font
+            # size), in the label gray when ok and the bright value color otherwise. The same dot, keyed by
+            # its own data-state, heads the detail card.
+            # The cell ships with the hidden attribute and shows on its first frame (the markup below). The UA's
+            # [hidden]{display:none} loses to ANY author display rule, and .ru-w{display:flex} above is one, so
+            # without this author rule the rail would show a gray 'API ok' from page load, and forever on a
+            # kernel that never sends a frame (the #mtabs button[hidden] idiom).
+            "#rail-api[hidden]{display:none}"
+            ".ah-dot{width:7px;height:7px;border-radius:50%;background:#9aa4ad;opacity:.55;flex:0 0 auto}"
+            "#rail-api[data-state=degraded] .ah-dot,.ah-dot[data-state=degraded]{background:#e67e22;opacity:1}"
+            "#rail-api[data-state=paused] .ah-dot,.ah-dot[data-state=paused]{background:#e5484d;opacity:1}"
+            ".ah-text{font:600 10px 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color:#cfe6ff;font-variant-numeric:tabular-nums;white-space:nowrap}"
+            "#rail-api[data-state=ok] .ah-text{color:#9aa4ad}"
+            "#rail-api{cursor:pointer;margin-left:4px}"
+            # the detail card's own rows, in the tip's font and palette (#ah-tip shares #ru-tip's skin below)
+            ".ah-head{gap:7px}.ah-word{font-weight:700;color:#e8eef5}.ah-since{opacity:.55;margin-left:auto}"
+            ".ah-line{margin-top:4px;max-width:340px}"
+            ".ah-btn{margin-top:6px;font:inherit;padding:3px 9px;border-radius:5px;border:1px solid #3a3a3a;background:#2a2a2a;color:#cfd6dd;cursor:pointer}"
+            ".ah-btn[disabled]{opacity:.55;cursor:default}#ah-tip .romp-acted{opacity:.6}"
+            ".ah-row{cursor:pointer;border-radius:4px;margin:2px -4px 0;padding:1px 4px}"
+            ".ah-row:hover{background:rgba(255,255,255,0.06)}"
+            ".ah-sw{width:8px;height:8px;border-radius:2px;background:#6b7a8c;flex:0 0 auto}"
+            ".ah-nm{font-weight:600}.ah-desc{opacity:.75}"
+            ".ah-foot{margin-top:7px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.08);gap:12px}"
+            ".ah-link{cursor:pointer;color:var(--accent)}"
+            # a failed send's reason, under the button it restored; the hover's rows carry no action (.ah-ro),
+            # so no pointer and no hover wash; the pinned detail takes focus as a dialog without a ring on the card
+            ".ah-hint{margin-top:4px;opacity:.75;max-width:340px}"
+            # the History section: the signal's state dot in status hexes (never the accent), the transition rows'
+            # state word, the restart divider in italics, a failed read in a red that reads (#ef6b6f, about 5.5:1 on
+            # the tip: the API-error red #e5484d is 4.3:1 there, under the 4.5:1 text floor), and the loader's dots
+            # (.rl-dots, _LOADER_CSS) while the first answer is in flight. The hover clips at the height anchor()
+            # caps it to (the room above the rail): border-box, so the cap is the outline the user sees and not the
+            # content plus 18 px of padding and border; .ru-modal's own overflow-y:auto outranks the clip on the
+            # pinned card, which scrolls as before.
+            ".ah-dot[data-state=thrashing]{background:#e5484d;opacity:1}.ah-dot[data-state=recovering]{background:#e67e22;opacity:.7}"
+            ".ah-hword{opacity:.8}.ah-hsub{opacity:.55}.ah-boot .ah-hword{font-style:italic;opacity:.6}"
+            ".ah-hname{margin-top:6px}.ah-err{color:#ef6b6f}.ah-wait{margin:5px 0 2px}"
+            ".ah-row.ah-ro{cursor:default}.ah-row.ah-ro:hover{background:transparent}"
+            "#ah-tip:focus{outline:none}#ah-tip{overflow:hidden;box-sizing:border-box}"
+            # the cell's short description for assistive tech (#ah-summary): present in the tree, off the screen
+            ".ah-vh{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}"
             # ONE shared hover panel for BOTH windows (the user 2026-06-26): it reproduces exactly the used/
             # elapsed bars that used to sit under the timeline — per window, a "used" bar (selected colormap)
             # over an "elapsed" bar (slate) with the % + reset countdown, and nothing else (no prose).
@@ -45757,7 +46997,7 @@ def _landing():
             # #ru-tip is a hover tooltip, pointer-events:none) so the pane can actually scroll — which also
             # stops a tap on the panel itself falling through to the dismiss backdrop; only backdrop taps
             # (and Escape) close it now, the modal contract everywhere else on the dashboard.
-            "#ru-tip.ru-modal{left:50%!important;top:44%!important;transform:translate(-50%,-50%);max-width:92vw;"
+            "#ah-tip.ru-modal,#ru-tip.ru-modal{left:50%!important;top:44%!important;transform:translate(-50%,-50%);max-width:92vw;"
             "max-height:84vh;max-height:84dvh;overflow-y:auto;pointer-events:auto;"
             "box-shadow:0 12px 36px #000000aa}"
             # the dismiss backdrop for the mobile Usage modal: below the tip (z 300), above the panes; a tap
@@ -45817,10 +47057,10 @@ def _landing():
             "#rsp-tip{position:fixed;z-index:310;pointer-events:none;display:none;background:#1e1e1e;border:1px solid #3a3a3a;"
             "border-radius:6px;padding:5px 8px;color:#cfd6dd;font:500 11px 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;"
             "box-shadow:0 5px 18px rgba(0,0,0,0.45)}#rsp-tip b{color:#e8eef5;font-weight:700}"
-            "#ru-tip{position:fixed;z-index:300;background:#1e1e1e;border:1px solid #3a3a3a;border-radius:7px;"
+            "#ah-tip,#ru-tip{position:fixed;z-index:300;background:#1e1e1e;border:1px solid #3a3a3a;border-radius:7px;"
             "padding:8px 10px;font:500 11px 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color:#cfd6dd;"
             "box-shadow:0 5px 18px rgba(0,0,0,0.45);pointer-events:none;line-height:1.4}"
-            ".ru-tip-win{margin-bottom:8px}#ru-tip .ru-tip-win:last-child{margin-bottom:0}"
+            ".ru-tip-win{margin-bottom:8px}#ah-tip .ru-tip-win:last-child,#ru-tip .ru-tip-win:last-child{margin-bottom:0}"
             # Multi-host breakdown: one COLUMN per host, side by side (the user 2026-08-08 — not one
             # tall stack). flex-wrap lets the mobile modal (92vw cap) fold back to a stack on its own.
             ".ru-tip-cols{display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap}"
@@ -45888,6 +47128,12 @@ def _landing():
             ".gh:hover{background:linear-gradient(180deg,transparent 3px,#3a4a58 3px,#3a4a58 4px,transparent 4px)}"
             ".gv:hover::after{background:var(--accent,#9cd2ff);height:52px}.gh:hover::after{background:var(--accent,#9cd2ff);width:52px}"
             "body.drag iframe{pointer-events:none}body.dragv{cursor:col-resize}body.dragh{cursor:row-resize}"
+            # the divider drag's landing line: a strip the gutter's width carrying a 1 px accent line, shown by gutter()
+            # in _LANDING_JS while a drag is held. Fixed, so its left is the viewport coordinate the script computes;
+            # never a hit target, so it takes no hover or click of its own and the gutter under it keeps its :hover
+            # at the grab; above the focus ring (.pane-focused::after, z-index 6) so a focused pane does not cover it.
+            "#gv-ghost{display:none;position:fixed;width:7px;pointer-events:none;z-index:40;"
+            "background:linear-gradient(90deg,transparent 3px,var(--accent,#9cd2ff) 3px,var(--accent,#9cd2ff) 4px,transparent 4px)}"
             ".pane{position:relative;min-width:0;min-height:0;overflow:hidden}"
             ".pane>iframe{position:absolute;inset:0;width:100%;height:100%}"
             # FOCUS cue (the user 2026-06-23): NO dimming — the active section is shown by a RING around it.
@@ -46126,7 +47372,7 @@ def _landing():
             "body.theme-light #rnet-x{color:#5D574E}body.theme-light #rnet-x:hover{color:#1F1E1D}"
             "body.theme-light #rfleet-panel{background:#FFFFFF;border-color:rgba(0,0,0,0.12);color:#1F1E1D;"
             "box-shadow:0 12px 36px rgba(31,26,20,0.18)}"
-            "body.theme-light #ru-tip{background:#FFFFFF;border-color:rgba(0,0,0,0.12);color:#1F1E1D;"
+            "body.theme-light #ah-tip,body.theme-light #ru-tip{background:#FFFFFF;border-color:rgba(0,0,0,0.12);color:#1F1E1D;"
             "box-shadow:0 5px 18px rgba(31,26,20,0.18)}"
             # the usage modal's light steps (T247): same card + hairlines as the other light panels;
             # the data colors are the sessions' own and do not flip
@@ -46150,6 +47396,25 @@ def _landing():
             "body.theme-light .ru-tip-name{color:#1F1E1D}"
             "body.theme-light .ru-name{color:#5D574E}"
             "body.theme-light .ru-pct{color:#1F1E1D}"
+            "body.theme-light .ah-text{color:#1F1E1D}"
+            # the ok dot: the dark label gray at .55 blends into the light rail (about 1.4:1); the light label
+            # color at the same opacity keeps the glyph where the eye expects it. Scoped to the ok state: a
+            # bare `body.theme-light .ah-dot` (0,2,1) would outrank the detail's `.ah-dot[data-state=...]`
+            # state rules (0,2,0), and the card's headline dot would lose its amber and red in the light
+            # theme while the rail's id-scoped dot kept them
+            # and the History head's dot for the signal's quiet states (healthy, unknown) is the same glyph: the base
+            # gray falls to about 1.6:1 on the white tip too
+            "body.theme-light #rail-api[data-state=ok] .ah-dot,body.theme-light .ah-dot[data-state=ok],"
+            "body.theme-light .ah-dot[data-state=healthy],body.theme-light .ah-dot[data-state=unknown]{background:#5D574E}"
+            # the failure line in the light theme's error-text red (styles.css --err #B02A1C, about 6.6:1 on white;
+            # the dark line's #ef6b6f is 3.0:1 there)
+            "body.theme-light .ah-err{color:#B02A1C}"
+            "body.theme-light #rail-api[data-state=ok] .ah-text{color:#5D574E}"
+            "body.theme-light .ah-word{color:#1F1E1D}"
+            "body.theme-light .ah-btn{background:#F1EAE2;border-color:rgba(0,0,0,0.12);color:#1F1E1D}"
+            "body.theme-light .ah-row:hover{background:rgba(0,0,0,0.05)}"
+            "body.theme-light .ah-row.ah-ro:hover{background:transparent}"
+            "body.theme-light .ah-foot{border-top-color:rgba(0,0,0,0.10)}"
             "body.theme-light .ru-track{background:rgba(0,0,0,0.10)}"
             "body.theme-light #mtabs{background:#E7DED2;border-top-color:#DCD2C4}"
             "body.theme-light #mtabs button{color:#5D574E}"
@@ -46202,6 +47467,7 @@ def _landing():
             "<div class=gv id=gv-b></div>"
             "<div class=pane id=feed-pane><iframe id=f-feed src=/feed></iframe></div>"
             "</div>"
+            "<div id=gv-ghost></div>"   # the divider drag's landing line (position:fixed; gutter() in _LANDING_JS moves it)
             # the timeline BOTTOM BAND: full-width below the pane row, with a row-resize gutter above it. Both
             # are hidden (CSS) unless po-timeline (the rail's Timeline toggle).
             "<div class=gh id=gh></div>"
@@ -46218,6 +47484,15 @@ def _landing():
             # the Claude /usage rate-limit bars (Pro/Max): three compact vertical bar-pairs (used % colored +
             # elapsed % slate), %-label, full detail on hover — side-by-side in the bottom bar.
             "<div id=rail-usage data-keycmd=usage.open></div>"
+            # the API health cell: its own label, a 7px dot, one word, painted by _LANDING_APIH_JS from the
+            # kernel's apiHealth push. Ships HIDDEN: it shows on its first frame, so a kernel that never sends
+            # one shows nothing rather than a false ok. Its own element, not a child of #rail-usage (renderRows
+            # empties that one when there are no bars and no spend). No title (the rail's no-title rule); no
+            # data-keycmd yet. role=button + tabindex=0 make it a keyboard control (Enter / Space open the
+            # detail); aria-label follows the frame's text.
+            "<div id=rail-api class=\"ru-w ru-ah\" hidden role=button tabindex=0 aria-label=\"API ok\" data-state=ok>"
+            "<span class=ru-name>API</span>"
+            "<i class=ah-dot></i><span class=ah-text>ok</span></div>"
             "</div>"   # /.rail-scroll
             # refresh + network + settings, pinned to the far RIGHT (settings last), always visible:
             "<div class=rail-acts>"
@@ -46391,6 +47666,7 @@ def _landing():
             + ("<script src=/dist/age-color-global.js?v=%d></script>" % v) +
             "<script>" + _LANDING_ERRS_JS + "</script>"
             "<script>" + _LANDING_USAGE_JS.replace("__ROMP_LOADER__", json.dumps(_loader_inner())) + "</script>"
+            "<script>" + _LANDING_APIH_JS + "</script>"
             "<script>" + _LANDING_JS + "</script>"
             "<script>" + _LANDING_FOCUS_JS + "</script>"
             "<script>" + _LANDING_ESC_JS + "</script>"
@@ -47231,7 +48507,14 @@ class Handler(BaseHTTPRequestHandler):
                 now = time.time()
                 out = fn(now, uptime_s=now - _STARTED)
                 out["bootId"] = _BOOT_ID
-                out["bootAt"] = int(_STARTED)
+                # bootAt rides the snapshot: the aggregator's boot_stamp, this kernel's _STARTED (passed at
+                # construction, _sdk_locked) truncated to the millisecond, the precision of every other stamp
+                # in the payload (asOf, transitions[].t, stateSince), or one millisecond past the newest
+                # transition the previous kernel left when that overlaps the start. The aggregator owns the
+                # number, so a bucket the boot seeded carries it as its stateSince and the restart row's t in
+                # every case, clamp or not (a stamp made here would be a second number whenever the clamp
+                # fired). /version's `started` is int(_STARTED), the same start in whole seconds:
+                # int(bootAt) == started unless the clamp moved the stamp.
                 # coverage's kernel half: tmux-backed sessions have no SDK stream and sit outside
                 # the signal — the count says how much of the machine the signal does not see. A null
                 # (never a silent 0) when the live enumeration fails. Codex-backed sessions are outside
@@ -47726,15 +49009,14 @@ class Handler(BaseHTTPRequestHandler):
                     if kind == "turn" and not _notify_turns_on():
                         held["turn"] += 1
                         continue
-                    # Wear the origin the way every federated surface wears it (host-prefix.ts):
-                    # the sid gains "origin:" so a tap routes through the merged dashboard's own
-                    # tabs, and the title's session name gains the same prefix. Tolerant surgery:
-                    # a title a different build composed passes through unprefixed rather than
-                    # mangled — version skew between peers is a normal state, not an error.
+                    # Wear the origin on the SID only, the way every federated surface routes
+                    # (host-prefix.ts): it gains "origin:" so a tap goes through the merged
+                    # dashboard's own tabs. The TITLE reaches the phone exactly as the origin
+                    # composed it (_notify_title: the session name alone — the user 2026-09-09;
+                    # which kernel detected an event is romp's business, and the host already rides
+                    # the routing block). Until then the relay grafted "romp: <origin>:" onto it.
                     if sid and ":" not in sid:
                         sid = "%s:%s" % (origin, sid)
-                    if t.startswith("romp: "):
-                        t = "romp: %s:%s" % (origin, t[len("romp: "):])
                     # badge omitted: the origin's count is not ours. kind/cardId pass through
                     # (an older peer sends neither → the card default, which is all it had);
                     # the card id is a goal id, globally unique and never host-prefixed
@@ -48936,23 +50218,8 @@ class Handler(BaseHTTPRequestHandler):
             # (the caps frame's viewsSeq, see KERNEL_WS_CAPS)
             _VIEWS_SERVED.seqs = []
             try:
+                # the tab strip rides the connect push (living PLUS kept-open, via the slot the reset cleared); none of its own here
                 self._push_one(client)
-                # Push the SHARED, STABLE tab order so the UI honors it on connect/reload. Without this
-                # the webview only learns the order from a live drag, loses it on every reload, and falls
-                # back to ordering tabs by session STATE — so they drift on their own (worse now that the
-                # heartbeat auto-reloads). _ordered_alive is the same order chat tabs + timeline lanes use.
-                try:
-                    _tm = _tmux_sessions()
-                    _alive = _ordered_alive(int(time.time()), _tm)
-                    _o = [s["sid"] for s in _alive]
-                    # name+color per tab → the client paints the whole strip as placeholders up front (tabs-first)
-                    _tabs = [{"id": s["sid"], "name": s.get("name", ""), "color": _name_color(s["sid"])} for s in _alive]
-                    _resolve_reconnect(client, _alive)   # a no-op here (the reset above consumed the flag) — every strip sender resolves
-                    # through _send_client, which captures the frame's views seq for the caps frame below (the raw send
-                    # this replaced bypassed that capture and had to record the seq by hand)
-                    _send_tab_order(client, _o, _tabs, _tm)
-                except Exception:
-                    pass
             finally:
                 seqs, _VIEWS_SERVED.seqs = _VIEWS_SERVED.seqs, None
             # What this kernel can do for the page (KERNEL_WS_CAPS), after the pushes above and on every
@@ -48983,6 +50250,7 @@ class Handler(BaseHTTPRequestHandler):
                     client["send"](json.dumps({"type": "badge", "n": _BADGE_LAST[0]}))
                 except Exception:
                     pass
+            _apih_resend(client)          # and the bottom bar's API cell, from the last frame (same reason)
         elif msg and msg.get("type") == "setSessionFlag" and msg.get("id") and msg.get("flag"):
             # timeline lane gear → toggle a per-session view flag (e.g. hideFromFeed). Persisted +
             # re-broadcast so the feed drops/restores that session's cards immediately. The notify

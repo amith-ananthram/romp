@@ -270,9 +270,6 @@ class TimelineViews(unittest.TestCase):
         self.assertIn('fr = {"type": "tabOrder", "order": list(order), "tabs": tabs, "selfHost": _self_host(),\n'
                       '          **_views_payload(), "live": sorted({str(x) for x in live})}', src, "tabOrder frames carry it")
         self.assertIn('**_views_payload(), "live":', src, "…which carries the blob")
-        # the connect-time strip goes through _send_tab_order → _tab_order_frame, whose frame is the literal pinned
-        # above; pin the hand-off instead of a second literal
-        self.assertIn('_send_tab_order(client, _o, _tabs, _tm)', src, "the connect-time tabOrder carries it")
 
     def test_web_boot_exposes_the_set_views_hook(self):
         src = open(os.path.join(BIN, "romp-kernel")).read()

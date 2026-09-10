@@ -9,18 +9,22 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
-// isolate the Retry button's click handler
-const H = (RENDER.match(/const retry = el\("button", "apierror-retry"\)[\s\S]*?head\.appendChild\(retry\);/) || [""])[0];
+// isolate the Retry button's click handler — since 2026-09-08 (the notice-vocabulary pass) it lives on the
+// document.body delegate (apiRetryNow), not on a per-node listener the tail rebuild destroyed mid-press
+const H = (RENDER.match(/apiRetryNow: \(el\) => \{[\s\S]*?\},\n    dismissDialog:/) || [""])[0];
 
 test("Retry now posts an explicit MANUAL override so it fires even when auto-retry is paused/suppressed", () => {
   assert.ok(H, "found the Retry button block");
   assert.match(H, /vscodeApi\.postMessage\(\{ type: "apiRetry", id: own, manual: true \}\)/);   // owner-scoped: inside the popover the card acts on the THREAD (the parity bundle, 2026-08-26)
+  // 2026-09-08 (the notice-vocabulary pass): the button is a data-act word button (noticeAct) and the handler
+  // lives on the document.body delegate — the per-node listener the tail rebuild destroyed mid-press is gone
+  assert.match(RENDER, /acts\.push\(noticeAct\("Retry now", "apiRetryNow",/);
 });
 
 test("Retry now acknowledges the click immediately (disabled + 'Retrying…'), then self-restores", () => {
-  assert.match(H, /retry\.disabled = true;/);
-  assert.match(H, /retry\.textContent = "Retrying…";/);
-  assert.match(H, /setTimeout\(\(\) => \{ if \(retry\.isConnected\) \{ retry\.disabled = false; retry\.textContent = "Retry now"; \} \}/);
+  assert.match(H, /b\.disabled = true;/);
+  assert.match(H, /b\.textContent = "Retrying…";/);
+  assert.match(H, /setTimeout\(\(\) => \{ if \(b\.isConnected\) \{ b\.disabled = false; b\.textContent = "Retry now"; \} \}/);
 });
 
 test("the AUTO-retry tick stays a plain apiRetry (no manual) so the pause/suppression gate still holds it", () => {
@@ -54,7 +58,8 @@ test("the tick holds off while the kernel's deadline stands, and adopts it as th
 test("a long wait reads in minutes, with the attempt count explaining the gap", () => {
   // "retrying in 1750s" is not a readable wait, and a silent 30-minute gap reads as stuck rather than
   // as deliberate — the count is what says the backoff has stepped up
-  assert.match(RENDER, /const when = left >= 90 \? `\$\{Math\.round\(left \/ 60\)\}m` : `\$\{left\}s`;/);
+  // 2026-09-08: the ONE duration format (duration.ts durLabel — "2m 30s"), not a private minutes rule
+  assert.match(RENDER, /cd\.textContent = `retrying in \$\{durLabel\(left\)\}`/);
   assert.match(RENDER, /tries > 1 \? ` · \$\{tries\} tries so far` : ""/);
 });
 

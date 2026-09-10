@@ -39,7 +39,7 @@
   /* the hljs syntax palette, as tokens — mirrors styles.css byte-for-byte (one treatment, two
      sheets; file-view.test.ts pins the two identical). Raw hexes here were dark-only. */
   --hl-fg: #d8c6a8; --hl-kw: #c98a6a; --hl-str: #9fb878; --hl-num: #d4a36a;
-  --hl-cmt: #6f6a5f; --hl-title: #e1c08d; --hl-meta: #9a8f7a; --hl-attr: #cdaf7e;
+  --hl-cmt: #978f81; --hl-title: #e1c08d; --hl-meta: #9a8f7a; --hl-attr: #cdaf7e;   /* --hl-cmt raised from #6f6a5f (2.85:1 on a code block) to 4.79:1; theme-parity.test.ts holds the pair */
   --accent-fg: #0c1a2e;  /* dark text ON the accent (CLAUDE.md) — for the reverse-highlight on a selected toggle */
   --accent-wash: rgba(156, 210, 255, 0.12);  /* THE faint accent wash — mirrors styles.css; one alpha
                        behind every selected/hovered accent chrome */
@@ -53,6 +53,7 @@
   --check-ring: rgba(30, 161, 235, 0.55);
   --surface-raised: #252526;  /* the transient-notice vocabulary — mirrors styles.css */
   --radius-toast: 8px;
+  --radius-card: 6px;   /* the boxed notice / card radius — mirrors styles.css */
   --shadow-toast: 0 8px 28px rgba(0, 0, 0, 0.45);
   --radius-modal: 10px;  /* the centered-modal vocabulary (CLAUDE.md) — mirrors styles.css */
   --shadow-modal: 0 12px 36px #000000aa;
@@ -87,6 +88,7 @@
                        in styles.css, so the "filled yellow so the stall is noticed" chip rendered as a quiet
                        white outline (background→transparent, border→currentColor, the user 2026-07-25).
                        feed-css-vars.test.ts now holds the whole file to "define it here or carry a fallback". */
+  --st-retrying-bg: #e67e22; --st-retrying-fg: #2a1500;   /* the RETRYING amber — mirrors styles.css (tokenised 2026-09-08) */
 
   /* Card background + border are set inline per card (the hawaii recency tint).
      These neutral tokens are for the chrome that frames them (header, detail box,
@@ -108,7 +110,12 @@
   --check-bg: #1EA1EB;
 
   --sans: "Inter", var(--vscode-chat-font-family, var(--vscode-font-family, system-ui, -apple-system, "Segoe UI", sans-serif));
-  --font-prose: var(--sans);   /* the reading face (.fileview-md); mirrors styles.css :root — the light block re-points it */
+  --font-prose: var(--sans);   /* the assistant's reading face; mirrors styles.css :root, and the light block re-points it */
+  /* --font-doc is the file viewer's face for a rendered document (.fileview-md): sans in both themes. --color-scheme names
+     the theme to a form control a document carries (a task list's checkbox), so its checkbox is drawn for the page it sits on.
+     Mirrors styles.css. */
+  --font-doc: var(--sans);
+  --color-scheme: dark;
   --fs: var(--vscode-chat-font-size, 13px);
 }
 
@@ -144,7 +151,7 @@ body.theme-light {
   --code-bg: rgba(180, 83, 9, 0.08);
   --link: #1D63A8;   /* inked cobalt — clearly clickable, clearly not the error red (5.2:1 on the page) */
   --hl-fg: #3E3A35; --hl-kw: #A03509; --hl-str: #47720F; --hl-num: #915C0B;
-  --hl-cmt: #6E675C; --hl-title: #8C4A00; --hl-meta: #6E6455; --hl-attr: #7A5A20;
+  --hl-cmt: #67614f; --hl-title: #8C4A00; --hl-meta: #6E6455; --hl-attr: #7A5A20;   /* --hl-cmt from #6E675C (4.39:1 on a code block) to 4.86:1 */
   --box-bg: rgba(0, 0, 0, 0.03);
   --box-border: rgba(0, 0, 0, 0.12);
   --err: #B02A1C;
@@ -153,12 +160,14 @@ body.theme-light {
   --cmt-hl: #FFDF70;
   --fast: #D45500;
   --warn: #9A6A00;
-  --st-working-bg: #e0b020; --st-working-fg: #332600;   /* status FILLS carry their own fg — same chips, both themes */
+  /* working gold + compacting teal re-inked for cream (the user 2026-09-08) — mirrors styles.css, same numbers */
+  --st-working-bg: #8B6914; --st-working-fg: #ffffff;
   --st-ready-bg: #2b7fb8;   --st-ready-fg: #ffffff;
   --st-awaiting-bg: #c0392b;--st-awaiting-fg: #ffffff;
   --st-awaitbg-bg: #54B204; --st-awaitbg-fg: #0c1a00;
-  --st-compacting-bg: #14b8a6; --st-compacting-fg: #ffffff;
+  --st-compacting-bg: #0F766E; --st-compacting-fg: #ffffff;
   --st-blocked-bg: #e5484d; --st-blocked-fg: #ffffff;
+  --st-retrying-bg: #9C4A0C; --st-retrying-fg: #ffffff;
   --radius-menu: 6px;
   --shadow-menu: 0 4px 12px rgba(31, 26, 20, 0.16);
   --menu-bg: #FBF6EF;
@@ -169,6 +178,7 @@ body.theme-light {
   --check-ring: rgba(194, 65, 12, 0.55);
   --surface-raised: #FAF5EE;
   --radius-toast: 8px;
+  --radius-card: 6px;   /* the boxed notice / card radius — mirrors styles.css */
   --shadow-toast: 0 8px 28px rgba(31, 26, 20, 0.18);
   --radius-modal: 10px;
   --shadow-modal: 0 12px 36px rgba(31, 26, 20, 0.22);
@@ -191,6 +201,8 @@ body.theme-light {
   --mono: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   --sans: "Space Grotesk", "Inter", var(--vscode-chat-font-family, var(--vscode-font-family, system-ui, -apple-system, "Segoe UI", sans-serif));
   --font-prose: var(--mono);   /* the user 2026-08-31, off the live preview: the serif read awful — assistant output goes MONO in light */
+  --font-doc: var(--sans);     /* a viewed document stays sans: the mono ruling was about chat output */
+  --color-scheme: light;
   --fs: var(--vscode-chat-font-size, 13px);
   /* the --vscode-* stand-ins: inline rules fall back through these (menus, inputs, widget cards) */
   --vscode-editor-background: #F1EAE2;
@@ -1393,10 +1405,14 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
   background: var(--bg, #1e1e1e); border: 1px solid var(--box-border); border-radius: var(--radius-modal);
   box-shadow: var(--shadow-modal); }
 body.fileview-open { overflow: hidden; }
-.fileview-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; min-width: 0;
+.fileview-bar { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0;
   padding: 7px 10px; border-bottom: 1px solid var(--box-border); }
 /* Only the DIRECTORY may be truncated: the filename identifies the file, so it holds its width however
-   deep the path is, and the dimmed directory in front of it gives up room first. */
+   deep the path is, and the dimmed directory in front of it gives up room first. The bar WRAPS: the path
+   keeps at least 12em and the action row drops to a second line, right-aligned, when the two do not fit
+   side by side (the text-size control's three buttons pushed Download, Copy path and the close button off
+   the card below about 600px; .fileview is overflow: hidden, and a phone has no Escape). The wrap is the
+   bar's own: the two .fileview-bar rules after .fileview-acts below. */
 .fileview-name { flex: 1 1 auto; min-width: 0; font-size: 0.86em; color: var(--fg);
   display: flex; align-items: baseline; white-space: nowrap; }
 .fileview-dir { flex: 0 1 auto; min-width: 0; color: var(--dim);
@@ -1419,6 +1435,12 @@ body.fileview-open { overflow: hidden; }
   background: var(--overlay-10, rgba(255, 255, 255, 0.12)); color: var(--fg); user-select: none; }
 .fileview-sess .host-prefix { color: inherit; opacity: 0.75; }
 .fileview-acts { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+/* The wrap is the TITLE BAR's, not the classes': the file browser's action row (.fb-bar, file-browse.ts)
+   wears .fileview-acts outside any bar and keeps one line at every width (its crumb trail is what gives up
+   room), so the plain flex above holds there. Inside the bar the path keeps 12em and takes the rest of a
+   wide bar, and the action row shrinks and wraps to the right edge. */
+.fileview-bar .fileview-name { flex: 1 1 0; min-width: 12em; }
+.fileview-bar .fileview-acts { flex: 0 1 auto; min-width: 0; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
 .fileview-btn { font: inherit; font-size: 0.82em; cursor: pointer; flex: 0 0 auto;
   padding: 3px 9px; border-radius: 6px; background: transparent; color: var(--fg);   /* T151: the one button rest */
   border: 1px solid var(--card-border);
@@ -1439,11 +1461,21 @@ a.fileview-btn { text-decoration: none; display: inline-flex; align-items: cente
    dimmed button and the loader's dots (.fileview-dot, the pane's own) where the caption will go — a slow
    check must read as a wait, not as the old no-button state nor as a verdict (the loading-state rule) */
 .fileview-gh-dots { display: inline-flex; align-items: center; gap: 4px; }
-/* no link: a real disabled button, greyed, hover inert — never hidden (an absent button read as
-   "broken" when the file was simply not committed yet, 2026-09-05) */
-.fileview-gh .fileview-btn:disabled { opacity: 0.55; cursor: default; }
-.fileview-gh .fileview-btn:disabled:hover { border-color: var(--card-border); color: var(--fg); background: transparent; }
-.fileview-gh .fileview-btn:disabled:active { transform: none; }
+/* a disabled bar button, greyed, hover inert: the GitHub unit's no-link state (a real disabled button, never
+   hidden: an absent button read as "broken" when the file was simply not committed yet, 2026-09-05), the
+   editor's Save while a save is in flight (disabled and reading "Saving…"), and the text-size control's ends
+   (A− at the smallest step, A+ at the largest; aria-disabled, so the button keeps the keyboard focus it holds
+   and the ring stays where the person left it). One treatment for every bar button, so neither an end nor a
+   save in progress reads as live under the pointer. */
+.fileview-btn:disabled, .fileview-btn[aria-disabled="true"] { opacity: 0.55; cursor: default; }
+.fileview-btn:disabled:hover, .fileview-btn[aria-disabled="true"]:hover { border-color: var(--card-border); color: var(--fg); background: transparent; }
+.fileview-btn:disabled:active, .fileview-btn[aria-disabled="true"]:active { transform: none; }
+/* the text-size readout between A− and A+ (file-view.ts textSizeControl): a slot of ONE width whatever it
+   says, and at the default (nothing to reset, nothing to say) an empty slot rather than none, so A− never
+   moves under the pointer when the readout appears after the first press. visibility, not display: the slot
+   stays, the button leaves the tab order. */
+.fileview-size-reset { min-width: 5.5em; box-sizing: border-box; text-align: center; font-variant-numeric: tabular-nums; }
+.fileview-size-reset.fileview-size-default { visibility: hidden; }
 /* a link whose branch is not on origin yet: dashed, the caption carries the note */
 a.fileview-gh-note { border-style: dashed; }
 .fileview-body { flex: 1 1 auto; min-height: 0; overflow: auto; }
@@ -1452,11 +1484,11 @@ a.fileview-gh-note { border-style: dashed; }
 .fileview-code { display: flex; align-items: flex-start; min-height: 100%; }
 .fileview-gutter { flex: 0 0 auto; position: sticky; left: 0; z-index: 1;
   padding: 10px 8px 10px 10px; text-align: right; user-select: none;
-  font-family: var(--mono, ui-monospace, monospace); font-size: 12px; line-height: 1.5;
+  font-family: var(--mono, ui-monospace, monospace); font-size: calc(12px * var(--fv-scale, 1)); line-height: 1.5;
   color: var(--dim); opacity: 0.55; background: var(--bg, #1e1e1e);
   border-right: 1px solid var(--box-border); white-space: pre; }
 .fileview-pre { flex: 1 1 auto; margin: 0; padding: 10px 12px;
-  font-family: var(--mono, ui-monospace, monospace); font-size: 12px; line-height: 1.5;
+  font-family: var(--mono, ui-monospace, monospace); font-size: calc(12px * var(--fv-scale, 1)); line-height: 1.5;
   white-space: pre; tab-size: 4; }
 .fileview-pre code { background: none; padding: 0; font: inherit; }
 /* a refusal explains itself in place, in the kernel's own words (too large — with the size and the
@@ -1503,31 +1535,95 @@ a.fileview-gh-note { border-style: dashed; }
   color: var(--dim); opacity: 0.55; user-select: none;
 }
 .fileview-wrap .fv-ct { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Links inside a shown file (file-view-links.ts): a URL opens a new tab, a path opens in the viewer. Light by
+   design (the user 2026-09-07): the token keeps the colour the highlight gave it, under a faint dotted underline
+   that turns solid on hover; nothing else in the view changes. A Markdown link whose target is a file keeps the
+   link ink the other Markdown links wear. Neither is draggable (-webkit-user-drag: none, with draggable=false on the
+   anchor) and both are selectable (user-select: text; Chromium starts no selection inside a link without it), so a
+   press-drag inside a path link selects its text as on plain text, a press held on a URL anchor and then dragged
+   selects too (Chromium's rule for a link: an immediate drag on one selects nothing), and neither starts the browser's
+   link drag; a click that arrives with the selection open finds the viewer's listener and the chat's opener yielding
+   to it (path-links.ts selectionOpenIn). Mirrored in styles.css and feed.css (fileview-parity.test.ts). */
+.fileview-body .file-uri-link, .fileview-body .fv-url { color: inherit; cursor: pointer; text-decoration: underline dotted; text-decoration-color: color-mix(in srgb, currentColor 35%, transparent); text-underline-offset: 2px; -webkit-user-drag: none; user-select: text; }
+.fileview-body .file-uri-link:hover, .fileview-body .fv-url:hover { text-decoration: underline; text-decoration-color: currentColor; }
+.fileview-md a.file-uri-link { color: var(--link); text-decoration: none; }
+.fileview-md a.file-uri-link:hover { text-decoration: underline; }
+/* A Markdown link with no target the viewer can follow (the sanitizer removed it; a section this document does not
+   have): dead, and it says so, since the title holds the reason (file-view-links.ts DEAD_LINK_CLASS). */
+.fileview-md a.fv-dead { color: inherit; opacity: 0.7; text-decoration: underline dotted; cursor: help; }
 
+/* ── text size and measure (file-view.ts textSizeControl) ── The A− / A+ buttons and Ctrl/Cmd + wheel over the
+   body set `data-fv-text` on the viewer root to one of TEXT_SIZES; this table turns the step into the ONE
+   property the text views read, --fv-scale. Every text size below is a multiple of it, so the prose, its
+   headings (em of the prose), inline and fenced code, and the Raw view's rows and gutter scale together, and
+   the prose measure with them (80 of the root's own ch, so the same characters per line at every size; the
+   Rendered markdown block below says how it is laid). Nothing else reads it: the title bar, its buttons and the
+   editor keep the page's size. Absent (a bundle without these rules) every fallback reads as 1, today's sizes
+   exactly. file-view-text-size.test.ts pins the table against TEXT_SIZES in both sheets and measures the layout. */
+.fileview[data-fv-text="70"] { --fv-scale: 0.7; }
+.fileview[data-fv-text="80"] { --fv-scale: 0.8; }
+.fileview[data-fv-text="90"] { --fv-scale: 0.9; }
+.fileview[data-fv-text="100"] { --fv-scale: 1; }
+.fileview[data-fv-text="115"] { --fv-scale: 1.15; }
+.fileview[data-fv-text="130"] { --fv-scale: 1.3; }
+.fileview[data-fv-text="150"] { --fv-scale: 1.5; }
+.fileview[data-fv-text="175"] { --fv-scale: 1.75; }
+.fileview[data-fv-text="200"] { --fv-scale: 2; }
 /* Rendered markdown (the Raw ⇄ Rendered toggle; Rendered is the default — the user 2026-08-09).
-   Typography mirrors the chat's .md block in styles.css, the reference aesthetic (one treatment, two
-   sheets — the .romp-acted precedent); font sizes reuse what this surface already wears (the page base,
-   12px mono, the err-hint's 0.92em). Vars the feed sheet does not define carry the chat's literals as
-   fallbacks (feed-css-vars.test.ts holds that line). */
-/* contain: layout makes .fileview-md the containing block for any fixed or absolutely positioned descendant: an
-   element in a file that reaches `position: fixed` (a class of the page's it happens to wear; the sanitizer drops
-   an inline one) stays inside the note instead of covering the viewer's chrome. Layout only, not paint: the
-   body's vertical scroll is untouched. Content wider than .fileview-md becomes ink overflow the body cannot
-   scroll to, so the media rules below cap an <svg>, <canvas> or <video> at the column as `.fileview-md img`
-   already does, and the table rule below gives a table wider than the column a horizontal scroll of its own.
-   Pinned byte-equal in both sheets (fileview-parity.test.ts). */
-.fileview-md { padding: 14px 18px; max-width: 860px; overflow-wrap: anywhere; font-family: var(--font-prose); contain: layout; }
+   A document's type scale, GitHub's: the prose at 1.15 times the page's size (14.95px at the 13px default) in the
+   document's own face, --font-doc (sans in both themes; --font-prose is the assistant's reading face, mono in the light
+   theme, and a README in mono reads as source); headings 2 / 1.5 / 1.25 / 1em with h5 and h6 dimmed and a rule under h1
+   and h2; a 2em list gutter; fenced code at 12px mono with the chat's per-line rows and Copy button; inline code and kbd
+   at 0.92 and 0.86em; the leading 1.5, declared on the root rather than inherited, since the chat's body is 1.6 and the
+   feed's 1.5, so the same document was a different height on the two surfaces. Vars the feed sheet does not define
+   carry the chat's literals as fallbacks (feed-css-vars.test.ts holds that line). One treatment, two sheets: the
+   .romp-acted precedent; fileview-parity.test.ts pins every head byte-equal.
+   The measure is 80 of the root's own ch, laid as inline padding rounded DOWN to whole pixels (a fractional left edge put
+   the text on sub-pixel positions where a drag selection stayed collapsed), centred, never under 18px; the plain calc()
+   is the fallback for an engine without round(), declared first. It replaces a fixed pixel cap, so the column is the
+   same characters wide at every text size. contain: layout makes the root the containing block for anything inside it
+   (an element in a file that reaches `position: fixed` through a class of the page's it happens to wear, the sanitizer
+   having dropped an inline one, stays inside the note instead of covering the viewer's chrome; layout only, not paint, so
+   the body's vertical scroll is untouched) and turns content wider than the root into ink overflow the body cannot scroll
+   to, so nothing a document carries widens the viewer: the img rule and the media rules below cap a picture, an inline
+   svg, a canvas or a video at the column, and a table wider than the column scrolls on its own (the table rules below).
+   --fv-body-w, the body's content width for a top-level table's cap (below), is registered non-inherited so a write to a
+   table restyles that table alone. */
+@property --fv-body-w { syntax: "*"; inherits: false; }
+.fileview-md { padding: 14px 18px; padding-inline: max(18px, calc((100% - 80ch) / 2)); padding-inline: max(18px, round(down, calc((100% - 80ch) / 2), 1px)); overflow-wrap: anywhere; font-family: var(--font-doc); font-size: calc(var(--fs) * 1.15 * var(--fv-scale, 1)); line-height: 1.5; contain: layout; }
 .fileview-md > :first-child { margin-top: 0; }
 .fileview-md > :last-child { margin-bottom: 0; }
 .fileview-md p { margin: 0.5em 0; }
-.fileview-md h1, .fileview-md h2, .fileview-md h3, .fileview-md h4 {
-  font-weight: 600; color: var(--fg); margin: 1em 0 0.4em; line-height: 1.3; }
-.fileview-md h1 { font-size: 1.3em; } .fileview-md h2 { font-size: 1.15em; } .fileview-md h3 { font-size: 1.05em; }
+/* The heading ladder: h1 2em, h2 1.5em, h3 1.25em, h4 1em, h5 and h6 1em in the dim tier, weight 600, a rule under h1 and
+   h2. em of the prose, so the text-size control scales them with it. The margins are 1.5 above and 0.5 below every
+   heading in the PROSE's em whatever the heading's size: a heading's em is its own, so the larger levels divide by their
+   size to land on the same distance. */
+.fileview-md h1, .fileview-md h2, .fileview-md h3, .fileview-md h4, .fileview-md h5, .fileview-md h6 {
+  font-weight: 600; color: var(--fg); margin: 1.5em 0 0.5em; line-height: 1.25; }
+.fileview-md h1 { font-size: 2em; margin: calc(1.5em / 2) 0 calc(0.5em / 2); }
+.fileview-md h2 { font-size: 1.5em; margin: calc(1.5em / 1.5) 0 calc(0.5em / 1.5); }
+.fileview-md h3 { font-size: 1.25em; margin: calc(1.5em / 1.25) 0 calc(0.5em / 1.25); }
+.fileview-md h4 { font-size: 1em; }
+.fileview-md h5, .fileview-md h6 { font-size: 1em; color: var(--dim); }
+.fileview-md h1, .fileview-md h2 { padding-bottom: 0.3em; border-bottom: 1px solid var(--box-border); }
 /* a heading an in-document link lands on (scrollIntoView) sits a breath below the title bar's hairline
    rather than flush against it — the bar's own 10px spacing */
 .fileview-md h1, .fileview-md h2, .fileview-md h3, .fileview-md h4, .fileview-md h5, .fileview-md h6 { scroll-margin-top: 10px; }
-.fileview-md ul, .fileview-md ol { margin: 0.4em 0; padding-left: 1.4em; }
+.fileview-md ul, .fileview-md ol { margin: 0.4em 0; padding-left: 2em; }
 .fileview-md li { margin: 0.2em 0; }
+/* A task item (`- [ ] ...`): no bullet beside the checkbox (mdBlock stamps GitHub's task-list-item on the li after the
+   sanitize, for a disabled checkbox that is the item's first child, in a paragraph or not), the checkbox pulled into the
+   gutter where the bullet was, drawn for the theme the page wears (--color-scheme; without it a dark page draws a white
+   checkbox). The pull is measured against Chromium's disc, whose centre sits about 7px plus 0.45em before the item's text at
+   every size, and the checkbox is the control's own 13px, declared so the margin can centre it on that point. font-size:
+   inherit makes the em the prose's: a control's own em is the UA's 13.33px, which the text-size control never moves.
+   The size is a rule of its own, for every checkbox under a task item (a nested list's too). 0.2em after the checkbox plus the
+   source's own space puts the text on the plain items' text edge. No accent-color: marked emits every checkbox disabled, and
+   Chromium paints a disabled checkbox grey whatever accent is declared. */
+.fileview-md li.task-list-item { list-style: none; }
+.fileview-md li.task-list-item input { font-size: inherit; }
+.fileview-md li.task-list-item > input[type="checkbox"], .fileview-md li.task-list-item > p:first-child > input[type="checkbox"] {
+  width: 13px; height: 13px; margin: 0 0.2em 0.25em calc(-13px - 0.46em); vertical-align: middle; color-scheme: var(--color-scheme); }
 .fileview-md strong { color: var(--fg); font-weight: 600; }
 .fileview-md em { font-style: italic; }
 .fileview-md a { color: var(--link); text-decoration: none; }
@@ -1545,22 +1641,80 @@ a.fileview-gh-note { border-style: dashed; }
   color: var(--code-fg, #e1c08d); background: var(--code-bg, rgba(217, 119, 87, 0.10));
   padding: 0.12em 0.4em; border-radius: 4px;
 }
+/* <kbd>, a key: the settings modal's two tokens (gear.css reads them too), mono at 0.86em, a bottom shadow line for the
+   key's edge. */
+.fileview-md kbd {
+  display: inline-block; padding: 0.1em 0.4em; font-family: var(--mono, ui-monospace, monospace); font-size: 0.86em;
+  line-height: 1.3; color: var(--fg); vertical-align: middle; background: var(--kbd-bg); border: 1px solid var(--kbd-border);
+  border-radius: 3px; box-shadow: inset 0 -1px 0 var(--kbd-border);
+}
 .fileview-md pre {
   background: var(--box-bg, rgba(255, 255, 255, 0.03)); border: 1px solid var(--box-border);
   border-radius: 6px; padding: 11px 14px; margin: 0.6em 0; overflow-x: auto;
 }
 .fileview-md pre code {
   background: none; padding: 0; display: block;
-  font-family: var(--mono, ui-monospace, monospace); font-size: 12px; line-height: 1.5;
+  font-family: var(--mono, ui-monospace, monospace); font-size: calc(12px * var(--fv-scale, 1)); line-height: 1.5;
   color: var(--code-fg, #e1c08d); white-space: pre-wrap; overflow-wrap: anywhere;
+  tab-size: 4; counter-reset: ln;   /* tabs as the Raw view shows them (.fileview-pre); the line counter, for every fence (below) */
 }
-/* A table wider than the column (a `nowrap` cell, many columns) scrolls sideways on its own, as on GitHub: a block
-   box shrink-wrapped to its content (width: max-content) and capped at the column, with the overflow scrollable.
-   Under contain: layout the body cannot scroll to what a table lets run past the column, so the table has to.
-   border-collapse is inherited by the anonymous table box the block wraps, so the cell borders still collapse. */
-.fileview-md table { border-collapse: collapse; margin: 0.6em 0; display: block; width: max-content; max-width: 100%; overflow-x: auto; }
+/* A fence's per-line rows and Copy button (code-block.ts, the chat's own): .cl is one logical line, .ct its wrapping
+   content, the number a CSS counter in ::before so a soft-wrap reads distinctly from a real newline and the numbers never
+   copy with the code. The counter resets on `.fileview-md pre code` above, not on `code.hljs` as the chat's does: mdBlock
+   wraps EVERY fence, and an unregistered language's fence carries no hljs class, so it would have gone on counting from
+   the block before. The Copy button is parked top-right, faint until the block is hovered, green on success. Scoped
+   copies of the chat's unscoped rules (styles.css), byte-equal in both sheets since the feed page loads only feed.css
+   (fileview-parity.test.ts, code-block.test.ts); the code tint carries the chat's literal as its fallback, since feed.css
+   defines no --code-bg in :root (feed-css-vars.test.ts). The gutter's own line-height is 1 and it never wraps, its basis
+   is 2.5em or the fence's digit count in ch (--ln-digits, written by wrapCodeLines), and the .ct's ::before is a word
+   joiner so a blank line's row is the line-height: the chat's rule says why each. */
+.fileview-md pre code .cl { display: flex; align-items: baseline; }
+.fileview-md pre code .cl::before {
+  counter-increment: ln; content: counter(ln);
+  flex: 0 0 max(2.5em, calc(var(--ln-digits, 0) * 1ch + 0.05em)); margin-right: 0.85em; text-align: right;
+  color: var(--dim); opacity: 0.32; user-select: none; font-size: 0.92em; line-height: 1; overflow-wrap: normal;
+}
+.fileview-md pre code .ct { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.fileview-md pre code .ct::before { content: "\2060"; }
+.fileview-md pre.has-copy { position: relative; }
+.fileview-md .code-copy {
+  position: absolute; top: 6px; right: 6px; z-index: 1;
+  font-family: var(--sans); font-size: 11px; line-height: 1; padding: 3px 7px; border-radius: 4px;
+  border: 1px solid var(--box-border); background: var(--code-bg, rgba(217, 119, 87, 0.10)); color: var(--dim);
+  cursor: pointer; opacity: 0; user-select: none;
+  transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.fileview-md pre.has-copy:hover .code-copy, .fileview-md .code-copy:focus-visible { opacity: 0.9; }
+.fileview-md .code-copy:hover { color: var(--fg); border-color: var(--dim); }
+.fileview-md .code-copy.copied { color: var(--green); border-color: var(--green); opacity: 1; }
+@media (hover: none) { .fileview-md .code-copy { opacity: 0.8; } }   /* touch: no hover state, so keep it visible */
+/* A table is a block as wide as its columns need, scrolling in its own box past its cap, whole words kept (overflow-wrap:
+   normal against the root's anywhere). A table inside a quote or a list item is capped at its container. A table of the
+   page's own (a direct child of the root) is capped at the BODY's width less the root's 18px inset, not the column's:
+   --fv-body-w is the body's content width as its ResizeObserver reports it (file-view.ts watchBodyWidth), written on
+   each top-level table and registered non-inherited above. A table no wider than the column sits at the column's left
+   edge with the prose, as on GitHub; one wider than the column grows out of it EVENLY, into both gutters, until it meets
+   the body's inset: the translate moves it left by half of what it exceeds the column by (a percentage in translate is
+   of the table's own width; half the body less the root's inline padding is half the column, the padding rounded down
+   here as the root rounds it, and the observer's width is the content box the root's 100% is, so the two agree to the
+   pixel; min() holds a narrower table still; the shift is rounded to whole pixels, as the measure is). Scrollable overflow
+   is computed from the transformed box, so the shifted table never makes the body scroll sideways; contain: layout on the
+   root is for anything else wider than the column (a fixed-width svg, an iframe), which it turns into ink overflow the
+   body cannot scroll to. Before the observer's first report, or with no ResizeObserver, the property is unset and both
+   declarations read the same stand-in, 100% plus the inset the cap takes back: the cap is then the column, and in the
+   translate, where 100% is the table's own width, the padding term is under 19px for any table the column holds and
+   rounds down to its 18px floor, so the shift is exactly none. border-collapse is inherited by the anonymous table box the
+   block wraps, so the cell borders still collapse. */
+.fileview-md table { border-collapse: collapse; margin: 0.6em 0; display: block; width: max-content; max-width: 100%; overflow-x: auto; overflow-wrap: normal; }
+.fileview-md > table { max-width: calc(var(--fv-body-w, calc(100% + 36px)) - 36px); translate: min(0px, round(calc(var(--fv-body-w, calc(100% + 36px)) / 2 - max(18px, round(down, (var(--fv-body-w, calc(100% + 36px)) - 80ch) / 2, 1px)) - 50%), 1px)); }
 .fileview-md th, .fileview-md td { border: 1px solid var(--box-border); padding: 4px 10px; text-align: left; }
-.fileview-md th { background: var(--box-bg, rgba(255, 255, 255, 0.03)); }
+.fileview-md th { font-weight: 600; background: var(--overlay-05); }
+.fileview-md tbody tr:nth-child(even) { background: var(--overlay-05); }
+/* marked writes a column's `:---:` / `---:` alignment as the cell's align attribute (DOMPurify keeps it); the rule above
+   overrode the presentational hint, so every cell read left */
+.fileview-md th[align="center"], .fileview-md td[align="center"] { text-align: center; }
+.fileview-md th[align="right"], .fileview-md td[align="right"] { text-align: right; }
+.fileview-md th[align="left"], .fileview-md td[align="left"] { text-align: left; }
 .fileview-md img { max-width: 100%; }
 /* Media a file draws itself (an inline <svg> diagram, a <canvas>, a <video>) fits the column the way an <img> does:
    under contain: layout anything wider than .fileview-md is clipped at the body's edge and unreachable. :where() keeps
@@ -1581,6 +1735,40 @@ a.fileview-gh-note { border-style: dashed; }
 .fileview-img { max-width: 100%; max-height: 82vh; object-fit: contain; border-radius: 8px;
   box-shadow: var(--shadow-modal); }
 .fileview-frame { display: block; width: 100%; height: 100%; border: 0; background: #fff; }
+
+/* ── print (Ctrl/Cmd + P while a rendered file is open): the file alone, black on white, across as many pages as it needs.
+   The dashboard's chrome behind the viewer is left out and the viewer's own title bar and Copy buttons with it; the page
+   and the card go white (both :root and body.fileview-open, so a served page's inline theme cannot paint the canvas grey)
+   and every fixed height and overflow that holds the card to one screen is released, so the document runs on to the
+   next page instead of being cut at the first. Tokens and gutters print in full black in the document and in the Raw
+   view (code.hljs and its spans under the body, the wrap mode's row numbers, the plain gutter); the task checkbox is drawn in
+   the light scheme whatever the page's theme; fills and washes go, borders turn black. A table is laid out as a table
+   again (display: block would let it scroll, and paper does not), and a table of the page's own keeps the screen's room,
+   the body less the root's inset, with the screen's shift into both gutters: the cap and the translate are restated in
+   container units, the body made a size container here (no script runs at print layout, so a unit the sheet resolves is
+   the one that holds). Byte-equal in styles.css and feed.css (fileview-parity.test.ts). */
+@media print {
+  :root, body.fileview-open { height: auto; overflow: visible; background: white; color: black; }
+  body.fileview-open { display: block; }
+  body.fileview-open > :not(#romp-fileview) { display: none; }
+  #romp-fileview { position: static; inset: auto; z-index: auto; display: block; background: none; }
+  .fileview { width: auto; height: auto; display: block; overflow: visible; background: white; color: black; border: 0; border-radius: 0; box-shadow: none; }
+  .fileview-bar, .fileview > .fileview-err, .fileview-md .code-copy { display: none; }
+  .fileview-body { overflow: visible; container-type: inline-size; }
+  .fileview-md, .fileview-md h1, .fileview-md h2, .fileview-md h3, .fileview-md h4, .fileview-md h5, .fileview-md h6, .fileview-md strong,
+  .fileview-md blockquote, .fileview-md a, .fileview-md kbd, .fileview-md :not(pre) > code, .fileview-md pre code, .fileview-md pre code span,
+  .fileview-md pre code .cl::before { color: black; }
+  .fileview-md a { text-decoration: underline; }
+  .fileview-md li.task-list-item input[type="checkbox"] { color-scheme: light; }
+  .fileview-md :not(pre) > code, .fileview-md kbd, .fileview-md pre, .fileview-md th, .fileview-md tbody tr:nth-child(even) { background: none; }
+  .fileview-md pre, .fileview-md th, .fileview-md td, .fileview-md hr, .fileview-md blockquote, .fileview-md h1, .fileview-md h2, .fileview-md kbd { border-color: black; }
+  .fileview-md kbd { box-shadow: none; }
+  .fileview-body code.hljs, .fileview-body code.hljs span, .fileview-body .fv-cl::before, .fileview-gutter { color: black; }
+  .fileview-md pre code .cl::before, .fileview-body .fv-cl::before, .fileview-gutter { opacity: 1; }
+  .fileview-gutter { background: none; border-color: black; }
+  .fileview-md table { display: table; width: max-content; overflow: visible; overflow-wrap: anywhere; }
+  .fileview-md > table { max-width: calc(100cqi - 36px); translate: min(0px, round(calc(50cqi - max(18px, round(down, (100cqi - 80ch) / 2, 1px)) - 50%), 1px)); }
+}
 
 /* ---------- syntax highlighting (warm, restrained) ----------
    The hljs token palette, mirrored from styles.css (one treatment, two sheets — the .romp-acted

@@ -19,19 +19,22 @@ test("the card partitions on-deck from finished, and on-deck ALWAYS renders", ()
   // finished = anything NOT on deck — completed, and cancelled/deleted should the store carry them
   // (the kernel's _TASK_DONE_STATUSES semantics, client-side)
   assert.match(TODO, /const finished = ev\.tasks\.filter\(\(t\) => t\.status !== "in_progress" && t\.status !== "pending"\);/);
-  assert.match(TODO, /for \(const t of onDeck\) card\.appendChild\(row\(t\)\);/, "on-deck rows render unconditionally");
+  assert.match(TODO, /for \(const t of onDeck\) body\.appendChild\(row\(t\)\);/, "on-deck rows render unconditionally (into the notice body, 2026-09-08)");
 });
 
 test("the finished bulk folds at 3+, and a tiny list stays inline (no click for two rows)", () => {
   assert.match(TODO, /if \(finished\.length >= 3\) \{/);
-  assert.match(TODO, /\} else for \(const t of finished\) card\.appendChild\(row\(t\)\);/);
+  assert.match(TODO, /\} else for \(const t of finished\) body\.appendChild\(row\(t\)\);/);
 });
 
-test("the fold row reads '+N more completed', flips on click, and the flip acknowledges in place", () => {
-  assert.match(TODO, /tog\.textContent = open \? `hide \$\{finished\.length\} completed` : `\+ \$\{finished\.length\} more completed`;/);
-  assert.match(TODO, /rememberFold\(doneBox, "todo-open", foldKey\);\s*\n\s*label\(\);/,
-    "the toggle records the keyed state and re-labels — the visible flip is the acknowledgement");
-  assert.match(TODO, /tog\.addEventListener\("click", \(e\) => \{/);
+test("the fold row reads '+N more completed', flips through the delegate, and the flip acknowledges in place", () => {
+  // 2026-09-08 (the notice-vocabulary pass): the toggle rides the body delegate (data-act=todofold) — no per-node
+  // listener for the tail rebuild to destroy; the label + tip flip in ONE helper the render and the click share
+  assert.match(RENDER, /function todoFoldLabel\(tog: HTMLElement, open: boolean, n: number\): void \{\s*\n\s*tog\.textContent = open \? `hide \$\{n\} completed` : `\+ \$\{n\} more completed`;/);
+  assert.match(TODO, /tog\.dataset\.act = "todofold"; tog\.dataset\.nkey = foldKey; tog\.dataset\.n = String\(finished\.length\);/);
+  assert.match(RENDER, /todofold: \(el\) => \{[\s\S]{0,300}?rememberFold\(box, "todo-open", el\.dataset\.nkey \|\| undefined\);\s*\n\s*todoFoldLabel\(el, box\.classList\.contains\("todo-open"\), Number\(el\.dataset\.n\) \|\| 0\);/,
+    "the click flips the box, keeps the state in openFolds and relabels — the acknowledgement");
+  assert.doesNotMatch(TODO, /tog\.addEventListener/);
 });
 
 test("expand state survives re-renders — the openFolds keyed idiom, keyed per session", () => {

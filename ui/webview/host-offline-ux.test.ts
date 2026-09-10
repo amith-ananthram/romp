@@ -38,13 +38,17 @@ test("the mark still goes on the host token, never the session name", () => {
 test("the transcript says why it ends, at the END, where the eye lands", () => {
   assert.match(RENDER, /function syncHostOfflineFoot\(\): void \{/);
   assert.match(RENDER, /is disconnected — this is the last romp got from it\. Reconnecting\./);
-  assert.match(RENDER, /note\.id = "host-offline-foot";/);
-  assert.match(CSS, /\.tx-hostoff \{/);
+  // 2026-09-08 (the notice-vocabulary pass): a slim SESSION notice in the warn severity — the one row that sat
+  // outside the vocabulary (centred italic); .notice-foot gives it the prose column's indent off the rail
+  assert.match(RENDER, /foot\.id = "host-offline-foot";/);
+  assert.match(RENDER, /notice\(\{ src: "session", glyph: "api", sev: "warn", gist: text, nested: true,/);
+  assert.match(CSS, /\.notice-foot \{/);
+  assert.doesNotMatch(CSS, /\.tx-hostoff/);
 });
 
 test("the foot is a SIBLING of the view, never a child of it", () => {
   // syncView counts v.el's children to track what it has rendered — a foot inside would read as transcript
-  assert.match(RENDER, /content\.appendChild\(note\);/);
+  assert.match(RENDER, /content\.appendChild\(foot\);/);
   assert.match(RENDER, /A sibling of the view element, never a child/);
 });
 

@@ -203,7 +203,7 @@ test("the header: 'subagent of <parent>' links back to the launch (setActive + t
   assert.match(RENDER, /if \(s\.sub\.truncated && !s\.sub\.error\) \{[\s\S]{0,200}?note\.textContent = "earlier part not shown";/);
   // the header lives in #content and is removed for every real session
   assert.match(RENDER, /if \(!s \|\| !s\.sub\) \{ if \(host\) host\.remove\(\); return; \}/);
-  assert.match(CSS, /#sub-head \{ position: sticky; top: 0;[^}]*font-size: 0\.86em;/);
+  assert.match(CSS, /#sub-head \{ position: sticky; top: 0;[^}]*font-size: 0\.82em;/);   // the notice META rung (2026-09-08; was 0.86em)
 });
 
 test("frames: events replace in place through appendActive (the chat's scroll rule); error → the sentence in the pane; loader first", () => {
