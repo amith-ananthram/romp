@@ -134,6 +134,28 @@ coordinate/question mail, a bookkeeping record): the anchor substitutes the
 segment's first assistant atom. The clear wrap-up is exempt: its one
 blocked card is the designed needs-you escape.
 
+A card appears only for work that traces to something the user asked for (the
+user 2026-09-10, whose feed filled with cards titled after the workflows their
+sessions ran on their own). The origin rule at minting time, event first, text
+second: in a segment whose trigger is not a human ask (a seam tail a completion
+notification woke, an autonomous stretch), every top-level `mint` the planner
+files demotes to a step under the goal the turn ran in (the seam's own top, the
+segment's placement, else the open top nearest in words to the work); in a
+human-triggered segment the mints demote when the segment's assistant turns
+started background work by the event model's own criterion (a Workflow run, or an
+Agent or Task with `run_in_background` or an asynchronous ack; a foreground
+subagent the turn waited on is no launch), whatever they are called, and the ask
+itself keeps its card
+(the segment's placement, or the reply's first mint when the segment was planned
+in one work-run). Word overlap never decides top versus step: it only picks which
+launch supplies the step's one-line why, and which open goal is the parent when
+the turn ran in none. A demoted step carries `born` (`{kind: session, via:
+workflow | agent | work, why}`); with nothing the user asked for to nest under,
+the mint files nothing. A harness report (a background task's completion, a
+system reminder) or a teammate's line never appears under USER ASKED in the text
+the judges read and never roots a mint. `_demote_session_mints`,
+`_seg_launches`.
+
 **placer.** The second, scoped call, only when the chosen card already has
 open sub-goals: it sees just that card's subtree and picks the spot, biased
 to the highest level that makes sense. Most cards have no open sub-goals,

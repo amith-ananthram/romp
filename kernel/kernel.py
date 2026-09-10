@@ -25609,6 +25609,95 @@ def _bg_scan_all_cached(path):
     return em.scan_bg_tasks_cached(path, _bgall_cache, want_all=True)
 
 
+def _session_started_face(nodes, nid, healed):
+    """The one-line story for a session-started ROOT card: {why, parent} or None for an ordinary ask."""
+    nd = nodes.get(nid) or {}
+    born = nd.get("born") if isinstance(nd.get("born"), dict) else None
+    if born is None and nid in healed:
+        born = healed[nid][1]
+    if not born:
+        return None
+    parent = str(born.get("parentText") or "") or None   # recorded at demotion / heal time: names the request
+    pid = nd.get("parentId")                              # even after the parent node itself is gone
+    if not parent and pid and pid in nodes:
+        parent = str(nodes[pid].get("text") or "") or None
+    return {"why": str(born.get("why") or ""), "parent": parent}
+
+
+_HEAL_LOG = {"n": 0}          # tops the feed has nested as session-started this boot (logged once per rise)
+_HEAL_STOP = {"the", "and", "for", "with", "over", "into", "from", "that", "this", "each", "then", "them", "they", "their", "your", "onto", "about"}   # function words: never a shared word
+
+
+def _heal_session_tops(path, nodes, status=None):
+    """READ-SIDE heal for stores written before the minting-time rule (T319): a top-level goal rooted in a
+    MACHINE record, not in anything the user asked for, is rendered inside the session's human-asked top that
+    was current when it was minted. The deciding fact is the judge's own latched anchor verdict (askAnchor
+    "machine": the node's prompt anchor resolved to a peer mail, the agent's own record or romp bookkeeping,
+    _latch_ask_anchors); never a word match, and never a top that merely lacks an anchor (older stores hold
+    plain tops without one). Excluded: cleared tops, handoff
+    trackers, delegate-rooted tops (origin.peer: a chain the courier traced), and steps born of a session
+    (never tops). Word overlap with the transcript's recorded background launches (every Agent/Task/Workflow
+    row, _bg_scan_all_cached) only picks WHICH launch supplies the why line and, when several human tops are
+    open, which is the parent; with no overlapping launch the parent is the newest human top minted before
+    the node (else the oldest) and the why says the record it is rooted in. Returns {nid: (parent nid or
+    None, born)}, None for a machine top with no human top to nest under (rendered as a card that says what
+    it is). Deterministic: a pure function of the store and the task stream (sorted hosts, first-match
+    launches), so the same inputs nest the same way on every build and nothing moves without a new record.
+    NEEDS-YOU BREAKS THROUGH (the serving fold's rule): a candidate whose exported status is blocked, or that
+    is itself blocked, keeps its card until the block lifts, and a clear wrap-up's decision card is never a
+    candidate; the heal only rewrites the feed's children map, so a nested node's block would otherwise leave
+    the Needs-You column with its host still reading working. Hosts include completed and cleared human tops:
+    a healed row stays with its host when the ask completes (the row renders in the completed card) and goes
+    with it when the user clears it (what a real step does), never resurfacing as a root card. Never writes
+    the store."""
+    out = {}
+    status = status or {}
+    def toks(x):
+        return {w for w in re.findall(r"[a-z0-9]+", str(x or "").lower()) if len(w) > 3 and w not in _HEAL_STOP}
+    def delegate(nd):
+        return isinstance(nd.get("handoff"), dict) or (isinstance(nd.get("origin"), dict) and nd["origin"].get("peer"))
+    cands = [(nid, nd) for nid, nd in nodes.items()
+             if nd.get("parentId") is None and not nd.get("cleared") and not nd.get("born") and not delegate(nd)
+             and not nd.get("blocked") and status.get(nid) != "blocked" and not nd.get("clearWrap")
+             and nd.get("askAnchor") == "machine"]      # the latched verdict only: an anchorless top is older
+             #                                           data, not evidence (a review finding on this change)
+    if not cands:
+        return out
+    try:
+        tasks = _bg_scan_all_cached(path) if path else []
+    except Exception:
+        tasks = []
+    launches = [t for t in tasks if isinstance(t, dict) and _bg_is_agent(t.get("type")) and t.get("summary")]
+    hosts = sorted(((hid, hd) for hid, hd in nodes.items()
+                    if hd.get("parentId") is None and not hd.get("born") and hd.get("askAnchor") != "machine"
+                    and (hd.get("promptUuid") or delegate(hd))),
+                   key=lambda h: (h[1].get("t") or 0, h[0]))      # keyed by the store's own ids, never a node's "id" field
+    for nid, nd in sorted(cands, key=lambda c: (c[1].get("t") or 0, c[0])):
+        tt = toks(nd.get("text"))
+        best, hit = 0.0, None
+        for l in launches:
+            lt = toks(l.get("summary"))
+            share = len(tt & lt) / float(min(len(tt), len(lt))) if tt and lt else 0.0
+            if share > best:
+                best, hit = share, l
+        before = [h for h in hosts if (h[1].get("t") or 0) <= (nd.get("t") or 0) and h[0] != nid]
+        pool = before or [h for h in hosts if h[0] != nid][:1]
+        host = None
+        if pool:
+            host = pool[-1]
+            if hit and len(pool) > 1:            # several open: the launch's words pick the parent, ties the newest
+                ht = toks(hit.get("summary"))
+                host = max(pool, key=lambda h: (len(toks(h[1].get("text")) & ht), h[1].get("t") or 0))
+        via = ("workflow" if hit.get("type") == "local_workflow" else "agent") if hit else "work"
+        why = ("matched a background %s the session started (%s)" % (via, " ".join(str(hit.get("summary")).split())[:120])
+               if hit else "rooted in the session's own record (a peer's line, a report, its own turn), not in a request")
+        born = {"kind": "session", "via": via, "why": why, "healed": True}
+        if host:
+            born["parentText"] = str(host[1].get("text") or "")[:120]
+        out[nid] = (host[0] if host else None, born)
+    return out
+
+
 def _bg_tasks(path, spawned_at=None, live=None):
     """The chat's background-task box payload: {count, tasks}. count = how many tasks to surface (drives the
     'N background tasks' header); tasks = up to 16 of them (newest first) enriched with each one's output tail
@@ -34778,6 +34867,7 @@ def build_feed(now, tmux=None):
     dbg_rows = _judge_error_rows(now) if jd._debug_mode() else None
     asks, working, awaiting = [], [], []
     serving_folds = []                                # T137: worker mirror cards awaiting the view-side fold
+    heal_total = 0                                    # T319: session-started tops nested this build (logged once per rise)
     bg_services = {}          # session name -> live SERVICE descs (judge-classified, _bg_split) → the neutral chip
     alive = _alive_sessions(now, tmux)               # hard filter: living sessions only
     wmap = _wait_for_graph(now, {s["sid"] for s in alive})   # per-session 'waiting on a live peer' (the user 2026-06-22)
@@ -34897,9 +34987,15 @@ def build_feed(now, tmux=None):
                             cite_uuids.add(_a["uuid"])
         except Exception:
             pass
+        healed = _heal_session_tops(s.get("path"), nodes, status)   # T319: pre-rule stores' machine-rooted tops nest (read-side)
+        heal_total += sum(1 for v in healed.values() if v[0])
         children = {}
         for nid, nd in nodes.items():
-            children.setdefault(nd.get("parentId"), []).append(nid)
+            _hp = healed.get(nid)
+            _pk = _hp[0] if (_hp and _hp[0]) else nd.get("parentId")
+            if _pk is not None and _pk not in nodes and isinstance(nd.get("born"), dict):
+                _pk = None                           # T319: a born step whose parent is gone renders as a root that says so
+            children.setdefault(_pk, []).append(nid)
         agent_open = _agent_open_set(nodes, children)   # authoritative-open subtree → never rendered 'done' (see helper)
         parked_rows = _parked_rows(nodes, children)     # leapfrogged open rows → the quiet "parked" row cue (see helper)
 
@@ -35013,7 +35109,9 @@ def build_feed(now, tmux=None):
             # courier-recorded handoff.peer, never inferred.
             _ho = nd.get("handoff") if isinstance(nd.get("handoff"), dict) else None
             _ho_sid = str(_ho.get("peer") or "") if _ho else ""
+            _born = nd.get("born") if isinstance(nd.get("born"), dict) else (healed.get(nid) or (None, None))[1]
             out.append({"id": nid, "kind": "handoff" if _ho_sid else "ask", "text": nd["text"],
+                        "born": _born or None,   # T319: a step the session started on its own (why it sits here)
                         "who": (_name_of(_ho_sid) or _ho_sid[:8]) if _ho_sid else name,
                         "whoSid": _ho_sid or fsid,
                         "whoColor": _name_color(_ho_sid) if _ho_sid else color,
@@ -35132,6 +35230,10 @@ def build_feed(now, tmux=None):
                 f = nodes[f]["parentId"]
             if f in nodes and status.get(f) not in ("completed", "cleared"):
                 jauth_top = f
+        def _host_top(x):                            # T319: a floor landing on a healed top belongs to its host card (the
+            _h = healed.get(x) if x else None        #   healed top is no longer a card, and the placeholder keys on the floor)
+            return _h[0] if (_h and _h[0]) else x
+        perm_top, api_top, jauth_top = _host_top(perm_top), _host_top(api_top), _host_top(jauth_top)
         plain_user_t = _last_plain_user_turn_t(ps["turns"]) if ps else 0   # re-check: a plain reply after a soft block de-urgents it
         had_working = False                          # does this session show ANY working card? → drives the provisional placeholder
         had_awaiting = False                         # …and does any of them read AWAITING? → the session's await-green dot (below)
@@ -35674,6 +35776,10 @@ def build_feed(now, tmux=None):
                 "warnRows": (_card_warn_rows(dbg_rows, fsid, set(_subtree(nid)),
                                              store.get("placements") or {}) or None)
                             if dbg_rows is not None else None,   # debug mode only: the card's judge failures, modal "Warnings" section
+                # T319: this root is work the SESSION started (a planner-born step whose parent is gone, or a
+                # pre-rule machine-rooted top the heal found no request to nest under): the face names the
+                # parent request when one is known and says why the work exists, in one line
+                "sessionStarted": _session_started_face(nodes, nid, healed),
                 "tree": flatten(nid, [], boundary=jd.review_boundary(nodes[nid]))}
             # THE SERVING FOLD, candidate side (the user 2026-08-28, T137: fan-out lives inside the
             # ask card — the T101 ruling applied to the mirror, view-side): a to-do mirror top the
@@ -35733,6 +35839,10 @@ def build_feed(now, tmux=None):
     # globally unique, so the tracker id is the whole key). A candidate whose tracker row is not
     # on this build's board keeps its own card — suppression without a rendered home would
     # silently hide live work.
+    if heal_total > _HEAL_LOG["n"]:                   # T319: said once per boot, and again only when the count rises
+        _HEAL_LOG["n"] = heal_total
+        sys.stderr.write("feed: %d session-started top(s) nested under the goal they ran in "
+                         "(no request behind them; the planner nests new ones at mint time)\n" % heal_total)
     if serving_folds:
         _byrow = {}
         for _c in asks:

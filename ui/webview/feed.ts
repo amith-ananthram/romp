@@ -53,6 +53,8 @@ interface AskQuestion { reply_id: string; sid: string; name: string; t: number; 
 // One node of the ask's request DAG (flat list, root first; nest via children ids;
 // a node under two parents appears in both → render twice, dim the repeat).
 interface AskTreeNode {
+  born?: { kind: string; via: string; why: string; healed?: boolean } | null;   // T319: a step the session started on its own
+                                                                                //   (via: workflow | agent | work); why it sits under this goal
   id: string; kind: "ask" | "handoff"; text: string; who: string;
   whoSid: string; whoColor: { bg: string; fg: string } | null;   // agent → colored session link
   whoWorking?: boolean;                                          // that agent is currently WORKING → yellow dot before its name
@@ -80,6 +82,9 @@ interface NodeLogRow {
   at?: number | null; evT?: number | null; anchorUuid?: string | null;
 }
 interface AskItem {
+  sessionStarted?: { why: string; parent: string | null } | null;   // T319: the root is work the SESSION started (a workflow, an
+                                                                    //   agent, its own thread) with no request of the user's to nest
+                                                                    //   under; the face says so in one line instead of posing as an ask
   itemId: string; sid: string; name: string; color: { bg: string; fg: string } | null;
   text: string; t: number; live: boolean;
   turnId: string;
@@ -2272,6 +2277,16 @@ function updateAskCard(card: HTMLElement, it: AskItem) {
   // TWO collapsible distiller sections (the user 2026-07-02): BACKGROUND (re-orientation for a reader who
   // forgot the thread, collapsed by default) above the takeaway (expanded by default), each with a +/−.
   applySections(a, it, !!distillShown);   // bg/summary/sub-goals (mutually exclusive) — applyDistillLine returns the line's TEXT (string), coerce to "has content"
+  // A SESSION-STARTED root (T319): work the session began on its own (a Workflow run, an agent, a thread of
+  // its own) that stands as a card only because its parent is gone or no request could host it. The face
+  // says what it is and why in one line, so it never reads as something the user asked for. AFTER
+  // applySections: with no takeaway that logic hides the distill line, and the face borrows that line.
+  if (it.sessionStarted && !distillShown && !(isJudgeAuth && it.blocked)) {
+    const dle = a._distill as HTMLElement;
+    const ss = it.sessionStarted;
+    dle.textContent = (ss.parent ? "Started by the session while working on \u201c" + ss.parent + "\u201d: " : "Started by the session on its own: ") + (ss.why || "");
+    dle.style.display = "";
+  }
   // API error → a red "API error" badge + a Retry button that pastes "retry" into the session to resume
   // the stalled turn (the user 2026-06-16). The card STAYS in Working (the user 2026-06-29) — an API error is
   // a transient stall, not a block — so this badge + Retry are the only API-error cue; no column move.

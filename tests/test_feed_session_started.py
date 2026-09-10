@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""The feed's side of T319 (the user 2026-09-10: no card for work a session started on its own). Three rules,
+each pinned here on a hermetic build_feed over synthetic stores and transcripts:
+- a Workflow or Agent run the session launched shows only inside the parent card's awaiting panel (the
+  local_workflow / local_agent rows), never as a card of its own;
+- a step the planner demoted (born {kind: session}) renders in its parent's tree with its why, and a
+  session-started ROOT that still shows (its parent gone) carries a one-line face naming what it is;
+- older stores are healed read-side: a top with no human prompt whose title matches a background run the
+  transcript records nests under the session's human-prompted top, the same way on every build, with a top
+  that has a human prompt never touched; the heal logs once how many it nested.
+Placeholder uuids, invented text, an invented project."""
+import contextlib
+import io
+import json
+import os
+import tempfile
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+from romp_load import load_source
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+BIN = os.path.join(os.path.dirname(HERE), "bin")
+os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
+os.environ.pop("ROMP_STATE_DIR", None)
+km = load_source("romp_kernel_session_started", os.path.join(BIN, "romp-kernel"))
+jd = km.jd
+
+NOW = 1781100000
+SID = "11111111-2222-3333-4444-555555555555"
+T0 = NOW - 3600
+WF_SCRIPT = "export const meta = { name: 'review-notes-api-retry', description: 'Lens reviewers over the retry diff' }\nreturn 1"
+
+
+def iso(t):
+    return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def uline(t, text, uuid, parent=None):
+    return {"type": "user", "timestamp": iso(t), "uuid": uuid, "parentUuid": parent,
+            "promptSource": "typed", "message": {"role": "user", "content": text}}
+
+
+def aline(t, text, uuid, parent=None, stop="end_turn", launch=None):
+    content = [{"type": "text", "text": text}]
+    if launch:
+        content.append({"type": "tool_use", "id": "toolu_" + uuid, "name": launch[0], "input": launch[1]})
+    return {"type": "assistant", "timestamp": iso(t), "uuid": uuid, "parentUuid": parent,
+            "message": {"role": "assistant", "content": content, "stop_reason": stop}}
+
+
+def tack(t, uuid, parent, tool_use_id, desc):
+    return {"type": "user", "timestamp": iso(t), "uuid": uuid, "parentUuid": parent,
+            "toolUseResult": {"isAsync": True, "status": "async_launched", "description": desc, "taskType": "local_workflow"},
+            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": "Workflow launched in background. Task ID: w1"}]}}
+
+
+class _Feed(unittest.TestCase):
+    def setUp(self):
+        km._downtime[:] = []
+        km._HEAL_LOG["n"] = 0
+        self.td = tempfile.TemporaryDirectory()
+        td = Path(self.td.name)
+        cdir = td / "launchdir"; cdir.mkdir()
+        proj = td / "projects"
+        pdir = proj / jd.re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(str(cdir)))
+        pdir.mkdir(parents=True)
+        recs = [uline(T0, "Add retries to the notes-api client", "u1"),
+                aline(T0 + 60, "Adding the retry loop.", "a1", "u1", stop="tool_use",
+                      launch=("Workflow", {"script": WF_SCRIPT})),
+                tack(T0 + 61, "u2", "a1", "toolu_a1", "Lens reviewers over the retry diff"),
+                aline(T0 + 400, "Wrote the retry loop; the review runs in the background.", "a2", "u2")]
+        self.tpath = pdir / (SID + ".jsonl")
+        self.tpath.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+        names = td / "names"; names.mkdir()
+        (names / SID).write_text("web\t%s\t#abcdef\n" % str(cdir))
+        self.saved = (jd.NAMES, jd.PROJECTS, jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR, jd.STATE, km.NAMES, km._tmux_sessions)
+        jd.NAMES, jd.PROJECTS = names, proj
+        jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR = td / "captions", td / "archive", td / "goals"
+        jd.STATE = td
+        km.NAMES = names
+        km._tmux_sessions = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
+                                           "context": None, "compactPct": None, "color": None}}
+        jd.GOALDIR.mkdir(parents=True)
+        km._bgall_cache.clear()
+
+    def tearDown(self):
+        (jd.NAMES, jd.PROJECTS, jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR, jd.STATE, km.NAMES, km._tmux_sessions) = self.saved
+        self.td.cleanup()
+
+    def _store(self, nodes, status=None, last=None):
+        (jd.GOALDIR / (SID + ".json")).write_text(json.dumps(
+            {"rompUuid": SID, "seq": len(nodes), "lastNode": last, "nodes": nodes, "placements": {}, "status": status or {}}))
+
+    def _feed(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            f = km.build_feed(NOW)
+        return f, err.getvalue()
+
+    @staticmethod
+    def _node(nid, text, parent=None, t=T0, **kw):
+        d = {"id": nid, "text": text, "parentId": parent, "nodeComplete": False, "blocked": False, "cleared": False,
+             "trail": [], "t": t, "mt": t}
+        d.update(kw)
+        return d
+
+
+class BornSteps(_Feed):
+    def test_a_demoted_step_renders_in_its_parents_tree_with_its_why(self):
+        top, step = SID + ":g1", SID + ":g2"
+        self._store({top: self._node(top, "Add retries to the notes-api client", promptUuid="u1"),
+                     step: self._node(step, "Adversarial review of the retry diff", parent=top, t=T0 + 400,
+                                      born={"kind": "session", "via": "workflow", "why": "started a background workflow (Lens reviewers over the retry diff)"})})
+        feed, err = self._feed()
+        asks = [a for a in feed["asks"] if a["sid"] == SID]
+        self.assertEqual([a["text"] for a in asks], ["Add retries to the notes-api client"], "one card: the ask")
+        self.assertIsNone(asks[0]["sessionStarted"], "an ask's own card carries no session-started face")
+        rows = {r["id"]: r for r in asks[0]["tree"]}
+        self.assertEqual(rows[step]["born"]["via"], "workflow")
+        self.assertIn("Lens reviewers", rows[step]["born"]["why"])
+        self.assertIsNone(rows[top]["born"])
+
+    def test_an_orphaned_born_step_is_a_root_that_names_the_request_it_served(self):
+        # the parent node is gone (popped by a later reconcile): the step still has a parentId, pointing nowhere.
+        # It renders as a root, and its face names the request from the record made at demotion time
+        step = SID + ":g2"
+        self._store({step: self._node(step, "Adversarial review of the retry diff", parent=SID + ":g1", t=T0 + 400,
+                                      born={"kind": "session", "via": "workflow", "parentText": "Add retries to the notes-api client",
+                                            "why": "started a background workflow (Lens reviewers over the retry diff)"})})
+        feed, err = self._feed()
+        card = next(a for a in feed["asks"] if a["sid"] == SID)
+        self.assertEqual(card["sessionStarted"], {"why": "started a background workflow (Lens reviewers over the retry diff)",
+                                                  "parent": "Add retries to the notes-api client"})
+
+
+class HealOlderStores(_Feed):
+    def _pre_rule_store(self):
+        ask, wf, other, plain = SID + ":g1", SID + ":g2", SID + ":g3", SID + ":g4"
+        self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human"),
+                     # minted by the old planner off the session's narration: its anchor resolved to the session's own
+                     # record (the judge latched "machine"), and its words match the recorded run
+                     wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine"),
+                     # a top with a human anchor whose words also match the run: never touched
+                     other: self._node(other, "Review the retry diff with fresh eyes", t=T0 + 600, promptUuid="u7", askAnchor="human"),
+                     # machine-rooted with words unlike any run: the event decides, it nests too
+                     plain: self._node(plain, "Tidy the colour names", t=T0 + 700, promptUuid="a9", askAnchor="machine")})
+        return ask, wf, other, plain
+
+    def test_machine_rooted_tops_nest_under_the_human_top_and_stay_there(self):
+        ask, wf, other, plain = self._pre_rule_store()
+        feed, err = self._feed()
+        asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
+        self.assertEqual(set(asks), {ask, other}, "the machine-rooted tops are no cards")
+        rows = {r["id"]: r for r in asks[ask]["tree"]}
+        self.assertIn(wf, rows, "the one whose words match the run sits in the retry top's tree")
+        self.assertEqual(rows[wf]["born"]["via"], "workflow")
+        self.assertTrue(rows[wf]["born"]["healed"])
+        self.assertIn("matched a background workflow the session started", rows[wf]["born"]["why"])
+        # the one unlike any run: nested by the event alone, under the newest human top minted before it
+        rows_other = {r["id"]: r for r in asks[other]["tree"]}
+        self.assertIn(plain, rows_other)
+        self.assertEqual(rows_other[plain]["born"]["via"], "work")
+        self.assertIn("rooted in the session's own record", rows_other[plain]["born"]["why"])
+        self.assertIn("feed: 2 session-started top(s) nested", err, "said once, on stderr")
+        # the second build: the same nesting, nothing said again
+        feed2, err2 = self._feed()
+        asks2 = {a["itemId"]: a for a in feed2["asks"] if a["sid"] == SID}
+        self.assertEqual(set(asks2), {ask, other})
+        self.assertIn(wf, {r["id"] for r in asks2[ask]["tree"]})
+        self.assertIn(plain, {r["id"] for r in asks2[other]["tree"]})
+        self.assertEqual(err2, "")
+
+    def test_a_top_with_a_human_anchor_is_never_healed_away(self):
+        ask, wf, other, plain = self._pre_rule_store()
+        feed, err = self._feed()
+        asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
+        self.assertIn(other, asks, "its words match the run, but a human asked for it")
+        self.assertIsNone(asks[other]["sessionStarted"])
+        self.assertIn(ask, asks)
+
+    def test_the_heal_is_a_pure_function_of_store_and_transcript(self):
+        ask, wf, other, plain = self._pre_rule_store()
+        nodes = json.loads((jd.GOALDIR / (SID + ".json")).read_text())["nodes"]
+        a = km._heal_session_tops(str(self.tpath), nodes)
+        b = km._heal_session_tops(str(self.tpath), nodes)
+        self.assertEqual(a, b)
+        self.assertEqual(set(a), {wf, plain})
+        self.assertEqual(a[wf][0], ask)
+        self.assertEqual(a[plain][0], other, "the newest human top minted before it")
+        self.assertEqual(km._heal_session_tops(str(self.tpath), {k: v for k, v in nodes.items() if k in (ask, other)}), {})
+
+    def test_an_unlatched_or_human_top_and_a_delegate_tracker_are_not_candidates(self):
+        ask, tracker, fresh = SID + ":g1", SID + ":g5", SID + ":g6"
+        self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human"),
+                     tracker: self._node(tracker, "delegated: review the retry diff", t=T0 + 500, handoff={"peer": "22222222-3333-4444-5555-666666666666", "msgId": "m1"}),
+                     fresh: self._node(fresh, "Lens review of the retry diff", t=T0 + 600, promptUuid="u8")})
+        feed, err = self._feed()
+        asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
+        self.assertIn(fresh, asks, "a not-yet-latched prompt top keeps its card")
+        self.assertIsNone(asks[fresh]["sessionStarted"])
+        nested = {r["id"] for a in asks.values() for r in a["tree"] if r["id"] != a["itemId"]}
+        self.assertNotIn(tracker, nested, "a delegate's tracker is never healed into another card")
+        self.assertNotIn(fresh, nested)
+        self.assertEqual(err, "")
+
+    def test_a_blocked_machine_top_keeps_its_needs_you_card(self):
+        # needs-you breaks through: the heal never takes a pending question off the board
+        ask, wf = SID + ":g1", SID + ":g2"
+        self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human"),
+                     wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine", blocked=True)},
+                    status={wf: "blocked", ask: "working"})
+        feed, err = self._feed()
+        asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
+        self.assertIn(wf, asks, "still a card")
+        self.assertEqual(asks[wf]["column"], "needs_input")
+        self.assertEqual(err, "")
+
+    def test_a_completed_host_keeps_its_healed_row(self):
+        # the ask completes: the row stays in the completed card's tree instead of resurfacing as a root card
+        # (a cleared host hides the same way: cards are built per root, and the row's root is the host)
+        ask, wf = SID + ":g1", SID + ":g2"
+        self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human", nodeComplete=True),
+                     wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine")},
+                    status={ask: "completed"})
+        feed, err = self._feed()
+        asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
+        self.assertEqual(set(asks), {ask}, "the completed ask still hosts the row; the row is no root")
+        self.assertEqual(asks[ask]["column"], "completed")
+        self.assertIn(wf, {r["id"] for r in asks[ask]["tree"]})
+
+    def test_an_anchorless_top_is_older_data_not_evidence_and_keeps_its_card(self):
+        # a top with no promptUuid and no latched verdict (an older store's plain mint) is never healed, even
+        # when its words match a recorded run: only the judge's machine verdict is the event
+        ask = SID + ":g1"; odd = SID + ":g9"; old = SID + ":g8"
+        self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1"),
+                     odd: self._node(odd, "Rename the widget colours", t=T0 + 500),
+                     old: self._node(old, "Lens review of the retry diff", t=T0 + 600)})
+        feed, err = self._feed()
+        self.assertEqual({a["itemId"] for a in feed["asks"] if a["sid"] == SID}, {ask, odd, old})
+        self.assertEqual(err, "")
+
+    def test_a_permission_floor_on_a_healed_top_reaches_its_host_card(self):
+        ask, wf = SID + ":g1", SID + ":g2"
+        self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human"),
+                     wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine")},
+                    last=wf)
+        km._tmux_sessions = lambda: {SID: {"state": "permission", "since": NOW - 10, "model": "", "effort": "",
+                                           "context": None, "compactPct": None, "color": None}}
+        feed, err = self._feed()
+        asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
+        self.assertEqual(set(asks), {ask}, "the healed top is no card")
+        self.assertEqual(asks[ask]["column"], "needs_input", "the live prompt's floor lands on the host")
+        self.assertEqual((asks[ask].get("blocked") or {}).get("state"), "permission")
+
+    def test_a_machine_top_with_no_human_top_to_nest_under_shows_as_a_card_that_says_so(self):
+        wf = SID + ":g2"
+        self._store({wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine")})
+        feed, err = self._feed()
+        card = next(a for a in feed["asks"] if a["sid"] == SID)
+        self.assertEqual(card["sessionStarted"]["parent"], None)
+        self.assertIn("matched a background workflow", card["sessionStarted"]["why"])
+        self.assertEqual(err, "", "nothing nested: nothing counted")
+
+
+class AwaitingPanel(unittest.TestCase):
+    def test_workflow_and_agent_rows_are_agents_for_the_awaiting_panel_never_cards(self):
+        self.assertTrue(km._bg_is_agent("local_workflow"))
+        self.assertTrue(km._bg_is_agent("local_agent"))
+        self.assertFalse(km._bg_is_agent("local_bash"))
+        # the feed's cards are goal nodes only: the card loop reads children[None], nothing else
+        import inspect
+        src = inspect.getsource(km.build_feed)
+        self.assertIn("for nid in children.get(None, [])", src)
+        self.assertNotIn("local_workflow", src.split("for nid in children.get(None, [])")[0].split("healed = _heal_session_tops")[0][-4000:],
+                         "no card is built from a workflow row")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
