@@ -68,6 +68,12 @@ os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="romp-tests-state-")
 # thread method ends a hung run that way), so a hung run leaves this dir beside the root.
 STATE_DIR = os.environ["XDG_STATE_HOME"]
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
+# No unittest run may reach a REAL manager or kernel either: the same three ports conftest.py poisons
+# for pytest (its comment has the readers and the incident). Set to a dead port, never popped: every
+# reader maps an absent variable to the default port, which on a machine running romp is the live one.
+os.environ["ROMP_MANAGER_PORT"] = "1"
+os.environ["ROMP_KERNEL_PORT"] = "1"
+os.environ["ROMP_SERVE_PORT"] = "1"
 
 # `from romp_load import load_source` in a test module (tests/romp_load.py): under pytest and
 # `python -m unittest tests.test_x` the test modules are imported as members of this package, so the

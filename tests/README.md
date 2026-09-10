@@ -48,7 +48,16 @@ Every bug fix or feature change lands with a test (repo rule). Five suites:
   (`ROMP_CLI_SCOPE_MEMORY_MAX` and the others): the kernel hands them to every
   session's CLI and a tool shell inherits them, so a suite run from a session on
   a self-hosted install would otherwise see them at every backend construction
-  and in every exact argv pin.
+  and in every exact argv pin. `conftest.py` and `__init__.py` set
+  `ROMP_MANAGER_PORT`, `ROMP_KERNEL_PORT` and `ROMP_SERVE_PORT` to a dead port
+  (never unset: to every reader an absent variable means the live default), so
+  no test dials a live manager or kernel through an inherited value.
+  Any suite that starts the real `bin/romp-manager` also gives it a state
+  root of its own before its first `@test` (`unset ROMP_STATE_DIR` plus
+  `export XDG_STATE_HOME="$TEST_DIR/state"`, or an exported
+  `ROMP_STATE_DIR`), since the manager boots from its state root's
+  `kernels.json` and reads the serve token there; `bats-state-isolation.bats`
+  is the ratchet.
   Any test whose subject binds a loopback port picks it with `load
   free-port` + `free_port VAR...`, never a literal: a literal shared by two
   files collided within one run (`romp-manager-ensure.bats` once used
