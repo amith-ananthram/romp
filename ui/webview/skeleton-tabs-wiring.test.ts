@@ -7,7 +7,9 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createRequire } from "node:module";
 
+const requireCjs = createRequire(__filename);
 const WEBVIEW = path.resolve(process.cwd(), "..", "ui", "webview");
 const RENDER = fs.readFileSync(path.join(WEBVIEW, "render.ts"), "utf8");
 const CSS = fs.readFileSync(path.join(WEBVIEW, "styles.css"), "utf8");
@@ -145,10 +147,33 @@ test("the idle prefetch: runPrebuild asks nextPrefetch (hidden = document.hidden
   assert.match(run, /if \(pendingBuildRaf != null\) \{ schedulePrebuild\(\); return; \}[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*const next = nextPrefetch\(skeletonTabs, activeId, awaitingFull, document\.hidden \|\| paneHidden\(\), tabInView\);\s*\n\s*if \(next\) requestFullSession\(next, "prefetch"\);/);
   assert.match(run, /const viewState = \(id: string\): ViewState \| null => \{\s*\n\s*if \(skeletonTabs\.ids\.has\(id\)\) return null;/,
     "the pure planner never builds DOM for a stale session");
-  assert.match(RENDER, /function paneHidden\(\): boolean \{\s*\n\s*try \{ return window\.parent !== window && \(window\.innerWidth === 0 \|\| window\.innerHeight === 0\); \}/,
-    "the shim's own display:none test, mirrored");
+  assert.match(RENDER, /function paneHidden\(\): boolean \{\s*\n\s*try \{ return \(window\.parent !== window && \(window\.innerWidth === 0 \|\| window\.innerHeight === 0\)\) \|\| \(window as PaneHiddenHost\)\.__rompPaneHidden === true; \}/,
+    "the shim's own display:none test, mirrored: the zero-viewport probe OR the pane's published word (paint-gate.ts states the rule; chat-visibility.ts publishes it on this page)");
   assert.match(RENDER, /document\.addEventListener\("visibilitychange", \(\) => \{ if \(!document\.hidden\) schedulePrebuild\(\); \}\);/,
     "coming back to the tab is the event that re-arms the chain");
+});
+
+test("run: render.ts's paneHidden() over window stand-ins says hidden when the probe OR a published word of true does, never the word first", () => {
+  // The function lifted from render.ts (esbuild at run time, the chat-exact-tail-exec.test.ts pattern) is the third
+  // consumer of the question the pane shim and perf telemetry answer; the eight cases are the shim's
+  // (tests/test_kernel_disconnect_banner.py runs the served function over the same stand-ins).
+  const a = RENDER.indexOf("function paneHidden(): boolean {"), b = RENDER.indexOf("// The prefetch never runs while the browser tab is hidden", a);
+  assert.ok(a > 0 && b > a, "paneHidden's anchors moved; re-anchor");
+  const js = requireCjs("esbuild").transformSync(RENDER.slice(a, b), { loader: "ts" }).code;
+  const verdict = (framed: boolean, iw: number, ih: number, word?: unknown): boolean => {
+    const win: any = { innerWidth: iw, innerHeight: ih };
+    win.parent = framed ? {} : win;
+    if (word !== undefined) win.__rompPaneHidden = word;
+    return (new Function("window", js + "\nreturn paneHidden();") as (w: unknown) => boolean)(win);
+  };
+  assert.equal(verdict(true, 0, 0), true, "a framed pane with a zero viewport: hidden since load, by the probe");
+  assert.equal(verdict(true, 600, 400), false, "a framed pane with a viewport and no word: shown");
+  assert.equal(verdict(true, 600, 400, true), true, "a viewport and a word of true: hidden after a first show (Chromium keeps the iframe's size)");
+  assert.equal(verdict(true, 600, 400, false), false, "a viewport and a word of false: shown");
+  assert.equal(verdict(true, 0, 0, false), true, "a zero viewport and a stale word of false: hidden (Firefox zeroes the viewport and stalls the observer)");
+  assert.equal(verdict(false, 600, 400, true), true, "a standalone page's word is its tab's hiding; the probe never applies there");
+  assert.equal(verdict(false, 0, 0), false, "a standalone page with no word: never hidden by the probe");
+  assert.equal(verdict(true, 600, 400, "yes"), false, "only a boolean true is the word");
 });
 
 test("requestFullSession(id, why): every ask names its why, from the fixed vocabulary", () => {

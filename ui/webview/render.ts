@@ -15,6 +15,7 @@ import type { ParsedAsk } from "../ask-types";
 import { TABBAR_H_KEY, TABBAR_H_DEFAULT, clampTabbarH, parseTabbarH } from "./tabbar-resize";
 import { ctxFallbackColor, pickTone, readableRgb } from "./ctx-color";
 import { applyTheme } from "./theme";
+import { applyDenseChrome } from "./dense-chrome";
 import { SessionViews, viewVisible, viewsKey, revealIn, viewTagUnion, viewTags, type TagUnion, type SessionTag } from "./session-views";
 import { mintWriteId, ackOutcome, adoptViews, seqOf, capsAdopts, announcedSeq, announcedAfter, createInFlight, rederivePending, lensBlob, applyLensFields, type InflightWrite, type LensFields, type TagEditOp, type ViewsAck } from "./views-writes";
 import { lensVisible, surfaceLens } from "./tag-lens";
@@ -40,7 +41,7 @@ import { titleWithKey, chordOf, effectiveChord, loadOverrides } from "./keybindi
 import { DEFAULT_CHORDS } from "./commands";
 import { NavHistory } from "./nav-history";
 import { StagedStack, quoteReplyBody, stagedPosts } from "./staged-messages";
-import { type PendingSend, type TailEvent, OPT_PREFIX, isOptimisticUuid, newPending, reconcilePending, queuedCopyToHide, dropPending, bareGroupLabel, sentAtLabel } from "./send-pending";
+import { type PendingSend, type TailEvent, OPT_PREFIX, isOptimisticUuid, newPending, mintQid, reconcilePending, queuedCopyToHide, dropPending, bareGroupLabel, sentAtLabel, pendingBody } from "./send-pending";
 import { reconcileHeld, heldAsQueued, type HeldCopy, type HeldQueued, type HeldMemory } from "./queued-held";
 import { reloadHoldReason } from "./reload-hold";
 import { liveNotices, keepReloadNotices, takeReloadNotices } from "./reload-notices";
@@ -50,12 +51,13 @@ import { numberDiff, type DiffRow } from "./diff-lines";
 import { parseAgentNotif, notifHead, type AgentNotif } from "./agent-notif";
 import { injectedHead, type InjectedSource } from "./injected-source";
 import { subTabId, isSubId, subParts, subLabel, gistLines, stepLines, stepsNote, agentFoldLabel, subHeadParts, openIconSvg, pinIconSvg, type SubMeta, type AgentGist, type AgentGistRow, type GistLine } from "./subagent-view";
-import { previewKind, previewFull, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal, setLightboxNav, type LightboxNavEntry } from "./preview";
+import { previewKind, previewFull, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal, mdImgPostPass, setLightboxNav, type LightboxNavEntry } from "./preview";
 import { openFileClick } from "./file-view";                  // a clicked file WITH its gesture (pdf-new-tab.test.ts)
 // initFileView rides its OWN line: the import above is pinned verbatim by file-view.test.ts
 import { initFileView, setFileViewIdentity, hostStub } from "./file-view";
 import { openUrlView } from "./file-view";                 // the URL mode of the same viewer (md-url-view.test.ts)
 import { isMarkdownUrl } from "./md-links";
+import { openPathLink, linkifyPathTokens, selectionOpenIn } from "./path-links";   // the path matcher the chat's links are made from (a shared module)
 import { initFileBrowse, openFileBrowse } from "./file-browse";   // the browser is pane-local here now (the user 2026-08-24)
 import { pastedFilePath } from "./paste-path";
 import { insertAtCaret } from "./composer-insert";
@@ -86,6 +88,8 @@ import { highlightHtml } from "./highlight-cache";
 import { wrapCodeLines, addCopyBtn } from "./code-block";   // a fence's per-line rows and Copy button, shared with the file viewer
 import { turnWorkedSecs as workedSecsOf, workedFooterPlan } from "./worked-footer";
 import { reconcileRewindPass, type RewindEvent } from "./rewind-reconcile";
+import { watchChatVisibility, browserChatVisibilityDeps } from "./chat-visibility";
+import type { PaneHiddenHost } from "./paint-gate";
 
 for (const [name, lang] of Object.entries({
   bash, sh: bash, shell: bash, python, py: python, javascript, js: javascript,
@@ -198,7 +202,7 @@ type ChatEvent = (
   // `held` DOES come from the kernel (_limit_hold): the queue is stuck on the ACCOUNT rather than on this
   // session — a usage limit or a monthly spend cap holds every send — so the head names what it is waiting
   // for, and how long is left when the API reported a reset (the user 2026-07-24).
-  | { kind: "queued"; texts: { md: string; followUp?: boolean; goal?: string; fuCtx?: string; idx?: number; park?: number; cancelable?: boolean; optimistic?: boolean; romp?: boolean; rompSystem?: boolean; rompAuto?: boolean; gist?: string; imgPaths?: string[]; lost?: string; qts?: number; qid?: string; hiddenByPending?: boolean; landing?: boolean }[]; ts?: string; uuid?: string; bare?: boolean; held?: { reason: string; resetsAt?: number | null; what: string; detail?: string } }   // imgPaths: an optimistic echo's dragged-image attachments → thumbnails, the landed form's own renderer (the user 2026-08-25); lost: client-only, the connection dropped after this unconfirmed send; qts: on OUR optimistic copy the pending entry's identity (its press time) so the ✕ removes ITS entry, on a kernel copy its enqueue stamp (T252c); qid: a kernel copy's identity, the ✕ drops the send that owns it (send-pending.ts)
+  | { kind: "queued"; texts: { md: string; followUp?: boolean; goal?: string; fuCtx?: string; idx?: number; park?: number; cancelable?: boolean; optimistic?: boolean; romp?: boolean; rompSystem?: boolean; rompAuto?: boolean; gist?: string; imgPaths?: string[]; lost?: string; qts?: number; qid?: string; hiddenByPending?: boolean; landing?: boolean }[]; ts?: string; uuid?: string; bare?: boolean; held?: { reason: string; resetsAt?: number | null; what: string; detail?: string } }   // imgPaths: an optimistic echo's dragged-image attachments → thumbnails, the landed form's own renderer (the user 2026-08-25); lost: client-only, the connection dropped after this unconfirmed send; qts: on OUR optimistic copy the pending entry's identity (its press time) so the ✕ removes ITS entry, on a kernel copy its enqueue stamp (T252c); qid: the copy's identity (T252c): minted at the press on OUR copy and posted with the send, so the kernel's copy wears the same one; the ✕ names it on both (send-pending.ts)
   // The turn stopped on an API error (event-based: transcript isApiErrorMessage). The session is BLOCKED
   // until retried — a red-dot card at the bottom with a Retry button (the user 2026-06-16).
   | { kind: "apiError"; text: string; status?: number; ts?: string; uuid?: string }
@@ -441,7 +445,10 @@ function reconcileOptimisticInner(s: Session): void {
   // `lost` rides along so the bubble can say "not confirmed" after a connection drop (markPendingLost).
   // `qts` is the entry's identity: the ✕ removes THAT entry, never the first with the same text (two
   // identical sends can sit in different states — one lost, one received).
-  const mk = (p: PendingSend) => ({ md: p.text, optimistic: true, cancelable: true, imgPaths: p.imgPaths, lost: p.lost, qts: p.ts });
+  // `qid` is the copy's identity on the kernel's side too (the id the press minted, posted with the send): the
+  // ✕ names it, so the kernel cancels exactly this copy, wherever the send landed and whatever else wears the
+  // same words.
+  const mk = (p: PendingSend) => ({ md: p.text, optimistic: true, cancelable: true, imgPaths: p.imgPaths, lost: p.lost, qts: p.ts, qid: p.qid });
   // ONE BARE dashed group at the TAIL, the sends in send order (T252d): below every event the kernel has
   // shown, where the model will read them; the landed atom, placed at its landing time, takes that same
   // position. No "N queued messages" header to claim what we can't back. A copy hidden out of a HELD kernel
@@ -543,10 +550,13 @@ function hideQueuedCopy(s: Session, p: PendingSend): { held?: Extract<ChatEvent,
   return { held: q.held || undefined };
 }
 
-// Record a composer send as in-flight and show its optimistic bubble NOW (before any kernel push).
-function registerOptimistic(id: string, text: string, imgPaths?: string[]): void {
+// Record a composer send as in-flight and show its optimistic bubble NOW (before any kernel push). `qid` is the
+// copy's id the caller minted at the press (mintQid) and posted with the send, so the kernel queues or parks the
+// copy under the id this bubble wears and the bubble, the kernel's chip and the ✕ agree from the press; a caller
+// that posts nothing (a provisional tab's send, held until the session exists) lets the entry mint its own.
+function registerOptimistic(id: string, text: string, imgPaths?: string[], qid?: string): void {
   const arr = pendingSent.get(id) || [];
-  const p = newPending(text, imgPaths);
+  const p = newPending(text, imgPaths, Date.now(), qid);
   arr.push(p);   // the anchor (`at`) is stamped by the reconcile just below
   pendingSent.set(id, arr);
   const s = sessions.get(id);
@@ -1176,6 +1186,7 @@ function md(src: string, repo: string | null = prRepoFor()): string {
     // the sanitizer's verdicts stand and a marked-autolinked GitHub URL is never wrapped twice.
     const clean = sanitizeMd(dirty);   // the sanitized <body>, its math rendered
     linkifyPrRefs(clean, repo);
+    mdImgPostPass(clean);   // a markdown image whose URL failed this page life is parked before the browser fetches it (T291c)
     return clean.innerHTML;
   } catch { const d = document.createElement("div"); d.textContent = src; return d.innerHTML; }
 }
@@ -1190,6 +1201,7 @@ function userMd(src: string, repo: string | null = prRepoFor()): string {
   try {
     const clean = sanitizeMd(userMdHtml(src));   // the sanitized <body>, its math rendered
     linkifyPrRefs(clean, repo);
+    mdImgPostPass(clean);   // a markdown image whose URL failed this page life is parked before the browser fetches it (T291c)
     return clean.innerHTML;
   } catch { const d = document.createElement("div"); d.textContent = src; return d.innerHTML; }
 }
@@ -1301,6 +1313,14 @@ function preEl(text: string, scrollKey?: string): HTMLElement {
 document.addEventListener("click", (e) => {
   const a = (e.target as HTMLElement)?.closest?.("a[href]") as HTMLAnchorElement | null;
   if (!a) return;
+  // The click that ends a press-drag-release inside an anchor that is not draggable (the file viewer's URL anchors,
+  // which select like the text around them; file-view-links.ts): the drag selected text, and the selection is what
+  // the person gets, not the link. The viewer's own listener rules the same for its links, but this opener runs
+  // first, at the capture phase, and would open the tab as well. Read for a non-draggable anchor ONLY: a press on a
+  // draggable anchor (the chat's own, and a rendered document's web links) starts no selection and collapses none,
+  // so a selection left open around one by a triple-click on its paragraph is not a drag on it, and reading it
+  // would leave every click on that link dead until a click elsewhere.
+  if (!a.draggable && selectionOpenIn(a)) { e.preventDefault(); return; }
   const href = a.getAttribute("href") || "";
   if (href.startsWith("#")) {
     // An in-page anchor in a message (a footnote's back link, `[section](#install)` over the reply's own `<a name>`):
@@ -1805,7 +1825,16 @@ function healPathImgs(): void {
 // the page shim fires romp:wsup when THIS pane's kernel socket reconnects (kernel.py ws.onopen) —
 // the same kernel-is-back event a hostUp is for a federated tunnel; heal everything on it
 window.addEventListener("romp:wsup", () => { retryFailedPreviews(); refreshSettledPreviews(); healPathImgs(); });
-installMdImgHeal();   // markdown-inline <img> failures register for the per-message heal (capture-phase, once)
+installMdImgHeal();   // markdown-inline <img> failures are PARKED (capture-phase, once) and heal on the reconnect-class events (T291c);
+//                       md() and userMd() run mdImgPostPass on their own output, so a re-render parks a known-failed image before it fetches
+// The page's own bundle build, filed once per page load (T291c, the user's 2026-09-09 report could not tell the
+// page's build from the kernel's): the ?v= the kernel stamped on the render.js script this page loaded (the
+// dist_ver it served then; a VS Code webview loads the bundle without one and files 0).
+(() => {
+  const tag = Array.from(document.scripts).map((sc) => sc.getAttribute("src") || "").find((u) => /\/dist\/render\.js(\?|$)/.test(u)) || "";
+  const m = /[?&]v=(\d+)/.exec(tag);
+  vscodeApi?.postMessage({ type: "clientDiag", surface: "chat", what: "pageload", data: { distVer: m ? Number(m[1]) : 0, path: location.pathname } });
+})();
 
 // One image of a user turn: the picture (or its hydration chip) plus, when the
 // on-disk path is known, a caption line — the full absolute path (click → open),
@@ -1904,22 +1933,18 @@ function linkifyImgPaths(root: HTMLElement, paths: string[]): void {
   }
 }
 
-// A file:// URI → its local filesystem path: strip the scheme, percent-decode. file:///a/b → /a/b.
-function fileUriToPath(uri: string): string {
-  let p = uri.replace(/^file:\/\//i, "");   // file:///Users/… → /Users/… (host is empty for file:///)
-  try { p = decodeURIComponent(p); } catch { /* malformed %-escape — use verbatim */ }
-  return p;
-}
-// A clickable, VERBATIM file link — the SAME open-the-file path the caption/image links use (openPath:
-// the editor in VS Code, the feed pane's viewer on the web). `raw` is shown as written; `open` is what
-// gets opened. A bare file:// can't be followed by the browser from the http dashboard (blocked scheme)
-// and a VS Code editor won't render a PDF, so it's routed rather than navigated. `relative` bare paths
-// carry the active session id so whoever resolves them uses THAT session's cwd — a relative
-// `design/foo.md` is relative to the repo the agent runs in, not the kernel's cwd (the user 2026-07-06).
-function openPathLink(raw: string, open: string, relative = false): HTMLElement {
-  const a = el("span", "file-uri-link");
-  a.textContent = raw;                       // shown exactly as written, selectable/copyable in place
-  a.title = "Open " + open;
+// The path-token matcher (the regex, its shape gates, the trailing-punctuation trim and the span it emits)
+// lives in path-links.ts, a module any surface can import; this file exports nothing. That module marks and
+// binds nothing: every span it emits carries data-path (what a click opens) and, for a bare path rather than
+// a file:// URI, data-rel, and the hosting document decides what a click does. Here that is openPath, the
+// editor in VS Code and the viewer on the web, bound per span exactly as the chat always did, the middle
+// button included (onMiddleClick): a `relative` bare path (data-rel) carries the active session id so
+// whoever resolves it uses THAT session's cwd (a relative `design/foo.md` is relative to the repo the agent
+// runs in, not the kernel's cwd; the user 2026-07-06), and a file:// URI names an absolute path and sends
+// none. stopPropagation as before: a path inside a fold head or a card must open the file, not toggle its
+// container.
+function bindPathLink(a: HTMLElement): HTMLElement {
+  const open = a.dataset.path || "", relative = a.dataset.rel === "1";
   a.addEventListener("click", (e) => {
     e.stopPropagation();
     openPath(open, relative ? activeId : null, e);
@@ -1927,45 +1952,17 @@ function openPathLink(raw: string, open: string, relative = false): HTMLElement 
   onMiddleClick(a, (e) => openPath(open, relative ? activeId : null, e));
   return a;
 }
-function fileUriLink(uri: string): HTMLElement { return openPathLink(uri, fileUriToPath(uri)); }
-// Is this bare token (trailing punctuation already stripped) a file path worth linkifying? Requires a slash
-// and EITHER an absolute/anchored start (/, ~/, ./, ../) OR a file extension on the final segment — so
-// "and/or", "TCP/IP", "24/7", "read/write" stay as prose. URL-ish tokens (a ':' or '//') are rejected;
-// http(s) links are already <a> (skipped) — this just guards a rare un-autolinked one.
-function looksLikeFilePath(tok: string): boolean {
-  if (tok.includes(":") || tok.includes("//") || !tok.includes("/")) return false;
-  if (/^(?:~\/|\.{1,2}\/|\/)/.test(tok)) return true;                        // absolute or anchored (/, ~/, ./, ../)
-  return /\.[A-Za-z0-9]{1,8}$/.test(tok.slice(tok.lastIndexOf("/") + 1));    // relative → the last segment has an extension
-}
-// A BARE filename (no slash — `power2_watts.pdf`) is linkified ONLY inside inline <code> (the user
-// 2026-07-17: a reply listing its output files wasn't clickable). Backticks are where agents put
-// filenames, and the KNOWN-extension gate keeps backticked dotted identifiers (`np.array`, `s.color`,
-// `romp.kernelPort`) and version numbers (`0.4.293`) reading as prose — an unknown extension stays text.
-const BARE_FILE_EXTS = new Set([
-  "md", "txt", "rst", "py", "ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "jsonl", "csv", "tsv",
-  "pdf", "png", "jpg", "jpeg", "gif", "svg", "webp", "html", "htm", "css", "scss", "sh", "bash", "zsh",
-  "bats", "yaml", "yml", "toml", "ini", "cfg", "conf", "xml", "ipynb", "rs", "go", "java", "c", "h",
-  "cpp", "hpp", "cc", "rb", "php", "sql", "log", "lock", "tex", "bib", "zip", "tar", "gz", "tgz",
-  "mp4", "mov", "mp3", "wav", "vsix", "plist", "diff", "patch",
-]);
-function looksLikeBareFileName(tok: string): boolean {
-  if (tok.includes("/") || tok.includes(":")) return false;
-  const dot = tok.lastIndexOf(".");
-  if (dot <= 0) return false;                                                // needs a name before the extension
-  return BARE_FILE_EXTS.has(tok.slice(dot + 1).toLowerCase());
-}
 // Make bare file:// URLs AND bare file paths inside a rendered CHAT message clickable (assistant replies +
 // your own bubbles) — a relative `design/foo.md` opens too, resolved against the session's cwd (the user
 // 2026-07-06). marked doesn't autolink these and DOMPurify strips the file: scheme, so without this they read
-// as dead text. Deliberately NOT applied to tool-use summaries. Linkifies inside INLINE <code> too — agents
-// routinely wrap a path in backticks; only FENCED <pre> blocks and text already inside a link are skipped.
-// Trailing sentence punctuation is left out, not swallowed.
-const CLICKABLE_PATH_RE = /file:\/\/\/?[^\s<>"'`)]+|[~.\w\-]*\/[~.\w\-/]*[\w\-]|[\w\-][\w\-.]*\.[A-Za-z0-9]{1,8}/gi;
+// as dead text. Deliberately NOT applied to tool-use summaries. The token walk itself is path-links.ts's
+// (linkifyPathTokens); what follows here is chat-only: the code-span URL pass, the kernel-verified spaced
+// spans, the click binding, and the figure previews.
 // `skipThumbs`: paths this turn ALREADY renders as full in-bubble images (a pasted screenshot's
 // ev.images) — they stay clickable links but are excluded from the mentioned-path thumbnail strip,
 // otherwise the same picture renders twice (the user 2026-07-10).
 // `spacePaths` (the user 2026-08-04): backticked filenames WITH SPACES that the KERNEL verified exist
-// (build_session's _space_paths — resolved like a click, existence-checked). The token regex below can
+// (build_session's _space_paths — resolved like a click, existence-checked). The token regex can
 // never span a space — in prose that boundary is what keeps ordinary text unlinked — so a note titled
 // `Moving from correlation to causal components.md` linkified only its last word. For exactly these
 // verified spans, the whole inline-code content becomes ONE link; the filesystem is the authority, so a
@@ -1974,9 +1971,10 @@ const CLICKABLE_PATH_RE = /file:\/\/\/?[^\s<>"'`)]+|[~.\w\-]*\/[~.\w\-/]*[\w\-]|
 // _path_links — tier 1 exact stat, tiers 2/3 a unique repo-list match that FIXES a shortened mention
 // to its real file). When the key is present, a token links ONLY if it's in the map, and it opens the
 // map's value — so `render.js` in prose stops 404ing, and hover shows the real target. Every shape
-// gate below still applies; the map only ever narrows. An event with NO pathLinks key at all (an old
+// gate still applies; the map only ever narrows. An event with NO pathLinks key at all (an old
 // kernel, a cached payload) keeps today's shape-only linking rather than unlinking history.
-// file:// URIs are explicit absolute paths — never gated on the map.
+// file:// URIs are explicit absolute paths — never gated on the map. (The gates and the map walk are
+// path-links.ts's; the map is threaded through to it.)
 function linkifyFileUris(root: HTMLElement, skipThumbs?: string[], spacePaths?: string[],
     pathLinks?: Record<string, string>, pathPins?: Record<string, string>): void {
   // A whole-backtick http(s) URL becomes a TAPPABLE link that still looks like code (the user
@@ -2005,7 +2003,7 @@ function linkifyFileUris(root: HTMLElement, skipThumbs?: string[], spacePaths?: 
       if (code.closest("a, .file-uri-link, pre")) continue;    // already linked, or a fenced block
       const tok = (code.textContent || "").trim();
       if (!verified.has(tok)) continue;
-      const link = openPathLink(tok, tok, true);
+      const link = bindPathLink(openPathLink(tok, tok, true));
       code.replaceChildren(link);                              // the <code> chrome stays; its content is the link
       kernelVerified.add(tok);
       if (previewKind(tok) && !previewable.includes(tok) && !(skipThumbs && skipThumbs.includes(tok))) {
@@ -2014,43 +2012,16 @@ function linkifyFileUris(root: HTMLElement, skipThumbs?: string[], spacePaths?: 
       }
     }
   }
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  const nodes: Text[] = [];
-  let n: Node | null;
-  while ((n = walker.nextNode())) nodes.push(n as Text);
-  for (const tn of nodes) {
-    if (tn.parentElement?.closest("a, .file-uri-link, pre")) continue;   // already a link, or a fenced code block
-    const inCode = !!tn.parentElement?.closest("code");                  // inline code — where bare filenames may link
-    const text = tn.data;
-    if (!text.includes("/") && !(inCode && text.includes("."))) continue;   // cheap pre-filter: no slash (and, in code, no dot) → nothing here
-    const re = new RegExp(CLICKABLE_PATH_RE.source, "gi");
-    const frag = document.createDocumentFragment();
-    let last = 0, any = false, m: RegExpExecArray | null;
-    while ((m = re.exec(text))) {
-      let tok = m[0];
-      const trail = tok.match(/[.,;:!?)\]}>"'`]+$/);   // don't grab a sentence's closing punctuation
-      if (trail) tok = tok.slice(0, tok.length - trail[0].length);
-      if (!tok) continue;
-      const isUri = /^file:\/\//i.test(tok);
-      if (!isUri && !looksLikeFilePath(tok) && !(inCode && looksLikeBareFileName(tok))) continue;   // "and/or", `np.array` etc. — leave as prose
-      const fixed = !isUri && pathLinks ? pathLinks[tok] : undefined;   // the kernel's verdict, when it rendered one
-      if (!isUri && pathLinks && typeof fixed !== "string") continue;   // checked against the filesystem: no such file (or several) → prose
-      if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
-      const open = isUri ? fileUriToPath(tok) : (fixed ?? tok);
-      const link = isUri ? fileUriLink(tok) : openPathLink(tok, open, true);
-      frag.appendChild(link);
-      if (!isUri && typeof fixed === "string") kernelVerified.add(open);   // the kernel stat'd it this build
-      if (previewKind(open) && !previewable.includes(open) && !(skipThumbs && skipThumbs.includes(open))) {
-        previewable.push(open);
-        mentionAt.set(open, link);
-      }
-      last = m.index + tok.length;
-      re.lastIndex = last;
-      any = true;
+  // The token walk is the shared one (path-links.ts linkifyPathTokens): it marks every path-shaped token, the
+  // kernel's pathLinks verdict narrowing it when the event carries one, and hands back the hits in document
+  // order; this document binds each click and reads the hits for the figure pass below.
+  for (const { el: link, open, verified } of linkifyPathTokens(root, pathLinks)) {
+    bindPathLink(link);
+    if (verified) kernelVerified.add(open);   // the kernel stat'd it this build
+    if (previewKind(open) && !previewable.includes(open) && !(skipThumbs && skipThumbs.includes(open))) {
+      previewable.push(open);
+      mentionAt.set(open, link);
     }
-    if (!any) continue;
-    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
-    tn.replaceWith(frag);
   }
   // A mentioned image/PDF renders FULL-SIZE at its MENTION — the figure lands right after the
   // paragraph/list item that names it, like figures in a document (the user 2026-08-15, whose four
@@ -4297,10 +4268,29 @@ function renderQueued(ev: Extract<ChatEvent, { kind: "queued" }>): HTMLElement {
       if (t.park !== undefined) x.dataset.qpark = String(t.park);
       if (t.optimistic) x.dataset.qopt = "1";   // ✕ before confirmation → cancel-by-body (no park/idx yet)
       if (t.optimistic && t.qts !== undefined) x.dataset.qts = String(t.qts);   // OUR entry's identity: the ✕ removes this bubble's entry, not the first with its text
-      if (t.qid) x.dataset.qid = t.qid;   // the kernel's copy names its id (T252c): the ✕ drops the send that owns it (a kernel copy's own qts is its enqueue stamp, not an entry)
+      if (t.qid) x.dataset.qid = t.qid;   // the copy's id (T252c): on a kernel copy the ✕ drops the send that owns it (a kernel copy's own qts is its enqueue stamp, not an entry); on ours it rides the cancel, so the kernel removes exactly this copy
       if (isCmd) x.dataset.qcmd = "1";
       (x as any)._qmd = t.md;   // the bubble's body — the kernel's drift guard + the composer restore read it
       xHost.appendChild(x);
+    }
+    // EDITABLE — a ✎ beside the ✕ (the user 2026-09-08): a message that has not reached the session is
+    // still the user's to change. The same three stages the ✕ covers (backend queue, parked, optimistic),
+    // and the same recall gate (cancelable); romp's own words and slash commands are not edited — a
+    // command is cancelled and typed again, and romp's notices are not the user's to reword. Delegated
+    // like the ✕ (data-act="qedit"); the composer takes the text under an editing pill (beginQueuedEdit),
+    // and send replaces the message where it sits — see the editQueued path in sendComposer.
+    if (t.cancelable && !t.romp && !isCmd && (t.idx !== undefined || t.park !== undefined || t.optimistic)) {
+      bubble.classList.add("editable");
+      const ed = el("button", "queued-edit");
+      ed.textContent = "✎";
+      ed.title = "edit this queued message — it keeps its place in the queue";
+      ed.dataset.act = "qedit";
+      if (t.idx !== undefined) ed.dataset.qidx = String(t.idx);
+      if (t.park !== undefined) ed.dataset.qpark = String(t.park);
+      if (t.optimistic) ed.dataset.qopt = "1";
+      if (t.optimistic && t.qts !== undefined) ed.dataset.qts = String(t.qts);   // OUR entry's identity, as on the ✕: a kernel copy's qts is its enqueue stamp, not an entry (T252c)
+      (ed as any)._qmd = t.md;
+      xHost.appendChild(ed);
     }
     turn.appendChild(bubble);
   }
@@ -6915,8 +6905,9 @@ function adoptProvisional(realId: string): void {
   if (draft) drafts.set(realId, draft);    // set BEFORE the switch — setActive fills the box from drafts
   setActive(realId);
   for (const text of queued) {
-    vscodeApi?.postMessage({ type: "sendMessage", id: realId, text });
-    registerOptimistic(realId, text);      // …and the bubble carries over to the tab that now owns it
+    const qid = mintQid();                                  // the copy's id, minted here: the real send carries it…
+    vscodeApi?.postMessage({ type: "sendMessage", id: realId, text, qid });
+    registerOptimistic(realId, text, undefined, qid);       // …and the bubble carries over to the tab that now owns it, under the same id
   }
   if (draft) { persistDrafts(); const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null; if (ta) growComposer(ta); }
 }
@@ -9960,14 +9951,20 @@ function warnToast(msg: string): HTMLElement {
   setTimeout(() => t.remove(), 12000);
   return t;   // the toast, for a caller that marks it (ephemeralWarnToast)
 }
-// A toast the page that follows a reload must not repeat. The staged sends' refusal ("Can't send yet") reports a STATE:
-// the session's host is unreachable (hostIsDown, a remote host's tunnel) or its tab is still being created
-// (isProvisionalId). The fresh page shows that state for itself (the host mark and the staged strip; a provisional tab
-// does not survive a reload), so replayed by persistNoticesForReload it would be redundant at best and stale at worst.
-// The mark keeps it out of the replay (reload-notices.ts liveNotices reads only the toasts without it). Toasts that
-// report what HAPPENED to a send or a file stay unmarked, since what they say is as true after the reload as before:
-// the nack (the attachment was not saved, the held message not sent), the dismissal and the other-tab ack (the held
-// message not sent), the refusal on a disconnected host (this message was not sent and is still in the composer).
+// A toast the page that follows a reload must not repeat: a refusal that reports a STATE rather than an event. The
+// staged sends' "Can't send yet" says the session's host is unreachable (hostIsDown, a remote host's tunnel) or its tab
+// is still being created (isProvisionalId); the staging refusals (stageComposer) say a picker is waiting on the
+// composer, an edit is in progress (to a past message, or to a queued one) or attachments are on the composer; the
+// branch jump's refusal (branchjump) says the session is not on this dashboard. The fresh page shows each state for
+// itself (the host mark and the staged strip; the picker, the attachments and the roster come back from the kernel and
+// the persisted drafts) or no longer has it (a provisional tab does not survive a reload; composerEdits and queuedEdits
+// are in memory alone, so no edit is in progress on a fresh page), so kept by persistNoticesForReload and shown again by
+// the page that follows, it would be redundant at best and false at worst. The mark keeps it out of the replay
+// (reload-notices.ts liveNotices reads only the toasts without it).
+// Toasts that report what HAPPENED to a send or a file stay unmarked, since what they say is as true after the reload
+// as before: the nack (the attachment was not saved, the held message not sent), the dismissal and the other-tab ack
+// (the held message not sent), the refusal on a disconnected host (this message was not sent and is still in the
+// composer).
 function ephemeralWarnToast(msg: string): void { warnToast(msg).dataset.ephemeral = "1"; }
 
 // Tail-windowing (see the View comment): a fresh/rewound view renders only the
@@ -10620,10 +10617,13 @@ function schedulePrebuild(): void {
 function cancelPrebuild(): void {
   if (prebuildHandle != null) { cancelIdle(prebuildHandle); prebuildHandle = null; }
 }
-// The pane iframe is display:none (the phone shell parks off-screen panes that way) — the shim's own test,
-// mirrored, so the skeleton prefetch below never spends bytes on a pane nobody can see.
+// The pane iframe is display:none (the phone shell parks off-screen panes that way): the shim's own test, mirrored,
+// so the skeleton prefetch below never spends bytes on a pane nobody can see. Two witnesses, read as their union
+// (paint-gate.ts states the rule): the zero-viewport probe sees a pane hidden since load, and the word this page
+// publishes (window.__rompPaneHidden, chat-visibility.ts) sees one hidden after a first show, which in Chromium
+// keeps its size.
 function paneHidden(): boolean {
-  try { return window.parent !== window && (window.innerWidth === 0 || window.innerHeight === 0); } catch { return false; }
+  try { return (window.parent !== window && (window.innerWidth === 0 || window.innerHeight === 0)) || (window as PaneHiddenHost).__rompPaneHidden === true; } catch { return false; }
 }
 // The prefetch never runs while the browser tab is hidden (nextPrefetch); coming back is the event that re-arms
 // it. (A display:none pane has no event for its CSS flip — it re-arms on the next upsert / click instead.)
@@ -13715,9 +13715,13 @@ function routeUserMessage(sid: string, text: string, cites: Citation[] | undefin
   // md (send-pending.ts): the quote branch echoes the COMPOSED body, which is byte-identical to what
   // lands (quoteReplyBody IS the send path); the follow-up echoes the typed words, which is what the
   // kernel ships as the landed event's md once it strips the goal wrapper (_split_followup).
-  if (goalCite?.itemId) { vscodeApi.postMessage({ type: "askFollowUp", itemId: goalCite.itemId, text, sid }); registerOptimistic(sid, text, imgPaths); }
-  else if (quoteCites.length) { const body = quoteReplyBody(quoteCites, text); vscodeApi.postMessage({ type: "sendMessage", id: sid, text: body }); registerOptimistic(sid, body, imgPaths); }
-  else { vscodeApi.postMessage({ type: "sendMessage", id: sid, text }); registerOptimistic(sid, text, imgPaths); }
+  // The copy's id is minted at the press and rides the post (`qid`), and the entry registered right after wears
+  // the same one: the kernel queues or parks the copy under it, so the two never have to be paired by text
+  // (send-pending.ts). The post still goes first: the paint that follows can never cost the send.
+  const qid = mintQid();
+  if (goalCite?.itemId) { vscodeApi.postMessage({ type: "askFollowUp", itemId: goalCite.itemId, text, sid, qid }); registerOptimistic(sid, text, imgPaths, qid); }
+  else if (quoteCites.length) { const body = quoteReplyBody(quoteCites, text); vscodeApi.postMessage({ type: "sendMessage", id: sid, text: body, qid }); registerOptimistic(sid, body, imgPaths, qid); }
+  else { vscodeApi.postMessage({ type: "sendMessage", id: sid, text, qid }); registerOptimistic(sid, text, imgPaths, qid); }
   // One breadcrumb per composer send (client-diag.jsonl): sid, when, how long, which route — never the
   // text. A send that "vanished" can then be traced from the press through the kernel's own logs
   // instead of reconstructed from memory.
@@ -13853,7 +13857,85 @@ function renderStagedStrip(id: string | null, opts?: { reveal?: "last" }): void 
   list.scrollTop = opts?.reveal === "last" ? list.scrollHeight : (stagedScroll.get(id) || 0);
 }
 
+// ---- editing a QUEUED message (the user 2026-09-08) --------------------------------------------------
+// A message that has not reached the session yet — parked in romp's FIFO, held in the SDK backend's own
+// queue, or still at the optimistic "sending…" stage — is the user's to change until it goes. The ✎ on its
+// bubble loads the text into the composer under an EDITING pill (the rewind edit's grammar, one level
+// deeper: "Editing queued message"), and send REPLACES it in place: same queue slot, same follow-up
+// context, only the words. The kernel verifies the entry by body (editQueued's md — the ✕'s drift guard)
+// and answers editResult; ok:false means the message left the queue meanwhile, so the typed words go
+// back to the composer and the queue repaints from the kernel — nothing is lost, nothing is sent twice.
+type QueuedEditRef = { md: string; idx?: number; park?: number; qts?: number; optimistic?: boolean };
+const queuedEdits = new Map<string, QueuedEditRef>();
+// the typed text + the entry it replaced, keyed sid + " " + old body, so a failed edit can give the words
+// back and undo the optimistic repaint (one-shot, ok or not — pendingCancelRestores' twin)
+const pendingEditRestores = new Map<string, { typed: string; ref: QueuedEditRef }>();
+// the in-progress draft the ✎ displaced, per session, handed back when the edit ends (cancelled or sent) so
+// correcting a queued message never costs a half-typed one (review find, 2026-09-08)
+const queuedEditHeld = new Map<string, string>();
+
+function beginQueuedEdit(sid: string, ref: QueuedEditRef): void {
+  if (composerEdits.has(sid)) cancelComposerEdit(sid);   // one edit at a time: a rewind edit yields to this one
+  queuedEdits.set(sid, ref);
+  composerCitations.delete(sid);   // the queued text carries its own context (a follow-up keeps it kernel-side)
+  if (sid !== activeId) return;
+  const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
+  if (ta) {
+    if (ta.value.trim()) queuedEditHeld.set(sid, ta.value);   // hold the draft this edit displaces
+    ta.value = ref.md; growComposer(ta); ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+  }
+  renderComposerChips(sid);
+}
+
+function cancelQueuedEdit(sid: string): void {
+  if (!queuedEdits.delete(sid)) return;
+  restoreHeldDraft(sid);
+}
+
+// The queued edit is over (cancelled, or sent): the box goes back to the draft the ✎ displaced, or empties,
+// and the pill goes with it. The draft store follows either way, so a tab switch or a reload sees the same.
+function restoreHeldDraft(sid: string): void {
+  const held = queuedEditHeld.get(sid) || "";
+  queuedEditHeld.delete(sid);
+  if (held) drafts.set(sid, held); else { drafts.delete(sid); draftStartedAt.delete(sid); }
+  persistDrafts();
+  if (sid !== activeId) return;
+  const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
+  if (ta) { ta.value = held; composerManualH = null; ta.style.height = ""; if (held) growComposer(ta); }
+  renderComposerChips(sid);
+}
+
+// The optimistic half of an edit: the queued bubble shows the NEW words at once (the acknowledge-the-click
+// rule) — in the client's copy of the kernel events and in our own pending-send entry, so neither the next
+// re-render nor the pending reconcile paints the old text back before the kernel's push confirms. `back`
+// reverses it (editResult ok:false: the session has the old words).
+function applyQueuedEditLocally(sid: string, ref: QueuedEditRef, text: string, back = false): void {
+  const from = back ? text : ref.md, to = back ? ref.md : text;
+  for (const p of pendingSent.get(sid) || []) {
+    if (p.text === from && (ref.qts === undefined || p.ts === ref.qts)) { p.text = to; p.body = pendingBody(to, p.imgPaths); }
+  }
+  const s = sessions.get(sid);
+  if (s) {
+    for (let i = s.events.length - 1, n = 0; i >= 0 && n < 10; i--, n++) {   // a queued group only ever sits at the tail
+      const e = s.events[i];
+      if (e.kind !== "queued") continue;
+      for (const t of e.texts) {
+        if (t.md !== from) continue;
+        if (ref.idx !== undefined && t.idx !== undefined && t.idx !== ref.idx) continue;
+        if (ref.park !== undefined && t.park !== undefined && t.park !== ref.park) continue;
+        t.md = to;
+      }
+    }
+  }
+  // the held-copy memory follows too (T262i): reconcileHeld keys an id-less copy by TEXT, so a previous-push copy
+  // left with the old words would read as vanished on the next push and be held as a phantom of them
+  const mem = heldQueued.get(sid);
+  if (mem) for (const c of mem.prev) if (c.md === from) c.md = to;
+  if (sid === activeId) { const v = views.get(sid); if (v) { v.stale = true; appendActive(); } }
+}
+
 function beginComposerEdit(sid: string, uuid: string, orig: string): void {
+  if (queuedEdits.has(sid)) cancelQueuedEdit(sid);   // …and a queued edit yields to a rewind edit
   composerEdits.set(sid, { uuid, orig });
   composerCitations.delete(sid);   // an edit replaces the message wholesale — mixed goal/quote context would mislead
   if (sid !== activeId) return;
@@ -13904,6 +13986,22 @@ function renderComposerChips(id: string | null): void {
     chip.appendChild(label);
     const x = el("button", "composer-chip-x"); x.setAttribute("aria-label", "Cancel edit"); x.textContent = "✕";
     x.addEventListener("click", (e) => { e.stopPropagation(); cancelComposerEdit(id); });
+    chip.appendChild(x);
+    strip.appendChild(chip);
+    return;
+  }
+  // the QUEUED edit's pill (the user 2026-09-08): the rewind pill's grammar, saying what send does instead
+  const qedit = id ? queuedEdits.get(id) : undefined;
+  if (qedit && id) {
+    strip.style.display = "flex";
+    const chip = el("div", "composer-chip composer-chip-edit");
+    chip.title = "the message keeps its place in the queue and goes as edited — ✕ (or Esc) leaves it as it was";
+    const mark = el("span", "composer-chip-mark"); mark.textContent = "✎"; chip.appendChild(mark);
+    const label = el("span", "composer-chip-label");
+    label.textContent = "Editing queued message — send replaces it in the queue";
+    chip.appendChild(label);
+    const x = el("button", "composer-chip-x"); x.setAttribute("aria-label", "Cancel edit"); x.textContent = "✕";
+    x.addEventListener("click", (e) => { e.stopPropagation(); cancelQueuedEdit(id); });
     chip.appendChild(x);
     strip.appendChild(chip);
     return;
@@ -15002,6 +15100,7 @@ function dismissSession(id: string, why: DismissWhy, doomed?: ReadonlySet<string
     // closed session was ACTIVE: the shared chip strip above the composer still shows its chip until
     // someone repaints it, and that stale chip's ✕ targets the dead id (whose map entry is gone), so the
     // click early-returns and the chip can't even be dismissed — hence the repaint below.
+    queuedEdits.delete(id); queuedEditHeld.delete(id);   // a queued edit goes with the rewind edit's pill (review find, 2026-09-08)
     drafts.delete(id); composerCitations.delete(id); composerEdits.delete(id); composerFiles.delete(id); persistDrafts();
   } else {
     persistDrafts();   // a host drop / omission KEEPS it all (see DismissWhy) — the stash above may have updated the copy
@@ -15222,6 +15321,31 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
       // message is still going through — and the kernel's build never changed, so its next delta carries no
       // repaint and the optimistic delete would stand. That reads as "cancelled" while the session answers it
       // anyway, contradicting the toast we just raised. Repaint from the kernel's events, which still hold it.
+      const rv = m.id === activeId && activeId ? views.get(activeId) : null;
+      if (rv) { rv.stale = true; appendActive(); }
+    }
+  }
+  // The kernel's verdict on an editQueued (the user 2026-09-08) — cancelResult's twin. ok:false: the message
+  // left the queue before the edit reached it (or the chip was never a message), so the optimistic repaint is
+  // reversed, the typed words go back to the composer (never lost, never sent twice), and the queue repaints
+  // from the kernel's events, which hold what the session actually has.
+  else if (m.type === "editResult" && typeof m.id === "string") {
+    const key = m.id + " " + (typeof m.md === "string" ? m.md : "");
+    const stash = pendingEditRestores.get(key);
+    pendingEditRestores.delete(key);
+    if (!m.ok) {
+      if (typeof m.text === "string" && m.text) warnToast(m.text);
+      if (stash) {
+        applyQueuedEditLocally(m.id, stash.ref, stash.typed, true);
+        if (m.id === activeId) restoreToComposer(stash.typed);
+        else {
+          // the tab changed mid-round-trip (review find, 2026-09-08): the words land in THAT session's draft,
+          // which setActive puts back in the box on the next switch to it, as the paste-verify restore does
+          const d = drafts.get(m.id);
+          drafts.set(m.id, d && d.trim() ? d.replace(/\s*$/, "") + "\n" + stash.typed : stash.typed);
+          persistDrafts();
+        }
+      }
       const rv = m.id === activeId && activeId ? views.get(activeId) : null;
       if (rv) { rv.stale = true; appendActive(); }
     }
@@ -15577,16 +15701,19 @@ function setupComposer() {
   // ⌘/Ctrl+⏎ — STAGE the box instead of sending (the user 2026-08-15): the text and its citation
   // chips move to the staged strip, the box clears, focus stays for the next highlight-and-comment.
   // The states that already own the box refuse loudly rather than staging a lie: a picker answer
-  // answers NOW or sends normally; an edit replaces a past message; attachments ride a normal send.
+  // answers NOW or sends normally; an edit replaces a past message, or a queued one; attachments ride a
+  // normal send.
+  // Each refusal reports a state, not an event, so it does not ride a reload (ephemeralWarnToast).
   const stageComposer = () => {
     if (!activeId) return;
     const typed = ta.value.trim();
     // context stages ALONE (the user 2026-08-23): select a passage, ⌘⏎ with an empty box, repeat —
     // then one typed message flushes the whole run. Nothing at all → nothing to stage.
     if (!typed && !(composerCitations.get(activeId) || []).some((c) => c.quote)) return;
-    if (composerAnswersAsk()) { warnToast("A picker is waiting on this box — answer it, or send normally."); return; }
-    if (composerEdits.has(activeId)) { warnToast("An edit replaces a past message — send it normally."); return; }
-    if ((composerFiles.get(activeId) || []).length) { warnToast("Attachments can't be staged — send them with a normal message."); return; }
+    if (composerAnswersAsk()) { ephemeralWarnToast("A picker is waiting on this box — answer it, or send normally."); return; }
+    if (composerEdits.has(activeId)) { ephemeralWarnToast("An edit replaces a past message — send it normally."); return; }
+    if (queuedEdits.has(activeId)) { ephemeralWarnToast("This edit replaces a queued message. Send it normally."); return; }   // staged, the words would go as a NEW message behind the unchanged original (review find, 2026-09-08)
+    if ((composerFiles.get(activeId) || []).length) { ephemeralWarnToast("Attachments can't be staged — send them with a normal message."); return; }
     stagedMsgs.push(activeId, { text: typed, cites: (composerCitations.get(activeId) || []).slice() });
     composerCitations.delete(activeId); renderComposerChips(activeId);   // the chips now live on the staged item
     drafts.delete(activeId); draftStartedAt.delete(activeId);
@@ -15663,6 +15790,36 @@ function setupComposer() {
       if (s) { reconcileRewind(s); appendActive(); }   // paint the overlay NOW (stale → window re-render)
       drafts.delete(activeId); draftStartedAt.delete(activeId); persistDrafts();
       ta.value = ""; composerManualH = null; ta.style.height = "";
+      return;
+    }
+    // A QUEUED-message edit → editQueued: the entry is replaced in place, kernel-side. No registerOptimistic
+    // (nothing new is sent — the bubble already exists and only changes words; applyQueuedEditLocally shows
+    // them now). The kernel's push confirms; editResult ok:false (the message left the queue meanwhile)
+    // hands the typed words back to the composer. Attachments wait for the next normal send, as for an edit.
+    const qedit = queuedEdits.get(activeId);
+    if (qedit) {
+      if (!typed) return;   // an empty edit is not a send — to drop the message, use its ✕
+      // Two refusals that leave the box exactly as it is (review finds, 2026-09-08). A down host DROPS the
+      // frame (federation posts nothing to a closed socket) and no editResult ever comes back to hand the
+      // words over, so the plain send's deliver() guard applies here, BEFORE the box is cleared; a provisional
+      // tab has no session behind it and nothing queued. And a slash command cannot be edited INTO a queued
+      // message: the kernel would deliver it as text, skipping the routing every typed command gets (the
+      // fire-alone park, the /model and /effort setters, the /clear confirm below), so the kernel refuses it
+      // too; this mirror keeps the words in the box instead of round-tripping them.
+      if (hostIsDown(activeId) || isProvisionalId(activeId)) {
+        if (hostIsDown(activeId)) vscodeApi?.postMessage({ type: "redial", host: String(activeId).slice(0, String(activeId).indexOf(":")) });
+        warnToast("Can't reach the session right now, so the edit wasn't sent. It's still in the box: send again when the link is back.");
+        return;
+      }
+      if (SLASH_CMD_RE.test(typed)) { warnToast("A queued message cannot become a command. Cancel it with its ✕ and type the command."); return; }
+      const qmsg: Record<string, unknown> = { type: "editQueued", id: activeId, md: qedit.md, text: typed };
+      if (qedit.idx !== undefined) qmsg.idx = qedit.idx;
+      if (qedit.park !== undefined) qmsg.park = qedit.park;
+      vscodeApi?.postMessage(qmsg);
+      pendingEditRestores.set(activeId + " " + qedit.md, { typed, ref: qedit });
+      queuedEdits.delete(activeId);
+      applyQueuedEditLocally(activeId, qedit, typed);
+      restoreHeldDraft(activeId);   // the pill goes; the box gets back the draft the ✎ displaced, or empties
       return;
     }
     const sid = activeId;   // the session this send (and any confirm below) was armed for
@@ -16065,6 +16222,7 @@ function setupComposer() {
       // for "tab mode" — focus the active tab so ←/→ switch sessions (the user 2026-06-25). Enter on a
       // tab drops back in (onTabKey). Any draft text stays in the box, untouched.
       e.preventDefault();
+      if (activeId && queuedEdits.has(activeId)) { cancelQueuedEdit(activeId); return; }
       if (activeId && composerEdits.has(activeId)) { cancelComposerEdit(activeId); return; }
       focusActiveTab();
       return;
@@ -16312,6 +16470,10 @@ function applyChatScheme(s: RompSettings): void {
   // the overall theme (T113 promoted 2026-08-28): the shared applier toggles the strip-aesthetic
   // and light-theme classes from s.theme. Applies live — onExternalSettingsChange re-runs this.
   applyTheme(document, s);
+  // compact tabs and agents (the user 2026-09-08): a body class the strip's and the #bg-tasks panel's dense
+  // rules key on (styles.css body.dense-chrome). The same two moments as the scheme and the theme, so the
+  // gear's flip repaints both surfaces at once through the cascade; neither is rebuilt.
+  applyDenseChrome(document, s);
 }
 function setupSettings(): void {
   applyChatScheme(settings);   // the persisted pick applies at startup — it survives reloads
@@ -16502,6 +16664,7 @@ setupSettings();
       const provisional = isProvisionalId(sidQ);
       if (provisional && qmd) forgetProvisionalSend(qmd);
       const msg: Record<string, unknown> = { type: "cancelQueued", id: sidQ, md: qmd };
+      if (el.dataset.qid) msg.qid = el.dataset.qid;   // the copy's id: the kernel cancels exactly this copy, in whichever queue it sits, never a same-words neighbour by index or body
       if (qmd && el.dataset.qopt !== "1") noteCancelledQueued(sidQ, qmd, el.dataset.qid || undefined);   // a kernel copy: never held once it vanishes (T262i)
       if (el.dataset.qidx !== undefined) msg.idx = Number(el.dataset.qidx);
       if (el.dataset.qpark !== undefined) msg.park = Number(el.dataset.qpark);
@@ -16528,6 +16691,23 @@ setupSettings();
       bub?.remove();
       if (grp) reflowQueuedGroup(grp);
       if (contentX && wasAtBottom) writeScroll(contentX, contentX.scrollHeight, "queued-x", true);
+    },
+    // ✎ on a queued bubble (the user 2026-09-08): edit the message while it is still romp's to change.
+    // Delegated like the ✕ (the tail rebuilds every push). The edit rides the ACTIVE composer, so a bubble
+    // owned by another session (a comment thread's popover) is declined with a pointer rather than edited
+    // in the wrong box. The acknowledgement is the composer filling + the editing pill, at once.
+    qedit: (el) => {
+      if (!activeId) return;
+      const qmd = (el as any)._qmd as string | undefined;
+      if (!qmd) return;
+      const sidQ = owningSidOf(el) || activeId;
+      if (sidQ !== activeId) { warnToast("open that session's chat to edit its queued message"); return; }
+      const ref: QueuedEditRef = { md: qmd };
+      if (el.dataset.qidx !== undefined) ref.idx = Number(el.dataset.qidx);
+      if (el.dataset.qpark !== undefined) ref.park = Number(el.dataset.qpark);
+      if (el.dataset.qts !== undefined) ref.qts = Number(el.dataset.qts);
+      if (el.dataset.qopt === "1") ref.optimistic = true;
+      beginQueuedEdit(sidQ, ref);
     },
     // a comment highlight or its turn badge (the user 2026-08-13): open the thread's popover at the
     // click. Delegated — marks and badges are re-created on every transcript rebuild — and so is
@@ -16609,11 +16789,12 @@ setupSettings();
       if (tid) setActive(tid);
     },
     // a branch divider (child side) or branch chip (parent side): jump to the other end of the
-    // branch, landing on the branch-point turn via the deep-link anchor machinery
+    // branch, landing on the branch-point turn via the deep-link anchor machinery. The refusal
+    // reports a state (the roster), not an event, so it does not ride a reload (ephemeralWarnToast).
     branchjump: (elx) => {
       const sid = elx.dataset.sid;
       if (!sid) return;
-      if (!sessions.get(sid)) { warnToast("That session isn't on this dashboard right now."); return; }
+      if (!sessions.get(sid)) { ephemeralWarnToast("That session isn't on this dashboard right now."); return; }
       setActive(sid, elx.dataset.cut || undefined);
     },
     // a below-response fork spot: the row carries its own cut ("" = whole conversation)
@@ -16872,6 +17053,9 @@ setupSettings();
     else if (next?.dataset?.id) { reorderTo(draggedId, next.dataset.id, false); tabDragCommitted = true; }
   });
 })();
+// The chat page's hidden word for the kernel's pane shim (chat-visibility.ts): the chat gates no paint, so this
+// is the one place it measures its own visibility. Once, at top level, over the page's body.
+watchChatVisibility(document.body, browserChatVisibilityDeps());
 // right-click a selection in the transcript → Reply (quote it) / Copy
 document.getElementById("content")?.addEventListener("contextmenu", showSelectionMenu);
 // The chat document hosts the viewer itself (openPath), so it boots the viewer's listener with the

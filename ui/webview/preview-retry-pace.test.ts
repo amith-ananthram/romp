@@ -42,7 +42,7 @@ class FakeEl {
   /** the structure without the words: only the elements that are there */
   bones(): string { return `${this.tag}.${this.cls()}(${this.children.map((c) => c.bones()).join(",")})`; }
 }
-(globalThis as any).document = { createElement: (t: string) => new FakeEl(t), addEventListener: () => {} };
+(globalThis as any).document = { createElement: (t: string) => new FakeEl(t), addEventListener: () => {}, querySelectorAll: () => [] };   // no parked markdown images here (md-img-park.test.ts drives those)
 (globalThis as any).location = { protocol: "http:", origin: "http://127.0.0.1:1" };   // canPreview: the web dashboard
 (globalThis as any).window = (globalThis as any).window || {};
 
@@ -181,7 +181,7 @@ test("the source keeps the two rules where the behaviour lives", () => {
   assert.match(PREVIEW, /if \(autoRetries <= 1\) return \{ wait, note: chip \};\s*\n\s*chip\.remove\(\);/, "the chip carries the words for the one new-evidence heal; a re-armed budget gets the loading persona back");
   // the PDF probe's 502 and a relay-URL markdown image wait for the reconnect-class heal too
   assert.match(PREVIEW, /\(r\.status === 502 \? settledPreviews : failedPreviews\)\.set\(box, probe\);/);
-  assert.match(PREVIEW, /\(\/\\\/remote\\\/\[\^\/\]\+\\\/file\\b\/\.test\(src\) \? settledPreviews : failedPreviews\)\.set\(img, \(\) => \{/);
+  assert.match(PREVIEW, /parkMdImg\(img, src\);/, "a markdown image that failed is parked, not registered for any per-message heal (T291c)");
   // a remote kernel's restart reopens the relay socket and fires neither romp:wsup nor hostUp: that event heals too
   const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
   assert.match(RENDER, /window\.addEventListener\("romp:hostRelayUp", \(e\) => \{[\s\S]{0,600}?refreshSettledPreviews\(\);/);
