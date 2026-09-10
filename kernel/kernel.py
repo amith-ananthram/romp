@@ -31583,10 +31583,17 @@ def build_episode(sid, now):
 _CLEARED_MEMO = {"slot": None}     # (key, parsed set) or None: the clear log's stat taken BEFORE the read, and the set read under it
 _CLEARED_STATS = {"served": 0, "derived": 0}   # bumped from the pusher AND socket threads (undo, connect-time builds) with
 #                                                no lock: a lost count under a race is tolerated, these are diagnostics only
+# The id families cleared.jsonl holds that name no session (review find, 2026-09-09), each built for the feed:
+# "parked:<msgId>" and "quarantine:<mid>" key a message, and "provisional:", "awaiting:" and "blocked:" + sid are
+# the placeholders build_feed re-lists every build whatever the clear log holds. The footer's Clear-all (the
+# clearAll handler) clears every ask build_feed lists, these included, so their rows arrive live and, the log being
+# append-only, accumulate. An explicit list rather than a shape test on the stem: the goals/ stems are the ground
+# truth for a session id and any uuid text is a valid one; a new family that keys no session is added here.
+_CLEARED_NO_SESSION = ("parked:", "quarantine:", "provisional:", "awaiting:", "blocked:")
 
 
 def _cleared_foreign(cleared):
-    """The ledger's ids that belong to no local session: no goal store and no archive here for the id's sid. A
+    """The cleared ids that name a session with no goal store and no archive here. A
     merged board routes a card's gestures to the owning kernel by id, but a viewer's ledger can still hold a
     remote card's clear (a gesture taken while the owner was unreachable, a ledger copied between machines,
     an older client), and the owning kernel's archive projection reads only its own ledger; so the viewer's
@@ -31600,8 +31607,15 @@ def _cleared_foreign(cleared):
         except OSError:
             pass
     # newest first under the cap (T287: a cut by id text dropped yesterday's clears on a long ledger), and only
-    # ids that name a session (a bare node id a mis-stripped route once recorded matches no card anywhere)
-    foreign = [i for i in cleared if ":" in i and i.rsplit(":", 1)[0] not in local]
+    # ids that name a session (a bare node id a mis-stripped route once recorded matches no card anywhere).
+    # The prefixed families are skipped as well (review find, 2026-09-09): the text before their last colon is a
+    # word, never a goals/ stem, so each read as foreign and rode every frame, local or not, and one Clear-all on
+    # a board of placeholders crowded a remote session's clears out of the cap. None names a session whose clear
+    # rows a kernel reads: a parked or quarantine id keys a message, so this kernel cannot tell its own from a
+    # remote one (after delivery or a decision the record is gone, the row is not), and no kernel honors a clear
+    # row for a placeholder, so no overlay could apply one. Only "sid:gN" ids ride.
+    foreign = [i for i in cleared if ":" in i and not i.startswith(_CLEARED_NO_SESSION)
+               and i.rsplit(":", 1)[0] not in local]
     foreign.sort(key=lambda i: (-(cleared.get(i) or 0), i))
     return foreign[:500]
 
