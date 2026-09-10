@@ -36482,9 +36482,10 @@ def _dead_lane_marks(marks, t0):
 #             object every build (live_tail).
 #   goals     the store the loop reads seams from (_segs_seam) and nodes from (_derive_judging_marks): a FrozenStore
 #             by identity (load_goals_shared serves one per file version, so a publish or a journal append is a new
-#             object); a store with neither seams nor nodes, or None after a fault, as "empty", since the two
-#             fields read are empty whatever its identity; any other private store is not held (unshared_skip: a
-#             mutable store could change under the entry).
+#             object); a store with neither seams nor nodes as "empty", since the two fields read are empty
+#             whatever its identity; any other private store is not held (unshared_skip: a mutable store could
+#             change under the entry). None after a fault is derived and not held (complain_skip): the derivation
+#             skips the marks for it, so it is not the empty store, and a skip compares and stores no key.
 #   captions  _stat_key of captions/<sid>.jsonl, taken by build_timeline BEFORE _captions reads the file (_captions
 #             builds a new dict per call, so the file is the input). Stat before read: a row appended between the
 #             two is read by this build and held under the OLD key, so the next build's stat misses and derives
@@ -36502,16 +36503,16 @@ def _dead_lane_marks(marks, t0):
 #             reads it; a sentinel (the stat failed) matches nothing and nothing is stored under it.
 #   sid       the entry's key; the bars and marks carry it.
 # NOT inputs: the clock. The horizon (now - TL_HORIZON) and JUDGE_CAP_LIMIT are applied per build by
-# _judging_assemble, and nothing else in the segment part reads a time. A lane whose parse failed, or whose seams
-# or marks stage complained (the derivation's own try/excepts), is derived and not held (complain_skip). The held
-# bars are shared by identity into every later build's turns[sid], the bars wire cache and the delta parts, none
-# of which writes to them (_bind_message_execs mutates the messages only; _timeline_skeleton copies the frame),
-# and the held marks into `semantic`, which _run_judging only reads. Entries are dropped for lanes outside a full
-# build's lane set (_lanes_forget) and past _LANES_MEMO_MAX, the least recently served first; an entry whose parse
-# object is no longer the build's is dropped when seen, since it cannot hit again and it holds that parse; the
-# dead-lane populate pops a lane's entry when the lane dies (the entry holds the parse the populate releases). One
-# lock around get, put, evict and the counters; the derivation runs unlocked, so two threads deriving one lane both
-# store an exact entry and the last wins.
+# _judging_assemble, and nothing else in the segment part reads a time. A lane whose parse failed, whose goal store
+# faulted, or whose seams or marks stage complained (the derivation's own try/excepts), is derived and not held
+# (complain_skip). The held bars are shared by identity into every later build's turns[sid], the bars wire cache
+# and the delta parts, none of which writes to them (_bind_message_execs mutates the messages only;
+# _timeline_skeleton copies the frame), and the held marks into `semantic`, which _run_judging only reads. Entries
+# are dropped for lanes outside a full build's lane set (_lanes_forget) and past _LANES_MEMO_MAX, the least
+# recently served first; an entry whose parse object is no longer the build's is dropped when seen, since it cannot
+# hit again and it holds that parse; the dead-lane populate pops a lane's entry when the lane dies (the entry holds
+# the parse the populate releases). One lock around get, put, evict and the counters; the derivation runs unlocked,
+# so two threads deriving one lane both store an exact entry and the last wins.
 _lanes_memo = {}          # sid -> (session, goals_obj, caps_key, key, value, prompts); value = _lane_segments' tuple,
 #                           prompts its full_prompts map (T278b)
 _LANES_MEMO_MAX = 256
@@ -36669,12 +36670,18 @@ def _lane_memo(sid, parsed, session, goals, caps, cap_key, live, bft, parse_ok=T
     True on every call here. `parsed` is the _parse object and `session` the one after _merge_live_atoms, the
     same object unless a live tail was merged; `cap_key` is the captions file's _stat_key taken before _captions
     read it (None when the file could not be stat'd); `parse_ok` is False when the parse failed and `session` is the
-    empty stand-in. `full_prompts` (T278b) receives the lane's whole prompts by bar id, on a hit from the entry and on
-    a miss from the derivation, so the binder reads them either way."""
+    empty stand-in; `goals` is None when the store faulted (build_timeline complained), and such a lane is derived and
+    not held, as the dead-lane path derives and never caches one. `full_prompts` (T278b) receives the lane's whole
+    prompts by bar id, on a hit from the entry and on a miss from the derivation, so the binder reads them either way."""
     if isinstance(goals, jd.FrozenStore):
         gobj, gtag = goals, "shared"
     elif goals is None or (not goals.get("seams") and not goals.get("nodes")):
-        gobj, gtag = None, "empty"   # None: the store FAULTED (build_timeline complained); no seams, no marks
+        gobj, gtag = None, "empty"   # no seams, no nodes: the two fields read are empty whatever the store's identity.
+        #                              None (the store FAULTED: build_timeline complained) lands here too and is a skip
+        #                              below, so its key is never compared and never stored: _lane_segments derives NO
+        #                              marks for None while the empty store still yields the captioner's and the
+        #                              archiver's, and held under one key, a lane across a fault was served the other
+        #                              side's marks (review find on the memo, 2026-09-09)
     else:
         gobj, gtag = None, None
     if cap_key is not None:
@@ -36685,8 +36692,8 @@ def _lane_memo(sid, parsed, session, goals, caps, cap_key, live, bft, parse_ok=T
         ckey = None                  # rows read with no file to stat: this build's rows have no key, not held
     arch_key = jd._file_key(str(jd.STATE / "archive" / (sid + ".json")))   # BEFORE the derivation reads it
     key = (live, bft, tuple(_downtime), gtag, arch_key)
-    if not parse_ok:
-        skip = "complain_skip"
+    if not parse_ok or goals is None:
+        skip = "complain_skip"       # the parse or the goals stage complained: derived, said so, not held
     elif session is not parsed:
         skip = "live_tail"
     elif gtag is None:
