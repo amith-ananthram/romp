@@ -35,7 +35,7 @@ test("a drag in any pane moves every pane, through both notification paths", () 
 });
 
 test("the chat strip's drag writes the BROWSER, not a kernel", () => {
-  assert.match(RENDER, /function commitTabOrder\(\) \{\s*\n\s*writeViewOrder\(order\.slice\(\)\);\s*\n\s*\}/);
+  assert.match(RENDER, /function commitTabOrder\(\) \{\s*\n\s*if \(fedMissing\) return;[^\n]*\n\s*writeViewOrder\(order\.slice\(\)\);\s*\n\s*\}/);   // the guard: a page without its manager never writes (federation-missing.test.ts, 2026-09-10)
   assert.doesNotMatch(RENDER, /type: "reorderTabs"/,
     "a kernel can only record an order over its own sids — writing there is what blocked interleaving");
 });

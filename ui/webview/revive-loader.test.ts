@@ -35,7 +35,7 @@ test("event-based clear: the kernel's focus for the reviving sid retires the loa
 
 test("the tab mints immediately: stub session + order + setActive, before any waiting", () => {
   // the openProvisional idiom — "opening" is the designed vocabulary for a tab whose payload is coming
-  assert.match(RENDER, /if \(!sessions\.has\(id\)\) \{\s*\n\s*sessions\.set\(id, \{ id, name, color: null, events: \[\], status: \{ state: "opening", sinceEpoch: Date\.now\(\) \} \}\);\s*\n\s*order\.push\(id\);/);
+  assert.match(RENDER, /if \(!sessions\.has\(id\)\) \{\s*\n\s*sessions\.set\(id, \{ id, name, color: null, events: \[\], status: \{ state: "opening", sinceEpoch: Date\.now\(\) \} \}\);\s*\n\s*if \(!order\.includes\(id\)\) order\.push\(id\);/);   // once: a skeleton the strip already carries (2026-09-10)
   const fn = RENDER.split("function showReviveLoader(")[1].split("\nfunction ")[0];
   assert.ok(fn.includes("renderTabs();"), "the tab is on the strip at once");
   assert.ok(fn.includes("setActive(id);"), "and foregrounded");

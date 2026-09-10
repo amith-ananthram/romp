@@ -75,3 +75,13 @@ export function reconcileTabOrder(
   }
   return out;
 }
+
+/** A session frame's id joins the order ONCE. The kernel sends a new session's tabOrder frame before its session
+ *  frame (tabs-first), so the id is usually in the order already when the session frame arrives; pushing it again put
+ *  a duplicate there that renderTabs hid but a drag's commit wrote into the browser's arrangement (review find,
+ *  2026-09-10). `existed` is the session map's word; the order's own is asked too. Returns whether it was added. */
+export function adoptArrival(order: string[], id: string, existed: boolean): boolean {
+  if (existed || order.includes(id)) return false;
+  order.push(id);
+  return true;
+}

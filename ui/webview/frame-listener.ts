@@ -22,3 +22,38 @@ export function listenForFrames(handler: (e: MessageEvent) => void): (e: Message
   if (fed && typeof fed.onFrame === "function") fed.onFrame(handler);
   return handler;
 }
+
+// ── a kernel-served page whose federation manager never came up (2026-09-10) ──────────────────────────────────
+// The pane shim publishes window.__rompLocalSend and window.__rompApp before any bundle loads (kernel.py, the shim),
+// and federation.js — loaded ahead of the pane bundle as a classic script — publishes window.__rompFed in start().
+// A classic script that fails to fetch or to evaluate stops nothing else: the pane bundle still runs, the shim's
+// deliver() falls to its window-dispatch branch, and the pane consumes the kernel's RAW frames — no arrangement
+// (view-order.ts) ever applied, so the strip shows the kernel's seed order, and a drag would then write that seed
+// over the browser's arrangement for every other pane (the 2026-09-10 incident: two chat columns on different
+// orders, one of them reshuffling on every push, pins helpless). Both fallbacks were designed for pages that never
+// have a manager (a VS Code webview, the timeline) and so degraded silently, against the fail-loudly rule. This is
+// the pure decision the pane bundle makes at boot: shim present, manager absent → the manager is MISSING, not
+// merely not part of this page.
+export function federationMissing(w: { __rompLocalSend?: unknown; __rompFed?: unknown }): boolean {
+  return typeof w.__rompLocalSend === "function" && !w.__rompFed;
+}
+
+/** What the browser recorded about fetching federation.js — the one measurement that separates a failed fetch
+ *  (status 0 or an empty transfer, a long duration: a network gap, a dist swap mid-read) from a bundle that
+ *  arrived and failed to evaluate (a 200 with a normal body, the slot still unset). Picked from
+ *  performance.getEntriesByType("resource"); null when the browser recorded nothing for it. */
+export function federationLoadEntry(entries: readonly { name: string; duration?: number; transferSize?: number; encodedBodySize?: number; responseStatus?: number }[]):
+    { duration: number; transferSize: number; encodedBodySize: number; responseStatus: number } | null {
+  const e = entries.find((x) => typeof x.name === "string" && /\/dist\/federation\.js(\?|$)/.test(x.name));
+  if (!e) return null;
+  return { duration: Math.round(e.duration || 0), transferSize: e.transferSize || 0, encodedBodySize: e.encodedBodySize || 0,
+           responseStatus: typeof e.responseStatus === "number" ? e.responseStatus : -1 };
+}
+
+/** The retry marker's key for THIS document. sessionStorage is per tab and shared by the shell page and every
+ *  same-origin iframe in it, so a bare key would let two chat columns (/chat and /chat?col=2, the split) steal each
+ *  other's one retry and file each other's load entries; the path and query name a column, and stay the same across
+ *  its own reloads. */
+export function fedRetryKey(loc: { pathname: string; search: string }): string {
+  return "romp:fed-retry:" + loc.pathname + loc.search;
+}
