@@ -20,12 +20,16 @@ const FEED = web("feed.ts");
 const FEED_CSS = web("feed.css");
 const CHAT_CSS = web("styles.css");
 
-test("openPath routes by HOST: the in-pane viewer modal on the web, the editor in VS Code", () => {
+test("openPath routes by HOST: the in-pane viewer modal on the web (or the Files pane, by the ladder), the editor in VS Code", () => {
   assert.match(RENDER, /function openPath\(path: string, sid\?: string \| null, ev\?: MouseEvent \| null\): void/);   // ev: the click, for a PDF's modified-click tab
-  // web → the viewer opens in THIS document, framed or standalone alike — no shell relay, no fallback
-  assert.match(RENDER, /openFileClick\(ev, path, sid \|\| activeId \|\| null\);/);   // via the gesture reader: a plain click is openFileView (pdf-new-tab.test.ts)
+  // web → the ladder decides at the click (file-route.ts fileLinkRoute, its table in file-route.test.ts): "here" opens
+  // the viewer in THIS document through the gesture reader; "pane" hands a plain click to the shell for the Files pane
+  assert.match(RENDER, /const route = fileLinkRoute\(settings\.fileLinkPane, window\.parent !== window, panesOn\.files === true\);/);
+  assert.match(RENDER, /openFileClick\(ev, path, to, route === "pane" \? \(\) => \{/);   // via the gesture reader: a plain click is openFileView or the relay (pdf-new-tab.test.ts)
   assert.match(RENDER, /import \{ openFileClick \} from "\.\/file-view";/);   // the gesture reader is the chat's only way in; openFileView is not imported
-  assert.doesNotMatch(RENDER, /romp: "viewFile"/, "the chat→shell→feed relay is gone");
+  assert.match(RENDER, /window\.parent\.postMessage\(\{ romp: "viewFile", path, sid: to, pane: "pane",\n\s*identity: s && s\.name \? \{ name: s\.name, color: s\.color \?\? null \} : null \}, "\*"\);/);
+  assert.equal((RENDER.match(/romp: "viewFile"/g) || []).length, 1, "one relay, aimed at the Files pane; the feed is never a file's target");
+  assert.doesNotMatch(RENDER, /pane: "feed"/);
   // VS Code keeps the host editor
   assert.match(RENDER, /vscodeApi\.postMessage\(sid \? \{ type: "openFile", path, id: sid \} : \{ type: "openFile", path \}\);/);
 });
@@ -38,12 +42,13 @@ test("every file-link surface in the chat goes through openPath — no direct op
                "both remaining mentions are the two arms of openPath's fallback");
 });
 
-test("the VIEWER's shell relay is gone; the BROWSER's stays — the feed pane is only juggled for it", () => {
+test("the VIEWER's shell relay serves the Files pane only; the BROWSER's stays, and the feed pane is only juggled for it", () => {
   const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
-  // the viewer lives in the clicking document now, so the shell no longer forwards viewFile clicks
-  // (the user 2026-08-15: a file view must never touch the feed) — and the viewer, being a modal over
-  // whatever pane opened it, has nothing to restore and nothing to announce
-  assert.doesNotMatch(KERNEL, /m\.romp==='viewFile'/);
+  // the viewer lives in the clicking document (the user 2026-08-15: a file view must never touch the feed), so
+  // the shell forwards a viewFile click to ONE place, the Files pane, and only when the click names it; the
+  // pane stays up, so the viewer has nothing to restore and nothing to announce. The arm itself is the kernel's
+  // and is pinned and run in the Python lane (tests/test_files_pane.py Relay, tests/test_pane_state_broadcast.py)
+  assert.doesNotMatch(KERNEL, /postMessage\(\{romp:'viewFile',path:m\.path,sid:m\.sid\},'\*'\)/, "no forward into the feed");
   assert.doesNotMatch(VIEW, /viewFileClosed/, "nothing to restore → nothing to announce");
   // the file BROWSER still lives in the FEED pane, so its ask still relays through the shell from
   // any pane, still turns a toggled-off feed on, and still restores it on browseClosed — that
@@ -795,9 +800,11 @@ test("the title bar carries a session chip resolved from the sid — never inven
     "capitalized like this bar's other tooltips; 'session' so a name like web is not read as a place");
   assert.match(openFn, /bar\.appendChild\(name\); if \(sess\) bar\.appendChild\(sess\); bar\.appendChild\(acts\);/,
     "between the path and the actions");
-  // the signatures every opener and the relay pin depend on are exactly as they were
-  assert.match(VIEW, /export function openFileView\(path: string, sid\?: string \| null, opts\?: \{ line\?: number \| null; frag\?: string \| null \}\): void \{/);   // frag: a sibling link's fragment lands after the render
-  assert.match(VIEW, /export function initFileView\(poster: \(m: Record<string, unknown>\) => void\): void \{/);
+  // the signatures every opener and the relay pin depend on: the open answers whether it happened (a
+  // dirty-edit veto is false, so the Files pane's recent list records only real opens), and the listener
+  // takes an optional relay contract (files.ts takes the shell's relay whole)
+  assert.match(VIEW, /export function openFileView\(path: string, sid\?: string \| null, opts\?: \{ line\?: number \| null; frag\?: string \| null \}\): boolean \{/);   // frag: a sibling link's fragment lands after the render
+  assert.match(VIEW, /export function initFileView\(poster: \(m: Record<string, unknown>\) => void,\n\s*onRelay\?: \(m: \{ path: string; sid\?: unknown; identity\?: unknown \}\) => void\): void \{/);
 });
 
 test("both hosting documents register a resolver beside their initFileView boot", () => {
@@ -867,4 +874,33 @@ test("the chip's dress is in BOTH sheets: a fixed-width pill that never yields t
     // (~1:1 contrast for a remote session's chip). opacity keeps it quiet without dimming to gray.
     assert.match(css, /\.fileview-sess \.host-prefix \{ color: inherit; opacity: 0\.75; \}/, "the host: token uses the pill's fg, quiet");
   }
+});
+
+// executed: openFileView's verdict, the head of the function lifted from file-view.ts (plain JS up to the guard's
+// reset) and run over a document that does or does not hold a viewer and a close guard that does or does not
+// veto. The Files pane's recent list records an open only when this answers true (files.ts openHere), so a
+// dirty-edit veto that answered true would list a file that never opened.
+test("openFileView answers false when the dirty-edit guard keeps the previous viewer, and falls through otherwise", () => {
+  const at = VIEW.indexOf("export function openFileView(");
+  const head = VIEW.slice(VIEW.indexOf("): boolean {", at) + "): boolean {".length, VIEW.indexOf("closeGuard = null;", at) + "closeGuard = null;".length);
+  assert.match(head, /if \(document\.getElementById\("romp-fileview"\) && closeGuard && !closeGuard\(\)\) return false;/);
+  const run = (viewerUp: boolean, guard: (() => boolean) | null) => {
+    let asked = 0;
+    const document = { getElementById: (id: string) => (viewerUp && id === "romp-fileview" ? {} : null) };
+    const closeGuard = guard ? () => { asked++; return guard(); } : null;
+    const out = (new Function("document", "closeGuard", "return (function () {" + head + " return { through: true, guard: closeGuard }; })();") as
+      (d: unknown, g: unknown) => false | { through: true; guard: unknown })(document, closeGuard);
+    return { out, asked };
+  };
+  const veto = run(true, () => false);
+  assert.equal(veto.out, false, "a viewer up whose guard refuses: the open did not happen");
+  assert.equal(veto.asked, 1, "the guard was asked once");
+  const ok = run(true, () => true);
+  assert.deepEqual(ok.out, { through: true, guard: null }, "the guard allowed it: the head falls through and the guard is dropped for the new viewer");
+  const none = run(false, () => false);
+  assert.deepEqual(none.out, { through: true, guard: null }, "no viewer up: nothing to ask, the guard is not consulted");
+  assert.equal(none.asked, 0);
+  assert.deepEqual(run(true, null).out, { through: true, guard: null }, "a viewer with no guard (nothing edited) is replaced");
+  // and the other end of the function: a completed open answers true
+  assert.match(VIEW, /body\.replaceChildren\(why\);\n\s*\}\);\n\s*return true;\n\}/, "openFileView ends by answering true");
 });

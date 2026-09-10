@@ -53,6 +53,7 @@ import { injectedHead, type InjectedSource } from "./injected-source";
 import { subTabId, isSubId, subParts, subLabel, gistLines, stepLines, stepsNote, agentFoldLabel, subHeadParts, openIconSvg, pinIconSvg, type SubMeta, type AgentGist, type AgentGistRow, type GistLine } from "./subagent-view";
 import { previewKind, previewFull, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal, mdImgPostPass, setLightboxNav, type LightboxNavEntry } from "./preview";
 import { openFileClick } from "./file-view";                  // a clicked file WITH its gesture (pdf-new-tab.test.ts)
+import { fileLinkRoute } from "./file-route";                 // where the click opens: here, or the Files pane (file-route.test.ts)
 // initFileView rides its OWN line: the import above is pinned verbatim by file-view.test.ts
 import { initFileView, setFileViewIdentity, hostStub } from "./file-view";
 import { openUrlView } from "./file-view";                 // the URL mode of the same viewer (md-url-view.test.ts)
@@ -1387,13 +1388,43 @@ document.addEventListener("click", (e) => {
 //     first cut filled the feed pane, and reading a file cost the cards). The bytes come to the
 //     browser over /file, which is the fix for the original break (the user 2026-08-08): the kernel
 //     used to run an opener on ITS machine, the wrong screen entirely from another device.
+//   • Web dashboard, the Files pane on screen, or the gear's "File links open in" naming it → the
+//     open is handed to the SHELL, which brings that pane forward and forwards the click into it
+//     (kernel.py's landing shell; ui/webview/files.ts): the viewer as a column of its own, which stays
+//     up beside the chat and the feed instead of covering either.
 //
-// Same document as the click, so there is no shell relay and no fallback ladder: standalone /chat
-// and the framed pane behave identically.
+// The route is fileLinkRoute (ui/webview/file-route.ts), pure so the table is testable: an OPEN Files
+// pane takes the click whatever the setting says (the pane being open is the intent); a closed one
+// only when the setting names it; a relay only when a shell exists to relay to (framed). Standalone
+// /chat has no shell and no other pane, so the setting quietly means "here", the in-document modal.
+// The gate lives at THIS end deliberately: the shell forwards whatever arrives, so a message never
+// sent is a click that opens in place, and no setting check shell-side can swallow a click.
+//
+// panesOn is the shell's pane set as the shell last told it: {romp:"panes", on:{chat,feed,files,...}},
+// posted on every pane toggle (its apply(), the exact event of the set changing), on this iframe's
+// load and on a phone's tab switch (kernel.py _LANDING_COLLAPSE_JS, _LANDING_MOBILE_JS), so a chat that
+// boots or reloads after the shell hears it too. A cache of the shell's state refreshed by the shell's
+// own event, never a per-click guess (no reading the parent's DOM, no polling). Standalone /chat never
+// hears one and reads as all-off, which the framed gate makes moot anyway.
+let panesOn: Record<string, boolean> = {};
 function openPath(path: string, sid?: string | null, ev?: MouseEvent | null): void {
   if (!vscodeApi) return;
   if (location.protocol === "http:" || location.protocol === "https:") {
-    openFileClick(ev, path, sid || activeId || null);   // with its gesture: a Cmd/Ctrl- or middle-click on a PDF → the browser's own tab
+    const to = sid || activeId || null;
+    const route = fileLinkRoute(settings.fileLinkPane, window.parent !== window, panesOn.files === true);
+    // with its gesture, read first: a Cmd/Ctrl- or middle-click on a PDF takes the browser's own tab wherever
+    // the plain click would have landed; a plain click routed to the Files pane is handed to the shell
+    openFileClick(ev, path, to, route === "pane" ? () => {
+      // Fire-and-forget by nature: postMessage to a live parent never throws, so there is no catchable
+      // failure here and no honest in-document fallback exists. The message names its target pane and
+      // carries the session's IDENTITY (name and colour, the tab set's own, the way the viewer's resolver
+      // below names a session) for the Files pane, which has no session list to resolve a title-bar chip
+      // from. Looked up, never invented: a sid neither list names sends null, and the pane's resolver
+      // falls to the kernel's stub.
+      const s = to ? (sessions.get(to) ?? tabMeta.get(to)) : undefined;
+      window.parent.postMessage({ romp: "viewFile", path, sid: to, pane: "pane",
+        identity: s && s.name ? { name: s.name, color: s.color ?? null } : null }, "*");
+    } : undefined);
     return;
   }
   vscodeApi.postMessage(sid ? { type: "openFile", path, id: sid } : { type: "openFile", path });
@@ -15208,6 +15239,17 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   }
   // the shell's palette / shell-focus chords: the chat owns the nav trail, the shell just asks
   if (m.romp === "chatNav") { navHist.go(m.dir === 1 ? 1 : -1); return; }
+  // the shell's pane set, which panes are on screen by key: the cache openPath routes file links by (panesOn
+  // above; the shell posts it on every toggle, on this iframe's load and on a phone's tab switch). Whole-set
+  // replace: a key the shell stopped naming must not linger as on.
+  if (m.romp === "panes") {
+    if (m.on && typeof m.on === "object") {
+      const on: Record<string, boolean> = {};
+      for (const k of Object.keys(m.on)) on[k] = m.on[k] === true;
+      panesOn = on;
+    }
+    return;
+  }
   // the pipe's down edge is the VS Code twin of the shim's romp:wsdown: unconfirmed sends say so (markPendingLost)
   if (m.type === "pipeState") { if (!m.up) markPendingLost("connection"); pipeBanner(!!m.up, Number(m.queued) || 0); return; }
   // any kernel message proves the kernel is reachable again — heal previews whose fetch died in a

@@ -409,7 +409,7 @@ test("rendered markdown never carries data-* attributes into the page, in the vi
 });
 
 test("local file mode: a sibling link's #fragment lands after the first RENDERED paint, once", () => {
-  assert.match(VIEW, /export function openFileView\(path: string, sid\?: string \| null, opts\?: \{ line\?: number \| null; frag\?: string \| null \}\): void \{/);
+  assert.match(VIEW, /export function openFileView\(path: string, sid\?: string \| null, opts\?: \{ line\?: number \| null; frag\?: string \| null \}\): boolean \{/);
   assert.match(OPEN_FN, /let pendingFrag: string \| null = opts\?\.frag \|\| null;/);
   assert.match(OPEN_FN, /if \(rendered && pendingFrag\) \{\s*\n\s*const h = pendingFrag; pendingFrag = null;\s*\n\s*requestAnimationFrame\(\(\) => \{ if \(wrap\.isConnected\) scrollToFragment\(body, h\); \}\);/);
 });

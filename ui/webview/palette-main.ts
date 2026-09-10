@@ -136,7 +136,7 @@ installMenuEcho();
   registerCommand({ id: "kernel.restart", title: "Restart the romp kernel", run: () => { if (w.__rompRestart) w.__rompRestart(); } });
   // Pane toggles. The Outline pane's INTERNAL key stays 'fleet' (the pane controller's API);
   // the command speaks the user-facing name.
-  const panes: Array<[string, string]> = [["chat", "chat"], ["timeline", "timeline"], ["fleet", "outline"], ["feed", "feed"]];
+  const panes: Array<[string, string]> = [["chat", "chat"], ["timeline", "timeline"], ["fleet", "outline"], ["feed", "feed"], ["files", "files"]];
   for (const [key, label] of panes) {
     registerCommand({
       id: "pane." + label, title: "Show or hide the " + label + " pane",
@@ -215,7 +215,7 @@ installMenuEcho();
   // render.ts's own window-capture Cmd+O handler stands down inside the shell (inRompShell),
   // so a keystroke in the chat document lands here exactly once.
   document.addEventListener("keydown", onKey, true);
-  ["f-chat", "f-fleet", "f-feed", "f-timeline"].forEach((id) => {
+  ["f-chat", "f-fleet", "f-feed", "f-files", "f-timeline"].forEach((id) => {
     const f = pane(id);
     if (!f) return;
     const wire = () => {
