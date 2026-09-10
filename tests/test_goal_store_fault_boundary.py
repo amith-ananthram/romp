@@ -596,6 +596,35 @@ class GestureRefusal(_World):
         self.assertIn(gid, json.loads((jd.GOALARCHDIR / (A + ".json")).read_text())["nodes"],
                       "the archive still holds the card for a later undo")
 
+    def test_the_refusal_names_the_goals_file_relative_to_the_state_root(self):
+        """The dialog's copy of the fault says goals/<sid>.json, never the absolute path under the home
+        directory: an absolute state path has no business in a pane (the rule _oserror_text already states
+        for the frames it serves), and a federated dashboard shows the pane on another machine's screen.
+        The errno text and the file name stay, so the user still learns what refused and which session's
+        store. The judge-errors row keeps the whole path, which is diagnostic there."""
+        self._compacted(A, NOW - 10)
+        with _fault_on(self.a_file):
+            sent = self._dispatch({"type": "undoClear"})
+        errs = [m for m in sent if m.get("type") == "err"]
+        self.assertEqual([m.get("sid") for m in errs], [A])
+        self.assertNotIn(self.td.name, errs[0]["text"], "the state root is not shown")
+        self.assertIn("goals/%s.json" % A, errs[0]["text"], "the file is still named, relative to the state root")
+        self.assertIn("Input/output error", errs[0]["text"], "and so is the fault")
+        self.assertIn(str(self.a_file), self._rows("store-unreadable")[0]["note"],
+                      "the judge-errors row keeps the whole path: it is diagnostic there")
+
+    def test_the_fault_copy_keeps_the_errno_text_and_the_file_name(self):
+        """The copy is str(fault) with the state root taken out of EVERY path it names: a failed publish's
+        rename names two, the temp file and its destination. A fault with no text at all reads as its type."""
+        fault = OSError(errno.EIO, "Input/output error", str(self.a_file))
+        self.assertEqual(km._store_fault_copy(fault), "[Errno 5] Input/output error: 'goals/%s.json'" % A)
+        tmp = jd.GOALDIR / (A + ".json.tmp.1.2.3")
+        fault = OSError(errno.ENOENT, "No such file or directory", str(tmp), None, str(self.a_file))
+        self.assertEqual(km._store_fault_copy(fault),
+                         "[Errno 2] No such file or directory: 'goals/%s.json.tmp.1.2.3' -> 'goals/%s.json'" % (A, A),
+                         "the root leaves both paths, not only the first")
+        self.assertEqual(km._store_fault_copy(ValueError()), "ValueError")
+
     def test_a_sub_goal_drop_the_fault_skipped_answers_with_its_own_account(self):
         """The modal's Drop is sub-task-only, and a sub-goal row renders from the node FLAG alone
         (cleared.jsonl hides TOP cards only) — the very write the fault refused. So the whole-card
@@ -614,6 +643,7 @@ class GestureRefusal(_World):
         self.assertEqual([m.get("sid") for m in errs], [A])
         self.assertIn("sub-goal was not cleared", errs[0]["title"])
         self.assertIn("Input/output error", errs[0]["text"], "it says why")
+        self.assertNotIn(self.td.name, errs[0]["text"], "the file is named relative to the state root")
         self.assertIn("nothing changed there", errs[0]["text"], "what happened: nothing")
         self.assertIn("Try it again", errs[0]["text"], "the true remedy: a retry appends a fresh row and sets the flag")
         self.assertNotIn("copy", errs[0])
@@ -655,8 +685,11 @@ class GestureRefusal(_World):
 
     def _assert_clear_refusal(self, err, before):
         """The whole-card clear dialog says exactly what happened: the card is off the board (its
-        cleared.jsonl row landed) but the durable flag was not written into a goals file romp could not read."""
+        cleared.jsonl row landed) but the durable flag was not written into a goals file romp could not read,
+        named as goals/<sid>.json, never by its absolute path."""
         self.assertIn("Input/output error", err["text"], "it says why")
+        self.assertNotIn(self.td.name, err["text"], "the file is named relative to the state root")
+        self.assertIn("goals/%s.json" % A, err["text"])
         self.assertIn("off the board", err["text"], "what did happen")
         self.assertIn("not written", err["text"], "what did not")
         self.assertNotIn("copy", err, "`copy` is the USER'S undelivered text by contract; romp's prose never rides it")
@@ -845,6 +878,7 @@ class GestureRefusal(_World):
         self.assertEqual([m.get("sid") for m in errs], [A])
         self.assertIn("undo", errs[0]["title"])
         self.assertIn("No such file or directory", errs[0]["text"], "it says why: the publish that failed")
+        self.assertNotIn(self.td.name, errs[0]["text"], "the temp it could not write is named relative to the root")
         self.assertIn("not restored", errs[0]["text"])
         self.assertEqual(self._undo_rows(), [B + ":g1"], "only the id whose publish LANDED is journaled as undone")
         self.assertEqual(km._cleared_ids(), {A + ":g1": NOW - 10}, "A's ids remain the newest cleared batch")

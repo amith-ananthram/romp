@@ -16,7 +16,7 @@ The fix, both faces:
     the page, so the ship NAMES persist beside the drafts and the next load says LOUDLY what
     was lost — never a silent vanish.
 
-Two guards here:
+The guards here:
   * SourcePins — runs everywhere, CI included: the wiring above, pinned in the sources (the
     webview-side twins live in ui/webview/pending-attach.test.ts).
   * ServedWedge — the executed guard: boots the hermetic kernel, opens the real /chat page,
@@ -25,6 +25,15 @@ Two guards here:
     reconnect re-ships, the thumbnail lands, and the held send fires. Plus the regression leg:
     a normal ship+send against the restarted kernel behaves exactly as before. Skips LOUDLY
     when the extension deps or a playwright browser are absent (CI installs no browsers).
+  * NackNoticeSurvivesReload: the same wedge with the relaunched kernel unable to save the
+    re-shipped file. Its nack retires the last pending ship, which lets the restart's held
+    reload fire on the next task, and the notice the nack raised (the file was not saved, the
+    held message not sent) must be shown again by the fresh page, once.
+  * RelaunchEnv, which runs everywhere: the relaunch stanza the lab writes to its cfg.json for the
+    driver's relaunch of the kernel carries only the environment the relaunched kernel needs, never
+    the runner's whole environment (a runner variable planted as a probe is absent; the lab's own
+    names, the run's private roots and its git isolation present); the served legs check the
+    written file itself.
 
 All fixtures synthetic.
 """
@@ -40,6 +49,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from tests.dist_copy import copy_dist
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -97,6 +109,21 @@ class SourcePins(unittest.TestCase):
         self.assertIn("shipsInFlight: [...pendingShips.values()].flat().map((p) => p.name)", RENDER)
         self.assertIn("still uploading when this page reloaded, so it was NOT attached", RENDER)
 
+    def test_the_notices_on_screen_ride_the_cores_reload_and_are_shown_once(self):
+        # the nack is raised in the same task as the reload hold's ending event, just after endReloadHoldIfIdle (the
+        # dismissal of the last pending chip and the ack landing on another tab, just before it), one task before the
+        # owed reload fires, so the toast was never read and the loss toast above has nothing to say (shipsInFlight is
+        # already empty). The core's synchronous hook keeps the toasts on screen in this tab's sessionStorage and the
+        # fresh page shows them once, after the loss toast (reload-notices.ts); pagehide keeps the scroll record alone,
+        # so a load the user asks for replays nothing. NackNoticeSurvivesReload executes the nack's.
+        self.assertIn("(window as any).__rompPersistForReload = persistForReload;", RENDER)
+        self.assertIn("function persistForReload(): void { persistScrollForReload(); persistNoticesForReload(); }", RENDER)
+        self.assertIn('window.addEventListener("pagehide", persistScrollForReload);', RENDER)
+        self.assertIn('keepReloadNotices(sessionStorage, liveNotices(document.getElementById("warn-toasts")))', RENDER)
+        self.assertIn("for (const text of takeReloadNotices(sessionStorage)) warnToast(text);", RENDER)
+        self.assertLess(RENDER.index("shipsInFlight: [] });"), RENDER.index("takeReloadNotices(sessionStorage)"),
+                        "the loss toast first, then what the last page was saying")
+
 
 def _free_port():
     s = socket.socket()
@@ -104,6 +131,32 @@ def _free_port():
     p = s.getsockname()[1]
     s.close()
     return p
+
+
+# The environment the driver hands the kernel it relaunches rides the lab's cfg.json, a file, so it carries only
+# the names the relaunched kernel needs here: ROMP_* and XDG_*, CLAUDE_CONFIG_DIR, PATH (bin/romp-kernel runs under
+# `env python3`) and HOME, plus what tests/conftest.py sets for every child of the run: TMPDIR and TMUX_TMPDIR, the
+# private roots its temp files and its tmux server live under, and GIT_CONFIG_GLOBAL and GIT_CONFIG_NOSYSTEM, which
+# keep the kernel's boot-time git (the build sha, the release-tag probe) off the developer's git configuration.
+# Never the runner's whole environment: on a machine whose shells carry API keys, a copy of os.environ in that file
+# holds them for the run. The lab's own kernel is started from this process and gets its environment by process,
+# as any child does; only what goes to the file is narrowed.
+RELAUNCH_ENV_PREFIXES = ("ROMP_", "XDG_")
+RELAUNCH_ENV_NAMES = frozenset(("CLAUDE_CONFIG_DIR", "PATH", "HOME", "TMPDIR", "TMUX_TMPDIR",
+                                "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"))
+
+
+def relaunch_env(env):
+    """The part of a lab kernel's environment `env` that a served lab writes to its cfg.json for the driver's
+    relaunch of the kernel."""
+    return {k: v for k, v in env.items() if k.startswith(RELAUNCH_ENV_PREFIXES) or k in RELAUNCH_ENV_NAMES}
+
+
+def relaunch_cfg(env, klog):
+    """cfg.relaunch, the stanza a served lab writes for the driver's relaunch of the kernel it kills: the command,
+    relaunch_env() of the lab kernel's environment `env`, and the log `klog` the first kernel writes. Both served
+    labs write their stanza through this, so RelaunchEnv covers what reaches the file."""
+    return {"cmd": os.path.join(BIN, "romp-kernel"), "env": relaunch_env(env), "log": klog}
 
 
 DRIVER = r"""
@@ -237,7 +290,7 @@ class _ShipLab(unittest.TestCase):
         if b.returncode != 0:
             raise unittest.SkipTest("esbuild failed here: " + (b.stderr or b.stdout)[-200:])
         dist = os.path.join(cls.lab, "dist")
-        shutil.copytree(os.path.join(EXT, "dist"), dist)
+        copy_dist(os.path.join(EXT, "dist"), dist)
         cls.state = os.path.join(cls.lab, "xdg", "romp")
         cwd = os.path.join(cls.lab, "proj")
         os.makedirs(os.path.join(cls.state, "names"), exist_ok=True)
@@ -273,14 +326,10 @@ class _ShipLab(unittest.TestCase):
         Path(cls.png).write_bytes(PNG)
         cls.port = _free_port()
         cls.token = "testtok-reship"
-        cls.env = dict(os.environ,
-                       XDG_STATE_HOME=os.path.join(cls.lab, "xdg"),
-                       CLAUDE_CONFIG_DIR=claude,
-                       ROMP_MANAGER_PORT="1", ROMP_KERNEL_NO_OPEN="1",
-                       ROMP_SERVE_TOKEN=cls.token, ROMP_KERNEL_PORT=str(cls.port),
-                       ROMP_DIST_DIR=dist,
-                       ROMP_MODEL_CATALOG="off")   # hermetic: the T222 catalog fetch must never reach the network
-        cls.env.pop("ROMP_STATE_DIR", None)
+        cls.env = cls.kernel_env(cls.lab, claude, dist, cls.port, cls.token)
+        # a stand-in for a key the runner's shell carries: the lab's kernel gets it by process environment with the
+        # rest of the runner's, and _run_driver checks that the cfg.json the driver reads never does
+        cls.env["RUNNER_SECRET_PROBE"] = "abc"
         cls.klog = os.path.join(cls.lab, "kernel.log")
         cls.kernel = subprocess.Popen([os.path.join(BIN, "romp-kernel")],
                                       stdout=open(cls.klog, "w"), stderr=subprocess.STDOUT, env=cls.env)
@@ -295,6 +344,21 @@ class _ShipLab(unittest.TestCase):
         else:
             cls.kernel.kill()
             raise unittest.SkipTest("hermetic kernel never served /healthz here")
+
+    @staticmethod
+    def kernel_env(lab, claude, dist, port, token):
+        """The lab kernel's environment: the runner's, with the lab's roots and seams over it. The kernel the lab
+        starts gets it by process; the driver's relaunch gets relaunch_env() of it, through the stanza
+        relaunch_cfg() writes to the lab's cfg.json."""
+        env = dict(os.environ,
+                   XDG_STATE_HOME=os.path.join(lab, "xdg"),
+                   CLAUDE_CONFIG_DIR=claude,
+                   ROMP_MANAGER_PORT="1", ROMP_KERNEL_NO_OPEN="1",
+                   ROMP_SERVE_TOKEN=token, ROMP_KERNEL_PORT=str(port),
+                   ROMP_DIST_DIR=dist,
+                   ROMP_MODEL_CATALOG="off")   # hermetic: the T222 catalog fetch must never reach the network
+        env.pop("ROMP_STATE_DIR", None)
+        return env
 
     @classmethod
     def tearDownClass(cls):
@@ -313,6 +377,13 @@ class _ShipLab(unittest.TestCase):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
             json.dump(cfg_obj, f)
+        # the file carries only what the driver and the relaunched kernel need: the probe the lab planted in its
+        # kernel's environment (checked first, so the file check cannot pass without it) must not be in it (names
+        # only in the report, never the values)
+        self.assertIn("RUNNER_SECRET_PROBE", sorted(self.env), "the lab plants the probe in its kernel's environment")
+        written = json.loads(Path(cfg).read_text(encoding="utf-8"))
+        self.assertNotIn("RUNNER_SECRET_PROBE", sorted(written.get("relaunch", {}).get("env", {})),
+                         "the lab's cfg.json carries a variable of the runner's environment the relaunch does not need")
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(driver_src)
@@ -342,13 +413,45 @@ class _ShipLab(unittest.TestCase):
         return r
 
 
+class RelaunchEnv(unittest.TestCase):
+    """The relaunch stanza a served lab writes to its cfg.json for the driver's relaunch of the kernel carries only
+    the environment the relaunched kernel needs, never the runner's whole environment: on a machine whose shells
+    carry API keys, a copy of os.environ in that file holds them for the run. No kernel and no browser, so this
+    runs everywhere; the served legs check the written file itself (_run_driver)."""
+
+    def test_a_runner_variable_never_reaches_the_relaunch_env_and_the_kernels_names_do(self):
+        lab = os.path.join(os.sep, "lab")
+        # the runner's shell: a stand-in for a key it carries, a live kernel's state export (it outranks the XDG root,
+        # and the lab removes it) and the floor tests/conftest.py sets for the run's children, planted here so the
+        # test asserts on values it chose rather than on conftest having set them
+        runner = {"RUNNER_SECRET_PROBE": "abc",
+                  "ROMP_STATE_DIR": os.path.join(lab, "live"),
+                  "TMPDIR": os.path.join(lab, "tmp"), "TMUX_TMPDIR": os.path.join(lab, "tmux"),
+                  "GIT_CONFIG_GLOBAL": os.path.join(lab, "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
+        with mock.patch.dict(os.environ, runner):
+            env = _ShipLab.kernel_env(lab, os.path.join(lab, "claude"), os.path.join(lab, "dist"), 4321, "testtok")
+        self.assertIn("RUNNER_SECRET_PROBE", sorted(env), "the lab's own kernel inherits the runner's environment, by process")
+        cfg = relaunch_cfg(env, os.path.join(lab, "kernel.log"))
+        self.assertEqual(cfg["cmd"], os.path.join(BIN, "romp-kernel"))
+        self.assertEqual(cfg["log"], os.path.join(lab, "kernel.log"))
+        out = cfg["env"]
+        names = sorted(out)
+        self.assertNotIn("RUNNER_SECRET_PROBE", names, "the relaunch reads the file: a runner variable must not be in it")
+        self.assertNotIn("ROMP_STATE_DIR", names, "a live kernel's export outranks the XDG root; the lab removes it")
+        for name in ("XDG_STATE_HOME", "CLAUDE_CONFIG_DIR", "ROMP_MANAGER_PORT", "ROMP_KERNEL_NO_OPEN", "ROMP_SERVE_TOKEN",
+                     "ROMP_KERNEL_PORT", "ROMP_DIST_DIR", "ROMP_MODEL_CATALOG", "PATH", "HOME"):
+            self.assertIn(name, names, "the relaunched kernel needs %s" % name)
+        self.assertEqual(out["XDG_STATE_HOME"], os.path.join(lab, "xdg"))
+        self.assertEqual(out["ROMP_KERNEL_PORT"], "4321")
+        for name in ("TMPDIR", "TMUX_TMPDIR", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"):
+            self.assertEqual(out.get(name), runner[name], "the run's %s reaches the relaunched kernel" % name)
+
+
 class ServedWedge(_ShipLab):
     def test_restart_between_ship_and_ack_reships_heals_and_releases_the_held_send(self):
         r = self._run_driver(DRIVER, {
             "url": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token),
-            "kernelPid": self.kernel.pid,
-            "relaunch": {"cmd": os.path.join(BIN, "romp-kernel"),
-                         "env": {k: v for k, v in self.env.items()}, "log": self.klog},
+            "kernelPid": self.kernel.pid, "relaunch": relaunch_cfg(self.env, self.klog),
             "file": self.png, "msg": "hold this message for the upload T215",
             "msg2": "a normal send after the restart T215",
             "shots": os.environ.get("SHIP_RESHIP_SHOTS", "")})
@@ -443,6 +546,163 @@ class ReloadLossToast(_ShipLab):
                         "the lost upload must warn loudly on the next load — never a silent vanish: %r" % r)
         self.assertFalse(r["toastOnSecondLoad"],
                          "the loss record must clear with the toast — one warning, not one per load: %r" % r)
+
+
+DRIVER_NACK = r"""
+import { createRequire } from "node:module";
+import fs from "node:fs";
+import { spawn } from "node:child_process";
+const require = createRequire(process.env.EXT_PKG);
+const { chromium } = require("playwright");
+const cfg = JSON.parse(fs.readFileSync(process.env.CFG, "utf8"));
+let browser;
+try { browser = await chromium.launch(); }
+catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
+const page = await browser.newPage({ viewport: { width: 1100, height: 900 } });
+const out = {};
+const die = async (why) => {
+  fs.writeSync(1, "RESULT:" + JSON.stringify({ ...out, died: why }) + "\n");
+  await browser.close();
+  process.exit(0);
+};
+// a wait that hands back the page's answer, asked of whichever page is up: an evaluate mid-navigation throws and is
+// asked again of the page that follows (waitForFunction can reject when the navigation destroys the context it polls)
+const until = async (fn, arg, ms) => {
+  const t0 = Date.now();
+  for (;;) {
+    let v = false;
+    try { v = await page.evaluate(fn, arg); } catch (e) { /* mid-navigation */ }
+    if (v) return v;
+    if (Date.now() - t0 > ms) return false;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+};
+await page.goto(cfg.url);
+await page.waitForSelector("#composer-input", { timeout: 20000 });
+const tab = await page.waitForSelector("#tabs .tab, #tabs [data-sid]", { timeout: 20000 }).catch(() => null);
+if (!tab) await die("no session tab: the lab seed never reached the chat payload");
+await page.waitForTimeout(500);   // let the shim's ws settle onto the live kernel
+// ServedWedge's stage: a ship on a live socket the stopped kernel never answers, the send held on the gate
+process.kill(cfg.kernelPid, "SIGSTOP");
+await page.setInputFiles("body > input[type=file]", cfg.file);
+await page.waitForSelector(".composer-file-pending", { timeout: 10000 }).catch(() => {});
+out.chipUpAfterShip = await page.locator(".composer-file-pending").count();
+await page.fill("#composer-input", cfg.msg);
+await page.click("#composer-send");
+await page.waitForSelector(".confirm-btn", { timeout: 10000 }).catch(() => {});
+const waitBtn = page.locator(".confirm-btn", { hasText: "Wait for the upload" });
+out.gateOffered = await waitBtn.count();
+if (out.gateOffered) await waitBtn.click();
+// two things on the OLD page before the kernel goes. A toast wearing the ephemeral mark, on screen as the core takes the
+// page: a stand-in with warnToast's shape (render.ts marks its own "Can't send yet" refusal the same way; this lab has
+// no unreachable host to raise it), which the fresh page must not repeat. And the latch: this document records the nack
+// toast the moment it appears, in sessionStorage, which survives the reload (the reload follows the nack by one task,
+// so nothing read from outside after the fact could see the old page's toasts).
+const bootBefore = await page.evaluate((probe) => {
+  window.__probe = 1;
+  let wt = document.getElementById("warn-toasts");
+  if (!wt) { wt = document.createElement("div"); wt.id = "warn-toasts"; document.body.appendChild(wt); }
+  const eph = document.createElement("div"); eph.className = "warn-toast"; eph.dataset.ephemeral = "1";
+  const msg = document.createElement("span"); msg.className = "warn-toast-msg"; msg.textContent = probe;
+  eph.appendChild(msg); wt.appendChild(eph);
+  sessionStorage.removeItem("probe:nackSeen");
+  const look = () => {
+    if (sessionStorage.getItem("probe:nackSeen")) return;
+    const toasts = document.getElementById("warn-toasts")?.textContent || "";
+    if (toasts.includes("couldn't be saved"))
+      sessionStorage.setItem("probe:nackSeen", JSON.stringify({ text: toasts,
+        ephemeralOnScreen: !!document.querySelector("#warn-toasts .warn-toast[data-ephemeral]"),
+        waiting: window.__rompReload ? window.__rompReload.waiting : null }));
+  };
+  new MutationObserver(look).observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true });
+  setInterval(look, 20);
+  return window.__rompReload ? window.__rompReload.boot : null;
+}, cfg.probe);
+out.bootBefore = bootBefore;
+// the drops path becomes a regular file: the relaunched kernel's _save_dropped_file fails and it NACKs the re-ship
+fs.rmSync(cfg.drops, { recursive: true, force: true });
+fs.writeFileSync(cfg.drops, "not a directory");
+process.kill(cfg.kernelPid, "SIGKILL");
+const k2 = spawn(cfg.relaunch.cmd, [], { env: cfg.relaunch.env, detached: true,
+  stdio: ["ignore", fs.openSync(cfg.relaunch.log, "a"), fs.openSync(cfg.relaunch.log, "a")] });
+k2.unref();
+fs.writeSync(1, "KPID:" + k2.pid + "\n");
+// the OLD page saw the nack (the re-shipped file could not be saved); then the reload core's turn
+out.nackSeen = await until(() => JSON.parse(sessionStorage.getItem("probe:nackSeen") || "null"), null, 45000) || null;
+out.reloaded = await until((boot) => window.__probe !== 1 && !!window.__rompReload && window.__rompReload.boot !== boot, bootBefore, 30000);
+await page.waitForSelector("#composer-input", { timeout: 20000 }).catch(() => {});
+out.bootAfter = await page.evaluate(() => window.__rompReload ? window.__rompReload.boot : null).catch(() => null);
+// the FRESH page: the notice again (the replay runs as the bundle loads; the toast lives 12 s, so read it at once),
+// and every toast on it by itself, for the count
+out.freshToasts = await until(() => {
+  const t = document.getElementById("warn-toasts")?.textContent || "";
+  return t.includes("couldn't be saved") ? t : false;
+}, null, 5000) || (await page.evaluate(() => document.getElementById("warn-toasts")?.textContent || "").catch(() => null));
+out.freshList = await page.evaluate(() => Array.from(document.querySelectorAll("#warn-toasts .warn-toast-msg"), (n) => n.textContent || "")).catch(() => null);
+out.freshPending = await page.locator(".composer-file-pending").count();
+out.freshFiles = await page.locator(".composer-file").count();
+// one replay: the record leaves sessionStorage as the toasts are raised
+out.recordAfterReplay = await page.evaluate(() => sessionStorage.getItem("romp:reloadNotices")).catch(() => "unread");
+// a load the USER asks for, with the replayed toast still on screen: pagehide keeps the scroll record alone, so the
+// page that follows says nothing
+out.toastsBeforeNav = await page.locator("#warn-toasts .warn-toast").count();
+await page.goto(cfg.url);
+await page.waitForSelector("#composer-input", { timeout: 20000 });
+await page.waitForTimeout(800);
+out.secondLoadToasts = await page.evaluate(() => document.getElementById("warn-toasts")?.textContent || "");
+// the draft comes back one time after a load, once the tab has landed (restoreActiveDraftOnce): a wait, not a read
+out.inputAfterNav = await until(() => document.getElementById("composer-input")?.value || false, null, 15000);
+fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
+await browser.close();
+process.exit(0);
+"""
+
+
+class NackNoticeSurvivesReload(_ShipLab):
+    """The reload core's restart reload follows the LAST pending ship's retirement: retirePendingShip ends the hold
+    (endReloadHoldIfIdle, __rompReload.ended()) and the core fires on the next task. The nack that retired the ship
+    raises its toast in the same handler, after the hold ended, so the notice (the file was not saved, the held
+    message NOT sent) was appended one task before the page went: never read, and the fresh page's loss toast had
+    nothing to say (shipsInFlight was already empty). A failed attachment and an unsent message went unannounced.
+    Now the core's synchronous hook keeps the toasts on screen in this tab's sessionStorage and the fresh page shows
+    them again once. The drops path is made a regular file before the relaunch so the re-ship's save fails and the
+    kernel nacks it (_save_dropped_file); the old page latches its toast in sessionStorage, which survives the
+    reload. A toast wearing the ephemeral mark is on screen too (a stand-in with warnToast's shape, since the lab has
+    no unreachable host for render.ts to raise its own), and the fresh page must not repeat it."""
+
+    def test_the_nack_of_the_last_ship_is_shown_again_by_the_fresh_page_once(self):
+        r = self._run_driver(DRIVER_NACK, {
+            "url": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token),
+            "kernelPid": self.kernel.pid, "relaunch": relaunch_cfg(self.env, self.klog),
+            "file": self.png, "msg": "hold this message for the upload that will not save",
+            "drops": os.path.join(self.state, "drops"),
+            "probe": "probe: an ephemeral notice, which the fresh page must not repeat"})
+        self.assertEqual(r["chipUpAfterShip"], 1, "the pending chip must be up after the ship: %r" % r)
+        self.assertEqual(r["gateOffered"], 1, "the ship gate must offer to wait for the upload: %r" % r)
+        # the old page: the re-ship was nacked, the toast named the file and the unsent message
+        self.assertTrue(r["nackSeen"], "the relaunched kernel must NACK the re-ship (drops is a file): %r (kernel log tail: %s)"
+                        % (r, Path(self.klog).read_text()[-500:]))
+        self.assertIn("shot.png couldn't be saved", r["nackSeen"]["text"])
+        self.assertIn("Your message was NOT sent", r["nackSeen"]["text"], "the held send did not fire without its file")
+        self.assertTrue(r["nackSeen"].get("ephemeralOnScreen"), "the toast wearing the ephemeral mark was on screen as the core took the page: %r" % r)
+        # then the reload the core owed (held while the ship awaited its answer)
+        self.assertTrue(r["reloaded"], "the reload core reloads once the ships settled: %r" % r)
+        self.assertNotEqual(r["bootAfter"], r["bootBefore"], "the fresh page carries the relaunched kernel's boot id: %r" % r)
+        # the heart of it: the fresh page says it again, once, and only that
+        self.assertIn("shot.png couldn't be saved", r["freshToasts"] or "",
+                      "the nack the reload wiped must be shown again by the fresh page: %r" % r)
+        self.assertIn("Your message was NOT sent", r["freshToasts"] or "", "with the unsent message named: %r" % r)
+        self.assertEqual(len([t for t in (r["freshList"] or []) if "couldn't be saved" in t]), 1,
+                         "shown again once, not once per raise: %r" % r)
+        self.assertNotIn("still uploading", r["freshToasts"] or "", "no loss toast over a ship that settled: %r" % r)
+        self.assertNotIn("probe:", r["freshToasts"] or "", "the toast wearing the ephemeral mark stays behind: %r" % r)
+        self.assertEqual([r["freshPending"], r["freshFiles"]], [0, 0], "no chip and no attachment over a file that was not saved: %r" % r)
+        # once: the record leaves sessionStorage with the replay, and a load the user asks for replays nothing
+        self.assertIsNone(r["recordAfterReplay"], "the replay takes the record out of sessionStorage: %r" % r)
+        self.assertGreaterEqual(r["toastsBeforeNav"], 1, "the replayed toast was on screen when the user navigated: %r" % r)
+        self.assertNotIn("couldn't be saved", r["secondLoadToasts"], "pagehide keeps the scroll record alone: nothing replayed: %r" % r)
+        # and the draft is still there to act on
+        self.assertEqual(r["inputAfterNav"], "hold this message for the upload that will not save", "the draft survives as before: %r" % r)
 
 
 if __name__ == "__main__":

@@ -25,17 +25,20 @@ import errno
 import io
 import json
 import os
+import shutil
 import tempfile
 import threading
 import time
 import unittest
 from importlib.machinery import SourceFileLoader
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
 
 # Hermetic state BEFORE the loads — they resolve their state root at import time, and only
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
+# That is the loads' import-time floor only: every test runs under a state root of its own (_own_state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
@@ -54,14 +57,42 @@ def store_tag(name):
     return next((t for t in km._timeline_views()["tags"] if t["name"] == name), None)
 
 
+def _own_state(test):
+    """A state root of the test's own, bound into the judge here and put back and removed by a cleanup on
+    the same test (a cleanup, so it runs after tearDown). The judge is ONE module object per process (a
+    SourceFileLoader load of a name already in sys.modules re-executes into that object), so jd.STATE is
+    shared with every module an xdist worker collected, and a fixture elsewhere that left it bound to a
+    removed directory reached this module: _atomic_write recreates the parent and a direct write_text does
+    not, so a test whose first touch of the views file is a write_text (a fixture written before any seed)
+    failed with FileNotFoundError when it ran first after such a fixture (LegacyStoreStampedOnce,
+    LegacyTagsStampedOnFirstRead, MigrationStampsTheArchivedTag, ReaderRestampKeepsTheDiskCap and
+    ReaderRestampUnwritableNamesTheDrop as classes, ReaderRestampUnwritable's read-only test alone). The
+    suite's shared-state check (tests/conftest.py, _shared_state_restored) fails the test that leaves such
+    a binding; a root per test makes this module independent of that check and of test order, and the
+    cleanup drops this root's entries from the two path-keyed caches. OwnStateRoot pins the shape."""
+    saved = km.jd.STATE
+    root = tempfile.mkdtemp()
+    km.jd._rebind_state(Path(root))
+    views = str(km._views_path())
+
+    def restore():
+        km._flags_cache.pop(views, None)
+        km._VIEWS_SEQ_FLOOR.pop(views, None)
+        km.jd._rebind_state(saved)
+        try:
+            os.chmod(root, 0o755)    # the unwritable-store tests leave the dir 0o555 if they fail before their finally
+        except OSError:
+            pass
+        shutil.rmtree(root, ignore_errors=True)
+    test.addCleanup(restore)
+    return Path(root)
+
+
 class _Wire(unittest.TestCase):
     """A dashboard's timeline socket, through the real dispatcher; every ack it receives is kept."""
 
     def setUp(self):
-        try:
-            km._views_path().unlink()
-        except OSError:
-            pass
+        _own_state(self)
         self.notices = []
         self._sync = km._sync_notice
         km._sync_notice = lambda text, ok=True: self.notices.append((text, ok))
@@ -72,10 +103,6 @@ class _Wire(unittest.TestCase):
 
     def tearDown(self):
         km._sync_notice = self._sync
-        try:
-            km._views_path().unlink()
-        except OSError:
-            pass
 
     @contextlib.contextmanager
     def real_notices(self):
@@ -110,6 +137,35 @@ class _Wire(unittest.TestCase):
                          "views": {"active": "all", "tags": [dict(WEB)]}})
         self.assertEqual((ack["type"], ack["ok"], ack["refused"]), ("viewsAck", True, []))
         return ack["views"]
+
+
+class OwnStateRoot(_Wire):
+    """_own_state: the binding an earlier test left behind decides nothing about where this module's
+    tests write, and comes back untouched afterwards. setUp leaves jd.STATE the way a neighbour's
+    tearDown can (bound to a temp root that has been removed, the prior root not put back) BEFORE
+    _Wire.setUp runs, so the helper is all that stands between a direct write_text and
+    FileNotFoundError; without it the test here fails as the legacy-fixture classes did. The root the
+    class found is registered as the FIRST cleanup, so it runs last and the class leaves jd.STATE as it
+    found it: the dangling binding is made inside the test and undone by it, which is what the suite's
+    shared-state check (tests/conftest.py, _shared_state_restored) requires of every test."""
+
+    def setUp(self):
+        found = km.jd.STATE
+        self.addCleanup(km.jd._rebind_state, found)    # registered first, so it runs last: the root found here
+                                                        # comes back after _own_state's own restore has run
+        gone = Path(tempfile.mkdtemp())
+        gone.rmdir()
+        km.jd._rebind_state(gone)                       # a temp root, removed, never put back
+        self.gone = gone
+        super().setUp()
+
+    def test_a_dangling_binding_left_by_an_earlier_test_is_not_inherited_by_a_direct_write(self):
+        p = km._views_path()
+        p.write_text(json.dumps({"active": "all", "tags": [dict(WEB)]}))   # a legacy fixture: write_text before any
+                                                                            # seed; FileNotFoundError under a dangling root
+        self.assertNotEqual(p.parent, self.gone, "the write landed under a root of this test's own, not the dangling one")
+        self.assertTrue(p.parent.is_dir(), "and that root exists")
+        self.assertIsNotNone(store_tag("web"), "and the reader reads the file back from it")
 
 
 class TargetedTagEdits(_Wire):
@@ -817,6 +873,8 @@ class Capability(_Wire):
 
     def setUp(self):
         super().setUp()
+        seen = set(km._UNKNOWN_OPS_SEEN)
+        self.addCleanup(lambda: (km._UNKNOWN_OPS_SEEN.clear(), km._UNKNOWN_OPS_SEEN.update(seen)))
         km._UNKNOWN_OPS_SEEN.clear()
 
     def test_ready_is_answered_with_the_caps_frame_after_the_pushes(self):
@@ -942,6 +1000,7 @@ class Capability(_Wire):
         from pathlib import Path as _P
         s0 = self.seed()["seq"]
         tmp = _tf.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
         names = _P(tmp) / "names"
         names.mkdir()
         (names / SID1).write_text("web\t/proj/TESTHOST/app\t#1EA1EB\twhite\n")
@@ -1051,19 +1110,12 @@ class SetterReturnsRefusals(unittest.TestCase):
     ignored None keep ignoring a list."""
 
     def setUp(self):
-        try:
-            km._views_path().unlink()
-        except OSError:
-            pass
+        _own_state(self)
         self._sync = km._sync_notice
         km._sync_notice = lambda text, ok=True: None
 
     def tearDown(self):
         km._sync_notice = self._sync
-        try:
-            km._views_path().unlink()
-        except OSError:
-            pass
 
     def test_clean_writes_return_an_empty_list_and_stale_ones_the_rows(self):
         self.assertEqual(km._set_timeline_views({"active": "all", "tags": [dict(WEB)]}), [])
@@ -1288,6 +1340,7 @@ class SeqFloorOutlivesTheCacheEntry(_Wire):
         home = km.jd.STATE
         self.assertGreaterEqual(km._views_seq_floor(), s1, "the first store's floor is raised by its own writes")
         other = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, other, True)
         km.jd.STATE = Path(other)
         p2 = km._views_path()
         try:
@@ -1395,6 +1448,7 @@ class ReaderRestampUnwritable(_Wire):
 
     def setUp(self):
         super().setUp()
+        self.addCleanup(km._VIEWS_RESTAMP_ERR.__setitem__, 0, km._VIEWS_RESTAMP_ERR[0])
         km._VIEWS_RESTAMP_ERR[0] = None
 
     def test_a_read_only_state_dir_is_served_not_raised_and_logged_once(self):
@@ -2112,12 +2166,12 @@ class ReaderRestampUnwritableNamesTheDrop(_Wire):
 
     def setUp(self):
         super().setUp()
+        self.addCleanup(km._VIEWS_RESTAMP_ERR.__setitem__, 0, km._VIEWS_RESTAMP_ERR[0])
         km._VIEWS_RESTAMP_ERR[0] = None
         self._real_write = km._atomic_write
 
     def tearDown(self):
         km._atomic_write = self._real_write
-        km._VIEWS_RESTAMP_ERR[0] = None
         super().tearDown()
 
     def _file(self, n, **extra):
@@ -2468,6 +2522,7 @@ class BlobLessConnectPushCaps(_Wire):
         # the pusher's next tabOrder carries the store's blob under that very seq, which the client's gate
         # adopts because the caps frame named it (the real pusher, through the test_tab_meta_push.py stubs)
         tmp = _tf.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
         names = _P(tmp) / "names"
         names.mkdir()
         (names / SID1).write_text("web\t/proj/TESTHOST/app\t#1EA1EB\twhite\n")
@@ -2524,10 +2579,11 @@ class BlobLessConnectPushCaps(_Wire):
         self.assertEqual(self.notices, [])
 
 
-class WebBootWiring(unittest.TestCase):
+class WebBootWiring(_Wire):
     """The kernel-served timeline page: the inline _TIMELINE_BOOT twin of timeline-boot.ts exposes
     the targeted-edit bridge and routes both acks to the panel (timeline-boot.test.ts pins the two
-    bridge sets equal)."""
+    bridge sets equal). Reads the kernel's source only; a _Wire so it runs under a state root of its
+    own like every other class in the module."""
 
     def test_the_bridge_and_the_ack_dispatch(self):
         src = open(os.path.join(BIN, "romp-kernel")).read()

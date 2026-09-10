@@ -51,7 +51,7 @@ test("the fork button sits INLINE, right of the worked-seconds label — never i
   // never the terracotta code tint; T141 2026-08-28 unified all button rests to the feed's — dark
   // ground, the mirrored --card-border hairline). Only .code-copy keeps the tint — it sits ON the
   // tinted code block and blends there.
-  for (const block of [".msg-edit {", ".msg-del, .msg-restorefiles, .msg-fork {", ".undelivered-act {"]) {
+  for (const block of [".msg-edit {", ".msg-del, .msg-restorefiles, .msg-fork {", ".notice-act {"]) {   // .undelivered-act → the notice word button (2026-09-08)
     const body = CSS.slice(CSS.indexOf(block), CSS.indexOf("}", CSS.indexOf(block)));
     assert.ok(body.includes("background: transparent"), block + " wears the one button rest");
     assert.ok(body.includes("var(--card-border)"), block + " wears the feed hairline");
@@ -63,7 +63,8 @@ test("the fork button sits INLINE, right of the worked-seconds label — never i
 
 test("the modal defaults to <session>-fork and posts forkSession {id, uuid, name}", () => {
   assert.match(RENDER, /function showForkPrompt\(sid: string, uuid: string\): void \{/);
-  assert.match(RENDER, /input\.value = base \+ "-fork";/);
+  assert.match(RENDER, /const base = defaultForkName\(sess\?\.name, sid\);/);   // <bare session>-fork (T289: never the viewer's host label)
+  assert.match(RENDER, /input\.value = base;/);
   assert.match(RENDER, /if \(!\/\^\[A-Za-z0-9._-\]\+\$\/\.test\(name\)\) \{ input\.classList\.add\("bad"\); input\.focus\(\); return; \}/);
   assert.match(RENDER, /vscodeApi\?\.postMessage\(\{ type: "forkSession", id: sid, uuid, name \}\);/);
   // the instant acknowledgement is the provisional tab, name-joined like a picker create
@@ -127,6 +128,9 @@ test("kernel persists lineage durably and serves it on the session payload", () 
 
 test("branch chrome wears the accent, like every highlight", () => {
   const css = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
-  assert.match(css, /\.branch-divider::before, \.branch-divider::after \{[^}]*var\(--accent\)/s);
+  // 2026-09-08 (the notice-vocabulary pass): the child's divider is a slim BRANCH notice in the romp severity —
+  // the accent on its rail/dot/glyph; the accent hairlines + pill are retired
+  assert.match(css, /\.notice-sev-romp\s+\{ --notice-rail: var\(--accent\);/);
+  assert.doesNotMatch(css, /\.branch-divider|\.branch-label/);
   assert.match(css, /\.branch-chip \{[^}]*color: var\(--accent\)/s);
 });

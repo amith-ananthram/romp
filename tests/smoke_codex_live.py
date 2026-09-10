@@ -25,7 +25,7 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
 
 RUNTIME_STATE = Path(os.environ.get("ROMP_STATE_DIR") or
-                     str(Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "romp"))
+                     str(Path(os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")) / "romp"))
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
 cb = SourceFileLoader("romp_codex_backend_live", os.path.join(ROOT, "kernel", "codex_backend.py")).load_module()

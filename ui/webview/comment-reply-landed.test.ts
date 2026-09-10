@@ -67,7 +67,7 @@ test("the client keys the green wash on the kernel's replyOwed; the gesture latc
   assert.match(KERNEL, /def _settle\(a\):/, "the stop's settle record is skipped when reading the landing");
   assert.match(KERNEL, /reply_owed = status == "open" and \(turn_open or queued > 0 or owes_first/);
   assert.match(RENDER, /else if \(m\.type === "commentSendFailed" && m\.tid\) \{\s*\n\s*cmtAwaitBase\.delete\(String\(m\.tid\)\);/, "a refused send releases its latch");
-  assert.match(RENDER, /unread: false, replyOwed: true, promotedName: "", msgs: \[\], name: nm \|\| "comment"/,
+  assert.match(RENDER, /unread: false, replyOwed: true, promotedName: "", msgs: \[\],\s*\n\s*name: nm \|\| nameBox\?\.dataset\.prefill \|\| "comment"/,
     "the synthetic thread owes its reply from the click");
   assert.match(COMMENTS, /replyOwed\?: boolean;/);
 });

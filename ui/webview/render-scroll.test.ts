@@ -133,10 +133,11 @@ test("the kind guard accepts a peer's postal card as a valid PROMPT target (reco
 
 test("the kind guard accepts a harness-injected record's notice card as a valid PROMPT target (a turn opened by a stamped prompt)", () => {
   // a scheduled task's fired prompt is origin-stamped, so its turn renders as a sourced notice (renderInjected →
-  // noticeCard's standalone .turn-notice), not .turn-user; a prompt-intent deep link into that turn was refused as
+  // notice()'s standalone .turn-notice), not .turn-user; a prompt-intent deep link into that turn was refused as
   // the wrong kind and died silently (review find, 2026-09-09, on #1099). An assistant turn is still refused.
   assert.match(RENDER, /pendingAnchorIntent === "user"\s+&& !target\.classList\.contains\("turn-user"\) && !target\.classList\.contains\("turn-postal-service"\)\s+&& !target\.classList\.contains\("turn-notice"\)\) \{/);
-  assert.match(RENDER, /el\("div", "turn turn-notice notice-" \+ o\.variant\)/, "the standalone notice turn wears the class the guard reads");
+  // 2026-09-08 (the notice-vocabulary pass): the one builder mints the standalone turn, severity-classed
+  assert.match(RENDER, /el\("div", "turn turn-notice notice-sev-" \+ sev \+ \(boxed \? " notice-boxed" : ""\)/, "the standalone notice turn wears the class the guard reads");
 });
 
 test("honest-fail fires whenever the deep-link can't resolve by id (the turn is genuinely gone)", () => {

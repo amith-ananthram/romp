@@ -23,9 +23,12 @@ test("a collapsed tool run renders bold tool labels via toolCounts and is click-
   // the "N Edits" summary shows only when collapsed; expanded → just the arrow
   assert.match(RENDER, /if \(!open\) \{/);
   // clicking the line toggles expand → the full non-compact cards for that span, indented
-  assert.match(RENDER, /line\.addEventListener\("click",[\s\S]*?toggleToolGroup\(key\)/);
+  // 2026-09-08 (the notice-vocabulary pass): the toggle rides the body delegate (data-act=noticetoggle + data-gkey)
+  // and the run's open state lives in openFolds — the per-node listener and the expandedGroups Set are gone
+  assert.match(RENDER, /line\.dataset\.act = "noticetoggle"; line\.dataset\.gkey = key;/);
+  assert.match(RENDER, /noticetoggle: \(el\) => \{\s*\n\s*const gkey = el\.dataset\.gkey;\s*\n\s*if \(gkey\) \{ toggleToolGroup\(gkey\); return; \}/);
   assert.match(RENDER, /function toggleToolGroup/);
-  assert.match(RENDER, /expandedGroups\.has\(key\)/);
+  assert.match(RENDER, /if \(openFolds\.has\(key\)\) openFolds\.delete\(key\); else openFolds\.add\(key\);/);
   assert.match(RENDER, /classList\.add\("tg-child"\)/, "expanded children are tagged for indent");
   assert.match(CSS, /\.toolgroup-tool \{[^}]*font-weight: 700/);
   assert.match(CSS, /\.tg-child \{[^}]*margin-left/);

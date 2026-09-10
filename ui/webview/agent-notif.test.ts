@@ -117,11 +117,12 @@ test("render.ts splits agent notifications out of the reminders into agent notic
   assert.match(RENDER, /turn\.appendChild\(renderAgentNotif\(a, ev\.taskOutputs,/);
   assert.match(RENDER, /else plain\.push\(r\);/);
   // the leftover plain reminders now get their OWN muted notice card too (not the old italic fold)
-  assert.match(RENDER, /noticeCard\(\{ variant: "reminder", chip: "system"/);
-  assert.match(RENDER, /\$\{n\} reminder/);
-  // an agent notif IS a notice card now (accent-blue); the chip is "task" for a command, "agent" for an agent
-  assert.match(RENDER, /const chip = a\.kind === "agent" \? "agent" : "task";/);
-  assert.match(RENDER, /noticeCard\(\{ variant: "agent", chip, head, body/);
+  // 2026-09-08 (the notice-vocabulary pass): both ride the ONE builder, notice(spec) — the reminders under the
+  // SYSTEM source label, an agent report under "background agent" / a command under "background command", the
+  // kind carried by the SOURCE label + line glyph rather than a coloured chip (noticeCard is retired)
+  assert.match(RENDER, /notice\(\{ src: "system", glyph: "system", gist: `\$\{n\} reminder\$\{n > 1 \? "s" : ""\}`, body,/);
+  assert.match(RENDER, /src: a\.kind === "agent" \? "background agent" : "background command",/);
+  assert.match(RENDER, /glyph: a\.kind === "agent" \? "agent" : "command",/);
 });
 
 test("the card gist never re-prints its body — the head is label+detail, the body is result or command/output", () => {
@@ -130,15 +131,20 @@ test("the card gist never re-prints its body — the head is label+detail, the b
   // output tail (command), and is omitted entirely when there is nothing more than the gist.
   // the head is notifHead's "Background agent finished · <label>" since 2026-09-08 (the sourced-notice work): it
   // says what the card IS before which agent — the old `label · detail` pin was retired deliberately
-  assert.match(RENDER, /const head = notifHead\(a\);/);
-  assert.match(RENDER, /collapsible: hasBody/);
+  // 2026-09-08: the head is the builder's GIST slot (notifHead's words), the body is passed only when there is one
+  assert.match(RENDER, /gist: notifHead\(a\), meta: \/\^exit \\d\+\$\/\.test\(a\.detail\) \? a\.detail : undefined,/);
+  assert.match(RENDER, /body: hasBody \? body : null, key, nested: opts\.nested !== false \}\);/);
   assert.doesNotMatch(RENDER, /p\.textContent = a\.summary/);   // the old "print the summary again" body is gone
-  // a flat card (no body) drops the whole body wrapper so there is no stray padding
-  assert.match(RENDER, /if \(hasBody\) \{ const bodyEl = el\("div", "notice-body"\)/);
+  // a flat card (no body) drops the whole body wrapper so there is no stray padding — the builder's rule
+  assert.match(RENDER, /if \(body\) \{ const wrap = el\("div", "notice-body"\); wrap\.appendChild\(body\); card\.appendChild\(wrap\); \}/);
 });
 
-test("styles define the agent notice card in the romp accent and the command detail sub-labels", () => {
-  assert.match(CSS, /\.notice-card-agent \{ border-left-color: var\(--accent\); \}/);
-  assert.match(CSS, /\.notice-chip-agent \{ color: var\(--accent\)/);
+test("styles: the notice glyph is coloured by the severity rail (info = dim), and the command detail sub-labels exist", () => {
+  // 2026-09-08 (the notice-vocabulary pass): the per-variant accent rules (.notice-card-agent / .notice-chip-agent)
+  // are retired — a background report is an INFO notice whose kind is its source label + fork glyph; the glyph
+  // reads the rail's colour, never a colour of its own
+  assert.match(CSS, /\.notice-glyph \{[^}]*color: var\(--notice-rail, var\(--dim\)\)/);
+  assert.match(CSS, /\.notice-sev-info\s+\{ --notice-rail: var\(--dim\);/);
+  assert.doesNotMatch(CSS, /\.notice-card-agent|\.notice-chip-agent/);
   assert.match(CSS, /\.notice-sub \{/);
 });

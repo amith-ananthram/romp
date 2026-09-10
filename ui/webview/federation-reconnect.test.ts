@@ -448,6 +448,31 @@ test("a host that ATTACHES is pending from that moment: the poll re-emits the me
   }
 });
 
+test("the kernel's recovery counter bumping while a row reads up is a hostUp: one per bump, none on a first observation or a steady poll (T291b)", async () => {
+  const g: any = globalThis;
+  const hadFetch = "fetch" in g, prevFetch = g.fetch;
+  let seq = 4;
+  g.fetch = async () => ({ json: async () => ({ tunnels: [{ host: "TESTHOST", hasToken: true, localPort: 5, status: "up", upSeq: seq }] }) });
+  try {
+    await withManager(async (fm, emitted) => {
+      fm.app = "feed";
+      const hostUps = () => emitted.filter((m) => m && m.type === "hostUp");
+      await fm.poll();                                  // first observation: the counter is recorded, never fired
+      assert.equal(hostUps().length, 0, "a first observation is not a recovery");
+      await fm.poll();                                  // steady: same counter, same status
+      assert.equal(hostUps().length, 0, "a steady answered row fires nothing");
+      seq = 5;                                          // the kernel noted a miss-then-answer while the row stayed up
+      await fm.poll();
+      assert.deepEqual(hostUps().map((m) => m.hosts), [["TESTHOST"]], "one hostUp for the bump, the status never having left up");
+      await fm.poll();
+      assert.equal(hostUps().length, 1, "…and none for the same counter again");
+      fm.conns.get("TESTHOST").closed = true;
+    });
+  } finally {
+    if (hadFetch) g.fetch = prevFetch; else delete g.fetch;
+  }
+});
+
 test("…but never drops an EMPTY merged feed onto a page still waiting for its local kernel", async () => {
   const g: any = globalThis;
   const hadFetch = "fetch" in g, prevFetch = g.fetch;

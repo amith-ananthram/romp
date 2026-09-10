@@ -61,7 +61,9 @@ test("a session carries cwd, shown on the statusline just left of the mode/model
 });
 
 test("the system-context card shows the dir basename in its collapsed summary", () => {
-  assert.match(RENDER, /bits\.push\("📁 " \+ \(ev\.cwd/);
+  // 2026-09-08 (the notice-vocabulary pass): the basename rides the notice META slot; the 📁 text glyph is retired
+  // (the head's one glyph is the gear line icon)
+  assert.match(RENDER, /bits\.push\(ev\.cwd\.replace\(\/\\\/\+\$\/, ""\)\.split\("\/"\)\.pop\(\) \|\| ev\.cwd\)/);
 });
 
 test("the status-dir and picker-dir-input styles exist", () => {

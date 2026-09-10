@@ -6,7 +6,8 @@ session's segmentation, plan units and placement normalization on every pass. Th
 every input the pass reads, taken before the store read: the parse cache's key bound to the session object,
 the store with its journal and archive, the episode log, the leaf's task-store files, the reg file and the
 transcript path, the captions file and each running background launch's expiry under the pass clock; it records
-only when the pass placed nothing, collected no unit and left the store's key unchanged. Pins: unchanged inputs
+only when the pass placed nothing, collected no unit, left the store's key unchanged and was complete (the
+evidence gate's bit). Pins: unchanged inputs
 skip after a pass that had nothing to do; a moved store, a fresh parse, a task-store change alone (under the
 session's own sid, and under its forked leaf's), a reg change alone, a prompt caption landing (which heals a
 floor title) and a running launch crossing its deadline (which completes a done focus top) each un-skip that
@@ -14,7 +15,7 @@ session; the expiry term holds while a launch is inside its ceiling, and for a l
 however far the clock runs; the settle reads the wall clock when no pass clock is handed in; a write landing
 during the pass is seen next pass; three sessions with one moved leave placements and nodes byte-identical to
 the ungated passes (two fresh worlds); a parse the cache does not hold is never skipped, nor is an expiry view
-that cannot be computed; a rebound root forgets; the counters.
+that cannot be computed; a pass that stood down is planned again, not recorded; a rebound root forgets; the counters.
 
 Synthetic sids and text; a temp state root, a temp Claude config root for the task store; the planner's model
 calls are stubs, deterministic, so two worlds agree byte for byte."""
@@ -191,6 +192,28 @@ class PlannerSkip(_World):
         jd.SDKDIR.mkdir(parents=True, exist_ok=True)
         (jd.SDKDIR / (A + ".json")).write_text(json.dumps({"sid": A, "name": "worker0", "cwd": "/tmp", "auth": "login"}))
         self.assertEqual(self.run_pass()[0:2], (1, 2), "A's reg appeared: A alone planned")
+
+    def test_a_pass_that_stood_down_is_not_recorded(self):
+        # the evidence gate's completeness bit (_judge_ctx.stage_incomplete, reset by _gated before every run): a
+        # deferral without a write, or a side file that exists and did not read, marks the pass incomplete. A
+        # recorded incomplete pass would skip the session until an input moved, which a permission bit never does
+        self.settle()
+        jd.SDKDIR.mkdir(parents=True, exist_ok=True)
+        (jd.SDKDIR / (A + ".json")).write_text(json.dumps({"sid": A, "name": "worker0", "cwd": "/tmp", "auth": "login"}))
+        real = jd._latch_ask_anchors
+
+        def stand_down(fsid, session, store):
+            jd._judge_ctx.stage_incomplete = True          # what a deferral or an unreadable side file does
+            return real(fsid, session, store)
+        jd._latch_ask_anchors = stand_down
+        try:
+            self.assertEqual(self.run_pass(), (1, 2, 0), "A planned with nothing to do, but incomplete: not recorded")
+            self.assertNotIn(A, jd._PLANNER_SEEN)
+            self.assertEqual(self.run_pass(), (1, 2, 0), "still incomplete: planned again, still not recorded")
+        finally:
+            jd._latch_ask_anchors = real
+        self.assertEqual(self.run_pass(), (1, 2, 1), "complete with nothing to do: recorded")
+        self.assertEqual(self.run_pass(), (0, 3, 0), "and skipped")
 
     def test_a_write_landing_during_the_pass_is_seen_next_pass(self):
         # INTERLEAVED WRITE: the key is taken before the store read; a journal row lands while the pass reads

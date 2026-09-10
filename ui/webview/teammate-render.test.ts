@@ -21,14 +21,13 @@ test("a kind:'teammate' event carries per-sender blocks and is dispatched to ren
   assert.ok(BODY, "renderTeammate is defined");
 });
 
-test("it is its own neutral card — a 'teammate' tag + plain agent names + the collapse affordance", () => {
-  assert.match(BODY, /el\("div", "turn turn-teammate"\)/);
-  assert.match(BODY, /el\("div", "teammate-card"\)/);
-  assert.match(BODY, /"teammate-tag"/);
-  assert.match(BODY, /el\("span", "teammate-names"\)/);
-  // collapse→expand, same affordance as the postal card
-  assert.match(BODY, /classList\.add\("teammate-expandable"\)/);
-  assert.match(BODY, /body\.classList\.toggle\("expanded"\)/);
+test("it is a TEAMMATE notice — 'teammate <names>' as the source label, two-heads glyph, a KEYED fold (2026-09-08)", () => {
+  // the notice-vocabulary pass: the dashed frame said what the label now says; the unkeyed classList.toggle (the
+  // exact 2026-07-25 postal bug, still live here) is the builder's openFolds fold now
+  assert.match(BODY, /const src = \(fromSub \? "background agent" : "teammate"\) \+ \(names \? " " \+ names : ""\);/);
+  assert.match(BODY, /notice\(\{ src, glyph: "teammate", gist: summaryText \|\| fullText, body,/);
+  assert.match(BODY, /key: "tm:" \+ \(ev\.uuid \|\| ev\.ts \|\| ""\), cls: "turn-teammate",/);
+  assert.doesNotMatch(BODY, /classList\.toggle\("expanded"\)/, "no DOM-only toggle — a kernel push re-collapsed it");
 });
 
 test("it is DIFFERENTIABLE from a romp postal card — no color, no swirl, no session chip", () => {
@@ -39,8 +38,7 @@ test("it is DIFFERENTIABLE from a romp postal card — no color, no swirl, no se
   assert.doesNotMatch(BODY, /postal-service/, "does not reuse the postal card classes");
 });
 
-test("the teammate card CSS is a neutral (dashed, colorless) frame that shares only the expand toggle", () => {
-  assert.match(CSS, /\.teammate-card \{[^}]*dashed/, "a dashed monochrome frame, not a colored postal bar");
-  assert.doesNotMatch(CSS, /\.teammate-card[^}]*--peer-bg/, "no per-peer color var on the teammate card");
-  assert.match(CSS, /\.teammate-expandable\.expanded \.teammate-full \{ display: block; \}/);
+test("the teammate notice wears the ONE notice skin — no dashed frame, no per-peer colour (2026-09-08)", () => {
+  assert.doesNotMatch(CSS, /\.teammate-card|\.teammate-tag|\.teammate-expandable/);
+  assert.match(CSS, /\.notice-collapsible:not\(\.notice-open\) > \.notice-body \{ display: none; \}/);
 });

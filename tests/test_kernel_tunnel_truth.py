@@ -42,6 +42,174 @@ class TunnelStatus(unittest.TestCase):
         self.assertEqual(km._tunnel_status(False, False, False), "down")
 
 
+class RecoveryCounter(unittest.TestCase):
+    """T291b (the user 2026-09-09): a row's recovery counter bumps ONLY when a pass that ANSWERED finds the row
+    had missed polls (or was not up), never on a steady answered poll and never on a silent pass — the event a
+    dashboard turns into hostUp for the previews parked on a link whose status never left "up". A miss a data
+    path preloaded mints one bump until a real silent poll or a status change re-arms it (the review's find: a
+    request that keeps stalling must not mint its own recovery, retry, stall and mint again forever)."""
+
+    def _pass(self, r, answered, st="up"):
+        """One supervisor pass's bookkeeping in the ssh branch's order: the poll, then the recovery."""
+        km._note_poll(r, answered)
+        return km._note_recovery(r, st)
+
+    def test_a_steady_up_row_never_bumps(self):
+        r = {"host": "TESTHOST", "status": "up", "misses": 0}
+        for _ in range(5):
+            self.assertFalse(self._pass(r, answered=True))
+        self.assertEqual(int(r.get("upSeq") or 0), 0)
+
+    def test_a_real_miss_then_an_answer_bumps_once(self):
+        r = {"host": "TESTHOST", "status": "up", "misses": 0}
+        self.assertFalse(self._pass(r, answered=False), "a silent pass is not a recovery")   # misses 1, the row keeps "up"
+        self.assertFalse(self._pass(r, answered=False), "a SECOND silent pass under the stale bound is not one either")
+        self.assertNotIn("upSeq", r)
+        self.assertTrue(self._pass(r, answered=True), "the poll answered again: the recovery")
+        self.assertEqual(r["upSeq"], 1)
+        self.assertFalse(self._pass(r, answered=True), "the following steady pass does not bump again")
+        self.assertEqual(r["upSeq"], 1)
+
+    def test_a_demand_preload_bumps_once_until_a_real_miss_or_a_status_change_rearms_it(self):
+        # the relay's timed-out request preloads misses (_demand_redial "timeout"); the woken pass answers
+        r = {"host": "TESTHOST", "status": "up", "misses": 0}
+        r["misses"], r["_demand_miss"] = km.STALE_MISSES - 1, True
+        self.assertTrue(self._pass(r, answered=True))
+        self.assertEqual(r["upSeq"], 1)
+        # the same request stalls again on a link whose polls never missed: no second bump, no retry loop
+        r["misses"], r["_demand_miss"] = km.STALE_MISSES - 1, True
+        self.assertFalse(self._pass(r, answered=True), "a demand preload mints one bump until the link shows a real miss")
+        self.assertEqual(r["upSeq"], 1)
+        # a REAL silent poll re-arms it
+        self.assertFalse(self._pass(r, answered=False))
+        self.assertTrue(self._pass(r, answered=True))
+        self.assertEqual(r["upSeq"], 2)
+        r["misses"], r["_demand_miss"] = km.STALE_MISSES - 1, True
+        self.assertTrue(self._pass(r, answered=True), "re-armed: the next demand preload bumps again")
+        self.assertEqual(r["upSeq"], 3)
+        # …and so does a status change
+        r["misses"], r["_demand_miss"] = km.STALE_MISSES - 1, True
+        self.assertFalse(self._pass(r, answered=True))
+        km._note_recovery(r, "down")                           # the pass saw the link down
+        r["status"] = "down"
+        self.assertTrue(self._pass(r, answered=True), "back up: a recovery")
+        self.assertEqual(r["upSeq"], 4)
+
+    def test_a_not_up_row_coming_up_bumps_even_with_no_misses(self):
+        r = {"host": "TESTHOST", "status": "down", "misses": 0}   # a torn-down, redialed row: misses reset by the teardown
+        self.assertTrue(self._pass(r, answered=True))
+        self.assertEqual(r["upSeq"], 1)
+
+    def test_a_start_hold_bumps_once_when_it_clears(self):
+        """_start_remote holds the row at "starting" (`booting`) while it updates and boots the far kernel, and the
+        pass skips its status write under the hold, so the row never reads "up" however many polls answer
+        meanwhile. Without a guard every answered pass under the hold looks like a not-up row coming up and bumps
+        again (1, 2, then 3 as the hold clears); the contract is one bump per recovery, when the hold clears."""
+        r = {"host": "TESTHOST", "status": "starting", "misses": 0, "booting": True}
+        self.assertFalse(self._pass(r, answered=True), "an answered pass under the hold is not the recovery")
+        self.assertFalse(self._pass(r, answered=True), "nor the next one: the hold owns the row's phase")
+        self.assertEqual(int(r.get("upSeq") or 0), 0, "no bump while the Start is in flight")
+        r["booting"] = False                    # the boot landed: the hold clears; the row still reads "starting"
+        self.assertTrue(self._pass(r, answered=True), "the first answered pass after the hold: the one recovery")
+        self.assertEqual(r["upSeq"], 1)
+        r["status"] = "up"                      # that pass's status write, no longer held
+        self.assertFalse(self._pass(r, answered=True), "steady afterwards")
+        self.assertEqual(r["upSeq"], 1)
+
+    def test_a_silent_poll_under_a_start_hold_mints_no_second_bump(self):
+        # the far kernel restarts under the hold (the update leg), so a poll or two go silent and leave the
+        # _poll_miss mark; the hold spends no mark, and the pass after the hold spends it in the SAME bump the
+        # not-up row coming up mints
+        r = {"host": "TESTHOST", "status": "starting", "misses": 0, "booting": True}
+        self.assertFalse(self._pass(r, answered=True))
+        self.assertFalse(self._pass(r, answered=False, st="starting"), "a silent pass under the hold keeps the held status")
+        self.assertFalse(self._pass(r, answered=True), "answered again, still under the hold")
+        self.assertEqual(int(r.get("upSeq") or 0), 0)
+        self.assertTrue(r.get("_poll_miss"), "the mark waits for the pass after the hold")
+        r["booting"] = False
+        self.assertTrue(self._pass(r, answered=True))
+        self.assertEqual(r["upSeq"], 1, "one recovery for the whole Start, whatever the polls did under it")
+        self.assertNotIn("_poll_miss", r, "spent in that bump")
+        r["status"] = "up"
+        self.assertFalse(self._pass(r, answered=True))
+        self.assertEqual(r["upSeq"], 1)
+
+    def test_a_demand_mark_survives_the_hold_and_latches_in_the_one_bump(self):
+        """The guard defers the counter's bookkeeping, it does not discard it. A request that stalled just before
+        the Start left the demand mark (its woken pass found no kernel, which spends no mark, and Start was
+        pressed); the passes under the hold leave it too, so the bump after the hold spends it and latches the
+        demand path the way the first answered pass would have without the hold: the same request stalling again
+        on the healthy link mints no second bump, until a real silent poll re-arms it."""
+        r = {"host": "TESTHOST", "status": "starting", "misses": 0, "booting": True, "_demand_miss": True}
+        self.assertFalse(self._pass(r, answered=True))
+        self.assertFalse(self._pass(r, answered=True))
+        self.assertTrue(r.get("_demand_miss"), "the mark waits for the pass after the hold")
+        r["booting"] = False
+        self.assertTrue(self._pass(r, answered=True))
+        self.assertEqual(r["upSeq"], 1)
+        r["status"] = "up"
+        r["misses"], r["_demand_miss"] = km.STALE_MISSES - 1, True       # the same request stalls again
+        self.assertFalse(self._pass(r, answered=True), "the demand path latched in the recovery bump")
+        self.assertEqual(r["upSeq"], 1)
+        self.assertFalse(self._pass(r, answered=False))                    # a real silent poll re-arms it
+        self.assertTrue(self._pass(r, answered=True))
+        self.assertEqual(r["upSeq"], 2)
+
+    def test_a_not_up_probe_under_the_hold_still_rearms_the_demand_path(self):
+        """The guard sits after the not-answered branch: a probe the far kernel refuses under the hold (the update
+        leg restarts it) re-arms the demand path the way it does off the hold, so a Start asked of a row whose
+        demand path had latched does not carry the latch across the restart. Green before the guard existed; it
+        pins the path the guard leaves alone."""
+        r = {"host": "TESTHOST", "status": "starting", "misses": 0, "booting": True, "_demand_bumped": True}
+        self.assertFalse(self._pass(r, answered=True, st="no-kernel"), "a refusal is an answered probe that is not up")
+        self.assertNotIn("_demand_bumped", r, "re-armed under the hold, as off it")
+        r["booting"] = False
+        self.assertTrue(self._pass(r, answered=True))
+        self.assertEqual(r["upSeq"], 1)
+        r["status"] = "up"
+        r["misses"], r["_demand_miss"] = km.STALE_MISSES - 1, True
+        self.assertTrue(self._pass(r, answered=True), "re-armed: the next demand preload bumps")
+        self.assertEqual(r["upSeq"], 2)
+
+    def test_a_row_that_is_not_up_never_bumps(self):
+        r = {"host": "TESTHOST", "status": "up", "misses": 0}
+        km._note_poll(r, False)
+        for st in ("no-kernel", "down", "starting", "restarting"):
+            self.assertFalse(km._note_recovery(r, st), st)
+        self.assertNotIn("upSeq", r)
+
+    def test_a_checked_in_peers_timeout_preloads_the_miss_too(self):
+        saved = dict(km._remotes)
+        try:
+            km._remotes.clear()
+            km._remotes["TESTHOST"] = {"host": "TESTHOST", "checkin_peer": True, "proc": None, "status": "up", "misses": 0}
+            km._tunnel_wake.clear()
+            km._demand_redial("TESTHOST", "timeout")
+            r = km._remotes["TESTHOST"]
+            self.assertEqual(r["misses"], km.STALE_MISSES - 1, "the same evidence an ssh row's timeout files")
+            self.assertTrue(r.get("_demand_miss"))
+            self.assertTrue(km._tunnel_wake.is_set(), "the supervisor is woken to decide now")
+            # the checkin branch's bookkeeping: an answered poll, then the recovery
+            km._note_poll(r, True)
+            self.assertTrue(km._note_recovery(r, "up"))
+            self.assertEqual(r["upSeq"], 1)
+        finally:
+            km._remotes.clear(); km._remotes.update(saved); km._tunnel_wake.clear()
+
+    def test_the_tunnels_row_serves_it_and_the_store_never_saves_it(self):
+        for k in ("upSeq", "_poll_miss", "_demand_miss", "_demand_bumped"):
+            self.assertIn(k, km._NOT_SAVED, k + ": a per-process mark, like the poll run counters")
+        src = open(os.path.join(BIN, "romp-kernel"), encoding="utf-8").read()
+        self.assertIn('"upSeq": int(r.get("upSeq") or 0)}', src, "_remote_public serves the counter beside lastOk")
+        # the supervisor pass notes the recovery once st is final, against the PREVIOUS status
+        call = "_note_recovery(r, st)   # an answered pass after misses"   # the pass's call site, not the def
+        self.assertIn(call, src)
+        self.assertLess(src.index(call), src.index('r["status"] = st                   # keep a richer spawn-error label'),
+                        "noted before the pass overwrites the status")
+        self.assertIn('r["_poll_miss"] = True', src, "a real silent poll leaves its mark")
+        self.assertEqual(src.count('r["_demand_miss"] = True'), 2, "both the ssh row's and the checked-in peer's timeout preload")
+
+
 class ExpectedRestart(unittest.TestCase):
     """T238: a restart the DIALING side caused (its p2p update) must read as 'restarting after update',
     never as a dead far kernel — no red no-kernel, no terminated ssh, no backoff step — until the event
