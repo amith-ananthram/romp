@@ -6,7 +6,7 @@
 //
 // 2026-07-25 (the user, from a real sent card): three more guarantees pinned here —
 //   1. the expand is KEYED (openFolds), because the unkeyed toggle was silently re-collapsed by the
-//      next kernel push ("it expands for like a second and then something collapses it");
+//      next kernel push (the user watched a card open and snap shut a moment later);
 //   2. expanded shows the full message ALONE — the summary line was repeating the same words right
 //      above the body;
 //   3. the collapsed fallback is clamped by CSS to two full lines, not pre-truncated at 100 chars,
@@ -18,22 +18,26 @@ import * as path from "node:path";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
+const GIST = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "gist.ts"), "utf8");   // T294: the head rule lives here (postalHead)
 
-test("a postal summary is the caption, or the first non-empty line of the body when there's none", () => {
-  assert.match(RENDER, /function postalServiceSummary/);
-  assert.match(RENDER, /const cap = ev\.summary && ev\.summary\.trim\(\)/);
-  assert.match(RENDER, /\.split\("\\n"\)\.map\(\(s\) => s\.trim\(\)\)\.find\(Boolean\)/);
+test("a postal summary is the caption, or the CLIPPED first line of the body when there's none", () => {
+  // T294 (2026-09-10): the rule is gist.ts postalHead: the caption, else gistOf's clip of the first line; an UNCLIPPED
+  // first line equalled a one-paragraph message, which then had no fold and nothing past the head's ellipsis
+  assert.match(GIST, /export function postalHead\(ev: \{ body\?: string; summary\?: string \}\): PostalHead \{/);
+  assert.match(GIST, /const cap = ev\.summary && ev\.summary\.trim\(\);/);
+  assert.match(GIST, /const gist = cap \|\| gistOf\(full\);/);
   assert.doesNotMatch(RENDER, /slice\(0, 99\)/, "the 100-char pre-truncation must be gone");
+  assert.doesNotMatch(RENDER, /function postalServiceSummary/, "the unclipped first-line rule is gone from render.ts");
   // 2026-09-08 (the notice-vocabulary pass): the summary is the notice GIST — one nowrap line with an ellipsis, the
   // head grammar every notice shares (the two-line clamp went with the bespoke card)
-  assert.match(RENDER, /const summaryText = postalServiceSummary\(ev\) \|\| gistOf\(fullText\);/);
+  assert.match(RENDER, /const \{ gist: summaryText, body: fullMd \} = postalHead\(ev\);/);
   assert.match(CSS, /\.notice-gist \{[^}]*text-overflow: ellipsis/);
 });
 
 test("both directions render the summary + a click-to-expand full body (no hover tooltip)", () => {
-  assert.match(RENDER, /const expandable = .*collapseWs\(fullText\) !== collapseWs\(summaryText\)/);
+  assert.match(GIST, /const body = !!full && collapseWs\(full\) !== collapseWs\(gist\) \? raw : null;/, "the fold holds the message as sent; the trim is the comparison's");
   // 2026-09-08: the full message is the notice BODY, markdown-rendered against the sender's repo
-  assert.match(RENDER, /if \(expandable\) \{ body = el\("div", "notice-md md"\); body\.innerHTML = md\(ev\.body, postalRepoFor\(ev\)\); highlight\(body\); \}/);
+  assert.match(RENDER, /if \(fullMd\) \{ body = el\("div", "notice-md md"\); body\.innerHTML = md\(fullMd, postalRepoFor\(ev\)\); highlight\(body\); \}/);
   assert.doesNotMatch(RENDER, /body\.title = ev\.body/, "the old hover-tooltip full body must be gone");
   assert.doesNotMatch(RENDER, /caption \|\| ev\.body/, "no longer 'caption else whole body'");
 });
