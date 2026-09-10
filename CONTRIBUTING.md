@@ -16,6 +16,12 @@ bats tests/*.bats          # the shell surfaces (hooks, postal, manager)
 cd vscode-extension && npm ci && npm test
 ```
 
+`tests/gitleaks-config.bats` checks the secret-scanning rules in `.gitleaks.toml`
+against the real scanner and skips itself when `gitleaks` is not installed
+(`brew install gitleaks`, or a release binary; `ROMP_GITLEAKS` names one that is
+not on `PATH`). Installing it also arms the credential half of the `pre-push`
+hook, which is worth having before you push anything.
+
 The Python and shell suites are also the CI gate, across Python 3.10 to 3.13 on
 Linux; the macOS cells run on demand from the Actions tab (they are billed even
 on a public repo, so they are not part of the per-push matrix).

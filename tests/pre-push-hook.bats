@@ -47,6 +47,7 @@ setup() {
     printf '# synthetic\nzzsynthuser\nTESTHOST\n' > "$STRINGS"
 
     export ROMP_PRIVATE_STRINGS="$STRINGS"
+    export ROMP_NO_GITLEAKS=1          # the credential half has its own test file
 }
 
 teardown() { rm -rf "${TEST_DIR:-}"; }
