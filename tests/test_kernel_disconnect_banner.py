@@ -6,9 +6,14 @@ blind-reloading — reloading to resync only once the socket is actually back.
 The shell surface changed on 2026-07-27: the fixed top "Disconnected — reconnecting…" banner is gone —
 connection drops now log entries in the shell's NOTIFICATION CENTER (the bell in the bottom bar, red while
 anything is unread or a visible pane is down), whose behavioral tests live in test_error_center.py. The
-source pins here cover the pane shim (unchanged) and the shell's wiring of the center."""
+source pins here cover the pane shim and the shell's wiring of the center; the hidden-pane test runs the
+served paneHidden() under node."""
 import inspect
+import json
 import os
+import re
+import shutil
+import subprocess
 import unittest
 from importlib.machinery import SourceFileLoader
 import tempfile
@@ -73,14 +78,70 @@ class DisconnectBanner(unittest.TestCase):
         # the user 2026-08-15, on the phone: the mobile shell shows ONE pane, hiding the rest with
         # display:none; iOS throttles the hidden iframes' JS, so each hidden pane's watchdog kept
         # force-closing its own healthy socket and re-raising the banner every ~45s over a dashboard
-        # that was visibly working. A display:none iframe has a ZERO viewport — raiseStale checks that
-        # at raise time (no event exists for a CSS display flip) and stays silent while hidden; a pane
-        # shown while genuinely stale re-raises within one watchdog tick, now visible.
+        # that was visibly working. raiseStale asks paneHidden() at raise time (no event exists for a CSS
+        # display flip) and stays silent while hidden; a pane shown while genuinely stale re-raises within
+        # one watchdog tick, now visible.
+        # Whether the user can see a pane has TWO witnesses, and paneHidden() reads their union. The shim's
+        # own witness is the zero-viewport probe (a display:none iframe has a zero viewport), right for a pane
+        # hidden since load in any browser and in Firefox always. In Chromium a display:none iframe keeps the
+        # size of its last show, so once the user has looked at a pane (the phone shell's every tab switch)
+        # the probe reads it as shown; the pane's own visibility code sees that case and publishes
+        # document.hidden OR its IntersectionObserver's last word as window.__rompPaneHidden, a boolean
+        # (ui/webview/paint-gate.ts publishPaneHidden for the feed and Outline panes, ui/webview/chat-visibility.ts
+        # for the chat page, the timeline's _publishPaneHidden), on its own events and never on a timer. Firefox
+        # does not run an IntersectionObserver inside a display:none frame, so there the word can go stale while
+        # the probe is right: hidden is EITHER witness, never the word first. The served function runs here
+        # under node over window stand-ins; tests/test_pane_hidden_word_browser.py drives real browsers.
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
         js = km._shim("feed")
-        self.assertIn("function paneHidden(){try{return window.parent!==window"
-                      "&&(window.innerWidth===0||window.innerHeight===0);}", js)
+        m = re.search(r"^function paneHidden\(\)\{[^\n]*$", js, re.M)
+        self.assertIsNotNone(m, "the shim's paneHidden is one line of the served shim")
+        fx = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, fx, ignore_errors=True)
+        with open(os.path.join(fx, "run.js"), "w") as f:
+            f.write(r"""
+var vm = require("vm"), fs = require("fs");
+var fn = fs.readFileSync(process.argv[2], "utf8");
+function verdict(framed, iw, ih, word) {
+  var win = { innerWidth: iw, innerHeight: ih };
+  win.parent = framed ? {} : win;
+  if (word !== undefined) win.__rompPaneHidden = word;
+  return vm.runInNewContext(fn + "\npaneHidden();", { window: win });
+}
+process.stdout.write(JSON.stringify({
+  neverShown: verdict(true, 0, 0, undefined),
+  shown: verdict(true, 600, 400, undefined),
+  wordHidden: verdict(true, 600, 400, true),
+  wordShown: verdict(true, 600, 400, false),
+  staleWord: verdict(true, 0, 0, false),
+  standaloneWord: verdict(false, 600, 400, true),
+  standaloneNoWord: verdict(false, 0, 0, undefined),
+  nonBoolean: verdict(true, 600, 400, "yes"),
+}));
+""")
+        with open(os.path.join(fx, "paneHidden.js"), "w") as f:
+            f.write(m.group(0))
+        r = subprocess.run([node, os.path.join(fx, "run.js"), os.path.join(fx, "paneHidden.js")],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        v = json.loads(r.stdout)
+        self.assertTrue(v["neverShown"], "a framed pane with a zero viewport: hidden since load, by the probe")
+        self.assertFalse(v["shown"], "a framed pane with a viewport and no word: shown")
+        self.assertTrue(v["wordHidden"], "a viewport and a word of true: hidden after a first show (Chromium keeps the iframe's size)")
+        self.assertFalse(v["wordShown"], "a viewport and a word of false: shown")
+        self.assertTrue(v["staleWord"], "a zero viewport and a stale word of false: hidden (Firefox zeroes the viewport and stalls the observer)")
+        self.assertTrue(v["standaloneWord"], "a standalone page's word is its tab's hiding; the probe never applies there")
+        self.assertFalse(v["standaloneNoWord"], "a standalone page with no word: never hidden by the probe")
+        self.assertFalse(v["nonBoolean"], "only a boolean true is the word")
         self.assertIn('function raiseStale(why){if(paneHidden()){staleDiag("stale-suppressed-hidden",why);return;}', js,
                       "the visibility gate is at RAISE time, so hidden panes reconnect silently")
+        # the other end of the word: the pane's shared publisher writes the flag under the name read above, on events
+        gate = open(os.path.join(os.path.dirname(HERE), "ui", "webview", "paint-gate.ts"), encoding="utf-8").read()
+        self.assertIn("export function publishPaneHidden(", gate, "the publisher, by name, in the pane's paint gate")
+        self.assertRegex(gate, r"\.__rompPaneHidden = ", "publishing the flag the shim reads, under that exact name")
+        self.assertNotIn("setInterval", gate, "published on the gate's own events, never a timer")
 
     def test_every_stale_raise_leaves_a_breadcrumb_naming_pane_and_path(self):
         # the user 2026-08-15: the flapping-banner repro was Chrome-on-Android after an iOS-shaped

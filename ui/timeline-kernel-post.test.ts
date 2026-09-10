@@ -652,10 +652,16 @@ test("executed: a lens write in flight never lends the local lens to another wri
     // …and a CHAT pane-filter row in the tags dialog posts chat's new value with the store's timeline (F2, trace c)
     answers.push(echo(1003));
     panel._openViewsDialog(null);
+    // the pane filters open FOLDED to one summary line per pane since the many-tags change (2026-09-09); the
+    // chips this test clicks exist only in the open matrix, so open it through the caption's caret first
+    const filtersCap = walk(panel._viewsDialog).find((n) => n.tag === "span" && String(n.textContent).startsWith("pane filters"));
+    assert.ok(filtersCap && filtersCap._listeners.click, "the pane-filters caption folds and opens the matrix");
+    if (filtersCap._attrs["aria-expanded"] !== "true") filtersCap._listeners.click();
     const chatLabel = walk(panel._viewsDialog).find((n) => n.tag === "span" && n.textContent === "Chat");
     assert.ok(chatLabel, "the Chat pane-filter row");
-    const chatWeb = chatLabel.parentNode.children.find((n: any) => n.textContent === "web");
-    assert.ok(chatWeb && chatWeb._listeners.click, "its web pill");
+    // the chips sit in their own wrapping cell beside the label since the many-tags change, so search the row
+    const chatWeb = walk(chatLabel.parentNode).find((n: any) => n.textContent === "web" && n._listeners && n._listeners.click);
+    assert.ok(chatWeb, "its web pill");
     chatWeb._listeners.click();
     const chatPost = posts[3][1];
     assert.deepEqual(chatPost.views.actives, { chat: { tags: ["web"] }, timeline: { all: true }, outline: { all: true } },

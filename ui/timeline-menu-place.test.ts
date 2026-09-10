@@ -31,6 +31,15 @@ test("a band shorter than the menu clamps the top on-screen instead of vanishing
   assert.equal(menuTop({ top: 150, bottom: 166 }, 150, 170), 170 - 6 - 150);
 });
 
+test("an anchor that sits below the viewport is clamped on-screen, never hung above it off the bottom (review find, 2026-09-09)", () => {
+  // the flip-above branch returned any `above >= 6`, so an anchor rect below the viewport (one translated
+  // into the wrong document: the colour popover's dot, already in the host document) put the menu at
+  // anchor.top - 4 - menuH, entirely below the fold; above must also END on screen
+  assert.equal(menuTop({ top: 1346, bottom: 1360 }, 62, 1300), 1300 - 6 - 62);
+  // above still wins when it ends on screen
+  assert.equal(menuTop({ top: 1200, bottom: 1216 }, 140, 1300), 1200 - 4 - 140);
+});
+
 test("both the lane gear menu and the model/effort menu place through menuTop", () => {
   // the fix must cover BOTH fixed-position drop-downs; a bare `r.bottom + 4` is the bug's signature
   const opens = SRC.match(/menu\.style\.top = Math\.round\(menuTop\(h\.rect, menu\.offsetHeight \|\| 0, h\.win\.innerHeight \|\| 9999\)\)/g) || [];
@@ -59,7 +68,10 @@ test("offsetRect translates a pane-local anchor by each intervening frame's offs
 test("both menus append into the host document and read the host viewport", () => {
   const appends = SRC.match(/h\.doc\.body\.appendChild\(menu\)/g) || [];
   assert.equal(appends.length, 4, "expected _openMetaMenu, _openLaneMenu, _openViewsMenu and _openDisplayMenu to adopt into the host doc");
-  assert.match(SRC, /_menuHost\(anchorRect\)[\s\S]*?offsetRect\(anchorRect, frames\)/);
+  // re-aimed 2026-09-09: _menuHost also takes the anchor ELEMENT, so an anchor already living in another
+  // document (the host-adopted Sessions & tags dialog) is placed there untranslated (timeline-tags-scale)
+  assert.match(SRC, /_menuHost\(anchorRect, anchorEl\)[\s\S]*?offsetRect\(anchorRect, frames\)/);
+  assert.match(SRC, /const own = anchorEl && anchorEl\.ownerDocument;\n\s*if \(own && own !== document\) \{/, "an anchor in another document skips the frame walk");
   // the host page shows the menu now, so its clicks/Escape must close it (with pagehide cleanup)
   assert.match(SRC, /tipDoc\.addEventListener\('click', this\._onDocClick\)/);
   assert.match(SRC, /tipDoc\.addEventListener\('keydown', this\._onDocKey\)/);

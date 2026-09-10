@@ -12,7 +12,7 @@
 import { distillText, distillInputs, applyDistillLine, distillPending, distillStaleNote } from "./distiller-line";
 import { flipNeeded } from "./feed-flip";
 import { delegate } from "./actions";
-import { paintHeld, paintReleased } from "./paint-gate";
+import { paintHeld, paintReleased, publishPaneHidden } from "./paint-gate";
 import { linkifyPrRefs, setLinkedText, senderPrRepo, installPrLinkOpener } from "./pr-links";
 import { cardInputsKey, cardNeedsUpdate, type GateEnv } from "./feed-card-gate";
 import { spinFor, awaitWord, groupRows, GROUP_TITLE, ROW_KIND_OF_LEGACY, type AwaitRow } from "./spin-caption";
@@ -4807,7 +4807,11 @@ function ensureHostLoad(list: HTMLElement): void {
 // double rAF per moved card onto the return frame — and the hidden-tab pile-up was the freeze. NOT the
 // hover-freeze queue below: that holder withholds the payload itself, and a confirming payload held back
 // lets the follow-move backstop revert a move the kernel had already confirmed.
-let feedIntersecting = true;   // #feed-list on screen by the observer's measure; true where there is no observer
+// The same two measures are this pane's hidden word for the kernel's pane shim (paint-gate.ts publishPaneHidden):
+// the shim's zero-viewport probe misses a pane hidden after a first show in Chromium, so the release path and the
+// hidden arm of visibilitychange publish document.hidden OR the observer's last word as window.__rompPaneHidden,
+// on the same events, and nothing until the observer has spoken.
+let feedIntersecting: boolean | null = null;   // #feed-list on screen by the observer's last word; null until it speaks (the gate reads null as on screen; nothing is published for it)
 let paintDirty = false;        // a render was withheld while the pane could not be seen
 let skipFlipOnce = false;      // the release paint snaps: cards that moved while away have no old spot to glide from
 let feedWatching = false;
@@ -4823,12 +4827,14 @@ function watchFeedVisibility(list: HTMLElement): void {
 // requestAnimationFrame hop): on a tab switch the compositor shows the cached frame until the page paints,
 // so a paint inside the event handler is the earliest fresh frame.
 function releasePaint(): void {
+  publishPaneHidden(document.hidden, feedIntersecting);
   if (!paintReleased(paintDirty, document.hidden, feedIntersecting)) return;
   paintDirty = false;
   skipFlipOnce = true;
   render();
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden) releasePaint(); });
+document.addEventListener("visibilitychange", () => { if (document.hidden) publishPaneHidden(true, feedIntersecting); });   // the hidden arm releases nothing, so the release path never publishes it
 
 function render() {
   const list = document.getElementById("feed-list")!;

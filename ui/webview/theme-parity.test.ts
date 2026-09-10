@@ -63,12 +63,17 @@ const PAIRS: Array<[string, string, number]> = [
   ["--st-working-fg", "--st-working-bg", 3],
   ["--st-ready-fg", "--st-ready-bg", 3],
   ["--st-blocked-fg", "--st-blocked-bg", 3],
+  ["--st-retrying-fg", "--st-retrying-bg", 3],       // 2026-09-08: the retrying amber tokenised (#e67e22/#2a1500 dark, #9C4A0C/#fff light)
+  // (--st-compacting-fg on --st-compacting-bg is deliberately NOT paired: the dark teal + white pairing predates
+  // this file and sits at 2.49:1, and decision 3 of the 2026-09-08 notice audit keeps dark byte-identical; the
+  // light re-ink — #0F766E, 4.30:1 on the card, white on it 5.47:1 — is pinned by value in notice-vocab.test.ts)
   ["--link", "--bg", 4.5],          // hyperlink ink (2026-09-02: the light theme's first link ink sat on --err)
   ["--hl-fg", "--bg", 4.5],         // the hljs syntax palette (tokenized 2026-09-02; was dark-only raw hex)
   ["--hl-kw", "--bg", 4.5],
   ["--hl-str", "--bg", 4.5],
   ["--hl-num", "--bg", 4.5],
-  ["--hl-cmt", "--bg", 3],          // comments are deliberately quiet — the dark set sits just above 3
+  ["--hl-cmt", "--bg", 3],          // comments are deliberately quiet
+  ["--hl-cmt", "--box-bg", 4.5],    // ...but readable on the code block they sit in (the fence's fill is --box-bg over --bg)
   ["--hl-title", "--bg", 4.5],
   ["--hl-meta", "--bg", 4.5],
   ["--hl-attr", "--bg", 4.5],
@@ -104,7 +109,7 @@ for (const sheet of ["styles.css", "feed.css"]) {
       }
       // a skip must be loud (PR #763 item 6): pin how many pairs actually ran per sheet/theme —
       // grow these numbers when PAIRS grows, never let them silently shrink
-      const expected = sheet === "styles.css" ? PAIRS.length : 19;   // feed's :root holds a deliberate subset
+      const expected = sheet === "styles.css" ? PAIRS.length : 20;   // feed's :root holds a deliberate subset (+ the retrying pair, 2026-09-08)
       assert.ok(evaluated >= expected,
         `${sheet} ${name}: only ${evaluated}/${expected} contrast pairs evaluated — silent skip`);
     }

@@ -21,17 +21,16 @@ test("renderEventInner dispatches the system kind to renderSystem", () => {
   assert.match(RENDER, /function renderSystem\(ev: Extract<ChatEvent, \{ kind: "system" \}>\)/);
 });
 
-test("the card is a bordered box with a ⚙ header + one-line summary + caret, complete even collapsed", () => {
-  assert.match(RENDER, /el\("div", "sys-card"\)/);
-  assert.match(RENDER, /el\("div", "sys-card-head"\)/);
-  assert.match(RENDER, /el\("div", "sys-card-body"\)/);
-  // the collapsed summary is informative: prettified model + the CLAUDE.md count
+test("the card is a SYSTEM notice — gear glyph, 'System context' gist, the summary as meta, a keyed fold (2026-09-08)", () => {
+  // the notice-vocabulary pass: the bespoke .sys-card (9px, its own ⚙ text glyph and caret) is the ONE builder now;
+  // it stays off the rail (nested, .turn-system hides the line) and complete when collapsed
+  assert.match(RENDER, /notice\(\{ src: "system", glyph: "system", gist: "System context", meta: bits\.join\(" · "\) \|\| undefined,/);
+  assert.match(RENDER, /body, key, nested: true, tip: "the CLAUDE\.md instructions \+ config this session is running under" \}\)/);
   assert.match(RENDER, /bits\.push\(prettyModel\(ev\.model\)\)/);
   assert.match(RENDER, /bits\.push\(`\$\{n\} CLAUDE\.md`\)/);
-  // the box has a real border/background, and the body shows only when .open
-  assert.match(CSS, /\.sys-card \{[^}]*border: 1px solid/);
-  assert.match(CSS, /\.sys-card-body \{ display: none;/);
-  assert.match(CSS, /\.sys-card\.open \.sys-card-body \{ display: block; \}/);
+  assert.match(CSS, /\.notice \{[^}]*border: 1px solid var\(--box-border\)/);
+  assert.match(CSS, /\.notice-collapsible:not\(\.notice-open\) > \.notice-body \{ display: none; \}/);
+  assert.doesNotMatch(CSS, /\.sys-card/);
 });
 
 test("each CLAUDE.md doc renders as a raw, scrollable SUB-box with a scope badge + path", () => {

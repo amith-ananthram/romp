@@ -155,7 +155,8 @@ class SurfacesPinTheOnYouTreatment(unittest.TestCase):
         # the 2026-07-03 flap: pausing the fleet on a model-scoped limit starved the judges, because
         # the account keeps serving and _auto_resume_retry cleared the pause every tick
         src = inspect.getsource(km._auto_pause_on_limit)
-        self.assertIn('k != "fable"', src, "account-wide windows only still gate the global pause")
+        self.assertIn("_account_limited()", src, "the engage reads the shared account-wide filter")
+        self.assertIn('k != "fable"', inspect.getsource(km._account_limited), "account-wide windows only still gate the global pause")
         self.assertNotIn("modelLimit", src)
 
 

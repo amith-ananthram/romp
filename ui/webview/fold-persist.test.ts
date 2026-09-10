@@ -22,8 +22,11 @@ test("there is a persisted-fold registry with apply/remember helpers", () => {
 test("the system-context card persists per session (keyed by renderingSid)", () => {
   assert.match(RENDER, /renderingSid = id;/, "syncView records which session it's building");
   assert.match(RENDER, /const key = renderingSid \? "sysctx:" \+ renderingSid : undefined;/);
-  assert.match(RENDER, /applyFold\(card, "open", key\)/);
-  assert.match(RENDER, /rememberFold\(card, "open", key\)/);
+  // 2026-09-08 (the notice-vocabulary pass): the key rides the ONE builder — notice() folds through openFolds
+  // ("notice:sysctx:<sid>") and the body delegate's noticetoggle remembers the flip
+  assert.match(RENDER, /gist: "System context", meta: bits\.join\(" · "\) \|\| undefined,\s*\n\s*body, key, nested: true,/);
+  assert.match(RENDER, /applyFold\(card, "notice-open", fkey\)/);
+  assert.match(RENDER, /rememberFold\(card, "notice-open", el\.dataset\.nkey \|\| undefined\)/);
 });
 
 test("foldable/inlineFold take a stable key and route through the persisted helpers", () => {
