@@ -222,7 +222,11 @@ class PlacementIdentityCanary(unittest.TestCase):
         # set again (tests/test_event_model_golden.py EclipsedChainSelection covers the pick).
         # v12 (2026-09-08, T252d): absorbed atoms placed at their landing time — att2's id and the atom set
         # above re-pinned with the bump.
-        self.assertEqual(jd.PLACEMENTS_V, 12, "EXPECTED_SEG_IDS was pinned under PLACEMENTS_V=11 — "
+        # v13 (2026-09-10, T318): a segment opened by romp's own system notice or auto-nudge keys on its anchor
+        # atom's uuid, not its (identical every time) text; this fixture carries no such notice, so every pinned
+        # id is UNCHANGED — the bump seals sessions whose restart-notice segments aliased under one key
+        # (tests/test_restart_notice_segments.py covers the derivation and the card anchors it protects).
+        self.assertEqual(jd.PLACEMENTS_V, 13, "EXPECTED_SEG_IDS was pinned under PLACEMENTS_V=13 — "
                          "re-pin the ids and this version together, in the same commit")
 
 

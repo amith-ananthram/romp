@@ -472,7 +472,7 @@ JUDGE_FAIL_CAP = 3                       # the same rule for every other retryin
 #                                          consolidator / courier; the
 #                                          planner (PLAN_PARSE_RETRIES) and distiller/briefer (DISTILL_FAIL_CAP)
 #                                          already had their own.
-PLACEMENTS_V = 12                        # placements-identity schema version (plan P2, the user 2026-07-06).
+PLACEMENTS_V = 13                        # placements-identity schema version (plan P2, the user 2026-07-06).
 #                                          v12 (2026-09-08, T252d): an ABSORBED atom (a mid-turn send the CLI
 #                                          spliced in) is placed at its LANDING time, not its send time, so
 #                                          every absorbed segment whose landing differs from its send changes
