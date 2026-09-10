@@ -8,10 +8,10 @@
 
 Romp is one always-on **kernel**: a single Python process that reads each
 session's Claude Code transcript, builds an event tree, runs the **judges**
-that write the durable records, and serves the four views over HTTP +
+that write the durable records, and serves the five views over HTTP +
 WebSocket.
 
-![From transcripts, through the kernel and judges, to the four views](assets/guide/architecture.png){ width="75%" }
+![From transcripts, through the kernel and judges, to the five views](assets/guide/architecture.png){ width="75%" }
 
 The judges are small `claude -p` calls with no tools and MCP disabled: they can
 caption, index, and file work, but structurally cannot act. They spend a little

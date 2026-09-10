@@ -485,6 +485,24 @@ through to `install.sh`:
   and follows to every connected machine like the other judge settings; its
   Default option clears the setting back to the variable, else 6.
 
+### Fast judging
+
+- **Fast judging** (the gear's Judges section; off by default) runs the judges
+  in Claude Code's fast mode, an Opus-only research preview billed at a premium
+  over standard Opus rates. The setting is read per call: a judge call whose
+  model is Opus, by the bare alias or a pinned Opus version, carries the CLI's
+  fast-mode opt-in in its per-call settings; a call on any other model runs
+  exactly as before, so with every tier on Sonnet and Haiku the setting changes
+  nothing until a tier is pinned to Opus. Fast requests draw on fast mode's own
+  rate limits, the pool your sessions' fast toggles share. Whether fast engaged
+  is the CLI's answer, per account (an account with extra usage turned off, or
+  an organisation with fast mode disabled, reports it off with the setting on):
+  each row of `judge-usage.jsonl` keeps that answer in its `fast` field (`on`,
+  `off` or `cooldown`; `null` when the CLI reported none), so a checkbox that
+  reads on beside rows that read off names the account, not the setting. Like
+  the other judge settings, a change applies on the judges' next pass with no
+  restart and follows to every connected machine.
+
 ### Session backends
 
 - **Enable Claude Code tmux backend** (the gear's Updates & debug section; off
@@ -758,6 +776,26 @@ in-flight turn, if it had one, and each background task, with a request to
 check whether each is still running before relaunching it. A kernel restart has
 never touched work a session deliberately detached: tmux servers, `setsid`
 children and other processes that outlive their shell.
+
+What the CLI itself does when its parent goes quiet was measured on Claude Code
+2.1.257 (2026-09-10, the restart-surviving sessions program's stage 3 probe, run
+against a throwaway config directory): a permission request (`can_use_tool`)
+waits for its answer with no expiry within ten minutes and the turn continues
+normally on a late answer; a hook callback waits 600 seconds by default, or the
+matcher's `timeout` seconds when one is set, then the CLI cancels the request
+(`control_cancel_request`), records a hook-timeout error as the tool's result
+and goes on with the turn; a second `initialize` on the same stdin is accepted
+and its hook table replaces the first; stdin end-of-file ends an idle CLI at
+once (0.02 s) and a busy one after its turn (a 30 s tool call ran to completion
+first); an unread stdout does not stall the CLI (the pipe's 64 kilobytes fill,
+the rest buffers inside the process, the turn completes); `--resume` takes no
+lock, and two processes on one session id both append to the one transcript;
+`claude --bg` runs an interactive session on a pseudo-terminal under a daemon
+that stays in the launcher's cgroup, and refuses `--print`, so a background
+session has no stream-json channel. `tests/test_cli_control_protocol_probe.py`
+re-checks the two facts that need no model call (the second initialize, the
+`--bg` refusal) when run with `ROMP_CLI_PROBE_LIVE=1` and a `claude` on PATH; it
+skips otherwise, as every test that would reach the live CLI must.
 
 A message the kernel cannot handle does not end the session's CLI. The kernel
 handles each streamed message on its own: when a handler raises, it logs the
@@ -1038,7 +1076,7 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `gone`, `tasks`, `cut`, `live`, `row`, `clock`, `backend`, `ops`, `limit`,
   `retry`, `bg`, `watch`, `stamp`, `anchors`, `downtime`, `names`, `flags`,
   `ncards`, `colormap`, `acct`, `cleared`, `host`, `cwd`, `claudemd`, `fork`,
-  `taskout`, `pathlink`, `postal`, plus `cold` for a tab with no cached
+  `note`, `needs`, `taskout`, `pathlink`, `postal`, plus `cold` for a tab with no cached
   build and `nosig` for one whose signature could not be taken) to the
   background rebuilds it caused. A rebuild with several moved components
   counts under each, so the map's sum can exceed `bg_built`. One session's
@@ -1229,7 +1267,12 @@ frames it received is measured in the panes themselves, by
   hosts (the VS Code bundle directly; the kernel page's inline boot through
   the `window.__rompPerf` that `federation.js` publishes before it runs), so
   `data`, `bars`, `hover`, `activeChat`, `revealEvent` and `models` are timed
-  like any pane's frames.
+  like any pane's frames. The file viewer (`ui/webview/file-view.ts`) brackets
+  each paint of a shown document's text body (a file on disk or a markdown URL,
+  as rendered markdown or as the code view) as `fileview:paint` under the pane
+  that hosts it (`chat` or `feed`), so painting a large document shows per
+  minute beside the pane's frames, with the main-thread-free sample the
+  collector takes after it.
 - Per type and minute: count, summed and maximum handler time, the exact
   number of frames over 16.7 ms (one dropped frame at 60 Hz) and at or over
   100 ms, and a 14-bucket log2 histogram (under 1 ms, 1-2, 2-4, ..., 2048-4096,
@@ -1252,6 +1295,17 @@ frames it received is measured in the panes themselves, by
   keeps the function name in a key readable across rebuilds (the position
   still moves with any edit to the bundle); whitespace and syntax are still
   minified.
+- The dashboard shell (the top-level window that frames the panes) runs the
+  same collector under app `shell` with no frame types at all
+  (`ui/webview/shell-perf.ts`): Chromium reports a long animation frame to
+  the top-level document and never to the iframe whose script ran it, so a
+  pane script that blocked the main thread is attributed in the shell's row
+  (`chat.js:paintAll@9000`) and nowhere else. The row goes over the shell's
+  own socket; up to twenty rows are held, oldest dropped first, while that
+  socket is closed, and go ahead of the next row once it is open. A browser
+  that reports neither long animation frames nor long tasks gives the shell
+  nothing to observe, and an idle minute posts nothing, so no shell row
+  appears there.
 - Once a minute the pane posts ONE `clientDiag` row on the socket it already
   uses for breadcrumbs, only when something happened that minute (a frame
   arrived or a long frame was observed); the kernel appends it to
@@ -1277,14 +1331,14 @@ The two rows, as the kernel writes them (`t` its clock, `wid` the dashboard id):
   p50, p90, max} | null, loaf: {n, blocking_ms, worst_ms, top: [{k, ms, n,
   inv}], src}, slow: {sent, suppressed, suppressed_worst_ms}, heap_mb?, dom,
   visible, hidden_pane, ua}}`. `app` is the pane (`chat`, `feed`, `fleet`,
-  `timeline`); `since` is the minute's start on the browser's clock (epoch ms)
-  and `span_ms` its length (shorter than a minute when the page was
-  hidden or closed); `hist` is the 14 bucket counts; `free` is null when no
-  sample was taken; `loaf.top` is the five largest keys by summed duration,
-  `inv` the last invoker seen for each (`WebSocket.onmessage`,
-  `Window.requestAnimationFrame`, `DIV.onclick`), `src` is `loaf`, `longtask`
-  or `none`; `slow` counts the slowframe rows sent and the slow frames past
-  the cap, with the worst of those; `heap_mb` is
+  `timeline`), or `shell` for the top-level window; `since` is the minute's
+  start on the browser's clock (epoch ms) and `span_ms` its length (shorter
+  than a minute when the page was hidden or closed); `hist` is the 14 bucket
+  counts; `free` is null when no sample was taken; `loaf.top` is the five
+  largest keys by summed duration, `inv` the last invoker seen for each
+  (`WebSocket.onmessage`, `Window.requestAnimationFrame`, `DIV.onclick`),
+  `src` is `loaf`, `longtask` or `none`; `slow` counts the slowframe rows sent
+  and the slow frames past the cap, with the worst of those; `heap_mb` is
   `performance.memory.usedJSHeapSize` and is absent outside Chrome; `dom` is
   the element count; `visible` is the document's visibility, `hidden_pane`
   the pane shim's test for a pane the shell has set to `display:none`: its
@@ -1310,7 +1364,9 @@ entry; the top attributed keys with their invokers; the worst minute (the one
 with the most handler time: its span from the minute's start to the row's
 arrival at the kernel, frame counts and long frames); heap and DOM at the last
 sample; and the five slowest slow frames in the window with their attribution,
-plus how many more there were. An absent file or one without perf rows is
+plus how many more there were. The shell's row shows as one more pane of its
+dashboard: no frame types, the long frames it observed and the pane scripts
+they name. An absent file or one without perf rows is
 reported as no browser telemetry yet (the bundles predate it or no dashboard
 has loaded them: rebuild the bundles and reload the dashboard); perf rows all
 older than the window are reported with their age. `--json` prints the folded

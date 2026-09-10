@@ -2,7 +2,7 @@ name: CI
 
 # Run the test suites that gate romp: the Python pipeline (kernel/, cli/,
 # postal/), the shell surfaces (tmux hooks / postal / manager), and the VS Code
-# extension build.
+# extension build; and scan the whole history for credentials (the secrets job).
 #
 # LINUX runs on every push and PR — it is free on a public repo, no minute cap.
 # macOS is BILLED even on a public repo (larger runners always are, at ~10x), and
@@ -121,6 +121,24 @@ jobs:
         if: runner.os == 'macOS'
         timeout-minutes: 15
         run: brew install bats-core tmux
+      - name: Install gitleaks (Linux)
+        # tests/gitleaks-config.bats skips itself when gitleaks is absent, so without this step the
+        # repo's scanning rules (.gitleaks.toml: the value-anchored allowlist, the merge-commit scan)
+        # would be checked nowhere and a rule regression would ship green. The same pinned,
+        # checksummed release the secrets job installs; bump the two version/sha pairs together.
+        # Linux only: the macOS cell is manual (see the header), and one arbiter is enough.
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        env:
+          GITLEAKS_VERSION: 8.28.0
+          GITLEAKS_SHA256: a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install /tmp/gitleaks /usr/local/bin/gitleaks
       - name: Run bats
         run: bats --print-output-on-failure tests/*.bats
       # T224: the manager<->kernel handshake proof (tests/manager-*.test.js: restart coalescing, the
@@ -134,6 +152,57 @@ jobs:
           node-version: '22'
       - name: Manager handshake tests (node --test)
         run: node --test tests/manager-*.test.js
+
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    # About a minute in practice (a full-history checkout, then two scans); the cap exists so a
+    # wedged download cannot burn the 6h default.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The load-bearing line. A secret's whole problem is that history is permanent, so the
+          # scan has to see history: the default depth-1 checkout would scan one commit and report
+          # no leaks for a repo with a token three commits back. Depth 0 also brings every branch
+          # and tag, which is what the --all below reads.
+          fetch-depth: 0
+      - name: Install gitleaks
+        # Pinned, and checksummed against the publisher's own release manifest
+        # (gitleaks_<version>_checksums.txt), rather than the marketplace action: a step that exists
+        # to keep secrets out of the repo should not hand a token to a third-party action, and
+        # gitleaks-action needs a licence key for organisation-owned repos. To bump, change both
+        # lines together (here and in the shell job above), or the checksum check fails loudly.
+        timeout-minutes: 5
+        env:
+          GITLEAKS_VERSION: 8.28.0
+          GITLEAKS_SHA256: a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install /tmp/gitleaks /usr/local/bin/gitleaks
+      - name: Scan every commit
+        # The repo's rules, named explicitly, as the hook names them: without --config gitleaks
+        # reads a GITLEAKS_CONFIG from the environment before the source root, and a missing file
+        # would scan under the default rules in silence; named, a missing file fails the step.
+        # -v prints the file, line and rule of each hit; without it gitleaks reports a bare count,
+        # so a red job would not say what to fix. --redact so a hit does not reprint the secret
+        # into a public build log, where it would be MORE exposed than in the commit that tripped
+        # the scan. --all reads every branch and tag the checkout brought, not only the pushed
+        # ref. --diff-merges=first-parent: `gitleaks git` runs `git log -p`, which omits
+        # merge-commit diffs, so a secret introduced only in a merge (a conflict resolution) is
+        # invisible to --all alone; the tree scan below catches it only while it is still at HEAD;
+        # this surfaces it in history for good. A finding exits nonzero and fails the step.
+        run: gitleaks git . --no-banner --redact -v --config .gitleaks.toml --log-opts="--all --diff-merges=first-parent"
+      - name: Scan the tree as it stands
+        # The history scan reads commit diffs, so a secret in a file that is present but untouched
+        # by any scanned commit (a submodule tip, a file added before a rewrite) is only caught by
+        # scanning the tree itself. Runs after a red history scan too, so one run reports both.
+        if: ${{ !cancelled() }}
+        run: gitleaks dir . --no-banner --redact -v --config .gitleaks.toml
 
   vscode-extension:
     name: vscode-extension (typecheck + test + build)

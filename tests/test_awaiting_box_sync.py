@@ -56,7 +56,11 @@ class SourcePins(unittest.TestCase):
         for fn in ("function chatTail(msg: any) {", "function update(msg: any) {", "function statusOnly(msg: any) {"):
             body = RENDER.split(fn)[1].split("\n}")[0]
             self.assertIn("const before = awaitKey(s.status);", body, fn)
-            self.assertIn("if (awaitKey(s.status) !== before) renderBgTasks();", body, fn)
+            # since 2026-09-10 the box render goes through awaitChanged(sid), which also re-renders the subagent
+            # viewer's header when the active tab is a viewer into this session (its "waiting on" tail reads the
+            # parent's nested rows) — the call sits after the active/inactive branch so a viewer tab reaches it
+            self.assertIn("if (awaitKey(s.status) !== before) awaitChanged(msg.id);", body, fn)
+        self.assertIn("function awaitChanged(sid: string): void {\n  if (sid === activeId) renderBgTasks();", RENDER)
 
     def test_the_chip_and_the_gist_agree_in_number_from_one_count(self):
         # since slice 2 (plans/subagent-transcripts.md, 2026-09-05) the ONE rule is awaitWord: the kernel's

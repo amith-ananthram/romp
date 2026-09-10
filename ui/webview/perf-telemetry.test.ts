@@ -512,6 +512,40 @@ test("long frames: distinct attribution keys are capped per minute; the overflow
   assert.equal(s.loaf.n, 2);
 });
 
+test("a chat minute with the viewer's paint bracket: fileview:paint with the pass cost, the free sample after it, the long frames the pane sees; no string carries a slash, a query, a path or a session id", () => {
+  // The file viewer times each paint of a shown file's text body through the hosting pane's collector (file-view.ts
+  // perfTimed, run for real in file-view-perf.test.ts); this is the row that pass produces, with the long frame the
+  // browser attributes to the pane's bundle and to an inline image load off the /file route, which carries a path.
+  const SID = "33333333-4444-5555-6666-777777777777";
+  const h = harness({ pageUrl: "http://h:1/chat", observer: FakeObserver as any, supportedEntryTypes: ["long-animation-frame"] });
+  const p = createPerfTelemetry("chat", h.deps);
+  p.timed("fileview:paint", () => { h.clock.t += 180; });   // a large file painted
+  h.runRafs(); h.clock.t += 40; h.runRafs();                // two animation frames later: the free sample
+  FakeObserver.deliver([{ startTime: 1000, duration: 190, blockingDuration: 140, scripts: [
+    { sourceURL: "http://h:1/dist/chat.js?v=1757100000&sid=" + SID, sourceFunctionName: "paintAll", sourceCharPosition: 9000, invoker: "Window.requestAnimationFrame", duration: 150 },
+    { sourceURL: "http://h:1/chat?token=abc&sid=" + SID, sourceFunctionName: "", sourceCharPosition: 4000, invoker: "IMG[src=/file?path=/repo/notes-api/docs/plot.png&sid=" + SID + "].onload", duration: 30 },
+  ] }]);
+  h.clock.wall += 60_000;
+  p.tick();
+  const rows = minuteRows(h.posted);
+  assert.equal(rows.length, 1);
+  const d = rows[0].data;
+  assert.equal(d.app, "chat");
+  assert.deepEqual(d.frames["fileview:paint"], stat(1, 180, 180, 1, 1, hist({ 8: 1 })));    // 128-256 ms
+  assert.deepEqual(d.free, { n: 1, p50: 40, p90: 40, max: 40 });
+  assert.equal(d.loaf.n, 1);
+  assert.deepEqual(d.loaf.top.map((t: any) => t.k), ["chat.js:paintAll@9000", "page:(anonymous)@4000"]);
+  assert.deepEqual(d.loaf.top.map((t: any) => t.inv), ["Window.requestAnimationFrame", "IMG[src].onload"]);
+  assert.equal(slowRows(h.posted).length, 1, "a 180 ms paint is a slow frame too, with the report's attribution");
+  // the privacy contract, over the minute row and the slowframe row: every string is a code identifier (so no
+  // slash, no query), and neither the session id nor a path word the inputs carried appears anywhere, keys included
+  const both = h.posted.map((m) => m.data);
+  assertIdentifiersOnly(both);
+  const text = JSON.stringify(both);
+  assert.ok(!text.includes(SID) && !text.includes("33333333"), "no session id in either row");
+  assert.ok(!text.includes("notes-api") && !text.includes("plot.png"), "no path in either row");
+});
+
 test("longtask fallback: no long-animation-frame support observes longtask, blocking is time over 50 ms, no attribution", () => {
   const h = harness({ observer: FakeObserver as any, supportedEntryTypes: ["longtask", "mark"] });
   const p = createPerfTelemetry("feed", h.deps);

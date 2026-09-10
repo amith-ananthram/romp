@@ -6,6 +6,9 @@
 // window.__rompPerf that federation.js publishes before it runs); federation times its own merge and
 // dispatch of every frame as `fed:<type>`, nested outside the pane's handler, and the collector records
 // each level's OWN time (the outer minus what its inner brackets took), so the per-type figures add up.
+// The file viewer (file-view.ts perfTimed) brackets each paint of a shown document's text body, a file on disk
+// or a markdown URL, as `fileview:paint` under the pane that hosts it (chat or feed), so a large document's paint
+// shows per minute beside the pane's frames.
 // Per frame type the module keeps a count, the summed and maximum handler time, exact counts over 16.7 ms
 // (one dropped frame at 60 Hz) and at or over 100 ms, and a fixed log2 histogram (one increment per frame),
 // which is additive across minutes so `romp perf client` computes true window percentiles. Two

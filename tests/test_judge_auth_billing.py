@@ -263,6 +263,26 @@ class JudgeArgvBilling(_JudgeAuthBase):
             self.assertNotIn("--settings", jd._judge_cmd("sonnet", "SYS", None, auth=auth), repr(auth))
         self.assertNotIn("--settings", jd._judge_cmd("sonnet", "SYS", None), "the default: no auth argument")
 
+    def test_a_fast_login_billed_call_rides_one_overlay_with_both_keys(self):
+        # `--settings` takes ONE value. With Fast judging on (STATE/judge-fast "on"), an Opus login-billed call
+        # carries the fastMode opt-in and the helper suppression in one JSON overlay; a login-billed call on a
+        # model that cannot run fast keeps HELPER_OFF byte for byte; a key-billed or unpicked Opus call carries
+        # the opt-in alone, and the helper key never appears in it.
+        (jd.STATE / "judge-fast").write_text("on")
+        jd._state_cache.clear()
+        try:
+            cmd = jd._judge_cmd("opus", "SYS", None, auth="login")
+            self.assertEqual(cmd.count("--settings"), 1, "one overlay, never two --settings")
+            self.assertEqual(json.loads(cmd[-1]), {"fastMode": True, "apiKeyHelper": ""})
+            self.assertEqual(jd._judge_cmd("sonnet", "SYS", None, auth="login")[-2:], HELPER_OFF)
+            for auth in ("key", None):
+                cmd = jd._judge_cmd("opus", "SYS", None, auth=auth)
+                self.assertEqual(cmd.count("--settings"), 1, repr(auth))
+                self.assertEqual(json.loads(cmd[-1]), {"fastMode": True}, repr(auth))
+        finally:
+            (jd.STATE / "judge-fast").unlink()
+            jd._state_cache.clear()
+
 
 class RuntimeJudgeBilling(_JudgeAuthBase):
     """_judge_run's pre-launch path: the usage gate and the codex engine touch no Anthropic credential."""
@@ -401,7 +421,7 @@ class JudgeRunBilling(_JudgeAuthBase):
     """_judge_run end to end with a fake CLI: the envelope drives the latch, the env and argv carry the
     billing. A helper is staged unless a test says otherwise, so the unpicked default is the key."""
 
-    def _run(self, envelope, auth_reg=None, helper=True):
+    def _run(self, envelope, auth_reg=None, helper=True, model="sonnet"):
         if helper:
             self._helper()
         if auth_reg:
@@ -418,7 +438,7 @@ class JudgeRunBilling(_JudgeAuthBase):
         jd.subprocess.run = fake_run
         try:
             with patch.object(jd, "_judge_engine", return_value="claude"):
-                out = jd._judge_run("sonnet", "SYS", "u", judge="planner", tier="triage")
+                out = jd._judge_run(model, "SYS", "u", judge="planner", tier="triage")
         finally:
             jd.subprocess.run = saved
         return out, seen
@@ -468,6 +488,32 @@ class JudgeRunBilling(_JudgeAuthBase):
         self.assertEqual(seen["env"].get("CLAUDE_CODE_OAUTH_TOKEN"), "synthetic-login-token")
         i = seen["cmd"].index("--settings")
         self.assertEqual(seen["cmd"][i:i + 2], HELPER_OFF)
+
+    def test_a_fast_login_pick_on_opus_launches_with_one_overlay_and_logs_the_readback(self):
+        # end to end through _judge_run: Fast judging on, a login pick, an Opus model. The child gets ONE
+        # --settings overlay carrying both keys, the login tokens, no key; the usage row keeps the envelope's
+        # fast_mode_state, the CLI's own word on whether fast engaged.
+        jd._LOGIN_AUTH_ENV_FN = lambda: {"CLAUDE_CODE_OAUTH_TOKEN": "synthetic-login-token"}
+        (jd.STATE / "judge-fast").write_text("on")
+        jd._state_cache.clear()
+        saved_usage = jd.USAGE
+        jd.USAGE = jd.STATE / ("judge-usage-%s.jsonl" % os.getpid())
+        try:
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": AMBIENT}):
+                out, seen = self._run({"result": "ok", "usage": {}, "duration_ms": 3, "fast_mode_state": "on"},
+                                      auth_reg="login", model="opus")
+            rows = [json.loads(ln) for ln in jd.USAGE.read_text().splitlines()]
+        finally:
+            jd.USAGE = saved_usage
+            (jd.STATE / "judge-fast").unlink()
+            jd._state_cache.clear()
+        self.assertEqual(out, "ok")
+        self.assertNotIn("ANTHROPIC_API_KEY", seen["env"])
+        self.assertEqual(seen["env"].get("CLAUDE_CODE_OAUTH_TOKEN"), "synthetic-login-token")
+        self.assertEqual(seen["cmd"].count("--settings"), 1)
+        self.assertEqual(json.loads(seen["cmd"][seen["cmd"].index("--settings") + 1]),
+                         {"fastMode": True, "apiKeyHelper": ""})
+        self.assertEqual([(r["model"], r["fast"]) for r in rows], [("opus", "on")])
 
 
 class KeylessKeyBilledCalls(_JudgeAuthBase):

@@ -41,6 +41,8 @@ const webview = {
     "../ui/webview/feed.css",
     "../ui/webview/fleet.ts",
     "../ui/webview/fleet-pane.css",      // fleet page layout — the kernel reads the same file live
+    "../ui/webview/files.ts",            // the Files pane: the file viewer as its own column (kernel /files)
+    "../ui/webview/files-pane.css",      // its page layout + the viewer's pane-resident variant; the kernel reads the same file live
     "../ui/webview/timeline-main.ts",    // VS Code timeline view: boot glue + ui/romp-timeline-view.js inlined
     "../ui/webview/timeline-pane.css",   // timeline wrapper styles — the kernel reads the same file live
     "../ui/webview/strip.css",           // the romp strip (VS Code-only bottom rail stand-in)
@@ -48,6 +50,7 @@ const webview = {
     "../ui/webview/federation.ts",   // multi-kernel manager: loaded after the shim on chat/feed/fleet pages
     "../ui/webview/age-color-global.ts",   // window.__rompAgeColor for the kernel's inline shell scripts (bell panel)
     "../ui/webview/palette-main.ts",   // command palette + Cmd/Ctrl+O/P hotkeys for the kernel's shell page
+    "../ui/webview/shell-perf.ts",     // the shell page's performance collector (a pane's long animation frames are reported to the top-level window)
     "../ui/webview/editor-chunk.ts",   // CodeMirror editing substrate — ON-DEMAND (file-view loads it by
                                        // script tag on first edit); nothing else may import it, so the
                                        // main bundles stay byte-stable for people who never edit

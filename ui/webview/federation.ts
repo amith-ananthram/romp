@@ -82,7 +82,8 @@ const KERNEL_SETTING = new Set(["setAutoNudge", "setJudgeModel", "setIndexModel"
                                 "setDistillModel", "setDistillEffort", "setFileEditing",
                                 "setCompactSuggest",
                                 "setCommentModel", "setCommentEffort", "setCommentFast",
-                                "setTmuxBackend"]);   // T288: the tmux backend's offer, one value across machines
+                                "setTmuxBackend",   // T288: the tmux backend's offer, one value across machines
+                                "setJudgeFast"]);   // Fast judging: the judges' fast-mode opt-in, one value across machines
 
 // ── what a send to a host whose relay socket is NOT open does, by message class (2026-09-10) ─────────
 // Three classes, decided by an EXPLICIT list — never guessed from the type's spelling at run time:

@@ -31,8 +31,10 @@ test("the chunk is its own esbuild entry, and no main-bundle source imports Code
 });
 
 test("file-view loads the chunk from its own bundle's URL (same dir, same ?v= token), latch cleared on failure", () => {
-  assert.match(VIEW, /\.find\(\(u\) => \/\\\/\(render\|feed\)\\\.js\/\.test\(u\)\)/);
-  assert.match(VIEW, /sc\.src = self\.replace\(\/\\\/\(render\|feed\)\\\.js\/, "\/editor-chunk\.js"\);/);
+  // the three bundles that host the viewer: render.js (chat), feed.js (feed), files.js (the Files pane); a page
+  // whose bundle the pattern misses sends every Edit to the textarea with the raw "no bundle script tag" error
+  assert.match(VIEW, /\.find\(\(u\) => \/\\\/\(render\|feed\|files\)\\\.js\/\.test\(u\)\)/);
+  assert.match(VIEW, /sc\.src = self\.replace\(\/\\\/\(render\|feed\|files\)\\\.js\/, "\/editor-chunk\.js"\);/);
   assert.match(VIEW, /sc\.onerror = \(\) => \{ edChunk = null; rej\(/,
     "a failed load clears the latch so a later edit retries fresh");
 });

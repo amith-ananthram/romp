@@ -76,6 +76,38 @@ This repo may go public; assume every commit is permanent and world-readable.
   text only, so screenshots and recordings under `docs/assets/` must be
   eyeballed for on-screen session content before release.
 
+### Credentials: gitleaks scans every pushed commit and all of history
+The rule above is about identifiers a human can enumerate. Credentials are the
+other half and cannot work that way: nobody knows a token's text until it leaks,
+so there is no list to write. **gitleaks** covers them, in two places:
+- **`.githooks/pre-push`** runs it over the commits a push would publish (a
+  merge by its first-parent diff, so a secret typed into a conflict resolution
+  is read too) and refuses the push on a hit. No gitleaks on the machine means a
+  loud notice and no scan (requiring an install to push would break every clone
+  that never asked for it); a gitleaks that fails to run refuses the push and
+  says so. `ROMP_NO_GITLEAKS=1` skips the scan, `ROMP_GITLEAKS` points at a
+  binary. This is the same hook as the identifier scan and both report before
+  it refuses, so one push tells you about both.
+- **CI's `Secret scan (gitleaks)` job** scans all of history, every branch and
+  tag the checkout brings, on every PR and every push to `main`, from a
+  pinned, checksummed binary. It needs `fetch-depth: 0`: a default checkout
+  scans one commit and reports clean.
+
+Three things follow for anyone touching this:
+- **A hit means rotate, not amend.** A credential that reached a commit is
+  compromised from that moment; removing it in a later commit leaves it in the
+  old one, and on a repo that may go public that is a published secret. Rotate
+  first, then clean the history.
+- **Excuse a false positive narrowly, in `.gitleaks.toml`, with a reason**: an
+  exact value, never a path. A path exclusion silences the scanner for every
+  future line in that file. There is one entry today (RFC 6455's published
+  example WebSocket key, which the kernel's handshake tests use), allowlisted by
+  value so a real key on the same line is still caught.
+- **Do not write a credential-shaped literal into a test fixture.** The scanner
+  reads this repo too, so a longhand fake token flags the very test that proves
+  the scanner works; assemble probes at run time, as
+  `tests/gitleaks-config.bats` does.
+
 ## Worktrees — work on an isolated worktree by default (user rule, 2026-06-29)
 Do ALL non-trivial work on its own git worktree, not the shared main tree — concurrent
 peer sessions clobber/commit each other's uncommitted edits in the shared tree (a peer's
@@ -94,7 +126,9 @@ broad `git add` will sweep up your work). Conventions:
   other sessions).
 - **Standing green light to publish.** When the work is done and tests pass, publish it
   without asking — through the fork (user rule, 2026-07-27): rulesets on the upstream
-  block EVERY direct branch push (`main` and feature branches alike, no bypass), so
+  block EVERY direct branch push (`main` and feature branches alike, no bypass; the one
+  exception since 2026-09-10 is the `stack/**` namespace, a staging area for GitHub's stacked
+  pull requests, unprotected and deleted on merge, see `docs/pr-tiers.md`), so
   publishing is always push-then-PR:
   1. `git push -u origin <branch>`: `origin` is the maintainer's **fork** and `upstream`
      is romp-on/romp (remote convention, the user 2026-09-06; a plain install has only

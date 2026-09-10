@@ -294,9 +294,12 @@ class PushTestRoute(_LoopbackMixin, unittest.TestCase):
         self.assertEqual(d["sid"], SID_WEB)
         self.assertEqual(d["tag"], "romp:" + SID_WEB)
         # a turn's routing shape under kind test: the shell POSTs /reveal for the sid, no card to scroll to
+        pid = d["data"].pop("pid")   # the kernel's handle on this push to this device (2026-09-09, the ledger — test_kernel_webpush's PushLedger): minted per send, so checked by shape and against the row it filed
+        self.assertRegex(pid, r"^[A-Za-z0-9_-]{22}$")
+        self.assertEqual([r["sid"] for r in km._push_ledger() if r["pid"] == pid], [SID_WEB], "the row the pid names is this push's")
         self.assertEqual(d["data"], {"sid": SID_WEB, "host": "", "kind": "test", "cardId": "",
-                                     "url": "/?push-reveal=" + SID_WEB,
-                                     "name": "web"})   # the same name the answer carries (2026-09-09: the shell's offer chip reads it off the payload)
+                                     "url": "/?push-reveal=%s&push-pid=%s" % (SID_WEB, pid),   # the deep link carries the pid (2026-09-10): on Apple the link IS the tap, and the page settles the row it lands
+                                     "name": "web"})   # the same name the answer carries (2026-09-09: the ledger row files it, so the kernel's lines can name the session)
         self.assertNotIn("badge", d, "the count rides its own push")
 
     def test_every_test_push_leaves_a_line_in_the_kernel_log(self):

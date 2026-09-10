@@ -15,7 +15,7 @@ const ESC = KERNEL.split('_LANDING_ESC_JS = """')[1].split('"""')[0];
 
 test("the shared Escape block wires the shell document AND every pane document", () => {
   assert.ok(ESC.includes("document.addEventListener('keydown',onEsc,true);"));
-  assert.ok(ESC.includes("['f-chat','f-fleet','f-feed','f-timeline'].forEach"));
+  assert.ok(ESC.includes("['f-chat','f-fleet','f-feed','f-files','f-timeline'].forEach"));
   assert.ok(ESC.includes("f.contentDocument.addEventListener('keydown',onEsc,true);"));
   assert.ok(ESC.includes("f.addEventListener('load',wire);wire();"), "re-attached on every iframe (re)load");
   // and the block is actually spliced into the landing page

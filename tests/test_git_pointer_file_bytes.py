@@ -20,13 +20,13 @@ import contextlib
 import io
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import threading
 import unittest
 from datetime import datetime, timezone
 from romp_load import load_source
+from git_fixture import git, init_repo, forbid_background
 from pathlib import Path
 from unittest import mock
 
@@ -67,15 +67,20 @@ def _tm():
             "context": None, "compactPct": None, "backend": "tmux"}
 
 
+_IDENT = ("t@TESTHOST", "t")                    # the fixture's synthetic author
+
+
 def _git(*args, cwd):
-    subprocess.run(["git", "-c", "user.email=t@TESTHOST", "-c", "user.name=t", *args],
-                   cwd=cwd, capture_output=True, text=True, timeout=10, check=True)
+    # Through the shared runner: `git commit` (and fetch, merge) spawn `git maintenance run --auto`, which detaches
+    # and can still be writing into .git while TemporaryDirectory removes the repo (the CI flake "Directory not
+    # empty: '.git'", 2026-09-10); the runner forbids that background work on every invocation and every repo it inits.
+    git(cwd, *args, ident=_IDENT, timeout=10)
 
 
 def _mk_repo(td, name="repo"):
     repo = Path(td) / name
     repo.mkdir()
-    _git("init", "-q", "-b", "main", cwd=repo)
+    init_repo(repo, "-q", "-b", "main", ident=_IDENT, timeout=10)
     (repo / "a.txt").write_text("a\n")
     _git("add", "a.txt", cwd=repo)
     _git("commit", "-q", "-m", "seed", cwd=repo)
@@ -202,9 +207,9 @@ class Resolver(unittest.TestCase):
             repo = _mk_repo(parent)
             wt = Path(td) / "wt"                                    # a clean cwd, as the registry carries it
             _git("worktree", "add", "-q", "-b", "feature", str(wt), cwd=repo)
+            forbid_background(wt)                                   # the kernel forks its own git against it
             self.assertIn(b"\xe9", (wt / ".git").read_bytes(), "premise: git wrote the byte into the pointer")
-            r = subprocess.run(["git", "-C", str(wt), "rev-parse", "--abbrev-ref", "HEAD"],
-                               capture_output=True, text=True, timeout=10)
+            r = git(wt, "rev-parse", "--abbrev-ref", "HEAD", check=False, timeout=10)
             self.assertEqual((r.returncode, r.stdout.strip()), (0, "feature"), "premise: git reads it fine")
             with _stderr() as err, mock.patch.object(km.subprocess, "run", wraps=km.subprocess.run) as run:
                 hp = km._git_head_file(str(wt))
@@ -385,6 +390,21 @@ class PushCycle(unittest.TestCase):
         self.assertTrue(seen, "premise: the second push re-derived the torn pointer file's fault (a fault is never cached)")
         self.assertEqual([l for l in err2.splitlines() if str(self.torn / ".git") in l], [],
                          "a second push logs nothing new: %r" % err2.splitlines())
+
+
+class FixtureRepos(unittest.TestCase):
+    """The kernel forks its own git against the fixture repos (the rev-parse fallback, the worktree's branch), so
+    the no-background keys must sit in each repo's config, not only on the fixture runner's command line."""
+
+    def test_the_fixture_repos_forbid_background_git_work(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = _mk_repo(td)
+            wt = Path(td) / "wt"
+            _git("worktree", "add", "-q", "-b", "feature", str(wt), cwd=repo)
+            forbid_background(wt)
+            for path in (repo, wt):
+                self.assertEqual(git(path, "config", "--local", "--get", "maintenance.auto").stdout.strip(), "false",
+                                 "background git work is forbidden in %s" % path)
 
 
 if __name__ == "__main__":

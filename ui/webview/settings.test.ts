@@ -8,7 +8,7 @@ const store: Record<string, string> = {};
   setItem: (k: string, v: string) => { store[k] = v; },
   removeItem: (k: string) => { delete store[k]; },
 };
-import { loadSettings, saveSettings, DEFAULT_SETTINGS } from "./settings";
+import { loadSettings, saveSettings, DEFAULT_SETTINGS, fileLinkPane } from "./settings";
 
 test("loadSettings returns defaults when nothing is stored", () => {
   delete store["romp:settings"];
@@ -105,5 +105,26 @@ test("Compact tabs and agents defaults OFF (the user 2026-09-08); the opt-in rou
   assert.equal(loadSettings().denseChrome, true, "the opt-in survives a reload (localStorage)");
   store["romp:settings"] = JSON.stringify({ compact: true });
   assert.equal(loadSettings().denseChrome, false, "a store written before the key reads as off");
+  delete store["romp:settings"];
+});
+
+// Where a chat file-link click opens on the web (the Files pane, a column of its own, or the viewer over
+// the pane you clicked): OFF by default, so a dashboard that never turns it on changes nothing. Only the
+// literal "pane" opts in; anything else a store might hold reads as the default, so a corrupt entry may
+// cost the preference, never the click (tabCtxMode's normalization idiom). Read at click time
+// (render.ts openPath through file-route.ts fileLinkRoute).
+test("File links open in defaults to the pane you clicked; the Files pane opt-in round-trips, and a foreign value reads as the default", () => {
+  assert.equal(DEFAULT_SETTINGS.fileLinkPane, "chat");
+  delete store["romp:settings"];
+  assert.equal(loadSettings().fileLinkPane, "chat", "a fresh install opens in place");
+  saveSettings({ fileLinkPane: "pane" });
+  assert.equal(loadSettings().fileLinkPane, "pane", "the opt-in survives a reload (localStorage)");
+  store["romp:settings"] = JSON.stringify({ compact: true });
+  assert.equal(loadSettings().fileLinkPane, "chat", "a store written before the key reads as the default");
+  store["romp:settings"] = JSON.stringify({ fileLinkPane: "purple" });
+  assert.equal(loadSettings().fileLinkPane, "chat", "a foreign stored value normalizes to the default");
+  assert.equal(fileLinkPane("pane"), "pane");
+  assert.equal(fileLinkPane("feed"), "chat", "no other target exists here");
+  assert.equal(fileLinkPane(undefined), "chat");
   delete store["romp:settings"];
 });

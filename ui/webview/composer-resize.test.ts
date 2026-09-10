@@ -34,8 +34,9 @@ test("dragging sets composerManualH + the height, clamped between min and 60vh",
 });
 
 test("a send snaps the box back to one line (composerManualH cleared)", () => {
-  // in sendComposer, before clearing the inline height
-  assert.match(RENDER, /composerManualH = null;\s*\/\/ a drag-expanded box snaps back to one line after a send/);
+  // in sendComposer's deliver, through the composer's one clear path (clearBox resets the drag height with the text)
+  assert.match(RENDER, /clearBox\(\);\s*\/\/ a drag-expanded box snaps back to one line after a send/);
+  assert.match(RENDER, /const clearBox = \(\) => \{\s*\n\s*ta\.value = ""; composerManualH = null; ta\.style\.height = "";/);
 });
 
 test("a double-click on the handle resets to auto without sending", () => {

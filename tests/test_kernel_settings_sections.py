@@ -46,7 +46,7 @@ class SettingsSectionsTest(unittest.TestCase):
                     "id=rs-conserve", "id=rs-thinksum", "id=rs-fileedit"):
             self.assertTrue(h.index(">Sessions<") < h.index(rid) < h.index(">Chat<"), rid)
         # Chat: transcript prefs AND the comment defaults (comments are part of the chat)
-        for rid in ("id=rs-compact", "id=rs-dense", "id=rs-branch", "id=rs-striprows", "id=rs-cmtmodel", "id=rs-cmtfast"):
+        for rid in ("id=rs-compact", "id=rs-dense", "id=rs-branch", "id=rs-striprows", "id=rs-filelink", "id=rs-cmtmodel", "id=rs-cmtfast"):
             self.assertTrue(h.index(">Chat<") < h.index(rid) < h.index(">Sessions pane<"), rid)
         # Sessions pane, then Feed, then Colors
         self.assertTrue(h.index(">Sessions pane<") < h.index("id=rs-collapsegaps") < h.index(">Feed<"))
@@ -56,6 +56,8 @@ class SettingsSectionsTest(unittest.TestCase):
         # Judges sit low: the six dropdowns between Judges and the bottom group
         self.assertTrue(h.index(">Judges<") < h.index("id=rs-judgemodel") < h.index(">Updates & debug<"))
         self.assertTrue(h.index(">Judges<") < h.index("id=rs-indexeffort") < h.index(">Updates & debug<"))
+        # Fast judging: a checkbox row among the judge picks, in the Judges section like the knobs it rides with
+        self.assertTrue(h.index(">Judges<") < h.index("id=rs-judgefast") < h.index(">Updates & debug<"))
         self.assertNotIn("rs-oldest", h)
         # Updates & debug (the very bottom): auto-updates, the judge-SHOW toggles, analytics, version
         self.assertLess(h.index(">Updates & debug<"), h.index("id=rs-updates"))
@@ -100,6 +102,17 @@ class SettingsSectionsTest(unittest.TestCase):
             self.assertRegex(h, r"rs-jrow'><b>[^<]+<span class=rs-mixed hidden></span></b>"
                                 r"<span class=rs-sub>[^<]*</span><select id=" + sel)
         self.assertIn("#rsettings .rs-jrow select {", _gear_css_src())
+
+    def test_fast_judging_is_a_label_row_with_a_mixed_mark(self):
+        # a checkbox row in the shape of Fast comment threads (label + checkbox, the mixed mark beside the name),
+        # not an .rs-jrow: the one-line label + picker count above stays at nine
+        h = _gear_src()
+        self.assertIn("<label class='rs-row'><input type=checkbox id=rs-judgefast>", h)
+        self.assertIn("<span><b>Fast judging</b><span class=rs-mixed hidden></span>", h)
+        row = h[h.index("id=rs-judgefast"):]
+        row = row[:row.index("</label>")]
+        self.assertIn("Opus", row, "the copy says which calls the setting reaches")
+        self.assertIn("connected machine's kernel", row, "the copy says the pick follows to the other machines")
 
     def test_collapse_gaps_is_wired_to_the_shared_collapseGaps_setting(self):
         # the gear JS persists/loads romp:settings.collapseGaps; the timeline reads it (see romp-timeline-view.js)

@@ -32,6 +32,7 @@ import subprocess
 import tempfile
 import unittest
 from romp_load import load_source
+from git_fixture import git, init_repo, forbid_background
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -52,16 +53,22 @@ REPO = "example-org/notes-api"
 PRIVATE_SID = "7a7a7a7a-1a1a-4b4b-8c8c-9d9d9d9d9d9d"
 
 
+IDENT = ("t@TESTHOST", "t")   # the fixtures' synthetic author, on every invocation and in every repo's config
+
+
 def _git(*args, cwd):
-    subprocess.run(["git", "-c", "user.email=t@TESTHOST", "-c", "user.name=t"] + list(args),
-                   cwd=cwd, check=True, capture_output=True)
+    # through the suite's shared runner (tests/git_fixture.py, T299), which forbids git's BACKGROUND work:
+    # `git commit`, fetch and merge spawn `git maintenance run --auto`, which on recent git detaches from its
+    # parent and can still be writing into .git while the temp dir is removed (the CI flake "Directory not
+    # empty: '.git'", tests/test_restart_classifier.py, 2026-09-10). Bytes output and check=True, as before.
+    git(cwd, *args, ident=IDENT, text=False)
 
 
 def _repo(root, name, origin=None):
     """A one-commit repo on branch main under `root`, with `origin` set when given."""
     d = os.path.join(root, name)
     os.makedirs(d)
-    _git("init", "-q", "-b", "main", cwd=d)
+    init_repo(d, "-q", "-b", "main", ident=IDENT)
     with open(os.path.join(d, "f.txt"), "w") as f:
         f.write("x\n")
     _git("add", "f.txt", cwd=d)
@@ -92,6 +99,7 @@ class _Fixtures(unittest.TestCase):
         os.makedirs(cls.sub)
         cls.wt = os.path.join(cls.root, "https-repo-feature")
         _git("worktree", "add", "-q", "-b", "feature", cls.wt, "HEAD", cwd=cls.https)
+        forbid_background(cls.wt)
         cls.ssh = _repo(cls.root, "ssh-repo", SSH_ORIGIN)
         cls.elsewhere = _repo(cls.root, "elsewhere-repo", ELSEWHERE_ORIGIN)
         cls.noorigin = _repo(cls.root, "no-origin-repo")
@@ -144,6 +152,12 @@ class GitHubRepoOf(_Fixtures):
         src = inspect.getsource(km._github_repo_of)
         self.assertIn("_GITHUB_REMOTE.match(remote)", src, "one spelling of what counts as GitHub")
         self.assertIn('_git_out(["remote", "get-url", "origin"], top)', src, "the same authoritative read")
+
+    def test_the_fixture_repos_forbid_background_git_work(self):
+        # the kernel's own git runs against these through its subprocess, not _git: the keys live in each
+        # repo's local config (a worktree reads its clone's), so that git obeys them too
+        for repo in (self.https, self.wt, self.ssh, self.elsewhere, self.noorigin):
+            self.assertEqual(git(repo, "config", "--local", "--get", "maintenance.auto").stdout.strip(), "false", repo)
 
 
 class Memo(unittest.TestCase):
@@ -225,7 +239,7 @@ class LateRepo(unittest.TestCase):
     def _init_with_origin(self, d):
         """What `git init` + a first commit + `gh repo create --push` leave behind (an unborn branch — init
         with no commit — reads as no branch, like a detached HEAD; the repo is still found)."""
-        _git("init", "-q", "-b", "main", cwd=d)
+        init_repo(d, "-q", "-b", "main", ident=IDENT)
         with open(os.path.join(d, "f.txt"), "w") as f:
             f.write("x\n")
         _git("add", "f.txt", cwd=d)
@@ -341,7 +355,7 @@ class RejectedDotGit(unittest.TestCase):
         self.assertEqual(self._build(sub), [(("", ""), None, None)] * 3)
         self.assertEqual(self.forks, {"--show-toplevel": 1}, "git rejects the empty .git once; no build after it forks")
         # `git init` populates the directory (its mtime moves): the next call asks git again and finds the tree
-        _git("init", "-q", "-b", "main", cwd=proj)
+        init_repo(proj, "-q", "-b", "main", ident=IDENT)
         _git("remote", "add", "origin", HTTPS_ORIGIN, cwd=proj)
         self.assertEqual(km._github_repo_of(sub), REPO)
         self.assertEqual(self.forks["--show-toplevel"], 2)
@@ -358,7 +372,7 @@ class RejectedDotGit(unittest.TestCase):
         top = os.path.realpath(plain)
         self.assertEqual(self._build(svc), [((top, "main"), REPO, REPO)] * 3, "found: the PARENT's tree, as git says")
         self.assertEqual(self.forks, {"--show-toplevel": 1, "--abbrev-ref": 1, "get-url": 1}, "asked once, then stats")
-        _git("init", "-q", "-b", "svc", cwd=svc)
+        init_repo(svc, "-q", "-b", "svc", ident=IDENT)
         with open(os.path.join(svc, "g.txt"), "w") as f:
             f.write("y\n")
         _git("add", "g.txt", cwd=svc)
@@ -395,6 +409,7 @@ class RejectedDotGit(unittest.TestCase):
         main = _repo(self.root, "main", HTTPS_ORIGIN)
         wt = os.path.join(self.root, "main-x")
         _git("worktree", "add", "-q", "-b", "x", wt, "HEAD", cwd=main)
+        forbid_background(wt)
         self.assertEqual(km._github_repo_of(wt), REPO, "a live worktree names the clone's repo")
         backup = os.path.join(self.root, "backup")
         shutil.copytree(main, backup, symlinks=True)
@@ -416,6 +431,7 @@ class RejectedDotGit(unittest.TestCase):
         main = _repo(self.root, "main", HTTPS_ORIGIN)
         wt = os.path.join(self.root, "main-y")
         _git("worktree", "add", "-q", "-b", "y", wt, "HEAD", cwd=main)
+        forbid_background(wt)
         pointer = os.path.join(wt, ".git")
         good = open(pointer).read()
         with open(pointer, "w") as f:
@@ -495,6 +511,7 @@ class DeadOrReshapedTree(unittest.TestCase):
         other = _repo(self.root, "other", "https://github.com/other-org/other-repo.git")
         shutil.rmtree(solo)
         _git("worktree", "add", "-q", "-b", "reshaped", solo, "HEAD", cwd=other)   # .git is a FILE now
+        forbid_background(solo)
         self.forks.clear()
         self.assertEqual(self._builds(solo), [("reshaped", "other-org/other-repo")] * 3,
                          "the new shape's branch and repo, from its pointer file")
@@ -512,6 +529,7 @@ class DeadOrReshapedTree(unittest.TestCase):
         main = _repo(self.root, "main", HTTPS_ORIGIN)
         wt = os.path.join(self.root, "main-web")
         _git("worktree", "add", "-q", "-b", "web", wt, "HEAD", cwd=main)
+        forbid_background(wt)
         self.assertEqual(self._builds(wt), [("web", REPO)] * 3)
         shutil.rmtree(wt)
         _repo(self.root, "main-web", "https://github.com/other-org/fresh.git")   # a plain clone where the worktree was
@@ -531,9 +549,11 @@ class DeadOrReshapedTree(unittest.TestCase):
         b = _repo(self.root, "b", "https://github.com/other-org/fork.git")
         wt = os.path.join(self.root, "shared-name")
         _git("worktree", "add", "-q", "-b", "web", wt, "HEAD", cwd=a)
+        forbid_background(wt)
         self.assertEqual(self._builds(wt), [("web", REPO)] * 3)
         shutil.rmtree(wt)
         _git("worktree", "add", "-q", "-b", "feature", wt, "HEAD", cwd=b)
+        forbid_background(wt)
         _bump_mtime(os.path.join(wt, ".git"))   # a new pointer; its mtime must differ even within one clock tick
         self.forks.clear()
         self.assertEqual(self._builds(wt), [("feature", "other-org/fork")] * 3)
@@ -551,12 +571,14 @@ class DeadOrReshapedTree(unittest.TestCase):
         b = _repo(self.root, "b", "https://github.com/other-org/fork.git")
         wt = os.path.join(self.root, "shared-name")
         _git("worktree", "add", "-q", "-b", "web", wt, "HEAD", cwd=a)
+        forbid_background(wt)
         self.assertEqual(self._builds(wt), [("web", REPO)] * 3)
         pointer = os.path.join(wt, ".git")
         old = os.stat(pointer)
         os.link(pointer, os.path.join(self.root, "keep-the-old-pointer-allocated"))
         shutil.rmtree(wt)
         _git("worktree", "add", "-q", "-b", "feature", wt, "HEAD", cwd=b)
+        forbid_background(wt)
         os.utime(pointer, ns=(old.st_atime_ns, old.st_mtime_ns))   # the same tick, as a coarse filesystem reports it
         new = os.stat(pointer)
         self.assertEqual(new.st_mtime, old.st_mtime, "the mtime says nothing changed")
@@ -604,6 +626,7 @@ class DeadOrReshapedTree(unittest.TestCase):
         main = _repo(self.root, "main", HTTPS_ORIGIN)
         wt = os.path.join(self.root, "main-web")
         _git("worktree", "add", "-q", "-b", "web", wt, "HEAD", cwd=main)
+        forbid_background(wt)
         self.assertEqual(self._builds(wt), [("web", REPO)] * 3)
         top = os.path.realpath(wt)
         self.assertIn(top, km._top_shape)
@@ -643,6 +666,7 @@ class DeadOrReshapedTree(unittest.TestCase):
         main = _repo(self.root, "main", HTTPS_ORIGIN)
         wt = os.path.join(self.root, "main-web")
         _git("worktree", "add", "-q", "-b", "web", wt, "HEAD", cwd=main)
+        forbid_background(wt)
         self.assertEqual(self._builds(wt), [("web", REPO)] * 3)
         self.assertEqual(self._builds(main), [("main", REPO)] * 3)
         self.forks.clear()
@@ -713,6 +737,7 @@ class PerCallCost(unittest.TestCase):
         main = _repo(self.root, "main", HTTPS_ORIGIN)
         wt = os.path.join(self.root, "main-web")
         _git("worktree", "add", "-q", "-b", "web", wt, "HEAD", cwd=main)
+        forbid_background(wt)
         self.assertEqual(self._cost(lambda: km._tree_of(main)), (2, 0), "the chain's stat and HEAD's")
         self.assertEqual(self._cost(lambda: km._tree_of(wt)), (3, 0), "…plus the pointer target's; the pointer itself is not read")
         self.assertEqual(self._cost(lambda: km._github_repo_of(wt)), (4, 0), "…plus the config file's")
@@ -726,6 +751,7 @@ class PerCallCost(unittest.TestCase):
         main = _repo(self.root, "main", HTTPS_ORIGIN)
         wt = os.path.join(self.root, "main-x")
         _git("worktree", "add", "-q", "-b", "x", wt, "HEAD", cwd=main)
+        forbid_background(wt)
         self.assertEqual(self._cost(lambda: km._tree_of(wt)), (3, 0))
         pointer = os.path.join(wt, ".git")
         with open(pointer) as f:
@@ -770,6 +796,7 @@ class BareRepository(unittest.TestCase):
         src = _repo(self.root, "src", HTTPS_ORIGIN)
         bare = os.path.join(self.root, "bare.git")
         _git("clone", "-q", "--bare", src, bare, cwd=self.root)
+        forbid_background(bare)
         self.assertEqual([km._git_branch(bare) for _ in range(3)], ["main"] * 3)
         self.assertEqual(self.forks, {"--show-toplevel": 1, "--abbrev-ref": 1}, "asked once each, then memoized")
         self.assertIsNone(km._github_repo_of(bare), "no work tree, no tree-derived repo — as before")
@@ -783,8 +810,10 @@ class BareRepository(unittest.TestCase):
         src = _repo(self.root, "src", HTTPS_ORIGIN)
         bare = os.path.join(self.root, "bare.git")
         _git("clone", "-q", "--bare", src, bare, cwd=self.root)
+        forbid_background(bare)
         wt = os.path.join(self.root, "topic")
         _git("worktree", "add", "-q", "-b", "topic", wt, "main", cwd=bare)
+        forbid_background(wt)
         self.assertEqual(km._git_branch(wt), "topic")
         self.assertEqual(km._github_repo_of(wt), None, "the bare clone has no origin remote")
 
@@ -927,6 +956,7 @@ class ConfigFile(unittest.TestCase):
         main = _repo(self.root, "main-repo", HTTPS_ORIGIN)
         wt = os.path.join(self.root, "main-repo-wt")
         _git("worktree", "add", "-q", "-b", "wtb", wt, "HEAD", cwd=main)
+        forbid_background(wt)
         with open(os.path.join(wt, ".git")) as f:
             gd = f.readline().strip()[len("gitdir:"):].strip()
         self.assertTrue(os.path.isabs(gd), "git writes the pointer absolute")

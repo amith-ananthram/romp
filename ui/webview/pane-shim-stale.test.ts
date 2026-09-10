@@ -24,15 +24,16 @@ import * as vm from "node:vm";
 
 const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
 
-function shimJs(app: string): string {
-  const def = KERNEL.indexOf("def _shim(app, v=0):");
+function shimJs(app: string, noStale = false): string {
+  const def = KERNEL.indexOf("def _shim(app, v=0, no_stale=False):");
   assert.ok(def > 0, "the shim renderer exists");
   const start = KERNEL.indexOf('return """', def) + 'return """'.length;
   // the tuple's first slot is the reload core (T265, its own executed test in tests/test_dashboard_auto_reload.py);
-  // an empty core here leaves window.__rompReload undefined, so the shim's raise takes its fallback path
-  const end = KERNEL.indexOf('""" % (_reload_core(v), app, int(v), app, app)', start);
+  // an empty core here leaves window.__rompReload undefined, so the shim's raise takes its fallback path. The
+  // fourth slot is the stale opt-out the Files page renders with (no_stale=True): a JS boolean literal.
+  const end = KERNEL.indexOf('""" % (_reload_core(v), app, int(v), "true" if no_stale else "false", app, app)', start);
   assert.ok(end > start, "the template's format tuple is the one the test substitutes");
-  const args = ["", app, "5", app, app];
+  const args = ["", app, "5", noStale ? "true" : "false", app, app];
   let i = 0;
   return KERNEL.slice(start, end).replace(/%[sd]/g, () => args[i++]).replace(/%%/g, "%");
 }
@@ -357,4 +358,34 @@ test("queued breadcrumbs are capped while the socket is down; other queued messa
   assert.deepEqual(diag.map((m) => m.data.i), [...Array(20).keys()], "the oldest are kept: the rows about the drop that started it");
   assert.equal(h.sent.filter((m) => m.type === "activeTab").length, 1, "a non-diagnostic message is never dropped");
   assert.equal(h.sent.length, 21);
+});
+
+// The Files pane's page (kernel.py _files_page) is served with the opt-out: nothing is pushed to app=files
+// (the viewer is request/response, so the kernel builds no frame for it), and without the opt-out the
+// reconnect arm would never be retired by a resync that never comes, so the second keepalive raised the
+// dashboard-wide "may be stale" prompt after every unannounced reconnect, for a file fetched over HTTP on
+// demand, which a dropped socket cannot make stale. With it, neither the arm nor the retire runs: the
+// page's own op replies (a GitHub-link answer) must not clear a prompt another pane raised either.
+test("a page served with the stale opt-out never arms the prompt after a reconnect, and never retires one", () => {
+  const h = new Harness(shimJs("files", true));
+  assert.match(h.ws.url, /^ws:\/\/TESTHOST:29855\/ws\?app=files&delta=1&iid=/, "the same dial as every pane");
+  h.ws.open(); h.bundleReady();
+  h.ws.close(); h.runTimers();
+  assert.equal(h.sockets.length, 2, "the close redialed");
+  h.ws.open();
+  h.ws.msg({ type: "ka", dv: 0 }); h.ws.msg({ type: "ka", dv: 0 }); h.ws.msg({ type: "ka", dv: 0 });
+  assert.equal(h.stale(), 0, "three keepalives with no resync: nothing is raised");
+  assert.equal(h.diags("stale-raise").length, 0, "and no raise breadcrumb");
+  h.ws.msg({ type: "fileGitLink", reqId: 1, url: "" });   // an op reply, the only non-keepalive frame this page sees
+  assert.equal(h.fresh(), 0, "an op reply retires nothing: wsFresh would clear a prompt another pane raised");
+  assert.equal(h.toBundle.filter((m) => m.type === "fileGitLink").length, 1, "the reply still reaches the bundle");
+  h.ws.close();
+  assert.equal(h.stale(), 0, "the reconnected socket closing raises nothing either");
+  h.runTimers(); h.ws.open();
+  h.settles(0);
+  // the control: the same script without the opt-out raises on the second keepalive (the rule the cases above run)
+  const g = new Harness(shimJs("files"));
+  g.reconnected();
+  g.ws.msg({ type: "ka", dv: 0 }); g.ws.msg({ type: "ka", dv: 0 });
+  assert.equal(g.stale(), 1, "the opt-out is the difference, not the app name");
 });

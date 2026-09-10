@@ -957,6 +957,77 @@ class ViewBuilder(unittest.TestCase):
         self.assertIsNotNone(cur, "an open (unfinished) turn → the Fleet recency stamp")
         self.assertEqual(cur, {"t": NOW}, "slimmed to the one field its reader (fleet stamp) uses")
 
+    def test_ledger_carries_the_working_note(self):
+        """The postal set_working note rides the per-session ledger: the chat's section-at-a-glance view
+        shows it as a row's own second line under the task. Read from the backend-agnostic store
+        (working/<sid>); "" when the session published none, never a missing key."""
+        saved = km.WORKING_DIR
+        km.WORKING_DIR = jd.STATE / "working"
+        try:
+            self.assertEqual(km.build_session(SID, NOW)["ledger"]["workingNote"], "", "no note: an empty string")
+            km._set_working_note(SID, "  editing the notes-api tests  \n")
+            self.assertEqual(km.build_session(SID, NOW)["ledger"]["workingNote"], "editing the notes-api tests", "the note, stripped")
+            km._set_working_note(SID, "")
+            self.assertEqual(km.build_session(SID, NOW)["ledger"]["workingNote"], "", "cleared: empty again")
+        finally:
+            km.WORKING_DIR = saved
+
+    def test_muted_session_keeps_its_working_note(self):
+        """hideFromFeed empties the ledger's task tracking (tree, current, recent) but NOT the note: the note is
+        the session's own statement of what it holds, not a goal the judges track. Pinned because the
+        hideFromFeed branch is the natural place to empty the ledger, and a field moved inside it would flip
+        this with every other test green."""
+        saved = km.WORKING_DIR
+        km.WORKING_DIR = jd.STATE / "working"
+        try:
+            km._set_working_note(SID, "editing the notes-api tests")
+            km._set_session_flag(SID, "hideFromFeed", True); km._flags_cache.clear()
+            led = km.build_session(SID, NOW)["ledger"]
+            self.assertEqual((led["tree"], led["current"], led["recent"]), ([], None, []), "muted: out of task tracking")
+            self.assertEqual(led["workingNote"], "editing the notes-api tests", "but the note stays: the session's claim, not a goal")
+        finally:
+            km._set_session_flag(SID, "hideFromFeed", False); km._flags_cache.clear()
+            km.WORKING_DIR = saved
+
+    def test_ledger_carries_the_feed_needs_you_verdict(self):
+        """ledger.needsInput is the FEED's per-session needs-you: True when the last feed build filed a card of
+        this session under needs_input (here the fixture's judge-filed block, g2, on an IDLE session, the case
+        the tab's chip rule never sees), False when none, None before the first feed build. Read from the feed
+        build's own payload, never re-derived; a muted session has no cards. The section-at-a-glance row's
+        "needs you" reads it so the two panes agree. The goal store this rewrites, and the override journal
+        load_goals replays over it, live under the fixture's own temp root (setUp rebinds jd.GOALDIR and
+        jd.STATE), so no other module's journaled gesture on the shared placeholder sid reaches it."""
+        tmux = km._tmux_sessions()
+        saved = (list(km._built_feed), km._feed_needs_input[0], km._views_dirty[0])
+        km._built_feed[:] = [None, None, 0.0, 0.0]; km._feed_needs_input[0] = None; km._views_dirty[0] = 0.0
+        try:
+            self.assertIsNone(km.build_session(SID, NOW)["ledger"]["needsInput"], "no feed build yet: None, not a verdict")
+            feed = km._cached_feed(NOW, tmux, km._fleet_view_sig(NOW, tmux))
+            self.assertTrue(any(a["sid"] == SID and a["column"] == "needs_input" for a in feed["asks"]),
+                            "the fixture's blocked goal files a needs_input card for the idle session")
+            self.assertEqual(tmux[SID]["state"], "idle", "while the chip is idle: the tab's rule alone shows nothing")
+            self.assertIs(km.build_session(SID, NOW)["ledger"]["needsInput"], True, "the row's needs-you = the feed's column")
+            # the judges rule the block answered: the store now holds the goal working; a dirty mark bypasses
+            # the rebuild throttle the way the reply handler does
+            store = json.loads((jd.GOALDIR / (SID + ".json")).read_text())
+            g2 = "%s:g2" % SID
+            store["nodes"][g2]["blocked"] = False; store["status"][g2] = "working"
+            (jd.GOALDIR / (SID + ".json")).write_text(json.dumps(store))
+            km._mark_views_dirty()
+            feed = km._cached_feed(NOW, tmux, km._fleet_view_sig(NOW, tmux))
+            self.assertFalse(any(a["sid"] == SID and a["column"] == "needs_input" for a in feed["asks"]))
+            self.assertIs(km.build_session(SID, NOW)["ledger"]["needsInput"], False, "no card under needs-you: False")
+            # muted: out of the feed altogether, so no cards, so False, whatever the store says
+            store["nodes"][g2]["blocked"] = True; store["status"][g2] = "blocked"
+            (jd.GOALDIR / (SID + ".json")).write_text(json.dumps(store))
+            km._set_session_flag(SID, "hideFromFeed", True); km._flags_cache.clear()
+            km._mark_views_dirty()
+            km._cached_feed(NOW, tmux, km._fleet_view_sig(NOW, tmux))
+            self.assertIs(km.build_session(SID, NOW)["ledger"]["needsInput"], False, "a muted session is out of task tracking")
+        finally:
+            km._set_session_flag(SID, "hideFromFeed", False); km._flags_cache.clear()
+            km._built_feed[:], km._feed_needs_input[0], km._views_dirty[0] = saved
+
     def test_host_sleep_closes_a_turn_left_open(self):
         # A turn still open when the laptop slept must NOT keep reading as "working": the kernel records the
         # suspend interval and the ledger closes the turn at last activity — no working-on line, no multi-hour
@@ -1881,7 +1952,8 @@ class ViewBuilder(unittest.TestCase):
             # source 0.5: the live bg-task set — one task shows its description verbatim (a COMMAND row;
             # the sentence says "command" since slice 2)
             desc = "20-minute timer for campaign-start check"
-            cmd_row = {"kind": "commands", "id": "tu_bg", "label": desc, "since": T0 + 9}
+            cmd_row = {"kind": "commands", "id": "tu_bg", "label": desc, "since": T0 + 9,
+                       "stoppable": True}   # a lifecycle-set row: stop_task resolves its id (2026-09-10)
             km._tmux_sessions = lambda: {SID: {"bgTasks": [timer]}}
             self.assertEqual(km._session_awaiting(SID, str(p), True),
                              {"kind": "task", "since": T0 + 9,   # the dispatch stamp (the user 2026-08-23)
@@ -7717,7 +7789,7 @@ class ServeSecurity(unittest.TestCase):
         self.assertNotIn("nav-typing", html)                           # the typing/dimming logic is gone
         # the wiring: maps each iframe id → its pane, toggles pane-focused exclusively, defaults to chat.
         # Fleet is its OWN pane now (the user 2026-06-24), so f-fleet maps to fleet-pane, not the chat pane.
-        self.assertIn("var PANE={'f-chat':'chat-pane','f-fleet':'fleet-pane','f-feed':'feed-pane','f-timeline':'tl-pane'}", html)
+        self.assertIn("var PANE={'f-chat':'chat-pane','f-fleet':'fleet-pane','f-feed':'feed-pane','f-files':'files-pane','f-timeline':'tl-pane'}", html)
         self.assertIn("classList.toggle('pane-focused'", html)
         self.assertIn("d.addEventListener('pointerdown',emit,true)", html)
         self.assertIn("d.addEventListener('focusin',emit,true)", html)
@@ -7788,6 +7860,23 @@ class ServeSecurity(unittest.TestCase):
         html = km._landing()
         self.assertIn("<script src=/dist/palette-main.js?v=", html)
 
+    def test_shell_perf_bundle_wired(self):
+        # the shell's performance collector (ui/webview/shell-perf.ts): Chromium reports a long animation
+        # frame to the top-level document, never to the iframe whose script ran it, so the shell page
+        # observes them and posts a minute row (app "shell") on its own socket (shellWS,
+        # window.__rompShellSend). It is a dist bundle like age-color-global, loaded right after it and
+        # before the errs script so that a long frame during the boot's own work is seen; its behavior is
+        # tested in ui/webview/shell-perf.test.ts, and tests/test_landing_bundles_built.py checks that the
+        # build emits every bundle this page names.
+        html = km._landing()
+        self.assertIn("<script src=/dist/shell-perf.js?v=", html)
+        self.assertLess(html.index("/dist/age-color-global.js"), html.index("/dist/shell-perf.js"))
+        self.assertLess(html.index("/dist/shell-perf.js"), html.index("window.__rompAgeColor"))   # before the errs script
+        self.assertLess(html.index("/dist/shell-perf.js"), html.index("/dist/palette-main.js"))
+        # the socket it posts through is the shell's own, defined by the mobile-shell script, which runs
+        # later: the bundle reads window.__rompShellSend at call time, so the order is fine
+        self.assertIn("window.__rompShellSend=", html)
+
     def test_fleet_page_served(self):
         # Fleet (the user 2026-06-23): /fleet serves the by-session open-work view, rendered by dist/fleet.js.
         import urllib.request
@@ -7807,6 +7896,28 @@ class ServeSecurity(unittest.TestCase):
         self.assertIn("window.addEventListener('romp:wsdown',function(){if(ready()){badge(true);}else{show();}});", body)   # T217: content → badge; empty pane → the sheet
         self.assertIn('dispatchEvent(new Event("romp:wsdown"))', body)            # shim fires it on close
         self.assertIn("function show(){o.classList.remove('gone')", body)         # kept in the DOM, not removed
+
+    def test_files_page_served(self):
+        # Files: /files serves the file viewer as its own pane, rendered by dist/files.js. It connects as its OWN
+        # app (app=files) with the shim's stale opt-out: the viewer is request/response (HTTP /file for the bytes,
+        # op replies to the sending client), never a feed consumer. The chat's styles.css supplies the viewer's
+        # dress; files-pane.css is inlined live for the layout and the pane-resident variant. No romp loader: an
+        # empty pane is not a loading state. The pane's own module is tests/test_files_pane.py.
+        import urllib.request
+        with urllib.request.urlopen("http://127.0.0.1:%d/files?token=testtok" % self.port, timeout=5) as r:
+            self.assertEqual(r.status, 200)
+            body = r.read().decode("utf-8", "replace")
+        self.assertIn("<body class=fileview-pane>", body)
+        self.assertIn("<div id=files-empty></div>", body)
+        self.assertIn("/dist/styles.css", body)
+        self.assertIn("/dist/federation.js", body)
+        self.assertIn("/dist/files.js", body)
+        self.assertLess(body.index("/dist/federation.js"), body.index("/dist/files.js"), "manager before the bundle")
+        self.assertIn("app=files", body)
+        self.assertIn("var NOSTALE=true;", body)   # no pushed view, so the "may be stale" prompt is never armed here
+        self.assertIn("body.fileview-pane #romp-fileview{", body, "files-pane.css is inlined live")
+        self.assertNotIn("id=pane-spin", body)
+        self.assertNotIn("rel=manifest", body)   # a pane, not an install target
 
     def test_landing_fleet_is_its_own_pane_toggled_from_the_rail(self):
         # Fleet is its OWN pane now (the user 2026-06-24): the old .show-fleet SWAP (Fleet living inside the

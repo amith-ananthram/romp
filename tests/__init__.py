@@ -81,3 +81,7 @@ os.environ["ROMP_SERVE_PORT"] = "1"
 # sys.path itself. One module object either way.
 from . import romp_load as _romp_load  # noqa: E402
 sys.modules.setdefault("romp_load", _romp_load)
+# `from git_fixture import git, init_repo` (tests/git_fixture.py, T299): the throwaway-repo fixtures' one git
+# runner, registered the same way for the same reason.
+from . import git_fixture as _git_fixture  # noqa: E402
+sys.modules.setdefault("git_fixture", _git_fixture)

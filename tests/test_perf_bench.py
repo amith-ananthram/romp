@@ -51,6 +51,8 @@ os.environ["XDG_STATE_HOME"] = _XDG_TMP
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 atexit.register(shutil.rmtree, _XDG_TMP, ignore_errors=True)
 
+from git_fixture import git, init_repo   # after the state-root preamble; it imports only the standard library
+
 SID_WEB = "11111111-2222-3333-4444-555555555555"
 SID_API = "22222222-3333-4444-5555-666666666666"
 SID_TESTS = "33333333-4444-5555-6666-777777777777"
@@ -196,12 +198,21 @@ def _transcript(path, sid, cwd, n_turns, t0):
 ORIGIN = "https://github.com/example-org/notes-api.git"   # fabricated; `remote get-url` reads config, no network
 
 
+GIT_IDENT = {"user.email": "t@TESTHOST", "user.name": "t", "commit.gpgsign": "false"}   # the fixture's synthetic author
+
+
+def _git_env():
+    """No global or system config: a developer's commit signing or url.insteadOf must not bend the fixture."""
+    return dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+
+
 def _git(*args, cwd):
     """A fixture git call that reads no global or system config (a developer's commit signing or
-    url.insteadOf must not bend the fixture) and commits as a synthetic author."""
-    env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
-    subprocess.run(["git", "-c", "user.email=t@TESTHOST", "-c", "user.name=t", "-c", "commit.gpgsign=false"] + list(args),
-                   cwd=str(cwd), check=True, capture_output=True, env=env)
+    url.insteadOf must not bend the fixture) and commits as a synthetic author. It runs through the shared
+    runner (tests/git_fixture.py), which forbids background git work: `git commit` spawns `git maintenance
+    run --auto`, which on recent git detaches from its parent and can still be writing into .git while the
+    fixture's directory is removed (the CI flake "Directory not empty: '.git'", 2026-09-10)."""
+    git(cwd, *args, env=_git_env(), ident=GIT_IDENT, text=False)
 
 
 def build_synthetic(root, web_turns=WEB_TURNS, age_api_days=0):
@@ -218,7 +229,7 @@ def build_synthetic(root, web_turns=WEB_TURNS, age_api_days=0):
     state = root / "romp"
     cwd = root / "notes-api"
     cwd.mkdir(parents=True)
-    _git("init", "-q", "-b", "main", cwd=cwd)
+    init_repo(cwd, "-q", "-b", "main", env=_git_env(), ident=GIT_IDENT)
     (cwd / "README.md").write_text("# notes-api\n")
     _git("add", "README.md", cwd=cwd)
     _git("commit", "-q", "-m", "seed", cwd=cwd)
@@ -405,6 +416,12 @@ class PerfBench(unittest.TestCase):
             self.assertEqual(set(b[row]["git_per_build"]) - {"rev-parse", "ls-files"}, set(), "only admitted queries ran")
         checkout, plain = b["build_session_cold:11111111"]["git_per_build"], b["build_session_cold:22222222"]["git_per_build"]
         self.assertLess(sum(checkout.values()), sum(plain.values()), "the checkout's answers are cached across the kept samples: %s vs %s" % (checkout, plain))
+
+    def test_the_fixture_repos_forbid_background_git_work(self):
+        # the kernel's own git queries (rev-parse, ls-files, through the tool's tripwire, not this file's
+        # runner) run against the sessions' checkout, so the no-background keys sit in that repo's own config
+        repo = os.path.join(self.root, "notes-api")
+        self.assertEqual(git(repo, "config", "--local", "--get", "maintenance.auto").stdout.strip(), "false")
 
     def test_push_rows_report_bytes_and_rebuild_flags(self):
         b = self._out()["benchmarks"]
@@ -866,7 +883,7 @@ class Tripwire(unittest.TestCase):
         cls.root = tempfile.mkdtemp(prefix="perf-bench-tripwire-")
         cls.repo = os.path.join(cls.root, "notes-api")
         os.makedirs(cls.repo)
-        _git("init", "-q", "-b", "main", cwd=cls.repo)
+        init_repo(cls.repo, "-q", "-b", "main", env=_git_env(), ident=GIT_IDENT)
         _git("remote", "add", "origin", ORIGIN, cwd=cls.repo)
 
     @classmethod
@@ -909,7 +926,7 @@ class Tripwire(unittest.TestCase):
         self.assertEqual(tw.git_calls, {})
         with self.assertRaises(self.pb.BenchError):
             tw.run(["git", "-C", self.repo, "remote"], capture_output=True, text=True)
-        r = subprocess.run(["git", "-C", self.repo, "remote", "get-url", "origin"], capture_output=True, text=True)
+        r = git(self.repo, "remote", "get-url", "origin", check=False)
         self.assertEqual(r.stdout.strip(), ORIGIN, "the refused set-url never ran")
 
     def test_no_git_answers_the_repo_query_as_a_failure(self):

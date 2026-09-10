@@ -397,9 +397,15 @@ body.tabbar-resizing { cursor: ns-resize; user-select: none; }
    by construction; the uncoloured "(no tags)" chip lifts from --dim toward --fg, the old label's exact cue */
 .tab-group-head:hover .tab-group-chip, .tab-group-head:focus-visible .tab-group-chip { filter: brightness(1.3); }
 .tab-group-head:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-/* the section holding the active tab: unfoldable while active (no fold action on its header), so no
-   pointer cursor promising a click — it still drags to reorder the groups */
-.tab-group-head.holds-active { cursor: default; }
+/* the section holding the tab being read, open or folded: it folds like any other (its cursor promises the
+   click), and its header says whose it is by the tag's chip, accent-underlined (the chip is coloured by
+   identity inline, which a colour rule cannot reach; the underline is a property it never sets), so the
+   header that stands in for a folded-away tab is found by the same mark it wore while open. Distinct from
+   the hover lift (a fold cue) and from .snap-shown (the pane shows the section). */
+.tab-group-head.holds-active .tab-group-chip { text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: 2px; }
+/* the section whose sessions the pane is SHOWING at a glance (render.ts sets .snap-shown on its header): the
+   accent wash the picker's active row wears, on the header the chip's inline style never reaches */
+.tab-group-head.snap-shown { background: var(--accent-wash); }
 .tab-group-head.dragging { opacity: 0.45; }
 .tab-group-head.drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 /* the disclosure chevron: ▸ folded, turned down while open — the fold-caret idiom (a CSS transition on
@@ -974,6 +980,14 @@ body.chat-theme-yatharth .tab.active.colored:not(.tab-blocked) {
 .bg-await-why { font-size: 0.92em; color: var(--fg); margin: 4px 0 0; }
 .bg-await-task { font-size: 0.92em; color: var(--dim); margin-top: 3px; }
 .bg-await-note { font-size: 0.82em; color: var(--dim); opacity: .8; margin-top: 6px; }
+/* NESTED rows (2026-09-10): what the agent above is itself waiting on — indented under its row, led by a
+   small dim "waiting on" on the first sub-row (the label rung .bg-status / .bg-group-head wear) and its
+   blank twin on the rest, one fixed width so every sub-row's dot lines up; a sub-row with waits of its
+   own counts them in .bg-deeper (the meta rung, like .bg-since). One level is drawn. */
+.bg-task.bg-sub > .bg-head { padding-left: 24px; }
+.bg-waits-on { flex: 0 0 auto; width: 72px; text-align: right; font-size: 0.72em; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; color: var(--dim); white-space: nowrap; }
+.bg-deeper { flex: 0 0 auto; font-size: 0.82em; color: var(--dim); white-space: nowrap; }
+.sub-head-waits { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }   /* the viewer header's "· waiting on …" tail */
 
 #footer {
   position: relative;   /* anchors #composer-resize on the top-edge divider */
@@ -1199,6 +1213,60 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
   animation: slash-spin 2.4s linear infinite; }
 @keyframes slash-spin { to { transform: rotate(-360deg); } }
 @media (prefers-reduced-motion: reduce) { .slash-spin { animation: none; } }
+
+/* ── @-mention autocomplete (the user 2026-09-07) ── the live sessions whose names match the "@query" at
+   the caret, floating just above the composer like the slash menu. A .ctx-menu card (the menu tokens and
+   size), one row per session: the name in its identity color, a remote host as the quiet .host-prefix
+   metadata. The highlighted row wears the menu's row wash, not the accent fill the slash menu uses: the
+   names carry their own colors and must stay readable on it. */
+.mention-pop { z-index: 120; max-height: 40vh; overflow-y: auto; min-width: 160px; }
+.mention-row { display: flex; align-items: center; gap: 7px; }
+.mention-row.sel { background: var(--menu-hover); }
+.mention-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+/* the matches the cap left out ("N more, keep typing"): the menu's sub-line dress, not a row (no wash, no pick) */
+.mention-more { padding: 4px 10px; font-size: 0.82em; opacity: 0.6; cursor: default; white-space: nowrap; }
+/* a sent message's "@name" that names a live session: a small pill in the session's identity color (the
+   tab's own --chip-bg/--chip-fg, set inline), over the blue you-bubble; the thin light ring keeps a blue
+   identity apart from the bubble. No link: the title carries the session's state. */
+.mention-chip { display: inline-block; padding: 0 6px; border-radius: 9px; line-height: 1.35;
+  background: var(--chip-bg, rgba(255, 255, 255, 0.18)); color: var(--chip-fg, currentColor);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3); }
+
+/* A SECTION AT A GLANCE (tab-snapshot.ts, render.ts renderSnapshot): one row per session of a tab-strip
+   section, in the transcript's place. Two sizes only: the body size for the name and the now line, and
+   0.82em, the header's label size, for the heading, the flag word, the time and the note (labels match
+   labels, times match the strip's sub-lines). The heading wears the header's own dress (letter-spaced dim
+   label + the tag's swatch bar); a row is a real button with the one action hover (accent border + accent
+   wash) and the accent focus ring; the pip wears the tab's state colors by the tab's rule (the retrying
+   amber is the same status token the tab and the folded header's pip use); the name takes the session's
+   identity color inline. Tokens only, so it reads in every theme without a light override. */
+#tab-snapshot { padding: 6px 14px 14px; }
+.snap-head { display: flex; align-items: center; gap: 6px; margin: 4px 0 8px; font-size: 0.82em; font-weight: 600; letter-spacing: 0.04em; color: var(--dim); }
+.snap-swatch { flex: 0 0 auto; width: 3px; height: 12px; border-radius: 1px; background: var(--dim); }
+.snap-count { font-weight: 400; opacity: 0.7; }
+.snap-list { display: flex; flex-direction: column; gap: 2px; }
+.snap-row { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; width: 100%; min-width: 0; padding: 5px 8px; border: 1px solid transparent; border-radius: 6px;
+  background: none; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
+.snap-row:hover { border-color: var(--accent); background: var(--accent-wash); }
+.snap-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.snap-pip { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: transparent; }
+.snap-pip.working { background: var(--st-working-bg); }
+.snap-pip.blocked { background: var(--st-blocked-bg); }
+.snap-pip.awaiting { background: var(--st-awaiting-bg); }
+.snap-pip.retrying { background: var(--st-retrying-bg); }
+.snap-pip.compacting { background: var(--st-compacting-bg); }
+.snap-pip.waiting { background: var(--st-awaitbg-bg); }
+.snap-pip.unknown { box-shadow: inset 0 0 0 1.5px var(--dim); }
+.snap-sess { flex: 0 0 auto; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.snap-row.closed .snap-sess { text-decoration: line-through; opacity: 0.6; }
+.snap-row.loading .snap-sess { opacity: 0.6; }
+.snap-flag { flex: 0 0 auto; padding: 0 6px; border: 1px solid var(--box-border); border-radius: var(--radius-pill); font-size: 0.82em; color: var(--dim); }
+.snap-flag.needs { border-color: transparent; background: var(--st-blocked-bg); color: var(--st-blocked-fg); }
+.snap-now { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); }
+/* the row's second line: the session's own working note (render.ts fillSnapshotRow), the header's 0.82em in
+   the dim token a step quieter, one line, indented past the pip and its gap so it sits under the name */
+.snap-note { flex: 1 0 100%; min-width: 0; padding-left: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.82em; color: var(--dim); opacity: 0.7; }
+.snap-when { flex: 0 0 auto; font-size: 0.82em; font-variant-numeric: tabular-nums; color: var(--dim); }
 /* The two buttons are the SAME rounded square, exactly as tall as the one-line message box beside them
    (the user 2026-07-30, round 2: the first cut's circles sat taller than the resting box, and a rounded
    rectangle reads better than a full circle). The size is the input's own min-height calc written

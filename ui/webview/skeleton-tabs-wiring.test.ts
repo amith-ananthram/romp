@@ -217,8 +217,8 @@ test("every ACTIVE-tab display path reads through liveSession; only name reads a
   for (const f of ["updateStatusline", "renderBgTasks", "renderSubHead", "paintScrollMarks", "updateCommentRail", "landNearestMoment", "virtualizeToViewport", "updateJumpBtn", "updateReplyChips"]) {
     assert.match(fn(f), /liveSession\(activeId\)/, f + " reads the gated session");
   }
-  assert.match(fn("renderLiveAsk"), /if \(!activeId \|\| skeletonTabs\.ids\.has\(activeId\) \|\| !liveAsks\.has\(activeId\)\) \{/,
-    "a skeleton's pre-outage picker is stale — hidden until the tab loads");
+  assert.match(fn("renderLiveAsk"), /if \(!activeId \|\| skeletonTabs\.ids\.has\(activeId\) \|\| !liveAsks\.has\(activeId\) \|\| snapView\) \{/,
+    "a skeleton's pre-outage picker is stale — hidden until the tab loads (and none shows under a section at a glance: snapView)");
 });
 
 test("styles: the skeleton label wears the placeholder's own muted value, and nothing else is new", () => {
@@ -231,7 +231,7 @@ test("the click path's loader latch: showActive latches the skeleton it is loadi
   // on the click path the strip that RELEASES the id lands before its full, so onFull() reports no skeleton —
   // the latch is what routes that full to showActive (review find 2026-09-07)
   assert.match(RENDER, /let skeletonLoading: string \| null = null;/);
-  const show = RENDER.slice(RENDER.indexOf("function showActive("), RENDER.indexOf("function showActive(") + 6000);
+  const show = RENDER.slice(RENDER.indexOf("function showActive("), RENDER.indexOf("function showActive(") + 9000);   // the section-at-a-glance branch sits ahead of the loading branch
   assert.match(show, /const skeleton = skeletonTabs\.ids\.has\(activeId\);\s*\n\s*skeletonLoading = skeleton \? activeId : null;/);
   assert.match(show, /document\.getElementById\("tab-loading"\)\?\.remove\(\);[^\n]*\n\s*skeletonLoading = null;/);
   assert.doesNotMatch(RENDER, /window\.addEventListener\("romp:wsup", \(\) => \{ onSocketUp/, "the socket flip is a frame now, never the onopen event");
@@ -318,6 +318,9 @@ function chipWorld(opts: { clientHeight: number; innerHeight: number; transcript
     const { sessions, views, tabMeta, skeletonTabs, commentThreads, jumpBtn, replyChips, atBottomDist, isReplyReady, hostOf, el, rompLoaderInner, HOOKS } = W;
     let activeId = null, skeletonLoading = null, replyChipSig = "";
     const placeReviveLoader = () => {}, notifyActive = () => {}, renderLedger = () => {}, renderLiveAsk = () => {}, renderBgTasks = () => {}, renderSubHead = () => {}, updateStatusline = () => {};
+    // the section-at-a-glance view, inert: no section shows (snapView null), so showActive's branch is not taken
+    let snapView = null, snapKeep = null;
+    const renderSnapshot = () => false, hideSnapshot = () => {}, composerRestingPlaceholder = () => "";
     const requestFullSession = (id, why) => { HOOKS.fulls.push(why + ":" + id); };
   `;
   const epilogue = `
