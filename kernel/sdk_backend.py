@@ -8523,11 +8523,14 @@ class SdkBackend:
                           "process trees, stopped %d leftover session scope(s)"
                           % (resumed, restored, notified, reaped, scopes_stopped))
                 self._poke()
-            # T304: the sweep's summary row, EVERY boot (a boot that recovered nothing is the baseline the
-            # restart monitors compare against); `resumed` is the count of continuation notices queued
-            append_session_event(self.state_dir, "reconcile.boot", sessions=len(alive), resumed=resumed,
-                                 restored=restored, notified=notified, reaped=reaped, scopesStopped=scopes_stopped,
-                                 toStart=len(to_start), durationS=round(time.time() - t_boot0, 3))
+            # T304: the sweep's summary row, every boot that had a session to reconcile (a boot that
+            # recovered nothing is the baseline the restart monitors compare against; a boot with no
+            # sessions at all measures nothing and writes nothing, so a read-only route's lazy backend
+            # build leaves the state directory untouched); `resumed` counts the continuation notices queued
+            if alive:
+                append_session_event(self.state_dir, "reconcile.boot", sessions=len(alive), resumed=resumed,
+                                     restored=restored, notified=notified, reaped=reaped, scopesStopped=scopes_stopped,
+                                     toStart=len(to_start), durationS=round(time.time() - t_boot0, 3))
             # STAGGERED spawn (see BOOT_RESUME_CONCURRENCY): every reg above is already fixed —
             # queues persisted, heals applied — so even a death mid-stagger loses nothing (the next
             # boot's sweep picks the rest up). Spawns hold a slot on the backend-wide _spawn_sem —

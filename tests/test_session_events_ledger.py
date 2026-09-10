@@ -205,6 +205,14 @@ class BootReconcileRows(unittest.TestCase):
         self.assertEqual(_ring(be), [])
 
 
+    def test_a_boot_with_no_sessions_writes_nothing(self):
+        d = tempfile.mkdtemp(); be = _backend(d)
+        with mock.patch.object(sb.subprocess, "run", side_effect=lambda argv, **kw: mock.Mock(stdout="", returncode=0)):
+            be._boot_reconcile([])
+        self.assertEqual(_events(d), [], "a read-only route's lazy backend build must leave the state dir untouched")
+        self.assertFalse((Path(d) / sb.SESSION_EVENTS_FILE).exists())
+
+
 class CrashRows(unittest.TestCase):
     def test_heal_then_loop(self):
         d = tempfile.mkdtemp(); be = _backend(d)

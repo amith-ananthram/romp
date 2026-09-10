@@ -2017,8 +2017,8 @@ the SDK backend and read by `romp restart-metrics` (below). `session-events.json
 gets one flat row per thing that went wrong with a session's process and one
 per boot sweep: `{"t": <epoch s>, "pid": <the writing kernel>, "kind":
 "<writer>.<what>", "sid": <the session, when about one>, "name": <its name
-then>, ...fields, "text": <the prose>}`. The kinds: `reconcile.boot` (every
-boot's sweep summary: `sessions`, `resumed` continuation notices queued,
+then>, ...fields, "text": <the prose>}`. The kinds: `reconcile.boot` (the
+sweep summary of every boot that had a session to reconcile: `sessions`, `resumed` continuation notices queued,
 `restored`, `notified`, `reaped`, `scopesStopped`, `toStart`, `durationS`),
 `reconcile.orphan-reaped` (`cliPid`, `fsid`, `scope`, `signaled`, `forced`,
 `tree`), `reconcile.scope-stopped` (`unit`, `sid8`, `cliPid`),
