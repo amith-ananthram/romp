@@ -68,8 +68,13 @@ test("the box follows the marks: repainted after every marks pass, on the rail's
   const pass = RENDER.slice(at, RENDER.indexOf("\n}\n", at));
   assert.match(pass, /if \(!threads\.length\) \{ paintCommentOutlines\(sid\);/, "the last thread gone: its box goes on the same pass");
   assert.match(pass, /for \(const th of list\) ensureCommentMark\(turn, th\);[\s\S]*paintCommentOutlines\(sid\);/, "after the marks are placed");
-  assert.match(RENDER, /requestAnimationFrame\(\(\) => \{ railStickyPending = false; paintRailSticky\(\); paintScrollMarks\(\); updateCommentRail\(\); if \(activeId\) paintCommentOutlines\(activeId\); \}\);/,
-    "the notches' and ticks' own repaint path (a re-render, the view's resize observer)");
-  assert.match(RENDER, /window\.addEventListener\("resize", \(\) => \{ updateCommentRail\(\); if \(activeId\) paintCommentOutlines\(activeId\); \}\);/);
+  assert.match(RENDER, /requestAnimationFrame\(\(\) => \{ railStickyPending = false; paintRailSticky\(\); paintScrollMarks\(\); updateCommentRail\(\); if \(activeId && hasUnreadOpenThread\(activeId\)\) paintCommentOutlines\(activeId\); \}\);/,
+    "the notches' and ticks' own repaint path (a re-render, the view's resize observer, every scroll frame) — gated");
+  assert.match(RENDER, /window\.addEventListener\("resize", \(\) => \{ updateCommentRail\(\); if \(activeId && hasUnreadOpenThread\(activeId\)\) paintCommentOutlines\(activeId\); \}\);/);
+  // the gate is a store read, never a DOM walk: a scroll frame on a session with nothing unread costs a Map lookup
+  assert.match(RENDER, /function hasUnreadOpenThread\(sid: string\): boolean \{\s*\n\s*return \(commentThreads\.get\(sid\) \|\| \[\]\)\.some\(\(t\) => !!t\.unread && t\.status === "open"\);\s*\n\}/);
+  // …while the marks pass stays ungated: it is the removal path (the last unread thread gone takes its box with it)
+  const pass2 = RENDER.slice(RENDER.indexOf("function applyCommentMarks(sid: string): void {"), RENDER.indexOf("\n}\n", RENDER.indexOf("function applyCommentMarks(sid: string): void {")));
+  assert.doesNotMatch(pass2, /hasUnreadOpenThread/);
   assert.doesNotMatch(RENDER.slice(RENDER.indexOf("function paintCommentOutlines"), RENDER.indexOf("\n}\n", RENDER.indexOf("function paintCommentOutlines"))), /setTimeout|setInterval/);
 });

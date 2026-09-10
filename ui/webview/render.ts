@@ -3009,7 +3009,7 @@ let railStickyPending = false;
 function scheduleRailSticky(): void {
   if (railStickyPending) return;
   railStickyPending = true;
-  requestAnimationFrame(() => { railStickyPending = false; paintRailSticky(); paintScrollMarks(); updateCommentRail(); if (activeId) paintCommentOutlines(activeId); });
+  requestAnimationFrame(() => { railStickyPending = false; paintRailSticky(); paintScrollMarks(); updateCommentRail(); if (activeId && hasUnreadOpenThread(activeId)) paintCommentOutlines(activeId); });
 }
 
 function renderEventInner(ev: ChatEvent): HTMLElement {
@@ -8404,10 +8404,19 @@ function applyCommentMarks(sid: string): void {
  *  the box sits outside those containers, so an unclipped fragment scrolled out of one would draw over the content
  *  below. Repainted where the geometry can move — after every marks pass (each transcript rebuild and comments frame),
  *  on the rail's rAF scheduler (a re-render, the view's resize observer, every scroll in the pane, inner containers'
- *  included through the capture-phase listener) and on window resize; the same measure-then-write
+ *  included through the capture-phase listener) and on window resize — those two only while the session has an unread
+ *  open thread (hasUnreadOpenThread: a store read, so a scroll frame with nothing to move walks no DOM); the same measure-then-write
  *  pass either way, writing only what changed. pointer-events: none, so hover and click land on the marks beneath.
  *  A box goes with its unread bit (styleCommentMark drops the class when the popover opens or the thread resolves)
  *  and with its marks (a windowed-out turn, a deleted thread); a hidden view has no boxes to measure and keeps none. */
+/** The cheap gate for the geometry hooks (the rail scheduler fires on every scroll frame, the resize listener on every
+ *  resize): a session with no unread open thread has no box to move, so those paths never walk its DOM (review find,
+ *  T310). Read from the thread store, no DOM. The marks pass calls the painter unconditionally: it is the removal path
+ *  (the last unread thread read, resolved or deleted takes its box with it on that pass). */
+function hasUnreadOpenThread(sid: string): boolean {
+  return (commentThreads.get(sid) || []).some((t) => !!t.unread && t.status === "open");
+}
+
 function paintCommentOutlines(sid: string): void {
   const v = views.get(sid);
   if (!v) return;
@@ -8595,7 +8604,7 @@ function updateCommentRail(): void {
     return tick;
   }));
 }
-window.addEventListener("resize", () => { updateCommentRail(); if (activeId) paintCommentOutlines(activeId); });
+window.addEventListener("resize", () => { updateCommentRail(); if (activeId && hasUnreadOpenThread(activeId)) paintCommentOutlines(activeId); });
 
 // (The per-turn count badge is GONE — the user 2026-08-17: the highlight does the speaking, and
 // the scroll-rail tick already covers a thread whose rendered text drifted beyond re-matching.)
