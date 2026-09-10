@@ -13,6 +13,9 @@ import diff from "highlight.js/lib/languages/diff";
 import yaml from "highlight.js/lib/languages/yaml";
 import type { ParsedAsk } from "../ask-types";
 import { TABBAR_H_KEY, TABBAR_H_DEFAULT, clampTabbarH, parseTabbarH } from "./tabbar-resize";
+import type { CmtPopFrac } from "./comment-pop-size";
+import { CMT_POP_SIZE_KEY, CMT_POP_THREAD_DEFAULT, parseCmtPopSize, clampCmtPopPx, toCmtPopFrac, isCmtPopMax,
+         centerCmtPop, cmtPopCapPx } from "./comment-pop-size";
 import { ctxFallbackColor, pickTone, readableRgb } from "./ctx-color";
 import { applyTheme } from "./theme";
 import { applyDenseChrome } from "./dense-chrome";
@@ -8337,6 +8340,10 @@ let pendingCommentAnchor: { sid: string; uuid: string; exact: string;
   model?: string; effort?: string; fast?: string; color?: string } | null = null; // create mode (+ the thread's own picks)
 let pendingAdoptTid: string | null = null;                          // commentCreated ack that beat its frame
 let commentPopPos: { x: number; y: number } | null = null;
+// the size WE set on the open popover (its open geometry, a stored preference, maximize/restore) — the
+// ResizeObserver tells our own sizing from the user's pull by it, so only a pull is remembered (2026-09-10)
+let cmtPopApplied: { w: number; h: number } | null = null;
+let cmtPopPreMax: CmtPopFrac | null = null;     // the size the box had before the last maximize this page-load: restore's target
 
 // the popover's own file picker (the user 2026-08-17: the attach clip, like the chat's) — files
 // ship through the SAME dropFile flow; the droppedPath ack sees the open popover and lands there
@@ -9087,6 +9094,77 @@ function wireEdgeResize(pop: HTMLElement): void {
   });
 }
 
+// ── remembered size + maximize (the user 2026-09-10, who enlarged the box by hand on every open) ── the
+// rules are comment-pop-size.ts's; this is the DOM half. localStorage reads and writes are wrapped so a
+// denied or full store costs the preference, never the popover (file-view.ts's convention).
+function readCmtPopSize(): CmtPopFrac | null {
+  try { return parseCmtPopSize(localStorage.getItem(CMT_POP_SIZE_KEY)); } catch { return null; }
+}
+function saveCmtPopSize(pop: HTMLElement): void {
+  const frac = toCmtPopFrac(pop.offsetWidth, pop.offsetHeight, window.innerWidth, window.innerHeight);
+  try { localStorage.setItem(CMT_POP_SIZE_KEY, JSON.stringify(frac)); } catch { /* storage full or denied */ }
+}
+/** Size the box programmatically and record what it measures: the observer treats that size as ours. */
+function sizeCommentPop(pop: HTMLElement, w: number, h: number): void {
+  pop.style.width = w + "px";
+  pop.style.height = h + "px";
+  cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };
+}
+// the house line-icon style (16-unit box, 1.4 stroke, round caps): one frame = maximize, two offset frames = restore
+const CMT_MAX_GLYPH = '<rect x="2.5" y="2.5" width="11" height="11" rx="1.5"/>';
+const CMT_RESTORE_GLYPH = '<path d="M5.5 5.5V3.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2"/>'
+  + '<rect x="2.5" y="5.5" width="8" height="8" rx="1"/>';
+/** "Maximized" is COMPUTED from the live size (within a few px of the cap), never a stored bit that can
+ *  drift: the data-max mark and the button's glyph/title/aria-label follow it (a control changes its own
+ *  label on click — ui/CLAUDE.md). Called at open, after every toggle, and after every user resize. */
+function syncCmtMaxState(pop: HTMLElement): void {
+  const max = isCmtPopMax(pop.offsetWidth, pop.offsetHeight, window.innerWidth, window.innerHeight);
+  if (max) pop.dataset.max = "1"; else delete pop.dataset.max;
+  const btn = pop.querySelector(".cmt-max") as HTMLElement | null;
+  if (!btn) return;
+  btn.innerHTML = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" '
+    + 'stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">' + (max ? CMT_RESTORE_GLYPH : CMT_MAX_GLYPH) + "</svg>";
+  btn.title = max ? "Restore" : "Maximize";
+  btn.setAttribute("aria-label", max ? "Restore" : "Maximize");
+}
+/** Maximize ⇄ restore — the head's button and a double-click on the title bar both land here. Maximize
+ *  sizes to the cap, centers, and remembers the fraction like any resize; restore goes back to the size
+ *  the box had before the maximize (this page-load), else the mode's own default — the thread's 70%/60%,
+ *  or the create dialog's content size (inline size AND preference dropped) — centered too. */
+function toggleCommentPopMax(): void {
+  const pop = document.getElementById("cmt-pop");
+  if (!pop) return;
+  const W = window.innerWidth, H = window.innerHeight;
+  if (isCmtPopMax(pop.offsetWidth, pop.offsetHeight, W, H)) {
+    if (cmtPopPreMax) {
+      const px = clampCmtPopPx(cmtPopPreMax, W, H);
+      sizeCommentPop(pop, px.w, px.h);
+      saveCmtPopSize(pop);
+    } else if (pop.dataset.mode === "thread") {
+      sizeCommentPop(pop, Math.round(W * CMT_POP_THREAD_DEFAULT.w), Math.round(H * CMT_POP_THREAD_DEFAULT.h));
+      saveCmtPopSize(pop);
+    } else {
+      pop.style.removeProperty("width");
+      pop.style.removeProperty("height");
+      pop.classList.remove("sized");                  // no expressed size any more: the quote clamp comes back…
+      cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };   // …and reflows the content size, so measure AFTER it
+      try { localStorage.removeItem(CMT_POP_SIZE_KEY); } catch { /* storage denied */ }
+    }
+  } else {
+    // an expressed size only: a content-sized create dialog has nothing to go back to but its content
+    cmtPopPreMax = pop.style.width ? toCmtPopFrac(pop.offsetWidth, pop.offsetHeight, W, H) : null;
+    const cap = cmtPopCapPx(W, H);
+    sizeCommentPop(pop, cap.w, cap.h);
+    saveCmtPopSize(pop);
+    pop.classList.add("sized");
+  }
+  const c = centerCmtPop(pop.offsetWidth, pop.offsetHeight, W, H);
+  pop.style.left = c.left + "px";
+  pop.style.top = c.top + "px";
+  commentPopPos = { x: c.left, y: c.top };             // a later rebuild reopens where the toggle put it, like a drag
+  syncCmtMaxState(pop);
+}
+
 function commentPopTitle(create: boolean, th: CommentThread | null | undefined): string {
   const nm = th?.name || "Thread";
   return create ? "New comment:"
@@ -9212,18 +9290,34 @@ function renderCommentPopover(): void {
     const nb = nameBox;
     nb.addEventListener("input", () => { nb.classList.remove("bad"); commentDrafts.set(nk, nb.value); });
   }
+  // maximize ⇄ restore (the user 2026-09-10), right before the ×; delegated like the × (cmtmax), the
+  // glyph and label painted by syncCmtMaxState once the box has its open size
+  const maxBtn = el("button", "cmt-max") as HTMLButtonElement;
+  maxBtn.type = "button";
+  maxBtn.dataset.act = "cmtmax";
   const closeBtn = el("button", "cmt-x") as HTMLButtonElement;
   closeBtn.type = "button";
   closeBtn.textContent = "×";
   closeBtn.title = "Close (the thread stays on its highlight)";
   closeBtn.dataset.act = "cmtclose";
-  if (nameBox) head.append(title, nameBox, closeBtn);
-  else head.append(title, closeBtn);
+  if (nameBox) head.append(title, nameBox, maxBtn, closeBtn);
+  else head.append(title, maxBtn, closeBtn);
   // DRAG by the header (the user 2026-08-13, who found the popover's spot inconvenient): pointer
   // capture, viewport-clamped, and the position writes through to commentPopPos so a later full
   // rebuild (a status flip) reopens where the user parked it. The header survives in-place
   // refreshes, so a drag is never cut by a comments frame; a full rebuild mid-drag just ends it.
-  head.title = "Drag to move";
+  head.title = "Drag to move · double-click to maximize or restore";
+  // DOUBLE-CLICK on the title bar toggles maximize, a window's title bar (the user 2026-09-10) — the same
+  // toggle as the button. Listened on the BOX and hit-tested at the pointer: the drag below captures the
+  // pointer on every press, and a captured press retargets the click/dblclick it ends in to the box, so a
+  // listener on the head would never hear it. Interactive children of the head (the name box, the two
+  // buttons) keep their own double-click.
+  pop.addEventListener("dblclick", (ev: MouseEvent) => {
+    const at = document.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement | null;
+    if (!at || !at.closest(".cmt-head") || at.closest(".cmt-name, .cmt-x, .cmt-max, button, input")) return;
+    ev.preventDefault();
+    toggleCommentPopMax();
+  });
   // the WHOLE box drags (the user 2026-08-17), not just the header — any grip that isn't an
   // interactive control or selectable text, and never the bottom-right resize corner
   pop.addEventListener("pointerdown", (ev: PointerEvent) => {
@@ -9503,10 +9597,38 @@ function renderCommentPopover(): void {
     // resizing the BOX (resize: both) hands the extra room to the quoted context: the .sized class
     // unlocks the quote's clamp; armed only after a real user resize, so the natural size stays tight
     const w0 = pop.offsetWidth, h0 = pop.offsetHeight;
+    // …and REMEMBERS the size (the user 2026-09-10): this observer sees the native grip and the edge
+    // bands alike, so it is the one event every user resize fires — each observation writes the fraction
+    // (comment-pop-size.ts) except the ones that are not the user's: the size WE set (cmtPopApplied —
+    // the open geometry, a stored preference, maximize/restore), a box the WINDOW moved through the
+    // vw/vh caps (re-baselined on resize below: a briefly-small window never rewrites the preference,
+    // the tab strip's rule), and the box leaving the page (a 0×0 box is a close, not a choice).
     const ro = new ResizeObserver(() => {
       if (Math.abs(pop.offsetWidth - w0) > 6 || Math.abs(pop.offsetHeight - h0) > 6) pop.classList.add("sized");
+      if (!pop.isConnected || !pop.offsetWidth || !pop.offsetHeight) return;
+      const a = cmtPopApplied;
+      if (a && Math.abs(pop.offsetWidth - a.w) <= 1 && Math.abs(pop.offsetHeight - a.h) <= 1) return;
+      cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };
+      saveCmtPopSize(pop);
+      syncCmtMaxState(pop);                          // a pull onto or off the cap flips the toggle's label with it
     });
     ro.observe(pop);
+    const onWin = () => {
+      if (!pop.isConnected) { window.removeEventListener("resize", onWin); return; }
+      cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };   // the resize event runs before the observer's frame
+    };
+    window.addEventListener("resize", onWin);
+  }
+  // REMEMBERED SIZE (the user 2026-09-10): the fraction of the window the user last dragged the box to,
+  // applied in BOTH modes and re-clamped to the live window (comment-pop-size.ts: the CSS mins as the
+  // floor, the CSS caps and an 8px margin as the cap). With nothing stored, both modes open exactly as
+  // before: the thread geometry below, the create dialog at its content size with no inline size at all.
+  const pref = readCmtPopSize();
+  if (pref) {
+    const sz = clampCmtPopPx(pref, window.innerWidth, window.innerHeight);
+    pop.style.width = sz.w + "px";
+    pop.style.height = sz.h + "px";
+    pop.classList.add("sized");                      // an expressed size: the quote/msgs reflow rules apply from open
   }
   // OPEN GEOMETRY (the user 2026-08-25), THREAD mode: 70% of the chat pane's width with the RIGHT
   // edge on the chat's right edge, 60% of the pane's height — and the size is FIXED from open:
@@ -9516,12 +9638,14 @@ function renderCommentPopover(): void {
   // The CREATE composer keeps its natural size at the selection point — a different gesture.
   if (th && !pop.style.width) { pop.style.width = Math.round(window.innerWidth * 0.7) + "px"; }
   if (th && !pop.style.height) { pop.style.height = Math.round(window.innerHeight * 0.6) + "px"; }
+  cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };   // whatever it measures now is ours, the content size included
   const r = pop.getBoundingClientRect();
   const defaultX = th ? (window.innerWidth - r.width - 8) : (window.innerWidth - r.width) / 2;
   const px = Math.max(8, Math.min(commentPopPos?.x ?? defaultX, window.innerWidth - r.width - 8));
   const py = Math.max(8, Math.min(commentPopPos?.y ?? 120, window.innerHeight - r.height - 8));
   pop.style.left = px + "px";
   pop.style.top = py + "px";
+  syncCmtMaxState(pop);                              // a stored cap-sized preference opens reading "Restore"
   const msgs = pop.querySelector(".cmt-msgs") as HTMLElement | null;
   if (msgs) msgs.scrollTop = msgs.scrollHeight;
   if (create || hadFocus || !th || !th.msgs.length) (pop.querySelector(".cmt-input") as HTMLTextAreaElement | null)?.focus();
@@ -17748,6 +17872,7 @@ setupSettings();
       openCommentPopover(activeId, tid, Math.min(r.left, window.innerWidth - 380), r.bottom + 6);
     },
     cmtclose: () => closeCommentPop(),
+    cmtmax: () => toggleCommentPopMax(),   // maximize ⇄ restore; the head's double-click lands in the same function
     // Interrupt the THREAD's own turn (T138): the sid rides the button (the thread's session),
     // never activeId — the exact owner-scoping class queued-x/Retry were fixed for. The gesture
     // itself ENDS the exchange with no reply record coming, so the T102 send-latch clears on THIS
