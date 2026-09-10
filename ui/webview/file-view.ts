@@ -16,18 +16,24 @@
 // BROWSER (file-browse.ts, feed bundle) opens files through this same viewer in the FEED document, so
 // whichever bundle imports it gets the identical modal.
 import hljs from "highlight.js/lib/core";
-import { marked } from "marked";
+import { marked, type Tokens } from "marked";
 import { sanitizeMd } from "./md-sanitize";
 import { hostOf, bareId, hostNameNodes } from "./host-prefix";
 import { fileUrl } from "./preview";
 import { openPdfTab, wantsOwnTab } from "./preview";   // a PDF's own tab, and the gesture that asks for it
+import { openFileTab, canPreview } from "./preview";   // any file's own tab, for the links inside a shown file, and the web-vs-webview test
 import { kernelUrl } from "./media";
 import { quoteSrcLabel } from "./docreview";
+import { linkifyFileText, linkMarkdownAnchors, viewerWalkTokens, fragmentTarget, URL_LINK_CLASS, FRAG_LINK_CLASS } from "./file-view-links";
+import { selectionOpenIn } from "./path-links";
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const gclock = require("./gesture-clock.js");   // the gesture clock every settings post stamps through
 import { delegate } from "./actions";
 import { resolveDocRelative, joinDocPath, urlTitleParts, headingSlug, uniqueSlugs } from "./md-links";
 import { readTextCapped, overCapWords, settleUrlResponse } from "./capped-read";
+import { wrapCodeLines, addCopyBtn } from "./code-block";   // a fence's per-line rows and Copy button, the chat's own
+import { fenceCopyQueue, type Fence } from "./fence-source";   // what Copy copies: the fence's text as the file holds it, tabs and all
+import "./viewer-grammars";   // six more grammars for a viewed file, registered on the bundle's hljs core (rust, go, c, java, sql, toml)
 
 // hljs is registered per-bundle. Same language set (and grammar registrations) the chat's fence
 // highlighting uses, dup-guarded, so importing this module alongside render.ts costs nothing.
@@ -59,6 +65,7 @@ const LANG: Record<string, string> = {
   yaml: "yaml", yml: "yaml", sh: "bash", bash: "bash", zsh: "bash", bats: "bash",
   html: "xml", htm: "xml", xml: "xml", svg: "xml", vue: "xml", css: "css", scss: "css",
   md: "markdown", markdown: "markdown", diff: "diff", patch: "diff",
+  rs: "rust", go: "go", c: "c", h: "c", java: "java", sql: "sql", toml: "ini", ini: "ini",   // viewer-grammars.ts (toml is hljs's ini grammar)
 };
 
 function langFor(path: string): string | null {
@@ -295,6 +302,40 @@ function dropUrlRead(): void {
   }
 }
 
+// ── the body's content width, for the sheets ──────────────────────────────────────────────────────
+// A table of the rendered document's own (a direct child of the .fileview-md root) may grow past the prose column, up to
+// the body's content width less the root's inset (`.fileview-md > table` in both sheets reads --fv-body-w; the rule there
+// says how). The value is the body's content width as its ResizeObserver reports it (the layout's own event, never a
+// timer; a scrollbar's width is taken), written on EACH TOP-LEVEL TABLE rather than on the body it describes: the property
+// is registered non-inherited (`@property --fv-body-w { inherits: false }`), so a write restyles the tables alone and not
+// every node under the body, as a write to an inherited property on the body would. mdBlock rebuilds the root on every
+// paint and no report follows a paint, so renderBody stamps the fresh tables itself (the returned function)
+// with the width last reported; before the first report the property is unset and the sheet's fallback holds (the cap is
+// the column). Absent ResizeObserver (a stand-in, an old engine) nothing is written and the fallback holds. One watch at a
+// time: the next open, or the close, drops the last.
+let dropWidthWatch: () => void = () => { /* no watch up */ };
+function watchBodyWidth(body: HTMLElement): () => void {
+  dropWidthWatch();
+  let width = -1;                                      // the body's content width as last reported, -1 before the first report
+  const stamp = (): void => {
+    if (width < 0) return;
+    const md = body.querySelector(".fileview-md");
+    if (!md) return;
+    for (const n of Array.from(md.children)) if (n.tagName === "TABLE") (n as HTMLElement).style.setProperty("--fv-body-w", width + "px");
+  };
+  if (typeof ResizeObserver === "function") {
+    const ro = new ResizeObserver((entries) => {
+      const w = entries.length ? entries[entries.length - 1].contentRect.width : body.clientWidth;
+      if (w === width) return;
+      width = w;
+      stamp();
+    });
+    ro.observe(body);
+    dropWidthWatch = () => { ro.disconnect(); dropWidthWatch = () => { /* dropped */ }; };
+  }
+  return stamp;
+}
+
 // ── viewer action registry (the user 2026-08-22) ── INTERNAL SEAM, no compatibility promise:
 // reshape freely. Anything acting on the OPEN file declares itself here instead of hand-wiring into
 // openFileView's action row, where every file-viewer change used to collide. mount() runs once per
@@ -420,6 +461,7 @@ export function closeFileView(): void {
   gitHooks = null;                                     // a reply landing after the close decorates nothing
   dropMediaUrl();                                      // an image/PDF view's bytes leave with the viewer
   dropUrlRead();                                       // …and a URL view's in-flight read is cancelled
+  dropWidthWatch();                                    // …and the body's width watch (watchBodyWidth)
   wrap.remove();
   document.body.classList.remove("fileview-open");
 }
@@ -437,8 +479,12 @@ export function openFileClick(ev: MouseEvent | KeyboardEvent | null | undefined,
   openFileView(path, sid);
 }
 
-/** Show `path` in a modal over this pane. Re-opening replaces whatever is up — never stacks. */
-export function openFileView(path: string, sid?: string | null, frag?: string | null): void {
+/** Show `path` in a modal over this pane. Re-opening replaces whatever is up — never stacks.
+ *  `opts.line`: a line the open should show (a `path:12` link inside another file, file-view-links.ts): the code
+ *  view scrolls its row into view once the text lands; a markdown file opens in its Raw view for THIS open (the
+ *  Rendered view has no rows), without touching the saved preference.
+ *  `opts.frag`: a sibling link's `#fragment` (`[see](report.md#results)`) to land on after the first rendered paint. */
+export function openFileView(path: string, sid?: string | null, opts?: { line?: number | null; frag?: string | null }): void {
   // The replace path bypasses closeFileView, so it needs the same dirty ask: opening file B over an
   // edited-but-unsaved file A must not silently eat A's buffer.
   if (document.getElementById("romp-fileview") && closeGuard && !closeGuard()) return;
@@ -455,10 +501,10 @@ export function openFileView(path: string, sid?: string | null, frag?: string | 
   wrap.id = "romp-fileview";
   wrap.onclick = (ev) => { if (ev.target === wrap) closeFileView(); };
   const box = el("div", "fileview");
-  // A sibling link's `#fragment` (`[see](report.md#results)`, stamped data-frag by mdBlock) lands on
-  // its heading after the FIRST rendered paint — once; a Raw view has no ids to land on, so the
-  // landing waits for the Rendered toggle rather than being spent (review find on #958, 2026-09-07).
-  let pendingFrag: string | null = frag || null;
+  // A sibling link's `#fragment` (`[see](report.md#results)`: data-frag on the path link, file-view-links.ts
+  // linkMarkdownAnchors) lands on its heading after the FIRST rendered paint — once; a Raw view has no ids to
+  // land on, so the landing waits for the Rendered toggle rather than being spent (review find on #958, 2026-09-07).
+  let pendingFrag: string | null = opts?.frag || null;
   document.body.classList.add("fileview-open");
 
   const bar = el("div", "fileview-bar");
@@ -664,22 +710,82 @@ export function openFileView(path: string, sid?: string | null, frag?: string | 
   bar.appendChild(name); if (sess) bar.appendChild(sess); bar.appendChild(acts);
 
   const body = el("div", "fileview-body");
+  const stampBodyWidth = watchBodyWidth(body);        // the body's content width, for a top-level table's cap (the sheets read --fv-body-w)
   textSize.bindWheel(body);                    // Ctrl/Cmd + wheel over the text steps the size (textSizeControl)
-  // A rendered document's RELATIVE links (`[notes](./notes.md)`, `[fig](plots/a.png)`) open the
-  // sibling file in this same viewer — mdBlock stamps each one `data-act="fv-open"` with the joined
-  // path (joinDocPath) instead of a target the page would navigate to. One delegated listener on
-  // the body, installed once per open and keyed off data-act (actions.ts: click-safe across the
-  // Rendered ⇄ Raw swaps that rebuild the body's children, and the press flash acknowledges the
-  // click). The chat's document-level anchor delegate (render.ts) leaves scheme-less hrefs alone,
-  // so the click reaches here in the chat document and in the feed document alike.
-  delegate(body, {
-    "fv-open": (a, ev) => {
+  // Links inside the file (file-view-links.ts): a rendered document's RELATIVE links (`[notes](./notes.md)`,
+  // `[fig](plots/a.png)`) open the sibling file in this same viewer, its `[top](#evidence)` links land on their
+  // heading, and the URLs and paths written in the text (a code view's rows, a rendered block) are links too. ONE
+  // listener on the body reads every kind, installed once per open, so it is click-safe across the Rendered ⇄ Raw
+  // swaps that rebuild the body's children. The gesture is the project's (the PDF and folder rule, preview.ts
+  // wantsOwnTab): a PLAIN click acts inside the dashboard, and a Cmd/Ctrl-click or a middle-click opens the link in
+  // a tab of its own. Plain: a path link opens the file here, with this viewer's session (a relative path was
+  // already joined onto this file's directory at mark time; the kernel reads `~` and the session's machine); a URL
+  // anchor opens itself (target _blank) and is left to the browser (in the chat document its capture-phase opener
+  // takes it first, the same way); a section link scrolls to its target in this document, or does nothing where
+  // there is none (its title says so), and never moves the hosting document. Modified: a path link opens in the
+  // browser's own tab off the kernel's /file route (openFileTab; a blocked popup falls through to the viewer, so the
+  // file is never unreachable), a URL anchor in a tab from here. A PLAIN click is not stopped: it goes on to the
+  // document's own listeners (the feed's window listener that returns focus to the chat, the chat's menu closers).
+  // A click that arrives with a selection open inside the body (the click that ends a press-drag-release inside a
+  // path link, or a press held on a URL anchor and then dragged; a press on text collapses a selection first, so a
+  // plain click never sees one, and the next click after such a selection opens) opens nothing; the chat's
+  // capture-phase opener reads the same selection and yields too (path-links.ts selectionOpenIn). Enter or Space on a focused
+  // path link is its click (path-links.ts, with a held Cmd/Ctrl carried) and lands here too. The chat's
+  // document-level anchor delegate (render.ts) leaves an anchor with no href and a `#fragment` href alone, so those
+  // clicks reach here in the chat document and in the feed document alike.
+  const openUrlTab = (href: string) => {
+    if (!href) return;
+    if (canPreview()) window.open(href, "_blank", "noopener,noreferrer");   // the web dashboard: the browser's tab
+    else post({ type: "openLink", href });                                  // the VS Code webview: the host's openExternal
+  };
+  const linkOf = (t: Element | null): HTMLElement | null => {
+    const x = t && typeof t.closest === "function" ? t.closest(".file-uri-link, a." + URL_LINK_CLASS + ", a." + FRAG_LINK_CLASS) as HTMLElement | null : null;
+    return x && body.contains(x) ? x : null;
+  };
+  const openLink = (x: HTMLElement, ev: MouseEvent) => {
+    const own = wantsOwnTab(ev);
+    if (x.classList.contains(FRAG_LINK_CLASS)) {                // a section of this document: this document's scroll, never the page's
       ev.preventDefault();
-      const target = a.dataset.path;
-      if (target) openFileView(target, sid, a.dataset.frag || null);
-    },
-    // an in-document `[top](#evidence)` lands on its heading (mdBlock minted the ids) — never a tab
-    "fv-anchor": (a, ev) => { ev.preventDefault(); scrollToFragment(body, a.getAttribute("href") || ""); },
+      // the rendered document's own headings, ids and named anchors, as mark time read them (scrollToFragment, over
+      // the .fileview-md box through file-view-links.ts fragmentTarget): the viewer's chrome carries an id of its own
+      // (the notice), and a lookup over the whole box would scroll to that on a colliding name
+      scrollToFragment(body, x.getAttribute("href") || "");
+      return;
+    }
+    const p = x.dataset.path;
+    if (!p) {                                                    // the URL anchor
+      if (!own) return;                                          // a plain click: the browser's own open
+      ev.preventDefault(); ev.stopPropagation();                 // a modified one: one tab, from here
+      openUrlTab(x.getAttribute("href") || "");
+      return;
+    }
+    ev.preventDefault();
+    if (own) {
+      ev.stopPropagation();                                      // the modified click is the link's alone
+      if (openFileTab(p, sid || null)) return;                   // its own tab; a blocked popup falls through to the viewer
+    }
+    const ln = Number(x.dataset.line);
+    openFileView(p, sid || null, { line: ln > 0 ? ln : null, frag: x.dataset.frag || null });
+  };
+  body.addEventListener("click", (ev) => {
+    const x = linkOf(ev.target as Element | null);
+    if (!x) return;
+    if (selectionOpenIn(box)) { ev.preventDefault(); return; }   // a drag-select ended on the link
+    openLink(x, ev);
+  });
+  // The middle button: its press would start the browser's autoscroll on a path link (a span, unlike an anchor)
+  // and swallow the auxclick, so the press is cancelled there; the auxclick is the link's own tab. A URL anchor's
+  // middle-click is the browser's (it opens the href in a new tab itself), so neither listener touches one. A
+  // section link's middle-click is this document's scroll, as its plain click is: the browser's own would open a
+  // second copy of the hosting page at its URL plus the id, and a section of the shown file has no tab of its own.
+  body.addEventListener("mousedown", (ev) => {
+    const x = ev.button === 1 ? linkOf(ev.target as Element | null) : null;
+    if (x && x.dataset.path) ev.preventDefault();
+  });
+  body.addEventListener("auxclick", (ev) => {
+    if (ev.button !== 1) return;
+    const x = linkOf(ev.target as Element | null);
+    if (x && (x.dataset.path || x.classList.contains(FRAG_LINK_CLASS))) openLink(x, ev);
   });
   // A submit inside the body never navigates the pane's document. The sanitizer drops <form> and every
   // form control (md-sanitize.ts), so this is the backstop: a note's `<form action=...><button>` used to
@@ -776,6 +882,7 @@ export function openFileView(path: string, sid?: string | null, frag?: string | 
     }
     if (text === null || editing) return;   // loading, or the textarea owns the body right now
     body.replaceChildren(rendered ? mdBlock(text, { kind: "file", path, sid: sid || null }) : codeBlock(text, path, true));
+    if (rendered) stampBodyWidth();           // a fresh root's tables take the width last reported (the property sits on the tables)
     if (rendered && pendingFrag) {
       const h = pendingFrag; pendingFrag = null;
       requestAnimationFrame(() => { if (wrap.isConnected) scrollToFragment(body, h); });
@@ -964,6 +1071,18 @@ export function openFileView(path: string, sid?: string | null, frag?: string | 
   };
   document.addEventListener("keydown", onKey);
 
+  // The row for a 1-based line of the code view, scrolled to the middle; `pendingLine` is the open's `line`, spent
+  // on the first text that lands (a Reload keeps the reader's place and does not scroll). A line past the end (a
+  // stale `x.py:400` in a file that shrank) lands on the last row AND says so in the viewer's notice: a silent
+  // landing on the wrong row would read as the file's truth.
+  const scrollToLine = (n: number) => {
+    const rows = body.querySelectorAll("code.hljs .fv-cl");
+    if (!rows.length) return;
+    if (n > rows.length) noteBar("Line " + n + " is past the end of this file, which has " + rows.length + (rows.length === 1 ? " line" : " lines") + "; showing the last line.");
+    (rows[Math.min(Math.max(0, n - 1), rows.length - 1)] as HTMLElement).scrollIntoView({ block: "center" });
+  };
+  let pendingLine: number | null = opts && typeof opts.line === "number" && opts.line > 0 ? Math.floor(opts.line) : null;
+
   fetch(fileUrl(path, sid), { cache: "no-store" }).then((r): Promise<string | Blob> => {
     // Every failure says WHY, in the pane, rather than leaving a blank one: the kernel distinguishes
     // "not a type I serve" from "too big" from "not text after all", and that is exactly what the
@@ -1000,7 +1119,10 @@ export function openFileView(path: string, sid?: string | null, frag?: string | 
       return;
     }
     text = t;
+    // a line the link named: the Raw view for this open (unsaved: the preference stays), then the row
+    if (pendingLine !== null && isMd && fmt.md === "rendered") fmt.md = "raw";
     renderBody();
+    if (pendingLine !== null) { scrollToLine(pendingLine); pendingLine = null; }
   }).catch((err) => {
     if (!document.getElementById("romp-fileview")) return;
     const why = el("div", "fileview-err");
@@ -1126,6 +1248,7 @@ export function openUrlView(href: string): void {
   bar.appendChild(name); bar.appendChild(acts);
 
   const body = el("div", "fileview-body");
+  const stampBodyWidth = watchBodyWidth(body);        // the body's content width, for a top-level table's cap (the sheets read --fv-body-w)
   textSize.bindWheel(body);                            // Ctrl/Cmd + wheel over the text steps the size
   // In-document links land on their heading (mdBlock's fv-anchor stamp): one delegated listener, the
   // local viewer's pattern. No fv-open here — a URL document's sibling links are made absolute and
@@ -1164,6 +1287,7 @@ export function openUrlView(href: string): void {
       ? mdBlock(text, { kind: "url", href: loc })      // relative refs resolve against where it LIVES
       : codeBlock(text, parts.base, true));            // basename → langFor → markdown highlighting
     landFragment();                                    // after the paint, and only a rendered one lands
+    if (fmt.md === "rendered") stampBodyWidth();       // a fresh root's tables take the width last reported
   };
   renderBody();
 
@@ -1294,6 +1418,7 @@ function codeBlock(text: string, path: string, wrapLines: boolean): HTMLElement 
   if (wrapLines) {
     pre.classList.add("fileview-wrap");
     code.innerHTML = wrapNumberedHtml(hl !== null ? hl : escapeHtml(text));
+    linkifyFileText(code, path);   // URLs and paths in the text, on the DOM the highlight built (file-view-links.ts)
     pre.appendChild(code);
     wrap.appendChild(pre);
     return wrap;
@@ -1302,20 +1427,25 @@ function codeBlock(text: string, path: string, wrapLines: boolean): HTMLElement 
   gutter.textContent = lines.map((_, i) => String(i + 1)).join("\n");
   gutter.setAttribute("aria-hidden", "true");
   if (hl !== null) code.innerHTML = hl; else code.textContent = text;
+  linkifyFileText(code, path);   // the same pass on the gutter layout, which no caller in the viewer asks for (every call passes wrapLines)
   pre.appendChild(code);
   wrap.appendChild(gutter); wrap.appendChild(pre);
   return wrap;
 }
 
-// Land an in-document fragment on its heading. The fragment — as typed, percent-encoded or not —
-// slugs the same way the heading ids were minted, so `#Evidence%20Results`, `#evidence-results` and
-// `#Evidence Results` all find md-evidence-results inside THIS rendered box (never the page's own ids).
-// Nothing found → nothing happens: inert, never a scroll to the top and never a navigation.
+// Land an in-document fragment on its target. The fragment, as typed, percent-encoded or not, names an element
+// of the RENDERED document (the .fileview-md box under `box`, never the viewer's chrome around it, whose notice wears
+// an id of its own, and never the page's ids): an element with exactly that id, a GitHub-style `<a name>`, or a
+// heading, through the slug the heading ids were minted with, so `#Evidence%20Results`, `#evidence-results` and
+// `#Evidence Results` all find md-evidence-results (file-view-links.ts fragmentTarget is the one lookup; mark time
+// reads it too). Nothing found → nothing happens: inert, never a scroll to the top and never a navigation. Both
+// viewers land through here: the local one's section links and a sibling link's fragment, the URL one's fv-anchor
+// links and the URL's own hash.
 function scrollToFragment(box: HTMLElement, fragment: string): boolean {
   let frag = fragment.replace(/^#/, "");
   try { frag = decodeURIComponent(frag); } catch { /* a stray % — match the bytes as written */ }
   if (!frag) return false;
-  const target = box.querySelector('[id="md-' + headingSlug(frag) + '"]');   // the slug's alphabet needs no escaping
+  const target = fragmentTarget(box.querySelector(".fileview-md") || box, frag);
   if (!target) return false;
   target.scrollIntoView({ block: "start" });
   return true;
@@ -1338,18 +1468,37 @@ type MdDocLoc = { kind: "url"; href: string } | { kind: "file"; path: string; si
 // the dashboard, and a README's <style>, form or fixed-positioned div must never reach the viewer's chrome.
 function mdBlock(text: string, doc?: MdDocLoc): HTMLElement {
   const box = el("div", "fileview-md");
+  const fences: Fence[] = [];                          // marked's code tokens in document order, for the fence pass's Copy (fence-source.ts)
+  let rendered = true;                                 // false on the fallback: the bare text, with nothing added to it
   try {
-    const dirty = marked.parse(text) as string;
+    // The code tokens are collected as the parse walks them: the lexer expanded the file's leading tabs to spaces before
+    // it cut them, and the fence pass below reads each fence's text back out of the file for its Copy button
+    // (fence-source.ts). Handed to THIS parse only, so the chat's marked singleton learns nothing; a walkTokens an
+    // extension put on the defaults runs as well, since per-call options replace rather than compose.
+    // A link's destination is put in the form the sanitizer keeps BEFORE the HTML exists (file-view-links.ts
+    // viewerWalkTokens: `notes.md:7` reads as a scheme to DOMPurify, `file:///a.md` is a scheme it refuses, and an
+    // anchor it strips is a label nothing can sort afterwards). Handed to THIS parse only: the marked singleton is
+    // the chat's too, and the chat's anchors must not learn the viewer's forms. A walkTokens an extension put on
+    // the defaults runs as well: per-call options replace, not compose. The file kind's alone: a URL document has
+    // no directory for `notes.md:7` to sit in, and its links resolve against the URL below.
+    const base = marked.defaults.walkTokens;
+    const dirty = marked.parse(text, { walkTokens: (t) => {
+      if (t.type === "code") { const c = t as Tokens.Code; fences.push({ text: c.text, indented: c.codeBlockStyle === "indented" }); }
+      if (doc && doc.kind === "file") viewerWalkTokens(t);
+      if (base) void base.call(marked, t);
+    } }) as string;
     // The one sanitizer the chat's md() uses too (md-sanitize.ts): html + svg (a note's own inline SVG), no
     // data-* (a document's `<span data-act="stopRetrying">` would otherwise bubble to render.ts's
     // document-level delegate and interrupt the active session; review find on #958, 2026-09-07), and
     // rules modelled on GitHub's for a note's own HTML: no <style>, no form controls, ids and names prefixed
     // user-content-, inline style reduced to its colours, no background attribute. The sanitized <body>'s
-    // children are adopted as they are, no re-parse. The viewer's own stamps (heading ids, fv-open,
-    // fv-anchor) are set AFTER this sanitize, so they are unaffected and never prefixed.
+    // children are adopted as they are, no re-parse. The viewer's own marks (heading ids, the file kind's path
+    // and section links, the URL kind's fv-anchor stamp) are set AFTER this sanitize, so they are unaffected and
+    // never prefixed; an author's own id or name is read under its prefix (file-view-links.ts fragmentTarget).
     box.replaceChildren(...Array.from(sanitizeMd(dirty).childNodes));
   } catch {
     box.textContent = text;                            // a marked bug must never cost the content
+    rendered = false;
   }
   // Relative references resolve against the DOCUMENT, after sanitisation (DOMPurify has already
   // dropped every dangerous scheme; what is left is either absolute — untouched — or relative to a
@@ -1359,10 +1508,25 @@ function mdBlock(text: string, doc?: MdDocLoc): HTMLElement {
   // Every heading gets an id first — marked 12 emits none, so a document's own `[top](#evidence)`
   // had nothing to land on. GitHub's slug (headingSlug, made unique in order by uniqueSlugs), and
   // PREFIXED `md-` on purpose: an unprefixed id="tabs" would dress a heading in the chat page's
-  // #tabs CSS and shadow getElementById("tabs") for the page's own controls.
+  // #tabs CSS and shadow getElementById("tabs") for the page's own controls. Both modes, before the
+  // anchors are sorted: a section link is live when its target is a heading, an element with that id
+  // or a named anchor (file-view-links.ts fragmentTarget reads all three).
   const heads = Array.from(box.querySelectorAll("h1, h2, h3, h4, h5, h6")) as HTMLElement[];
   const slugs = uniqueSlugs(heads.map((h) => headingSlug(h.textContent || "")));
   heads.forEach((h, i) => { h.id = "md-" + slugs[i]; });
+  // A task item wears GitHub's class: marked emits the checkbox as the li's first node with no hook on the li (inside its
+  // first paragraph in a loose list), and the sheets' `li.task-list-item` rule drops the bullet that sat beside the box
+  // and pulls the box into the gutter. After the sanitize (md-sanitize.ts keeps marked's checkbox as the one control a
+  // note carries, and makes an author's enabled one disabled, so every box the stamp sees is inert), and only for a
+  // checkbox that is the item's FIRST NODE: :first-child counts elements alone, so a checkbox an author's raw HTML puts
+  // after the item's text (`- text then <input type="checkbox" disabled>`) matches the selector, and the previousSibling
+  // check leaves it, and its item's bullet, where the file put them. An author who writes the class on an li of their
+  // own, or a raw checkbox that opens an item, gets the same bullet-less item GitHub would give them.
+  box.querySelectorAll('li > input[type="checkbox"]:first-child:disabled, li > p:first-child > input[type="checkbox"]:first-child:disabled').forEach((input) => {
+    if (input.previousSibling) return;                 // text before the box: an author's checkbox mid-item, not a task item
+    const li = input.closest("li");
+    if (li) li.classList.add("task-list-item");
+  });
   if (doc) {
     box.querySelectorAll("img[src]").forEach((node) => {
       const img = node as HTMLImageElement;
@@ -1376,50 +1540,66 @@ function mdBlock(text: string, doc?: MdDocLoc): HTMLElement {
         img.setAttribute("src", fileUrl(joinDocPath(doc.path, src), doc.sid));
       }
     });
+  }
+  if (doc && doc.kind === "url") {
     box.querySelectorAll("a[href]").forEach((node) => {
       const a = node as HTMLAnchorElement;
       const href = a.getAttribute("href") || "";
       if (!href || href.startsWith("#") || /^[a-z][a-z0-9+.-]*:/i.test(href)) return;   // in-document, or already absolute
-      if (doc.kind === "url") {
-        // Absolute now, so the chat's document-level anchor delegate sees a scheme: a same-origin
-        // .md target opens in this viewer (isMarkdownUrl), everything else in a new tab.
-        a.setAttribute("href", resolveDocRelative(href, doc.href));
-      } else if (!href.startsWith("//")) {
-        // The sibling path rides data-act/data-path for openFileView's delegated body listener;
-        // the href stays as written (hover still shows where it goes) and no _blank is forced —
-        // the page would only 404 on it.
-        const joined = joinDocPath(doc.path, href);
-        a.dataset.act = "fv-open";
-        a.dataset.path = joined;
-        const hash = href.indexOf("#") >= 0 ? href.slice(href.indexOf("#")) : "";
-        if (hash.length > 1) a.dataset.frag = hash;          // `report.md#results`: the heading to land on, once open
-        a.title = joined;
-      }
+      // Absolute now, so the chat's document-level anchor delegate sees a scheme: a same-origin
+      // .md target opens in this viewer (isMarkdownUrl), everything else in a new tab.
+      a.setAttribute("href", resolveDocRelative(href, doc.href));
     });
   }
-  // Links open a NEW tab: the viewer lives inside the chat pane's document, and letting a README link
-  // navigate it away would silently eat the chat until a reload. Two kinds stay in the viewer: a local
-  // document's sibling links (stamped fv-open above), and IN-DOCUMENT `#fragment` links, which land on
-  // their heading through the body's delegated fv-anchor handler — a forced _blank on those opened a
-  // REAL tab at the chat page's own URL plus the fragment (found live, 2026-09-06).
-  box.querySelectorAll("a[href]").forEach((node) => {
-    const a = node as HTMLAnchorElement;
-    if (a.dataset.act === "fv-open") return;
-    if ((a.getAttribute("href") || "").startsWith("#")) { a.dataset.act = "fv-anchor"; return; }
-    a.target = "_blank";
-    a.rel = "noopener";
-  });
-  // Fenced blocks: highlight only a language the fence NAMES and this bundle registers — the same
-  // no-guessing rule as langFor; an unnamed block stays plain rather than being painted at random.
+  if (doc && doc.kind === "file") {
+    // A file on the session's disk: its links are sorted by file-view-links.ts (linkMarkdownAnchors). A link to the
+    // web opens a NEW tab: the viewer lives inside the chat pane's document, and letting a README link navigate it
+    // away would silently eat the chat until a reload. A link whose target is a file relative to this one becomes a
+    // path link that opens THAT file in the viewer (its `#fragment` or `:line` riding along); a section link
+    // (`#results`) is the viewer's scroll; a target the sanitizer removed is a dead link that says why.
+    if (rendered) linkMarkdownAnchors(box, doc.path);
+  } else {
+    // A URL document (openUrlView), or a caller with no location: links open a NEW tab, for the same reason. One
+    // kind stays in the viewer: an IN-DOCUMENT `#fragment` link, which lands on its heading through the body's
+    // delegated fv-anchor handler — a forced _blank on those opened a REAL tab at the chat page's own URL plus
+    // the fragment (found live, 2026-09-06). A URL document's sibling links are absolute by now, and the chat's
+    // own anchor delegate routes them (a same-origin .md back into the viewer).
+    box.querySelectorAll("a[href]").forEach((node) => {
+      const a = node as HTMLAnchorElement;
+      if ((a.getAttribute("href") || "").startsWith("#")) { a.dataset.act = "fv-anchor"; return; }
+      a.target = "_blank";
+      a.rel = "noopener";
+    });
+  }
+  // Fenced blocks: highlight only a language the fence NAMES and this bundle registers (the same no-guessing rule as
+  // langFor; an unnamed block stays plain rather than being painted at random). Then, for EVERY fence, named or not, the
+  // chat's own dress (code-block.ts): the per-line rows that number the lines and make a soft-wrap read distinctly from a
+  // real newline, and the Copy button. Copy copies the fence's text AS THE FILE HOLDS IT (fence-source.ts, off the code
+  // tokens the parse collected): the raw text captured here is read before the rows drop the newlines, but after marked's
+  // lexer turned the file's leading tabs into four spaces each, so a Makefile recipe copied from the rendered text pasted
+  // back with spaces; a fence the module does not find in the file copies the raw text as before.
+  const copySources = fenceCopyQueue(text, fences);
   box.querySelectorAll("pre code").forEach((node) => {
     const codeEl = node as HTMLElement;
+    const raw = codeEl.textContent || "";
+    const pre = codeEl.parentElement;
+    const host = pre && pre.tagName === "PRE" ? pre : null;
+    const queued = copySources.get(raw);
+    const toCopy = (queued && queued.length ? queued.shift() : null) ?? raw;
     const lang = (codeEl.className.match(/language-([\w-]+)/) || [])[1];
-    if (!lang || !hljs.getLanguage(lang)) return;
-    try {
-      codeEl.innerHTML = hljs.highlight(codeEl.textContent || "", { language: lang }).value;
-      codeEl.classList.add("hljs");
-    } catch { /* leave plain */ }
+    if (lang && hljs.getLanguage(lang)) {
+      try {
+        codeEl.innerHTML = hljs.highlight(raw, { language: lang }).value;
+        codeEl.classList.add("hljs");
+      } catch { /* leave plain */ }
+    }
+    wrapCodeLines(codeEl);
+    if (host) addCopyBtn(host, toCopy);
   });
+  // URLs and paths written in the prose and the code blocks, after the highlight rewrote the blocks' markup
+  // (a pass before it would be undone). marked already made the prose's URLs anchors; text inside one is skipped.
+  // The fallback's bare text is left bare: it is the content and nothing else, which is that branch's promise.
+  if (rendered && doc && doc.kind === "file") linkifyFileText(box, doc.path);
   return box;
 }
 

@@ -15,10 +15,13 @@ import { sectionTabs, anySectioned, parseTabGroups, readTabGroups, writeTabGroup
          DEFAULT_COLLAPSED, sectionRef, isPinned, setPinned, togglePinned, prunePinned, reachableFrom, tagRenames, followTagRenames, followAdoption,
          sameTagNames, headWords, type TabSection, type SectionRef, type TabGroupsState } from "./tab-groups";
 import { sectionPipTitle } from "./tab-state";
+import { DEFAULT_SETTINGS } from "./settings";
 
 const ui = (...p: string[]) => fs.readFileSync(path.resolve(process.cwd(), "..", "ui", ...p), "utf8");
 const RENDER = ui("webview", "render.ts");
 const CSS = ui("webview", "styles.css");
+const GEAR = ui("webview", "gear.js");
+const SETTINGS = ui("webview", "settings.ts");
 const MENU = ui("webview", "tag-menu.ts");
 const VIEWS = ui("webview", "session-views.ts");
 const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
@@ -123,8 +126,9 @@ test("the strip renders sections when the switch is on and some tag holds a visi
   assert.match(RENDER, /const unions = viewTagUnion\(effViews\(\)\);\s*\n\s*const plan = planStrip\(visibleIds, unions, readTabGroups\(unions\), activeId, phoneLayout\(\),/,
     "the pure module owns the rule; the phone layout and the create in flight are its inputs");
   assert.match(RENDER, /collapsedTabIds = plan\.folded;/);
-  assert.match(RENDER, /if \("head" in item\) \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(item\.head\.name !== null && bar\.childElementCount\) bar\.appendChild\(makeRowBreak\(false\)\);\s*\n\s*bar\.appendChild\(makeGroupHead\(item\.head, item\.folded, item\.active, item\.hidden\)\);\s*\n\s*copyGroup = item\.head\.name;\s*\n\s*continue;\s*\n\s*\}/,
-    "a header paints from the plan (T264: on its own line — the break ahead of it; T264b: it names the group the copies below sit in)");
+  // the break ahead of a header is emitted under the one-group-per-row setting (stripGroupRows, on by default)
+  assert.match(RENDER, /if \("head" in item\) \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(settings\.stripGroupRows && item\.head\.name !== null && bar\.childElementCount\) bar\.appendChild\(makeRowBreak\(false\)\);\s*\n\s*bar\.appendChild\(makeGroupHead\(item\.head, item\.folded, item\.active, item\.hidden\)\);\s*\n\s*copyGroup = item\.head\.name;\s*\n\s*continue;\s*\n\s*\}/,
+    "a header paints from the plan (T264: on its own line under the setting, opened by the break ahead of it; T264b: it names the group the copies below sit in)");
 });
 
 test("executed: planStrip — sections + folds; the flat strip when off or untagged; the ACTIVE tab's section never folds", () => {
@@ -262,7 +266,10 @@ test("a folded section renders its header alone with the folded-away count and o
   assert.ok(head.indexOf('el("span", "tab-group-count")') < head.indexOf("sectionPip("), "after the count (the row's last child when folded, T284)");
   assert.ok(!head.includes("tabStateClass("), "the header itself wears no state class");
   assert.ok(!head.includes('"tab-dot"'), "never a .tab-dot — the kernel's mobile scrape keys on the tab pips' vocabulary");
-  assert.match(head, /if \(sec\.name === null\) return makeRowBreak\(true\);/, "the untagged trail is UNLABELED (the ruling): its own row with no chip, not a header (T264)");
+  // the trail is never a header: its own row with no chip under the one-group-per-row setting (T264), a 13px
+  // divider with the setting off
+  assert.match(head, /if \(sec\.name === null\) return settings\.stripGroupRows \? makeRowBreak\(true\) : makeTrailSep\(\);/,
+    "the untagged trail is UNLABELED (the ruling): never a header; its own row with no chip under stripGroupRows (T264), the divider otherwise");
   // the tab's own class comes from the same function
   assert.match(RENDER, /const stateCls = tabStateClass\(s\.status\);\s*\n\s*if \(stateCls\) tab\.classList\.add\(stateCls\);/);
   assert.match(CSS, /\.tab-group-pip \{ flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var\(--st-working-bg\); \}/, "small: subordinate to the label");
@@ -363,17 +370,22 @@ test("the section chrome is a LABEL's (the user 2026-09-06): the surface's sub-l
   assert.doesNotMatch(CSS, /\.tab-group-dot/, "the dot is gone");
   const sizes = new Set(Array.from(CSS.matchAll(/\n\.tab-group-[^{\n]*\{[^}]*font-size: ([^;]+);/g)).map((m) => m[1]));
   assert.deepEqual([...sizes], ["0.82em"], "one font-size across every section rule");
-  assert.doesNotMatch(CSS, /\.tab-group-sep \{/, "the visible separator is gone (T264): the untagged trail opens its own row instead");
+  // the divider the trail stands behind with the one-group-per-row setting off is scoped off the row break,
+  // which wears .tab-group-sep too (the boundary sectionHeadOf reads) and must keep no box
+  assert.doesNotMatch(CSS, /\.tab-group-sep \{/, "no unscoped separator rule: the break's boundary class must not give it a box");
+  assert.match(CSS, /\.tab-group-sep:not\(\.tab-group-break\) \{ flex: 0 0 auto; box-sizing: border-box; width: 13px; padding: 8px 6px; background: var\(--box-border\); background-clip: content-box; \}/,
+    "the divider's rule: a 13px box whose gutters are padding");
 });
 
-// ── T264 (the user 2026-09-08): every tag group on its own line ──────────────────────────────────────────
-test("every group opens a new line: a zero-height full-width break ahead of each header, the trail's break doubling as the boundary (T264)", () => {
+// ── T264 (the user 2026-09-08): every tag group on its own line, under the stripGroupRows setting (on by default) ──
+test("under the setting (on by default), every group opens a new line: a zero-height full-width break ahead of each header, the trail's break doubling as the boundary (T264)", () => {
   // the strip read as one long concatenation; now the chip sits at the left edge, its tabs follow it
-  // and wrap onto further rows as they need, and the next group starts a fresh line
+  // and wrap onto further rows as they need, and the next group starts a fresh line. The breaks are
+  // emitted under the one-group-per-row setting (the next test runs the gate at both values)
   const loop = RENDER.slice(RENDER.indexOf("collapsedTabIds = plan.folded;"), RENDER.indexOf("const id = item.id;"));
-  assert.match(loop, /if \(item\.head\.name !== null && bar\.childElementCount\) bar\.appendChild\(makeRowBreak\(false\)\);\s*\n\s*bar\.appendChild\(makeGroupHead\(item\.head, item\.folded, item\.active, item\.hidden\)\);/,
-    "a break before every header but the strip's first item (which already opens the first row)");
-  const brk = RENDER.slice(RENDER.indexOf("function makeRowBreak("), RENDER.indexOf("function sectionHeadOf("));
+  assert.match(loop, /if \(settings\.stripGroupRows && item\.head\.name !== null && bar\.childElementCount\) bar\.appendChild\(makeRowBreak\(false\)\);\s*\n\s*bar\.appendChild\(makeGroupHead\(item\.head, item\.folded, item\.active, item\.hidden\)\);/,
+    "under the setting, a break before every header but the strip's first item (which already opens the first row)");
+  const brk = RENDER.slice(RENDER.indexOf("function makeRowBreak("), RENDER.indexOf("function makeTrailSep("));
   assert.match(brk, /el\("div", "tab-group-break" \+ \(untagged \? " tab-group-sep" : ""\)\)/,
     "the untagged trail's break keeps the .tab-group-sep class — the boundary sectionHeadOf reads");
   assert.match(brk, /brk\.setAttribute\("aria-hidden", "true"\);/, "layout only: nothing to read aloud");
@@ -385,6 +397,81 @@ test("every group opens a new line: a zero-height full-width break ahead of each
   assert.match(sh, /if \(h\.classList\.contains\("tab-group-sep"\)\) return null;/);
   // the header's own rule is unchanged: flex-none, the chip first in its row
   assert.match(CSS, /\.tab-group-head \{ display: flex; flex: 0 0 auto; align-items: center;/);
+});
+
+// ── the one-group-per-row setting (stripGroupRows, on by default): off, the groups follow one another across the strip ──
+test("executed + pinned: the one-group-per-row setting is on by default; off, the strip emits NO break, a group's head and tabs stay contiguous and the trail stands behind a divider; the gear's row", () => {
+  // the setting and its default (executed: the real defaults object)
+  assert.equal(DEFAULT_SETTINGS.stripGroupRows, true, "on by default: every tag group on its own row");
+  assert.match(SETTINGS, /stripGroupRows: boolean;/);
+  // the loop's head branch appends the break and the header, nothing else, and the break is the ONE gated append;
+  // the gate itself is executed here off the source text: on, every head but the first gets a break; off, none
+  const loop = RENDER.slice(RENDER.indexOf("for (const item of plan.items) {"), RENDER.indexOf("const id = item.id;"));
+  assert.equal((loop.match(/makeRowBreak\(/g) ?? []).length, 1, "one break site in the loop");
+  assert.equal((loop.match(/bar\.appendChild\(/g) ?? []).length, 2, "the head branch appends the break (gated) and the header; nothing else sits between a head and its tabs");
+  const gate = loop.match(/if \((settings\.stripGroupRows && item\.head\.name !== null && bar\.childElementCount)\) bar\.appendChild\(makeRowBreak\(false\)\);/);
+  assert.ok(gate, "the break is gated on the setting");
+  const breaks = new Function("settings", "item", "bar", "return !!(" + gate![1] + ");") as (s: unknown, it: unknown, b: unknown) => boolean;
+  const heads = [{ head: { name: "web" } }, { head: { name: "api" } }, { head: { name: null } }];
+  assert.deepEqual(heads.map((it, i) => breaks({ stripGroupRows: true }, it, { childElementCount: i })), [false, true, false], "on: a break ahead of every header but the strip's first item; the trail's header is itself the break");
+  assert.deepEqual(heads.map((it, i) => breaks({ stripGroupRows: false }, it, { childElementCount: i })), [false, false, false], "off: no break ahead of any header, first or later, nor the trail's");
+  // the plan's items are contiguous per group (executed on the pure module): a head, then its tabs, then the next
+  // head; with no break appended the DOM is the plan in order, so the groups follow one another and wrap
+  const unions = viewTagUnion({ tags: [{ id: "t-infra", name: "infra", color: "#1EA1EB", members: ["web", "api"] },
+                                       { id: "t-qa", name: "qa", color: "#54B204", members: ["tests"] }] });
+  const plan = planStrip(["web", "api", "tests", "loose"], unions, parseTabGroups(null, unions), "web", false);
+  assert.deepEqual(plan.items.map((it) => ("head" in it ? "#" + (it.head.name ?? "null") : it.id)), ["#infra", "web", "api", "#qa", "tests", "#null", "loose"],
+    "each group's head is followed by its tabs and then the next head; the trail's head last");
+  // with the setting off the trail's boundary is a divider: a real 13px box wearing .tab-group-sep (the boundary
+  // sectionHeadOf reads and the drop's group edge), titled, no aria noise
+  const sep = RENDER.slice(RENDER.indexOf("function makeTrailSep("), RENDER.indexOf("function sectionHeadOf("));
+  assert.match(sep, /const sep = el\("div", "tab-group-sep"\);\s*\n\s*sep\.title = "sessions in no tag";\s*\n\s*return sep;/);
+  const drop = RENDER.slice(RENDER.indexOf('tabs.addEventListener("drop"'), RENDER.indexOf("tabDragCommitted = true; }"));
+  assert.match(drop, /const edge = \(n: Element\) => n\.classList\.contains\("tab-group-head"\) \|\| n\.classList\.contains\("tab-group-break"\) \|\| n\.classList\.contains\("tab-group-sep"\);/,
+    "the divider bounds the trail for the drop's in-group neighbour walk, as the break does under the setting");
+  // a gear flip repaints at once: the setting rides the strip's rebuild signature, and the settings listener calls renderTabs
+  assert.match(RENDER, /settings\.tabCtx, settings\.stripGroupRows, settings\.theme, settings\.colormap,/, "in the strip's signature");
+  assert.match(RENDER, /onExternalSettingsChange\(\(s\) => \{ settings = s; applyChatScheme\(s\); renderTabs\(\);/);
+  // the gear's row: a checkbox like Show git branch's, checked by default, saved through the same save() and filled at open
+  assert.match(GEAR, /<label class=rs-row><input type=checkbox id=rs-striprows checked>' \+\s*\n\s*'<span><b>One tag group per row in the tab strip<\/b>/);
+  assert.match(GEAR, /sr\.addEventListener\('change', function \(\) \{ var s = load\(\); s\.stripGroupRows = sr\.checked; save\(s\); \}\);/);
+  assert.match(GEAR, /if \(sr\) sr\.checked = s\.stripGroupRows !== false;/, "the default-ON fill: only an explicit false unchecks");
+  assert.equal((GEAR.match(/stripGroupRows: true/g) ?? []).length, 2, "the gear's defaults mirror agrees: on, in both of load()'s literals");
+  // the guide says so in one sentence (matched across its line wraps)
+  const sentence = "Every group starts on its own row; turning off the gear's **One tag group per row in the tab strip** lets the groups follow one another across the strip and wrap as they need, with the untagged sessions behind a thin divider, so a strip with many tags stays short.";
+  assert.match(GUIDE, new RegExp(sentence.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+")));
+  assert.match(GUIDE, /the untagged sessions on a row of their\s+own at the end\./, "the paragraph's opening describes the default layout");
+});
+
+test("executed: the drop's in-group neighbour walk stops at the trail's divider, as it stops at a break or a header", () => {
+  // the walk's own source, lifted from the drop handler and run over a fake sibling chain; the replaces strip the
+  // body's TypeScript annotations, leaving plain JS for new Function
+  const drop = RENDER.slice(RENDER.indexOf('tabs.addEventListener("drop"'), RENDER.indexOf("tabDragCommitted = true; }"));
+  const src = drop.slice(drop.indexOf("const own = "), drop.indexOf("// committed only when"))
+    .replace(/: \(x: Element\) => Element \| null/g, "").replace(/\): HTMLElement \| null =>/g, ") =>")
+    .replace(/ as HTMLElement \| null/g, "").replace(/\(n as HTMLElement\)/g, "n")
+    .replace(/: Element \| null/g, "").replace(/: Element\)/g, ")").replace(/: boolean\)/g, ")");
+  assert.match(src, /const edge = /); assert.match(src, /const next = /);
+  const neighbours = new Function("dragged", "draggedId", src + "\nreturn { prev: prev?.dataset?.id ?? null, next: next?.dataset?.id ?? null };") as
+    (dragged: unknown, draggedId: string) => { prev: string | null; next: string | null };
+  type Fake = { classList: { contains(c: string): boolean }; dataset: { id?: string }; previousElementSibling: Fake | null; nextElementSibling: Fake | null };
+  const strip = (specs: { cls: string; id?: string }[]): Fake[] => {
+    const els = specs.map((s): Fake => ({ classList: { contains: (c) => s.cls.split(" ").includes(c) }, dataset: s.id ? { id: s.id } : {},
+                                          previousElementSibling: null, nextElementSibling: null }));
+    els.forEach((e, i) => { e.previousElementSibling = els[i - 1] ?? null; e.nextElementSibling = els[i + 1] ?? null; });
+    return els;
+  };
+  // the strip with the setting off: [#infra] a b | loose1 loose2 [+]; loose1 dropped where it stands, at the trail's head
+  const inline = [{ cls: "tab-group-head" }, { cls: "tab", id: "a" }, { cls: "tab", id: "b" }, { cls: "tab-group-sep" },
+                  { cls: "tab", id: "loose1" }, { cls: "tab", id: "loose2" }, { cls: "tab tab-add" }];
+  const bar = strip(inline);
+  assert.deepEqual(neighbours(bar[4], "loose1"), { prev: null, next: "loose2" },
+    "the divider bounds the trail: the drop anchors before the trail's next tab, never after the tagged group's last");
+  // under the setting the same boundary is the break, wearing both classes: the same edge
+  const rows = strip(inline.map((s) => (s.cls === "tab-group-sep" ? { cls: "tab-group-break tab-group-sep" } : s)));
+  assert.deepEqual(neighbours(rows[4], "loose1"), { prev: null, next: "loose2" }, "the trail's break is the edge under the setting");
+  // inside a group the walk names the tab before, and the group's end bounds the tab after
+  assert.deepEqual(neighbours(bar[2], "b"), { prev: "a", next: null }, "b sits after a; the divider ends its group");
 });
 
 test("the tab drag's virtual layout wraps where the strip wraps: headers after a break and the trail's break open rows (T264)", () => {
@@ -1679,10 +1766,11 @@ test("the tab drag moves THIS copy and reorders within its group's neighbours (T
   // the drop's neighbours skip the session's own copy in the group next door — reorderTo against itself moves nothing
   const drop = RENDER.slice(RENDER.indexOf('tabs.addEventListener("drop"'), RENDER.indexOf("tabDragCommitted = true; }"));
   assert.match(drop, /const own = \(n: Element \| null\) => !!n && \(n as HTMLElement\)\.dataset\?\.id === draggedId;/);
-  // the neighbours come from the dragged copy's OWN group first: the walk stops at a header or a row break,
-  // and only a group holding no other tab falls back to the nearest tab across groups (a drop at a group's
-  // head used to anchor on the group above's last tab, so the session's other copy jumped)
-  assert.match(drop, /const edge = \(n: Element\) => n\.classList\.contains\("tab-group-head"\) \|\| n\.classList\.contains\("tab-group-break"\);/);
+  // the neighbours come from the dragged copy's OWN group first: the walk stops at a header, a row break or
+  // the trail's divider (its boundary with the one-group-per-row setting off), and only a group holding no
+  // other tab falls back to the nearest tab across groups (a drop at a group's head used to anchor on the
+  // group above's last tab, so the session's other copy jumped)
+  assert.match(drop, /const edge = \(n: Element\) => n\.classList\.contains\("tab-group-head"\) \|\| n\.classList\.contains\("tab-group-break"\) \|\| n\.classList\.contains\("tab-group-sep"\);/);
   assert.match(drop, /while \(n && \(!\(n as HTMLElement\)\.dataset\?\.id \|\| own\(n\)\)\) \{ if \(inGroup && edge\(n\)\) return null; n = step\(n\); \}/);
   assert.match(drop, /const prev = prevIn \?\? \(nextIn \? null : walk\(dragged\.previousElementSibling, back, false\)\);/);
   assert.match(drop, /const next = nextIn \?\? \(prevIn \? null : walk\(dragged\.nextElementSibling, fwd, false\)\);/);

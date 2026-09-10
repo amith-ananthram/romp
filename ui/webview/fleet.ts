@@ -5,7 +5,7 @@
 // bottom "Show completed" checkbox (default off). The recency colour helpers are copied verbatim from render.ts
 // so the colours are IDENTICAL to the ledger box.
 import { delegate, flash } from "./actions";
-import { paintHeld, paintReleased } from "./paint-gate";
+import { paintHeld, paintReleased, publishPaneHidden } from "./paint-gate";
 import { applyTheme } from "./theme";
 import { loadSettings, installSettingsSync, onExternalSettingsChange } from "./settings";
 import { SessionViews, viewTagUnion } from "./session-views";
@@ -416,7 +416,11 @@ function hostLoadStrip(): HTMLElement {
 // a background tab kept rebuilding on every push, and nothing fired on the return — and document.hidden
 // sees the tab but never a display:none pane. Both gate, both events release, and the payload (sessions,
 // asksById, the pending hosts) is applied either way; only the rebuild waits (paint-gate.ts).
-let paneVisible = true;
+// The same two measures are this pane's hidden word for the kernel's pane shim (paint-gate.ts publishPaneHidden):
+// the shim's zero-viewport probe misses a pane hidden after a first show in Chromium, so the release path and the
+// hidden arm of visibilitychange publish document.hidden OR the observer's last word as window.__rompPaneHidden,
+// on the same events, and nothing until the observer has spoken.
+let paneVisible: boolean | null = null;   // the observer's last word; null until it speaks (the gate reads null as on screen; nothing is published for it)
 let paneDirty = false;
 function watchPaneVisibility(list: HTMLElement): void {
   if (typeof IntersectionObserver === "undefined") return;   // no observer → the tab's visibility alone gates
@@ -428,11 +432,13 @@ function watchPaneVisibility(list: HTMLElement): void {
 // Synchronous on purpose: a paint inside the event handler is the earliest fresh frame after the
 // compositor's cached one; a requestAnimationFrame hop is later at best and never fires in a hidden frame.
 function releasePaint(): void {
+  publishPaneHidden(document.hidden, paneVisible);
   if (!paintReleased(paneDirty, document.hidden, paneVisible)) return;
   paneDirty = false;
   render();
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden) releasePaint(); });
+document.addEventListener("visibilitychange", () => { if (document.hidden) publishPaneHidden(true, paneVisible); });   // the hidden arm releases nothing, so the release path never publishes it
 let paneWatching = false;
 function render() {
   syncFleetTagBtn?.();
@@ -1000,10 +1006,12 @@ vscodeApi?.postMessage({ type: "ready" });   // ask the kernel to push the initi
 // wire is doing. A whole render(), not a per-element repaint: it is what every frame already runs, the ledgers
 // are small, and the cutoff filter has to be able to DROP a row as it ages out of the window — which no
 // repaint of the row's own text could do. Not for a pane nobody can see: a hidden tab (document.hidden) or a
-// pane the shell has hidden (display:none gives the iframe a ZERO viewport — the shim's paneHidden test;
+// pane the shell has hidden (display:none gives the iframe a ZERO viewport, the shim's zero-viewport probe;
 // document.hidden stays false for it) skips the tick, and the first visible moment catches up once
 // (visibilitychange, or the resize the iframe gets when it is shown again) — not on every flip, only after a
-// tick was skipped. Frames still render as they arrive.
+// tick was skipped. Frames still render as they arrive. The probe alone, not the pane's published word the shim's
+// paneHidden() also reads: a pane hidden after a first show keeps its size in Chromium, so this tick runs for it,
+// and the cost is one 15 s pass nobody sees.
 const paneHidden = () => document.hidden || window.innerWidth === 0 || window.innerHeight === 0;
 let tickSkipped = false;   // a refresh fell while hidden: the pane owes one catch-up render
 const refreshIfVisible = () => {

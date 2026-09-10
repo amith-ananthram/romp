@@ -399,7 +399,8 @@ class _PerfStats:
         for key, read in (("pass", _goals_memo_report), ("shared", jd.shared_store_stats),
                           ("chain", jd.chain_memo_stats), ("courierSkip", jd.courier_skip_stats),
                           ("backref", jd.backref_memo_stats), ("captions", jd.captions_memo_stats),
-                          ("goalArchive", jd.goal_archive_memo_stats), ("plannerSkip", jd.planner_skip_stats)):
+                          ("goalArchive", jd.goal_archive_memo_stats), ("plannerSkip", jd.planner_skip_stats),
+                          ("liftGate", _lift_gate_report), ("bgTops", _bg_tops_report)):
             try:
                 memos[key] = read()
             except Exception:
@@ -3005,14 +3006,16 @@ def _clear_unresolved_live_note(sid):
 
 
 def _tab_order_frame(order, tabs, live, c=None):
-    """The ONE tabOrder frame shape (T258) for its four senders (the pusher's tabs-first send, _push_session_now,
-    _confirm_close_now, and the WS 'ready' handler's connect-time frame), all of which go through
+    """The ONE tabOrder frame shape (T258) for its three senders (the pusher's tabs-first send, which is also the
+    connect push a `ready` triggers, _push_session_now and _confirm_close_now), all of which go through
     _send_tab_order: the shared order, the tabs meta, the viewer's views blob, `live` — the sids the kernel
     affirms are LIVE this build (raw tmux/SDK liveness, independent of whether discover could resolve each
     one's transcript) — and `selfHost`, this kernel's own name (_self_host). The pane keeps a live sid on the
     strip even if this frame's `order` omits it: a transient read failure that drops a session from the order
-    is not a close (render.ts applyTabOrder). The chat reads a postal card's sender host against `selfHost`
-    (its postalSenderHost). The session frame carries the name too, but only a LOCAL session's frame teaches
+    is not a close (render.ts applyTabOrder). That rule is why the WS `ready` handler sends no strip of its own:
+    a frame built there from _ordered_alive (living only) omitted every kept-open read-only tab the connect push
+    had just listed, and the pane closed them all at each ready. The chat reads a postal card's sender host against
+    `selfHost` (its postalSenderHost). The session frame carries the name too, but only a LOCAL session's frame teaches
     it, so a dashboard whose kernel runs no sessions of its own — every session attached from elsewhere —
     never learned it until the + picker was opened, and a remote card stamped with this kernel's name stayed
     plain text (review find, 2026-09-06). Every chat client receives a tabOrder frame, first of all on connect
@@ -3681,8 +3684,8 @@ def _ordered(sessions):
 
 
 def _ordered_alive(now, tmux):
-    """Living sessions in the shared, persisted order (see _ordered). Kept as the source for the tab-order
-    push on connect; chat tabs AND timeline lanes resolve the SAME order through _ordered, in lockstep."""
+    """Living sessions in the shared, persisted order (see _ordered): chat tabs AND timeline lanes resolve the
+    SAME order through _ordered, in lockstep."""
     return _ordered(_alive_sessions(now, tmux))
 
 
@@ -9714,6 +9717,20 @@ def _sid_inputs_fp(sid, path, extra=()):
 
 
 _lift_seen = {}   # sid -> the inputs fingerprint the awaiting lift last ruled on — see _lift_spent_awaiting
+_lift_gate_stats = {"skip": 0, "load": 0, "shared": 0, "writer": 0, "noop": 0}   # /perf memos.liftGate, see _lift_gate_report
+
+
+def _lift_gate_report():
+    """The gate's counters plus its occupancy, for /perf: `skip` session-cycles that took no read, `load` the
+    ones that read the store (phase 1 of _lift_spent_awaiting), `shared` the phase-1 reads the shared
+    read-only cache answered (the rest were load_goals' own store: no file, an unreadable journal, the cache
+    off), `writer` the phase-2 writer loads: one per session-tick that loaded the writer's copy because a
+    lift was due (a tick filing two lifts on one session counts once; the `noop` ones count too), `noop`
+    the writer loads whose fresh decision filed nothing (the store moved between the probe and the load),
+    `entries` sids remembered."""
+    out = dict(_lift_gate_stats)
+    out["entries"] = len(_lift_seen)
+    return out
 
 
 def _lift_spent_awaiting(now, tmux):
@@ -9730,18 +9747,34 @@ def _lift_spent_awaiting(now, tmux):
     awaiting flavors are untouched: we lift only when this goal DID dispatch background work of its own by
     stamp time, every one of those has come back, and at least one came back AFTER the stamp's anchor —
     a return already sitting in a turn the stamping judge had audited can't be what the stamp waits on
-    (see the loop's _returned_after note, 2026-08-16). A stamp naming a CI run, a scheduled check-back or a
-    peer handoff owns no such dispatches, so it never matches and keeps its stamp — those still rely on the
-    6h awaiting wake (_wake_goal, in the nudge tick's goal walk), which is exactly the case a timer is the
-    only tool for. A kind=job stamp that DOES own dispatches (the standard shape: a watcher armed over an
-    external computation) lifts only on their REAL terminal records: a watcher dying with a restart or
+    (see _lift_decisions' _returned_after note, 2026-08-16). A stamp naming a CI run, a scheduled check-back
+    or a peer handoff owns no such dispatches, so it never matches and keeps its stamp — those still rely on
+    the 6h awaiting wake (_wake_goal, in the nudge tick's goal walk), which is exactly the case a timer is
+    the only tool for. A kind=job stamp that DOES own dispatches (the standard shape: a watcher armed over
+    an external computation) lifts only on their REAL terminal records: a watcher dying with a restart or
     expiring is the CARRIER going, not the job returning — before this, the watcher's silent death lifted
     the stamp while the slurm job ran on (the user 2026-08-15; the wake stays the backstop).
 
     Dormant sessions are skipped: their tasks died with their CLI, so the death notice is the truth there,
-    not a lift (same rule as _session_awaiting's source 0.75)."""
+    not a lift (same rule as _session_awaiting's source 0.75).
+
+    TWO-PHASE READ. Every rule lives in _lift_decisions, which decides and writes nothing. Phase 1 runs it
+    on the shared read-only view (jd.load_goals_shared_or_fault: one parse per store version for every
+    reader; the fingerprint is recorded before the probe, as before). Most stamped sessions end there: the
+    dispatch is still out, so nothing is due and no writer load happens. Before this, every alive session
+    whose fingerprint moved paid a private load_goals (a full read plus the journal replay) to decide
+    nothing. Phase 2 runs only when phase 1 found a lift due: the writer's copy is loaded
+    (jd.load_goals_or_fault), the decision is made AGAIN on that copy, and that second decision is what
+    record_verdict files and save_goals publishes, never the first. The frozen view is never written to and
+    never reaches save_goals (both would raise), and the copy a lift is written on is the copy it was
+    decided on: a writer that publishes between the probe and the load (the closer re-placing the deciding
+    launch under another card) costs one writer load that decides nothing (`noop`), never a lift from a
+    stale decision. After the loop, the gate entries and the placed-launch memo's entries of sids that
+    left the alive set are dropped: nothing to gate, nothing to place for."""
+    seen = set()
     for s in _alive_sessions(now, tmux):
         sid = s["sid"]
+        seen.add(sid)
         try:
             if tmux.get(sid) is None:                 # dormant → its tasks died with the CLI, don't rule
                 continue
@@ -9769,275 +9802,335 @@ def _lift_spent_awaiting(now, tmux):
                                          tuple(sorted((str(t.get("id") or ""), bool(em._bg_expired(t, now)))
                                                       for t in every if isinstance(t, dict) and t.get("status") == "running"))))
             if gate is not None and _lift_seen.get(sid) == gate:
-                continue
+                _lift_gate_stats["skip"] += 1
+                continue                              # the same inputs were ruled on last cycle
+            _lift_gate_stats["load"] += 1
             _lift_seen[sid] = gate                    # recorded now; a ruling that RAISES forgets it below,
-            store, fault = jd.load_goals_or_fault(sid)   # so the next cycle retries instead of skipping
-            if fault is not None:                     # its row is filed; forget the gate so the next cycle
-                _lift_seen.pop(sid, None)             # retries this session, and go on to the others
+            #                                           so the next cycle retries instead of skipping
+            # PHASE 1, the probe: the shared read-only view. A FrozenStore is the cache's answer; anything
+            # else is load_goals' own store handed through (no file, an unreadable journal, the cache off).
+            # A read FAULT (the file exists and did not read) comes back as (None, fault) through the
+            # boundary, its row filed once per episode: forget the gate so the next cycle retries this
+            # session, and go on to the others.
+            store, fault = jd.load_goals_shared_or_fault(sid)
+            if fault is not None:
+                _lift_seen.pop(sid, None)
                 continue
             if store.get("_unread"):                  # the store read but its journal did not (the mark):
                 _lift_seen.pop(sid, None)             # not a ruling on the files; the next cycle retries
-            nodes = store.get("nodes") or {}
-            stamped = [nd for nd in nodes.values()
-                       if nd.get("awaitingWhy") and nd.get("awaitingAt") and not nd.get("rolledUp")]
-            # A stamped node the roll-down folded under a RESOLVED ancestor: its card's story ended, but
-            # the stamp survives invisibly (every reader skips rolledUp) — lift it explicitly so the
-            # diary says why it went, instead of an unretired wait no surface can show (the user
-            # 2026-07-27). Guarded on the diary so an unmaterialized lift never re-fires each tick.
-            rolled = [nd for nd in nodes.values()
-                      if nd.get("awaitingWhy") and nd.get("rolledUp")
-                      and not _last_awaiting_is_lift(nd)]
+            if isinstance(store, jd.FrozenStore):
+                _lift_gate_stats["shared"] += 1
+            if not _lift_decisions(sid, s, store, now, tmux):
+                continue                              # nothing due (no candidate, or the common stamped case:
+                #                                       the dispatch still out): no writer load
+            # PHASE 2, the write: a fresh private copy, decided on again, and only its own decisions filed.
+            # The same boundary: a fault between the probe and this load forgets the gate and retries, and
+            # so does a copy that loaded without its journal (the mark, as on the probe above).
+            _lift_gate_stats["writer"] += 1
+            wstore, wfault = jd.load_goals_or_fault(sid)
+            if wfault is not None:
+                _lift_seen.pop(sid, None)
+                continue
+            if wstore.get("_unread"):
+                _lift_seen.pop(sid, None)
+            wnodes = wstore.get("nodes") or {}
             changed = False
-            for nd in rolled:
-                if jd.record_verdict(store, nd, "romp", "awaiting", _lift_ev_t(nd, now), lift=True):
-                    changed = True
-
-            def _top_of(x):
-                seen = set()
-                while x in nodes and nodes[x].get("parentId") is not None and x not in seen:
-                    seen.add(x); x = nodes[x]["parentId"]
-                return x
-            # SUPERSEDED PEER-WAIT LIFT (the user 2026-08-24): a peer's reply at/after a kind=peer (or
-            # kindless) stamp's WRITE time already ends that wait at every read — _goal_awaiting_stamp_full
-            # hides the stamp from the card and the chip, and the nudge walk (which reads the same
-            # predicate) then never arms the 6h wake. But that supersede was read-time only: it filed
-            # NOTHING, so the stamp sat invisibly forever — the closer was never re-nominated (its
-            # filed-since gate needs a diary row newer than closerLookT, and the newest row was the stamp
-            # itself), the plain-nudge fire gate read the RAW fields and vetoed every fire, and a LIVE
-            # session's Working card wore the quiet floor ("Paused — resumes when its wait ends")
-            # indefinitely — three live specimens on one board, one ~14h, breaking the recorded 2026-08-22
-            # promise that every Working card is nudged/woken until it lands (_dead_wait_block's docstring).
-            # File the lift the readers already act on: the reply is the wait's designed exact ending event
-            # (the reader's own rule), the lift row re-arms the closer's filed-since nomination (a re-audit
-            # can re-stamp a still-real wait with a fresh write time that out-orders the answer — the
-            # designed self-correction the read-only supersede promised but never delivered), and the
-            # ledger drop re-engages the nudge ladder exactly like the dispatch arms below. Peer-scoped
-            # exactly like the reader (job/agents/task/timer stamps stand through mail); DORMANT sessions
-            # never reach here (the sweep's own gate above) — the dead-wait conversion reads the stamp RAW
-            # on purpose (2026-08-23) and owns that ending.
-            answered = _peer_answered(sid)
-            for nd in (list(stamped) if answered[0] else ()):
-                reply_t = _peer_stamp_superseded(nd, answered)   # the superseding reply's time, or 0
-                if not reply_t:
+            for nid, top, drop_rec, end_ev in _lift_decisions(sid, s, wstore, now, tmux):
+                nd = wnodes.get(nid)
+                if nd is None:
                     continue
-                # the reply IS the evidence this lift rules on: journal it as the horizon, so a later
-                # closer assert on evidence newer than the reply stands whatever this row's arrival
-                if jd.record_verdict(store, nd, "romp", "awaiting", _lift_ev_t(nd, now), lift=True,
-                                     end_ev=reply_t):
+                # `end_ev` is the EVIDENCE HORIZON the decision ruled on (record_verdict end_ev, 2026-09-07:
+                # the superseding reply's time, the newest in-harness ending, the newest cited return; None
+                # for a rolled-up lift), journaled so a later closer assert on evidence newer than it stands
+                # whatever this row's arrival, and so the stand-down compares evidence to evidence
+                if jd.record_verdict(wstore, nd, "romp", "awaiting", _lift_ev_t(nd, now), lift=True,
+                                     end_ev=end_ev):
                     changed = True
-                    stamped.remove(nd)
-                    _drop_auto_nudge_rec(_top_of(nd.get("id")))
-            if not stamped:
-                if changed:
-                    jd.rollup_status(store, False)
-                    jd.save_goals(sid, store)
-                    _mark_views_dirty()
-                continue
-            every = _bg_scan_all_cached(s["path"])
-            # the backend's lifecycle set (present-but-empty is AUTHORITATIVE — _bg_live_norm's own
-            # rule) and the CLI epoch it (re)started at: the restart-orphan reconciliation evidence
-            snap = tmux.get(sid) or {}
-            reg_ids = ({str(t.get("toolUseId") or "") for t in snap.get("bgTasks") or []
-                        if isinstance(t, dict)} if "bgTasks" in snap else None)
-            sp = _sdk_spawned_at(sid) or 0
-            # the launch ledger's stop tombstones (sdk_backend's bgLedgerEnded): a TaskStop suppresses
-            # the task notification, so the transcript never learns the Monitor ended — the hook did
-            tombs = ((_thread_reg(sid).get("bgLedgerEnded") or []) if reg_ids is not None else [])
-            if not every and reg_ids is None:
-                if changed:
-                    jd.rollup_status(store, False)
-                    jd.save_goals(sid, store)
-                    _mark_views_dirty()
-                continue
-            # RESTART-ORPHAN reconciliation (the user 2026-08-24): a kernel/backend restart kills
-            # tracked subagents and workflows WITH the claude process — the terminal record never
-            # lands, the transcript pairing shows them "running" forever, and the stamp orphaned
-            # (16h of "awaiting agents" over an empty registry, nothing reconciling). A
-            # transcript-"running" task ABSENT from a PRESENT lifecycle set died with its process;
-            # its return event IS the backend's (re)spawn — an exact event, not a timer. kind=job
-            # stays registry-blind below: the watcher dying is the carrier going, not the job
-            # returning.
-            dead = (set() if reg_ids is None else
-                    {t.get("id") for t in every
-                     if t.get("status") == "running" and t.get("id") and str(t.get("id")) not in reg_ids})
-            # a monitor past its recorded lifetime ceiling counts as RETURNED even with no terminal
-            # record (its CLI died mid-watch; the notification can never arrive) — see em._bg_expired
-            running = {t.get("id") for t in every
-                       if t.get("status") == "running" and not em._bg_expired(t, now)
-                       and t.get("id") not in dead}
-            # kind=job: expiry is not a return (see docstring) — only a real terminal record lifts
-            running_job = {t.get("id") for t in every if t.get("status") == "running"}
-            placed = _bg_placed_tops(sid, s["path"], [t.get("id") for t in every])
-            for nd in stamped:
-                born = nd.get("t") or 0
-                top = _top_of(nd.get("id"))
-                # The dispatches this goal owns. Placement is authoritative when the judge has spoken:
-                # a task placed under ANOTHER card can never retire this stamp (the user 2026-07-27:
-                # unrelated returns were lifting CI-wait stamps — one lifted the same minute it was
-                # re-asserted). The time window survives only for placement-unknown launches (the
-                # conservative pre-verdict shape): launched during the goal's life, at or before the
-                # stamp it explains — bounded by when that stamp was WRITTEN, not by its turn-trigger
-                # anchor, which the launches of that very turn all postdate (see _stamp_written_at).
-                horizon = _stamp_written_at(nd)
-                own = []
-                for t in every:
-                    p = placed.get(t.get("id"))
-                    if p is not None:
-                        if p == top:
-                            own.append(t)             # the goal's own thread, before OR after the stamp:
-                            #                           anything of its own still out keeps the wait honest
-                    elif born <= (t.get("t") or 0) <= horizon:
-                        own.append(t)
-                if not own:                           # nothing dispatched → not a background wait; leave it
-                    # …EXCEPT a stamp standing over an authoritatively EMPTY in-harness world: the
-                    # backend's lifecycle set present and empty, no live subagents, nothing running in
-                    # the transcript. Two shapes, one writer:
-                    #  - kind=agents (the user 2026-08-24): an agents-kind wait ends with task
-                    #    notifications, and with no dispatch recorded ANYWHERE no such event can ever
-                    #    arrive — the shape a closer mints when it misreads peer sessions as agents,
-                    #    orphaned for good the moment a restart clears the world it described. Same
-                    #    evidence-postdates-anchor rule as every lift: the (re)spawn must be newer than
-                    #    the stamp's anchor — or the transcript itself shows NOTHING running at all
-                    #    (2026-08-25 audit: the misread-peer-as-agents shape needs no respawn to prove
-                    #    the notification can never arrive; the pairing already did).
-                    #  - kind=task/job (2026-09-05): a closer stamped a top kind=job for a Monitor plus
-                    #    a background command the session ITSELF was running, the planner placed both
-                    #    launches on a sibling top, and this skip kept the stamp 17 hours over an empty
-                    #    registry with nothing pending anywhere (the wake below it never reached it —
-                    #    nudges off, top all-delegated). The deciding event is the LAST in-harness item
-                    #    ENDING after the stamp (_bg_ended_after: a terminal record, a Monitor's recorded
-                    #    ceiling, the launch ledger's stop tombstone, or the CLI respawn that killed
-                    #    everything) — a world already empty when the judge stamped is a wait on
-                    #    something the registry cannot see (a CI run), and stays the dead-man's. An
-                    #    ARMED kernel watch for this sid (a PR watch) is a carrier still running: its
-                    #    delivery is the ending, so the stamp stands. The owned-dispatch job rule below
-                    #    ("the watcher dying is the carrier going") is untouched: it needs a dispatch of
-                    #    the goal's OWN to protect, and this branch has none.
-                    _kind, _anchor0 = nd.get("awaitingKind"), nd.get("awaitingAt") or 0
-                    _empty = reg_ids is not None and not reg_ids and not snap.get("subagents") and not running
-                    # `_ended` = the newest in-harness ending this lift cites — its EVIDENCE HORIZON
-                    # (record_verdict end_ev, 2026-09-07). An agents lift resting on no recorded ending
-                    # at all (a stamp over a transcript where nothing ever ran, no respawn past the
-                    # anchor: the misread-peers-as-agents shape) rules "the authoritative registry shows
-                    # nothing running NOW and nothing ever ended", so the registry read's moment is what
-                    # it ruled through, the dead-man lift's own choice for the same shape of ruling
-                    # (_wake_goal), and journaled as read, never floored to the second: the gates compare
-                    # a horizon against raw evidence times, and int(now) disowned an assert triggered in
-                    # the read's own second. Journaling none instead (review find, 2026-09-08) left the gates
-                    # reading the row's anchor, which disowns nothing: a lagging closer's re-assert from a
-                    # segment triggered inside (anchor, lift) stood, the next pass re-lifted on the same
-                    # empty world, and every re-lift re-armed the nudge ladder: a permanent flap on no
-                    # new information, where main's arrival compare had suppressed the re-assert.
-                    _ended, _lift = 0, False
-                    if _empty and _kind == "agents" \
-                            and (sp > _anchor0 or not any(t.get("status") == "running" for t in every)):
-                        _ended = _bg_ended_after(every, tombs, sp, _anchor0, now, kind=_kind) or now
-                        _lift = True
-                    elif _empty and _kind in ("task", "job") and not _kernel_watch_armed(sid):
-                        # endings are measured from the stamp's WRITE time (_stamp_written_at), not
-                        # the audited turn's trigger: an item that returned mid-turn, before the
-                        # closer even wrote the stamp, is not the world emptying after it (review
-                        # find on #936, 2026-09-07)
-                        _ended = _bg_ended_after(every, tombs, sp, _stamp_written_at(nd), now, kind=_kind)
-                        _lift = bool(_ended)
-                    if _lift and jd.record_verdict(store, nd, "romp", "awaiting", _lift_ev_t(nd, now),
-                                                   lift=True, end_ev=_ended):
-                        changed = True
+                    if drop_rec:
+                        # The lift is NEW INFORMATION for the escalation ladder: the wait this goal's last
+                        # nudge/wake episode ended on has returned. Drop the goal's spent ledger record
+                        # (failed/moot/answered alike) so the next tick can re-engage — an idle session
+                        # never produces the genuine turn the arm-key dedup otherwise waits for, and a
+                        # latched record left its cards in Working forever (2026-08-16). Event-keyed and
+                        # bounded: record_verdict lifts a given stamp exactly once.
                         _drop_auto_nudge_rec(top)
-                    continue
-                live_set = running_job if nd.get("awaitingKind") == "job" else running
-                if any(t.get("id") in live_set for t in own):
-                    continue                          # at least one is genuinely still out
-                # The lift's event is a return the stamp was WAITING ON — one that landed after the
-                # stamp's ANCHOR (endT past the audited turn's trigger; a launch past it necessarily
-                # returned past it too; a kindless expiry "returns" at its recorded deadline). A
-                # dispatch already terminal in a turn the stamping judge had ALREADY AUDITED can't
-                # evidence the wait's end: the judge stamped knowing that completion, so the wait is
-                # about something else, and the goal keeps its stamp + 6h wake like any dispatch-less
-                # wait. The boundary is the anchor, NOT the write time (`horizon`): the write postdates
-                # the whole audited turn, so testing against it would also disown mid-turn and
-                # audit-lag returns the judge never saw (the suite pins those as lifting). Without
-                # this, a stamp about external cluster work lifted the same minute it was written off
-                # a workflow hours dead — and the lift row then MOOTED the nudge-failure evaluation,
-                # parking the card in Working with no reviver left (an idle experiment session,
-                # 2026-08-16).
-                _anchor = nd.get("awaitingAt") or 0
-
-                def _return_ev(t):
-                    # the evidence time of this dispatch's RETURN, the ONE conditioning both the "did
-                    # anything return after the anchor" test and the horizon this lift journals read
-                    # (review find, 2026-09-08: two hand-kept copies had drifted, and the older one still
-                    # counted an UNSPENT ceiling, so a dead watcher whose ceiling lay ahead lifted off a
-                    # horizon older than the anchor it retracted). A terminal record's endT; for a task
-                    # the pairing still shows running, the respawn that killed it (dead) or its recorded
-                    # ceiling once that has PASSED (expired); the launch as the floor (a launch past the
-                    # anchor returned past it). A ceiling that has not passed is never evidence: the
-                    # completion path leaves `deadline` in place, so a watcher that fired early carries a
-                    # FUTURE ceiling, and folding it unconditionally pushed the horizon past the clock;
-                    # a min() floor then journaled the tick time, arrival by another name.
-                    ev = max(t.get("endT") or 0, t.get("t") or 0)
-                    if t.get("status") == "running":
-                        if t.get("id") in dead:
-                            ev = max(ev, sp)
-                        if em._bg_expired(t, now):
-                            ev = max(ev, t.get("deadline") or 0)
-                    return ev
-
-                def _returned_after(t):
-                    return _return_ev(t) > _anchor
-                if not any(_returned_after(t) for t in own):
-                    continue
-                # THE STAND-DOWN RULE, joined (the 2026-08-19 audit): a writer whose evidence
-                # predates the diary yields — but only on a RE-ASSERT. The flap's signature is the
-                # closer re-affirming the wait AFTER a prior lift of this same stamp: everything
-                # this lift can cite (returns that preceded that lift) was already ruled on once,
-                # so lifting again off it produced the observed 2-3 second stamp↔lift flaps that
-                # reset the nudge ladder (fires 5s after a lift, three first-nudges in 21 minutes —
-                # the session had re-armed a watcher the ownership window cannot see). A FIRST
-                # stamp keeps the designed audit-lag lift: the write postdates the whole audited
-                # turn, and returns the judge never saw must still lift (the suite pins those).
-                _aw = [e for e in (nd.get("log") or []) if e.get("kind") == "awaiting"]
-                # the RE-ASSERT test asks about the diary's write order — was the wait re-affirmed after
-                # the lift was FILED — so arrival is the right timebase for these two…
-                _last_lift = max((e.get("at") or e.get("ev_t") or 0 for e in _aw if e.get("lift")), default=0)
-                _last_assert = max((e.get("at") or e.get("ev_t") or 0 for e in _aw if not e.get("lift")), default=0)
-                # …but the EVIDENCE test compares evidence to evidence: the newest return this lift can
-                # cite against the newest evidence any prior lift RULED ON (its journaled horizon,
-                # jd._wait_end_ev), never that lift's arrival. Read as arrival, a lift filed late for
-                # evidence up to T_ev claimed everything before its filing, so a return landing between
-                # T_ev and the filing was never citable and the stamp stayed on new information
-                # (2026-09-07). `<=`: a return AT the horizon is the very return that lift cited.
-                _horizon = max((jd._wait_end_ev(e) for e in _aw if e.get("lift")), default=0)
-                _evidence = max((_return_ev(t) for t in own), default=0)   # conditioned as _returned_after
-                if _last_lift and _last_assert > _last_lift and _evidence <= _horizon:
-                    continue                          # every citable return was already ruled on by that
-                    #                                   lift — re-lifting off it is the flap. A return
-                    #                                   NEWER than the last lift is new information even
-                    #                                   when the re-assert's WRITE postdates it by seconds:
-                    #                                   the closer's audit segment ended before the return
-                    #                                   landed (2026-08-25 audit — a watcher's stamp written
-                    #                                   17s after its merge notification stood 9.5h because
-                    #                                   write-time was read as the epistemic boundary)
-                # this lift's own horizon: the newest return it cites — the very `_evidence` the gate
-                # above measured, so what a lift journals is by construction what its stand-down compares
-                if jd.record_verdict(store, nd, "romp", "awaiting", _lift_ev_t(nd, now), lift=True,
-                                     end_ev=_evidence):
-                    changed = True
-                    # The lift is NEW INFORMATION for the escalation ladder: the wait this goal's last
-                    # nudge/wake episode ended on has returned. Drop the goal's spent ledger record
-                    # (failed/moot/answered alike) so the next tick can re-engage — an idle session
-                    # never produces the genuine turn the arm-key dedup otherwise waits for, and a
-                    # latched record left its cards in Working forever (2026-08-16). Event-keyed and
-                    # bounded: record_verdict lifts a given stamp exactly once.
-                    _drop_auto_nudge_rec(top)
-            if changed:
-                jd.rollup_status(store, False)
-                jd.save_goals(sid, store)
-                _mark_views_dirty()
-
+            if not changed:
+                _lift_gate_stats["noop"] += 1        # the store moved between the probe and the load
+                continue
+            jd.rollup_status(wstore, False)
+            jd.save_goals(sid, wstore)
+            _mark_views_dirty()
         except Exception:
             _lift_seen.pop(sid, None)                 # a raised ruling is not a ruling — re-run next cycle
             sys.stderr.write("awaiting-lift (session %s): %s\n" % (sid or "?", traceback.format_exc()))
+    for sid in [k for k in _lift_seen if k not in seen]:
+        del _lift_seen[sid]                           # the sid left the alive set: nothing to gate
+    for cache in (_BG_TOPS_CACHE, _PLACEMENT_IDX):    # ...and nothing to place for: release the pinned parse
+        for sid in list(cache):                       # list(): the handler threads fill these concurrently
+            if sid not in seen:
+                cache.pop(sid, None)
+
+
+def _lift_candidates(store):
+    """(stamped, rolled): the (node key, node) pairs one lift tick can rule on, from the store alone. The
+    KEY is what a decision names and what phase 2 resolves on the writer's copy, so a node whose `id`
+    field differs from its key is still found there rather than dropped as a no-op. `stamped` carries a
+    live awaiting stamp; `rolled` is a stamped node the roll-down left under a resolved ancestor whose
+    newest awaiting row is not yet a lift."""
+    nodes = store.get("nodes") or {}
+    stamped = [(nid, nd) for nid, nd in nodes.items()
+               if nd.get("awaitingWhy") and nd.get("awaitingAt") and not nd.get("rolledUp")]
+    # A stamped node the roll-down folded under a RESOLVED ancestor: its card's story ended, but the
+    # stamp survives invisibly (every reader skips rolledUp) — lift it explicitly so the diary says why
+    # it went, instead of an unretired wait no surface can show (the user 2026-07-27). Guarded on the
+    # diary so an unmaterialized lift never re-fires each tick.
+    rolled = [(nid, nd) for nid, nd in nodes.items()
+              if nd.get("awaitingWhy") and nd.get("rolledUp")
+              and not _last_awaiting_is_lift(nd)]
+    return stamped, rolled
+
+
+def _lift_decisions(sid, s, store, now, tmux):
+    """The lifts due for one alive session, decided on `store` and written NOWHERE: [(nid, top, drop_rec,
+    end_ev)], one per stamp the tick would retire. `top` is the node's top ancestor; `drop_rec` says whether
+    the goal's spent nudge record goes with the lift (the rolled-up arm drops none); `end_ev` is the
+    EVIDENCE HORIZON the decision ruled on (record_verdict end_ev: the superseding reply's time, the newest
+    in-harness ending, the newest cited return; None for a rolled-up lift, which cites no ending). Every rule
+    of the lift lives here, and the verdict gate is consulted read-only: jd.may_apply is exactly the gate
+    record_verdict asks before it appends, so a decision here is a record_verdict that would have returned
+    True. A decision is a function of (the store, the transcript's task pairing, the backend snapshot, the
+    postal wait maps, now) and of nothing this function writes, so _lift_spent_awaiting can run it on the
+    shared read-only view to learn whether a lift is due, then again on the writer's copy it loads, and file
+    the second run's decisions on that copy (the docstring there). Placement is read from the SAME store
+    object through _bg_placed_tops, so the stamps ruled on and the launches placed come from one version."""
+    out = []
+    nodes = store.get("nodes") or {}
+    stamped, rolled = _lift_candidates(store)
+    if not (stamped or rolled):
+        return out                                    # nothing to rule on: no peer read, no scan
+    for nid, nd in rolled:
+        if jd.may_apply(store, nd, "romp", "awaiting", _lift_ev_t(nd, now)):
+            out.append((nid, None, False, None))
+
+    def _top_of(x):
+        seen = set()
+        while x in nodes and nodes[x].get("parentId") is not None and x not in seen:
+            seen.add(x); x = nodes[x]["parentId"]
+        return x
+    # SUPERSEDED PEER-WAIT LIFT (the user 2026-08-24): a peer's reply at/after a kind=peer (or
+    # kindless) stamp's WRITE time already ends that wait at every read — _goal_awaiting_stamp_full
+    # hides the stamp from the card and the chip, and the nudge walk (which reads the same
+    # predicate) then never arms the 6h wake. But that supersede was read-time only: it filed
+    # NOTHING, so the stamp sat invisibly forever — the closer was never re-nominated (its
+    # filed-since gate needs a diary row newer than closerLookT, and the newest row was the stamp
+    # itself), the plain-nudge fire gate read the RAW fields and vetoed every fire, and a LIVE
+    # session's Working card wore the quiet floor ("Paused — resumes when its wait ends")
+    # indefinitely — three live specimens on one board, one ~14h, breaking the recorded 2026-08-22
+    # promise that every Working card is nudged/woken until it lands (_dead_wait_block's docstring).
+    # File the lift the readers already act on: the reply is the wait's designed exact ending event
+    # (the reader's own rule), the lift row re-arms the closer's filed-since nomination (a re-audit
+    # can re-stamp a still-real wait with a fresh write time that out-orders the answer — the
+    # designed self-correction the read-only supersede promised but never delivered), and the
+    # ledger drop re-engages the nudge ladder exactly like the dispatch arms below. Peer-scoped
+    # exactly like the reader (job/agents/task/timer stamps stand through mail); DORMANT sessions
+    # never reach here (the sweep's own gate) — the dead-wait conversion reads the stamp RAW
+    # on purpose (2026-08-23) and owns that ending.
+    answered = _peer_answered(sid)
+    for nid, nd in (list(stamped) if answered[0] else ()):
+        reply_t = _peer_stamp_superseded(nd, answered)   # the superseding reply's time, or 0
+        if not reply_t:
+            continue
+        # the reply IS the evidence this lift rules on: journal it as the horizon, so a later
+        # closer assert on evidence newer than the reply stands whatever this row's arrival
+        if jd.may_apply(store, nd, "romp", "awaiting", _lift_ev_t(nd, now)):
+            out.append((nid, _top_of(nid), True, reply_t))
+            stamped.remove((nid, nd))
+    if not stamped:
+        return out
+    every = _bg_scan_all_cached(s["path"])
+    # the backend's lifecycle set (present-but-empty is AUTHORITATIVE — _bg_live_norm's own
+    # rule) and the CLI epoch it (re)started at: the restart-orphan reconciliation evidence
+    snap = tmux.get(sid) or {}
+    reg_ids = ({str(t.get("toolUseId") or "") for t in snap.get("bgTasks") or []
+                if isinstance(t, dict)} if "bgTasks" in snap else None)
+    sp = _sdk_spawned_at(sid) or 0
+    # the launch ledger's stop tombstones (sdk_backend's bgLedgerEnded): a TaskStop suppresses
+    # the task notification, so the transcript never learns the Monitor ended — the hook did
+    tombs = ((_thread_reg(sid).get("bgLedgerEnded") or []) if reg_ids is not None else [])
+    if not every and reg_ids is None:
+        return out
+    # RESTART-ORPHAN reconciliation (the user 2026-08-24): a kernel/backend restart kills
+    # tracked subagents and workflows WITH the claude process — the terminal record never
+    # lands, the transcript pairing shows them "running" forever, and the stamp orphaned
+    # (16h of "awaiting agents" over an empty registry, nothing reconciling). A
+    # transcript-"running" task ABSENT from a PRESENT lifecycle set died with its process;
+    # its return event IS the backend's (re)spawn — an exact event, not a timer. kind=job
+    # stays registry-blind below: the watcher dying is the carrier going, not the job
+    # returning.
+    dead = (set() if reg_ids is None else
+            {t.get("id") for t in every
+             if t.get("status") == "running" and t.get("id") and str(t.get("id")) not in reg_ids})
+    # a monitor past its recorded lifetime ceiling counts as RETURNED even with no terminal
+    # record (its CLI died mid-watch; the notification can never arrive) — see em._bg_expired
+    running = {t.get("id") for t in every
+               if t.get("status") == "running" and not em._bg_expired(t, now)
+               and t.get("id") not in dead}
+    # kind=job: expiry is not a return (see docstring) — only a real terminal record lifts
+    running_job = {t.get("id") for t in every if t.get("status") == "running"}
+    placed = _bg_placed_tops(sid, s["path"], [t.get("id") for t in every], store=store)
+    for nid, nd in stamped:
+        born = nd.get("t") or 0
+        top = _top_of(nid)
+        # The dispatches this goal owns. Placement is authoritative when the judge has spoken:
+        # a task placed under ANOTHER card can never retire this stamp (the user 2026-07-27:
+        # unrelated returns were lifting CI-wait stamps — one lifted the same minute it was
+        # re-asserted). The time window survives only for placement-unknown launches (the
+        # conservative pre-verdict shape): launched during the goal's life, at or before the
+        # stamp it explains — bounded by when that stamp was WRITTEN, not by its turn-trigger
+        # anchor, which the launches of that very turn all postdate (see _stamp_written_at).
+        horizon = _stamp_written_at(nd)
+        own = []
+        for t in every:
+            p = placed.get(t.get("id"))
+            if p is not None:
+                if p == top:
+                    own.append(t)             # the goal's own thread, before OR after the stamp:
+                    #                           anything of its own still out keeps the wait honest
+            elif born <= (t.get("t") or 0) <= horizon:
+                own.append(t)
+        if not own:                           # nothing dispatched → not a background wait; leave it
+            # …EXCEPT a stamp standing over an authoritatively EMPTY in-harness world: the
+            # backend's lifecycle set present and empty, no live subagents, nothing running in
+            # the transcript. Two shapes, one writer:
+            #  - kind=agents (the user 2026-08-24): an agents-kind wait ends with task
+            #    notifications, and with no dispatch recorded ANYWHERE no such event can ever
+            #    arrive — the shape a closer mints when it misreads peer sessions as agents,
+            #    orphaned for good the moment a restart clears the world it described. Same
+            #    evidence-postdates-anchor rule as every lift: the (re)spawn must be newer than
+            #    the stamp's anchor — or the transcript itself shows NOTHING running at all
+            #    (2026-08-25 audit: the misread-peer-as-agents shape needs no respawn to prove
+            #    the notification can never arrive; the pairing already did).
+            #  - kind=task/job (2026-09-05): a closer stamped a top kind=job for a Monitor plus
+            #    a background command the session ITSELF was running, the planner placed both
+            #    launches on a sibling top, and this skip kept the stamp 17 hours over an empty
+            #    registry with nothing pending anywhere (the wake below it never reached it —
+            #    nudges off, top all-delegated). The deciding event is the LAST in-harness item
+            #    ENDING after the stamp (_bg_ended_after: a terminal record, a Monitor's recorded
+            #    ceiling, the launch ledger's stop tombstone, or the CLI respawn that killed
+            #    everything) — a world already empty when the judge stamped is a wait on
+            #    something the registry cannot see (a CI run), and stays the dead-man's. An
+            #    ARMED kernel watch for this sid (a PR watch) is a carrier still running: its
+            #    delivery is the ending, so the stamp stands. The owned-dispatch job rule below
+            #    ("the watcher dying is the carrier going") is untouched: it needs a dispatch of
+            #    the goal's OWN to protect, and this branch has none.
+            _kind, _anchor0 = nd.get("awaitingKind"), nd.get("awaitingAt") or 0
+            _empty = reg_ids is not None and not reg_ids and not snap.get("subagents") and not running
+            # `_ended` = the newest in-harness ending this lift cites — its EVIDENCE HORIZON
+            # (record_verdict end_ev, 2026-09-07). An agents lift resting on no recorded ending
+            # at all (a stamp over a transcript where nothing ever ran, no respawn past the
+            # anchor: the misread-peers-as-agents shape) rules "the authoritative registry shows
+            # nothing running NOW and nothing ever ended", so the registry read's moment is what
+            # it ruled through, the dead-man lift's own choice for the same shape of ruling
+            # (_wake_goal), and journaled as read, never floored to the second: the gates compare
+            # a horizon against raw evidence times, and int(now) disowned an assert triggered in
+            # the read's own second. Journaling none instead (review find, 2026-09-08) left the gates
+            # reading the row's anchor, which disowns nothing: a lagging closer's re-assert from a
+            # segment triggered inside (anchor, lift) stood, the next pass re-lifted on the same
+            # empty world, and every re-lift re-armed the nudge ladder: a permanent flap on no
+            # new information, where main's arrival compare had suppressed the re-assert.
+            _ended, _lift = 0, False
+            if _empty and _kind == "agents" \
+                    and (sp > _anchor0 or not any(t.get("status") == "running" for t in every)):
+                _ended = _bg_ended_after(every, tombs, sp, _anchor0, now, kind=_kind) or now
+                _lift = True
+            elif _empty and _kind in ("task", "job") and not _kernel_watch_armed(sid):
+                # endings are measured from the stamp's WRITE time (_stamp_written_at), not
+                # the audited turn's trigger: an item that returned mid-turn, before the
+                # closer even wrote the stamp, is not the world emptying after it (review
+                # find on #936, 2026-09-07)
+                _ended = _bg_ended_after(every, tombs, sp, _stamp_written_at(nd), now, kind=_kind)
+                _lift = bool(_ended)
+            if _lift and jd.may_apply(store, nd, "romp", "awaiting", _lift_ev_t(nd, now)):
+                out.append((nid, top, True, _ended))
+            continue
+        live_set = running_job if nd.get("awaitingKind") == "job" else running
+        if any(t.get("id") in live_set for t in own):
+            continue                          # at least one is genuinely still out
+        # The lift's event is a return the stamp was WAITING ON — one that landed after the
+        # stamp's ANCHOR (endT past the audited turn's trigger; a launch past it necessarily
+        # returned past it too; a kindless expiry "returns" at its recorded deadline). A
+        # dispatch already terminal in a turn the stamping judge had ALREADY AUDITED can't
+        # evidence the wait's end: the judge stamped knowing that completion, so the wait is
+        # about something else, and the goal keeps its stamp + 6h wake like any dispatch-less
+        # wait. The boundary is the anchor, NOT the write time (`horizon`): the write postdates
+        # the whole audited turn, so testing against it would also disown mid-turn and
+        # audit-lag returns the judge never saw (the suite pins those as lifting). Without
+        # this, a stamp about external cluster work lifted the same minute it was written off
+        # a workflow hours dead — and the lift row then MOOTED the nudge-failure evaluation,
+        # parking the card in Working with no reviver left (an idle experiment session,
+        # 2026-08-16).
+        _anchor = nd.get("awaitingAt") or 0
+
+        def _return_ev(t):
+            # the evidence time of this dispatch's RETURN, the ONE conditioning both the "did
+            # anything return after the anchor" test and the horizon this lift journals read
+            # (review find, 2026-09-08: two hand-kept copies had drifted, and the older one still
+            # counted an UNSPENT ceiling, so a dead watcher whose ceiling lay ahead lifted off a
+            # horizon older than the anchor it retracted). A terminal record's endT; for a task
+            # the pairing still shows running, the respawn that killed it (dead) or its recorded
+            # ceiling once that has PASSED (expired); the launch as the floor (a launch past the
+            # anchor returned past it). A ceiling that has not passed is never evidence: the
+            # completion path leaves `deadline` in place, so a watcher that fired early carries a
+            # FUTURE ceiling, and folding it unconditionally pushed the horizon past the clock;
+            # a min() floor then journaled the tick time, arrival by another name.
+            ev = max(t.get("endT") or 0, t.get("t") or 0)
+            if t.get("status") == "running":
+                if t.get("id") in dead:
+                    ev = max(ev, sp)
+                if em._bg_expired(t, now):
+                    ev = max(ev, t.get("deadline") or 0)
+            return ev
+
+        def _returned_after(t):
+            return _return_ev(t) > _anchor
+        if not any(_returned_after(t) for t in own):
+            continue
+        # THE STAND-DOWN RULE, joined (the 2026-08-19 audit): a writer whose evidence
+        # predates the diary yields — but only on a RE-ASSERT. The flap's signature is the
+        # closer re-affirming the wait AFTER a prior lift of this same stamp: everything
+        # this lift can cite (returns that preceded that lift) was already ruled on once,
+        # so lifting again off it produced the observed 2-3 second stamp↔lift flaps that
+        # reset the nudge ladder (fires 5s after a lift, three first-nudges in 21 minutes —
+        # the session had re-armed a watcher the ownership window cannot see). A FIRST
+        # stamp keeps the designed audit-lag lift: the write postdates the whole audited
+        # turn, and returns the judge never saw must still lift (the suite pins those).
+        _aw = [e for e in (nd.get("log") or []) if e.get("kind") == "awaiting"]
+        # the RE-ASSERT test asks about the diary's write order — was the wait re-affirmed after
+        # the lift was FILED — so arrival is the right timebase for these two…
+        _last_lift = max((e.get("at") or e.get("ev_t") or 0 for e in _aw if e.get("lift")), default=0)
+        _last_assert = max((e.get("at") or e.get("ev_t") or 0 for e in _aw if not e.get("lift")), default=0)
+        # …but the EVIDENCE test compares evidence to evidence: the newest return this lift can
+        # cite against the newest evidence any prior lift RULED ON (its journaled horizon,
+        # jd._wait_end_ev), never that lift's arrival. Read as arrival, a lift filed late for
+        # evidence up to T_ev claimed everything before its filing, so a return landing between
+        # T_ev and the filing was never citable and the stamp stayed on new information
+        # (2026-09-07). `<=`: a return AT the horizon is the very return that lift cited.
+        _horizon = max((jd._wait_end_ev(e) for e in _aw if e.get("lift")), default=0)
+        _evidence = max((_return_ev(t) for t in own), default=0)   # conditioned as _returned_after
+        if _last_lift and _last_assert > _last_lift and _evidence <= _horizon:
+            continue                          # every citable return was already ruled on by that
+            #                                   lift — re-lifting off it is the flap. A return
+            #                                   NEWER than the last lift is new information even
+            #                                   when the re-assert's WRITE postdates it by seconds:
+            #                                   the closer's audit segment ended before the return
+            #                                   landed (2026-08-25 audit — a watcher's stamp written
+            #                                   17s after its merge notification stood 9.5h because
+            #                                   write-time was read as the epistemic boundary)
+        # this lift's own horizon: the newest return it cites — the very `_evidence` the gate
+        # above measured, so what a lift journals is by construction what its stand-down compares
+        if jd.may_apply(store, nd, "romp", "awaiting", _lift_ev_t(nd, now)):
+            out.append((nid, top, True, _evidence))
+    return out
 
 
 _PREV_ALIVE = None                       # last tick's alive sids — a sid LEAVING is the death event
@@ -14416,7 +14509,17 @@ def _sdk_locked():
                 mcp_config=(str(_SDK_MCP) if _SDK_MCP.exists() else None),
                 append_prompt_path=(str(_SDK_PROMPT) if _SDK_PROMPT.exists() else None),
                 log=lambda m: sys.stderr.write("sdk-backend: %s\n" % m),
-                reconcile=True)   # boot reconcile: reap orphaned CLIs, resume cut turns, deliver persisted queues
+                reconcile=True,   # boot reconcile: reap orphaned CLIs, resume cut turns, deliver persisted queues
+                # the API-health aggregator's boot clock: this kernel's own _STARTED, which the aggregator
+                # truncates to the millisecond (the precision of every stamp in the payload) and serves as
+                # /api-health's bootAt, so a bucket the boot seeded is unknown since the kernel's own start
+                # and the hover's head, divider and restart row name one time (the aggregator's own clock would
+                # run seconds later: this backend is built after the boot's imports, migrations and warm-up).
+                # The float, never int(): truncated to the second boundary BEFORE the process started, the seed
+                # would sort under a row the previous kernel filed in that same second, and the tail would read
+                # the old kernel's last state as current above the restart row. /version's `started` is the
+                # same start in whole seconds.
+                boot_at=_STARTED)
             # a limit-shaped judge error envelope pokes ONE exact usage poll (get_usage rides turn
             # ends, so an idle fleet's usage.json goes stale — measured ~15h — and the rate gate is
             # only as good as that file); the backend picks any live login session to ask
@@ -15241,7 +15344,7 @@ def _drive(msg, client):
         return False
     t = msg.get("type")
     ID_OPS = ("sendMessage", "rewindSend", "rewindDelete", "interrupt", "compactSession", "dismissDialog", "answerAsk", "navAsk", "toggleAsk", "submitAsk",
-              "addCustomAsk", "cancelAsk", "askText", "cancelQueued", "dismissEcho", "apiRetry", "setModel", "setEffort", "setMode", "setFast",
+              "addCustomAsk", "cancelAsk", "askText", "cancelQueued", "dismissEcho", "apiRetry", "editQueued", "setModel", "setEffort", "setMode", "setFast",
               "setAuth", "endSession", "renameSession", "moveSession", "stopTask", "rewindFiles", "mcpAction", "forkSession",
               "commentCreate", "commentReply", "commentResolve", "commentDelete", "commentSeen", "commentPromote",
               "commentMerge")
@@ -15456,6 +15559,35 @@ def _drive(msg, client):
             # had already gone through, or never reached this kernel. sid only: the body is the user's text
             sys.stderr.write("queued-cancel miss: %s (body-only)\n" % sid)
         client["send"](json.dumps({"type": "cancelResult", "ok": not err, "id": sid,
+                                   "md": md, "text": err or ""}))
+        _push_soon()
+    elif t == "editQueued" and msg.get("park") is not None:
+        # ✎ on a PARKED message (the user 2026-09-08): replace its words in place — same slot, same
+        # follow-up context. The result frame is authoritative like the ✕'s: ok:false means the message
+        # left the queue meanwhile (or the chip is not a message), and the client hands the typed words
+        # back to the composer instead of leaving them nowhere.
+        err = _edit_parked(sid, int(msg["park"]), str(msg.get("md") or ""), str(msg.get("text") or ""))
+        client["send"](json.dumps({"type": "editResult", "ok": not err, "id": sid,
+                                   "md": str(msg.get("md") or ""), "text": err or ""}))
+        _push_soon()
+    elif t == "editQueued" and msg.get("idx") is not None and hasattr(be, "edit_queued"):
+        # ✎ on a backend-queue message: replaced under the backend's lock, drift-guarded by the body.
+        err = _edit_backend_queued(be, sid, int(msg["idx"]), str(msg.get("md") or ""), str(msg.get("text") or ""))
+        client["send"](json.dumps({"type": "editResult", "ok": not err, "id": sid,
+                                   "md": str(msg.get("md") or ""), "text": err or ""}))
+        _push_soon()
+    elif t == "editQueued" and msg.get("md"):
+        # ✎ at the OPTIMISTIC stage: no park/idx has round-tripped yet, so locate the send by body wherever
+        # it landed — the FIFO first, then the backend's queue (the ws is ordered: the send op was processed
+        # before this edit). Neither holding it means it already forwarded into the CLI: the honest refusal.
+        md = str(msg["md"])
+        new_text = str(msg.get("text") or "")
+        err = _edit_parked(sid, -1, md, new_text)
+        if err and hasattr(be, "edit_queued"):
+            err2 = _edit_backend_queued(be, sid, -1, md, new_text)
+            if err2 is None:
+                err = None
+        client["send"](json.dumps({"type": "editResult", "ok": not err, "id": sid,
                                    "md": md, "text": err or ""}))
         _push_soon()
     elif t == "dismissEcho" and hasattr(be, "dismiss_echo"):
@@ -24012,68 +24144,159 @@ def _seg_of_tool_uses(ps, store, tool_ids):
     return found
 
 
-_BG_TOPS_CACHE = {}    # sid -> ((transcript stat, goals stat, overrides stat, tid tuple), {tid: top})
+_BG_TOPS_CACHE = {}    # sid -> (parse object, store object, {tid: top or None}), see _bg_placed_tops
+_PLACEMENT_IDX = {}    # sid -> (store object, {jd._seg_key(placement key): its first value in dict order})
+_bg_tops_stats = {"hit": 0, "miss": 0, "resolve": 0, "walk": 0, "walk_neg": 0, "idx_build": 0}
+_BG_TOPS_STATS_LOCK = threading.Lock()   # the counters are bumped from the pusher and the handler threads
 
 
-def _bg_placed_tops(sid, path, tids):
+def _bg_tops_bump(key, n=1):
+    with _BG_TOPS_STATS_LOCK:
+        _bg_tops_stats[key] += n
+
+
+def _bg_tops_report():
+    """The memo's counters plus its occupancy, for /perf (memos.bgTops): `hit` calls answered from the
+    per-version map, `miss` calls that looked up at least one tid, `resolve` tids looked up on a miss (placed
+    or not), `walk` transcript walks (_seg_of_tool_uses) and `walk_neg` the walks that left at least one
+    asked tid unresolved (an upper bound on what a negative walk cache would save: such a cache, keyed per
+    parse to stay exact, saves only the re-walks under one parse), `idx_build` placement indexes built (one
+    per store object asked, a writer's private copy included), and the gauge `entries` (sids holding a
+    map)."""
+    with _BG_TOPS_STATS_LOCK:
+        out = dict(_bg_tops_stats)
+    out["entries"] = len(_BG_TOPS_CACHE)
+    return out
+
+
+def _placement_index(placements):
+    """{jd._seg_key(k): v} over a store's placements, the FIRST key in dict order winning (setdefault): for
+    any looked-up key that normalizes to a seg key, exactly the value jd._placement_of's scan returns for
+    it, a None-valued retired entry included."""
+    idx = {}
+    for k, v in placements.items():
+        idx.setdefault(jd._seg_key(k), v)
+    return idx
+
+
+def _placed_via_index(placements, idx, seg_id):
+    """jd._placement_of(placements, seg_id) answered from _placement_index: the exact key when it is
+    present (its value, None included, the scan never runs), else the normalized key's first match."""
+    if seg_id in placements:
+        return placements[seg_id]
+    return idx.get(jd._seg_key(seg_id))
+
+
+def _bg_placed_tops(sid, path, tids, store=None):
     """{tid: owning top node id} for the live background-task launches the JUDGE has PLACED: launch
-    tool_use id → the transcript segment holding it (_seg_of_tool_uses via _task_seg_cache — a launch's
-    segment never changes) → the store's placement for that segment → the placed node's top ancestor.
+    tool_use id -> the transcript segment holding it (_seg_of_tool_uses via _task_seg_cache: a launch's
+    segment never changes) -> the store's placement for that segment, under the four suffixes
+    jd._placement_of accepts, read from a per-store index (_placement_index) -> the placed node's top
+    ancestor.
 
     A tid ABSENT from the result is a launch the judge hasn't spoken for yet (segment unparsed or
-    unplaced, no goal store, unreadable evidence) — the AWAITED-conservative default every consumer
-    keys on. Cached on the transcript + goal-store + override-journal file stats and the tid set (the
-    _session_stamp_read pattern): an idle session hits this every render, and load_goals is a full
-    read + override replay."""
+    unplaced, no goal store, unreadable evidence): the AWAITED-conservative default every consumer
+    keys on.
+
+    The answer is a function of (the parse object, the store object, the _task_seg_cache positives, which
+    rest on the standing "a launch's segment never changes" assumption), and the memo is keyed on exactly
+    those two objects: _BG_TOPS_CACHE[sid] = (ps, store, {tid: top or None}) holds every tid asked so far
+    under one (parse, store) pair, a hit iff both objects in hand ARE the entry's. Identity, not a stat: the
+    awaiting lift asks with every task id the transcript records and the feed with the live ids, a subset
+    that is often empty, so one map answers both and the feed's ask never evicts the lift's fill; and a
+    stat is not the version: a rewrite that keeps the mtime and the byte count is served stale under a
+    stat key, and a stat taken beside a read can describe a version the read did not see (a publish
+    between the two records one version's identity under another's placements, so a launch the closer
+    moved under another card still reads as this goal's own).
+    _parse returns one object per transcript version and load_goals_shared one FrozenStore per store
+    version, so identity is the version. `store`: the caller's own store (a caller deciding on a store
+    hands it in, so the placement it reads and the stamps it rules on come from one object); None reads
+    through load_goals_shared. A store that is not the shared cache's FrozenStore (no file, the cache off,
+    an unreadable journal, a writer's private copy) is computed on and never published as an entry.
+    _PLACEMENT_IDX[sid] = (store, index) is keyed on the store object alone, so the writer's copy misses it
+    harmlessly. While the shared cache is off (_SHARED_OFF: a reader wrote to a shared view, a judge-errors
+    row names the site, off until the kernel restarts) every store=None call is a full load_goals and
+    nothing is memoized; acceptable because that state is a loud error, not a mode the kernel runs in.
+
+    Threads: the pusher and the handler threads (build_session, _session_awaiting) both run this. An entry
+    is read into locals once, a fill builds a NEW dict from it and publishes a NEW tuple; nothing writes
+    into an entry in place, so a reader holding the old tuple keeps a consistent (ps, store, map). Entries
+    are dropped when a session asks with no live tids and the pinned parse is no longer the transcript's
+    current one (below: the pin the bound is for), and when the sid leaves the alive set (the awaiting
+    lift's end-of-tick prune, _lift_spent_awaiting)."""
     sid = str(sid)
     tids = tuple(sorted(t for t in tids if t))
     if not tids or not path:
+        # Nothing to answer. The feed, chat and timeline builds ask here with an EMPTY live set for a
+        # session whose tasks all returned, several times per cycle, while the lift's ask (every task id
+        # the transcript records) is what filled the entry; evicting on every empty ask would make the lift
+        # miss every cycle and re-walk the transcript. Release the pinned parse only when it is no longer
+        # the transcript's current parse: _parse answers _parse_cache[path][1] on a hit, so an entry whose
+        # parse IS that object costs no memory beyond the parse every build holds anyway, and one whose
+        # parse is not (the transcript was re-parsed, or nothing is cached) is the stale pin the bound is
+        # for.
+        ent = _BG_TOPS_CACHE.get(sid)
+        cur = _parse_cache.get(path) if path else None
+        if ent is None or cur is None or ent[0] is not cur[1]:
+            _BG_TOPS_CACHE.pop(sid, None)
+            _PLACEMENT_IDX.pop(sid, None)
         return {}
     try:
-        st = os.stat(path)
-        tkey = (st.st_mtime, st.st_size)
-    except OSError:
-        tkey = None
-    try:
-        gs = (jd.GOALDIR / (sid + ".json")).stat()
-        gkey = (gs.st_mtime, gs.st_size)
-    except Exception:
-        return {}                                    # no store yet → nothing placed
-    try:
-        ostt = (jd._overrides_dir() / (sid + ".jsonl")).stat()
-        okey = (ostt.st_mtime, ostt.st_size)
-    except Exception:
-        okey = None                                  # no override journal is normal
-    key = (tkey, gkey, okey, tids)
-    hit = _BG_TOPS_CACHE.get(sid)
-    if hit and hit[0] == key:
-        return hit[1]
-    out = {}
-    try:
+        if store is None and not os.path.exists(str(jd.GOALDIR / (sid + ".json"))):
+            return {}                                # no store yet -> nothing placed: no parse, no fallback load
         ps = _parse(path, sid, time.time())
-        store = jd.load_goals(sid)
-        nodes = (store or {}).get("nodes") or {}
+        if store is None:
+            store = jd.load_goals_shared(sid)
+        ent = _BG_TOPS_CACHE.get(sid)
+        known = ent[2] if (ent is not None and ent[0] is ps and ent[1] is store) else None
+        if known is not None and all(t in known for t in tids):
+            _bg_tops_bump("hit")
+            return {t: known[t] for t in tids if known[t] is not None}
+        _bg_tops_bump("miss")
+        nodes = store.get("nodes") or {}
         placements = store.get("placements") or {}
-        need = [t for t in tids if (sid, t) not in _task_seg_cache]
+        shared = isinstance(store, jd.FrozenStore)
+        pidx = _PLACEMENT_IDX.get(sid)
+        if pidx is not None and pidx[0] is store:
+            idx = pidx[1]
+        else:
+            idx = _placement_index(placements)
+            _bg_tops_bump("idx_build")
+            if shared:
+                _PLACEMENT_IDX[sid] = (store, idx)
+        todo = tids if known is None else tuple(t for t in tids if t not in known)
+        need = [t for t in todo if (sid, t) not in _task_seg_cache]
         if need and ps and nodes:
-            for tid, sgid in _seg_of_tool_uses(ps, store, need).items():
+            found = _seg_of_tool_uses(ps, store, need)
+            for tid, sgid in found.items():
                 _task_seg_cache[(sid, tid)] = sgid
-        for tid in tids:
+            _bg_tops_bump("walk")
+            if len(found) < len(need):
+                _bg_tops_bump("walk_neg")
+        fill = dict(known) if known is not None else {}
+        for tid in todo:
+            fill[tid] = None
             sgid = _task_seg_cache.get((sid, tid))
             if not sgid:
-                continue                             # unresolvable launch → unplaced (see docstring)
-            nid = next((v for v in (jd._placement_of(placements, sgid + suf)
-                                    for suf in ("", "#live", "#p", "#d")) if v), None)
-            seen = set()                             # placed node → its top ancestor (cycle-guarded)
+                continue                             # unresolvable launch -> unplaced (see docstring)
+            nid = None
+            for suf in ("", "#live", "#p", "#d"):
+                v = _placed_via_index(placements, idx, sgid + suf)
+                if v:
+                    nid = v
+                    break
+            seen = set()                             # placed node -> its top ancestor (cycle-guarded)
             while nid in nodes and nodes[nid].get("parentId") is not None and nid not in seen:
                 seen.add(nid)
                 nid = nodes[nid]["parentId"]
             if nid in nodes:
-                out[tid] = nid
+                fill[tid] = nid
+        _bg_tops_bump("resolve", len(todo))
+        if shared:
+            _BG_TOPS_CACHE[sid] = (ps, store, fill)  # a new tuple, never a write into the old one
+        return {t: fill[t] for t in tids if fill[t] is not None}
     except Exception:
-        return {}                                    # unreadable evidence → nothing placed (conservative)
-    _BG_TOPS_CACHE[sid] = (key, out)
-    return out
+        return {}                                    # unreadable evidence -> nothing placed (conservative)
 
 
 def _bg_owner_tops(fsid, path, tasks):
@@ -28083,6 +28306,18 @@ def _cancel_miss_text(md):
             "and will be answered in the current turn")
 
 
+def _edit_miss_text(md):
+    """The user-facing 'too late' for an EDIT whose target already left the queue — the ✕'s twin
+    (_cancel_miss_text): once the session has the message there is no recall, so the words it answers
+    are the ones it got. The client hands the edited text back to the composer on this frame, so
+    nothing is lost and nothing is sent twice (the user 2026-09-08)."""
+    body = (md or "").strip()
+    if body.startswith("/"):
+        return "too late to edit %s — the session already has it" % body.split()[0]
+    return ("too late to edit — the message already reached the session as it was, "
+            "and will be answered in the current turn")
+
+
 def _cancel_parked(sid, park, md):
     """Remove ONE parked op — the queued bubble's ✕ (the user 2026-07-08). Verified by body text: if the
     park list shifted between the push and the click (ops applied / another cancel), the index alone
@@ -28147,6 +28382,101 @@ def _cancel_backend_queued(be, sid, idx, md):
         return _cancel_miss_text(md)
     got = be.unqueue(sid, idx, pending[idx])
     return None if got is not None else _cancel_miss_text(md)
+
+
+def _replace_followup_body(text, body):
+    """`text` with its user-visible BODY replaced by `body` and everything else kept byte for byte. A plain
+    send IS its body. A romp FOLLOW-UP keeps its leading goal-context quote and its trailing romp markers —
+    the follow-up judge reopens the goal off the romp-goal-id marker — so an edited follow-up still files
+    under its goal. The inverse of _split_followup's body read: _split_followup(_replace_followup_body(t,
+    b))[1] == b.strip(). The queued bubble's ✎ hands the kernel the BODY the bubble showed (the ✕'s drift
+    guard reads the same body), and the kernel keeps the wrapper the client never saw."""
+    body = (body or "").strip()
+    if not text or not _FOLLOWUP_GOAL_RE.search(text):
+        return body
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines) and lines[i].lstrip().startswith(">"):
+        i += 1
+    head = "\n".join(lines[:i])
+    rest = "\n".join(lines[i:])
+    # The trailing marker block, one comment at a time: a comment can never span another's close, so an
+    # inline <!-- x --> INSIDE the old body cannot anchor the tail and drag old words behind the new body
+    # (review find, 2026-09-08: the .*? form under re.S did exactly that). Of the block, only the WRAPPER's
+    # own markers survive (romp-note / romp-injected / romp-auto / romp-goal-id, _followup_body's tail): a
+    # marker that described the old BODY, like the Continue button's romp-canned, would make the typed
+    # replacement render as the canned gesture row, so it goes with the words it described.
+    cmt = r"<!--(?:(?!-->).)*-->"
+    m = re.search(r"((?:\s*%s)+\s*)$" % cmt, rest, flags=re.S)
+    keep = [c for c in re.findall(cmt, m.group(1), flags=re.S)
+            if re.match(r"<!--\s*romp-(?:note|injected|auto|goal-id)\b", c)] if m else []
+    return (head + "\n\n" if head else "") + body + ("\n\n" + "".join(keep) if keep else "")
+
+
+def _edit_parked(sid, park, md, text):
+    """Replace the BODY of one parked SEND in place — the queued bubble's ✎ (the user 2026-09-08). Same
+    slot in the FIFO (park order IS delivery order, so the edited message still goes where it would
+    have), same echo author, and a follow-up keeps its goal quote and markers (_replace_followup_body).
+    Verified by body text and refused on the in-flight head exactly as _cancel_parked is: the locate and
+    the swap are ONE step under the queue lock, so the drain cannot pop the head between them. Only a
+    send is editable — a command / compact / model chip has no words to change (cancel it and type it
+    again), and a non-send match is refused with its own sentence rather than the 'too late' one, which
+    would be a lie. Returns None on success, else the text for the client to toast. Logged like the
+    cancel: sid and kind, never the body, which is user text."""
+    sid = str(sid)
+    body = (text or "").strip()
+    if not body:
+        return "nothing to send — to drop the message, use its ✕"
+    if _is_slash_command(body):
+        # an edit swaps the WORDS of a ("send", ...) op and nothing else, so a command edited in would stay a
+        # send and reach the model as text, skipping the fire-alone park and the kernel-side setters every
+        # typed command gets (review find, 2026-09-08). The composer mirrors this refusal (SLASH_CMD_RE).
+        return "a queued message cannot become a command: cancel it with its ✕ and type the command"
+    with _pending_ops_lock:
+        ops = _pending_ops.get(sid) or []
+        inflight_head = bool(ops) and ops[0] is _inflight_ops.get(sid)   # the head is with the backend this instant
+        if not (0 <= park < len(ops)) or (md and _parked_md(ops[park]) != md):
+            park = next((j for j, op in enumerate(ops)
+                         if _parked_md(op) == md and not (j == 0 and inflight_head)), -1) if md else -1
+            if park < 0:
+                return _edit_miss_text(md)
+        if park == 0 and inflight_head:
+            return _edit_miss_text(md)            # too late, not a wrong-op rewrite
+        op = ops[park]
+        if op[0] != "send":
+            return "only a queued message can be edited — cancel this %s and type it again" % (
+                "command" if op[0] in ("command", "compact") else "change")
+        sys.stderr.write("parked-op edit: %s send\n" % sid)
+        ops[park] = ("send", _replace_followup_body(op[1], body)) + tuple(op[2:])
+        _save_pending_ops()
+    _mark_views_dirty()
+    return None
+
+
+def _edit_backend_queued(be, sid, idx, md, text):
+    """edit_queued with _cancel_backend_queued's DRIFT GUARD: re-locate the entry by body if the backend
+    queue moved between the push and the click, then replace it in place under the backend's lock
+    (edit_queued's `expect`), keeping a follow-up's wrapper. Returns None on success; on a MISS — the
+    message already forwarded to the CLI, where no recall exists — the 'too late' text to toast."""
+    body = (text or "").strip()
+    if not body:
+        return "nothing to send — to drop the message, use its ✕"
+    if _is_slash_command(body):
+        # replace_queued swaps the queued text in place, so SdkBackend.send's /compact and /clear cues would
+        # never fire for a command edited in; same refusal as _edit_parked (review find, 2026-09-08)
+        return "a queued message cannot become a command: cancel it with its ✕ and type the command"
+    try:
+        pending = be.pending_queued(sid)
+    except Exception:
+        pending = []
+    if md:
+        if not (0 <= idx < len(pending)) or _split_followup(pending[idx])[1] != md:
+            idx = next((i for i, q in enumerate(pending) if _split_followup(q)[1] == md), -1)
+    if not (0 <= idx < len(pending)):
+        return _edit_miss_text(md)
+    old = pending[idx]
+    got = be.edit_queued(sid, idx, _replace_followup_body(old, body), old)
+    return None if got is not None else _edit_miss_text(md)
 
 
 def _queue_recallable(be, sid):
@@ -31255,10 +31585,17 @@ def build_episode(sid, now):
 _CLEARED_MEMO = {"slot": None}     # (key, parsed set) or None: the clear log's stat taken BEFORE the read, and the set read under it
 _CLEARED_STATS = {"served": 0, "derived": 0}   # bumped from the pusher AND socket threads (undo, connect-time builds) with
 #                                                no lock: a lost count under a race is tolerated, these are diagnostics only
+# The id families cleared.jsonl holds that name no session (review find, 2026-09-09), each built for the feed:
+# "parked:<msgId>" and "quarantine:<mid>" key a message, and "provisional:", "awaiting:" and "blocked:" + sid are
+# the placeholders build_feed re-lists every build whatever the clear log holds. The footer's Clear-all (the
+# clearAll handler) clears every ask build_feed lists, these included, so their rows arrive live and, the log being
+# append-only, accumulate. An explicit list rather than a shape test on the stem: the goals/ stems are the ground
+# truth for a session id and any uuid text is a valid one; a new family that keys no session is added here.
+_CLEARED_NO_SESSION = ("parked:", "quarantine:", "provisional:", "awaiting:", "blocked:")
 
 
 def _cleared_foreign(cleared):
-    """The ledger's ids that belong to no local session: no goal store and no archive here for the id's sid. A
+    """The cleared ids that name a session with no goal store and no archive here. A
     merged board routes a card's gestures to the owning kernel by id, but a viewer's ledger can still hold a
     remote card's clear (a gesture taken while the owner was unreachable, a ledger copied between machines,
     an older client), and the owning kernel's archive projection reads only its own ledger; so the viewer's
@@ -31272,8 +31609,15 @@ def _cleared_foreign(cleared):
         except OSError:
             pass
     # newest first under the cap (T287: a cut by id text dropped yesterday's clears on a long ledger), and only
-    # ids that name a session (a bare node id a mis-stripped route once recorded matches no card anywhere)
-    foreign = [i for i in cleared if ":" in i and i.rsplit(":", 1)[0] not in local]
+    # ids that name a session (a bare node id a mis-stripped route once recorded matches no card anywhere).
+    # The prefixed families are skipped as well (review find, 2026-09-09): the text before their last colon is a
+    # word, never a goals/ stem, so each read as foreign and rode every frame, local or not, and one Clear-all on
+    # a board of placeholders crowded a remote session's clears out of the cap. None names a session whose clear
+    # rows a kernel reads: a parked or quarantine id keys a message, so this kernel cannot tell its own from a
+    # remote one (after delivery or a decision the record is gone, the row is not), and no kernel honors a clear
+    # row for a placeholder, so no overlay could apply one. Only "sid:gN" ids ride.
+    foreign = [i for i in cleared if ":" in i and not i.startswith(_CLEARED_NO_SESSION)
+               and i.rsplit(":", 1)[0] not in local]
     foreign.sort(key=lambda i: (-(cleared.get(i) or 0), i))
     return foreign[:500]
 
@@ -37560,14 +37904,18 @@ def _client_reset_chat_base(client):
     rarer live), the `ready` dispatch died in the handler's generic except, and the _push_one repair this
     exists for was skipped for that pane, once per renderer life. The same lock serializes the two — and
     _send_chat holds it across its read-decide-send-write, so a pusher chat send lands as a whole either
-    before the reset (its slot and tail entry are cleared, _push_one re-sends) or after it."""
+    before the reset (its slot and tail entry are cleared, _push_one re-sends) or after it.
+    The ("taborder",) slot goes too: a renderer that just evaluated holds no tab strip either, and the pusher
+    fires from accept, so this socket may have been sent the strip before the bundle's listener existed;
+    with the slot kept, the connect push's strip at `ready` was deduped against that one for _DEDUP_REPOST_S
+    (an unchanged strip: the same signature) and the page had no tabs until the strip changed."""
     with _client_lock(client):
         client.get("echat", {}).clear()
         # …and the reconnect skeleton set (2026-09-07): a renderer that just evaluated holds NOTHING, so there
         # is nothing it could lazily reload — every tab must arrive whole, and the status slots go with the set
         client.pop("skeleton", None); client.pop("skeletonOrder", None); client.pop("reconnect", None)
         snt = client.get("sent", {})
-        for k in [k for k in snt if isinstance(k, tuple) and k and k[0] in ("chat", "status")]:
+        for k in [k for k in snt if isinstance(k, tuple) and k and k[0] in ("chat", "status", "taborder")]:
             snt.pop(k, None)
 
 
@@ -37621,10 +37969,10 @@ def _skeleton_for(c, act, chat_list):
 
 def _resolve_reconnect(c, chat_list):
     """Consume a client's reconnect flag and fix its skeleton set — ONCE, by the first tabOrder sender that sees
-    it (the pusher, _push_session_now, _confirm_close_now, ready), so no strip can reach a reconnecting client
-    before its set exists: a close confirmation landing in the gap before the pusher's first pass would
-    otherwise paint the page's stale sessions as loaded tabs. No active hint (no localStorage) → the kernel
-    cannot know what the page shows → no set → today's full push (fail safe)."""
+    it (the pusher, the connect push a `ready` triggers included, _push_session_now, _confirm_close_now), so no
+    strip can reach a reconnecting client before its set exists: a close confirmation landing in the gap before
+    the pusher's first pass would otherwise paint the page's stale sessions as loaded tabs. No active hint (no
+    localStorage) → the kernel cannot know what the page shows → no set → today's full push (fail safe)."""
     # ATOMIC under the client's slot lock, flag to set (review find 2026-09-07): with the pop and the stats outside
     # it, a second strip sender racing this one popped False, sent a keyless strip and a FULL for some sid, and
     # this sender then wrote a set still naming that sid — held whole by the client yet served only status frames
@@ -40842,6 +41190,22 @@ def _pure_feed(now, tmux):
 _NOTIFY_PREV = [None]   # itemId -> column at the last build; None = baseline pending
 
 
+def _notify_title(name, needs_you=False):
+    """The ONE title every notification wears — desktop, phone, test push, and a relayed event as
+    its origin composed it (the user 2026-09-09, whose phone found the notifications too busy: a
+    lowercase "romp: web" over a body that had to carry the kind read like a subtitle). Two shapes
+    and no third: an event that needs the user is "Romp needs you: <session>"; everything else — a
+    completion, a turn end, the test — is "Romp: <session>". The body is the event's own and stays
+    as it was; the kind is decided by the CALLER from authoritative state (a card's column), never
+    from the body text. `name` is the session's name and nothing more: no host prefix, no sid, no
+    decoration — the tap carries the routing in the payload's `data`, and which machine a session
+    runs on is not the user's concern in the words they read. With no name (a sid-less test) the
+    title is the bare wordmark."""
+    name = " ".join(str(name if name is not None else "").split())
+    head = "Romp needs you" if needs_you else "Romp"
+    return "%s: %s" % (head, name) if name else head
+
+
 def _system_notify(title, body):
     """Best-effort OS notification (macOS osascript; notify-send elsewhere) — fire-and-forget Popen so the
     pusher thread never blocks on it; never raises."""
@@ -40882,9 +41246,10 @@ def _feed_notifications(feed):
             continue
         if not _notify_card_effective(cards, iid, str(a.get("sid") or "")):
             continue
-        what = "Needs you" if col == "needs_input" else "Completed"
+        needs_you = col == "needs_input"                # the card's column: the authoritative state, not the words
+        what = "Needs you" if needs_you else "Completed"
         txt = str(a.get("text") or "").strip()
-        out.append(("romp: %s" % (a.get("name") or "session"),
+        out.append((_notify_title(a.get("name") or "session", needs_you),
                     "%s: %s" % (what, txt[:140] if txt else "a task changed state"),
                     str(a.get("sid") or ""), iid))
     return out
@@ -41257,18 +41622,30 @@ def _push_session_name(sid, label=""):
     (_remote_name_of), host-prefixed the way the merged dashboard shows it; then the caller's `label` (the
     shell's own tab text — display-only, clipped and flattened, never consulted ahead of the kernel's copy);
     then the short id. "" for no session."""
+    return _push_session_names(sid, label)[0]
+
+
+def _push_session_names(sid, label=""):
+    """_push_session_name's lookup, returning BOTH forms as a (name, bare) pair: `name` host-prefixed
+    for a federated session the way the merged dashboard shows it, `bare` the session's own name with
+    no host in front — what _notify_title puts in a notification's title (the user 2026-09-09: which
+    machine a session runs on is not their concern in the words they read; the tap carries the
+    routing). One lookup for both so a body and its title can never name two different sessions.
+    The label and short-id stand-ins are shared: neither has a host to strip. ("", "") for no session."""
     sid = str(sid or "")
     if not sid:
-        return ""
+        return "", ""
     label = " ".join(str(label or "").split())[:PUSH_LABEL_MAX]
     if ":" in sid:
-        pfx, bare = sid.split(":", 1)
-        rn = _remote_name_of(pfx, bare)
+        pfx, bare_sid = sid.split(":", 1)
+        rn = _remote_name_of(pfx, bare_sid) or ""
         name = ("%s:%s" % (pfx, rn)) if rn else ""
     else:
-        bare = sid
-        name = _name_of(bare) or ""
-    return name or label or bare[:8]
+        bare_sid = sid
+        rn = _name_of(bare_sid) or ""
+        name = rn
+    stand_in = label or bare_sid[:8]
+    return (name or stand_in), (rn or stand_in)
 
 
 def _push_test(endpoint, sid="", host="", label=""):
@@ -41297,9 +41674,9 @@ def _push_test(endpoint, sid="", host="", label=""):
     (_remote_name_of), worn host-prefixed the way the merged dashboard shows it. When the kernel
     truly has no name — a host not polled yet, a kernel too old to file names — the shell's
     `label` stands in: the active tab's own text, the user's UI text and nothing more, so it is
-    clipped and flattened here and never consulted ahead of the kernel's own copy. Neither → the
-    short id, as before."""
-    sid, host, name = str(sid or ""), str(host or ""), ""
+    clipped and flattened (_push_session_names) and never consulted ahead of the kernel's own copy.
+    Neither → the short id, as before."""
+    sid, host, name, bare_name = str(sid or ""), str(host or ""), "", ""
     # One stderr line per test push (2026-09-08: a phone's test tap brought romp forward and nothing more,
     # and the journal could not say whether the test had carried a session at all — this route logged nothing).
     # The session's id clipped, the endpoint's host only: enough to match the shell's client-diag row.
@@ -41311,11 +41688,16 @@ def _push_test(endpoint, sid="", host="", label=""):
         return {"ok": False, "status": 0, "detail": "this device isn't subscribed yet"}
     _vapid_keys()                                          # RuntimeError without cryptography → the route's 500
     if sid:
-        name = _push_session_name(sid, label)
+        # ONE lookup names the session in both forms (#1157's _push_session_name is the authority; the
+        # pair-returning twin below it keeps the two from ever disagreeing): the body, the echoed
+        # `name` and the payload's routing block wear the host-prefixed form the merged dashboard
+        # shows, while the TITLE wears the session name alone (_notify_title: the host is not the
+        # user's concern there — the tap carries the routing in `data`)
+        name, bare_name = _push_session_names(sid, label)
         body = "Test notification — tap to come back to %s." % name
     else:
         body = "Test notification — this device is set up."
-    payload = json.dumps(_push_payload("romp", body, sid=sid, kind="test", host=host, name=name)).encode()
+    payload = json.dumps(_push_payload(_notify_title(bare_name), body, sid=sid, kind="test", host=host, name=name)).encode()
     status, detail = _push_post(sub, payload)
     print("[push] test sid=%s endpoint=%s: %s" % (_tag, _ep_host, status), file=sys.stderr)
     ok = 200 <= status < 300
@@ -41446,7 +41828,7 @@ def _push_forward(events):
 
 # ── the turn-finished push (the bell popover's third row, 2026-09-05) ─────────────────────────────
 # With the master AND the turn switch on, every session's turn end buzzes the subscribed phones:
-# {title: the session's name, body: the first line of what it said, sid}. The EVENT is the session's
+# {title: "Romp: <the session's name>" (_notify_title), body: the first line of what it said, sid}. The EVENT is the session's
 # recorded settle — the Stop hook's `lastStopAt` stamp (SDK sessions) or the states/ 'waiting'/'idle'
 # transition the Stop hook writes (tmux) — read per pusher cycle, which the very same settle wakes
 # (/tick, the backend's poke). No timer, no transcript-mtime inference. The first sight of a session
@@ -41526,8 +41908,9 @@ def _turn_notify_tick(now, tmux):
         if not _buzz_claim(sid, key, "turn"):
             continue                                     # a bell event already buzzed for this turn end
         body = _first_line(_last_assistant_text(s.get("path") or "")) or "finished a turn"
-        title = str(s.get("name") or _name_of(sid) or sid[:8])
-        _push_notify(title, body, sid, kind="turn", name=title)     # badge omitted: the count rides its own push; the title IS the name
+        sname = str(s.get("name") or _name_of(sid) or sid[:8])
+        title = _notify_title(sname)                             # a turn end is never a needs-you
+        _push_notify(title, body, sid, kind="turn", name=sname)  # badge omitted: the count rides its own push; the routing block carries the name the title wears
         fired.append({"title": title, "body": body, "sid": sid, "kind": "turn"})   # the kind rides to peers too, so their tap lands the same way
     if fired:
         _push_forward(fired)                             # peers' phones hear it too, the bell-event way
@@ -42297,7 +42680,19 @@ try{window.dispatchEvent(new Event("romp:wsfresh"));}catch(e){}}   // the pane's
 // checked at RAISE time (there is no event for a CSS display flip). The hidden pane still reconnects in
 // the background; if it is shown again while genuinely stale, its watchdog re-raises within one tick,
 // now visible, and the resync retires it exactly as before.
-function paneHidden(){try{return window.parent!==window&&(window.innerWidth===0||window.innerHeight===0);}catch(e){return false;}}
+// That probe is one of TWO witnesses, and this reads their union (ui/webview/paint-gate.ts states the rule). In
+// Chromium the probe is right for a pane hidden SINCE LOAD only: a display:none iframe keeps the size of its last
+// show there, so it misses every pane the shell hides after the user has looked at it, the phone shell's every
+// tab switch. The pane's own visibility code holds the two measures that do not miss it (document.hidden and its
+// IntersectionObserver) and publishes their union as window.__rompPaneHidden on its own events (paint-gate.ts
+// publishPaneHidden for the feed and Outline panes, ui/webview/chat-visibility.ts for the chat page, the
+// timeline's _publishPaneHidden; never a timer; nothing until the observer has spoken). Firefox is the mirror
+// image: a display:none iframe's viewport reads 0 (the probe is right) but its IntersectionObserver does not run,
+// so the word stays at its last verdict. So hidden is EITHER witness at raise time, the probe or a published
+// word of true, and never the word first. A standalone page (a bare /chat or /feed, no shell) reads the same word:
+// its own reload bar (selfStale) is held while the page's tab is hidden, and if the connection is still stale on
+// the return, the foreground redial's arm raises it, now visible.
+function paneHidden(){try{return (window.parent!==window&&(window.innerWidth===0||window.innerHeight===0))||window.__rompPaneHidden===true;}catch(e){return false;}}
 // every raise (and every hidden-pane suppression) leaves a clientDiag breadcrumb naming the pane, the
 // PATH that raised (reconnect/foreground), the socket state and the quiet gap — so the next "the banner
 // keeps flapping" report is diagnosable from client-diag.jsonl instead of re-hypothesized (the user
@@ -43111,15 +43506,25 @@ function shown(id){var p=document.getElementById(id);return p&&getComputedStyle(
 window.__rompGrowFair=function(k){if(k==='timeline')return;var v=PANES.filter(shown).map(function(id){return grow[key(id)];});
 var avg=v.length?v.reduce(function(a,b){return a+b;},0)/v.length:50;setGrow(k,avg);
 try{localStorage.setItem(GK,JSON.stringify(grow));}catch(e){}};
+// A drag moves a LANDING LINE and the panes take their widths ONCE, at release. A grow write re-lays out the row
+// and with it every same-origin pane document in that frame, so writing the pair on every mousemove cost one
+// relayout of every pane per pointer step, a cost that grows with what the panes hold (seconds a step once a pane
+// holds a large document). So mousemove only positions #gv-ghost, a fixed line over the row where the divider will
+// land, and mouseup writes the two grows and persists them. The pair is resolved before the drag classes go on, so
+// a grab with no pair leaves no col-resize cursor behind.
+var ghost=document.getElementById('gv-ghost');
 function gutter(gid,leftPick,rightId){var h=document.getElementById(gid);if(!h)return;
-h.addEventListener('mousedown',function(e){e.preventDefault();document.body.classList.add('drag','dragv');
+h.addEventListener('mousedown',function(e){e.preventDefault();
+var L=document.getElementById(leftPick()),R=document.getElementById(rightId);if(!L||!R)return;
+document.body.classList.add('drag','dragv');
 PANES.forEach(function(id){if(shown(id))setGrow(key(id),document.getElementById(id).offsetWidth);});
-var L=document.getElementById(leftPick()),R=document.getElementById(rightId);
-if(!L||!R)return;var wL=L.offsetWidth,wR=R.offsetWidth,sum=wL+wR,sx=e.clientX,mn=Math.min(120,sum*0.25);
-function mv(ev){var nL=Math.max(mn,Math.min(sum-mn,wL+(ev.clientX-sx)));setGrow(key(L.id),nL);setGrow(key(R.id),sum-nL);}
-function up(){document.body.classList.remove('drag','dragv');try{localStorage.setItem(GK,JSON.stringify(grow));}catch(e){}
+var wL=L.offsetWidth,wR=R.offsetWidth,sum=wL+wR,sx=e.clientX,mn=Math.min(120,sum*0.25),nL=wL,lx=L.getBoundingClientRect().left,rr=row.getBoundingClientRect();
+function show(){if(!ghost)return;ghost.style.top=rr.top+'px';ghost.style.height=rr.height+'px';ghost.style.left=(lx+nL)+'px';ghost.style.display='block';}
+function mv(ev){nL=Math.max(mn,Math.min(sum-mn,wL+(ev.clientX-sx)));show();}
+function up(){document.body.classList.remove('drag','dragv');if(ghost)ghost.style.display='none';
+setGrow(key(L.id),nL);setGrow(key(R.id),sum-nL);try{localStorage.setItem(GK,JSON.stringify(grow));}catch(e){}
 window.removeEventListener('mousemove',mv);window.removeEventListener('mouseup',up);}
-window.addEventListener('mousemove',mv);window.addEventListener('mouseup',up);});}
+show();window.addEventListener('mousemove',mv);window.addEventListener('mouseup',up);});}
 gutter('gv-a',function(){return 'chat-pane';},'fleet-pane');
 gutter('gv-b',function(){return document.body.classList.contains('po-fleet')?'fleet-pane':'chat-pane';},'feed-pane');
 tf&&tf.addEventListener('load',function(){autosize();
@@ -44117,17 +44522,26 @@ window.addEventListener('message',function(e){var m=e.data;if(m&&m.romp==='usage
 
 # The bottom bar's API health cell: one dot and one word beside the usage readout, painted from the kernel's
 # apiHealth shell push (_api_health_frame), the reading on hover, the detail with its actions pinned on click
-# (or Enter / Space: the cell is a keyboard button). It renders ONLY from the last pushed frame, no fetch, no
-# timer: the frame moves on events, and the cell repaints only when its state or text changed, so the ready
-# re-send of an identical frame cannot pulse it. The detail card is built in the usage tip's grammar and shares
-# its skin (#ah-tip sits beside #ru-tip in every selector) and its backdrop (#ru-back, one modal at a time).
+# (or Enter / Space: the cell is a keyboard button). The cell and the frame's reading render ONLY from the last
+# pushed frame, no fetch, no timer: the frame moves on events, and the cell repaints only when its state or text
+# changed, so the ready re-send of an identical frame cannot pulse it. The hover's History section (the user
+# 2026-09-08, who wanted the cell's hover to carry some history the way the spend hover does) is the ONE read:
+# GET /api-health, the designed signal (docs/reference.md "The API-health signal"), fetched when the hover or the
+# detail opens and again when a frame lands on an open one. The signal derives its state at read time by design,
+# so the read is the observation; the frame stays byte-identical and its dedupe untouched. The detail card is
+# built in the usage tip's grammar and shares its skin (#ah-tip sits beside #ru-tip in every selector) and its
+# backdrop (#ru-back, one modal at a time).
 # The web shell's rail only, for now; the VS Code strip twin (strip.ts apiCell's sibling, with a --st-retrying
 # token) and the phone's Usage-modal section (no rail on the phone) are named follow-ups.
 _LANDING_APIH_JS = """
 (function(){var el=document.getElementById('rail-api');if(!el)return;
 var txt=el.querySelector('.ah-text');
 var tip=document.createElement('div');tip.id='ah-tip';tip.style.display='none';
-tip.setAttribute('role','dialog');tip.setAttribute('aria-label','API health');tip.setAttribute('aria-modal','true');tip.tabIndex=-1;document.body.appendChild(tip);
+tip.setAttribute('role','tooltip');tip.setAttribute('aria-label','API health');tip.tabIndex=-1;document.body.appendChild(tip);
+// what the cell is described by while the hover shows (aria-describedby): a SHORT visually-hidden summary, refreshed
+// when the read lands, never the tip's whole text (the tip runs to hundreds of characters of rows, and at focus time,
+// when assistive tech reads the description, it would be the loader's markup); Enter reaches the rest
+var desc=document.createElement('span');desc.id='ah-summary';desc.className='ah-vh';document.body.appendChild(desc);
 var back=document.getElementById('ru-back');
 if(!back){back=document.createElement('div');back.id='ru-back';document.body.appendChild(back);}
 // LAST: the newest frame. pinned: the detail is the modal. held / dirty: a PRIMARY pointer is down over the detail
@@ -44137,8 +44551,30 @@ if(!back){back=document.createElement('div');back.id='ru-back';document.body.app
 // button. lastX: where the hover anchored, so a re-anchor keeps its place. focusBack: where focus returns when the
 // detail closes.
 var LAST=null,pinned=false,held=false,dirty=false,pending=null,pendSeq=null,hint='',lastX=null,focusBack=null;
+// HIST: the last /api-health answer, {error} for a failed read, null before the first; histSeq keys the paint to the
+// newest read so an older answer landing last is dropped. skipFocus: the dialog's close refocuses the cell, and that
+// focus event must not pop the hover. winFocusEl: the element that held focus when the window's own focus event
+// fired, cleared on the next animation frame (an event, not a timer). When the window regains system focus the
+// browser re-dispatches focus on the active element in that same task (the cell keeps focus after Escape by
+// design), which is not the user reaching for the cell: the cell's focus is skipped only when the cell WAS that
+// element. Chromium fires the same window event whenever the focused FRAME changes, and the shell's panes are
+// iframes, so a Tab out of a pane onto the cell (its keyboard path here) arrives under the mark too; the recorded
+// element is then the document's body (the pane's host is cleared before the event fires), never the cell, and the
+// hover shows. No timer anywhere: the show is the event.
+var HIST=null,histSeq=0,skipFocus=false,winFocusEl=null;
+window.addEventListener('focus',function(){winFocusEl=document.activeElement;requestAnimationFrame(function(){winFocusEl=null;});});
+var RESTART_WHY='kernel restarted: the event ring is empty';   // sdk_backend.API_HEALTH_RESTART_WHY: the row the boot files
+var HIST_ROWS=6;
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 function hm(ep){return new Date(ep*1000).toTimeString().slice(0,5);}
+function hms(ep){return new Date(ep*1000).toTimeString().slice(0,8);}
+// a stamp from another day carries its date (a quiet tail can span days): '09-07 14:02'
+function hmd(ep){var d=new Date(ep*1000),n=new Date();if(d.toDateString()===n.toDateString())return hm(ep);
+return ('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2)+' '+hm(ep);}
+function dur(s){s=Math.max(0,Math.round(s));if(s<60)return s+' s';var m=Math.round(s/60);if(m<60)return m+' min';
+var h=Math.floor(m/60);m-=h*60;if(h<24)return h+' h'+(m?' '+m+' min':'');var d=Math.floor(h/24);h-=d*24;return d+' d'+(h?' '+h+' h':'');}
+function pct(r){return (r==null?0:Math.round(r*100))+'%';}
+function pl(n,w){n=n||0;return n+' '+w+(n===1?'':'s');}
 // The plain-words pause reasons and the ok line: the kernel's `text` is the headline, these say what it means.
 var PAUSE={limit:'Auto-retry and the judges are paused until your usage limit resets.',
 spend:'Auto-retry and the judges are paused: you have reached the monthly spend limit. Raise it at claude.ai/settings/usage.',
@@ -44160,6 +44596,84 @@ return '<div class="ru-tip-row ah-row'+(full?'':' ah-ro')+'"'+(full?' role=butto
 +(bg?'<i class=ah-sw style="background:'+bg+'"></i><span class=ah-nm style="color:'+bg+'">':'<i class=ah-sw></i><span class=ah-nm>')+esc(r.name)+'</span>'
 +'<span class=ah-desc>'+(r.kind==='retrying'?'retrying':'stopped')+' · '+clsWords(r)+(r.since?' · since '+hm(r.since):'')
 +(r.suppressed?' · auto-retry off for this session (you interrupted it)':'')+'</span></div>';}
+// -- History: GET /api-health at show time. The shell authenticates the way its other fetches do (the romp_token
+// cookie; a same-origin GET sends no Origin, which _origin_ok accepts). A failed read is said in the section, in
+// place of the rows: never stale numbers, never silence. Painted through the same held / dirty gate as a frame.
+// fresh=true (a show) drops the last answer first, so a hover never paints an earlier hover's numbers while its
+// own read is in flight. A frame on an open card re-reads behind the stamped answer the card shows, and a pin from
+// hidden behind the last hover's answer (its as-of says when it was read; the dots only before the first answer):
+// the card the user opened is not blanked for the read's duration, on purpose.
+function load(fresh){var n=++histSeq;if(fresh)HIST=null;
+fetch('/api-health',{cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
+.then(function(d){if(n!==histSeq)return;HIST=(d&&d.buckets)?d:{error:'malformed answer'};
+if(tip.style.display!=='block')return;if(held){dirty=true;return;}render();},
+function(e){if(n!==histSeq)return;HIST={error:String((e&&e.message)||e)};
+if(tip.style.display!=='block')return;if(held){dirty=true;return;}render();});}
+// a bucket's name for the card: its model family, plus its auth label when another bucket shares the family
+function bname(d,key){var b=(d.buckets||{})[key]||{},fam=b.family||key.split('|')[1]||key,dup=false;
+Object.keys(d.buckets||{}).forEach(function(k){if(k!==key&&((d.buckets[k]||{}).family||'')===fam)dup=true;});
+return dup?fam+' · '+(b.auth||key.split('|')[0]):fam;}
+// one window row in the spend hover's grammar: the label (with its caveat when the window outreaches the kernel's
+// uptime, the way the rolling month says 'complete since'), then the figures. The figures are the window's totals,
+// said in the window's tense ('retried', never 'retrying': the live set is the Sessions waiting list above).
+// `requests` counts attempts WITH a status and the shares are over it; a connection-level failure has none
+// (`noStatus`, outside that sum), so a window is quiet only when every count is zero, and its no-status attempts
+// are named when there are any (an offline window would otherwise read 'no attempts' and hide its give-ups). A mixed
+// window counts every attempt once and says how many of them had no status, with the shares' base named beside them:
+// '15 attempts, 7 of them without a status · 25% 429 · 0% 5xx of the other 8'.
+function winRow(w,c,up){var lab=(w%60===0?(w/60)+' min':w+' s');if(c&&c.complete===false&&typeof up==='number')lab+=' · kernel up '+dur(up);
+var v,rq=(c&&c.requests)||0,ns=(c&&c.noStatus)||0;if(!c||!(rq||ns||c.gaveUp||c.sessionsRetrying))v='no attempts';
+else{v=rq?(pl(rq+ns,'attempt')+(ns?', '+ns+' of them without a status':'')+' · '+pct(c.rate429)+' 429 · '+pct(c.rate5xx)+' 5xx'+(ns?' of the other '+(rq===1?'one':rq):'')):(pl(ns,'attempt')+' without a status');
+v+=' · '+(c.gaveUp||0)+' gave up · '+pl(c.sessionsRetrying,'session')+' retried';}
+return '<div class="ru-tip-row ah-hrow"><span class=ru-tip-k>'+esc(lab)+'</span><span class=ru-tip-v>'+esc(v)+'</span></div>';}
+// the newest HIST_ROWS transitions, newest first: the time, the state entered (with its bucket when there are
+// several), and how long it held (until the same bucket's next transition; 'so far' for the current one, a flag and
+// never a stamp comparison: the transition the hover's own read files carries that read's asOf as its time, and the
+// state it closed must not read 'so far' beside it). A row the boot filed says so; where the tail crosses this
+// kernel's bootAt with no such row shown above the crossing (the bucket was already unknown at shutdown, so the boot
+// filed nothing), a divider names the restart, and takes no slot: the cap counts transitions. Any restart row above
+// suppresses it, not only the one right above, so one restart is one mark whatever sits between. bootAt is the
+// backend's own seed stamp (the start to the millisecond, or one millisecond past a row the previous kernel filed at
+// or after it), so every restored row is before it and the restart rows sit at it. Every bucket comes back unknown
+// at a restart, so a hold from before the boot ends at the boot and is never 'so far'; a bucket the boot seeded
+// carries that same boot clock as its stateSince, so the head and the tail name one time. Never hidden.
+function transRows(d){var rows=(d.transitions||[]).slice().sort(function(a,b){return b.t-a.t;});
+var multi=Object.keys(d.buckets||{}).length>1,now=d.asOf,boot=d.bootAt,hasBoot=typeof boot==='number',out='',crossed=false,sawRestart=false,shown=0;
+for(var i=0;i<rows.length&&shown<HIST_ROWS;i++){var r=rows[i],restart=r.why===RESTART_WHY,pre=hasBoot&&r.t<boot;
+if(!crossed&&pre){crossed=true;
+if(!sawRestart){out+='<div class="ru-tip-row ah-hrow ah-boot"><span class=ru-tip-k>'+hmd(boot)+'</span><span class=ah-hword>kernel restarted</span></div>';}}
+var end=now,cur=true;for(var j=i-1;j>=0;j--)if(rows[j].bucket===r.bucket){end=rows[j].t;cur=false;break;}
+if(pre&&end>boot){end=boot;cur=false;}
+var word=(multi?bname(d,r.bucket)+' ':'')+r.to+(restart?' · kernel restarted':'');
+out+='<div class="ru-tip-row ah-hrow"><span class=ru-tip-k>'+hmd(r.t)+'</span><span class=ah-hword>'+esc(word)+'</span><span class=ru-tip-v>'+dur(end-r.t)+(cur?' so far':'')+'</span></div>';
+if(restart)sawRestart=true;shown++;}
+return out;}
+function histHTML(){var h='<div class="ru-tip-win ah-hist"><div class=ru-tip-name><span>History</span>'
++((HIST&&!HIST.error&&typeof HIST.asOf==='number')?'<span class=ru-tip-reset>as of '+hms(HIST.asOf)+'</span>':'')+'</div>';
+if(!HIST)return h+'<div class="rl-dots ah-wait"><i></i><i></i><i></i></div></div>';
+if(HIST.error)return h+'<div class="ah-line ah-err">Could not read the API history: '+esc(HIST.error)+'</div></div>';
+var d=HIST,ov=d.overall||{},key=ov.worstBucket,b=key?(d.buckets||{})[key]:null,nb=Object.keys(d.buckets||{}).length,st=ov.state||'unknown';
+// since is the bucket's stateSince as the backend files it: a bucket the boot seeded is unknown since the kernel's
+// own start (SdkBackend seeds the aggregator with the boot clock the payload serves as bootAt), so the head, the
+// tail's divider and the boot's row name one time with no branch here
+var since=b?b.stateSince:0;
+h+='<div class="ru-tip-row ah-head"><i class=ah-dot data-state='+esc(st)+'></i><span class=ah-word>'+esc(st)+'</span>'
++((nb>1&&b)?'<span class=ah-hsub>'+esc(bname(d,key))+' · worst of '+nb+' buckets</span>':'')
++(since?'<span class=ah-since>since '+hmd(since)+'</span>':'')+'</div>';
+if(b&&b.why)h+='<div class="ah-line ru-tip-reset">'+esc(b.why)+'</div>';
+if(!b)h+='<div class=ah-line>No API traffic seen'+(typeof d.bootAt==='number'?' since the kernel started at '+hmd(d.bootAt):' yet')+'.</div>';
+else ((d.config&&d.config.windows)||[60,300,900]).forEach(function(w){h+=winRow(w,(b.windows||{})[String(w)],d.uptimeS);});
+var tr=transRows(d);if(tr)h+='<div class="ru-tip-name ah-hname"><span>State changes</span></div>'+tr;
+return h+'</div>';}
+// the cell's description while the hover shows: the state word and its since, then how to reach the rest. Before the
+// answer lands it carries the state word the frame already put on the cell (assistive tech reads the description once,
+// at focus time, and the landed text replaces it with nothing to announce the change: a loading line with no state
+// word would leave a screen-reader user with none) and says the read is in flight; the landed line adds the since; a
+// failed read says so in the same words as the section's line
+function descText(){var tail=' Press Enter to open it.';if(!HIST)return 'History: '+((LAST&&LAST.text)||'unknown')+'. Reading the details.'+tail;
+if(HIST.error)return 'Could not read the API history: '+HIST.error+'.'+tail;
+var ov=HIST.overall||{},key=ov.worstBucket,b=key?(HIST.buckets||{})[key]:null;
+return 'History: '+(ov.state||'unknown')+((b&&b.stateSince)?' since '+hmd(b.stateSince):'')+'.'+tail;}
 // full=false is the HOVER: the same reading with no controls. The hover sits under pointer-events:none and hides
 // on mouseleave, so a button there could not be honored; the click is where the actions live.
 function html(m,full){var h='<div class=ru-tip-win><div class=ru-tip-name><span>API · this machine</span></div>'
@@ -44172,40 +44686,69 @@ h+='</div>';
 var rows=m.sessions||[];
 if(rows.length){h+='<div class=ru-tip-win><div class=ru-tip-name><span>Sessions waiting</span></div>';
 rows.forEach(function(r){h+=rowHTML(r,full);});h+='</div>';}
+h+=histHTML();
 if(m.tmux>0)h+='<div class="ru-tip-win ah-line">'+(m.tmux===1?'1 tmux session is seen through its transcript only':m.tmux+' tmux sessions are seen through their transcripts only')
 +', so a retry in progress there shows only when it fails or recovers.</div>';
 if(full)h+='<div class="ru-tip-row ah-foot"><span class=ah-link role=button tabindex=0 data-act=usage>Usage and spend</span><span class=ah-link role=button tabindex=0 data-act=log>Log</span></div>';
 return h;}
-// The hover anchors above the rail, centered on the cursor, exactly as the usage tip's showTip does; a re-render
-// re-anchors from the same x, since new rows change the height and the tip hangs ABOVE the rail.
+// The hover anchors above the rail, centered on the cursor, as the usage tip's showTip does; a re-render re-anchors
+// from the same x, since new rows change the height and the tip hangs ABOVE the rail. Measured AFTER a reset: a
+// fixed element's shrink-to-fit width is taken against where it last sat, so a tip measured at its old left comes
+// out narrower than its rows and sits flush with the viewport's edge (at 830 px wide: a wrapped row and no margin).
+// The height is capped to the room above the rail (6 px margin, 8 px gap; #ah-tip clips), so a short window clips
+// the section's oldest rows instead of clamping the top to 6 and spilling over the rail and the cell; open() clears
+// the cap, and the pinned card keeps .ru-modal's own scroll pane.
 function anchor(){var r=el.getBoundingClientRect();var x=(typeof lastX==='number')?lastX:(r.left+r.width/2);
-tip.style.left=Math.max(6,Math.min(window.innerWidth-tip.offsetWidth-6,x-tip.offsetWidth/2))+'px';
-tip.style.top=Math.max(6,r.top-tip.offsetHeight-8)+'px';}
+tip.style.left='0px';tip.style.top='0px';tip.style.maxHeight=Math.max(0,r.top-14)+'px';
+var w=tip.offsetWidth,h=tip.offsetHeight;
+tip.style.left=Math.max(6,Math.min(window.innerWidth-w-6,x-w/2))+'px';
+tip.style.top=Math.max(6,r.top-h-8)+'px';}
 // A re-render replaces the card's nodes, so a focused control would fall to the page body and the next Tab would
 // leave the dialog: the same control (by act and sid) takes focus again in the new markup, else the card does.
 function focusKey(n){return (n&&n.getAttribute)?(n.getAttribute('data-act')||'')+'|'+(n.getAttribute('data-sid')||''):'';}
 function render(){if(!LAST)return;var a=document.activeElement,key=(pinned&&a&&a!==tip&&tip.contains(a))?focusKey(a):null;
-tip.innerHTML=html(LAST,pinned);if(!pinned)anchor();
+tip.innerHTML=html(LAST,pinned);if(!pinned)anchor();desc.textContent=descText();
 if(key!==null){var n=null,all=tip.querySelectorAll('[data-act]');for(var i=0;i<all.length;i++)if(focusKey(all[i])===key){n=all[i];break;}
 try{if(n)n.focus();if(!n||document.activeElement!==n)tip.focus();}catch(e){}}}
+// The shown, unpinned tip is a TOOLTIP (the role, the cell described by the short summary, no aria-modal): a keyboard
+// user who Tabs onto the cell must not meet a modal dialog their focus sits outside of. open() makes it the dialog.
 function show(ev){if(!LAST)return;lastX=(ev&&typeof ev.clientX==='number')?ev.clientX:null;
-tip.classList.remove('ru-modal');tip.style.display='block';render();}
-function close(){tip.style.display='none';tip.classList.remove('ru-modal');back.classList.remove('on');pinned=false;
+tip.classList.remove('ru-modal');tip.setAttribute('role','tooltip');tip.removeAttribute('aria-modal');
+tip.style.display='block';el.setAttribute('aria-describedby','ah-summary');load(true);render();}
+function hide(){tip.style.display='none';el.removeAttribute('aria-describedby');}
+function close(){hide();tip.classList.remove('ru-modal');back.classList.remove('on');pinned=false;
 window.__rompApiClose=null;if(back.onclick===close)back.onclick=null;
-var fb=focusBack;focusBack=null;try{(fb&&fb.focus?fb:el).focus();}catch(e){}}
+// the refocus fires the cell's focus event, which would pop the hover right after Escape: skipFocus covers that one
+// call (the handler runs synchronously inside .focus(), so the flag is reset as soon as the call returns)
+var fb=focusBack;focusBack=null;skipFocus=true;try{(fb&&fb.focus?fb:el).focus();}catch(e){}skipFocus=false;}
 // A click PINS the detail as a centered modal over the dimmed dashboard (the usage modal's own backdrop and
 // pattern); Escape lands via _LANDING_ESC_JS (shell AND pane documents), the backdrop tap closes too. An open
 // usage modal is closed FIRST, explicitly: the two share #ru-back, and its one handler must belong to one modal.
-// Focus moves into the detail and comes back to the cell (or wherever it was) on close.
+// Focus moves into the detail and comes back to the cell (or wherever it was) on close. A pin reads only when the
+// tip was hidden: a hover's read, landed or in flight, is this same document, so a click after the pointer's
+// mouseenter (or a tap after its compat mouseenter) costs one read and keeps its answer.
 function open(){if(!LAST)return;try{window.__rompUsageClose&&window.__rompUsageClose();}catch(e){}
-focusBack=document.activeElement;pinned=true;tip.classList.add('ru-modal');tip.style.left='';tip.style.top='';
+var was=tip.style.display==='block';
+focusBack=document.activeElement;pinned=true;tip.classList.add('ru-modal');tip.style.left='';tip.style.top='';tip.style.maxHeight='';
+tip.setAttribute('role','dialog');tip.setAttribute('aria-modal','true');el.removeAttribute('aria-describedby');
 tip.style.display='block';render();back.classList.add('on');
-window.__rompApiClose=close;back.onclick=close;try{tip.focus();}catch(e){}}
+window.__rompApiClose=close;back.onclick=close;try{tip.focus();}catch(e){}if(!was)load();}
 // The listeners sit on the STABLE #rail-api cell; __rompApiHealth writes its children, never the cell.
-el.addEventListener('mouseenter',function(ev){if(!pinned)show(ev);});
-el.addEventListener('mouseleave',function(){if(!pinned)tip.style.display='none';});
+// a pointer arriving on a tip that focus already shows re-anchors it from the pointer and keeps its rows: the
+// document did not change, so no re-read and no flash to the loader's dots
+el.addEventListener('mouseenter',function(ev){if(pinned)return;
+if(tip.style.display==='block'){if(typeof ev.clientX==='number')lastX=ev.clientX;anchor();return;}show(ev);});
+el.addEventListener('mouseleave',function(){if(!pinned)hide();});
+// keyboard focus shows the hover as the pointer does (the tooltip pattern) and blur hides it; a pinned detail is
+// unmoved, a hover the pointer already opened is left where it anchored, and a focus the browser re-dispatches
+// because the window regained focus while the cell already held it (winFocusEl) is not the user reaching for the cell
+el.addEventListener('focus',function(){if(skipFocus||winFocusEl===el||pinned||tip.style.display==='block')return;show(null);});
+el.addEventListener('blur',function(){if(!pinned)hide();});
 el.addEventListener('click',function(){if(pinned)close();else open();});
-el.addEventListener('keydown',function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();if(pinned)close();else open();}});
+// Escape on the focused cell dismisses the hover that focus showed, without moving focus (content shown on focus
+// must be dismissible in place); the pinned dialog's Escape lands via _LANDING_ESC_JS, inert while no modal is on
+el.addEventListener('keydown',function(ev){if(ev.key==='Escape'){if(!pinned&&tip.style.display==='block'){ev.preventDefault();hide();}return;}
+if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();if(pinned)close();else open();}});
 // Click-safe across a frame (ui/CLAUDE.md): a frame that lands while a pointer is DOWN over the detail is painted
 // on release, never under the press, so the pressed button survives to its click. A PRIMARY release inside the
 // detail is followed by the click, so the flush waits for it (a swap between mouseup and click would detach the
@@ -44270,6 +44813,7 @@ if(pending!==null&&(m.seq==null||m.seq!==pendSeq))pending=null;
 if(el.hidden)el.hidden=false;   // the first frame reveals the cell (a kernel that sends none shows nothing)
 if(el.getAttribute('data-state')!==m.state||txt.textContent!==m.text){el.setAttribute('data-state',m.state);txt.textContent=m.text;el.setAttribute('aria-label','API '+m.text);}
 if(tip.style.display!=='block')return;   // an open detail re-renders from the new frame, nothing else does
+load();   // and re-reads the history: the world changed
 if(held){dirty=true;return;}render();};
 })();
 """
@@ -46308,8 +46852,20 @@ def _landing():
             # a failed send's reason, under the button it restored; the hover's rows carry no action (.ah-ro),
             # so no pointer and no hover wash; the pinned detail takes focus as a dialog without a ring on the card
             ".ah-hint{margin-top:4px;opacity:.75;max-width:340px}"
+            # the History section: the signal's state dot in status hexes (never the accent), the transition rows'
+            # state word, the restart divider in italics, a failed read in a red that reads (#ef6b6f, about 5.5:1 on
+            # the tip: the API-error red #e5484d is 4.3:1 there, under the 4.5:1 text floor), and the loader's dots
+            # (.rl-dots, _LOADER_CSS) while the first answer is in flight. The hover clips at the height anchor()
+            # caps it to (the room above the rail): border-box, so the cap is the outline the user sees and not the
+            # content plus 18 px of padding and border; .ru-modal's own overflow-y:auto outranks the clip on the
+            # pinned card, which scrolls as before.
+            ".ah-dot[data-state=thrashing]{background:#e5484d;opacity:1}.ah-dot[data-state=recovering]{background:#e67e22;opacity:.7}"
+            ".ah-hword{opacity:.8}.ah-hsub{opacity:.55}.ah-boot .ah-hword{font-style:italic;opacity:.6}"
+            ".ah-hname{margin-top:6px}.ah-err{color:#ef6b6f}.ah-wait{margin:5px 0 2px}"
             ".ah-row.ah-ro{cursor:default}.ah-row.ah-ro:hover{background:transparent}"
-            "#ah-tip:focus{outline:none}"
+            "#ah-tip:focus{outline:none}#ah-tip{overflow:hidden;box-sizing:border-box}"
+            # the cell's short description for assistive tech (#ah-summary): present in the tree, off the screen
+            ".ah-vh{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}"
             # ONE shared hover panel for BOTH windows (the user 2026-06-26): it reproduces exactly the used/
             # elapsed bars that used to sit under the timeline — per window, a "used" bar (selected colormap)
             # over an "elapsed" bar (slate) with the % + reset countdown, and nothing else (no prose).
@@ -46452,6 +47008,12 @@ def _landing():
             ".gh:hover{background:linear-gradient(180deg,transparent 3px,#3a4a58 3px,#3a4a58 4px,transparent 4px)}"
             ".gv:hover::after{background:var(--accent,#9cd2ff);height:52px}.gh:hover::after{background:var(--accent,#9cd2ff);width:52px}"
             "body.drag iframe{pointer-events:none}body.dragv{cursor:col-resize}body.dragh{cursor:row-resize}"
+            # the divider drag's landing line: a strip the gutter's width carrying a 1 px accent line, shown by gutter()
+            # in _LANDING_JS while a drag is held. Fixed, so its left is the viewport coordinate the script computes;
+            # never a hit target, so it takes no hover or click of its own and the gutter under it keeps its :hover
+            # at the grab; above the focus ring (.pane-focused::after, z-index 6) so a focused pane does not cover it.
+            "#gv-ghost{display:none;position:fixed;width:7px;pointer-events:none;z-index:40;"
+            "background:linear-gradient(90deg,transparent 3px,var(--accent,#9cd2ff) 3px,var(--accent,#9cd2ff) 4px,transparent 4px)}"
             ".pane{position:relative;min-width:0;min-height:0;overflow:hidden}"
             ".pane>iframe{position:absolute;inset:0;width:100%;height:100%}"
             # FOCUS cue (the user 2026-06-23): NO dimming — the active section is shown by a RING around it.
@@ -46720,7 +47282,13 @@ def _landing():
             # bare `body.theme-light .ah-dot` (0,2,1) would outrank the detail's `.ah-dot[data-state=...]`
             # state rules (0,2,0), and the card's headline dot would lose its amber and red in the light
             # theme while the rail's id-scoped dot kept them
-            "body.theme-light #rail-api[data-state=ok] .ah-dot,body.theme-light .ah-dot[data-state=ok]{background:#5D574E}"
+            # and the History head's dot for the signal's quiet states (healthy, unknown) is the same glyph: the base
+            # gray falls to about 1.6:1 on the white tip too
+            "body.theme-light #rail-api[data-state=ok] .ah-dot,body.theme-light .ah-dot[data-state=ok],"
+            "body.theme-light .ah-dot[data-state=healthy],body.theme-light .ah-dot[data-state=unknown]{background:#5D574E}"
+            # the failure line in the light theme's error-text red (styles.css --err #B02A1C, about 6.6:1 on white;
+            # the dark line's #ef6b6f is 3.0:1 there)
+            "body.theme-light .ah-err{color:#B02A1C}"
             "body.theme-light #rail-api[data-state=ok] .ah-text{color:#5D574E}"
             "body.theme-light .ah-word{color:#1F1E1D}"
             "body.theme-light .ah-btn{background:#F1EAE2;border-color:rgba(0,0,0,0.12);color:#1F1E1D}"
@@ -46779,6 +47347,7 @@ def _landing():
             "<div class=gv id=gv-b></div>"
             "<div class=pane id=feed-pane><iframe id=f-feed src=/feed></iframe></div>"
             "</div>"
+            "<div id=gv-ghost></div>"   # the divider drag's landing line (position:fixed; gutter() in _LANDING_JS moves it)
             # the timeline BOTTOM BAND: full-width below the pane row, with a row-resize gutter above it. Both
             # are hidden (CSS) unless po-timeline (the rail's Timeline toggle).
             "<div class=gh id=gh></div>"
@@ -47818,7 +48387,14 @@ class Handler(BaseHTTPRequestHandler):
                 now = time.time()
                 out = fn(now, uptime_s=now - _STARTED)
                 out["bootId"] = _BOOT_ID
-                out["bootAt"] = int(_STARTED)
+                # bootAt rides the snapshot: the aggregator's boot_stamp, this kernel's _STARTED (passed at
+                # construction, _sdk_locked) truncated to the millisecond, the precision of every other stamp
+                # in the payload (asOf, transitions[].t, stateSince), or one millisecond past the newest
+                # transition the previous kernel left when that overlaps the start. The aggregator owns the
+                # number, so a bucket the boot seeded carries it as its stateSince and the restart row's t in
+                # every case, clamp or not (a stamp made here would be a second number whenever the clamp
+                # fired). /version's `started` is int(_STARTED), the same start in whole seconds:
+                # int(bootAt) == started unless the clamp moved the stamp.
                 # coverage's kernel half: tmux-backed sessions have no SDK stream and sit outside
                 # the signal — the count says how much of the machine the signal does not see. A null
                 # (never a silent 0) when the live enumeration fails. Codex-backed sessions are outside
@@ -48313,15 +48889,14 @@ class Handler(BaseHTTPRequestHandler):
                     if kind == "turn" and not _notify_turns_on():
                         held["turn"] += 1
                         continue
-                    # Wear the origin the way every federated surface wears it (host-prefix.ts):
-                    # the sid gains "origin:" so a tap routes through the merged dashboard's own
-                    # tabs, and the title's session name gains the same prefix. Tolerant surgery:
-                    # a title a different build composed passes through unprefixed rather than
-                    # mangled — version skew between peers is a normal state, not an error.
+                    # Wear the origin on the SID only, the way every federated surface routes
+                    # (host-prefix.ts): it gains "origin:" so a tap goes through the merged
+                    # dashboard's own tabs. The TITLE reaches the phone exactly as the origin
+                    # composed it (_notify_title: the session name alone — the user 2026-09-09;
+                    # which kernel detected an event is romp's business, and the host already rides
+                    # the routing block). Until then the relay grafted "romp: <origin>:" onto it.
                     if sid and ":" not in sid:
                         sid = "%s:%s" % (origin, sid)
-                    if t.startswith("romp: "):
-                        t = "romp: %s:%s" % (origin, t[len("romp: "):])
                     # badge omitted: the origin's count is not ours. kind/cardId pass through
                     # (an older peer sends neither → the card default, which is all it had);
                     # the card id is a goal id, globally unique and never host-prefixed
@@ -49523,23 +50098,8 @@ class Handler(BaseHTTPRequestHandler):
             # (the caps frame's viewsSeq, see KERNEL_WS_CAPS)
             _VIEWS_SERVED.seqs = []
             try:
+                # the tab strip rides the connect push (living PLUS kept-open, via the slot the reset cleared); none of its own here
                 self._push_one(client)
-                # Push the SHARED, STABLE tab order so the UI honors it on connect/reload. Without this
-                # the webview only learns the order from a live drag, loses it on every reload, and falls
-                # back to ordering tabs by session STATE — so they drift on their own (worse now that the
-                # heartbeat auto-reloads). _ordered_alive is the same order chat tabs + timeline lanes use.
-                try:
-                    _tm = _tmux_sessions()
-                    _alive = _ordered_alive(int(time.time()), _tm)
-                    _o = [s["sid"] for s in _alive]
-                    # name+color per tab → the client paints the whole strip as placeholders up front (tabs-first)
-                    _tabs = [{"id": s["sid"], "name": s.get("name", ""), "color": _name_color(s["sid"])} for s in _alive]
-                    _resolve_reconnect(client, _alive)   # a no-op here (the reset above consumed the flag) — every strip sender resolves
-                    # through _send_client, which captures the frame's views seq for the caps frame below (the raw send
-                    # this replaced bypassed that capture and had to record the seq by hand)
-                    _send_tab_order(client, _o, _tabs, _tm)
-                except Exception:
-                    pass
             finally:
                 seqs, _VIEWS_SERVED.seqs = _VIEWS_SERVED.seqs, None
             # What this kernel can do for the page (KERNEL_WS_CAPS), after the pushes above and on every

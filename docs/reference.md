@@ -1021,12 +1021,28 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `plannerSkip` counts the sessions the outer gate let through, not every
   planner skip: an idle session stops at the outer gate and appears in neither
   `skipped` nor `planned`. Outside a pass frame (`romp-judge --plan`) the
-  outer gate stamps nothing, and the inner gate does the skipping. The
-  compaction sweep after each judge pass evicts from `pass` and `shared` the
-  entries of stores no session in the discover window owns, so both stay
-  bounded by the live board; the courier's and the planner's change-gate
-  tables are pruned to the sessions each pass discovers, and the evidence
-  gate's stamps are cleared at a fixed cap.
+  outer gate stamps nothing, and the inner gate does the skipping. `liftGate`
+  is the awaiting lift's per-session inputs gate and two-phase read: `skip`
+  and `load` (session-cycles that took no store read against the ones that
+  read it, a probe on the shared read-only view), `shared` (probes the shared
+  cache answered), `writer` (session-ticks that loaded the writer's copy
+  because a lift was due) and `noop` (writer loads whose fresh decision filed
+  nothing, the store having moved between the probe and the load), and the
+  gauge `entries` (sessions remembered). `bgTops` is the placed-launch memo
+  behind the awaiting lift and the feed's background-task classification,
+  keyed on the parse object and the store object: `hit` and `miss` (calls
+  answered from the per-version map against looked up), `resolve` (launch ids
+  looked up on a miss, placed or not), `walk` and `walk_neg` (transcript
+  walks, and the walks that left a launch unresolved: an upper bound on what a
+  negative walk cache would save), `idx_build` (placement indexes built, one
+  per store object asked, a writer's private copy included) and the gauge
+  `entries` (sessions holding a map). The compaction sweep after each judge
+  pass evicts from `pass` and `shared` the entries of stores no session in the
+  discover window owns, so both stay bounded by the live board; the courier's
+  and the planner's change-gate tables are pruned to the sessions each pass
+  discovers, the evidence gate's stamps are cleared at a fixed cap, and the
+  awaiting lift's tick drops the gate's and the placed-launch memo's entries
+  of sessions that left the alive set.
 - `judge`: `passes`, `ms_sum`, `ms_last`, `ms_mean` (wall time; a pass waits
   on model calls), `cpu_ms_sum` (CPU time of the judge tier threads and every
   per-session worker they run; the workers' share is `cpu_ms_workers`).
@@ -1043,6 +1059,12 @@ goes where the manager's stderr goes: under systemd, `journalctl --user -u
 romp-manager -f | grep romp-perf`; under launchd (macOS), `tail -f
 ~/.local/state/romp/manager.log | grep romp-perf`. Setting `ROMP_PERF=1` in the
 kernel's environment still turns it on at start.
+
+The counters describe a running kernel. To time the same builders offline, on
+a copy of a state directory and with no live kernel, `tools/perf-bench.py`
+loads a checkout's kernel in-process and reports each builder's cost on
+real-sized data; two checkouts can run against one copy for a before-and-after
+comparison. Its module docstring is the reference.
 
 ## Browser-side performance telemetry
 
@@ -1135,8 +1157,10 @@ The two rows, as the kernel writes them (`t` its clock, `wid` the dashboard id):
   the cap, with the worst of those; `heap_mb` is
   `performance.memory.usedJSHeapSize` and is absent outside Chrome; `dom` is
   the element count; `visible` is the document's visibility, `hidden_pane`
-  the zero-viewport test the pane shim uses for a pane the shell has set to
-  `display:none`; `ua` is `chrome-desktop`, `safari-ios` or `other`.
+  the pane shim's test for a pane the shell has set to `display:none`: its
+  zero-viewport probe, or the word the pane published as
+  `window.__rompPaneHidden` from its own visibility events; `ua` is
+  `chrome-desktop`, `safari-ios` or `other`.
 - `{"t", "wid", "surface": "perf", "what": "slowframe", "data": {app, type, ms,
   dom, loaf?: {ms, blocking_ms, top: [{k, ms, inv}]}}}`. `type` is the frame
   as received on the wire and `ms` its whole synchronous handling, the
@@ -1172,6 +1196,12 @@ in progress in the same shape, plus a derived `p90_le` per type, `active`
 other browser API is behind a feature check, and nothing in the module throws
 into the pane.
 
+The telemetry describes what the panes did while people used them. To measure
+a pane change before and after on the same input, `tools/ui-bench.mjs` replays
+a recorded or synthetic frame stream into the real pane page in a headless
+Chromium and reports where the browser's time went; the "Measuring dashboard
+pane performance" section of CONTRIBUTING.md describes it.
+
 ## The API-health signal
 
 `GET /api-health` returns one JSON document describing how the API is treating
@@ -1205,8 +1235,13 @@ label the account digest itself, so a bucket can be matched to the log.
   is the response time. A clock step moves it; a reader that wants a freshness
   check a clock step cannot fake uses `seq`.
 - `bootId`, `bootAt`, `uptimeS`: the kernel process identity, the same id
-  `/version` and `X-Romp-Boot` carry. A changed `bootId` means a restart, and
-  the windows restarted with it.
+  `/version` and `X-Romp-Boot` carry. `bootAt` is the boot's stamp in this
+  signal: the kernel's start truncated to the millisecond, the precision of
+  every other stamp in the payload, or, when the previous kernel's last
+  transition overlaps the start, one millisecond past that row; every bucket
+  the boot seeded carries this same number as its `stateSince`, and so does
+  every row the boot filed. `/version`'s `started` is the whole-second boot
+  time. A changed `bootId` means a restart, and the windows restarted with it.
 - `complete`: true once the longest window (900 s) fits inside the uptime.
 - `seq`: count of ring events (attempts, successful responses and give-ups)
   ingested since boot. Monotonic within a boot: two reads with the same `seq`
@@ -1430,11 +1465,16 @@ tail, so it stays bounded however many transitions pass; per-request events
 are never written. The event ring itself is in memory only, so a restart
 empties the windows: `seq` restarts at 0, `bootId` changes, `complete` stays
 false until each window fits inside the new uptime, and every bucket the state
-file knows comes back `unknown` with `stateSince` at the boot time. For each
+file knows comes back `unknown` with `stateSince` at the boot's stamp. For each
 bucket whose persisted state was not already `unknown` the reload files
-`<state> -> unknown` at boot, so the transitions list is continuous across the
-restart, and the first read with enough evidence records `unknown -> <state>`
-after it. The pre-restart state is not carried over: an empty ring is no
+`<state> -> unknown` at that stamp, so the transitions list is continuous across
+the restart, and the first read with enough evidence records `unknown -> <state>`
+after it. The boot's stamp is the kernel's start truncated to the millisecond,
+or one millisecond past the newest transition the file carries when that one
+is not before the start (the previous kernel filed it after this one started,
+or the clock stepped), so the restart row is always the newest row; the payload
+serves that stamp as `bootAt`, and the kernel log says when it was moved. The
+pre-restart state is not carried over: an empty ring is no
 evidence. A state file, or an entry in it, that cannot be read is skipped and
 logged, and never keeps the SDK backend from starting.
 
@@ -1493,6 +1533,34 @@ transcripts only. Every timestamp is an event's time, never the clock, so an
 unchanged world sends nothing. On-you failures (a too-long prompt, a spent
 model allowance, a dead credential, a refusal) are not counted; a spend cap is,
 and engages the `spend` pause in the same cycle.
+
+The cell's hover and its click detail carry a **History** section read from
+this signal: the shell fetches `GET /api-health` when the hover or the detail
+opens, and again when a frame lands on an open one, authenticating with the
+dashboard's own cookie the way its other reads do. Nothing polls; the frame
+carries no history and is unchanged. The section shows `overall.state` with
+the worst bucket's `stateSince` and `why` (naming the bucket and the bucket
+count when there is more than one; a bucket the boot seeded is `unknown`
+since `bootAt`: the boot time or, when an older kernel's last row overlaps
+it, one millisecond past that row, because the backend seeds its `stateSince`
+with the stamp it serves as `bootAt`, the one the tail uses for the boot),
+one row per window from `config.windows` (`requests` plus `noStatus` as the
+attempts, saying how many of them had no status when there are any, `rate429`
+and `rate5xx` as percentages over the attempts with a status, `gaveUp`, and
+`sessionsRetrying` as the sessions that retried in the window; a window
+reads `no attempts` only when every one of those is zero; a window whose
+`complete` is false says how long the kernel has been up), up to six rows
+of `transitions` newest first with the state entered and how long it held
+(until the same bucket's next transition, `so far` for the current one; a
+hold from before `bootAt` ends at the boot, since every bucket comes back
+`unknown` at a restart), and the payload's `asOf`. A row the boot filed
+(`<state> -> unknown`, its `why` the restart reason) reads `kernel
+restarted`; where the tail crosses `bootAt` without such a row (the bucket
+was already `unknown` when the previous kernel stopped, so the boot filed
+nothing), a `kernel restarted` divider is inserted, and it takes none of the
+six slots. A read that fails (a non-2xx, no answer, or an answer without
+the signal's shape) shows one line saying so in place of the rows,
+never the previous numbers.
 
 ## Where things live
 

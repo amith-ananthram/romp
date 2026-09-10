@@ -68,13 +68,17 @@ test("a settled chip re-registers for RECONNECT-class heals regardless of error 
   assert.match(PREVIEW, /settledPreviews\.delete\(box\);\s*\/\/ one attempt per registration; re-registers on error/);
 });
 
-test("markdown-inline <img> failures register through ONE capture-phase listener", () => {
+test("markdown-inline <img> failures are caught by ONE capture-phase listener and PARKED, never retried per message", () => {
   // DOMPurify strips inline handlers (correctly) and md() returns a string, so per-site onerror
   // wiring is impossible — a failed md img sat as a dead element in the cached DOM forever. Error
-  // events don't bubble but DO capture: one document-level listener covers every md img, skips the
-  // preview machinery's own imgs (they run budgets/resume/chips), and rides failedPreviews so every
-  // kernel message re-attempts.
+  // events don't bubble but DO capture: one document-level listener covers every md img and skips the
+  // preview machinery's own imgs (they run budgets/resume/chips). Since T291c the listener PARKS the
+  // image (no src, the alt text as a stable caption) and the reconnect-class heal probes it off the DOM;
+  // the per-message re-set of src flipped every caption on and off at the push rate.
   assert.match(PREVIEW, /export function installMdImgHeal\(\): void \{/);
+  assert.match(PREVIEW, /parkMdImg\(img, src\);\s*\n\s*if \(servedByKernel\(src\)\) \{/, "the listener parks; only a URL the kernel serves gets a bounded, off-DOM probe on the per-message path");
+  assert.doesNotMatch(PREVIEW, /img\.removeAttribute\("src"\);\s*\n\s*img\.src = u;/, "the per-message re-set of a failed img's src, the caption flip, is gone");
+  assert.match(PREVIEW, /export function refreshSettledPreviews\(\): void \{\s*\n\s*healMdImgs\(\);/, "the parked images ride the reconnect-class heal");
   assert.match(PREVIEW, /document\.addEventListener\("error", \(e\) => \{/);
   assert.match(PREVIEW, /\}, true\);\s*\n\}/, "capture phase — error events do not bubble");
   assert.match(PREVIEW, /if \(!src \|\| src\.startsWith\("data:"\)\) return;/, "a broken data: URI has no server to heal");

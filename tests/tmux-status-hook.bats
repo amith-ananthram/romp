@@ -141,8 +141,10 @@ run_hook() {
     run run_hook '{"hook_event_name":"PostCompact","trigger":"auto","cwd":"/tmp/project"}'
     [ "$status" -eq 0 ]
     grep -q 'tmux set -t test @claude-state working' "$MOCK_LOG"
-    ! grep -q '@claude-state waiting' "$MOCK_LOG"
-    ! grep -q '@claude-state compacting' "$MOCK_LOG"
+    run grep -q '@claude-state waiting' "$MOCK_LOG"
+    [ "$status" -ne 0 ]
+    run grep -q '@claude-state compacting' "$MOCK_LOG"
+    [ "$status" -ne 0 ]
 }
 
 # ─── Notification mapping tests ───────────────────────────────────────

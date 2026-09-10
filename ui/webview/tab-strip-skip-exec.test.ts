@@ -88,7 +88,10 @@ function lift(): (hooks: Hooks) => Api {
     let tabStripSig = "", activeId = null, peekId = null, allHiddenBlanked = false, draggedId = null, draggedEl = null, tabDragCommitted = false;
     let order = [], closingTabs = new Set(), tabMeta = new Map(), sessions = new Map(), views = new Map();
     let collapsedTabIds = new Set(), draggedGroup = null, provisionalId = null, provisionalTags = [];
-    let settings = { tabCtx: "over50", theme: "classic", colormap: "aurora" };
+    // stripGroupRows mirrors the default. Its break site is never reached here: FakeEl has no childElementCount,
+    // so the gate's last operand is undefined whatever the setting, hence no makeRowBreak stub. Give FakeEl a
+    // childElementCount and this prelude needs one.
+    let settings = { tabCtx: "over50", stripGroupRows: true, theme: "classic", colormap: "aurora" };
     const H = HOOKS;
     const el = (tag, cls) => new H.FakeEl(tag, cls);
     const document = { activeElement: null,
@@ -154,7 +157,7 @@ function world(): { H: Hooks; api: Api; sessions: Map<string, any>; tabMeta: Map
   const api = lift()(H);
   const sessions = new Map<string, any>([["a", session("web", "ready")], ["b", session("api", "working")]]);
   const tabMeta = new Map<string, any>([["p", { name: "tests", color: { bg: "#112233", fg: "#ffffff" } }]]);
-  const settings = { tabCtx: "over50", theme: "classic", colormap: "aurora" };
+  const settings = { tabCtx: "over50", stripGroupRows: true, theme: "classic", colormap: "aurora" };
   api.set({ order: ["a", "b", "p"], sessions, tabMeta, settings, activeId: "a" });
   return { H, api, sessions, tabMeta, settings };
 }
@@ -217,6 +220,7 @@ test("every input the strip paints repaints it, once, when it changes", () => {
     ["the order", () => { api.set({ order: ["b", "a", "p"] }); }],
     ["a tab hidden by the views filter", () => { H.hidden.add("p"); }],
     ["the context-gauge setting", () => { settings.tabCtx = "always"; }],
+    ["the one-group-per-row setting", () => { settings.stripGroupRows = false; }],
     ["the theme", () => { settings.theme = "yatharth"; }],
     ["the colormap", () => { settings.colormap = "hawaii"; }],
     ["the + tab's key hint", () => { H.keyHint = "Open a session (J)"; }],

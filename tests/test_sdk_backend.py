@@ -4140,6 +4140,39 @@ class PendingQueue(unittest.TestCase):
         self.assertIsNone(self.be.unqueue("qx2", 0, "already forwarded"))
         self.assertEqual(s.pending(), ["survivor"], "a miss never pops a different message")
 
+    def test_replace_queued_edits_in_place_and_keeps_order(self):
+        # the chat's ✎ on a queued message (the user 2026-09-08): new words, same slot — the queue drains
+        # front-first, so the edited message still goes exactly where it would have
+        s = self._sess("qed1")
+        s.enqueue("alpha"); s.enqueue("beta"); s.enqueue("gamma")
+        self.assertEqual(self.be.edit_queued("qed1", 1, "beta, revised"), "beta", "the OLD text comes back")
+        self.assertEqual(s.pending(), ["alpha", "beta, revised", "gamma"])
+        self.assertEqual(self.be.pending_queued("qed1"), ["alpha", "beta, revised", "gamma"])
+        self.assertIsNone(self.be.edit_queued("qed1", 9, "x"), "out-of-range idx is a safe no-op")
+        self.assertIsNone(self.be.edit_queued("no-such-sid", 0, "x"), "unknown session → None")
+
+    def test_edit_queued_expect_relocates_under_the_lock_and_a_miss_touches_nothing(self):
+        s = self._sess("qed2")
+        s.enqueue("alpha"); s.enqueue("beta")
+        s.unqueue(0)                                     # the queue shifts after the caller's snapshot
+        self.assertEqual(self.be.edit_queued("qed2", 1, "beta 2", "beta"), "beta", "stale idx 1 re-locates to 'beta'")
+        self.assertEqual(s.pending(), ["beta 2"])
+        self.assertIsNone(self.be.edit_queued("qed2", 0, "late words", "already forwarded"), "a miss is None…")
+        self.assertEqual(s.pending(), ["beta 2"], "…and rewrites nothing else")
+
+    def test_edit_queued_rewords_the_optimistic_echo(self):
+        # unqueue drops the echo of a cancelled message; an edit re-words it, so the live tail shows the
+        # edited message and the landing scan matches the record the transcript will write
+        sid = "qed3"
+        s = self._sess(sid)
+        s.enqueue("first draft")
+        self.be._live.setdefault(sid, {})["echo:x"] = {"type": "user", "_echo_text": "first draft",
+            "message": {"role": "user", "content": [{"type": "text", "text": "first draft"}]}}
+        self.assertEqual(self.be.edit_queued(sid, 0, "second draft"), "first draft")
+        a = self.be._live[sid]["echo:x"]
+        self.assertEqual(a["_echo_text"], "second draft")
+        self.assertEqual(a["message"]["content"][0]["text"], "second draft")
+
     def test_queue_recallable_only_while_a_recall_can_win(self):
         # the ✕ affordance gate (the user 2026-07-20): during a running UN-HELD turn the input
         # generator forwards a queued send into the CLI within milliseconds — a cancel there can only
