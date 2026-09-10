@@ -3669,10 +3669,21 @@ def _quarantine_put(origin, m, to_id, via="", wire_id=None):
         tmp = QUARANTINE / (mid + ".tmp")
         tmp.write_text(json.dumps(rec))
         tmp.rename(QUARANTINE / (mid + ".json"))      # atomic publish (the kernel may be reading the dir)
+        _refusal_over("quarantine")                   # a hold landed: the next refusal here is a new episode
         _log("quarantine: held %s from %s -> %s (directed)" % (mid, origin, rec["to"]))
         return True
     except OSError as e:
-        _log("quarantine %s from %s: the hold could not be written (%s) — nothing held" % (mid, origin, e))
+        # No card says this (the kernel only reads the dir), so the log says it on every refusal, and
+        # the USER hears it once per episode as a bell row, the way deliver() says a refused publish:
+        # the directed arm answers 'retry', so the sender re-relays the message every exchange while
+        # its receipt reads carried, and a store that stays unwritable would otherwise be a lasting
+        # fault with no surface anyone watches. Keyed on the one store; the next hold that lands re-arms it.
+        text = "quarantine %s from %s: the hold could not be written (%s) — nothing held" % (mid, origin, e)
+        if _REFUSAL_SAID.get("quarantine"):
+            _log(text)
+        else:
+            _REFUSAL_SAID["quarantine"] = True
+            _refused_notice(text + "; the sender holds the text and re-relays until the store can be written")
         return False
 
 def quarantine_list():
