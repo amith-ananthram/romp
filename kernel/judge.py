@@ -10573,7 +10573,7 @@ def run_plan(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=Fal
     time-order is the courier's need; the planner's tree is per-session.)"""
     if now is None:
         now = int(time.time())
-    fleet = [s for s in by_recency(discover(now)) if not _hidden_from_feed(s[0])][:sessions_cap]   # muted sessions are out of task tracking
+    fleet = [s for s in discover(now) if not _hidden_from_feed(s[0])][:sessions_cap]   # muted sessions are out of task tracking
     for _gone in [f for f in _PLANNER_SEEN if f not in {s[0] for s in fleet}]:
         _PLANNER_SEEN.pop(_gone, None)                # the planner gate, bounded by the sessions this pass discovered
     placed = 0
@@ -11269,7 +11269,7 @@ def run_group(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=Fa
     session's open-top set changed. Per-session sequential, sessions concurrent. Returns total relinks."""
     if now is None:
         now = int(time.time())
-    fleet = by_recency(discover(now))[:sessions_cap]
+    fleet = discover(now)[:sessions_cap]
     n = 0
     with ThreadPoolExecutor(max_workers=_conc(concurrency)) as ex:
         futs = {}
@@ -11373,7 +11373,7 @@ def run_consolidate(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verb
     of sessions whose completed column changed."""
     if now is None:
         now = int(time.time())
-    fleet = by_recency(discover(now))[:sessions_cap]
+    fleet = discover(now)[:sessions_cap]
     n = 0
     with ThreadPoolExecutor(max_workers=_conc(concurrency)) as ex:
         futs = {}
@@ -12944,7 +12944,7 @@ def run_close(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=Fa
     upgrade still gets its finalize (the promised backfill; the re-critique's population fix)."""
     if now is None:
         now = int(time.time())
-    fleet = [s for s in by_recency(discover(now)) if not _hidden_from_feed(s[0])][:sessions_cap]   # muted sessions are out of task tracking
+    fleet = [s for s in discover(now) if not _hidden_from_feed(s[0])][:sessions_cap]   # muted sessions are out of task tracking
     fleet_sids = {f[0] for f in fleet}
     pending = _death_pending(exclude=fleet_sids)
     if pending:
@@ -13300,7 +13300,7 @@ def _ab_close(sessions_cap=PLAN_SESSIONS):
     positive+negative completed-top-goal counts, the goals (b) newly completes, and a sample of the
     turn-end sweeps so the false-completion rate can be eyeballed before flipping the default."""
     now = int(time.time())
-    fleet = by_recency(discover(now))[:sessions_cap]
+    fleet = discover(now)[:sessions_cap]
     tot_a = tot_b = 0
     all_new, all_samples = [], []
     # Parallel ACROSS sessions (each session sweeps its own turns sequentially for clean attribution).
@@ -13361,7 +13361,7 @@ def _ab_classify(sessions_cap=PLAN_SESSIONS, concurrency=None):
     the live status, WITHOUT mutating goal state. The question: do the soft blocks hold under
     thinking/opus, or were they over-blocks the bigger model corrects?"""
     now = int(time.time())
-    fleet = by_recency(discover(now))[:sessions_cap]
+    fleet = discover(now)[:sessions_cap]
     jobs = []
     for fsid, path, anchor, name in fleet:
         try:
@@ -15204,7 +15204,7 @@ def run_distill(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=
     undiagnosable shape of the T110 report. Returns goals distilled."""
     if now is None:
         now = int(time.time())
-    fleet = by_recency(discover(now))[:sessions_cap]
+    fleet = discover(now)[:sessions_cap]
     n = 0
     with ThreadPoolExecutor(max_workers=_conc(concurrency)) as ex:
         futs = {}
@@ -16527,7 +16527,7 @@ def run_courier(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=
     refinement.)"""
     if now is None:
         now = int(time.time())
-    fleet = by_recency(discover(now))[:sessions_cap]
+    fleet = discover(now)[:sessions_cap]
     id2name = {f: nm for f, p, a, nm in fleet}          # recipient id → name, for the sender's tracking-node label
     paths_map = {f: str(p) for f, p, a, nm in fleet}    # sid → transcript, for the mint-time chain trace
     pending, closed = [], {}                           # pending: (seg_t, fsid, seg_id, text, mid, sender)

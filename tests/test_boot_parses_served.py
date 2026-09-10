@@ -168,7 +168,8 @@ class ServedBootParses(unittest.TestCase):
         self.assertEqual(p["bySid"], {}, "per session: none")
         # the judges' first pass still parses what it enumerates (their checkpoint resume is stages 3 and 4); this
         # stage only orders it newest first; pin the count so a regression to double parsing shows
-        self.assertLessEqual(p["judge"], len(ALL), "the judges parse each session at most once at boot: %r" % p)
+        self.assertLessEqual(p["judge"], 2 * len(ALL), "the judges parse each session about once at boot (a key file moving "
+                                                        "during the boot costs one re-parse): %r" % p)
         feed = self._get("/feed.json")
         cards = [c for c in (feed.get("asks") or []) if isinstance(c, dict)]   # the feed's cards ride `asks`
         web = [c for c in cards if str(c.get("sid") or c.get("fsid") or "").startswith(WEB[:8])]

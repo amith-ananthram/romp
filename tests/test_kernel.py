@@ -8841,13 +8841,15 @@ class SlashCommands(unittest.TestCase):
 
 
 class BootWarm(unittest.TestCase):
-    """_boot_warm pre-parses the living fleet into the kernel parse cache at STARTUP, during the browser's
-    reconnect/reload gap, so the first connect is warm instead of paying the cold serial parse (the user
-    2026-07-03: local sessions take a long time to load on restart)."""
+    """_boot_warm at STARTUP warms the shared discover() listing and parses NOTHING (T323 stage 1, the user
+    2026-09-10: a boot must not read every live transcript for nobody). It used to pre-parse the living fleet
+    for the browser's reconnect gap (the user 2026-07-03); the redial road now ships the active tab whole and
+    every other tab as a skeleton, so the one parse a reconnecting dashboard needs is its own connect push's."""
     def setUp(self):
         self._saved = (km._alive_sessions, km._has_parsing_client, km._parse, km._tmux_sessions, km.jd.discover)
         self.parsed = []
-        km.jd.discover = lambda now: []
+        self.discovered = []
+        km.jd.discover = lambda now: self.discovered.append(now) or []
         km._tmux_sessions = lambda: {}
         km._parse = lambda path, sid, now: self.parsed.append(sid)
 
@@ -8862,12 +8864,13 @@ class BootWarm(unittest.TestCase):
             time.sleep(0.02)
         return pred()
 
-    def test_boot_warm_parses_every_live_session(self):
+    def test_boot_warm_warms_discover_and_parses_no_session(self):
         km._has_parsing_client = lambda: False
         km._alive_sessions = lambda now, tmux: [{"sid": "s1", "path": "/p1"}, {"sid": "s2", "path": "/p2"}]
         km._boot_warm()
-        self.assertTrue(self._wait(lambda: sorted(self.parsed) == ["s1", "s2"]),
-                        "boot-warm parsed every live session into the cache")
+        self.assertTrue(self._wait(lambda: len(self.discovered) == 1), "the shared discover listing is warmed once")
+        time.sleep(0.1)
+        self.assertEqual(self.parsed, [], "no live session is parsed at boot for nobody (T323 stage 1)")
 
     def test_boot_warm_stands_down_for_a_live_parsing_client(self):
         km._has_parsing_client = lambda: True     # the browser already reconnected → its build warms the cache

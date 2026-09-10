@@ -8938,28 +8938,42 @@ _TICK_SEEN: dict = {}          # (job, sid) -> the files' stat tuple at the job'
 _TICK_SEEN_LOCK = threading.Lock()
 
 
-def _tick_job_skips(job, s):
-    """T323 stage 1: an event-keyed tick job (one whose answer is a pure function of the session's transcript,
-    state log and the goal store, never of the wall clock) skips a session whose transcript and state log are
-    UNCHANGED since the job's last evaluation, and, at its first evaluation in this kernel life, unchanged since
+def _tick_job_check(job, s):
+    """T323 stage 1: (skip, stat) for an event-keyed tick job, one whose answer is a pure function of the
+    session's transcript, state log and goal store, never of the wall clock. `skip` is True when those files
+    are UNCHANGED since the job's last COMPLETED evaluation (_tick_job_done), and, before any, unchanged since
     this kernel BOOTED. Why the boot baseline: before this, every such job parsed every alive session on the
     first cycle after a restart to re-derive what the previous kernel had already filed in the store (the
-    interrupt block marker, the working note), a full parse per session for nothing new (T311: 388 chats' worth
-    of parses in five minutes). A session that moved under the previous kernel's death is evaluated; one that
-    did not keeps the store's verdict, which is what the card reads. Records the stat tuple and returns True
-    to skip, False to evaluate; a job with a wall-clock leg (the nudge's timers) must not use this."""
+    interrupt block marker, the working note), a full parse per session for nothing new (T311: 388 chats'
+    worth of parses in five minutes). A session that moved under the previous kernel's death is evaluated;
+    one that did not keeps the store's verdict, which is what the card reads. Nothing is recorded here: the
+    caller marks the evaluation done only once its store work landed, so a fault mid-tick (an unproved ledger,
+    a refused marker write) leaves the session to the next tick exactly as before (the fault-boundary tests
+    pin that). A job with a wall-clock leg (the nudge's timers) must not use this."""
     st = _session_files_stat(s)
+    if not st[0]:
+        return False, st                      # no transcript to stat: nothing is known about it, so never a skip
     key = (job, str(s.get("sid") or ""))
     with _TICK_SEEN_LOCK:
         prev = _TICK_SEEN.get(key)
-        if prev is None:
-            unchanged = not (st[0] > _STARTED or st[2] > _STARTED or st[4] > _STARTED)
-        else:
-            unchanged = st == prev
+    if prev is None:
+        return (not (st[0] > _STARTED or st[2] > _STARTED or st[4] > _STARTED)), st
+    return st == prev, st
+
+
+def _tick_job_done(job, s, st):
+    """The job's evaluation of `s` completed with its store work landed: the files' stat tuple `st` (from
+    _tick_job_check) becomes the baseline the next check compares against."""
+    key = (job, str(s.get("sid") or ""))
+    with _TICK_SEEN_LOCK:
         _TICK_SEEN[key] = st
         if len(_TICK_SEEN) > 4096:            # bounded by jobs × sessions; never unbounded
             _TICK_SEEN.clear()
-    return unchanged
+
+
+def _tick_job_skips(job, s):
+    """Check and, when unchanged, nothing else: the skip needs no record (the baseline it matched still stands)."""
+    return _tick_job_check(job, s)[0]
 
 
 def _interrupt_block_tick(now, tmux):
@@ -9000,8 +9014,9 @@ def _interrupt_block_tick(now, tmux):
             continue                                     # awaiting you / compacting → a different needs-you path owns it
         if _api_error(s["path"]):                        # stopped on an API error → not a user stop
             continue
-        if _tick_job_skips("interrupt-block", s):        # nothing appended since the last look (or since boot): the
-            continue                                     # store already carries the verdict this tick would re-derive
+        skip, files_st = _tick_job_check("interrupt-block", s)   # nothing appended since the last COMPLETED look (or
+        if skip:                                                 # since boot): the store already carries the verdict
+            continue                                             # this tick would re-derive
         try:
             turns = jd.parsed_session(sid, [s["path"]], now)["turns"]
         except Exception:
@@ -9025,6 +9040,8 @@ def _interrupt_block_tick(now, tmux):
             if ib and not _intr_block_stands(sid, ib):   # but VERIFY the marked block still holds its card (see
                 _set_intr_blocked(sid, None)             # _intr_block_stands): a stale marker is the 'already
                 ib = None                                # surfaced' claim with its evidence gone
+            if ib:
+                _tick_job_done("interrupt-block", s, files_st)   # the standing block still holds its card: evaluated
             if not ib:
                 # the evidence is the CURRENT quiet, not just the stop: the transcript's newest event
                 # time is the horizon the user has stayed silent through — injected activity (a task
@@ -9042,8 +9059,12 @@ def _interrupt_block_tick(now, tmux):
                     # and the first healed tick re-mints the marker (_record_interrupt_block hands back the
                     # gid of a card our own block already holds, appending nothing)
                     _set_intr_blocked(sid, g)
+                    _tick_job_done("interrupt-block", s, files_st)   # filed and marked: evaluated (a refused
+                    #                                                    record leaves the session to the next tick)
         else:                                            # working / re-engaged / machine cut → lift OUR block if any
             ib = _intr_blocked(sid)
+            if not ib:
+                _tick_job_done("interrupt-block", s, files_st)   # nothing to lift: evaluated
             if ib:
                 # the re-engagement IS the newest turn's trigger — the same stamp the judges will put on
                 # every verdict about that turn, so their ruling outranks this lift on arrival order.
@@ -9055,6 +9076,7 @@ def _interrupt_block_tick(now, tmux):
                 # the marker too, so the next tick retries the lift rather than erasing it (the #1019 boundary)
                 if _lift_interrupt_block(sid, ib, turns[-1].get("t") if turns else 0):
                     _set_intr_blocked(sid, None)     # spent → the marker goes; refused under a fault it stays
+                    _tick_job_done("interrupt-block", s, files_st)   # lifted: evaluated
                 #                                      in the last proved snapshot and the next tick retries
     alive_sids = {s["sid"] for s in alive}              # a sid that left the alive set is the event that retires
     _intr_marks_forget(alive_sids)                      # its interrupt-marks entries and its states-overlay fold
@@ -12147,12 +12169,14 @@ def _clear_done_working_notes(now, tmux):
             continue
         if (tmux.get(sid) or {}).get("state", "") in ("working", "compacting", "permission", "picker", "retrying"):
             continue                                     # actively progressing / awaiting input per tmux → keep (cheap pre-gate, no parse)
-        if _tick_job_skips("working-notes", s):          # nothing appended since the last look (or since boot) → the
-            continue                                     # note's fate was settled by the previous evaluation
+        skip, files_st = _tick_job_check("working-notes", s)   # nothing appended since the last completed look (or
+        if skip:                                               # since boot) → the note's fate was settled then
+            continue
         try:
             turns = jd.parsed_session(sid, [s["path"]], now)["turns"]
         except Exception:
             continue
+        _tick_job_done("working-notes", s, files_st)      # evaluated (every branch below reads, at most one writes)
         if not turns or _session_working(turns):         # still working per the event model → keep its claim
             continue
         if _open_top_goal(sid):                           # working OR blocked top remains → still its work

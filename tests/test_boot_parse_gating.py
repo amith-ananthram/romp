@@ -108,13 +108,18 @@ class TickJobsKeyOnAChange(unittest.TestCase):
         with open(r["path"], "a") as f:
             f.write(json.dumps({"type": "assistant", "uuid": "a1"}) + "\n")
         os.utime(r["path"], None)
-        self.assertFalse(km._tick_job_skips("interrupt-block", r), "an appended record is the event: evaluate")
-        self.assertTrue(km._tick_job_skips("interrupt-block", r), "and once evaluated, the same files skip again")
+        skip, st = km._tick_job_check("interrupt-block", r)
+        self.assertFalse(skip, "an appended record is the event: evaluate")
+        self.assertFalse(km._tick_job_skips("interrupt-block", r), "not yet marked done (a fault mid-tick): the next tick evaluates again")
+        km._tick_job_done("interrupt-block", r, st)
+        self.assertTrue(km._tick_job_skips("interrupt-block", r), "once the evaluation completed, the same files skip again")
 
     def test_a_session_that_moved_before_this_boot_read_it_is_evaluated_at_first_look(self):
         d = tempfile.mkdtemp()
         r = _row(d, SID_NEW, old=False)          # mtime after _STARTED: it changed under the previous kernel's death or since
-        self.assertFalse(km._tick_job_skips("working-notes", r))
+        skip, st = km._tick_job_check("working-notes", r)
+        self.assertFalse(skip)
+        km._tick_job_done("working-notes", r, st)
         self.assertTrue(km._tick_job_skips("working-notes", r))
 
     def test_a_goal_store_write_is_an_event_too(self):
@@ -126,10 +131,19 @@ class TickJobsKeyOnAChange(unittest.TestCase):
         km.jd.GOALDIR.mkdir(parents=True, exist_ok=True)
         (km.jd.GOALDIR / (SID_OLD + ".json")).write_text("{}")
         try:
-            self.assertFalse(km._tick_job_skips("interrupt-block", r), "the store moved: evaluate")
+            skip, st = km._tick_job_check("interrupt-block", r)
+            self.assertFalse(skip, "the store moved: evaluate")
+            km._tick_job_done("interrupt-block", r, st)
             self.assertTrue(km._tick_job_skips("interrupt-block", r))
         finally:
             (km.jd.GOALDIR / (SID_OLD + ".json")).unlink()
+
+    def test_a_missing_transcript_is_unknown_never_unchanged(self):
+        r = {"sid": SID_OLD, "path": "/nonexistent-t323.jsonl", "name": "web"}
+        skip, st = km._tick_job_check("interrupt-block", r)
+        self.assertFalse(skip, "a row whose transcript cannot be read is evaluated (the fault-boundary tests build such rows)")
+        km._tick_job_done("interrupt-block", r, st)
+        self.assertFalse(km._tick_job_skips("interrupt-block", r), "and stays evaluated every tick until a file exists")
 
     def test_jobs_keep_separate_memos(self):
         d = tempfile.mkdtemp()
@@ -140,8 +154,11 @@ class TickJobsKeyOnAChange(unittest.TestCase):
     def test_the_two_event_keyed_ticks_gate_before_their_parse_and_the_nudge_does_not(self):
         for fn, job in ((km._interrupt_block_tick, "interrupt-block"), (km._clear_done_working_notes, "working-notes")):
             src = inspect.getsource(fn)
-            gate, parse = src.index('_tick_job_skips("%s", s)' % job), src.index("jd.parsed_session(sid, [s[\"path\"]], now)")
+            gate, parse = src.index('_tick_job_check("%s", s)' % job), src.index("jd.parsed_session(sid, [s[\"path\"]], now)")
             self.assertLess(gate, parse, "%s: the gate sits before the parse" % job)
+            self.assertIn('_tick_job_done("%s", s, files_st)' % job, src, "%s: a completed evaluation is marked done" % job)
+        self.assertEqual(inspect.getsource(km._interrupt_block_tick).count('_tick_job_done("interrupt-block", s, files_st)'), 4,
+                         "done on the four landed outcomes (filed, standing, lifted, nothing to lift); never on a refused write or an unproved ledger")
         self.assertNotIn("_tick_job_skips", inspect.getsource(km._auto_nudge_session),
                          "the nudge has wall-clock timers, so it keeps its per-cycle evaluation (documented in _tick_job_skips)")
 
@@ -195,7 +212,8 @@ class JudgesGoNewestFirst(unittest.TestCase):
         src = inspect.getsource(jd._run_index)
         self.assertIn("fleet = by_recency(discover(now))", src)
         self.assertIn("yield_between_sessions()", src)
-        self.assertGreaterEqual(inspect.getsource(jd).count("by_recency(discover(now))"), 5, "every capped pass loop orders by recency")
+        self.assertEqual(inspect.getsource(jd).count("by_recency(discover(now))"), 1,
+                         "the FIRST pass (the index) orders by recency; the courier and the capped passes keep discover()'s order, which their tests pin")
 
 
 if __name__ == "__main__":
