@@ -1207,6 +1207,24 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
   animation: slash-spin 2.4s linear infinite; }
 @keyframes slash-spin { to { transform: rotate(-360deg); } }
 @media (prefers-reduced-motion: reduce) { .slash-spin { animation: none; } }
+
+/* ── @-mention autocomplete (the user 2026-09-07) ── the live sessions whose names match the "@query" at
+   the caret, floating just above the composer like the slash menu. A .ctx-menu card (the menu tokens and
+   size), one row per session: the name in its identity color, a remote host as the quiet .host-prefix
+   metadata. The highlighted row wears the menu's row wash, not the accent fill the slash menu uses: the
+   names carry their own colors and must stay readable on it. */
+.mention-pop { z-index: 120; max-height: 40vh; overflow-y: auto; min-width: 160px; }
+.mention-row { display: flex; align-items: center; gap: 7px; }
+.mention-row.sel { background: var(--menu-hover); }
+.mention-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+/* the matches the cap left out ("N more, keep typing"): the menu's sub-line dress, not a row (no wash, no pick) */
+.mention-more { padding: 4px 10px; font-size: 0.82em; opacity: 0.6; cursor: default; white-space: nowrap; }
+/* a sent message's "@name" that names a live session: a small pill in the session's identity color (the
+   tab's own --chip-bg/--chip-fg, set inline), over the blue you-bubble; the thin light ring keeps a blue
+   identity apart from the bubble. No link: the title carries the session's state. */
+.mention-chip { display: inline-block; padding: 0 6px; border-radius: 9px; line-height: 1.35;
+  background: var(--chip-bg, rgba(255, 255, 255, 0.18)); color: var(--chip-fg, currentColor);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3); }
 /* The two buttons are the SAME rounded square, exactly as tall as the one-line message box beside them
    (the user 2026-07-30, round 2: the first cut's circles sat taller than the resting box, and a rounded
    rectangle reads better than a full circle). The size is the input's own min-height calc written
