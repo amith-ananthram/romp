@@ -151,6 +151,29 @@ test("a NON-link failure keeps the bounded per-message budget, and even those at
   assert.match(box.shape(), /span\.path-full-wait\[\]\{img\.path-load-spin\[\]\{""\},span\.path-load-note\[\]\{"fetching…"\}\}/, "a tap shows the swirl and the note: the chip is the give-up state only");
 });
 
+test("a link failure while the tunnel row never left up heals once on the recovery counter's hostUp (T291b)", async () => {
+  // the kernel bumps the row's upSeq when a row that had misses answers again; federation's poll turns the bump into
+  // hostUp; render.ts drains the settled previews on hostUp — so the parked box makes exactly one attempt
+  fetchCalls = 0;
+  const { P, box } = await armedBox("/home/user/notes-api/plots/queue-depth.png");
+  fetchAnswer = failWith(502, "tunnel to TESTHOST is not answering; re-dialing");
+  P.retryFailedPreviews(); await sleep(20); await sleep(450);   // the budget's one attempt names the link
+  const parked = box.shape();
+  assert.match(parked, /retries when the link is back/);
+  const before = fetchCalls;
+  for (let i = 0; i < 30; i++) P.retryFailedPreviews();
+  await sleep(450);
+  assert.equal(fetchCalls, before, "the status stayed up and pushes kept coming: no attempt");
+  P.refreshSettledPreviews();                                    // what the bump's hostUp runs (render.ts)
+  await sleep(20);
+  assert.equal(fetchCalls, before + 1, "the counter's hostUp: exactly one attempt");
+  assert.equal(box.shape(), parked, "the box did not move for it");
+  const FED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "federation.ts"), "utf8");
+  assert.match(FED, /if \(prev !== undefined && seq !== prev && !down\.has\(host\) && !recovered\.includes\(host\)\) recovered\.push\(host\);/, "a bump while up is a recovery");
+  const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
+  assert.match(RENDER, /if \(m\.type === "hostUp"\) \{ refreshSettledPreviews\(\); healPathImgs\(\); \}/, "hostUp drains the settled previews");
+});
+
 test("the source keeps the two rules where the behaviour lives", () => {
   assert.match(PREVIEW, /if \(transient\) settledPreviews\.set\(box, \(\) => build\(true\)\);\s*\n\s*else \{ autoRetries--; failedPreviews\.set\(box, \(\) => build\(true\)\); \}/,
     "a link failure registers for the reconnect-class heal only; a real verdict spends the budget on the per-message heal");

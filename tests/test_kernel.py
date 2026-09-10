@@ -5084,13 +5084,13 @@ class ViewBuilder(unittest.TestCase):
         card = next(a for a in km.build_feed(NOW)["asks"] if a["itemId"] == g)
         self.assertEqual(card["column"], "needs_input", "no pass active → live read shows the block at once")
 
-    def _settled_store(self, *suffixes):
+    def _settled_store(self, *suffixes, sid=SID):
         # top goal(s) already SETTLED into Completed, each with the diary its flags were materialized from —
         # the state a card is in when the user replies to it
         suffixes = suffixes or ("gP",)
         nodes, status = {}, {}
         for sfx in suffixes:
-            g = "%s:%s" % (SID, sfx)
+            g = "%s:%s" % (sid, sfx)
             nodes[g] = {"id": g, "text": "the goal " + sfx, "parentId": None,
                         "nodeComplete": True, "blocked": False, "cleared": False, "trail": [],
                         "t": NOW - 100, "mt": NOW - 50, "doneWhy": "finished",
@@ -5098,8 +5098,8 @@ class ViewBuilder(unittest.TestCase):
                         "log": [{"ev_t": NOW - 50, "src": "closer", "kind": "done", "why": "finished", "at": NOW - 50},
                                 {"ev_t": NOW - 50, "src": "romp", "kind": "settle", "at": NOW - 50}]}
             status[g] = "completed"
-        (jd.GOALDIR / (SID + ".json")).write_text(json.dumps({
-            "rompUuid": SID, "seq": len(nodes), "lastNode": list(nodes)[-1],
+        (jd.GOALDIR / (sid + ".json")).write_text(json.dumps({
+            "rompUuid": sid, "seq": len(nodes), "lastNode": list(nodes)[-1],
             "nodes": nodes, "placements": {}, "status": status}))
         return list(nodes) if len(nodes) > 1 else list(nodes)[0]
 
@@ -5254,8 +5254,9 @@ class ViewBuilder(unittest.TestCase):
         # unchanged, so the punch (the gesture's replay + rollup, both in place) must land on a copy:
         # otherwise the reopen would be baked into the object the NEXT pass serves for a file that does
         # not hold it. Contract: the memoized object always equals a fresh raw parse of its file
-        # version; the served copy carries the reopen; a second gesture in the same pass works the same
-        # copy; build_feed reads and never writes.
+        # version; the served copy carries the reopen; a second gesture in the same pass lands on a
+        # fresh copy, never on the copy an earlier read served (an object _feed_goals handed out is a
+        # fixed value); build_feed reads and never writes.
         g = self._settled_store()
         path = jd.GOALDIR / (SID + ".json")
         raw = json.loads(path.read_bytes())                # the version this pass memoizes
@@ -5276,7 +5277,9 @@ class ViewBuilder(unittest.TestCase):
             self.assertIs(km._feed_goals(SID), served, "later reads in the pass serve that one copy")
             self.assertTrue(jd.optimistic_followup(SID, g, text="and the null case", now=NOW + 1))
             km._note_user_goal_write(SID)
-            self.assertIs(km._feed_goals(SID), served, "a second gesture punches the copy already made")
+            served2 = km._feed_goals(SID)
+            self.assertIsNot(served2, served, "a second gesture lands on a fresh copy, never on the first in place")
+            self.assertEqual(served2["status"].get(g), "working", "…and that copy carries the second reopen")
             self.assertEqual(memo_obj, raw)
             card = next(a for a in km.build_feed(NOW)["asks"] if a["itemId"] == g)
             self.assertEqual(card["column"], "working")
@@ -5289,6 +5292,46 @@ class ViewBuilder(unittest.TestCase):
             self.assertEqual(km._feed_goals(SID)["status"].get(g), "working")
         finally:
             km._end_goals_pass()
+
+    # Private to the fresh-copy test below: it mints a goal store and journals gestures against it.
+    FRESH_SID = "11111111-2222-3333-4444-fefefefefefe"
+
+    def test_a_second_gesture_in_the_same_pass_never_changes_the_copy_an_earlier_read_served(self):
+        # An object _feed_goals hands out is a fixed value: a reader that keeps it, or keys anything on
+        # its identity, must never see it change under it. A second gesture on the same sid inside one
+        # pass therefore replays onto a FRESH copy of the snapshot entry, not in place on the copy an
+        # earlier read served. Content tells the copies apart: the first carries the follow-up's reopen
+        # (nodeComplete cleared) and keeps it; the second carries the later resolve (nodeComplete set).
+        sid = self.FRESH_SID
+        g = self._settled_store(sid=sid)
+        path = jd.GOALDIR / (sid + ".json")
+        raw = json.loads(path.read_bytes())                # the version this pass memoizes
+        km._user_goal_write.pop(sid, None)
+        km._begin_goals_pass()
+        try:
+            memo_obj = km._goals_memo[0][str(path)][1]
+            punched = km._goals_memo_stats["punch"]
+            self.assertTrue(jd.optimistic_followup(sid, g, text="also handle the empty case", now=NOW))
+            km._note_user_goal_write(sid)                  # gesture 1: the reply reopens the goal
+            served1 = km._feed_goals(sid)
+            self.assertEqual(served1["status"].get(g), "working")
+            self.assertFalse(served1["nodes"][g].get("nodeComplete"), "the reply's reopen cleared the flag")
+            jd.append_override(sid, g, "resolve", NOW + 1)  # gesture 2: the user resolves it a second later
+            # The mark moves. Set by hand rather than by a second _note_user_goal_write so the fresh copy
+            # never rides on the clock advancing between two gestures.
+            km._user_goal_write[sid] = km._user_goal_write[sid] + 1.0
+            served2 = km._feed_goals(sid)
+            self.assertIsNot(served2, served1, "the second gesture lands on a fresh copy")
+            self.assertTrue(served2["nodes"][g].get("nodeComplete"), "…which carries the resolve")
+            self.assertFalse(served1["nodes"][g].get("nodeComplete"),
+                             "the copy the earlier read served has not changed under its holder")
+            self.assertEqual(memo_obj, raw, "the memoized object is still the raw parse")
+            self.assertEqual(km._goals_memo_stats["punch"] - punched, 1,
+                             "punch counts the sids copied, once per pass each")
+        finally:
+            km._end_goals_pass()
+            km._user_goal_write.pop(sid, None)
+            (jd._overrides_dir() / (sid + ".jsonl")).unlink(missing_ok=True)
 
     def test_a_store_that_does_not_decode_is_served_live_and_retried_only_when_it_changes(self):
         # A version that fails to decode stays out of the snapshot (the feed falls to live load_goals,
@@ -5703,7 +5746,7 @@ class ViewBuilder(unittest.TestCase):
             self.assertTrue(jd.optimistic_followup(SID, g, text="one more thing", now=NOW))
             km._note_user_goal_write(SID)
             d = deltas(lambda: (km._feed_goals(SID), km._feed_goals(SID)))
-            self.assertEqual(d["punch"], 1, "one copy per pass per sid, however many reads")
+            self.assertEqual(d["punch"], 1, "one punch per pass per sid, however many reads")
         finally:
             km._end_goals_pass()
 

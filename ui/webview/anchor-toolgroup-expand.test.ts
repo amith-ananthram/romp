@@ -25,9 +25,9 @@ test("an anchor inside a collapsed tool run expands the run before the window re
   // the expansion must key on the EXACT item that contains the event index — a nearest-unit
   // fallback hit is a different unit and must not pop a stranger's fold open
   assert.match(RENDER,
-    /if \(hit && hit\.kind === "toolgroup" && hit\.indices\.includes\(idx\)\)\s*\n\s*expandedGroups\.add\(toolGroupKey\(s\.events\[hit\.indices\[0\]\]\)\);/,
-    "scrollToAnchor expands the collapsed run holding the anchor, keyed like toggleToolGroup");
-  const expandAt = RENDER.indexOf("expandedGroups.add(toolGroupKey(s.events[hit.indices[0]]));");
+    /if \(hit && hit\.kind === "toolgroup" && hit\.indices\.includes\(idx\)\)\s*\n\s*openFolds\.add\(toolGroupKey\(s\.events\[hit\.indices\[0\]\]\)\);/,
+    "scrollToAnchor expands the collapsed run holding the anchor, keyed like toggleToolGroup (openFolds since 2026-09-08)");
+  const expandAt = RENDER.indexOf("openFolds.add(toolGroupKey(s.events[hit.indices[0]]));");
   const rerenderAt = RENDER.indexOf("renderWindowItems(v, s, items, Math.max(0, u - WINDOW_RADIUS)");
   assert.ok(expandAt >= 0 && rerenderAt >= 0 && expandAt < rerenderAt,
     "the expansion lands BEFORE the window re-render, so the re-query can find the member's turn");

@@ -5,11 +5,16 @@
 // 2026-06-22). Thinking is dropped FIRST, so tools separated only by thinking still count as consecutive;
 // tools separated by visible content (an assistant reply, a prompt, …) do not. The rail timestamp logic
 // runs over the RESULT of this, so the stamps reflect the compacted stream.
+// The same shape folds LOW-STAKES NOTICES (2026-09-08, generalising the T131 retry-run fold): a run of ≥2
+// consecutive foldable notices — a recovery, an effort change, a model swap, a reload, an interrupt + its
+// settle, a background report, a system reminder, a romp notice — collapses into one `noticegroup` head.
+// Which events are foldable is the caller's call (render.ts isFoldableNotice, passed per event): peers,
+// API errors, compaction/clear boundaries, asks, to-dos, dividers and every bubble stay standalone.
 
 export type DisplayItem =
   | { kind: "event"; index: number }            // a pass-through event, by its index in the source array
   | { kind: "toolgroup"; indices: number[] }    // a collapsed run of ≥2 consecutive tool uses (a lone tool is an "event")
-  | { kind: "retrygroup"; indices: number[] };  // a collapsed run of ≥2 consecutive retry-recovery notes (T131 follow-up)
+  | { kind: "noticegroup"; indices: number[] }; // a collapsed run of ≥2 consecutive foldable notices (was the "retried"-only retrygroup)
 
 // Tools that are an EXCEPTION to collapsing: they render FIRST-CLASS even in compact mode, never swept
 // into a toolgroup (the user 2026-06-17). AskUserQuestion is the "↳ You answered Claude's question" box —
@@ -17,12 +22,13 @@ export type DisplayItem =
 export const STANDALONE_TOOLS = new Set<string>(["AskUserQuestion"]);
 
 // Given the per-event `kind` strings (and, for tool events, the tool `names` so the standalone-tool
-// exception can be applied), produce the compacted display list. `names[i]` is the tool name for a
-// "tool" event, undefined otherwise.
-export function compactDisplay(kinds: readonly string[], names?: readonly (string | undefined)[]): DisplayItem[] {
+// exception can be applied; and `notices[i]` = whether event i is a foldable notice), produce the
+// compacted display list. `names[i]` is the tool name for a "tool" event, undefined otherwise. Without
+// `notices`, only a bare "retried" run folds (the pre-2026-09-08 behaviour, kept for callers that pass none).
+export function compactDisplay(kinds: readonly string[], names?: readonly (string | undefined)[], notices?: readonly boolean[]): DisplayItem[] {
   const out: DisplayItem[] = [];
   let run: number[] | null = null;
-  let retryRun: number[] | null = null;           // consecutive "retried" recovery notes (T131 follow-up)
+  let noticeRun: number[] | null = null;          // consecutive foldable notices
   // a LONE tool passes through as a normal event (its first-class inline tool line + fold); only a run of
   // TWO OR MORE collapses into a summary toolgroup (the user 2026-06-22)
   const flush = () => {
@@ -30,26 +36,27 @@ export function compactDisplay(kinds: readonly string[], names?: readonly (strin
     out.push(run.length === 1 ? { kind: "event", index: run[0] } : { kind: "toolgroup", indices: run });
     run = null;
   };
-  // same shape for retry-recovery runs (the user 2026-08-27, seventeen consecutive recovery rows):
-  // a lone recovery stays a first-class row; a storm of ≥2 collapses into one expandable line
-  const flushRetries = () => {
-    if (!retryRun) return;
-    out.push(retryRun.length === 1 ? { kind: "event", index: retryRun[0] } : { kind: "retrygroup", indices: retryRun });
-    retryRun = null;
+  // same shape for notice runs (the user 2026-08-27, seventeen consecutive recovery rows): a lone notice
+  // stays a first-class row; a run of ≥2 collapses into one expandable head
+  const flushNotices = () => {
+    if (!noticeRun) return;
+    out.push(noticeRun.length === 1 ? { kind: "event", index: noticeRun[0] } : { kind: "noticegroup", indices: noticeRun });
+    noticeRun = null;
   };
+  const foldable = (i: number) => notices ? !!notices[i] : kinds[i] === "retried";
   for (let i = 0; i < kinds.length; i++) {
     const k = kinds[i];
     if (k === "thinking") continue;                 // hidden — and does NOT break a tool run
     // A standalone tool (AskUserQuestion) is NOT collapsed: it breaks the run and passes through as its
     // own event, so renderTool → renderAsk draws the first-class box instead of "+1" inside a group.
-    if (k === "tool" && !STANDALONE_TOOLS.has(names?.[i] ?? "")) { flushRetries(); (run ||= []).push(i); continue; }
-    if (k === "retried") { flush(); (retryRun ||= []).push(i); continue; }
+    if (k === "tool" && !STANDALONE_TOOLS.has(names?.[i] ?? "")) { flushNotices(); (run ||= []).push(i); continue; }
+    if (foldable(i)) { flush(); (noticeRun ||= []).push(i); continue; }
     flush();
-    flushRetries();
+    flushNotices();
     out.push({ kind: "event", index: i });
   }
   flush();
-  flushRetries();
+  flushNotices();
   return out;
 }
 

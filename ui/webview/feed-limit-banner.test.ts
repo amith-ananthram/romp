@@ -68,7 +68,9 @@ test("the gate, the clear, and the envelope mark all scope to LOGIN-billed calls
   // usage.json's windows are the login account's; a judge call bills the JUDGED session's account
   // (the 2026-08-12 rule) — so a key-billed call (pay-per-token, no windows) is never gated, its
   // success never clears the login latch, and its limit-shaped 429 never mints one.
-  const run = JUDGE.slice(JUDGE.indexOf("def _judge_run(")).split("\ndef ", 1)[0];
+  // the call's body is _judge_run_impl: the evidence gate wrapped _judge_run around it to mark an
+  // empty reply as an incomplete stage, and the wrapper holds none of the billing or the gate
+  const run = JUDGE.slice(JUDGE.indexOf("def _judge_run_impl(")).split("\ndef ", 1)[0];
   const billing = run.indexOf('auth = "codex" if engine == "codex" else _judge_auth(fsid)');
   const gate = run.indexOf('u = json.loads((STATE / "usage.json").read_text()) if auth == "login" else {}');
   assert.ok(billing >= 0 && gate > billing,

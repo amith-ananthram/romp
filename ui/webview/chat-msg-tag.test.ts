@@ -40,8 +40,10 @@ test("chat: a tagged message wears the gray injected family with the sender's �
     "tagged must be declared before the dot call reads it");
   assert.match(CSS, /\.dot\.tag \{ background: #8a8f98; border: none; \}/);
   // the label chip reuses the romp-tag dress (one vocabulary), ⚙ marking "scripted" vs romp's swirl
-  assert.match(RENDER, /tchip\.appendChild\(document\.createTextNode\("⚙ " \+ ev\.tag\)\);/);
-  assert.match(RENDER, /tagged \? "romp-bubble tag-bubble" : injected \? "user-note" : "user-bubble"/);
+  // 2026-09-08 (the notice-vocabulary pass): the ⚙ text glyph is the gear LINE icon at the source-label size; the
+  // injected (harness) line is a system notice, not the .user-note box
+  assert.match(RENDER, /tchip\.appendChild\(noticeGlyph\("system"\)\);[^\n]*\n\s*tchip\.appendChild\(document\.createTextNode\(ev\.tag \|\| ""\)\);/);
+  assert.match(RENDER, /tagged \? "romp-bubble tag-bubble" : injected \? "notice-md" : "user-bubble"/);
   // a tagged message is neither a slash-command row nor the canned Continue gesture
   assert.match(RENDER, /if \(!romp && !injected && !tagged && ev\.md && renderSlashCmd\(bubble, ev\.md\)\) \{/);
   assert.match(RENDER, /\} else if \(!romp && !injected && !tagged && ev\.md && ev\.canned === "continue"\) \{/);

@@ -794,6 +794,10 @@ export class FederationManager {
   private perHostTlBars: Record<string, any> = {}; // last timeline {type:"bars"} detail per host
   private hostSeq: string[] = [LOCAL]; // local first, then attach order — fixes the group order in the strip
   private downHosts = new Set<string>(); // attached, but its tunnel isn't up: what's on screen is a memory
+  // each host's recovery counter as last seen (/tunnels upSeq, T291b): the kernel bumps it when a row that had
+  // missed polls answers again, so a link that failed a request while its status never left "up" still has a
+  // recovery event; a change is treated as that host coming back (hostUp). A first observation is not a bump.
+  private upSeq = new Map<string, number>();
   private lastSeen: Record<string, number> = {}; // host -> epoch secs of its last `up` poll
   // the page's performance collector (ui/webview/perf-telemetry.ts), set by start(); inbound() times its own
   // merge and dispatch through it as fed:<type>, nested outside the pane's handler. Public so a test can hand
@@ -1413,6 +1417,14 @@ export class FederationManager {
     // state; the down→up transition is the exact moment the relay works again, so it dispatches
     // through the same message path and the heal fires with zero chat traffic.
     const recovered = [...this.downHosts].filter((h) => want.has(h) && !down.has(h));
+    // …and the kernel's recovery counter (T291b): a bump while the row reads "up" is a link that answered again
+    // after missing, which the status alone never showed; one hostUp per bump, never one per poll or per push
+    for (const [host, t] of want) {
+      const seq = Number(t.upSeq) || 0, prev = this.upSeq.get(host);
+      this.upSeq.set(host, seq);
+      if (prev !== undefined && seq !== prev && !down.has(host) && !recovered.includes(host)) recovered.push(host);
+    }
+    for (const host of [...this.upSeq.keys()]) if (!want.has(host)) this.upSeq.delete(host);
     if (recovered.length) window.dispatchEvent(new MessageEvent("message", { data: { type: "hostUp", hosts: recovered } }));
     this.downHosts = down;
     if (changed) window.dispatchEvent(new Event("romp-hosts"));   // panes repaint their disconnected marks

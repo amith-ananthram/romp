@@ -4,10 +4,12 @@
 // rule and the DOM applier are EXECUTED here (pr-links.ts is pure but for createElement/createTextNode,
 // which a small plain-object DOM stand-in provides); the wiring into render.ts's md(), feed.ts and
 // fleet.ts is pinned at the source, the way the other webview tests pin the chat renderer.
+// The chat's own markdown shapes come from marked, read into the same stand-in.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { Marked } from "marked";
 
 // ── a DOM stand-in: text and element nodes with the handful of members the applier touches ─────────
 class T {
@@ -289,6 +291,205 @@ test("text already inside a link is never wrapped again", () => {
 test("the chat's path links are skipped, so a docs/x.md#12-shaped path stays the path it is", () => {
   const p = el("p", cls(el("span", "docs/x.md#12"), "file-uri-link"), " and ", cls(el("span", el("code", "https://x/#1")), "url-code-link"));
   assert.equal(linkifyPrRefs(p as unknown as Node, REPO), 0);
+});
+
+test("the boundary is judged over the rendered text: a reference at the head of a text node follows the character before that node", () => {
+  // the pure rule, given the character that precedes the text in the run it was cut from: a word character
+  // or a slash glues, a boundary does not, and no character at all is the start of the run
+  const after = (text: string, before: string) => prRefSegments(text, REPO, before).filter((s) => s.href).map((s) => s.text);
+  assert.deepEqual(prRefSegments("#12 next", REPO, "d"), [{ text: "#12 next" }]);
+  assert.deepEqual(prRefSegments("#12 next", REPO, "/"), [{ text: "#12 next" }], "a slash is no boundary on its own");
+  assert.deepEqual(prRefSegments("#12 next", REPO, "-"), [{ text: "#12 next" }], "the ASCII hyphen ends a URL path or an identifier");
+  for (const b of [" ", "\n", "\t", "(", "[", "{", "<", ",", ";", ":", "\"", "'", "“", "‘", "«", "—", "–"]) assert.deepEqual(after("#12 next", b), ["#12"], JSON.stringify(b));
+  assert.deepEqual(after("#12 next", ""), ["#12"], "an empty before is the start of the run");
+  // `before` is one UTF-16 code unit: an emoji cut off at the node edge leaves a lone surrogate, no boundary;
+  // the one-node reading of the same text refuses it too, so the two agree
+  assert.deepEqual(prRefSegments("#12 next", REPO, "🎉".slice(-1)), [{ text: "#12 next" }], "a lone surrogate is no boundary");
+  assert.deepEqual(after("🎉#12 next", ""), [], "the one-node reading agrees");
+  assert.deepEqual(prRefSegments("#12 next", REPO, " a"), [{ text: "#12 next" }], "a longer string is never a boundary: the caller passes one character");
+  assert.deepEqual(prRefSegments("#12 next", REPO).filter((s) => s.href).map((s) => s.text), ["#12"], "the two-argument call is unchanged");
+  assert.deepEqual(after("PR #12 next", "d"), ["#12"], "a glued phrase: the bare reference inside it still follows a space, as the one-node reading of `dPR #12` does");
+  assert.deepEqual(after("example-org/other#4 and #5", "d"), ["#5"], "a glued cross-repo form is refused; the scan resumes after it");
+  assert.deepEqual(after("#12 and #13", "d"), ["#13"], "the scan resumes after the refused match");
+  assert.deepEqual(after("#12/#13 then #9", "d"), ["#9"], "a glued run links nothing: `/` is no boundary, so its later members cannot start a reference");
+  assert.deepEqual(after("#12", "x"), []);
+  assert.deepEqual(prRefSegments("#12", REPO, "x"), [{ text: "#12" }], "a refused text comes back whole");
+  // through the walk: a path link followed by its fragment in the next node, which is what a path pass that
+  // runs before this one leaves behind (the span stands in for that pass's output)
+  const split = el("p", "see ", cls(el("span", "docs/a.md"), "file-uri-link"), "#12 and #13");
+  assert.equal(linkifyPrRefs(split as unknown as Node, REPO), 1);
+  assert.deepEqual(anchors(split).map((a) => a.textContent), ["#13"]);
+  assert.equal(split.textContent, "see docs/a.md#12 and #13", "the text is unchanged");
+  const run = el("p", "check ", cls(el("span", "notes/plan.md"), "file-uri-link"), "#7/#8 then #9");
+  assert.equal(linkifyPrRefs(run as unknown as Node, REPO), 1);
+  assert.deepEqual(anchors(run).map((a) => a.textContent), ["#9"]);
+});
+
+test("an element's text ends the run too: #12 glued to <code>x</code> is no reference, #12 after a space is; an inline element with no text carries the run", () => {
+  // marked renders `docs/a.md`#12, **docs/a.md**#12 and [text](url)#12 as an element followed by a text
+  // node that begins `#12`; the start of that node is no boundary
+  const glued = el("p", "use ", el("code", "x"), "#12");
+  assert.equal(linkifyPrRefs(glued as unknown as Node, REPO), 0);
+  assert.equal(glued.html(), "<p>use <code>x</code>#12</p>");
+  const spaced = el("p", "use ", el("code", "x"), " #12");
+  assert.equal(linkifyPrRefs(spaced as unknown as Node, REPO), 1);
+  const a = el("a", "text"); a.href = "https://x/y";
+  const afterLink = el("p", "see ", a, "#12");
+  assert.equal(linkifyPrRefs(afterLink as unknown as Node, REPO), 0, "[text](url)#12");
+  const afterStrong = el("p", "read ", el("strong", "docs/a.md"), "#12 now");
+  assert.equal(linkifyPrRefs(afterStrong as unknown as Node, REPO), 0, "**docs/a.md**#12");
+  assert.equal(afterStrong.html(), "<p>read <strong>docs/a.md</strong>#12 now</p>");
+  // an empty INLINE element between (an <img>, an empty <span>) does not reset the run: the text before it decides
+  const img = el("p", "see ", cls(el("span", "docs/a.md"), "file-uri-link"), el("img"), "#12");
+  assert.equal(linkifyPrRefs(img as unknown as Node, REPO), 0);
+  const imgSpaced = el("p", "see docs ", el("img"), "#12");
+  assert.equal(linkifyPrRefs(imgSpaced as unknown as Node, REPO), 1);
+  const emptySpan = el("p", "docs", el("span"), "#12");
+  assert.equal(linkifyPrRefs(emptySpan as unknown as Node, REPO), 0);
+  // a SKIPPED element with no text (an empty <code>, a form control) carries the run the same way
+  for (const tag of ["code", "input"]) {
+    assert.equal(linkifyPrRefs(el("p", "docs", el(tag), "#12") as unknown as Node, REPO), 0, `an empty <${tag}> carries the run`);
+    assert.equal(linkifyPrRefs(el("p", "docs ", el(tag), "#12") as unknown as Node, REPO), 1, `an empty <${tag}> after a space`);
+  }
+  // a walked wrapper's text carries into the node after it, and the run before it carries into its first node
+  const wrapped = el("p", el("em", "see"), " #8 and ", el("strong", "ok"), "#9 and ", el("strong", "x"), " ", el("em", "#10"));
+  assert.equal(linkifyPrRefs(wrapped as unknown as Node, REPO), 2);
+  assert.deepEqual(anchors(wrapped).map((a) => a.textContent), ["#8", "#10"]);
+  const intoWrapper = el("p", "docs/a.md", el("em", "#12"));
+  assert.equal(linkifyPrRefs(intoWrapper as unknown as Node, REPO), 0, "a fragment inside a wrapper is glued to the text before the wrapper");
+  const nested = el("p", "see ", el("em", el("strong", "docs/a.md")), "#12 and ", el("em", el("strong", "x")), " #13");
+  assert.equal(linkifyPrRefs(nested as unknown as Node, REPO), 1, "the carry comes back out of nested wrappers");
+  assert.deepEqual(anchors(nested).map((a) => a.textContent), ["#13"]);
+  // a node that is neither text nor an element (a comment) renders nothing: the run is unbroken across it
+  class C { nodeType = 8; parentNode: E | null = null; constructor(public textContent: string) {} }
+  const commented = el("p", "docs", new C(" a note ") as unknown as E, "#12");
+  assert.equal(linkifyPrRefs(commented as unknown as Node, REPO), 0);
+  const commentedSpaced = el("p", "docs ", new C(" a note ") as unknown as E, "#12");
+  assert.equal(linkifyPrRefs(commentedSpaced as unknown as Node, REPO), 1);
+  // what FOLLOWS a reference is still judged per node: a `#12` that ends a wrapper links although the next
+  // node begins with letters, where the one-node reading of the same text refuses; outside this change
+  const trailing = el("p", "see ", el("em", "#12"), "abc");
+  assert.equal(linkifyPrRefs(trailing as unknown as Node, REPO), 1);
+  assert.deepEqual(prRefSegments("see #12abc", REPO), [{ text: "see #12abc" }]);
+});
+
+// ── marked's HTML read into the stand-in, so the chat's own markdown shapes run through the walk ─────
+const VOID_TAGS = new Set(["BR", "HR", "IMG", "INPUT", "WBR"]);
+const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: "\"", "#39": "'" };
+const unescapeHtml = (s: string): string => s.replace(/&(amp|lt|gt|quot|#39);/g, (_, k: string) => ENTITIES[k]);
+/** tags and text only, the class attribute kept: enough for what marked emits */
+function fromHtml(html: string): E {
+  const root = new E("DIV");
+  let cur = root;
+  const re = /<\/([A-Za-z][\w-]*)\s*>|<([A-Za-z][\w-]*)([^>]*)>|([^<]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) {
+    if (m[1]) { cur = cur.parentNode || root; continue; }
+    if (m[2]) {
+      const e = cur.appendChild(new E(m[2].toUpperCase()));
+      const c = /class="([^"]*)"/.exec(m[3] || "");
+      if (c) e.className = c[1];
+      if (!VOID_TAGS.has(e.tagName) && !/\/\s*$/.test(m[3] || "")) cur = e;
+      continue;
+    }
+    cur.appendChild(new T(unescapeHtml(m[4])));
+  }
+  return root;
+}
+/** a node list as tags and text: ["done", "BR", "#12 next"] */
+const shape = (e: E): string[] => e.childNodes.map((c) => (c instanceof T ? c.textContent : c.tagName));
+/** the links this module made, in order; an anchor marked wrote (`[text](url)`) is not one */
+const linked = (root: E): string[] => anchors(root).filter((a) => a.classList.contains(PR_LINK_CLASS)).map((a) => a.textContent);
+// the chat's options (render.ts md()); its extensions and the sanitizer play no part in the shapes read here,
+// and an instance of our own leaves the shared singleton as the other tests find it
+const chatMarked = new Marked({ gfm: true, breaks: false });
+const md = (src: string): E => fromHtml(chatMarked.parse(src) as string);
+
+test("a line or block edge is a boundary with no whitespace node: marked's hard-break <br>, abutting paragraphs, list items, table cells; an inline element with no text is not", () => {
+  // a GFM hard break (two trailing spaces, or a backslash): <br> with NO text node between it and the `#`
+  let root = md("done  \n#12 next");
+  assert.deepEqual(shape(root.childNodes[0] as E), ["done", "BR", "#12 next"], "marked's shape: no whitespace after the <br>");
+  assert.equal(linkifyPrRefs(root as unknown as Node, REPO), 1);
+  assert.deepEqual(linked(root), ["#12"]);
+  root = md("done\\\n#12 next");
+  assert.deepEqual((linkifyPrRefs(root as unknown as Node, REPO), linked(root)), ["#12"], "the backslash form");
+  root = md("done  \nPR #12 next");
+  assert.deepEqual((linkifyPrRefs(root as unknown as Node, REPO), linked(root)), ["PR #12"]);
+  root = md("done  \nexample-org/other#4 next");
+  assert.deepEqual((linkifyPrRefs(root as unknown as Node, REPO), linked(root)), ["example-org/other#4"]);
+  root = md("done  \n#12/#13 next");
+  assert.deepEqual((linkifyPrRefs(root as unknown as Node, REPO), linked(root)), ["#12", "#13"], "a run at the head of the line");
+  // the block shapes marked itself emits: a paragraph, a list item, a table cell, a heading, a quote, a fence, a rule
+  for (const src of ["done\n\n#12", "- fixed\n- #12", "| a | b |\n|---|---|\n| fix | #12 |", "## Status\n#12", "> #12", "```\nx\n```\n#12", "---\n#12"]) {
+    root = md(src);
+    assert.deepEqual((linkifyPrRefs(root as unknown as Node, REPO), linked(root)), ["#12"], JSON.stringify(src));
+  }
+  // the inline shapes marked cuts before a reference, from the chat's own markdown: inline code, emphasis, an explicit link
+  for (const src of ["`docs/a.md`#12", "**docs/a.md**#12", "*docs/a.md*#12", "[text](https://x/y)#12", "a <span>x</span>#12"]) {
+    root = md(src);
+    assert.equal(linkifyPrRefs(root as unknown as Node, REPO), 0, src);
+  }
+  for (const src of ["`docs/a.md` #12", "**done** #12", "[text](https://x/y) #12", "(**done**) #12"]) {
+    root = md(src);
+    assert.deepEqual((linkifyPrRefs(root as unknown as Node, REPO), linked(root)), ["#12"], src);
+  }
+  // marked separates blocks with a "\n" text node; a DOM whose blocks abut has the same boundary
+  const abutting: E[] = [
+    el("div", el("p", "done"), el("p", "#12")),
+    el("ul", el("li", "fixed"), el("li", "#12")),
+    el("li", "#12"),
+    el("tr", el("td", "fix"), el("td", "#12")),
+    el("div", el("h2", "Status"), el("p", "#12")),
+    el("div", el("p", "note"), el("blockquote", "#12")),
+    el("div", el("pre", "x"), "#12"),
+    el("div", "done", el("hr"), "#12"),
+    el("div", el("p", "done"), "#12"),
+    el("p", el("span", "docs"), el("br"), "#12"),
+    el("div", el("p", "x"), el("div", "#12")),
+    // block-display tags a message's raw HTML may carry: the carry stops at them too
+    el("li", "done", el("center", "#12")),
+    el("div", "done", el("legend", "#12")),
+    el("div", "done", el("dialog", "#12")),
+    el("div", el("center", "done"), "#12"),
+    el("div", "done", el("hgroup", "#12")),
+    el("div", el("details", el("summary", "more")), "#12"),
+  ];
+  for (const r of abutting) assert.deepEqual((linkifyPrRefs(r as unknown as Node, REPO), linked(r)), ["#12"], r.html());
+  // every tag on the module's block list (copied here, so a tag dropped from it fails its own row) is an edge on
+  // both sides: a `#12` at its head follows glued text, and text right after it starts a run of its own; a
+  // <pre> is code-like, so only its far side is checked
+  const blockTags = [
+    "br", "hr", "p", "pre", "blockquote", "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6",
+    "table", "caption", "thead", "tbody", "tfoot", "tr", "td", "th",
+    "div", "dl", "dt", "dd", "section", "article", "header", "footer", "nav", "aside", "main",
+    "figure", "figcaption", "details", "summary", "form", "fieldset", "address",
+    "center", "legend", "dialog", "dir", "menu", "hgroup", "search",
+  ];
+  assert.equal(blockTags.length, 47);
+  for (const tag of blockTags) {
+    if (tag === "br" || tag === "hr") {
+      const r = el("div", "done", el(tag), "#12");
+      assert.deepEqual((linkifyPrRefs(r as unknown as Node, REPO), linked(r)), ["#12"], `<${tag}> between`);
+      continue;
+    }
+    if (tag !== "pre") {
+      const head = el("div", "done", el(tag, "#12"));
+      assert.deepEqual((linkifyPrRefs(head as unknown as Node, REPO), linked(head)), ["#12"], `<${tag}> starts a run`);
+    }
+    const tail = el("div", el(tag, "done"), "#12");
+    assert.deepEqual((linkifyPrRefs(tail as unknown as Node, REPO), linked(tail)), ["#12"], `<${tag}> ends a run`);
+  }
+  // a tag name is read case-insensitively, as the skip list always was
+  const lower = el("div", "done", new E("br"), "#12");
+  assert.deepEqual((linkifyPrRefs(lower as unknown as Node, REPO), linked(lower)), ["#12"]);
+  // the glue protections stay: a path span, an empty inline element, an empty walked wrapper, a fragment inside one
+  for (const r of [
+    el("p", "see ", cls(el("span", "docs/a.md"), "file-uri-link"), "#12"),
+    el("p", "docs", el("span"), "#12"),
+    el("p", "docs", el("img"), "#12"),
+    el("p", "docs", el("em", ""), "#12"),
+    el("p", "see docs/a.md", el("em", "#12")),
+  ]) assert.equal(linkifyPrRefs(r as unknown as Node, REPO), 0, r.html());
 });
 
 test("references inside emphasis and list items link (only anchors and code-like elements are opaque)", () => {
@@ -626,7 +827,7 @@ test("the session frame's githubRepo rides the Session and survives a chatTail d
 });
 
 test("postal bodies link against the SENDER's frame-known repo only: outbound = the writer's own, inbound = senderPrRepo over the session map by the card's host and name, never the reader's as a fallback", () => {
-  assert.match(RENDER, /full\.innerHTML = md\(ev\.body, postalRepoFor\(ev\)\)/);
+  // 2026-09-08 (the notice-vocabulary pass): ONE render path — the full message is the notice body (the summary is the head)
   assert.match(RENDER, /body\.innerHTML = md\(ev\.body, postalRepoFor\(ev\)\);/);
   const fn = RENDER.match(/function postalRepoFor\([\s\S]*?\n\}/)?.[0] || "";
   assert.match(fn, /if \(ev\.direction === "out"\) return prRepoFor\(\);/);

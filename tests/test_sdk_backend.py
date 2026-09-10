@@ -17,6 +17,7 @@ import os
 import json
 import threading
 import time
+import tracemalloc
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -3373,6 +3374,166 @@ class SpendRecord(unittest.TestCase):
         self.assertIsNone(sb.last_cost_state(str(p)))
         p.write_text(filler + "\n")
         self.assertIsNone(sb.last_cost_state(str(p)), "no record: None, never a zero seed")
+
+    def _reads_through_a_stand_in(self, chunk_type=bytes):
+        """Route the module's `open` through a stand-in file object for this test: it records the length
+        of each read and hands the bytes back as `chunk_type`, so a test can see how the scan reads the
+        file and, with a bytes subclass, what the scan does to what it read. Restored at tearDown."""
+        reads, real_open = [], open
+
+        class Reader:
+            def __init__(self, f): self.f = f
+            def __enter__(self): return self
+            def __exit__(self, *exc): return self.f.__exit__(*exc)
+            def seek(self, *a): return self.f.seek(*a)
+            def tell(self): return self.f.tell()
+            def read(self, n=-1):
+                b = self.f.read(n)
+                reads.append(len(b))
+                return chunk_type(b)
+
+        patch = mock.patch.object(sb, "open", lambda p, *a, **k: Reader(real_open(p, *a, **k)), create=True)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return reads
+
+    @staticmethod
+    def _line_of(length, **fields):
+        """A JSON line of exactly `length` bytes: `fields`, then a `pad` of x's that makes up the length."""
+        bare = json.dumps({**fields, "pad": ""})
+        return json.dumps({**fields, "pad": "x" * (length - len(bare))})
+
+    def _record_line(self, total, length, mu):
+        """A record-shaped line of exactly `length` bytes: last_cost_state takes it when it is short enough."""
+        return self._line_of(length, type="cost-state", sessionId=self._FSID, totalCostUSD=total, modelUsage=mu)
+
+    def test_last_cost_state_reassembles_a_long_line_and_finds_the_record_before_it(self):
+        """A transcript line is one JSON record, and a tool result can make one several MB long. The
+        scan walks such a line back to its first byte in 64 KB reads, covering the bounded tail once
+        and nothing more, reassembles it, and takes the record before it."""
+        p = Path(self._private_dir()) / "t.jsonl"
+        mu = {"m": {"inputTokens": 7, "outputTokens": 3}}
+        long_line = json.dumps({"type": "user", "uuid": "u", "message": {"role": "user", "content": "x" * (3 << 20)}})
+        after = json.dumps({"type": "last-prompt", "lastPrompt": "x"})
+        p.write_text(self._cost_state(2.25, mu) + "\n" + long_line + "\n" + after + "\n")
+        reads = self._reads_through_a_stand_in()
+        self.assertEqual(sb.last_cost_state(str(p))["total"], 2.25)
+        size = p.stat().st_size
+        self.assertEqual(sum(reads), size, "the whole file, under the 8 MB bound, is read once")
+        self.assertEqual(len(reads), -(-size // (1 << 16)), "in chunks of 64 KB, the head chunk shorter")
+        self.assertLessEqual(max(reads), 1 << 16)
+
+    def test_the_bound_reads_the_same_tail_and_drops_the_line_it_cuts_through(self):
+        """The scan reads the last `scan_bytes` of the file and nothing before them: a record older than
+        that is absent, and the line the bound cuts through is a fragment, never joined, so a record
+        whose first byte the bound lands on is absent too, and found once the bound reaches the newline
+        before it. This held before the pieces were collected in a list and holds after: a guard on the
+        range read."""
+        p = Path(self._private_dir()) / "t.jsonl"
+        mu = {"m": {"inputTokens": 7, "outputTokens": 3}}
+        filler = json.dumps({"type": "user", "uuid": "u", "message": {"role": "user", "content": "x" * 900}})
+        bound = 3 << 16
+        rec = self._cost_state(2.25, mu)
+        p.write_text(rec + "\n" + (filler + "\n") * 300)          # about 290 KB after the record
+        reads = self._reads_through_a_stand_in()
+        self.assertIsNone(sb.last_cost_state(str(p), scan_bytes=bound), "older than the bound: absent")
+        self.assertEqual(sum(reads), bound, "the last scan_bytes of the file, and no more")
+        # the bound lands exactly on the record's first byte: the record is the cut line, a fragment; one
+        # byte more reaches the newline before it, and the record is a whole line again
+        tail = self._line_of(bound - len(rec) - 2, type="user", uuid="u", message={"role": "user"})
+        p.write_text((filler + "\n") * 5 + rec + "\n" + tail + "\n")
+        self.assertIsNone(sb.last_cost_state(str(p), scan_bytes=bound))
+        self.assertEqual(sb.last_cost_state(str(p), scan_bytes=bound + 1)["total"], 2.25)
+
+    def test_a_line_longer_than_the_cap_is_not_a_record_and_the_earlier_record_wins(self):
+        """A cost-state record is under 1 KB. A line longer than last_cost_state's cap (4 MB) is skipped
+        without being reassembled, even when its text would parse as a record: the record before it
+        wins, and with none before it the answer is None, as for a file that has no record. The rule is
+        exact on the length, and the same for a line the scan reassembles from the pieces of many chunks
+        as for one whole inside a chunk: a line AT the cap is still a record, joined from its pieces in
+        file order, and one byte longer is skipped."""
+        p = Path(self._private_dir()) / "t.jsonl"
+        mu = {"m": {"inputTokens": 7, "outputTokens": 3}}
+        filler = json.dumps({"type": "user", "uuid": "u", "message": {"role": "user", "content": "x" * 900}})
+        cap = 4 << 20
+        huge = self._record_line(7.0, cap + (1 << 20), mu)        # record-shaped, well past the cap
+        p.write_text(self._cost_state(1.0, mu) + "\n" + huge + "\n")
+        self.assertEqual(sb.last_cost_state(str(p))["total"], 1.0, "the line past the cap is not a record")
+        p.write_text(huge + "\n")
+        self.assertIsNone(sb.last_cost_state(str(p)), "skipped without an exception; no record remains")
+        p.write_text(huge)                                    # the too-long line is the file's head, unterminated
+        self.assertIsNone(sb.last_cost_state(str(p)))
+        p.write_text(huge + "\n" + self._cost_state(3.0, mu) + "\n")
+        self.assertEqual(sb.last_cost_state(str(p))["total"], 3.0, "a record after it is taken as usual")
+        # exactly the cap, spanning about 65 chunks between two other lines: a record, reassembled from its
+        # pieces in file order (out of order it would not parse); one byte longer: skipped, and the record
+        # before it wins
+        for length, total in ((cap, 2.5), (cap + 1, 1.0)):
+            p.write_text(self._cost_state(1.0, mu) + "\n" + self._record_line(2.5, length, mu) + "\n" + filler + "\n")
+            self.assertEqual(sb.last_cost_state(str(p))["total"], total, f"a line of {length} bytes")
+        # the cap is the parameter. A record-shaped line the scan carries in three pieces, one per chunk
+        # (it begins on a chunk edge: the file's tail from its first byte is three chunks exactly), is a
+        # record at a cap of its own length and skipped at one byte less, where the record before it wins
+        three = self._record_line(6.0, 3 * (1 << 16) - 1, mu)
+        p.write_text(self._cost_state(1.0, mu) + "\n" + three + "\n")
+        self.assertEqual(sb.last_cost_state(str(p), max_line=len(three))["total"], 6.0)
+        self.assertEqual(sb.last_cost_state(str(p), max_line=len(three) - 1)["total"], 1.0)
+        # and for a line the scan never carries: the head piece alone in the file, and a line whole inside a
+        # chunk between two others
+        rec = self._cost_state(2.0, mu)
+        for text in (rec + "\n", filler + "\n" + rec + "\n" + filler + "\n"):
+            p.write_text(text)
+            self.assertEqual(sb.last_cost_state(str(p), max_line=len(rec))["total"], 2.0)
+            self.assertIsNone(sb.last_cost_state(str(p), max_line=len(rec) - 1))
+
+    def test_the_scan_copies_a_line_once_and_holds_at_most_the_cap_however_long_the_line(self):
+        """Linear by construction, pinned without a clock. The pieces of a line are collected as the
+        chunks arrive and joined once at the newline that opens the line, so no chunk is ever
+        concatenated onto the carried fragment (that copied the fragment again on every chunk, a cost
+        quadratic in the line). A line past the cap is dropped as it arrives, so on such a line the scan
+        holds at most the cap plus a few chunks at any moment; a reader that keeps the line, or re-copies
+        it per chunk, peaks at one to three times the 7 MB line here. A line one byte past the cap is
+        never joined either, though every piece of it was kept: joined, it would be held twice."""
+        p = Path(self._private_dir()) / "t.jsonl"
+        mu = {"m": {"inputTokens": 7, "outputTokens": 3}}
+        filler = json.dumps({"type": "user", "uuid": "u", "message": {"role": "user", "content": "x" * 900}})
+        adds = []
+
+        class Chunk(bytes):
+            """What the scan read, watching for a concatenation onto it."""
+            def __add__(self, other): adds.append(len(self) + len(other)); return bytes(self) + other
+            def __radd__(self, other): adds.append(len(self) + len(other)); return other + bytes(self)
+
+        reads = self._reads_through_a_stand_in(Chunk)
+
+        def scan():
+            """The scan's answer and the process's growth in bytes over it, measured from what the process
+            held as the scan began (a tracer already running, PYTHONTRACEMALLOC, then adds nothing)."""
+            tracing = tracemalloc.is_tracing()
+            if not tracing:
+                tracemalloc.start()
+            try:
+                tracemalloc.reset_peak()
+                held = tracemalloc.get_traced_memory()[0]
+                rec = sb.last_cost_state(str(p))
+                return rec, tracemalloc.get_traced_memory()[1] - held
+            finally:
+                if not tracing:
+                    tracemalloc.stop()
+
+        big = json.dumps({"type": "user", "uuid": "u", "message": {"role": "user", "content": "x" * (7 << 20)}})
+        p.write_text(self._cost_state(2.25, mu) + "\n" + big + "\n" + filler + "\n")
+        rec, peak = scan()
+        self.assertEqual(rec["total"], 2.25, "the record before the 7 MB line is found")
+        self.assertEqual(sum(reads), p.stat().st_size, "the range read is the same bounded tail")
+        self.assertEqual(adds, [], "no chunk is concatenated onto: a line's pieces are joined once")
+        self.assertLess(peak, (4 << 20) + (2 << 20), "held: the 4 MB cap plus chunks, never the 7 MB line")
+        over = self._record_line(7.0, (4 << 20) + 1, mu)
+        p.write_text(self._cost_state(2.25, mu) + "\n" + over + "\n" + filler + "\n")
+        rec, peak = scan()
+        self.assertEqual(rec["total"], 2.25, "one byte past the cap: not a record")
+        self.assertEqual(adds, [])
+        self.assertLess(peak, (4 << 20) + (2 << 20), "held: its pieces, and no joined line beside them")
 
     def test_a_first_result_after_connect_above_the_single_turn_mark_is_recorded_and_traced_as_info(self):
         """On the CLI as probed a resumed process starts its cost counters at zero, so a first delta above

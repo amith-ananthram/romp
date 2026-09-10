@@ -50,6 +50,7 @@ test("migrated families hover in pattern A — the one accent triple", () => {
   // styles.css
   assert.match(CHAT, new RegExp("\\.ask-btn:not\\(\\.ask-btn-primary\\):hover \\{ " + TRIPLE));
   assert.match(CHAT, new RegExp("\\.bg-stop:hover \\{ " + TRIPLE));
+  assert.match(CHAT, new RegExp("\\.notice-act:hover:not\\(:disabled\\) \\{ " + TRIPLE));   // the notice word button (2026-09-08)
   // .fileview-btn hovers identically in BOTH sheets (fileview-parity pins them byte-equal)
   for (const css of [CHAT, FEED]) {
     assert.match(css, new RegExp("\\.fileview-btn:hover \\{ " + TRIPLE));
@@ -94,13 +95,13 @@ test("destructive stays RED; a SELECTED .on keeps the reverse-highlight", () => 
 
 test("ONE transition string + the :active press cue on every touched family", () => {
   const T = "transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease, transform 0.08s ease;";
-  // styles.css: .bg-stop, .composer-stage-btn, .ask-btn, .fileview-btn
-  assert.equal(CHAT.split(T).length - 1, 4, "styles.css: the four touched families share the one string");
+  // styles.css: .bg-stop, .composer-stage-btn, .ask-btn, .fileview-btn, and .notice-act (the notice word button, 2026-09-08)
+  assert.equal(CHAT.split(T).length - 1, 5, "styles.css: the five touched families share the one string");
   // feed.css: .fask-secbtn, .ftree-act-btn, .fconfirm-btn, .fdismiss, .fileview-btn
   assert.equal(FEED.split(T).length - 1, 5, "feed.css: the five touched families share the one string");
   // gear.css: #rs-keys-btn, .ra-openbtn, the .ra-* toggles
   assert.equal(GEAR.split(T).length - 1, 3, "gear.css: the three touched families share the one string");
-  for (const sel of [".bg-stop", ".composer-stage-btn", ".ask-btn", ".fileview-btn"]) {
+  for (const sel of [".bg-stop", ".composer-stage-btn", ".ask-btn", ".fileview-btn", ".notice-act"]) {
     assert.ok(CHAT.includes(sel + ":active { transform: scale(0.96); }"), sel + " press cue (styles.css)");
   }
   for (const sel of [".fask-secbtn", ".ftree-act-btn", ".fconfirm-btn", ".fdismiss", ".fileview-btn"]) {

@@ -235,7 +235,8 @@ test("the echo renders dragged-image THUMBNAILS — composer → provisional →
   // bytes and the reconcile swap never re-fetches or flickers.
   assert.match(RENDER, /if \(t\.imgPaths && t\.imgPaths\.length\) \{\s*\n\s*for \(const ip of t\.imgPaths\) bubble\.appendChild\(userImage\(\{ src: "path:" \+ ip, path: ip \}, true\)\);/);
   // the paths ride the send at every register site (deliver, staged flush, the provisional hold)
-  assert.match(RENDER, /routeUserMessage\(activeId, text, cites, attached\.filter\(\(p\) => previewKind\(p\) === "img"\)\);/);
+  assert.match(RENDER, /flushStaged\(sid, \{ text, cites, imgPaths: attached\.filter\(\(p\) => previewKind\(p\) === "img"\) \}\);/);
+  assert.match(RENDER, /routeUserMessage\(sid, p\.text, [^\n]*p\.imgPaths\);/);   // each post of the release carries its images (staged-list-cap.test.ts executes the loop)
   // …and ONLY image-kind attachments mint thumbs — a dropped .csv stays the path text it always was
   assert.doesNotMatch(RENDER, /registerOptimistic\(sid, text, attached\)/);
 });

@@ -1035,6 +1035,57 @@ class RenameFaultsThroughTheDoors(_Routes):
         self.assertNotIn("rewrites it later", log, "bin/romp's hook returns early on an absent entry: no false promise")
 
 
+    def _no_name_record(self):
+        """names/<SID> reads with no name: 0 bytes, another writer's window or a damaged file. The writer's
+        one re-read runs for real here (a short pause); the error-center ring is restored afterwards."""
+        (self.names / SID).write_text("")
+        saved = list(km._SDK_BOOT_PROBLEMS)
+        self.addCleanup(lambda: km._SDK_BOOT_PROBLEMS.__setitem__(slice(None), saved))
+
+    def test_a_dead_tab_rename_over_a_record_with_no_name_is_refused_with_the_cause(self):
+        # before the guard: 'renamed' != 'warn', and the file read web2\t\t\t\n (cwd and colors erased)
+        self.as_dead()
+        self._no_name_record()
+        f = self.ws()
+        self.assertEqual(f["type"], "warn", f)
+        self.assertIn("the rename did not take", f["text"])
+        self.assertIn("names/%s reads with no name" % SID, f["text"], "the cause, naming the record")
+        self.assertNotIn("is that session known", f["text"], "a record with no name is not an unknown session")
+        self.assertEqual((self.names / SID).read_text(), "", "left byte for byte as it was")
+        self.assertEqual(sorted(p.name for p in self.names.iterdir()), [SID], "no temp left behind")
+        self.assertIn(SID, self.err.getvalue(), "the log names the sid")
+        self.assertEqual(self.claims(), {}, "the claim is released")
+
+    def test_a_dead_tab_rename_over_a_record_with_no_name_answers_the_route_ok_false(self):
+        # before the guard: ok True, id SID, over a file rewritten as web2\t\t\t\n
+        self.as_dead()
+        self._no_name_record()
+        st, r = self.route(SID)                     # dead: no live name resolves, so the sid is the target
+        self.assertEqual(st, 200, r)
+        self.assertFalse(r.get("ok"), r)
+        self.assertIn("the rename did not take", r.get("error") or "")
+        self.assertIn("reads with no name", r.get("error") or "")
+        self.assertEqual((self.names / SID).read_text(), "")
+        self.assertEqual(self.claims(), {})
+
+    def test_a_live_rename_over_a_record_with_no_name_keeps_the_old_name_and_says_so(self):
+        # before the guard: 'renamed' != 'warn'; tmux renamed the session AND the kernel published
+        # web2\t\t\t\n, so the after-rename hook's own rewrite (which would have carried the whole record
+        # had the kernel left the file alone) landed on an unlinked inode
+        self.as_live()
+        self._no_name_record()
+        f = self.ws()
+        self.assertEqual(self.renamed, [("web", "web2")], "tmux renamed the session")
+        self.assertEqual(f["type"], "warn", f)
+        self.assertIn("was renamed, but its name on file could not be updated", f["text"])
+        self.assertIn("reads with no name", f["text"], "with the cause")
+        self.assertIn("until that write lands", f["text"], "the entry exists: the hook's rewrite lands")
+        self.assertNotIn("did not take", f["text"], "tmux did take it")
+        self.assertEqual((self.names / SID).read_text(), "", "nothing published over the record")
+        self.assertIn("the after-rename hook rewrites it later", self.err.getvalue())
+        self.assertEqual(self.claims(), {})
+
+
 class LockDiscipline(_Base):
     """The snapshot is taken OUTSIDE the claims lock by every caller; the check-and-insert is INSIDE it."""
 

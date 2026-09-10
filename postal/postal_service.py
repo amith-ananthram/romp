@@ -67,14 +67,16 @@ BASE = f"http://{HOST}:{PORT}"
 KERNEL_BASE = "http://127.0.0.1:%s" % os.environ.get("ROMP_KERNEL_PORT", "29855")  # the dashboard kernel — it owns the backend session query (tmux + SDK)
 
 STATE = Path(os.environ.get("ROMP_STATE_DIR")      # per-kernel state root override (plans/multi-kernel.md)
-             or Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "romp") / "postal"
+             or Path(os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")) / "romp") / "postal"
+# `or`, not a .get default, here and at NAMES_DIR: an empty XDG_STATE_HOME is unset (the note at
+# kernel/event_model.py's STATE).
 MAILROOT = STATE / "mail"
 MAILPENDING = STATE / "mail-pending"   # touch <sid> here IFF that session has unread mail in new/
 WARNED = STATE / "warned-undelivered"  # marker per msg-id we've already warned a sender is STILL UNDELIVERED (one-time)
 LOG = STATE / "server.log"
 PIDFILE = STATE / "server.pid"
 NAMES_DIR = Path(os.environ.get("ROMP_STATE_DIR")
-                 or Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "romp") / "names"
+                 or Path(os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")) / "romp") / "names"
 TLDIR = STATE.parent / "timeline"     # append-only logs for the timeline view (messages.jsonl)
 SESSION_FLAGS = STATE.parent / "session-flags.json"   # the kernel's per-session view flags {sid:{flag:true}}; we honour postalServiceOff (legacy: postalOff)
 
