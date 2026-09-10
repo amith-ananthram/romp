@@ -1762,7 +1762,13 @@ converge until the window opens, and the note written at the window names its
 delivery the same way. A SIGTERM that reaches a kernel with a quiet-window
 request parked and no manager note for its pid (a note naming no pid counts as
 its own) is not that request's delivery: the kernel files a `signal` row and
-leaves the request on record for the kernel the window will restart.
+leaves the request on record for the kernel the window will restart. The
+manager's stop of one kernel (a `stop` note with trigger `stop`, which leaves
+the manager's parked request armed; a stop of every kernel writes the same
+note) is not the delivery either: that cut is named by the note,
+`manager-sigterm: stop`, and the request stays on record. A restart note, or
+the self-bounce's `refresh` note, is the delivery: the cut row names the
+request and consumes it.
 
 When no row qualifies, the kernel writes a row with action `signal`: the signal
 name, its pid and its parent's pid, the manager pid it was started with,
