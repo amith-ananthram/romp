@@ -26391,17 +26391,49 @@ def _postal_index():
     if hit is not None and hit[0] == key:
         return hit[1]
     idx = {}
+    later = {}                                        # mid -> its outcome rows, in log order (folded after the scan)
     for o in _messages_rows(p):                       # append-incremental rows (2026-09-03): a send no
         if not isinstance(o, dict):                   # longer re-decodes the whole log on the active tab
             continue
-        if o.get("ev") == "sent" and o.get("id"):
-            idx[o["id"]] = {"id": o["id"], "from": o.get("from", "?"), "fromId": o.get("from_id", ""),
-                            # the sender's host as the log stamped it: "" for this kernel's own sessions,
-                            # a peer's name for relayed mail — and None when the row carries NO field, a
-                            # row from before the field existed, whose sender could be either (2026-09-06)
-                            "fromHost": o.get("from_host"),
-                            "toId": o.get("to_id", ""), "body": o.get("body", ""), "kind": o.get("kind", ""),
-                            "t": o["t"] if isinstance(o.get("t"), (int, float)) else 0, "park": bool(o.get("park"))}
+        ev, mid = o.get("ev"), o.get("id")
+        if ev == "sent" and mid:
+            idx[mid] = {"id": mid, "from": o.get("from", "?"), "fromId": o.get("from_id", ""),
+                        # the sender's host as the log stamped it: "" for this kernel's own sessions,
+                        # a peer's name for relayed mail — and None when the row carries NO field, a
+                        # row from before the field existed, whose sender could be either (2026-09-06)
+                        "fromHost": o.get("from_host"),
+                        "toId": o.get("to_id", ""), "body": o.get("body", ""), "kind": o.get("kind", ""),
+                        "t": o["t"] if isinstance(o.get("t"), (int, float)) else 0, "park": bool(o.get("park"))}
+            continue
+        # The message's LATER outcomes ride the same record (T302): the sent card's delivery icon reads them.
+        # Each is the ledger's own event, never inferred — `exec` is the recipient's inbox drain consuming
+        # the message (a REAL read), `unexec` a claimed-then-rolled-back drain (not read after all),
+        # `relayed` the far host's end-to-end ack, `bounced` a return (with the refusal's why), `recall`
+        # the sender unsending it. Collected here and folded after the scan, the postal service's own
+        # reader's shape (_sent_receipts): deliver() publishes the file before it appends the sent row, and
+        # a drain can log its exec in that instant, so an outcome may sit BEFORE its sent row. Row order
+        # within one id still decides (exec then unexec is not read).
+        if mid and ev in ("exec", "unexec", "relayed", "bounced", "recall") and isinstance(o.get("t"), (int, float)):
+            later.setdefault(mid, []).append(o)
+    for mid, rows in later.items():
+        rec = idx.get(mid)
+        if rec is None:                               # an outcome for a message this log never sent
+            continue
+        for o in rows:
+            ev = o.get("ev")
+            if ev == "exec":
+                rec["read"] = o["t"]
+            elif ev == "unexec":
+                rec.pop("read", None)
+            elif ev == "relayed":
+                rec["relayed"] = o["t"]
+            elif ev == "bounced":
+                rec["bounced"] = o["t"]
+                why = str(o.get("why") or "")
+                if why:
+                    rec["bouncedWhy"] = re.sub(r"[\x00-\x1f\x7f]+", " ", why)[:200]
+            elif ev == "recall":
+                rec["recalled"] = o["t"]
     _postal_index_memo[0] = (key, idx, _postal_body_map(idx))
     return idx
 
@@ -26602,6 +26634,19 @@ def _hydrate_postal(events, index, sid=None, captions=None):
             cap = caption_for(rec["id"])
             if cap:
                 card["summary"] = cap
+            # the ledger's outcomes for this message (T302): the delivery icon moves after the send —
+            # read (the recipient consumed it), relayed (a far host acked), bounced (+ why), recalled;
+            # `remote` says the send crossed the peer bus, where the tool's "delivered" is only "handed
+            # to the relay". Only what the ledger holds; an empty receipt is not sent at all.
+            # — never on a send that ERRORED (status None): the body-keyed join would hand a refused send the
+            # outcomes of its retry with the same words, and a message that never left has no receipt.
+            receipt = {k: rec[k] for k in ("read", "relayed", "bounced", "recalled") if rec.get(k)}
+            if rec.get("bouncedWhy"):
+                receipt["why"] = rec["bouncedWhy"]
+            if str(rec.get("toId") or "").startswith("peer:"):
+                receipt["remote"] = True
+            if receipt and card.get("status") is not None:
+                card["receipt"] = receipt
         return card
     for ev in events:
         if ev.get("kind") == "tool" and _SEND_TOOL_RE.search(ev.get("name") or ""):

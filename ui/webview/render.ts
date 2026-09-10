@@ -96,6 +96,7 @@ import { reconcileRewindPass, type RewindEvent } from "./rewind-reconcile";
 import { watchChatVisibility, browserChatVisibilityDeps } from "./chat-visibility";
 import type { PaneHiddenHost } from "./paint-gate";
 import { gistOf, collapseWs, postalHead } from "./gist";   // the shared gist rule + the postal head (T294)
+import { kindLabel, deliveryOf, deliveryTitle, type PostalDelivery, type PostalDeliveryState, type PostalReceipt } from "./postal-state";   // the postal card's kind word + delivery state (T302)
 
 for (const [name, lang] of Object.entries({
   bash, sh: bash, shell: bash, python, py: python, javascript, js: javascript,
@@ -187,7 +188,8 @@ type ChatEvent = (
       mid?: string;      // postal message id (joins feed-modal handoff hovers to this card)
       t?: number;        // epoch seconds (incoming)
       park?: boolean;
-      status?: "delivered" | "parked"; // outgoing
+      status?: "delivered" | "parked"; // outgoing, as stamped at send time
+      receipt?: PostalReceipt;         // outgoing: the ledger's later outcomes, joined by message id (read / relayed / bounced / recalled / remote)
       ts?: string;
       uuid?: string;
     }
@@ -4752,7 +4754,9 @@ function setPeerDot(peerEl: HTMLElement, on: boolean) {
   else if (!on && has) prev!.remove();
 }
 function refreshPostalDots() {
-  document.querySelectorAll(".notice-src-chip").forEach((p) => setPeerDot(p as HTMLElement, workingSet.has((p.textContent || "").trim())));
+  // the PEER chips only: this session's own end (.notice-src-self) shows its state elsewhere, and a dot that
+  // arrives with the next working frame and leaves on the next rebuild would only flap (T302 review)
+  document.querySelectorAll(".notice-src-chip:not(.notice-src-self)").forEach((p) => setPeerDot(p as HTMLElement, workingSet.has((p.textContent || "").trim())));
 }
 
 
@@ -4776,25 +4780,70 @@ function postalServiceIntent(body: string | undefined): { label: string; cls: st
   return m ? (POSTAL_INTENTS[m[1].toUpperCase()] || null) : null;
 }
 
+// The delivery-state icon at the postal head's right edge (T302, the user 2026-09-10): the way messaging apps
+// show sent / delivered / read. One check = sent (handed to the relay), two dim checks = delivered (in the
+// recipient's inbox, or the far host's ack), two coloured checks = read (the recipient consumed it: the
+// ledger's own exec event, never inferred), a clock = parked, a red mark = bounced, a return arrow = recalled.
+// Each carries a worded title with the clock. States and words: postal-state.ts.
+const DELIVERY_GLYPHS: Record<PostalDeliveryState, string> = {
+  sent: '<path d="M3 8.6 L6.4 12 L13 5"/>',
+  delivered: '<path d="M1.6 8.6 L4.8 11.8 L10.2 5.4"/><path d="M6.6 11.6 L14.4 5.4"/>',
+  read: '<path d="M1.6 8.6 L4.8 11.8 L10.2 5.4"/><path d="M6.6 11.6 L14.4 5.4"/>',
+  parked: '<circle cx="8" cy="8" r="5.6"/><path d="M8 4.8 V8.2 L10.4 9.6"/>',
+  bounced: '<path d="M4.5 4.5 L11.5 11.5"/><path d="M11.5 4.5 L4.5 11.5"/>',
+  recalled: '<path d="M6.6 4.6 L3.2 8 L6.6 11.4"/><path d="M3.2 8 H10 A2.8 2.8 0 0 0 12.8 5.2"/>',
+};
+function clockOf(epochS: number): string {
+  return new Date(epochS * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+function deliveryIcon(d: PostalDelivery): HTMLElement {
+  const span = el("span", "postal-delivery postal-delivery-" + d.state);
+  span.dataset.state = d.state;
+  span.innerHTML = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" '
+    + 'stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">' + DELIVERY_GLYPHS[d.state] + "</svg>";
+  const title = deliveryTitle(d, clockOf);
+  setTip(span, title);                       // the pane's styled tip on hover…
+  span.setAttribute("role", "img");          // …and the same words for a screen reader: a labelled span is announced
+  span.setAttribute("aria-label", title);    //    only with an image role (the icon has no text)
+  return span;
+}
+
 function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>): HTMLElement {
-  // SOURCE = "from"/"to" + the house session chip naming the peer (the ONE coloured element in the notice
-  // vocabulary — the peer's identity colour, as the tab wears it); click the name → that session's tab
-  const chip = el("span", "notice-src-chip");
-  chip.textContent = ev.peer;
-  if (ev.color) { chip.style.setProperty("--peer-bg", ev.color.bg); chip.style.setProperty("--peer-fg", ev.color.fg); }
-  makeSessionChip(chip, ev.peer);
-  setPeerDot(chip, workingSet.has(ev.peer));   // working dot before the peer name if that session is working
-  const src = el("span");
+  // BOTH ENDS in the head, each in its session's colour (T302, the user 2026-09-10, after seeing old and new
+  // renderings): "from <peer> to <this session>" for incoming, "to <peer> from <this session>" for sent — the
+  // peer's chip in the peer's identity colour, this session's chip in its own, and NO wash of either colour on
+  // the card (a wash read as this session's colour). Click a name → that session's tab.
+  const peer = el("span", "notice-src-chip");
+  peer.textContent = ev.peer;
+  if (ev.color) { peer.style.setProperty("--peer-bg", ev.color.bg); peer.style.setProperty("--peer-fg", ev.color.fg); }
+  makeSessionChip(peer, ev.peer);
+  setPeerDot(peer, workingSet.has(ev.peer));   // working dot before the peer name if that session is working
+  // the session that OWNS the transcript being built (a comment popover's parent, a subagent viewer's session),
+  // the same chain every other owner lookup in this file uses; an id the tab set does not know draws no own end
+  const ownId = renderingOwnerSid ?? renderingSid ?? activeId;
+  const own = ownId && sessions.has(ownId) ? sessions.get(ownId) : undefined;
+  const src = el("span", "notice-src-ends");
   src.appendChild(document.createTextNode(ev.direction === "in" ? "from " : "to "));
-  src.appendChild(chip);
-  // interaction type (delegation / coordination / question) + delivery state, as META text — prefer the
-  // sender's DECLARED kind (send_message's `kind` param, surfaced by the kernel); the old leading-token
-  // parse of the body is only a legacy fallback now that the kind rides as an explicit field
+  src.appendChild(peer);
+  if (own && ownId) {
+    // this session's own end: its name (the host label muted, as the tab wears it) in its identity colour; a
+    // narrow head collapses it to its coloured dot (the container query in styles.css) — both colours still show
+    const self = el("span", "notice-src-chip notice-src-self");
+    const nm = el("span", "notice-src-name"); nm.append(...hostNameNodes(own.name, ownId));
+    self.appendChild(nm);
+    self.title = own.name;
+    if (own.color) { self.style.setProperty("--peer-bg", own.color.bg); self.style.setProperty("--peer-fg", own.color.fg); }
+    src.appendChild(document.createTextNode(ev.direction === "in" ? " to " : " from "));
+    src.appendChild(self);
+  }
+  // the interaction KIND as coloured text, never a chip (chips read as tags now): Delegation / Coordination /
+  // Question in the kind's colour — prefer the sender's DECLARED kind (send_message's `kind` param, surfaced by
+  // the kernel); the old leading-token parse of the body is only a legacy fallback. The postal meta is rigid,
+  // so the word is never truncated.
   const intent = (ev.intent && POSTAL_INTENTS[ev.intent.toUpperCase()]) || postalServiceIntent(ev.body);
-  const meta: string[] = [];
-  if (intent) meta.push(intent.label);
-  if (ev.park || ev.status === "parked") meta.push("parked");
-  else if (ev.status === "delivered") meta.push("delivered");
+  const kind = kindLabel(intent ? intent.cls : null);
+  let meta: HTMLElement | undefined;
+  if (kind && intent) { meta = el("span", "postal-kind postal-kind-" + intent.cls); meta.textContent = kind; }
   // Gist: ALWAYS a one-line summary, the incoming caption, else the first line of the message CLIPPED (gist.ts
   // postalHead), with the full message one click deeper whenever the gist does not carry all of it (the user
   // 2026-06-16; T294, the user 2026-09-10, whose one-paragraph sent card had no fold at all). KEYED (the user
@@ -4804,10 +4853,25 @@ function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>)
   if (fullMd) { body = el("div", "notice-md md"); body.innerHTML = md(fullMd, postalRepoFor(ev)); highlight(body); }
   // an incoming QUESTION opens by default: a reply is owed, and the whole ask is what you need to read
   const owed = !!intent && intent.cls === "question" && ev.direction === "in";
-  const turn = notice({ src, glyph: "peer", gist: summaryText, meta: meta.join(" · ") || undefined, body, open: owed,
+  const turn = notice({ src, glyph: "peer", gist: summaryText, meta, body, open: owed,
                         key: "postal:" + (ev.mid || ev.uuid || ""), rail: ev.color ? ev.color.bg : undefined,
-                        cls: "turn-postal-service postal-service-" + ev.direction + " notice-peer",
-                        tip: intent ? "interaction type: " + intent.label : undefined });
+                        cls: "turn-postal-service postal-service-" + ev.direction,
+                        tip: kind ? "interaction type: " + kind.toLowerCase() : undefined });
+  // the delivery state: an icon at the head's right edge, and — while the message has not landed (handed to the
+  // relay, or parked for an unreachable host) — the SAME provisional dress the user's own pending send wears
+  // (the queued bubble's class and tokens, the T302 amendment): solid again once the receipt says delivered,
+  // relayed or read; bounced keeps its red mark. Incoming: only a parked clock (it waited while you were offline).
+  const delivery = deliveryOf(ev);
+  if (delivery) {
+    turn.querySelector(".notice-head")?.appendChild(deliveryIcon(delivery));
+    if (ev.direction === "out" && (delivery.state === "sent" || delivery.state === "parked")) {
+      turn.querySelector(".notice")?.classList.add("queued-bubble");
+      turn.classList.add("postal-provisional");   // the bubble's border + padding move the head line: the rail dot follows
+    }
+  }
+  // an INCOMING message keeps its box (border + rail) even when its one line carries the whole message and there
+  // is nothing to fold; a SENT one stays the slim line (the ruling's density rule for the two directions)
+  if (ev.direction === "in") { turn.classList.add("notice-boxed"); turn.querySelector(".notice")?.classList.remove("notice-slim"); }
   if (ev.mid) turn.dataset.mid = ev.mid;   // joins feed-modal handoff hovers to this card
   return turn;
 }
