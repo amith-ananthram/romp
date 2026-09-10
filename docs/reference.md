@@ -947,6 +947,25 @@ check whether each is still running before relaunching it. A kernel restart has
 never touched work a session deliberately detached: tmux servers, `setsid`
 children and other processes that outlive their shell.
 
+A boot reads no transcript for nobody. Until 2026-09-10 a fresh kernel parsed
+every living session's whole transcript at startup (a warm for the first
+dashboard's frames), parsed every session again for its own tick jobs on the
+first cycle, and let the feed-only warm parse every session too; on a box with
+47 live sessions that was 15 GB read and 6.6 GB resident within five minutes.
+Now the startup warm only refreshes the shared session listing: a reconnecting
+dashboard receives its active tab whole and every other tab as a skeleton, so
+the one parse it needs is the one its own connect push runs. The feed-only warm
+parses only sessions whose transcript, state log or goal store changed since
+the boot, or that are working now. The interrupt-block and working-note tick
+jobs skip a session whose transcript, state log and goal store are unchanged
+since their last look, with the boot as the first baseline: a session blocked
+before the restart and untouched after reads blocked from the store the
+previous kernel wrote, with no parse. The judges' passes walk sessions newest
+first and yield between them; their first pass still parses what it
+enumerates, which the checkpoint work that follows removes. `/perf`'s `parses`
+counts the cold parses, and `scripts/bench_boot_parse.py` measures a boot's
+cost against transcript size on synthetic worlds.
+
 What the CLI itself does when its parent goes quiet was measured on Claude Code
 2.1.257 (2026-09-10, the restart-surviving sessions program's stage 3 probe, run
 against a throwaway config directory): a permission request (`can_use_tool`)
@@ -1251,6 +1270,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   longer wait between cycles would have skipped; a conservative undercount,
   since a wake set by another thread or a periodic repost of an unchanged
   frame marks a cycle busy).
+- `parses`: the cold event-model parses this kernel ran, `total`, `bytes`
+  (the parsed files' sizes) and `bySid` (per session, by the first eight
+  characters of its id), plus `judge`, the judges' own cold parses through
+  their separate cache. The acceptance number of the lazy-transcript work: a
+  boot with no client connected reads zero here, and a connecting chat client
+  adds exactly its shown tabs.
 - `stages_ms`: `jobs` (the cycle's tick jobs outside the push), `push`, and
   inside it `push.chat`, `push.feed`, `push.timeline`, `push.send`. The
   `push.*` stages count every push, including the one a connecting page gets,
