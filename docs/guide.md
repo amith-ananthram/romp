@@ -101,6 +101,37 @@ way a paper opens from OpenReview: full size, and it stays open beside the dashb
 you keep working. If the browser blocks that new tab, the PDF opens inside the dashboard
 instead; a PDF too large to show offers a download in its place.
 
+**Links in a file.** Wherever the viewer shows a file's text, the links in that text work. A
+web address opens in a new browser tab. A file path opens that file in the viewer, in place of
+the one you were reading: a relative path such as `docs/guide.md` is taken from the folder of
+the file you are reading, an absolute or `~/` path as written, on the machine of the session the
+file belongs to, and a line written after the path (`src/app.py:12`, or `src/app.py#L12`)
+scrolls the code view to that line. A Markdown file opens in its Raw view for that one open, since
+the Rendered view has no lines; your Raw/Rendered choice is unchanged. A line past the end of the
+file lands on the last line, with a notice saying so. In a Markdown file, a `[link](target)`
+follows the same two rules: a web target opens a tab, a file target opens the file (a host with a
+port, `127.0.0.1:3000` or `api.example.com:8443`, is neither, and says so). A link to a section
+of another file (`report.md#results`) opens that file at the section. A link to a section of the
+same document scrolls to it when the document has a heading or an anchor by that name
+(`<a name="install">` included), and otherwise says so when you hover it; it scrolls under every
+click, since a section of the shown file has no tab of its own. One click does one thing: a plain
+click acts in the dashboard, and a Cmd-click (Ctrl on Windows and Linux) or a middle-click opens
+the link in a browser tab of its own. Inside a file the test for a path is stricter than the one
+a chat message gets: a path links only when it has a slash and a file extension, starts on its
+own, at the start of a line or after a space, a quote, a bracket, a comma, a semicolon, an
+equals sign, a pipe or Markdown's `*` (so `$HOME/docs/a.md`, `@scope/pkg/index.js` and
+`C:/Users/x.txt` stay text), is not part of a web address, does not start with a site name
+(`www.example.org/docs/index.html`), and is not the package an `import` statement or a
+`require()` call names, whether the statement fits one line or its `from` starts the next (a
+relative import such as `./app.css` still links, and so does a path after the English word
+"from" in prose, unless that line holds nothing but `from` and the
+quoted path). After a `*` the path must be the whole emphasised text, closed by a `*` of its
+own: `*docs/a.md*` and `**./scripts/setup.sh**` link; a glob's `**/docs/a.md`, an operand's
+`w*h/img.size` and the first path in `**docs/a.md and docs/b.md**` stay text. Web addresses and
+paths found in the text wear a dotted underline that turns solid under the pointer; a Markdown
+link that names a file keeps the ordinary link look. Selecting text across a link works as
+before, and a click that lands while text is selected inside a link opens nothing.
+
 **Tags and groups.** A tag is a named, colored set of sessions; a session can be in
 several. Right-click a tab and open **Tags** to add or remove them. Tags filter every
 surface (the tag button in the strip narrows the tabs to the tags you pick), and they group
