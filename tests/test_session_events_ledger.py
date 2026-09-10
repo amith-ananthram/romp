@@ -174,9 +174,12 @@ class BootReconcileRows(unittest.TestCase):
             be._boot_reconcile([sb.read_reg(Path(d), SID)])
         rows = _events(d)
         kinds = [r["kind"] for r in rows]
-        self.assertEqual(kinds, ["reconcile.duplicate-cli", "reconcile.orphan-reaped", "reconcile.scope-stopped",
-                                 "reconcile.boot"], kinds)
-        dup, orphan, scope, boot = rows
+        # the LIVE CLI is a live kernel's child with no lease: kept, and reported by the lease census (T305,
+        # the upgrade boot's transitional row) between the duplicate row and the reap
+        self.assertEqual(kinds, ["reconcile.duplicate-cli", "lease.cli-without-lease", "reconcile.orphan-reaped",
+                                 "reconcile.scope-stopped", "reconcile.boot"], kinds)
+        dup, unleased, orphan, scope, boot = rows
+        self.assertEqual((unleased["sid"], unleased["cliPid"], unleased["fsid"]), (SID, LIVE, SID))
         self.assertEqual((dup["sid"], dup["name"], dup["fsid"], dup["n"]), (SID, "web", SID, 2))
         self.assertEqual(dup["pids"], "%d,%d" % (CLI, LIVE), "listing order, before the reap")
         self.assertEqual((orphan["sid"], orphan["name"], orphan["cliPid"], orphan["fsid"]), (SID, "web", CLI, SID))
@@ -189,7 +192,7 @@ class BootReconcileRows(unittest.TestCase):
         self.assertIn("durationS", boot)
         # the problems reached the ring as prose (no json tail), the summary did not
         texts = [r["text"] for r in _ring(be)]
-        self.assertEqual(len(texts), 3, texts)
+        self.assertEqual(len(texts), 4, texts)
         self.assertTrue(all(sb.PROBLEM_ROW_MARK not in t for t in texts))
         self.assertTrue(texts[0].startswith("boot: 2 claude processes were holding session web's conversation"))
 

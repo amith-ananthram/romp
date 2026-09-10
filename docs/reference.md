@@ -971,10 +971,12 @@ its CLIs are reaped as before, keeping one writer per transcript. The scope swee
 spares an owned CLI's scope, and the interrupt escalation signals the leased CLI
 first, so a re-parented CLI is still stoppable. Every anomaly the census meets (a
 CLI without a lease, a lease without a live process or holder, a stale
-heartbeat, two CLIs on one conversation, a lease from another code version) is
-a problem row: prose in the error center, the same prose with a JSON object on
-the kernel log line, and one JSON line in `session-events.jsonl` under the state
-directory, the shape the restart monitors read.
+heartbeat, a lease from another code version) is a problem row: prose in the
+error center, the same prose with a JSON object on the kernel log line, and one
+JSON line in `session-events.jsonl` under the state directory, the shape the
+restart monitors read. Two CLIs on one conversation is the boot sweep's own row
+there. The CLI takes no lock on a transcript it resumes, so the one writer per
+conversation is entirely the lease's to keep.
 
 A message the kernel cannot handle does not end the session's CLI. The kernel
 handles each streamed message on its own: when a handler raises, it logs the

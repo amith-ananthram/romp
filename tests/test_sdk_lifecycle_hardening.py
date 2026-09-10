@@ -291,10 +291,11 @@ class LeaseRules(unittest.TestCase):
         c = self._census([self._cli(708, 1)], [self._lease(708, version="old00000")], starts)   # no version to compare: no row
         self.assertEqual(c["problems"], [])
 
-    def test_two_clis_on_one_conversation_are_reported_and_each_judged_alone(self):
+    def test_two_clis_on_one_conversation_are_each_judged_alone_with_no_row_of_their_own(self):
+        # the boot sweep files that event itself (reconcile.duplicate-cli, duplicate_clis); the census judges each
         c = self._census([self._cli(709, 1), self._cli(710, 1)], [self._lease(709)], {709: "1000", self.HOLDER: "50"})
-        self.assertEqual((c["owned"], c["orphans"]), ({709: "lease"}, [710]))
-        self.assertEqual([(p["kind"], p["fsid"]) for p in c["problems"]], [("lease.duplicate-cli", self.SID)])
+        self.assertEqual((c["owned"], c["orphans"], c["problems"]), ({709: "lease"}, [710], []))
+        self.assertEqual(sb.duplicate_clis([self._cli(709, 1), self._cli(710, 1)], [self.SID]), {self.SID: [709, 710]})
 
     def test_lease_state_names_the_first_failing_check(self):
         st = lambda starts: (lambda p: starts.get(p))

@@ -285,7 +285,9 @@ class BootReconcileEndsTheTree(unittest.TestCase):
         self.assertIsNotNone(sb.read_lease(d, SID), "the valid lease stays")
         self.assertIsNone(sb.read_lease(d, OTHER), "the lease that did not hold went with its CLI")
         self.assertIsNone(sb.read_lease(d, DEADSID), "a lease naming no live CLI is dropped")
-        rows = [json.loads(l) for l in (Path(d) / sb.SESSION_EVENTS_FILE).read_text().splitlines()]
+        # the lease rows among the ledger's (the boot sweep files rows of its own there: reconcile.*)
+        rows = [r for r in (json.loads(l) for l in (Path(d) / sb.SESSION_EVENTS_FILE).read_text().splitlines())
+                if r["kind"].startswith("lease.")]
         self.assertEqual(sorted(r["kind"] for r in rows), ["lease.holder-gone", "lease.no-live-process"])
         self.assertEqual({r["sid"] for r in rows}, {OTHER, DEADSID})
         self.assertEqual({r["cliPid"] for r in rows}, {STALE, DEAD})
@@ -419,7 +421,8 @@ class RealProcessTree(unittest.TestCase):
         self.assertTrue(self._alive(live), "the leased CLI survived the boot")
         self.assertIsNotNone(sb.read_lease(d, SID))
         self.assertIsNone(sb.read_lease(d, OTHER))
-        rows = [json.loads(l) for l in (Path(d) / sb.SESSION_EVENTS_FILE).read_text().splitlines()]
+        rows = [r for r in (json.loads(l) for l in (Path(d) / sb.SESSION_EVENTS_FILE).read_text().splitlines())
+                if r["kind"].startswith("lease.")]
         self.assertEqual([(r["kind"], r["sid"], r["cliPid"]) for r in rows], [("lease.holder-gone", OTHER, stale)])
         # the escalation reaches the surviving, re-parented CLI through its lease
         self.assertEqual(be._session_cli_pid(_Sess(SID)), live)

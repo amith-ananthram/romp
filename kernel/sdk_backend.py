@@ -3498,7 +3498,6 @@ def duplicate_clis(ps_lines: list[str], lastsids: list[str]) -> dict[str, list[i
 LEASE_DIR = "leases"
 LEASE_HEARTBEAT_S = 3.0      # the drain hold's poll cadence
 LEASE_TTL_S = 12.0           # DRAIN_HOLD_TTL: four beats, outlives a missed beat, not a dead holder
-LEASE_FIELDS = ("sid", "fsid", "pid", "start", "holder", "version", "t", "spawnedAt", "name")
 
 LEASE_ANOMALIES = ("lease.cli-without-lease",   # an SDK CLI of ours with no valid lease, kept because a live kernel parents it
                    "lease.no-live-process",     # a lease whose pid is gone, or now names another process
@@ -5912,7 +5911,6 @@ class SdkSession:
                 async with ClaudeSDKClient(options=opts) as client:
                     connected = True
                     self.client = client
-                    self.backend._lease_open(self, client)   # ownership by lease (T305): pid + start time, heartbeat
                     # The handshake IS the "this session is open" event (snapshot `connected`, the flip
                     # the kernel's opening chip stands down on) — push THIS session now. Left to the
                     # periodic cycle, a fresh session wore the opening dots seconds after its CLI was
@@ -5920,6 +5918,7 @@ class SdkSession:
                     # create, the ready chip landing at 5-12s with the cycle).
                     self.backend._push_session(self.sid)
                     self._connected.set()   # the control channel exists from here (move() waits on this)
+                    self.backend._lease_open(self, client)   # ownership by lease (T305): pid + start time, heartbeat
                     self._seed_spend_watermarks()   # a fresh CLI process starts its cumulative counters at
                     #   zero, or at what it restores from the resumed transcript's cost-state record
                     # The CLI is demonstrably up, so any recorded launch failure is HISTORY — clear it
