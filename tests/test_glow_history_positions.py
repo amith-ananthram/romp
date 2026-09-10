@@ -6,9 +6,15 @@ the group builder reads the pusher's built payload, and every glow site in the s
 SYNTHETIC fixtures only: a private synthetic sid, placeholder uuids."""
 import inspect
 import os
+import tempfile
 import unittest
 
-from romp_load import load_source
+# the state root is hermetic BEFORE any romp code loads (tests/test_state_isolation_order.py): under a bare unittest
+# or script run the kernel would otherwise operate on the real state directory
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
+os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
+
+from romp_load import load_source   # noqa: E402
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
