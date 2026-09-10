@@ -29,8 +29,19 @@ load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 km = load_source("romp_kernel_rclass", os.path.join(BIN, "romp-kernel"))
 
 
-def _git(repo, *args):
-    r = subprocess.run(["git", "-C", str(repo)] + list(args), capture_output=True, text=True)
+# T298: every git the fixture runs forbids BACKGROUND work. `git commit` spawns `git maintenance run --auto`,
+# which on current git detaches from its parent (maintenance.autoDetach, on by default in recent git; older git's
+# `gc --auto` detached once it had work) and can still be writing into .git while tearDownClass removes the
+# temp repo — the CI flake "Directory not empty: '.git'" raised by TemporaryDirectory.cleanup's rmtree (the
+# Python 3.10 job, 2026-09-10). The repo's own config carries the same keys (setUpClass), so a git the KERNEL
+# runs against the repo obeys them too; fsmonitor is off for the same reason on hosts where it has a daemon.
+GIT_NO_BACKGROUND = {"maintenance.auto": "false", "maintenance.autoDetach": "false", "gc.auto": "0",
+                     "gc.autoDetach": "false", "core.fsmonitor": "false"}
+_GIT_C = [x for k, v in GIT_NO_BACKGROUND.items() for x in ("-c", "%s=%s" % (k, v))]
+
+
+def _git(repo, *args, env=None):
+    r = subprocess.run(["git", "-C", str(repo)] + _GIT_C + list(args), capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr
     return r.stdout.strip()
 
@@ -46,6 +57,8 @@ class RealDiffShapes(unittest.TestCase):
         for sub in ("kernel", "bin", "postal", "cli", "docs", "tests", "ui/webview"):
             (repo / sub).mkdir(parents=True)
         _git(repo, "init", "-q")
+        for k, v in GIT_NO_BACKGROUND.items():   # T298: in the repo too, for any git run against it
+            _git(repo, "config", k, v)
         _git(repo, "config", "user.email", "t@TESTHOST")
         _git(repo, "config", "user.name", "t")
         (repo / "kernel/mod.py").write_text('def f():\n    """doc."""\n    return 1  # one\n')
@@ -192,6 +205,25 @@ class RealDiffShapes(unittest.TestCase):
         changed, cc = self._verdict(self.base, sha)
         self.assertTrue(changed, "the running kernel LOSES a module it loaded — restart")
         self.assertIn("kernel/mod.py", cc["kernel"])
+
+    def test_the_fixture_forbids_background_git_work(self):
+        # T298: the repo's config and every helper invocation forbid auto maintenance, gc and its detach, and
+        # the fsmonitor daemon, so no git child outlives the command that spawned it (see GIT_NO_BACKGROUND).
+        # Pinned at the source and by behaviour: git's own trace names every child it runs, and a commit
+        # through the helper spawns none.
+        for k, v in GIT_NO_BACKGROUND.items():
+            self.assertEqual(_git(self.repo, "config", "--local", "--get", k), v, "the repo's config carries " + k)
+            self.assertIn("%s=%s" % (k, v), _GIT_C, "…and so does every helper invocation")
+        self._reset()
+        (self.repo / "docs/a.md").write_text("# docs, traced\n")
+        with tempfile.NamedTemporaryFile("r", suffix=".log") as trace:
+            env = dict(os.environ, GIT_TRACE=trace.name)
+            _git(self.repo, "add", "-A", env=env)
+            _git(self.repo, "commit", "-qm", "traced", env=env)
+            t = trace.read()
+        self.assertIn("built-in: git commit", t, "the trace is on")
+        self.assertNotIn("maintenance", t, "no auto-maintenance child is spawned:\n" + t)
+        self.assertNotIn("run_command: git gc", t, "no gc child is spawned")
 
     def test_unknown_shas_and_git_failure_restart(self):
         self.assertTrue(km._kernel_code_changed("", "abc"), "unknown shas: restart")
