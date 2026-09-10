@@ -57,8 +57,9 @@ This repo may go public; assume every commit is permanent and world-readable.
   `notes-api` with `web`/`api`/`tests` sessions) rather than inventing per-test
   worlds.
 - Two machine-local backstops enforce this, neither a substitute for the rule:
-  the `.githooks/pre-push` hook greps each pushed ref's TIP tree, plus the lines
-  every commit new to every fetched remote ADDS, for the strings in
+  the `.githooks/pre-push` hook greps each pushed ref's TIP tree (regular files
+  and symlink targets), plus the lines every commit new to every fetched remote
+  ADDS, for the strings in
   `~/.config/romp/private-strings.txt` (absent file → no-op, so contributors
   are unaffected; it reads pushed shas, not the working tree, so it arms every
   worktree — a working-tree scan missed a leak pushed from a peer worktree on
