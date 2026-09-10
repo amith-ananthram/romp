@@ -565,22 +565,34 @@ export function followAdoption(st: TabGroupsState, prev: SessionViews | null | u
  *  truthful either way — the section IS folded, and the click opens it. */
 export interface HeadWords { count: string; title: string; label: string }
 
-export function headWords(name: string, total: number, hidden: number, folded: boolean, holdsActive: boolean): HeadWords {
+// The click's clause: a click also shows the section in the pane (the section at a glance, tab-snapshot.ts),
+// open or folded, so every title says so, except while the pane already shows the section (`shown`): then the
+// clause names the fold alone, or the way back to the transcript when the open section also holds the tab
+// being read (`back`). `holdsActive`, the section holds the tab being read, is a phrase in the words, not a
+// different action: the section folds like any other, and folded, its header is the tab's stand-in.
+export function headWords(name: string, total: number, hidden: number, folded: boolean, holdsActive: boolean, back = false, shown = false): HeadWords {
   const n = (k: number) => `${k} session${k === 1 ? "" : "s"}`;
-  if (holdsActive) {
-    return { count: String(total), label: `${name}, ${n(total)}`,
-             title: `${name} — ${n(total)}; holds the active tab, so it stays open; drag to reorder the groups` };
-  }
+  const reading = holdsActive ? "; holds the tab you are reading" : "";
+  const here = holdsActive ? ", holds the tab you are reading" : "";
   if (!folded) {
-    return { count: String(total), label: `${name}, ${n(total)}`,
-             title: `${name} — ${n(total)}; click to fold this group; drag to reorder the groups` };
+    // `back`: the pane is showing this section, the section is open and holds the tab being read: the click
+    // puts that transcript back (render.ts show-transcript), so the title says so, not "fold", and the spoken
+    // label names the action too (render.ts drops the header's aria-expanded in that state, since the press
+    // folds nothing). `shown` without `back`: the pane shows this open section but the tab being read is
+    // elsewhere, so the click still folds, and the title does not promise to show what the pane already shows.
+    const click = back ? "click to go back to the transcript" : shown ? "click to fold this group" : "click to fold this group and see its sessions at a glance";
+    return { count: String(total), label: `${name}, ${n(total)}${here}${back ? "; back to the transcript" : ""}`,
+             title: `${name} — ${n(total)}${reading}; ${click}; drag to reorder the groups` };
   }
+  // folded and `shown`: the header's click just folded the section and put its sessions in the pane, so the
+  // click opens it and the title says that alone
+  const open = shown ? "click to open this group" : "click to open and see its sessions at a glance";
   if (hidden === 0) {
     const all = total === 1 ? "its one session is" : `all ${total} sessions are`;
-    return { count: String(total), label: `${name}, ${n(total)}, folded, all shown`,
-             title: `${name} — folded, but ${all} set to show when folded, so none is hidden; click to open` };
+    return { count: String(total), label: `${name}, ${n(total)}, folded, all shown${here}`,
+             title: `${name} — folded, but ${all} set to show when folded, so none is hidden${reading}; ${open}` };
   }
-  return { count: String(hidden), label: `${name}, ${n(hidden)} folded`, title: `${name} — ${n(hidden)} folded; click to open` };
+  return { count: String(hidden), label: `${name}, ${n(hidden)} folded${here}`, title: `${name} — ${n(hidden)} folded${reading}; ${open}` };
 }
 
 /** One strip item: a section header (folded or open; `active` = it holds the active tab; `hidden` =
@@ -605,14 +617,17 @@ export interface StripPlan {
  *  - A folded section hides its members EXCEPT the pinned ones (the tab menu's "Show when folded"),
  *    which keep their place under the header in strip order; the header stands in for `hidden` alone
  *    (its count reads those), and only those ids join the `folded` set.
- *  - The ACTIVE tab never renders hidden: keyboard focus must never land on a hidden node. Its
- *    section's header is marked `active`, and render.ts gives that header no fold action: a fold stored
- *    there could not render (nothing changed on screen, on every click) and then bit when the user
- *    switched tabs. The section is unfoldable while it holds the active tab. A session under several
- *    tags (T264b) has a copy in each: while any copy is on screen under the stored folds (an open
- *    section, or pinned through a fold) every fold stands and only the OPEN holders are marked active;
- *    only when every copy would be hidden is exactly one holder — the first in tagOrder — forced open.
- *    (Activating a live session also tagged `archived` must not spring the whole archived row open.) */
+ *  - The ACTIVE tab's section folds like any other. Its header is marked `active` whether open or
+ *    folded: folded, the header is the hidden tab's stand-in, so keyboard focus never lands on a hidden
+ *    node. render.ts focuses it where it would focus the tab, the arrows step from its position
+ *    (neighborOfFolded), and the pane shows the section at a glance (tab-snapshot.ts) instead of a
+ *    transcript whose tab is nowhere on screen.
+ *  - A session under several tags (T264b) has a copy in each section, and each copy's fold stands on
+ *    its own. The header of a holder that SHOWS a copy (open, or folded with the copy pinned through the
+ *    fold) is marked `active`; when no copy shows anywhere exactly one holder, the first in tagOrder, is
+ *    marked: the header that stands in for the tab. Nothing springs open (the active tab's section folds
+ *    like any other, above). A tab joins the `folded` set only when EVERY copy is off the strip; one
+ *    copy on screen keeps it in the keyboard order. */
 export function planStrip(visibleIds: readonly string[], unions: readonly TagUnion[], st: TabGroupsState,
                           activeId: string | null, phone: boolean,
                           pending?: { id: string; tags: readonly string[] } | null): StripPlan {
@@ -629,15 +644,17 @@ export function planStrip(visibleIds: readonly string[], unions: readonly TagUni
     return { items, folded, sectioned };
   }
   const secs = sectionTabs(visibleIds, u);
-  const open = (sec: TabSection) => sec.name === null || !isSectionCollapsed(st, sec.name);
+  // does this section put a copy of `id` on the strip: open, or folded with the copy pinned through the fold
+  const shows = (sec: TabSection, id: string): boolean => sec.name === null || !isSectionCollapsed(st, sec.name) || isPinned(st, sec, id);
   const holders = activeId !== null ? secs.filter((sec) => sec.ids.includes(activeId)) : [];
-  const shownSomewhere = activeId !== null && holders.some((sec) => open(sec) || isPinned(st, sec, activeId));
+  const shownSomewhere = activeId !== null && holders.some((sec) => shows(sec, activeId));
   for (const sec of secs) {
-    // one holder: open and unfoldable, as always. several (T264b): the open ones are active; a folded
-    // one stays folded (a pinned copy shows through it) unless NO copy shows anywhere — then the first
-    // holder in tagOrder opens
-    const active = holders.includes(sec) && (holders.length === 1 || open(sec) || (!shownSomewhere && sec === holders[0]));
-    const f = sec.name !== null && !active && isSectionCollapsed(st, sec.name);
+    // a holder showing a copy is marked; when NO copy shows anywhere the first holder in tagOrder is the
+    // one stand-in (T264b; a single holder is holders[0], so it is marked whatever its fold: folded, its
+    // header is the hidden tab's stand-in). No fold is forced open here: the active tab's section folds
+    // like any other
+    const active = activeId !== null && holders.includes(sec) && (shows(sec, activeId) || (!shownSomewhere && sec === holders[0]));
+    const f = sec.name !== null && isSectionCollapsed(st, sec.name);
     const hidden = f ? sec.ids.filter((id) => !isPinned(st, sec, id)) : [];
     items.push({ head: sec, folded: f, active, hidden });
     for (const id of sec.ids) { if (hidden.includes(id)) folded.add(id); else items.push({ id }); }
@@ -646,6 +663,28 @@ export function planStrip(visibleIds: readonly string[], unions: readonly TagUni
   // keyboard — only when EVERY copy is; one copy on screen keeps it in the order
   for (const it of items) if ("id" in it) folded.delete(it.id);
   return { items, folded, sectioned };
+}
+
+/** The section a tab is homed in, from a rendered plan's items: the first header whose ids include it,
+ *  or null (a flat strip, or an id the plan does not know). */
+export function homeSectionOf(items: readonly StripItem[], id: string): TabSection | null {
+  for (const it of items) if ("head" in it && it.head.ids.includes(id)) return it.head;
+  return null;
+}
+
+/** Where the arrows land when the active tab is folded away: the header holding it is its stand-in, so
+ *  the step starts THERE. `dir` +1 is the first tab rendered after that header, -1 the last one before
+ *  it, wrapping round the strip. Folded ids are not items, so the walk sees only tabs on screen. Null
+ *  when no header holds the id or no tab is on screen at all. */
+export function neighborOfFolded(items: readonly StripItem[], id: string, dir: 1 | -1): string | null {
+  const at = items.findIndex((it) => "head" in it && it.head.ids.includes(id));
+  if (at < 0) return null;
+  const n = items.length;
+  for (let k = 1; k <= n; k++) {
+    const it = items[(at + dir * k + n * k) % n];
+    if ("id" in it) return it.id;
+  }
+  return null;
 }
 
 /** The header drag: `from` takes `to`'s slot in the FULL union order (every name, not only the

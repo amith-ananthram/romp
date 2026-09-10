@@ -183,7 +183,7 @@ def _process_stats():
 _CHAT_SIG_LABELS = ("transcript", "states", "store", "hold", "archive", "episodes", "reg", "gone", "tasks", "cut",
                     "live", "row", "clock", "backend", "ops", "limit", "retry", "bg", "watch", "stamp", "anchors",
                     "downtime", "names", "flags", "ncards", "colormap", "acct", "cleared", "host",
-                    "cwd", "claudemd", "fork",
+                    "cwd", "claudemd", "fork", "note", "needs",
                     "taskout", "pathlink", "postal")
 _CHAT_SIG_DEPS = ("taskout", "pathlink", "postal")
 
@@ -27990,6 +27990,17 @@ def _chat_build_sig(sess, tm=None, now=None, tmux=None, deps=None):
         # the sdk/ directory's mtime, which moves at turn rate; the per-sid value moves only when a fork of
         # THIS session appears, is promoted or is deleted).
         sig.append((_be.fork_children().get(sid) if _be and hasattr(_be, "fork_children") else None) or None)
+        # note: the session's postal working note (working/<sid>), by identity: the ledger carries its text
+        # (workingNote), and a `romp mail working` from a shell, a peer's forwarded write and the kernel's own
+        # idle-and-done lift all change it with no transcript, states or store write.
+        _np = _working_note_path(sid)
+        sig.append(_chat_ident(_np) if _np is not None else None)
+        # needs: the feed's per-session needs-you verdict the ledger carries (needsInput), as the boolean "a
+        # card of THIS session is filed under needs-you". The set behind it is None until the first feed build
+        # since start, and a push builds the chat sessions BEFORE the feed, so the raw tri-state would give
+        # every tab a None on the first push and a False on the next: one whole-strip rebuild for a value the
+        # row reads the same (needsInput === true). Only True is a verdict.
+        sig.append(_feed_needs_input_of(sid) is True)
         sig.extend(((), (), None) if deps is False else _chat_sig_deps(sid, deps))   # taskout, pathlink, postal
         return tuple(sig)
 
@@ -32762,7 +32773,21 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
     if _session_flag(sid, "hideFromFeed"):       # muted → out of task tracking: the ledger shows no goal tree / current task
         tree, current, recent_tops = [], None, []
     ledger = {"summary": arch.get("headline", ""), "tree": tree[:80],
-              "current": current, "recent": recent_tops}
+              "current": current, "recent": recent_tops,
+              # the postal working note (set_working: the session's claim to a branch and files, written for
+              # peer sessions), "" when none. The chat's section-at-a-glance view shows it as a row's second
+              # line. Kept for a muted session: it is the session's own statement, not a goal the judges track.
+              "workingNote": Sessions.working_note(sid),
+              # the FEED's per-session needs-you verdict: True when the last feed build filed a card of this
+              # session under needs_input (the column the feed's Blocked list is: a judge-filed block, a live
+              # prompt, an on-you API error), False when none, None before the first feed build since start.
+              # The section view's row reads it for its "needs you" word, so the two panes agree; the tab's own
+              # chip rule misses the common case (a session that asked and went idle). Read from the feed build
+              # rather than re-derived: the column's rule lives in build_feed with a dozen inputs. The feed
+              # builds AFTER the chat sessions in a push, so this trails the feed by one push cycle (the chat
+              # signature's `needs` component brings the change forward on the next one). A muted session has
+              # no cards, so it reads False.
+              "needsInput": _feed_needs_input_of(sid)}
     # work-timer base, in MILLISECONDS (render's elapsedMs does Date.now()ms - sinceEpoch; a seconds
     # value showed ~494,000h — the user's "400,000 hours" bug): the current open turn's start while
     # working, else the last activity; None when unknown (render then shows no timer).
@@ -42844,6 +42869,26 @@ _VIEW_STATS = {"feedBuild": 0, "feedServe": 0, "tlBuild": 0, "tlServe": 0,
                # would forge the bug signature above, or bury a pusher regression (review find, 2026-09-08)
                "feedJsonBuild": 0, "feedJsonServe": 0}
 _built_timeline = [None, None, 0.0, 0.0]          # [fleet_sig, payload, built_at, build_started_at]
+# The sids the LAST feed build filed under needs_input: the per-session form of the feed's Blocked column,
+# read by build_session's ledger (needsInput) so the chat's section-at-a-glance rows say "needs you" exactly
+# when the feed does. None until the first feed build since start (a chat client alone makes the push build
+# the feed, so that is one push cycle). Set by _cached_feed on every rebuild, from the same payload the badge
+# and the bells read (_needs_you_count), never re-derived.
+_feed_needs_input = [None]
+
+
+def _needs_input_sids(feed):
+    """The sids with a card in the feed's needs_input column: the filing rule the feed client maps
+    (feed.ts askColumn: it.column == "needs_input"), applied per session. Placeholders count too: the
+    Blocked list shows them."""
+    return frozenset(str(a.get("sid")) for a in (feed.get("asks") or [])
+                     if a.get("column") == "needs_input" and a.get("sid"))
+
+
+def _feed_needs_input_of(sid):
+    """build_session's read: True/False from the last feed build, None before the first one."""
+    sids = _feed_needs_input[0]
+    return None if sids is None else (str(sid) in sids)
 # Wire-form caches for the two heavy shared payloads (the 2026-08-10 CPU fix, round three): the last
 # (source-identity key, lazy serialization, dedup sig, per-entry split) for the feed and the timeline bars,
 # so an unchanged build is never re-serialized cycle after cycle (~357KB + ~1.65MB per cycle measured with
@@ -42978,6 +43023,7 @@ def _cached_feed(now, tmux, sig, connect=False):
     _PERF_STATS.build("feed", False, time.monotonic() - _t0)
     feed["buildId"] = bid
     _built_feed[:] = [sig, feed, time.time(), started]
+    _feed_needs_input[0] = _needs_input_sids(feed)        # the per-session needs-you the session ledgers read
     _badge = _needs_you_count(feed)
     _fired = _feed_notifications(feed)                    # armed bells: fresh builds are the transition event
     _buzzed = []
