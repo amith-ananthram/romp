@@ -13466,7 +13466,12 @@ def _thread_events(tsid, cut_uuid, now, tmux):
     the task store, the pending cut, the backend's live revision and queue, the snapshot row, the
     shared files), without the dependency tail (a thread records no build dependencies), plus the
     thread's own states row; the serve yields to _views_dirty for the dependencies that tail would
-    have carried. A thread with no keyable input (no transcript yet) is built every time, never cached."""
+    have carried. A thread with no keyable input (no transcript yet) is built every time, never cached.
+    A signature that RAISES (one of its component reads failed) is said once per fault episode, on
+    stderr with the traceback and as a refused bell row, the chat loop's rule for the same signature
+    (_chat_sig_fault; a signature that is taken ends the episode, _chat_sig_ok), and the thread is
+    built uncached until a signature is taken: before this, the fault was swallowed into an uncached
+    build and left no trace anywhere."""
     reg = _thread_reg(tsid)
     if reg.get("forkOf"):
         return []
@@ -13477,6 +13482,7 @@ def _thread_events(tsid, cut_uuid, now, tmux):
     key = None
     try:
         sig = _chat_build_sig(sess, tm, now, tmux=tmux, deps=False)
+        _chat_sig_ok(tsid)                          # a signature that was taken ends its fault episode
         if sig is not None:
             # plus the thread's OWN state rows (review 2026-09-08): the backend writes states/<tsid>.jsonl under
             # the romp sid, while the key above stats states/<fsid>.jsonl for the reg's lastSid (_sdk_sess hands
@@ -13489,7 +13495,10 @@ def _thread_events(tsid, cut_uuid, now, tmux):
             except OSError:
                 states = None
             key = sig + (states,)
-    except Exception:
+    except Exception as e:
+        _chat_sig_fault(sess, e)                # once per fault episode: stderr and a bell row, the chat loop's rule.
+        #                                         _chat_sig_faults is sid-keyed; the chat loop builds only a PROMOTED
+        #                                         thread and the frame never hands one here, so no entry is shared.
         key = None                              # an input we cannot key → build, never cache
     hit = _built_thread.get(tsid)
     if key is not None and hit is not None and hit[0] == key and hit[1] == cut_uuid and _views_dirty[0] <= hit[3]:
