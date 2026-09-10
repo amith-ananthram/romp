@@ -20,14 +20,16 @@ Three scenarios against the REAL shell, the REAL worker and the REAL kernel (her
      Apple endpoint is dispatched at the REAL `push` handler as e.data — the shape a browser that does not parse it
      receives — and then a `notificationclick` carrying that notification's data at the REAL click handler. The tap
      must land: the chat pane's active tab becomes `api`, ONE /reveal via 'sw', /push/landed for the pid, and the
-     kernel log carries [push] ack stage=shown, [push] ack stage=clicked, [reveal] sw and [push] landed, in that
-     order. (Headless Chromium refuses showNotification whatever the context grants, so the show's promise rejects;
+     kernel log carries [push] ack stage=shown, [push] ack stage=clicked, [reveal] sw and [push] landed (all
+     four; their order is not pinned, each rides its own connection). (Headless Chromium refuses showNotification
+     whatever the context grants, so the show's promise rejects;
      the ack was started before it. The click is dispatched as a plain event carrying the two fields the handler
      reads, .notification and .waitUntil — and, a script-made click carrying no user activation, with focus()
      granted the way a real click grants it.)
   2. THE LINK ROAD (what an iOS tap produces): the page is navigated to the deep link the declarative message's
      `navigate` names — '/?push-reveal=<api>&push-pid=<pid>' — as iOS does on a tap. The page must land it at boot:
-     ONE /reveal via 'link' with boot:true, parked by the kernel and consumed on the chat pane's ready (the tab
+     ONE /reveal via 'link' with boot:true, parked by the kernel and consumed on the chat pane's ready, or delivered
+     at once when that pane's ready beat the fetch (T312: a copy stays parked until the pane answers) (the tab
      becomes `api`), /push/landed for the pid, the params stripped from the URL (and the ?token= it was opened
      with, which the shell drops once the cookie is set), the 'deeplink' row on file. Then the open page GAINS the
      params without a load (history.pushState + pageshow, the window iOS navigates in place) for a second push:
@@ -151,6 +153,22 @@ try { browser = await chromium.launch(); }
 catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
 const out = { reveals: [], ledger: [] };
 const context = await browser.newContext({ viewport: { width: 1100, height: 720 } });
+// T312 trace: in every frame, wrap the federation layer's inbound the moment it is published (federation.ts assigns
+// window.__rompFed once, by plain assignment; every reader goes through the getter by truthiness, and before the
+// manager starts the getter answers undefined, so a page that never publishes reads as before). The order of frames
+// the chat pane processed at boot (tabOrder, sessions, the focus) and the active tab after each is on record; the
+// list grows for the page's life, which is seconds here
+await context.addInitScript(() => {
+  const w = window; w.__frames = [];
+  let fed = undefined;
+  Object.defineProperty(w, "__rompFed", { configurable: true, get() { return fed; }, set(v) {
+    fed = v;
+    if (v && typeof v.inbound === "function" && !v.__traced) {
+      const orig = v.inbound.bind(v); v.__traced = true;
+      v.inbound = (h, m) => { try { w.__frames.push([Math.round(performance.now()), h, m && m.type, m && (m.id || (Array.isArray(m.order) ? "order:" + m.order.length : "")), (document.querySelector("#tabs .tab.active") || {}).dataset?.id || null]); } catch {} return orig(h, m); };
+    }
+  } });
+});
 const page = await context.newPage();
 page.on("request", (r) => { const u = r.url();
   if (r.method() === "POST" && /\/reveal$/.test(u)) out.reveals.push(JSON.parse(r.postData() || "{}"));
@@ -162,6 +180,7 @@ if (!chat) { console.error("no chat iframe in the shell"); process.exit(1); }
 const active = () => chat.evaluate(() => (document.querySelector("#tabs .tab.active") || { dataset: {} }).dataset.id || null);
 out.landed = await chat.waitForFunction((sid) => (document.querySelector("#tabs .tab.active") || {}).dataset?.id === sid, cfg.sidB, { timeout: 20000 }).then(() => true).catch(() => false);
 out.after = await active();
+out.frames = await chat.evaluate(() => (window.__frames || []).slice(0, 60));   // T312 trace
 out.urlAfterBoot = page.url();
 out.cookies = (await context.cookies(cfg.origin)).map((c) => ({ name: c.name, value: c.value }));   // the token's home once the address drops it
 for (let i = 0; i < 40 && !out.ledger.length; i++) await page.waitForTimeout(50);
@@ -450,10 +469,11 @@ class ServedTapLanding(unittest.TestCase):
                      r"\[reveal\] sw sid=%s wid=\S+: delivered" % re.escape(SID_B[:8]),
                      r"\[push\] landed sid=%s endpoint=%s" % (re.escape(SID_B[:8]), ep_host)):
             self.assertRegex(klog, line, "the kernel logged it: %s" % klog[-2000:])
-        self.assertLess(klog.index("[push] ack stage=shown"), klog.index("[push] ack stage=clicked"), "the push settled before the click was dispatched")
-        # (the worker STARTS the clicked ack before it tells the page, but that ack and the page's /reveal — like the
-        # /reveal and the /push/landed — travel on two connections the kernel serves on two threads: all are on the
-        # trail, their relative order is not a fact of the design, and pinning it flaked on 2026-09-10)
+        # (the worker STARTS the shown ack before the click and the clicked ack before it tells the page, but every one
+        # of those requests — the two acks, the page's /reveal, the /push/landed — travels on its own connection, which
+        # the kernel serves on its own thread: all four are on the trail, and their relative order is not a fact of
+        # the design. Pinning clicked-before-reveal flaked on 2026-09-10; pinning shown-before-clicked flaked the same
+        # day on the CI runner (T308), so neither order is pinned: the four lines' presence is the whole claim.)
         # the shell's trail: the worker's message row, structure only
         rows = self._diag_rows("sw-message")
         self.assertTrue(rows, "an sw-message row is on file")
@@ -473,8 +493,8 @@ class ServedTapLanding(unittest.TestCase):
         link2 = "/?push-reveal=%s&push-pid=%s" % (SID_B, pid2)
         out = self._drive(DRIVER_LINK, link=link, link2=link2)
         # THE OUTCOME first: the page booted on the link and the chat pane is on api
-        self.assertTrue(out["landed"], "the chat pane's active tab must become the session the link names; it is %r, the page posted %d /reveal(s)\n  kernel: %s\n  reveals: %r"
-                        % (out["after"], len(out["boot"]["reveals"]), self._reveal_lines(), out["boot"]["reveals"]))
+        self.assertTrue(out["landed"], "the chat pane's active tab must become the session the link names; it is %r, the page posted %d /reveal(s)\n  kernel: %s\n  reveals: %r\n  frames (t, host, type, id, active-after): %r"
+                        % (out["after"], len(out["boot"]["reveals"]), self._reveal_lines(), out["boot"]["reveals"], out.get("frames")))
         self.assertEqual(out["after"], SID_B)
         b = out["boot"]
         self.assertEqual(len(b["reveals"]), 1, "exactly one /reveal at boot: %r" % b["reveals"])
@@ -504,9 +524,10 @@ class ServedTapLanding(unittest.TestCase):
                 break
             time.sleep(0.1)
         self.assertTrue((self._row(pid) or {}).get("landedAt") and (self._row(pid2) or {}).get("landedAt"), "both rows landed on the kernel: %r %r" % (self._row(pid), self._row(pid2)))
-        # the kernel's trail: the boot's park consumed on the pane's ready; the later one delivered live; both settled
+        # the kernel's trail: the boot reveal parked (the pane not yet up) or delivered with a copy parked (the pane's
+        # ready beat the fetch, T312) — either road lands; the later one delivered live; both settled
         klog = self._klog()
-        self.assertRegex(klog, r"\[reveal\] link sid=%s wid=\S+ boot: parked" % re.escape(SID_B[:8]), "the boot parked: %s" % self._reveal_lines())
+        self.assertRegex(klog, r"\[reveal\] link sid=%s wid=\S+ boot: (parked|delivered, copy parked \(booting page\))" % re.escape(SID_B[:8]), "the boot reveal: %s" % self._reveal_lines())
         self.assertRegex(klog, r"\[reveal\] link sid=%s wid=\S+: delivered" % re.escape(SID_B[:8]), "the in-place arrival delivered live: %s" % self._reveal_lines())
         self.assertEqual(len(re.findall(r"\[push\] landed sid=%s endpoint=web.push.apple.com" % re.escape(SID_B[:8]), klog)), 2)
         # the shell's trail: the deeplink rows, boot then pageshow, structure only

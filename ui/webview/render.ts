@@ -13,6 +13,9 @@ import diff from "highlight.js/lib/languages/diff";
 import yaml from "highlight.js/lib/languages/yaml";
 import type { ParsedAsk } from "../ask-types";
 import { TABBAR_H_KEY, TABBAR_H_DEFAULT, clampTabbarH, parseTabbarH } from "./tabbar-resize";
+import type { CmtPopFrac } from "./comment-pop-size";
+import { CMT_POP_SIZE_KEY, CMT_POP_THREAD_DEFAULT, parseCmtPopSize, clampCmtPopPx, toCmtPopFrac, isCmtPopMax,
+         centerCmtPop, cmtPopCapPx } from "./comment-pop-size";
 import { ctxFallbackColor, pickTone, readableRgb } from "./ctx-color";
 import { applyTheme } from "./theme";
 import { applyDenseChrome } from "./dense-chrome";
@@ -64,7 +67,7 @@ import { openPathLink, linkifyPathTokens, selectionOpenIn } from "./path-links";
 import { initFileBrowse, openFileBrowse } from "./file-browse";   // the browser is pane-local here now (the user 2026-08-24)
 import { pastedFilePath } from "./paste-path";
 import { insertAtCaret } from "./composer-insert";
-import { hostNameNodes, hostPartsNodes, hostPrefix, hostOf, hostIsDown, hostDownNote } from "./host-prefix";
+import { hostNameNodes, hostPartsNodes, hostPrefix, hostOf, hostIsDown, hostIsDialing, hostDownNote } from "./host-prefix";
 import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionToken, insertMention, mentionKeyAction, mentionSegments } from "./composer-mention";   // the @-mention card's rules, pure; the DOM is setupComposer's mention block and markMentions
 import type { MentionCandidate, MentionQuery } from "./composer-mention";
 import { defaultCommentName, defaultBreakoutName, defaultForkName, nameToSend } from "./comment-name";
@@ -3009,7 +3012,7 @@ let railStickyPending = false;
 function scheduleRailSticky(): void {
   if (railStickyPending) return;
   railStickyPending = true;
-  requestAnimationFrame(() => { railStickyPending = false; paintRailSticky(); paintScrollMarks(); updateCommentRail(); });
+  requestAnimationFrame(() => { railStickyPending = false; paintRailSticky(); paintScrollMarks(); updateCommentRail(); if (activeId && hasUnreadOpenThread(activeId)) paintCommentOutlines(activeId); });
 }
 
 function renderEventInner(ev: ChatEvent): HTMLElement {
@@ -4859,6 +4862,12 @@ function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>)
   const kind = kindLabel(intent ? intent.cls : null);
   let meta: HTMLElement | undefined;
   if (kind && intent) { meta = el("span", "postal-kind postal-kind-" + intent.cls); meta.textContent = kind; }
+  // the delivery state, read once here: it decides the meta below and the icon + dress after the card is built
+  const delivery = deliveryOf(ev);
+  // no recognised kind (a legacy row with neither a declared kind nor a leading token) but a delivery state to show:
+  // an EMPTY meta slot, so the icon always rides in the meta (T313 review find) — one geometry for every card, and
+  // the CSS needs no second path for an icon appended straight to the head
+  if (!meta && delivery) meta = el("span", "postal-meta-empty");
   // Gist: ALWAYS a one-line summary, the incoming caption, else the first line of the message CLIPPED (gist.ts
   // postalHead), with the full message one click deeper whenever the gist does not carry all of it (the user
   // 2026-06-16; T294, the user 2026-09-10, whose one-paragraph sent card had no fold at all). KEYED (the user
@@ -4876,9 +4885,11 @@ function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>)
   // relay, or parked for an unreachable host) — the SAME provisional dress the user's own pending send wears
   // (the queued bubble's class and tokens, the T302 amendment): solid again once the receipt says delivered,
   // relayed or read; bounced keeps its red mark. Incoming: only a parked clock (it waited while you were offline).
-  const delivery = deliveryOf(ev);
   if (delivery) {
-    turn.querySelector(".notice-head")?.appendChild(deliveryIcon(delivery));
+    // the icon rides INSIDE the meta slot, after the kind word (T313): the meta grows to the head's right edge, so the
+    // icon still sits at that edge, and on a phone-width head the kind word and the icon wrap as ONE unit (an icon
+    // alone on a line of its own was the alternative); the meta always exists when there is an icon (above)
+    turn.querySelector(".notice-meta")?.appendChild(deliveryIcon(delivery));
     if (ev.direction === "out" && (delivery.state === "sent" || delivery.state === "parked")) {
       turn.querySelector(".notice")?.classList.add("queued-bubble");
       turn.classList.add("postal-provisional");   // the bubble's border + padding move the head line: the rail dot follows
@@ -6697,6 +6708,9 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
 // this only when the reachable set actually CHANGES (its own /tunnels poll is the event), so this is a
 // repaint per connect/drop, not per poll (the user 2026-07-29).
 window.addEventListener("romp-hosts", () => { renderTabs(); });
+// a dial attempt to a remote host began or ended (federation.ts dialEvent): the host-down foot's swirl
+// spins while one is in flight, as of the last /tunnels poll, so it repaints on this event and on nothing else
+window.addEventListener("romp:hostDial", () => { syncHostOfflineFoot(); });
 window.addEventListener("mousedown", (e) => { if (ctxMenuEl && !ctxMenuEl.contains(e.target as Node)) dismissTabMenu(); }, true);
 // an Escape that closed the menu says so on the event (preventDefault), so the section view's own Escape
 // (installSnapshotEscape, armed at this same capture phase, later in the listener order) yields to it
@@ -8345,6 +8359,10 @@ let pendingCommentAnchor: { sid: string; uuid: string; exact: string;
   model?: string; effort?: string; fast?: string; color?: string } | null = null; // create mode (+ the thread's own picks)
 let pendingAdoptTid: string | null = null;                          // commentCreated ack that beat its frame
 let commentPopPos: { x: number; y: number } | null = null;
+// the size WE set on the open popover (its open geometry, a stored preference, maximize/restore) — the
+// ResizeObserver tells our own sizing from the user's pull by it, so only a pull is remembered (2026-09-10)
+let cmtPopApplied: { w: number; h: number } | null = null;
+let cmtPopPreMax: CmtPopFrac | null = null;     // the size the box had before the last maximize this page-load: restore's target
 
 // the popover's own file picker (the user 2026-08-17: the attach clip, like the chat's) — files
 // ship through the SAME dropFile flow; the droppedPath ack sees the open popover and lands there
@@ -8394,7 +8412,7 @@ function applyCommentMarks(sid: string): void {
   // the rail cue clears first (idempotent re-apply): a thread viewed, resolved, or removed must
   // drop its turn's tint on this very pass, not linger until the next anchor match
   for (const t of Array.from(v.el.querySelectorAll(".turn.cmt-rail-unread"))) t.classList.remove("cmt-rail-unread");
-  if (!threads.length) { if (sid === activeId) updateReplyChips(); return; }   // no threads → no chips (the last one resolved/deleted)
+  if (!threads.length) { paintCommentOutlines(sid); if (sid === activeId) updateReplyChips(); return; }   // no threads → no boxes, no chips (the last one resolved/deleted)
   for (const [uuid, list] of threadsByAnchor(threads)) {
     const turn = v.el.querySelector(`.turn[data-uuid="${cssEscape(uuid)}"]`) as HTMLElement | null;
     if (!turn) continue;                       // windowed out — the mark returns when the turn does
@@ -8405,9 +8423,82 @@ function applyCommentMarks(sid: string): void {
     // openCommentPopover drops the unread flag and re-runs this pass.
     turn.classList.toggle("cmt-rail-unread", list.some((t) => !!t.unread && t.status === "open"));
   }
+  paintCommentOutlines(sid);                   // the unread boxes follow the marks this pass just placed (or unwrapped)
   // the reply chips MEASURE the marks (above/below the viewport), so they recount after this pass has the
   // highlights back in the DOM — this is the comments frame's and every transcript rebuild's hook for them
   if (sid === activeId) updateReplyChips();
+}
+
+/** ONE outline around the WHOLE highlighted passage of an unread open thread (the user 2026-09-10), in the scroll
+ *  notch's yellow (var(--cmt-hl)) — in place of the dashed ring each line fragment wore (an outline on the inline
+ *  mark paints per fragment, so a wrapped passage read as a stack of dashed boxes). CSS cannot merge the fragments,
+ *  so the box is an absolutely positioned child of the TURN (.cmt-outline, one per thread), sized to the union of the
+ *  thread's mark fragments' client rects, turn-relative: it scrolls with the text and needs no repaint on scroll.
+ *  Each fragment is first cut to every scrolling ancestor between its mark and the turn (a notice body, a wide formula):
+ *  the box sits outside those containers, so an unclipped fragment scrolled out of one would draw over the content
+ *  below. Repainted where the geometry can move — after every marks pass (each transcript rebuild and comments frame),
+ *  on the rail's rAF scheduler (a re-render, the view's resize observer, every scroll in the pane, inner containers'
+ *  included through the capture-phase listener) and on window resize — those two only while the session has an unread
+ *  open thread (hasUnreadOpenThread: a store read, so a scroll frame with nothing to move walks no DOM); the same measure-then-write
+ *  pass either way, writing only what changed. pointer-events: none, so hover and click land on the marks beneath.
+ *  A box goes with its unread bit (styleCommentMark drops the class when the popover opens or the thread resolves)
+ *  and with its marks (a windowed-out turn, a deleted thread); a hidden view has no boxes to measure and keeps none. */
+/** The cheap gate for the geometry hooks (the rail scheduler fires on every scroll frame, the resize listener on every
+ *  resize): a session with no unread open thread has no box to move, so those paths never walk its DOM (review find,
+ *  T310). Read from the thread store, no DOM. The marks pass calls the painter unconditionally: it is the removal path
+ *  (the last unread thread read, resolved or deleted takes its box with it on that pass). */
+function hasUnreadOpenThread(sid: string): boolean {
+  return (commentThreads.get(sid) || []).some((t) => !!t.unread && t.status === "open");
+}
+
+function paintCommentOutlines(sid: string): void {
+  const v = views.get(sid);
+  if (!v) return;
+  const want = new Map<string, HTMLElement[]>();          // tid -> its unread fragments, document order
+  if (v.el.style.display !== "none") {
+    for (const m of Array.from(v.el.querySelectorAll("mark.cmt-hl.unread")) as HTMLElement[]) {
+      const tid = m.dataset.tid || "";
+      const list = want.get(tid);
+      if (list) list.push(m); else want.set(tid, [m]);
+    }
+  }
+  for (const box of Array.from(v.el.querySelectorAll(".cmt-outline")) as HTMLElement[]) {
+    const tid = box.dataset.tid || "";
+    const marks = want.get(tid);
+    // a box whose thread is no longer unread, or that sits on a turn its marks have left, goes
+    if (!marks || marks[0].closest(".turn") !== box.parentElement) box.remove();
+  }
+  const PAD = 1;                                          // the box sits 1px clear of the glyphs (outline-offset's role)
+  for (const [tid, marks] of want) {
+    const turn = marks[0].closest(".turn") as HTMLElement | null;
+    if (!turn) continue;
+    let l = Infinity, t = Infinity, r = -Infinity, b = -Infinity;
+    for (const m of marks) {
+      // a fragment counts only where it can be SEEN: the box lives on the turn, outside any scrolling container between
+      // the mark and the turn (a notice body at its max height, a wide formula), whose clip the fragment's own rect
+      // ignores — so each fragment is cut to every such ancestor first, and a fragment scrolled out of view adds nothing
+      // (review find, T310). The union of what remains is the box; nothing left → no box.
+      let cl = -Infinity, ct = -Infinity, cr = Infinity, cb = Infinity;
+      for (let a = m.parentElement; a && a !== turn; a = a.parentElement) {
+        const cs = getComputedStyle(a);
+        if (cs.overflowX === "visible" && cs.overflowY === "visible") continue;
+        const ar = a.getBoundingClientRect();
+        cl = Math.max(cl, ar.left); ct = Math.max(ct, ar.top); cr = Math.min(cr, ar.right); cb = Math.min(cb, ar.bottom);
+      }
+      for (const q of Array.from(m.getClientRects())) {
+        if (!q.width && !q.height) continue;
+        const ql = Math.max(q.left, cl), qt = Math.max(q.top, ct), qr = Math.min(q.right, cr), qb = Math.min(q.bottom, cb);
+        if (qr <= ql || qb <= qt) continue;              // clipped away by a scrolling ancestor
+        l = Math.min(l, ql); t = Math.min(t, qt); r = Math.max(r, qr); b = Math.max(b, qb);
+      }
+    }
+    let box = turn.querySelector(`:scope > .cmt-outline[data-tid="${cssEscape(tid)}"]`) as HTMLElement | null;
+    if (!isFinite(l)) { box?.remove(); continue; }        // no visible fragment (a display:none ancestor, or all scrolled out)
+    if (!box) { box = el("div", "cmt-outline"); box.dataset.tid = tid; turn.appendChild(box); }
+    const tr = turn.getBoundingClientRect();
+    const css = { left: (l - tr.left - PAD) + "px", top: (t - tr.top - PAD) + "px", width: (r - l + 2 * PAD) + "px", height: (b - t + 2 * PAD) + "px" };
+    for (const k of ["left", "top", "width", "height"] as const) if (box.style[k] !== css[k]) box.style[k] = css[k];
+  }
 }
 
 /** The parent side of a branch (the user 2026-08-13): a small "↳ <name>" chip on the turn a fork
@@ -8547,7 +8638,7 @@ function updateCommentRail(): void {
     return tick;
   }));
 }
-window.addEventListener("resize", () => updateCommentRail());
+window.addEventListener("resize", () => { updateCommentRail(); if (activeId && hasUnreadOpenThread(activeId)) paintCommentOutlines(activeId); });
 
 // (The per-turn count badge is GONE — the user 2026-08-17: the highlight does the speaking, and
 // the scroll-rail tick already covers a thread whose rendered text drifted beyond re-matching.)
@@ -9022,6 +9113,77 @@ function wireEdgeResize(pop: HTMLElement): void {
   });
 }
 
+// ── remembered size + maximize (the user 2026-09-10, who enlarged the box by hand on every open) ── the
+// rules are comment-pop-size.ts's; this is the DOM half. localStorage reads and writes are wrapped so a
+// denied or full store costs the preference, never the popover (file-view.ts's convention).
+function readCmtPopSize(): CmtPopFrac | null {
+  try { return parseCmtPopSize(localStorage.getItem(CMT_POP_SIZE_KEY)); } catch { return null; }
+}
+function saveCmtPopSize(pop: HTMLElement): void {
+  const frac = toCmtPopFrac(pop.offsetWidth, pop.offsetHeight, window.innerWidth, window.innerHeight);
+  try { localStorage.setItem(CMT_POP_SIZE_KEY, JSON.stringify(frac)); } catch { /* storage full or denied */ }
+}
+/** Size the box programmatically and record what it measures: the observer treats that size as ours. */
+function sizeCommentPop(pop: HTMLElement, w: number, h: number): void {
+  pop.style.width = w + "px";
+  pop.style.height = h + "px";
+  cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };
+}
+// the house line-icon style (16-unit box, 1.4 stroke, round caps): one frame = maximize, two offset frames = restore
+const CMT_MAX_GLYPH = '<rect x="2.5" y="2.5" width="11" height="11" rx="1.5"/>';
+const CMT_RESTORE_GLYPH = '<path d="M5.5 5.5V3.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2"/>'
+  + '<rect x="2.5" y="5.5" width="8" height="8" rx="1"/>';
+/** "Maximized" is COMPUTED from the live size (within a few px of the cap), never a stored bit that can
+ *  drift: the data-max mark and the button's glyph/title/aria-label follow it (a control changes its own
+ *  label on click — ui/CLAUDE.md). Called at open, after every toggle, and after every user resize. */
+function syncCmtMaxState(pop: HTMLElement): void {
+  const max = isCmtPopMax(pop.offsetWidth, pop.offsetHeight, window.innerWidth, window.innerHeight);
+  if (max) pop.dataset.max = "1"; else delete pop.dataset.max;
+  const btn = pop.querySelector(".cmt-max") as HTMLElement | null;
+  if (!btn) return;
+  btn.innerHTML = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" '
+    + 'stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">' + (max ? CMT_RESTORE_GLYPH : CMT_MAX_GLYPH) + "</svg>";
+  btn.title = max ? "Restore" : "Maximize";
+  btn.setAttribute("aria-label", max ? "Restore" : "Maximize");
+}
+/** Maximize ⇄ restore — the head's button and a double-click on the title bar both land here. Maximize
+ *  sizes to the cap, centers, and remembers the fraction like any resize; restore goes back to the size
+ *  the box had before the maximize (this page-load), else the mode's own default — the thread's 70%/60%,
+ *  or the create dialog's content size (inline size AND preference dropped) — centered too. */
+function toggleCommentPopMax(): void {
+  const pop = document.getElementById("cmt-pop");
+  if (!pop) return;
+  const W = window.innerWidth, H = window.innerHeight;
+  if (isCmtPopMax(pop.offsetWidth, pop.offsetHeight, W, H)) {
+    if (cmtPopPreMax) {
+      const px = clampCmtPopPx(cmtPopPreMax, W, H);
+      sizeCommentPop(pop, px.w, px.h);
+      saveCmtPopSize(pop);
+    } else if (pop.dataset.mode === "thread") {
+      sizeCommentPop(pop, Math.round(W * CMT_POP_THREAD_DEFAULT.w), Math.round(H * CMT_POP_THREAD_DEFAULT.h));
+      saveCmtPopSize(pop);
+    } else {
+      pop.style.removeProperty("width");
+      pop.style.removeProperty("height");
+      pop.classList.remove("sized");                  // no expressed size any more: the quote clamp comes back…
+      cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };   // …and reflows the content size, so measure AFTER it
+      try { localStorage.removeItem(CMT_POP_SIZE_KEY); } catch { /* storage denied */ }
+    }
+  } else {
+    // an expressed size only: a content-sized create dialog has nothing to go back to but its content
+    cmtPopPreMax = pop.style.width ? toCmtPopFrac(pop.offsetWidth, pop.offsetHeight, W, H) : null;
+    const cap = cmtPopCapPx(W, H);
+    sizeCommentPop(pop, cap.w, cap.h);
+    saveCmtPopSize(pop);
+    pop.classList.add("sized");
+  }
+  const c = centerCmtPop(pop.offsetWidth, pop.offsetHeight, W, H);
+  pop.style.left = c.left + "px";
+  pop.style.top = c.top + "px";
+  commentPopPos = { x: c.left, y: c.top };             // a later rebuild reopens where the toggle put it, like a drag
+  syncCmtMaxState(pop);
+}
+
 function commentPopTitle(create: boolean, th: CommentThread | null | undefined): string {
   const nm = th?.name || "Thread";
   return create ? "New comment:"
@@ -9147,18 +9309,34 @@ function renderCommentPopover(): void {
     const nb = nameBox;
     nb.addEventListener("input", () => { nb.classList.remove("bad"); commentDrafts.set(nk, nb.value); });
   }
+  // maximize ⇄ restore (the user 2026-09-10), right before the ×; delegated like the × (cmtmax), the
+  // glyph and label painted by syncCmtMaxState once the box has its open size
+  const maxBtn = el("button", "cmt-max") as HTMLButtonElement;
+  maxBtn.type = "button";
+  maxBtn.dataset.act = "cmtmax";
   const closeBtn = el("button", "cmt-x") as HTMLButtonElement;
   closeBtn.type = "button";
   closeBtn.textContent = "×";
   closeBtn.title = "Close (the thread stays on its highlight)";
   closeBtn.dataset.act = "cmtclose";
-  if (nameBox) head.append(title, nameBox, closeBtn);
-  else head.append(title, closeBtn);
+  if (nameBox) head.append(title, nameBox, maxBtn, closeBtn);
+  else head.append(title, maxBtn, closeBtn);
   // DRAG by the header (the user 2026-08-13, who found the popover's spot inconvenient): pointer
   // capture, viewport-clamped, and the position writes through to commentPopPos so a later full
   // rebuild (a status flip) reopens where the user parked it. The header survives in-place
   // refreshes, so a drag is never cut by a comments frame; a full rebuild mid-drag just ends it.
-  head.title = "Drag to move";
+  head.title = "Drag to move · double-click to maximize or restore";
+  // DOUBLE-CLICK on the title bar toggles maximize, a window's title bar (the user 2026-09-10) — the same
+  // toggle as the button. Listened on the BOX and hit-tested at the pointer: the drag below captures the
+  // pointer on every press, and a captured press retargets the click/dblclick it ends in to the box, so a
+  // listener on the head would never hear it. Interactive children of the head (the name box, the two
+  // buttons) keep their own double-click.
+  pop.addEventListener("dblclick", (ev: MouseEvent) => {
+    const at = document.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement | null;
+    if (!at || !at.closest(".cmt-head") || at.closest(".cmt-name, .cmt-x, .cmt-max, button, input")) return;
+    ev.preventDefault();
+    toggleCommentPopMax();
+  });
   // the WHOLE box drags (the user 2026-08-17), not just the header — any grip that isn't an
   // interactive control or selectable text, and never the bottom-right resize corner
   pop.addEventListener("pointerdown", (ev: PointerEvent) => {
@@ -9196,7 +9374,9 @@ function renderCommentPopover(): void {
     quote.title = "the highlighted passage this thread is about";
     pop.appendChild(quote);
   }
-  if (th) {
+  if (th && th.status !== "promoted") {
+    // (a promoted thread gets no list: the kernel ships it with no messages or events — see the
+    // promoted branch below — and an empty list only grew into the box's fixed height)
     const list = el("div", "cmt-msgs");
     fillCommentMsgs(list, th, sid);
     pop.appendChild(list);
@@ -9410,10 +9590,22 @@ function renderCommentPopover(): void {
     }
     pop.appendChild(row);
   } else if (th) {
+    // a thread that became its own session (the user 2026-09-10, with a screenshot): the kernel
+    // ships it with no messages or events — the talk lives in the session now — so this view is the
+    // quote, one line saying where the talk went, and the one action, stacked from the top; nothing
+    // here grows into the box's fixed height (the empty list and the .sized quote used to split the
+    // free room between them: a one-line quote ran hundreds of pixels tall over a void, the action
+    // pinned under it). The action wears the shared .cmt-act word-button dress like every other
+    // action in this popover — it wore the composer's send-glyph square (.cmt-send: ~36px wide,
+    // 16px, no border), so "Open the session" wrapped one word per line in an oversized font.
+    const note = el("div", "cmt-note");
+    note.textContent = "The discussion continues there.";
+    pop.appendChild(note);
     const row = el("div", "cmt-actions");
-    const open = el("button", "cmt-send") as HTMLButtonElement;
+    const open = el("button", "cmt-act") as HTMLButtonElement;
     open.type = "button";
     open.textContent = "Open the session";
+    open.title = "Switch to that session";
     open.dataset.act = "cmtopensession";
     open.dataset.tid = th.tid;
     row.appendChild(open);
@@ -9424,10 +9616,38 @@ function renderCommentPopover(): void {
     // resizing the BOX (resize: both) hands the extra room to the quoted context: the .sized class
     // unlocks the quote's clamp; armed only after a real user resize, so the natural size stays tight
     const w0 = pop.offsetWidth, h0 = pop.offsetHeight;
+    // …and REMEMBERS the size (the user 2026-09-10): this observer sees the native grip and the edge
+    // bands alike, so it is the one event every user resize fires — each observation writes the fraction
+    // (comment-pop-size.ts) except the ones that are not the user's: the size WE set (cmtPopApplied —
+    // the open geometry, a stored preference, maximize/restore), a box the WINDOW moved through the
+    // vw/vh caps (re-baselined on resize below: a briefly-small window never rewrites the preference,
+    // the tab strip's rule), and the box leaving the page (a 0×0 box is a close, not a choice).
     const ro = new ResizeObserver(() => {
       if (Math.abs(pop.offsetWidth - w0) > 6 || Math.abs(pop.offsetHeight - h0) > 6) pop.classList.add("sized");
+      if (!pop.isConnected || !pop.offsetWidth || !pop.offsetHeight) return;
+      const a = cmtPopApplied;
+      if (a && Math.abs(pop.offsetWidth - a.w) <= 1 && Math.abs(pop.offsetHeight - a.h) <= 1) return;
+      cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };
+      saveCmtPopSize(pop);
+      syncCmtMaxState(pop);                          // a pull onto or off the cap flips the toggle's label with it
     });
     ro.observe(pop);
+    const onWin = () => {
+      if (!pop.isConnected) { window.removeEventListener("resize", onWin); return; }
+      cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };   // the resize event runs before the observer's frame
+    };
+    window.addEventListener("resize", onWin);
+  }
+  // REMEMBERED SIZE (the user 2026-09-10): the fraction of the window the user last dragged the box to,
+  // applied in BOTH modes and re-clamped to the live window (comment-pop-size.ts: the CSS mins as the
+  // floor, the CSS caps and an 8px margin as the cap). With nothing stored, both modes open exactly as
+  // before: the thread geometry below, the create dialog at its content size with no inline size at all.
+  const pref = readCmtPopSize();
+  if (pref) {
+    const sz = clampCmtPopPx(pref, window.innerWidth, window.innerHeight);
+    pop.style.width = sz.w + "px";
+    pop.style.height = sz.h + "px";
+    pop.classList.add("sized");                      // an expressed size: the quote/msgs reflow rules apply from open
   }
   // OPEN GEOMETRY (the user 2026-08-25), THREAD mode: 70% of the chat pane's width with the RIGHT
   // edge on the chat's right edge, 60% of the pane's height — and the size is FIXED from open:
@@ -9437,12 +9657,14 @@ function renderCommentPopover(): void {
   // The CREATE composer keeps its natural size at the selection point — a different gesture.
   if (th && !pop.style.width) { pop.style.width = Math.round(window.innerWidth * 0.7) + "px"; }
   if (th && !pop.style.height) { pop.style.height = Math.round(window.innerHeight * 0.6) + "px"; }
+  cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };   // whatever it measures now is ours, the content size included
   const r = pop.getBoundingClientRect();
   const defaultX = th ? (window.innerWidth - r.width - 8) : (window.innerWidth - r.width) / 2;
   const px = Math.max(8, Math.min(commentPopPos?.x ?? defaultX, window.innerWidth - r.width - 8));
   const py = Math.max(8, Math.min(commentPopPos?.y ?? 120, window.innerHeight - r.height - 8));
   pop.style.left = px + "px";
   pop.style.top = py + "px";
+  syncCmtMaxState(pop);                              // a stored cap-sized preference opens reading "Restore"
   const msgs = pop.querySelector(".cmt-msgs") as HTMLElement | null;
   if (msgs) msgs.scrollTop = msgs.scrollHeight;
   if (create || hadFocus || !th || !th.msgs.length) (pop.querySelector(".cmt-input") as HTMLTextAreaElement | null)?.focus();
@@ -11568,15 +11790,35 @@ function syncHostOfflineFoot(): void {
   if (!activeId || !hostIsDown(activeId)) { existing?.remove(); return; }
   const host = String(activeId).slice(0, String(activeId).indexOf(":"));
   const text = host + " is disconnected — this is the last romp got from it. Reconnecting.";
-  if (existing && existing.dataset.text === text) return;
+  // The swirl after "Reconnecting" spins only while romp is actually trying to reach the host (the user
+  // 2026-09-10, who wanted it dynamic and honest: trying right now, not a spinner because something is wrong).
+  // hostIsDialing reads what federation publishes (host-prefix.ts hostDialLive): the kernel's /tunnels row
+  // saying `dialing` (an ssh dial spawned and unconfirmed, or its health request to the host in flight;
+  // the browser never dials a host the kernel reports down, so the kernel's word is the one that matters
+  // here) or this page's relay socket in its CONNECTING state. Federation's romp:hostDial event, on the
+  // row's change and on the socket's dial, open and close, is what repaints this foot; between attempts
+  // (the kernel waiting out its backoff) the swirl sits still. It sits AFTER the sentence as the gist's flex
+  // SIBLING in the head (the postal delivery icon's convention), never inside the gist: that span ellipsizes
+  // on a narrow pane and would clip the swirl first, the one dynamic cue. The rebuild is keyed on the state
+  // too, so a repaint with nothing changed leaves the DOM alone.
+  const dialing = hostIsDialing(activeId);
+  const key = text + (dialing ? " |dialing" : "");
+  if (existing && existing.dataset.text === key) return;
   existing?.remove();
   // a slim SESSION notice in the warn severity at the transcript's tail (the audit's row 35 — it was a
   // centred italic line, the one row outside the vocabulary); off the rail, so the prose-column indent
   const foot = el("div", "notice-foot");
   foot.id = "host-offline-foot";
-  foot.dataset.text = text;
-  foot.appendChild(notice({ src: "session", glyph: "api", sev: "warn", gist: text, nested: true,
-                            tip: hostDownNote(activeId) }));   // the one place that note is worded — host-prefix.ts
+  foot.dataset.text = key;
+  const card = notice({ src: "session", glyph: "api", sev: "warn", gist: text, nested: true, live: dialing,
+                        tip: hostDownNote(activeId) });   // the one place that note is worded — host-prefix.ts
+  if (dialing) {
+    const swirl = el("img", "host-dial-swirl") as HTMLImageElement;   // the romp-loader motif (the placeholder tab's mini swirl)
+    swirl.src = mediaSrc("romp-swirl-glyph.svg"); swirl.alt = ""; swirl.onerror = () => swirl.remove();
+    const gistEl = card.querySelector(".notice-head .notice-gist");
+    if (gistEl) gistEl.after(swirl); else card.querySelector(".notice-head")?.appendChild(swirl);
+  }
+  foot.appendChild(card);
   content.appendChild(foot);
 }
 
@@ -11621,10 +11863,13 @@ if (typeof ResizeObserver === "function") {
   const c = document.getElementById("content");
   if (c) ro.observe(c);
 }
-// the sticky rail stamp tracks the scroll it annotates (passive: it only measures, never blocks the scroll)
+// the sticky rail stamp tracks the scroll it annotates (passive: it only measures, never blocks the scroll). CAPTURE,
+// so a scroll INSIDE the pane reaches it too — a notice body at its max height, a wide formula: scroll events do not
+// bubble, and the unread comment boxes (paintCommentOutlines, on this same scheduler) must follow marks that move
+// inside such a container and be cut to it (review find, T310). The other painters here are signature-guarded.
 {
   const c = document.getElementById("content");
-  if (c) c.addEventListener("scroll", scheduleRailSticky, { passive: true });
+  if (c) c.addEventListener("scroll", scheduleRailSticky, { passive: true, capture: true });
 }
 // ── jump to newest (the user 2026-08-31) ─────────────────────────────────────────────────────────
 // Scrolled-up reading leaves follow mode, and the send gate keeps it that way — this chip is the
@@ -17795,6 +18040,7 @@ setupSettings();
       openCommentPopover(activeId, tid, Math.min(r.left, window.innerWidth - 380), r.bottom + 6);
     },
     cmtclose: () => closeCommentPop(),
+    cmtmax: () => toggleCommentPopMax(),   // maximize ⇄ restore; the head's double-click lands in the same function
     // Interrupt the THREAD's own turn (T138): the sid rides the button (the thread's session),
     // never activeId — the exact owner-scoping class queued-x/Retry were fixed for. The gesture
     // itself ENDS the exchange with no reply record coming, so the T102 send-latch clears on THIS

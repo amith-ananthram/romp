@@ -54,6 +54,7 @@ const PAIRS: Array<[string, string, number]> = [
   ["--dim", "--bg", 4.5],
   ["--fg", "--surface-raised", 4.5],
   ["--accent", "--bg", 3],
+  ["--cmt-hl-outline", "--bg", 3],   // the comment notch and the unread box: a LINE, so it must read against the page (T310)
   ["--accent-fg", "--accent", 3],
   ["--warn", "--bg", 3],
   ["--err", "--bg", 3],

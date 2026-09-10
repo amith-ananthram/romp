@@ -162,8 +162,9 @@ test("every input is an event the chat already listens for — no timers, no pol
   assert.match(RENDER, /if \(off\) jumpBtn\.style\.bottom = [^\n]*\n\s*updateReplyChips\(\);/, "updateJumpBtn's tail");
   assert.match(RENDER, /c\.addEventListener\("scroll", updateJumpBtn, \{ passive: true \}\);/, "…and that update rides the passive scroll listener");
   // the comments frame and every transcript rebuild re-anchor the marks, then recount (the marks are what gets measured)
-  assert.match(RENDER, /turn\.classList\.toggle\("cmt-rail-unread", [^\n]*\n\s*\}\s*\n[^\n]*\n[^\n]*\n\s*if \(sid === activeId\) updateReplyChips\(\);\s*\n\}/, "applyCommentMarks' tail");
-  assert.match(RENDER, /if \(!threads\.length\) \{ if \(sid === activeId\) updateReplyChips\(\); return; \}/, "…and its no-threads early return drops the chips");
+  // (the unread outline boxes are painted between the marks and the recount — T310 — the chips still close the pass)
+  assert.match(RENDER, /turn\.classList\.toggle\("cmt-rail-unread", [^\n]*\n\s*\}\s*\n\s*paintCommentOutlines\(sid\);[^\n]*\n[^\n]*\n[^\n]*\n\s*if \(sid === activeId\) updateReplyChips\(\);\s*\n\}/, "applyCommentMarks' tail");
+  assert.match(RENDER, /if \(!threads\.length\) \{ paintCommentOutlines\(sid\); if \(sid === activeId\) updateReplyChips\(\); return; \}/, "…and its no-threads early return drops the boxes and the chips");
   assert.match(BLOCK, /new ResizeObserver\(updateReplyChips\)\.observe\(c\);/, "a pane measuring 0 drops the chips like the jump chip");
   assert.match(UPDATE, /if \(sig === replyChipSig\) return;/, "a signature skips unchanged paints (pure scrolls do no DOM work)");
 });

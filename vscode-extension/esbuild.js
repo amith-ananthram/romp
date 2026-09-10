@@ -49,6 +49,7 @@ const webview = {
     "../ui/webview/gear.css",            // the settings modal (linked by the kernel feed page + VS Code chat/feed)
     "../ui/webview/federation.ts",   // multi-kernel manager: loaded after the shim on chat/feed/fleet pages
     "../ui/webview/age-color-global.ts",   // window.__rompAgeColor for the kernel's inline shell scripts (bell panel)
+    "../ui/webview/api-health-global.ts",   // window.__rompApiHealthMerge: the API-health merge + reading rules for the shell's rail (T301)
     "../ui/webview/palette-main.ts",   // command palette + Cmd/Ctrl+O/P hotkeys for the kernel's shell page
     "../ui/webview/shell-perf.ts",     // the shell page's performance collector (a pane's long animation frames are reported to the top-level window)
     "../ui/webview/editor-chunk.ts",   // CodeMirror editing substrate — ON-DEMAND (file-view loads it by

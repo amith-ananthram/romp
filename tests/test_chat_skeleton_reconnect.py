@@ -411,8 +411,10 @@ class SkeletonReconnect(unittest.TestCase):
         self.assertIn("_send_chat_or_status(c, m, ms, change_from, led_changed)", s)
         self.assertNotIn("= _send_chat(c, m, ms, change_from, led_changed)", s,
                          "the pusher's per-client send goes through the skeleton-aware twin")
-        self.assertIn('+((everConnected&&bundleReady&&!readyQueued)?"&reconnect=1":"")', km._shim("chat", 1),
-                      "the shim declares the redial once its bundle's ready has left on a socket")
+        self.assertIn('+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1":"")', km._shim("chat", 1),
+                      "the shim declares the redial once the kernel's caps frame has answered its bundle's ready")
+        self.assertIn('if(msg&&msg.type==="caps")readyAcked=true;', km._shim("chat", 1),
+                      "the latch is the caps frame, the ready arm's reply (_send_caps)")
         s = inspect.getsource(km.Handler._ws)
         self.assertIn('reconnect = (q.get("reconnect") or [""])[0] == "1"', s)
         self.assertIn('client["reconnect"] = True', s)
