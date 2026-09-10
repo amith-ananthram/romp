@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""romp-update — push THIS machine's committed romp to attached REMOTE kernels + restart them
-(`romp update [host...]`).
+"""usage: romp update [host...]
 
-Peer-to-peer, no GitHub (the user 2026-07-04): the local kernel pushes its committed HEAD straight to each
-host over ssh and restarts it, so the remote runs exactly the local code — no `git pull` from origin, no round
-trip through GitHub. With NO host it updates every attached remote that is out of date (running a different
-commit than local). Uncommitted local edits are NOT sent — commit first. (To update THIS machine, use your own
-`git pull`/checkout then `romp refresh`.)
+Push THIS machine's committed romp to attached REMOTE kernels and restart them, so each runs exactly the
+local code. With no host, every attached remote that is out of date (running a different commit than local)
+is updated; naming hosts updates just those. The local kernel pushes its committed HEAD straight to each
+host over ssh and restarts it: peer-to-peer, no `git pull` from origin, no round trip through GitHub.
+Uncommitted local edits are NOT sent; commit first. To update THIS machine, `git pull` or check out the
+commit you want, then `romp refresh`.
+
+  -h, --help   print this and do nothing else. There are no other options: an unknown one is refused,
+               and nothing is pushed.
 """
+# Peer-to-peer, no GitHub, by the user's 2026-07-04 decision. The docstring doubles as the -h text, so it
+# reads as usage first and keeps attributions down here.
 import json
 import os
 import sys
@@ -67,11 +72,22 @@ def _post(u, path, body):
 
 
 def main(argv):
+    # bin/romp hands over every word after `update`, and this command defines no option, so a dash-prefixed
+    # word is either a help request or a mistake. Both are answered here, before anything is pushed. Dropping
+    # them unread, as the hosts line alone used to, sent `romp update --help` down the no-host path, which
+    # force-pushed the local HEAD to every out-of-date remote and restarted it, cutting its sessions' turns.
+    flags = [a for a in argv if a.startswith("-")]
+    if "-h" in flags or "--help" in flags:                          # help needs no kernel and touches nothing
+        sys.stdout.write(__doc__)
+        return 0
+    if flags:
+        sys.stderr.write("romp update: unknown option %s (usage: romp update [host...])\n" % flags[0])
+        return 2
     u = _kernel()
     if not u:
         sys.stderr.write("romp update: no running kernel found (is romp on? try `romp status`)\n")
         return 2
-    hosts = [a for a in argv if not a.startswith("-")]
+    hosts = list(argv)
     if not hosts:                                                   # no host → the out-of-date attached remotes
         try:
             tuns = _get(u, "/tunnels?fresh=1").get("tunnels", [])    # judged against the head this checkout is at NOW, not the dashboard's 15 s cache

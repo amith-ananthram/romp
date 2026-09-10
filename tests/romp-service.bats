@@ -349,3 +349,189 @@ EOF2
     run grep -q "ROMP_SERVICE_ENV_FILE" "$plist"
     [ "$status" -ne 0 ]
 }
+
+# ─── stop / start: the supervisor halves of `romp down` / `romp up` ──────────────────────────
+# A stop has to go THROUGH the supervisor: the manager exiting on its own is a crash to
+# Restart=always / KeepAlive and it respawns within seconds. ROMP_SYSTEMCTL stubs systemctl the
+# way ROMP_LAUNCHCTL stubs launchctl; both record their argv so the tests assert the exact call.
+
+_systemctl_stub() {
+    # $1 = what `is-active` answers (active|inactive|failed); every call's argv lands in systemctl-calls
+    local stub="$TEST_DIR/systemctl-stub" calls="$TEST_DIR/systemctl-calls"
+    cat > "$stub" <<EOF
+#!/bin/sh
+echo "\$*" >> "$calls"
+case "\$2" in
+  is-active) echo "$1"; [ "$1" = active ] ;;
+  *) exit 0 ;;
+esac
+EOF
+    chmod +x "$stub"
+    printf '%s' "$stub"
+}
+
+@test "stop (Linux): stops the unit through systemctl and says it stays stopped" {
+    unset ROMP_SERVICE_NO_LOAD
+    ROMP_OS_OVERRIDE=Linux ROMP_SERVICE_NO_LOAD=1 "$SVC" install >/dev/null
+    local stub; stub="$(_systemctl_stub active)"
+    ROMP_SYSTEMCTL="$stub" ROMP_OS_OVERRIDE=Linux run "$SVC" stop
+    [ "$status" -eq 0 ]
+    grep -qx -- '--user stop romp-manager.service' "$TEST_DIR/systemctl-calls"
+    [[ "$output" == *"stays stopped until"* ]]
+    # never a disable: the unit stays enabled so the next boot (linger) brings it back
+    run grep -q 'disable' "$TEST_DIR/systemctl-calls"
+    [ "$status" -ne 0 ]
+}
+
+@test "start (Linux): starts the unit through systemctl" {
+    unset ROMP_SERVICE_NO_LOAD
+    ROMP_OS_OVERRIDE=Linux ROMP_SERVICE_NO_LOAD=1 "$SVC" install >/dev/null
+    local stub; stub="$(_systemctl_stub inactive)"
+    ROMP_SYSTEMCTL="$stub" ROMP_OS_OVERRIDE=Linux run "$SVC" start
+    [ "$status" -eq 0 ]
+    grep -qx -- '--user start romp-manager.service' "$TEST_DIR/systemctl-calls"
+    [[ "$output" == *"Started the login service"* ]]
+}
+
+@test "stop / start with no unit installed exit 3 and touch nothing: the caller falls back" {
+    unset ROMP_SERVICE_NO_LOAD
+    local stub; stub="$(_systemctl_stub inactive)"
+    ROMP_SYSTEMCTL="$stub" ROMP_OS_OVERRIDE=Linux run "$SVC" stop
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"no login service is installed"* ]]
+    ROMP_SYSTEMCTL="$stub" ROMP_OS_OVERRIDE=Linux run "$SVC" start
+    [ "$status" -eq 3 ]
+    [ ! -e "$TEST_DIR/systemctl-calls" ]
+    # macOS: the same contract against the plist
+    ROMP_OS_OVERRIDE=Darwin run "$SVC" stop
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"no login agent is installed"* ]]
+}
+
+@test "stop (Linux): a failing systemctl stop is loud and exit 1" {
+    unset ROMP_SERVICE_NO_LOAD
+    ROMP_OS_OVERRIDE=Linux ROMP_SERVICE_NO_LOAD=1 "$SVC" install >/dev/null
+    local stub="$TEST_DIR/systemctl-stub"
+    printf '#!/bin/sh\ncase "$2" in is-active) echo active; exit 0 ;; esac\necho "Failed to stop" >&2\nexit 1\n' > "$stub"
+    chmod +x "$stub"
+    ROMP_SYSTEMCTL="$stub" ROMP_OS_OVERRIDE=Linux run "$SVC" stop
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"stop romp-manager.service failed"* ]]
+}
+
+@test "stop (macOS): boots the job out and waits for it to leave launchd" {
+    unset ROMP_SERVICE_NO_LOAD
+    ROMP_OS_OVERRIDE=Darwin ROMP_SERVICE_NO_LOAD=1 "$SVC" install >/dev/null
+    local stub="$TEST_DIR/launchctl-stub" calls="$TEST_DIR/launchctl-calls"
+    # loaded until the bootout lands; `print` fails once bootout has been called
+    cat > "$stub" <<EOF
+#!/bin/sh
+echo "\$1" >> "$calls"
+case "\$1" in
+  print) grep -q bootout "$calls" && exit 1; exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF
+    chmod +x "$stub"
+    ROMP_LAUNCHCTL="$stub" ROMP_OS_OVERRIDE=Darwin run "$SVC" stop
+    [ "$status" -eq 0 ]
+    grep -q bootout "$calls"
+    [[ "$output" == *"Stopped the login agent"* ]]
+}
+
+@test "start (macOS): a booted-out job is bootstrapped again; a loaded one is kickstarted" {
+    unset ROMP_SERVICE_NO_LOAD
+    ROMP_OS_OVERRIDE=Darwin ROMP_SERVICE_NO_LOAD=1 "$SVC" install >/dev/null
+    local stub="$TEST_DIR/launchctl-stub" calls="$TEST_DIR/launchctl-calls"
+    # not loaded: print fails, so bootstrap
+    cat > "$stub" <<EOF
+#!/bin/sh
+echo "\$1" >> "$calls"
+[ "\$1" = print ] && exit 1
+exit 0
+EOF
+    chmod +x "$stub"
+    ROMP_LAUNCHCTL="$stub" ROMP_OS_OVERRIDE=Darwin run "$SVC" start
+    [ "$status" -eq 0 ]
+    grep -q bootstrap "$calls"
+    run grep -q kickstart "$calls"
+    [ "$status" -ne 0 ]
+    # loaded: print succeeds, so kickstart, no bootstrap
+    : > "$calls"
+    printf '#!/bin/sh\necho "$1" >> "%s"\nexit 0\n' "$calls" > "$stub"
+    ROMP_LAUNCHCTL="$stub" ROMP_OS_OVERRIDE=Darwin run "$SVC" start
+    [ "$status" -eq 0 ]
+    grep -q kickstart "$calls"
+    run grep -q bootstrap "$calls"
+    [ "$status" -ne 0 ]
+}
+
+@test "status names a deliberate stop: the romp down marker's time, and how to start again" {
+    unset ROMP_SERVICE_NO_LOAD
+    ROMP_OS_OVERRIDE=Linux ROMP_SERVICE_NO_LOAD=1 "$SVC" install >/dev/null
+    local stub; stub="$(_systemctl_stub inactive)"
+    mkdir -p "$XDG_STATE_HOME/romp"
+    printf '{"t": %s, "cmd": "romp down"}\n' "$(date +%s)" > "$XDG_STATE_HOME/romp/down-by-romp"
+    ROMP_SYSTEMCTL="$stub" ROMP_OS_OVERRIDE=Linux run "$SVC" status
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"stopped by romp down at "* ]]
+    [[ "$output" == *"(romp up to start)"* ]]
+    run grep -qx running <<< "$output"
+    [ "$status" -ne 0 ]
+    # a running service outranks a stale marker: no "stopped" line while it answers active
+    stub="$(_systemctl_stub active)"
+    ROMP_SYSTEMCTL="$stub" ROMP_OS_OVERRIDE=Linux run "$SVC" status
+    [[ "$output" == *"running"* ]]
+    run grep -q 'stopped by romp down' <<< "$output"
+    [ "$status" -ne 0 ]
+    # no marker, not running: nothing about a deliberate stop
+    rm "$XDG_STATE_HOME/romp/down-by-romp"
+    stub="$(_systemctl_stub inactive)"
+    ROMP_SYSTEMCTL="$stub" ROMP_OS_OVERRIDE=Linux run "$SVC" status
+    run grep -q 'romp down' <<< "$output"
+    [ "$status" -ne 0 ]
+}
+
+@test "status renders an old marker with its date, not a bare clock time" {
+    unset ROMP_SERVICE_NO_LOAD
+    ROMP_OS_OVERRIDE=Linux ROMP_SERVICE_NO_LOAD=1 "$SVC" install >/dev/null
+    local stub; stub="$(_systemctl_stub inactive)"
+    mkdir -p "$XDG_STATE_HOME/romp"
+    printf '{"t": %s, "cmd": "romp down"}\n' "$(( $(date +%s) - 3 * 86400 ))" > "$XDG_STATE_HOME/romp/down-by-romp"
+    ROMP_SYSTEMCTL="$stub" ROMP_OS_OVERRIDE=Linux run "$SVC" status
+    [[ "$output" =~ stopped\ by\ romp\ down\ at\ [0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2} ]]
+}
+
+@test "stop (Linux): an installed unit that is not running is exit 4, says so, and is not stopped again" {
+    # `systemctl --user stop` on an inactive unit exits 0, which would read as a stop while a manager
+    # started outside the service kept running; the caller stops that one itself on a 4
+    unset ROMP_SERVICE_NO_LOAD
+    ROMP_OS_OVERRIDE=Linux ROMP_SERVICE_NO_LOAD=1 "$SVC" install >/dev/null
+    local stub; stub="$(_systemctl_stub inactive)"
+    ROMP_SYSTEMCTL="$stub" ROMP_OS_OVERRIDE=Linux run "$SVC" stop
+    [ "$status" -eq 4 ]
+    [[ "$output" == *"installed but not running"* ]]
+    run grep -q -- '--user stop' "$TEST_DIR/systemctl-calls"
+    [ "$status" -ne 0 ]
+    run grep -q 'Stopped the login service' <<< "$output"
+    [ "$status" -ne 0 ]
+    # a failed unit is not running either
+    stub="$(_systemctl_stub failed)"
+    ROMP_SYSTEMCTL="$stub" ROMP_OS_OVERRIDE=Linux run "$SVC" stop
+    [ "$status" -eq 4 ]
+}
+
+@test "stop (macOS): an installed agent that is not loaded is exit 4, says so, and no bootout" {
+    unset ROMP_SERVICE_NO_LOAD
+    ROMP_OS_OVERRIDE=Darwin ROMP_SERVICE_NO_LOAD=1 "$SVC" install >/dev/null
+    local stub="$TEST_DIR/launchctl-stub" calls="$TEST_DIR/launchctl-calls"
+    printf '#!/bin/sh\necho "$1" >> "%s"\n[ "$1" = print ] && exit 1\nexit 0\n' "$calls" > "$stub"
+    chmod +x "$stub"
+    ROMP_LAUNCHCTL="$stub" ROMP_OS_OVERRIDE=Darwin run "$SVC" stop
+    [ "$status" -eq 4 ]
+    [[ "$output" == *"installed but not running"* ]]
+    run grep -q bootout "$calls"
+    [ "$status" -ne 0 ]
+    run grep -q 'Stopped the login agent' <<< "$output"
+    [ "$status" -ne 0 ]
+}

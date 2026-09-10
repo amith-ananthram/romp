@@ -174,6 +174,8 @@ STUB
     STUB_PR_STATE=OPEN run "$REPO/scripts/release.sh" minor --skip-tests
     [ "$status" -ne 0 ]
     [[ "$output" == *"did not merge"* ]]
+    # it dies on the release branch, so it says how to converge: local main is behind the merge
+    [[ "$output" == *"switch to main and pull"* ]]
     run git -C "$REPO" tag -l
     [ -z "$output" ]
 }
@@ -183,6 +185,54 @@ STUB
     STUB_PR_STATE=CLOSED run "$REPO/scripts/release.sh" minor --skip-tests
     [ "$status" -ne 0 ]
     [[ "$output" == *"closed without merging"* ]]
+    run git -C "$REPO" tag -l
+    [ -z "$output" ]
+}
+
+@test "release: a re-run while the version PR is still open refuses — it never tags the release branch" {
+    # A bump run whose PR has not landed when the wait runs out dies still checked out on the
+    # release branch, where VERSION already reads the target. The script advertises re-running to
+    # resume; unchecked, that re-run saw VERSION at the target, skipped the bump, and tagged HEAD —
+    # the release branch — then pushed the tag, so bootstrap.sh installed a commit that is not on
+    # main while main's VERSION lagged. The re-run must refuse, by name, and before spending CI.
+    _stub_gh
+    STUB_PR_STATE=OPEN run "$REPO/scripts/release.sh" minor --skip-tests
+    [ "$status" -ne 0 ]
+    [ "$(git -C "$REPO" rev-parse --abbrev-ref HEAD)" = "release-0.2.0" ]
+    run "$REPO/scripts/release.sh" --skip-tests
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"on branch release-0.2.0, not main"* ]]
+    [[ "$output" == *"switch to main and pull"* ]]     # the same way forward as the run that left it here
+    run git -C "$REPO" tag -l
+    [ -z "$output" ]
+    run git -C "$TEST_DIR/origin.git" tag -l
+    [ -z "$output" ]
+    run grep -q "workflow run" "$GH_LOG"      # refused before any CI was dispatched
+    [ "$status" -ne 0 ]
+}
+
+@test "release: a release branch that already exists refuses before VERSION is touched — main stays clean" {
+    # The bump used to write VERSION first and branch second, so a branch that already existed
+    # died with a modified VERSION sitting on main, which then failed the next run's dirty-tree
+    # check for no reason the user had caused.
+    _stub_gh
+    git -C "$REPO" branch release-0.2.0
+    run "$REPO/scripts/release.sh" minor --skip-tests
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"could not create branch release-0.2.0"* ]]
+    [ "$(git -C "$REPO" rev-parse --abbrev-ref HEAD)" = "main" ]
+    [ -z "$(git -C "$REPO" status --porcelain)" ]
+    [ "$(cat "$REPO/VERSION")" = "0.1.0" ]
+}
+
+@test "release: a detached HEAD refuses by that name — there is no branch to blame" {
+    # `git rev-parse --abbrev-ref HEAD` prints the word HEAD when detached, which would have made the
+    # refusal name a branch that cannot exist and offer the open-PR diagnosis that does not fit.
+    _stub_gh
+    git -C "$REPO" switch -q --detach main
+    run "$REPO/scripts/release.sh" --skip-tests
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"detached HEAD, not on main"* ]]
     run git -C "$REPO" tag -l
     [ -z "$output" ]
 }

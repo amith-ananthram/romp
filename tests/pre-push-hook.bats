@@ -23,14 +23,18 @@
 ROMP_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 HOOK="$ROMP_DIR/.githooks/pre-push"
 
+load git-hermetic
+
 setup() {
-    TEST_DIR="$(mktemp -d)"
     # Hermetic git: the fixtures commit and merge with plain defaults, and a developer's global
     # config (merge.ff=only, commit.gpgsign, a hooks path) must not reach them (the #968 review).
+    # The floor (tests/git-hermetic.bash) also forbids background git work in the repos below and
+    # in the bare remote the pushes land in, and its exported identity is the one every commit
+    # carries; the user.* lines below give the repo a configured user for anything that reads one.
+    git_hermetic
+    TEST_DIR="$(mktemp -d)"
     export HOME="$TEST_DIR/home"
     mkdir -p "$HOME"
-    export GIT_CONFIG_GLOBAL="$TEST_DIR/gitconfig" GIT_CONFIG_NOSYSTEM=1
-    : > "$GIT_CONFIG_GLOBAL"
     REPO="$TEST_DIR/repo"
     mkdir -p "$REPO"
     git -C "$REPO" init -q

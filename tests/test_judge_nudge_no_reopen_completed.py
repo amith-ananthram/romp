@@ -53,16 +53,17 @@ class NudgeNoReopenCompleted(unittest.TestCase):
     def tearDown(self):
         jd.plan_llm, jd.opener_llm, jd._group_store = self._saved
 
-    def _nudge_transcript(self, declared_todo=None):
+    def _nudge_transcript(self, declared_todo=None, sid=SID, gid=GID):
         """One ENDED turn opened by an AUTO-nudge message (romp-injected + romp-auto + romp-goal-id) targeting
-        GID, with an assistant 'waiting on you' reply → classified as a nudge unit for GID. `declared_todo`
+        `gid` (GID by default), with an assistant 'waiting on you' reply → classified as a nudge unit for it,
+        written as `sid`'s transcript. `declared_todo`
         prepends a prior turn declaring that item OPEN via the Task tool, so _sync_declared_plan (which reads
         the WHOLE session) sees the agentTask fixture's item as genuinely still open instead of flipping it
         to completed for being absent from the declared plan."""
-        path = os.path.join(self.td, SID + ".jsonl")
+        path = os.path.join(self.td, sid + ".jsonl")
         t = 3000
         nudge_text = ("Status on the goal above: what's done, what's left, and is anything blocked?"
-                      "<!-- romp-injected --><!-- romp-auto --><!-- romp-goal-id: %s -->" % GID)
+                      "<!-- romp-injected --><!-- romp-auto --><!-- romp-goal-id: %s -->" % gid)
         recs = []
         parent = None
         if declared_todo:
@@ -157,6 +158,50 @@ class NudgeNoReopenCompleted(unittest.TestCase):
         self.assertTrue(store["nodes"][GID].get("nodeComplete"))
         self.assertFalse(store["nodes"][GID].get("blocked"))
         self.assertEqual(self._plan_calls, [], "still moot without open agent to-dos")
+
+    def test_a_working_top_whose_steps_are_all_done_still_gets_its_reply_judged(self):
+        # The top's steps are ALL done but the top itself carries no verdict: rollup's is_complete reads it
+        # WORKING (verdicts only, the user 2026-07-15), so the auto-nudge fires legitimately and the agent
+        # answers with a blocker. The moot-guard read the top through _subtree_done, the bottom-up rule rollup
+        # retired, so it took the top as done, discarded the reply (nothing placed, the planner never consulted)
+        # and left the top unblocked — after which the kernel's follow-up-failed path files a procedural block
+        # with no brief. Done, for the guard, is the target's OWN nodeComplete (or its sticky settle).
+        # A PRIVATE synthetic sid (CLAUDE.md, goal-store fixtures): the store is minted here, and another
+        # module's journaled override against the shared placeholder must not land on this g1. The journal lives
+        # under the per-test state root setUp rebinds, so it dies with that root.
+        psid = "7a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d"
+        gid, s2, s3 = psid + ":g1", psid + ":g2", psid + ":g3"
+        store = {"rompUuid": psid, "seq": 1, "placementsV": jd.PLACEMENTS_V,
+                 "nodes": {gid: {"id": gid, "text": "Ship the schema change", "parentId": None,
+                                 "nodeComplete": False, "blocked": False, "cleared": False,
+                                 "trail": [], "t": 1000, "mt": 2000},
+                           s2: {"id": s2, "text": "write the migration", "parentId": gid,
+                                "nodeComplete": True, "blocked": False, "cleared": False,
+                                "trail": [], "t": 1200, "mt": 1300},
+                           s3: {"id": s3, "text": "run it on the staging copy", "parentId": gid,
+                                "nodeComplete": True, "blocked": False, "cleared": False,
+                                "trail": [], "t": 1400, "mt": 1500}},
+                 "placements": {}, "status": {gid: "working"}, "lastNode": gid}
+        jd.rollup_status(store, False)
+        self.assertEqual(store["status"][gid], "working", "premise: the board shows the verdict-less top WORKING")
+        jd.save_goals(psid, store)
+        captured = {}
+
+        def fake_plan(text, menu_text, **k):
+            captured.update(k); captured["menu"] = menu_text
+            return '{"ops":[{"do":"block","goal":1,"why":"approve the schema change"}]}'
+        jd.plan_llm = fake_plan
+        path = self._nudge_transcript(sid=psid, gid=gid)
+        jd._plan_session(psid, path, time.time())
+        store = jd.load_goals(psid)
+        self.assertIn("menu", captured, "the planner IS consulted: the top has no verdict of its own")
+        self.assertIn("Ship the schema change", captured["menu"], "…over the menu the top leads")
+        self.assertTrue(store["nodes"][gid]["blocked"], "the reply's blocker lands on the top")
+        self.assertEqual(store["nodes"][gid]["blockWhy"], "approve the schema change")
+        self.assertTrue(store["nodes"][s2]["nodeComplete"] and store["nodes"][s3]["nodeComplete"],
+                        "the genuinely-done steps keep their verdicts across the reopen")
+        jd.rollup_status(store, False)
+        self.assertEqual(store["status"][gid], "blocked", "…and the top rolls up blocked/needs-you")
 
     def test_open_menu_seal_respects_a_user_clear_over_the_agent_list(self):
         # the user's cross-off outranks the agent's to-do list: a CLEARED umbrella seals its subtree even
