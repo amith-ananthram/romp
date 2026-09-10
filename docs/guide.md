@@ -148,7 +148,7 @@ surface (the tag button in the strip narrows the tabs to the tags you pick), and
 the tabs: as soon as any session carries a tag, the strip shows one section per tag, in your
 tag order, each with a header in the tag's color, and the untagged sessions on a row of their
 own at the end. A session with several tags appears under each of them; every copy is the same
-session (click either to open it, and closing either ends it). Each header shows a chevron, the tag's color, its name, and a
+session (click either to open it, and closing either ends it). Each header shows the tag's color and name, then a chevron and a
 member count. Click a header, or press Enter on it, to fold its section down to the header
 alone; the count then says how many tabs are folded away, and a small dot after it says when
 one of them is working or waiting on you (hover it for their names). To keep one tab visible
