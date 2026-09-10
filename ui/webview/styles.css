@@ -183,6 +183,9 @@ body.scheme-solarized-dark {
   --st-awaitbg-bg: #54B204; --st-awaitbg-fg: #0c1a00;
   --st-compacting-bg: #14b8a6; --st-compacting-fg: #ffffff;   /* teal — the compacting accent (text + compression bar) */
   --st-blocked-bg: #e5484d; --st-blocked-fg: #ffffff;   /* alarm red — session stopped on an API error */
+  /* magenta — a 5xx answer (529 included) in the API-health histograms and counts (T316): distinct from the 429 red
+     and the retrying amber, so a storm of one kind never reads as the other */
+  --st-5xx-bg: #c026d3; --st-5xx-fg: #ffffff;
   /* amber-orange — the API is backing off and retrying (the tab ring, the chip, the chat's retry notices); the
      hue sat RAW in seven rules until 2026-09-08 (5.38:1 on the chat's card surface) */
   --st-retrying-bg: #e67e22; --st-retrying-fg: #2a1500;
@@ -255,6 +258,7 @@ body.theme-light {
   --st-awaitbg-bg: #54B204; --st-awaitbg-fg: #0c1a00;
   --st-compacting-bg: #0F766E; --st-compacting-fg: #ffffff;
   --st-blocked-bg: #e5484d; --st-blocked-fg: #ffffff;
+  --st-5xx-bg: #A21CAF; --st-5xx-fg: #ffffff;   /* the 5xx magenta in the light palette: 5.3:1 on the card, white on it 6.7:1 */
   --st-retrying-bg: #9C4A0C; --st-retrying-fg: #ffffff;   /* the retrying amber in the light palette: 4.86:1 on the card, white on it 6.18:1 */
   --radius-menu: 6px;
   --shadow-menu: 0 4px 12px rgba(31, 26, 20, 0.16);

@@ -167,6 +167,7 @@ body.theme-light {
   --st-awaitbg-bg: #54B204; --st-awaitbg-fg: #0c1a00;
   --st-compacting-bg: #0F766E; --st-compacting-fg: #ffffff;
   --st-blocked-bg: #e5484d; --st-blocked-fg: #ffffff;
+  --st-5xx-bg: #A21CAF; --st-5xx-fg: #ffffff;   /* the 5xx magenta (T316), mirrors styles.css */
   --st-retrying-bg: #9C4A0C; --st-retrying-fg: #ffffff;
   --radius-menu: 6px;
   --shadow-menu: 0 4px 12px rgba(31, 26, 20, 0.16);
