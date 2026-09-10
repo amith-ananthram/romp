@@ -3006,14 +3006,16 @@ def _clear_unresolved_live_note(sid):
 
 
 def _tab_order_frame(order, tabs, live, c=None):
-    """The ONE tabOrder frame shape (T258) for its four senders (the pusher's tabs-first send, _push_session_now,
-    _confirm_close_now, and the WS 'ready' handler's connect-time frame), all of which go through
+    """The ONE tabOrder frame shape (T258) for its three senders (the pusher's tabs-first send, which is also the
+    connect push a `ready` triggers, _push_session_now and _confirm_close_now), all of which go through
     _send_tab_order: the shared order, the tabs meta, the viewer's views blob, `live` — the sids the kernel
     affirms are LIVE this build (raw tmux/SDK liveness, independent of whether discover could resolve each
     one's transcript) — and `selfHost`, this kernel's own name (_self_host). The pane keeps a live sid on the
     strip even if this frame's `order` omits it: a transient read failure that drops a session from the order
-    is not a close (render.ts applyTabOrder). The chat reads a postal card's sender host against `selfHost`
-    (its postalSenderHost). The session frame carries the name too, but only a LOCAL session's frame teaches
+    is not a close (render.ts applyTabOrder). That rule is why the WS `ready` handler sends no strip of its own:
+    a frame built there from _ordered_alive (living only) omitted every kept-open read-only tab the connect push
+    had just listed, and the pane closed them all at each ready. The chat reads a postal card's sender host against
+    `selfHost` (its postalSenderHost). The session frame carries the name too, but only a LOCAL session's frame teaches
     it, so a dashboard whose kernel runs no sessions of its own — every session attached from elsewhere —
     never learned it until the + picker was opened, and a remote card stamped with this kernel's name stayed
     plain text (review find, 2026-09-06). Every chat client receives a tabOrder frame, first of all on connect
@@ -3682,8 +3684,8 @@ def _ordered(sessions):
 
 
 def _ordered_alive(now, tmux):
-    """Living sessions in the shared, persisted order (see _ordered). Kept as the source for the tab-order
-    push on connect; chat tabs AND timeline lanes resolve the SAME order through _ordered, in lockstep."""
+    """Living sessions in the shared, persisted order (see _ordered): chat tabs AND timeline lanes resolve the
+    SAME order through _ordered, in lockstep."""
     return _ordered(_alive_sessions(now, tmux))
 
 
@@ -37902,14 +37904,18 @@ def _client_reset_chat_base(client):
     rarer live), the `ready` dispatch died in the handler's generic except, and the _push_one repair this
     exists for was skipped for that pane, once per renderer life. The same lock serializes the two — and
     _send_chat holds it across its read-decide-send-write, so a pusher chat send lands as a whole either
-    before the reset (its slot and tail entry are cleared, _push_one re-sends) or after it."""
+    before the reset (its slot and tail entry are cleared, _push_one re-sends) or after it.
+    The ("taborder",) slot goes too: a renderer that just evaluated holds no tab strip either, and the pusher
+    fires from accept, so this socket may have been sent the strip before the bundle's listener existed;
+    with the slot kept, the connect push's strip at `ready` was deduped against that one for _DEDUP_REPOST_S
+    (an unchanged strip: the same signature) and the page had no tabs until the strip changed."""
     with _client_lock(client):
         client.get("echat", {}).clear()
         # …and the reconnect skeleton set (2026-09-07): a renderer that just evaluated holds NOTHING, so there
         # is nothing it could lazily reload — every tab must arrive whole, and the status slots go with the set
         client.pop("skeleton", None); client.pop("skeletonOrder", None); client.pop("reconnect", None)
         snt = client.get("sent", {})
-        for k in [k for k in snt if isinstance(k, tuple) and k and k[0] in ("chat", "status")]:
+        for k in [k for k in snt if isinstance(k, tuple) and k and k[0] in ("chat", "status", "taborder")]:
             snt.pop(k, None)
 
 
@@ -37963,10 +37969,10 @@ def _skeleton_for(c, act, chat_list):
 
 def _resolve_reconnect(c, chat_list):
     """Consume a client's reconnect flag and fix its skeleton set — ONCE, by the first tabOrder sender that sees
-    it (the pusher, _push_session_now, _confirm_close_now, ready), so no strip can reach a reconnecting client
-    before its set exists: a close confirmation landing in the gap before the pusher's first pass would
-    otherwise paint the page's stale sessions as loaded tabs. No active hint (no localStorage) → the kernel
-    cannot know what the page shows → no set → today's full push (fail safe)."""
+    it (the pusher, the connect push a `ready` triggers included, _push_session_now, _confirm_close_now), so no
+    strip can reach a reconnecting client before its set exists: a close confirmation landing in the gap before
+    the pusher's first pass would otherwise paint the page's stale sessions as loaded tabs. No active hint (no
+    localStorage) → the kernel cannot know what the page shows → no set → today's full push (fail safe)."""
     # ATOMIC under the client's slot lock, flag to set (review find 2026-09-07): with the pop and the stats outside
     # it, a second strip sender racing this one popped False, sent a keyless strip and a FULL for some sid, and
     # this sender then wrote a set still naming that sid — held whole by the client yet served only status frames
@@ -50063,23 +50069,8 @@ class Handler(BaseHTTPRequestHandler):
             # (the caps frame's viewsSeq, see KERNEL_WS_CAPS)
             _VIEWS_SERVED.seqs = []
             try:
+                # the tab strip rides the connect push (living PLUS kept-open, via the slot the reset cleared); none of its own here
                 self._push_one(client)
-                # Push the SHARED, STABLE tab order so the UI honors it on connect/reload. Without this
-                # the webview only learns the order from a live drag, loses it on every reload, and falls
-                # back to ordering tabs by session STATE — so they drift on their own (worse now that the
-                # heartbeat auto-reloads). _ordered_alive is the same order chat tabs + timeline lanes use.
-                try:
-                    _tm = _tmux_sessions()
-                    _alive = _ordered_alive(int(time.time()), _tm)
-                    _o = [s["sid"] for s in _alive]
-                    # name+color per tab → the client paints the whole strip as placeholders up front (tabs-first)
-                    _tabs = [{"id": s["sid"], "name": s.get("name", ""), "color": _name_color(s["sid"])} for s in _alive]
-                    _resolve_reconnect(client, _alive)   # a no-op here (the reset above consumed the flag) — every strip sender resolves
-                    # through _send_client, which captures the frame's views seq for the caps frame below (the raw send
-                    # this replaced bypassed that capture and had to record the seq by hand)
-                    _send_tab_order(client, _o, _tabs, _tm)
-                except Exception:
-                    pass
             finally:
                 seqs, _VIEWS_SERVED.seqs = _VIEWS_SERVED.seqs, None
             # What this kernel can do for the page (KERNEL_WS_CAPS), after the pushes above and on every
