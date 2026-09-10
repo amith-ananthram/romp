@@ -25,8 +25,9 @@ test("the ruler observes ONLY the active view's .ext-glow turns and hides when t
   // other views are display:none (zero rects), so only the active view's glows map onto its #content scroll
   assert.match(RENDER, /const v = activeId \? views\.get\(activeId\) : null;/);
   assert.match(RENDER, /v\.el\.querySelectorAll<HTMLElement>\("\.turn\.ext-glow"\)/);
-  // …or history marks (T318b): a hover on turns outside the resident tail shows the strip with no glowing row
-  assert.match(RENDER, /if \(!content \|\| \(!glows\.length && !hist\.length\)\) \{ ruler\.style\.display = "none"; ruler\.replaceChildren\(\); return; \}/);
+  // …or history marks or spacer units (T318b): a hover on turns outside the resident tail shows the strip, one on
+  // turns outside the render window bands their spacer slice, each with no glowing row
+  assert.match(RENDER, /if \(!content \|\| !v \|\| \(!glows\.length && !hist\.length && !units\.length\)\) \{ ruler\.style\.display = "none"; ruler\.replaceChildren\(\); return; \}/);
 });
 
 test("bands are CONTENT-space (scroll-independent), mapped to ruler space by scrollHeight", () => {

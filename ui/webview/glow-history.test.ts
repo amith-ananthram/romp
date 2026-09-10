@@ -7,7 +7,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { historyMarks, historyBands, HIST_H, HIST_GAP, HIST_MIN_H } from "./glow-history";
+import { historyMarks, historyBands, windowSpans, HIST_H, HIST_GAP, HIST_MIN_H } from "./glow-history";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
@@ -25,7 +25,7 @@ test("a resident turn is the ruler proper's, never the strip's; a lit row and an
   const idx = { u100: 100, u450: 450, u500: 500 };
   const lit = new Set(["u500"]);                    // its row is on the page and already glows
   assert.deepEqual(historyMarks(["u100", "u450", "u500", "u999"], idx, lit, 400), [0.25],
-    "u450 is resident (at or past headFrom) even without a lit row: folded or off the active path, not unloaded");
+    "u450 is resident (at or past headFrom) even without a lit row: the ruler proper's business (windowSpans), never the strip's");
   assert.deepEqual(historyMarks(["u100"], idx, lit, 0), [], "headFrom 0: the whole transcript is resident, no strip");
   assert.deepEqual(historyMarks(["u100"], undefined, lit, 400), [], "a group without positions (no built payload) marks nothing");
 });
@@ -41,17 +41,38 @@ test("marks are sorted, touching marks coalesce into one band, and the last mark
   assert.deepEqual(historyBands([], HIST_H), []);
 });
 
+test("a hover on a turn that is RESIDENT but outside the render window lands on the ruler proper by its spacer slice, not the strip", () => {
+  // a fresh tab of a long session: 250 resident events [400, 650), the last 80 units rendered, units [0, 170) folded
+  // into one top spacer of 170 × 60 px; the card's source turn is unit 85 (global 485): no row, and not history
+  const lit = new Set<string>();
+  assert.deepEqual(historyMarks(["u485"], { u485: 485 }, lit, 400), [], "resident: nothing on the strip");
+  const w = { winStart: 170, winEnd: 250, unitTotal: 250, topY: 0, topH: 170 * 60, botY: 0, botH: 0, avg: 60 };
+  assert.deepEqual(windowSpans([85], w), [{ top: 85 * 60, bot: 86 * 60 }], "halfway down the top spacer, one row tall");
+  assert.deepEqual(windowSpans([200], w), [], "inside the window: its row is lit by applyGlow, or folded and placeless");
+  assert.equal(lit.size, 0, "no row lit: none is on the page");
+  // a window rendered around a deep link, with a bottom spacer of 30 units below it starting at content y 9000
+  const w2 = { winStart: 100, winEnd: 220, unitTotal: 250, topY: 0, topH: 6000, botY: 9000, botH: 1800, avg: 60 };
+  assert.deepEqual(windowSpans([235], w2), [{ top: 9000 + 15 * 60, bot: 9000 + 16 * 60 }], "the bottom spacer's slice for a newer unit");
+  assert.deepEqual(windowSpans([50, 235], w2).map((s) => s.top), [3000, 9900]);
+  // the hover's units are looked up by uuid in the resident events and placed at paint time from the live spacers
+  assert.match(RENDER, /function residentUnits\(s: Session, uuids: string\[\]\): number\[\]/);
+  assert.match(RENDER, /const idx = s\.events\.findIndex\(\(e\) => e\.uuid === uuid\);\s*if \(idx < 0\) continue;/);
+  assert.match(RENDER, /glowUnits = s \? residentUnits\(s, \(g\.uuids \|\| \[\]\)\.filter\(\(u\) => !lit\.has\(u\)\)\) : \[\];/);
+  assert.match(RENDER, /segs\.push\(\.\.\.windowSpans\(units, \{ winStart: v\.winStart \?\? 0, winEnd: v\.winEnd \?\? \(v\.unitTotal \?\? 0\), unitTotal: v\.unitTotal \?\? 0,/);
+  assert.match(RENDER, /topY: yOf\(topSp\), topH: topSp \? topSp\.offsetHeight : 0, botY: yOf\(botSp\), botH: botSp \? botSp\.offsetHeight : 0,/);
+});
+
 test("applyGlow records which uuids lit a row and hands the rest to the strip, for the active view only", () => {
   // the lit set is filled inside the ONE query that adds .ext-glow, so a uuid with no rendered row can never glow
   assert.match(RENDER, /const lit = new Set<string>\(\);\s*v\.el\.querySelectorAll<HTMLElement>\("\.turn\[data-uuid\]"\)\.forEach\(\(n\) => \{\s*const u = n\.dataset\.uuid \|\| "";\s*if \(uset\.has\(u\)\) \{ n\.classList\.add\("ext-glow"\); lit\.add\(u\); \}/);
-  assert.match(RENDER, /if \(g\.sid === activeId\) glowHistory = historyMarks\(g\.uuids \|\| \[\], g\.idx, lit, liveSession\(g\.sid\)\?\.headFrom \?\? 0\);/);
-  assert.match(RENDER, /glowHistory = \[\];\s*const midSet = new Set\(mids\);/, "a fresh hover (or a clear) starts with no history marks");
-  assert.match(RENDER, /import \{ historyMarks, historyBands, HIST_H, HIST_GAP \} from "\.\/glow-history";/);
+  assert.match(RENDER, /if \(g\.sid === activeId\) \{\s*const s = liveSession\(g\.sid\);\s*glowHistory = historyMarks\(g\.uuids \|\| \[\], g\.idx, lit, s\?\.headFrom \?\? 0\);/);
+  assert.match(RENDER, /glowHistory = \[\]; glowUnits = \[\];\s*const midSet = new Set\(mids\);/, "a fresh hover (or a clear) starts with no history marks and no spacer units");
+  assert.match(RENDER, /import \{ historyMarks, historyBands, windowSpans, HIST_H, HIST_GAP \} from "\.\/glow-history";/);
 });
 
 test("the ruler shows for history marks alone, caps its top with the strip, and maps the resident scroll below it", () => {
-  assert.match(RENDER, /const hist = \(content && v\) \? glowHistory : \[\];/);
-  assert.match(RENDER, /if \(!content \|\| \(!glows\.length && !hist\.length\)\) \{ ruler\.style\.display = "none"; ruler\.replaceChildren\(\); return; \}/);
+  assert.match(RENDER, /const hist = \(content && v\) \? glowHistory : \[\];\s*const units = \(content && v\) \? glowUnits : \[\];/);
+  assert.match(RENDER, /if \(!content \|\| !v \|\| \(!glows\.length && !hist\.length && !units\.length\)\) \{ ruler\.style\.display = "none"; ruler\.replaceChildren\(\); return; \}/);
   assert.match(RENDER, /const capH = hist\.length \? HIST_H \+ HIST_GAP : 0;/);
   assert.match(RENDER, /const mapH = Math\.max\(1, rulerH - capH\);/);
   assert.match(RENDER, /band\.style\.top = \(capH \+ b\.top \/ scrollH \* mapH\) \+ "px";/);

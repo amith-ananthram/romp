@@ -11,8 +11,9 @@ export const HIST_GAP = 2;     // px: the hairline between the strip and the res
 export const HIST_MIN_H = 3;   // px: a mark's minimum height, so one turn still reads
 
 /** Fractions in [0, 1) of the unloaded prefix for the hovered uuids with NO lit row and a known global index
- *  before the resident head. A lit row is banded by the ruler proper; a uuid at or past headFrom is resident (its
- *  row is folded or off the active path, not unloaded) and stays off the strip; an unknown uuid has no place. */
+ *  before the resident head. A lit row is banded by the ruler proper; a uuid at or past headFrom is resident and
+ *  stays off the strip (outside the render window it is placed on the ruler proper by windowSpans; inside it
+ *  without a row it is folded or off the active path and has no place); an unknown uuid has no place. */
 export function historyMarks(uuids: readonly string[], idx: Readonly<Record<string, number>> | undefined,
                              lit: { has(u: string): boolean }, headFrom: number): number[] {
   if (!(headFrom > 0) || !idx) return [];
@@ -37,4 +38,31 @@ export function historyBands(marks: readonly number[], stripH: number): Array<{ 
     else bands.push({ top, height: HIST_MIN_H });
   }
   return bands;
+}
+
+/** The render window's geometry, read off the active view when the ruler paints (render.ts sizeSpacers): the hidden
+ *  head [0, winStart) is one top spacer of topH px starting at content-space topY; the hidden tail [winEnd, unitTotal)
+ *  one bottom spacer of botH px at botY; avg is the measured row height the spacers were sized by. */
+export interface WindowGeometry { winStart: number; winEnd: number; unitTotal: number; topY: number; topH: number; botY: number; botH: number; avg: number }
+
+/** Content-space spans for hovered turns that are RESIDENT but outside the render window (review find on the first
+ *  cut: a fresh tab of a long session holds 250 events and renders the last 80 units, so a source turn 81 to 250 back
+ *  had no row and was not history either, and the hover lit nothing). Such a turn sits inside a spacer, which is its
+ *  place in the scroll, sized by unit count; its span is the spacer's slice for its unit, and the ruler proper bands
+ *  it exactly as it would a rendered row. A unit inside the window has no span here: its row exists (lit by
+ *  applyGlow) or is folded away, and neither is a spacer's. */
+export function windowSpans(units: readonly number[], w: WindowGeometry): Array<{ top: number; bot: number }> {
+  const out: Array<{ top: number; bot: number }> = [];
+  for (const u of units) {
+    if (u < w.winStart && w.winStart > 0 && w.topH > 0) {
+      const slot = w.topH / w.winStart;
+      const top = w.topY + u * slot;
+      out.push({ top, bot: top + Math.min(slot, w.avg) });
+    } else if (u >= w.winEnd && w.unitTotal > w.winEnd && w.botH > 0) {
+      const slot = w.botH / (w.unitTotal - w.winEnd);
+      const top = w.botY + (u - w.winEnd) * slot;
+      out.push({ top, bot: top + Math.min(slot, w.avg) });
+    }
+  }
+  return out;
 }
