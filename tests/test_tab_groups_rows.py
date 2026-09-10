@@ -26,6 +26,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -37,6 +38,9 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
 BIN = os.path.join(ROOT, "bin")
 EXT = os.path.join(ROOT, "vscode-extension")
+sys.path.insert(0, HERE)
+import test_ship_reship as _lab   # noqa: E402  the lab kernel's environment (the module, not its classes: an
+#                                   imported TestCase would be collected here a second time)
 
 # name → (sid, tags) ; the web tag is wide enough to wrap at a 640px viewport; "archived" folds by default;
 # web-search carries TWO tags and appears under both (T264b: tags are equivalent, no home tag)
@@ -170,10 +174,7 @@ class ServedGroupsOnOwnLines(unittest.TestCase):
         Path(cls.state, "timeline-views.json").write_text(json.dumps({"tags": tags, "tagOrder": [t[1] for t in TAGS]}))
         cls.port = _free_port()
         cls.token = "testtok-tabrows"
-        env = dict(os.environ, XDG_STATE_HOME=os.path.join(cls.lab, "xdg"), CLAUDE_CONFIG_DIR=claude,
-                   ROMP_MANAGER_PORT="1", ROMP_KERNEL_NO_OPEN="1", ROMP_SERVE_TOKEN=cls.token,
-                   ROMP_KERNEL_PORT=str(cls.port), ROMP_DIST_DIR=dist, ROMP_MODEL_CATALOG="off")
-        env.pop("ROMP_STATE_DIR", None)
+        env = _lab.kernel_env(cls.lab, claude, dist, cls.port, cls.token)
         cls.klog = os.path.join(cls.lab, "kernel.log")
         cls.kernel = subprocess.Popen([os.path.join(BIN, "romp-kernel")],
                                       stdout=open(cls.klog, "w"), stderr=subprocess.STDOUT, env=env)
