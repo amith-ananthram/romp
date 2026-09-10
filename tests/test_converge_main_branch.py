@@ -11,9 +11,9 @@ checkout, a second clone to advance the remote's main.
 
 Hermetic state, synthetic content; the restart leg is stopped before the manager POST."""
 import os
-import subprocess
 import tempfile
 import unittest
+from git_fixture import git as fixture_git, init_repo, forbid_background
 from romp_load import load_source
 from pathlib import Path
 from unittest import mock
@@ -35,8 +35,13 @@ else:
     os.environ["ROMP_STATE_DIR"] = _PREV_STATE_DIR
 
 
+# T299: every git here goes through the suite's shared runner (tests/git_fixture.py), which forbids BACKGROUND
+# work: `git commit`, fetch and merge spawn `git maintenance run --auto`, which on recent git detaches from its
+# parent and can still be writing into .git while the TemporaryDirectory removes the repo (the CI flake
+# "Directory not empty: '.git'", tests/test_restart_classifier.py, 2026-09-10). init_repo writes the same keys
+# into each fixture repo's own config, so the git the KERNEL runs against the checkout obeys them too.
 def git(cwd, *args):
-    r = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=30)
+    r = fixture_git(cwd, *args, timeout=30, check=False)
     if r.returncode != 0:
         raise AssertionError("git %s failed: %s%s" % (" ".join(args), r.stdout, r.stderr))
     return r.stdout.strip()
@@ -56,12 +61,14 @@ class ConvergeMovesMain(unittest.TestCase):
         self.remote = root / "remote.git"
         seed = root / "seed"
         seed.mkdir()
-        git(seed, "init", "-q", "-b", "main")
+        init_repo(seed, "-q", "-b", "main")
         self.base = commit(seed, "one")
-        git(seed, "init", "-q", "--bare", "-b", "main", str(self.remote))   # HEAD -> main, so clones start on main
+        self.remote.mkdir()
+        init_repo(self.remote, "-q", "--bare", "-b", "main")   # HEAD -> main, so clones start on main
         git(seed, "push", "-q", str(self.remote), "main")
         self.checkout = root / "checkout"
         git(root, "clone", "-q", str(self.remote), str(self.checkout))
+        forbid_background(self.checkout)   # the kernel runs git against this clone through its own subprocess
         # advance the remote's main from a second clone: the target the verdict advertises
         other = root / "other"
         git(root, "clone", "-q", str(self.remote), str(other))
@@ -91,8 +98,7 @@ class ConvergeMovesMain(unittest.TestCase):
             return list(km._SYNC_NOTICES)
 
     def head_branch(self):
-        r = subprocess.run(["git", "symbolic-ref", "-q", "--short", "HEAD"], cwd=str(self.checkout),
-                           capture_output=True, text=True)
+        r = fixture_git(self.checkout, "symbolic-ref", "-q", "--short", "HEAD", check=False)   # exits 1 when detached
         return r.stdout.strip()
 
     def test_main_that_is_an_ancestor_is_fast_forwarded_and_checked_out(self):
@@ -145,6 +151,13 @@ class ConvergeMovesMain(unittest.TestCase):
         self.assertEqual(git(self.checkout, "rev-parse", "--short=8", "HEAD"), local)
         self.assertEqual(git(self.checkout, "rev-parse", "--short=8", "main"), local)
         self.assertTrue(any("not a fast-forward" in n["text"] and not n["ok"] for n in self.notices()))
+
+    def test_the_fixture_repos_forbid_background_git_work(self):
+        # T299: the kernel runs its own `git fetch` / `git checkout` against the checkout (and the fetch reaches
+        # the bare remote), so the no-background keys must sit in each repo's own config, not only ride the
+        # fixture runner's -c flags
+        for repo in (self.checkout, self.remote):
+            self.assertEqual(git(repo, "config", "--local", "--get", "maintenance.auto"), "false", str(repo))
 
 
 if __name__ == "__main__":

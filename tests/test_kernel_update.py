@@ -18,6 +18,7 @@ import time
 import unittest
 from unittest import mock
 from romp_load import load_source
+from git_fixture import git, init_repo, forbid_background
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -944,13 +945,19 @@ class ReleaseChannelMigration(unittest.TestCase):
         and DETACHED at c3 — ahead of v9.9.9, on no tag: the walked-onto-main shape."""
         env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+        # Through the shared runner (T299): `git commit`, fetch and merge spawn `git maintenance run
+        # --auto`, which on recent git detaches and can still be writing into .git while the
+        # TemporaryDirectory removes the repo (the CI flake "Directory not empty: '.git'",
+        # tests/test_restart_classifier.py, 2026-09-10); the runner forbids that work on every call,
+        # and init_repo / forbid_background write the same keys into each repo's own config so the
+        # update script's fetch + merge, run by the kernel's bash and not by this runner, obey them too.
         def g(cwd, *args):
-            r = subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True, text=True)
+            r = git(cwd, *args, env=env, check=False)
             self.assertEqual(r.returncode, 0, "git %s: %s%s" % (" ".join(args), r.stdout, r.stderr))
             return r.stdout.strip()
         src = os.path.join(tmp, "src")
         os.makedirs(src)
-        g(src, "init", "-q", "-b", "main")
+        init_repo(src, "-q", "-b", "main", env=env)
         with open(os.path.join(src, "install.sh"), "w") as f:
             f.write("#!/bin/sh\nexit 0\n")
         os.chmod(os.path.join(src, "install.sh"), 0o755)
@@ -962,10 +969,22 @@ class ReleaseChannelMigration(unittest.TestCase):
         g(src, "commit", "-qm", "c3", "--allow-empty")
         bare = os.path.join(tmp, "origin.git")
         g(tmp, "clone", "-q", "--bare", src, bare)
+        forbid_background(bare, env=env)                         # the script's fetch is served from here
         inst = os.path.join(tmp, "install")
         g(tmp, "clone", "-q", bare, inst)
+        forbid_background(inst, env=env)                         # the script's fetch + merge run here
         g(inst, "checkout", "-q", "--detach", "origin/main")     # the old banner's walk
         return g, inst
+
+    def test_the_fixture_repos_forbid_background_git_work(self):
+        # The pin for the keys above: the update script runs fetch, merge and checkout against the
+        # install through its own bash (the fetch served from the bare origin), never through g, so
+        # the no-background config must sit in each repo's LOCAL config, not only on the runner's flags.
+        with tempfile.TemporaryDirectory() as tmp:
+            _, inst = self._repos(tmp)
+            for repo in (inst, os.path.join(tmp, "origin.git"), os.path.join(tmp, "src")):
+                self.assertEqual(git(repo, "config", "--local", "--get", "maintenance.auto").stdout.strip(),
+                                 "false", repo)
 
     def _run(self, tag, inst):
         """Capture _run_update's script via the Popen seam, run it SYNCHRONOUSLY. The log and
@@ -1121,14 +1140,16 @@ class BootOnTheTag(Fresh):
     def test_a_release_checkout_reads_the_plus_and_the_boot_still_says_it_runs_it(self):
         env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+        # the shared runner, for the reason ReleaseChannelMigration._repos gives (T299); the kernel's
+        # own `git rev-parse` reads this repo through ROOT, so init_repo puts the keys in its config
         def g(cwd, *args):
-            r = subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True, text=True)
+            r = git(cwd, *args, env=env, check=False)
             self.assertEqual(r.returncode, 0, "git %s: %s%s" % (" ".join(args), r.stdout, r.stderr))
             return r.stdout.strip()
         with tempfile.TemporaryDirectory() as tmp:
             src = os.path.join(tmp, "src")
             os.makedirs(src)
-            g(src, "init", "-q", "-b", "main")
+            init_repo(src, "-q", "-b", "main", env=env)
             with open(os.path.join(src, "VERSION"), "w") as f:
                 f.write("9.9.9\n")
             g(src, "add", "VERSION")

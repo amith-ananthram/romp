@@ -38,6 +38,8 @@ import textwrap
 import unittest
 from unittest.mock import patch
 
+from git_fixture import git, init_repo
+
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
 IDENT = "romp tests <tests@example.invalid>"
@@ -47,6 +49,14 @@ under_conftest = unittest.skipUnless("tests.conftest" in sys.modules,
 
 
 def _run(cmd, **kw):
+    # T299: a git handed a cwd runs against a FIXTURE repository here and goes through the suite's shared runner
+    # (tests/git_fixture.py), which forbids BACKGROUND work on every invocation: `git commit` spawns
+    # `git maintenance run --auto`, which on recent git detaches and can still be writing into .git while the
+    # TemporaryDirectory removes the repo (the CI flake "Directory not empty: '.git'",
+    # tests/test_restart_classifier.py, 2026-09-10). A git with no cwd reads the checkout running the tests, or
+    # no repository at all (`--version`, `config --global --list`), and stays the plain run it was.
+    if cmd[0] == "git" and "cwd" in kw:
+        return git(kw.pop("cwd"), *cmd[1:], check=kw.pop("check", False), timeout=60, **kw)
     return subprocess.run(cmd, capture_output=True, text=True, timeout=60, **kw)
 
 
@@ -434,7 +444,7 @@ class GitFloor(unittest.TestCase):
             f.write("[core]\n\thooksPath = %s\n" % hooks)
         repo = os.path.join(td, "repo")
         os.makedirs(repo)
-        _run(["git", "init", "-q"], cwd=repo, check=True)
+        init_repo(repo, "-q")   # no ident: the commit below pins the conftest floor's identity, not a local one
         with open(os.path.join(repo, "a.txt"), "w") as f:
             f.write("a\n")
         _run(["git", "add", "a.txt"], cwd=repo, check=True)
@@ -477,6 +487,7 @@ class GitFloor(unittest.TestCase):
 
 LEAKY_MODULE = textwrap.dedent('''\
     import os, subprocess, tempfile, unittest
+    from git_fixture import git, init_repo    # the suite's runner (tests/__init__.py registers it under tests.conftest)
     ROOT = os.environ["TMPDIR"]
     STATE = tempfile.mkdtemp()            # a module preamble's state root: never cleaned by the module
 
@@ -486,10 +497,10 @@ LEAKY_MODULE = textwrap.dedent('''\
             d = tempfile.mkdtemp()            # a seed repo, the shape that leaked: never cleaned
             fd, f = tempfile.mkstemp()
             os.close(fd)
-            subprocess.run(["git", "init", "-q", d], check=True)
+            init_repo(d, "-q")                # no background git work: a detached maintenance would outlive the run
             open(os.path.join(d, "a.txt"), "w").write("a\\n")
-            subprocess.run(["git", "-C", d, "add", "a.txt"], check=True)
-            subprocess.run(["git", "-C", d, "commit", "-q", "-m", "seed"], check=True)
+            git(d, "add", "a.txt")
+            git(d, "commit", "-q", "-m", "seed")
             sh = subprocess.run(["mktemp", "-d"], capture_output=True, text=True, check=True).stdout.strip()
             for p in (STATE, d, f, sh):
                 self.assertEqual(os.path.commonpath([ROOT, p]), ROOT, p)
