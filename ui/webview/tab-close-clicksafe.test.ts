@@ -16,8 +16,9 @@ const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview"
 test("renderTabs defers its rebuild while a pointer is pressed on the tab strip", () => {
   assert.match(RENDER, /let tabPointerHeld = false;/);
   assert.match(RENDER, /let renderPendingWhilePressed = false;/);
-  // the guard sits at the TOP of renderTabs, alongside the rename guard, so no push rebuilds mid-press
-  assert.match(RENDER, /function renderTabs\(\) \{\s*\n\s*if \(renameActive\)[\s\S]*?\n\s*if \(tabPointerHeld\) \{ renderPendingWhilePressed = true; return; \}/);
+  // the guard sits at the TOP of renderTabs, alongside the rename guard, so no push rebuilds mid-press (the
+  // @-mention roster hook ahead of both touches no strip DOM: composer-mention-pane.test.ts)
+  assert.match(RENDER, /function renderTabs\(\) \{\s*\n\s*mentionRosterChanged\(\);[^\n]*\n\s*if \(renameActive\)[\s\S]*?\n\s*if \(tabPointerHeld\) \{ renderPendingWhilePressed = true; return; \}/);
 });
 
 test("the press guard is armed on #tabs pointerdown and released on pointerup/cancel/blur", () => {

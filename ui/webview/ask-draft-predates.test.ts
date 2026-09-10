@@ -37,7 +37,7 @@ test("every send path ends the draft, and a send re-arms the picker's claim on t
   const clears = RENDER.match(/draftStartedAt\.delete\(activeId\)/g) || [];
   assert.ok(clears.length >= 4, "cleared on the ask/rewind/plain sends + the emptied box, got " + clears.length);
   // once the box is empty again the picker takes it back → just type the answer
-  assert.match(RENDER, /ta\.style\.height = "";\s*\n\s*\/\/ The box is empty again[\s\S]*?setComposerAskMode\(\);/);
+  assert.match(RENDER, /clearBox\(\);[^\n]*\n\s*\/\/ The box is empty again[\s\S]*?setComposerAskMode\(\);/);   // clearBox: the composer's one clear path (composer-mention-pane.test.ts)
   // and a mode flip while typing repaints the box's own cue (the "answering" tint)
   assert.match(RENDER, /if \(had !== draftStartedAt\.has\(activeId\)\) setComposerAskMode\(\);/);
 });
