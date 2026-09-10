@@ -993,6 +993,38 @@ class RequestOnRecord(unittest.TestCase):
         self._write({"t": 1000, "action": "manager-sigterm", "kernel": "main", "reason": "stop"})
         self.assertEqual(self._reason(), "manager-sigterm: stop")
 
+    def test_a_romp_down_outranks_the_managers_cli_down_note_above_it(self):
+        # `romp down`: the CLI's `down` row, then the service stop, then the manager's note with the
+        # trigger it read off the marker. The request names the cut; the note beneath it does not
+        # rewrite it as the manager's doing
+        self._write({"t": 1000, "action": "down", "ppid": 7},
+                    {"t": 1002, "action": "manager-sigterm", "kernel": "main", "pid": os.getpid(),
+                     "reason": "stop", "trigger": "cli-down"})
+        self.assertEqual(self._reason(now=1003), "down")
+
+    def test_a_down_that_did_not_land_is_no_request_for_a_later_signal(self):
+        # the stop failed and `romp down` filed a superseding `down-failed` row: neither row is the
+        # request for a signal that arrives later, so the kernel files its own verdict instead
+        self._write({"t": 1000, "action": "down", "ppid": 7},
+                    {"t": 1001, "action": "down-failed", "reason": "the login service did not stop", "ppid": 7})
+        self.assertEqual(self._reason(now=1003), "")
+        self.assertIsNone(km._recent_restart_audit(window=90, now=1003, started=900))
+
+    def test_a_down_failed_supersedes_only_the_down_beneath_it(self):
+        # a failed `romp down`, then a `romp refresh` that did cut this kernel: the refresh is the request
+        self._write({"t": 1000, "action": "down", "ppid": 7},
+                    {"t": 1001, "action": "down-failed", "reason": "a manager still answers on :7432", "ppid": 7},
+                    {"t": 1002, "action": "refresh", "ppid": 8})
+        self.assertEqual(self._reason(now=1003), "refresh")
+
+    def test_the_managers_cli_down_note_answers_when_the_down_row_is_out_of_reach(self):
+        # a kernel that started after the `down` row was written (the row predates this process) still
+        # reads the manager's note, and its trigger names the CLI as what set the stop off
+        self._write({"t": 950, "action": "down", "ppid": 7},
+                    {"t": 1001, "action": "manager-sigterm", "kernel": "main", "pid": os.getpid(),
+                     "reason": "stop", "trigger": "cli-down"})
+        self.assertEqual(self._reason(now=1002, started=1000), "manager-sigterm: cli-down")
+
     def test_a_labeled_request_beneath_an_unlabeled_row_is_the_answer(self):
         # the skip, executed against the order it exists for: the CLI's actionless row lands ABOVE a labeled
         # request (a `romp refresh` typed while the dashboard's restart is on record) and is walked past;

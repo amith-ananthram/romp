@@ -50,13 +50,13 @@ test("the gear posts kernel ops through ONE shared channel (never re-acquires th
     assert.ok(GEAR.includes(`'${op}'`), `gear must post ${op}`);
 });
 
-test("Fast judging is a kernel setting: a stamped emitter under its own store name, a toast name, a mixed mark, and it follows to every machine", () => {
+test("Fast mode for the judges is a kernel setting: a stamped emitter under its own store name, a toast name, a mixed mark, and it follows to every machine", () => {
   assert.ok(GEAR.includes("post({ type: 'setJudgeFast', enabled: jf.checked, gt: gclock.stamp('judge-fast') })"),
     "the click posts the kernel's designed message with the gesture stamp minted in the literal");
   assert.ok(GEAR.includes("jf.checked = v.judgeFast === 'on'"),
     "the checkbox shows the kernel's persisted answer (RAW on/off), never a page default");
-  assert.match(GEAR, /STALE_LABELS = \{[\s\S]*?'judge-fast': 'Fast judging'/,
-    "a stood-down gesture toasts under the row's own name");
+  assert.match(GEAR, /STALE_LABELS = \{[\s\S]*?'judge-fast': 'Fast mode \(judges\)'/,
+    "a stood-down gesture toasts under the control's own name");
   assert.match(GEAR, /STALE_TYPE = \{[\s\S]*?'judge-fast': 'setJudgeFast'/,
     "the store maps to its message type (the toast's Apply anyway whitelist)");
   assert.match(GEAR, /\['judgeFast', jf\]/, "the row carries the mixed mark where machines disagree");
@@ -64,6 +64,34 @@ test("Fast judging is a kernel setting: a stamped emitter under its own store na
   const setSrc = FED.match(/const KERNEL_SETTING = new Set\(\[([\s\S]*?)\]\)/);
   assert.ok(setSrc && setSrc[1].includes('"setJudgeFast"'),
     "one click writes every attached kernel, like the other judge settings");
+});
+
+test("the judges' fast-mode box sits on the Triage model row in the chat's words, and greys when no tier is on Opus", () => {
+  // The user 2026-09-10: say Fast mode, the word the chat's statusline badge and its tip already use
+  // (render.ts FAST_CHOICES / "toggle fast mode"), never a coinage of the gear's own; and put the box
+  // with the model rather than on a row of its own under a paragraph. The ids and the message stay,
+  // so the kernel side and the cross-machine propagation are untouched.
+  assert.ok(!GEAR.includes("Fast judging"), "the old label is gone from the gear");
+  assert.match(GEAR, /<select id=rs-judgemodel><\/select>" \+[\s\S]{0,600}?<label class=rs-fastin id=rs-judgefast-wrap><input type=checkbox id=rs-judgefast>Fast mode<span class=rs-mixed hidden><\/span>/,
+    "the box follows the triage picker inside the same row, with its own mixed mark");
+  assert.ok(GEAR.includes("<span class=rs-sub id=rs-judgefast-sub>"), "its hint is a row hint like its neighbours', not a paragraph");
+  assert.match(GEAR, /var JUDGEFAST_SUB = "[^"]*Opus-only[^"]*premium/, "the one-line hint carries the Opus-only condition and the premium");
+  // the gate, mirroring cmtFastGate: the opt-in rides only a call whose model is Opus, so with no tier on
+  // Opus the box is inert; the gear greys it and the hint says why, instead of a dead control
+  assert.ok(GEAR.includes("function judgeFastGate"), "the availability gate must exist");
+  assert.ok(GEAR.includes("jf.disabled = !can"), "the box disables when no tier is on Opus");
+  assert.ok(GEAR.includes("sub.textContent = can ? JUDGEFAST_SUB : JUDGEFAST_SUB_OFF"), "the hint says why while greyed");
+  assert.ok(GEAR.includes("if (dis === 'triage') dis = tri;"), "distilling on Follow triage counts as the triage pick");
+  for (const store of ["judge-model", "index-model", "distill-model"])
+    assert.match(GEAR, new RegExp("gclock\\.stamp\\('" + store + "'\\) \\}\\); judgeFastGate\\(\\);"), `a ${store} pick re-runs the gate`);
+  assert.match(GEAR, /cmtFastGate\(false\);\n\s*judgeFastGate\(\);/, "fill() re-checks availability after the tiers are set");
+  // the mixed mark is the one inside the box's own label, not the picker's (both share the row now)
+  assert.ok(GEAR.includes("el.closest('label') || el.closest('.rs-row')"), "fillMixedMarks scopes to the control's own label first");
+  const CSS = read("ui", "webview", "gear.css");
+  assert.ok(CSS.includes("#rsettings .rs-fastin.rs-off { opacity: .4;"), "the greyed look");
+  assert.ok(CSS.includes("#rsettings .rs-row:has(.rs-fastin:hover) > .rs-sub { display: none; }"), "one hover description at a time");
+  assert.ok(CSS.includes("#rsettings .rs-fastin .rs-sub { white-space: normal; }"), "the hint wraps: the label's nowrap (box + word on one line) must not reach the hint, or it runs off the card");
+  assert.ok(CSS.includes("#rsettings .rs-row:has(.rs-fastin .rs-mixed:hover) .rs-fastin .rs-sub { display: none; }"), "the box's mixed mark keeps its title alone: no hint under it");
 });
 
 test("EVERY queued-class kernel setting is emitted with its gesture time (completeness-pinned to federation's own set)", () => {

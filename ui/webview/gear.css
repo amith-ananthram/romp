@@ -78,6 +78,22 @@ body.rs-lifted.rs-pane-gone::before { display: none; }
 #rsettings .rs-jrow b { flex: 1 1 auto; }
 #rsettings .rs-jrow select { flex: 0 0 auto; width: 45%; background: var(--bg, #1e1e1e); color: var(--fg, #ccc);
   border: 1px solid var(--hairline, #3a3a3a); border-radius: 5px; padding: 3px 4px; cursor: pointer; }
+/* Fast mode rides the Triage model row, after the picker (the user 2026-09-10, who wanted the setting to speak
+   the chat's own words and sit with the model): a compact box + word at the row's size, greyed (.rs-off) while
+   no judge tier is on Opus. Hover shows ONE description: the box's own over the box, the row's elsewhere. */
+#rsettings .rs-fastin { display: inline-flex; align-items: center; gap: 5px; margin-left: 10px; flex: 0 0 auto; white-space: nowrap; cursor: pointer; }
+#rsettings .rs-fastin input { margin: 0; }
+#rsettings .rs-fastin.rs-off { opacity: .4; cursor: default; }
+#rsettings .rs-fastin.rs-off input { cursor: default; }
+#rsettings .rs-row:hover .rs-fastin .rs-sub { display: none; }
+#rsettings .rs-row:has(.rs-fastin:hover) > .rs-sub { display: none; }
+#rsettings .rs-row:has(.rs-fastin:hover) .rs-fastin .rs-sub { display: block; }
+/* the label's nowrap keeps the box and its word together; the hint must NOT inherit it, or it runs off
+   the card as one line with the Opus-only condition and the premium cut off at the right edge */
+#rsettings .rs-fastin .rs-sub { white-space: normal; }
+/* the box's own mixed mark carries a native title naming the machines that differ; while it is hovered the
+   hint stands down, so one tooltip shows at a time (the rule the section's other mixed marks follow above) */
+#rsettings .rs-row:has(.rs-fastin .rs-mixed:hover) .rs-fastin .rs-sub { display: none; }
 /* feed-colormap dropdown: the button shows the picked map's gradient bar; the list is one bar per map. */
 #rs-cmap { position: relative; margin-top: 5px; }
 #rs-cmap-btn { width: 100%; height: 20px; border-radius: 5px; border: 1px solid var(--hairline, #3a3a3a); cursor: pointer; padding: 0; display: block; }

@@ -559,9 +559,14 @@ class MachineCutStampWiring(unittest.TestCase):
 
     def test_boot_reconcile_stamps_the_restart_cut(self):
         src = Path(BIN, "romp_sdk_backend.py").read_text()
-        cut = src.index("prepend = ([BOOT_RESUME_NUDGE] if cut else [])")
+        # the queued text is BOOT_RESUME_NUDGE or its `romp down` variant, both carrying the lead
+        # sentence INTR_RESTART_SIG matches; the stamp must still follow the queueing
+        pick = src.index("nudge = down_resume_nudge(stop_t, boot_t) if stop_t is not None else BOOT_RESUME_NUDGE")
+        cut = src.index("prepend = ([nudge] if cut else [])", pick)
         self.assertIn('append_machine_cut(self.state_dir, sid, "restart")', src[cut:cut + 2000],
-                      "the boot reconcile that queues BOOT_RESUME_NUDGE must stamp the cut it is resuming")
+                      "the boot reconcile that queues the resume nudge must stamp the cut it is resuming")
+        self.assertIn(km.INTR_RESTART_SIG, sb.down_resume_nudge(1000, 2000),
+                      "the `romp down` variant keeps the restart signature the kernel classifies on")
 
     def test_crash_resume_stamps_the_crash_cut(self):
         src = Path(BIN, "romp_sdk_backend.py").read_text()

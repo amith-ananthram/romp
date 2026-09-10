@@ -19,10 +19,11 @@ update` starts a session called "update".
 | `romp new -d <dir> <name>` | Start it in `<dir>` instead of the current folder |
 | `romp new -t <name>` | Start it as a terminal (tmux) session and attach; add `--detach` to leave it running |
 | `romp resume` | Resume a past conversation, chosen from a full-screen picker |
-| `romp status` | Manager and kernel status |
+| `romp status` | Manager and kernel status; a kernel stopped by `romp down` says so |
 | `romp refresh` | Restart the postal bus and every kernel immediately, picking up new code (cut turns resume with their history) |
-| `romp update [host…]` | Push this machine's committed Romp to attached remotes and restart them at once (every deploy restart is immediate; boot reconcile resumes the cut turns with their history) |
-| `romp up` | Run the kernel manager in the foreground; rare, since the login service runs it |
+| `romp update [host…]` | Push this machine's committed Romp to attached remotes and restart them at once (every deploy restart is immediate; boot reconcile resumes the cut turns with their history); a remote stopped by `romp down` is synced and left stopped |
+| `romp up` | Start the kernel: through the login service when one is installed, in the foreground otherwise. Clears a `romp down` marker |
+| `romp down` | Stop the kernel and keep it stopped until `romp up`. Turns in flight get 5 seconds to finish first; sessions resume with their history at the next start. See [Stopping the kernel on purpose](#stopping-the-kernel-on-purpose) |
 | `romp version` | Version report across the moving parts |
 | `romp help` | The same list, from the terminal |
 
@@ -51,6 +52,8 @@ These are for scripting and for agents rather than daily use:
 | `romp debug [on\|off\|status]` | Judge debug mode, where rejection rows carry the full input and reply |
 | `romp resume <id> [--name <n>] [--detach]` | Resume one exact conversation by UUID |
 | `romp refresh --quiet` | Refresh at the next quiet window instead — waits for sessions to finish their turns (15-min backstop). The ONLY door to the quiet window: a deploy (a peer's `romp update`, a release self-update, an automatic converge) restarts immediately, by the user's 2026-09-08 decision |
+| `romp down --wait <s>`, `romp down --now` | How long `romp down` waits for turns in flight to finish (0 to 600 seconds; default 5), or no wait at all |
+| `romp up --foreground` | Run the manager in this terminal even with a login service installed (its log in front of you); the manager refuses to start beside a running one |
 
 Raw `POST` callers, anything that talks to the kernel's routes directly rather
 than through `romp`, follow one body contract, and the postal bus's own routes
@@ -485,18 +488,21 @@ through to `install.sh`:
   and follows to every connected machine like the other judge settings; its
   Default option clears the setting back to the variable, else 6.
 
-### Fast judging
+### Fast mode for the judges
 
-- **Fast judging** (the gear's Judges section; off by default) runs the judges
-  in Claude Code's fast mode, an Opus-only research preview billed at a premium
-  over standard Opus rates. The setting is read per call: a judge call whose
-  model is Opus, by the bare alias or a pinned Opus version, carries the CLI's
-  fast-mode opt-in in its per-call settings; a call on any other model runs
-  exactly as before, so with every tier on Sonnet and Haiku the setting changes
-  nothing until a tier is pinned to Opus. Fast requests draw on fast mode's own
-  rate limits, the pool your sessions' fast toggles share. Whether fast engaged
-  is the CLI's answer, per account (an account with extra usage turned off, or
-  an organisation with fast mode disabled, reports it off with the setting on):
+- **Fast mode** (the checkbox beside the gear's Triage model picker; off by
+  default) runs the judges in Claude Code's fast mode, the same Opus-only
+  research preview the chat statusline's Fast badge toggles for a session,
+  billed at a premium over standard Opus rates. The setting is read per call: a
+  judge call whose model is Opus, by the bare alias or a pinned Opus version,
+  carries the CLI's fast-mode opt-in in its per-call settings; a call on any
+  other model runs exactly as before, so with every tier on Sonnet and Haiku the
+  setting changes nothing until a tier is pinned to Opus. The gear says so: while
+  no judge tier (triage, distilling, or indexing) is on Opus, the box is greyed
+  and its hint names the reason. Fast requests draw on fast mode's own rate
+  limits, the pool your sessions' fast toggles share. Whether fast engaged is
+  the CLI's answer, per account (an account with extra usage turned off, or an
+  organisation with fast mode disabled, reports it off with the setting on):
   each row of `judge-usage.jsonl` keeps that answer in its `fast` field (`on`,
   `off` or `cooldown`; `null` when the CLI reported none), so a checkbox that
   reads on beside rows that read off names the account, not the setting. Like
@@ -760,12 +766,159 @@ vault item, and does nothing else. Remote kernels each read their own
 machine's Claude Code settings, so a key shared across machines rotates once,
 in the vault, and everywhere within the TTL.
 
+### Stopping the kernel on purpose
+
+`romp down` stops the kernel and keeps it stopped until `romp up`. The manager
+is supervised (`Restart=always` under systemd, `KeepAlive` under launchd), so a
+kernel or manager that merely exits is back within seconds, and Ctrl+C is not
+available to a manager the service runs. `romp down` instead stops the login
+service itself (`systemctl --user stop romp-manager.service`; on macOS
+`launchctl bootout` of the agent), which nothing respawns, and then probes the
+processes themselves rather than trusting the exit code of `romp-service stop`.
+
+Before stopping, `romp down` gives the turns in flight `--wait` seconds
+(default 5, up to 600) to reach a turn boundary. It asks the kernel to quiesce
+(`POST /down`), which holds new turn starts and new session creation, and then
+reports whether the kernel went quiet or which sessions are still mid-turn and
+about to be cut. The wait ends on the event the in-flight count reaches zero;
+`--wait` is only its bound. `--now` skips the wait, not the request: when a
+kernel answers on the port, the same `POST /down` goes out with a wait of 0 and
+nothing is reported about it, so the token check below still comes first; the
+hold it arms is the grace the kernel keeps after any wait, and the kernel probe
+re-arms it right before the signal. A `romp new` or a dashboard create during
+the hold is refused with one line saying the kernel is being stopped on purpose
+and no new session can start; the line names no command, because inside a
+session its reader is an agent, and an agent told to run `romp up` would undo
+the stop. If the stop never lands, the kernel carries on by itself: the hold is
+a lease, and it lapses 30 seconds after the wait. The stop then cuts what a
+`romp refresh` cuts, and it comes back the same way (see
+[What survives a restart](#what-survives-a-restart)).
+
+`romp down` signals only a kernel it has confirmed as its own: one that
+accepted this romp's serve token on `POST /down` and named the pid that
+`GET /version` also reports. A kernel that rejects the token (HTTP 401 or 403)
+is another romp's or another program's. When the quiesce request is rejected,
+`romp down` prints `romp down: the kernel on :<port> is not the one this romp
+manages (it rejected the serve token); not touching it. Check
+ROMP_KERNEL_PORT and the state dir` and exits 1, before the marker is written
+or anything is stopped. Under `--now` the same request goes out with a wait of
+0 whenever a kernel answers on the port, so a rejected token ends the command
+at the same point; the kernel probe asks again right before the signal, and a
+rejection there removes the marker.
+
+The exit code of `romp-service stop` decides the first step; the probes after
+it run every time:
+
+- Exit 0 (the unit or agent stopped), 3 (no login service installed) or 4
+  (installed but not running): on to the probes. After a 3 or a 4, any manager
+  running is outside the service (a foreground `romp up`, a hand
+  `romp-manager up`).
+- Any other exit: the service refused to stop, and the kernel is most likely
+  still up. `romp down` releases the quiesce hold, removes its marker, prints
+  `romp down: the login service did not stop` and exits 1.
+- The manager probe: `romp-manager status` on the control port (`:7432` by
+  default). A manager that answers is stopped through its own control endpoint
+  (`romp-manager down`, a `POST /stop`) and polled until it leaves; the poll's
+  bound is seven seconds, the manager's own five-second grace for its kernels
+  (it sends SIGKILL to one still there) plus its exit. One still answering
+  after that: `romp down` releases the hold, removes the marker, prints
+  `romp down: a manager is still running on :<port> (pid <pid>)`, which says
+  to stop it by hand and run `romp down` again, and exits 1.
+- The kernel probe: `GET /healthz` on the kernel port (`:29855` by default). A
+  kernel the earlier steps already asked to stop is polled for up to three
+  seconds first, the bound on its own drain. One still answering (it ran with
+  no manager, or outlived the manager's SIGTERM) must first be confirmed as
+  this romp's: `POST /down` with a wait of 0 under the serve token must answer
+  200 naming a pid, and `GET /version` must name the same pid. That pid is
+  sent the manager's own stop signal (SIGTERM) and polled for up to six
+  seconds to leave. Any other answer (a rejected token, a 200 without a pid, a
+  pid `GET /version` disagrees with, another HTTP code, no answer) leaves the
+  kernel alone: `romp down` releases the hold, removes the marker, appends a
+  superseding `down-failed` row to `restart-audit.jsonl`, prints
+  `romp down: the kernel on :<port> was not confirmed as the one this romp
+  manages (<why>); not touching it. Check ROMP_KERNEL_PORT and the state dir`
+  (a rejected token gets the rejected-token line instead) and exits 1. One
+  still answering six seconds after the signal gets the same release and
+  `down-failed` row, then
+  `romp down: the kernel on :<port> (pid <pid>) is still running after being
+  asked to stop`, which says to stop it by hand and run `romp down` again,
+  and exits 1.
+- Nothing left answering: a `[romp] down` line that says what stopped (the
+  service, a manager outside it, a kernel the probe found, or a kernel that
+  answered the quiesce and has since gone) and names `romp up`, or
+  `[romp] nothing was running` when neither the service nor a manager was up
+  (the auto-start stays held until `romp up`), and exit 0.
+
+With a login service installed, the unit stays enabled, so it comes back at
+`romp up` or when the service manager next starts it. On Linux that is the
+next boot, not the next login: `romp-service install` enables linger, so your
+`systemd --user` instance outlives your logins and a stopped unit stays
+stopped through them (where the linger call failed, the instance ends at
+logout and the next login starts the unit again). On macOS the booted-out
+agent loads again at the next login.
+
+The stop leaves a marker, `down-by-romp` under the state directory (with the
+time and the command), so the stopped kernel reads as stopped on purpose. While
+the marker exists and no manager answers, `romp status` prints
+`down (romp down at HH:MM; romp up to start)` and exits 0 instead of the
+manager's not-running error; a marker from an earlier day shows its date
+(`down (romp down at 2026-09-04 17:12; romp up to start)`), and one with no
+readable time drops it (`down (romp down; romp up to start)`). A manager that
+does answer outranks the marker: `romp status` prints its usual report and
+exits 0. `romp-service status` reports the marker too, as
+`stopped by romp down at HH:MM (romp up to start)`.
+
+The marker also blocks romp's other ways of bringing the kernel back.
+`romp-manager ensure` refuses to bring the manager back. `ensure` is the
+supervised start that `romp update <host>` and the dashboard's remote restart
+run on the far host, so a remote stopped by `romp down` is left stopped:
+`romp update` syncs its code, restarts nothing, and says so, and `romp up`
+there boots the new code. The dashboard's Start button and an attach's
+bootstrap, which boot a bare kernel on a host with no manager, decline the same
+way and name `romp up` on that host. `romp up` clears the marker and starts the
+service; a manager started any other deliberate way (the login service at the
+next boot, a hand `systemctl --user start`) clears it too.
+
+`romp down` also appends a row to `restart-audit.jsonl` that names the action,
+so the kernel's restart-cut ledger records the cut as a `down`, not an
+anonymous SIGTERM; a `romp down` whose stop did not land appends a superseding
+`down-failed` row, so a later cut of the kernel it left running is never
+blamed on it.
+
+Sessions come back at the next `romp up` from what is already on disk: the
+kernel's boot reconcile reads each session's registry entry and state tail and
+needs nothing written at shutdown. A session whose turn had ended before the
+stop is revived on demand, with its history, the next time something reaches
+it; a session cut mid-turn is resumed at boot and told its turn was cut. When
+the stop was a `romp down` (the newest `restart-audit.jsonl` request row is a
+`down`, and the cut turn started at or before its time), the notice also gives
+the stop time, the start time and the gap, so a model resumed hours later
+re-checks what it was running before relying on it.
+
+Terminal (tmux) sessions survive the stop where they survive a service restart
+(see [What survives a restart](#what-survives-a-restart)): on Linux
+`systemctl --user stop` kills everything in the service's cgroup, so the tmux
+server and its sessions live on only when the manager started it in its own
+transient scope (the default under the service; off with `ROMP_CLI_SCOPE=0`,
+and not true of a tmux server that predates the scopes). On macOS there is no
+cgroup kill, and the tmux server survives the stop.
+
+Only `romp refresh` stops the postal bus on purpose; `romp down` leaves it
+alone, but on Linux a bus the kernel started dies with the service anyway: the
+kernel runs `romp-postal-service ensure` at boot, which spawns the bus in a
+process session of its own but inside the service's cgroup, and the service
+stop kills that cgroup. A bus started from a session's postal MCP server lives
+in that session's scope and keeps running. Either way the next kernel boot runs
+`ensure` again, so at worst mail parks until `romp up`.
+
 ### What survives a restart
 
 A kernel restart ends every session's CLI. On `romp refresh`, the manager's
-restart-all or a service stop, the kernel receives SIGTERM and drains: it
+restart-all, `romp down` or a service stop, the kernel receives SIGTERM and drains: it
 closes each CLI, and a CLI still running when the drain's bound expires gets
-SIGTERM, then SIGKILL. A crash respawn has no drain: the kernel died without
+SIGTERM, then SIGKILL. The manager does the same to the kernel: one still
+running five seconds after the manager's SIGTERM, on a restart as on a stop,
+gets SIGKILL, so no kernel outlives the stop that was meant for it. A crash respawn has no drain: the kernel died without
 running one, its CLIs are orphaned, and the next kernel's boot reaper
 terminates them (see below). The CLI's harness background tasks do not all end
 with it. Its timers and monitors live inside the CLI process and end when it
@@ -1795,11 +1948,12 @@ the automatic pass sends nothing whose record could not land, and the file
 keeps what it holds.
 
 Two files there record restarts. `restart-audit.jsonl` gets a row from
-whatever asks for one: `romp refresh`, the dashboard's restart button, the
-kernel's own update, and the manager before each SIGTERM it sends (action
-`manager-sigterm`, with a `trigger` naming what set it off: `restart`,
-`restart-all`, `refresh` for the stale-manager self-bounce, `stop` for any
-other). When a SIGTERM arrives, the kernel reads the last two hundred rows,
+whatever asks for one: `romp refresh`, `romp down`, the dashboard's restart
+button, the kernel's own update, and the manager before each SIGTERM it sends
+(action `manager-sigterm`, with a `trigger` naming what set it off: `restart`,
+`restart-all`, `refresh` for the stale-manager self-bounce, `cli-down` for a
+stop while `romp down`'s marker is on disk, `stop` for any other). When a
+SIGTERM arrives, the kernel reads the last two hundred rows,
 newest first, for a request within the last 90 seconds (20 minutes for a
 request that asked to wait for a quiet window) and no older than its own
 start: a request that predates the process was delivered to the kernel before
@@ -1807,24 +1961,27 @@ it, so the walk ends there, except for a quiet-window request, which the
 manager parks and delivers to whichever kernel is running when the window
 opens. A row with an action names the request. The kernel's own `signal` and
 `parent-gone` rows are verdicts a previous kernel filed on its exit, never a
-request, and are passed over. The manager's `manager-sigterm` row is a note
-that the manager sent the signal, not a request: it answers only when no
+request, and are passed over. A `down-failed` row (written when a `romp down`
+did not stop the kernel) cancels the `down` written before it: neither names a
+later signal, and both are passed over. The manager's `manager-sigterm` row is
+a note that the manager sent the signal, not a request: it answers only when no
 request row written before it lies within the window and this kernel's
-lifetime, with `manager-sigterm: <trigger>` as the reason, and a note aimed at
-another kernel's pid is ignored. Verdicts and notes are passed over wherever
-they sit, an aged one included: one older than the window or older than this
-kernel never ends the walk, so a quiet-window request beneath it is still
-read. A row with no action (the `romp refresh` row) is skipped, and the
-manager's `restart-all` note written after it is what names the refresh; a
-`romp refresh --quiet` row is the parked deploy that holds the automatic
-converge until the window opens, and the note written at the window names its
-delivery the same way. A SIGTERM that reaches a kernel with a quiet-window
-request parked and no manager note for its pid (a note naming no pid counts as
-its own) is not that request's delivery: the kernel files a `signal` row and
-leaves the request on record for the kernel the window will restart. The
-manager's stop of one kernel (a `stop` note with trigger `stop`, which leaves
-the manager's parked request armed; a stop of every kernel writes the same
-note) is not the delivery either: that cut is named by the note,
+lifetime, with `manager-sigterm: <trigger>` as the reason, so a `down` followed
+by the manager's `cli-down` note still reads as the `down`, and a note aimed at
+another kernel's pid is ignored. Verdicts, notes and the two `down` rows are
+passed over wherever they sit, an aged one included: one older than the window
+or older than this kernel never ends the walk, so a quiet-window request
+beneath it is still read. A row with no action (the `romp refresh` row) is
+skipped, and the manager's `restart-all` note written after it is what names
+the refresh; a `romp refresh --quiet` row is the parked deploy that holds the
+automatic converge until the window opens, and the note written at the window
+names its delivery the same way. A SIGTERM that reaches a kernel with a
+quiet-window request parked and no manager note for its pid (a note naming no
+pid counts as its own) is not that request's delivery: the kernel files a
+`signal` row and leaves the request on record for the kernel the window will
+restart. The manager's stop of one kernel (a `stop` note with trigger `stop`,
+which leaves the manager's parked request armed; a stop of every kernel writes
+the same note) is not the delivery either: that cut is named by the note,
 `manager-sigterm: stop`, and the request stays on record. A restart note, or
 the self-bounce's `refresh` note, is the delivery: the cut row names the
 request and consumes it.

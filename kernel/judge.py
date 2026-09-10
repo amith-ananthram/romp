@@ -243,7 +243,7 @@ def _index_effort():  return _state_str("index-effort", "")
 def _judge_engine():  return _state_str("judge-engine", "claude")   # "claude" | "codex" — which model
 #   harness runs the judges (docs/codex.md §judges). "codex" lets a machine with no Claude login keep
 #   the board thinking: every judge becomes a one-shot `codex exec` billing the machine's codex login.
-def _judge_fast():    return _state_str("judge-fast", "off") == "on"   # gear "Fast judging": the CLI's fast-mode
+def _judge_fast():    return _state_str("judge-fast", "off") == "on"   # the gear's Fast mode box (Triage model row): the CLI's fast-mode
 #   opt-in rides every judge call whose model is Opus (_judge_cmd); off by default. Read per call, like the tiers.
 INDEX_EFFORT_DEFAULT = "low"   # the index tier's cost lever on models that take --effort (2026-09-01; see _judge_env)
 
@@ -861,7 +861,7 @@ def _judge_cmd(model, sys_prompt, effort=None, auth=None):
     # --settings still loads. Two keys can ride it:
     overlay = {}
     if _judge_fast() and _model_family_version(model)[0] == "opus":
-        # Fast judging (the gear's Judges section, off by default): the CLI refuses fast mode to a
+        # Fast mode for the judges (the gear's box beside the Triage model picker, off by default): the CLI refuses fast mode to a
         # non-interactive client unless the flag-settings layer carries this exact key, the same opt-in a
         # fast-picked session's launch uses (sdk_backend.flag_settings_path), and fast mode is an Opus-only
         # preview, so the key rides only a call whose model reads as the opus family: the bare alias or a
@@ -1501,7 +1501,7 @@ def _log_judge_usage(judge, tier, model, fsid, wrap, sent=None, recv=None):
                                 "cache_w": u.get("cache_creation_input_tokens"),
                                 "cache_r": u.get("cache_read_input_tokens"),
                                 "fast": wrap.get("fast_mode_state"),   # the CLI's word on whether fast mode engaged
-                                #   ("on" | "off" | "cooldown"; null when the envelope carries none): Fast judging's readback
+                                #   ("on" | "off" | "cooldown"; null when the envelope carries none): the judges' fast-mode readback
                                 "cost": wrap.get("total_cost_usd")}) + "\n")
     except Exception:
         pass
