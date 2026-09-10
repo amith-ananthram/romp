@@ -11,6 +11,8 @@
 // hostOf(parentId) for free. The suffix never reaches the kernel as a session id (openSubagent carries
 // the parent id + agentId), and a bare "/agent/" cannot occur in a uuid or a host name.
 
+import { agentRowOf, waitsNote, type AwaitRow } from "./spin-caption";
+
 export const SUB_SEP = "/agent/";
 
 export function subTabId(parentId: string, agentId: string): string { return parentId + SUB_SEP + agentId; }
@@ -113,6 +115,16 @@ export function agentFoldLabel(o: { stepsTotal?: number | null; reportLines?: nu
 // name is rendered by the caller as a link (hostNameNodes), so this returns the pieces, not a string.
 export function subHeadParts(meta: SubMeta | null | undefined, running: boolean): { type: string; state: "running" | "finished" } {
   return { type: (meta?.agentType || "").trim() || "agent", state: running ? "running" : "finished" };
+}
+
+// The header's "· waiting on <what>" tail (2026-09-10): what this agent is itself waiting on, read from the
+// PARENT session's awaited rows — the same nested `waits` the parent's box draws under the agent's row —
+// so the viewer and the box can never disagree. Only while the agent runs: a finished agent waits on
+// nothing, whatever a stale row says. "" when the parent lists no waits for it.
+export function subWaitTail(running: boolean, parentItems: readonly AwaitRow[] | null | undefined, agentId: string | null | undefined): string {
+  if (!running) return "";
+  const note = waitsNote(agentRowOf(parentItems, agentId));
+  return note ? "waiting on " + note : "";
 }
 
 // The two line icons, in the house style every glyph in render.ts wears (16-unit viewBox, currentColor

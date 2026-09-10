@@ -1,0 +1,28 @@
+# gitleaks config: the secret scanner's rules for this repo.
+#
+# The privacy rule in CLAUDE.md is about identifiers a human recognises (names,
+# hostnames, real transcripts) and is enforced by the pre-push denylist. This is
+# the other half: credentials, which no denylist can anticipate because nobody
+# knows a token's text until it leaks. gitleaks runs over every PUSHED commit in
+# .githooks/pre-push and over the whole history in CI, reading this file.
+#
+# Start from gitleaks' own rule set and only ever SUBTRACT from it here, with a
+# reason. An allowlist is a standing claim that a match is not a credential; a
+# wrong one is invisible forever after, so keep each entry as narrow as the
+# thing it excuses: an exact value beats a pattern, a pattern beats a path, and
+# a whole-path exclusion is almost never right (it silences the scanner for
+# every future line in that file too).
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """
+RFC 6455's own example Sec-WebSocket-Key. The WebSocket handshake key is a
+client nonce the protocol requires to be random, so it trips the entropy rule in
+generic-api-key; but this exact string is the base64 of "the sample nonce",
+published in the RFC, and it is what the kernel's handshake tests hand a fake
+request. Allowlisted by exact value, so a real high-entropy key on the same line
+is still caught. ANCHORED (^...$): unanchored, this would also excuse any secret
+that merely CONTAINS the nonce as a substring.
+"""
+regexes = ['''^dGhlIHNhbXBsZSBub25jZQ==$''']

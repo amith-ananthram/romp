@@ -13,7 +13,7 @@ Run:  bin/romp-kernel   → opens http://127.0.0.1:29855
 """
 import copy
 import math
-import contextlib, json, os, queue, random, re, signal, socket, sys, time, threading, traceback, base64, bisect, errno, hashlib, hmac, struct, subprocess, shutil, shlex, http.client, uuid, tempfile, stat, gzip, collections, functools, fcntl, inspect, importlib.util
+import contextlib, json, os, queue, random, re, signal, socket, sys, time, threading, traceback, base64, bisect, errno, hashlib, hmac, struct, subprocess, shutil, shlex, http.client, uuid, tempfile, stat, gzip, collections, functools, fcntl, inspect, secrets, importlib.util
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1220,16 +1220,10 @@ def _dist_ver():
 
 
 def _sw_version():
-    """The build string the push worker and the shell page BOTH carry (2026-09-09, the phone with the app
-    warm: three taps, three 201s from the push service, and then nothing — no [reveal] line, no worker
-    message, an empty tap store on every resume, and each tap booting a fresh page on the start URL. Either
-    iOS handed the tap to the live app and never ran the worker's click handler, or the phone still ran an
-    OLDER worker that never wrote the store; the trail could not tell the two apart, because nothing said
-    which worker ran). The kernel's short sha plus the dist token: a deploy is a new commit, so the sha
-    moves; a bundle rebuild moves the token. Baked into /sw.js at serve time (_sw_js) and into the shell's
-    reveal script at render, so the page can read the worker's fingerprint and say whether the worker on
-    this device is its own build (a 'tap-resume' row's swMatchesPage; 'sw-stale' when not). Characters
-    safe inside a JS string literal only."""
+    """The build string the push worker bakes into its acks (`v` in POST /push/ack, kept as the ledger row's
+    swVersion), so the trail says which worker build acked a push. The kernel's short sha plus the dist token: a
+    deploy is a new commit, so the sha moves; a bundle rebuild moves the token. Baked into /sw.js at serve time
+    (_sw_js). Characters safe inside a JS string literal only."""
     return re.sub(r"[^A-Za-z0-9._+-]", "", "%s.%s" % (_kernel_sha() or "nogit", _dist_ver()))
 
 
@@ -24182,17 +24176,23 @@ _AWAIT_ITEM_KINDS = ("agents", "commands", "watches", "peer", "timer")       # t
 _AWAIT_ITEM_LEGACY_KIND = {"agents": "agents", "commands": "task", "watches": "job", "peer": "peer", "timer": "timer"}
 
 
-def _awaiting_item(kind, iid, label, since, agent_id=None, detail=None):
-    """One awaited row: {kind, id, label, since} plus agentId (an agent row — the open-transcript arrow)
-    and detail (a watch's predicate) only when known, so every row without them is byte-identical to the
-    minimal shape. `since` is the row's OWN event time (a dispatch stamp, a hook's start, a watch's
-    registration) or None — never wall-clock now (the user 2026-08-23)."""
+def _awaiting_item(kind, iid, label, since, agent_id=None, detail=None, stoppable=False):
+    """One awaited row: {kind, id, label, since} plus agentId (an agent row — the open-transcript arrow),
+    detail (a watch's predicate) and stoppable (the row is a task in the SDK's live lifecycle set, so its
+    id is one the stop_task control request resolves — the box offers Stop on it even when the parent
+    transcript never saw the launch, as it never does for a subagent's own command; 2026-09-10) only when
+    known, so every row without them is byte-identical to the minimal shape. A row may also grow `waits`
+    (_awaiting_nest): the rows the thing it names is in turn waiting on. `since` is the row's OWN event
+    time (a dispatch stamp, a hook's start, a watch's registration) or None — never wall-clock now (the
+    user 2026-08-23)."""
     assert kind in _AWAIT_ITEM_KINDS, kind
     it = {"kind": kind, "id": str(iid or ""), "label": str(label or "").strip(), "since": (int(since) if since else None)}
     if agent_id:
         it["agentId"] = str(agent_id)
     if detail:
         it["detail"] = str(detail)
+    if stoppable:
+        it["stoppable"] = True
     return it
 
 
@@ -24295,6 +24295,7 @@ def _awaiting_live_rows(sid, path, live):
     pending = _bg_pending(sid, path, tasks) if tasks else []
     pending_tids = {t.get("tid") for t in pending}
     meta = None   # the subagents sidecar map, read once and only if an agent launch lacks its agentId
+    cmd_owner = {}   # command row id → the launch ledger's ACTING agent (the hook's agent_id), when it recorded one
     for t in tasks:
         # Sources 0.5/0.75 — a NEW row is added only for a PENDING task (launch not yet placed); a placed
         # launch's story belongs to the judge's verdicts (see the docstring's 0.5 entry for the full
@@ -24307,9 +24308,13 @@ def _awaiting_live_rows(sid, path, live):
         # as two groups, never "task".
         is_pending = t.get("tid") in pending_tids
         is_agent = _bg_is_agent(t.get("type"))
+        stoppable = bool(t.get("stoppable"))
         if not is_agent:
             if is_pending:
-                commands.append(_awaiting_item("commands", t.get("tid") or "", t.get("desc") or "background command", t.get("t")))
+                commands.append(_awaiting_item("commands", t.get("tid") or "", t.get("desc") or "background command", t.get("t"),
+                                               stoppable=stoppable))
+                if t.get("agentId"):
+                    cmd_owner[commands[-1]["id"]] = str(t["agentId"])   # a shell launched by a subagent (the ledger's acting agent)
             continue
         aid = t.get("agentId")
         if not aid and path and t.get("tid"):
@@ -24325,15 +24330,106 @@ def _awaiting_live_rows(sid, path, live):
             hit["label"] = t.get("desc") or hit["label"]
             if t.get("t") and (not hit.get("since") or int(t["t"]) < hit["since"]):
                 hit["since"] = int(t["t"])
+            if stoppable:
+                hit["stoppable"] = True
             continue
         if is_pending:   # unmatched by the hook set: a new row only while its launch is still unplaced
-            agents.append(_awaiting_item("agents", t.get("tid") or "", t.get("desc") or "background agent", t.get("t"), agent_id=aid))
+            agents.append(_awaiting_item("agents", t.get("tid") or "", t.get("desc") or "background agent", t.get("t"), agent_id=aid,
+                                         stoppable=stoppable))
+    # What a SUBAGENT itself waits on nests under the agent's row (2026-09-10) — the session waits on the
+    # agent, the agent on its command — so the top level counts only what the session itself waits on.
+    agents, commands = _awaiting_nest(agents, commands, cmd_owner, path)
     # Source 0.9 — ARMED KERNEL WATCHES this session registered (`romp watch --cmd` / `romp watch-pr`):
     # kernel-owned and restart-proof like the rows themselves, event-true at both ends (armed at
     # registration, cleared when the predicate fires or the watch cancels/times out). The user's rule
     # (2026-08-30): ANY awaited thing shows — an idle session holding only a watch used to read plain
     # ready, its wait visible nowhere but `romp watch --list`.
     return agents, commands, _watch_awaiting(sid)
+
+
+def _awaiting_nest(agents, commands, cmd_owner, path):
+    """Move every row a live SUBAGENT owns out of the top level and under that agent's row as `waits` →
+    (top-level agents, top-level commands). Claude Code keeps ONE task list per session, so a background
+    command a subagent launches registers under the parent, and the box listed it beside the agent as a
+    second thing the session waited on ("Awaiting 2 · 1 agent · 1 command" for a session running one agent
+    whose test chunk was the command — the user 2026-09-10, who wants the top level to count what the
+    session itself waits on and the agent's row to show what the agent in turn waits on). Ownership is
+    read from designed sources, exact or not at all — never a guess:
+      - a COMMAND's owner is the launch ledger's acting agent (`cmd_owner`: the PostToolUse hook's
+        agent_id, which the SDK documents as present only when the hook fires inside a subagent — the one
+        reliable attribution when several agents' hooks interleave), else the one live agent whose OWN
+        transcript holds the launch's tool_use block (_agent_launch_ids: the file the CLI writes for the
+        agent, append-folded; the parent's transcript never contains a subagent's calls, so a hit there
+        is exact);
+      - a nested AGENT's owner is its sidecar's parentAgentId when the CLI wrote one, else the one live
+        agent whose transcript holds its launch's tool_use id (the row's id from the stream, or the
+        sidecar's toolUseId for a hook-only row).
+    A row whose owner is unknown, or names an agent that is not a live row (it finished; its command
+    outlived it), stays top-level. An owner chain that loops (malformed data) is left flat. Rows move by
+    reference, so a chain nests to any depth (A's waits hold B, B's hold B's command); the client shows one
+    level and counts the deeper ones in the label. `waits` is ordered like the top level (agents, then
+    commands) and present only when non-empty, so every other row keeps the minimal shape. Nothing here
+    is read unless there is a live agent row to attribute to: a session with no agents costs no file read."""
+    by_agent = {}
+    for it in agents:
+        aid = it.get("agentId")
+        if aid and aid not in by_agent:
+            by_agent[aid] = it
+    if not by_agent:
+        return agents, commands
+    launch_sets = {}   # agentId → the launch tool_use ids in that agent's own transcript (read lazily, once)
+
+    def launches(aid):
+        if aid not in launch_sets:
+            ap = _subagent_file(path, aid) if path else None
+            launch_sets[aid] = _agent_launch_ids(ap) if ap else set()
+        return launch_sets[aid]
+
+    def owner_by_transcript(tuid, exclude=None):
+        if not tuid:
+            return None
+        hits = [a for a in by_agent if a != exclude and tuid in launches(a)]
+        return hits[0] if len(hits) == 1 else None   # exactly one agent's file names the launch, or nobody does
+
+    owned = {}   # id(row) → owner agentId
+    for it in commands:
+        o = cmd_owner.get(it["id"])
+        if o is None:
+            o = owner_by_transcript(it["id"])
+        if o in by_agent:
+            owned[id(it)] = o
+    inv_meta = None
+    agent_owner = {}
+    for aid, it in by_agent.items():
+        if inv_meta is None:
+            inv_meta = {v["agentId"]: dict(v, toolUseId=k) for k, v in (_subagent_meta_map(path) if path else {}).items()}
+        m = inv_meta.get(aid) or {}
+        o = m.get("parentAgentId")
+        if not o:
+            tuid = it["id"] if it["id"] and it["id"] != aid else m.get("toolUseId")
+            o = owner_by_transcript(tuid, exclude=aid)
+        if o and o != aid and o in by_agent:
+            agent_owner[aid] = o
+    for aid in list(agent_owner):
+        seen, cur = set(), aid       # a loop (A owns B owns A) can only come from malformed data: leave it flat
+        while cur in agent_owner and cur not in seen:
+            seen.add(cur)
+            cur = agent_owner[cur]
+        if cur in seen:
+            for a in seen:
+                agent_owner.pop(a, None)
+    for aid, o in agent_owner.items():
+        owned[id(by_agent[aid])] = o
+    if not owned:
+        return agents, commands
+    for it in agents + commands:
+        o = owned.get(id(it))
+        if o:
+            by_agent[o].setdefault("waits", []).append(it)
+    for it in by_agent.values():
+        if it.get("waits"):
+            it["waits"].sort(key=lambda w: _AWAIT_ITEM_KINDS.index(w["kind"]))   # stable: agents, then commands
+    return [a for a in agents if id(a) not in owned], [c for c in commands if id(c) not in owned]
 
 
 def _session_background_items(sid, path):
@@ -24562,7 +24658,8 @@ def _bg_live_norm(sid, path):
                 continue
             kind = str(t.get("type") or "")
             row = {"tid": t.get("toolUseId"), "desc": _agent_task_label(t.get("desc"), kind),
-                   "t": int(t.get("since") or 0), "type": kind}
+                   "t": int(t.get("since") or 0), "type": kind,
+                   "stoppable": True}   # a lifecycle-set task: stop_task resolves its id (request_stop_task takes either form)
             e = led.get(str(t.get("toolUseId")))
             if e and e.get("deadlineEpoch"):
                 row["deadline"] = float(e["deadlineEpoch"])
@@ -25354,7 +25451,7 @@ def _subagents_dir(path):
 
 
 def _subagent_meta_map(path):
-    """toolUseId → {agentId, agentType, description, spawnDepth} for every agent-*.meta.json beside the
+    """toolUseId → {agentId, agentType, description, spawnDepth, parentAgentId} for every agent-*.meta.json beside the
     transcript at `path`, cached on the DIRECTORY's mtime (a sidecar landing changes it — a stat, never a
     timer). {} when the directory does not exist (older CLIs wrote no subagent files)."""
     d = _subagents_dir(path)
@@ -25390,7 +25487,8 @@ def _subagent_meta_map(path):
             continue
         out[str(meta["toolUseId"])] = {"agentId": aid, "agentType": meta.get("agentType") or "",
                                        "description": meta.get("description") or "",
-                                       "spawnDepth": meta.get("spawnDepth")}
+                                       "spawnDepth": meta.get("spawnDepth"),
+                                       "parentAgentId": meta.get("parentAgentId") or None}   # optional: a nested agent's launcher (_awaiting_nest)
     if len(_SUBAGENT_META_CACHE) > 256:
         _SUBAGENT_META_CACHE.clear()
     _SUBAGENT_META_CACHE[str(d)] = (key, out)
@@ -25468,6 +25566,42 @@ def _gist_step(state, o):
                                                          "desc": _tool_gist_desc(b.get("name"), b.get("input")),
                                                          "ts": ts}])[-SUBAGENT_STEPS_CAP:]
     return state
+
+
+_AGENT_LAUNCH_IDS_CACHE = {}    # agent jsonl path -> em.fold_records entry: the tool_use ids of the launches the agent itself made
+
+
+def _launch_ids_fresh():
+    return set()
+
+
+def _launch_ids_step(state, o):
+    """Collect the tool_use ids of the LAUNCH-shaped calls in a subagent's own transcript — a
+    run_in_background Bash, a Monitor, an Agent/Task (background by default) — the ids the session's task
+    list carries for the agent's own background work. A few ids per agent, never the whole call list."""
+    if o.get("type") != "assistant":
+        return state
+    c = (o.get("message") or {}).get("content")
+    if isinstance(c, list):
+        for b in c:
+            if not (isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id")):
+                continue
+            nm = b.get("name")
+            inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+            if nm in ("Agent", "Task", "Monitor") or (nm == "Bash" and inp.get("run_in_background")):
+                state.add(str(b["id"]))
+    return state
+
+
+def _agent_launch_ids(agent_path):
+    """The launch tool_use ids in one agent's own file (_launch_ids_step), folded append-incrementally like
+    the head's steps (a growing file steps only its new records; an unchanged one costs a stat). The
+    transcript half of _awaiting_nest's attribution: a background command whose tool_use id is in THIS
+    file was launched by THIS agent. set() when unreadable."""
+    try:
+        return em.fold_records(_AGENT_LAUNCH_IDS_CACHE, str(agent_path), _launch_ids_fresh, _launch_ids_step)
+    except Exception:
+        return set()
 
 
 def _agent_steps(agent_path):
@@ -43498,16 +43632,99 @@ def _save_push_subs(subs):
     _atomic_write(jd.STATE / "push-subscriptions.json", json.dumps(subs, sort_keys=True), mode=0o600)
 
 
+_PUSH_SUBS_LOCK = threading.Lock()   # the store's read-modify-write (set, delete, the origin backfill) is one op under it
+# An origin as a subscription row keeps it — scheme://host[:port] and nothing more. It becomes the ABSOLUTE `navigate`
+# URL of an Apple endpoint's declarative message (_push_declarative), so a path, a query or a non-http scheme is refused
+# whole, at the subscribe route and at the backfill alike.
+_PUSH_ORIGIN_RE = re.compile(r"https?://[A-Za-z0-9.\-\[\]:_]+")
+_LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "[::1]")
+
+
 def _set_push_sub(sub):
-    cur = dict(_push_subs())
-    cur[sub["endpoint"]] = sub
-    _save_push_subs(cur)
+    with _PUSH_SUBS_LOCK:
+        cur = dict(_push_subs())
+        cur[sub["endpoint"]] = sub
+        _save_push_subs(cur)
 
 
 def _del_push_sub(endpoint):
-    cur = dict(_push_subs())
-    if cur.pop(endpoint, None) is not None:
-        _save_push_subs(cur)
+    with _PUSH_SUBS_LOCK:
+        cur = dict(_push_subs())
+        gone = cur.pop(endpoint, None) is not None
+        if gone:
+            _save_push_subs(cur)
+    if gone:
+        _push_ledger_forget(endpoint)          # the device's rows go with its subscription (the ledger block below)
+
+
+def _request_page_origin(headers):
+    """The origin of the page a request comes from — scheme://host[:port] — as the REQUEST states it, or "" when it
+    states none. What _push_backfill_origin records for a subscription made before the bell posted location.origin
+    (2026-09-10): the same fact, read off the requests the device already makes instead of asked of the user as a
+    toggle. In order of who is speaking:
+      1. the browser's own word: the `Origin` header (Fetch appends it to a POST — the worker's ack, the popover's test
+         — and never to a same-origin GET), else the `Referer`'s origin (the page's URL on its GET /push/pending, the
+         worker script's on its fetch; the origin only — the page URL carries the token);
+      2. a reverse proxy's word: `X-Forwarded-Proto` with `X-Forwarded-Host` (tailscale serve, Caddy), or the `Host`
+         the proxy preserved when it forwards no host;
+      3. `Host` alone, a plain connection to the kernel's own socket. The scheme is then the Push API's own rule
+         ([SecureContext]): a page holding a subscription runs over https, unless its host is loopback, the one place
+         http is a secure context. A proxy that rewrites Host to the backend and forwards nothing is invisible from
+         here; the conflict line _push_backfill_origin leaves at the device's next ack is the tell.
+    Anything that is not a bare scheme://host — an opaque `null` Origin, a javascript: scheme, a path — is no origin:
+    a bad value must never become a `navigate` URL the user agent would refuse whole. No kernel helper built absolute
+    dashboard links before this (verified 2026-09-10: nothing read X-Forwarded-*; _origin_ok only compares Host)."""
+    g = lambda k: str(headers.get(k) or "").strip()
+    o = g("Origin").rstrip("/")
+    if o and _PUSH_ORIGIN_RE.fullmatch(o):
+        return o
+    ref = urlparse(g("Referer"))
+    if ref.scheme in ("http", "https") and ref.netloc:
+        o = "%s://%s" % (ref.scheme, ref.netloc)
+        if _PUSH_ORIGIN_RE.fullmatch(o):
+            return o
+    proto = g("X-Forwarded-Proto").split(",")[0].strip().lower()
+    host = g("X-Forwarded-Host").split(",")[0].strip() or g("Host")
+    if not host:
+        return ""
+    if proto not in ("http", "https"):
+        bare = (host.split("]")[0] + "]") if host.startswith("[") else host.rsplit(":", 1)[0]
+        proto = "http" if bare.lower() in _LOOPBACK_HOSTS else "https"
+    o = "%s://%s" % (proto, host)
+    return o if _PUSH_ORIGIN_RE.fullmatch(o) else ""
+
+
+def _push_backfill_origin(endpoint, origin):
+    """Record `origin` on `endpoint`'s subscription when the row has NONE (2026-09-10): a subscription made before the
+    bell posted location.origin gains it from the requests the device already makes — the page's GET /push/pending
+    (its own endpoint in the query), the worker's POST /push/ack (the row's endpoint), the popover's POST /push/test
+    — with no user action, so the very next push to an Apple endpoint is the declarative message (_push_wire). Only a
+    missing origin is filled: a recorded one stands whatever a later request says — a different one logs
+    `[push] origin conflict … kept=… saw=…` and keeps the first (a PushSubscription belongs to ONE origin, so a
+    conflict is a misconfiguration to look at, never something to paper over silently). Every fill leaves its own
+    line, the event that flips the device to the declarative shape. Returns 'filled' | 'same' | 'conflict' | 'none'
+    (no such row, or no origin to record)."""
+    endpoint, origin = str(endpoint or ""), str(origin or "")
+    if not origin:
+        return "none"
+    with _PUSH_SUBS_LOCK:
+        cur = dict(_push_subs())
+        sub = cur.get(endpoint)
+        if not isinstance(sub, dict):
+            return "none"
+        have = str(sub.get("origin") or "")
+        if have:
+            verdict = "same" if have.rstrip("/").lower() == origin.rstrip("/").lower() else "conflict"
+        else:
+            cur[endpoint] = dict(sub, origin=origin)
+            _save_push_subs(cur)
+            verdict = "filled"
+    ep_host = urlparse(endpoint).netloc or "?"
+    if verdict == "filled":
+        print("[push] origin recorded endpoint=%s origin=%s" % (ep_host, origin), file=sys.stderr)
+    elif verdict == "conflict":
+        print("[push] origin conflict endpoint=%s kept=%s saw=%s" % (ep_host, have, origin), file=sys.stderr)
+    return verdict
 
 
 def _vapid_keys():
@@ -43610,6 +43827,190 @@ def _push_send_one(sub, payload):
     status, _detail = _push_post(sub, payload)
     return status not in _PUSH_DEAD_STATUSES
 
+# ── the push ledger: the kernel's record of what became of each push (2026-09-09; the tap made the OS's own
+# callback for a killed app 2026-09-10, and the vanished notification the live app's road the same day) ──
+# THE FINDING (2026-09-09/10, a real iPhone): the worker's `push` handler runs and its acks reach the kernel
+# (`[push] test … 201`, then `[push] ack stage=shown` a second later). A KILLED Home Screen app gets the tap as the
+# OS's own callback: an Apple endpoint gets a Declarative Web Push message (_push_declarative) whose `navigate` is
+# the deep link, iOS navigates the app to '/?push-reveal=<sid>[&push-card=<id>]&push-pid=<pid>' and the page lands
+# it by the link road, settling this row (POST /push/landed). A LIVE app (background or foreground) gets NOTHING: iOS
+# only foregrounds it — no navigation, NO notificationclick to the worker, and NO notificationclose either (zero
+# 'closed' acks, ever). The one thing the page can then read is the screen: registration.getNotifications() lists
+# what is still displayed, so a push the worker acked shown whose notification is GONE is read as tapped (the
+# 'vanish' road, _LANDING_REVEAL_JS).
+# THE TRADE-OFF, ACCEPTED (the user 2026-09-10): because iOS fires neither the click nor the close for a live app, a
+# swiped-away notification leaves exactly the evidence a tapped one leaves — gone from the screen — and lands on the
+# next foregrounding as if tapped. The user weighed that and decided a working background tap is worth an
+# occasional wrong landing after a swipe. This is their explicit call, not an oversight (the road shipped as
+# a1a9d4b5, was taken out over this very conflation, and is back by that decision). The foreground case stays
+# non-switching: no wake event reaches the page, so nothing moves until it next comes forward.
+#
+# Every session-addressed push gets an unguessable `pid` in its routing block and a row here, and the worker tells
+# the kernel what became of it — POST /push/ack {pid, stage} for 'shown' (started before the show; on Apple, from
+# the push event the mutable declarative message dispatches) and 'clicked' (the first thing the click handler does,
+# on a browser that dispatches one) — while the page asks GET /push/pending?endpoint=<its own subscription> for
+# EVERY row to THIS device nobody has settled, newest first, on boot / visible / pageshow / focus, and holds the
+# shown ones against the notifications still displayed. A clicked row lands (/reveal via 'ack'); EXACTLY ONE
+# vanished row lands, silently (/reveal via 'vanish'); anything else — two or more gone at once, everything still
+# displayed, rows never acked shown, a screen the page cannot read — shows NOTHING: no chip, no prompt (the user
+# 2026-09-09). The page settles each row it is done with: POST /push/landed (the push landed, by whichever road —
+# the worker's message 'sw', the deep link 'link', 'ack', 'vanish'), /push/superseded (a NEWER notification for
+# the same session is still displayed — the notification tag is per session, so the show REPLACED this one's on
+# the screen: gone without a tap) or /push/dropped (vanished beside another landing, or one of several vanished at
+# once: spent, never a landing, and never left to inflate the next check's count). The kernel supersedes at the
+# shown ack too — the event itself: a shown ack for a session retires that session's older unsettled, untapped rows
+# on that device, with a line.
+#
+# The ledger is small and kernel-owned: STATE/push-ledger.json, {rows: [...]} oldest first, the newest
+# PUSH_LEDGER_CAP rows per endpoint, 0600 (an endpoint is a capability URL, the subscription store's rule),
+# written under a lock and read fresh on every op — an ack arrives minutes after the send, possibly to a
+# kernel that restarted in between, so nothing lives in memory. A row is the stages of ONE push to ONE device:
+# {pid, endpoint, sid, host, kind, cardId, name, sentAt, shownAt, tappedAt, landedAt, supersededAt, droppedAt,
+# swVersion}. That is also the seed of the delivery ledger the notify-popover backlog names (what the phone showed and tapped, per push);
+# no UI reads it yet, on purpose. Only session-addressed pushes get a row: a sid-less probe has nowhere to land.
+# An unsubscribe or a prune drops the endpoint's rows — the event that ends a device's history; no age-based
+# expiry anywhere.
+_PUSH_LEDGER_LOCK = threading.Lock()
+PUSH_LEDGER_CAP = 20            # rows kept per endpoint: the last few pushes to a device, never a history
+_PID_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")   # secrets.token_urlsafe(16) is 22 such characters; the routes admit nothing else
+_PUSH_ACK_MAX_BYTES = 2048      # the unauthenticated ack's body cap: {pid, stage, v} is well under 200 bytes
+_PUSH_STAGE_FIELD = {"shown": "shownAt", "clicked": "tappedAt", "landed": "landedAt", "superseded": "supersededAt", "dropped": "droppedAt"}
+_PUSH_ACK_STAGES = ("shown", "clicked")                     # what /push/ack admits: the worker's word on what became of a notification (no 'closed': iOS never reports one)
+_PUSH_SETTLE_STAGES = ("landed", "superseded", "dropped")   # the page's routes, POST /push/<stage> {pid}: its word that a row is done with
+
+
+def _push_ledger_path():
+    return jd.STATE / "push-ledger.json"
+
+
+def _push_ledger():
+    """Every row, oldest first — a fresh read (the block above: no memory, so a restart loses nothing)."""
+    try:
+        d = json.loads(_push_ledger_path().read_text())
+        rows = d.get("rows") if isinstance(d, dict) else None
+        return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def _save_push_ledger(rows):
+    _atomic_write(_push_ledger_path(), json.dumps({"rows": rows}, sort_keys=True), mode=0o600)
+
+
+def _push_ledger_add(endpoint, sid, host="", kind="", card_id="", name=""):
+    """File the row for one push to one device and return its pid (the payload carries it as data.pid and in the
+    deep link's push-pid). Caps THIS endpoint's rows to the newest PUSH_LEDGER_CAP; other endpoints' rows are
+    untouched."""
+    pid = secrets.token_urlsafe(16)
+    endpoint = str(endpoint or "")
+    row = {"pid": pid, "endpoint": endpoint, "sid": str(sid or ""), "host": str(host or ""), "kind": str(kind or ""),
+           "cardId": str(card_id or ""), "name": str(name or ""), "sentAt": int(time.time() * 1000),
+           "shownAt": 0, "tappedAt": 0, "landedAt": 0, "supersededAt": 0, "droppedAt": 0, "swVersion": ""}
+    with _PUSH_LEDGER_LOCK:
+        rows = _push_ledger() + [row]
+        mine = [i for i, r in enumerate(rows) if r.get("endpoint") == endpoint]
+        drop = set(mine[:-PUSH_LEDGER_CAP]) if len(mine) > PUSH_LEDGER_CAP else set()
+        _save_push_ledger([r for i, r in enumerate(rows) if i not in drop])
+    return pid
+
+
+def _push_ledger_stamp(pid, stage, sw_version=None):
+    """Record `stage` (an ack — 'shown' | 'clicked' — or a settle — 'landed' | 'superseded' | 'dropped') for the push
+    `pid` names: the stage's field takes the current time (the FIRST stamp stands, so a repeated ack is idempotent);
+    sw_version is kept when the acking worker names its build. Returns the row, or None for a pid this ledger never
+    issued (the routes' 404)."""
+    field = _PUSH_STAGE_FIELD[stage]
+    with _PUSH_LEDGER_LOCK:
+        rows = _push_ledger()
+        for r in rows:
+            if r.get("pid") == pid:
+                if not r.get(field):
+                    r[field] = int(time.time() * 1000)
+                if sw_version is not None:
+                    r["swVersion"] = str(sw_version)
+                _save_push_ledger(rows)
+                return dict(r)
+    return None
+
+
+def _push_ledger_forget(endpoint):
+    """Drop every row of one endpoint: the device unsubscribed, or the push service said it is gone."""
+    with _PUSH_LEDGER_LOCK:
+        rows = _push_ledger()
+        kept = [r for r in rows if r.get("endpoint") != endpoint]
+        if len(kept) != len(rows):
+            _save_push_ledger(kept)
+
+
+def _push_ledger_supersede(row):
+    """A push was SHOWN on a device (its 'shown' ack, `row`): the notification tag is per session, so that show
+    REPLACED whatever notification an older push for the same session still had on that device's screen. Every
+    older row for the same (endpoint, sid) that nobody has settled — and that the user did not TAP (a clicked
+    row is a tap still waiting to land, never collapsed away) — is stamped supersededAt, so /push/pending stops
+    naming it and the page never reads its gone notification as a tap (without this, a tap on the newer
+    notification read as TWO vanished, and nothing landed where one landing belonged). Returns the rows
+    superseded, for the route's lines. The page has the same rule for the case this cannot cover — the newer
+    push displayed but its shown ack lost (a 'sent' row on the screen): POST /push/superseded."""
+    pid, ep, sid = str(row.get("pid") or ""), str(row.get("endpoint") or ""), str(row.get("sid") or "")
+    if not (pid and sid):
+        return []
+    done = []
+    with _PUSH_LEDGER_LOCK:
+        rows = _push_ledger()
+        idx = next((i for i, r in enumerate(rows) if r.get("pid") == pid), None)
+        if idx is None:
+            return []
+        now = int(time.time() * 1000)
+        for r in rows[:idx]:                      # older = filed earlier (rows are appended in send order)
+            if r.get("endpoint") == ep and r.get("sid") == sid and not r.get("tappedAt") and _push_unsettled(r):
+                r["supersededAt"] = now
+                done.append(dict(r))
+        if done:
+            _save_push_ledger(rows)
+    return done
+
+
+def _push_unsettled(row):
+    """Nobody has landed, superseded or dropped it: the page still has a decision to make about it."""
+    return not row.get("landedAt") and not row.get("supersededAt") and not row.get("droppedAt")
+
+
+def _push_stage_of(row):
+    """The strongest word the row carries: 'clicked' (the worker saw the tap), 'shown' (it showed the notification,
+    as far as anyone said) or 'sent' (no ack at all). No 'closed': iOS never reports a close, so none is ever on
+    record (the ledger block above)."""
+    return "clicked" if row.get("tappedAt") else ("shown" if row.get("shownAt") else "sent")
+
+
+def _push_pending(endpoint):
+    """GET /push/pending: {rows: [...]} — EVERY row for `endpoint` that nobody has landed, superseded or dropped,
+    NEWEST FIRST, each as the page reads it: {pid, sid, host, kind, cardId, name, stage, ageS}. stage is 'clicked'
+    (the worker acked the tap: the page lands it via 'ack'), 'shown' (acked the show: the page holds it against the
+    notifications still displayed and lands the ONE that is gone via 'vanish' — the ledger block above has the
+    trade-off the user accepted) or 'sent' (no ack at all: nothing is known to have been displayed, so nothing of it
+    can have vanished). ageS counts from the newest stamp, clipped like every age the shell files. Every row, not
+    the newest (2026-09-09: the newest unsettled row was a push for ANOTHER session, sent 40 s after the one the
+    user tapped, and it was the one named); {rows: []} when there is none."""
+    out = []
+    now = time.time() * 1000
+    for r in _push_ledger():
+        if r.get("endpoint") != endpoint or not r.get("sid") or not _push_unsettled(r):
+            continue
+        t = int(r.get("tappedAt") or r.get("shownAt") or r.get("sentAt") or 0)
+        age = max(0, min(86400, int(round((now - t) / 1000.0)))) if t else -1
+        out.append({"pid": r["pid"], "sid": str(r.get("sid") or ""), "host": str(r.get("host") or ""), "kind": str(r.get("kind") or ""),
+                    "cardId": str(r.get("cardId") or ""), "name": str(r.get("name") or ""), "stage": _push_stage_of(r), "ageS": age})
+    out.reverse()
+    return {"rows": out}
+
+
+def _push_ledger_line(what, row):
+    """The stderr line a stage leaves — `[push] ack stage=shown sid=<8> endpoint=<host>`, `[push] landed …` —
+    the session clipped, the endpoint's host only: enough to match the shell's client-diag rows."""
+    sid = str(row.get("sid") or "")
+    tag = (("%s:%s" % (sid.split(":", 1)[0], sid.split(":", 1)[1][:8])) if ":" in sid else sid[:8]) or "none"
+    print("[push] %s sid=%s endpoint=%s" % (what, tag, urlparse(str(row.get("endpoint") or "")).netloc or "?"), file=sys.stderr)
+
 
 PUSH_LABEL_MAX = 80    # the shell's tab label, as a last-resort session name: display text, clipped
 
@@ -43697,7 +44098,12 @@ def _push_test(endpoint, sid="", host="", label=""):
         body = "Test notification — tap to come back to %s." % name
     else:
         body = "Test notification — this device is set up."
-    payload = json.dumps(_push_payload(_notify_title(bare_name), body, sid=sid, kind="test", host=host, name=name)).encode()
+    # the ledger row and its pid (the ledger block above): a session-addressed test is a push like any other, so
+    # the device's worker acks it and the page settles it through the kernel; a sid-less probe gets none. The wire
+    # shape is the endpoint's (_push_wire): a declarative message to Apple, the imperative payload elsewhere. The
+    # title is _notify_title's (#1155): the bare session name under the wordmark, the bare wordmark for a sid-less probe
+    pid = _push_ledger_add(sub["endpoint"], sid, host=host, kind="test", name=name) if sid else ""
+    payload = _push_wire(_push_payload(_notify_title(bare_name), body, sid=sid, kind="test", host=host, name=name, pid=pid), sub)
     status, detail = _push_post(sub, payload)
     print("[push] test sid=%s endpoint=%s: %s" % (_tag, _ep_host, status), file=sys.stderr)
     ok = 200 <= status < 300
@@ -43710,10 +44116,12 @@ def _push_test(endpoint, sid="", host="", label=""):
     return res
 
 
-def _push_payload(title, body, sid="", badge=None, kind="card", card_id="", host="", quiet=False, name=""):
+def _push_payload(title, body, sid="", badge=None, kind="card", card_id="", host="", quiet=False, name="", pid=""):
     """The JSON one web push carries — the ONE builder every push kind goes through, so a tap on
     any of them lands the same way (the user 2026-09-06, who wants a tap to focus the romp
-    window they already have open and put them on the session — and card — that buzzed).
+    window they already have open and put them on the session — and card — that buzzed). This is
+    the IMPERATIVE shape, what a non-Apple endpoint is sent as-is and what the worker's push handler
+    shows; _push_wire turns it into the Declarative Web Push message for an Apple endpoint.
 
     Content is the gist and nothing more: title + body. Everything else is ROUTING metadata the
     service worker acts on, never text it shows:
@@ -43725,31 +44133,35 @@ def _push_payload(title, body, sid="", badge=None, kind="card", card_id="", host
       badge — the needs-you count the worker paints on the app icon while the app is closed;
               None OMITS the key and the worker leaves the count alone — the shape a mirrored
               federated event wears, because the origin's count is not ours;
-      data  — {sid, host, kind, cardId, url, name}: what the worker hands the shell on a tap (or puts
-              in the URL it opens when no window exists). name (2026-09-09) is the session's display
-              name, resolved by _push_session_name unless the leg passes its own — the worker keeps
-              it with the notification it shows, so the shell's "from the notification" offer can
-              name the session without a kernel round-trip. kind names the leg that fired ("card":
-              a card entered needs-you/completed; "turn": a turn ended; "test": the popover's
-              probe, carrying the session the user was looking at when they pressed the button —
-              2026-09-06 — so its tap comes back there like a turn's; sid-less, and nowhere to
-              land, only when no session was in front); cardId (a card kind only) is the goal id the feed
-              scrolls to; url is the same-origin deep link the shell already parses at boot
-              (?push-reveal=<sid>, plus &push-card=<id> for a card) — "/" when there is no
-              session to land on. host is the origin kernel of a relayed event ("" = local);
-              the sid already wears it as a prefix (host:sid, the merged dashboard's own tab
-              address), so this is a courtesy copy, not a second source of truth."""
+      data  — {sid, host, kind, cardId, url, name, pid}: what the worker hands the shell on a tap (or
+              puts in the URL it opens when no window exists). kind names the leg that fired ("card":
+              a card entered needs-you/completed; "turn": a turn ended; "test": the popover's probe,
+              carrying the session the user was looking at when they pressed the button — 2026-09-06
+              — so its tap comes back there like a turn's; sid-less, and nowhere to land, only when
+              no session was in front); cardId (a card kind only) is the goal id the feed scrolls to;
+              url is the same-origin deep link the shell parses (?push-reveal=<sid>, plus &push-card=<id>
+              for a card, plus &push-pid=<pid> so the page settles the ledger row it lands — 2026-09-10;
+              on Apple this URL, made absolute, is the declarative message's `navigate`, the OS's own
+              tap callback) — "/" when there is no session to land on. host is the origin kernel of a
+              relayed event ("" = local); the sid already wears it as a prefix (host:sid, the merged
+              dashboard's own tab address), so this is a courtesy copy, not a second source of truth.
+              name (2026-09-09) is the session's display name, resolved by _push_session_name unless
+              the leg passes its own — the ledger row files it, so the kernel's lines can name the
+              session. pid (2026-09-09, the ledger block above) is the kernel's handle on THIS push to
+              THIS device: the worker acks the show and the tap against it, the page settles it; "" for
+              a sid-less push, which has no row. Per (push, device), so the caller fills it per
+              subscription."""
     import urllib.parse
-    sid, card_id, kind = str(sid or ""), str(card_id or ""), str(kind or "card")
+    sid, card_id, kind, pid = str(sid or ""), str(card_id or ""), str(kind or "card"), str(pid or "")
     host = str(host or "") or (sid.split(":", 1)[0] if ":" in sid else "")
     url = "/"
     if sid:
-        q = [("push-reveal", sid)] + ([("push-card", card_id)] if card_id else [])
+        q = [("push-reveal", sid)] + ([("push-card", card_id)] if card_id else []) + ([("push-pid", pid)] if pid else [])
         url = "/?" + urllib.parse.urlencode(q)
     d = {"title": str(title), "body": str(body), "sid": sid,
          "tag": "romp:" + (sid or kind),
          "data": {"sid": sid, "host": host, "kind": kind, "cardId": card_id, "url": url,
-                  "name": str(name or "") or _push_session_name(sid)}}
+                  "name": str(name or "") or _push_session_name(sid), "pid": pid}}
     if badge is not None:
         d["badge"] = int(badge or 0)
     if quiet:
@@ -43758,6 +44170,67 @@ def _push_payload(title, body, sid="", badge=None, kind="card", card_id="", host
         # the turn notification and the icon count stays current
         d["quiet"] = True
     return d
+
+
+# ── Declarative Web Push for Apple endpoints (2026-09-10) ─────────────────────────────────────────
+# The tap as the OS's own callback (the ledger block above _push_ledger has the finding: a live Home Screen app on
+# iOS gets no notificationclick and no notificationclose, so nothing the worker or the screen could say was ever the
+# tap). Safari 18.4+ and iOS Home Screen web apps parse a push whose payload is the declarative JSON below, display
+# the notification themselves, and on a tap NAVIGATE the app to its `navigate` URL — the deep link the shell already
+# lands (_LANDING_REVEAL_JS, via 'link'). Every member here is verified, not guessed, against the W3C Push API
+# editor's draft ("Declarative push message": `web_push` must be 8030; `notification` with `title` and `navigate`
+# required and `body`, `tag`, `silent`, `data` optional; `mutable` a top-level boolean that dispatches a `push` event
+# carrying the parsed Notification) and WebKit's parser (Source/WebCore/Modules/notifications/NotificationJSONParser.cpp:
+# `app_badge` a TOP-level non-negative integer or digit string; `navigate` parsed with NO base URL, so it must be
+# absolute — hence the page origin the shell records at subscribe). Members this kernel cannot verify a need for
+# (lang, dir, icon — all optional; the notification wears the app's own icon) are left out. Non-Apple endpoints
+# (FCM, Mozilla) keep the imperative shape: their browsers dispatch notificationclick, and the worker's handler
+# lands the tap as before.
+_PUSH_APPLE_HOST = "web.push.apple.com"   # Apple's push service: the endpoint host whose user agents parse the declarative message
+
+
+def _push_apple_endpoint(endpoint):
+    """Is this subscription Apple's (Safari; an iOS Home Screen web app)? By the endpoint's host, which the push
+    service assigned at subscribe — never a user-agent guess."""
+    host = urlparse(str(endpoint or "")).netloc.lower()
+    return host == _PUSH_APPLE_HOST or host.endswith("." + _PUSH_APPLE_HOST)
+
+
+def _push_declarative(d, origin):
+    """The Declarative Web Push message for one imperative payload `d` (_push_payload's dict) to a device whose page
+    runs at `origin` (the block above). `navigate` is the deep link made absolute — the tap's destination, the OS's
+    own callback. `mutable` so the worker still SEES the push (the `shown` ack, the ledger's evidence the push
+    reached the device); it shows nothing itself, the user agent does. `data` is the routing block, exactly as the
+    imperative shape carries it. A quiet card push (the buzz yielded to a turn push, #937) is `silent`; the badge
+    count rides as `app_badge` only when the caller had one (a mirrored federated event has none — the origin's
+    count is not ours)."""
+    n = {"title": str(d.get("title") or "romp"), "body": str(d.get("body") or ""),
+         "navigate": str(origin).rstrip("/") + str(d["data"]["url"]), "tag": str(d.get("tag") or ""), "data": d["data"]}
+    if d.get("quiet"):
+        n["silent"] = True
+    out = {"web_push": 8030, "notification": n, "mutable": True}
+    if "badge" in d:
+        out["app_badge"] = int(d["badge"])
+    return out
+
+
+def _push_wire(d, sub):
+    """The bytes one subscription is sent for the payload `d`: the declarative message for an Apple endpoint with a
+    page origin on file, the imperative shape for every other endpoint. An Apple endpoint WITHOUT an origin (a
+    subscription made before the shell recorded one, and before any of the device's own requests has revealed it —
+    _push_backfill_origin) cannot carry a valid `navigate`, so it gets the imperative shape — the notification still
+    shows, and a killed app's tap still lands by the worker's click — with one stderr line saying what records the
+    origin, never a declarative message the user agent would refuse whole."""
+    ep = str(sub.get("endpoint") or "")
+    if _push_apple_endpoint(ep):
+        origin = str(sub.get("origin") or "")
+        if origin:
+            return json.dumps(_push_declarative(d, origin)).encode()
+        print("romp: web push: %s has no page origin on file (subscribed before 2026-09-10), so its notifications "
+              "take the old shape and a tap on a live app cannot land; the device's next request records one (its "
+              "page's next look at the dashboard, or its worker's next ack) with nothing to toggle"
+              % (urlparse(ep).netloc or "?"), file=sys.stderr)
+    return json.dumps(d).encode()
 
 
 def _push_notify(title, body, sid="", badge=None, kind="card", card_id="", host="", quiet=False, name=""):
@@ -43778,13 +44251,24 @@ def _push_notify(title, body, sid="", badge=None, kind="card", card_id="", host=
         print("romp: web push: %d subscription(s) on file but the python 'cryptography' package "
               "is missing — notification not delivered" % len(subs), file=sys.stderr)
         return
-    payload = json.dumps(_push_payload(title, body, sid, badge, kind, card_id, host, quiet=quiet, name=name)).encode()
+    base = _push_payload(title, body, sid, badge, kind, card_id, host, quiet=quiet, name=name)
 
     def run():
         dead = []
         for ep, sub in subs.items():
             try:
-                if not _push_send_one(sub, payload):
+                d = base
+                if sid:
+                    # one ledger row per (push, device) — the pid is that device's handle on THIS push (the
+                    # ledger block above), in the routing block AND the deep link, so the payload is rebuilt
+                    # per device (the name already resolved once, on `base`); a ledger that cannot be
+                    # written costs a stderr line, never the push
+                    try:
+                        pid = _push_ledger_add(ep, sid, base["data"]["host"], kind, card_id, base["data"]["name"])
+                        d = _push_payload(title, body, sid, badge, kind, card_id, host, quiet=quiet, name=base["data"]["name"], pid=pid)
+                    except Exception as e:
+                        print("romp: web push: ledger write failed (%s: %s) — pushed without a pid" % (type(e).__name__, e), file=sys.stderr)
+                if not _push_send_one(sub, _push_wire(d, sub)):
                     dead.append(ep)
             except Exception:
                 pass                               # one bad subscription must not block the rest
@@ -43958,140 +44442,89 @@ _SW_JS = """
 // this one, which owns nothing but event handlers: the tap-to-open worker sat waiting behind its
 // sid-blind predecessor, so notification taps kept running the OLD handler and opened the app on
 // whatever session was last shown (the user 2026-08-08, testing the very fix that was parked).
-// install and activate also STAMP the worker's fingerprint ('/__romp/sw', the store helpers below): a fresh record
-// for this build at install, its takeover time at activate — the page reads it to say WHICH worker runs here.
-self.addEventListener('install',function(e){self.skipWaiting();e.waitUntil(stamp({installedAt:Date.now()},true));});
-self.addEventListener('activate',function(e){e.waitUntil(Promise.all([clients.claim(),stamp({activatedAt:Date.now()})]));});
+self.addEventListener('install',function(e){self.skipWaiting();});
+self.addEventListener('activate',function(e){e.waitUntil(clients.claim());});
+// THE ACK (2026-09-09; the ledger block above _push_ledger in the kernel): each session-addressed push carries a `pid` the
+// kernel issued for THIS device, and this worker tells the kernel what became of it — 'shown' before the show, 'clicked' as
+// the first thing a tap does (where the platform dispatches one). Authenticated by the pid alone (a worker's fetch carries
+// no token header, and the pid is the kernel's own 128-bit handle on one row); keepalive so a worker the platform ends
+// early still gets the request out; a failure is swallowed — the ack must never cost the show or the tap. A push without
+// a pid (a sid-less probe) acks nothing. SWV is this build's string, baked at serve time, so the row says which worker
+// build acked. The ONE fetch this worker makes; it intercepts none (no fetch handler — a caching worker would fight the
+// stale-bundle machinery, which assumes the network serves every load).
+var SWV='__ROMP_SWV__';
+function ack(pid,stage){if(!pid)return Promise.resolve();try{return fetch('/push/ack',{method:'POST',keepalive:true,body:JSON.stringify({pid:pid,stage:stage,v:SWV})}).then(function(){},function(){});}catch(e){return Promise.resolve();}}
+// TWO SHAPES REACH THIS HANDLER (2026-09-10). To an Apple endpoint the kernel sends a Declarative Web Push message
+// ({web_push:8030, notification:{title, body, navigate, tag, data[, silent]}, mutable:true[, app_badge]} — _push_declarative
+// in the kernel): a user agent that parses it (Safari 18.4+, an iOS Home Screen web app) DISPLAYS the notification itself,
+// and a tap NAVIGATES the app to `navigate` — the OS's own callback, where iOS dispatched no notificationclick to a live
+// app. `mutable` makes it hand this worker the parsed Notification as e.notification (the W3C draft and WebKit's
+// ServiceWorkerThread both dispatch it as a `push` event with a null data), so the worker acks 'shown' by the pid in its
+// data and shows NOTHING: the system is displaying it, and a second show would replace it. Feature-detected on
+// e.notification, never a user-agent sniff. Every other push arrives as e.data — the imperative shape to FCM/Mozilla, or
+// the declarative JSON reaching a browser that does not parse it (Safari before 18.4): the declarative shape is read off
+// its notification block, the imperative one off the top level, and the notification is shown here as before.
 self.addEventListener('push',function(e){
+if(e.notification){var rd=(e.notification.data&&typeof e.notification.data==='object')?e.notification.data:{};e.waitUntil(ack(String(rd.pid||''),'shown'));return;}
 var d={};try{d=e.data?e.data.json():{};}catch(err){}
-// data = the ROUTING block the kernel built (_push_payload: sid, host, kind, cardId, url) — what the
-// tap below acts on; a payload from an older kernel carries only a flat sid, so that is the fallback.
-// tag: one notification per session — a second buzz for the same session REPLACES the first on the
-// lock screen instead of stacking (renotify keeps it audible); the kernel picks the tag.
-var opts={body:d.body||'',icon:'/media/romp-app-192.png',badge:'/media/romp-app-192.png',
-data:(d.data&&typeof d.data==='object')?d.data:{sid:d.sid||''}};
-if(d.tag){opts.tag=d.tag;opts.renotify=!d.quiet;}   // a quiet push replaces without re-alerting
-if(d.quiet)opts.silent=true;
-// THE SHOWN RECORD (2026-09-09, the phone with the app WARM: the tap brought the app forward and nothing below ran —
-// no message, no link, an empty tap store; whether iOS handed the tap to the live app past this worker, or an older
-// worker took it, the click handler is a road the page cannot count on). So every session-addressed notification this
-// worker puts up is ALSO written where the page can read it, BEFORE the show is attempted: one entry, '/__romp/shown',
-// {id, sid, host, kind, cardId, url, name, t}, latest wins. A page that comes forward with no tap stored but a shown
-// record can OFFER the session the notification named (the shell's chip) — an offer, not a jump: the user may have
-// opened the app for another reason. Retired by a tap (the click handler, the shell's landing of any tap), or by the
-// shell when the offer is taken or dismissed. The fingerprint's push stamp rides the same write. Started before the
-// show so a show that fails still leaves the record; a write that fails is swallowed — the show is what a push owes.
-var rd=opts.data,sid0=String(rd.sid||'');
-var kept=Promise.all([stamp({lastPushAt:Date.now(),lastPushSid:sid0}),
-sid0?putJson(SHOWN,{id:mint(),sid:sid0,host:String(rd.host||''),kind:String(rd.kind||''),cardId:String(rd.cardId||''),
-url:String(rd.url||('/?push-reveal='+encodeURIComponent(sid0))),name:String(rd.name||''),t:Date.now()}):Promise.resolve()]);
-var shown=self.registration.showNotification(d.title||'romp',opts);
-// Refresh THIS worker once the notification is up (2026-09-08, the phone again: a tap after a deploy
-// still did nothing). A Home Screen app left in the background checks for a new worker only on a
-// navigation — a relaunch or a reload — so until then every tap ran the worker the phone installed
-// LAST, whose handler could post a shape the current shell no longer reads. update() fetches /sw.js
-// now; the install above takes over at once, and the tap that follows runs the current handler.
-// After the show, never beside it: the notification is what a push must produce, and a takeover
-// while it is still pending would race it. A failure (offline, a browser without update() here) is
-// swallowed — the notification already shows. `shown` itself stays in the list, so a show that fails
-// still fails the push the way it always did.
-var work=[shown,shown.then(function(){return self.registration.update?self.registration.update():null;})['catch'](function(){}),kept];
-// the app-icon count, kept current while the app is CLOSED (the open shell re-paints it live over
-// its own WS). setAppBadge exists in the SW only where badging works at all (iOS installed apps).
-// Numeric-only on purpose: a mirrored federated event omits badge (the ORIGIN kernel's count is
-// not this kernel's count — plans/federated-push.md), and repainting 0 for it would CLEAR a real
-// local count.
-if('setAppBadge' in self.navigator&&typeof d.badge==='number')work.push(self.navigator.setAppBadge(d.badge)['catch'](function(){}));
+var n=(d.web_push===8030&&d.notification&&typeof d.notification==='object')?d.notification:d;   // the declarative message's notification block, or the imperative payload itself
+// data = the ROUTING block the kernel built (_push_payload: sid, host, kind, cardId, url, name, pid) — what the tap
+// below acts on; a payload with only a flat sid is the fallback. tag: one notification per session — a second buzz for
+// the same session REPLACES the first on the lock screen instead of stacking (renotify keeps it audible); the kernel
+// picks the tag. quiet (imperative) / silent (declarative): the card push that yields the buzz to an already-fired turn
+// push replaces without re-alerting.
+var quiet=!!(d.quiet||n.silent);
+var opts={body:n.body||'',icon:'/media/romp-app-192.png',badge:'/media/romp-app-192.png',
+data:(n.data&&typeof n.data==='object')?n.data:{sid:d.sid||''}};
+if(n.tag){opts.tag=n.tag;opts.renotify=!quiet;}
+if(quiet)opts.silent=true;
+var kept=ack(String(opts.data.pid||''),'shown');   // started BEFORE the show: the kernel must know the show happened whatever becomes of this worker
+var work=[self.registration.showNotification(n.title||'romp',opts),kept];
+// the app-icon count, kept current while the app is CLOSED (the open shell re-paints it live over its own WS).
+// setAppBadge exists in the SW only where badging works at all. Numeric-only on purpose: a mirrored federated event
+// omits the badge (the ORIGIN kernel's count is not this kernel's count — plans/federated-push.md), and repainting 0
+// for it would CLEAR a real local count. app_badge is the declarative message's word for the same number.
+var badge=(typeof d.badge==='number')?d.badge:((typeof d.app_badge==='number')?d.app_badge:null);
+if('setAppBadge' in self.navigator&&badge!==null)work.push(self.navigator.setAppBadge(badge)['catch'](function(){}));
 e.waitUntil(Promise.all(work));
 });
 // Land ON the thing that notified (the user 2026-08-08, whose first push opened a different
-// session; 2026-09-06, who wants the tap to come back to the romp they already have open): the
-// notification closes; then the window the user last had in front (matchAll orders most-recently-
-// focused first) is focused and handed the routing block over postMessage — the shell turns that
-// into the chat focus + the feed's card reveal. No window at all -> open one on the deep link the
-// kernel built (the shell parses it at boot). focus() can REJECT (an installed iOS app has refused
-// it) — then the tap still lands: fall through to openWindow rather than dropping it. Everything
-// rides waitUntil, so the worker is kept alive until the tap has landed; no timers anywhere.
+// session; 2026-09-06, who wants the tap to come back to the romp they already have open): the ack
+// first, then the notification closes; then the window the user last had in front (matchAll orders
+// most-recently-focused first) is focused and handed the routing block over postMessage — the shell
+// turns that into the chat focus + the feed's card reveal. No window at all -> open one on the deep
+// link the kernel built (the shell parses it at boot; it carries the pid, so the page settles the row).
+// focus() can REJECT (an installed iOS app has refused it) — then the tap still lands: fall through to
+// openWindow rather than dropping it. Everything rides waitUntil, so the worker is kept alive until the
+// tap has landed; no timers anywhere. A declarative notification never reaches this handler: its tap
+// is the user agent's own navigation to the deep link (it skips notificationclick for one).
 // TOP-LEVEL windows only (the user 2026-09-06, whose tap on the phone did nothing): the dashboard's
 // panes are same-origin iframes under this worker's scope, and matchAll lists each of them as a
 // window client too (frameType 'nested') — most recently FOCUSED first, which after a tap in the
 // chat pane's session picker is the chat iframe. Only the shell (the top-level document) carries
 // the reveal listener; posting into a pane dropped the tap on the floor. A client that reports no
 // frameType is treated as a window rather than dropped.
-// EVERY TAP WEARS AN ID AND A `diag` BLOCK (2026-09-08, the phone again: the app came forward and no
-// /reveal ever left it, and nothing recorded where between the tap and the shell it had stopped). The
-// shell files the block in client-diag.jsonl beside its own rows, so one file says what the worker saw:
-// how many window clients, how many top-level, which road it took, the target's visibility. The id lets
-// the shell land a tap ONCE however many roads deliver it (the message, the replay, the link).
-// THE TAP IS KEPT (`pending`) until a shell says it landed. A page the browser SUSPENDED while the app
-// sat in the background can miss a message posted before it resumed, and a page the browser EVICTED and
-// relaunches on the start URL never saw one. The shell asks {romp:'tapReplay'} at boot and whenever it
-// becomes visible again — the very events a tap that brought the app forward produces — the worker
-// answers with the kept tap, and the shell's {romp:'tapLanded', id} retires it, so a reload minutes
-// later cannot replay a tap that already landed. Events, no timers.
-// NO RELOAD ROAD (review find, 2026-09-09, on #1127; it removes a 'last resort' of 2026-09-08 that set a focused
-// top-level client's URL to the deep link when it STILL reported hidden after focus()). visibilityState is not a
-// liveness test: a live dashboard can report hidden in the very frame focus() resolves (the flip to visible lands
-// after), and setting its URL is a full page load, every pane's state gone, on every tap in that state. A client
-// that reports hidden is told like any other; the roads for a page that missed the message are the replay above
-// (asked at boot, on visibilitychange, pageshow and focus) and the stored tap below, and no road of the worker's
-// loads a page. What the worker saw still rides the message's diag block (`vis`), so the trail says so.
-// THE STORED TAP (2026-09-09, the phone with the app alive in the BACKGROUND: the tap brought it forward and
-// changed nothing, while the same tap after a force-quit landed). The instruments said why: matchAll listed NO
-// client for the backgrounded Home Screen app — clients:0, tops:0 — so the worker took the openWindow road; iOS
-// brought the EXISTING page forward without a load (so no link) and without a client to message (so no message),
-// and then ended the worker, `pending` with it, before the page could ask for the replay. So the tap is also
-// WRITTEN where the page can read it without the worker: the Cache API (`caches`, shared by worker and window),
-// one entry, '/__romp/tap' in the 'romp-tap' cache, holding {id, sid, host, kind, cardId, url, t}. Written and
-// AWAITED before the matchAll, so the write is done before iOS moves on, whatever road the tap then takes; a write
-// that fails is swallowed — the other roads still run. The shell reads the entry on the events a resumed page
-// produces (boot, visible, pageshow, focus) and lands it once by id; its {romp:'tapLanded'} retires the kept copy
-// AND the entry — when the entry still holds THAT tap; an older tap's ack never deletes a newer one — and the shell
-// deletes the entry itself as well. One slot, latest wins, like `pending`. Never expired by age: a tap the user
-// made is a tap the user made, however long the page took to come back; landing retires it, nothing else does.
-var TAP='/__romp/tap',TAPC='romp-tap',SWFP='/__romp/sw',SHOWN='/__romp/shown',SWV='__ROMP_SWV__',cs=(typeof caches!=='undefined')?caches:null;
-function keep(tap){if(!cs)return Promise.resolve();return cs.open(TAPC).then(function(c){return c.put(TAP,new Response(JSON.stringify(tap)));})['catch'](function(){});}
-function forget(id){if(!cs)return Promise.resolve();return cs.open(TAPC).then(function(c){return c.match(TAP).then(function(r){return r?r.json():null;}).then(function(t){if(t&&String(t.id||'')===String(id))return c['delete'](TAP);});})['catch'](function(){});}
-// THE FINGERPRINT (2026-09-09, the warm-app round above): one entry, '/__romp/sw' in the same cache — {version,
-// installedAt, activatedAt, lastPushAt, lastPushSid, lastClickAt, lastClickSid, clicks}. `version` is baked at serve
-// time (the kernel's sha + dist token, the string the shell page carries too), so a page can tell whether the worker
-// whose record it reads is its own build. install writes a fresh record for the new build; activate, every push and
-// every click merge their stamp into it — the click's at the very TOP of its handler, before anything can await, so a
-// click that ran and was then ended still counts. Read-modify-write, failures swallowed: a fingerprint must never cost
-// a notification or a tap. The shell folds the reading into every 'tap-resume' row and files 'sw-stale' on a mismatch.
-function mint(){return String(Date.now())+'-'+Math.random().toString(36).slice(2,8);}
-function putJson(k,v){if(!cs)return Promise.resolve();return cs.open(TAPC).then(function(c){return c.put(k,new Response(JSON.stringify(v)));})['catch'](function(){});}
-function stamp(patch,fresh,click){if(!cs)return Promise.resolve();return cs.open(TAPC).then(function(c){return c.match(SWFP).then(function(r){return r?r.json():null;})['catch'](function(){return null;}).then(function(old){
-var o=(!fresh&&old&&typeof old==='object')?old:{installedAt:0,activatedAt:0,lastPushAt:0,lastPushSid:'',lastClickAt:0,lastClickSid:'',clicks:0};
-for(var k in patch)o[k]=patch[k];if(click)o.clicks=(+o.clicks||0)+1;o.version=SWV;return c.put(SWFP,new Response(JSON.stringify(o)));});})['catch'](function(){});}
-// the shown record's retirement: by id (the shell's tapLanded for an offer it took or dismissed), or whatever is there ('' —
-// a tap on a session-addressed notification: the user has chosen where to be, and a pending offer is spent)
-function forgetShown(id){if(!cs)return Promise.resolve();return cs.open(TAPC).then(function(c){return c.match(SHOWN).then(function(r){return r?r.json():null;}).then(function(t){if(t&&(!id||String(t.id||'')===String(id)))return c['delete'](SHOWN);});})['catch'](function(){});}
-var pending=null;   // the last tap addressed to a session, until a shell says it landed
-self.addEventListener('message',function(e){var m=(e&&e.data)||{},src=e&&e.source;
-if(m.romp==='tapReplay'){if(pending&&src){try{src.postMessage(pending);}catch(err){}}}
-else if(m.romp==='tapLanded'){if(pending&&m.id===pending.id)pending=null;var f=Promise.all([forget(m.id),forgetShown(m.id)]);if(e.waitUntil)e.waitUntil(f);}});
+// EVERY MESSAGE WEARS A `diag` BLOCK (2026-09-08): the shell files it in client-diag.jsonl beside its own rows,
+// so one file says what the worker saw: how many window clients, how many top-level, which road it took, the
+// target's visibility. The pid rides too, so the page lands one push ONCE however many roads deliver it (the
+// message and the link can both carry the same tap) and settles the kernel's row. NO RELOAD ROAD (review find,
+// 2026-09-09, on #1127): visibilityState is not a liveness test, and no road of the worker's loads a page. No
+// kept tap, no stored tap, no fingerprint either (2026-09-10): a tap the worker did not see is not inferred.
 self.addEventListener('notificationclick',function(e){
-var d=e.notification.data||{};var sid=d.sid||'';
-var fp=stamp({lastClickAt:Date.now(),lastClickSid:String(sid)},false,true);   // the click's fingerprint FIRST — before the close, before anything can await
+var d=e.notification.data||{};var sid=d.sid||'',pid=String(d.pid||'');
+var acked=ack(pid,'clicked');   // THE ACK FIRST: the kernel's row says tapped before anything here can be cut short
 e.notification.close();
 var url=d.url||(sid?'/?push-reveal='+encodeURIComponent(sid):'/');
-var msg={romp:'notificationClick',sid:sid,host:d.host||'',kind:d.kind||'',cardId:d.cardId||'',
-id:mint(),diag:{}};
-var tap={id:msg.id,sid:sid,host:msg.host,kind:msg.kind,cardId:msg.cardId,url:url,t:Date.now()};
-if(sid)pending=msg;
+var msg={romp:'notificationClick',sid:sid,host:d.host||'',kind:d.kind||'',cardId:d.cardId||'',pid:pid,diag:{}};
 function tell(c,road){msg.diag.road=road;msg.diag.vis=String((c&&c.visibilityState)||'');try{c.postMessage(msg);}catch(err){}}
 // The window openWindow hands back is ALSO given the routing block (2026-09-08): a message posted to a
 // window client before its page has a listener is held by the browser until the shell adds one, so it
 // lands exactly like a live tap's — a second road to the same focus for a browser that opens the app
-// on its start URL rather than the link (reported of installed iOS apps; unverified here). Where the
-// link arrives too, the kernel sees the same focus asked twice for the same window — idempotent. No
+// on its start URL rather than the link. Where the link arrives too, the page lands the pid once. No
 // client back (null), or nothing to land on (no sid) → the link alone.
 function open(road){return clients.openWindow(url).then(function(c){if(sid&&c&&typeof c.postMessage==='function')tell(c,road);return c;});}
 function shell(w){return !w.frameType||w.frameType==='top-level'||w.frameType==='auxiliary';}
-// the write first (a sid-less tap has nowhere to land, so nothing is kept), then the window lookup; the fingerprint's
-// stamp and the shown record's retirement (a session-addressed tap spends any pending offer) ride the same waitUntil
-e.waitUntil(Promise.all([fp,sid?forgetShown(''):Promise.resolve(),(sid?keep(tap):Promise.resolve()).then(function(){return clients.matchAll({type:'window',includeUncontrolled:true});}).then(function(ws){
+e.waitUntil(Promise.all([acked,clients.matchAll({type:'window',includeUncontrolled:true}).then(function(ws){
 var tops=ws.filter(shell);msg.diag.clients=ws.length;msg.diag.tops=tops.length;
 if(!tops.length)return open('open');
 var w=tops[0];
@@ -44102,9 +44535,9 @@ return Promise.resolve().then(function(){return w.focus();}).then(function(fw){t
 
 
 def _sw_js():
-    """/sw.js as served: _SW_JS with this build's fingerprint string in place of its placeholder (the
-    same string _landing() bakes into the shell's reveal script). The raw _SW_JS stays valid JS — the
-    placeholder sits inside a string literal — so the node harness can run it unbaked."""
+    """/sw.js as served: _SW_JS with this build's string in place of its placeholder (_sw_version; the worker
+    sends it in every ack). The raw _SW_JS stays valid JS — the placeholder sits inside a string literal — so the
+    node harness can run it unbaked."""
     return _SW_JS.replace("__ROMP_SWV__", _sw_version())
 
 
@@ -44118,13 +44551,17 @@ def _sw_js():
 # `sent` (2026-09-06): the clients a LIVE tap was already handed to while unproven — see
 # _reveal_request; a pong from one of them retires the slot, a redial's ready consumes it.
 _PENDING_REVEAL = [None]                     # {"sid": ..., "wid": ...[, "sent": [clients]]} or None
-# The roads a shell may name in /reveal's `via`, the log line's first word: the worker's message to a live window,
-# the deep link a cold start opened, the entry the worker wrote to the Cache API, and the shell's "from the
-# notification" offer chip (2026-09-09, later that day — a notification shown but never tapped through, taken by the
-# user). Any other word the body carries is logged as 'other' (review find, 2026-09-09, on #1127: the word went from
-# the request body straight into the line-oriented stderr journal); a shell of a build before the field sends none,
-# and that stays the bare line.
-_REVEAL_ROADS = frozenset({"sw", "link", "store", "offer"})
+# The roads a shell may name in /reveal's `via`, the log line's first word: the worker's message to a live window
+# ('sw' — a browser that dispatches notificationclick), the deep link the page opened on or was navigated to ('link' —
+# on Apple the OS's own tap callback for a killed app, the Declarative Web Push message's `navigate`; 2026-09-10), the
+# kernel's own ledger ('ack' — GET /push/pending said the worker had acked a tap no message or link delivered; the
+# ledger block above _push_ledger), and the vanished notification ('vanish' — a shown push whose notification is gone
+# from the screen, the one thing a LIVE iOS app leaves for the page to read; back 2026-09-10 by the user's call, with
+# the swipe-dismiss conflation accepted — the ledger block has it). 'store' and 'offer' — the kept entry and the chip —
+# are gone, and the route refuses them like any other word. Any other word the body carries is logged as 'other'
+# (review find, 2026-09-09, on #1127: the word went from the request body straight into the line-oriented stderr
+# journal); a shell of a build before the field sends none, and that stays the bare line.
+_REVEAL_ROADS = frozenset({"sw", "link", "ack", "vanish"})
 
 
 def _reveal_msg(sid):
@@ -44167,11 +44604,12 @@ def _reveal_request(sid, wid, boot=False, via=""):
 
     One stderr line per tap, whatever became of it (2026-09-08: a phone's tap "did nothing" and
     nothing anywhere recorded whether it had even reached the kernel). `via` is the road the shell
-    says the tap took ('sw': the worker's message to a live window; 'link': the deep link a cold start
-    opened; 'store': the entry the worker wrote to the Cache API, read by a page that came back —
-    2026-09-09; 'offer': the shell's "from the notification" chip, taken by the user for a notification
-    that was shown but never tapped through — later that day; the route admits those four, _REVEAL_ROADS, and
-    logs any other word as 'other'); _consume_pending_reveal and _reveal_proven log a park's end the same way, so the journal
+    says the tap took ('sw': the worker's message to a live window; 'link': the deep link the page opened
+    on or was navigated to — on Apple the OS's own tap callback, 2026-09-10; 'ack': the kernel's ledger
+    said the worker had acked a tap no message or link delivered; 'vanish': the ledger said the push was
+    shown and the screen no longer shows it — the one road a live iOS app leaves, 2026-09-10; the route
+    admits those four, _REVEAL_ROADS, and logs any other word as 'other'); _consume_pending_reveal and _reveal_proven log a
+    park's end the same way, so the journal
     answers the next such report: no line — the worker never posted or opened; parked and never
     consumed — the pane's ready never came for that wid; consumed — the pane got it. Ids clipped:
     enough to match rows, not a transcript of anything."""
@@ -47837,7 +48275,7 @@ return navigator.serviceWorker.register('/sw.js');
 if(!r.ok)return r.text().then(function(t){throw new Error(t||'no server key');});return r.json();});
 }).then(function(k){return navigator.serviceWorker.ready.then(function(reg){
 return reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64u(k.key)});});
-}).then(function(s){return post('/push/subscribe',s.toJSON());});}
+}).then(function(s){var j=s.toJSON();j.origin=String(location.origin||'');return post('/push/subscribe',j);});}   // origin (2026-09-10): the page this device runs, for the ABSOLUTE navigate URL an Apple endpoint's declarative message needs (_push_declarative)
 function devUnsubscribe(){return sub().then(function(s){var ep=s?s.endpoint:'';
 return (s?s.unsubscribe():Promise.resolve()).then(function(){return ep?post('/push/unsubscribe',{endpoint:ep}):null;});});}
 // the session the user is LOOKING AT: the chat pane's active tab, read off the same-origin iframe's DOM — the very
@@ -47898,94 +48336,55 @@ if(!isOn)testOut.textContent+=" Real notifications won't arrive until the main s
 
 # Landing a notification tap on what fired (the user 2026-08-08, whose first push opened a different
 # session; 2026-09-06, who wants the tap to come back to the romp already open and put them on the
-# session — and the card — that buzzed). Two arrivals, ONE activation path: both ask the KERNEL to
-# aim the chat focus at THIS dashboard (POST /reveal {sid, wid}) — never a focus posted straight
-# into the chat iframe, which could only ever address a tab that is already there. The kernel
+# session — and the card — that buzzed). Three roads, ONE activation path: each asks the KERNEL to
+# aim the chat focus at THIS dashboard (POST /reveal {sid, wid, via[, boot]}) — never a focus posted
+# straight into the chat iframe, which could only ever address a tab that is already there. The kernel
 # answers a live session with the focus (chat pane connected → delivered now; not yet → parked for
 # that wid and consumed on the pane's ready — the exact event, no delay heuristics) and a dead or
 # unknown one with the revive prompt (_reveal_msg), so no sid ever ends in a silent no-op.
-#  - live window: the SW focused us and posted {romp:'notificationClick', sid, host, kind, cardId}
-#    — or {romp:'pushReveal', sid}, the shape the worker of builds before 2026-09-06 posts: a phone runs
-#    the worker it installed last until a navigation refreshes it, so that tap lands too (2026-09-08,
-#    when a tap after a deploy still did nothing). The worker now refreshes itself on every push, but
-#    only once a phone has THAT worker.
-#  - cold start: the SW opened the kernel's deep link '/?push-reveal=<sid>[&push-card=<id>]'. The
-#    params are stripped (history.replaceState) the moment they are read, so a manual reload later
-#    does not replay the jump. This arrival POSTs boot:true — the page is booting, so its chat pane
-#    is not connected yet, and the kernel must park for it rather than hand the focus to a same-wid
-#    socket the previous page left behind (the phone, 2026-09-06: iOS reopens the installed app's
-#    one window on the link and sessionStorage keeps the wid; the old pane's socket died without a
-#    close and sat in the kernel's client list until the ping timeout).
-# A card kind ALSO scrolls the feed to its card: {romp:'revealCard'} into the feed iframe — the same
-# message the Log's bell entries post — but only once the feed has its cards, which it announces
-# with {romp:'ready', app:'feed'} after its first payload renders (before that the iframe may have
-# no listener yet, or nothing to scroll to); a tap that arrives earlier waits for exactly that
-# message. ANY sid lands, whatever the kind: a test notification carries the session the user was
-# looking at when they pressed the button (2026-09-06) and comes back to it exactly like a turn's;
-# only a card kind adds the card scroll. A sid-less tap (a test pressed with no session in front)
-# has nowhere to land: the SW's focus/openWindow was the whole action. A /reveal the kernel refuses
-# lands in the Log rather than vanishing. Each /reveal names the road the tap took (via: 'sw' — the
-# worker's message; 'link' — the deep link), and the kernel logs it with the outcome: the evidence a
-# "the tap did nothing" report needs, of which there was none (2026-09-08).
-# THE SHELL'S OWN TRAIL (2026-09-08, the phone once more: the app came forward, the session did not
-# change, and the journal held no /reveal line — so the request never left the phone, and nothing said
-# where between the tap and the fetch it had stopped). Every step here files a client-diag row (surface
-# 'shell', over the shell socket _LANDING_MOBILE_JS owns): 'deeplink' at every boot (did the page open on
-# the link; does a worker control it), 'sw-message' when a worker's message arrives (its shape, whether
-# it carries a session, the worker's own diag block: clients seen, road taken, target visibility, and
-# whether this tap already landed), 'reveal-post' with /reveal's status. Structure only, never text.
-# THE REPLAY: the worker keeps the last tap until a shell says it landed; this page asks for it at
-# boot and every time it becomes visible again (the events a tap that brought the app forward
-# produces), so a message posted while the page was suspended, or to a page the browser had already
-# evicted, still lands — and acks each tap it lands so the worker retires it. A tap's id dedupes the
-# roads: message, replay and link can all deliver the same tap, and it lands once.
-# THE STORED TAP (2026-09-09, the phone with the app alive in the BACKGROUND: the tap brought it forward
-# and changed nothing, while the same tap after a force-quit landed). None of the roads above reaches a
-# backgrounded Home Screen app: iOS lists no window client for it, so the worker takes the openWindow
-# road; iOS then brings the EXISTING page forward without a load (no link) and without a client to
-# message (no message), and ends the worker with its kept tap before the page can ask (no replay). So
-# the worker WRITES every session-addressed tap to the Cache API before it tries anything — one entry,
-# '/__romp/tap' in the 'romp-tap' cache — and this page reads it on the events a resumed page produces:
-# boot, visibilitychange→visible, pageshow, window focus. A stored tap lands by the same land() path
-# (via 'store'; boot:true when the page is booting), once by id however many roads carry it; the entry
-# is then deleted here AND the worker acked, so neither copy can replay it. A page booting on the DEEP
-# LINK drops a stored tap instead of landing it: the worker opened this very page on the link, so the
-# link is the newest word on where to land, and the entry is either that same tap (landing by the link
-# already; its id is marked seen, so the message handed to the opened window is a dup too) or an older
-# one the link outranks. Age never retires a tap — only landing does. Every check files a 'tap-resume'
-# row (found; which event asked; age, clipped; whether it was a dup or dropped), the evidence that the
-# resume ran at all — the thing the 2026-09-09 journal could not say.
+#  - 'link': the page opened on — or was navigated to — the kernel's deep link
+#    '/?push-reveal=<sid>[&push-card=<id>]&push-pid=<pid>'. On Apple this IS the tap (2026-09-10): the Declarative
+#    Web Push message's `navigate`, the OS's own callback for a KILLED app — the ledger block above _push_ledger has
+#    the finding: a live one gets no navigation, no notificationclick and no notificationclose, only the screen (the
+#    'vanish' road below). Read at boot AND on pageshow / popstate (a window the user agent navigates without
+#    a full load), stripped (history.replaceState) the moment it is read so a manual reload does not replay the
+#    jump. boot:true at boot: the page's chat pane is not connected yet, so the kernel must park for it rather than
+#    hand the focus to a same-wid socket the previous page left behind (the phone, 2026-09-06: iOS reopens the
+#    installed app's one window on the link and sessionStorage keeps the wid).
+#  - 'sw': a browser that dispatches notificationclick (Chrome): the worker focused this window and posted
+#    {romp:'notificationClick', sid, host, kind, cardId, pid, diag}.
+#  - 'ack': the kernel's own ledger — GET /push/pending?endpoint=<this page's subscription> lists every unsettled
+#    push to this device; the ones the worker acked clicked (a tap whose message and link reached no page) land;
+#    asked on the events a page that came forward produces: boot, visible, pageshow, focus.
+#  - 'vanish' (2026-09-10, the user's call; the fromLedger comment below has the whole table and the trade-off): the
+#    same list's SHOWN rows, held against registration.getNotifications() — exactly ONE shown push whose
+#    notification is gone from the screen lands, silently. The one thing a LIVE iOS app leaves: it gets no
+#    navigation, no click and no close, only these events and the screen.
+#  The pid rides all four, so one push lands ONCE: the first road to land it settles the kernel's row (POST
+#  /push/landed) and the rest are dups. A card kind ALSO scrolls the feed to its card: {romp:'revealCard'} into the
+#  feed iframe — the same message the Log's bell entries post — but only once the feed has its cards, which it
+#  announces with {romp:'ready', app:'feed'} after its first payload renders (before that the iframe may have no
+#  listener yet, or nothing to scroll to); a tap that arrives earlier waits for exactly that message. ANY sid
+#  lands, whatever the kind: a test notification carries the session the user was looking at when they pressed the
+#  button (2026-09-06) and comes back to it exactly like a turn's; only a card kind adds the card scroll. A sid-less
+#  tap (a test pressed with no session in front) has nowhere to land. A /reveal the kernel refuses lands in the Log
+#  rather than vanishing.
 # THE BOOT FLAG FOLLOWS THE CHAT PANE'S OWN SOCKET (review find, 2026-09-09, on #1127): every road posts boot:true
-# until this page's chat pane reports its socket up ({romp:'wsState',app:'chat',state:'up'}, the message the
-# pane's shim posts to the shell on every open, the one the notification center already reads). The link road
-# always said booting; the worker's message and the replay said live even when they reached a page whose pane
-# had not connected (the message handed to the window openWindow opened on its start URL; the replay answered
-# at parse time), so the kernel aimed at the previous page's same-wid socket, logged 'delivered', and the tap
-# was lost. The flag LATCHES on the first up: the pane posts its ready once per page life, so a park made after
-# that would wait for a ready that never comes; a later drop is the redial's business (the kernel retires the
-# superseded socket by instance id), not this flag's.
-# THE FINGERPRINT AND THE OFFER (2026-09-09, later, the phone with the app WARM: three taps, three 201s from the
-# push service, and then nothing — no [reveal] line, no 'sw-message' row, 'tap-resume' found:false on every
-# resume, and each tap booting a fresh page on the start URL with no link. The cold-start round the same morning
-# had the worker's own trail (clients:0, road 'open') and a link; this round had no sign the worker's click handler
-# ran at all. Two hypotheses the trail cannot separate: iOS delivers a tap on a live app to the app itself and
-# bypasses the worker; or the phone still runs an OLDER worker — a Home Screen app may not re-check the worker on
-# relaunch — that never wrote the store.) Two answers, both in this script:
-#   - the worker's FINGERPRINT: the worker writes '/__romp/sw' (version — baked at serve time, the same string this
-#     page carries as PAGEV — plus install/activate/last push/last click stamps and a click count); every
-#     'tap-resume' row folds in the reading (swVersion, swMatchesPage, lastPushAgeS, lastClickAgeS, clicks — ages,
-#     never ids), a version other than the page's files 'sw-stale', and the page asks registration.update() at
-#     boot and on every visible ('sw-update'), so a stale worker is replaced at the next opportunity. A row that
-#     says the worker's last push is seconds old and its last click never happened settles the question.
-#   - the OFFER, a landing road that needs no click handler at all: the worker writes '/__romp/shown' for every
-#     session-addressed notification it displays, and a page that comes forward with NO tap stored but a shown
-#     record does not jump — the user may have opened the app for another reason — it OFFERS: a chip at bottom-left
-#     ("Open <name> · from the notification", with a dismiss), the jump-chip family's dress on the shell's own
-#     tokens, a stable element (never rebuilt, so a click always lands) that acknowledges the press before the
-#     round-trip. Taken → the same land() path, via 'offer'; dismissed → the record is retired and nothing lands.
-#     Never shown when the active session already IS the one named (retired: the notification's purpose is met),
-#     never on a deep-link boot (the link is the newer word), and never beside a stored tap: the tap wins, the
-#     offer is spent. 'tap-offer' {shown, ageS, why} on every reading; 'tap-offer-click' / 'tap-offer-dismiss'.
+# until this page's chat pane reports its socket up ({romp:'wsState',app:'chat',state:'up'}, the message the pane's
+# shim posts to the shell on every open) or has rendered its tabs (the tabs come over that very socket, and the
+# shell's parser can yield to the wsState message before this script exists). The flag LATCHES on the first up:
+# the pane posts its ready once per page life, so a park made after that would wait for a ready that never comes.
+# THE SHELL'S OWN TRAIL (2026-09-08, the phone: the app came forward, the session did not change, and the journal
+# held no /reveal line — nothing said where between the tap and the fetch it had stopped). Every step files a
+# client-diag row (surface 'shell', over the shell socket _LANDING_MOBILE_JS owns): 'deeplink' {via, hasSid,
+# hasCard, hasPid, dup, controlled} at every boot and every later arrival of the params; 'sw-message' {shape,
+# hasSid, kind, dup, sw: the worker's own diag block} when a worker's message arrives; 'tap-pending' {via, sub,
+# rows[, getNotifications, displayed, vanished][, superseded][, err]}, 'tap-pending-land' {sid8, ageS, dup} and
+# 'tap-vanish-land' {sid8, ageS} for the ledger check; 'reveal-post' {status, via, boot} with /reveal's answer.
+# Structure and clipped ids only, never text or a session id whole.
+# GONE (2026-09-10): the stored tap and its replay, the worker fingerprint with its sw-stale and sw-update rows,
+# the offer chip. (The vanished-notification road went with them that morning and came BACK the same day by the
+# user's call — the fromLedger comment below.)
 # Its own <script>, like every shell behaviour (test_kernel_mobile's count pin): a throw in the
 # bell's script must not strand a tap, and a bell that bails where the Push API is missing must
 # not take the deep-link half with it.
@@ -48002,108 +48401,100 @@ window.addEventListener('message',function(e){var m=e&&e.data;
 if(m&&m.romp==='wsState'&&m.app==='chat'&&m.state==='up')chatUp=true;   // the chat pane's shim, on its socket's open: from here a tap is delivered live
 if(!(m&&m.romp==='ready'&&m.app==='feed'))return;
 feedReady=true;if(pendingCard){var c=pendingCard;pendingCard=null;revealCard(c.itemId,c.sid);}});
+// the session the user is looking at: the chat pane's active tab, read off the same-origin iframe's DOM — the read
+// the bell's test push uses (one truth, no second channel); '' before the pane has tabs, or without a pane
+function activeSid(){try{var f=document.getElementById('f-chat'),d=f&&f.contentDocument,t=d&&d.querySelector('#tabs .tab.active[data-id]');return t?String(t.getAttribute('data-id')||''):'';}catch(e){return '';}}
 function land(sid,kind,cardId,boot,via){
-boot=!!boot||!chatUp;   // booting, or our chat pane has not connected yet: the kernel parks for it and its ready delivers, never a same-wid socket the previous page left; via: which road the tap took, for the kernel's log line
+boot=!!boot||!(chatUp||activeSid());   // booting, or our chat pane has not connected yet: the kernel parks for it and its ready delivers, never a same-wid socket the previous page left; via: which road the tap took, for the kernel's log line. The pane's rendered tabs (activeSid, the same-origin read above) are proof its socket was up even when its wsState message beat this listener (2026-09-09: the served shell's parser can yield to that message before this script runs, and every landing then said booting and parked for a ready that had already come)
 var body={sid:sid,wid:wid(),via:via};if(boot)body.boot=true;
 if(sid)fetch('/reveal',{method:'POST',body:JSON.stringify(body)}).then(function(r){
 diag('reveal-post',{status:r.status,via:via,boot:!!boot});
 if(!r.ok)return r.text().then(function(t){throw new Error(t||('HTTP '+r.status));});},
 function(e){diag('reveal-post',{status:0,via:via,boot:!!boot});throw e;})['catch'](fail);
-if(sid&&kind==='card'&&cardId)revealCard(cardId,sid);
-if(sid&&via!=='offer')retireShown('');}   // a landed tap outranks any offer still pending: the user has chosen where to be (the offer retires its own record by id)
+if(sid&&kind==='card'&&cardId)revealCard(cardId,sid);}
+// ONE PUSH LANDS ONCE (the kernel's ledger; the block above): every road carries the push's pid — the deep link's
+// push-pid, the worker's message, the kernel's clicked and shown rows — and the first road to land it settles the
+// kernel's row (POST /push/landed); the rest are dups. A landing without a pid (a link from a kernel of an older build)
+// has nothing to dedupe on and lands. settle: 'landed' | 'superseded' | 'dropped' — a row this page is done with
 var swc=('serviceWorker' in navigator)&&navigator.serviceWorker||null,seen={};
-function toWorker(m,src){try{var t=src||(swc&&swc.controller);if(t)t.postMessage(m);}catch(e){}}
-function askReplay(){toWorker({romp:'tapReplay'});}
-// the stored tap (2026-09-09): the entry the worker writes before it tries to focus or open anything — the road
-// for a backgrounded Home Screen app, which iOS brings forward without a load and without listing it as a client.
-// Beside it, the worker's fingerprint (SWFP) and the record of the last notification it showed (SHOWN); PAGEV is
-// this page's own build string, baked at render — the worker bakes the same string into its fingerprint.
-var TAP='/__romp/tap',TAPC='romp-tap',SWFP='/__romp/sw',SHOWN='/__romp/shown',PAGEV='__ROMP_SWV__',cs=(typeof caches!=='undefined')?caches:null;
-function readJson(k){return cs?cs.open(TAPC).then(function(c){return c.match(k);}).then(function(r){return r?r.json():null;})['catch'](function(){return null;}):Promise.resolve(null);}
-function readTap(){return readJson(TAP);}
-// retire an entry: the one holding THAT id (never a newer record), or whatever is there when no id is given
-function dropIf(k,id){readJson(k).then(function(t){if(t&&(!id||String(t.id||'')===id))return cs.open(TAPC).then(function(c){return c['delete'](k);});})['catch'](function(){});}
-// retire a landed tap everywhere it is kept: the entry (while it still holds THAT record — never a newer one) and
-// the worker's kept copy (the ack; src: the worker that posted, else the one in control)
-function drop(id){dropIf(TAP,id);}
-function retire(id,src){drop(id);if(id)toWorker({romp:'tapLanded',id:id},src);}
-// the shown record goes the same two ways: the entry here, and the worker's copy through the same ack (by id only —
-// '' retires the entry alone, a tap having outranked whatever it held)
-function dropShown(id){dropIf(SHOWN,id);}
-function retireShown(id){dropShown(id);if(id)toWorker({romp:'tapLanded',id:id});}
-function ageOf(t){return +t>0?Math.max(-1,Math.min(86400,Math.round((Date.now()-t)/1000))):-1;}
-// the worker's fingerprint, as every tap-resume row carries it: which build wrote it and whether that is this page's
-// build, how long since it last saw a push and a click, how many clicks it has handled. Ages, never sids or ids
-function fingerprint(fp){var ok=!!(fp&&typeof fp==='object'&&fp.version);
-return {swVersion:ok?String(fp.version):null,swMatchesPage:ok?String(fp.version)===PAGEV:null,lastPushAgeS:ok?ageOf(fp.lastPushAt):-1,lastClickAgeS:ok?ageOf(fp.lastClickAt):-1,clicks:ok?(+fp.clicks||0):0};}
-function withFp(row,fp){for(var k in fp)row[k]=fp[k];return row;}
-// ask the browser to re-check the worker now (2026-09-09): a Home Screen app may not look for a new worker on relaunch,
-// so a stale one would keep taking the taps — at boot and on every coming-back, the events such an app produces. The
-// row says whether there was a registration to update at all (reg) and whether the check ran (ok)
-function refreshWorker(){if(!(swc&&typeof swc.getRegistration==='function')){diag('sw-update',{ok:false,reg:false});return;}
-swc.getRegistration('/').then(function(r){if(!r){diag('sw-update',{ok:false,reg:false});return;}return r.update().then(function(){diag('sw-update',{ok:true,reg:true});});})['catch'](function(){diag('sw-update',{ok:false,reg:true});});}
-// THE OFFER: the notification the worker last showed for a session, when no tap for it was stored (see the block
-// above). A chip, not a jump. `offered` is what the chip currently names; the two buttons are stable shell elements
-// with their handlers installed once here, so a re-render elsewhere can never swallow the press
-var offerEl=document.getElementById('tap-offer'),offerGo=document.getElementById('tap-offer-go'),offerX=document.getElementById('tap-offer-x'),offered=null;
-function offerHide(){offered=null;if(offerEl)offerEl.hidden=true;}
-// the session the user is looking at: the chat pane's active tab, read off the same-origin iframe's DOM — the read
-// the bell's test push uses (one truth, no second channel); '' before the pane has tabs, or without a pane
-function activeSid(){try{var f=document.getElementById('f-chat'),d=f&&f.contentDocument,t=d&&d.querySelector('#tabs .tab.active[data-id]');return t?String(t.getAttribute('data-id')||''):'';}catch(e){return '';}}
-function offer(shown,via,linkSid){
-if(!(shown&&typeof shown==='object'&&shown.sid)){if(shown)dropShown(String(shown.id||''));offerHide();return;}   // no session: not an offer — cleared
-var sid=String(shown.sid),id=String(shown.id||''),age=ageOf(shown.t);
-var why=linkSid?'link':(activeSid()===sid?'active':((offerEl&&offerGo)?'':'no-chip'));   // link: the deep link is the newer word; active: already there, the notification's purpose is met
-diag('tap-offer',{shown:!why,via:via,ageS:age,why:why});
-if(why==='link'||why==='active'){retireShown(id);offerHide();return;}
-if(why)return;
-offered={id:id,sid:sid,kind:String(shown.kind||''),cardId:String(shown.cardId||''),age:age};
-offerGo.textContent='Open '+(String(shown.name||'')||sid.slice(0,8));
-var tail=document.createElement('span');tail.className='to-from';tail.textContent=' · from the notification';offerGo.appendChild(tail);
-offerGo.disabled=false;offerEl.classList.remove('acted');offerEl.hidden=false;}
-if(offerGo)offerGo.addEventListener('click',function(){var o=offered;if(!o)return;
-offerEl.classList.add('acted');offerGo.disabled=true;   // the acknowledgement, before the round-trip
-diag('tap-offer-click',{ageS:o.age});land(o.sid,o.kind,o.cardId,false,'offer');retireShown(o.id);offerHide();});
-if(offerX)offerX.addEventListener('click',function(){var o=offered;if(!o)return;diag('tap-offer-dismiss',{ageS:o.age});retireShown(o.id);offerHide();});
-// via: the event asking ('boot' | 'visible' | 'pageshow' | 'focus'); linkSid: the deep link this page booted on,
-// if any — then the stored tap is dropped, not landed (the link is the newer word; see the block above), and the
-// row says whether the two named the same session. Landed once by id however many roads carry it. The fingerprint
-// rides every row; with no tap stored, the shown record decides whether to offer
-function resume(via,linkSid){
-if(!cs){diag('tap-resume',withFp({found:false,via:via,store:false},fingerprint(null)));offerHide();return;}
-Promise.all([readTap(),readJson(SWFP),readJson(SHOWN)]).then(function(rs){var tap=rs[0],fp=fingerprint(rs[1]),shown=rs[2];
-if(fp.swVersion!==null&&!fp.swMatchesPage)diag('sw-stale',{swVersion:fp.swVersion,pageVersion:PAGEV});
-if(!(tap&&typeof tap==='object'&&tap.sid)){diag('tap-resume',withFp({found:false,via:via,store:true},fp));if(tap)drop(String(tap.id||''));offer(shown,via,linkSid);return;}   // no session: not a tap — cleared, never landed, nothing to ack
-var id=String(tap.id||''),dup=!!(id&&seen[id]),dropped=!dup&&!!linkSid;
-diag('tap-resume',withFp({found:true,via:via,ageS:ageOf(tap.t),dup:dup,dropped:dropped,sameSid:linkSid?String(tap.sid)===linkSid:null},fp));
-if(id)seen[id]=1;
-if(!dup&&!dropped)land(String(tap.sid),String(tap.kind||''),String(tap.cardId||''),via==='boot','store');
-retire(id);retireShown('');offerHide();});}   // the tap wins: whatever a notification offered, the user tapped one, and the offer is spent
-if(swc&&swc.addEventListener){
-swc.addEventListener('message',function(ev){var m=ev&&ev.data;
-// notificationClick: this build's worker. pushReveal: the worker of builds before 2026-09-06, which a phone
-// keeps running until a navigation refreshes it — its tap must land too, not arrive in a shape nobody reads.
-if(!(m&&(m.romp==='notificationClick'||m.romp==='pushReveal')))return;
-var id=String(m.id||''),dup=!!(id&&seen[id]);
-diag('sw-message',{shape:m.romp,hasSid:!!m.sid,kind:String(m.kind||''),dup:dup,sw:m.diag||null});
-if(dup)return;if(id)seen[id]=1;
-land(String(m.sid||''),String(m.kind||''),String(m.cardId||''),false,'sw');
-if(id)retire(id,ev.source);});
-askReplay();   // after the listener, so the answer has somewhere to land
-refreshWorker();   // and the worker re-checked at boot (a relaunched app may not have)
-document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible'){askReplay();refreshWorker();resume('visible');}});
-window.addEventListener('pageshow',function(){askReplay();resume('pageshow');});
-window.addEventListener('focus',function(){askReplay();resume('focus');});}
-var u=new URL(location.href),pr=u.searchParams.get('push-reveal'),pc=u.searchParams.get('push-card');
-// push-card is a goal id; a crafted link with a quote or bracket would reach the feed's
-// [data-key="a:..."] lookup as a selector and throw a SyntaxError that skips the openSession fallback
-// too (review find on #940, 2026-09-07). Drop a non-id value before it lands.
+function fresh(pid){if(!pid)return true;if(seen[pid])return false;seen[pid]=1;return true;}
+function settle(what,pid){if(pid)fetch('/push/'+what,{method:'POST',body:JSON.stringify({pid:pid})})['catch'](function(){});}
+// THE LINK (the block above — on Apple the OS's own tap callback): the params this page opened on, or gained without
+// a load (pageshow, popstate: iOS may navigate the existing window rather than open one). push-card is a goal id; a
+// crafted link with a quote or bracket would reach the feed's [data-key="a:..."] lookup as a selector and throw a
+// SyntaxError that skips the openSession fallback too (review find on #940, 2026-09-07) — a non-id value is dropped
+// before it lands; push-pid likewise admits the kernel's own token shape only. The params are stripped the moment
+// they are read. The 'deeplink' row files every boot (link or not: did a worker control the page) and every later
+// arrival of the params. Returns the session it landed ('' for none): the ledger check that follows takes it as the
+// newer word, so nothing else lands beside it
+function fromLink(via){var u=new URL(location.href),pr=u.searchParams.get('push-reveal'),pc=u.searchParams.get('push-card'),pp=u.searchParams.get('push-pid');
+if(!(pr||pc||pp)){if(via==='boot')diag('deeplink',{via:via,hasSid:false,hasCard:false,hasPid:false,controlled:!!(swc&&swc.controller)});return '';}
 if(pc&&!/^[A-Za-z0-9_.:-]{1,128}$/.test(pc))pc='';
-diag('deeplink',{hasSid:!!pr,hasCard:!!pc,controlled:!!(swc&&swc.controller)});
-if(pr||pc){land(pr||'',pc?'card':'',pc||'',true,'link');
-u.searchParams['delete']('push-reveal');u.searchParams['delete']('push-card');
-try{history.replaceState(null,'',u.pathname+(u.searchParams.toString()?'?'+u.searchParams.toString():'')+u.hash);}catch(e){}}
-resume('boot',pr||'');   // the stored tap: landed when this page is the relaunch iOS made on the start URL, dropped when the link above already says where to go
+if(pp&&!/^[A-Za-z0-9_-]{16,64}$/.test(pp))pp='';
+var first=fresh(pp);
+diag('deeplink',{via:via,hasSid:!!pr,hasCard:!!pc,hasPid:!!pp,dup:!first,controlled:!!(swc&&swc.controller)});
+if(first){land(pr||'',pc?'card':'',pc||'',via==='boot','link');settle('landed',pp);}
+u.searchParams['delete']('push-reveal');u.searchParams['delete']('push-card');u.searchParams['delete']('push-pid');
+try{history.replaceState(null,'',u.pathname+(u.searchParams.toString()?'?'+u.searchParams.toString():'')+u.hash);}catch(e){}
+return first?(pr||''):'';}
+// THE KERNEL'S ROWS AND THE SCREEN (the ack and vanish roads; the block above): this page's own push subscription
+// endpoint, every unsettled push to it (newest first), and the notifications still displayed. No subscription: the
+// kernel is not asked (said so at boot). No caching of the endpoint — the bell can subscribe this page after it booted
+function endpoint(){if(!(swc&&typeof swc.getRegistration==='function'))return Promise.resolve('');
+return swc.getRegistration('/').then(function(r){return (r&&r.pushManager)?r.pushManager.getSubscription():null;}).then(function(s){return (s&&s.endpoint)?String(s.endpoint):'';})['catch'](function(){return '';});}
+// the notifications still on this device's screen, by the pid in each one's data: {pid: 1, …}; null where the API is
+// missing or throws — then the screen cannot be read, and a notification gone cannot be told from one never shown
+function displayed(){if(!(swc&&typeof swc.getRegistration==='function'))return Promise.resolve(null);
+return swc.getRegistration('/').then(function(r){if(!(r&&typeof r.getNotifications==='function'))return null;
+return r.getNotifications().then(function(ns){var d={};(ns||[]).forEach(function(n){var pid=n&&n.data&&n.data.pid;if(pid)d[String(pid)]=1;});return d;});})['catch'](function(){return null;});}
+// THE DECISION TABLE, per row of the kernel's list: 'clicked' → a tap the worker saw: lands via 'ack', once by pid;
+// 'shown' and still displayed → untouched; 'shown' and GONE → tapped, as far as this page can tell: EXACTLY ONE such row
+// lands via 'vanish', silently; two or more gone at once → the tap could have been on any of them: spent (/push/dropped),
+// nothing lands, nothing shows; a displayed notification for the SAME session as an older gone row superseded it (the
+// per-session tag replaced its notification: /push/superseded, never a tap); 'sent' → nothing known displayed, so nothing
+// of it can have vanished. A link this page landed at the same time (linkSid — a killed app, navigated by iOS) or a
+// clicked row landed here is the newer word: whatever else vanished is dropped. A screen this page cannot read (no
+// getNotifications, or it throws) decides nothing. No chip, no prompt, no timer: a tap lands or nothing happens.
+// THE KNOWN CONFLATION, AND THE USER'S CALL (2026-09-10): iOS fires neither notificationclick nor notificationclose for
+// a live Home Screen web app, so a notification the user SWIPED AWAY leaves exactly what a tapped one leaves — gone from
+// the screen — and lands here on the next foregrounding as if tapped. The user weighed that on 2026-09-10 and accepted
+// it: a background tap that works is worth an occasional wrong landing after a swipe. A deliberate decision, not an
+// oversight — do not read this road as a bug and take it out again. The foreground case stays non-switching (no wake
+// event reaches this page, so this table does not run until it next comes forward); a killed app never reaches it (the
+// declarative message's native navigate lands the link road first, and what else vanished is dropped)
+function fromLedger(via,linkSid){endpoint().then(function(e){if(!e)return {sub:false};
+return fetch('/push/pending?endpoint='+encodeURIComponent(e)).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}).then(function(p){p=(p&&typeof p==='object')?p:{};p.sub=true;return p;})['catch'](function(){return {sub:true,err:true};});}).then(function(p){
+var rows=(Array.isArray(p.rows)?p.rows:[]).filter(function(r){return r&&typeof r==='object'&&r.sid&&r.pid&&r.stage;});
+rows.forEach(function(r){r.pid=String(r.pid);r.sid=String(r.sid);});
+var row={via:via,sub:!!p.sub,rows:rows.length};if(p.err)row.err=true;
+if(!rows.length){if(p.sub||via==='boot')diag('tap-pending',row);return;}
+displayed().then(function(d){
+var gn=d!==null;row.getNotifications=gn;row.displayed=gn?Object.keys(d).length:-1;
+var landed=!!linkSid,vanished=[],superseded=0;
+rows.forEach(function(r){if(r.stage!=='clicked')return;var first=fresh(r.pid);   // 1. the taps the worker saw: a jump, once by pid, newest first
+diag('tap-pending-land',{sid8:r.sid.slice(0,8),ageS:r.ageS,dup:!first});
+if(first){land(r.sid,String(r.kind||''),String(r.cardId||''),via==='boot','ack');settle('landed',r.pid);landed=true;}});
+if(gn){   // 2. the shown rows against the screen
+var front={};rows.forEach(function(r,i){if(d[r.pid]&&!(r.sid in front))front[r.sid]=i;});   // per session, the newest row still displayed (rows are newest first)
+rows.forEach(function(r,i){if(r.stage!=='shown'||seen[r.pid]||d[r.pid])return;   // clicked: above; sent: nothing known displayed; displayed: untouched; seen: landed or spent already
+if((r.sid in front)&&front[r.sid]<i){seen[r.pid]=1;superseded++;settle('superseded',r.pid);return;}   // a newer notification for the same session is on the screen: the tag replaced this one's — gone without a tap
+vanished.push(r);});}   // acked shown, gone from the screen: tapped, as far as this page can tell (or swiped — the accepted trade-off above)
+row.vanished=vanished.length;if(superseded)row.superseded=superseded;diag('tap-pending',row);
+if(landed||vanished.length!==1){vanished.forEach(function(v){seen[v.pid]=1;settle('dropped',v.pid);});return;}   // another road landed, or more than one gone at once: spent, silently — no chip, no prompt
+var v=vanished[0];seen[v.pid]=1;diag('tap-vanish-land',{sid8:v.sid.slice(0,8),ageS:v.ageS});
+land(v.sid,String(v.kind||''),String(v.cardId||''),via==='boot','vanish');settle('landed',v.pid);});});}
+// the worker's message (a browser that dispatches notificationclick: the tap focused this window, or opened it): its
+// shape, the worker's own trail, and whether the pid already landed by another road
+if(swc&&swc.addEventListener)swc.addEventListener('message',function(ev){var m=ev&&ev.data;
+if(!(m&&m.romp==='notificationClick'))return;
+var pid=String(m.pid||''),first=fresh(pid);
+diag('sw-message',{shape:m.romp,hasSid:!!m.sid,kind:String(m.kind||''),dup:!first,sw:m.diag||null});
+if(first){land(String(m.sid||''),String(m.kind||''),String(m.cardId||''),false,'sw');settle('landed',pid);}});
+document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible')fromLedger('visible');});
+window.addEventListener('pageshow',function(){fromLedger('pageshow',fromLink('pageshow'));});
+window.addEventListener('popstate',function(){fromLink('popstate');});
+window.addEventListener('focus',function(){fromLedger('focus');});
+fromLedger('boot',fromLink('boot'));
 })();
 """
 
@@ -49114,23 +49505,6 @@ def _landing():
             # is pointer-events:none (never blocks) and z below the timeline collapse handle (z-30).
             ".pane.pane-focused::after{content:'';position:absolute;inset:0;pointer-events:none;z-index:6;"
             "box-shadow:inset 0 0 0 2px rgba(156,210,255,0.55)}"   # the romp accent — focus cues wear it (CLAUDE.md)
-            # the offer chip (2026-09-09): the jump-chip family's dress — the menu-card vocabulary as a pill,
-            # dim at rest, accent on hover — on the shell's menu TOKENS (dark literals as var() fallbacks only),
-            # 12px romp sans like every menu. Bottom-LEFT, the jump chip's corner, 12px above the desktop rail
-            # (30px); the mobile block below re-anchors it above the tab bar's measured height. [hidden] must be
-            # restated: an authored display:flex outspecifies the UA's rule (the login-modal lesson).
-            "#tap-offer{position:fixed;left:14px;bottom:42px;z-index:40;display:flex;align-items:center;max-width:min(92vw,420px);"
-            "background:var(--menu-bg,#252526);color:var(--menu-fg,#cccccc);border:1px solid var(--menu-border,rgba(255,255,255,0.12));"
-            "border-radius:999px;box-shadow:var(--shadow-menu,0 4px 12px rgba(0,0,0,0.35));"
-            "font:12px/1.2 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}"
-            "#tap-offer[hidden]{display:none}"
-            "#tap-offer button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;-webkit-tap-highlight-color:transparent;"
-            "padding:8px 12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}"
-            "#tap-offer button:hover{color:var(--accent)}"
-            "#tap-offer #tap-offer-go{padding-right:6px}"
-            "#tap-offer #tap-offer-go .to-from{opacity:.6}"
-            "#tap-offer #tap-offer-x{flex:0 0 auto;padding:8px 12px 8px 8px;opacity:.6}"
-            "#tap-offer.acted{opacity:.55}"   # the press acknowledged at once; the chip goes the moment the record is retired
             "#mtabs{display:none}"
             # narrow OR a touch device up to 1024px → one pane + bottom tabs; mouse desktops keep the grid
             "@media (max-width:820px),(pointer:coarse) and (max-width:1024px){"
@@ -49206,9 +49580,6 @@ def _landing():
             "#mtabs button[hidden]{display:none}"
             "#mtabs #mbell.on{color:var(--accent)}"
             "#mtabs #mbell.busy{opacity:.45}"
-            # the offer chip clears the mobile tab bar instead of the (hidden) desktop rail: --mtabs-h is the
-            # bar's measured height (barfit), so the chip rides the same reservation the panes do
-            "#tap-offer{bottom:calc(var(--mtabs-h,0px) + 12px)}"
             ".rail-acts #rail-bell.on{color:var(--accent)}"
             ".rail-acts #rail-bell.busy{opacity:.45}"
             "}"
@@ -49510,12 +49881,8 @@ def _landing():
             "</div>"   # /.rail-acts
             "</div>"   # /.pane-rail (bottom bar)
             "</div>"
-            # the "from the notification" offer (2026-09-09; driven by _LANDING_REVEAL_JS): the session a shown
-            # but never-tapped notification named, offered — not jumped to — when the app comes forward. A
-            # stable element with its two buttons, hidden until a shown record without a tap is read; the
-            # script fills the name and shows it. Lives in the shell so it sits over whichever pane is up.
-            "<div id=tap-offer hidden role=status><button id=tap-offer-go type=button></button>"
-            "<button id=tap-offer-x type=button aria-label='Not now' title='Not now'>&#x2715;</button></div>"
+            # (no "from the notification" chip here — the user 2026-09-09: a notification that was tapped lands, by
+            # the roads _LANDING_REVEAL_JS documents, and the shell never offers or guesses.)
             "<nav id=mtabs>"
             # the pane tabs, from _PANE_ORDER — the desktop rail's exact order (the user 2026-08-30:
             # mobile is a re-layout, never a re-ordering)
@@ -49654,9 +50021,7 @@ def _landing():
             "<script>" + _LANDING_REMOTES_JS + "</script>"
             "<script>" + _LANDING_MOBILE_JS + "</script>"
             "<script>" + _LANDING_PUSH_JS + "</script>"
-            # the build string the worker's fingerprint is compared against (PAGEV) — the same _sw_version() the
-            # /sw.js route bakes into the worker, so a match means the worker on this device is this page's build
-            "<script>" + _LANDING_REVEAL_JS.replace("__ROMP_SWV__", _sw_version()) + "</script>"
+            "<script>" + _LANDING_REVEAL_JS + "</script>"
             "<script>" + _LANDING_COLLAPSE_JS + "</script>"
             # the command palette (Cmd/Ctrl+P) and the session quick-switcher hotkey (Cmd/Ctrl+O):
             # a dist bundle (ui/webview/palette-main.ts) like age-color-global above. Loaded last —
@@ -50636,6 +51001,17 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, json.dumps({"key": pub}), "application/json", cache="no-cache")
                 except RuntimeError as e:
                     return self._send(500, str(e), "text/plain")
+            if p == "/push/pending":
+                # the page's question on every coming-back (the ledger block above _push_ledger): every push to THIS
+                # device — its own subscription endpoint — that nobody has settled, newest first, each wearing its
+                # stage, as {rows: [...]}; the page lands the clicked ones and holds the shown ones against its screen
+                _pep = (q.get("endpoint") or [""])[0]
+                if not _pep:
+                    return self._send(400, "missing endpoint", "text/plain")
+                # the origin backfill (2026-09-10; _push_backfill_origin): this request names the device's own
+                # subscription and states where its page runs (its Referer — a same-origin GET carries no Origin)
+                _push_backfill_origin(_pep, _request_page_origin(self.headers))
+                return self._send(200, json.dumps(_push_pending(_pep)), "application/json", cache="no-cache")
             if p.startswith("/dist/") or p.startswith("/media/"):
                 base = DIST if p.startswith("/dist/") else MEDIA
                 fp = (base / p.split("/", 2)[2]).resolve()
@@ -50738,6 +51114,43 @@ class Handler(BaseHTTPRequestHandler):
         # foreign origin — the federated dashboard — and a denial clears the echo).
         self._cors_origin = self.headers.get("Origin") if self._origin_ok() else None
         try:
+            if u.path == "/push/ack":
+                # The push worker's word on one push (the ledger block above _push_ledger): {pid, stage: 'shown' |
+                # 'clicked', v}. AUTHENTICATED BY THE PID ALONE, ahead of _authorize on purpose: a worker's fetch
+                # carries no token header, and the pid is 128 unguessable bits the kernel itself issued, handed only
+                # to the device the push went to, good for two timestamps on that one row and nothing else. An
+                # unknown pid is a 404 and a line, a bad body buys no state, and the body is capped far below
+                # _POST_MAX_BYTES before a byte is read, since no token gates the read here. A 'shown' ack also
+                # SUPERSEDES the older unsettled, untapped rows for the same session on the same device
+                # (_push_ledger_supersede: the per-session tag replaced their notifications), one line each.
+                _cl = str(self.headers.get("Content-Length") or "0").strip()
+                if not re.fullmatch(r"[0-9]{1,20}", _cl) or int(_cl) > _PUSH_ACK_MAX_BYTES:
+                    self.close_connection = True
+                    return self._send(413, "ack body too large", "text/plain", headers={"Connection": "close"})
+                raw_body, berr = self._read_post_body()
+                if berr is not None:
+                    return self._send(berr[0], json.dumps({"ok": False, "error": berr[1]}), "application/json",
+                                      headers={"Connection": "close"})
+                try:
+                    _ab = json.loads(raw_body or b"{}")
+                    _pid, _stage, _v = str(_ab.get("pid") or ""), str(_ab.get("stage") or ""), str(_ab.get("v") or "")
+                except (ValueError, AttributeError):
+                    return self._send(400, "bad json", "text/plain")
+                if _stage not in _PUSH_ACK_STAGES or not _PID_RE.match(_pid):
+                    return self._send(400, "bad ack", "text/plain")
+                _row = _push_ledger_stamp(_pid, _stage, re.sub(r"[^A-Za-z0-9._+-]", "", _v)[:64])
+                if _row is None:
+                    print("[push] ack stage=%s: unknown pid" % _stage, file=sys.stderr)
+                    return self._send(404, "unknown pid", "text/plain")
+                _push_ledger_line("ack stage=%s" % _stage, _row)
+                if _stage == "shown":
+                    for _old in _push_ledger_supersede(_row):
+                        _push_ledger_line("superseded", _old)
+                # the origin backfill (2026-09-10; _push_backfill_origin): the row names the device's endpoint, and the
+                # worker's same-origin POST states its origin. The pid that admitted the ack is the credential here
+                # too — it reached only the device the push went to — and only a MISSING origin is ever written
+                _push_backfill_origin(_row.get("endpoint"), _request_page_origin(self.headers))
+                return self._send(200, json.dumps({"ok": True, "stage": _stage}), "application/json", cache="no-cache")
             ok, self._set_cookie, why = self._authorize(q)
             self._cors_origin = self.headers.get("Origin") if ok else None   # echoed by _send (CORS delivery)
             if not ok:
@@ -50914,6 +51327,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, "bad sid", "text/plain")
                 if not isinstance(_tlabel, str):
                     return self._send(400, "bad label", "text/plain")
+                # the origin backfill (2026-09-10; _push_backfill_origin), BEFORE the send: a device subscribed
+                # before the bell posted its origin has this very test push go out declarative
+                _push_backfill_origin(_ep, _request_page_origin(self.headers))
                 try:
                     _res = _push_test(_ep, _tsid, _thost, _tlabel)
                 except RuntimeError as e:
@@ -50923,13 +51339,21 @@ class Handler(BaseHTTPRequestHandler):
                 # A device opting into the bell pushes (plans/ios-app.md proposal 2): body is the
                 # browser's own PushSubscription JSON, stored keyed by endpoint — so re-subscribing
                 # the same device overwrites rather than duplicates, and opt-in is per device by
-                # construction (a subscription exists only if that device posted one).
+                # construction (a subscription exists only if that device posted one). Plus `origin`
+                # (2026-09-10): the page's own location.origin (or the request's Origin header), kept
+                # with the subscription — an Apple endpoint's declarative message needs an ABSOLUTE
+                # `navigate` URL (_push_declarative), and the page is the authority on where it runs.
+                # A row from before this build gains its origin from the device's later requests
+                # instead (_push_backfill_origin), so nobody has to re-subscribe.
                 try:
                     sub = json.loads(raw_body or b"{}")
                     ep = str(sub.get("endpoint") or "")
                     keys = sub.get("keys") or {}
+                    origin = str(sub.get("origin") or self.headers.get("Origin") or "").strip()
                     if not (ep.startswith("https://") and keys.get("p256dh") and keys.get("auth")):
                         return self._send(400, "not a push subscription", "text/plain")
+                    if origin and not _PUSH_ORIGIN_RE.fullmatch(origin):
+                        return self._send(400, "bad origin", "text/plain")
                 except (ValueError, AttributeError):
                     return self._send(400, "bad json", "text/plain")
                 try:
@@ -50937,7 +51361,7 @@ class Handler(BaseHTTPRequestHandler):
                 except RuntimeError as e:         # never store a subscription we can't deliver to
                     return self._send(500, str(e), "text/plain")
                 _set_push_sub({"endpoint": ep, "keys": {"p256dh": str(keys["p256dh"]),
-                                                        "auth": str(keys["auth"])}})
+                                                        "auth": str(keys["auth"])}, "origin": origin})
                 return self._send(200, json.dumps({"ok": True}), "application/json")
             if u.path == "/push/unsubscribe":
                 try:
@@ -50945,6 +51369,25 @@ class Handler(BaseHTTPRequestHandler):
                 except (ValueError, AttributeError):
                     return self._send(400, "bad json", "text/plain")
                 _del_push_sub(ep)
+                return self._send(200, json.dumps({"ok": True}), "application/json")
+            if u.path in ("/push/landed", "/push/superseded", "/push/dropped"):
+                # the page settling a ledger row (the ledger block above _push_ledger; _PUSH_SETTLE_STAGES): it
+                # landed the push, by whichever road — the deep link, the worker's message, the kernel's own clicked
+                # row, the vanished notification; a newer notification for the same session is displayed in its
+                # place; or it is spent without a landing (vanished beside another landing, or one of several
+                # vanished at once). From here /push/pending no longer names it; one line each
+                _lstage = u.path.rsplit("/", 1)[1]
+                try:
+                    _lpid = str(json.loads(raw_body or b"{}").get("pid") or "")
+                except (ValueError, AttributeError):
+                    return self._send(400, "bad json", "text/plain")
+                if not _PID_RE.match(_lpid):
+                    return self._send(400, "bad pid", "text/plain")
+                _lrow = _push_ledger_stamp(_lpid, _lstage)
+                if _lrow is None:
+                    print("[push] %s: unknown pid" % _lstage, file=sys.stderr)
+                    return self._send(404, "unknown pid", "text/plain")
+                _push_ledger_line(_lstage, _lrow)
                 return self._send(200, json.dumps({"ok": True}), "application/json")
             if u.path == "/push/relay":
                 # A federated peer mirroring its bell events into THIS kernel's subscriptions
@@ -51024,7 +51467,7 @@ class Handler(BaseHTTPRequestHandler):
                     sid = str(body.get("sid") or "")
                     wid = str(body.get("wid") or "")
                     boot = bool(body.get("boot"))
-                    via = str(body.get("via") or "")   # 'sw' | 'link' | 'store' | 'offer': the road the tap took, for the log line
+                    via = str(body.get("via") or "")   # 'sw' | 'link' | 'ack' | 'vanish': the road the tap took, for the log line
                     if via not in _REVEAL_ROADS:       # whitelisted before it reaches the journal (_REVEAL_ROADS has the why)
                         via = "other" if via else ""
                 except (ValueError, AttributeError):

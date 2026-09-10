@@ -97,7 +97,7 @@ test("a tick moves the plot group by a transform and creates no element; the ope
   const closedBar = plotOf(panel).children.find((c: any) => c.tag === "rect" && c._attrs.fill === "#7aa2f7" && widthOf(c) !== w0 && !tp.riders.some((r: any) => r.el === c));
   assert.ok(closedBar, "a closed bar is in the plot group and is not a rider");
   const cw0 = widthOf(closedBar);
-  advance(panel, 10);   // a whole pixel and a half at this zoom: past LIVE_MIN_PX
+  advance(panel, 10);   // a whole pixel and a half at this zoom: well past TICK_MIN_PX
   const before = created;
   tick(panel);
   assert.equal(created, before, "the tick created no element: no rebuild");
@@ -112,8 +112,8 @@ test("a tick moves the plot group by a transform and creates no element; the ope
   assert.equal(panel._holdReal, panel._geom.t1);
 });
 
-test("a move under LIVE_MIN_PX writes nothing; the translate is measured from the build, not the last tick", () => {
-  const panel = livePanel(liveData(), 43200);   // 12 h: 0.1 s is far under a pixel
+test("a move under TICK_MIN_PX writes nothing; the translate is measured from the build, not the last tick", () => {
+  const panel = livePanel(liveData(), 43200);   // 12 h: 0.1 s is a thousandth of a pixel, far under the guard
   advance(panel, 0.1);
   const before = created;
   tick(panel);
@@ -343,16 +343,18 @@ test("a gridline entering the window gets its full draw: the tick translates unt
   assert.equal(panel._tickPlot.applied, 0);
 });
 
-test("sub-pixel looks add up: the drift is measured from the build, not the last look, so the edge advances once they reach a pixel", () => {
-  // a 12 h window: a 5 s look is a fraction of a pixel, under LIVE_MIN_PX every time. Re-basing the drift on each
-  // look would leave the edge stuck at any zoom where one look is under a pixel; measured from the build, the
-  // looks accumulate and the first whose drift reaches a pixel writes it.
+test("sub-pixel looks add up: the drift is measured from the build, not the last look, so the edge advances once they reach the guard", () => {
+  // a 12 h window: a 5 s look is a sixteenth of a pixel, under the translate's guard (TICK_MIN_PX, 0.15 px) every
+  // time. Re-basing the drift on each look would leave the edge stuck at any zoom where one look is under the
+  // guard; measured from the build, the looks accumulate and the first whose drift since the last write reaches
+  // the guard writes it.
+  const GUARD = 0.15;
   const panel = livePanel(liveData(), 43200);
   const tp = panel._tickPlot, step = 5 * panel._geom.plotW / panel._geom.winSec;   // px per 5 s look
-  assert.ok(step < 0.2, "one look is well under a pixel: " + step);
-  const expected: number[] = [];   // the writes a drift measured from the build makes: each the first look a pixel past the last write
-  for (let i = 1, last = 0; i <= 20; i++) { const d = i * step; if (d - last >= 1 - 1e-9) { expected.push(d); last = d; } }
-  assert.ok(expected.length >= 1, "20 looks reach a pixel at this zoom");
+  assert.ok(step < GUARD, "one look is under the guard, so no single look writes: " + step);
+  const expected: number[] = [];   // the writes a drift measured from the build makes: each the first look a guard's worth past the last write
+  for (let i = 1, last = 0; i <= 20; i++) { const d = i * step; if (d - last >= GUARD - 1e-9) { expected.push(d); last = d; } }
+  assert.ok(expected.length >= 3, "20 looks cross the guard several times at this zoom: " + expected.length);
   const before = created, writes: number[] = [];
   for (let i = 1; i <= 20; i++) {
     advance(panel, 5 * i);
@@ -360,7 +362,7 @@ test("sub-pixel looks add up: the drift is measured from the build, not the last
     if (tp.applied !== (writes.length ? writes[writes.length - 1] : 0)) writes.push(tp.applied);
   }
   assert.equal(created, before, "no look rebuilt");
-  assert.ok(tp.applied >= 1, "the looks added up and the edge moved: applied " + tp.applied);
+  assert.ok(tp.applied >= 1, "the looks added up and the edge moved a whole pixel: applied " + tp.applied);
   assert.equal(writes.length, expected.length, "writes: " + writes.join(", ") + " vs " + expected.join(", "));
   writes.forEach((w, i) => assert.ok(Math.abs(w - expected[i]) < 0.05, "write " + i + ": " + w + " vs " + expected[i]));
   assert.equal(plotOf(panel).getAttribute("transform"), "translate(" + (-tp.applied) + " 0)");
@@ -470,4 +472,155 @@ test("the focus pulse's step stops once a rebuild detached its group", () => {
   } finally {
     g.requestAnimationFrame = raf;
   }
+});
+
+// The glide: a translate look sleeps only until the edge could have moved TICK_MIN_PX (within a frame at a narrow
+// window, so the next animation frame; the rebuild look keeps its whole-pixel sleep), and writes the frame once the
+// edge has moved that far, so at a ten-minute window the edge moves about a dozen times a second by 0.15 px instead
+// of stepping a whole pixel about twice a second. Two costs a look this frequent would otherwise pay are tested with
+// it: the visibility check reads the observer's word, not layout, and the hover re-arm (a hit test) runs once per
+// whole pixel of drift.
+test("a translate look sleeps TICK_MIN_PX's worth: within a frame at a one-minute window, a fraction of a second at ten; a look the build left no handle for sleeps the whole pixel", () => {
+  const waits: number[] = [];
+  const panel = livePanel(liveData(), 600);
+  panel._sleep = (ms: number) => { waits.push(ms); };
+  advance(panel, 1.5);   // about 1.35 px at this zoom: past a whole pixel, well under the drift cap
+  const before = created;
+  panel._tickLive();
+  assert.equal(created, before, "the look was a translate");
+  assert.ok(panel._tickPlot.applied >= 1, "applied " + panel._tickPlot.applied);
+  const want = Math.round(0.15 * panel._geom.winSec / panel._geom.plotW * 1000);   // ms per 0.15 px at this zoom
+  assert.ok(want > 100 && want < 300, "a ten-minute window over this plot: about a sixth of a second per 0.15 px: " + want);
+  assert.deepEqual(waits, [want], "the next look comes when the edge could have moved TICK_MIN_PX, not a whole pixel");
+  assert.ok(want < panel._liveWaitMs(), "shorter than the rebuild's wait: " + panel._liveWaitMs());
+  // a one-minute window: 0.15 px is under a frame, so the look is on the next animation frame
+  const narrow = livePanel(liveData(), 60);
+  const nwaits: number[] = []; narrow._sleep = (ms: number) => { nwaits.push(ms); };
+  advance(narrow, 0.05);   // about half a pixel
+  narrow._tickLive();
+  assert.ok(narrow._tickPlot.applied > 0.15 && narrow._tickPlot.applied < 1, "a sub-pixel translate: " + narrow._tickPlot.applied);
+  assert.equal(nwaits.length, 1);
+  assert.ok(nwaits[0] <= 17, "within a frame: " + nwaits[0] + " ms");
+  // a build that left no handle (a glyph rides the live edge): the look is a full draw or nothing, and the next
+  // look waits a whole pixel's worth (_liveWaitMs), as before
+  const data = liveData();
+  data.messages = [{ id: "m1", fromId: SID2, toId: SID1, from: "api", to: "web", sent: NOW - 100, exec: NOW - 100, pending: true, text: "please review" }];
+  const held: any = new TimelinePanel(makeNode("div"));
+  held._lockNow = true; held._pinned = true; held._winSec = 600; held.fitted = true;
+  held.update(data);
+  assert.equal(held._tickPlot, null, "no handle");
+  const hwaits: number[] = []; held._sleep = (ms: number) => { hwaits.push(ms); };
+  advance(held, 1.5);
+  held._tickLive();
+  assert.deepEqual(hwaits, [held._liveWaitMs()], "the rebuild look sleeps the whole pixel");
+  assert.ok(hwaits[0] > want, hwaits[0] + " vs " + want);
+});
+
+test("at a ten-minute window a fraction of a second is a visible move: the translate is written under a pixel", () => {
+  const panel = livePanel(liveData(), 600);
+  const tp = panel._tickPlot;
+  advance(panel, 0.6);
+  const want = 0.6 * panel._geom.plotW / panel._geom.winSec;
+  assert.ok(want > 0.3 && want < 1, "the move is a fraction of a pixel: " + want);
+  const before = created;
+  tick(panel);
+  assert.equal(created, before, "a translate, not a rebuild");
+  assert.ok(tp.applied >= 0.15 && tp.applied < 1 && Math.abs(tp.applied - want) < 0.05, "written under a pixel: " + tp.applied + " vs " + want);
+  assert.equal(plotOf(panel).getAttribute("transform"), "translate(" + (-tp.applied) + " 0)");
+  // under the guard nothing is written: at a wide window the edge idles between the frames that move it
+  const wide = livePanel(liveData(), 43200);   // 12 h: a 5 s look is about a sixteenth of a pixel
+  advance(wide, 5);
+  tick(wide);
+  assert.equal(wide._tickPlot.applied, 0, "under TICK_MIN_PX: no write");
+  assert.equal(plotOf(wide).getAttribute("transform"), undefined);
+});
+
+test("a translate look reads no layout once the pane's observer has spoken: its word gates the look and re-arms the loop", () => {
+  const savedIO = g.IntersectionObserver, raf = g.requestAnimationFrame;
+  let io: any = null;
+  g.IntersectionObserver = class { cb: any; constructor(cb: any) { this.cb = cb; io = this; } observe() {} disconnect() {} };
+  let armed = 0;
+  try {
+    const panel = livePanel(liveData(), 600);
+    assert.ok(panel._io && io, "the wrap is observed");
+    let reads = 0;
+    Object.defineProperty(panel.wrap, "offsetParent", { get() { reads++; return {}; }, configurable: true });
+    const sleeps: number[] = []; panel._sleep = (ms: number) => { sleeps.push(ms); };
+    g.requestAnimationFrame = () => { armed++; return 1; };
+    // before the observer's first word the look reads offsetParent, as it always did
+    advance(panel, 0.6); panel._tickLive();
+    assert.equal(reads, 1, "no word yet: the one read");
+    assert.equal(sleeps.length, 1, "a translate: the next look is scheduled");
+    // the observer speaks: from here a look reads no layout
+    io.cb([{ isIntersecting: true }]);
+    reads = 0; sleeps.length = 0;
+    for (let i = 1; i <= 5; i++) { advance(panel, 0.6 + 0.3 * i); panel._tickLive(); }
+    assert.equal(reads, 0, "five translate looks, no layout read");
+    assert.equal(sleeps.length, 5, "each scheduled the next look");
+    assert.ok(panel._tickPlot.applied > 1, "and the edge moved: " + panel._tickPlot.applied);
+    // a hidden tab, the word still saying in view: the look stops without a read, as the hidden branch always did
+    sleeps.length = 0; let applied = panel._tickPlot.applied;
+    g.document.visibilityState = "hidden";
+    advance(panel, 2.3); panel._tickLive();
+    assert.equal(sleeps.length, 0, "hidden tab: no next look scheduled");
+    assert.equal(panel._tickPlot.applied, applied, "nothing written for a tab nobody sees");
+    assert.equal(reads, 0, "and no layout read to find that out");
+    delete g.document.visibilityState;
+    // out of view (display:none, scrolled away): the look stops without a read; the observer's next word re-arms it
+    io.cb([{ isIntersecting: false }]);
+    sleeps.length = 0; applied = panel._tickPlot.applied;
+    advance(panel, 2.5); panel._tickLive();
+    assert.equal(sleeps.length, 0, "stopped: no next look scheduled");
+    assert.equal(panel._tickPlot.applied, applied, "nothing written for a pane nobody sees");
+    assert.equal(reads, 0, "and no layout read to find that out");
+    armed = 0;
+    io.cb([{ isIntersecting: true }]);
+    assert.equal(armed, 1, "back in view: the release re-armed the loop");
+  } finally { g.IntersectionObserver = savedIO; g.requestAnimationFrame = raf; delete g.document.visibilityState; }
+});
+
+test("the hover re-arms once per whole pixel of drift, not on every sub-pixel write", () => {
+  const panel = livePanel(liveData(), 600);
+  const tp = panel._tickPlot;
+  let hits = 0;
+  panel._ptr = { x: 500, y: 40 };
+  panel.svg.ownerDocument = { elementFromPoint: () => { hits++; return null; } };
+  const step = 0.3, looks = 10;   // 3 s: about 2.7 px, under the drift cap
+  assert.ok(looks * step * panel._geom.plotW / panel._geom.winSec < tp.maxDrift, "the run stays under the drift cap");
+  let writes = 0, last = 0, crossings = 0;
+  const before = created;
+  for (let i = 1; i <= looks; i++) {
+    advance(panel, step * i);
+    tick(panel);
+    if (tp.applied !== last) { writes++; if (Math.floor(tp.applied) !== Math.floor(last)) crossings++; last = tp.applied; }
+  }
+  assert.equal(created, before, "every look a translate");
+  assert.equal(writes, looks, "every look wrote: each is about a quarter of a pixel, past TICK_MIN_PX");
+  assert.ok(crossings >= 2, "the drift crossed two whole pixels: " + last);
+  assert.equal(hits, crossings, "one hit test per whole pixel crossed, none for the sub-pixel writes between");
+});
+
+test("once the clock has reached the interpolation cap the edge stands still, and the translate look sleeps the rebuild's wait, not TICK_MIN_PX's", () => {
+  const waits: number[] = [];
+  const panel = livePanel(liveData(), 600);
+  panel._sleep = (ms: number) => { waits.push(ms); };
+  const glide = Math.round(0.15 * panel._geom.winSec / panel._geom.plotW * 1000);   // the translate's sleep while the edge moves
+  advance(panel, 200);   // a kernel quiet for longer than the cap (150 s): the edge has stopped at it
+  const before = created;
+  panel._tickLive();     // the drift since the build is far past the drift cap: this look is a full draw
+  assert.ok(created > before, "the look rebuilt");
+  assert.deepEqual(waits, [panel._liveWaitMs()], "a still edge: the rebuild's wait, not " + glide);
+  waits.length = 0;
+  const applied = panel._tickPlot.applied, before2 = created;
+  panel._tickLive();
+  assert.equal(created, before2, "a translate look");
+  assert.equal(panel._tickPlot.applied, applied, "nothing to write: the edge is at the cap");
+  assert.deepEqual(waits, [panel._liveWaitMs()], "and it sleeps the rebuild's wait, not TICK_MIN_PX's worth (" + glide + ")");
+  assert.ok(waits[0] > glide);
+  // the next frame re-anchors the clock: the edge moves again and the look sleeps TICK_MIN_PX's worth
+  panel.update(liveData(NOW + 200)); panel._stopLiveTick();
+  waits.length = 0;
+  advance(panel, 0.6); panel._tickLive();
+  assert.ok(panel._tickPlot.applied > 0.15, "moving again: " + panel._tickPlot.applied);
+  assert.deepEqual(waits, [glide], "the glide's sleep");
 });
