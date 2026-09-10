@@ -658,7 +658,9 @@ class SpendDetail(unittest.TestCase):
         import re as _re
         css = open(os.path.join(os.path.dirname(HERE), "ui", "webview", "styles.css")).read()
         def decls(sel):
-            m = _re.search(_re.escape(sel) + r"\s*\{([^}]*)\}", css)
+            # the rule that STARTS a line: a descendant rule such as `.mention-chip .host-prefix` also ends in
+            # the selector and may sit earlier in the sheet than the global rule this twin mirrors
+            m = _re.search(r"(?m)^" + _re.escape(sel) + r"\s*\{([^}]*)\}", css)
             self.assertIsNotNone(m, sel + " missing from styles.css")
             return _re.sub(r"\s+", "", m.group(1)).rstrip(";")
         self.assertIn(".rsp-name .tab-label.colored{" + decls(".tab.colored .tab-label") + "}", js,

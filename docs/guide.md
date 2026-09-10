@@ -67,7 +67,8 @@ without inserting, and it stays closed for that `@` until you delete it: more le
 caret move away and back, do not reopen it. In the sent message, a name that matches a live
 session is shown as a chip: the name without its `@`, in that session's color on a dark
 backing, the way the Awaiting chip names the session it waits on. Hover it for how that
-session is doing; the message itself still carries the `@name` you typed.
+session is doing; the message itself still carries the `@name` you typed, and so does a
+copy of it.
 
 **A message that has not gone yet.** Send to a busy session and your message waits as a
 dashed bubble under an hourglass until the session takes it — while it compacts, while a

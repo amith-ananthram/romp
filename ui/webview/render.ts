@@ -6143,7 +6143,7 @@ function dismissTabMenu() {
 function showSelectionMenu(e: MouseEvent) {
   const content = document.getElementById("content");
   const sel = window.getSelection();
-  const text = sel ? sel.toString() : "";
+  const text = sel ? (mentionCopyText(sel)?.text ?? sel.toString()) : "";   // a chip copies as the @name typed, as Ctrl+C does
   if (!content || !sel || !sel.anchorNode || !content.contains(sel.anchorNode) || !text.trim()) return;
   e.preventDefault();
   dismissTabMenu();
@@ -16825,6 +16825,63 @@ function markMentions(root: HTMLElement): void {
     t.replaceWith(frag);
   }
 }
+
+// A copy over a chip: the chip's text is the bare name, so the browser's own copy (and the selection menu's
+// Copy) would paste "ask api" for a message sent as "ask @api", and the pasted word no longer names the
+// session (the picker put the @ there so that it would). Every chip the selection covers WHOLE gets its "@"
+// back for the moment the clipboard is read, and the DOM is then as it was: insertData and deleteData on the
+// chip's first text node move a live range's offsets and move them back, so the visible selection does not
+// change (the transcript's observers watch child lists, not character data). Whole means the range reaches
+// the chip's first character and its last (Range.comparePoint on the chip's text nodes): a double-clicked
+// chip word counts, a run of letters inside a chip does not and copies as rendered. Every range is read (a
+// multi-select holds several and sel.toString() concatenates them). A selection with no whole chip is left
+// to the browser in both flavours, including a copy inside the composer (the document's selection holds no
+// chip then). The rich flavour is the ranges' own markup with each chip's hover title (live status text) and
+// data attributes dropped, so a paste keeps the chip's class and text and nothing about the session behind it.
+// The Comment/Quote seed (transcriptSelection) keeps reading the rendered text: a thread's quoted passage
+// anchors on what the transcript shows.
+function mentionCopyText(sel: Selection): { text: string; html: string } | null {
+  const firsts = new Set<Text>();
+  for (let i = 0; i < sel.rangeCount; i++) {
+    const r = sel.getRangeAt(i);
+    if (r.collapsed) continue;
+    const c = r.commonAncestorContainer;
+    const scope = c instanceof Element ? c : c.parentElement;
+    if (!scope) continue;
+    const own = scope.closest(".mention-chip");
+    const chips = own ? [own] : Array.from(scope.querySelectorAll(".mention-chip"));
+    for (const chip of chips) {
+      const texts: Text[] = [];
+      const walker = document.createTreeWalker(chip, NodeFilter.SHOW_TEXT);
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) texts.push(n as Text);
+      if (!texts.length) continue;
+      const first = texts[0], last = texts[texts.length - 1];
+      if (r.comparePoint(first, 0) === 0 && r.comparePoint(last, last.length) === 0) firsts.add(first);
+    }
+  }
+  if (!firsts.size) return null;
+  for (const t of firsts) t.insertData(0, "@");
+  try {
+    const scratch = document.createElement("div");
+    for (let i = 0; i < sel.rangeCount; i++) scratch.appendChild(sel.getRangeAt(i).cloneContents());
+    for (const c of Array.from(scratch.querySelectorAll<HTMLElement>(".mention-chip"))) {   // class and text travel; the hover title and the ids do not
+      c.removeAttribute("title");
+      for (const k of Object.keys(c.dataset)) delete c.dataset[k];
+    }
+    return { text: sel.toString(), html: scratch.innerHTML };
+  } finally {
+    for (const t of firsts) t.deleteData(0, 1);
+  }
+}
+document.addEventListener("copy", (e) => {
+  const sel = window.getSelection();
+  if (!e.clipboardData || !sel) return;
+  const out = mentionCopyText(sel);
+  if (!out) return;                        // no whole chip in the selection: the browser's own copy
+  e.preventDefault();
+  e.clipboardData.setData("text/plain", out.text);
+  e.clipboardData.setData("text/html", out.html);
+});
 
 // Composer: Enter sends the message to the active session as its next prompt,
 // Shift+Enter inserts a newline; the box auto-grows a few lines.
