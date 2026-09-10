@@ -28,6 +28,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tests.dist_copy import copy_dist
+
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
 BIN = os.path.join(ROOT, "bin")
@@ -172,7 +174,7 @@ class ServedRemoteCommentName(unittest.TestCase):
         if b.returncode != 0:
             shutil.rmtree(cls.lab, ignore_errors=True)
             raise unittest.SkipTest("esbuild failed here: " + (b.stderr or b.stdout)[-200:])
-        shutil.copytree(os.path.join(EXT, "dist"), os.path.join(cls.lab, "dist"))
+        copy_dist(os.path.join(EXT, "dist"), os.path.join(cls.lab, "dist"))
         cls.procs = []
         t0 = int(time.time()) - 900
         recs = [
