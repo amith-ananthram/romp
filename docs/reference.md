@@ -485,18 +485,21 @@ through to `install.sh`:
   and follows to every connected machine like the other judge settings; its
   Default option clears the setting back to the variable, else 6.
 
-### Fast judging
+### Fast mode for the judges
 
-- **Fast judging** (the gear's Judges section; off by default) runs the judges
-  in Claude Code's fast mode, an Opus-only research preview billed at a premium
-  over standard Opus rates. The setting is read per call: a judge call whose
-  model is Opus, by the bare alias or a pinned Opus version, carries the CLI's
-  fast-mode opt-in in its per-call settings; a call on any other model runs
-  exactly as before, so with every tier on Sonnet and Haiku the setting changes
-  nothing until a tier is pinned to Opus. Fast requests draw on fast mode's own
-  rate limits, the pool your sessions' fast toggles share. Whether fast engaged
-  is the CLI's answer, per account (an account with extra usage turned off, or
-  an organisation with fast mode disabled, reports it off with the setting on):
+- **Fast mode** (the checkbox beside the gear's Triage model picker; off by
+  default) runs the judges in Claude Code's fast mode, the same Opus-only
+  research preview the chat statusline's Fast badge toggles for a session,
+  billed at a premium over standard Opus rates. The setting is read per call: a
+  judge call whose model is Opus, by the bare alias or a pinned Opus version,
+  carries the CLI's fast-mode opt-in in its per-call settings; a call on any
+  other model runs exactly as before, so with every tier on Sonnet and Haiku the
+  setting changes nothing until a tier is pinned to Opus. The gear says so: while
+  no judge tier (triage, distilling, or indexing) is on Opus, the box is greyed
+  and its hint names the reason. Fast requests draw on fast mode's own rate
+  limits, the pool your sessions' fast toggles share. Whether fast engaged is
+  the CLI's answer, per account (an account with extra usage turned off, or an
+  organisation with fast mode disabled, reports it off with the setting on):
   each row of `judge-usage.jsonl` keeps that answer in its `fast` field (`on`,
   `off` or `cooldown`; `null` when the CLI reported none), so a checkbox that
   reads on beside rows that read off names the account, not the setting. Like

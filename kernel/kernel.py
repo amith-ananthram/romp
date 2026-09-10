@@ -1137,7 +1137,7 @@ def _version_info():
             "commentEffort": jd._state_str("comment-effort", "session"),
             "commentFast": jd._state_str("comment-fast", "session"),
             "tmuxBackend": jd._state_str("tmux-backend", "off"),   # T288: "on" offers Claude Code (tmux) in the picker and the gear
-            "judgeFast": jd._state_str("judge-fast", "off"),   # RAW "on" | "off": Fast judging, the fast-mode opt-in on Opus judge calls
+            "judgeFast": jd._state_str("judge-fast", "off"),   # RAW "on" | "off": the judges' Fast mode box, the fast-mode opt-in on Opus judge calls
             # One dict with every kernel-side setting, lifted by a PEER kernel's /version poll onto its
             # /tunnels row so its gear can mark controls where machines disagree (the user 2026-08-14).
             # The top-level fields above stay: this tab's own gear and older kernels read those.
@@ -40590,7 +40590,7 @@ def _set_comment_fast(v, gt=None):   return _set_judge_state("comment-fast", v, 
 # ids and the protocol are unchanged. Rides the judge-knob machinery (validated, stamped, propagated to
 # every linked kernel: the 2026-08-14 gear rule, one value across machines).
 def _set_tmux_backend(v, gt=None):   return _set_judge_state("tmux-backend", v, {"on", "off"}, gt=gt)
-# Fast judging (the gear's Judges section): "on" runs every judge call whose model is Opus in the CLI's fast
+# Fast mode for the judges (the gear's box beside the Triage model picker): "on" runs every judge call whose model is Opus in the CLI's fast
 # mode (jd._judge_cmd adds the flag-settings opt-in per call; a call on any other model is untouched); off by
 # default. Fast mode bills Opus at a premium and draws on fast mode's own rate limits, so it is a deliberate
 # pick. Rides the judge-knob machinery: validated, stamped, propagated to every linked kernel.
@@ -40620,7 +40620,7 @@ _JUDGE_SETTING_FIELDS = (("judgeModel", _set_judge_model), ("indexModel", _set_i
                          ("commentModel", _set_comment_model), ("commentEffort", _set_comment_effort),
                          ("commentFast", _set_comment_fast),
                          ("tmuxBackend", _set_tmux_backend),   # T288: the tmux backend's offer, "on" | "off"
-                         ("judgeFast", _set_judge_fast))       # Fast judging, "on" | "off"
+                         ("judgeFast", _set_judge_fast))       # the judges' Fast mode, "on" | "off"
 
 # The per-field PICK STAMPS this leg carried from 2026-08-30 (each field's STATE-file mtime in a
 # body "stamps" dict, preserved by utime at the receiver — the distill-pick stomp fix) are
@@ -53820,7 +53820,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 _tell_stale_gesture(client, msg)
         elif msg and msg.get("type") == "setJudgeFast" and msg.get("enabled") is not None:
-            # gear "Fast judging": a checkbox, stored as on/off and read by the judges per call (jd._judge_fast).
+            # the gear's Fast mode box on the Triage model row: a checkbox, stored as on/off and read by the judges per call (jd._judge_fast).
             # The boolean is checked like its siblings' (_as_bool), and a malformed frame is refused with a
             # warn, unwritten; an applied pick fans out to every linked kernel under its gesture stamp.
             _jfe, ferr = _as_bool(msg.get("enabled"), "enabled")
