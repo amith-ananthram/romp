@@ -90,9 +90,12 @@ body.scheme-solarized-dark {
   --err: #c0392b;   /* unified with the awaiting/blocked red (the user 2026-06-24): one "needs you" red. API-error (--st-blocked-bg #e5484d) stays distinct. */
   --warn: #d7a23a;  /* the heads-up amber — "attention, not an error". Was referenced with fallbacks but never
                        defined (a phantom token) until 2026-08-26; mirrored in feed.css (own :root). */
-  /* the postal card's two KIND colours (T302): the pre-rewrite chip colours as text on the dark page (6.4:1 and
-     6.7:1); the light theme re-inks both (they read 2.2:1 and 2.1:1 on cream otherwise) */
-  --postal-delegate: #b08cff;  --postal-coordinate: #14b8a6;  --postal-question: var(--st-working-bg);
+  /* the postal card's three KIND colours (T320, the user 2026-09-10): one SEQUENTIAL ramp in the accent's hue, not
+     three unrelated hues, ranked by how much the kind asks of the reader: coordination lowest (an FYI), delegation
+     next (work handed over), question highest (an answer owed). More asking = more intense against the page: on the
+     dark page the ramp climbs toward the accent's brightness (OKLCH hue 244, L .66 / .76 / .86; 5.4:1, 7.8:1 and
+     10.8:1 on it); the light theme re-inks the same three ranks toward the deep end of its clay accent (below). */
+  --postal-coordinate: #7996af;  --postal-delegate: #7fb8e7;  --postal-question: #91d9ff;
   /* THE romp accent — light blue (the user 2026-06-24). Use var(--accent) for accent/highlight chrome
      (selected toggles, in-progress loading dots, the Fleet pill, focus) — NOT for STATUS colors, which keep
      their own meaning (--st-working-bg yellow = working, --st-blocked-bg red, etc.). --accent-fg reads on it. */
@@ -226,9 +229,11 @@ body.theme-light {
   --hl-cmt: #67614f; --hl-title: #8C4A00; --hl-meta: #6E6455; --hl-attr: #7A5A20;   /* --hl-cmt from #6E675C (4.39:1 on a code block) to 4.86:1 */
   --box-bg: rgba(0, 0, 0, 0.03);
   --box-border: rgba(0, 0, 0, 0.12);
-  --postal-delegate: #6e3fd0;  --postal-coordinate: #0d6b64;  --postal-question: #7d5600;   /* 5.4:1, 5.3:1 and 5.5:1 on the
-                                                                                            cream page (T302); the working
-                                                                                            amber alone read 4.26:1 there */
+  --postal-coordinate: #a1533a;  --postal-delegate: #962b00;  --postal-question: #751000;   /* the kind ramp (T320): the
+                                                                                            accent's clay hue (OKLCH 38)
+                                                                                            deepening with rank, L .53 /
+                                                                                            .45 / .36; 4.6:1, 6.7:1 and
+                                                                                            9.7:1 on the cream page */
   --err: #B02A1C;
   --accent: #C2410C; --accent-fg: #FFF8F2;
   --accent-wash: rgba(194, 65, 12, 0.10);
@@ -2427,12 +2432,13 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   .turn-postal-service .notice-head > .notice-gist { flex: 1 0 100%; order: 1; min-width: 0;
     white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: break-word; }
 }
-/* T302 (the user 2026-09-10): the interaction KIND is coloured TEXT in the meta slot — a chip reads as a tag now — in
-   the colours the old chips wore: delegation violet, coordination teal, question the working amber. */
-.postal-kind { font-weight: 600; }
-.postal-kind-delegate { color: var(--postal-delegate, #b08cff); }
-.postal-kind-coordinate { color: var(--postal-coordinate, #14b8a6); }
-.postal-kind-question { color: var(--postal-question, var(--st-working-bg)); }
+/* T302 (the user 2026-09-10): the interaction KIND is coloured TEXT in the meta slot — a chip reads as a tag now.
+   T320 (the user, later that day): the word wears the prose weight, not bold, and its three colours are one
+   sequential ramp ranked by how much the kind asks of the reader (the tokens' comment has the ranking). */
+.postal-kind { font-weight: 400; }
+.postal-kind-delegate { color: var(--postal-delegate, #7fb8e7); }
+.postal-kind-coordinate { color: var(--postal-coordinate, #7996af); }
+.postal-kind-question { color: var(--postal-question, #91d9ff); }
 /* BOTH ENDS of a postal card in the head, each in its session's identity colour (the peer's chip as before, and this
    session's own chip after it); a narrow head collapses this session's chip to its coloured dot, so both colours
    still show where the words would not fit */
