@@ -94,7 +94,8 @@ body.scheme-solarized-dark {
      three unrelated hues, ranked by how much the kind asks of the reader: coordination lowest (an FYI), delegation
      next (work handed over), question highest (an answer owed). More asking = more intense against the page: on the
      dark page the ramp climbs toward the accent's brightness (OKLCH hue 244, L .66 / .76 / .86; 5.4:1, 7.8:1 and
-     10.8:1 on it); the light theme re-inks the same three ranks toward the deep end of its clay accent (below). */
+     10.8:1 on the page, 5.0:1, 7.3:1 and 9.9:1 on a boxed card, whose --box-bg wash the word also sits on); the light
+     theme re-inks the same three ranks toward the deep end of its clay accent (below). */
   --postal-coordinate: #7996af;  --postal-delegate: #7fb8e7;  --postal-question: #91d9ff;
   /* THE romp accent — light blue (the user 2026-06-24). Use var(--accent) for accent/highlight chrome
      (selected toggles, in-progress loading dots, the Fleet pill, focus) — NOT for STATUS colors, which keep
@@ -229,11 +230,14 @@ body.theme-light {
   --hl-cmt: #67614f; --hl-title: #8C4A00; --hl-meta: #6E6455; --hl-attr: #7A5A20;   /* --hl-cmt from #6E675C (4.39:1 on a code block) to 4.86:1 */
   --box-bg: rgba(0, 0, 0, 0.03);
   --box-border: rgba(0, 0, 0, 0.12);
-  --postal-coordinate: #a1533a;  --postal-delegate: #962b00;  --postal-question: #751000;   /* the kind ramp (T320): the
+  --postal-coordinate: #974a32;  --postal-delegate: #962b00;  --postal-question: #751000;   /* the kind ramp (T320): the
                                                                                             accent's clay hue (OKLCH 38)
-                                                                                            deepening with rank, L .53 /
-                                                                                            .45 / .36; 4.6:1, 6.7:1 and
-                                                                                            9.7:1 on the cream page */
+                                                                                            deepening with rank, L .50 /
+                                                                                            .45 / .36; 5.3:1, 6.7:1 and
+                                                                                            9.6:1 on the cream page and
+                                                                                            5.0:1, 6.2:1 and 9.0:1 on a
+                                                                                            boxed card (the review's
+                                                                                            floor is the box, 4.5:1) */
   --err: #B02A1C;
   --accent: #C2410C; --accent-fg: #FFF8F2;
   --accent-wash: rgba(194, 65, 12, 0.10);

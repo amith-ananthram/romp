@@ -32,11 +32,11 @@ test("the kind is coloured text in the meta slot, never a chip, at prose weight,
   assert.match(CSS, /\.postal-kind-question \{ color: var\(--postal-question, #91d9ff\); \}/);
   assert.match(CSS, /\n  --postal-coordinate: #7996af;\s+--postal-delegate: #7fb8e7;\s+--postal-question: #91d9ff;/, "the dark ramp, low to high");
   const light = CSS.slice(CSS.indexOf("body.theme-light {"), CSS.indexOf("\n}\n", CSS.indexOf("body.theme-light {")));
-  assert.match(light, /--postal-coordinate: #a1533a;\s+--postal-delegate: #962b00;\s+--postal-question: #751000;/, "the light ramp, low to high, deepening");
+  assert.match(light, /--postal-coordinate: #974a32;\s+--postal-delegate: #962b00;\s+--postal-question: #751000;/, "the light ramp, low to high, deepening");
   // the ramp IS a ramp: in each theme the three steps are monotone in luminance in rank order (brighter with rank on
   // the dark page, darker with rank on the light one), so the eye reads one scale, not three tags
   const lumOf = (hex: string) => { const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((v) => v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)); return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; };
-  const dark = ["#7996af", "#7fb8e7", "#91d9ff"].map(lumOf), lightRamp = ["#a1533a", "#962b00", "#751000"].map(lumOf);
+  const dark = ["#7996af", "#7fb8e7", "#91d9ff"].map(lumOf), lightRamp = ["#974a32", "#962b00", "#751000"].map(lumOf);
   assert.ok(dark[0] < dark[1] && dark[1] < dark[2], "dark: coordination < delegation < question in luminance");
   assert.ok(lightRamp[0] > lightRamp[1] && lightRamp[1] > lightRamp[2], "light: coordination > delegation > question in luminance");
   assert.match(CSS, /coordination lowest \(an FYI\), delegation\s+next \(work handed over\), question highest \(an answer owed\)/, "the ranking sits beside the tokens");
