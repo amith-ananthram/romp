@@ -21689,7 +21689,9 @@ def _start_remote(host):
       2. If the kernel still isn't answering (the up-to-date path), _start_remote_kernel + the same
          port wait attach's bootstrap uses.
     Refreshes the stored token after boot (a first-ever kernel just wrote its serve-token).
-    Returns (ok, detail); mirrors _update_remote's contract."""
+    Returns (ok, detail); mirrors _update_remote's contract. An exception that escapes any step after the
+    hold is set releases the hold through _fail (the row reads no-kernel, the failure as its detail) and
+    propagates."""
     host = str(host or "").strip()
     if not host:
         return False, "no host"
@@ -21706,28 +21708,42 @@ def _start_remote(host):
             if rr:
                 rr["status"], rr["detail"], rr["booting"] = "no-kernel", detail, False
         return False, detail
-    ok, detail = _update_remote(host)
-    if not ok:
-        return _fail(detail)
-    if not _remote_kernel_up(host, kport):
-        # the already-up-to-date path: nothing synced, so _update_remote (re)started nothing
-        started, d2 = _start_remote_kernel(host)
-        if not started:
-            return _fail(d2)
-        detail = detail + " + started the kernel"
-    deadline = time.time() + _BOOT_WAIT_S
-    while time.time() < deadline and not _remote_kernel_up(host, kport):
-        time.sleep(1.0)
-    if not _remote_kernel_up(host, kport):
-        return _fail("started romp on %s but its kernel port never answered — check its kernel.log" % host)
-    token = _fetch_remote_token(host)
-    with _remotes_lock:
-        rr = _remotes.get(host)
-        if rr and token:
-            rr["token"] = token
-        if rr:
-            rr["detail"], rr["booting"] = "", False   # healthy — the supervisor's next poll flips it to 'up'
-    return True, detail
+    try:
+        ok, detail = _update_remote(host)
+        if not ok:
+            return _fail(detail)
+        if not _remote_kernel_up(host, kport):
+            # the already-up-to-date path: nothing synced, so _update_remote (re)started nothing
+            started, d2 = _start_remote_kernel(host)
+            if not started:
+                return _fail(d2)
+            detail = detail + " + started the kernel"
+        deadline = time.time() + _BOOT_WAIT_S
+        while time.time() < deadline and not _remote_kernel_up(host, kport):
+            time.sleep(1.0)
+        if not _remote_kernel_up(host, kport):
+            return _fail("started romp on %s but its kernel port never answered — check its kernel.log" % host)
+        token = _fetch_remote_token(host)
+        with _remotes_lock:
+            rr = _remotes.get(host)
+            if rr and token:
+                rr["token"] = token
+            if rr:
+                rr["detail"], rr["booting"] = "", False   # healthy — the supervisor's next poll flips it to 'up'
+        return True, detail
+    except BaseException as e:
+        # Every planned failure returns through _fail and success clears the hold above; this is the exit
+        # nothing planned for. The hold must not outlive the call: while it stands the supervisor skips
+        # its status write, the no-kernel hint and (T291b) the recovery counter, so an escaped exception
+        # left the row unable to read up or no-kernel again, with no Start button and, while the label
+        # read starting, the popover's fast poll running, until a kernel restart's load reset freed it.
+        # Through _fail, not a bare flag clear: with only `booting` cleared the next pass writes
+        # no-kernel but keeps the stale "updating + starting the kernel" detail (a specific detail
+        # survives the hint), so the row parks the failure the way every other failed Start does. The
+        # route's answer is unchanged.
+        what = str(e).strip()[:160]
+        _fail("Start on %s failed unexpectedly (%s)%s" % (host, type(e).__name__, ": " + what if what else ""))
+        raise
 
 
 def _tunnel_supervisor():
