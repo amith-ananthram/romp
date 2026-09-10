@@ -307,34 +307,41 @@ class RealProcessTree(unittest.TestCase):
 
     def _tree(self):
         marker = "romp-t276-loop-" + uuid.uuid4().hex
+        ready = os.path.join(tempfile.mkdtemp(), "loop.ready")
         # the "CLI": a shell that starts a setsid'd loop (its own session + process group, like a tool's nohup child)
-        # and then sits like a CLI mid-turn; the loop sleeps — no load
-        cli = subprocess.Popen(["bash", "-c", 'setsid bash -c "while :; do sleep 0.2; done" "$0" & wait', marker],
+        # and then sits like a CLI mid-turn; the loop sleeps — no load. The loop ANNOUNCES itself: its first act is
+        # to write its own pid and its parent's pid to the ready file, and every assertion below keys on that file,
+        # never on an argv scan (T314, 2026-09-10: the pgrep-then-ps shape flaked twice on main in one day — a
+        # pgrep match on the not-yet-exec'd child, then a ps snapshot that did not yet show the loop under the CLI).
+        cli = subprocess.Popen(["bash", "-c", 'setsid bash -c \'echo "$$ $PPID" > "$1"; while :; do sleep 0.2; done\' "$0" "$1" & wait',
+                                marker, ready],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         self.addCleanup(self._kill_marker, marker)
         self.addCleanup(lambda: (cli.poll() is None) and os.killpg(cli.pid, signal.SIGKILL))
         # a bystander outside the tree
         by = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(by.wait, timeout=10); self.addCleanup(by.kill)
-        # Wait for the LOOP itself, not for any process wearing the marker: the fake CLI's own argv carries it too,
-        # so a poll on _marker_pids alone was satisfied the instant the shell existed, before its setsid'd child
-        # had started; on a slow runner the descendant check below then found no loop (T276d, CI 3.13 once).
-        deadline = time.time() + 5
-        while time.time() < deadline and not self._loop_pids(marker, cli.pid):
+        # the loop's readiness is an EVENT: the file exists with both numbers in it (a bounded wait, since a runner may
+        # be slow to schedule the child; the bound is generous and never the thing asserted)
+        deadline = time.time() + 20
+        pid = ppid = None
+        while time.time() < deadline:
+            try:
+                parts = open(ready).read().split()
+                if len(parts) == 2:
+                    pid, ppid = int(parts[0]), int(parts[1])
+                    break
+            except (OSError, ValueError):
+                pass
             time.sleep(0.05)
-        self.assertTrue(self._loop_pids(marker, cli.pid), "the detached loop itself is running before the cut")
-        return cli, by, marker
+        self.assertIsNotNone(pid, "the detached loop announced itself before the cut (ready file %s)" % ready)
+        self.assertEqual(ppid, cli.pid, "the loop's parent is the fake CLI: setsid exec'd in place, no extra fork")
+        return cli, by, marker, pid
 
     @staticmethod
     def _marker_pids(marker):
         out = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True).stdout.split()
         return [int(x) for x in out if x.isdigit() and int(x) != os.getpid()]
-
-    def _loop_pids(self, marker, cli_pid):
-        """The setsid'd loop's pid(s): every process wearing the marker except the fake CLI shell (whose argv carries
-        it too). pgrep reads /proc/<pid>/cmdline, which a killed-but-unreaped process no longer has, so a pid listed
-        here is a live loop, never a zombie."""
-        return [p for p in self._marker_pids(marker) if p != cli_pid]
 
     def _kill_marker(self, marker):
         for p in self._marker_pids(marker):
@@ -342,20 +349,21 @@ class RealProcessTree(unittest.TestCase):
             except ProcessLookupError: pass
 
     def test_ending_the_cut_clis_tree_kills_the_detached_loop_and_spares_the_bystander(self):
-        cli, by, marker = self._tree()
+        cli, by, marker, loop = self._tree()
         be = _backend()
         ps = subprocess.run(sb.PS_ARGV, capture_output=True, text=True, timeout=10).stdout.splitlines()
-        loop_pids = self._loop_pids(marker, cli.pid)
-        self.assertTrue(loop_pids and all(p in sb.descendants(ps, cli.pid) for p in loop_pids),
-                        "the setsid'd loop is still the CLI's descendant by ppid: %r vs %r" % (loop_pids, sb.descendants(ps, cli.pid)))
+        # the loop announced its pid; the ps snapshot taken AFTER that announcement must show it under the CLI
+        self.assertIn(loop, sb.descendants(ps, cli.pid),
+                      "the setsid'd loop (pid %d) is the CLI's descendant by ppid: %r" % (loop, sb.descendants(ps, cli.pid)))
         out = be._end_cli_tree(cli.pid, ps, cgroup=lambda p: "")
         # Bounded poll for the loop to be GONE (the reaper's own poll shape: liveness, up to a few seconds): the
         # SIGKILL has been sent when _end_cli_tree returns, but a slow runner may not have taken the process off
-        # the table yet. The bystander check stays immediate and strict.
+        # the table yet. The bystander check stays immediate and strict. Liveness is the pid's /proc entry (a
+        # killed loop's parent, the CLI, is killed too, so the subreaper reaps it and the entry goes).
         deadline = time.time() + 5
-        while time.time() < deadline and (self._loop_pids(marker, cli.pid) or cli.poll() is None):
+        while time.time() < deadline and (self._alive(loop) or cli.poll() is None):
             time.sleep(0.05)
-        self.assertEqual(self._loop_pids(marker, cli.pid), [], "the detached loop died with the cut turn")
+        self.assertFalse(self._alive(loop), "the detached loop died with the cut turn")
         self.assertIsNotNone(cli.poll(), "the CLI is gone")
         self.assertIsNone(by.poll(), "the bystander outside the tree was never signaled")
         self.assertGreaterEqual(out["tree"], 1)
