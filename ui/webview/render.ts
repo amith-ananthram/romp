@@ -4844,6 +4844,12 @@ function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>)
   const kind = kindLabel(intent ? intent.cls : null);
   let meta: HTMLElement | undefined;
   if (kind && intent) { meta = el("span", "postal-kind postal-kind-" + intent.cls); meta.textContent = kind; }
+  // the delivery state, read once here: it decides the meta below and the icon + dress after the card is built
+  const delivery = deliveryOf(ev);
+  // no recognised kind (a legacy row with neither a declared kind nor a leading token) but a delivery state to show:
+  // an EMPTY meta slot, so the icon always rides in the meta (T313 review find) — one geometry for every card, and
+  // the CSS needs no second path for an icon appended straight to the head
+  if (!meta && delivery) meta = el("span", "postal-meta-empty");
   // Gist: ALWAYS a one-line summary, the incoming caption, else the first line of the message CLIPPED (gist.ts
   // postalHead), with the full message one click deeper whenever the gist does not carry all of it (the user
   // 2026-06-16; T294, the user 2026-09-10, whose one-paragraph sent card had no fold at all). KEYED (the user
@@ -4861,9 +4867,11 @@ function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>)
   // relay, or parked for an unreachable host) — the SAME provisional dress the user's own pending send wears
   // (the queued bubble's class and tokens, the T302 amendment): solid again once the receipt says delivered,
   // relayed or read; bounced keeps its red mark. Incoming: only a parked clock (it waited while you were offline).
-  const delivery = deliveryOf(ev);
   if (delivery) {
-    turn.querySelector(".notice-head")?.appendChild(deliveryIcon(delivery));
+    // the icon rides INSIDE the meta slot, after the kind word (T313): the meta grows to the head's right edge, so the
+    // icon still sits at that edge, and on a phone-width head the kind word and the icon wrap as ONE unit (an icon
+    // alone on a line of its own was the alternative); the meta always exists when there is an icon (above)
+    turn.querySelector(".notice-meta")?.appendChild(deliveryIcon(delivery));
     if (ev.direction === "out" && (delivery.state === "sent" || delivery.state === "parked")) {
       turn.querySelector(".notice")?.classList.add("queued-bubble");
       turn.classList.add("postal-provisional");   // the bubble's border + padding move the head line: the rail dot follows
