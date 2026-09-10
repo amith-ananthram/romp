@@ -347,7 +347,7 @@ class ViewBuilder(unittest.TestCase):
                       {"id": "3", "subject": "c", "activeForm": None, "status": "pending"}]
         saved = (km._read_task_store, km._fold_tasks)
         km._read_task_store = lambda fsid, fold=None: [dict(t) for t in live_store]
-        km._fold_tasks = lambda session: [dict(t) for t in stale_fold]
+        km._fold_tasks = lambda session, sid=None: [dict(t) for t in stale_fold]
         try:
             todo = next(e for e in km.build_session(SID, NOW)["events"] if e["kind"] == "todo")
         finally:
@@ -362,7 +362,7 @@ class ViewBuilder(unittest.TestCase):
         # ERROR — it does NOT quietly show the lossy fold (which could be wrong, the whole bug).
         saved = (km._read_task_store, km._fold_tasks)
         km._read_task_store = lambda fsid, fold=None: None            # store unreadable
-        km._fold_tasks = lambda session: [{"id": "1", "subject": "a", "activeForm": None, "status": "pending"}]
+        km._fold_tasks = lambda session, sid=None: [{"id": "1", "subject": "a", "activeForm": None, "status": "pending"}]
         try:
             todo = next(e for e in km.build_session(SID, NOW)["events"] if e["kind"] == "todo")
         finally:
@@ -374,7 +374,7 @@ class ViewBuilder(unittest.TestCase):
         # a done/absent list is a non-event — an unreadable store there is not worth alarming on, so no card.
         saved = (km._read_task_store, km._fold_tasks)
         km._read_task_store = lambda fsid, fold=None: None
-        km._fold_tasks = lambda session: [{"id": "1", "subject": "a", "activeForm": None, "status": "completed"}]
+        km._fold_tasks = lambda session, sid=None: [{"id": "1", "subject": "a", "activeForm": None, "status": "completed"}]
         try:
             kinds = [e["kind"] for e in km.build_session(SID, NOW)["events"]]
         finally:
@@ -386,7 +386,7 @@ class ViewBuilder(unittest.TestCase):
         # stale transcript fold — no card, and NO error (the store was read fine, it's just empty).
         saved = (km._read_task_store, km._fold_tasks)
         km._read_task_store = lambda fsid, fold=None: []              # authoritative-empty (cleared / none)
-        km._fold_tasks = lambda session: [{"id": "1", "subject": "a", "activeForm": None, "status": "pending"}]
+        km._fold_tasks = lambda session, sid=None: [{"id": "1", "subject": "a", "activeForm": None, "status": "pending"}]
         try:
             kinds = [e["kind"] for e in km.build_session(SID, NOW)["events"]]
         finally:
@@ -445,11 +445,11 @@ class ViewBuilder(unittest.TestCase):
         saved = (km._read_task_store, km._fold_tasks)
         km._read_task_store = lambda fsid, fold=None: None            # store unresolvable, as in the repro
         try:
-            km._fold_tasks = lambda session: real_fold(bg)
+            km._fold_tasks = lambda session, sid=None: real_fold(bg)
             kinds = [e["kind"] for e in km.build_session(SID, NOW)["events"]]
-            km._fold_tasks = lambda session: real_fold(batch)
+            km._fold_tasks = lambda session, sid=None: real_fold(batch)
             kinds_batch = [e["kind"] for e in km.build_session(SID, NOW)["events"]]
-            km._fold_tasks = lambda session: real_fold(mixed)
+            km._fold_tasks = lambda session, sid=None: real_fold(mixed)
             todo = [e for e in km.build_session(SID, NOW)["events"] if e["kind"] == "todo"]
         finally:
             (km._read_task_store, km._fold_tasks) = saved

@@ -108,6 +108,14 @@ the developer's git configuration (CI has none), and the env identity outranks
 exports its own `GIT_AUTHOR_*` after the floor. `tests/test_tempdir_hygiene.py`
 and `tests/git-hermetic.bats` pin all of it.
 
+**A served-page class copies the built `vscode-extension/dist/` with
+`tests.dist_copy.copy_dist`, never `shutil.copytree`.** Under `pytest -n` a
+sibling class's build renames or removes its staging files
+(`.<name>.tmp-<pid>-<n>`, `stagingPath` in `esbuild.js`) between the listing
+and the copy, and a plain copytree raises `shutil.Error` before the class's
+first test; `copy_dist` skips that shape. `tests/test_dist_copy_staging.py`
+pins the copy and refuses a raw copytree of dist in any test module.
+
 **No test report shows a process-environment value or a credential-shaped
 token.** An assertion whose container is an environment mapping prints the
 whole mapping when it fails (`assertNotIn("X", os.environ)` renders every

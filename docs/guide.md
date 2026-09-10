@@ -150,9 +150,11 @@ tag order, each with a header in the tag's color, and the untagged sessions on a
 own at the end. A session with several tags appears under each of them; every copy is the same
 session (click either to open it, and closing either ends it). Each header shows the tag's color and name, then a chevron and a
 member count. Click a header, or press Enter on it, to fold its section down to the header
-alone; the count then says how many tabs are folded away, and a small dot after it says when
-one of them is working or waiting on you (hover it for their names). To keep one tab visible
-while its section is folded, right-click the tab and pick **Show when folded** under **Tags**;
+alone; the count then says how many tabs are folded away, and a small dot after it shows when
+one of them is busy or needs you: red when one is blocked or waiting on you, otherwise gold
+when one is working, otherwise amber when one hit an API error and is retrying on its own
+(hover it for their names). To keep one tab visible while its section is folded, right-click
+the tab and pick **Show when folded** under **Tags**;
 the header's count then leaves that tab out; when every tab in a section is set to
 show, the folded header shows the full count and its tooltip says nothing is hidden. Pick it
 again to fold the tab with the rest. A tab set to show when folded keeps that setting when its
