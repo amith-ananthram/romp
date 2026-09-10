@@ -905,7 +905,10 @@ if [[ "${1:-}" == "perf" ]]; then
     # minutes per dashboard and pane (window percentiles from the summed histograms, the worst minute, the
     # slowest frames) and prints one screen. No kernel round trip: the files are read directly, so it works
     # with the kernel down. An absent file or one with no perf rows is said plainly: the bundles predate the
-    # telemetry, or no dashboard has been open since.
+    # telemetry, or no dashboard has been open since. The dashboard shell (the top-level window, app "shell";
+    # ui/webview/shell-perf.ts) posts the same minute row with no frame types: the long animation frames
+    # Chromium reports to the top-level document and never to the pane whose script ran them, so the pane
+    # script that blocked the page is named there, and this shows it as one more pane of its dashboard.
     if [[ "${1:-}" == "client" ]]; then
         shift
         _cusage="usage: romp perf client [--minutes <n>] [--json]"

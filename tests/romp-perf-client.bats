@@ -138,6 +138,54 @@ teardown() { rm -rf "$TEST_DIR"; }
     [ ! -f "$CURL_LOG" ]                                 # no kernel round trip
 }
 
+@test "romp perf client: the shell's row (long frames only, no frame types) renders as a pane of its dashboard without special handling" {
+    # The dashboard shell (the top-level window, ui/webview/shell-perf.ts) runs the panes' collector with no
+    # brackets at all: Chromium reports a long animation frame to the top-level document, never to the iframe
+    # whose script ran it, so the shell's row is where a pane script that blocked the page is named. The row
+    # has the minute row's shape with an empty frames map and no free sample, so the verb renders it like any pane's.
+    python3 - "$DIAG" <<'PY'
+import json, sys, time
+now = int(time.time())
+W1 = "11111111-2222-3333-4444-555555555555"
+def row(t, wid, what, data): return json.dumps({"t": t, "wid": wid, "surface": "perf", "what": what, "data": data})
+shell = {"app": "shell", "since": (now - 70) * 1000, "span_ms": 60000,
+         "frames": {}, "free": None,
+         "loaf": {"n": 1, "blocking_ms": 19950, "worst_ms": 20000,
+                  "top": [{"k": "chat.js:paintAll@9000", "ms": 19500, "n": 1, "inv": "Window.requestAnimationFrame"},
+                          {"k": "page:onMove@120", "ms": 150, "n": 1, "inv": "DIV.onpointermove"}], "src": "loaf"},
+         "slow": {"sent": 0, "suppressed": 0, "suppressed_worst_ms": 0}, "heap_mb": 60.0, "dom": 900, "visible": True, "hidden_pane": False, "ua": "chrome-desktop"}
+with open(sys.argv[1], "a") as f:
+    f.write(row(now - 10, W1, "minute", shell) + "\n")
+PY
+    run "$ROMP_SCRIPT" perf client
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"2 dashboards, 4 panes, 6 minute rows, 1 slow frame row"* ]]
+    # the shell: one more pane of dashboard 11111111, no frame types, the long frame it alone saw with the pane script the browser named
+    [[ "$output" == *"dashboard 11111111 · shell   chrome-desktop   1 min reported   heap 60.0 MB   dom 900   visible"* ]]
+    shell_block="$(echo "$output" | sed -n '/^dashboard 11111111 · shell/,/^dashboard 22222222/p')"
+    [[ "$shell_block" == *"handler      no frames"* ]]
+    [[ "$shell_block" == *"main thread  free after a frame p90 n/a   long frames 1.0/min   blocking 19950 ms/min   worst 20000 ms"* ]]
+    [[ "$shell_block" == *"attribution  chat.js:paintAll@9000 19500 ms (Window.requestAnimationFrame)   page:onMove@120 150 ms (DIV.onpointermove)"* ]]
+    [[ "$shell_block" == *"0 ms handler   no frames   long frames 1, blocking 19950 ms"* ]]
+    [[ "$shell_block" == *"slow frames  none"* ]]
+    # the feed pane's own screen is unchanged by the extra pane
+    [[ "$output" == *"feed           14.4/min    360 ms/min   p50 <4   p90 <32   p99 <128 ms   max 130   >16.7 ms 25%   >=100 ms 6%"* ]]
+    run "$ROMP_SCRIPT" perf client --json
+    [ "$status" -eq 0 ]
+    echo "$output" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+panes = {(p["wid"], p["app"]): p for p in d["panes"]}
+assert set(panes) == {("11111111", "feed"), ("11111111", "chat"), ("11111111", "shell"), ("22222222", "feed")}, set(panes)
+s = panes[("11111111", "shell")]
+assert s["frames"] == {} and s["total_ms_per_min"] == 0 and s["free_p90"] is None and s["minutes"] == 1, s
+assert s["loaf"] == {"per_min": 1.0, "blocking_ms_per_min": 19950.0, "worst_ms": 20000, "src": "loaf"}, s["loaf"]
+assert s["top"] == [{"k": "chat.js:paintAll@9000", "ms": 19500, "inv": "Window.requestAnimationFrame"}, {"k": "page:onMove@120", "ms": 150, "inv": "DIV.onpointermove"}], s["top"]
+assert s["worst_minute"]["total_ms"] == 0 and s["worst_minute"]["loaf_n"] == 1 and s["worst_minute"]["blocking_ms"] == 19950, s["worst_minute"]
+assert s["slow"] == [] and s["heap_mb"] == 60.0 and s["dom"] == 900
+'
+}
+
 @test "romp perf client --minutes: narrows the window, and a half-minute row is rated by its span" {
     run "$ROMP_SCRIPT" perf client --minutes 1
     [ "$status" -eq 0 ]
