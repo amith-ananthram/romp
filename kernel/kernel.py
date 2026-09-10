@@ -49144,7 +49144,9 @@ var F={chat:document.getElementById('f-chat'),fleet:document.getElementById('f-f
 // bell's `.on`, the class _LANDING_PUSH_JS paints from the master + this device's subscription and the
 // slash rule keys on, until the next paint event. A tab or a reveal decides which pane shows, nothing else.
 var B=bar.querySelectorAll('button[data-pane]'),KT='romp-mobile-tab';
-function show(p){if(!F[p])return;document.body.setAttribute('data-tab',p);for(var k in F)if(F[k])F[k].classList.toggle('m-on',k===p);   // a pane this shell lacks is skipped, never a TypeError
+function filesCtlM(){try{var st=JSON.parse(localStorage.getItem('romp:settings')||'null');return !(st&&st.filesControl===false);}catch(e){return true;}}   // the gear's Files-control setting (T317): the same read the pane controller makes, which parses after this script
+function show(p){if(p==='files'&&!filesCtlM())p='chat';   // the Files tab is hidden while its control is off: the chat shows instead
+if(!F[p])return;document.body.setAttribute('data-tab',p);for(var k in F)if(F[k])F[k].classList.toggle('m-on',k===p);   // a pane this shell lacks is skipped, never a TypeError
 for(var i=0;i<B.length;i++)B[i].classList.toggle('on',B[i].getAttribute('data-pane')===p);
 try{localStorage.setItem(KT,p);}catch(e){}
 // a tab switch changes what is on screen: re-tell the panes (the collapse script's broadcast; absent only
@@ -49629,6 +49631,14 @@ _LANDING_COLLAPSE_JS = """
   if(qp!==null){po={chat:false,fleet:false,feed:false,timeline:false,files:false};qp.split(',').forEach(function(k){k=k.trim();if(k in po)po[k]=true;});}
   function saveP(){try{localStorage.setItem(PK,JSON.stringify(po));}catch(e){}}
   var LBL={chat:'chat',fleet:'fleet',feed:'feed',timeline:'timeline',files:'files pane'};
+  // THE FILES CONTROL'S OWN SETTING (T317, the user 2026-09-10): the gear's "Files control in the dashboard bar"
+  // (romp:settings.filesControl, gear.js; shown unless the store holds the literal false). Off: the rail's Files
+  // toggle and the phone's Files tab are hidden (body.no-files-control), an open Files pane closes on the same
+  // apply, the pane cannot be brought forward (togglePane refuses 'files': the palette command, a stale relay),
+  // and the panes are told the pane is unavailable (avail.files below), so a file link set to open there opens
+  // over the pane clicked (ui/webview/file-route.ts). The gear writes the store from the feed iframe, another
+  // document, so the storage listener below is the event that re-applies it here.
+  function filesCtl(){try{var st=JSON.parse(localStorage.getItem('romp:settings')||'null');return !(st&&st.filesControl===false);}catch(e){return true;}}
   // The pane KEYS, from _PANE_ORDER (the one list of panes), so a pane added there is broadcast below without
   // anyone remembering this block. The panes learn which panes are ON SCREEN from the shell, which holds that
   // state: {romp:'panes',on:{key:bool}} goes to every pane iframe on every apply(), a toggle being the event
@@ -49644,11 +49654,16 @@ _LANDING_COLLAPSE_JS = """
   // classes ignored, _LANDING_MOBILE_JS) it is the current tab, so a po.files left true by a desktop session
   // or an earlier bring-forward cannot silently steer a phone's file links into a tab nobody is looking at
   function panesMsg(){var mob=!!(window.__rompMobileOn&&window.__rompMobileOn()),tab=mob?document.body.getAttribute('data-tab'):null;
-    var on={};KEYS.forEach(function(k){on[k]=mob?(k===tab):!!po[k];});return {romp:'panes',on:on};}
+    var on={};KEYS.forEach(function(k){on[k]=mob?(k===tab):!!po[k];});return {romp:'panes',on:on,avail:{files:filesCtl()}};}
   function tell(f,m){try{f&&f.contentWindow&&f.contentWindow.postMessage(m,'*');}catch(e){}}
   function broadcast(){var m=panesMsg();KEYS.forEach(function(k){tell(document.getElementById('f-'+k),m);});}
   window.__rompPanesTell=broadcast;   // the mobile script re-tells on a tab switch / layout flip
   function apply(){
+    var ctl=filesCtl();
+    document.body.classList.toggle('no-files-control',!ctl);
+    if(!ctl&&po.files){po.files=false;if(qp===null)saveP();}   // the control gone, its pane closes cleanly on the same apply; a ?panes= bookmark stays a view (never written over the stored set)
+    // a phone left on the Files tab when the control goes: the tab bar's button is hidden, so the chat comes forward
+    if(!ctl&&window.__rompMobileOn&&window.__rompMobileOn()&&document.body.getAttribute('data-tab')==='files'){try{window.__rompMobileTab&&window.__rompMobileTab('chat');}catch(e){}}
     document.body.classList.toggle('po-chat',!!po.chat);
     document.body.classList.toggle('po-fleet',!!po.fleet);
     document.body.classList.toggle('po-feed',!!po.feed);
@@ -49663,7 +49678,7 @@ _LANDING_COLLAPSE_JS = """
     try{window.dispatchEvent(new Event('romp-panes'));}catch(e){}   // nudge the timeline band to auto-fit when toggled
     broadcast();
   }
-  function togglePane(k,to){if(!(k in po))return;var nv=(to===undefined)?!po[k]:!!to;
+  function togglePane(k,to){if(!(k in po))return;if(k==='files'&&!filesCtl())return;var nv=(to===undefined)?!po[k]:!!to;
     if(nv===!!po[k])return;   // already so (a relay's bring-forward on an open pane): nothing changed, so no re-apply and no broadcast claiming one
     if(nv&&!po[k]&&window.__rompGrowFair)window.__rompGrowFair(k);   // newly shown → fair width, not a sliver
     po[k]=nv;apply();saveP();}
@@ -50084,6 +50099,8 @@ def _landing():
             "justify-content:center;transition:color .1s,background .1s,border-color .1s}"
             ".rail-btn:hover{color:#cfe6ff;background:rgba(255,255,255,0.06)}"
             ".rail-btn.on{color:var(--accent);background:rgba(156,210,255,0.12);border-color:rgba(156,210,255,0.35)}"
+            # the Files control hidden by its gear setting (T317): the rail's toggle and the phone's tab both go
+            "body.no-files-control .rail-btn[data-pane=files],body.no-files-control #mtabs button[data-pane=files]{display:none}"
             # the ↻ refresh + ⛭ settings actions sit in .rail-acts, pinned to the RIGHT (margin-left:auto on the
             # wrapper) of the bottom bar and ALWAYS visible — settings (⛭, last in the DOM) at the far right.
             ".rail-act{flex:0 0 auto;display:flex;align-items:center;justify-content:center;margin:1px 4px;padding:4px 0;"

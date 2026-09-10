@@ -1425,11 +1425,12 @@ document.addEventListener("click", (e) => {
 // own event, never a per-click guess (no reading the parent's DOM, no polling). Standalone /chat never
 // hears one and reads as all-off, which the framed gate makes moot anyway.
 let panesOn: Record<string, boolean> = {};
+let panesAvail: Record<string, boolean> = {};   // …and which panes EXIST to bring forward (avail: the Files control's setting, T317); absent = available
 function openPath(path: string, sid?: string | null, ev?: MouseEvent | null): void {
   if (!vscodeApi) return;
   if (location.protocol === "http:" || location.protocol === "https:") {
     const to = sid || activeId || null;
-    const route = fileLinkRoute(settings.fileLinkPane, window.parent !== window, panesOn.files === true);
+    const route = fileLinkRoute(settings.fileLinkPane, window.parent !== window, panesOn.files === true, panesAvail.files !== false);
     // with its gesture, read first: a Cmd/Ctrl- or middle-click on a PDF takes the browser's own tab wherever
     // the plain click would have landed; a plain click routed to the Files pane is handed to the shell
     openFileClick(ev, path, to, route === "pane" ? () => {
@@ -1462,7 +1463,7 @@ function onMiddleClick(a: HTMLElement, fn: (e: MouseEvent) => void): void {
 // tells the person where Browse files will land, so the two cannot disagree.
 function browseRouteNow(): BrowseRoute {
   const web = location.protocol === "http:" || location.protocol === "https:";
-  return browseRoute(web, settings.fileLinkPane, window.parent !== window, panesOn.files === true);
+  return browseRoute(web, settings.fileLinkPane, window.parent !== window, panesOn.files === true, panesAvail.files !== false);
 }
 // Surface the FILE BROWSER at `path` for the session: the folder shown under the chat, the system context
 // card's Directory row, a tab menu's Browse files, a chat-hosted viewer's directory link. The listing goes
@@ -16165,6 +16166,10 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
       for (const k of Object.keys(m.on)) on[k] = m.on[k] === true;
       panesOn = on;
     }
+    // which panes exist to bring forward (the Files control's setting): whole-set replace as well
+    const avail: Record<string, boolean> = {};
+    if (m.avail && typeof m.avail === "object") for (const k of Object.keys(m.avail)) avail[k] = m.avail[k] !== false;
+    panesAvail = avail;
     return;
   }
   // the pipe's down edge is the VS Code twin of the shim's romp:wsdown: unconfirmed sends say so (markPendingLost)
