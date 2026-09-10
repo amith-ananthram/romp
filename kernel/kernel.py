@@ -45244,10 +45244,12 @@ function spMany(d){return spHosts(d).length>1;}
 // rule the strip uses, so the two cannot drift) and the quiet .host-prefix — no swatch
 function spTitle(s,many){return '<span class="tab-label colored" style="--chip-bg:'+spColor(s)+'">'+(many&&s.host?'<span class=host-prefix>'+esc(s.host)+':</span>':'')+esc(spName(s))+'</span>';}
 // ── T247g (the user 2026-09-08): three ranges, and "merge by tag"
-// the series for the range: "1 day" is the hourly series' last 24 buckets (the ledger holds hours and
-// days; a day is a slice of the hours, never a third ledger)
-function spSeries(d){var ser=d[SP.range==='day'?'hours':SP.range];if(!ser)return null;if(SP.range!=='day')return ser;
-var n=(ser.keys||[]).length,cut=Math.max(0,n-24);
+// the series for the range: "1 day" is the hourly series' last 24 buckets and "7 days" its last 168 (T293, the
+// user 2026-09-09; the ledger holds 192 hours, a day of slack past the view, and 90 days; a range is a slice of
+// the hours, never a third ledger); the daily range is the ledger's series whole
+var SP_RANGE_BUCKETS={day:24,hours:168};
+function spSeries(d){var ser=d[SP.range==='day'?'hours':SP.range];if(!ser)return null;var keep=SP_RANGE_BUCKETS[SP.range];return keep?spTail(ser,keep):ser;}
+function spTail(ser,keep){var n=(ser.keys||[]).length,cut=Math.max(0,n-keep);
 return {keys:(ser.keys||[]).slice(cut),epochs:(ser.epochs||[]).slice(cut),stacks:(ser.stacks||[]).map(function(s){var o={};for(var k in s)o[k]=s[k];o.usd=(s.usd||[]).slice(cut);o.tok=(s.tok||[]).slice(cut);
 if(s.hosts){o.hosts={};Object.keys(s.hosts).forEach(function(h){o.hosts[h]={usd:(s.hosts[h].usd||[]).slice(cut),tok:(s.hosts[h].tok||[]).slice(cut)};});}return o;})};}
 // the rows: the ordered sessions, or — merged by tag — one row per tag holding sessions here (named
@@ -45358,7 +45360,7 @@ h+='<div class=rsp-sec id=rsp-totals>'+totalsHTML(d)+'</div>';
 h+='<div class=rsp-sec><div class=ru-tip-name><span>Spend over time</span></div>'
 +'<div class=rsp-ctl>'
 +'<button class="rsp-btn'+(SP.range==='day'?' on':'')+'" data-act=range:day>1 day \u00b7 by hour</button>'
-+'<button class="rsp-btn'+(SP.range==='hours'?' on':'')+'" data-act=range:hours>8 days \u00b7 by hour</button>'
++'<button class="rsp-btn'+(SP.range==='hours'?' on':'')+'" data-act=range:hours>7 days \u00b7 by hour</button>'
 +'<button class="rsp-btn'+(SP.range==='days'?' on':'')+'" data-act=range:days>90 days \u00b7 by day</button>'
 +'<span class=rsp-gap></span>'
 +'<button class="rsp-btn'+(SP.measure==='usd'?' on':'')+'" data-act=measure:usd>dollars</button>'
@@ -45398,19 +45400,41 @@ function spStackText(s,many,meas,i){if(s.kind==='tag')return s.name;if(s.kind===
 if(s.kind==='unattributed'&&many&&s.hosts){var parts=[];Object.keys(s.hosts).forEach(function(hn){var v=(s.hosts[hn][meas]||[])[i]||0;if(v>0)parts.push(hn+' '+(meas==='usd'?fmtUsd(v):fmtTok(Math.round(v))));});
 return 'unattributed'+(parts.length?' ('+parts.join(', ')+')':'');}
 return spStackName(s);}
-function spTipShow(x,y,name,val,sub){if(!spTip){spTip=document.createElement('div');spTip.id='rsp-tip';document.body.appendChild(spTip);}
-// values lead, labels follow; built with textContent — a session name is user data
-spTip.textContent='';var b=document.createElement('b');b.textContent=val;spTip.appendChild(b);
-spTip.appendChild(document.createTextNode(' \u00b7 '+name+' \u00b7 '+sub));
-spTip.style.display='block';
-var w=spTip.offsetWidth,hh=spTip.offsetHeight;
-spTip.style.left=Math.max(6,Math.min(window.innerWidth-w-6,x+12))+'px';
-spTip.style.top=Math.max(6,(y-hh-12))+'px';}
+// ── T293 (the user 2026-09-09): the hover crosshair and the bucket tooltip
+var SP_DOW=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'],SP_MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+var SP_TIP_ROWS=6;   // the tooltip lists the bucket's top several sessions, then folds the rest into one "+N more" line
+// the pointer's bucket: its offset over the chart's rendered width, discretised to the view's own buckets; -1 outside
+function spBucketAt(px,width,n){if(!(width>0)||!(n>0)||!(px>=0)||px>=width)return -1;return Math.min(n-1,Math.floor(px/width*n));}
+// the stamp: the bucket in words — "Wed Sep 9, 3 PM" for an hour, "Wed Sep 9" for a day — read off the KEY (the recorder's
+// local time, like every label here; the zone note says when the viewer's differs); a key it cannot read is shown as it is
+function spStamp(k,range){k=String(k);var y=+k.slice(0,4),mo=+k.slice(5,7),d=+k.slice(8,10);if(!(y>0&&mo>=1&&mo<=12&&d>=1&&d<=31)||k.charAt(4)!=='-'||k.charAt(7)!=='-')return k;
+var s=SP_DOW[new Date(y,mo-1,d).getDay()]+' '+SP_MON[mo-1]+' '+d;if(range!=='hours')return k.length===10?s:k;if(k.length!==13||k.charAt(10)!=='T')return k;var h=+k.slice(11,13);return (h>=0&&h<=23)?s+', '+(h%12===0?12:h%12)+' '+(h<12?'AM':'PM'):k;}
+// the bucket's sessions in spend order (ties keep stack order), zeros dropped, the top `cap` kept and the rest counted;
+// the hovered stack (pin, a stack index) is always listed even past the cap, so the bar under the pointer is named
+function spBucketTop(stacks,meas,i,cap,pin){var rows=[],total=0;for(var s=0;s<stacks.length;s++){var v=(stacks[s][meas]&&stacks[s][meas][i])||0;if(v>0){rows.push({si:s,v:v});total+=v;}}
+rows.sort(function(a,b){return (b.v-a.v)||(a.si-b.si);});var top=rows.slice(0,cap),more=rows.length-top.length;
+if(pin>=0&&more>0&&!top.some(function(r){return r.si===pin;})){var p=null;rows.forEach(function(r){if(r.si===pin)p=r;});if(p){top.push(p);more--;}}return {rows:top,more:more,total:total};}
+function spDot(s){return s.kind==='unattributed'?'#8a97a6':s.kind==='other'?SP_OTHER:spColor(s);}   // the hatch's stroke stands in for its texture
+function spTipBox(){if(!spTip){spTip=document.createElement('div');spTip.id='rsp-tip';document.body.appendChild(spTip);}spTip.textContent='';return spTip;}
+// below and to the right of the pointer, to its left near the right edge; when nothing fits below, above the CHART
+// (rect, the svg's box) rather than the pointer, so the box stays clear of the stamp at the chart's top (review find:
+// a pointer-anchored flip landed a six-row box on the stamp in a short window); only a viewport too short for either
+// falls back to the pointer, and the header repeats the stamp's text. The box takes no pointer events
+function spTipPlace(x,y,rect){spTip.style.display='block';var w=spTip.offsetWidth,hh=spTip.offsetHeight,left=x+14,top=y+18;if(left+w+6>window.innerWidth)left=x-14-w;
+if(top+hh+6>window.innerHeight){var above=(rect?rect.top:y)-hh-6;top=above>=6?above:y-18-hh;}
+spTip.style.left=Math.max(6,left)+'px';spTip.style.top=Math.max(6,top)+'px';}
+// the bucket tooltip: the total leads (the other measure and the stamp follow), then a row per session — a dot in the
+// stack's colour, the name (user data: textContent), the value — the hovered bar's row emphasised, the fold line last
+function spBucketTipShow(x,y,head,total,top,stacks,many,meas,i,pin,fmt,rect){var box=spTipBox(),h=document.createElement('div');h.className='rsp-tip-h';
+var b=document.createElement('b');b.textContent=total;h.appendChild(b);h.appendChild(document.createTextNode(' \u00b7 '+head));box.appendChild(h);
+top.rows.forEach(function(r){var s=stacks[r.si],row=document.createElement('div');row.className='rsp-tip-row'+(r.si===pin?' on':'');
+var dot=document.createElement('i');dot.style.background=spDot(s);row.appendChild(dot);var nm=document.createElement('span');nm.textContent=spStackText(s,many,meas,i);row.appendChild(nm);
+var v=document.createElement('b');v.textContent=fmt(r.v);row.appendChild(v);box.appendChild(row);});
+if(top.more>0||!top.rows.length){var m=document.createElement('div');m.className='rsp-tip-more';m.textContent=top.rows.length?'+'+top.more+' more':'nothing recorded';box.appendChild(m);}
+spTipPlace(x,y,rect);}
 function spTipHide(){if(spTip)spTip.style.display='none';}
-function spBucketLabel(k,range){if(range==='hours'){var m=/^(\\d{4})-(\\d\\d)-(\\d\\d)T(\\d\\d)$/.exec(k);
-return m?(Number(m[2])+'/'+Number(m[3])+' '+m[4]+':00\u2013'+(('0'+((Number(m[4])+1)%24)).slice(-2))+':00'):k;}
-var n=/^(\\d{4})-(\\d\\d)-(\\d\\d)$/.exec(k);return n?(Number(n[2])+'/'+Number(n[3])):k;}
-function renderChart(){var box=document.getElementById('rsp-chart');if(!box||!SP.data)return;
+// a rebuild (a resize under a still pointer, a toggle) takes the tooltip down with the svg it described (review find)
+function renderChart(){spTipHide();var box=document.getElementById('rsp-chart');if(!box||!SP.data)return;
 var d=SP.data,ser=spSeries(d),meas=SP.measure;
 if(!ser||!ser.keys||!ser.keys.length){box.innerHTML='<div class=rsp-note>No history yet.</div>';return;}
 var stacks=spStacks(d,ser,spRows(d)),n=ser.keys.length,W=Math.max(320,box.clientWidth||600),H=200;
@@ -45461,13 +45485,24 @@ if(typeof d.tzOffsetMin==='number'&&d.tzOffsetMin!==mine)tzNote+='<div class=rsp
 var offs={};spHosts(d).forEach(function(x){offs[String(x.tzOffsetMin)]=1;});
 if(Object.keys(offs).length>1)tzNote+='<div class=rsp-note>Hourly buckets are aligned by clock time across machines; daily buckets follow each machine\u2019s own calendar day.</div>';
 box.innerHTML=svg+ylab+'<div class=ru-tip-gx>'+xlab+'</div>'+tzNote;
-// the per-segment hover: session · value · bucket, the mark itself the hit target
+// the hover (T293, the user 2026-09-09): a crosshair at the pointer's bucket — a hairline inside the svg and a stamp
+// naming the bucket in words — with the bucket's sessions in spend order in the tooltip; over a bar the same box, that
+// bar's row emphasised (one shape, so nothing flips as the pointer crosses a bar's edge). Both marks take no pointer
+// events and sit out of the flow (an svg line, an absolutely placed stamp), so nothing moves under the pointer; all
+// three leave with it. Keyboard and touch gain nothing and lose nothing: only pointermove and pointerleave are read.
 var svgEl=box.querySelector('svg');if(!svgEl)return;
-svgEl.onpointermove=function(e){var t=e.target;if(!t||!t.classList||!t.classList.contains('rsp-seg')){spTipHide();return;}
-var i=+t.getAttribute('data-i'),si=+t.getAttribute('data-s'),s=stacks[si];if(!s)return;
-var v=(s[meas]&&s[meas][i])||0,o=(s[meas==='usd'?'tok':'usd']&&s[meas==='usd'?'tok':'usd'][i])||0;
-spTipShow(e.clientX,e.clientY,spStackText(s,many,meas,i),fmt(v),(meas==='usd'?fmtTok(Math.round(o))+' tok':fmtUsd(o))+' \u00b7 '+spBucketLabel(ser.keys[i],SP.range==='day'?'hours':SP.range));};
-svgEl.onpointerleave=spTipHide;}
+var xh=document.createElementNS('http://www.w3.org/2000/svg','line');xh.setAttribute('class','rsp-xh');xh.setAttribute('y1','0');xh.setAttribute('y2',String(H));xh.style.display='none';svgEl.appendChild(xh);
+var stamp=document.createElement('div');stamp.className='rsp-xh-stamp';stamp.style.display='none';box.appendChild(stamp);
+var range=SP.range==='day'?'hours':SP.range,other=meas==='usd'?'tok':'usd',ofmt=function(v){return meas==='usd'?fmtTok(Math.round(v))+' tok':fmtUsd(v);};
+var xhHide=function(){xh.style.display='none';stamp.style.display='none';spTipHide();};
+svgEl.onpointermove=function(e){var r=svgEl.getBoundingClientRect(),i=spBucketAt(e.clientX-r.left,r.width,n);if(i<0){xhHide();return;}
+var cx=(i+0.5)*slot,pct=cx/W*100;xh.setAttribute('x1',cx.toFixed(1));xh.setAttribute('x2',cx.toFixed(1));xh.style.display='';
+var st=spStamp(ser.keys[i],range);stamp.textContent=st;stamp.className='rsp-xh-stamp';stamp.style.left='max('+pct.toFixed(1)+'%,24px)';stamp.style.display='';
+if(cx/W*r.width+6+stamp.offsetWidth>r.width)stamp.classList.add('flip');   // decided in pixels (the stamp's width is fixed, the chart's is not); the 24px floor keeps it off the ceiling label
+var t=e.target,pin=(t&&t.classList&&t.classList.contains('rsp-seg'))?+t.getAttribute('data-s'):-1;
+var top=spBucketTop(stacks,meas,i,SP_TIP_ROWS,pin),ot=0;for(var s=0;s<stacks.length;s++)ot+=(stacks[s][other]&&stacks[s][other][i])||0;
+spBucketTipShow(e.clientX,e.clientY,ofmt(ot)+' \u00b7 '+st,fmt(top.total),top,stacks,many,meas,i,pin,fmt,r);};
+svgEl.onpointerleave=xhHide;}
 var spResizeRaf=0;
 window.addEventListener('resize',function(){if(!(SP.open&&SP.data)||spResizeRaf)return;
 spResizeRaf=requestAnimationFrame(function(){spResizeRaf=0;if(SP.open&&SP.data){renderChart();spSizePane();}});});
@@ -47895,9 +47930,19 @@ def _landing():
             "#rsp-chart{position:relative}.rsp-svg{display:block;width:100%;background:rgba(255,255,255,0.04);border-radius:3px}"
             ".rsp-grid{stroke:rgba(255,255,255,0.10);stroke-width:1}"
             ".rsp-seg{cursor:pointer}.rsp-seg:hover{filter:brightness(1.18)}"
+            # T293: the crosshair — a hairline in the svg and a stamp out of the flow, both pointer-inert (nothing moves
+            # under the pointer); the stamp wears the surface's 10px annotation size (the notes' and the hint's)
+            ".rsp-xh{stroke:rgba(255,255,255,0.45);stroke-width:1;pointer-events:none}"
+            ".rsp-xh-stamp{position:absolute;top:4px;transform:translateX(6px);font-size:10px;line-height:1;padding:3px 5px;border-radius:3px;"
+            "background:rgba(30,30,30,0.88);color:#cfd6dd;pointer-events:none;white-space:nowrap}.rsp-xh-stamp.flip{transform:translateX(calc(-100% - 6px))}"
             "#rsp-tip{position:fixed;z-index:310;pointer-events:none;display:none;background:#1e1e1e;border:1px solid #3a3a3a;"
             "border-radius:6px;padding:5px 8px;color:#cfd6dd;font:500 11px 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;"
             "box-shadow:0 5px 18px rgba(0,0,0,0.45)}#rsp-tip b{color:#e8eef5;font-weight:700}"
+            # T293: the bucket tooltip's rows — a dot in the stack's colour, the name (clipped, never wrapping), the value;
+            # the hovered bar's row emphasised; the fold line quiet
+            ".rsp-tip-h{margin-bottom:3px}.rsp-tip-row{display:flex;align-items:center;gap:6px;line-height:1.5}.rsp-tip-row i{flex:none;width:8px;height:8px;border-radius:2px}"
+            ".rsp-tip-row span{flex:1;min-width:0;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+            ".rsp-tip-row.on span{color:#e8eef5;font-weight:700}.rsp-tip-more{opacity:.6;margin-top:2px}"
             "#ah-tip,#ru-tip{position:fixed;z-index:300;background:#1e1e1e;border:1px solid #3a3a3a;border-radius:7px;"
             "padding:8px 10px;font:500 11px 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color:#cfd6dd;"
             "box-shadow:0 5px 18px rgba(0,0,0,0.45);pointer-events:none;line-height:1.4}"
@@ -48234,6 +48279,8 @@ def _landing():
             "body.theme-light .rsp-svg{background:rgba(0,0,0,0.04)}body.theme-light .rsp-grid{stroke:rgba(0,0,0,0.10)}"
             "body.theme-light #rsp-tip{background:#FFFFFF;border-color:rgba(0,0,0,0.12);color:#1F1E1D;"
             "box-shadow:0 5px 18px rgba(31,26,20,0.18)}body.theme-light #rsp-tip b{color:#1F1E1D}"
+            "body.theme-light .rsp-xh{stroke:rgba(0,0,0,0.40)}body.theme-light .rsp-xh-stamp{background:rgba(255,255,255,0.92);color:#1F1E1D}"
+            "body.theme-light .rsp-tip-row.on span{color:#1F1E1D}"
             "body.theme-light .ru-tip-name{color:#1F1E1D}"
             "body.theme-light .ru-name{color:#5D574E}"
             "body.theme-light .ru-pct{color:#1F1E1D}"
