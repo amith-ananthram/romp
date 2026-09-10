@@ -769,8 +769,15 @@ class SessionHost:
 
 
 def _lease_api() -> dict:
-    """The stage 1 lease helpers from kernel/sdk_backend.py (the launcher put the kernel dir on sys.path)."""
-    import sdk_backend as sb   # noqa: the launcher's sys.path
+    """The stage 1 lease helpers from kernel/sdk_backend.py, loaded the kernel's way (a file-path load under
+    a stable module name; the kernel's own copy when this runs inside the kernel)."""
+    import importlib.util
+    here = Path(__file__).resolve().parent
+    sb = sys.modules.get("romp_sdk_backend")
+    if sb is None:
+        spec = importlib.util.spec_from_file_location("romp_loadsource", str(here / "loadsource.py"))
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        sb = mod.load_source("romp_sdk_backend_hostside", here / "sdk_backend.py")
     return {"write_lease": sb.write_lease, "remove_lease": sb.remove_lease, "proc_start": sb.proc_start}
 
 

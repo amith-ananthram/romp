@@ -34,7 +34,10 @@ def _sdk_on_path() -> None:
 
 
 _sdk_on_path()
-import session_host  # noqa: E402
+_ls_spec = importlib.util.spec_from_file_location("romp_loadsource", str(KERNEL_DIR / "loadsource.py"))
+_ls_mod = importlib.util.module_from_spec(_ls_spec)
+_ls_spec.loader.exec_module(_ls_mod)
+session_host = _ls_mod.load_source("romp_session_host", KERNEL_DIR / "session_host.py")
 
 if __name__ == "__main__":
     sys.exit(session_host.main())
