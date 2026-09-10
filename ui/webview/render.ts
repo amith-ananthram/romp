@@ -9950,14 +9950,20 @@ function warnToast(msg: string): HTMLElement {
   setTimeout(() => t.remove(), 12000);
   return t;   // the toast, for a caller that marks it (ephemeralWarnToast)
 }
-// A toast the page that follows a reload must not repeat. The staged sends' refusal ("Can't send yet") reports a STATE:
-// the session's host is unreachable (hostIsDown, a remote host's tunnel) or its tab is still being created
-// (isProvisionalId). The fresh page shows that state for itself (the host mark and the staged strip; a provisional tab
-// does not survive a reload), so replayed by persistNoticesForReload it would be redundant at best and stale at worst.
-// The mark keeps it out of the replay (reload-notices.ts liveNotices reads only the toasts without it). Toasts that
-// report what HAPPENED to a send or a file stay unmarked, since what they say is as true after the reload as before:
-// the nack (the attachment was not saved, the held message not sent), the dismissal and the other-tab ack (the held
-// message not sent), the refusal on a disconnected host (this message was not sent and is still in the composer).
+// A toast the page that follows a reload must not repeat: a refusal that reports a STATE rather than an event. The
+// staged sends' "Can't send yet" says the session's host is unreachable (hostIsDown, a remote host's tunnel) or its tab
+// is still being created (isProvisionalId); the staging refusals (stageComposer) say a picker is waiting on the
+// composer, an edit is in progress (to a past message, or to a queued one) or attachments are on the composer; the
+// branch jump's refusal (branchjump) says the session is not on this dashboard. The fresh page shows each state for
+// itself (the host mark and the staged strip; the picker, the attachments and the roster come back from the kernel and
+// the persisted drafts) or no longer has it (a provisional tab does not survive a reload; composerEdits and queuedEdits
+// are in memory alone, so no edit is in progress on a fresh page), so kept by persistNoticesForReload and shown again by
+// the page that follows, it would be redundant at best and false at worst. The mark keeps it out of the replay
+// (reload-notices.ts liveNotices reads only the toasts without it).
+// Toasts that report what HAPPENED to a send or a file stay unmarked, since what they say is as true after the reload
+// as before: the nack (the attachment was not saved, the held message not sent), the dismissal and the other-tab ack
+// (the held message not sent), the refusal on a disconnected host (this message was not sent and is still in the
+// composer).
 function ephemeralWarnToast(msg: string): void { warnToast(msg).dataset.ephemeral = "1"; }
 
 // Tail-windowing (see the View comment): a fresh/rewound view renders only the
@@ -15696,16 +15702,17 @@ function setupComposer() {
   // The states that already own the box refuse loudly rather than staging a lie: a picker answer
   // answers NOW or sends normally; an edit replaces a past message, or a queued one; attachments ride a
   // normal send.
+  // Each refusal reports a state, not an event, so it does not ride a reload (ephemeralWarnToast).
   const stageComposer = () => {
     if (!activeId) return;
     const typed = ta.value.trim();
     // context stages ALONE (the user 2026-08-23): select a passage, ⌘⏎ with an empty box, repeat —
     // then one typed message flushes the whole run. Nothing at all → nothing to stage.
     if (!typed && !(composerCitations.get(activeId) || []).some((c) => c.quote)) return;
-    if (composerAnswersAsk()) { warnToast("A picker is waiting on this box — answer it, or send normally."); return; }
-    if (composerEdits.has(activeId)) { warnToast("An edit replaces a past message — send it normally."); return; }
-    if (queuedEdits.has(activeId)) { warnToast("This edit replaces a queued message. Send it normally."); return; }   // staged, the words would go as a NEW message behind the unchanged original (review find, 2026-09-08)
-    if ((composerFiles.get(activeId) || []).length) { warnToast("Attachments can't be staged — send them with a normal message."); return; }
+    if (composerAnswersAsk()) { ephemeralWarnToast("A picker is waiting on this box — answer it, or send normally."); return; }
+    if (composerEdits.has(activeId)) { ephemeralWarnToast("An edit replaces a past message — send it normally."); return; }
+    if (queuedEdits.has(activeId)) { ephemeralWarnToast("This edit replaces a queued message. Send it normally."); return; }   // staged, the words would go as a NEW message behind the unchanged original (review find, 2026-09-08)
+    if ((composerFiles.get(activeId) || []).length) { ephemeralWarnToast("Attachments can't be staged — send them with a normal message."); return; }
     stagedMsgs.push(activeId, { text: typed, cites: (composerCitations.get(activeId) || []).slice() });
     composerCitations.delete(activeId); renderComposerChips(activeId);   // the chips now live on the staged item
     drafts.delete(activeId); draftStartedAt.delete(activeId);
@@ -16781,11 +16788,12 @@ setupSettings();
       if (tid) setActive(tid);
     },
     // a branch divider (child side) or branch chip (parent side): jump to the other end of the
-    // branch, landing on the branch-point turn via the deep-link anchor machinery
+    // branch, landing on the branch-point turn via the deep-link anchor machinery. The refusal
+    // reports a state (the roster), not an event, so it does not ride a reload (ephemeralWarnToast).
     branchjump: (elx) => {
       const sid = elx.dataset.sid;
       if (!sid) return;
-      if (!sessions.get(sid)) { warnToast("That session isn't on this dashboard right now."); return; }
+      if (!sessions.get(sid)) { ephemeralWarnToast("That session isn't on this dashboard right now."); return; }
       setActive(sid, elx.dataset.cut || undefined);
     },
     // a below-response fork spot: the row carries its own cut ("" = whole conversation)
