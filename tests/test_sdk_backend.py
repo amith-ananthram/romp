@@ -5303,5 +5303,86 @@ class SettleBeforePoke(unittest.TestCase):
                         "…before the registry write that used to separate them")
 
 
+class KillDuringRevive(unittest.TestCase):
+    """A Kill that lands while _ensure is reviving the same sid (the producer waking a cron-armed
+    session at the instant the user clicks Kill) must end the session the revive builds, not miss it.
+    _ensure reads alive, constructs, inserts and starts under the backend lock; kill used to flip the
+    reg under _reg_lock and pop the session under no lock, so a kill arriving mid-construction popped
+    nothing, and the revive then inserted and started a CLI for a reg the flip had just marked dead: a
+    running claude process with no tab, no listing and nothing that could stop it. Event-ordered, no
+    sleeps: the session under construction parks the revive inside the lock until the test lets it go,
+    and the kill thread signals the moment it commits to its path — on main by completing its pop
+    (finding nothing) while the revive is parked; with the fix by queueing on the backend lock — and
+    only then is the revive released. Either way the kill then has to take effect on the session the
+    revive built."""
+
+    def test_kill_during_revive_ends_the_revived_session(self):
+        d = tempfile.mkdtemp()
+        be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None)
+        sid = be.spawn("alpha", d)
+        Real = sb.SdkSession
+        constructing, release, committed = threading.Event(), threading.Event(), threading.Event()
+        built = []
+        self.addCleanup(lambda: [s.shutdown() for s in built])   # never leave a parked stand-in behind
+
+        class Parked(Real):
+            def __init__(self, backend, reg):
+                super().__init__(backend, reg)
+                self._stopped = threading.Event()
+                built.append(self)
+                constructing.set()
+                release.wait(10)
+
+            def _run(self):                          # the CLI stand-in: alive until shutdown says stop
+                self._stopped.wait(10)
+
+            def shutdown(self):
+                super().shutdown()
+                self._stopped.set()
+
+        class PopSpy(dict):                          # main's kill commits by popping under no lock
+            def pop(self, key, *default):
+                r = super().pop(key, *default)
+                if threading.current_thread() is killer:
+                    committed.set()
+                return r
+
+        class LockSpy:                               # the fixed kill commits by queueing on the lock
+            def __init__(self, real):
+                self._real = real
+
+            def __enter__(self):
+                if threading.current_thread() is killer:
+                    committed.set()
+                return self._real.__enter__()
+
+            def __exit__(self, *a):
+                return self._real.__exit__(*a)
+
+        be.sessions = PopSpy(be.sessions)
+        be._lock = LockSpy(be._lock)
+        revived = []
+        reviver = threading.Thread(target=lambda: revived.append(be._ensure(sid)))
+        killer = threading.Thread(target=lambda: be.kill(sid))
+        with mock.patch.object(sb, "SdkSession", Parked):
+            reviver.start()
+            self.assertTrue(constructing.wait(10), "the revive never reached construction")
+            killer.start()
+            self.assertTrue(committed.wait(10), "the kill never committed to a path")
+            release.set()
+            reviver.join(10)
+            killer.join(10)
+        self.assertFalse(reviver.is_alive() or killer.is_alive(), "a thread never finished")
+        self.assertEqual(len(built), 1, "the revive built exactly one session")
+        s = built[0]
+        self.assertIs(revived[0], s, "the revive returned the session it built")
+        self.assertFalse(sb.read_reg(d, sid)["alive"], "the kill flipped the reg dead")
+        self.assertNotIn(sid, be.sessions,
+                         "the revived session outlived the kill: a running CLI whose reg says dead")
+        self.assertTrue(s.ended, "the revived session was never shut down")
+        s.thread.join(10)
+        self.assertFalse(s.thread.is_alive(), "the stand-in CLI thread kept running after the kill")
+
+
 if __name__ == "__main__":
     unittest.main()
