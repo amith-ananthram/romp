@@ -3476,6 +3476,11 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
 .cmt-act:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-wash); }   /* the feed word-button hover (2026-08-25): Break out / Merge / Delete light up like Clear/Undo */
 .cmt-act.cmt-del.armed { border-color: var(--st-blocked-bg, #c94f4f); color: var(--st-blocked-bg, #c94f4f); }
 .cmt-note.cmt-err { color: var(--st-blocked-bg, #c94f4f); opacity: 0.9; }
+/* a thread that became its own session (the user 2026-09-10): nothing in its view grows. The kernel
+   ships it with no messages or events, so the .sized quote's flex had nothing beside it to share the
+   box's fixed height with — a one-line quote ran hundreds of pixels tall over a void. The quote keeps
+   its natural height at every box size; the free room is simply the box's. */
+.cmt-pop.sized[data-status="promoted"] .cmt-quote { flex: 0 0 auto; min-height: 0; }
 
 /* ── branch lineage (the user 2026-08-13: branching must show) ────────────────────────────────────
    The child's divider marks where its history splits from the parent's — an accent hairline with a

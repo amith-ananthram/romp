@@ -804,3 +804,24 @@ test("a create the send has not heard back on is not re-posted, and one past the
   assert.deepEqual(lift.dropped, ["a2"]);
   assert.equal(lift.toasts.length, 1);
 });
+
+// ── a thread that became its own session (the user 2026-09-10, with a screenshot) ─────────────────
+
+test("a promoted thread's popup is the quote, one line, and Open the session in the shared button dress", () => {
+  // the kernel ships a promoted thread with no messages or events, so the popup renders no list for it:
+  // an empty list only grew into the box's fixed height (the void under the quote)
+  assert.match(UI, /if \(th && th\.status !== "promoted"\) \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*const list = el\("div", "cmt-msgs"\);/);
+  const start = UI.indexOf("} else if (th) {\n    // a thread that became its own session");
+  assert.ok(start > 0, "the promoted branch of renderCommentPopover");
+  const branch = UI.slice(start, UI.indexOf("document.body.appendChild(pop);", start));
+  assert.match(branch, /const open = el\("button", "cmt-act"\) as HTMLButtonElement;/,
+               "the shared .cmt-act word-button, never the composer's send-glyph square");
+  assert.doesNotMatch(branch, /"cmt-send"/);
+  assert.match(branch, /open\.textContent = "Open the session";/);
+  assert.match(branch, /open\.dataset\.act = "cmtopensession";/);
+  assert.match(branch, /const row = el\("div", "cmt-actions"\);[\s\S]*row\.appendChild\(open\);\s*\n\s*pop\.appendChild\(row\);/, "inside .cmt-actions");
+  assert.match(branch, /const note = el\("div", "cmt-note"\);\s*\n\s*note\.textContent = "The discussion continues there\.";/,
+               "one line saying where the talk went");
+  // and the quote never flexes in this state, whatever size the box is (the .sized rule hands it the free room otherwise)
+  assert.match(CSS, /\.cmt-pop\.sized\[data-status="promoted"\] \.cmt-quote \{ flex: 0 0 auto; min-height: 0; \}/);
+});
