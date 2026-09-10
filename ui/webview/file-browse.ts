@@ -7,7 +7,9 @@
 // ONE-DIRECTIONAL: opening a file from a listing overlays the viewer on top with the listing intact
 // underneath — while opening the BROWSER always closes a viewer that is up (openFileBrowse below),
 // because "browse" means the user wants the listing now, and a browser painted under an opaque
-// viewer is a dead click (found in review, 2026-08-14). One direction also makes the keydown story
+// viewer is a dead click (found in review, 2026-08-14). When unsaved edits keep that viewer up (its
+// discard confirm, answered with cancel), the browse stands down whole rather than paint the dead
+// listing beneath it (the stand-down in openFileBrowse). One direction also makes the keydown story
 // honest: the browser's handler always registers before the viewer's, so Escape's topmost-only rule
 // holds by construction. The close contract is ownership-aware — the viewer is a modal over this
 // document (2026-08-15) and never touches the pane, so the browser's own browseClosed is the ONLY
@@ -103,12 +105,6 @@ function dirnameOf(p: string): string {
 /** Open the browser at `path` (as the sid's kernel resolves it — "." means that session's cwd). */
 export function openFileBrowse(path: string, sid?: string | null): void {
   const had = document.getElementById("romp-filebrowse");
-  curSid = sid || null;
-  showHidden = false;
-  // A re-invoke while open must resync the persistent Hidden control with the state it claims to
-  // show — resetting the variable alone left the button lit over a dotfile-hidden listing (review).
-  const hb = document.getElementById("fb-hidden");
-  if (hb) { hb.classList.remove("on"); hb.setAttribute("aria-pressed", "false"); }
   if (!had) {
     // the id rides the BACKDROP — every open/close/topmost check looks up #romp-filebrowse, and
     // the outermost element is what closeFileBrowse removes. The card inside is the viewer's
@@ -232,7 +228,29 @@ export function openFileBrowse(path: string, sid?: string | null): void {
   // the modal itself: the viewer never touches the pane, so there is no restore to worry about and
   // the pane stays up for the listing.
   if (document.getElementById("romp-fileview")) closeFileView();
+  // The viewer's dirty-edit guard can keep it (closeFileView's closeGuard: the person answered the
+  // discard confirm with cancel). Then the click stands down WHOLE: no listing is asked for (it would
+  // sit beneath a viewer that covers it, a dead click, and the next Escape after the viewer would fall
+  // through to it); no notice follows (the person just answered the confirm); an overlay built above
+  // for this click is taken down again; and a listing already beneath the viewer is left exactly as it
+  // was, its session and its Hidden state included, since nothing below changed.
+  if (document.getElementById("romp-fileview")) { if (!had) unbuild(); return; }
+  curSid = sid || null;
+  showHidden = false;
+  // A re-invoke while open must resync the persistent Hidden control with the state it claims to
+  // show — resetting the variable alone left the button lit over a dotfile-hidden listing (review).
+  const hb = document.getElementById("fb-hidden");
+  if (hb) { hb.classList.remove("on"); hb.setAttribute("aria-pressed", "false"); }
   ask(path);
+}
+
+// An overlay built for a click that then stood down (the viewer's veto above): gone again, outside the
+// close protocol. Nothing opened, so nothing is owed: no browseClosed (the notice a browser that was up
+// sends on closing; the shell's pane restore hangs on it), and no latch to reset, since no ask went out.
+function unbuild(): void {
+  document.getElementById("romp-filebrowse")?.remove();
+  document.body.classList.remove("filebrowse-open");
+  if (onKeyRef) { document.removeEventListener("keydown", onKeyRef); onKeyRef = null; }
 }
 
 function onAct(row: HTMLElement, ev?: MouseEvent | KeyboardEvent): void {
