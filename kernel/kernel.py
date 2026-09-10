@@ -21689,7 +21689,9 @@ def _start_remote(host):
       2. If the kernel still isn't answering (the up-to-date path), _start_remote_kernel + the same
          port wait attach's bootstrap uses.
     Refreshes the stored token after boot (a first-ever kernel just wrote its serve-token).
-    Returns (ok, detail); mirrors _update_remote's contract."""
+    Returns (ok, detail); mirrors _update_remote's contract. An exception that escapes any step after the
+    hold is set releases the hold through _fail (the row reads no-kernel, the failure as its detail) and
+    propagates."""
     host = str(host or "").strip()
     if not host:
         return False, "no host"
@@ -21706,28 +21708,42 @@ def _start_remote(host):
             if rr:
                 rr["status"], rr["detail"], rr["booting"] = "no-kernel", detail, False
         return False, detail
-    ok, detail = _update_remote(host)
-    if not ok:
-        return _fail(detail)
-    if not _remote_kernel_up(host, kport):
-        # the already-up-to-date path: nothing synced, so _update_remote (re)started nothing
-        started, d2 = _start_remote_kernel(host)
-        if not started:
-            return _fail(d2)
-        detail = detail + " + started the kernel"
-    deadline = time.time() + _BOOT_WAIT_S
-    while time.time() < deadline and not _remote_kernel_up(host, kport):
-        time.sleep(1.0)
-    if not _remote_kernel_up(host, kport):
-        return _fail("started romp on %s but its kernel port never answered — check its kernel.log" % host)
-    token = _fetch_remote_token(host)
-    with _remotes_lock:
-        rr = _remotes.get(host)
-        if rr and token:
-            rr["token"] = token
-        if rr:
-            rr["detail"], rr["booting"] = "", False   # healthy — the supervisor's next poll flips it to 'up'
-    return True, detail
+    try:
+        ok, detail = _update_remote(host)
+        if not ok:
+            return _fail(detail)
+        if not _remote_kernel_up(host, kport):
+            # the already-up-to-date path: nothing synced, so _update_remote (re)started nothing
+            started, d2 = _start_remote_kernel(host)
+            if not started:
+                return _fail(d2)
+            detail = detail + " + started the kernel"
+        deadline = time.time() + _BOOT_WAIT_S
+        while time.time() < deadline and not _remote_kernel_up(host, kport):
+            time.sleep(1.0)
+        if not _remote_kernel_up(host, kport):
+            return _fail("started romp on %s but its kernel port never answered — check its kernel.log" % host)
+        token = _fetch_remote_token(host)
+        with _remotes_lock:
+            rr = _remotes.get(host)
+            if rr and token:
+                rr["token"] = token
+            if rr:
+                rr["detail"], rr["booting"] = "", False   # healthy — the supervisor's next poll flips it to 'up'
+        return True, detail
+    except BaseException as e:
+        # Every planned failure returns through _fail and success clears the hold above; this is the exit
+        # nothing planned for. The hold must not outlive the call: while it stands the supervisor skips
+        # its status write, the no-kernel hint and (T291b) the recovery counter, so an escaped exception
+        # left the row unable to read up or no-kernel again, with no Start button and, while the label
+        # read starting, the popover's fast poll running, until a kernel restart's load reset freed it.
+        # Through _fail, not a bare flag clear: with only `booting` cleared the next pass writes
+        # no-kernel but keeps the stale "updating + starting the kernel" detail (a specific detail
+        # survives the hint), so the row parks the failure the way every other failed Start does. The
+        # route's answer is unchanged.
+        what = str(e).strip()[:160]
+        _fail("Start on %s failed unexpectedly (%s)%s" % (host, type(e).__name__, ": " + what if what else ""))
+        raise
 
 
 def _tunnel_supervisor():
@@ -42836,24 +42852,47 @@ def _push_forward(events):
 # event yields on the phone (the desktop notice and the badge still fire — they are not the buzz).
 # Bell events never yield to EACH OTHER: two cards of one session moving in one build buzz twice,
 # exactly as before this rule existed.
+#
+# THE HUMAN'S TURNS ONLY (2026-09-10): a session running background subagents gets a harness-injected
+# user-role turn per completion (the task notification — origin.kind "task-notification"), reacts to
+# it, and that reaction's Stop stamps lastStopAt like any other end — ten buzzes in fifty minutes from
+# one coordinating session, none about anything the user had asked at that moment. The Stop hook stamps
+# WHO opened the turn beside the settle (lastTurnOpener, sdk_backend `_stop_hook`, from the two places
+# a turn can open: the feeder's pop — a fed text, the human's unless it carries the romp-injected
+# marker — and a stamped user atom the CLI streams while idle), and the tick skips an end whose opener
+# is not the human WITHOUT spending the buzz claim, so a bell event that turn raises keeps its buzz. A
+# registry without the field (an older ledger, a tmux session) reads as the human's: a missing fact
+# never drops the user's buzz.
 _TURN_PREV = {}      # sid -> turn-end key at the last tick; absent = baseline pending
 _PUSH_BUZZED = {}    # sid -> (turn-end key, "turn"|"bell") of the last phone buzz filed for it
 _TURN_BODY_CAP = 120
 
 
-def _turn_end_key(sid):
+def _turn_end_key(sid, reg=None):
     """The session's newest TURN-END as an opaque key, 0 when there is no settle evidence. Like
     _settle_event_key, the Stop hook's lastStopAt is primary; the fallback is stricter — only a
     STOPPED states/ transition ('waiting'/'idle') counts, because _last_state also moves when a
-    turn STARTS and a start must never read as an end here."""
+    turn STARTS and a start must never read as an end here. `reg`: the session's registry entry
+    when the caller already holds one (the tick reads it ONCE for this and the opener beside it)."""
     try:
-        t = int((_thread_reg(sid) or {}).get("lastStopAt") or 0)
+        t = int((reg if reg is not None else _thread_reg(sid) or {}).get("lastStopAt") or 0)
     except Exception:
         t = 0
     if t:
         return t
     val, vt = _last_natural_state(sid)          # the session's own settle — never the idle romp wrote for a Stop press
     return (vt or 0) if val in ("waiting", "idle") else 0
+
+
+def _turn_opener(reg):
+    """Who opened the turn `lastStopAt` closed, off the registry entry the Stop hook stamps it on
+    beside the settle: "human" (the composer's words, a queued message, a typed follow-up) or
+    "injected" (a harness-injected task notification / scheduled prompt / peer message, or romp's own
+    nudge, follow-up, notice or relayed mail). Anything else — the field absent (an older ledger, a
+    tmux session) or a value the hook never writes — reads "human": a missing fact never drops the
+    user's buzz."""
+    v = (reg or {}).get("lastTurnOpener") if isinstance(reg, dict) else None
+    return v if v in ("human", "injected") else "human"
 
 
 
@@ -42884,20 +42923,27 @@ def _first_line(text, cap=_TURN_BODY_CAP):
 
 def _turn_notify_tick(now, tmux):
     """One pusher-cycle pass over the live sessions: a session whose turn-end key MOVED since the
-    last pass finished a turn. Fires only with both switches on and the session unmuted; every
-    sighting advances the memo regardless, so switching the row on later never replays old ends."""
+    last pass finished a turn. Fires only with both switches on, the session unmuted, and the turn
+    the HUMAN's (_turn_opener — a subagent's task notification or a nudge opening a turn is not news
+    to them); every sighting advances the memo regardless, so switching the row on later never
+    replays old ends and a silent end is never replayed either."""
     fired = []
     for s in _alive_sessions(now, tmux):
         sid = str(s.get("sid") or "")
         if not sid:
             continue
-        key = _turn_end_key(sid)
+        reg = _thread_reg(sid)                           # one read: the settle and its opener are one Stop-hook write
+        key = _turn_end_key(sid, reg)
         prev = _TURN_PREV.get(sid)
         _TURN_PREV[sid] = key
         if prev is None or key == prev or not key:
             continue                                     # baseline / nothing new / no settle evidence
         if not (_notify_all_on() and _notify_turns_on() and _notify_session_effective(sid)):
             continue
+        if _turn_opener(reg) != "human":
+            continue                                     # the CLI or romp opened this turn (a subagent's task notification,
+            #                                              a scheduled prompt, a nudge): nobody asked the user anything, so
+            #                                              nothing to buzz about — and no claim spent, the bell event's is its own
         if not _buzz_claim(sid, key, "turn"):
             continue                                     # a bell event already buzzed for this turn end
         body = _first_line(_last_assistant_text(s.get("path") or "")) or "finished a turn"

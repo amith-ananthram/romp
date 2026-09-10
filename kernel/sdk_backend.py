@@ -2630,6 +2630,16 @@ CRASH_RESUME_NUDGE = (
     "<!-- romp-gist: resumed after its process died mid-turn -->")
 
 
+def fed_text_opener(text: str) -> str:
+    """Who a text we FEED the CLI speaks for: "injected" when it carries the romp-injected marker (a nudge,
+    a follow-up romp wrote, a restart or rename notice, relayed mail, the retry line: everything romp puts
+    into a session on its own), "human" otherwise (the composer's words, a queued message, a typed
+    follow-up, a button's /command). The COMMENT FORM only, the rule send()'s echo authoring and the event
+    model's ROMP_INJECT_RE follow: prose that merely mentions the marker is the user's. Feeds the turn-
+    opener stamp (SdkSession._note_turn_opener), whose reader is the kernel's turn-finished push."""
+    return "injected" if "<!-- romp-injected -->" in (text or "") else "human"
+
+
 # A CLI that cannot even START says so on the way out — and the ONE cause that reliably does this is the
 # account being out of usage: `claude` refuses the handshake and exits with the limit in its own words
 # ("You've hit your session limit · resets 1:10pm (America/Los_Angeles)"). romp used to swallow that
@@ -3886,6 +3896,16 @@ class SdkSession:
         # _cli_working mirrors the last lifecycle state we persisted so the live stream can re-assert
         # 'working' if a stamp ever falls behind actual output, with no reliance on feed-vs-result counting.
         self._cli_working = False
+        # WHO OPENED the turn in flight — "human" (any fed text without the romp-injected marker: the
+        # composer's words, a queued message, a typed follow-up, a button's /command) or "injected" (romp's
+        # own feed — a nudge, a follow-up, a restart notice, relayed mail — or a turn the CLI opened by
+        # itself: a background task's notification, a scheduled prompt, a peer's channel message, told by
+        # the streamed record's origin stamp). None until an open is seen. Set at the two places a turn can
+        # open (the feeder's pop; _forward's stamped user atom while idle — see _note_turn_opener), stamped
+        # beside lastStopAt by the Stop hook as lastTurnOpener, and read by the kernel's turn-finished push,
+        # which buzzes the phone for the human's turns only (the user 2026-09-10: ten buzzes in fifty minutes
+        # from one session reacting, turn after turn, to its own background subagents' completions).
+        self._turn_opener = None
         self._skill_tool_ids = set()   # Skill tool_use ids seen on THIS stream → classify their injected
         #                                instructions payload (parent_tool_use_id link) as a skillMd atom
         self.since = 0
@@ -5031,6 +5051,7 @@ class SdkSession:
                     self.since = int(time.time())    # a new turn starts now (mid-turn forwards keep the turn's clock)
                     self._interrupted = False        # a fresh turn → clear any stale interrupt flag
                     self._intr_level = 0             #   ...and its escalation episode (a new stop starts polite)
+                self._note_turn_opener(fed_text_opener(item), fresh)   # who this turn is for (the Stop hook stamps it)
                 if item.startswith(RENAME_PING_HEAD):
                     self._ping_feeding = True       # hold feeds until this turn's first streamed message
                 self._mark("working")
@@ -5377,6 +5398,17 @@ class SdkSession:
             return "\n".join(self._stderr_tail)
         except Exception:
             return ""
+
+    def _note_turn_opener(self, opener: str, fresh: bool) -> None:
+        """Record who opened, or joined, the turn in flight (see _turn_opener in __init__). A HUMAN text
+        always makes the turn theirs: from idle it opens one; mid-turn the CLI splices it in at the next
+        tool boundary and answers it there, so the person asked during the turn and its end IS news to
+        them. An INJECTED opener counts only from idle (`fresh`): a nudge fed into the human's running turn,
+        or a task notification the CLI folds into it, does not take the turn from them. Never reset at the
+        settle: the next open overwrites, and the Stop hook (which runs BEFORE the ResultMessage) reads the
+        turn it is closing."""
+        if fresh or opener == "human":
+            self._turn_opener = opener
 
     def _mark(self, state: str) -> None:
         """Persist a lifecycle STATE to states/<sid>.jsonl AND track whether the CLI is producing.
@@ -6385,9 +6417,14 @@ class SdkSession:
             self.backend._log("stop hook (%s): bg-ledger reconcile failed: %s" % (self.name, e))
         # The turn-end EVENT itself, durable and kernel-readable (2026-08-29, for the nudge layer's
         # memo re-arm and any consumer that needs "this session settled a turn at T" as a fact
-        # rather than an inference from transcript mtimes — romp_cards' round keys on it).
+        # rather than an inference from transcript mtimes — romp_cards' round keys on it). Beside it,
+        # in the SAME write so a reader never pairs one turn's settle with another's opener, WHO opened
+        # the turn (2026-09-10, see _turn_opener): the kernel's turn-finished push buzzes the phone for
+        # the human's turns only. No open seen (a session object born mid-turn at a kernel restart, a
+        # CLI that stamps no origin) reads "human" — fail OPEN on the buzz, never silently drop it.
         try:
-            self.backend._update_reg(self.sid, lastStopAt=int(time.time()))
+            self.backend._update_reg(self.sid, lastStopAt=int(time.time()),
+                                     lastTurnOpener=getattr(self, "_turn_opener", None) or "human")
         except Exception:
             pass
         # delete-while-busy: the turn this delete interrupted has ENDED — complete the arm here,
@@ -11502,6 +11539,17 @@ class SdkBackend:
             self._touch_live(sess.sid)
         if vanished:
             self._note_live_tail_race("_evict_live_overflow")
+        # A user atom the CLI streams WHILE IDLE, wearing an injected provenance stamp, is a turn the CLI
+        # opened by itself — a background task's notification, a scheduled prompt, a peer's channel
+        # message — never the composer's words: a fed text is not replayed on the stream
+        # (replay-user-messages stays off, see _options), so its opener was noted at the feeder's pop.
+        # Only the CLI's own stamp says so (atom["origin"], msg_to_atom); a stamp-less user atom (a tool
+        # result) or a "human" stamp says nothing. Judged BEFORE the working re-assert below, and only
+        # while nothing is in flight: the same stamp arriving mid-turn is a splice into the running turn,
+        # which keeps its opener (see SdkSession._note_turn_opener).
+        okind = (atom.get("origin") or {}).get("kind") if atom.get("type") == "user" else None
+        if okind and okind != "human" and not getattr(sess, "inflight", 0) and not sess._cli_working:
+            sess._note_turn_opener("injected", True)
         # The stream is the AUTHORITATIVE busy signal: a genuine WORK atom (streamed assistant/tool
         # output — not an input echo, not a /model-style command line) means the CLI is producing RIGHT
         # NOW, so re-assert 'working' if a prior state write settled ahead of it (e.g. a separate turn

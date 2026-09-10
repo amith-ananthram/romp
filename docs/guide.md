@@ -634,10 +634,12 @@ switches indented under it, and a button:
   main switch off, the row says the device is set up but nothing arrives until
   the main switch is on.
 - **Also when a turn finishes**, also under it, adds a notification every time
-  any session finishes a turn, with the session's name and the first line of
-  what it said. With many sessions running this is a lot of buzzing, so it is
-  off unless you want it. A turn that ends by asking you something buzzes once,
-  not twice.
+  any session finishes a turn you started, with the session's name and the
+  first line of what it said. Turns a session starts on its own, such as
+  reacting to one of its background agents finishing, or to a reminder, stay
+  quiet: nothing there was waiting on you. With many sessions running this is
+  still a lot of buzzing, so it is off unless you want it. A turn that ends by
+  asking you something buzzes once, not twice.
 - **Send a test notification** sends one notification to the device you are
   holding, whatever the switches say, and prints the push service's answer under
   the button, so you can see at once whether the phone is set up or why it is
