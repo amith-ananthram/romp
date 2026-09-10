@@ -102,7 +102,7 @@ test("a queued edit cannot become a command: the kernel refuses in both arms and
 });
 
 test("⌘/Ctrl+⏎ cannot stage a queued edit as a NEW message while the original stays queued", () => {
-  assert.match(RENDER, /if \(composerEdits\.has\(activeId\)\) \{ warnToast\("An edit replaces a past message[^\n]*\n\s*if \(queuedEdits\.has\(activeId\)\) \{ warnToast\("This edit replaces a queued message\. Send it normally\."\); return; \}/,
+  assert.match(RENDER, /if \(composerEdits\.has\(activeId\)\) \{ ephemeralWarnToast\("An edit replaces a past message[^\n]*\n\s*if \(queuedEdits\.has\(activeId\)\) \{ ephemeralWarnToast\("This edit replaces a queued message\. Send it normally\."\); return; \}/,
     "staging is refused while a queued edit owns the box, as it is for a rewind edit");
 });
 
