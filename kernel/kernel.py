@@ -15805,8 +15805,7 @@ def _drive(msg, client):
             or _edit_parked(sid, int(msg["park"]), str(msg.get("md") or ""), str(msg.get("text") or ""))
         if err:
             _release_after_refusal(be, sid, msg, client)
-        client["send"](json.dumps({"type": "editResult", "ok": not err, "id": sid,
-                                   "md": str(msg.get("md") or ""), "text": err or ""}))
+        client["send"](json.dumps(_edit_frame(sid, str(msg.get("md") or ""), err)))
         _push_soon()
     elif t == "editQueued" and msg.get("idx") is not None and hasattr(be, "edit_queued"):
         # ✎ on a backend-queue message: replaced under the backend's lock, drift-guarded by the body.
@@ -15814,8 +15813,7 @@ def _drive(msg, client):
             or _edit_backend_queued(be, sid, int(msg["idx"]), str(msg.get("md") or ""), str(msg.get("text") or ""))
         if err:
             _release_after_refusal(be, sid, msg, client)
-        client["send"](json.dumps({"type": "editResult", "ok": not err, "id": sid,
-                                   "md": str(msg.get("md") or ""), "text": err or ""}))
+        client["send"](json.dumps(_edit_frame(sid, str(msg.get("md") or ""), err)))
         _push_soon()
     elif t == "editQueued" and msg.get("md"):
         # ✎ at the OPTIMISTIC stage: no park/idx has round-tripped yet, so locate the send by body wherever
@@ -15833,8 +15831,7 @@ def _drive(msg, client):
                 err = err2
         if err:
             _release_after_refusal(be, sid, msg, client)
-        client["send"](json.dumps({"type": "editResult", "ok": not err, "id": sid,
-                                   "md": md, "text": err or ""}))
+        client["send"](json.dumps(_edit_frame(sid, md, err)))
         _push_soon()
     elif t == "holdQueued":
         # T306 (the user 2026-09-10): the queued bubble's editor opened (hold) or was cancelled (hold:false) — the
@@ -29489,6 +29486,27 @@ def _inflight_slot(sid, ops):
     return next((j for j, o in enumerate(ops) if o is cur), -1)
 
 
+def _relocate_parked(sid, ops, md, skip=-1, prefer_held=True):
+    """The slot a drifted click means among the parked ops whose body is `md` (T306 review): the one an editor HOLDS when
+    prefer_held and exactly one is held (a Save or a check names the copy being edited), else the single candidate, else
+    -2 for several id-less twins nobody can tell apart (the caller refuses rather than guesses: by body alone the first
+    twin took an edit meant for the held one), -1 for none. `skip` is the slot with the backend this instant."""
+    cands = [j for j, op in enumerate(ops) if j != skip and op[0] == "send" and _parked_md(op) == md] if md else []
+    if not cands:
+        return -1
+    held = [j for j in cands if _parked_held(sid, ops[j])]
+    if prefer_held and len(held) == 1:
+        return held[0]
+    if not prefer_held:
+        free = [j for j in cands if not _parked_held(sid, ops[j])]
+        if len(free) == 1:
+            return free[0]
+    return cands[0] if len(cands) == 1 else -2
+
+
+_MOVED_TEXT = "the queue moved under this edit \u2014 open the message again"
+
+
 def _hold_parked(sid, park, md, owner, qid=None, hold=True):
     """Mark (hold=True) or unmark ONE parked SEND as being edited (T306): _apply_pending_ops takes no held send, so
     its words cannot leave while the editor is open. Located exactly as _edit_parked locates (the id, else the slot
@@ -29503,8 +29521,9 @@ def _hold_parked(sid, park, md, owner, qid=None, hold=True):
         if qid:
             park = next((j for j, op in enumerate(ops) if _op_qid(op) == qid), -1)
         elif not (0 <= park < len(ops)) or (md and _parked_md(ops[park]) != md):
-            park = next((j for j, op in enumerate(ops)
-                         if _parked_md(op) == md and j != inflight_j), -1) if md else -1
+            park = _relocate_parked(sid, ops, md, inflight_j, prefer_held=not hold)   # a hold wants the free twin, a release the held one
+            if park == -2:
+                return _MOVED_TEXT
         if park < 0 or park == inflight_j:
             return _edit_miss_text(md)
         op = ops[park]
@@ -29608,11 +29627,21 @@ def _parked_held_by_other(sid, park, md, owner, qid=None):
         if qid:
             park = next((j for j, op in enumerate(ops) if _op_qid(op) == qid), -1)
         elif not (0 <= park < len(ops)) or (md and _parked_md(ops[park]) != md):
-            park = next((j for j, op in enumerate(ops) if _parked_md(op) == md), -1) if md else -1
+            park = _relocate_parked(sid, ops, md)   # the held twin is the one an ownership check is about
         if park < 0:
             return None
         cur = (_park_holds.get(sid) or {}).get(_park_key(ops[park]))
     return "another client is editing this message" if cur is not None and owner and cur not in ("", owner) else None
+
+
+def _edit_frame(sid, md, err):
+    """The editResult frame for an editQueued arm: ok, the body the client keys its restore on, the refusal text, and
+    `gone` ONLY when the copy left every queue (the too-late refusal), so the client knows the words have no bubble to
+    return to and puts them in a toast that never fades (T306). An ok frame keeps its three-field shape."""
+    frame = {"type": "editResult", "ok": not err, "id": sid, "md": md, "text": err or ""}
+    if err and err == _edit_miss_text(md):
+        frame["gone"] = True
+    return frame
 
 
 def _release_after_refusal(be, sid, msg, client):
@@ -29985,8 +30014,9 @@ def _edit_parked(sid, park, md, text):
         ops = _pending_ops.get(sid) or []
         inflight_j = _inflight_slot(sid, ops)  # the slot with the backend this instant (slot 0 unless a held send sits ahead, T306)
         if not (0 <= park < len(ops)) or (md and _parked_md(ops[park]) != md):
-            park = next((j for j, op in enumerate(ops)
-                         if _parked_md(op) == md and j != inflight_j), -1) if md else -1
+            park = _relocate_parked(sid, ops, md, inflight_j)   # the held twin first: a Save is the editor's (T306 review)
+            if park == -2:
+                return _MOVED_TEXT                # id-less twins nobody can tell apart: refuse, never guess
             if park < 0:
                 return _edit_miss_text(md)
         if park == inflight_j:
@@ -30700,10 +30730,12 @@ def _apply_pending_ops(now=None):
                     _inflight_ops.pop(sid, None)
                     _pending_ops.pop(sid, None)           # a dead session's queue is dropped, never retried
                     _drain_hold.pop(sid, None)            # …and its hold with it
+                    _park_holds.pop(sid, None)            # …and the editors' holds: an obj: key must not outlive its op (T306 review)
                 changed = True
             with _pending_ops_lock:
                 if not _pending_ops.get(sid):
                     _pending_ops.pop(sid, None)
+                    _park_holds.pop(sid, None)
             if changed:
                 _save_pending_ops()           # every delivery/drop shrinks the disk mirror too
                 _mark_views_dirty()           # the queue shrank (in-memory): the chat signature's ops component carries

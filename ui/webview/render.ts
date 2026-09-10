@@ -4318,7 +4318,8 @@ function renderQueued(ev: Extract<ChatEvent, { kind: "queued" }>): HTMLElement {
     const qsid = renderingSid || activeId || "";
     const qed = qsid && !t.romp && !isCmd ? queuedEditorFor(qsid, t) : undefined;
     if (qed && qed.open) { bubble.innerHTML = ""; renderQueuedEditor(bubble, qed); }
-    else if (qed && qed.note) { const n = el("div", "queued-editnote"); n.textContent = qed.note; bubble.appendChild(n); }
+    else if (qed && qed.note && t.held) { const n = el("div", "queued-editnote"); n.textContent = qed.note; bubble.appendChild(n); }
+    else if (qed && qed.note) queuedEditors.delete(qed.key);   // the hold the note spoke of is gone (the other client cancelled or saved): the bubble stops saying it
     else if (t.held && !t.romp && !isCmd) {
       bubble.classList.add("held");
       const h = el("span", "queued-held-label"); h.textContent = "editing"; h.title = "being edited — it goes when the edit is done";
@@ -10158,18 +10159,7 @@ function landToast(msg: string) {
 // additive noise-removal, not a key the rest of the UI loses — and overlay consumers
 // that capture Escape (the lightbox, the viewer) still peel first by construction.
 function warnToast(msg: string): HTMLElement {
-  let box = document.getElementById("warn-toasts");
-  if (!box) {
-    box = el("div", "");
-    box.id = "warn-toasts";
-    document.body.appendChild(box);
-    box.addEventListener("click", (e) => {
-      (e.target as HTMLElement | null)?.closest(".warn-toast")?.remove();
-    });
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") for (const w of Array.from(box!.children)) w.remove();
-    });
-  }
+  const box = ensureToastBox();
   const t = el("div", "warn-toast");
   const txt = el("span", "warn-toast-msg");
   txt.textContent = msg;
@@ -10183,6 +10173,44 @@ function warnToast(msg: string): HTMLElement {
   setTimeout(() => t.classList.add("fade"), 11000);
   setTimeout(() => t.remove(), 12000);
   return t;   // the toast, for a caller that marks it (ephemeralWarnToast)
+}
+function ensureToastBox(): HTMLElement {
+  let box = document.getElementById("warn-toasts");
+  if (!box) {
+    box = el("div", "");
+    box.id = "warn-toasts";
+    document.body.appendChild(box);
+    box.addEventListener("click", (e) => {
+      (e.target as HTMLElement | null)?.closest(".warn-toast")?.remove();   // the Copy button stops its own click short of here
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") for (const w of Array.from(box!.children)) w.remove();
+    });
+  }
+  return box;
+}
+// A toast that never fades and carries the words: for typed words that have nowhere else to live (a queued message's
+// edit refused after the copy left the queue, T306 review). No timers; dismissed by its ✕, Escape or a click on its
+// text; the Copy button puts the words on the clipboard and stays put.
+function stickyToast(msg: string, copyText: string): HTMLElement {
+  const box = ensureToastBox();
+  const t = el("div", "warn-toast sticky");
+  const txt = el("span", "warn-toast-msg");
+  txt.textContent = msg;
+  const c = el("button", "warn-toast-copy");
+  c.textContent = "Copy";
+  c.title = "copy the words to the clipboard";
+  c.addEventListener("click", (e) => {
+    e.stopPropagation();
+    try { navigator.clipboard?.writeText(copyText); c.textContent = "Copied"; } catch (_) { c.textContent = "Select the text above"; }
+  });
+  const x = el("button", "warn-toast-x");
+  x.setAttribute("aria-label", "Dismiss");
+  x.title = "dismiss (Esc)";
+  x.textContent = "✕";
+  t.append(txt, c, x);
+  box.appendChild(t);
+  return t;
 }
 // A toast the page that follows a reload must not repeat: a refusal that reports a STATE rather than an event. The
 // staged sends' "Can't send yet" says the session's host is unreachable (hostIsDown, a remote host's tunnel) or its tab
@@ -14553,6 +14581,7 @@ function renderQueuedEditor(bubble: HTMLElement, ed: QueuedEditor): void {
     else if (e.key === "Escape") { e.preventDefault(); cancelQueuedEditor(ed); }
   });
   box.appendChild(field);
+  if (ed.note) { const n = el("div", "queued-editnote"); n.textContent = ed.note; box.appendChild(n); }   // a refused Save's reason, beside the words it kept
   const btns = el("div", "queued-editbtns");
   const cancel = el("button", "queued-editbtn");
   cancel.textContent = "Cancel"; cancel.title = "leave the message as it was (Esc)";
@@ -16072,10 +16101,21 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
           ed.open = false; ed.note = why || "too late to edit — the message already reached the session as it was";
           if (ed.text.trim() && ed.text !== ed.ref.md) edited = ed.text;
         }
-        if (why || edited) warnToast((why || "The message could not be held for editing.") + (edited ? " Your edit: " + edited : ""));
+        if (edited) stickyToast((why || "The message could not be held for editing.") + " Your edit: " + edited, edited);   // never fades: the words live here now
+        else if (why) warnToast(why);
       } else if (m.op !== "release") {
         if (stash) applyQueuedEditLocally(m.id, stash.ref, stash.typed, true);
-        if (why || stash) warnToast((why || "The edit was not applied.") + (stash ? " Your edit: " + stash.typed : ""));
+        if (stash && m.gone) {
+          // the copy left the queue (fed already): no bubble to hold a field, so the words go to a toast that never fades
+          stickyToast((why || "The edit was not applied.") + " Your edit: " + stash.typed, stash.typed);
+        } else if (stash) {
+          // the copy is still queued (another client holds it, the words were a command, the session is not running):
+          // the field reopens with the typed words and the refusal beside them, so nothing typed is lost (review find)
+          const key = queuedEditorKey(m.id, stash.ref);
+          queuedEditors.set(key, { eid: ++queuedEditorSeq, sid: m.id, key, ref: stash.ref, text: stash.typed, sel: [stash.typed.length, stash.typed.length],
+                                   focused: true, open: true, note: why || "The edit was not applied.", width: 0, height: 0 });
+          if (!isProvisionalId(m.id) && !hostIsDown(m.id)) vscodeApi?.postMessage(holdQueuedMsg(m.id, stash.ref, true));
+        } else if (why) warnToast(why);
       }
       repaintQueuedFor(m.id);
     }

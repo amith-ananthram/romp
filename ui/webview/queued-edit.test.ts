@@ -43,7 +43,10 @@ test("the ✎ opens a field IN the bubble: the editor is keyed by the entry, the
     "the open records the state (the words, the caret at the end, focus, the bubble's width) and posts the hold; the repaint is the acknowledgement");
   assert.match(EDITOR, /if \(ed\.width > 0\) bubble\.style\.width = ed\.width \+ "px";/, "the field keeps the bubble's width as it stood");
   assert.match(DELEGATES, /openQueuedEditor\(sidQ, ref, bub \? bub\.getBoundingClientRect\(\)\.width : 0\);/, "measured at the click");
-  assert.match(CSS, /\.queued-bubble\.editing \{ opacity: 1; border-color: var\(--accent\); padding-right: 30px; box-sizing: border-box; \}/);
+  assert.match(CSS, /\.queued-bubble\.editing \{ opacity: 1; border-color: var\(--accent\); padding-right: 52px; box-sizing: border-box; \}/,
+    "the idle bubble's padding stays, so the words do not re-wrap under the caret when the field opens (review find)");
+  assert.match(KERNEL, /def _relocate_parked\(sid, ops, md, skip=-1, prefer_held=True\):/, "a drifted slot relocates to the twin the editor holds, and refuses when nobody can tell (review find)");
+  assert.match(KERNEL, /_park_holds\.pop\(sid, None\)\s+# …and the editors' holds: an obj: key must not outlive its op/);
   assert.match(EDITOR, /function holdQueuedMsg\(sid: string, ref: QueuedEditRef, hold: boolean\): Record<string, unknown> \{\s*\n\s*const m: Record<string, unknown> = \{ type: "holdQueued", id: sid, md: ref\.md, hold \};\s*\n\s*if \(ref\.idx !== undefined\) m\.idx = ref\.idx;\s*\n\s*if \(ref\.park !== undefined\) m\.park = ref\.park;\s*\n\s*if \(ref\.qid\) m\.qid = ref\.qid;/,
     "the hold names the entry the way the ✎ and the ✕ do: body, slot, and the copy's id");
   assert.match(DELEGATES, /qedit: \(el\) => \{[\s\S]*?const sidQ = owningSidOf\(el\) \|\| activeId;[\s\S]*?if \(el\.dataset\.qid\) ref\.qid = el\.dataset\.qid;[\s\S]*?openQueuedEditor\(sidQ, ref, bub \? bub\.getBoundingClientRect\(\)\.width : 0\);/,
@@ -143,12 +146,22 @@ test("the hold: every other client reads 'editing' on a held copy; the kernel sk
 test("the verdict: a refused Save reverses the repaint and hands the words back in a toast; a refused hold closes the field and the bubble says so", () => {
   assert.match(VERDICT, /const isSave = m\.op !== "hold" && m\.op !== "release";/, "a hold's or a release's acknowledgement never consumes a Save's restore stash (review find)");
   assert.match(VERDICT, /if \(m\.op === "hold"\) \{[\s\S]*?if \(ed\.sid !== m\.id \|\| ed\.ref\.md !== md \|\| !ed\.open\) continue;[\s\S]*?if \(typeof m\.qid === "string" && m\.qid && ed\.ref\.qid && ed\.ref\.qid !== m\.qid\) continue;[\s\S]*?ed\.open = false; ed\.note = why \|\| "too late to edit — the message already reached the session as it was";/);
-  assert.match(VERDICT, /if \(why \|\| edited\) warnToast\(\(why \|\| "The message could not be held for editing\."\) \+ \(edited \? " Your edit: " \+ edited : ""\)\);/,
-    "a refused hold hands back the words typed so far");
-  assert.match(VERDICT, /\} else if \(m\.op !== "release"\) \{\s*\n\s*if \(stash\) applyQueuedEditLocally\(m\.id, stash\.ref, stash\.typed, true\);\s*\n\s*if \(why \|\| stash\) warnToast\(\(why \|\| "The edit was not applied\."\) \+ \(stash \? " Your edit: " \+ stash\.typed : ""\)\);/,
-    "the words are never lost and never sent twice; they ride a sticky toast, not the composer");
+  assert.match(VERDICT, /if \(edited\) stickyToast\(\(why \|\| "The message could not be held for editing\."\) \+ " Your edit: " \+ edited, edited\);[^\n]*\n\s*else if \(why\) warnToast\(why\);/,
+    "a refused hold hands back the words typed so far, in a toast that never fades");
+  assert.match(VERDICT, /\} else if \(m\.op !== "release"\) \{\s*\n\s*if \(stash\) applyQueuedEditLocally\(m\.id, stash\.ref, stash\.typed, true\);\s*\n\s*if \(stash && m\.gone\) \{[\s\S]*?stickyToast\(\(why \|\| "The edit was not applied\."\) \+ " Your edit: " \+ stash\.typed, stash\.typed\);/,
+    "a copy that left the queue has no bubble: the words go to a toast that never fades, with a Copy button (review find: warnToast fades at 11 s)");
+  assert.match(VERDICT, /\} else if \(stash\) \{[\s\S]*?queuedEditors\.set\(key, \{ eid: \+\+queuedEditorSeq, sid: m\.id, key, ref: stash\.ref, text: stash\.typed, sel: \[stash\.typed\.length, stash\.typed\.length\],\s*\n\s*focused: true, open: true, note: why \|\| "The edit was not applied\.", width: 0, height: 0 \}\);\s*\n\s*if \(!isProvisionalId\(m\.id\) && !hostIsDown\(m\.id\)\) vscodeApi\?\.postMessage\(holdQueuedMsg\(m\.id, stash\.ref, true\)\);/,
+    "a copy still queued: the field reopens with the typed words and the refusal beside them, re-held");
+  assert.match(EDITOR, /if \(ed\.note\) \{ const n = el\("div", "queued-editnote"\); n\.textContent = ed\.note; box\.appendChild\(n\); \}/, "the open field shows the refusal above its buttons");
+  assert.match(VERDICT, /if \(edited\) stickyToast\(\(why \|\| "The message could not be held for editing\."\) \+ " Your edit: " \+ edited, edited\);/, "a refused hold's typed words never fade either");
+  assert.match(RENDER, /^function stickyToast\(msg: string, copyText: string\): HTMLElement \{/m);
+  assert.doesNotMatch(slice("function stickyToast(", "\n}\n", RENDER), /setTimeout/, "no timers on the sticky toast");
+  assert.match(slice("function stickyToast(", "\n}\n", RENDER), /navigator\.clipboard\?\.writeText\(copyText\)/);
+  assert.match(CSS, /\.warn-toast\.sticky \{ border-color: var\(--accent\); \}/);
+  assert.match(KERNEL, /if err and err == _edit_miss_text\(md\):\s*\n\s*frame\["gone"\] = True/, "the kernel says when the copy is gone, and only then");
   assert.match(VERDICT, /repaintQueuedFor\(m\.id\);/);
-  assert.match(BUBBLE, /else if \(qed && qed\.note\) \{ const n = el\("div", "queued-editnote"\); n\.textContent = qed\.note; bubble\.appendChild\(n\); \}/, "the bubble says so, under its words");
+  assert.match(BUBBLE, /else if \(qed && qed\.note && t\.held\) \{ const n = el\("div", "queued-editnote"\); n\.textContent = qed\.note; bubble\.appendChild\(n\); \}\s*\n\s*else if \(qed && qed\.note\) queuedEditors\.delete\(qed\.key\);/,
+    "the bubble says so under its words for as long as the hold it speaks of stands, and stops when the other client lets go (review find)");
 });
 
 test("the hold survives the page's socket and a tab close: re-hold on socket-up, explicit release on close, the pending group's cache reads the editor, the ✕ hands back the edited words", () => {

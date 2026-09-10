@@ -337,6 +337,48 @@ class KernelHold(unittest.TestCase):
         self.assertFalse(self.sent.pop()["ok"])
         self.assertEqual(km._park_holds.get(SID, {}), {})
 
+    def test_a_drifted_save_lands_on_the_twin_the_editor_holds_and_refuses_when_nobody_can_tell(self):
+        # two id-less same-words parked sends (a CLI send, a re-delivery) behind a compaction; the editor opened on the
+        # second at slot 2; the compaction fires and the slots shift; by body alone the first twin took the edit
+        km._pending_ops[SID] = [("compact",), tuple(["send", "x", "human"]), tuple(["send", "x", "human"])]
+        self.assertTrue(self._op(park=2, md="x")["ok"])
+        held = km._pending_ops[SID][2]
+        km._pending_ops[SID].pop(0)                                              # the compaction went
+        self.assertTrue(km._drive({"type": "editQueued", "id": SID, "park": 2, "md": "x", "text": "x edited"}, self.client))
+        frame = self.sent.pop()
+        self.assertTrue(frame["ok"], frame)
+        self.assertEqual([op[1] for op in km._pending_ops[SID]], ["x", "x edited"], "the edit landed on the held twin, not the first by body")
+        self.assertIs(km._pending_ops[SID][0], km._pending_ops[SID][0])
+        self.assertEqual(km._park_holds.get(SID, {}), {}, "…and its Save released the hold")
+        # nobody holds either twin and the slot drifted: refused, nothing changed
+        km._pending_ops[SID] = [tuple(["send", "y", "human"]), tuple(["send", "y", "human"])]
+        self.assertTrue(km._drive({"type": "editQueued", "id": SID, "park": 5, "md": "y", "text": "y2"}, self.client))
+        frame = self.sent.pop()
+        self.assertEqual((frame["ok"], frame["text"]), (False, km._MOVED_TEXT))
+        self.assertNotIn("gone", frame, "still queued: the client reopens the field with the words")
+        self.assertEqual([op[1] for op in km._pending_ops[SID]], ["y", "y"])
+        # a hold placed by a drifted slot takes the FREE twin, not the held one
+        self.assertTrue(self._op(park=0, md="y")["ok"])
+        self.assertTrue(self._op(park=7, md="y")["ok"], "the drifted hold lands on the twin nobody holds")
+        self.assertEqual(len(km._park_holds[SID]), 2)
+        # a gone copy says so, so the client keeps the words in a toast that never fades
+        self.assertTrue(km._drive({"type": "editQueued", "id": SID, "park": 0, "md": "gone", "text": "g2"}, self.client))
+        frame = self.sent.pop()
+        self.assertEqual((frame["ok"], frame["gone"]), (False, True))
+
+    def test_the_drains_drop_arm_takes_the_parked_holds_with_the_queue(self):
+        class _Raising(_FakeBackend):
+            def send(self, sid, text):
+                raise RuntimeError("the session is dead")
+        km._pending_ops[SID] = [tuple(["send", "a", "human"]), tuple(["send", "b", "human"])]
+        self._op(park=0, md="a")
+        self.assertIn(SID, km._park_holds)
+        km.Sessions.backend_for = staticmethod(lambda sid: _Raising())
+        km._compacting_now = lambda sid: False
+        km._apply_pending_ops()                                                  # b's delivery raises: the queue is dropped once
+        self.assertNotIn(SID, km._pending_ops)
+        self.assertNotIn(SID, km._park_holds, "no hold outlives the queue it was about (an obj: key could latch onto a reused address)")
+
     def test_a_hold_on_a_copy_no_running_session_holds_says_so_not_too_late(self):
         class _Dormant(_HoldBackend):
             def hold_queued(self, sid, idx, expect, owner, qid=None):
