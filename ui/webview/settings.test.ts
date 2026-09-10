@@ -151,3 +151,21 @@ test("the optional panes default to shown, a hide round-trips, and only an expli
   assert.deepEqual(paneSet(undefined), { timeline: true, fleet: true, feed: true });
   delete store["romp:settings"];
 });
+
+// The Files CONTROL's own setting (T317, the user 2026-09-10): whether the dashboard bar's Files toggle and the
+// phone's Files tab show at all. Shown by default (today's behaviour); only the literal false hides them, so a
+// corrupt entry may cost the preference, never the control. The shell reads the store key itself
+// (kernel.py _LANDING_COLLAPSE_JS filesCtl), so the key and the false-only rule are the contract.
+test("the Files control shows by default; hiding it round-trips, and only the literal false hides it", () => {
+  assert.equal(DEFAULT_SETTINGS.filesControl, true);
+  delete store["romp:settings"];
+  assert.equal(loadSettings().filesControl, true, "a fresh install shows the control");
+  saveSettings({ filesControl: false });
+  assert.equal(loadSettings().filesControl, false, "hiding it survives a reload (localStorage)");
+  assert.equal(JSON.parse(store["romp:settings"]).filesControl, false, "the key the shell reads, the literal false");
+  store["romp:settings"] = JSON.stringify({ compact: true });
+  assert.equal(loadSettings().filesControl, true, "a store written before the key shows the control");
+  store["romp:settings"] = JSON.stringify({ filesControl: "no" });
+  assert.equal(loadSettings().filesControl, true, "a foreign stored value shows it: only false hides");
+  delete store["romp:settings"];
+});

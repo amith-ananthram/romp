@@ -239,6 +239,44 @@ class Shell(unittest.TestCase):
         _has(self, "gutter('gv-c',function(){var c=document.body.classList;return c.contains('po-feed')?'feed-pane':"
                       "c.contains('po-fleet')?'fleet-pane':'chat-pane';},'files-pane');", self.html)
 
+    def test_the_files_controls_own_setting_hides_it_in_both_layouts(self):
+        # T317 (the user 2026-09-10): the gear's "Files control in the dashboard bar" (romp:settings.filesControl,
+        # shown unless the store holds the literal false). The shell reads the gear's store key itself, hides the
+        # rail's toggle and the phone's tab by one body class, closes an open pane on the same apply, refuses to
+        # bring the pane forward, tells the panes it is unavailable, and the phone's switcher never shows a hidden
+        # tab (a stored romp-mobile-tab, a relay). Executed under node in tests/test_pane_state_broadcast.py.
+        _has(self, "body.no-files-control .rail-btn[data-pane=files],body.no-files-control #mtabs button[data-pane=files]{display:none}", self.html)
+        js = km._LANDING_COLLAPSE_JS
+        _has(self, "function filesCtl(){try{var st=JSON.parse(localStorage.getItem('romp:settings')||'null');return !(st&&st.filesControl===false);}catch(e){return true;}}", js)
+        _has(self, "document.body.classList.toggle('no-files-control',!ctl);", js)
+        _has(self, "if(k==='files'&&!filesCtl())return;", js)
+        _has(self, "return {romp:'panes',on:on,avail:{files:filesCtl()}};", js)
+        _has(self, "window.addEventListener('storage',apply);", js)   # the gear writes from another document: this is the event
+        mob = km._LANDING_MOBILE_JS
+        _has(self, "function show(p){if(p==='files'&&!filesCtlM())p='chat';", mob)
+        # the gear's row, in the panes section beside "File links open in", shown by default; the chat's route reads the word
+        gear = (UI / "gear.js").read_text()
+        _has(self, "<input type=checkbox id=rs-filesctl checked>", gear)
+        # the box has a NAME OF ITS OWN in the gear's one var list (review find: a second `fc` shadowed the feed's
+        # collapsed box, so the new row was dead and the feed box wrote this setting)
+        _has(self, "fsc = document.getElementById('rs-filesctl')", gear)
+        _has(self, "if (fsc) fsc.addEventListener('change', function () { var s = load(); s.filesControl = fsc.checked; save(s); });", gear)
+        _has(self, "if (fsc) fsc.checked = (s.filesControl !== false);", gear)
+        self.assertEqual(gear.count("fc = document.getElementById("), 1, "fc is the feed's collapsed box alone")
+        self.assertEqual(gear.count("fsc = document.getElementById("), 1)
+        # the palette's entry for the pane is not listed while the control is hidden (re-read at every open)
+        pal = (UI / "palette-main.ts").read_text()
+        _has(self, 'when: key === "files" ? () => !document.body.classList.contains("no-files-control") : undefined,', pal)
+        _has(self, "filter((c) => !c.hidden && (!c.when || c.when()))", (UI / "palette.ts").read_text())
+        # a ?panes= bookmark stays a view: the forced close is never written over the stored set
+        _has(self, "if(!ctl&&po.files){po.files=false;if(qp===null)saveP();}", js)
+        self.assertLess(gear.index("id=rs-filelink"), gear.index("id=rs-filesctl"), "the row follows the file-link setting it qualifies")
+        render = (UI / "render.ts").read_text()
+        _has(self, "fileLinkRoute(settings.fileLinkPane, window.parent !== window, panesOn.files === true, panesAvail.files !== false)", render)
+        # the hint in the pane stays true: it speaks of the pane being open or closed, never of the control
+        files = (UI / "files.ts").read_text()
+        _has(self, "To open them here while it is closed, set File links open in to The Files pane in the gear.", files)
+
     def test_mobile_tab_and_the_palette_command(self):
         _has(self, "#chat-pane,#fleet-pane,#feed-pane,#files-pane,#tl-pane{display:contents!important}", self.html)
         _has(self, "#f-chat.m-on,#f-fleet.m-on,#f-feed.m-on,#f-files.m-on{display:block}", self.html)
@@ -295,11 +333,11 @@ class Relay(unittest.TestCase):
         # gesture reader); the pane validates the identity and caches it per sid (files.ts)
         render = (UI / "render.ts").read_text()
         _has(self, 'window.parent.postMessage({ romp: "viewFile", path, sid: to, pane: "pane",', render)
-        _has(self, "fileLinkRoute(settings.fileLinkPane, window.parent !== window, panesOn.files === true)", render)
+        _has(self, "fileLinkRoute(settings.fileLinkPane, window.parent !== window, panesOn.files === true, panesAvail.files !== false)", render)
         files = (UI / "files.ts").read_text()
         _has(self, "asIdentity(m.identity)", files)
         route = (UI / "file-route.ts").read_text()
-        _has(self, "export function fileLinkRoute(pane: unknown, framed: boolean, filesOpen: boolean): FileRoute {", route)
+        _has(self, "export function fileLinkRoute(pane: unknown, framed: boolean, filesOpen: boolean, filesAvail: boolean = true): FileRoute {", route)
 
     def test_the_gear_and_the_guide_say_the_open_pane_wins(self):
         gear = (UI / "gear.js").read_text()
@@ -519,7 +557,7 @@ class BrowseRelay(unittest.TestCase):
         # identity, opens the browser, routes a pick through its own open, and owes the shell no browseClosed
         render = (UI / "render.ts").read_text()
         _has(self, 'window.parent.postMessage({ romp: "browseFiles", path: path || ".", sid: to, pane: "pane",', render)
-        _has(self, "browseRoute(web, settings.fileLinkPane, window.parent !== window, panesOn.files === true)", render)
+        _has(self, "browseRoute(web, settings.fileLinkPane, window.parent !== window, panesOn.files === true, panesAvail.files !== false)", render)
         files = (UI / "files.ts").read_text()
         _has(self, "shellRestore: false,", files)
         _has(self, "if (sid && id) identities.set(sid, id);", files)
@@ -528,7 +566,7 @@ class BrowseRelay(unittest.TestCase):
         browse = (UI / "file-browse.ts").read_text()
         _has(self, "if (!shellRestore) return;", browse)
         route = (UI / "file-route.ts").read_text()
-        _has(self, "export function browseRoute(web: boolean, pane: unknown, framed: boolean, filesOpen: boolean): BrowseRoute {", route)
+        _has(self, "export function browseRoute(web: boolean, pane: unknown, framed: boolean, filesOpen: boolean, filesAvail: boolean = true): BrowseRoute {", route)
         _has(self, 'export type BrowseRoute = FileRoute | "editor";', route)
 
     def test_the_gear_and_the_guide_name_the_folder(self):

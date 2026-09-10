@@ -11,12 +11,16 @@ reconcile sweeps roots under the system temp dir whose marker names a dead pid.
 Pinned: a root whose owner is dead goes; a root whose owner is alive stays (this process is the
 owner); a root with no marker, an unreadable marker or a foreign name stays — refusing is the safe
 direction; the running suite's own root carries a marker naming this process; the marker file name
-agrees between conftest and the kernel; and _boot_reconcile calls the sweep. Everything is built
-under this test's own temp dir (itself inside the run's root), never in the real system temp dir.
+agrees between conftest and the kernel; the chmod retry re-modes only directories of the tombstone's
+own tree (never its parent, never a symlink's target, never a hard-linked file); and _boot_reconcile
+calls the sweep.
+Everything is built under this test's own temp dir (itself inside the run's root), never in the
+real system temp dir.
 """
 import inspect
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -122,6 +126,92 @@ class DeadOwnerSweep(unittest.TestCase):
             if os.path.isdir(locked):
                 os.chmod(locked, 0o700)
         self.assertFalse(os.path.exists(dead))
+
+    def _read_only_children(self, dead: str, names):
+        """One read-only child of `dead` per name, restored (wherever the sweep left it: under the root
+        or under the tombstone) once the test is over, so the run's own temp root can go at run end."""
+        children = {n: os.path.join(dead, "deep", n) for n in names}
+        for c in children.values():
+            os.makedirs(c)
+
+        def restore():
+            for base in (dead, dead + sb.TEST_ROOT_TOMBSTONE):
+                for n in names:
+                    c = os.path.join(base, "deep", n)
+                    if os.path.isdir(c) and not os.path.islink(c):
+                        os.chmod(c, 0o700)
+        self.addCleanup(restore)
+        return children
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores the read-only bit; the retry never runs")
+    def test_chmod_retry_never_follows_a_symlink_out_of_the_root(self):
+        # A symlink inside a read-only child: unlinking it fails once (the parent lacks the write
+        # bit), the retry re-modes the parent, and the link itself is left alone. os.chmod follows
+        # a symlink, so a chmod of the link would land on its target, which can be anywhere. One
+        # link per read-only child, because the first failure re-modes that child and the rest of
+        # its entries then go without a retry: a link to a file and a link to a directory each get
+        # their own (a directory target is the one os.path.isdir follows).
+        outside_file = os.path.join(self.tmp, "outside.txt")
+        with open(outside_file, "w") as fh:
+            fh.write("x")
+        os.chmod(outside_file, 0o644)
+        outside_dir = os.path.join(self.tmp, "outside-dir")
+        os.makedirs(outside_dir)
+        os.chmod(outside_dir, 0o755)
+        dead = _root(self.tmp, "romp-tests-linky", {"pid": _dead_pid()})
+        ro = self._read_only_children(dead, ("ro-file", "ro-dir"))
+        os.symlink(outside_file, os.path.join(ro["ro-file"], "link"))
+        os.symlink(outside_dir, os.path.join(ro["ro-dir"], "link"))
+        for c in ro.values():
+            os.chmod(c, 0o555)
+        self.assertEqual(sb.sweep_dead_test_roots(self.tmp), 1)
+        self.assertFalse(os.path.exists(dead))
+        self.assertEqual(stat.S_IMODE(os.stat(outside_file).st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE(os.stat(outside_dir).st_mode), 0o755)
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores the read-only bit; the retry never runs")
+    def test_chmod_retry_leaves_a_hard_linked_file_alone(self):
+        # A hard link inside a read-only child shares its inode, and so its mode, with a file
+        # outside the root: the retry re-modes the read-only child and never the entry.
+        outside = os.path.join(self.tmp, "shared.txt")
+        with open(outside, "w") as fh:
+            fh.write("x")
+        os.chmod(outside, 0o644)
+        dead = _root(self.tmp, "romp-tests-hardy", {"pid": _dead_pid()})
+        ro = self._read_only_children(dead, ("ro",))["ro"]
+        os.link(outside, os.path.join(ro, "hard"))
+        os.chmod(ro, 0o555)
+        self.assertEqual(sb.sweep_dead_test_roots(self.tmp), 1)
+        self.assertFalse(os.path.exists(dead))
+        self.assertEqual(stat.S_IMODE(os.stat(outside).st_mode), 0o644)
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores the read-only bit; the retry never runs")
+    def test_a_failure_at_the_tombstone_itself_leaves_the_temp_dir_mode_alone(self):
+        # The final rmdir of the tombstone fails because its PARENT (the temp dir, which is not
+        # ours) is not writable: the parent keeps its mode, the tombstone stands for the next boot,
+        # and the sweep says so.
+        arena = os.path.join(self.tmp, "arena")
+        os.makedirs(arena)
+        tomb = _root(arena, "romp-tests-old" + sb.TEST_ROOT_TOMBSTONE)
+        os.chmod(arena, 0o555)
+        logs = []
+        try:
+            n = sb.sweep_dead_test_roots(arena, log=logs.append)
+            self.assertEqual(stat.S_IMODE(os.stat(arena).st_mode), 0o555)
+        finally:
+            os.chmod(arena, 0o700)
+        self.assertEqual(n, 0)
+        self.assertTrue(os.path.isdir(tomb))
+        self.assertTrue(any("not removed" in line for line in logs), logs)
+
+    def test_a_tombstone_a_peer_already_removed_does_not_re_mode_its_parent(self):
+        # rmtree reports a root that is already gone through the same handler; nothing outside the
+        # root changes.
+        arena = os.path.join(self.tmp, "arena2")
+        os.makedirs(arena)
+        os.chmod(arena, 0o755)
+        sb._rmtree_stubborn(os.path.join(arena, "romp-tests-gone" + sb.TEST_ROOT_TOMBSTONE))
+        self.assertEqual(stat.S_IMODE(os.stat(arena).st_mode), 0o755)
 
     def test_a_leftover_tombstone_is_removed_without_a_marker(self):
         # A previous boot renamed the root and died before finishing: the tombstone is ours by name.

@@ -77,7 +77,7 @@ test("the defaults hold — Mod+O jump, Mod+Shift+O picker, Mod+P palette — th
   assert.match(MAIN, /window\.addEventListener\("storage", invalidate\);/);
   // …and the palette chips show the EFFECTIVE binding, never a stale default
   assert.match(MAIN, /kbdFor: \(c\) => \{ const ch = effectiveChord\(c\.id, c\.chord, loadOverrides\(\), mac\); return ch \? displayChord\(ch, mac\) : undefined; \}/);
-  assert.match(PALETTE, /commandList\(\)\.filter\(\(c\) => !c\.hidden\)/);
+  assert.match(PALETTE, /commandList\(\)\.filter\(\(c\) => !c\.hidden && \(!c\.when \|\| c\.when\(\)\)\)/);
 });
 
 test("key wiring mirrors the Alt+Arrow pane nav: capture on the shell doc AND every pane doc, re-wired on load", () => {
@@ -208,4 +208,13 @@ test("the gear links the shortcuts dialog instead of carrying its own stale list
   assert.match(GEAR, /\{ romp: 'openKeys' \}/);
   assert.doesNotMatch(GEAR, /quick switcher/);
   assert.doesNotMatch(GEAR, /<kbd>⌘\/Ctrl<\/kbd>/);
+});
+
+// The Files control hidden by its gear setting (T317): the shell's body wears no-files-control and __rompPaneToggle
+// refuses 'files', so the palette's "Show or hide the files pane" entry is not listed either — a `when` predicate on
+// the command, re-read at every open (the gear's change in the feed iframe reaches the body class through the
+// shell's storage listener), so the list never offers a visible no-op.
+test("the Files pane command is listed only while its control shows: a `when` predicate the list re-reads at every open", () => {
+  assert.match(MAIN, /when: key === "files" \? \(\) => !document\.body\.classList\.contains\("no-files-control"\) : undefined,/);
+  assert.match(PALETTE, /filter\(\(c\) => !c\.hidden && \(!c\.when \|\| c\.when\(\)\)\)/, "the list filters on it beside `hidden`");
 });

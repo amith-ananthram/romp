@@ -114,6 +114,101 @@ console.log(JSON.stringify(out));
 """
 
 
+# ── the Files control hidden by its gear setting (T317) ─────────────────────────────────────────────────
+# The store holds romp:settings.filesControl false and the Files pane is ON (a desktop session left it open):
+# the boot apply hides the control (body.no-files-control), closes the pane and saves that, tells the panes the
+# pane is unavailable (avail.files false), and refuses to bring it forward; a phone left on the Files tab is
+# switched to the chat. Flipping the store back on (the gear's write, heard through the storage listener) shows
+# the control again and the pane can open.
+_HIDDEN_DRIVER = r"""
+const last = (k) => (POSTED[k] || []).slice(-1)[0];
+const counts = () => Object.fromEntries(KEYS.map((k) => [k, (POSTED[k] || []).length]));
+const out = {};
+out.boot = { cls: CLS.has('no-files-control'), poFiles: CLS.has('po-files'), store: JSON.parse(STORE['romp-panes'] || 'null'), chat: last('chat'), counts: counts() };
+window.__rompPaneToggle('files', true);          // a relay's bring-forward, the palette's command: refused
+out.refused = { poFiles: CLS.has('po-files'), chat: last('chat'), counts: counts() };
+MOBILE = true; TAB = 'files'; SWITCHED.length = 0; window.__rompPaneToggle('feed');   // any apply (here a feed flip) on a phone left on the Files tab
+out.phone = { switched: SWITCHED.slice() };
+MOBILE = false;
+STORE['romp:settings'] = JSON.stringify({ filesControl: true }); STORAGE_LISTENERS.forEach((f) => f());   // the gear turns it back on
+out.shown = { cls: CLS.has('no-files-control'), chat: last('chat') };
+window.__rompPaneToggle('files', true);
+out.reopened = { poFiles: CLS.has('po-files'), chat: last('chat') };
+console.log(JSON.stringify(out));
+"""
+
+
+_BOOKMARK_DRIVER = r"""
+const out = { poFiles: CLS.has('po-files'), cls: CLS.has('no-files-control'), store: STORE['romp-panes'], chat: (POSTED.chat || []).slice(-1)[0] };
+console.log(JSON.stringify(out));
+"""
+
+
+class HiddenControlBookmark(unittest.TestCase):
+    """A ?panes=chat,files bookmark opened with the control hidden: the view shows the chat alone (the pane is closed
+    on the boot apply), but the stored pane set is NOT rewritten with the bookmark's — a bookmark was always a view,
+    never a write (review find: the forced close's save would have replaced the person's stored set)."""
+
+    @classmethod
+    def setUpClass(cls):
+        keys = [k for k, _ in km._PANE_ORDER]
+        stored = json.dumps({"chat": True, "fleet": False, "feed": True, "timeline": True, "files": False})
+        harness = (_COLLAPSE_HARNESS.replace("__KEYS__", json.dumps(keys))
+                   .replace("const POSTED = {}, LOADS = {}, CLS = new Set(['po-chat', 'po-feed', 'po-timeline']), STORE = {};",
+                            "const POSTED = {}, LOADS = {}, CLS = new Set(['po-chat', 'po-feed', 'po-timeline']), STORE = {"
+                            "'romp:settings': JSON.stringify({ filesControl: false }), 'romp-panes': " + json.dumps(stored) + " };")
+                   .replace("global.location = { search: '' };", "global.location = { search: '?panes=chat,files' };")
+                   .replace("global.URLSearchParams = class { get() { return null; } };", "global.URLSearchParams = class { get(k) { return k === 'panes' ? 'chat,files' : null; } };"))
+        cls.stored = stored
+        cls.out = _run(harness + km._LANDING_COLLAPSE_JS + _BOOKMARK_DRIVER)
+
+    def test_the_bookmark_shows_the_chat_alone_and_writes_nothing(self):
+        self.assertFalse(self.out["poFiles"], "the bookmark's files pane is closed: the control is hidden")
+        self.assertTrue(self.out["cls"])
+        self.assertEqual(self.out["store"], self.stored, "the stored pane set is untouched: a bookmark is a view")
+        self.assertEqual(self.out["chat"]["on"], {"chat": True, "timeline": False, "fleet": False, "feed": False, "files": False})
+        self.assertEqual(self.out["chat"]["avail"], {"files": False})
+
+
+class HiddenControl(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        keys = [k for k, _ in km._PANE_ORDER]
+        harness = (_COLLAPSE_HARNESS.replace("__KEYS__", json.dumps(keys))
+                   .replace("const POSTED = {}, LOADS = {}, CLS = new Set(['po-chat', 'po-feed', 'po-timeline']), STORE = {};",
+                            "const POSTED = {}, LOADS = {}, CLS = new Set(['po-chat', 'po-feed', 'po-timeline']), STORE = {"
+                            "'romp:settings': JSON.stringify({ filesControl: false }), 'romp-panes': JSON.stringify({ chat: true, fleet: false, feed: true, timeline: true, files: true }) };"
+                            "const STORAGE_LISTENERS = [], SWITCHED = [];")
+                   .replace("global.addEventListener = () => {};", "global.addEventListener = (ev, f) => { if (ev === 'storage') STORAGE_LISTENERS.push(f); };")
+                   + "window.__rompMobileTab = (p) => { SWITCHED.push(p); TAB = p; };\n")
+        cls.out = _run(harness + km._LANDING_COLLAPSE_JS + _HIDDEN_DRIVER)
+
+    def test_the_boot_apply_hides_the_control_and_closes_the_open_pane(self):
+        b = self.out["boot"]
+        self.assertTrue(b["cls"], "body.no-files-control: the rail's toggle and the phone's tab are hidden by CSS")
+        self.assertFalse(b["poFiles"], "the pane a desktop session left open closes on the same apply")
+        self.assertEqual(b["store"]["files"], False, "…and the close is saved, so a reload stays closed")
+        self.assertEqual(b["chat"]["avail"], {"files": False}, "the panes are told the pane is unavailable: file links open over the pane clicked")
+        self.assertEqual(b["chat"]["on"]["files"], False)
+
+    def test_the_pane_cannot_be_brought_forward_while_the_control_is_hidden(self):
+        r = self.out["refused"]
+        self.assertFalse(r["poFiles"], "a relay's bring-forward or the palette's command is refused")
+        self.assertEqual(r["counts"], self.out["boot"]["counts"], "…silently: no message claiming a change")
+        self.assertEqual(self.out["boot"]["counts"], {k: 1 for k in [k for k, _ in km._PANE_ORDER]}, "the boot apply told each pane once")
+
+    def test_a_phone_left_on_the_files_tab_is_switched_to_the_chat(self):
+        self.assertEqual(self.out["phone"]["switched"], ["chat"])
+
+    def test_the_gears_write_shows_the_control_again_and_the_pane_can_open(self):
+        s = self.out["shown"]
+        self.assertFalse(s["cls"], "the storage event re-applies: the control shows")
+        self.assertEqual(s["chat"]["avail"], {"files": True})
+        r = self.out["reopened"]
+        self.assertTrue(r["poFiles"], "and the pane opens again")
+        self.assertEqual(r["chat"]["on"]["files"], True)
+
+
 class Broadcast(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -122,7 +217,8 @@ class Broadcast(unittest.TestCase):
 
     def test_the_boot_apply_tells_every_pane_the_set_as_the_flags_stand(self):
         self.assertEqual(self.out["boot"]["counts"], {k: 1 for k in self.keys}, "one message per pane at boot")
-        self.assertEqual(self.out["boot"]["chat"], {"romp": "panes", "on": {"chat": True, "timeline": True, "fleet": False, "feed": True, "files": False}})
+        self.assertEqual(self.out["boot"]["chat"], {"romp": "panes", "on": {"chat": True, "timeline": True, "fleet": False, "feed": True, "files": False},
+                                                     "avail": {"files": True}})   # avail: the Files control's setting rides every tell (T317)
         self.assertEqual(self.out["boot"]["files"], self.out["boot"]["chat"], "every pane hears the same set")
 
     def test_a_toggle_is_the_event_and_a_no_change_toggle_is_silent(self):

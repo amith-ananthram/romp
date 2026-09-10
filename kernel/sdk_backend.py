@@ -2341,16 +2341,24 @@ def _rmtree_stubborn(root: str) -> None:
     """rmtree that gets past a child with its permission bits cleared (a 000-mode directory some suite
     tests create and restore only in a finally that an os._exit skipped): on the first failure at a
     path, restore owner rwx on it and its parent and retry that step once. Raises on a second failure
-    so the caller can leave the tombstone standing and say so."""
+    so the caller can leave the tombstone standing and say so. Only `root` and directories inside it
+    are re-moded: the root's parent is not ours, and a chmod of a symlink would land on its target."""
     def onexc(func, path, exc):
         # `func` is whichever os call failed (3.12's fd-based rmtree hands over os.open, os.scandir,
         # os.rmdir, os.unlink with their own signatures), so it is not called back: the subtree at
         # `path` is removed again plainly after the chmod, and a second failure raises.
-        try:
-            os.chmod(os.path.dirname(path), 0o700)
-            os.chmod(path, 0o700)
-        except OSError:
-            pass
+        # Re-mode only directories of the tombstone's own tree. rmtree hands over the root or a
+        # descendant, so the parent is outside the tree exactly when `path` is the root (a failed
+        # rmdir of the root, or a root a peer already removed, must not chmod the system temp dir);
+        # and os.chmod follows a symlink, so a link inside a read-only child is left alone (its
+        # target may be anywhere). Unlink needs the parent's write bit, never the entry's own mode,
+        # so a non-directory never needed the chmod.
+        for p in ([os.path.dirname(path)] if path != root else []) + [path]:
+            if os.path.isdir(p) and not os.path.islink(p):
+                try:
+                    os.chmod(p, 0o700)
+                except OSError:
+                    pass
         if os.path.isdir(path) and not os.path.islink(path):
             shutil.rmtree(path)
         elif os.path.lexists(path):

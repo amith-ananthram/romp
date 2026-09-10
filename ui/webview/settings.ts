@@ -19,6 +19,7 @@ export interface RompSettings {
   tabCtx: TabCtxMode;        // chat tabs: WHEN the context gauge shows beside each session name (the user 2026-08-08) — "over50" (default: only once half full, so quiet tabs stay clean), "always", or "never".
   fileLinkPane: FileLinkPane;   // where a chat file-link click opens on the WEB while the Files pane is CLOSED: "chat" (the default: the viewer over the pane you clicked) or "pane" (the Files pane, a column of its own that comes forward and stays up). An OPEN Files pane takes the click whatever this says (file-route.ts). Read at click time (render.ts openPath, and openBrowse for a folder click, which walks the same ladder); VS Code (the host editor) and standalone /chat (no shell to relay to) are unaffected.
   stripGroupRows: boolean;   // chat tabs, grouped by tag: start EVERY tag group on its own row (T264, the row breaks in render.ts). ON by default; off, the groups follow one another across the strip and wrap as they need, the untagged trail behind its divider. Per browser profile, like every setting here. Read by renderTabs and part of the strip's rebuild signature, so a gear flip repaints at once.
+  filesControl: boolean;   // the Files control (the dashboard bar's toggle, the phone's tab) shows; off hides it and closes the pane (T317)
   chatScheme: ChatScheme;    // chat TEXT scheme (the user 2026-08-24): raises body-text contrast without collapsing the tool-dimmer-than-prose hierarchy. A scheme = a text-tier variable set (styles.css body.scheme-*); "default" applies nothing — today's values exactly.
   chatTabTheme: ChatTabTheme;   // LEGACY, derived (2026-08-28): the chat TAB STRIP's appearance (T113). Now computed from `theme` on every load/save ("classic" -> classic strip, anything else -> the yatharth strip) so older panes/extension builds keep working; never set it directly.
   theme: Theme;   // the OVERALL dashboard theme (the user 2026-08-27, promoting the tab-strip setting): "classic" = the pre-720 dark look; "yatharth" = dark + the contributed strip aesthetic (what chatTabTheme:"yatharth" was); "yatharth-light" = the warm light theme (body.theme-light + the yatharth strip). Migration: a store written before `theme` existed seeds it from chatTabTheme.
@@ -70,7 +71,7 @@ export function tabCtxMode(v: unknown): TabCtxMode {
 // hand-written "why" as their line; they show the distiller's summary instead (the why demotes to a hover).
 // compact defaults ON (the user 2026-07-14): a fresh install reads the tidy transcript
 // (thinking hidden, tool runs folded); the gear opts back into the full stream.
-export const DEFAULT_SETTINGS: RompSettings = { compact: true, colormap: "aurora", subgoals: true, showIndexJudges: false, showTriageJudges: false, backend: "sdk", defaultDir: "", showBranch: false, tabCtx: "over50", fileLinkPane: "chat", stripGroupRows: true, chatScheme: "default", chatTabTheme: "classic", theme: "classic", denseChrome: false, panes: { timeline: true, fleet: true, feed: true } };
+export const DEFAULT_SETTINGS: RompSettings = { compact: true, colormap: "aurora", subgoals: true, showIndexJudges: false, showTriageJudges: false, backend: "sdk", defaultDir: "", showBranch: false, tabCtx: "over50", fileLinkPane: "chat", stripGroupRows: true, filesControl: true, chatScheme: "default", chatTabTheme: "classic", theme: "classic", denseChrome: false, panes: { timeline: true, fleet: true, feed: true } };
 const KEY = "romp:settings";
 
 export function loadSettings(): RompSettings {
@@ -81,6 +82,7 @@ export function loadSettings(): RompSettings {
       const s = { ...DEFAULT_SETTINGS, ...parsed };
       s.tabCtx = tabCtxMode(s.tabCtx);   // a store written by the boolean-era gear holds true/false
       s.fileLinkPane = fileLinkPane(s.fileLinkPane);   // only "pane" opts in; anything else reads as the default
+      s.filesControl = s.filesControl !== false;   // only the literal false hides the control; anything else shows it (the default)
       s.chatScheme = chatScheme(s.chatScheme);   // unknown/legacy values normalize to "default"
       s.panes = paneSet(s.panes);   // every optional pane present; only an explicit false hides one
       // theme migration (2026-08-28): a store from before `theme` existed seeds it from the old

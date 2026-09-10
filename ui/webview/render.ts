@@ -71,7 +71,7 @@ import { hostNameNodes, hostPartsNodes, hostPrefix, hostOf, hostIsDown, hostIsDi
 import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionToken, insertMention, mentionKeyAction, mentionSegments } from "./composer-mention";   // the @-mention card's rules, pure; the DOM is setupComposer's mention block and markMentions
 import type { MentionCandidate, MentionQuery } from "./composer-mention";
 import { defaultCommentName, defaultBreakoutName, defaultForkName, nameToSend } from "./comment-name";
-import { followReader, keepPlaceAcrossShow, followTail, atBottomDist, followBoxBelow, followTailShrink } from "./scroll-keep";
+import { followReader, keepPlaceAcrossShow, followTail, atBottomDist, followBoxBelow, followTailShrink, reshowStick } from "./scroll-keep";
 import { retainLiveOmitted } from "./tab-order";
 import { userTurnShows } from "./user-turn-content";
 import { ScrollDiagBudget, classifyScroll, scrollWriteRow, tailChangeRow, tailLabel, spacerRow, readScrollDiagCap, summarizeTailMutations, tailMutRow, unitChangeRow, unitChanges, boxChanges, boxLabel, BOX_FROM_TAIL } from "./scroll-write";
@@ -1425,11 +1425,12 @@ document.addEventListener("click", (e) => {
 // own event, never a per-click guess (no reading the parent's DOM, no polling). Standalone /chat never
 // hears one and reads as all-off, which the framed gate makes moot anyway.
 let panesOn: Record<string, boolean> = {};
+let panesAvail: Record<string, boolean> = {};   // …and which panes EXIST to bring forward (avail: the Files control's setting, T317); absent = available
 function openPath(path: string, sid?: string | null, ev?: MouseEvent | null): void {
   if (!vscodeApi) return;
   if (location.protocol === "http:" || location.protocol === "https:") {
     const to = sid || activeId || null;
-    const route = fileLinkRoute(settings.fileLinkPane, window.parent !== window, panesOn.files === true);
+    const route = fileLinkRoute(settings.fileLinkPane, window.parent !== window, panesOn.files === true, panesAvail.files !== false);
     // with its gesture, read first: a Cmd/Ctrl- or middle-click on a PDF takes the browser's own tab wherever
     // the plain click would have landed; a plain click routed to the Files pane is handed to the shell
     openFileClick(ev, path, to, route === "pane" ? () => {
@@ -1462,7 +1463,7 @@ function onMiddleClick(a: HTMLElement, fn: (e: MouseEvent) => void): void {
 // tells the person where Browse files will land, so the two cannot disagree.
 function browseRouteNow(): BrowseRoute {
   const web = location.protocol === "http:" || location.protocol === "https:";
-  return browseRoute(web, settings.fileLinkPane, window.parent !== window, panesOn.files === true);
+  return browseRoute(web, settings.fileLinkPane, window.parent !== window, panesOn.files === true, panesAvail.files !== false);
 }
 // Surface the FILE BROWSER at `path` for the session: the folder shown under the chat, the system context
 // card's Directory row, a tab menu's Browse files, a chat-hosted viewer's directory link. The listing goes
@@ -11023,7 +11024,15 @@ function rerenderAll(): void {
   // (follow mode lands there); a hidden pane has nothing to keep either. showActive restores it after the land.
   const content = document.getElementById("content");
   const av = activeId ? views.get(activeId) : null;
-  const keep = av && av.shown && content && content.clientHeight > 0 && !atBottom(content) ? captureScrollAnchor(content, av) : null;   // follow mode: only a true tail-sitter lands at the bottom
+  const live = !!(av && av.shown && content && content.clientHeight > 0);
+  const bottom = live && atBottom(content!);
+  // Follow mode is re-derived from the true bottom HERE, before the clear (T262 review find, 2026-09-10): an
+  // emptied scroller reads as the bottom (reading scrollHeight forces layout and the browser clamps scrollTop to
+  // the new maximum, 0 once what is left of #content fits), so showActive's re-show rule would put a scrolled-up
+  // reader into follow mode, and the same frame's tail-shrink and box-below observers would then write them to
+  // the bottom over the anchor restored below. One read of the DOM drives both the flag and the keep.
+  if (live) av!.stick = reshowStick(av!.stick, bottom);
+  const keep = live && !bottom ? captureScrollAnchor(content!, av!) : null;   // follow mode: only a true tail-sitter lands at the bottom
   for (const v of views.values()) { while (v.el.firstChild) v.el.removeChild(v.el.firstChild); v.rendered = 0; v.stale = false; v.winStart = 0; v.winEnd = 0; v.avgTurnH = undefined; v.spacerCount = undefined; v.spacerCountBot = undefined; v.unitTotal = undefined; }
   showActive(keep);
   schedulePrebuild(); // rebuild every off-screen view in idle under the new setting, so switches stay instant
@@ -11512,6 +11521,12 @@ function showActive(keep?: { uuid: string; y: number } | null) {
   // decision, and a restore over its landing would undo the jump the reader asked for (review find, 2026-09-08)
   const navigating = !!pendingAnchor || pendingAnchorT != null || (!!seek && seek.sid === activeId);
   const reshow = keepPlaceAcrossShow(v, v.el.style.display !== "none", content.clientHeight > 0, navigating);
+  // the true bottom decides follow mode at a re-show (T262): the recorded flag can lag the reader (a scroll
+  // that landed during a pending build is not recorded), and a stale `stick` sent a bottom reader to a saved
+  // spot a screen above on every full show — the snap-up the journal filed as `land-saved`
+  // (gated the way the keep below is: a caller that emptied the DOM first, rerenderAll, read the true bottom
+  // before the clear and hands its keep in; the emptied scroller here would read as the bottom for anyone)
+  if (reshow && keep === undefined) v.stick = reshowStick(v.stick, atBottom(content));
   const keepAnchor = reshow ? (keep !== undefined ? keep : (!atBottom(content) ? captureScrollAnchor(content, v) : null)) : null;   // follow mode: off the true bottom keeps its place
   // Bound the switch. A view the user scrolled to the top of has had its window expanded to the WHOLE
   // transcript (winStart crept to 0 via lazy-expand), and compact mode renders the whole folded stream —
@@ -16165,6 +16180,10 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
       for (const k of Object.keys(m.on)) on[k] = m.on[k] === true;
       panesOn = on;
     }
+    // which panes exist to bring forward (the Files control's setting): whole-set replace as well
+    const avail: Record<string, boolean> = {};
+    if (m.avail && typeof m.avail === "object") for (const k of Object.keys(m.avail)) avail[k] = m.avail[k] !== false;
+    panesAvail = avail;
     return;
   }
   // the pipe's down edge is the VS Code twin of the shim's romp:wsdown: unconfirmed sends say so (markPendingLost)
