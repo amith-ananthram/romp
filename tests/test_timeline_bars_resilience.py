@@ -73,7 +73,9 @@ class RunJudgingFeed(unittest.TestCase):
 
 class FrameNeverSilentlyDies(unittest.TestCase):
     def test_every_bars_stage_degrades_alone_and_loudly(self):
-        src = inspect.getsource(km.build_timeline)
+        # the per-lane seams and marks stages live in _lane_segments (the lane memo's derivation); the parse, the
+        # live merge, the store read and the global stages stay in build_timeline
+        src = inspect.getsource(km.build_timeline) + inspect.getsource(km._lane_segments)
         # the per-lane parse swallow SAYS why a lane has no bars
         self.assertIn('_bars_complain(sid, "parse", e)', src)
         self.assertIn('_bars_complain(sid, "live-merge", e)', src)

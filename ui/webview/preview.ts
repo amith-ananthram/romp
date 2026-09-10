@@ -729,6 +729,7 @@ export function previewFull(path: string, sid?: string | null, verified = false,
 // as the manual path and the backstop once a box's bounded auto-retries are spent).
 const failedPreviews = new Map<HTMLElement, () => void>();
 export function retryFailedPreviews(): void {
+  retryMdImgProbes();                                // parked markdown images with attempts left (T291c): the budget rides the URL
   if (!failedPreviews.size) return;
   for (const [box, rebuild] of Array.from(failedPreviews.entries())) {
     failedPreviews.delete(box);                      // one attempt per registration; re-registers on error
@@ -757,15 +758,20 @@ export function refreshSettledPreviews(): void {
 // push rate (T291c, the user 2026-09-09: three captions, two to four lines each, ten times a second). A
 // failed markdown image is PARKED instead: its src leaves (into data-md-src), the element wears
 // .md-img-failed, and the browser shows the alt text as a stable caption: no src, no fetch, nothing to
-// flip. No per-message path exists. The reconnect-class heal (refreshSettledPreviews: romp:wsup, hostUp,
-// romp:hostRelayUp) probes every parked URL once OFF the DOM with a detached Image: a failure changes
-// nothing on screen, a success lands the picture on every parked img with that URL. A URL that failed is
-// remembered for the page life, and the sanitizer post-pass (mdImgPostPass, registered by render.ts) parks
-// a re-rendered img with that URL BEFORE the browser fetches it, so a re-render of the same markdown
-// reuses the state instead of fetching, failing and flipping once more. DOMPurify strips inline handlers
+// flip. No per-message path touches the img on the page: a URL the kernel serves gets a bounded probe OFF the
+// DOM (servedByKernel and retryMdImgProbes, below), every other parked URL waits for a reconnect. A URL that
+// failed is remembered for the page life, and the reconnect-class heal (refreshSettledPreviews: romp:wsup,
+// hostUp, romp:hostRelayUp) probes every remembered URL once OFF the DOM with a detached Image, whether or not
+// an img with it is on the page (a turn evicted from the rendered window, a closed tab): a failure changes
+// nothing on screen, a success lands the picture on every parked img with that URL. The sanitizer post-pass
+// (mdImgPostPass, registered by render.ts) parks a re-rendered img with a remembered URL BEFORE the browser
+// fetches it, so a re-render of the same markdown reuses the state instead of fetching, failing and flipping
+// once more. DOMPurify strips inline handlers
 // (correctly), so the failures are caught by ONE document-level capture listener (error events do not
 // bubble but do capture); previews' own <img>s are skipped: their machinery (budgets, resume, chips) owns those.
 const mdImgFailed = new Set<string>();             // URLs that failed this page life: a re-render parks them before any fetch
+const mdImgProbe = new Map<string, number>();      // served URLs with per-message attempts left: the budget rides the URL, not the img
+const mdImgProbing = new Set<string>();            // served URLs with a per-message probe in flight: one at a time per URL
 let mdImgHealOn = false;
 function parkMdImg(img: HTMLImageElement, url: string): void {
   mdImgFailed.add(url);
@@ -786,7 +792,9 @@ export function mdImgPostPass(root: ParentNode): void {
 }
 /** A URL the kernel actually answers (/file, a remote relay's /file, /media): a file an agent is still writing or a
  *  relay behind a blip may come back with no reconnect event, so those get a BOUNDED probe on the per-message path
- *  (three attempts, off the DOM, so the caption never moves for them); an origin-resolved path no route serves is
+ *  (three attempts, off the DOM, so the caption never moves for them). The budget is keyed on the URL, not on the img
+ *  that failed: a streaming turn is re-rendered on every push, so that img is off the page by the next push and the
+ *  post-pass has parked a fresh one, which inherits the attempts left. An origin-resolved path no route serves is
  *  park-only, since nothing but a reconnect could change its answer. */
 function servedByKernel(u: string): boolean {
   try {
@@ -801,6 +809,7 @@ function probeMdImgUrl(u: string, onFail?: () => void): void {
   const probe = new Image();
   probe.onload = () => {
     mdImgFailed.delete(u);                           // first: a rebuild from here on fetches normally
+    mdImgProbe.delete(u); mdImgProbing.delete(u);    // a healed URL has no pending budget
     for (const img of Array.from(document.querySelectorAll("img.md-img-failed[data-md-src]")) as HTMLImageElement[]) {
       if (img.dataset.mdSrc !== u || !img.isConnected) continue;
       img.classList.remove("md-img-failed");
@@ -811,9 +820,27 @@ function probeMdImgUrl(u: string, onFail?: () => void): void {
   probe.onerror = () => { if (onFail) onFail(); };  // still down: the parked captions stay exactly as they are
   probe.src = u;
 }
-/** The reconnect-class heal for parked markdown images: one detached probe per parked URL. */
+/** The per-message path for the served URLs with attempts left: one detached probe per URL per push, the next armed
+ *  only once the previous has failed (a push while it is pending fires nothing), whatever img carries the URL now and
+ *  whether or not one is on the page (the probe is off the DOM; a load re-queries the page). Run from
+ *  retryFailedPreviews, so it rides the kernel-message event like the figure previews' own retries. */
+function retryMdImgProbes(): void {
+  for (const [u, left] of Array.from(mdImgProbe.entries())) {
+    if (mdImgProbing.has(u)) continue;
+    mdImgProbing.add(u);
+    probeMdImgUrl(u, () => {
+      mdImgProbing.delete(u);
+      if (left > 1 && mdImgFailed.has(u)) mdImgProbe.set(u, left - 1);   // still down: one attempt spent
+      else mdImgProbe.delete(u);                                          // spent (or healed meanwhile): the reconnect heal alone from here
+    });
+  }
+}
+/** The reconnect-class heal for parked markdown images: one detached probe per remembered URL. The remembered set is
+ *  the source, since a URL whose turn left the rendered window or whose tab was closed has no img on the page, and a
+ *  re-render would park it again for the page life; the page's parked imgs are read too, for one parked under a URL
+ *  the memory no longer holds. */
 export function healMdImgs(): void {
-  const urls = new Set<string>();
+  const urls = new Set<string>(mdImgFailed);
   for (const img of Array.from(document.querySelectorAll("img.md-img-failed[data-md-src]")) as HTMLImageElement[]) {
     const u = img.dataset.mdSrc || "";
     if (u) urls.add(u);
@@ -831,9 +858,7 @@ export function installMdImgHeal(): void {
     if (img.onerror || img.closest(".path-full")) return;   // the preview machinery retries its own
     parkMdImg(img, src);
     if (servedByKernel(src)) {                       // bounded and off the DOM: the caption never moves for it
-      let budget = 3;
-      const again = () => probeMdImgUrl(src, () => { if (--budget > 0) failedPreviews.set(img, again); });
-      failedPreviews.set(img, again);
+      if (!mdImgProbe.has(src)) mdImgProbe.set(src, 3);   // the budget rides the URL: a re-rendered turn inherits what is left
     }
   }, true);
 }
