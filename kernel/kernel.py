@@ -14631,15 +14631,21 @@ def _sdk_setup_hint():
     source of truth with the session card: the backend's venv verdict, read at request time
     (SdkBackend.creation_refusal reads the same unavailable_verdict the card's launch_error does), so a
     venv rebuilt while the kernel runs makes both say "restart romp", and a ROMP_PYTHON pin is named
-    only for an interpreter that was seen to run. Without a backend to ask (its module failed to load)
-    the fallback names a mismatch _ensure_sdk_on_path saw with the rebuild remedy alone, the one this
-    process can vouch for without a probe; otherwise the plain install hint."""
+    only for an interpreter that was seen to run as the venv's python. Without a backend to ask (its
+    module failed to load), or when its verdict raises (said on stderr, once per ask, so a failing
+    reading does not downgrade the refusal to the install hint in silence), the fallback names a
+    mismatch _ensure_sdk_on_path saw with the rebuild remedy alone, the one this process can vouch for
+    without a probe; otherwise the plain install hint."""
     be = _sdk_backend
     try:
         if be and hasattr(be, "creation_refusal"):
             return be.creation_refusal(default=SDK_SETUP_HINT)
-    except Exception:
-        pass
+    except Exception as e:
+        try:
+            sys.stderr.write("sdk-backend: the backend's creation_refusal failed (%s: %s); refusing from this "
+                             "process's own reading of the venv\n" % (type(e).__name__, e))
+        except Exception:
+            pass            # the line is the report, not the answer: a message that will not format costs nothing
     if _SDK_VENV_BUILT_FOR:
         return ("Session not created: the Claude Code backend's Agent SDK was set up for Python %s, but romp "
                 "is running on Python %s. Re-run bin/romp-sdk-setup to rebuild it for Python %s, restart romp "

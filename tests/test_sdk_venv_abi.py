@@ -146,6 +146,47 @@ class EnsureSdkOnPath(unittest.TestCase):
             self.assertEqual(km._sdk_setup_hint(), "the backend's verdict, whatever it is")
         self.assertEqual(calls, [km.SDK_SETUP_HINT])
 
+    def test_a_raising_creation_refusal_is_said_on_stderr_and_the_hint_still_answers(self):
+        # the backend's verdict raised (a cfg this process cannot read, a regression in its reading):
+        # `romp new` and the browser's create still get an answer from this process's own reading, and
+        # stderr says why the backend's was not used; swallowed, the downgrade to the plain install hint
+        # over an installed venv would leave no trace of what went wrong
+        class Backend:
+            def creation_refusal(self, default):
+                raise RuntimeError("cfg unreadable")
+        with mock.patch.object(km, "_sdk_backend", Backend()):
+            hint = self._run(fn=km._sdk_setup_hint)
+        self.assertEqual(hint, km.SDK_SETUP_HINT, "no mismatch seen: the plain install hint")
+        lines = self.err.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, "one stderr line: %r" % self.err.getvalue())
+        self.assertIn("creation_refusal", lines[0])
+        self.assertIn("RuntimeError", lines[0], "names the exception type")
+        self.assertIn("cfg unreadable", lines[0], "and its message")
+        # over a mismatch this process saw itself, the same line and the rebuild-only fallback
+        self._run(importable_from=self._site("python3.99"))
+        self.err.truncate(0); self.err.seek(0)
+        with mock.patch.object(km, "_sdk_backend", Backend()):
+            hint = self._run(fn=km._sdk_setup_hint)
+        self.assertIn("3.99", hint)
+        self.assertIn("romp-sdk-setup", hint)
+        self.assertNotIn("ROMP_PYTHON", hint)
+        lines = self.err.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, "one stderr line: %r" % self.err.getvalue())
+        self.assertIn("RuntimeError", lines[0])
+
+    def test_a_verdict_failure_the_report_cannot_format_still_gets_the_fallback(self):
+        # the stderr line is the report, not the answer: an exception whose own message raises when it is
+        # formatted must not turn the create door's fallback into a raise of its own
+        class Unspeakable(Exception):
+            def __str__(self):
+                raise ValueError("no message")
+
+        class Backend:
+            def creation_refusal(self, default):
+                raise Unspeakable()
+        with mock.patch.object(km, "_sdk_backend", Backend()):
+            self.assertEqual(self._run(fn=km._sdk_setup_hint), km.SDK_SETUP_HINT)
+
     def test_without_a_backend_the_refusal_names_only_the_rebuild(self):
         # the backend module failed to load, so nothing has probed the venv's interpreter: the fallback
         # names the mismatch and the one remedy this process can vouch for; never a ROMP_PYTHON pin to

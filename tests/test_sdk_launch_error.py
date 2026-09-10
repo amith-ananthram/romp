@@ -21,6 +21,8 @@ What is pinned here:
 
 SYNTHETIC fixtures only (placeholder ids, hostname TESTHOST).
 """
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -124,12 +126,20 @@ class VenvBuiltForAnotherInterpreter(unittest.TestCase):
             "home = %s\nversion = 3.99.0\nexecutable = %s\n" % (os.path.dirname(executable), executable))
 
     def test_recorded_interpreter_present_names_the_pin(self):
+        # the stub stands for the venv's own python: the kernel's probe runs it and reads the tag it
+        # prints (a `#!/bin/sh` script gets `-c ...` as positional parameters, so it answers with the
+        # fixed tag), and it reports the venv's, so a pin to it brings the kernel up matching the venv
         interp = os.path.join(self.state, "py399", "python3.99")
         os.makedirs(os.path.dirname(interp))
-        Path(interp).write_text("#!/bin/sh\n")
+        Path(interp).write_text("#!/bin/sh\necho 3.99\n")
         os.chmod(interp, 0o755)
         self._cfg(interp)
-        err = _backend(self.state, missing=True).launch_error(SID)
+        be = _backend(self.state, missing=True)
+        v = be.unavailable_verdict()
+        self.assertEqual(v["kind"], "mismatch")
+        self.assertEqual(v["interp_tag"], "3.99", "the probe reads the tag the interpreter reports")
+        self.assertNotIn("interp_runs", v, "exit 0 alone decides nothing")
+        err = be.launch_error(SID)
         text = err["text"]
         self.assertTrue(err["dep"])
         self.assertNotIn("isn't installed", text, "it IS installed; the interpreter changed")
@@ -149,9 +159,9 @@ class VenvBuiltForAnotherInterpreter(unittest.TestCase):
         self.assertNotIn("ROMP_PYTHON", text, "a pin to a missing interpreter would not help")
 
     def test_recorded_interpreter_present_but_not_running_names_the_rebuild(self):
-        # executable, and exits non-zero on `-c pass`: the state pick_python's fallback creates (the
-        # kernel came up on a newer python BECAUSE this one is broken). A pin to it would have romp-serve
-        # exec a binary that cannot start, and the manager respawn it in a loop
+        # executable, and exits non-zero when run: the state pick_python's fallback creates (the kernel
+        # came up on a newer python BECAUSE this one is broken). A pin to it would have romp-serve exec a
+        # binary that cannot start, and the manager respawn it in a loop
         interp = os.path.join(self.state, "py399", "python3.99")
         os.makedirs(os.path.dirname(interp))
         Path(interp).write_text("#!/bin/sh\nexit 1\n")
@@ -161,23 +171,106 @@ class VenvBuiltForAnotherInterpreter(unittest.TestCase):
         self.assertIn("3.99", text)
         self.assertIn("romp-sdk-setup", text, "it will not run: rebuild for the python romp has")
         self.assertNotIn("ROMP_PYTHON", text, "never prescribe a pin to an interpreter that does not run")
-        self.assertFalse(sb.interpreter_runs(interp))
-        self.assertFalse(sb.interpreter_runs(os.path.join(self.state, "nope")))
-        self.assertTrue(sb.interpreter_runs(sys.executable))
-        # and one that never answers: the probe is bounded, so it reads as not running (asserted on the
-        # verdict, not on elapsed time; unbounded, this call would not return before the stub's sleep ends)
+        self.assertEqual(sb.interpreter_tag(interp), "", "a non-zero exit reports no tag")
+        self.assertEqual(sb.interpreter_tag(os.path.join(self.state, "nope")), "", "nor does a missing path")
+        self.assertEqual(sb.interpreter_tag(sys.executable), TAG, "a real python reports its own tag")
+        # and one that prints the venv's tag and then never exits: the probe is bounded, so it reads as not
+        # running (asserted on the verdict, not on elapsed time; unbounded, this call would return the tag
+        # once the stub's sleep ends, 30 s on)
         hang = os.path.join(self.state, "py399", "python3.99-hangs")
-        Path(hang).write_text("#!/bin/sh\nexec sleep 30\n")
+        Path(hang).write_text("#!/bin/sh\necho 3.99\nexec sleep 30\n")
         os.chmod(hang, 0o755)
-        self.assertFalse(sb.interpreter_runs(hang, timeout=0.5))
+        self.assertEqual(sb.interpreter_tag(hang, timeout=0.5), "", "a tag from a python that never exits is no answer")
+
+    def test_the_probe_reads_a_tag_from_the_last_line_and_nothing_else(self):
+        # the probe parses the interpreter's stdout, so what it accepts is narrow: the last line, stripped,
+        # must be a whole tag (`3.12`, `3.14t`). A sitecustomize that prints ahead of the tag does not
+        # defeat it, and a script that prints anything else, or prints a tag and then fails, reports none
+        def stub(name, body):
+            path = os.path.join(self.state, "py399", name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            Path(path).write_text("#!/bin/sh\n" + body)
+            os.chmod(path, 0o755)
+            return path
+        self.assertEqual(sb.interpreter_tag(stub("noisy", "echo a sitecustomize said this\necho 3.99\n")), "3.99")
+        self.assertEqual(sb.interpreter_tag(stub("padded", "echo '  3.99t  '\n")), "3.99t")
+        self.assertEqual(sb.interpreter_tag(stub("indented", "echo noise\necho '  3.99  '\n")), "3.99",
+                         "the last line is stripped on its own, not only the output as a whole")
+        self.assertEqual(sb.interpreter_tag(stub("trailing", "echo 3.99\necho\n")), "3.99",
+                         "a blank line after the tag (an atexit hook that prints nothing) is not the answer")
+        self.assertEqual(sb.interpreter_tag(stub("words", "echo hello\n")), "")
+        self.assertEqual(sb.interpreter_tag(stub("silent", "")), "", "exit 0 with no tag is not a python")
+        self.assertEqual(sb.interpreter_tag(stub("partial", "echo 3.99 and more\n")), "")
+        self.assertEqual(sb.interpreter_tag(stub("failing", "echo 3.99\nexit 1\n")), "")
+        self.assertEqual(sb.interpreter_tag(""), "")
+
+    def test_the_probes_program_is_the_tag_this_process_computes(self):
+        # the program the probe runs in the recorded interpreter is the expression running_python_tag()
+        # evaluates in this process (and bin/romp-sdk-setup's pytag runs in the setup script), so the two
+        # sides of the remedy's comparison are computed the same way. Run here it prints this process's tag;
+        # under a free-threaded 3.99 it prints 3.99t, the build half of the tag, which the probe never
+        # exercises on a default-build machine's own interpreter
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            exec(sb._TAG_PROGRAM, {})
+        self.assertEqual(out.getvalue(), TAG + "\n")
+        self.assertEqual(out.getvalue().strip(), sb.running_python_tag())
+        out = io.StringIO()
+        with mock.patch.multiple(sys, abiflags="t", version_info=(3, 99, 0, "final", 0), create=True), \
+             contextlib.redirect_stdout(out):
+            exec(sb._TAG_PROGRAM, {})
+            self.assertEqual(sb.running_python_tag(), "3.99t")
+        self.assertEqual(out.getvalue(), "3.99t\n")
+
+    def test_the_remedy_follows_the_tag_the_probe_reports(self):
+        # the verdict's seam: with the probe's answer given, the remedy is a function of that tag against
+        # the tags the venv was built for and nothing else. The venv's own tag names the pin; this process's
+        # tag (a repointed `python3`), the same minor in the other build (3.99t over a venv built for 3.99,
+        # whose extensions are not that python's either) and no tag at all name the rebuild
+        interp = os.path.join(self.state, "py399", "python3.99")
+        self._cfg(interp)
+        for answer, pin in (("3.99", True), (TAG, False), ("3.99t", False), ("", False)):
+            with self.subTest(answer=answer):
+                seen = []
+                v = sb.sdk_venv_verdict(self.state, probe=lambda p: seen.append(p) or answer)
+                self.assertEqual(seen, [interp], "the probe is asked about the recorded interpreter")
+                self.assertEqual((v["kind"], v["interp"], v["interp_tag"]), ("mismatch", interp, answer))
+                text = sb._mismatch_remedy(v)
+                self.assertEqual("ROMP_PYTHON=" + interp in text, pin)
+                self.assertEqual("romp-sdk-setup" in text, not pin)
+
+    def test_a_recorded_interpreter_that_reports_another_tag_names_the_rebuild(self):
+        # the recorded path runs and exits 0, but it is no longer the venv's python: an upgrade repointed
+        # `python3` (or replaced the recorded binary in place) at the python romp now runs. bin/romp-serve
+        # honors a ROMP_PYTHON pin as given, so a pin to this path brings the kernel up on that same other
+        # python and this card returns after the restart with the same remedy; the rebuild is the one
+        # that works. The stub answers the probe with THIS process's tag, as that repointed binary would
+        interp = os.path.join(self.state, "py399", "python3")
+        os.makedirs(os.path.dirname(interp))
+        Path(interp).write_text("#!/bin/sh\necho %s\n" % TAG)
+        os.chmod(interp, 0o755)
+        self._cfg(interp)
+        be = _backend(self.state, missing=True)
+        text = be.launch_error(SID)["text"]
+        self.assertIn("3.99", text)
+        self.assertIn(TAG, text)
+        self.assertNotIn("ROMP_PYTHON", text,
+                         "a pin to a path that no longer runs the venv's python repeats the same card after the restart")
+        self.assertIn("romp-sdk-setup", text, "it runs, but as another python: rebuild for the one romp has")
+        v = be.unavailable_verdict()
+        self.assertEqual(v["kind"], "mismatch")
+        self.assertEqual(v["built"], ["3.99"])
+        self.assertEqual(v["interp"], interp)
+        self.assertEqual(v["interp_tag"], TAG, "it runs, and reports the python romp is already on")
 
     def test_a_cfg_with_home_and_version_but_no_executable_names_the_pin(self):
         # python < 3.11 wrote no `executable =` line (and uv writes version_info): home plus the version's
-        # X.Y reach the interpreter, and when it runs the pin to it is the remedy, as with `executable`
+        # X.Y reach the interpreter, and when it runs as the venv's python the pin to it is the remedy, as
+        # with `executable`
         home = os.path.join(self.state, "py399")
         interp = os.path.join(home, "python3.99")
         os.makedirs(home)
-        Path(interp).write_text("#!/bin/sh\n")
+        Path(interp).write_text("#!/bin/sh\necho 3.99\n")
         os.chmod(interp, 0o755)
         (self.venv / "pyvenv.cfg").write_text("home = %s\nversion = 3.99.0\n" % home)
         self.assertEqual(sb.sdk_venv_interpreter(self.state), interp)
@@ -194,7 +287,7 @@ class VenvBuiltForAnotherInterpreter(unittest.TestCase):
         # shows: over a venv for another python whose interpreter runs, it names the pin, not an install
         interp = os.path.join(self.state, "py399", "python3.99")
         os.makedirs(os.path.dirname(interp))
-        Path(interp).write_text("#!/bin/sh\n")
+        Path(interp).write_text("#!/bin/sh\necho 3.99\n")
         os.chmod(interp, 0o755)
         self._cfg(interp)
         lines = []
@@ -272,7 +365,9 @@ class OneVerdictForEverySurface(unittest.TestCase):
             (sp / "claude_agent_sdk").mkdir(exist_ok=True)
             (sp / "claude_agent_sdk" / "__init__.py").write_text("")
 
-    def _interp(self, body="#!/bin/sh\n"):
+    def _interp(self, body="#!/bin/sh\necho 3.99\n"):
+        """A stub for the venv's recorded interpreter; by default the venv's own python, which answers the
+        kernel's probe with the venv's tag (a `#!/bin/sh` script gets `-c ...` as positional parameters)."""
         interp = os.path.join(self.state, "py399", "python3.99")
         os.makedirs(os.path.dirname(interp), exist_ok=True)
         Path(interp).write_text(body)
@@ -316,6 +411,64 @@ class OneVerdictForEverySurface(unittest.TestCase):
             self.assertIn("romp-sdk-setup", text)
             self.assertNotIn("ROMP_PYTHON", text)
 
+    def test_mismatch_with_an_interpreter_of_another_tag_offers_the_rebuild_on_both(self):
+        # the recorded interpreter runs, and reports this process's tag rather than the venv's (a
+        # repointed `python3`): both surfaces name the rebuild, never a pin that would bring the kernel
+        # up on the same python again
+        self._venv("3.99")
+        self._interp("#!/bin/sh\necho %s\n" % TAG)
+        be = _backend(self.state, missing=True)
+        for text in (be.launch_error(SID)["text"], be.creation_refusal()):
+            self.assertIn("3.99", text)
+            self.assertNotIn("ROMP_PYTHON", text)
+            self.assertIn("romp-sdk-setup", text)
+        self.assertEqual(be.unavailable_verdict()["interp_tag"], TAG)
+
+    def test_mismatch_with_an_interpreter_of_the_other_build_offers_the_rebuild_on_both(self):
+        # the recorded interpreter reports the venv's minor in the other build (3.99t over a venv built for
+        # 3.99: a free-threaded python swapped in at the recorded path). The venv's extensions are not that
+        # python's, bin/romp-serve's _runs_as would not follow it, and a pin to it would bring the kernel up
+        # refusing the same venv: both surfaces name the rebuild
+        self._venv("3.99")
+        self._interp("#!/bin/sh\necho 3.99t\n")
+        be = _backend(self.state, missing=True)
+        for text in (be.launch_error(SID)["text"], be.creation_refusal()):
+            self.assertIn("3.99", text)
+            self.assertNotIn("ROMP_PYTHON", text)
+            self.assertIn("romp-sdk-setup", text)
+        self.assertEqual(be.unavailable_verdict()["interp_tag"], "3.99t")
+
+    def test_a_repointed_recorded_interpreter_moves_the_cached_verdict_to_the_rebuild(self):
+        # the trace end to end on one backend: the cfg records `python3`, a link to the venv's own python,
+        # and both surfaces name the pin. An upgrade repoints the link at another build, which runs and
+        # exits 0 as the python this process is on. The verdict is cached on the venv's fingerprint, which
+        # stats the recorded path through the link (the target's mtime and size), so the next ask re-runs
+        # the probe and both surfaces move to the rebuild. The two targets differ in size, so the change of
+        # fingerprint does not rest on the clock
+        self._venv("3.99")
+        home = os.path.join(self.state, "py399")
+        os.makedirs(home)
+        own = os.path.join(home, "venv-build")
+        Path(own).write_text("#!/bin/sh\necho 3.99\n")
+        other = os.path.join(home, "other-build")
+        Path(other).write_text("#!/bin/sh\n# the build an upgrade put at the same path\necho %s\n" % TAG)
+        for p in (own, other):
+            os.chmod(p, 0o755)
+        link = os.path.join(home, "python3")
+        os.symlink(own, link)
+        (self.venv / "pyvenv.cfg").write_text("home = %s\nversion = 3.99.0\nexecutable = %s\n" % (home, link))
+        be = _backend(self.state, missing=True)
+        for text in (be.launch_error(SID)["text"], be.creation_refusal()):
+            self.assertIn("ROMP_PYTHON=" + link, text)
+            self.assertNotIn("romp-sdk-setup", text)
+        os.remove(link)
+        os.symlink(other, link)
+        for text in (be.launch_error(SID)["text"], be.creation_refusal()):
+            self.assertNotIn("ROMP_PYTHON", text, "the same pin again would show this text again after the restart")
+            self.assertIn("romp-sdk-setup", text)
+        v = be.unavailable_verdict()
+        self.assertEqual((v["kind"], v["interp"], v["interp_tag"]), ("mismatch", link, TAG))
+
     def test_a_rebuild_while_the_kernel_runs_moves_both_surfaces_to_the_restart(self):
         # kernel on this python, venv for 3.99: both say mismatch. The user rebuilds for this python
         # WITHOUT restarting: the same backend, asked again, says the backend was set up after romp
@@ -341,7 +494,7 @@ class OneVerdictForEverySurface(unittest.TestCase):
         self._venv("3.99")
         self._interp()
         be = _backend(self.state, missing=True)
-        with mock.patch.object(sb, "interpreter_runs", wraps=sb.interpreter_runs) as probe:
+        with mock.patch.object(sb, "interpreter_tag", wraps=sb.interpreter_tag) as probe:
             for _ in range(5):
                 be.launch_error(SID)
                 be.creation_refusal()
