@@ -260,6 +260,28 @@ class OverlayFold(_State):
         km._states_overlay_forget({SID})
         self.assertEqual(km._states_overlay_report()["evict"], 1, "nothing left to drop: no count")
 
+    def test_forget_also_drops_a_departed_sids_stranded_failed_episode(self):
+        # A read that fails pops the cache entry (fold_records), so a sid whose LAST read before it left the
+        # alive set failed sits only in _states_overlay_failed, never in _states_overlay_cache: the loop
+        # over the cache alone would never reach it, and nothing else reads a departed sid's file again to
+        # end the episode the ordinary way.
+        self.check([{"t": 100, "awaiting": True, "why": "x"}], {"t": 100, "awaiting": True, "why": "x"})
+        # the shared reader serves an UNCHANGED file's records on an identity hit without opening it, so a
+        # permission flip alone is not a read attempt: the file grows first, then becomes unreadable
+        self.append_state({"t": 200, "state": "idle"})
+        os.chmod(self.states_path(), 0)
+        try:
+            if os.access(self.states_path(), os.R_OK):
+                self.skipTest("this user reads through mode 000 (root)")
+            self.assertIsNone(km._states_awaiting_overlay(SID), "the read failed: no overlay")
+        finally:
+            os.chmod(self.states_path(), 0o644)
+        self.assertIn(str(self.states_path()), km._states_overlay_failed, "the open episode is recorded")
+        self.assertNotIn(str(self.states_path()), km._states_overlay_cache, "a fail pops the cache entry too")
+        km._states_overlay_forget(set())                       # SID leaves the alive set with the episode still open
+        self.assertNotIn(str(self.states_path()), km._states_overlay_failed,
+                         "forget retires the stranded episode along with the cache entry")
+
     def test_the_report_has_the_documented_shape(self):
         st = km._states_overlay_report()
         self.assertEqual(set(st), {"hit", "append", "refold", "fail", "evict", "entries"})

@@ -24296,12 +24296,21 @@ def _states_overlay_forget(alive):
     readers of this overlay are the chips and lanes of live sessions, so a session leaving the alive set is
     the event that retires its entry, the same event that releases its interrupt-marks entries. Iterates a
     key snapshot: a connect-time build on a WS thread may insert concurrently. The records stay in the event
-    model's LRU reader; a later read of a departed session's file re-folds them without re-reading the file."""
+    model's LRU reader; a later read of a departed session's file re-folds them without re-reading the file.
+    A departed path also loses its open-fail episode, if any, straight out of `_states_overlay_failed`: a
+    fail always pops the cache entry too (fold_records), so a path whose LAST read before it left the alive
+    set failed is never IN the cache for this loop to reach, and nothing else reads a departed session's
+    file again to end the episode the ordinary way. `_states_overlay_failed` has no cap of its own (unlike
+    the cache's 256-entry clear-whole), so a path stranded there would sit forever otherwise."""
     keep = {str(jd.STATE / "states" / ("%s.jsonl" % sid)) for sid in alive}
     n = 0
     for k in list(_states_overlay_cache):
         if k not in keep and _states_overlay_cache.pop(k, None) is not None:
             n += 1
+    with _STATES_OVERLAY_LOCK:
+        for k in list(_states_overlay_failed):
+            if k not in keep:
+                _states_overlay_failed.discard(k)
     if n:
         _states_overlay_bump("evict", n)
 
