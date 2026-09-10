@@ -8911,6 +8911,13 @@ def _intr_block_stands(sid, gid):
 _PARSE_WARM_STATES = ("working", "compacting", "retrying")   # a session the feed warm still parses when it did not move
 
 
+def _warm_wanted(s, tm):
+    """Whether the feed warm would parse session row `s` (its tmux row `tm`): it moved since this kernel booted, or
+    it is working now. build_feed asks for a warm only for such a session; one the gate leaves cold is cold by
+    design (its card reads the store, its dots wait for a client), not a cold parse to chase every cycle."""
+    return _session_moved_since_boot(s) or (tm or {}).get("state", "") in _PARSE_WARM_STATES
+
+
 def _session_files_stat(s):
     """(mtime, size) of the transcript, the state log and the session's goal store, zeros for a missing file: the
     three inputs every event-keyed tick job reads. A change in any of them is the only event that can change the
@@ -8934,8 +8941,53 @@ def _session_moved_since_boot(s):
     return st[0] > _STARTED or st[2] > _STARTED or st[4] > _STARTED
 
 
-_TICK_SEEN: dict = {}          # (job, sid) -> the files' stat tuple at the job's last evaluation (T323 stage 1)
+_TICK_SEEN: dict = {}          # (job, sid) -> the files' stat tuple at the job's last COMPLETED evaluation (T323 stage 1)
 _TICK_SEEN_LOCK = threading.Lock()
+_TICK_SEEN_FILE = "tick-seen.json"   # the memo PERSISTED under the state dir (jd.STATE): written when dirty at the end
+#                                      of a pusher cycle and at exit, read at boot, so the next kernel's first look
+#                                      compares against the previous kernel's last evaluation rather than its own
+#                                      start (review find: a stop landing in the gap between the previous kernel's
+#                                      last tick and this boot read as unchanged and was never blocked). A crash
+#                                      loses the newest writes: the affected sessions are evaluated once, the safe way.
+_TICK_SEEN_DIRTY = [False]
+
+
+def _tick_seen_path():
+    return jd.STATE / _TICK_SEEN_FILE
+
+
+def _load_tick_seen():
+    """Read the persisted memo into _TICK_SEEN (best-effort; a missing or torn file is an empty memo)."""
+    try:
+        d = json.loads(_tick_seen_path().read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+    n = 0
+    with _TICK_SEEN_LOCK:
+        for k, v in (d.items() if isinstance(d, dict) else ()):
+            if isinstance(k, str) and "|" in k and isinstance(v, list) and len(v) == 6:
+                job, sid = k.split("|", 1)
+                _TICK_SEEN[(job, sid)] = tuple(v)
+                n += 1
+    return n
+
+
+def _persist_tick_seen(force=False):
+    """Write the memo when a completed evaluation moved it since the last write (or `force`); atomic, best-effort."""
+    with _TICK_SEEN_LOCK:
+        if not (_TICK_SEEN_DIRTY[0] or force):
+            return False
+        snap = {"%s|%s" % k: list(v) for k, v in _TICK_SEEN.items()}
+        _TICK_SEEN_DIRTY[0] = False
+    try:
+        p = _tick_seen_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp.%d" % os.getpid())
+        tmp.write_text(json.dumps(snap), encoding="utf-8")
+        os.replace(tmp, p)
+        return True
+    except Exception:
+        return False
 
 
 def _tick_job_check(job, s):
@@ -8957,7 +9009,7 @@ def _tick_job_check(job, s):
     with _TICK_SEEN_LOCK:
         prev = _TICK_SEEN.get(key)
     if prev is None:
-        return (not (st[0] > _STARTED or st[2] > _STARTED or st[4] > _STARTED)), st
+        return False, st                      # never evaluated by any kernel on record: evaluate once
     return st == prev, st
 
 
@@ -8967,6 +9019,7 @@ def _tick_job_done(job, s, st):
     key = (job, str(s.get("sid") or ""))
     with _TICK_SEEN_LOCK:
         _TICK_SEEN[key] = st
+        _TICK_SEEN_DIRTY[0] = True
         if len(_TICK_SEEN) > 4096:            # bounded by jobs × sessions; never unbounded
             _TICK_SEEN.clear()
 
@@ -8974,6 +9027,9 @@ def _tick_job_done(job, s, st):
 def _tick_job_skips(job, s):
     """Check and, when unchanged, nothing else: the skip needs no record (the baseline it matched still stands)."""
     return _tick_job_check(job, s)[0]
+
+
+_load_tick_seen()               # the previous kernel's last evaluations, if it left them
 
 
 def _interrupt_block_tick(now, tmux):
@@ -29029,6 +29085,7 @@ def _warm_fleet_bg(now):
         _warming[0] = True
 
     def go():
+        parsed_any = False
         try:
             tmux = _tmux_sessions()
             for s in _alive_sessions(now, tmux):         # live sessions first
@@ -29037,11 +29094,14 @@ def _warm_fleet_bg(now):
                 # T323 stage 1: only a session that MOVED since this kernel booted (its transcript or state log
                 # appended) or is working right now is worth a cold parse here; the rest cost O(file bytes)
                 # each for working dots nobody's card will show differently, and the cache fills on demand
-                if not (_session_moved_since_boot(s) or (tmux.get(s["sid"]) or {}).get("state", "") in _PARSE_WARM_STATES):
+                if not _warm_wanted(s, tmux.get(s["sid"])):
                     continue
                 _parse(s["path"], s["sid"], now)          # warm the kernel parse cache
-            _built_feed[1] = None                         # force the next build to use the now-warm parses
-            _push_soon()   # ack-fast (the 2026-08-30 wedge: inline fleet builds piled 53 POST handlers; the pusher coalesces)
+                parsed_any = True
+            if parsed_any:                                # (review find: a warm that parsed nothing must not
+                _built_feed[1] = None                     #  invalidate the feed and wake the pusher, or a feed-only
+                _push_soon()   # ack-fast (the 2026-08-30 wedge: inline fleet builds piled 53 POST handlers; the pusher coalesces)
+            #                                                window rebuilt the whole feed every cycle for ever)
         except Exception:
             sys.stderr.write("warm: %s\n" % traceback.format_exc())
         finally:
@@ -35241,7 +35301,8 @@ def build_feed(now, tmux=None):
         # and anchors snap in a beat later.
         ps = _parse_cached(s["path"])
         if ps is None:
-            cold_parse = True
+            if _warm_wanted(s, tm):                      # cold by design otherwise (T323 stage 1): no warm to chase
+                cold_parse = True
         else:
             ps = _merge_live_atoms(ps, fsid)         # the same LIVE-MERGED session the chat chip + timeline lane read
             #                                          (the feed was the one surface deriving from the bare cache, 2026-07-05)
@@ -45814,6 +45875,10 @@ def _pusher_cycle_jobs(now, tmux, any_client):
         _interrupt_block_tick(now, tmux)
     except Exception:
         sys.stderr.write("interrupt-block: %s\n" % traceback.format_exc())
+    try:                                  # the tick jobs' evaluation memo, persisted when a completed evaluation
+        _persist_tick_seen()              # moved it (T323 stage 1): the next kernel's first look starts from here
+    except Exception:
+        sys.stderr.write("tick-seen: %s\n" % traceback.format_exc())
     try:                                  # hitting a usage limit auto-engages the retry-pause (before the resume check)
         _auto_pause_on_limit()
     except Exception:
@@ -55524,6 +55589,10 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
     reason_err = ""
     be = _sdk_backend or None
     _exit_log("romp-kernel: %s, draining SDK sessions\n" % what)
+    try:
+        _persist_tick_seen(force=True)    # the tick jobs' memo for the next kernel's first look (T323 stage 1)
+    except Exception:
+        pass
     try:
         if be is not None and hasattr(be, "drain"):
             res = be.drain(2.0)

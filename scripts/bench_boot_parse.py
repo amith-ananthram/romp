@@ -158,6 +158,9 @@ def draw(rows, out):
     tops = [0.0, 0.0, 0.0]
     for i, label in enumerate(labels):
         rs = sorted([r for r in rows if r["label"] == label and not r.get("error")], key=lambda r: r["worldBytes"])
+        if not rs:
+            sys.stderr.write("figure: every boot of %r errored; the label is left out\n" % label)
+            continue
         xs = [r["worldBytes"] / 1048576 for r in rs]
         c = cols[i % len(cols)]
         counted = all(r.get("parses") is not None for r in rs)

@@ -116,6 +116,20 @@ class ServedBootParses(unittest.TestCase):
                            "log": [{"t": t0 + 61, "judge": "interrupt", "verdict": "block", "why": "stopped mid-turn"}]}},
              "placements": {}, "status": {g: "blocked"}}))
         Path(state, "auto-nudge.json").write_text(json.dumps({"enabled": False, "nudged": {}, "intrBlocked": {WEB: g}}))
+        # the previous kernel's tick memo: it had looked at every session with these very files (T323 stage 1's
+        # persisted _TICK_SEEN), so this boot has nothing new to evaluate for any of them
+        def _stat(p):
+            try:
+                st = os.stat(p); return [st.st_mtime, st.st_size]
+            except OSError:
+                return [0.0, 0]
+        memo = {}
+        for sid in ALL:
+            files = _stat(os.path.join(proj, sid + ".jsonl")) + _stat(os.path.join(state, "states", sid + ".jsonl")) \
+                + _stat(os.path.join(state, "goals", sid + ".json"))
+            for job in ("interrupt-block", "working-notes"):
+                memo["%s|%s" % (job, sid)] = files
+        Path(state, "tick-seen.json").write_text(json.dumps(memo))
         Path(state, "usage.json").write_text(json.dumps({"five_hour": {"pct": 10}, "seven_day": {"pct": 10}}))
         # every file predates the boot by construction (written before the kernel starts): "unchanged since boot"
         cls.port, cls.token = _free_port(), "testtok-t323"

@@ -66,6 +66,33 @@ class BootWarmParsesNothing(unittest.TestCase):
 
 
 class FeedWarmParsesOnlyWhatMoved(unittest.TestCase):
+    def test_a_warm_that_parses_nothing_wakes_nobody(self):
+        """Review find: with a feed-only window and an idle unmoved session, the warm used to invalidate the feed
+        and wake the pusher every cycle though it parsed nothing (a whole-feed rebuild per cycle for ever)."""
+        d = tempfile.mkdtemp()
+        rows = [_row(d, SID_OLD, old=True)]
+        pokes = []
+        before = _threads()
+        km._warming[0] = False
+        saved = list(km._clients)
+        with km._clients_lock:
+            km._clients[:] = [{"app": "feed", "send": lambda s: None, "sent": {}, "alive": True}]
+        self.addCleanup(lambda: km._clients.__setitem__(slice(None), saved))
+        km._built_feed[1] = "a built payload"
+        with mock.patch.object(km, "_alive_sessions", side_effect=lambda now, tmux: rows), \
+             mock.patch.object(km, "_tmux_sessions", side_effect=lambda: {}), \
+             mock.patch.object(km, "_has_parsing_client", side_effect=lambda: False), \
+             mock.patch.object(km, "_parse", side_effect=lambda path, sid, now: None), \
+             mock.patch.object(km, "_push_soon", side_effect=lambda: pokes.append(1)):
+            km._warm_fleet_bg(int(time.time()))
+            _join_new(before)
+        self.assertEqual(km._built_feed[1], "a built payload", "the feed cache is left alone")
+        self.assertEqual(pokes, [], "and the pusher is not woken")
+        src = inspect.getsource(km.build_feed)
+        self.assertIn("if _warm_wanted(s, tm):", src, "build_feed asks for a warm only for a session the gate would parse")
+        self.assertFalse(km._warm_wanted(rows[0], None), "an unmoved idle session is cold by design")
+        self.assertTrue(km._warm_wanted(rows[0], {"state": "working"}))
+
     def test_moved_or_working_only(self):
         d = tempfile.mkdtemp()
         rows = [_row(d, SID_OLD, old=True), _row(d, SID_NEW, old=False), _row(d, SID_WORK, old=True)]
@@ -97,36 +124,59 @@ class FeedWarmParsesOnlyWhatMoved(unittest.TestCase):
 
 
 class TickJobsKeyOnAChange(unittest.TestCase):
+    """The event-keyed tick jobs' memo: a session is evaluated once when no kernel on record has looked at it,
+    skipped while its transcript, state log and goal store match the last COMPLETED look, and evaluated again on
+    any change; the memo persists across kernels, so a stop that landed in the gap between the previous kernel's
+    last tick and this boot is evaluated (review find, 2026-09-10), while a session settled before the restart
+    and untouched since is not parsed again."""
+
     def setUp(self):
         km._TICK_SEEN.clear()
+        km._TICK_SEEN_DIRTY[0] = False
+        p = km._tick_seen_path()
+        if p.exists():
+            p.unlink()
 
-    def test_unchanged_since_boot_is_skipped_and_a_change_is_evaluated_once(self):
+    def test_first_look_evaluates_then_a_completed_look_skips_until_a_change(self):
         d = tempfile.mkdtemp()
-        r = _row(d, SID_OLD, old=True)
-        self.assertTrue(km._tick_job_skips("interrupt-block", r), "first look: unchanged since boot → the store's verdict stands, no parse")
-        self.assertTrue(km._tick_job_skips("interrupt-block", r), "still unchanged")
+        r = _row(d, SID_OLD, old=True)                    # mtime BEFORE this kernel's start: no longer a reason to skip
+        skip, st = km._tick_job_check("interrupt-block", r)
+        self.assertFalse(skip, "no kernel on record has looked at it: evaluate once, whatever the mtime")
+        self.assertFalse(km._tick_job_skips("interrupt-block", r), "not yet marked done (a fault mid-tick): the next tick evaluates again")
+        km._tick_job_done("interrupt-block", r, st)
+        self.assertTrue(km._tick_job_skips("interrupt-block", r), "once the evaluation completed, the same files skip")
         with open(r["path"], "a") as f:
             f.write(json.dumps({"type": "assistant", "uuid": "a1"}) + "\n")
         os.utime(r["path"], None)
         skip, st = km._tick_job_check("interrupt-block", r)
         self.assertFalse(skip, "an appended record is the event: evaluate")
-        self.assertFalse(km._tick_job_skips("interrupt-block", r), "not yet marked done (a fault mid-tick): the next tick evaluates again")
         km._tick_job_done("interrupt-block", r, st)
-        self.assertTrue(km._tick_job_skips("interrupt-block", r), "once the evaluation completed, the same files skip again")
+        self.assertTrue(km._tick_job_skips("interrupt-block", r))
 
-    def test_a_session_that_moved_before_this_boot_read_it_is_evaluated_at_first_look(self):
+    def test_the_memo_persists_and_the_next_kernel_starts_from_it(self):
         d = tempfile.mkdtemp()
-        r = _row(d, SID_NEW, old=False)          # mtime after _STARTED: it changed under the previous kernel's death or since
-        skip, st = km._tick_job_check("working-notes", r)
-        self.assertFalse(skip)
-        km._tick_job_done("working-notes", r, st)
-        self.assertTrue(km._tick_job_skips("working-notes", r))
+        settled = _row(d, SID_OLD, old=True)             # settled by the previous kernel, untouched since
+        moved = _row(d, SID_NEW, old=True)               # settled, then moved in the gap before this boot
+        skip, st = km._tick_job_check("interrupt-block", settled); km._tick_job_done("interrupt-block", settled, st)
+        skip, st = km._tick_job_check("interrupt-block", moved); km._tick_job_done("interrupt-block", moved, st)
+        self.assertTrue(km._persist_tick_seen(), "dirty → written")
+        self.assertFalse(km._persist_tick_seen(), "clean → nothing to write")
+        # the gap: a stop lands in `moved` after the previous kernel's last tick, before this boot (mtime still < _STARTED)
+        with open(moved["path"], "a") as f:
+            f.write(json.dumps({"type": "user", "uuid": "u9", "message": {"role": "user", "content": "[Request interrupted by user]"}}) + "\n")
+        os.utime(moved["path"], (km._STARTED - 60, km._STARTED - 60))
+        # the next kernel: an empty memo, then the persisted one
+        km._TICK_SEEN.clear()
+        self.assertEqual(km._load_tick_seen(), 2)
+        self.assertTrue(km._tick_job_skips("interrupt-block", settled), "unchanged since the previous kernel's look: the store's verdict stands, no parse")
+        self.assertFalse(km._tick_job_skips("interrupt-block", moved), "moved in the gap before the boot: evaluated, whatever _STARTED says")
 
     def test_a_goal_store_write_is_an_event_too(self):
         """A judge can clear or complete the goal a marker points at without a transcript change; the interrupt
         tick must re-evaluate on that alone (its stale-marker rule)."""
         d = tempfile.mkdtemp()
         r = _row(d, SID_OLD, old=True)
+        skip, st = km._tick_job_check("interrupt-block", r); km._tick_job_done("interrupt-block", r, st)
         self.assertTrue(km._tick_job_skips("interrupt-block", r))
         km.jd.GOALDIR.mkdir(parents=True, exist_ok=True)
         (km.jd.GOALDIR / (SID_OLD + ".json")).write_text("{}")
@@ -148,8 +198,28 @@ class TickJobsKeyOnAChange(unittest.TestCase):
     def test_jobs_keep_separate_memos(self):
         d = tempfile.mkdtemp()
         r = _row(d, SID_NEW, old=False)
-        self.assertFalse(km._tick_job_skips("interrupt-block", r))
+        skip, st = km._tick_job_check("interrupt-block", r); km._tick_job_done("interrupt-block", r, st)
         self.assertFalse(km._tick_job_skips("working-notes", r), "another job's first look is its own")
+
+    def test_a_bail_out_leaves_the_session_unmarked(self):
+        """Review find: an unproved ledger read, a parse failure or an exception mid-tick must leave the session
+        for the next tick; only a landed outcome marks it done."""
+        d = tempfile.mkdtemp()
+        r = _row(d, SID_OLD, old=True)
+        stopped = [{"id": "t1", "t": 1000, "atoms": [{"t": 1000, "type": "user"}]}]
+        common = dict(_alive_sessions=lambda now, tmux: [r], _session_flag=lambda sid, flag: False,
+                      _compacting_now=lambda *a, **k: False, _api_error=lambda path: False,
+                      _interrupt_marks=lambda turns, sid, family="judge": (1000, 900), _session_working=lambda turns: False,
+                      _auto_nudge_pause=lambda why: None, _auto_nudge_resume=lambda: None)
+        with mock.patch.multiple(km, **common), \
+             mock.patch.object(km.jd, "parsed_session", side_effect=lambda sid, paths, now: {"turns": stopped}), \
+             mock.patch.object(km, "_auto_nudge_data", side_effect=lambda: {km.UNPROVED: {"t": 1}}):
+            km._interrupt_block_tick(int(time.time()), {})
+        self.assertNotIn(("interrupt-block", SID_OLD), km._TICK_SEEN, "an unproved ledger read bails out unmarked")
+        with mock.patch.multiple(km, **common), \
+             mock.patch.object(km.jd, "parsed_session", side_effect=RuntimeError("parse failed")):
+            km._interrupt_block_tick(int(time.time()), {})
+        self.assertNotIn(("interrupt-block", SID_OLD), km._TICK_SEEN, "a parse failure bails out unmarked")
 
     def test_the_two_event_keyed_ticks_gate_before_their_parse_and_the_nudge_does_not(self):
         for fn, job in ((km._interrupt_block_tick, "interrupt-block"), (km._clear_done_working_notes, "working-notes")):
@@ -159,8 +229,11 @@ class TickJobsKeyOnAChange(unittest.TestCase):
             self.assertIn('_tick_job_done("%s", s, files_st)' % job, src, "%s: a completed evaluation is marked done" % job)
         self.assertEqual(inspect.getsource(km._interrupt_block_tick).count('_tick_job_done("interrupt-block", s, files_st)'), 4,
                          "done on the four landed outcomes (filed, standing, lifted, nothing to lift); never on a refused write or an unproved ledger")
-        self.assertNotIn("_tick_job_skips", inspect.getsource(km._auto_nudge_session),
-                         "the nudge has wall-clock timers, so it keeps its per-cycle evaluation (documented in _tick_job_skips)")
+        self.assertNotIn("_tick_job_check", inspect.getsource(km._auto_nudge_session),
+                         "the nudge has wall-clock timers, so it keeps its per-cycle evaluation (documented in _tick_job_check)")
+        cyc = inspect.getsource(km._pusher_cycle_jobs)
+        self.assertLess(cyc.index("_interrupt_block_tick(now, tmux)"), cyc.index("_persist_tick_seen()"), "the memo is written after the tick jobs")
+        self.assertIn("_persist_tick_seen(force=True)", inspect.getsource(km._drain_and_exit), "and at exit")
 
 
 class PerfCountsColdParses(unittest.TestCase):
