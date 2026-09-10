@@ -75,12 +75,12 @@ test("registerOptimistic gates the snap on a pre-append nearBottomForSend read",
 });
 
 test("every composer-shaped send rides the same gate — staged flush and provisional adoption included", () => {
-  // the staged flush releases each message through routeUserMessage…
-  assert.match(RENDER, /function flushStaged\(sid: string\): number \{\s*\n\s*const batch = stagedMsgs\.takeAll\(sid\);\s*\n\s*for \(const s of batch\) routeUserMessage\(sid, s\.text, s\.cites as Citation\[\]\);/);
+  // the staged flush releases each post of the run (one message, plus any item that goes alone) through routeUserMessage…
+  assert.match(RENDER, /function flushStaged\(sid: string, typed\?: \{ text: string; cites\?: Citation\[\]; imgPaths\?: string\[\] \}\): number \{\s*\n\s*const run = stagedMsgs\.takeAll\(sid\);\s*\n\s*for \(const p of stagedPosts\(run, typed\)\) routeUserMessage\(sid, p\.text, p\.cites as Citation\[\] \| undefined, p\.imgPaths\);/);
   // …whose every branch registers the optimistic bubble (2026-08-23), so the gate covers them all
-  assert.match(RENDER, /if \(goalCite\?\.itemId\) \{ [^\n]*registerOptimistic\(sid, text, imgPaths\); \}/);
-  assert.match(RENDER, /else if \(quoteCites\.length\) \{ [^\n]*registerOptimistic\(sid, body, imgPaths\); \}/);
-  assert.match(RENDER, /else \{ [^\n]*registerOptimistic\(sid, text, imgPaths\); \}/);
+  assert.match(RENDER, /if \(goalCite\?\.itemId\) \{ [^\n]*registerOptimistic\(sid, text, imgPaths, qid\); \}/);
+  assert.match(RENDER, /else if \(quoteCites\.length\) \{ [^\n]*registerOptimistic\(sid, body, imgPaths, qid\); \}/);
+  assert.match(RENDER, /else \{ [^\n]*registerOptimistic\(sid, text, imgPaths, qid\); \}/);
   // provisional adoption re-sends through registerOptimistic too
-  assert.match(RENDER, /registerOptimistic\(realId, text\);/);
+  assert.match(RENDER, /registerOptimistic\(realId, text, undefined, qid\);/);
 });

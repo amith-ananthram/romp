@@ -107,7 +107,17 @@ _romp_record() {   # <sid> <name> <dir> [bg] [fg] — write/replace the map entr
     # users from reading anything beneath it (the traverse bit is enough).
     # Idempotent; best-effort.
     chmod 700 "${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}" 2>/dev/null || true
-    printf '%s\t%s\t%s\t%s\n' "$nm" "$dir" "$bg" "$fg" > "$ROMP_NAMES_DIR/$sid"
+    # Atomic: the line is written to a temp in the same directory and moved into place, one rename(2),
+    # so no reader ever sees the record empty or half-written. The kernel's names writers read the
+    # record while this hook rewrites it (its rename writer runs right after a live tmux rename; its
+    # color and palette writers touch any session's record) and publish their edit over what they
+    # read, so a truncate-then-write here cost the session its name and cwd. This is the one shell
+    # writer of a record (_romp_rename_record and _romp_free_title come through here). The temp is
+    # dot-prefixed, so _romp_free_title's glob and the resume picker's listing skip it; a failed write
+    # or move removes it.
+    local tmp="$ROMP_NAMES_DIR/.$sid.tmp.$$"
+    printf '%s\t%s\t%s\t%s\n' "$nm" "$dir" "$bg" "$fg" > "$tmp" && mv -f "$tmp" "$ROMP_NAMES_DIR/$sid" \
+        || { rm -f "$tmp"; return 1; }
 }
 
 _romp_rename_record() {   # <sid> <name> — update name, keep dir + identity color
@@ -1238,7 +1248,19 @@ print("stages    jobs %s   push %s  (chat %s  feed %s  timeline %s  send %s)"
 parts = []
 for k in ("chat", "feed", "timeline", "feedJson"):     # feedJson: GET /feed.json's own reads, apart from the pusher's feed
     built, cached, ms = dl("builds", k, "built"), dl("builds", k, "cached"), dl("builds", k, "ms")
-    parts.append("%s %d built / %d cached%s" % (k, built, cached, (" (%.0f ms avg)" % (ms / built)) if built else ""))
+    split = ""
+    if k == "chat":
+        # the chat builder's attribution: rebuilds of the watched tab against background tabs whose signature
+        # moved, then per signature component the background rebuilds it caused; a kernel from before the
+        # split reports neither field and prints the line as before
+        active, bg = dl("builds", k, "active_built"), dl("builds", k, "bg_built")
+        if active or bg:
+            labels = sorted(((b.get("builds") or {}).get("chat") or {}).get("bg_miss") or {})
+            causes = ", ".join("%s %d" % (lab, dl("builds", k, "bg_miss", lab)) for lab in labels
+                               if dl("builds", k, "bg_miss", lab))
+            split = "; %d watched, %d background%s" % (active, bg, (": " + causes) if causes else "")
+    parts.append("%s %d built / %d cached%s"
+                 % (k, built, cached, (" (%.0f ms avg%s)" % (ms / built, split)) if built else ""))
 print("builds    " + "   ".join(parts))
 parts = []
 for kind in ("full", "delta", "deduped"):

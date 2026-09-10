@@ -4,12 +4,15 @@ it to the names registry (bg + fg word, preserving name + cwd) and re-broadcasts
 colors picker switches the whole SET (STATE/palette): the kernel remaps every stored color to the same
 slot in the new set, rewrites the shell launcher's STATE/palette-colors mirror, and pushes. SYNTHETIC
 fixtures only (placeholder uuids, invented paths)."""
+import contextlib
 import inspect
+import io
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from importlib.machinery import SourceFileLoader
+from unittest import mock
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -23,6 +26,8 @@ km = SourceFileLoader("romp_kernel", os.path.join(BIN, "romp-kernel")).load_modu
 
 SID = "11111111-2222-3333-4444-555555555555"
 SID2 = "22222222-3333-4444-5555-666666666666"
+NSID = "aaaa1111-bbbb-2222-cccc-333333333333"     # the NoNameRecordIsLeftAlone sandbox's own sids
+NSID2 = "dddd4444-eeee-5555-ffff-666666666666"
 
 
 class SessionColor(unittest.TestCase):
@@ -229,6 +234,124 @@ class HighSlotSwitches(SessionColor):
         i = zlib.crc32(sid.encode()) % len(bgs)
         self.assertGreaterEqual(i, 9)
         self.assertEqual((bg, fg), (bgs[i], fgs[i]), "the paired index holds past the old nine")
+
+
+class NoNameRecordIsLeftAlone(SessionColor):
+    """A names record whose FIRST field is empty is never a real record: every writer puts the name
+    first, so it is another writer's window (bin/romp's record writer truncated the file before it
+    wrote it; it publishes atomically now, but an older copy of it may still run the tmux rename
+    hook) or a damaged file. The kernel's three writers of the record (a rename, a recolor, a palette
+    switch) used to pad it to four fields and publish the edit over it, erasing the session's name,
+    cwd and colors for good while reporting success: the kernel's os.replace won over the other
+    writer's pending bytes. Each now re-reads once after a short pause and, if the record still has no
+    name, leaves it byte for byte as it was and reports the sid to the log and the dashboard's error
+    center. The pause is recorded, never slept; the sandbox has its own sids."""
+
+    def setUp(self):
+        super().setUp()
+        self._problems = list(km._SDK_BOOT_PROBLEMS)        # the error-center ring, restored in tearDown
+        del km._SDK_BOOT_PROBLEMS[:]
+
+    def tearDown(self):
+        km._SDK_BOOT_PROBLEMS[:] = self._problems
+        super().tearDown()
+
+    def _record_pauses(self, on_pause=None):
+        """The kernel's time.sleep recorded, not slept: the writer's one re-read pauses _NAMES_REREAD_S, and
+        `on_pause` stands in for the other writer landing its bytes meanwhile. The stub stands in for the
+        `time` name the kernel module reads, so a sleep by any other code in the process is neither
+        recorded nor answered with `on_pause`. Restored at cleanup."""
+        slept = []
+        real = km.time
+
+        class _Clock:
+            def __getattr__(self, k):
+                return getattr(real, k)
+
+            @staticmethod
+            def sleep(s):
+                slept.append(s)
+                if on_pause is not None:
+                    on_pause()
+        p = mock.patch.object(km, "time", _Clock())
+        p.start()
+        self.addCleanup(p.stop)
+        return slept
+
+    def test_a_record_that_reads_with_no_name_is_left_alone_and_reported(self):
+        # before the guard: the recolor answered True and the file read \t\t#54B204\tblack\n; the
+        # rename answered True and the file read api\t\t\t\n (cwd and colors gone, for every shape here)
+        slept = self._record_pauses()
+        for raw in ("", "\n", "\t/proj/TESTHOST/app\t#1EA1EB\twhite\n", "\t\t\t\n"):
+            for writer, call in (("color", lambda: km._set_session_color(NSID, "#54B204")),
+                                 ("name", lambda: km._set_name(NSID, "api"))):
+                with self.subTest(raw=raw.encode("unicode_escape").decode(), writer=writer):
+                    (self.names / NSID).write_text(raw)
+                    del slept[:]
+                    del km._SDK_BOOT_PROBLEMS[:]
+                    err = io.StringIO()
+                    with contextlib.redirect_stderr(err):
+                        if writer == "name":
+                            # the rename door's contract: a name that did not land RAISES, never a quiet True
+                            with self.assertRaises(RuntimeError) as cm:
+                                call()
+                            self.assertIn(NSID, str(cm.exception), "the raise names the sid")
+                            self.assertIn("no name", str(cm.exception))
+                        else:
+                            self.assertFalse(call(), "nothing was written")
+                    self.assertEqual((self.names / NSID).read_text(), raw, "the file is left byte for byte as it was")
+                    self.assertEqual(slept, [km._NAMES_REREAD_S], "exactly one re-read, after the short pause")
+                    self.assertIn(NSID, err.getvalue(), "the log line names the sid")
+                    self.assertIn("no name", err.getvalue())
+                    self.assertEqual(len(km._SDK_BOOT_PROBLEMS), 1, "one row reaches the dashboard's error center")
+                    self.assertIn(NSID, km._SDK_BOOT_PROBLEMS[0]["text"])
+        self.assertGreater(km._NAMES_REREAD_S, 0)
+        self.assertLessEqual(km._NAMES_REREAD_S, 0.25, "a printf's worth of window, not a wait the user notices")
+
+    def test_the_palette_switch_skips_a_record_with_no_name_and_recolors_the_rest(self):
+        # before the guard: the record with no name came back recolored, still with no name, and nothing
+        # was reported; a 0-byte record was skipped only because it had no third field to match
+        slept = self._record_pauses()
+        pb, pf = km.pal.colors("romp"), km.pal.fgs("romp")
+        skipped = "\t/proj/TESTHOST/app\t%s\t%s\n" % (pb[0], pf[0])   # a color the remap would otherwise move
+        (self.names / NSID).write_text(skipped)
+        (self.names / NSID2).write_text("api\t/proj/TESTHOST/svc\t%s\t%s\n" % (pb[1], pf[1]))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertTrue(km._set_palette("phase"))
+        nb, nf = km.pal.colors("phase"), km.pal.fgs("phase")
+        self.assertEqual((self.names / NSID).read_text(), skipped, "the record with no name is left as it was")
+        self.assertEqual((self.names / NSID2).read_text().rstrip("\n").split("\t"),
+                         ["api", "/proj/TESTHOST/svc", nb[1], nf[1]], "the rest recolor")
+        self.assertEqual(slept, [km._NAMES_REREAD_S], "one re-read, for the one record with no name")
+        self.assertIn(NSID, err.getvalue(), "the log names the skipped sid")
+        self.assertEqual([NSID in r["text"] for r in km._SDK_BOOT_PROBLEMS], [True])
+
+    def test_the_re_read_catches_a_writer_that_was_mid_write(self):
+        # the window is a printf's worth of time: a record empty on the first read and whole on the second
+        # is a writer caught mid-write, and the edit lands on the whole record; nothing lost, nothing reported
+        whole = "web\t/proj/TESTHOST/app\t#1EA1EB\twhite\n"
+        slept = self._record_pauses(on_pause=lambda: (self.names / NSID).write_text(whole))
+        for writer, call, want in (
+                ("name", lambda: km._set_name(NSID, "api"), "api\t/proj/TESTHOST/app\t#1EA1EB\twhite\n"),
+                ("color", lambda: km._set_session_color(NSID, "#54B204"), "web\t/proj/TESTHOST/app\t#54B204\tblack\n")):
+            with self.subTest(writer=writer):
+                (self.names / NSID).write_text("")          # empty on the first read: the other writer's window
+                del slept[:]
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    self.assertTrue(call())
+                self.assertEqual((self.names / NSID).read_text(), want, "the edit lands on the whole record")
+                self.assertEqual(slept, [km._NAMES_REREAD_S])
+                self.assertEqual(err.getvalue(), "", "a caught window is not a problem")
+                self.assertEqual(km._SDK_BOOT_PROBLEMS, [])
+        # a record with a name and nothing else is a real (if old) record: padded and published as before.
+        # The guard keys on the NAME field, not on the field count, and pauses only on an empty read.
+        (self.names / NSID).write_text("web\n")
+        del slept[:]
+        self.assertTrue(km._set_name(NSID, "api"))
+        self.assertEqual((self.names / NSID).read_text(), "api\t\t\t\n")
+        self.assertEqual(slept, [], "no re-read for a record that has a name")
 
 
 if __name__ == "__main__":

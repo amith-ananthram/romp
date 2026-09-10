@@ -38,10 +38,12 @@ test("INTERRUPTING is a first-class chip state: labeled, styled, timerless, butt
                "busy-yellow but dimmed + static — in flight, not still grinding");
 });
 
-test("the stop record renders as a rail marker, not a message bubble", () => {
+test("the stop record renders as a slim SESSION notice, not a message bubble", () => {
+  // 2026-09-08 (the notice-vocabulary pass): the ONE builder; the stop square is the notice's glyph (cause tied to
+  // effect), the italic dropped — one information type, one weight
   assert.match(SRC, /if \(\(ev as any\)\.interruptMarker\) \{/);
-  assert.match(SRC, /const turn = el\("div", "turn turn-interrupt"\);/);
-  assert.match(SRC, /line\.appendChild\(el\("span", "interrupt-square"\)\);/, "the stop button's own glyph ties cause to effect");
-  assert.match(CSS, /\.interrupt-line \{[^}]*font-style: italic/);
-  assert.match(CSS, /\.interrupt-square \{ width: 8px; height: 8px;/);
+  assert.match(SRC, /return notice\(\{ src: "session", glyph: "session", gist: interruptGist\(cause\), cls: "turn-interrupt",/);
+  assert.match(SRC, /session: '<rect x="4" y="4" width="8" height="8" rx="1\.3"\/>'/, "the stop button's own glyph");
+  assert.doesNotMatch(CSS, /\.interrupt-line|\.interrupt-square/);
+  assert.match(CSS, /\.notice\.notice-slim \{/);
 });

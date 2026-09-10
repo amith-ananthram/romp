@@ -30,9 +30,9 @@ const RENDER = fs.readFileSync(
 test("the plain send registers an optimistic bubble; follow-up/quote sends keep their own kernel echo", () => {
   // only the PLAIN sendMessage branch registers — a citation follow-up/quote has its own kernel-side
   // echo (the branch lives in routeUserMessage since the staged flush, 2026-08-15)
-  assert.match(RENDER, /else \{ vscodeApi\.postMessage\(\{ type: "sendMessage", id: sid, text \}\); registerOptimistic\(sid, text, imgPaths\); \}/);
+  assert.match(RENDER, /else \{ vscodeApi\.postMessage\(\{ type: "sendMessage", id: sid, text, qid \}\); registerOptimistic\(sid, text, imgPaths, qid\); \}/);
   // registerOptimistic shows it NOW (before any push) via reconcile + appendActive
-  assert.match(RENDER, /function registerOptimistic\(id: string, text: string, imgPaths\?: string\[\]\): void/);   // + the dragged-image paths → echo thumbnails (2026-08-25)
+  assert.match(RENDER, /function registerOptimistic\(id: string, text: string, imgPaths\?: string\[\], qid\?: string\): void/);   // + the dragged-image paths → echo thumbnails (2026-08-25); + the copy's id the caller minted and posted
   // the active-tab arm still paints via appendActive (the snap gate moved ahead of it, 2026-08-30)
   assert.match(RENDER, /if \(v\) v\.stale = true;\s*\n\s*if \(id === activeId\) \{/);
   assert.match(RENDER, /const wasAtBottom = !!content && nearBottomForSend\(content\);[^\n]*\s*\n\s*appendActive\(\);/);
@@ -77,7 +77,7 @@ test("every push entry point re-asserts (or retires) the optimistic tail", () =>
 
 test("retire needs a NEW landed atom (after the send's anchor); kernel provisionals only suppress", () => {
   // the entry is minted by the module (unanchored until the first reconcile stamps where the send sits)
-  assert.match(RENDER, /const p = newPending\(text, imgPaths\);\s*\n\s*arr\.push\(p\);/);
+  assert.match(RENDER, /const p = newPending\(text, imgPaths, Date\.now\(\), qid\);\s*\n\s*arr\.push\(p\);/);
   assert.equal(newPending("x", undefined, 5).at, undefined);
   // the decision is the module's, read off KERNEL truth after our injections are stripped — the whole
   // resident array from the anchor on, never a tail count (2026-09-06 review)
@@ -88,7 +88,7 @@ test("retire needs a NEW landed atom (after the send's anchor); kernel provision
   // and no clock anywhere in the file's decision: the TTL is gone for good
   assert.doesNotMatch(RENDER, /OPT_TTL_MS/);
   const SP = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "send-pending.ts"), "utf8");
-  assert.doesNotMatch(SP, /Date\.now\(\)(?! *\): PendingSend)/, "the module reads no clock in a decision (only the press stamp's default)");
+  assert.doesNotMatch(SP, /Date\.now\(\)(?!, qid: string = mintQid\(\)\): PendingSend)/, "the module reads no clock in a decision (only the press stamp's default, beside the id's)");
 });
 
 // The optimistic echo rides the QUEUED idiom (the user 2026-07-16): to the reader an unconfirmed send and a
@@ -100,7 +100,7 @@ test("an optimistic echo is a kernel-invisible QUEUED event at the tail — neve
   const SP = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "send-pending.ts"), "utf8");
   assert.match(SP, /export const OPT_PREFIX = "optimistic:";/);
   assert.match(RENDER, /const isOptimistic = \(e: ChatEvent\): boolean => isOptimisticUuid\(e\.uuid\);/);
-  assert.match(RENDER, /const mk = \(p: PendingSend\) => \(\{ md: p\.text, optimistic: true, cancelable: true, imgPaths: p\.imgPaths, lost: p\.lost, qts: p\.ts \}\);/);   // the echo carries its dragged-image paths (2026-08-25); cancelable from the press (2026-08-30); `lost` after a connection drop, `qts` its identity for the ✕ (2026-09-06)
+  assert.match(RENDER, /const mk = \(p: PendingSend\) => \(\{ md: p\.text, optimistic: true, cancelable: true, imgPaths: p\.imgPaths, lost: p\.lost, qts: p\.ts, qid: p\.qid \}\);/);   // the echo carries its dragged-image paths (2026-08-25); cancelable from the press (2026-08-30); `lost` after a connection drop, `qts` its identity for the ✕ (2026-09-06); `qid` the copy's id the kernel shares, so the ✕ names the copy
   // stale ones are stripped wherever they sit (the strip is position-agnostic; T252d puts the group at the tail)
   assert.match(RENDER, /if \(isOptimistic\(e\)\) \{ s\.events\.splice\(i, 1\); continue; \}/);
   // the abandoned dim/pending idiom is FULLY gone: render, guard fields, and stylesheet — the last
@@ -235,7 +235,8 @@ test("the echo renders dragged-image THUMBNAILS — composer → provisional →
   // bytes and the reconcile swap never re-fetches or flickers.
   assert.match(RENDER, /if \(t\.imgPaths && t\.imgPaths\.length\) \{\s*\n\s*for \(const ip of t\.imgPaths\) bubble\.appendChild\(userImage\(\{ src: "path:" \+ ip, path: ip \}, true\)\);/);
   // the paths ride the send at every register site (deliver, staged flush, the provisional hold)
-  assert.match(RENDER, /routeUserMessage\(activeId, text, cites, attached\.filter\(\(p\) => previewKind\(p\) === "img"\)\);/);
+  assert.match(RENDER, /flushStaged\(sid, \{ text, cites, imgPaths: attached\.filter\(\(p\) => previewKind\(p\) === "img"\) \}\);/);
+  assert.match(RENDER, /routeUserMessage\(sid, p\.text, [^\n]*p\.imgPaths\);/);   // each post of the release carries its images (staged-list-cap.test.ts executes the loop)
   // …and ONLY image-kind attachments mint thumbs — a dropped .csv stays the path text it always was
   assert.doesNotMatch(RENDER, /registerOptimistic\(sid, text, attached\)/);
 });

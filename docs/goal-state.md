@@ -47,7 +47,9 @@ Sort events by evidence time (`ev_t`; arrival `at` breaks ties) and replay:
   clears.
 - **Snapshots**: provisional flips restore what they displaced. A `clear`
   snapshots the state it covers, and an undo-reopen restores it, so a
-  cleared completed card comes back completed, never "open". A msg-reopen
+  cleared completed card comes back completed, never "open". An
+  undo-reopen with nothing to restore (its clear lost, or a second undo
+  for one clear) leaves the state as it stands. A msg-reopen
   (the optimistic flip when you reply to a card) snapshots too, and a
   planner `dismiss` (the pivot verdict: that reply started its own thread)
   restores the original state and settle stamp. The pivot's new goal is its
@@ -163,9 +165,11 @@ within a beat it reverts with a toast, never silently.
 5. Every verdict goes through `record_verdict`. A reopen carries `unblock`
    events for blocked descendants and ancestors; every unblock is an
    event.
-6. Reopens un-resolve only auto-rolled (`rolledUp`) children;
-   genuinely-done leaves keep their state. Re-completions re-summarize
-   only the new stretch (`deltaSince`).
+6. Reopens un-resolve only auto-rolled (`rolledUp`) children, and so
+   does the dissolution of a container above them (the marker mirrors a
+   resolved ancestor and is dropped once none remains); genuinely-done
+   leaves keep their state. Re-completions re-summarize only the new
+   stretch (`deltaSince`).
 7. Identity: identical prompts in different turns are different work
    (twins); same-second identical bursts plan once; any seg-id-derivation
    change ships a placements migration (`placementsV`, currently v12);

@@ -32,6 +32,6 @@ test("render.ts: the user branch returns a hidden zero-height unit BEFORE the ra
   // the guard precedes the turn element itself, so no dot, no follow-up header and no bubble are ever built for it
   assert.ok(between.indexOf("if (!userTurnShows(ev))") < between.indexOf('const turn = el("div", "turn turn-user"'));
   // the interrupt marker and the romp system notice keep their own marks (they return before this guard)
-  assert.match(RENDER, /if \(\(ev as any\)\.interruptMarker\) \{\s*\n\s*const turn = el\("div", "turn turn-interrupt"\);\s*\n\s*turn\.appendChild\(dot\("ring"\)\);/);
+  assert.match(RENDER, /if \(\(ev as any\)\.interruptMarker\) \{[\s\S]{0,700}?return notice\(\{ src: "session", glyph: "session", gist: interruptGist\(cause\)/);   // a slim notice since 2026-09-08
   assert.match(RENDER, /if \(\(ev as any\)\.rompSystem && ev\.md\) \{/);
 });

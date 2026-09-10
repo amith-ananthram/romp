@@ -730,6 +730,42 @@ test("installPerfTelemetry: one collector per page on window.__rompPerf, wired t
   }
 });
 
+test("installPerfTelemetry: hidden_pane is the pane shim's union, the zero-viewport probe OR the pane's published word", () => {
+  // The pane shim's paneHidden() (kernel.py) and this row agree: a pane that publishes its word (paint-gate.ts
+  // publishPaneHidden, chat-visibility.ts) is reported hidden after a first show in Chromium, where the probe alone
+  // never saw it (a display:none iframe keeps its size there); in Firefox the viewport goes to zero and the observer
+  // does not run, so the probe carries it and a stale word of false must not override it.
+  const g: any = globalThis;
+  const win: any = new EventTarget();
+  win.performance = { now: () => 0 };
+  win.navigator = { userAgent: "Mozilla/5.0 (Macintosh) Chrome/128.0.0.0 Safari/537.36", maxTouchPoints: 0 };
+  win.location = { href: "http://h:1/chat" };
+  win.parent = {};                                   // framed
+  win.innerWidth = 800; win.innerHeight = 600;
+  const doc: any = new EventTarget();
+  doc.visibilityState = "visible";
+  doc.getElementsByTagName = () => ({ length: 3 });
+  g.window = win;
+  g.document = doc;
+  try {
+    const a = installPerfTelemetry("chat")!;
+    assert.ok(a);
+    assert.equal((a.snapshot() as any).hidden_pane, false, "unset word, a viewport: the probe says shown");
+    win.__rompPaneHidden = true;
+    assert.equal((a.snapshot() as any).hidden_pane, true, "the pane's word: hidden after a first show, size kept");
+    win.innerWidth = 0; win.__rompPaneHidden = false;
+    assert.equal((a.snapshot() as any).hidden_pane, true, "a zero viewport says hidden whatever a stale word says");
+    delete win.__rompPaneHidden;
+    assert.equal((a.snapshot() as any).hidden_pane, true, "unset: the probe's turn (zero viewport)");
+    win.innerWidth = 800; win.parent = win;
+    win.__rompPaneHidden = true;
+    assert.equal((a.snapshot() as any).hidden_pane, true, "a standalone page: the probe never applies, the word (the tab's hiding) does");
+  } finally {
+    delete g.window;
+    delete g.document;
+  }
+});
+
 // ── the wraps themselves ──
 // Everything above drives the collector through PerfDeps, so nothing in it fails when a pane bundle stops
 // wrapping its listener: the whole suite stayed green with a wrap removed (review, 2026-09-07). These pin the

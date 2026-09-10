@@ -27,21 +27,29 @@ PY_SURFACES = [
     ("kernel/judge.py", "STATE", ""),
     ("postal/postal_service.py", "STATE", "/postal"),
     ("postal/postal_service.py", "NAMES_DIR", "/names"),
+    ("cli/idle_dots.py", "STATE", ""),
+    # The live Codex smoke helper reads the root to find the installed Codex runtime before it
+    # rebinds XDG_STATE_HOME to a scratch dir; nothing else executes it, so it is a row here.
+    ("tests/smoke_codex_live.py", "RUNTIME_STATE", ""),
 ]
 
 
-def _derive(module, attr, env):
+def _derive(module, attr, env, cwd=None):
     """Import `module` in a SUBPROCESS with exactly `env` and print its `attr` path. A subprocess so
-    each case gets a fresh import (the constants bind at import time) and a clean environment."""
+    each case gets a fresh import (the constants bind at import time) and a clean environment.
+    `cwd` defaults to the checkout; a case that could resolve a RELATIVE root passes a temp dir, since
+    judge.py mkdirs its root at import and a regression must not litter the checkout. TMPDIR is the
+    case's temp home, so a module that mkdtemps at import (the smoke helper) leaves nothing behind."""
     code = ("import importlib.util\n"
             "spec = importlib.util.spec_from_file_location('m', %r)\n"
             "m = importlib.util.module_from_spec(spec)\n"
             "try:\n    spec.loader.exec_module(m)\n"
             "except SystemExit:\n    pass\n"
             "print(getattr(m, %r))\n" % (str(ROOT / module), attr))
-    full = {"PATH": os.environ.get("PATH", ""), "HOME": env.pop("_HOME"), **env}
+    home = env.pop("_HOME")
+    full = {"PATH": os.environ.get("PATH", ""), "HOME": home, "TMPDIR": home, **env}
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
-                         env=full, cwd=str(ROOT), timeout=60)
+                         env=full, cwd=str(cwd or ROOT), timeout=60)
     self_desc = "%s.%s with %s" % (module, attr, {k: v for k, v in full.items() if k != "PATH"})
     assert out.returncode == 0, "%s failed: %s" % (self_desc, out.stderr[-400:])
     return out.stdout.strip().splitlines()[-1]
@@ -63,6 +71,19 @@ class PythonSurfaces(unittest.TestCase):
                 got = _derive(module, attr, {"_HOME": td, "XDG_STATE_HOME": td + "/xdg"})
                 self.assertEqual(got, td + "/xdg/romp" + suffix,
                                  "%s.%s must keep the XDG derivation" % (module, attr))
+
+    def test_empty_xdg_state_home_is_unset(self):
+        # XDG_STATE_HOME present but EMPTY reads as unset: the XDG spec says so, and every shell
+        # surface's ${XDG_STATE_HOME:-...} already does. A .get default kept the empty string and made
+        # the root the RELATIVE path romp under the process cwd, so a kernel started with a blank
+        # XDG_STATE_HOME= line kept its state (and looked for the SDK venv) under its cwd while the
+        # shell surfaces used the home root.
+        with tempfile.TemporaryDirectory() as td:
+            for module, attr, suffix in PY_SURFACES:
+                with self.subTest(module=module, attr=attr):
+                    got = _derive(module, attr, {"_HOME": td, "XDG_STATE_HOME": ""}, cwd=td)
+                    self.assertEqual(got, td + "/.local/state/romp" + suffix,
+                                     "%s.%s must read an empty XDG_STATE_HOME as unset" % (module, attr))
 
 
 WRAPPED = "${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}"

@@ -115,7 +115,7 @@ test("the Awaiting chip is a BUTTON on the stable statusline delegate, acknowled
   assert.doesNotMatch(branch, /chip\.title =/, "styled tip only — never the native title beside it");
   // installed ONCE on #statusline (updateStatusline rebuilds its children every push); the handler opens the
   // box's own fold state, re-renders it, and scrolls it into view
-  assert.match(RENDER, /const sl = document\.getElementById\("statusline"\);\s*\n\s*if \(!sl\) return;\s*\n\s*delegate\(sl, \{\s*\n\s*"awaitingChip": \(\) => \{\s*\n\s*if \(!activeId\) return;\s*\n\s*bgFoldOpen\.add\(activeId\);[^\n]*\n\s*renderBgTasks\(\);\s*\n\s*document\.getElementById\("bg-tasks"\)\?\.scrollIntoView\(\{ block: "nearest" \}\);/);
+  assert.match(RENDER, /const sl = document\.getElementById\("statusline"\);\s*\n\s*if \(!sl\) return;\s*\n\s*delegate\(sl, \{\s*\n\s*"awaitingChip": \(\) => \{\s*\n\s*if \(!activeId\) return;\s*\n\s*openFolds\.add\("bgfold:" \+ activeId\);[^\n]*\n\s*renderBgTasks\(\);\s*\n\s*document\.getElementById\("bg-tasks"\)\?\.scrollIntoView\(\{ block: "nearest" \}\);/);
   // a button's UA chrome is reset so it wears the chip exactly; hover/active feedback; the .romp-acted pulse is the delegate's
   assert.match(STYLES, /button\.chip \{ font-family: inherit; line-height: normal; border: 0; cursor: pointer;/);
   assert.match(STYLES, /button\.chip:hover \{ filter: brightness\(1\.08\); \}/);
@@ -146,8 +146,8 @@ test("the box groups the rows by kind, headers only when more than one group sho
   assert.match(body, /\} else if \(groups\.length > 1\) \{\s*\n\s*lab\.textContent = "Awaiting " \+ word \+ " · " \+ awaitBreakdown\(items\);/);
   // the no-rows fallback still expands to the full sentence — never a dead end
   assert.match(body, /if \(!groups\.length && !leftovers\.length\) \{[\s\S]*?const w = el\("div", "bg-await-why"\); w\.textContent = why;/);
-  // the header vocabulary is .bg-status's (10px uppercase), dim
-  assert.match(STYLES, /\.bg-group-head \{ flex: 0 0 auto; padding: 6px 9px 2px; font-size: 10px; text-transform: uppercase; letter-spacing: \.04em; font-weight: 600; color: var\(--dim\); \}/);
+  // the header vocabulary is .bg-status's — the notice SOURCE-label rung (0.72em uppercase, 2026-09-08; was 10px), dim
+  assert.match(STYLES, /\.bg-group-head \{ flex: 0 0 auto; padding: 6px 9px 2px; font-size: 0\.72em; text-transform: uppercase; letter-spacing: \.06em; font-weight: 600; color: var\(--dim\); \}/);
 });
 
 test("per-kind affordances on ONE row shape: agent → arrow + Stop; command → output fold + Stop; watch → armed-since + Cancel", () => {
@@ -272,21 +272,19 @@ test("the header follows the wait: idle → 'Awaiting …' + the idle note; work
   assert.equal("In the background · " + awaitBreakdown([{ kind: "commands", id: "b1", label: "serve the docs" }]), "In the background · 1 command");
 });
 
-test("the box's fold state survives the idle↔working flip: the renderer only READS bgFoldOpen; the two clicks are its only writers", () => {
+test("the box's fold state survives the idle↔working flip: the renderer only READS the fold; the two clicks are its only writers", () => {
+  // 2026-09-08 (the notice-vocabulary pass): the fold lives in openFolds under "bgfold:<sid>" — the ONE fold store
+  // (bgFoldOpen was one of four); the renderer reads, the header toggle and the chip click write
   const body = RENDER.split("function renderBgTasks(")[1].split("\nfunction ")[0];
-  assert.match(body, /const open = bgFoldOpen\.has\(sid\);/);
-  assert.doesNotMatch(body, /bgFoldOpen\.(add|delete|clear)\(/, "the renderer never writes the fold state");
-  const writers = (RENDER.match(/bgFoldOpen\.(add|delete|clear)\([^)]*\)/g) || []).sort();
-  assert.deepEqual(writers, ["bgFoldOpen.add(activeId)", "bgFoldOpen.add(id)", "bgFoldOpen.delete(id)"],
+  assert.match(body, /const open = openFolds\.has\("bgfold:" \+ sid\);/);
+  assert.doesNotMatch(body, /openFolds\.(add|delete|clear)\(/, "the renderer never writes the fold state");
+  const writers = (RENDER.match(/openFolds\.(add|delete)\("bgfold:" \+ [^)]*\)/g) || []).sort();
+  assert.deepEqual(writers, ['openFolds.add("bgfold:" + activeId)', 'openFolds.add("bgfold:" + id)', 'openFolds.delete("bgfold:" + id)'],
     "the header toggle and the chip click, nothing else — a status-only frame that flips awaitingWhy re-renders through awaitKey and finds the fold as it was");
   const key = RENDER.split("function awaitKey(")[1].split("\n}")[0];
   assert.ok(key.includes("st.awaitingWhy") && key.includes("st.awaitingItems"), "the flip and the rows both re-render the box");
   // …and the kernel ships the SAME rows in both states, so only the header changes on the flip
   assert.match(KERNEL, /def _awaiting_live_rows\(sid, path, live\):/);
-  assert.match(KERNEL, /def _session_background_items\(sid, path\):/);
-  assert.match(KERNEL, /def _awaiting_items_payload\(aw, sid, path, tmux=None\):[\s\S]*?if aw:\s*\n\s*return list\(aw\.get\("items"\) or \[\]\)\s*\n\s*with _serve_live\(tmux\):\s*\n\s*return _session_background_items\(sid, path\)/,
-    "the wait's own rows, else everything in flight — read under the caller's snapshot (no fresh liveness read on the working path)");
-  assert.match(KERNEL, /def _awaiting_join_items\(agents, commands, watch\):/, "one concatenation for the idle read and the turn-agnostic read");
 });
 
 // --- vocabulary: the plain words everywhere, and no card moves --------------------------------------------

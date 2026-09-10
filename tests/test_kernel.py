@@ -347,7 +347,7 @@ class ViewBuilder(unittest.TestCase):
                       {"id": "3", "subject": "c", "activeForm": None, "status": "pending"}]
         saved = (km._read_task_store, km._fold_tasks)
         km._read_task_store = lambda fsid, fold=None: [dict(t) for t in live_store]
-        km._fold_tasks = lambda session: [dict(t) for t in stale_fold]
+        km._fold_tasks = lambda session, sid=None: [dict(t) for t in stale_fold]
         try:
             todo = next(e for e in km.build_session(SID, NOW)["events"] if e["kind"] == "todo")
         finally:
@@ -362,7 +362,7 @@ class ViewBuilder(unittest.TestCase):
         # ERROR — it does NOT quietly show the lossy fold (which could be wrong, the whole bug).
         saved = (km._read_task_store, km._fold_tasks)
         km._read_task_store = lambda fsid, fold=None: None            # store unreadable
-        km._fold_tasks = lambda session: [{"id": "1", "subject": "a", "activeForm": None, "status": "pending"}]
+        km._fold_tasks = lambda session, sid=None: [{"id": "1", "subject": "a", "activeForm": None, "status": "pending"}]
         try:
             todo = next(e for e in km.build_session(SID, NOW)["events"] if e["kind"] == "todo")
         finally:
@@ -374,7 +374,7 @@ class ViewBuilder(unittest.TestCase):
         # a done/absent list is a non-event — an unreadable store there is not worth alarming on, so no card.
         saved = (km._read_task_store, km._fold_tasks)
         km._read_task_store = lambda fsid, fold=None: None
-        km._fold_tasks = lambda session: [{"id": "1", "subject": "a", "activeForm": None, "status": "completed"}]
+        km._fold_tasks = lambda session, sid=None: [{"id": "1", "subject": "a", "activeForm": None, "status": "completed"}]
         try:
             kinds = [e["kind"] for e in km.build_session(SID, NOW)["events"]]
         finally:
@@ -386,7 +386,7 @@ class ViewBuilder(unittest.TestCase):
         # stale transcript fold — no card, and NO error (the store was read fine, it's just empty).
         saved = (km._read_task_store, km._fold_tasks)
         km._read_task_store = lambda fsid, fold=None: []              # authoritative-empty (cleared / none)
-        km._fold_tasks = lambda session: [{"id": "1", "subject": "a", "activeForm": None, "status": "pending"}]
+        km._fold_tasks = lambda session, sid=None: [{"id": "1", "subject": "a", "activeForm": None, "status": "pending"}]
         try:
             kinds = [e["kind"] for e in km.build_session(SID, NOW)["events"]]
         finally:
@@ -445,11 +445,11 @@ class ViewBuilder(unittest.TestCase):
         saved = (km._read_task_store, km._fold_tasks)
         km._read_task_store = lambda fsid, fold=None: None            # store unresolvable, as in the repro
         try:
-            km._fold_tasks = lambda session: real_fold(bg)
+            km._fold_tasks = lambda session, sid=None: real_fold(bg)
             kinds = [e["kind"] for e in km.build_session(SID, NOW)["events"]]
-            km._fold_tasks = lambda session: real_fold(batch)
+            km._fold_tasks = lambda session, sid=None: real_fold(batch)
             kinds_batch = [e["kind"] for e in km.build_session(SID, NOW)["events"]]
-            km._fold_tasks = lambda session: real_fold(mixed)
+            km._fold_tasks = lambda session, sid=None: real_fold(mixed)
             todo = [e for e in km.build_session(SID, NOW)["events"] if e["kind"] == "todo"]
         finally:
             (km._read_task_store, km._fold_tasks) = saved
@@ -1337,8 +1337,8 @@ class ViewBuilder(unittest.TestCase):
         import inspect
         src = inspect.getsource(km)
         self.assertIn('elif t == "cancelQueued" and msg.get("md"):', src)
-        self.assertIn("err = _cancel_parked(sid, -1, md)", src)
-        self.assertIn("err2 = _cancel_backend_queued(be, sid, -1, md)", src)
+        self.assertIn("err = _cancel_parked(sid, -1, md, qid=qid)", src)
+        self.assertIn("err2 = _cancel_backend_queued(be, sid, -1, md, qid=qid)", src)
 
     def test_tmux_echo_the_transcript_OVERTOOK_is_not_counted_as_queued(self):
         # The reported bug (the user 2026-08-26): a busy session's queued header counted sends from DAYS
@@ -1529,8 +1529,9 @@ class ViewBuilder(unittest.TestCase):
             "rompUuid": SID, "seq": 2, "lastNode": top, "nodes": nodes,
             "placements": placements, "status": status}))
         km._task_seg_cache.clear()
-        km._BG_TOPS_CACHE.clear()          # both classifier caches key on store/transcript file stats —
-        km._SESSION_STAMP_CACHE.clear()    # cleared so a same-stat rewrite can't serve a stale verdict
+        km._BG_TOPS_CACHE.clear()          # the launch-segment positives, the (parse, store)-keyed placement
+        km._SESSION_STAMP_CACHE.clear()    # memo and the stat-keyed stamp read: cleared so an earlier fixture's
+        #                                    answer under this sid, or a same-stat rewrite, serves nothing here
         saved = km._tmux_sessions
         km._tmux_sessions = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
                                            "context": None, "compactPct": None, "color": None,
@@ -4386,7 +4387,8 @@ class ViewBuilder(unittest.TestCase):
             self.assertEqual(km._alive_sessions(NOW, {}), [], "tmux present + empty → no sessions")
             feed = km.build_feed(NOW, tmux={})
             self.assertEqual(feed.get("cards", []), [], "feed shows no card for a dead session")
-            self.assertEqual(km._ordered_alive(NOW, {}), [], "no chat tabs / timeline lanes either")
+            self.assertEqual(km._chat_tab_sessions(NOW, {}), [], "no chat tabs either")
+            self.assertEqual(km._timeline_sessions(NOW, {}, live_only=True), [], "and no live timeline lanes")
         finally:
             km._has_tmux = saved
 
@@ -4733,6 +4735,18 @@ class ViewBuilder(unittest.TestCase):
         self.assertIn("gb.checked = s.showBranch === true", _gear_src())  # open → reflect (default OFF)
         self.assertIn("showBranch: false", _gear_src())               # load() default OFF, both branches
         self.assertNotIn("showBranch: true", _gear_src())             # the old default must not linger
+
+    def test_gear_has_compact_tabs_and_agents_toggle(self):
+        # the user 2026-09-08: a "Compact tabs and agents" checkbox in the Chat section shrinks the tab strip's
+        # tabs and group headers and tightens the rows of the background-work panel (one body class, styles.css
+        # body.dense-chrome, applied by dense-chrome.ts from render.ts). OFF by default: an explicit stored true
+        # opts in. It mirrors render.ts' loadSettings().denseChrome read, persisted in romp:settings.
+        self.assertIn("id=rs-dense", _gear_src())
+        self.assertIn("Compact tabs and agents", _gear_src())
+        self.assertIn("s.denseChrome = dn.checked", _gear_src())          # change → persist
+        self.assertIn("dn.checked = s.denseChrome === true", _gear_src())  # open → reflect (default OFF)
+        self.assertIn("denseChrome: false", _gear_src())              # load() default OFF (dense-chrome.test.ts counts both branches)
+        self.assertNotIn("denseChrome: true", _gear_src())
 
     def test_chat_body_has_an_explicit_send_button(self):
         # The web-dashboard composer (kernel _chat_body, a SECOND copy of vscode-extension/src/page-skeleton.chatBody)
@@ -5084,13 +5098,13 @@ class ViewBuilder(unittest.TestCase):
         card = next(a for a in km.build_feed(NOW)["asks"] if a["itemId"] == g)
         self.assertEqual(card["column"], "needs_input", "no pass active → live read shows the block at once")
 
-    def _settled_store(self, *suffixes):
+    def _settled_store(self, *suffixes, sid=SID):
         # top goal(s) already SETTLED into Completed, each with the diary its flags were materialized from —
         # the state a card is in when the user replies to it
         suffixes = suffixes or ("gP",)
         nodes, status = {}, {}
         for sfx in suffixes:
-            g = "%s:%s" % (SID, sfx)
+            g = "%s:%s" % (sid, sfx)
             nodes[g] = {"id": g, "text": "the goal " + sfx, "parentId": None,
                         "nodeComplete": True, "blocked": False, "cleared": False, "trail": [],
                         "t": NOW - 100, "mt": NOW - 50, "doneWhy": "finished",
@@ -5098,8 +5112,8 @@ class ViewBuilder(unittest.TestCase):
                         "log": [{"ev_t": NOW - 50, "src": "closer", "kind": "done", "why": "finished", "at": NOW - 50},
                                 {"ev_t": NOW - 50, "src": "romp", "kind": "settle", "at": NOW - 50}]}
             status[g] = "completed"
-        (jd.GOALDIR / (SID + ".json")).write_text(json.dumps({
-            "rompUuid": SID, "seq": len(nodes), "lastNode": list(nodes)[-1],
+        (jd.GOALDIR / (sid + ".json")).write_text(json.dumps({
+            "rompUuid": sid, "seq": len(nodes), "lastNode": list(nodes)[-1],
             "nodes": nodes, "placements": {}, "status": status}))
         return list(nodes) if len(nodes) > 1 else list(nodes)[0]
 
@@ -5254,8 +5268,9 @@ class ViewBuilder(unittest.TestCase):
         # unchanged, so the punch (the gesture's replay + rollup, both in place) must land on a copy:
         # otherwise the reopen would be baked into the object the NEXT pass serves for a file that does
         # not hold it. Contract: the memoized object always equals a fresh raw parse of its file
-        # version; the served copy carries the reopen; a second gesture in the same pass works the same
-        # copy; build_feed reads and never writes.
+        # version; the served copy carries the reopen; a second gesture in the same pass lands on a
+        # fresh copy, never on the copy an earlier read served (an object _feed_goals handed out is a
+        # fixed value); build_feed reads and never writes.
         g = self._settled_store()
         path = jd.GOALDIR / (SID + ".json")
         raw = json.loads(path.read_bytes())                # the version this pass memoizes
@@ -5276,7 +5291,9 @@ class ViewBuilder(unittest.TestCase):
             self.assertIs(km._feed_goals(SID), served, "later reads in the pass serve that one copy")
             self.assertTrue(jd.optimistic_followup(SID, g, text="and the null case", now=NOW + 1))
             km._note_user_goal_write(SID)
-            self.assertIs(km._feed_goals(SID), served, "a second gesture punches the copy already made")
+            served2 = km._feed_goals(SID)
+            self.assertIsNot(served2, served, "a second gesture lands on a fresh copy, never on the first in place")
+            self.assertEqual(served2["status"].get(g), "working", "…and that copy carries the second reopen")
             self.assertEqual(memo_obj, raw)
             card = next(a for a in km.build_feed(NOW)["asks"] if a["itemId"] == g)
             self.assertEqual(card["column"], "working")
@@ -5289,6 +5306,46 @@ class ViewBuilder(unittest.TestCase):
             self.assertEqual(km._feed_goals(SID)["status"].get(g), "working")
         finally:
             km._end_goals_pass()
+
+    # Private to the fresh-copy test below: it mints a goal store and journals gestures against it.
+    FRESH_SID = "11111111-2222-3333-4444-fefefefefefe"
+
+    def test_a_second_gesture_in_the_same_pass_never_changes_the_copy_an_earlier_read_served(self):
+        # An object _feed_goals hands out is a fixed value: a reader that keeps it, or keys anything on
+        # its identity, must never see it change under it. A second gesture on the same sid inside one
+        # pass therefore replays onto a FRESH copy of the snapshot entry, not in place on the copy an
+        # earlier read served. Content tells the copies apart: the first carries the follow-up's reopen
+        # (nodeComplete cleared) and keeps it; the second carries the later resolve (nodeComplete set).
+        sid = self.FRESH_SID
+        g = self._settled_store(sid=sid)
+        path = jd.GOALDIR / (sid + ".json")
+        raw = json.loads(path.read_bytes())                # the version this pass memoizes
+        km._user_goal_write.pop(sid, None)
+        km._begin_goals_pass()
+        try:
+            memo_obj = km._goals_memo[0][str(path)][1]
+            punched = km._goals_memo_stats["punch"]
+            self.assertTrue(jd.optimistic_followup(sid, g, text="also handle the empty case", now=NOW))
+            km._note_user_goal_write(sid)                  # gesture 1: the reply reopens the goal
+            served1 = km._feed_goals(sid)
+            self.assertEqual(served1["status"].get(g), "working")
+            self.assertFalse(served1["nodes"][g].get("nodeComplete"), "the reply's reopen cleared the flag")
+            jd.append_override(sid, g, "resolve", NOW + 1)  # gesture 2: the user resolves it a second later
+            # The mark moves. Set by hand rather than by a second _note_user_goal_write so the fresh copy
+            # never rides on the clock advancing between two gestures.
+            km._user_goal_write[sid] = km._user_goal_write[sid] + 1.0
+            served2 = km._feed_goals(sid)
+            self.assertIsNot(served2, served1, "the second gesture lands on a fresh copy")
+            self.assertTrue(served2["nodes"][g].get("nodeComplete"), "…which carries the resolve")
+            self.assertFalse(served1["nodes"][g].get("nodeComplete"),
+                             "the copy the earlier read served has not changed under its holder")
+            self.assertEqual(memo_obj, raw, "the memoized object is still the raw parse")
+            self.assertEqual(km._goals_memo_stats["punch"] - punched, 1,
+                             "punch counts the sids copied, once per pass each")
+        finally:
+            km._end_goals_pass()
+            km._user_goal_write.pop(sid, None)
+            (jd._overrides_dir() / (sid + ".jsonl")).unlink(missing_ok=True)
 
     def test_a_store_that_does_not_decode_is_served_live_and_retried_only_when_it_changes(self):
         # A version that fails to decode stays out of the snapshot (the feed falls to live load_goals,
@@ -5703,7 +5760,7 @@ class ViewBuilder(unittest.TestCase):
             self.assertTrue(jd.optimistic_followup(SID, g, text="one more thing", now=NOW))
             km._note_user_goal_write(SID)
             d = deltas(lambda: (km._feed_goals(SID), km._feed_goals(SID)))
-            self.assertEqual(d["punch"], 1, "one copy per pass per sid, however many reads")
+            self.assertEqual(d["punch"], 1, "one punch per pass per sid, however many reads")
         finally:
             km._end_goals_pass()
 
@@ -6533,18 +6590,21 @@ class ViewBuilder(unittest.TestCase):
                 "output": "Delivered to 'beta'.", "isError": False, "uuid": "t4", "ts": "x"}
         self.assertEqual(km._hydrate_postal([bare], {})[0]["intent"], "")
 
-    def test_ordered_alive_is_stable_under_activity(self):
+    def test_live_order_is_stable_under_activity(self):
         """Lanes/tabs must not auto-shuffle when a session becomes active: a fresh session is appended
-        once and keeps its slot even when its mtime later jumps ahead (the user 2026-06-15)."""
+        once and keeps its slot even when its mtime later jumps ahead (the user 2026-06-15). Read the way
+        the surfaces read it: the timeline's live-only lanes and the chat tabs, both through _ordered."""
         saved = km._alive_sessions
         try:
             km._alive_sessions = lambda now, tmux: [{"sid": "A", "mtime": 100}, {"sid": "B", "mtime": 50}]
-            first = [s["sid"] for s in km._ordered_alive(NOW, {})]
+            first = [s["sid"] for s in km._timeline_sessions(NOW, {}, live_only=True)]
             # B now becomes the most-recently-active (its mtime jumps past A) — the order must NOT change
             km._alive_sessions = lambda now, tmux: [{"sid": "A", "mtime": 100}, {"sid": "B", "mtime": 999}]
-            second = [s["sid"] for s in km._ordered_alive(NOW, {})]
+            second = [s["sid"] for s in km._timeline_sessions(NOW, {}, live_only=True)]
             self.assertEqual(first, ["A", "B"], "new sessions frozen newest-active-first, once")
             self.assertEqual(second, first, "activity (mtime) must not reorder existing lanes/tabs")
+            self.assertEqual([s["sid"] for s in km._chat_tab_sessions(NOW, {})], first,
+                             "the chat tabs read the same order")
         finally:
             km._alive_sessions = saved
 
@@ -6556,8 +6616,10 @@ class ViewBuilder(unittest.TestCase):
         saved = km._alive_sessions
         km._alive_sessions = lambda now, tmux: list(fake)
         try:
-            self.assertEqual([s["sid"] for s in km._ordered_alive(NOW, {})], ["b", "a", "c"],
-                             "living sessions follow the saved shared order")
+            self.assertEqual([s["sid"] for s in km._timeline_sessions(NOW, {}, live_only=True)], ["b", "a", "c"],
+                             "living sessions follow the saved shared order as timeline lanes")
+            self.assertEqual([s["sid"] for s in km._chat_tab_sessions(NOW, {})], ["b", "a", "c"],
+                             "and as chat tabs")
         finally:
             km._alive_sessions = saved
 
@@ -8205,11 +8267,11 @@ class SessionOrderStable(unittest.TestCase):
     keeps its persisted slot, only a drag reorders (the user 2026-06-23). Before the fix, dead lanes were
     pulled into a separate mtime-sorted block, so a session jumped slots the moment it died."""
     def setUp(self):
-        self._saved = (km._ordered_alive, km._alive_sessions, km._sessions, km._session_order,
+        self._saved = (km._alive_sessions, km._sessions, km._session_order,
                        km._session_order_proved, set(km._kept_open))
 
     def tearDown(self):
-        (km._ordered_alive, km._alive_sessions, km._sessions, km._session_order,
+        (km._alive_sessions, km._sessions, km._session_order,
          km._session_order_proved, kept) = self._saved
         km._kept_open.clear(); km._kept_open.update(kept)
 
@@ -8224,11 +8286,10 @@ class SessionOrderStable(unittest.TestCase):
         km._session_order = lambda: ["A", "B", "C"]
         km._session_order_proved = lambda: ["A", "B", "C"]
         km._sessions = lambda now: [B, A, C]             # _sessions is mtime-DESC → B first
-        # _chat_tab_sessions/_timeline_sessions now read _alive_sessions directly and order via _ordered
-        # (the session-order refactor, 15f5037) — stub THAT for the live list; _ordered_alive is no longer
-        # on their path. B has DIED → only A, C live, in persisted order.
+        # _chat_tab_sessions/_timeline_sessions read _alive_sessions directly and order via _ordered
+        # (the session-order refactor, 15f5037): stub THAT for the live list. B has DIED, so only A, C live,
+        # in persisted order.
         km._alive_sessions = lambda now, tmux: [A, C]
-        km._ordered_alive = lambda now, tmux: [A, C]
         return A, B, C
 
     def test_dead_timeline_lane_keeps_its_slot(self):

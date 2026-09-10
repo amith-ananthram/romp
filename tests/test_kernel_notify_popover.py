@@ -259,8 +259,10 @@ class PushTestRoute(_LoopbackMixin, unittest.TestCase):
         (sub, payload), _ = pp.call_args
         self.assertEqual(sub["endpoint"], self.ep)
         d = json.loads(payload.decode())
-        self.assertEqual(d["title"], "romp")
-        self.assertTrue(d["body"])
+        # ONE title rule (the user 2026-09-09): "Romp: <session>" with a session in front, a bare
+        # "Romp" without one; the body stays what it was. Was the lowercase "romp" for both.
+        self.assertEqual(d["title"], "Romp")
+        self.assertEqual(d["body"], "Test notification — this device is set up.")
         # preview reconciliation with #940: the tap payload rides `data` (kind test, no sid) and a tag
         self.assertLessEqual(set(d), {"title", "body", "tag", "data", "sid"}, "a test carries no sid to jump to and no badge")
         self.assertFalse(d.get("sid"))
@@ -281,7 +283,7 @@ class PushTestRoute(_LoopbackMixin, unittest.TestCase):
         (sub, payload), _ = pp.call_args
         self.assertEqual(sub["endpoint"], self.ep)
         d = json.loads(payload.decode())
-        self.assertEqual(d["title"], "romp")
+        self.assertEqual(d["title"], "Romp: web", "the session the tap comes back to, in the title too")
         self.assertEqual(d["body"], "Test notification — tap to come back to web.")
         self.assertEqual(d["sid"], SID_WEB)
         self.assertEqual(d["tag"], "romp:" + SID_WEB)
@@ -329,6 +331,7 @@ class PushTestRoute(_LoopbackMixin, unittest.TestCase):
         self.assertEqual((res["sid"], res["name"]), ("boxa:" + SID_API, SID_API[:8]))
         d = json.loads(pp.call_args[0][1].decode())
         self.assertEqual(d["body"], "Test notification — tap to come back to %s." % SID_API[:8])
+        self.assertEqual(d["title"], "Romp: " + SID_API[:8], "the title wears the same stand-in the body does")
         self.assertEqual((d["data"]["sid"], d["data"]["host"], d["data"]["kind"]), ("boxa:" + SID_API, "boxa", "test"))
 
     def _snapshot(self, host, names):
@@ -355,6 +358,12 @@ class PushTestRoute(_LoopbackMixin, unittest.TestCase):
         self.assertEqual((res["sid"], res["name"]), ("boxa:" + SID_API, "boxa:api"))
         d = json.loads(pp.call_args[0][1].decode())
         self.assertEqual(d["body"], "Test notification — tap to come back to boxa:api.")
+        # the TITLE wears the session name alone (the user 2026-09-09: the host is not their
+        # concern — the tap carries the routing in `data`); the body and the popover's result
+        # line keep the host-prefixed name the merged dashboard shows
+        self.assertEqual(d["title"], "Romp: api")
+        self.assertNotIn("boxa", d["title"])
+        self.assertEqual(d["data"]["name"], "boxa:api", "the routing block (#1157) carries the form the body and the popover echo wear")
 
     def test_the_shells_label_stands_in_when_the_kernel_has_no_name_for_the_id(self):
         # no snapshot for that host (never polled, or a kernel too old to file names): the tab's own
@@ -368,6 +377,10 @@ class PushTestRoute(_LoopbackMixin, unittest.TestCase):
         self.assertEqual(json.loads(body)["name"], "boxa:api (paused)", "trimmed and flattened, otherwise verbatim")
         d = json.loads(pp.call_args[0][1].decode())
         self.assertEqual(d["body"], "Test notification — tap to come back to boxa:api (paused).")
+        # the title takes the label WHOLE: it is the user's own tab text, not a host:name the kernel composed,
+        # so there is no host to strip from it (only a snapshot-resolved remote name loses its prefix in the title)
+        self.assertEqual(d["title"], "Romp: boxa:api (paused)")
+        self.assertEqual(d["data"]["name"], "boxa:api (paused)", "the routing block carries the same stand-in")
         # a local session keeps the registry's name even when the label disagrees (the registry is authoritative)
         with mock.patch.object(km, "_vapid_keys", return_value=(None, "pub")), \
              mock.patch.object(km, "_push_post", return_value=(201, "Created")), \
@@ -377,7 +390,7 @@ class PushTestRoute(_LoopbackMixin, unittest.TestCase):
 
     def test_the_label_is_a_capped_string_or_a_400(self):
         with mock.patch.object(km, "_vapid_keys", return_value=(None, "pub")), \
-             mock.patch.object(km, "_push_post", return_value=(201, "Created")), \
+             mock.patch.object(km, "_push_post", return_value=(201, "Created")) as pp, \
              mock.patch.object(km, "_name_of", return_value=None):
             code, _ = self._post("/push/test", {"endpoint": self.ep, "sid": "boxa:" + SID_API, "label": 5})
             self.assertEqual(code, 400)
@@ -387,6 +400,11 @@ class PushTestRoute(_LoopbackMixin, unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(json.loads(body)["name"], "x" * km.PUSH_LABEL_MAX, "long UI text is clipped, not refused")
         self.assertLessEqual(km.PUSH_LABEL_MAX, 80)
+        # the title wears the SAME clipped stand-in (#1157's clip meets #1155's title rule through one lookup,
+        # _push_session_names): an unclipped 500-char title over a clipped body would be two names for one session
+        d = json.loads(pp.call_args[0][1].decode())
+        self.assertEqual(d["title"], "Romp: " + "x" * km.PUSH_LABEL_MAX)
+        self.assertEqual(d["data"]["name"], "x" * km.PUSH_LABEL_MAX, "the routing block carries the name the body wears")
 
     def test_without_a_sid_the_probe_is_what_it_was(self):
         code, res, pp = self._test((201, "Created"))
@@ -548,11 +566,16 @@ class TurnFinishedPush(unittest.TestCase):
         self.assertEqual((fired, pushed, fwd), ([], [], []), "existing state is status, not news")
         _stamp_stop(SID_WEB, 1001)
         fired, pushed, fwd = self._tick()
-        self.assertEqual(fired, [{"title": "web", "body": "Done: the login flow now redirects to the notes list.",
+        # the title is "Romp: <session>" (the user 2026-09-09: one title rule for every kind; a turn end
+        # is not a needs-you) — was the bare session name. The body stays the first line it said.
+        self.assertEqual(fired, [{"title": "Romp: web", "body": "Done: the login flow now redirects to the notes list.",
                                   "sid": SID_WEB, "kind": "turn"}])   # preview reconciliation with #940: the kind rides to peers
         (args, kw), = pushed
-        self.assertEqual(args, ("web", "Done: the login flow now redirects to the notes list.", SID_WEB))
+        self.assertEqual(args, ("Romp: web", "Done: the login flow now redirects to the notes list.", SID_WEB))
         self.assertNotIn("badge", kw, "the count rides its own push")
+        # the routing block's `name` (#1157: the shell's offer chip reads it off the payload) is the session name
+        # the title was built from — NOT the title: "Romp: web" is not a session
+        self.assertEqual(kw, {"kind": "turn", "name": "web"})
         self.assertEqual(fwd, [fired], "the same event travels to trusted peers, the bell-event way")
         # the same key again is nothing new
         self.assertEqual(self._tick()[0], [])
@@ -741,13 +764,13 @@ class RelayOfTurnEvents(unittest.TestCase):
         km._set_notify_turns(False)
 
     def test_a_turn_shaped_event_mirrors_with_the_origin_on_its_sid(self):
-        # the relay's tolerant surgery (the federation test's contract): a session-named title
-        # passes as composed, the sid gains the origin so a tap routes through the merged dashboard
+        # the relay touches the SID only (the federation test's contract): the title passes as the
+        # origin composed it, the sid gains the origin so a tap routes through the merged dashboard
         with km._remotes_lock:
             km._remotes["boxa"] = {"host": "boxa", "kernel_port": 1, "local_port": 1, "token": "tok",
                                    "proc": None, "status": "up", "trust": "trusted"}
         try:
-            raw = json.dumps({"origin": "boxa", "events": [{"title": "web", "body": "Done: shipped.", "sid": SID_WEB}]}).encode()
+            raw = json.dumps({"origin": "boxa", "events": [{"title": "Romp: web", "body": "Done: shipped.", "sid": SID_WEB}]}).encode()
             h = km.Handler.__new__(km.Handler)
             h.client_address = ("127.0.0.1", 0)
             h.headers = {"X-Romp-Token": km.TOKEN, "Content-Length": str(len(raw))}
@@ -765,8 +788,9 @@ class RelayOfTurnEvents(unittest.TestCase):
                 h.do_POST()
             pn.assert_called_once()   # preview reconciliation with #940: kind/host ride as kwargs
             args, kw = pn.call_args
-            self.assertEqual(args, ("web", "Done: shipped.", "boxa:" + SID_WEB))
+            self.assertEqual(args, ("Romp: web", "Done: shipped.", "boxa:" + SID_WEB))
             self.assertEqual(kw.get("host"), "boxa")
+            self.assertNotIn("boxa", args[0] + args[1], "the host rides the routing, never the words")
         finally:
             with km._remotes_lock:
                 km._remotes.pop("boxa", None)

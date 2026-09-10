@@ -166,8 +166,10 @@ test("badges wear the header conventions: accent adds, block-red removes, the co
   // painted on the build-once column heads and the data-fsid-stamped session headers; cleared when quiet
   assert.match(FEED, /put\(document\.querySelector\("\.feed-col\.col-" \+ key \+ " \.feed-col-head"\), d\.cols\[key\]\);/);
   assert.match(FEED, /h\.setAttribute\("data-fsid", e\.sid\);/);
-  assert.match(FEED, /const c = groupedNow \? d\.sess\[sid\] : undefined;\s*if \(sid !== hoveredSid\) \{ put\(h, c\); return; \}/,
-    "every header but the hovered one carries its in-row badge (the hovered one's floats — T285)");
+  assert.match(FEED, /if \(h\.getAttribute\("data-fcol"\) !== e\.col\) h\.setAttribute\("data-fcol", e\.col\);/,
+    "the column stamp beside the sid, compare-first like it: the two together are the row the hover key names");
+  assert.match(FEED, /const c = groupedNow \? d\.sess\[sid\] : undefined;\s*if \(sessFreezeKey\(h\) !== hoveredHead\) \{ put\(h, c\); return; \}/,
+    "every header but the hovered ROW carries its in-row badge (the hovered one's floats, T285); the same session's header in another column is not the hovered row");
   assert.match(FEED, /document\.querySelectorAll\("\.freeze-badge"\)\.forEach\(\(n\) => n\.remove\(\)\);/,
     "nothing pending → every badge comes off");
   // local renders while frozen re-sync the hints, so a rebuilt board never strands a stale count
@@ -179,8 +181,8 @@ test("a session header row holds the same gate a card holds: a push while it is 
   // the row (name, caret, Clear all inside it) enters and leaves the freeze by the session it stands for
   assert.match(head, /h\.addEventListener\("mouseenter", \(\) => freezeEnter\(sessFreezeKey\(h\)\)\);/, "hovering the header row arms the gate");
   assert.match(head, /h\.addEventListener\("mouseleave", \(\) => freezeLeave\(sessFreezeKey\(h\)\)\);/, "leaving it releases (the flush follows)");
-  assert.match(FEED, /function sessFreezeKey\(h: HTMLElement\): string \{ return "h:" \+ \(h\.getAttribute\("data-fsid"\) \|\| ""\); \}/,
-    "keyed by the data-fsid stamp read at event time — the row's identity across re-homing renders");
+  assert.match(FEED, /function sessFreezeKey\(h: HTMLElement\): string \{\s*return "h:" \+ \(h\.getAttribute\("data-fcol"\) \|\| ""\) \+ ":" \+ \(h\.getAttribute\("data-fsid"\) \|\| ""\);\s*\}/,
+    "keyed by the data-fcol and data-fsid stamps read at event time: the (column, session) row's identity across re-homing renders");
   // the payload path is ONE gate for both holders: while any freeze key is set, the payload is queued and
   // NOTHING renders — so updateSessHead never runs and the hovered row (its Clear all included) stands
   const gate = FEED.slice(FEED.indexOf('if (m.type === "feed") {'), FEED.indexOf('} else if (m.type === "hoverCards") {'));
@@ -200,8 +202,8 @@ test("a session header row holds the same gate a card holds: a push while it is 
   // badge lands after the auto-margin Clear all and slides it out from under the pointer, the very click loss
   // this hold prevents. The hovered header's badge floats: body-mounted, pointer-inert, its row's rect untouched.
   const paint = FEED.slice(FEED.indexOf("function paintFreezeBadges(): void {"), FEED.indexOf("// ── CARD KEYBOARD SCOPE"));
-  assert.match(paint, /const hoveredSid = freezeKey && freezeKey\.startsWith\("h:"\) \? freezeKey\.slice\(2\) : null;/);
-  assert.match(paint, /if \(sid !== hoveredSid\) \{ put\(h, c\); return; \}\s*put\(h, undefined\);/, "every other header keeps its in-row badge; the hovered one carries none");
+  assert.match(paint, /const hoveredHead = freezeKey && freezeKey\.startsWith\("h:"\) \? freezeKey : null;/, "the whole key, never the sid alone");
+  assert.match(paint, /if \(sessFreezeKey\(h\) !== hoveredHead\) \{ put\(h, c\); return; \}\s*put\(h, undefined\);/, "every other header keeps its in-row badge; the hovered row carries none");
   assert.match(paint, /headNote\.id = "freeze-headnote"; document\.body\.appendChild\(headNote\);/, "…its hint is body-mounted");
   assert.match(paint, /headNote\.style\.top = Math\.round\(r\.bottom \+ 2\) \+ "px";/, "…placed just under the row, right-aligned");
   assert.match(CSS, /#freeze-headnote \{ position: fixed; z-index: 6; pointer-events: none;/, "pointer-inert, like the card's self-note");

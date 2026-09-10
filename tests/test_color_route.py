@@ -5,6 +5,8 @@ one identity color without WS surgery. Only a swatch of a known palette is accep
 palette supplies the fg word), and a recolor is a names-registry write, so a dormant session
 recolors by sid just like /rename renames one. Drives the REAL Handler over HTTP (the
 test_new_route_prefs.py pattern). Synthetic only."""
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -123,6 +125,32 @@ class ColorRoute(unittest.TestCase):
         self.assertEqual(st, 400)
         st, r = self._post({"bg": "#54B204"})
         self.assertEqual(st, 400)
+
+
+    def test_a_record_that_reads_with_no_name_is_refused_with_the_cause_and_left_alone(self):
+        # before the guard: ok True, and the file read \t\t#54B204\tblack\n (name and cwd erased). A record
+        # whose first field is empty is another writer's window or a damaged file, never a real record:
+        # the writer leaves it alone, and the route says which of its two refusals this is
+        (self.names / SID).write_text("")
+        saved = list(km._SDK_BOOT_PROBLEMS)
+        self.addCleanup(lambda: km._SDK_BOOT_PROBLEMS.__setitem__(slice(None), saved))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            st, r = self._post({"target": "web", "bg": "#54B204"})
+        self.assertEqual(st, 200)
+        self.assertFalse(r.get("ok"), r)
+        self.assertIn("reads with no name", r.get("error") or "", "the cause, not the absent-record question")
+        self.assertNotIn("no names record", r.get("error") or "")
+        self.assertEqual((self.names / SID).read_text(), "", "left byte for byte as it was")
+        self.assertFalse(self.dirty, "nothing to repaint")
+        self.assertIn(SID, err.getvalue(), "the log names the sid")
+
+    def test_an_absent_record_still_asks_if_the_session_is_known(self):
+        st, r = self._post({"target": SID2, "bg": "#54B204"})
+        self.assertFalse(r.get("ok"), r)
+        self.assertIn("no names record for that session", r.get("error") or "")
+        self.assertFalse((self.names / SID2).exists(), "no record is invented")
+        self.assertFalse(self.dirty)
 
 
 if __name__ == "__main__":

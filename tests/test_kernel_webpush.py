@@ -763,6 +763,17 @@ class PushPayloadShape(unittest.TestCase):
             self.assertEqual(km._push_session_name("SID-other", label="  the   tab  text  "), "the tab text", "the label, flattened, when the kernel has no name")
             self.assertEqual(km._push_session_name(""), "")
             self.assertEqual(km._push_session_name("SID-other", label="x" * 200), "x" * km.PUSH_LABEL_MAX, "clipped")
+            # the same lookup as a (name, bare) pair — reconciling #1157 with #1155's title rule: the TITLE wears the
+            # session's own name with no host in front, the body and routing block the host-prefixed form, and both
+            # come from ONE lookup so a body and its title can never name two different sessions. The stand-ins
+            # (label, short id) have no host to strip, so they are shared
+            self.assertEqual(km._push_session_names("boxa:SID-api", label="ignored"), ("boxa:api", "api"))
+            self.assertEqual(km._push_session_names("SID-web"), ("web", "web"))
+            self.assertEqual(km._push_session_names("boxb:SID-unknown"), ("SID-unkn", "SID-unkn"))
+            self.assertEqual(km._push_session_names("boxb:SID-unknown", label=" tab\ttext "), ("tab text", "tab text"))
+            self.assertEqual(km._push_session_names("SID-other", label="x" * 200), ("x" * km.PUSH_LABEL_MAX,) * 2)
+            self.assertEqual(km._push_session_names(""), ("", ""))
+            self.assertEqual(km._push_session_name("boxa:SID-api"), km._push_session_names("boxa:SID-api")[0], "the singular is the pair's first")
 
     def test_a_relayed_push_keeps_the_origin_in_sid_and_host(self):
         # a federated event's sid already wears its host prefix (the merged dashboard's own tab
@@ -884,7 +895,8 @@ class DeclarativeWire(unittest.TestCase):
             res = km._push_test(self.APPLE, "SID-web", "", "web")
         self.assertTrue(res["ok"])
         t = json.loads(pp.call_args[0][1].decode())
-        self.assertEqual((t["web_push"], t["notification"]["title"], t["notification"]["data"]["kind"]), (8030, "romp", "test"))
+        self.assertEqual((t["web_push"], t["notification"]["title"], t["notification"]["data"]["kind"]), (8030, "Romp: web", "test"),
+                         "the test push wears _notify_title's shape (#1155): the wordmark over the bare session name")
         self.assertEqual(t["notification"]["data"]["pid"], [r["pid"] for r in km._push_ledger() if r["kind"] == "test"][0])
 
 

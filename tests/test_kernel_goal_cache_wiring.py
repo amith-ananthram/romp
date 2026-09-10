@@ -62,12 +62,17 @@ def _tm():
 # (load_goals_shared_or_fault), so one session's unreadable store costs that session's goal-derived data
 # and files one row per fault episode, never the frame.
 WIRED = {"_open_top_goal": 1, "_deferral_sweep_tick": 1, "_session_stamp_read": 1, "_owned_yield_why": 1,
-         "_msg_sum_scan_session": 1}
+         "_msg_sum_scan_session": 1,
+         "_bg_placed_tops": 1}   # the placed-launch memo: the shared view, or the store the caller hands in
 WIRED_BOUNDARY = {"build_feed": 1, "build_session": 2, "build_timeline": 1}
-# NOT wired, on purpose: the awaiting-lift job and the background-placement reader do a probe-then-write
-# two-phase read, and the feed's pass snapshot has its own memo (_feed_goals stays on the writer's loader,
-# bare or behind load_goals_or_fault).
-UNWIRED = ("_lift_spent_awaiting", "_bg_placed_tops", "_feed_goals")
+# TWO-PHASE: the awaiting-lift job takes one shared PROBE (through the boundary: a fault forgets the gate so
+# the next tick retries) and one writer load only when the probe found a lift due (jd.load_goals_or_fault,
+# the same boundary around the writer's loader); the decision body (_lift_decisions) loads nothing and
+# writes nothing.
+TWO_PHASE = {"_lift_spent_awaiting": (1, 1)}
+# NOT wired, on purpose: the feed's pass snapshot has its own memo (_feed_goals stays on the writer's
+# loader, bare or behind load_goals_or_fault).
+UNWIRED = ("_feed_goals",)
 
 
 class WiringPins(unittest.TestCase):
@@ -83,13 +88,45 @@ class WiringPins(unittest.TestCase):
             self.assertEqual(src.count("jd.load_goals(") + src.count("jd.load_goals_or_fault("), 0,
                              "%s: the boundary reads the shared view, not the writer's loader" % name)
 
-    def test_the_writers_and_the_two_phase_readers_stay_on_load_goals(self):
+    def test_the_feeds_pass_snapshot_stays_on_load_goals(self):
         for name in UNWIRED:
             src = inspect.getsource(getattr(km, name))
             self.assertEqual(src.count("jd.load_goals_shared(") + src.count("jd.load_goals_shared_or_fault("), 0,
                              "%s: not wired" % name)
             self.assertGreaterEqual(src.count("jd.load_goals(") + src.count("jd.load_goals_or_fault("), 1,
                                     "%s: still the writer's loader, bare or behind the boundary" % name)
+
+    def test_the_awaiting_lift_probes_the_shared_view_and_loads_the_writers_copy_once(self):
+        for name, (shared, writer) in TWO_PHASE.items():
+            src = inspect.getsource(getattr(km, name))
+            self.assertEqual(src.count("jd.load_goals_shared_or_fault("), shared, "%s: the phase-1 probe" % name)
+            self.assertEqual(src.count("jd.load_goals_or_fault("), writer, "%s: the phase-2 writer load" % name)
+            self.assertEqual(src.count("jd.load_goals_shared(") + src.count("jd.load_goals("), 0,
+                             "%s: no bare load outside the boundary" % name)
+
+    def test_the_lifts_decision_body_loads_nothing_and_writes_nothing(self):
+        # every rule of the lift is decided here, on whichever store the caller hands in (the shared view
+        # in phase 1, the writer's copy in phase 2); the verdict gate is read through jd.may_apply only
+        src = inspect.getsource(km._lift_decisions)
+        for needle in ("jd.load_goals(", "jd.load_goals_shared(", "jd.load_goals_or_fault(",
+                       "jd.load_goals_shared_or_fault(", "record_verdict(", "save_goals(",
+                       "rollup_status(", "_drop_auto_nudge_rec("):
+            self.assertEqual(src.count(needle), 0, "_lift_decisions: %s" % needle)
+        self.assertEqual(src.count("jd.may_apply("), 4,
+                         "the read-only gate, once per arm: rolled-up, peer-superseded, empty-registry, cited-return")
+        # ...and it is the gate record_verdict consults before it appends, so a decision here is a
+        # record_verdict that would have returned True (LiftGate's floor cases run the two side by side)
+        self.assertIn("may_apply(", inspect.getsource(km.jd.record_verdict),
+                      "record_verdict asks may_apply: phase 1 decides through the gate phase 2 files through")
+
+    def test_bg_placed_tops_keys_on_objects_not_on_a_stat(self):
+        # the per-version map is keyed on the parse and store OBJECTS in hand (a stat taken after the
+        # read can describe a version the read did not see); no stat is taken here. The one presence
+        # check (os.path.exists on the store file, an absent store answering nothing without a parse or
+        # a load) is not a key and is allowed.
+        src = inspect.getsource(km._bg_placed_tops)
+        self.assertEqual(src.count(".stat()"), 0)
+        self.assertEqual(src.count("os.stat("), 0)
 
     def test_the_compaction_sweep_evicts_the_caches_absent_paths(self):
         src = inspect.getsource(km._compact_goal_stores)
@@ -106,7 +143,8 @@ class SharedViewInBuilds(unittest.TestCase):
         self.td = tempfile.TemporaryDirectory()
         self.saved_state = jd.STATE
         jd._rebind_state(Path(self.td.name))         # clears the cache and lifts any earlier off switch
-        self.saved = {nm: getattr(km, nm) for nm in ("_timeline_sessions", "_derive_judging")}
+        self.saved = {nm: getattr(km, nm) for nm in ("_timeline_sessions", "_derive_judging_marks")}
+        km._lanes_memo.clear()                        # a lane the timeline memo holds never reaches the spy below
         for i, sid in enumerate(SIDS):
             s = {"rompUuid": sid, "seq": 0, "placementsV": jd.PLACEMENTS_V, "nodes": {},
                  "placements": {}, "status": {}}
@@ -225,7 +263,7 @@ class SharedViewInBuilds(unittest.TestCase):
     def test_the_store_a_wired_site_works_on_is_the_frozen_shared_view(self):
         seen, raised = [], []
 
-        def spy(sid, caps, goals, t0, out, seg_ends=None):
+        def spy(sid, caps, goals, seg_ends=None):
             seen.append(goals)
             for attempt in (lambda: goals["status"].__setitem__("x", "y"),
                             lambda: goals["nodes"][sid + ":g1"]["log"].append({"kind": "done"}),
@@ -234,8 +272,8 @@ class SharedViewInBuilds(unittest.TestCase):
                     attempt()
                 except jd.FrozenStoreError:
                     raised.append(1)
-            return self.saved["_derive_judging"](sid, caps, goals, t0, out, seg_ends)
-        km._derive_judging = spy
+            return self.saved["_derive_judging_marks"](sid, caps, goals, seg_ends)
+        km._derive_judging_marks = spy
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             tl = km.build_timeline(NOW, {}, with_bars=True)
@@ -259,7 +297,7 @@ class SharedViewInBuilds(unittest.TestCase):
         self.assertEqual(jd.load_goals(SIDS[1])["nodes"][SIDS[1] + ":g1"]["text"], "Goal 1",
                          "a write on a fallback store reached no file")
         # the board keeps rendering: the next build's loads take load_goals (private, mutable) and succeed
-        km._derive_judging = self.saved["_derive_judging"]
+        km._derive_judging_marks = self.saved["_derive_judging_marks"]
         km.build_timeline(NOW, {}, with_bars=True)
         self.assertEqual(self._delta("fallback"), 2 * len(SIDS) - 1)
 

@@ -111,6 +111,41 @@ class TheNewKinds(unittest.TestCase):
         self.assertEqual(f["state"], "done", "a cleared COMPLETED card comes back completed, never 'open'")
         self.assertFalse(f["held"], "an undo asserts nothing about doneness — no held-open")
 
+    def test_an_undo_reopen_with_nothing_to_restore_is_a_state_no_op(self):
+        # an undo-reopen restores the state its clear displaced; one that finds no clear before it (a second
+        # undo row for one clear after a lost re-clear, or an undo whose clear never landed) has nothing to
+        # restore and must leave the state as it stands: a completed card stays done, its settle stamp
+        # stands, and the user's floor still advances. Before, it fell through to "open" like a plain
+        # reopen, and the completed top came back Working
+        log = [{"ev_t": T, "src": "closer", "kind": "done", "why": "shipped", "at": T},
+               {"ev_t": T + 2, "src": "romp", "kind": "settle", "at": T + 2},
+               {"ev_t": T + 5, "src": "user", "kind": "clear", "at": T + 5},
+               {"ev_t": T + 10, "src": "user", "kind": "reopen", "undo": True, "at": T + 10},
+               {"ev_t": T + 20, "src": "user", "kind": "reopen", "undo": True, "at": T + 20}]
+        f = self._fold(log)
+        self.assertEqual(f["state"], "done", "the second undo finds nothing to restore and changes nothing")
+        self.assertFalse(f["held"], "an undo asserts nothing about doneness, so no held-open")
+        self.assertEqual(f["settledAt"], T + 2, "the settle the first undo restored still stands")
+        self.assertEqual(f["floor"], T + 20, "the user's floor advances to the undo all the same")
+        log = [{"ev_t": T, "src": "closer", "kind": "done", "why": "shipped", "at": T},
+               {"ev_t": T + 2, "src": "romp", "kind": "settle", "at": T + 2},
+               {"ev_t": T + 10, "src": "user", "kind": "reopen", "undo": True, "at": T + 10}]
+        f = self._fold(log)
+        self.assertEqual(f["state"], "done", "an undo whose clear never landed changes nothing")
+        self.assertFalse(f["held"])
+        self.assertEqual((f["settledAt"], f["floor"]), (T + 2, T + 10))
+        # a done node never reports held (_fold_node masks it at its return), so the two cases above cannot
+        # tell an undo that holds from one that does not. On a node no verdict has landed on the state is
+        # "open" and held reaches the return unmasked: a clear, its undo and a second undo leave the node
+        # open and NOT held, with the floor at the last undo (green before the fix too; it pins that the
+        # no-op branch, like the restore, never turns an undo into a user's plain reopen)
+        log = [{"ev_t": T + 5, "src": "user", "kind": "clear", "at": T + 5},
+               {"ev_t": T + 10, "src": "user", "kind": "reopen", "undo": True, "at": T + 10},
+               {"ev_t": T + 20, "src": "user", "kind": "reopen", "undo": True, "at": T + 20}]
+        f = self._fold(log)
+        self.assertEqual((f["state"], f["held"], f["floor"]), ("open", False, T + 20),
+                         "an undo never holds the node open, whether or not it had a clear to restore")
+
     def test_any_judge_event_answers_held_and_pending(self):
         log = [{"ev_t": T, "src": "closer", "kind": "done", "at": T},
                {"ev_t": T + 10, "src": "user", "kind": "reopen", "msg": True, "at": T + 10}]

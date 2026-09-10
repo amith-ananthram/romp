@@ -75,7 +75,7 @@ test("marks translate EVENT indices to DISPLAY UNITS before asking the frame", (
   // one) and the mark silently vanished — worst exactly beside big tool runs, where replies to a
   // working session land. Both painters now translate through eventUnitIndex.
   assert.match(RENDER, /function eventUnitIndex\(s: Session\): Int32Array/);
-  assert.match(RENDER, /if \(it\.kind === "toolgroup" \|\| it\.kind === "retrygroup"\) \{ for \(const i of it\.indices\) map\[i\] = u; \}/);
+  assert.match(RENDER, /if \(it\.kind === "toolgroup" \|\| it\.kind === "noticegroup"\) \{ for \(const i of it\.indices\) map\[i\] = u; \}/);   // noticegroup since 2026-09-08
   assert.match(RENDER, /const evUnit = eventUnitIndex\(s\);/);
   assert.match(RENDER, /const u = evUnit\[i\];/);
   assert.match(RENDER, /const off = frame\.offsetOf\(u\);/, "notches ask the frame in unit space");
@@ -182,4 +182,43 @@ test("only the NOTCH takes the pointer — the box stays passive over the native
   assert.match(light, /--accent: #C2410C;/);
   // the hover rule outranks the machine notch's dimmer opacity by specificity (state rules must win the cascade)
   assert.match(CSS, /\.scroll-marks \.scroll-mark\.machine \{ background: #8a8f98; opacity: 0\.55; \}/);
+});
+
+// ── replies ready (the user 2026-09-08): the strip's reply DOTS are the comment rail's ticks ──────────────
+// Each unread landed reply marks the scroll edge at its anchor's position in the comment colour, so the reader
+// sees how many wait and where. The strip already carried this as #cmt-rail — one yellow tick per open thread,
+// the UNREAD one wider, taller and double-ringed — in the SAME frame as the notches and over them; a second dot
+// for the same thread on .scroll-marks would have put two marks in one column for one fact (the T129 rule: two
+// marks on one scrollbar may never disagree). So the dots are pinned here, not duplicated: same frame, the
+// landed colour token, unread keyed on the kernel's bit, and CLICKABLE — the tick jumps there and opens the
+// thread (its 2026-08-15 contract, which is also what marks it read; the reply chips' click deliberately does
+// not — reply-ready.test.ts).
+const RAIL = RENDER.slice(RENDER.indexOf("function updateCommentRail(): void {"), RENDER.indexOf("function unwrapCommentMark("));
+
+test("a reply dot sits at its anchor's position in the notches' own frame, over them in the same column", () => {
+  assert.match(RAIL, /const frame = contentOffsetFrame\(content, v, s\);/, "the ONE frame the notches use");
+  assert.match(RAIL, /const off = frame\.offsetOf\(evUnit\[idx\]\);/, "event → unit → offset, like a notch");
+  assert.match(RAIL, /ticks\.push\(\{ th, y: Math\.min\(r\.height - 6, Math\.round\(\(off \/ frame\.sh\) \* \(r\.height - 4\)\)\) \}\);/, "the same proportional map");
+  assert.match(RAIL, /rail\.style\.left = \(r\.right - 10\) \+ "px";/);
+  assert.match(PAINT, /box\.style\.left = \(cRect\.right - 12\) \+ "px";/, "…the notch box's right edge is the rail's right edge");
+  assert.match(CSS, /\.cmt-rail \{ position: fixed; width: 10px; z-index: 40; pointer-events: none; \}/, "over the notches (z 3), passive between ticks");
+  assert.match(RENDER, /paintRailSticky\(\); paintScrollMarks\(\); updateCommentRail\(\);/, "one scheduler paints notches and dots from one world");
+});
+
+test("the dot is the comment's landed colour; UNREAD shouts; keyed on the kernel's bit on an open thread", () => {
+  assert.match(CSS, /\.cmt-tick \{\s*\n\s*position: absolute; right: 1px; width: 8px; height: 4px;[\s\S]{0,120}background: var\(--cmt-hl\);/, "the landed token, never a raw hex");
+  assert.match(CSS, /\.cmt-tick\.unread \{ width: 10px; height: 6px; right: 0; opacity: 1; z-index: 1;\s*\n\s*box-shadow: 0 0 0 1\.5px var\(--bg\), 0 0 0 3px color-mix\(in srgb, var\(--cmt-hl\) 85%, transparent\); \}/,
+    "…and lifted above a read sibling at the same top (nested-marks.test.ts)");
+  assert.match(RAIL, /\+ \(th\.unread && th\.status === "open" \? " unread" : ""\)/, "the same predicate the mark's ring and the reply chips read");
+  assert.match(RAIL, /\+ ":" \+ \(t\.th\.unread \? 1 : 0\)/, "the unread bit rides the signature: a reply landing repaints the dot");
+  assert.match(CSS, /\.cmt-tick\.busy \{ background: var\(--st-awaitbg-bg\); \}/, "a reply still being written is green here as on the mark");
+});
+
+test("a dot is a BUTTON, delegated: click = jump to the anchor and open the thread; same-tid sets move in place", () => {
+  assert.match(RAIL, /const tick = el\("button", cls\(t\.th\)\) as HTMLButtonElement;/);
+  assert.match(RAIL, /tick\.dataset\.act = "cmtjump";\s*\n\s*tick\.dataset\.tid = t\.th\.tid;\s*\n\s*tick\.dataset\.uuid = t\.th\.anchorUuid;/);
+  assert.match(RENDER, /cmtjump: \(elx\) => \{\s*\n\s*const tid = elx\.dataset\.tid, uuid = elx\.dataset\.uuid;\s*\n\s*if \(!tid \|\| !uuid \|\| !activeId\) return;\s*\n\s*flashedAnchor = null;\s*\n\s*scrollToAnchor\(uuid\);/);
+  assert.match(RENDER, /openCommentPopover\(activeId, tid, Math\.max\(8, r\.left - 380\), Math\.max\(60, r\.top - 40\)\);/, "…and opens it (which is what marks it read)");
+  assert.match(RAIL, /if \(kids\.length === ticks\.length && kids\.every\(\(k, i\) => k\.dataset\.tid === ticks\[i\]\.th\.tid\)\) \{/, "an unchanged tick set moves in place — a mid-press rebuild can't eat the click");
+  assert.match(CSS, /\.cmt-tick \{[\s\S]{0,200}pointer-events: auto; cursor: pointer;/, "only the tick takes the pointer");
 });

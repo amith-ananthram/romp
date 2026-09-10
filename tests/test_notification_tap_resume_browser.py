@@ -44,6 +44,8 @@ import time
 import unittest
 from pathlib import Path
 
+from tests.dist_copy import copy_dist
+
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
 BIN = os.path.join(ROOT, "bin")
@@ -191,7 +193,7 @@ class ServedTapLanding(unittest.TestCase):
         if b.returncode != 0:
             raise unittest.SkipTest("esbuild failed here: " + (b.stderr or b.stdout)[-200:])
         dist = os.path.join(cls.lab, "dist")
-        shutil.copytree(os.path.join(EXT, "dist"), dist)
+        copy_dist(os.path.join(EXT, "dist"), dist)
         cls.state = os.path.join(cls.lab, "xdg", "romp")
         cwd = os.path.join(cls.lab, "proj")
         for d in ("names", "sdk", "states"):

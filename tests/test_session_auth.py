@@ -869,10 +869,9 @@ class AuthErrorClass(unittest.TestCase):
 
     def test_it_is_an_on_you_class_end_to_end(self):
         import inspect
-        # the classification lives in _api_error_scan since the tail-window split; _api_error is the
-        # widening driver around it, so read the pair rather than pinning which half holds the flag
-        self.assertIn('"authErr": _is_auth_error(text)',
-                      inspect.getsource(km._api_error) + inspect.getsource(km._api_error_scan))
+        # the classification lives in _api_error_pass, the one-pass scanner both _api_error and the latched
+        # _api_last_failed read through, so the pin reads that function
+        self.assertIn('"authErr": _is_auth_error(text)', inspect.getsource(km._api_error_pass))
         self.assertIn('"apiAuthErr": bool(aerr and aerr.get("authErr"))', inspect.getsource(km.build_session))
         feed = inspect.getsource(km.build_feed)
         self.assertIn('aerr.get("authErr") or aerr.get("refusal"))))', feed, "the card floors to needs-you")

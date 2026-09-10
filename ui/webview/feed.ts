@@ -12,7 +12,7 @@
 import { distillText, distillInputs, applyDistillLine, distillPending, distillStaleNote } from "./distiller-line";
 import { flipNeeded } from "./feed-flip";
 import { delegate } from "./actions";
-import { paintHeld, paintReleased } from "./paint-gate";
+import { paintHeld, paintReleased, publishPaneHidden } from "./paint-gate";
 import { linkifyPrRefs, setLinkedText, senderPrRepo, installPrLinkOpener } from "./pr-links";
 import { cardInputsKey, cardNeedsUpdate, type GateEnv } from "./feed-card-gate";
 import { spinFor, awaitWord, groupRows, GROUP_TITLE, ROW_KIND_OF_LEGACY, type AwaitRow } from "./spin-caption";
@@ -3577,13 +3577,20 @@ function makeSessHead(): HTMLElement {
   h.addEventListener("mouseleave", () => freezeLeave(sessFreezeKey(h)));
   return h;
 }
-/** The hover-freeze key a session header holds: "h:<sid>", read from the data-fsid stamp at event time (grouped
- *  mode re-homes and re-stamps headers across renders; the stamp is the row's identity). */
-function sessFreezeKey(h: HTMLElement): string { return "h:" + (h.getAttribute("data-fsid") || ""); }
+/** The hover-freeze key a session header holds: "h:<column>:<sid>", read from the data-fcol and data-fsid stamps at
+ *  event time (grouped mode re-homes and re-stamps headers across renders; the stamps are the row's identity). The
+ *  key names the (column, session) ROW, the identity reconcileCol keys the element by, not the session alone: a
+ *  session heads a run in every column it has cards in, and the badge painter must tell the hovered row from that
+ *  session's headers in the other columns. */
+function sessFreezeKey(h: HTMLElement): string {
+  return "h:" + (h.getAttribute("data-fcol") || "") + ":" + (h.getAttribute("data-fsid") || "");
+}
 function updateSessHead(h: HTMLElement, e: Entry & { kind: "sess" }): void {
-  // the hover-freeze badge painter finds headers by sid; compare first, like the labels below — the DOM's
-  // change-an-attribute steps queue a mutation record for a same-value write too
+  // the hover-freeze key and its badge painter read the row's session and column from these stamps (sessFreezeKey);
+  // compare first, like the labels below: the DOM's change-an-attribute steps queue a mutation record for a
+  // same-value write too
   if (h.getAttribute("data-fsid") !== e.sid) h.setAttribute("data-fsid", e.sid);
+  if (h.getAttribute("data-fcol") !== e.col) h.setAttribute("data-fcol", e.col);
   const nm = (h as any)._name as HTMLElement;
   // the name nodes are minted only when what they show changes: headers repaint every render (they are not
   // behind the per-card update gate), and each mint is a Text-node replacement — the same reason cards are
@@ -4386,7 +4393,12 @@ function clearSessionCards(sid: string): void {
     if (turns.has(tid) && ((g as any)._g as AskGroup | undefined)?.sid === sid) leaving.push([g, () => groupEls.get(tid) === g, () => groupEls.delete(tid)]);
   }
   for (const [c] of leaving) { c.dispatchEvent(new MouseEvent("mouseleave")); c.classList.add("dismissing"); }
-  for (const [key, head] of Array.from(sessHeadEls)) if (head.getAttribute("data-fsid") === sid) startSessHeadExit(key, head);
+  // The header row holds the hover-freeze gate too, and its Clear all sits on the row: the pointer that clicked it
+  // is resting on the row by construction. The ghost is pointer-inert (and reduced motion removes the row outright),
+  // so no mouseleave of its own ever fires; dispatch the synthetic one, as the card loop above does, so the release
+  // comes from the click and the kernel's confirmation of the clear applies at once instead of queueing behind
+  // the hold. freezeLeave ignores a key it does not hold, so the session's headers in the other columns are safe.
+  for (const [key, head] of Array.from(sessHeadEls)) if (head.getAttribute("data-fsid") === sid) { head.dispatchEvent(new MouseEvent("mouseleave")); startSessHeadExit(key, head); }
   clearedStack.push(members.slice());   // one batch: one Undo brings the whole session back
   for (const m of members) pendingCleared.add(m.itemId);
   vscodeApi?.postMessage({ type: "askClearMany", itemIds: ids, sid });   // ONE kernel batch (see above)
@@ -4807,7 +4819,11 @@ function ensureHostLoad(list: HTMLElement): void {
 // double rAF per moved card onto the return frame — and the hidden-tab pile-up was the freeze. NOT the
 // hover-freeze queue below: that holder withholds the payload itself, and a confirming payload held back
 // lets the follow-move backstop revert a move the kernel had already confirmed.
-let feedIntersecting = true;   // #feed-list on screen by the observer's measure; true where there is no observer
+// The same two measures are this pane's hidden word for the kernel's pane shim (paint-gate.ts publishPaneHidden):
+// the shim's zero-viewport probe misses a pane hidden after a first show in Chromium, so the release path and the
+// hidden arm of visibilitychange publish document.hidden OR the observer's last word as window.__rompPaneHidden,
+// on the same events, and nothing until the observer has spoken.
+let feedIntersecting: boolean | null = null;   // #feed-list on screen by the observer's last word; null until it speaks (the gate reads null as on screen; nothing is published for it)
 let paintDirty = false;        // a render was withheld while the pane could not be seen
 let skipFlipOnce = false;      // the release paint snaps: cards that moved while away have no old spot to glide from
 let feedWatching = false;
@@ -4823,12 +4839,14 @@ function watchFeedVisibility(list: HTMLElement): void {
 // requestAnimationFrame hop): on a tab switch the compositor shows the cached frame until the page paints,
 // so a paint inside the event handler is the earliest fresh frame.
 function releasePaint(): void {
+  publishPaneHidden(document.hidden, feedIntersecting);
   if (!paintReleased(paintDirty, document.hidden, feedIntersecting)) return;
   paintDirty = false;
   skipFlipOnce = true;
   render();
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden) releasePaint(); });
+document.addEventListener("visibilitychange", () => { if (document.hidden) publishPaneHidden(true, feedIntersecting); });   // the hidden arm releases nothing, so the release path never publishes it
 
 function render() {
   const list = document.getElementById("feed-list")!;
@@ -5363,13 +5381,15 @@ function paintFreezeBadges(): void {
   // auto-margin Clear all and slides that button out from under the pointer — the click loss the header
   // hold exists to prevent, caused by the hold's own hint. That row's badge floats instead: body-mounted,
   // pointer-inert, right-aligned just under the row (the self-note idiom), so the row's rect stands.
-  const hoveredSid = freezeKey && freezeKey.startsWith("h:") ? freezeKey.slice(2) : null;
+  // The hovered row is ONE (column, session) header, matched by its whole key: a session with cards in two
+  // columns heads a run in each, and the other column's header keeps its in-row badge and never gets the float.
+  const hoveredHead = freezeKey && freezeKey.startsWith("h:") ? freezeKey : null;
   let headNote = document.getElementById("freeze-headnote") as HTMLElement | null;
   let floated = false;
   document.querySelectorAll<HTMLElement>(".feed-sess-head").forEach((h) => {
     const sid = h.getAttribute("data-fsid") || "";
     const c = groupedNow ? d.sess[sid] : undefined;
-    if (sid !== hoveredSid) { put(h, c); return; }
+    if (sessFreezeKey(h) !== hoveredHead) { put(h, c); return; }
     put(h, undefined);                                   // never inside the hovered row
     if (!c || (!c.add && !c.del)) return;
     if (!headNote) { headNote = el("div", "freeze-badge"); headNote.id = "freeze-headnote"; document.body.appendChild(headNote); }

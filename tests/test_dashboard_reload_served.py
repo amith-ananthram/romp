@@ -26,11 +26,18 @@ import time
 import unittest
 from pathlib import Path
 
+from tests.dist_copy import copy_dist
+
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
 BIN = os.path.join(ROOT, "bin")
 EXT = os.path.join(ROOT, "vscode-extension")
 SID = "11111111-2222-4333-8444-000000000201"
+
+import sys
+sys.path.insert(0, HERE)
+import test_ship_reship as _lab   # noqa: E402  the served lab's cfg.relaunch stanza (the module, not its classes:
+#                                   an imported TestCase would be collected here a second time)
 
 
 def _free_port():
@@ -172,7 +179,7 @@ class ServedAutoReload(unittest.TestCase):
         if b.returncode != 0:
             raise unittest.SkipTest("esbuild failed here: " + (b.stderr or b.stdout)[-200:])
         dist = os.path.join(cls.lab, "dist")
-        shutil.copytree(os.path.join(EXT, "dist"), dist)
+        copy_dist(os.path.join(EXT, "dist"), dist)
         cls.bump_file = os.path.join(dist, "render.js")
         state = os.path.join(cls.lab, "xdg", "romp")
         cwd = os.path.join(cls.lab, "proj")
@@ -201,6 +208,9 @@ class ServedAutoReload(unittest.TestCase):
                        ROMP_TMUX_SOCKET="romp-autoreload-%d" % cls.port)
         cls.env.pop("ROMP_STATE_DIR", None)
         cls.env.pop("ANTHROPIC_API_KEY", None)
+        # a stand-in for a key the runner's shell carries: the lab's kernel gets it by process environment with the
+        # rest of the runner's, and the cfg.json the driver reads must never carry it
+        cls.env["RUNNER_SECRET_PROBE"] = "abc"
         cls.klog = os.path.join(cls.lab, "kernel.log")
         cls.kernel = subprocess.Popen([os.path.join(BIN, "romp-kernel")],
                                       stdout=open(cls.klog, "w"), stderr=subprocess.STDOUT, env=cls.env)
@@ -234,7 +244,14 @@ class ServedAutoReload(unittest.TestCase):
         with open(cfg, "w") as f:
             json.dump({"url": "http://127.0.0.1:%d/?token=%s" % (self.port, self.token),
                        "kernelPid": self.kernel.pid, "bumpFile": self.bump_file,
-                       "relaunch": {"cmd": os.path.join(BIN, "romp-kernel"), "env": self.env, "log": self.klog}}, f)
+                       "relaunch": _lab.relaunch_cfg(self.env, self.klog)}, f)
+        # the file carries only what the driver and the relaunched kernel need: the probe the lab planted in its
+        # kernel's environment (checked first, so the file check cannot pass without it) must not be in it (names
+        # only in the report, never the values)
+        self.assertIn("RUNNER_SECRET_PROBE", sorted(self.env), "the lab plants the probe in its kernel's environment")
+        written = json.loads(Path(cfg).read_text(encoding="utf-8"))
+        self.assertNotIn("RUNNER_SECRET_PROBE", sorted(written["relaunch"]["env"]),
+                         "the lab's cfg.json carries a variable of the runner's environment the relaunch does not need")
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)

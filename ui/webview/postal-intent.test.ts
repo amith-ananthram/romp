@@ -33,11 +33,11 @@ test("the DECLARED kind (ev.intent) drives the chip; the body-token parse is onl
   assert.match(RENDER, /intent\?: string;/);   // the event carries the declared kind
 });
 
-test("the chip is rendered on the postal head and styled per type (three classes only)", () => {
-  assert.match(RENDER, /el\("span", "postal-service-intent postal-service-intent-" \+ intent\.cls\)/);
-  assert.match(CSS, /\.postal-service-intent \{/);
-  assert.match(CSS, /\.postal-service-intent-delegate \{/);
-  assert.match(CSS, /\.postal-service-intent-coordinate \{/);
-  assert.match(CSS, /\.postal-service-intent-question \{/);
-  assert.doesNotMatch(CSS, /\.postal-service-intent-fyi \{/);    // FYI chip class is gone
+test("the intent reads as META text on the postal notice head — no coloured chip (2026-09-08)", () => {
+  // the notice-vocabulary pass: the three per-type colours (raw #b08cff / #14b8a6, the working yellow at 1.59:1 on
+  // cream) are retired; the label rides the head's meta slot beside the delivery state
+  assert.match(RENDER, /if \(intent\) meta\.push\(intent\.label\);/);
+  assert.match(RENDER, /else if \(ev\.status === "delivered"\) meta\.push\("delivered"\);/);
+  assert.doesNotMatch(CSS, /\.postal-service-intent/);
+  assert.doesNotMatch(CSS, /#b08cff/);
 });

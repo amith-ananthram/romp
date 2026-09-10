@@ -108,7 +108,10 @@ security settings. It also cannot repair a runtime that fails before a thread
 starts, and reviewer availability is determined by Codex and your account.
 If the API says a model needs a newer Codex, select a compatible model from the
 model picker or update ROMP's pinned runtime; Auto cannot fix a model/runtime
-version mismatch. Runtime 0.153.3 supports Astra, but the host must also support
+version mismatch. The picker's list is the app-server's own. When it cannot be
+had, the chat's menu shows the reason (the client not up yet, a failed list, no
+live Codex session) instead of opening blank, and a menu opened on an empty list
+asks for it again. Runtime 0.153.3 supports Astra, but the host must also support
 sandbox creation as described below.
 
 ## Sandboxing
