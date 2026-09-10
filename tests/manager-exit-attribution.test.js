@@ -79,7 +79,19 @@ test('an aux kernel\'s row goes to ITS state root (the kernel reads the audit fi
 });
 
 test('auditSigterm never throws: an unwritable root is a lost note, not a lost restart', () => {
-  assert.doesNotThrow(() => auditSigterm({ id: 'x', port: 1, stateDir: path.join(STATE, 'no', 'such', 'file.txt', 'dir') }, 1, 'restart'));
+  // A regular file as a component of the root's path: recursive mkdir cannot create the root
+  // (ENOTDIR), so the function's catch is what keeps this from throwing. An earlier fixture named a
+  // path under STATE that did not exist yet, which recursive mkdir created, so the row was written and
+  // the catch never ran: the case passed with the try/catch deleted. The mkdirSync self-check keeps the
+  // fixture uncreatable, so the case cannot go vacuous again without failing here first.
+  const file = path.join(STATE, 'a-file.txt');
+  fs.writeFileSync(file, '');
+  const root = path.join(file, 'dir');
+  assert.throws(() => fs.mkdirSync(root, { recursive: true }));
+  let t;
+  assert.doesNotThrow(() => { t = auditSigterm({ id: 'x', port: 1, stateDir: root }, 1, 'restart'); });
+  assert.equal(typeof t, 'number');                                          // the stamp comes back regardless
+  assert.equal(fs.existsSync(path.join(root, 'restart-audit.jsonl')), false); // the note is lost, nothing else happens
 });
 
 // The wiring: the row goes on disk BEFORE the signal, and the record says what was asked. The pure

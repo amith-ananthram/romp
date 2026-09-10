@@ -21649,15 +21649,18 @@ def _audit_unrequested_signal(signum, pending=False, now=None, manager_stopped=F
 SIGNAL_MANAGER_NOTE_WAIT_S = 0.5   # how long an unexplained SIGTERM waits for the manager's own stop note
 
 
-def _manager_sigterm_row_for_us(now=None, window=90, started=None):
-    """Whether the audit tail holds a `manager-sigterm` STOP note aimed at THIS kernel (its `pid` is
-    ours, or it names none) within `window` seconds and not before this kernel's start (`started`; the
-    default is the process start, _STARTED, in whole seconds as the rows are): the manager's note that
-    it is stopping us, which is what _unrequested_signal_reason takes as the manager going down
-    alongside us. Only `reason: stop` counts. A `restart` note means the manager is alive and about to
-    respawn the kernel, and one landing during the drain of an unrelated signal (a stray kill, then the
-    rail's restart button) must not file that exit as a service stop with `managerStopped: true` while
-    the manager's own log shows a requested restart. The start bound is the one _recent_restart_audit
+def _manager_sigterm_row_for_us(now=None, window=90, started=None, reasons=("stop",)):
+    """Whether the audit tail holds a `manager-sigterm` note aimed at THIS kernel (its `pid` is ours, or
+    it names none) with a `reason` in `reasons`, within `window` seconds and not before this kernel's
+    start (`started`; the default is the process start, _STARTED, in whole seconds as the rows are).
+    With the default, only `reason: stop` counts: the manager's note that it is stopping us, which is
+    what _unrequested_signal_reason takes as the manager going down alongside us. A `restart` note means
+    the manager is alive and about to respawn the kernel, and one landing during the drain of an
+    unrelated signal (a stray kill, then the rail's restart button) must not file that exit as a service
+    stop with `managerStopped: true` while the manager's own log shows a requested restart. With
+    `reasons=("restart", "stop")` the question is whether the manager noted ANY kill of this kernel,
+    which is how _graceful_term tells the delivery of a parked quiet request from a signal nobody sent
+    through the manager. The start bound is the one _recent_restart_audit
     applies: the note this waits for lands AFTER our signal, so a stop note for our pid from before the
     process existed is a predecessor's, left behind when a reboot reused the pid (the machine back inside
     the window, the kernel up under the pid the previous one had, then a stray kill), and without the
@@ -21679,7 +21682,7 @@ def _manager_sigterm_row_for_us(now=None, window=90, started=None):
             continue
         if t0 - rec["t"] > window or rec["t"] < born:
             return False
-        if rec.get("pid") in (None, os.getpid()) and rec.get("reason") == "stop":
+        if rec.get("pid") in (None, os.getpid()) and rec.get("reason") in reasons:
             return True
     return False
 
@@ -21698,7 +21701,11 @@ def _unrequested_signal_reason(signum, be=None, wait=None, sleep=time.sleep, now
     manager that wrote no note (one older than auditSigterm) can exit during it. A genuinely stray
     signal pays the wait and reads as unrequested; nothing here asserts who sent it. `started` bounds
     the note walk at this kernel's start (the process start by default; the tests pass their own, as
-    _recent_restart_reason's do)."""
+    _recent_restart_reason's do). The log line is best-effort, like the audit write: the kernel runs on
+    the manager's stdio, and a stream that is gone makes the write raise. It sits between filing the
+    `signal` row and the return, so an unguarded raise would hand _drain_and_exit its fallback, the plain
+    unrequested verdict, for a cut row whose `signal` row says the manager was stopped; guarded, the
+    reason returned is the one that row carries."""
     pending = False
     try:
         pending = bool(be.drain_holding()) if be is not None and hasattr(be, "drain_holding") else False
@@ -21900,8 +21907,11 @@ def _recent_restart_audit(window=90, now=None, started=None):
         the deploy as the reason the service went down. The one exception is a `when: quiet` request: the
         manager parks it and restarts whatever kernel is running at the quiet window, so it outlives the
         kernel that filed it. With the manager's note for us on record the note answers (below); with none
-        (a manager build that wrote no notes) the parked row itself names the cut, unless a row above it
-        shows it delivered or dropped: a `manager-sigterm` note for a restart (every restart the manager
+        the parked row itself is returned, unless a row above it shows it delivered or dropped. That
+        no-note return serves the label and _parked_quiet_deploy, not consumption: _graceful_term
+        consumes a quiet row only when the manager noted a kill of this pid (its delivery), and files a
+        SIGTERM with a park on record and no such note as unrequested, the park untouched. Delivered or
+        dropped: a `manager-sigterm` note for a restart (every restart the manager
         sends clears the park in passing) or for the stop of this kernel or of every kernel (the manager's
         own shutdown takes the park down with it), a verdict that the manager was gone (`parent-gone`, or
         `signal` with `managerStopped`), or a cut row that already joined it (`auditT`: the restart it asked
@@ -21909,7 +21919,13 @@ def _recent_restart_audit(window=90, now=None, started=None):
         kernel's pid settles nothing: POST /stop naming one kernel leaves the manager's park armed, and the
         row cannot be told from the stop that took every kernel down, so the park stays on record (the
         error to prefer: a held converge self-heals at the backstop bound, a released one cuts the turns
-        the quiet window was to spare);
+        the quiet window was to spare). Settled or not is decided by the rows above the park at ANY age:
+        verdicts and notes are classified before this bound and the window, so one older than either is
+        passed over (or settles the park) and never ends the walk with the park unread. A park this kernel
+        filed itself (its t at or after the start) is its own request whatever sits above it, inside the
+        window and past it alike: a note for this pid above it is the delivery of that very park, or the
+        stop of this kernel, which the rule above already reads as taking the park down, and the settled
+        rule reads predecessors' parks only;
       - a row with an action is a request and wins, unless a cut row already consumed it: spent on the
         cut it asked for, this cut is anonymous;
       - a `when: quiet` request is pending until the restart it asked for lands, up to the far manager's
@@ -21918,13 +21934,18 @@ def _recent_restart_audit(window=90, now=None, started=None):
       - the kernel's OWN verdict rows (EXIT_VERDICT_ACTIONS: `signal`, `parent-gone`) are never a request,
         whatever pid they carry. They have an action, so without the rule a SIGTERM reaching the next
         kernel within the window reads a predecessor's verdict as the request, copies it onto its own cut
-        row and writes no `signal` row of its own (two stray kills within 90 seconds, one row);
+        row and writes no `signal` row of its own (two stray kills within 90 seconds, one row). They and
+        the manager's notes are classified before the window and the start bound, wherever they sit: an
+        aged one is passed over, not the end of the walk, so a live quiet park beneath it is still read
+        (a `signal` verdict with the manager alive, or another kernel's single stop, that aged past 90 s
+        before the drift check read the park);
       - a `manager-sigterm` row (bin/romp-manager auditSigterm, written before every SIGTERM it sends) is
         a mechanism note, not a request: it says the manager was the messenger, and its `trigger` names
         what set it off (`restart`, `restart-all`, `refresh`, `stop`), so that is the label it answers
         with (a note without one falls back to its `reason`). It never outranks a request row beneath it
         within the window, answers only when no request is on record (a `romp-manager restart`, a service stop
-        that noted before it killed), and one aimed at another kernel pid is not about us;
+        that noted before it killed) and only from inside the window and this kernel's lifetime, and one
+        aimed at another kernel pid is not about us;
       - a row with no action is skipped, never taken as the answer. The CLI's `romp refresh` writes its
         caller-attribution row with no action field ({t, ppid, parent, sid, name, tty, tmux}), and taking
         that row's empty label as the verdict would file every deploy as an unrequested signal; the
@@ -21952,17 +21973,12 @@ def _recent_restart_audit(window=90, now=None, started=None):
             action = str(rec.get("action") or "")
             if action in _NO_RESTART_ACTIONS:
                 continue                                    # restarted no kernel; says nothing about this cut
-            quiet = rec.get("when") == "quiet"
-            win = max(window, RESTART_EXPECT_MAX_S) if quiet else window
-            if t0 - rec["t"] > win:
-                break                                       # older rows are older still
-            spent = bool(consumed) and rec["t"] == consumed  # a cut row already joined it (auditT)
-            if rec["t"] < born:
-                # a predecessor's row; only a parked quiet request survives the kernel that filed it
-                if quiet and action not in EXIT_VERDICT_ACTIONS + ("manager-sigterm",) \
-                        and not park_settled and not spent:
-                    return rec
-                break
+            # Rows that are never the answer are classified BEFORE the window and the start bound, wherever
+            # they sit: what a verdict or a manager note says about a parked quiet request beneath it holds
+            # at any age, and the walk has to reach that park. A live park is inside its own 20-minute
+            # window long after a row above it has aged past the 90 s one, or was filed before this kernel
+            # started; ending the walk at such a row read the park as nothing on record, for the cut row's
+            # reason and for the drift stand-down that reads the park through this walk.
             if action in EXIT_VERDICT_ACTIONS:
                 if action == "parent-gone" or (action == "signal" and rec.get("managerStopped")):
                     park_settled = True                     # the manager was gone, its park with it
@@ -21971,9 +21987,20 @@ def _recent_restart_audit(window=90, now=None, started=None):
                 ours = rec.get("pid") in (None, os.getpid())    # a note about THIS kernel (or one naming none)
                 if ours or rec.get("reason") != "stop" or rec.get("trigger", "stop") != "stop":
                     park_settled = True                     # a restart, or the manager's own shutdown: the park went with it
-                if ours and via_manager is None:
-                    via_manager = rec
+                if ours and via_manager is None and t0 - rec["t"] <= window and rec["t"] >= born:
+                    via_manager = rec                       # the answer only inside the window and this kernel's lifetime
                 continue
+            # The bounds: only a row that can answer (a request, a park, an unlabeled row) reaches them.
+            quiet = rec.get("when") == "quiet"
+            win = max(window, RESTART_EXPECT_MAX_S) if quiet else window
+            if t0 - rec["t"] > win:
+                break                                       # older rows are older still
+            spent = bool(consumed) and rec["t"] == consumed  # a cut row already joined it (auditT)
+            if rec["t"] < born:
+                # a predecessor's row; only a parked quiet request survives the kernel that filed it
+                if quiet and not park_settled and not spent:
+                    return rec
+                break
             if not action and not quiet:
                 continue                                    # an unlabeled row parks nothing; nothing to answer with
             if spent:
@@ -53549,7 +53576,10 @@ def _graceful_term(signum, frame):
     mutation, and a cut turn keeps its 'working' state tail: the NEXT kernel's boot reconcile
     resumes exactly those. Bounded (~2s) so `romp refresh` stays snappy. Never construct the
     backend here: no SDK sessions were running if it doesn't exist. A second SIGTERM while the first
-    is draining returns at once (_EXIT_ONCE): the first finishes and exits."""
+    is draining returns at once (_EXIT_ONCE): the first finishes and exits. A parked quiet request on
+    record is consumed only when the manager noted a kill of this kernel (its `manager-sigterm` row for
+    this pid, or one naming none): the manager delivers the park, so a SIGTERM with no such note is not
+    its delivery, and the park stays on record for the kernel the quiet window will restart."""
     if not _EXIT_ONCE.acquire(blocking=False):
         return
     _TERMINATING[0] = True                          # the parent-watch stands down (see _parent_watch)
@@ -53561,6 +53591,17 @@ def _graceful_term(signum, frame):
     # this). A row that lands during the drain below did not send this signal. The row itself rides
     # along so the cut row can join it and consume it (auditT; see _recent_restart_audit).
     rec = _recent_restart_audit()
+    if isinstance(rec, dict) and rec.get("when") == "quiet" \
+            and not _manager_sigterm_row_for_us(reasons=("restart", "stop")):
+        # A parked quiet request is delivered by the manager, and the manager notes every kill it sends
+        # before sending it. With no note for this pid inside the window and this kernel's lifetime, this
+        # SIGTERM is not that delivery: the manager still holds the park for whatever kernel runs at the
+        # quiet window (a dynamic kernel or a stateDir-less aux shares this root and this park). Consuming
+        # the park here stamped its t as auditT, which hid it from every reader under the root
+        # (_consumed_audit_t), labeled a signal nobody asked for as the deploy, filed no `signal` row,
+        # and counted a stray kill as a deploy landing (_last_deploy_restart_t). So the pick is dropped
+        # and the exit takes the unrequested path below: a `signal` row, the unrequested reason, no auditT.
+        rec = None
     _drain_and_exit(_audit_reason_text(rec), signum=signum, what="SIGTERM", audit=rec)
 
 

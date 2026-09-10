@@ -1752,11 +1752,17 @@ request, and are passed over. The manager's `manager-sigterm` row is a note
 that the manager sent the signal, not a request: it answers only when no
 request row written before it lies within the window and this kernel's
 lifetime, with `manager-sigterm: <trigger>` as the reason, and a note aimed at
-another kernel's pid is ignored. A row with no action (the `romp refresh` row)
-is skipped, and the manager's `restart-all` note written after it is what
-names the refresh; a `romp refresh --quiet` row is the parked deploy that
-holds the automatic converge until the window opens, and the note written at
-the window names its delivery the same way.
+another kernel's pid is ignored. Verdicts and notes are passed over wherever
+they sit, an aged one included: one older than the window or older than this
+kernel never ends the walk, so a quiet-window request beneath it is still
+read. A row with no action (the `romp refresh` row) is skipped, and the
+manager's `restart-all` note written after it is what names the refresh; a
+`romp refresh --quiet` row is the parked deploy that holds the automatic
+converge until the window opens, and the note written at the window names its
+delivery the same way. A SIGTERM that reaches a kernel with a quiet-window
+request parked and no manager note for its pid (a note naming no pid counts as
+its own) is not that request's delivery: the kernel files a `signal` row and
+leaves the request on record for the kernel the window will restart.
 
 When no row qualifies, the kernel writes a row with action `signal`: the signal
 name, its pid and its parent's pid, the manager pid it was started with,
