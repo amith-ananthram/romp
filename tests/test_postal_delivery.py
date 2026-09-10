@@ -280,6 +280,27 @@ class PushIsChunkedUnderTheKernelsCap(unittest.TestCase):
         self.assertEqual(len(named), 1, named)
         self.assertIn("waits in new/ for the turn-end drain", named[0])
 
+    def test_an_oversize_message_from_a_from_label_sender_is_put_back_and_the_rest_still_land(self):
+        # `romp mail send --from cron` mails under ext:cron (cli_send), which is no mailbox: the REAL deliver()
+        # raises ValueError for it (_safe_id has no ':'). Before 2026-09-10 the local-sender arm took it, the
+        # ValueError escaped into _push's catch-all as "push error", nothing was posted and nothing put back:
+        # every message the drain had claimed sat in cur/ while its sender's receipt read "read".
+        pm.deliver = self.saved[2]                            # the real one: its refusal is the point
+        big = self._msg("m-big", 1_000_000, **{"from": "cron", "from_id": "ext:cron"})
+        pm._drain = lambda sid: {"messages": [big, self._msg("m-small", 1000)]}
+        pm._kernel_post = self._inject_all
+        self.assertTrue(pm._push(self.SID, {"id": self.SID, "state": "idle"}), "the rest of the box landed")
+        self.assertEqual([l for l in self.logged if "push error" in l], [], "nothing escaped to the catch-all")
+        self.assertEqual(len(self.posted), 1)
+        self.assertIn("<!-- romp-msg-id: m-small -->", self.posted[0]["text"])
+        self.assertNotIn("m-big", self.posted[0]["text"], "the oversize message is never posted")
+        self.assertEqual(self.restored, [(self.SID, "m-big")],
+                         "put back under its own id for the drain and check_inbox, which have no size cap")
+        self.assertFalse((pm.MAILROOT / "ext:cron").exists(), "no mailbox is made for the label")
+        named = [l for l in self.logged if "m-big" in l]
+        self.assertEqual(len(named), 1, named)
+        self.assertIn("has no local sender to bounce to", named[0])
+
     def test_publish_working_reads_a_refusal_as_failure(self):
         pm._kernel_post = lambda path, body, timeout=2: {"ok": False, "status": 400, "error": "id required"}
         self.assertFalse(pm._publish_working(self.SID, "note"), "a refusal used to pass the `is not None` test")
