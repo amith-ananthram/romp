@@ -51986,7 +51986,7 @@ class Handler(BaseHTTPRequestHandler):
                 # a session could be FED without a browser (POST /send, postal) but never STOPPED — a
                 # runaway had no headless escape hatch. These mirror the WS handlers exactly (same
                 # backend calls, same chip/close events). Body: {"id"|"name": <session>}; remote
-                # sessions forward over their tunnel like /send.
+                # sessions forward over their tunnel like /send, and the far kernel's answer is the answer.
                 try:
                     b = json.loads(raw_body or b"{}")
                     who = str(b.get("id") or b.get("name") or "") if isinstance(b, dict) else ""
@@ -51997,8 +51997,23 @@ class Handler(BaseHTTPRequestHandler):
                 sid = _sid_of(who)
                 r = _host_for_sid(sid)
                 if r is not None:                               # remote session → forward over its -L tunnel
-                    _remote_forward(r, u.path, {"id": sid})
-                    return self._send(200, json.dumps({"ok": True}), "application/json")
+                    # The /send arm's shape, for the same reason: the first cut discarded the far kernel's
+                    # reply and answered ok:true, so `romp end` on a session whose tunnel had just dropped
+                    # printed ok while the runaway kept running; and it forwarded the id alone, so an
+                    # `--when-idle` end killed the far session mid-turn. The deferral crosses the wire, a
+                    # far kernel that doesn't answer is said so, its refusal comes back as itself, and its
+                    # reply — `deferred` and all — is what the caller reads.
+                    fwd = {"id": sid}
+                    if isinstance(b, dict) and b.get("when") == "idle":
+                        fwd["when"] = "idle"
+                    res = _remote_forward(r, u.path, fwd)
+                    if res is None:                             # the far kernel didn't answer — say so, never
+                        return self._send(200, json.dumps({"ok": False, "error":   # pretend it was done
+                            "the remote kernel for this session (%s) isn't answering — not %s"
+                            % (r.get("host", "?"), "interrupted" if u.path == "/interrupt" else "ended")}),
+                            "application/json")
+                    # its answer verbatim — a refusal, a plain ok, or an ok with `deferred` — never rewritten
+                    return self._send(200, json.dumps(res), "application/json")
                 be = Sessions.backend_for(sid)
                 if u.path == "/interrupt":
                     be.interrupt(sid)                           # Esc/stop AND settle idle (in the backend)

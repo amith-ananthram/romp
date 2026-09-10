@@ -16328,13 +16328,15 @@ function mentionRosterChanged(): void {
   if (fresh) remarkMentions();
 }
 
-// A chip's dress from the session it names: the identity color and, as its title, the name and the state.
-// The chip is keyed by the session's id (data-sid) and re-dressed on every roster change, so a rename or a
-// state change reaches a chip rendered long before (the sent text itself stays as typed). A session gone
-// reads Closed and keeps its last color, so the reader still sees who was meant.
+// A chip's dress from the session it names: the identity colour as the NAME's own colour (--chip-bg, the
+// tab label's foreground idiom; the sheet paints it on the awaiting chip's dark backing, .chip-peer-name's
+// declarations) and, as its title, the name and the state. The chip is keyed by the session's id (data-sid)
+// and re-dressed on every roster change, so a rename or a state change reaches a chip rendered long before
+// (the chip's text stays the name as typed). A session gone reads Closed and keeps its last colour, so the
+// reader still sees who was meant.
 function dressMentionChip(chip: HTMLElement, s: Session | null): void {
-  if (!s) { chip.title = (chip.textContent || "").replace(/^@/, "") + " · " + CHIP_LABEL.closed; return; }
-  if (s.color) { chip.style.setProperty("--chip-bg", s.color.bg); chip.style.setProperty("--chip-fg", s.color.fg); }
+  if (!s) { chip.title = (chip.textContent || "") + " · " + CHIP_LABEL.closed; return; }
+  if (s.color) chip.style.setProperty("--chip-bg", s.color.bg);
   chip.title = s.name + " · " + (CHIP_LABEL[s.status.state] || s.status.state);
 }
 function refreshMentionChips(): void {
@@ -16349,7 +16351,7 @@ function refreshMentionChips(): void {
       // is not the test: a closed session stays in it until its tab is dismissed, and a chip keyed on that would
       // read "Closed" beside a live namesake, then flip when the tab went, with nothing new about the mention.
       if (!s || s.status.state === "closed") {
-        const again = byName.get((chip.textContent || "").replace(/^@/, ""));
+        const again = byName.get(chip.textContent || "");   // the chip's text is the bare name (the token as typed rides data-token)
         if (again) { chip.dataset.sid = again.id; s = again; }
       }
       dressMentionChip(chip, s);
@@ -16363,9 +16365,12 @@ function remarkMentions(): void {
   for (const v of views.values()) for (const b of Array.from(v.el.querySelectorAll<HTMLElement>("[data-mentions]"))) markMentions(b);
 }
 
-// A typed "@name" that names a live session wears that session's identity color (the user 2026-09-07):
-// the reader sees who was meant, and a hover says how that session is doing. A quiet chip, the tab's
-// own dress, with no link behavior; a word that names nothing stays plain text. Text nodes only, never
+// A typed "@name" that names a live session becomes a chip reading the bare NAME in that session's
+// identity colour (the user 2026-09-07; the @ dropped and the awaiting chip's dress adopted 2026-09-10,
+// the user, who wanted the two chips to look the same: the name in its colour on a dark backing, no
+// fill): the reader sees who was meant, and a hover says how that session is doing. The token as typed
+// rides data-token, so what was SENT is still on the element; a word that names nothing stays plain
+// text, and the chip carries no link behaviour. Text nodes only, never
 // inside code, a fenced block, a link or a chip already made, so a path or an email address is left
 // alone. The same boundary rule as the composer's trigger (composer-mention.ts mentionSegments). Exact
 // names only: postal's direct match is exact, so a hand-typed "@API" for the session "api" is not a name
@@ -16390,7 +16395,11 @@ function markMentions(root: HTMLElement): void {
     for (const sg of segs) {
       if (!sg.hit) { frag.appendChild(document.createTextNode(sg.text)); continue; }
       const chip = el("span", "mention-chip");
-      chip.textContent = sg.text;
+      // the name without its "@", through the house session-reference renderer, as the awaiting chip
+      // names its peer: a remote "host:" prefix wears .host-prefix (quiet, italic) and only the NAME
+      // takes the identity colour; textContent still reads the whole "host:name" the roster keys by
+      chip.replaceChildren(...hostNameNodes(sg.text.slice(1), sg.hit.id));
+      chip.dataset.token = sg.text;          // the mention as typed and sent, for anyone reading the element
       chip.dataset.sid = sg.hit.id;
       dressMentionChip(chip, sg.hit);
       frag.appendChild(chip);

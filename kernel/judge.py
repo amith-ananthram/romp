@@ -10083,7 +10083,13 @@ def _plan_session(fsid, path, now):
                 # this response is processed; the old unconditional _reopen below then UN-completed it, and a "blocked
                 # on you" reply re-blocked it — a completed→blocked flip, which must never happen. If the goal is
                 # already done, the nudge is moot (its "what's the status?" is answered by completion): record the
-                # unit processed and place NOTHING, leaving the completed goal completed.
+                # unit processed and place NOTHING, leaving the completed goal completed. "Done" here is the
+                # target's OWN verdict (nodeComplete) or its sticky settle — never all-children-done: rollup's
+                # is_complete retired that bottom-up rule (VERDICTS ONLY, the user 2026-07-15), so a top whose
+                # steps are all done but which carries no verdict of its own reads WORKING on the board, its
+                # nudge fires legitimately, and its reply must reach the planner. Reading it through
+                # _subtree_done discarded that reply here (nothing placed, plan_llm never called), after which
+                # the kernel's follow-up-failed path filed a procedural block with no brief (2026-09-10).
                 _nkids = {}
                 for _nid, _nd in store["nodes"].items():
                     _nkids.setdefault(_nd.get("parentId"), []).append(_nid)
@@ -10101,7 +10107,7 @@ def _plan_session(fsid, path, now):
                         _open_items.append(_x)
                     _stack.extend(_nkids.get(_x, []))
                 if (not _open_items and not _fold_node(store["nodes"][target])["held"]
-                        and (_subtree_done(store["nodes"], _nkids, target)
+                        and (store["nodes"][target].get("nodeComplete")
                              or store["nodes"][target].get("settledDone"))):
                     # (held check 2026-07-07: a user reopen no verdict has answered means the user asserted
                     # NOT done — an all-done subtree under it is exactly why they were asked; never moot.)
