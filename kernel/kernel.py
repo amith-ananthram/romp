@@ -40577,17 +40577,99 @@ def _save_push_subs(subs):
     _atomic_write(jd.STATE / "push-subscriptions.json", json.dumps(subs, sort_keys=True), mode=0o600)
 
 
+_PUSH_SUBS_LOCK = threading.Lock()   # the store's read-modify-write (set, delete, the origin backfill) is one op under it
+# An origin as a subscription row keeps it — scheme://host[:port] and nothing more. It becomes the ABSOLUTE `navigate`
+# URL of an Apple endpoint's declarative message (_push_declarative), so a path, a query or a non-http scheme is refused
+# whole, at the subscribe route and at the backfill alike.
+_PUSH_ORIGIN_RE = re.compile(r"https?://[A-Za-z0-9.\-\[\]:_]+")
+_LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "[::1]")
+
+
 def _set_push_sub(sub):
-    cur = dict(_push_subs())
-    cur[sub["endpoint"]] = sub
-    _save_push_subs(cur)
+    with _PUSH_SUBS_LOCK:
+        cur = dict(_push_subs())
+        cur[sub["endpoint"]] = sub
+        _save_push_subs(cur)
 
 
 def _del_push_sub(endpoint):
-    cur = dict(_push_subs())
-    if cur.pop(endpoint, None) is not None:
-        _save_push_subs(cur)
+    with _PUSH_SUBS_LOCK:
+        cur = dict(_push_subs())
+        gone = cur.pop(endpoint, None) is not None
+        if gone:
+            _save_push_subs(cur)
+    if gone:
         _push_ledger_forget(endpoint)          # the device's rows go with its subscription (the ledger block below)
+
+
+def _request_page_origin(headers):
+    """The origin of the page a request comes from — scheme://host[:port] — as the REQUEST states it, or "" when it
+    states none. What _push_backfill_origin records for a subscription made before the bell posted location.origin
+    (2026-09-10): the same fact, read off the requests the device already makes instead of asked of the user as a
+    toggle. In order of who is speaking:
+      1. the browser's own word: the `Origin` header (Fetch appends it to a POST — the worker's ack, the popover's test
+         — and never to a same-origin GET), else the `Referer`'s origin (the page's URL on its GET /push/pending, the
+         worker script's on its fetch; the origin only — the page URL carries the token);
+      2. a reverse proxy's word: `X-Forwarded-Proto` with `X-Forwarded-Host` (tailscale serve, Caddy), or the `Host`
+         the proxy preserved when it forwards no host;
+      3. `Host` alone, a plain connection to the kernel's own socket. The scheme is then the Push API's own rule
+         ([SecureContext]): a page holding a subscription runs over https, unless its host is loopback, the one place
+         http is a secure context. A proxy that rewrites Host to the backend and forwards nothing is invisible from
+         here; the conflict line _push_backfill_origin leaves at the device's next ack is the tell.
+    Anything that is not a bare scheme://host — an opaque `null` Origin, a javascript: scheme, a path — is no origin:
+    a bad value must never become a `navigate` URL the user agent would refuse whole. No kernel helper built absolute
+    dashboard links before this (verified 2026-09-10: nothing read X-Forwarded-*; _origin_ok only compares Host)."""
+    g = lambda k: str(headers.get(k) or "").strip()
+    o = g("Origin").rstrip("/")
+    if o and _PUSH_ORIGIN_RE.fullmatch(o):
+        return o
+    ref = urlparse(g("Referer"))
+    if ref.scheme in ("http", "https") and ref.netloc:
+        o = "%s://%s" % (ref.scheme, ref.netloc)
+        if _PUSH_ORIGIN_RE.fullmatch(o):
+            return o
+    proto = g("X-Forwarded-Proto").split(",")[0].strip().lower()
+    host = g("X-Forwarded-Host").split(",")[0].strip() or g("Host")
+    if not host:
+        return ""
+    if proto not in ("http", "https"):
+        bare = (host.split("]")[0] + "]") if host.startswith("[") else host.rsplit(":", 1)[0]
+        proto = "http" if bare.lower() in _LOOPBACK_HOSTS else "https"
+    o = "%s://%s" % (proto, host)
+    return o if _PUSH_ORIGIN_RE.fullmatch(o) else ""
+
+
+def _push_backfill_origin(endpoint, origin):
+    """Record `origin` on `endpoint`'s subscription when the row has NONE (2026-09-10): a subscription made before the
+    bell posted location.origin gains it from the requests the device already makes — the page's GET /push/pending
+    (its own endpoint in the query), the worker's POST /push/ack (the row's endpoint), the popover's POST /push/test
+    — with no user action, so the very next push to an Apple endpoint is the declarative message (_push_wire). Only a
+    missing origin is filled: a recorded one stands whatever a later request says — a different one logs
+    `[push] origin conflict … kept=… saw=…` and keeps the first (a PushSubscription belongs to ONE origin, so a
+    conflict is a misconfiguration to look at, never something to paper over silently). Every fill leaves its own
+    line, the event that flips the device to the declarative shape. Returns 'filled' | 'same' | 'conflict' | 'none'
+    (no such row, or no origin to record)."""
+    endpoint, origin = str(endpoint or ""), str(origin or "")
+    if not origin:
+        return "none"
+    with _PUSH_SUBS_LOCK:
+        cur = dict(_push_subs())
+        sub = cur.get(endpoint)
+        if not isinstance(sub, dict):
+            return "none"
+        have = str(sub.get("origin") or "")
+        if have:
+            verdict = "same" if have.rstrip("/").lower() == origin.rstrip("/").lower() else "conflict"
+        else:
+            cur[endpoint] = dict(sub, origin=origin)
+            _save_push_subs(cur)
+            verdict = "filled"
+    ep_host = urlparse(endpoint).netloc or "?"
+    if verdict == "filled":
+        print("[push] origin recorded endpoint=%s origin=%s" % (ep_host, origin), file=sys.stderr)
+    elif verdict == "conflict":
+        print("[push] origin conflict endpoint=%s kept=%s saw=%s" % (ep_host, have, origin), file=sys.stderr)
+    return verdict
 
 
 def _vapid_keys():
@@ -41005,17 +41087,19 @@ def _push_declarative(d, origin):
 def _push_wire(d, sub):
     """The bytes one subscription is sent for the payload `d`: the declarative message for an Apple endpoint with a
     page origin on file, the imperative shape for every other endpoint. An Apple endpoint WITHOUT an origin (a
-    subscription made before the shell recorded one) cannot carry a valid `navigate`, so it gets the imperative
-    shape — the notification still shows, and a killed app's tap still lands by the worker's click — with one
-    stderr line naming the fix, never a declarative message the user agent would refuse whole."""
+    subscription made before the shell recorded one, and before any of the device's own requests has revealed it —
+    _push_backfill_origin) cannot carry a valid `navigate`, so it gets the imperative shape — the notification still
+    shows, and a killed app's tap still lands by the worker's click — with one stderr line saying what records the
+    origin, never a declarative message the user agent would refuse whole."""
     ep = str(sub.get("endpoint") or "")
     if _push_apple_endpoint(ep):
         origin = str(sub.get("origin") or "")
         if origin:
             return json.dumps(_push_declarative(d, origin)).encode()
         print("romp: web push: %s has no page origin on file (subscribed before 2026-09-10), so its notifications "
-              "take the old shape and a tap on a live app cannot land; turn This device off and on again in the bell "
-              "to record one" % (urlparse(ep).netloc or "?"), file=sys.stderr)
+              "take the old shape and a tap on a live app cannot land; the device's next request records one (its "
+              "page's next look at the dashboard, or its worker's next ack) with nothing to toggle"
+              % (urlparse(ep).netloc or "?"), file=sys.stderr)
     return json.dumps(d).encode()
 
 
@@ -47222,6 +47306,9 @@ class Handler(BaseHTTPRequestHandler):
                 _pep = (q.get("endpoint") or [""])[0]
                 if not _pep:
                     return self._send(400, "missing endpoint", "text/plain")
+                # the origin backfill (2026-09-10; _push_backfill_origin): this request names the device's own
+                # subscription and states where its page runs (its Referer — a same-origin GET carries no Origin)
+                _push_backfill_origin(_pep, _request_page_origin(self.headers))
                 return self._send(200, json.dumps(_push_pending(_pep)), "application/json", cache="no-cache")
             if p.startswith("/dist/") or p.startswith("/media/"):
                 base = DIST if p.startswith("/dist/") else MEDIA
@@ -47352,6 +47439,10 @@ class Handler(BaseHTTPRequestHandler):
                     print("[push] ack stage=%s: unknown pid" % _stage, file=sys.stderr)
                     return self._send(404, "unknown pid", "text/plain")
                 _push_ledger_line("ack stage=%s" % _stage, _row)
+                # the origin backfill (2026-09-10; _push_backfill_origin): the row names the device's endpoint, and the
+                # worker's same-origin POST states its origin. The pid that admitted the ack is the credential here
+                # too — it reached only the device the push went to — and only a MISSING origin is ever written
+                _push_backfill_origin(_row.get("endpoint"), _request_page_origin(self.headers))
                 return self._send(200, json.dumps({"ok": True, "stage": _stage}), "application/json", cache="no-cache")
             ok, self._set_cookie, why = self._authorize(q)
             self._cors_origin = self.headers.get("Origin") if ok else None   # echoed by _send (CORS delivery)
@@ -47529,6 +47620,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, "bad sid", "text/plain")
                 if not isinstance(_tlabel, str):
                     return self._send(400, "bad label", "text/plain")
+                # the origin backfill (2026-09-10; _push_backfill_origin), BEFORE the send: a device subscribed
+                # before the bell posted its origin has this very test push go out declarative
+                _push_backfill_origin(_ep, _request_page_origin(self.headers))
                 try:
                     _res = _push_test(_ep, _tsid, _thost, _tlabel)
                 except RuntimeError as e:
@@ -47542,6 +47636,8 @@ class Handler(BaseHTTPRequestHandler):
                 # (2026-09-10): the page's own location.origin (or the request's Origin header), kept
                 # with the subscription — an Apple endpoint's declarative message needs an ABSOLUTE
                 # `navigate` URL (_push_declarative), and the page is the authority on where it runs.
+                # A row from before this build gains its origin from the device's later requests
+                # instead (_push_backfill_origin), so nobody has to re-subscribe.
                 try:
                     sub = json.loads(raw_body or b"{}")
                     ep = str(sub.get("endpoint") or "")
@@ -47549,7 +47645,7 @@ class Handler(BaseHTTPRequestHandler):
                     origin = str(sub.get("origin") or self.headers.get("Origin") or "").strip()
                     if not (ep.startswith("https://") and keys.get("p256dh") and keys.get("auth")):
                         return self._send(400, "not a push subscription", "text/plain")
-                    if origin and not re.fullmatch(r"https?://[A-Za-z0-9.\-\[\]:_]+", origin):
+                    if origin and not _PUSH_ORIGIN_RE.fullmatch(origin):
                         return self._send(400, "bad origin", "text/plain")
                 except (ValueError, AttributeError):
                     return self._send(400, "bad json", "text/plain")

@@ -854,7 +854,9 @@ class DeclarativeWire(unittest.TestCase):
             w = json.loads(km._push_wire(d, {"endpoint": self.APPLE, "keys": {}}).decode())
         self.assertEqual(w, d)
         self.assertIn("web.push.apple.com", err.getvalue())
-        self.assertIn("off and on again", err.getvalue())
+        # the line names what records the origin now — the device's own next request (OriginBackfill below), no toggle
+        self.assertIn("next request", err.getvalue())
+        self.assertNotIn("off and on", err.getvalue(), "no manual step is asked of the user (2026-09-10)")
 
     def test_the_fan_out_and_the_test_push_send_each_device_its_own_shape_with_its_own_pid(self):
         km._save_push_subs({self.APPLE: {"endpoint": self.APPLE, "keys": {"p256dh": "k", "auth": "a"}, "origin": self.ORIGIN},
@@ -884,6 +886,162 @@ class DeclarativeWire(unittest.TestCase):
         t = json.loads(pp.call_args[0][1].decode())
         self.assertEqual((t["web_push"], t["notification"]["title"], t["notification"]["data"]["kind"]), (8030, "romp", "test"))
         self.assertEqual(t["notification"]["data"]["pid"], [r["pid"] for r in km._push_ledger() if r["kind"] == "test"][0])
+
+
+class OriginBackfill(unittest.TestCase):
+    """2026-09-10, the follow-up: a subscription made BEFORE the bell posted its origin gains one from the requests the
+    device already makes, with no user action — the page's GET /push/pending (its own endpoint in the query), the
+    worker's POST /push/ack (the row's endpoint), the popover's POST /push/test. The origin is read off the request
+    the way the browser states it: the Origin header (a same-origin POST carries one; a same-origin GET does not, per
+    Fetch), else the Referer's origin (the page's or the worker script's URL), else a reverse proxy's X-Forwarded-Proto
+    + X-Forwarded-Host/Host, else Host alone (a plain connection to the kernel's own socket). Only a MISSING origin is
+    filled; a recorded one is never overwritten — a different one logs `[push] origin conflict` and the first stands.
+    After the fill, the very next push to that endpoint is the declarative message."""
+    APPLE = "https://web.push.apple.com/QOJ7backfill00000000000000000000000000"
+    ORIGIN = "https://TESTHOST.example"
+
+    @classmethod
+    def setUpClass(cls):
+        from http.server import ThreadingHTTPServer
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), km.Handler)
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def setUp(self):
+        _clear_push_state()
+        # the pre-existing row: the shape the 2026-09-09 kernel stored — endpoint and keys, no origin key at all
+        km._save_push_subs({self.APPLE: {"endpoint": self.APPLE, "keys": {"p256dh": "k", "auth": "a"}}})
+
+    def _req(self, method, path, body=None, token=True, headers=None):
+        import urllib.request, urllib.error
+        h = {"Content-Type": "application/json"}
+        if token:
+            h["X-Romp-Token"] = km.TOKEN
+        h.update(headers or {})
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request("http://127.0.0.1:%d%s" % (self.port, path), method=method, data=data, headers=h)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+
+    def _pending(self, headers):
+        import urllib.parse
+        return self._req("GET", "/push/pending?endpoint=" + urllib.parse.quote(self.APPLE, safe=""), headers=headers)
+
+    def _wire(self):
+        """What the NEXT push to the Apple device would carry, with stderr captured: (decoded payload, stderr text)."""
+        d = km._push_payload("web", "finished a turn", "SID-web", kind="turn", name="web", pid="PID-b-0000000000000")
+        with mock.patch.object(km.sys, "stderr", new=io.StringIO()) as err:
+            w = json.loads(km._push_wire(d, km._push_subs()[self.APPLE]).decode())
+        return w, err.getvalue()
+
+    def test_the_pages_pending_poll_records_the_origin_and_the_next_push_is_declarative(self):
+        import contextlib
+        w, err = self._wire()
+        self.assertNotIn("web_push", w, "before any request: the imperative shape…")
+        self.assertIn("no page origin on file", err, "…and the line")
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            code, _ = self._pending({"Origin": self.ORIGIN})
+        self.assertEqual(code, 200)
+        self.assertEqual(km._push_subs()[self.APPLE]["origin"], self.ORIGIN, "the row gained the request's origin")
+        self.assertEqual([l for l in buf.getvalue().splitlines() if l.startswith("[push]")],
+                         ["[push] origin recorded endpoint=web.push.apple.com origin=" + self.ORIGIN])
+        w, err = self._wire()
+        self.assertEqual((w["web_push"], w["mutable"]), (8030, True), "the very next push is the declarative message")
+        self.assertEqual(w["notification"]["navigate"], self.ORIGIN + "/?push-reveal=SID-web&push-pid=PID-b-0000000000000")
+        self.assertEqual(err, "", "no fallback line once the origin is on file")
+
+    def test_a_same_origin_get_carries_no_origin_header_so_the_referer_stands_in(self):
+        # what a browser page's fetch('/push/pending?…') looks like from here: no Origin (Fetch appends it to POSTs and
+        # CORS requests only), a Referer with the page's URL — token and all, which is why only its ORIGIN is kept
+        code, _ = self._pending({"Referer": self.ORIGIN + "/?token=not-a-real-token&x=1"})
+        self.assertEqual(code, 200)
+        self.assertEqual(km._push_subs()[self.APPLE]["origin"], self.ORIGIN)
+
+    def test_the_workers_ack_records_the_origin_by_the_rows_endpoint(self):
+        import contextlib
+        pid = km._push_ledger_add(self.APPLE, "SID-web", kind="turn", name="web")
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            # the worker's fetch: no token, a same-origin POST, so the Origin header is the worker's own origin
+            code, _ = self._req("POST", "/push/ack", {"pid": pid, "stage": "shown", "v": "abc.1"}, token=False, headers={"Origin": self.ORIGIN})
+        self.assertEqual(code, 200)
+        self.assertEqual(km._push_subs()[self.APPLE]["origin"], self.ORIGIN)
+        self.assertEqual([l for l in buf.getvalue().splitlines() if l.startswith("[push]")],
+                         ["[push] ack stage=shown sid=SID-web endpoint=web.push.apple.com",
+                          "[push] origin recorded endpoint=web.push.apple.com origin=" + self.ORIGIN])
+        w, _ = self._wire()
+        self.assertEqual(w["notification"]["navigate"], self.ORIGIN + "/?push-reveal=SID-web&push-pid=PID-b-0000000000000")
+        # an ack for a pid this ledger never issued names no endpoint: nothing to fill, and the row is untouched
+        km._save_push_subs({self.APPLE: {"endpoint": self.APPLE, "keys": {"p256dh": "k", "auth": "a"}}})
+        code, _ = self._req("POST", "/push/ack", {"pid": "never-issued-pid-0001", "stage": "shown", "v": ""}, token=False, headers={"Origin": self.ORIGIN})
+        self.assertEqual(code, 404)
+        self.assertNotIn("origin", km._push_subs()[self.APPLE])
+
+    def test_the_test_button_records_the_origin_before_it_sends_so_the_test_push_itself_is_declarative(self):
+        with mock.patch.object(km, "_push_post", return_value=(201, "Created")) as pp:
+            code, body = self._req("POST", "/push/test", {"endpoint": self.APPLE, "sid": "SID-web", "host": "", "label": "web"},
+                                   headers={"Origin": self.ORIGIN})
+        self.assertEqual((code, json.loads(body)["ok"]), (200, True))
+        self.assertEqual(km._push_subs()[self.APPLE]["origin"], self.ORIGIN)
+        t = json.loads(pp.call_args[0][1].decode())
+        self.assertEqual(t["web_push"], 8030, "the test push went out declarative: the origin was on file before the send")
+        self.assertTrue(t["notification"]["navigate"].startswith(self.ORIGIN + "/?push-reveal=SID-web&push-pid="), t["notification"]["navigate"])
+
+    def test_a_recorded_origin_is_never_overwritten_and_a_different_one_logs_a_conflict(self):
+        import contextlib
+        km._save_push_subs({self.APPLE: {"endpoint": self.APPLE, "keys": {"p256dh": "k", "auth": "a"}, "origin": self.ORIGIN}})
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            code, _ = self._pending({"Origin": "https://other.TESTHOST.example"})
+            self.assertEqual(code, 200)
+            code, _ = self._pending({"Origin": self.ORIGIN})       # the same origin again: nothing to say
+            self.assertEqual(code, 200)
+            pid = km._push_ledger_add(self.APPLE, "SID-web", kind="turn", name="web")
+            self._req("POST", "/push/ack", {"pid": pid, "stage": "shown", "v": "abc.1"}, token=False, headers={"Origin": "http://127.0.0.1:29855"})
+        self.assertEqual(km._push_subs()[self.APPLE]["origin"], self.ORIGIN, "the first recorded origin stands")
+        self.assertEqual([l for l in buf.getvalue().splitlines() if l.startswith("[push] origin")],
+                         ["[push] origin conflict endpoint=web.push.apple.com kept=%s saw=https://other.TESTHOST.example" % self.ORIGIN,
+                          "[push] origin conflict endpoint=web.push.apple.com kept=%s saw=http://127.0.0.1:29855" % self.ORIGIN],
+                         "each conflicting sighting is a line; the matching one is silent")
+
+    def test_an_endpoint_nobody_subscribed_writes_nothing(self):
+        import urllib.parse
+        before = (jd.STATE / "push-subscriptions.json").read_text()
+        code, _ = self._req("GET", "/push/pending?endpoint=" + urllib.parse.quote("https://web.push.apple.com/unknown-000", safe=""),
+                            headers={"Origin": self.ORIGIN})
+        self.assertEqual(code, 200)
+        self.assertEqual((jd.STATE / "push-subscriptions.json").read_text(), before, "no row minted for an endpoint nobody subscribed")
+        self.assertEqual(km._push_backfill_origin(self.APPLE, ""), "none", "no origin derivable: nothing written")
+        self.assertNotIn("origin", km._push_subs()[self.APPLE])
+
+    def test_the_origin_is_read_off_the_request_in_the_order_the_browser_and_the_proxy_state_it(self):
+        f = km._request_page_origin
+        # the browser's own word first: the Origin header, then the Referer's origin (never its path or query)
+        self.assertEqual(f({"Origin": self.ORIGIN, "Referer": "https://elsewhere.example/", "Host": "127.0.0.1:1"}), self.ORIGIN)
+        self.assertEqual(f({"Origin": self.ORIGIN + "/", "Host": "x"}), self.ORIGIN, "a trailing slash is dropped")
+        self.assertEqual(f({"Referer": self.ORIGIN + ":8443/?token=t#h", "Host": "127.0.0.1:1"}), self.ORIGIN + ":8443")
+        self.assertEqual(f({"Origin": "null", "Referer": self.ORIGIN + "/sw.js"}), self.ORIGIN, "an opaque 'null' Origin is no origin; the worker script's Referer is")
+        # then a reverse proxy's word: the browser-facing scheme and host it forwards (tailscale serve, Caddy)
+        self.assertEqual(f({"X-Forwarded-Proto": "https", "X-Forwarded-Host": "TESTHOST.example", "Host": "127.0.0.1:8765"}), self.ORIGIN)
+        self.assertEqual(f({"X-Forwarded-Proto": "https, http", "Host": "TESTHOST.example"}), self.ORIGIN, "the first hop's scheme; Host when the proxy forwards none")
+        # then Host alone — a plain connection to the kernel's own socket. The Push API is [SecureContext]: a page holding
+        # a subscription runs over https unless its host is loopback, the one place http is a secure context
+        self.assertEqual(f({"Host": "127.0.0.1:8765"}), "http://127.0.0.1:8765")
+        self.assertEqual(f({"Host": "localhost:8765"}), "http://localhost:8765")
+        self.assertEqual(f({"Host": "[::1]:8765"}), "http://[::1]:8765")
+        self.assertEqual(f({"Host": "TESTHOST.example"}), self.ORIGIN)
+        # nothing usable → "" (never a guess written to the row)
+        for h in ({}, {"Origin": "javascript:alert(1)"}, {"Referer": "not a url"}, {"Origin": "https://TESTHOST.example/path"},
+                  {"X-Forwarded-Proto": "https"}, {"Host": "bad host with spaces"}):
+            self.assertEqual(f(h), "", repr(h))
 
 
 class PushLedger(unittest.TestCase):
