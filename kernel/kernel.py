@@ -44731,21 +44731,25 @@ rows.sort(function(a,b){return (b.v-a.v)||(a.si-b.si);});var top=rows.slice(0,ca
 if(pin>=0&&more>0&&!top.some(function(r){return r.si===pin;})){var p=null;rows.forEach(function(r){if(r.si===pin)p=r;});if(p){top.push(p);more--;}}return {rows:top,more:more,total:total};}
 function spDot(s){return s.kind==='unattributed'?'#8a97a6':s.kind==='other'?SP_OTHER:spColor(s);}   // the hatch's stroke stands in for its texture
 function spTipBox(){if(!spTip){spTip=document.createElement('div');spTip.id='rsp-tip';document.body.appendChild(spTip);}spTip.textContent='';return spTip;}
-// below and to the right of the pointer (the stamp sits at the chart's top, so the two never meet), to its left near
-// the right edge and above it near the bottom, kept inside the viewport; the box takes no pointer events
-function spTipPlace(x,y){spTip.style.display='block';var w=spTip.offsetWidth,hh=spTip.offsetHeight,left=x+14,top=y+18;if(left+w+6>window.innerWidth)left=x-14-w;if(top+hh+6>window.innerHeight)top=y-18-hh;
+// below and to the right of the pointer, to its left near the right edge; when nothing fits below, above the CHART
+// (rect, the svg's box) rather than the pointer, so the box stays clear of the stamp at the chart's top (review find:
+// a pointer-anchored flip landed a six-row box on the stamp in a short window); only a viewport too short for either
+// falls back to the pointer, and the header repeats the stamp's text. The box takes no pointer events
+function spTipPlace(x,y,rect){spTip.style.display='block';var w=spTip.offsetWidth,hh=spTip.offsetHeight,left=x+14,top=y+18;if(left+w+6>window.innerWidth)left=x-14-w;
+if(top+hh+6>window.innerHeight){var above=(rect?rect.top:y)-hh-6;top=above>=6?above:y-18-hh;}
 spTip.style.left=Math.max(6,left)+'px';spTip.style.top=Math.max(6,top)+'px';}
 // the bucket tooltip: the total leads (the other measure and the stamp follow), then a row per session — a dot in the
 // stack's colour, the name (user data: textContent), the value — the hovered bar's row emphasised, the fold line last
-function spBucketTipShow(x,y,head,total,top,stacks,many,meas,i,pin,fmt){var box=spTipBox(),h=document.createElement('div');h.className='rsp-tip-h';
+function spBucketTipShow(x,y,head,total,top,stacks,many,meas,i,pin,fmt,rect){var box=spTipBox(),h=document.createElement('div');h.className='rsp-tip-h';
 var b=document.createElement('b');b.textContent=total;h.appendChild(b);h.appendChild(document.createTextNode(' \u00b7 '+head));box.appendChild(h);
 top.rows.forEach(function(r){var s=stacks[r.si],row=document.createElement('div');row.className='rsp-tip-row'+(r.si===pin?' on':'');
 var dot=document.createElement('i');dot.style.background=spDot(s);row.appendChild(dot);var nm=document.createElement('span');nm.textContent=spStackText(s,many,meas,i);row.appendChild(nm);
 var v=document.createElement('b');v.textContent=fmt(r.v);row.appendChild(v);box.appendChild(row);});
 if(top.more>0||!top.rows.length){var m=document.createElement('div');m.className='rsp-tip-more';m.textContent=top.rows.length?'+'+top.more+' more':'nothing recorded';box.appendChild(m);}
-spTipPlace(x,y);}
+spTipPlace(x,y,rect);}
 function spTipHide(){if(spTip)spTip.style.display='none';}
-function renderChart(){var box=document.getElementById('rsp-chart');if(!box||!SP.data)return;
+// a rebuild (a resize under a still pointer, a toggle) takes the tooltip down with the svg it described (review find)
+function renderChart(){spTipHide();var box=document.getElementById('rsp-chart');if(!box||!SP.data)return;
 var d=SP.data,ser=spSeries(d),meas=SP.measure;
 if(!ser||!ser.keys||!ser.keys.length){box.innerHTML='<div class=rsp-note>No history yet.</div>';return;}
 var stacks=spStacks(d,ser,spRows(d)),n=ser.keys.length,W=Math.max(320,box.clientWidth||600),H=200;
@@ -44808,10 +44812,11 @@ var range=SP.range==='day'?'hours':SP.range,other=meas==='usd'?'tok':'usd',ofmt=
 var xhHide=function(){xh.style.display='none';stamp.style.display='none';spTipHide();};
 svgEl.onpointermove=function(e){var r=svgEl.getBoundingClientRect(),i=spBucketAt(e.clientX-r.left,r.width,n);if(i<0){xhHide();return;}
 var cx=(i+0.5)*slot,pct=cx/W*100;xh.setAttribute('x1',cx.toFixed(1));xh.setAttribute('x2',cx.toFixed(1));xh.style.display='';
-var st=spStamp(ser.keys[i],range);stamp.textContent=st;stamp.style.left=pct.toFixed(1)+'%';stamp.className='rsp-xh-stamp'+(pct>70?' flip':'');stamp.style.display='';
+var st=spStamp(ser.keys[i],range);stamp.textContent=st;stamp.className='rsp-xh-stamp';stamp.style.left='max('+pct.toFixed(1)+'%,24px)';stamp.style.display='';
+if(cx/W*r.width+6+stamp.offsetWidth>r.width)stamp.classList.add('flip');   // decided in pixels (the stamp's width is fixed, the chart's is not); the 24px floor keeps it off the ceiling label
 var t=e.target,pin=(t&&t.classList&&t.classList.contains('rsp-seg'))?+t.getAttribute('data-s'):-1;
 var top=spBucketTop(stacks,meas,i,SP_TIP_ROWS,pin),ot=0;for(var s=0;s<stacks.length;s++)ot+=(stacks[s][other]&&stacks[s][other][i])||0;
-spBucketTipShow(e.clientX,e.clientY,ofmt(ot)+' \u00b7 '+st,fmt(top.total),top,stacks,many,meas,i,pin,fmt);};
+spBucketTipShow(e.clientX,e.clientY,ofmt(ot)+' \u00b7 '+st,fmt(top.total),top,stacks,many,meas,i,pin,fmt,r);};
 svgEl.onpointerleave=xhHide;}
 var spResizeRaf=0;
 window.addEventListener('resize',function(){if(!(SP.open&&SP.data)||spResizeRaf)return;

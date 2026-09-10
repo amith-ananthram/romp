@@ -276,7 +276,7 @@ class SpendDetail(unittest.TestCase):
         # T247b review find: the recorder rounds the bucket sum and each sid's sum independently (6
         # places), so a fully attributed bucket can carry a +1e-6..+6e-6 dollar residue with zero token
         # residue — 28 of 113 live hour buckets did — and the presence test on the unrounded residues
-        # hung a hatched "unattributed" chip with no bars on the 8-day view. Below the rounding grain
+        # hung a hatched "unattributed" chip with no bars on the hourly view. Below the rounding grain
         # a residue is zero: no stack, no row.
         hours, days = {}, {}
         for n in range(0, 40):
@@ -646,8 +646,9 @@ class SpendDetail(unittest.TestCase):
         self.assertIn("stamp.className='rsp-xh-stamp'", js)
         self.assertIn("svgEl.onpointerleave=xhHide;", js, "the line, the stamp and the tooltip leave with the pointer")
         self.assertIn(".rsp-xh{stroke:rgba(255,255,255,0.45);stroke-width:1;pointer-events:none}", html)
-        self.assertIn(".rsp-xh-stamp{position:absolute;", html)
-        self.assertIn("pointer-events:none;white-space:nowrap}", html, "the stamp takes no pointer events")
+        self.assertIn(".rsp-xh-stamp{position:absolute;top:4px;transform:translateX(6px);font-size:10px;line-height:1;padding:3px 5px;border-radius:3px;"
+                      "background:rgba(30,30,30,0.88);color:#cfd6dd;pointer-events:none;white-space:nowrap}", html,
+                      "the stamp: out of the flow, the surface's 10px annotation size, no pointer events")
         self.assertIn("body.theme-light .rsp-xh{", html, "a light step for the hairline")
         self.assertIn("body.theme-light .rsp-xh-stamp{", html, "…and for the stamp")
         self.assertIn(".rsp-tip-row i{", html, "a row's dot wears its stack's colour")
