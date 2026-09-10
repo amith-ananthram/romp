@@ -397,11 +397,12 @@ EOF
 }
 
 @test "romp-sdk-setup: a uv-built venv (home plus version_info, no executable) is followed and kept, not rebuilt" {
-    # uv writes `version_info = X.Y.Z` and neither `version =` nor `executable =`. Both readers in the script
-    # must take that key: pick_python, to follow the venv's interpreter, and venv_built_for, to read the tag
-    # it was built for; with either reading nothing, the run rebuilds a venv that already matches. The venv
-    # has no lib directory on purpose: with one, venv_built_for takes the tag from lib/python3.X and this
-    # case would hold with the cfg read gone.
+    # uv writes `version_info =` (X.Y for one of its managed interpreters, X.Y.Z for a system python) and
+    # neither `version =` nor `executable =`. Both readers in the script must take that key, and its X.Y
+    # prefix from either shape (this cfg carries the longer one): pick_python, to follow the venv's
+    # interpreter, and venv_built_for, to read the tag it was built for; with either reading nothing, the
+    # run rebuilds a venv that already matches. The venv has no lib directory on purpose: with one,
+    # venv_built_for takes the tag from lib/python3.X and this case would hold with the cfg read gone.
     VENV="$TEST_DIR/state/sdkvenv"; mkdir -p "$VENV/bin"
     write_stub_py "$TEST_DIR/uvhome/python3.12" 3.12          # the venv's interpreter, off PATH
     ln -s "$TEST_DIR/uvhome/python3.12" "$VENV/bin/python"
