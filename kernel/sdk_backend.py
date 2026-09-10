@@ -1506,6 +1506,111 @@ def append_resume_fork(state_dir: Path, sid: str, from_fsid: str, to_fsid: str, 
         f.write(json.dumps(rec) + "\n")
 
 
+# ── The session-event ledger and the per-turn ledger (T304 stage 0 of the restart-surviving sessions
+# program, 2026-09-10; the row shape agreed with the lease work, T305, which writes its `lease.*` kinds
+# through the same helper). Two append-only files under the state directory, read by `romp restart-metrics`
+# (cli/restart_metrics.py), which reads FILES and the kernel's routes only, never the kernel log:
+#   session-events.jsonl  one row per thing that went wrong with a session's process, or per boot sweep:
+#                         {"t": epoch s (int), "pid": the writing kernel, "kind": "<writer>.<what>",
+#                          "sid": romp sid when about a session, "name": its name then, ...flat fields}.
+#                         Kinds this file writes: reconcile.boot (the sweep's summary, every boot, ledger only),
+#                         reconcile.orphan-reaped, reconcile.scope-stopped, reconcile.duplicate-cli, crash.heal,
+#                         crash.loop, drain.unjoined. Every kind that IS a problem also lands on the backend's
+#                         problem ring (the dashboard's bell and error center) as its prose, and on the kernel
+#                         log as `<prose> ;; problem-row {json}` so a log reader parses the same object with
+#                         `line.rsplit(PROBLEM_ROW_MARK, 1)[1]`.
+#   turns.jsonl           one row per settled turn (SdkSession._turn_ledger_row): the event stamps the latency
+#                         and redo-cost figures read. Every stamp is an EVENT's time: fedT is the feed pop
+#                         (the turn left the queue for the CLI's stdin), firstOutT the first streamed work atom,
+#                         resultT the ResultMessage; durationMs / apiMs are the CLI's own figures on that
+#                         result; usd and the token columns are what the spend fold recorded for the turn;
+#                         resumeNotice marks a turn whose fed text was a boot or crash continuation notice.
+# Both writers are best-effort and never raise: a ledger must not be able to break the thing it measures.
+SESSION_EVENTS_FILE = "session-events.jsonl"
+TURNS_FILE = "turns.jsonl"
+PROBLEM_ROW_MARK = " ;; problem-row "
+LEDGER_ROTATE_BYTES = 32 * 1024 * 1024   # a ledger past this size is rotated to <name>.1 (one predecessor kept),
+#                                          so the pair is bounded at twice this: at ~300 bytes a turn and a few
+#                                          thousand turns a day, turns.jsonl holds about a month; the reader reads both
+
+
+_LEDGER_LOCK = threading.Lock()   # one appender at a time across the ledgers: two threads crossing the
+#                                    rotation size together would rotate twice, moving a one-row file over the
+#                                    predecessor just made and losing its month of rows (review find, 2026-09-10)
+
+
+def _append_ledger_row(state_dir: Path, name: str, row: dict) -> None:
+    try:
+        p = Path(state_dir) / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with _LEDGER_LOCK:
+            try:
+                if p.stat().st_size >= LEDGER_ROTATE_BYTES:
+                    os.replace(p, p.with_name(p.name + ".1"))   # the older predecessor, if any, is dropped
+            except FileNotFoundError:
+                pass
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
+                f.flush()
+    except Exception:
+        pass
+
+
+def append_session_event(state_dir: Path, kind: str, *, sid=None, name=None, t=None, **fields) -> dict:
+    """One session-events.jsonl row (see the ledger note above). Fields are FLAT by contract: a scalar rides
+    as is, None is dropped, anything else is its str. Returns the row written (pid and t filled in)."""
+    row = {"t": int(time.time() if t is None else t), "pid": os.getpid(), "kind": str(kind)}
+    if sid:
+        row["sid"] = str(sid)
+    if name:
+        row["name"] = str(name)
+    for k, v in fields.items():
+        if v is None:
+            continue
+        row[k] = v if isinstance(v, (str, int, float, bool)) else str(v)
+    _append_ledger_row(state_dir, SESSION_EVENTS_FILE, row)
+    return row
+
+
+def problem_row(state_dir: Path, prose: str, kind: str, *, sid=None, name=None, log=None, ring=True,
+                **fields) -> str:
+    """A session problem said three ways at once: the ledger row (append_session_event, `text` = the
+    prose), the kernel-log line `<prose> ;; problem-row {json}` (returned; written when `log` is given), and
+    the prose alone on the problem ring when `ring` (SdkBackend._log's ring_text, so the error center stays
+    readable while the log line stays parseable). `log` is the backend's _log; a plainer callable gets the
+    line alone."""
+    row = append_session_event(state_dir, kind, sid=sid, name=name, text=str(prose), **fields)
+    line = str(prose) + PROBLEM_ROW_MARK + json.dumps(row)
+    if log is not None:
+        try:
+            log(line, problem=bool(ring), ring_text=str(prose))
+        except TypeError:
+            try:
+                log(line)
+            except Exception:
+                pass
+        except Exception:
+            pass
+    return line
+
+
+def parse_problem_row(line: str) -> "dict | None":
+    """The JSON object a `;; problem-row` log line carries, or None for any other line."""
+    if PROBLEM_ROW_MARK not in str(line):
+        return None
+    try:
+        obj = json.loads(str(line).rsplit(PROBLEM_ROW_MARK, 1)[1])
+    except Exception:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def append_turn_row(state_dir: Path, row: dict) -> None:
+    """One turns.jsonl row (SdkSession._turn_ledger_row builds it). Best-effort, never raises."""
+    if isinstance(row, dict) and row:
+        _append_ledger_row(state_dir, TURNS_FILE, row)
+
+
 def append_awaiting(state_dir: Path, sid: str, awaiting: bool, why: str = "") -> None:
     """Append an "awaiting" OVERLAY record to states/<sid>.jsonl (interleaved with the state
     records; the kernel reader scans for the latest line carrying an "awaiting" key). "Awaiting" =
@@ -3334,6 +3439,37 @@ def find_orphan_clis(ps_lines: list[str], lastsids: list[str], own_pid: int) -> 
     return out
 
 
+def cli_sid_of(cmd: str, sids) -> "str | None":
+    """The one of `sids` this CLI's argv names (_cli_carries_sid's match, returning the id), or None."""
+    for s in sids:
+        if not s:
+            continue
+        for flag in ("--resume", "--session-id"):
+            if (flag + " " + s) in cmd or (flag + "=" + s) in cmd:
+                return s
+    return None
+
+
+def duplicate_clis(ps_lines: list[str], lastsids: list[str]) -> dict[str, list[int]]:
+    """Conversation ids that MORE THAN ONE SDK-driven CLI in a PS_ARGV listing is holding, id -> pids in
+    listing order (T304: two writers for one transcript is the failure the boot reap exists to prevent, and
+    until now nothing recorded when it was found). Same match as find_orphan_clis (the stream-json mark plus
+    a --resume/--session-id spelling), whatever the parents are: an orphan beside this kernel's live child
+    counts, and so do two orphans. Pure."""
+    seen: dict[str, list[int]] = {}
+    for ln in ps_lines:
+        parts = ln.strip().split(None, 2)
+        if len(parts) < 3 or not parts[0].isdigit():
+            continue
+        cmd = parts[2]
+        if _SDK_CLI_MARK not in cmd:
+            continue
+        s = cli_sid_of(cmd, lastsids)
+        if s:
+            seen.setdefault(s, []).append(int(parts[0]))
+    return {s: pids for s, pids in seen.items() if len(pids) > 1}
+
+
 # ENDING A CUT TURN'S WHOLE TREE (T276, the user 2026-09-08). Reaping the orphaned CLI alone left its Bash
 # tool's processes alive: a stress harness's 32 busy loops and a benchmark's 11 (setsid'd from tool shells,
 # re-parented to the user manager once the shells died) burned cores for over an hour after restarts.
@@ -4346,6 +4482,12 @@ class SdkSession:
         self._skill_tool_ids = set()   # Skill tool_use ids seen on THIS stream → classify their injected
         #                                instructions payload (parent_tool_use_id link) as a skillMd atom
         self.since = 0
+        self._first_out_t = None   # the turn's first streamed WORK atom (turns.jsonl firstOutT; reset per fresh feed)
+        self._turn_spend = None    # (delta usd, turn usage) the spend fold recorded for the turn in flight, read by the
+        #                            turn ledger row at the settle and spent with it
+        self._fed_t = None         # the fresh feed's pop at millisecond resolution (turns.jsonl fedT; `since` stays whole
+        #                            seconds for its other readers); both are spent at the settle, so a turn the CLI
+        #                            opens by itself never inherits the previous fed turn's stamps
         self.model = reg.get("liveModel") or ""   # seed from the last-known model so the badge/picker show on
         #                                           OPEN (even once eager-connected, before init/a turn reports)
         self._model_id = reg.get("liveModelId") or ""   # the RAW id behind that name (claude-fable-5-1), the
@@ -5574,6 +5716,8 @@ class SdkSession:
                     self.since = int(time.time())    # a new turn starts now (mid-turn forwards keep the turn's clock)
                     self._interrupted = False        # a fresh turn → clear any stale interrupt flag
                     self._intr_level = 0             #   ...and its escalation episode (a new stop starts polite)
+                    self._first_out_t = None         # the turn's first output is still to come (turns.jsonl)
+                    self._fed_t = time.time()        # the pop, at millisecond resolution (turns.jsonl fedT)
                 self._note_turn_opener(fed_text_opener(item), fresh)   # who this turn is for (the Stop hook stamps it)
                 if item.startswith(RENAME_PING_HEAD):
                     self._ping_feeding = True       # hold feeds until this turn's first streamed message
@@ -5932,6 +6076,49 @@ class SdkSession:
         turn it is closing."""
         if fresh or opener == "human":
             self._turn_opener = opener
+
+    def _turn_ledger_row(self, msg, usd=None, turn_u=None, now=None) -> dict:
+        """The turns.jsonl row for the ResultMessage `msg` (see the ledger note by append_turn_row): the
+        turn's event stamps (fedT = since, the feed pop; firstOutT = the first streamed work atom; resultT =
+        now), the CLI's own duration_ms / duration_api_ms / num_turns / is_error when the result carries
+        them, the spend fold's usd and token counts when it ran (`usd`, `turn_u` as _turn_usage returns
+        it), who opened the turn, and resumeNotice: whether any text fed into this turn was the boot or the
+        crash continuation notice — the turn that REDOES cut work, the redo-cost marker. Pure over its
+        inputs; getattr throughout so a __new__-built test double works."""
+        now = time.time() if now is None else float(now)
+        fed = [x for x in (getattr(self, "_inflight_texts", None) or []) if isinstance(x, str)]
+        row = {"t": int(now), "sid": str(self.sid), "name": str(getattr(self, "name", "") or ""),
+               "resultT": round(now, 3),
+               "opener": str(getattr(self, "_turn_opener", None) or ""),
+               "resumeNotice": any(x.startswith((BOOT_RESUME_NUDGE, CRASH_RESUME_NUDGE)) for x in fed),
+               "fedTexts": len(fed)}
+        # fedT and firstOutT only for a turn THIS session fed and whose pop was stamped: a turn the CLI opened
+        # by itself (a channel message, a task notification, a scheduled prompt) or a mid-turn forward run as
+        # its own turn has no feed of its own, and the stamps still in memory would be the PREVIOUS fed
+        # turn's (review find, 2026-09-10: hours of feed-to-result, a duplicated first output). Absent, never
+        # wrong; the reader measures latency only where fedT is present.
+        ft = getattr(self, "_fed_t", None)
+        if fed and isinstance(ft, (int, float)) and ft:
+            row["fedT"] = round(float(ft), 3)
+            fo = getattr(self, "_first_out_t", None)
+            if isinstance(fo, (int, float)) and fo >= ft:
+                row["firstOutT"] = round(float(fo), 3)
+        for attr, key in (("duration_ms", "durationMs"), ("duration_api_ms", "apiMs"), ("num_turns", "numTurns")):
+            v = getattr(msg, attr, None)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                row[key] = int(v)
+        ie = getattr(msg, "is_error", None)
+        if isinstance(ie, bool):
+            row["isError"] = ie
+        if isinstance(usd, (int, float)) and not isinstance(usd, bool):
+            row["usd"] = round(float(usd), 6)
+        if isinstance(turn_u, dict):
+            for k, kk in (("input_tokens", "tokIn"), ("output_tokens", "tokOut"),
+                          ("cache_read_input_tokens", "tokCacheR"), ("cache_creation_input_tokens", "tokCacheW")):
+                v = turn_u.get(k)
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    row[kk] = int(v)
+        return row
 
     def _mark(self, state: str) -> None:
         """Persist a lifecycle STATE to states/<sid>.jsonl AND track whether the CLI is producing.
@@ -6538,6 +6725,7 @@ class SdkSession:
                     # the tokens: THIS turn's counts, from whichever result counter is a running total —
                     # the two are not the same kind (see _turn_usage; the flat `usage` is per-turn now)
                     turn_u = self._turn_usage(msg)
+                    self._turn_spend = (delta, turn_u)   # for the turn ledger row the finally writes (T304)
                     self.backend._record_spend(delta, turn_u, keyed=self.api_key_auth,
                                                sid=self.thread_of or self.sid)   # the rail's spend —
                     #   a comment THREAD bills its owning session (T144: whole-session truth for the
@@ -6558,6 +6746,19 @@ class SdkSession:
                                           "transcript than the connect-time seed (last_cost_state)."
                                           % (self.name, delta, SANE_TURN_USD, total), problem=False)
             finally:
+                # T304: one durable row per settled turn (turns.jsonl, see the ledger note by
+                # append_turn_row) — the event stamps the restart monitors read. In the finally, ahead of
+                # the settle, so a bookkeeping exception (a spend-fold fault: exactly the anomalous turn)
+                # still leaves its row (review find, 2026-09-10); guarded on its own, so a failing append
+                # costs the row alone and never the settle below.
+                try:
+                    _sp = getattr(self, "_turn_spend", None) or (None, None)   # the fold's figures, when it ran
+                    append_turn_row(self.backend.state_dir, self._turn_ledger_row(msg, _sp[0], _sp[1]))
+                except Exception as e:
+                    self.backend._log("turn ledger (%s): %s" % (self.name, e), problem=False)
+                self._turn_spend = None          # spent with the row, like the feed stamps below
+                self._fed_t = None               # the turn's feed stamps are spent (see _turn_ledger_row)
+                self._first_out_t = None
                 # THE SETTLE — everything that makes the turn over for the kernel — runs whatever the
                 # bookkeeping above did (the rewind flags, the live-tail sweep, the refreshes, the spend
                 # accounting last: any step may raise and stop the rest). The rule
@@ -8348,6 +8549,12 @@ class SdkBackend:
             try:
                 run(["systemctl", "--user", "stop", unit], capture_output=True, text=True, timeout=SCOPE_STOP_TIMEOUT)
                 stopped += 1
+                m = _SESSION_SCOPE_RE.match(unit)
+                problem_row(self.state_dir,
+                            "boot: stopped the leftover session scope %s (its CLI was gone; processes it left "
+                            "behind were still running)" % unit,
+                            "reconcile.scope-stopped", log=self._log, unit=unit,
+                            sid8=(m.group(1).lower() if m else ""), cliPid=sp)
             except Exception as e:
                 self._log("cut-turn reap: stopping leftover %s failed: %s" % (unit, e))
         return stopped
@@ -8376,21 +8583,49 @@ class SdkBackend:
                     self._log("boot reconcile: cwdPending heal for %s failed: %s"
                               % (r.get("sid"), traceback.format_exc()))
         try:
+            t_boot0 = time.time()
             alive = [r for r in regs if r.get("alive") and r.get("sid")]
             reaped = 0
             scopes_stopped = 0
             lastsids = [str(r.get("lastSid") or "") for r in alive if r.get("lastSid")]
+            by_fsid = {str(r.get("lastSid")): r for r in alive if r.get("lastSid")}   # conversation id -> its reg
             if lastsids:
                 try:
                     ps = subprocess.run(PS_ARGV, capture_output=True, text=True, timeout=10).stdout
                     ps_lines = ps.splitlines()
+                    cmd_of: dict[int, str] = {}
+                    for ln in ps_lines:
+                        parts = ln.strip().split(None, 2)
+                        if len(parts) == 3 and parts[0].isdigit():
+                            cmd_of[int(parts[0])] = parts[2]
+                    # T304: two CLIs holding ONE conversation, as the listing stands before the reap — the
+                    # two-writers hazard itself, recorded even though the reap below usually resolves it
+                    for fsid, pids in duplicate_clis(ps_lines, lastsids).items():
+                        r0 = by_fsid.get(fsid) or {}
+                        problem_row(self.state_dir,
+                                    "boot: %d claude processes were holding session %s's conversation at once "
+                                    "(pids %s); the orphans are being ended" % (len(pids), r0.get("name") or fsid[:8],
+                                                                                 ", ".join(str(p) for p in pids)),
+                                    "reconcile.duplicate-cli", log=self._log, sid=r0.get("sid"), name=r0.get("name"),
+                                    fsid=fsid, pids=",".join(str(p) for p in pids), n=len(pids))
                     for pid in find_orphan_clis(ps_lines, lastsids, os.getpid()):
                         if pid == os.getpid():
                             continue
                         # the CLI AND its tree (T276): its scope unit, then every process still under it
                         try:
-                            self._end_cli_tree(pid, ps_lines)
+                            res = self._end_cli_tree(pid, ps_lines)
                             reaped += 1
+                            fsid = cli_sid_of(cmd_of.get(pid, ""), lastsids) or ""
+                            r0 = by_fsid.get(fsid) or {}
+                            res = res if isinstance(res, dict) else {}
+                            problem_row(self.state_dir,
+                                        "boot: ended an orphaned claude process (pid %d) still holding session %s's "
+                                        "conversation from before the restart%s" % (
+                                            pid, r0.get("name") or fsid[:8] or "?",
+                                            ", with its scope %s" % res["scope"] if res.get("scope") else ""),
+                                        "reconcile.orphan-reaped", log=self._log, sid=r0.get("sid"), name=r0.get("name"),
+                                        cliPid=pid, fsid=fsid, scope=res.get("scope") or "",
+                                        signaled=res.get("signaled"), forced=res.get("forced"), tree=res.get("tree"))
                         except (ProcessLookupError, PermissionError):
                             pass
                     # …and the scopes whose CLI already died but whose children live on
@@ -8499,6 +8734,14 @@ class SdkBackend:
                           "process trees, stopped %d leftover session scope(s)"
                           % (resumed, restored, notified, reaped, scopes_stopped))
                 self._poke()
+            # T304: the sweep's summary row, every boot that had a session to reconcile (a boot that
+            # recovered nothing is the baseline the restart monitors compare against; a boot with no
+            # sessions at all measures nothing and writes nothing, so a read-only route's lazy backend
+            # build leaves the state directory untouched); `resumed` counts the continuation notices queued
+            if alive:
+                append_session_event(self.state_dir, "reconcile.boot", sessions=len(alive), resumed=resumed,
+                                     restored=restored, notified=notified, reaped=reaped, scopesStopped=scopes_stopped,
+                                     toStart=len(to_start), durationS=round(time.time() - t_boot0, 3))
             # STAGGERED spawn (see BOOT_RESUME_CONCURRENCY): every reg above is already fixed —
             # queues persisted, heals applied — so even a death mid-stagger loses nothing (the next
             # boot's sweep picks the rest up). Spawns hold a slot on the backend-wide _spawn_sem —
@@ -8760,6 +9003,7 @@ class SdkBackend:
                 s.thread.join(max(0.05, deadline - time.time()))
         unjoined = [s for s in sessions if s.thread is not None and s.thread.is_alive()]
         reaped = []
+        reaped_sids = set()
         for s in unjoined:
             try:
                 pid = self._session_cli_pid(s)
@@ -8775,10 +9019,15 @@ class SdkBackend:
                 else:
                     kill(pid, signal.SIGKILL)            # a wedged CLI still never outlives us
                 reaped.append("%s(pid %d)" % (s.name, pid))
+                reaped_sids.add(s.sid)
             except ProcessLookupError:
                 pass                                     # exited between the join and the reap — fine
             except Exception:
                 self._log("drain: reap failed for %s: %s" % (s.name, traceback.format_exc()))
+        for s in unjoined:   # T304: the sessions the bound left closing, one ledger row each (the cut row's
+            #                 `unjoined` is the count alone); the process is exiting, so the ring is not asked
+            append_session_event(self.state_dir, "drain.unjoined", sid=s.sid, name=s.name,
+                                 inflight=int(bool(getattr(s, "inflight", 0))), reaped=(s.sid in reaped_sids))
         if sessions:
             names = [s.name for s in unjoined]
             self._log("drain: stopped %d session(s), %d in-flight turn(s) interrupted%s%s"
@@ -9458,7 +9707,7 @@ class SdkBackend:
     # ---- logging / wakeups ----
     PROBLEM_RING = 100        # how many backend problems are kept for the dashboard (oldest dropped)
 
-    def _log(self, m, problem=None, key=None):
+    def _log(self, m, problem=None, key=None, ring_text=None):
         """Every backend line goes to the kernel log; the ones that report a FAILURE also land in a ring
         the dashboard's error center reads, so an SDK problem shows up where the user is looking instead
         of only in a file nobody tails (the user 2026-07-28, who could tell exceptions were happening and
@@ -9477,6 +9726,9 @@ class SdkBackend:
         key whose entry the ring has since dropped enters again as new."""
         if problem is None:
             problem = sys.exc_info()[0] is not None
+        # ring_text (T304): the ring's readable text when the LOG line carries more than prose — a
+        # `;; problem-row {json}` tail (problem_row) belongs in the log a reader parses, not in the bell
+        rt = str(m if ring_text is None else ring_text)
         if problem:
             with self._problem_lock:
                 hit = None
@@ -9493,9 +9745,9 @@ class SdkBackend:
                         hit.get("first", hit["text"]), reps, "" if reps == 1 else "s")
                 else:
                     self._problem_seq += 1
-                    row = {"seq": self._problem_seq, "t": time.time(), "text": str(m)}
+                    row = {"seq": self._problem_seq, "t": time.time(), "text": rt}
                     if key is not None:
-                        row.update(key=key, first=str(m), count=1)
+                        row.update(key=key, first=rt, count=1)
                     self._problems.append(row)
                     if len(self._problems) > self.PROBLEM_RING:
                         del self._problems[:-self.PROBLEM_RING]
@@ -12261,6 +12513,9 @@ class SdkBackend:
         # queued in the CLI that started streaming after the previous turn's Result). Only on the
         # transition, so it never spams the log. This is what makes the signal self-heal without a count.
         if not atom.get("_echo_text") and not atom.get("command") and not atom.get("isApiError") \
+                and getattr(sess, "_first_out_t", None) is None and getattr(sess, "inflight", 0):
+            sess._first_out_t = time.time()   # the turn's FIRST streamed work atom — turns.jsonl's firstOutT (T304)
+        if not atom.get("_echo_text") and not atom.get("command") and not atom.get("isApiError") \
                 and not sess._cli_working:
             sess._mark("working")   # (an isApiError settle is the turn DYING, not producing — never 'working')
         self._wake_push()
@@ -12723,11 +12978,14 @@ class SdkBackend:
             attempts = self._heal_attempts.get(sid, 0)
             self._heal_attempts[sid] = attempts + 1
         if attempts >= 1:
-            self._log("session %s: claude process died mid-turn AGAIN before completing a turn — "
-                      "crash loop; NOT resuming again, turn left cut for the next kernel restart"
-                      % sess.name)
+            problem_row(self.state_dir,
+                        "session %s: claude process died mid-turn AGAIN before completing a turn — "
+                        "crash loop; NOT resuming again, turn left cut for the next kernel restart" % sess.name,
+                        "crash.loop", log=self._log, sid=sid, name=sess.name, attempt=attempts + 1)
             return
-        self._log("session %s: claude process died mid-turn — resuming with history intact" % sess.name)
+        problem_row(self.state_dir,
+                    "session %s: claude process died mid-turn — resuming with history intact" % sess.name,
+                    "crash.heal", log=self._log, sid=sid, name=sess.name, attempt=attempts + 1)
         try:
             with self._reg_lock:
                 reg = read_reg(self.state_dir, sid) or {"sid": sid}

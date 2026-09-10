@@ -7566,7 +7566,9 @@ def _in_place_converge(target):
 
 _DEPLOY_RESTART_REASONS = ("main-converge", "p2p-update", "self-update",   # ledger reasons that ARE a
                            "kernel-asks-manager-restart-all: self-update")   # deploy restart of this kernel
-_NO_RESTART_ACTIONS = {"main-converge-skip", "bus-converge", "end-on-idle"}   # audit rows that restart no
+_NO_RESTART_ACTIONS = {"main-converge-skip", "bus-converge", "end-on-idle",   # audit rows that restart no
+                       "quiet-window"}   # (the manager's note of a quiet window APPLYING: a wait measured, T304;
+                                         #  the restart it releases writes its own manager-sigterm note)
 #                                                                              kernel (in-place converges; a
 #                                                                              session's own self-close ask)
 
@@ -15094,6 +15096,38 @@ def _sdk_problem_rows(limit=20, cap=400):
     return out
 
 
+SESSION_EVENTS_TAIL = 5000     # lines of session-events.jsonl one GET /session-events reads (newest)
+
+
+def _session_event_rows(since=0.0, limit=200, tail=SESSION_EVENTS_TAIL):
+    """(rows, count) for GET /session-events (T304): the session-event ledger the SDK backend appends
+    (kernel/sdk_backend.py SESSION_EVENTS_FILE: an orphaned CLI ended at boot, a leftover scope stopped, two
+    CLIs holding one conversation, a crash heal or loop, a session the drain left closing, and the boot
+    sweep's summary), newest first, rows with t >= `since`, at most `limit`, each carrying `host` (this
+    kernel's own name, _self_host) so a federated shell merges per-host maps and never sums across kernels.
+    `count` is the problems since THIS kernel's boot on THIS host: every row at or after _STARTED except the
+    boot summary (reconcile.boot, which every boot writes). Reads the file's tail only; a missing or
+    unreadable ledger is ([], 0)."""
+    path = jd.STATE / "session-events.jsonl"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()[-int(tail):]
+    except OSError:
+        return [], 0
+    rows = []
+    for ln in lines:
+        try:
+            r = json.loads(ln)
+        except Exception:
+            continue
+        if isinstance(r, dict) and isinstance(r.get("t"), (int, float)) and r.get("kind"):
+            rows.append(r)
+    boot_t = int(_STARTED)
+    count = sum(1 for r in rows if r["t"] >= boot_t and r["kind"] != "reconcile.boot")
+    host = _self_host()
+    out = [dict(r, host=host) for r in reversed(rows) if r["t"] >= since][:max(1, int(limit))]
+    return out, count
+
+
 # ── slash-command list for the composer's "/" autocomplete (the user 2026-06-29) ──────────────────────────────
 # The DESIGNED source is the Agent SDK's get_server_info()['commands'] — each {name, description, argumentHint,
 # aliases} — and it covers BOTH backends, because the command set is fixed by the `claude` binary + config + cwd,
@@ -21884,14 +21918,29 @@ def _restart_cut_row(drain_res, watches_armed=0, audit_reason="", now=None):
     so the ledger documents the cut honestly on our side and the stamps stay a documented CLI
     artifact."""
     d = drain_res if isinstance(drain_res, dict) else {}
-    return {"t": int(now if now is not None else time.time()),
-            "pid": os.getpid(),
-            "cutTurns": list(d.get("cutTurns") or []),
-            "stopped": int(d.get("stopped") or 0),
-            "unjoined": int(d.get("unjoined") or 0),
-            "reaped": int(d.get("reaped") or 0),
-            "watchesArmed": int(watches_armed or 0),
-            "reason": str(audit_reason or "")}
+    row = {"t": int(now if now is not None else time.time()),
+           "pid": os.getpid(),
+           "cutTurns": list(d.get("cutTurns") or []),
+           "stopped": int(d.get("stopped") or 0),
+           "unjoined": int(d.get("unjoined") or 0),
+           "reaped": int(d.get("reaped") or 0),
+           "watchesArmed": int(watches_armed or 0),
+           "reason": str(audit_reason or "")}
+    row.update(_kernel_process_sample())   # T304: the kernel's own size and CPU at the end of its life
+    return row
+
+
+def _kernel_process_sample() -> dict:
+    """{rssKb, cpuS} of THIS kernel process (T304): its resident size and CPU seconds, sampled at the two
+    events the restart ledger already records, the exit (the cut row: the process at the end of its life)
+    and the settled boot (the boot row: the process just born), so the kernel's own growth between restarts
+    is a series with no sampler of its own. _process_stats reads /proc (macOS: ru_maxrss, the peak). Never
+    raises; an unreadable process is an empty dict, and the row simply lacks the two fields."""
+    try:
+        ps = _process_stats()
+        return {"rssKb": int(ps.get("rss_kb") or 0), "cpuS": round(float(ps.get("cpu_s") or 0.0), 2)}
+    except Exception:
+        return {}
 
 
 def _append_restart_cut(row):
@@ -21932,6 +21981,7 @@ def _append_boot_settled(first_serve, reconcile_done):
         row = {"t": int(time.time()), "pid": os.getpid(), "bootSettled": True,
                "firstServe": round(first_serve, 2), "reconcileDone": round(reconcile_done, 2),
                "settleS": round(reconcile_done - first_serve, 2)}
+        row.update(_kernel_process_sample())   # T304: the just-born kernel's size, the series' other bookend
         if prev_cut and isinstance(prev_cut.get("t"), int) and first_serve >= prev_cut["t"]:
             row["prevCutT"] = prev_cut["t"]
             row["outageS"] = round(first_serve - prev_cut["t"], 2)
@@ -51512,6 +51562,24 @@ class Handler(BaseHTTPRequestHandler):
                     sys.stderr.write("api-health: tmux coverage count failed: %s\n" % e)
                     out["coverage"]["tmuxSessionsUncovered"] = None
                 return self._send(200, json.dumps(out), "application/json", cache="no-cache")
+            if p == "/session-events":
+                # T304: the session-event ledger for the dashboard's "sessions gone wrong" cue and `romp
+                # restart-metrics` (_session_event_rows): ?since=<epoch s> (default this kernel's boot),
+                # ?limit=<n> (default 200, at most 1000). AUTHED like /api-health, by the plain _authorize:
+                # session names ride it. `count` is this kernel's alone, never a cross-kernel sum (a federated
+                # shell keeps per-host maps; every row names its host for that merge).
+                try:
+                    since = float((q.get("since") or [""])[0] or _STARTED)
+                except ValueError:
+                    since = float(_STARTED)
+                try:
+                    limit = max(1, min(1000, int((q.get("limit") or [""])[0] or 200)))
+                except ValueError:
+                    limit = 200
+                rows, count = _session_event_rows(since, limit)
+                return self._send(200, json.dumps({"host": _self_host(), "bootId": _BOOT_ID, "bootAt": int(_STARTED),
+                                                   "count": count, "since": since, "rows": rows}),
+                                  "application/json", cache="no-cache")
             if p == "/mcp":                                   # the MCP panel's data (the user 2026-08-05): `/mcp`
                 # in a romp session hits the CLI's INTERACTIVE panel, which an SDK session can't render — it
                 # just says "use a terminal". These are the SAME facts via the SDK's designed control request

@@ -36,6 +36,7 @@ These are for scripting and for agents rather than daily use:
 | `romp perf [--interval <s>] [--json]`, `romp perf log on\|off` | The kernel's performance counters as rates over two snapshots (below); `--json` prints one raw snapshot; `log on\|off` turns the `romp-perf` stderr log on or off without a restart |
 | `romp perf client [--minutes <n>] [--json]` | What the open dashboards' browsers spent on the frames they received (below): handler milliseconds per minute by frame type with window p50/p90/p99 and max, the worst minute's main-thread-free p90, long animation frames and their attributed callbacks, the worst minute, heap and DOM, the slowest frames, per dashboard and pane over the last `<n>` minutes (default 10) |
 | `romp api-health` | The API-health signal as JSON (see [The API-health signal](#the-api-health-signal)): per-credential, per-model-family retry and give-up rates over rolling windows, with a derived state |
+| `romp restart-metrics [--json] [--window day\|week] [--anchor D] [--since D] [--until D] [--tz Z] [--no-live]` | What kernel restarts do to the sessions (see [Restart metrics](#restart-metrics)): turns cut per restart and per window, outage and reconcile times, quiet-window waits, orphans and reaps, crash heals, redo cost, turn latency, per-session and kernel memory and CPU; a text summary per window, or the whole document as JSON |
 | `romp mail …` | The postal service from the shell (below) |
 | `romp send <session> [--tag <label>] <text>` | Hand a session a message, on either backend. Anything a script, cron job, or launcher composes SHOULD carry a tag (one word, letters/digits/dashes, up to 24 chars): the chat then renders it as machine-sent under that label instead of as the user's typed words. Raw POST /send callers pass it as the JSON `tag` field (`{name, text, tag}`; a malformed tag fails the whole send, loudly); `--tag` is the CLI's equivalent. Both resolve to the `<!-- romp-tag: <label> -->` marker in the delivered text |
 | `romp new --env NAME=VALUE <name>` | A per-session env var for the SDK session, repeatable; a re-run against a running `<name>` replaces the whole set; vars not re-named are dropped |
@@ -2011,6 +2012,48 @@ writes the row. The manager's log says `exited without a restart request
 (signal or crash); respawning` when a kernel exits that it did not ask to stop
 or restart.
 
+Two more ledgers there record what restarts do to the sessions, appended by
+the SDK backend and read by `romp restart-metrics` (below). `session-events.jsonl`
+gets one flat row per thing that went wrong with a session's process and one
+per boot sweep: `{"t": <epoch s>, "pid": <the writing kernel>, "kind":
+"<writer>.<what>", "sid": <the session, when about one>, "name": <its name
+then>, ...fields, "text": <the prose>}`. The kinds: `reconcile.boot` (the
+sweep summary of every boot that had a session to reconcile: `sessions`, `resumed` continuation notices queued,
+`restored`, `notified`, `reaped`, `scopesStopped`, `toStart`, `durationS`),
+`reconcile.orphan-reaped` (`cliPid`, `fsid`, `scope`, `signaled`, `forced`,
+`tree`), `reconcile.scope-stopped` (`unit`, `sid8`, `cliPid`),
+`reconcile.duplicate-cli` (two Claude Code processes holding one conversation
+as the boot's process listing stood: `fsid`, `pids`, `n`), `crash.heal` and
+`crash.loop` (`attempt`), `drain.unjoined` (a session the drain's bound left
+closing: `inflight`, `reaped`), and the lease work's `lease.*` kinds. Every kind
+but the boot summary is also a problem-ring entry (the bell and error center
+show its prose) and a kernel-log line of the form `<prose> ;; problem-row
+{json}`, the same object after the marker, so a log reader parses it with a
+split on the marker. `GET /session-events?since=<epoch s>&limit=<n>`
+(token-gated) returns the rows newest first since the stamp (default this
+kernel's boot; at most 1000), each with `host`, and `count`, this kernel's
+problems since its boot, never a sum across kernels. `turns.jsonl` gets one
+row per settled turn: `t`, `sid`, `name`, `fedT` (the feed pop, when the text
+left the queue for the CLI's stdin, at millisecond resolution), `firstOutT`
+(the first streamed work atom), `resultT` (the ResultMessage), the CLI's own `durationMs`, `apiMs`,
+`numTurns` and `isError`, the spend fold's `usd` and token columns (`tokIn`,
+`tokOut`, `tokCacheR`, `tokCacheW`), `opener` (`human` or `injected`),
+`fedTexts`, and `resumeNotice`, true when a text fed into the turn was the
+boot or crash continuation notice, the turn that redoes cut work. Every stamp
+is an event's time, and `fedT` and `firstOutT` are present only for a turn
+this kernel fed: a turn the CLI opened by itself (a channel message, a
+background task's notification, a scheduled prompt) has no feed, so its row
+carries neither rather than the previous turn's stamps. Both files rotate at 32 MB to `<name>.1`, one predecessor
+kept, so each pair stays under 64 MB; the reader reads both. The restart rows
+of `restart-cuts.jsonl` carry the kernel process's own `rssKb` and `cpuS`,
+sampled at its exit (the cut row) and at its settled boot (the boot row), so
+the kernel's growth between restarts is a series without a sampler of its own.
+And the manager writes a `quiet-window` row to `restart-audit.jsonl` when a
+parked deploy refresh applies (`since`, `waitedS`, `reason` as the gate's
+verdict, `backstop` when the fifteen-minute cap fired, `coalesced`, `mode`,
+`lastInflight`, `misses`, and the park's drain-hold counts); it is a note, not
+a request, and the kernel's restart-reason walk passes it over.
+
 The two host registries there, `remotes.json` (attached and checked-in
 machines, each row with that machine's serve token) and `remotes-known.json`
 (machines remembered for re-attach, with the mail tier you set for each), are
@@ -2036,6 +2079,68 @@ kind. At start the bus removes the temporary files a crash left behind (a
 message written but never placed, a store record never finished), closes each
 one's receipt as refused, and says so once. The sidecars are yours to inspect
 or delete.
+
+## Restart metrics
+
+`romp restart-metrics` reads what kernel restarts do to the sessions, from the
+state directory's ledgers (`restart-cuts.jsonl`, `restart-audit.jsonl`,
+`session-events.jsonl`, `turns.jsonl`, the state logs under `states/`, and
+`spend.json` for the day's total dollars) and from the running kernel's
+`GET /version` and `GET /perf`; it loads no kernel module and writes nothing.
+The text form prints one screen per window: restarts and the turns they cut
+(with the clean restarts and the boots that had no cut row, a crash respawn,
+whose cut count is unknown; the per-restart rate divides by the measured
+restarts alone),
+the reasons, the outage from exit to first serve and the reconcile settle (from
+the `bootSettled` rows), the quiet windows' waits and backstop firings (from
+the manager's `quiet-window` rows), the boot sweeps' orphans reaped, scopes
+stopped, duplicate processes, crash heals and loops, sessions the drain left
+closing, and lease problems (from `session-events.jsonl`), the continuation
+notices and the redo turns with their dollars and tokens (from `turns.jsonl`;
+the spend ledger's buckets cannot attribute a turn's cost, and the summary says
+so), turn latency from the feed pop to the result and to the first output (from
+`turns.jsonl`, at millisecond resolution) beside the same interval from the
+state log's `working` and `waiting` rows (one-second resolution, the only
+latency available for turns before `turns.jsonl` existed), the machine cuts by
+cause (a state-log pair broken by a machine cut is not a turn), and the kernel
+process's resident memory and CPU at its exits. The live
+block reads each `romp-session-*` scope's `memory.current` and `cpu.stat` on
+Linux (a `ps` tree walk where there is no cgroup), the kernel's pid, uptime,
+CPU, resident size and the pusher's idle-cycle share, and lists any
+conversation two Claude Code processes hold right now. Windows are days or
+weeks (`--window`), weeks anchored on `--anchor` (default the first restart's
+day in range), bounded by `--since` and `--until`, in the machine's local time
+unless `--tz` names a zone; weeks are counted in local dates, so a clock change
+inside a week moves no boundary off local midnight. The header names the machine `this machine`
+unless `--label` says otherwise, so no hostname reaches the text by default. A
+missing ledger is named at the top, never a silent zero. `--json` prints the whole document (`schema` 1): `restarts`
+(each cut row joined to the boot that followed it), `quietWindows` (each
+joined to the restart it released), `kernelSeries`, `events`, `buckets` (every
+metric above per window, with capped latency samples for the distribution
+figure), `sources`, and `live`.
+
+`scripts/restart_metrics_report.py` draws the before-versus-after figures from
+two or more of those JSON documents with cleanplots, which is not a romp
+dependency, so it runs under uv:
+
+```
+uvx --with cleanplots --with matplotlib --with pandas python \
+    scripts/restart_metrics_report.py --doc baseline=baseline.json --doc after=after.json --out DIR
+```
+
+The figures land in `--out` (default
+`~/.local/state/romp-research/restart-metrics/`): turns cut per window and per
+restart, outage and settle times, quiet-window waits, sessions gone wrong per
+window, continuation notices and redo dollars, the turn-latency distribution,
+resident memory per session scope and the kernel's own, and the kernel's
+resident memory at each exit and boot over the days of each document; beside
+them `figures.json` carries the numbers drawn and `summary.txt` the reader's
+text per document. Session names are hidden by default (`session 1..N` by
+memory rank; the kernel's own bar keeps its name and its own colour) for any
+output directory outside your state root, because real session names are
+private and must not reach a repository, an issue or a pull request; `--named`
+shows them, and inside your own state root they show by default. Without
+cleanplots the script says so and draws nothing.
 
 ## Switches
 
