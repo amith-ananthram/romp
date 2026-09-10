@@ -1912,7 +1912,7 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    width, the dashed provisional look kept, the ✕ still in its corner — with Save and Cancel under the text. The field
    inherits the bubble's type; the buttons and the labels wear the queued header's 0.82em. A bubble another client is
    editing reads "editing" beside its text; a refused edit says why on its own line. */
-.queued-bubble.editing { opacity: 1; border-color: var(--accent); padding-right: 30px; }
+.queued-bubble.editing { opacity: 1; border-color: var(--accent); padding-right: 30px; box-sizing: border-box; }   /* the width set from the measured bubble is its border box */
 .queued-editor { display: flex; flex-direction: column; gap: 6px; }
 .queued-editbox {
   width: 100%; box-sizing: border-box; display: block; resize: none; overflow: hidden;

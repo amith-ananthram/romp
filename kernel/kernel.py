@@ -15800,13 +15800,20 @@ def _drive(msg, client):
         # follow-up context. The result frame is authoritative like the ✕'s: ok:false means the message
         # left the queue meanwhile (or the chip is not a message), and the client hands the typed words
         # back to the composer instead of leaving them nowhere.
-        err = _edit_parked(sid, int(msg["park"]), str(msg.get("md") or ""), str(msg.get("text") or ""))
+        # another connection's open editor owns the entry (T306): its words are not this client's to replace
+        err = _parked_held_by_other(sid, int(msg["park"]), str(msg.get("md") or ""), str(client.get("cid") or "") or None, qid=_wire_qid(msg)) \
+            or _edit_parked(sid, int(msg["park"]), str(msg.get("md") or ""), str(msg.get("text") or ""))
+        if err:
+            _release_after_refusal(be, sid, msg, client)
         client["send"](json.dumps({"type": "editResult", "ok": not err, "id": sid,
                                    "md": str(msg.get("md") or ""), "text": err or ""}))
         _push_soon()
     elif t == "editQueued" and msg.get("idx") is not None and hasattr(be, "edit_queued"):
         # ✎ on a backend-queue message: replaced under the backend's lock, drift-guarded by the body.
-        err = _edit_backend_queued(be, sid, int(msg["idx"]), str(msg.get("md") or ""), str(msg.get("text") or ""))
+        err = _queued_held_by_other(be, sid, int(msg["idx"]), str(msg.get("md") or ""), str(client.get("cid") or "") or None) \
+            or _edit_backend_queued(be, sid, int(msg["idx"]), str(msg.get("md") or ""), str(msg.get("text") or ""))
+        if err:
+            _release_after_refusal(be, sid, msg, client)
         client["send"](json.dumps({"type": "editResult", "ok": not err, "id": sid,
                                    "md": str(msg.get("md") or ""), "text": err or ""}))
         _push_soon()
@@ -15816,11 +15823,16 @@ def _drive(msg, client):
         # before this edit). Neither holding it means it already forwarded into the CLI: the honest refusal.
         md = str(msg["md"])
         new_text = str(msg.get("text") or "")
-        err = _edit_parked(sid, -1, md, new_text)
+        _own = str(client.get("cid") or "") or None
+        err = _parked_held_by_other(sid, -1, md, _own, qid=_wire_qid(msg)) or _edit_parked(sid, -1, md, new_text)
         if err and hasattr(be, "edit_queued"):
-            err2 = _edit_backend_queued(be, sid, -1, md, new_text)
+            err2 = _queued_held_by_other(be, sid, -1, md, _own) or _edit_backend_queued(be, sid, -1, md, new_text)
             if err2 is None:
                 err = None
+            elif "another client" in err2:
+                err = err2
+        if err:
+            _release_after_refusal(be, sid, msg, client)
         client["send"](json.dumps({"type": "editResult", "ok": not err, "id": sid,
                                    "md": md, "text": err or ""}))
         _push_soon()
@@ -15836,7 +15848,9 @@ def _drive(msg, client):
         owner = str(client.get("cid") or "") or None
         md = str(msg.get("md") or "")
         qid = _wire_qid(msg)
-        if msg.get("park") is not None:
+        if not owner:
+            err = "this connection can't hold a message for editing"   # every pane has an id; a stand-in without one holds nothing
+        elif msg.get("park") is not None:
             err = _hold_parked(sid, int(msg["park"]), md, owner, qid=qid, hold=want)
         elif msg.get("idx") is not None and hasattr(be, "hold_queued"):
             err = _hold_backend_queued(be, sid, int(msg["idx"]), md, owner, qid=qid, hold=want)
@@ -15846,8 +15860,10 @@ def _drive(msg, client):
                 err2 = _hold_backend_queued(be, sid, -1, md, owner, qid=qid, hold=want)
                 if err2 is None:
                     err = None
-        client["send"](json.dumps({"type": "editResult", "ok": not err, "id": sid, "md": md, "text": err or "",
-                                   "op": "hold" if want else "release"}))
+        _frame = {"type": "editResult", "ok": not err, "id": sid, "md": md, "text": err or "", "op": "hold" if want else "release"}
+        if qid:
+            _frame["qid"] = qid   # the copy the verdict is about: two same-words copies close only the refused one
+        client["send"](json.dumps(_frame))
         _mark_views_dirty()
         _push_soon()
     elif t == "dismissEcho" and hasattr(be, "dismiss_echo"):
@@ -27957,15 +27973,15 @@ def _chat_build_sig(sess, tm=None, now=None, tmux=None, deps=None):
             _bc = None
         queued = tuple(be.pending_queued(sid))
         try:
-            _qmeta = tuple(((m or {}).get("qid"), (m or {}).get("qts")) for m in (be.pending_queued_meta(sid) or ())) \
-                if hasattr(be, "unqueue") and hasattr(be, "pending_queued_meta") else None
+            _qmeta = tuple(((m or {}).get("qid"), (m or {}).get("qts"), bool((m or {}).get("held"))) for m in (be.pending_queued_meta(sid) or ())) \
+                if hasattr(be, "unqueue") and hasattr(be, "pending_queued_meta") else None   # held (T306): an open editor's mark repaints "editing"
         except Exception:
             _qmeta = None
         sig.append((_bc, _clearing_now(sid), queued, _qmeta,
                     _queue_recallable(be, sid) if hasattr(be, "unqueue") else None, _launch_error(sid)))
         # ops: the ops parked for this session while it compacts or is held (the kernel FIFO), by value.
         ops = tuple(tuple(o) for o in (_pending_ops.get(sid) or ()))
-        sig.append(ops)
+        sig.append((ops, tuple(sorted((_park_holds.get(sid) or {}).items()))))   # + the parked holds (T306): a held send reads "editing"
         # limit: the account-level hold the queued bubble names (_limit_hold: usage windows and their reset
         # clock, the spend pause, a limit-shaped launch error), by value, read whenever the build can render
         # a queued bubble: something queued or parked, or on a tmux backend an input echo still in flight,
@@ -29314,7 +29330,9 @@ _park_holds: dict = {}
 
 
 def _park_key(op):
-    return _op_qid(op) or ("md:" + _parked_md(op))
+    """The hold's key for a parked send: the copy's id, else the op object itself (holds live in memory, and the walk pops by
+    identity too), so two id-less sends of the same words hold and release apart (review find)."""
+    return _op_qid(op) or ("obj:%x" % id(op))
 
 
 def _parked_held(sid, op):
@@ -29358,6 +29376,9 @@ def _hold_parked(sid, park, md, owner, qid=None, hold=True):
         key = _park_key(op)
         holds = _park_holds.get(sid) or {}
         if hold:
+            cur = holds.get(key)
+            if cur is not None and owner and cur not in ("", owner):
+                return "another client is editing this message"   # the first editor keeps it; the second gets the refusal on its bubble
             holds[key] = owner or ""
             _park_holds[sid] = holds
         else:
@@ -29403,11 +29424,76 @@ def _hold_backend_queued(be, sid, idx, md, owner, qid=None, hold=True):
             idx = next((i for i, q in enumerate(pending) if _split_followup(q)[1] == md), -1)
     if not (0 <= idx < len(pending)):
         return _edit_miss_text(md)
-    if hold:
-        ok = be.hold_queued(sid, idx, pending[idx], owner, qid=qid)
-    else:
-        ok = be.release_queued(sid, idx, pending[idx], owner, qid=qid)
-    return None if ok else _edit_miss_text(md)
+    if not hold:
+        return None if be.release_queued(sid, idx, pending[idx], owner, qid=qid) else _edit_miss_text(md)
+    holder = _queued_holder(be, sid, idx)
+    if holder and owner and holder != owner:
+        return "another client is editing this message"
+    if be.hold_queued(sid, idx, pending[idx], owner, qid=qid):
+        return None
+    try:
+        still = pending[idx] in (be.pending_queued(sid) or [])
+    except Exception:
+        still = False
+    # still queued but unholdable: no running session holds the copy (the persisted mirror lists it); gone: fed already
+    return "the session isn't running right now, so this message can't be edited yet" if still else _edit_miss_text(md)
+
+
+def _queued_holder(be, sid, idx):
+    """The connection holding the backend copy at `idx`, or None (pending_queued_meta's holder; a backend without it holds nothing)."""
+    try:
+        metas = be.pending_queued_meta(sid) if hasattr(be, "pending_queued_meta") else None
+        m = metas[idx] if isinstance(metas, list) and 0 <= idx < len(metas) else None
+        return (m or {}).get("holder") or None
+    except Exception:
+        return None
+
+
+def _queued_held_by_other(be, sid, idx, md, owner):
+    """The Save's ownership check (T306): the refusal text when another connection holds the backend copy the edit names,
+    located like _edit_backend_queued locates; None otherwise."""
+    try:
+        pending = be.pending_queued(sid)
+    except Exception:
+        pending = []
+    if md and (not (0 <= idx < len(pending)) or _split_followup(pending[idx])[1] != md):
+        idx = next((i for i, q in enumerate(pending) if _split_followup(q)[1] == md), -1)
+    holder = _queued_holder(be, sid, idx) if idx >= 0 else None
+    return "another client is editing this message" if holder and owner and holder != owner else None
+
+
+def _parked_held_by_other(sid, park, md, owner, qid=None):
+    """The same check for a parked send (located like _edit_parked locates)."""
+    sid = str(sid)
+    with _pending_ops_lock:
+        ops = _pending_ops.get(sid) or []
+        if qid:
+            park = next((j for j, op in enumerate(ops) if _op_qid(op) == qid), -1)
+        elif not (0 <= park < len(ops)) or (md and _parked_md(ops[park]) != md):
+            park = next((j for j, op in enumerate(ops) if _parked_md(op) == md), -1) if md else -1
+        if park < 0:
+            return None
+        cur = (_park_holds.get(sid) or {}).get(_park_key(ops[park]))
+    return "another client is editing this message" if cur is not None and owner and cur not in ("", owner) else None
+
+
+def _release_after_refusal(be, sid, msg, client):
+    """A Save the kernel refused (T306): the client closed its field before the verdict, so its hold would outlive the
+    editor — release it, best effort, wherever the entry sits."""
+    owner = str((client or {}).get("cid") or "") or None
+    if not owner:
+        return
+    md = str(msg.get("md") or "")
+    qid = _wire_qid(msg)
+    try:
+        _hold_parked(sid, int(msg["park"]) if msg.get("park") is not None else -1, md, owner, qid=qid, hold=False)
+    except Exception:
+        pass
+    if hasattr(be, "release_queued"):
+        try:
+            _hold_backend_queued(be, sid, int(msg["idx"]) if msg.get("idx") is not None else -1, md, owner, qid=qid, hold=False)
+        except Exception:
+            pass
 
 
 def _release_client_holds(client):
@@ -30402,7 +30488,9 @@ def _apply_pending_ops(now=None):
                         k = next((j for j, o in enumerate(ops) if not _parked_held(sid, o)), -1)
                         if k < 0:
                             break                         # everything left is being edited: nothing to hand over
-                        op = ops[k]
+                        if ops[k][0] != "send" and any(_parked_held(sid, o) for o in ops[:k]):
+                            break                         # a command, compaction or setting parked BEHIND a held send waits for it:
+                        op = ops[k]                       # only messages pass a message being edited (the shown order stays the run order otherwise)
                         if op[0] == "send":
                             run = []                      # coalesce the run of unheld sends → deliver them AT ONCE
                             while k < len(ops) and ops[k][0] == "send" and not _parked_held(sid, ops[k]):

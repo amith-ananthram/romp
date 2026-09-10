@@ -56,12 +56,13 @@ plain text.
 **A message that has not gone yet.** Send to a busy session and your message waits as a
 dashed bubble under an hourglass until the session takes it — while it compacts, while a
 turn runs, or in the beat before the kernel confirms the send. Until then it is still
-yours: the **✕** in its corner pulls it back into the composer, and the **✎** beside it loads
-the text into the composer under an editing pill, so you can change your mind without
-losing your place in the queue. Send replaces the message where it was, a follow-up keeps
-its context, and Esc or the pill's ✕ leaves it as it was. If the session takes the message
-before the edit lands, romp says so and gives your edited words back to the composer
-rather than sending them twice.
+yours: the **✕** in its corner pulls it back into the composer, and the **✎** beside it turns
+the bubble's text into a field where it sits, so you can change your mind without losing
+your place in the queue. While the field is open the message holds: it does not go until you
+are done. Enter (or Save) replaces the message where it was, a follow-up keeps its context,
+and Esc (or Cancel) leaves it as it was; the composer is not involved. If the session took
+the message before you could hold it, the bubble says so, and if an edit cannot be applied
+romp gives your words back in a notice rather than sending them twice.
 
 **Opening a markdown document.** A markdown link in the chat opens in the file viewer,
 rendered, with **Raw** one click away — a path on the session's machine, or a link to a

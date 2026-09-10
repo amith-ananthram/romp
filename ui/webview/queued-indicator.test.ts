@@ -69,7 +69,7 @@ test("the delegated qx handler cancels click-safely: kernel op + composer restor
   assert.match(RENDER, /if \(el\.dataset\.qpark !== undefined\) msg\.park = Number\(el\.dataset\.qpark\);/);
   // a MESSAGE returns to the composer to re-edit; a slash COMMAND (qcmd) just cancels
   assert.match(RENDER, /if \(qmd && el\.dataset\.qcmd !== "1" && el\.dataset\.qromp !== "1"\) \{/);
-  assert.match(RENDER, /restoreToComposer\(qmd\);/);
+  assert.match(RENDER, /restoreToComposer\(edx && edx\.open && edx\.text\.trim\(\) \? edx\.text : qmd\);/, "the message's words come back — the words being edited when a field was open on it (T306)");
   assert.match(RENDER, /const bub = el\.closest\("\.queued-bubble"\) as HTMLElement \| null;[\s\S]*?bub\?\.remove\(\);/,
     "optimistic removal before the next push");
   // restoreToComposer fills the composer textarea, fires input (autosize/enable), focuses, caret to end

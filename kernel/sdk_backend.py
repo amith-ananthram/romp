@@ -4430,13 +4430,18 @@ class SdkSession:
         by text) as held by `owner`, the connection whose editor has its words open (T306). The feeder skips it
         until release_queued / replace_queued / release_holds_by. False when no such copy is queued (fed already):
         the caller's cue to refuse the edit loudly."""
+        if not owner:
+            return False                                     # a hold needs an owner to release it by
         with self._lock:
             i = self._locate_locked(idx, expect, qid)
             if i < 0:
                 return False
             while len(self._pending_hold) < len(self._pending):
                 self._pending_hold.append(None)
-            self._pending_hold[i] = owner or ""
+            cur = self._pending_hold[i]
+            if cur and cur != owner:
+                return False                                 # another connection's editor has it: the first keeps it
+            self._pending_hold[i] = owner
         return True
 
     def release_queued(self, idx: int, expect, owner: str | None = None, qid: str | None = None) -> bool:
@@ -4481,7 +4486,8 @@ class SdkSession:
             if len(self._pending_meta) != len(self._pending):
                 return None
             return [{"md": t, "qid": (m or {}).get("qid"), "qts": (m or {}).get("qts"),
-                     "held": bool(self._pending_hold[i] if i < len(self._pending_hold) else None)}   # T306: an open editor
+                     "held": bool(self._pending_hold[i] if i < len(self._pending_hold) else None),   # T306: an open editor…
+                     "holder": (self._pending_hold[i] if i < len(self._pending_hold) else None) or None}   # …and whose (the kernel's ownership check)
                     for i, (t, m) in enumerate(zip(self._pending, self._pending_meta))]
 
     def qids_for_landing(self, uuid_: str, texts, t=None):

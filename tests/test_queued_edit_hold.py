@@ -103,6 +103,15 @@ class BackendHold(unittest.TestCase):
         with self.s._lock:
             self.assertEqual(self.s._feed_index_locked(), 0)
 
+    def test_a_hold_by_another_owner_is_refused_and_a_hold_needs_an_owner(self):
+        self.assertTrue(self.s.hold_queued(0, "first", "c1", qid="q1"))
+        self.assertFalse(self.s.hold_queued(0, "first", "c2", qid="q1"), "the first editor keeps the copy")
+        self.assertEqual(self.s.pending_meta()[0]["holder"], "c1", "the meta says whose hold it is")
+        self.assertFalse(self.s.hold_queued(1, "second", "", qid="q2"), "a hold needs an owner to release it by")
+        self.assertIsNone(self.s.pending_meta()[1]["holder"])
+        self.assertTrue(self.s.release_queued(0, "first", "c1", qid="q1"))
+        self.assertTrue(self.s.hold_queued(0, "first", "c2", qid="q1"), "released, another connection may edit it")
+
     def test_the_backend_wrappers_reach_the_session(self):
         self.assertTrue(self.be.hold_queued(SID, 0, "first", "c1", qid="q1"))
         self.assertTrue(self.be.pending_queued_meta(SID)[0]["held"])
@@ -141,7 +150,7 @@ class _HoldBackend:
         return list(self.q)
 
     def pending_queued_meta(self, sid):
-        return [{"md": t, "qid": None, "qts": None, "held": t in self.holds} for t in self.q]
+        return [{"md": t, "qid": None, "qts": None, "held": t in self.holds, "holder": self.holds.get(t)} for t in self.q]
 
     def edit_queued(self, sid, idx, text, expect=None):
         if not (0 <= idx < len(self.q)) or self.q[idx] != expect:
@@ -152,8 +161,10 @@ class _HoldBackend:
 
     def hold_queued(self, sid, idx, expect, owner, qid=None):
         self.calls.append(("hold", idx, expect, owner, qid))
-        if not (0 <= idx < len(self.q)) or self.q[idx] != expect:
+        if not owner or not (0 <= idx < len(self.q)) or self.q[idx] != expect:
             return False
+        if self.holds.get(expect) not in (None, owner):
+            return False                                   # SdkSession.hold_queued's contract: the first editor keeps it
         self.holds[expect] = owner
         return True
 
@@ -230,14 +241,38 @@ class KernelHold(unittest.TestCase):
         km.Sessions.backend_for = staticmethod(lambda sid: fb)
         km._compacting_now = lambda sid: False
         km._apply_pending_ops()
-        self.assertEqual(fb.calls, [("send", "b")], "the unheld send behind it goes; the held one waits")
+        self.assertEqual(fb.calls, [("send", "b")], "a message behind the held one goes; the held one waits")
         self.assertEqual(km._pending_ops[SID], [("send", "a", "human"), ("model", "opus")], "the held send keeps its slot")
         km._apply_pending_ops()
-        self.assertEqual(fb.calls, [("send", "b"), ("model", "opus")], "a settings op behind a held send still applies")
+        self.assertEqual(fb.calls, [("send", "b")], "a settings op behind a held send WAITS for it: only messages pass a message being edited (review find)")
         self.assertEqual(self._op(park=0, md="a", hold=False)["op"], "release")
         km._apply_pending_ops()
         self.assertEqual(fb.calls[-1], ("send", "a"), "released, it goes on the next pass")
+        km._apply_pending_ops()
+        self.assertEqual(fb.calls[-1], ("model", "opus"), "…and the setting behind it on the pass after (the send ends its pass)")
         self.assertNotIn(SID, km._pending_ops)
+
+    def test_a_parked_send_with_a_press_id_is_held_by_it_and_a_same_words_twin_is_not(self):
+        km._pending_ops[SID] = [("send", "a", "human", "echo:1111"), ("send", "a", "human", "echo:2222")]
+        self.assertEqual(self._op(park=0, md="a", qid="echo:1111")["op"], "hold")
+        self.assertEqual(set(km._park_holds[SID]), {"echo:1111"}, "the hold is keyed by the copy's id")
+        self.assertTrue(km._parked_held(SID, km._pending_ops[SID][0]))
+        self.assertFalse(km._parked_held(SID, km._pending_ops[SID][1]), "the same words under another id are not held")
+        fb = _FakeBackend()
+        km.Sessions.backend_for = staticmethod(lambda sid: fb)
+        km._compacting_now = lambda sid: False
+        km._apply_pending_ops()
+        self.assertEqual(fb.calls, [("send", "a")], "the unheld twin went")
+        self.assertEqual([km._op_qid(op) for op in km._pending_ops[SID]], ["echo:1111"], "the held copy stays")
+        self.assertTrue(km._drive({"type": "editQueued", "id": SID, "park": 0, "md": "a", "qid": "echo:1111", "text": "a2"}, self.client))
+        self.sent.clear()
+        self.assertEqual(km._park_holds.get(SID, {}), {}, "the Save released it")
+        # two id-less same-words copies hold apart too (keyed by the op object)
+        # built at run time, as _send_or_park builds them: two equal tuple LITERALS in one list are one interned object
+        km._pending_ops[SID] = [tuple(["send", "x", "human"]), tuple(["send", "x", "human"])]
+        self._op(park=1, md="x")
+        self.assertFalse(km._parked_held(SID, km._pending_ops[SID][0]))
+        self.assertTrue(km._parked_held(SID, km._pending_ops[SID][1]))
 
     def test_a_parked_hold_is_refused_on_a_command_chip_and_on_a_gone_entry(self):
         km._pending_ops[SID] = [("compact",)]
@@ -269,16 +304,49 @@ class KernelHold(unittest.TestCase):
         self.assertEqual(self.be.holds, {"alpha": "cid-one"})
 
     def test_the_in_flight_guard_finds_the_op_the_backend_holds_wherever_it_sits(self):
-        # with a held send at the head, the op the walk hands over sits at slot 1: its ✕ and ✎ are still too
-        # late, and the held head's are still allowed (the slot-0 rule alone would have it backwards)
-        km._pending_ops[SID] = [("send", "a", "human"), ("send", "b", "human")]
+        # with a held send at the head, the op the walk hands over (a compaction, recorded in flight) sits at slot 1:
+        # its ✕ is still too late, and the held head's ✎ is still allowed (the slot-0 rule alone would have it backwards)
+        km._pending_ops[SID] = [("send", "a", "human"), ("compact",)]
         self._op(park=0, md="a")
         km._inflight_ops[SID] = km._pending_ops[SID][1]
-        self.assertEqual(km._cancel_parked(SID, 1, "b"), km._cancel_miss_text("b"))
-        self.assertEqual(km._edit_parked(SID, 1, "b", "b2"), km._edit_miss_text("b"))
-        self.assertEqual(km._edit_parked(SID, 5, "b", "b2"), km._edit_miss_text("b"), "a body re-locate never lands on it either")
+        self.assertEqual(km._cancel_parked(SID, 1, "/compact"), km._cancel_miss_text("/compact"))
+        self.assertEqual(km._cancel_parked(SID, 5, "/compact"), km._cancel_miss_text("/compact"), "a body re-locate never lands on it either")
         self.assertIsNone(km._edit_parked(SID, 0, "a", "a2"), "the held head is romp's to change")
-        self.assertEqual([op[1] for op in km._pending_ops[SID]], ["a2", "b"])
+        self.assertEqual(km._parked_md(km._pending_ops[SID][0]), "a2")
+
+    def test_another_clients_hold_and_save_are_refused_and_a_refused_save_releases_the_savers_hold(self):
+        other_sent = []
+        other = {"send": lambda s: other_sent.append(json.loads(s)), "cid": "cid-two"}
+        self._op(idx=0, md="alpha")                                              # cid-one's editor has alpha
+        km._drive({"type": "holdQueued", "id": SID, "idx": 0, "md": "alpha"}, other)
+        self.assertEqual((other_sent[-1]["ok"], other_sent[-1]["text"]), (False, "another client is editing this message"))
+        km._drive({"type": "editQueued", "id": SID, "idx": 0, "md": "alpha", "text": "alpha by two"}, other)
+        self.assertEqual((other_sent[-1]["ok"], other_sent[-1]["text"]), (False, "another client is editing this message"))
+        self.assertEqual(self.be.q, ["alpha", "beta"], "the other client's Save changed nothing")
+        self.assertEqual(self.be.holds, {"alpha": "cid-one"}, "…and the first editor's hold stands")
+        km._pending_ops[SID] = [("send", "p", "human")]
+        self._op(park=0, md="p")
+        km._drive({"type": "editQueued", "id": SID, "park": 0, "md": "p", "text": "p by two"}, other)
+        self.assertEqual((other_sent[-1]["ok"], other_sent[-1]["text"]), (False, "another client is editing this message"))
+        self.assertEqual(km._pending_ops[SID][0][1], "p")
+        # the holder's own Save the kernel refuses (a command edited in) releases its hold: the field closed before the verdict
+        self.assertTrue(km._drive({"type": "editQueued", "id": SID, "idx": 0, "md": "alpha", "text": "/model x"}, self.client))
+        self.assertFalse(self.sent.pop()["ok"])
+        self.assertEqual(self.be.holds, {}, "the refused Save left no hold behind")
+        self.assertTrue(km._drive({"type": "editQueued", "id": SID, "park": 0, "md": "p", "text": "   "}, self.client))
+        self.assertFalse(self.sent.pop()["ok"])
+        self.assertEqual(km._park_holds.get(SID, {}), {})
+
+    def test_a_hold_on_a_copy_no_running_session_holds_says_so_not_too_late(self):
+        class _Dormant(_HoldBackend):
+            def hold_queued(self, sid, idx, expect, owner, qid=None):
+                return False                                                     # no SdkSession: the persisted mirror lists the copy
+        self.be = _Dormant(["alpha"])
+        km.Sessions.backend_for = staticmethod(lambda sid: self.be)
+        frame = self._op(idx=0, md="alpha")
+        self.assertFalse(frame["ok"])
+        self.assertIn("isn't running", frame["text"])
+        self.assertNotEqual(frame["text"], km._edit_miss_text("alpha"))
 
     def test_a_clients_close_releases_its_holds_in_both_queues(self):
         km._pending_ops[SID] = [("send", "a", "human")]

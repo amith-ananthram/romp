@@ -4143,7 +4143,8 @@ const pendingGroupNode = new Map<string, { sig: string; node: HTMLElement }>();
 function renderPendingGroup(ev: Extract<ChatEvent, { kind: "queued" }>): HTMLElement {
   const sid = renderingSid || activeId || "";
   const sig = JSON.stringify(ev.texts.map((t) => [t.md, !!t.lost, t.qts, t.imgPaths || null])) + "|" + JSON.stringify(ev.held || null)
-    + (ev.held && ev.held.resetsAt ? "|" + Math.floor(Date.now() / 60000) : "");   // a held countdown reads the minute: re-rendered as it ticks
+    + (ev.held && ev.held.resetsAt ? "|" + Math.floor(Date.now() / 60000) : "")   // a held countdown reads the minute: re-rendered as it ticks
+    + "|" + JSON.stringify(ev.texts.map((t) => { const e = queuedEditorFor(sid, t); return e ? [e.eid, e.open, e.text, e.note] : null; }));   // an editor on one of OUR copies (T306): the cached node predates it
   const fresh = renderQueued(ev);
   const cached = pendingGroupNode.get(sid);
   if (cached && cached.node.isConnected !== undefined) {
@@ -6758,6 +6759,7 @@ function typeFromAnywhereTarget(e: Event): HTMLTextAreaElement | null {
   const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
   if (!ta || ta.disabled || document.activeElement === ta) return null;   // no box / read-only session / already in the box (covers key repeat; a paste there is native)
   if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return null;
+  for (const ed of queuedEditors.values()) if (ed.open && ed.focused) return null;   // a queued message's field owns the keys, across the tail's rebuild (T306)
   if (activeId && liveAsks.has(activeId)) return null;   // the live-ask card owns input while it is up (digits are its number keys)
   if (ctxMenuEl || document.querySelector(".picker-overlay")) return null;   // an open menu / #picker / #confirm owns the keys
   if (document.getElementById("romp-fileview") || document.getElementById("romp-filebrowse")
@@ -13696,6 +13698,7 @@ window.addEventListener("romp:wsup", () => {
 window.addEventListener("romp:hostRelayUp", (e) => {
   const h = String((((e as CustomEvent).detail || {}) as any).host || "");
   if (h) reshipPendingUploads([h]);
+  if (h) reholdQueuedEditors(true);   // the remote kernel released this page's holds with the old relay socket (T306)
   // …and the figure previews parked on that host's link (T291): the relay socket's open is the reconnect-class
   // event a remote kernel's restart produces (it fires neither romp:wsup nor hostUp), so settled previews
   // make their one attempt here as well
@@ -14016,14 +14019,17 @@ function renderStagedStrip(id: string | null, opts?: { reveal?: "last" }): void 
 // a fresh page has no edit in progress (the kernel released the hold with the old socket).
 type QueuedEditRef = { md: string; idx?: number; park?: number; qts?: number; qid?: string; optimistic?: boolean };
 type QueuedEditor = { eid: number; sid: string; key: string; ref: QueuedEditRef; text: string; sel: [number, number] | null;
-                      focused: boolean; open: boolean; note: string };
+                      focused: boolean; open: boolean; note: string; width: number; height: number };
 const queuedEditors = new Map<string, QueuedEditor>();   // sid + the entry's key → its editor (open, or a closed one carrying a note)
 let queuedEditorSeq = 0;
 // the typed text + the entry it replaced, keyed sid + " " + old body, so a refused Save can undo the optimistic
 // repaint and hand the words back (one-shot, ok or not — pendingCancelRestores' twin)
 const pendingEditRestores = new Map<string, { typed: string; ref: QueuedEditRef }>();
+// the copy's identity: its id when it has one (every kernel copy, and every press this page minted), else the press
+// stamp (an id-less optimistic copy of ours) — never the stamp BESIDE an id: a kernel copy's stamp is its enqueue time,
+// which the ✎ does not carry, so keying on it left the field unfindable and the copy held (review find)
 const queuedEditorKey = (sid: string, t: { md: string; qid?: string; qts?: number }): string =>
-  sid + "\u0001" + t.md + "\u0001" + (t.qid || "") + "\u0001" + (t.qts === undefined ? "" : String(t.qts));
+  sid + "\u0001" + t.md + "\u0001" + (t.qid ? "id:" + t.qid : "ts:" + (t.qts === undefined ? "" : String(t.qts)));
 function queuedEditorFor(sid: string, t: { md: string; qid?: string; qts?: number }): QueuedEditor | undefined {
   return queuedEditors.get(queuedEditorKey(sid, t));
 }
@@ -14046,12 +14052,35 @@ function holdQueuedMsg(sid: string, ref: QueuedEditRef, hold: boolean): Record<s
 // the ✎: the field opens where the bubble is (the acknowledgement), and the hold goes out with it. A session that
 // cannot be reached (a down host, a provisional tab) gets no hold posted: there is no kernel entry to hold yet, and the
 // Save's own guard says so if it is still unreachable then.
-function openQueuedEditor(sid: string, ref: QueuedEditRef): void {
+let queuedEditorListenersOn = false;
+// the field's focus is tracked by the USER's own acts, never by blur: the tail's rebuild removes the focused field (a
+// blur Chromium fires before the node reads as disconnected, after the container is cleared), so a blur listener and a
+// render-time snapshot both read the rebuild as the user leaving. A pointer press outside the field, or focus landing on
+// some other element, is the user leaving; nothing else clears the flag, and the rebuilt field takes focus back
+// (preventScroll: the tail's scroll position is the reader's).
+function installQueuedEditorListeners(): void {
+  if (queuedEditorListenersOn) return;
+  queuedEditorListenersOn = true;
+  const isField = (t: EventTarget | null, ed: QueuedEditor) =>
+    !!t && t instanceof HTMLElement && t.classList.contains("queued-editbox") && (t as any)._eid === ed.eid;
+  const insideBox = (t: EventTarget | null, ed: QueuedEditor) =>
+    !!t && t instanceof Node && !!(t as HTMLElement).closest?.(".queued-editor") && ((t as HTMLElement).closest(".queued-editor") as any)?._eid === ed.eid;
+  document.addEventListener("pointerdown", (e) => {
+    for (const ed of queuedEditors.values()) if (ed.open && ed.focused && !insideBox(e.target, ed)) ed.focused = false;
+  }, true);
+  document.addEventListener("focusin", (e) => {
+    for (const ed of queuedEditors.values()) if (ed.open && ed.focused && !isField(e.target, ed) && !insideBox(e.target, ed)) ed.focused = false;
+  }, true);
+}
+function openQueuedEditor(sid: string, ref: QueuedEditRef, width = 0): void {
+  installQueuedEditorListeners();
   const key = queuedEditorKey(sid, ref);
   const cur = queuedEditors.get(key);
   if (cur && cur.open) return;
+  // the bubble's width as it stood (measured at the click): the field keeps it, so the words do not re-wrap in a
+  // box that shrank to the textarea's own size; the editor carries it across the tail's rebuilds
   queuedEditors.set(key, { eid: ++queuedEditorSeq, sid, key, ref, text: ref.md, sel: [ref.md.length, ref.md.length],
-                           focused: true, open: true, note: "" });
+                           focused: true, open: true, note: "", width: Math.round(width), height: 0 });
   if (!isProvisionalId(sid) && !hostIsDown(sid)) vscodeApi?.postMessage(holdQueuedMsg(sid, ref, true));
   repaintQueuedFor(sid);
 }
@@ -14061,10 +14090,24 @@ function cancelQueuedEditor(ed: QueuedEditor): void {
   if (!isProvisionalId(ed.sid) && !hostIsDown(ed.sid)) vscodeApi?.postMessage(holdQueuedMsg(ed.sid, ed.ref, false));
   repaintQueuedFor(ed.sid);
 }
-// a closed tab takes its editors with it; nothing is posted — the kernel releases the holds when the socket closes,
-// and this page's socket is the same one for every tab
+// a closed tab takes its editors with it and RELEASES their holds: the session and its queue live on, and so does this
+// page's socket, so the kernel's socket-close release would never come (review find)
 function closeQueuedEditorsFor(sid: string): void {
-  for (const [k, ed] of queuedEditors) if (ed.sid === sid) queuedEditors.delete(k);
+  for (const [k, ed] of queuedEditors) {
+    if (ed.sid !== sid) continue;
+    if (ed.open && !isProvisionalId(sid) && !hostIsDown(sid)) vscodeApi?.postMessage(holdQueuedMsg(sid, ed.ref, false));
+    queuedEditors.delete(k);
+  }
+}
+// the socket came back (a kernel restart, a dropped link, a relay re-dial): the kernel released the old socket's holds
+// with it, so every field still open re-holds its entry; a copy that fed meanwhile answers ok:false (op hold) and the
+// field closes with the words in the toast (review find: the kernel's comments promised this and nothing did it)
+function reholdQueuedEditors(remoteOnly = false): void {
+  for (const ed of queuedEditors.values()) {
+    if (!ed.open || isProvisionalId(ed.sid) || hostIsDown(ed.sid)) continue;
+    if (remoteOnly && !String(ed.sid).includes(":")) continue;
+    vscodeApi?.postMessage(holdQueuedMsg(ed.sid, ed.ref, true));
+  }
 }
 // Save (the button, Enter): editQueued with the new words; the kernel replaces the entry in place and drops the hold
 // with the edit. Three refusals leave the field exactly as it is: an empty edit (to drop the message, use its ✕), a
@@ -14094,19 +14137,27 @@ function saveQueuedEditor(ed: QueuedEditor): void {
 // from the editor's state — its words, its caret and its focus — instead of losing them to the rebuild.
 function renderQueuedEditor(bubble: HTMLElement, ed: QueuedEditor): void {
   bubble.classList.add("editing");
+  if (ed.width > 0) bubble.style.width = ed.width + "px";   // the same width as the bubble it replaces (max-width still caps it)
+  // whether THIS editor's previous field holds the focus right now: read off the DOM before the rebuild swaps it out,
+  // because the old field's blur fires during its removal, before it reads as disconnected, and would otherwise cancel
+  // the refocus on every push (the served-page harness lost focus within a second)
+  const prev = document.activeElement as HTMLElement | null;
+  const wasFocused = !!prev && prev.classList.contains("queued-editbox") && (prev as any)._eid === ed.eid;
   const box = el("div", "queued-editor");
+  (box as any)._eid = ed.eid;
   const field = document.createElement("textarea");
+  (field as any)._eid = ed.eid;
   field.className = "queued-editbox";
   field.value = ed.text;
-  field.rows = 1;
+  field.rows = Math.max(1, ed.text.split("\n").length);   // sized on the spot: the rebuild must not paint one row and grow a frame later
+  if (ed.height > 0) field.style.height = ed.height + "px";
   field.setAttribute("aria-label", "edit the queued message");
-  const grow = () => { field.style.height = "auto"; field.style.height = field.scrollHeight + "px"; };
+  const grow = () => { field.style.height = "auto"; field.style.height = field.scrollHeight + "px"; ed.height = field.scrollHeight; };
   const remember = () => { ed.sel = [field.selectionStart, field.selectionEnd]; };
   field.addEventListener("input", () => { ed.text = field.value; remember(); grow(); });
   field.addEventListener("select", remember);
   field.addEventListener("keyup", remember);
-  field.addEventListener("focus", () => { ed.focused = true; });
-  field.addEventListener("blur", () => { ed.focused = false; });
+  field.addEventListener("focus", () => { ed.focused = true; });   // (no blur listener: see installQueuedEditorListeners)
   field.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveQueuedEditor(ed); }
     else if (e.key === "Escape") { e.preventDefault(); cancelQueuedEditor(ed); }
@@ -14125,7 +14176,7 @@ function renderQueuedEditor(bubble: HTMLElement, ed: QueuedEditor): void {
   bubble.appendChild(box);
   if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => {
     grow();
-    if (ed.focused && document.body.contains(field)) { field.focus(); if (ed.sel) field.setSelectionRange(ed.sel[0], ed.sel[1]); }
+    if ((wasFocused || ed.focused) && document.body.contains(field)) { ed.focused = true; field.focus({ preventScroll: true }); if (ed.sel) field.setSelectionRange(ed.sel[0], ed.sel[1]); }
   });
 }
 
@@ -15466,7 +15517,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   else if (m.type === "chatEpisode") chatEpisode(m);
   else if (m.type === "subagent") applySubagentFrame(m);
   else if (m.type === "update") update(m);
-  else if (m.type === "wsup") { onSocketUp(skeletonTabs); skeletonDiagArmed = true; }   // the shim's socket-flip marker, in FRAME order: the dead socket's frames may still be draining from the FIFO when onopen fires (review find 2026-09-07)
+  else if (m.type === "wsup") { onSocketUp(skeletonTabs); skeletonDiagArmed = true; reholdQueuedEditors(); }   // the shim's socket-flip marker, in FRAME order: the dead socket's frames may still be draining from the FIFO when onopen fires (review find 2026-09-07)
   else if (m.type === "status") statusOnly(m);
   else if (m.type === "focus") {
     revealSelfPane();   // every focus is someone jumping HERE — on mobile, come forward (incl. from a remote kernel)
@@ -15601,16 +15652,20 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   else if (m.type === "editResult" && typeof m.id === "string") {
     const md = typeof m.md === "string" ? m.md : "";
     const key = m.id + " " + md;
-    const stash = pendingEditRestores.get(key);
-    pendingEditRestores.delete(key);
+    const isSave = m.op !== "hold" && m.op !== "release";   // a hold's or a release's acknowledgement carries the same body: it must not consume a Save's stash
+    const stash = isSave ? pendingEditRestores.get(key) : undefined;
+    if (isSave) pendingEditRestores.delete(key);
     if (!m.ok) {
       const why = typeof m.text === "string" && m.text ? m.text : "";
       if (m.op === "hold") {
+        let edited = "";
         for (const ed of queuedEditors.values()) {
           if (ed.sid !== m.id || ed.ref.md !== md || !ed.open) continue;
+          if (typeof m.qid === "string" && m.qid && ed.ref.qid && ed.ref.qid !== m.qid) continue;   // two same-words copies: only the refused one closes
           ed.open = false; ed.note = why || "too late to edit — the message already reached the session as it was";
+          if (ed.text.trim() && ed.text !== ed.ref.md) edited = ed.text;
         }
-        if (why) warnToast(why);
+        if (why || edited) warnToast((why || "The message could not be held for editing.") + (edited ? " Your edit: " + edited : ""));
       } else if (m.op !== "release") {
         if (stash) applyQueuedEditLocally(m.id, stash.ref, stash.typed, true);
         if (why || stash) warnToast((why || "The edit was not applied.") + (stash ? " Your edit: " + stash.typed : ""));
@@ -16919,7 +16974,11 @@ setupSettings();
         // the composer's before/after so the kernel's cancelResult ok:false can undo it (untouched only).
         const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
         const before = ta ? ta.value : "";
-        restoreToComposer(qmd);
+        // a field open on this bubble (T306): the editor goes with the entry, and the words the user was working on are
+        // what comes back, not the message as it stood (review find)
+        const edx = queuedEditorFor(sidQ, { md: qmd, qid: el.dataset.qid || undefined, qts: el.dataset.qts !== undefined ? Number(el.dataset.qts) : undefined });
+        if (edx) queuedEditors.delete(edx.key);
+        restoreToComposer(edx && edx.open && edx.text.trim() ? edx.text : qmd);
         // a provisional ✕ gets no cancelResult (nothing was posted) — no stash to consume, none kept
         if (!provisional) pendingCancelRestores.set(activeId + " " + qmd, { before, after: ta ? ta.value : "" });
       }
@@ -16943,13 +17002,15 @@ setupSettings();
       if (!qmd) return;
       const sidQ = owningSidOf(el) || activeId;
       if (!sidQ) return;
+      if (sidQ !== activeId) { warnToast("open that session's chat to edit its queued message"); return; }   // the field is painted by the active chat's render; a bubble owned elsewhere gets a pointer, not a silent hold
       const ref: QueuedEditRef = { md: qmd };
       if (el.dataset.qidx !== undefined) ref.idx = Number(el.dataset.qidx);
       if (el.dataset.qpark !== undefined) ref.park = Number(el.dataset.qpark);
       if (el.dataset.qts !== undefined) ref.qts = Number(el.dataset.qts);
       if (el.dataset.qid) ref.qid = el.dataset.qid;
       if (el.dataset.qopt === "1") ref.optimistic = true;
-      openQueuedEditor(sidQ, ref);
+      const bub = el.closest(".queued-bubble") as HTMLElement | null;
+      openQueuedEditor(sidQ, ref, bub ? bub.getBoundingClientRect().width : 0);
     },
     // the field's Save and Cancel (T306): delegated too, keyed by the editor's id (the field is rebuilt every push)
     qsave: (el) => { const ed = queuedEditorByEid(Number(el.dataset.eid)); if (ed) saveQueuedEditor(ed); },

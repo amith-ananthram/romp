@@ -327,7 +327,8 @@ test("render.ts: warnToast hands back its toast, and the refusals about a state 
   // the send into a tab whose create failed (a provisional tab does not survive a reload) and the queued edit's send on
   // a session that cannot be reached (the edit lives in memory alone): states the fresh page no longer has
   assert.match(RENDER, /if \(sid !== provisionalId\) \{\n\s*ephemeralWarnToast\("“" \+ \(sessions\.get\(sid\)\?\.name \|\| "this session"\) \+ "” never started, so there's "/);
-  assert.match(RENDER, /if \(hostIsDown\(activeId\) \|\| isProvisionalId\(activeId\)\) \{\n\s*if \(hostIsDown\(activeId\)\) vscodeApi\?\.postMessage\(\{ type: "redial"[^\n]*\n\s*ephemeralWarnToast\("Can't reach the session right now, so the edit wasn't sent\./);
+  assert.match(RENDER, /if \(hostIsDown\(ed\.sid\) \|\| isProvisionalId\(ed\.sid\)\) \{\n\s*if \(hostIsDown\(ed\.sid\)\) vscodeApi\?\.postMessage\(\{ type: "redial"[^\n]*\n\s*ephemeralWarnToast\("Can't reach the session right now, so the edit wasn't saved\./,
+    "the in-place Save's guard (T306): the field keeps the words, a re-dial is asked for, and the refusal is ephemeral (the edit lives in memory alone)");
   // the plain send's refusal on a disconnected host: the host's reach is a state the fresh page reads from the kernel's
   // tunnel health (the tab mark, the transcript foot), and the re-dial that makes "re-dialing now" true is posted by
   // the gesture, never by a replay
