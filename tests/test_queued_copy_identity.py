@@ -291,6 +291,34 @@ class TheChatCarriesTheIds(unittest.TestCase):
         landed = [e for e in m["events"] if e.get("kind") == "user" and e.get("md") == fed_text and not str(e.get("uuid", "")).startswith("echo:")]
         self.assertEqual([e.get("qid") for e in landed], [qid])
 
+    def test_a_slash_sends_wrapper_record_carries_the_typed_copys_id(self):
+        # A slash or skill command typed into the composer with its arguments on the next line: the CLI
+        # records it as a <command-name> wrapper (no verbatim copy of the typed text), which the kernel reads
+        # as "/deploy staging now" with one space. The chat's own pending bubble retires by id once it has
+        # latched the copy's, so the landed event must carry it although the texts differ in whitespace;
+        # and the kernel's echo, the other visible copy, retires on the same record (2026-09-10).
+        live = self.w.now - T0
+        self.w.write(RUNNING, shift=live)
+        typed = "/deploy \n\nstaging now"
+        self.assertTrue(self.w.be.send(SID, typed))
+        [qid] = [m["qid"] for m in self.w.be.pending_queued_meta(SID)]
+        with self.w.s._lock:
+            self.w.s._pop_for_feed_locked()
+        wrap = ("<command-message>deploy</command-message>\n<command-name>/deploy</command-name>\n"
+                "<command-args>staging now</command-args>\n<skill-format>true</skill-format>")
+        recs = RUNNING + [dict(uline(T0 + 55, wrap, "c1", "tr1"), isMeta=True, promptId="p1"),
+                          dict(uline(T0 + 55, "Base directory for this skill: /tmp/notes-api/.claude/skills/deploy\n\nDeploy the service.",
+                                     "c2", "c1"), isMeta=True, promptId="p1"),
+                          aline(T0 + 75, "Deploying staging now.", "a3", "c2")]
+        self.w.write(recs, shift=live)
+        m = self.w.build()
+        landed = [e for e in m["events"] if e.get("kind") == "user" and e.get("md") == "/deploy staging now"
+                  and not str(e.get("uuid", "")).startswith("echo:")]
+        self.assertEqual([e.get("qid") for e in landed], [qid], "the wrapper's event carries the typed copy's id")
+        echoes = [e for e in m["events"] if str(e.get("uuid", "")).startswith("echo:")]
+        self.assertEqual(echoes, [], "the kernel's echo retired on the same record")
+        self.assertNotIn(SID, self.w.be._live, "…and left the live store")
+
     def test_a_two_block_record_carries_both_copies_ids(self):
         live = self.w.now - T0
         self.w.write(RUNNING, shift=live)

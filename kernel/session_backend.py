@@ -26,6 +26,7 @@ A backend that genuinely cannot do an op returns the documented empty value (Fal
 than raising, so callers never need to know which backend they hold.
 """
 from __future__ import annotations
+import re
 from abc import ABC, abstractmethod
 
 
@@ -42,6 +43,56 @@ def echo_text_key(text) -> str:
     the data needs: the CLI stores user text verbatim (checked against recorded SDK transcripts,
     2026-09-06 — double spaces, bare CRs and line-trailing blanks all preserved). Not a str → ""."""
     return text.strip() if isinstance(text, str) else ""
+
+
+# A command-name-shaped token: a slash, then characters with no further slash or whitespace ("/deploy",
+# "/plugin:skill"). A path ("/tmp/build.log") has a further slash and is not one; a message that starts
+# with a path keeps the plain rule alone.
+_COMMAND_TOKEN_RE = re.compile(r"^/[^/\s]+$")
+
+
+def command_text_key(text) -> str:
+    """The second rule, for a SLASH-COMMAND send only: the text's whitespace-delimited tokens joined by
+    single spaces, or "" when the first token is not command-name-shaped (_COMMAND_TOKEN_RE; a plain
+    message has no command key). Claude Code records a slash send as a wrapper (<command-name>,
+    <command-args>) and, for a skill, the skill body as a second record: the wrapper is the record it
+    always writes, and a verbatim copy of the typed text is not guaranteed (some CLI versions also write a
+    raw twin record, which matches under echo_text_key when present). The event model reads the wrapper
+    back as a command atom whose text is "/name args" with ONE space between them, whatever whitespace
+    the sender typed there. So a send like "/deploy \\n\\nstaging now" never met its own record under
+    echo_text_key: the chat kept the sending bubble forever while the turn ran, and the boot/spawn scan,
+    which reads the raw records, called the send lost and re-delivered it (reported from a live dashboard,
+    2026-09-10). The match is the same words in the same order: the whitespace the CLI drops between the
+    name and the arguments, or reflows inside them, never decides, and a different command or different
+    arguments never lands the echo. Every reader that compares under echo_text_key compares under this
+    key too, on BOTH sides: the kernel's _atom_user_texts adds it for each slash-shaped record text, the
+    backend's _landed_texts does the same (and, for a wrapper record, adds the "/name args" the event
+    model would read), and the echo side asks for either key through echo_keys (kernel._echo_landed_in,
+    SdkBackend.prune_live, _text_landed and qids_for_landing). Not a str → "". The common case, a text
+    that does not start with a slash, is settled before any split: this runs for every user text on
+    every build."""
+    if not isinstance(text, str):
+        return ""
+    s = text.lstrip()
+    if not s.startswith("/"):
+        return ""
+    toks = s.split()
+    if not _COMMAND_TOKEN_RE.match(toks[0]):
+        return ""
+    return " ".join(toks)
+
+
+def echo_keys(text) -> tuple:
+    """The keys an echo's text is looked up under: echo_text_key, and command_text_key when the text is a
+    slash send. Empty and duplicate keys dropped, so a plain text yields one key and a slash send one or
+    two. The one place the "either key" rule is written; every echo-side reader (kernel._echo_landed_in
+    and the thread's held count, SdkBackend.prune_live, _text_landed, qids_for_landing) reads it from
+    here, and two texts match when their key tuples intersect."""
+    keys = []
+    for k in (echo_text_key(text), command_text_key(text)):
+        if k and k not in keys:
+            keys.append(k)
+    return tuple(keys)
 
 
 class SessionBackend(ABC):

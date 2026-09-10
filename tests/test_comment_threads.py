@@ -787,6 +787,34 @@ class ThreadProjection(CommentBase):
         finally:
             self._State.live = []
 
+    def test_a_slash_sends_echo_is_landed_by_its_wrapper_record(self):
+        # a slash or skill command typed into the composer: the CLI records it as a <command-name> wrapper
+        # (no verbatim copy of the typed text), which parses to "/deploy staging now" with one space where
+        # the sender typed a space and two newlines. The held count reads the landing off that record;
+        # before, the echo was held forever and the thread owed a reply that had already come. The record
+        # lands in the SAME second as the send: a strictly later human turn would read the echo as
+        # overtaken (a loss, not held) whatever its text, and this case is about the landing rule alone.
+        t = self.now - 500
+        self._seed_thread(seen=self.now)
+        recs = self._thread_side(aline(t + 120, "Jitter prevents thundering herds.", "ca1", parent="cu1"))
+        echo = {"type": "user", "author": "human", "t": t + 130, "uuid": "echo:1", "_echo_text": "/deploy \n\nstaging now"}
+        wrap = lambda args: ("<command-message>deploy</command-message>\n<command-name>/deploy</command-name>\n"
+                             "<command-args>%s</command-args>\n<skill-format>true</skill-format>" % args)
+        try:
+            self._State.live = [echo]
+            th = self._frame_thread(recs, state="")
+            self.assertEqual(th["queued"], 1, "held until its record lands")
+            th = self._frame_thread(recs + [uline(t + 130, wrap("staging now"), "cc1", parent="ca1", meta=True),
+                                            aline(t + 140, "Deploying staging now.", "ca2", parent="cc1")], state="")
+            self.assertEqual(th["queued"], 0, "the wrapper record is this send's landing")
+            self.assertFalse(th["replyOwed"])
+            self._State.live = [echo]
+            th = self._frame_thread(recs + [uline(t + 130, wrap("production now"), "cc1", parent="ca1", meta=True),
+                                            aline(t + 140, "Deploying production now.", "ca2", parent="cc1")], state="")
+            self.assertEqual(th["queued"], 1, "another command's record is not this send's landing")
+        finally:
+            self._State.live = []
+
     def test_a_dropped_echo_and_a_repeat_text_send_are_read_right(self):
         # round-5 review, two faults in the echo fold: (1) an echo the backend flagged `dropped` (the send was
         # LOST on a reconnect; the popover shows "never delivered") counted as held → green forever; (2) an
