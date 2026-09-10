@@ -46,6 +46,7 @@ from pathlib import Path
 # The tmux launcher picks the first unused colour; for an SDK session we pick deterministically by a
 # stable hash of the sid (the launcher's own fallback when all are taken), so the session gets a
 # consistent colour without cross-backend "used" bookkeeping.
+import importlib
 import importlib.util
 _HERE = Path(__file__).resolve().parent
 _ls_spec = importlib.util.spec_from_file_location("romp_loadsource", str(_HERE / "loadsource.py"))
@@ -64,10 +65,31 @@ class CLIConnectionErrorLike(RuntimeError):
     the launch-error path records it (T315)."""
 
 
+_HT_LOCK = threading.Lock()
+
+
 def _ht():
     """kernel/host_transport.py (the per-session host's kernel side, T315), loaded on first use: the
-    hosts are a setting, and a kernel with the setting off never needs the module."""
-    return sys.modules.get("romp_host_transport") or load_source("romp_host_transport", _HERE / "host_transport.py")
+    hosts are a setting, and a kernel with the setting off never needs the module. Loaded under a lock and
+    checked for completeness: the boot reconcile's thread and a session's thread reach here together at
+    boot, and load_source registers the module before its body has run, so an unguarded second caller saw
+    a half-built module (AttributeError on session_hosts_on, the first served run of T315)."""
+    m = sys.modules.get("romp_host_transport")
+    if m is not None and hasattr(m, "HostTransport"):
+        return m
+    with _HT_LOCK:
+        m = sys.modules.get("romp_host_transport")
+        if m is not None and hasattr(m, "HostTransport"):
+            return m
+        # the SDK package FIRST, whole: host_transport.py imports the SDK's Transport submodule at its top, and
+        # a session thread importing the package at the same moment (its own `from claude_agent_sdk import`)
+        # deadlocked on the two module locks taken in opposite orders (the first served run of T315). With
+        # the package imported here, the submodule import inside the load finds it loaded.
+        try:
+            importlib.import_module("claude_agent_sdk")
+        except Exception:
+            pass
+        return load_source("romp_host_transport", _HERE / "host_transport.py")
 # The by-text KEY RULES (session_backend.echo_text_key, and command_text_key for a slash send): the one
 # normalization under which an input echo's text is compared with a transcript record's, shared with the
 # kernel's _atom_user_texts so the landing scan below can never find what prune_live cannot retire. The
