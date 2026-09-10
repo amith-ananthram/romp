@@ -21,6 +21,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -32,6 +33,9 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
 BIN = os.path.join(ROOT, "bin")
 EXT = os.path.join(ROOT, "vscode-extension")
+sys.path.insert(0, HERE)
+import test_ship_reship as _lab   # noqa: E402  the lab kernel's environment (the module, not its classes: an
+#                                   imported TestCase would be collected here a second time)
 
 SID = "aaaaaaaa-1111-2222-3333-444444444444"
 REPLY = "The web session finished the notes-api login flow and every test passes now. Next up is the password reset path."
@@ -160,11 +164,7 @@ class ServedPaste(unittest.TestCase):
                                     "stop_reason": "end_turn"}}) + "\n")
         cls.port = _free_port()
         cls.token = "testtok-pastefocus"
-        env = dict(os.environ, XDG_STATE_HOME=os.path.join(cls.lab, "xdg"), CLAUDE_CONFIG_DIR=claude,
-                   ROMP_MANAGER_PORT="1", ROMP_KERNEL_NO_OPEN="1", ROMP_SERVE_TOKEN=cls.token,
-                   ROMP_KERNEL_PORT=str(cls.port), ROMP_DIST_DIR=dist,
-                   ROMP_MODEL_CATALOG="off")   # hermetic: never reach the network
-        env.pop("ROMP_STATE_DIR", None)
+        env = _lab.kernel_env(cls.lab, claude, dist, cls.port, cls.token)
         cls.klog = open(os.path.join(cls.lab, "kernel.log"), "w")
         cls.kernel = subprocess.Popen([os.path.join(BIN, "romp-kernel")],
                                       stdout=cls.klog, stderr=subprocess.STDOUT, env=env)

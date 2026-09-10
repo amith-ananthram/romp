@@ -62,7 +62,8 @@ test("one click, one Undo batch on the client AND on the kernel, through the gro
     "ONE kernel batch: N askClear posts stamped N batches and the kernel's Undo restored only the last");
   assert.doesNotMatch(fn, /type: "askClear",/, "no per-member posts");
   assert.match(fn, /c\.dispatchEvent\(new MouseEvent\("mouseleave"\)\); c\.classList\.add\("dismissing"\);/, "flush the hover highlight, animate out");
-  assert.match(fn, /if \(head\.getAttribute\("data-fsid"\) === sid\) startSessHeadExit\(key, head\);/, "every column's header leaves with its run, one motion");
+  assert.match(fn, /if \(head\.getAttribute\("data-fsid"\) === sid\) \{ head\.dispatchEvent\(new MouseEvent\("mouseleave"\)\); startSessHeadExit\(key, head\); \}/,
+    "every column's header leaves with its run, one motion; the row's hover-freeze gate is released by the click, as a card's is");
   assert.match(fn, /setTimeout\(\(\) => \{[\s\S]*stillOurs\(\) && c\.classList\.contains\("dismissing"\)[\s\S]*dropDismissed\(ids\.filter\(\(id\) => pendingCleared\.has\(id\)\)\);\s*\n\s*\}, 180\);/,
     "finalize after the 180ms exit only what is still ours and still dismissing; drop only ids still pending (an Undo inside the window keeps its cards)");
   assert.doesNotMatch(fn, /confirm\(/, "no confirm dialog: Undo is the safety net");
