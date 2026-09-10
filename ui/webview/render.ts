@@ -90,6 +90,7 @@ import { turnWorkedSecs as workedSecsOf, workedFooterPlan } from "./worked-foote
 import { reconcileRewindPass, type RewindEvent } from "./rewind-reconcile";
 import { watchChatVisibility, browserChatVisibilityDeps } from "./chat-visibility";
 import type { PaneHiddenHost } from "./paint-gate";
+import { gistOf, collapseWs, postalHead } from "./gist";   // the shared gist rule + the postal head (T294)
 
 for (const [name, lang] of Object.entries({
   bash, sh: bash, shell: bash, python, py: python, javascript, js: javascript,
@@ -1642,13 +1643,6 @@ function noticeLiveGlyph(inner: HTMLElement): HTMLElement {
   const span = el("span", "notice-glyph notice-glyph-wide");
   span.appendChild(inner);
   return span;
-}
-
-// The first meaningful line of a message, clipped for a head (the gist rule every text-derived head shares).
-function gistOf(text: string, max = 90): string {
-  const lines = text.split("\n").map((l) => l.trim());
-  const first = lines.find((l) => l && !l.startsWith(">")) || lines.find((l) => l) || text.trim();
-  return first.length > max ? first.slice(0, max - 2).replace(/\s+\S*$/, "") + "…" : first;
 }
 
 // The fold toggle's tail work when a notice opens: the /clear boundary's body lazy-loads the cleared
@@ -4688,18 +4682,6 @@ function refreshPostalDots() {
   document.querySelectorAll(".notice-src-chip").forEach((p) => setPeerDot(p as HTMLElement, workingSet.has((p.textContent || "").trim())));
 }
 
-// A Romp Postal Service message, as a compact identity-coloured card.
-// One-line summary for a postal card: the judge's gist when one exists (the recipient session's caption
-// of this message, joined by msg id — the kernel now fills it for OUTGOING mail too), else the first
-// non-empty line of the body. The fallback is NOT hard-truncated here: a 100-char slice parked its "…"
-// mid-line and wasted the rest (the user 2026-07-25) — CSS clamps the summary to two full lines instead,
-// and the gist replaces it on a later render once the recipient's judge has captioned the message.
-function postalServiceSummary(ev: Extract<ChatEvent, { kind: "postal-service" }>): string {
-  const cap = ev.summary && ev.summary.trim();
-  if (cap) return cap;
-  return (ev.body || "").split("\n").map((s) => s.trim()).find(Boolean) || "";
-}
-const collapseWs = (s: string) => s.replace(/\s+/g, " ").trim();
 
 // The interaction TYPE of a postal message, parsed from its leading intent token → a small chip on the
 // card head, shown in both the compact and expanded views (the user 2026-06-16). There are THREE
@@ -4740,14 +4722,13 @@ function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>)
   if (intent) meta.push(intent.label);
   if (ev.park || ev.status === "parked") meta.push("parked");
   else if (ev.status === "delivered") meta.push("delivered");
-  // Gist: ALWAYS a one-line summary — the incoming caption, or (sent mail / no caption) the first line of the
-  // message — with the full message one click deeper (the user 2026-06-16). KEYED (the user 2026-07-25:
-  // "it expands for like a second and then collapses again" — a DOM-only toggle died with every push).
-  const fullText = (ev.body || "").trim();
-  const summaryText = postalServiceSummary(ev) || gistOf(fullText);
-  const expandable = !!fullText && collapseWs(fullText) !== collapseWs(summaryText);
+  // Gist: ALWAYS a one-line summary, the incoming caption, else the first line of the message CLIPPED (gist.ts
+  // postalHead), with the full message one click deeper whenever the gist does not carry all of it (the user
+  // 2026-06-16; T294, the user 2026-09-10, whose one-paragraph sent card had no fold at all). KEYED (the user
+  // 2026-07-25, who watched a card open and snap shut a moment later: a DOM-only toggle died with every push).
+  const { gist: summaryText, body: fullMd } = postalHead(ev);   // gist.ts: the caption, else the CLIPPED first line; the fold whenever the gist does not carry the whole message (T294)
   let body: HTMLElement | null = null;
-  if (expandable) { body = el("div", "notice-md md"); body.innerHTML = md(ev.body, postalRepoFor(ev)); highlight(body); }
+  if (fullMd) { body = el("div", "notice-md md"); body.innerHTML = md(fullMd, postalRepoFor(ev)); highlight(body); }
   // an incoming QUESTION opens by default: a reply is owed, and the whole ask is what you need to read
   const owed = !!intent && intent.cls === "question" && ev.direction === "in";
   const turn = notice({ src, glyph: "peer", gist: summaryText, meta: meta.join(" · ") || undefined, body, open: owed,

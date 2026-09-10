@@ -828,7 +828,7 @@ test("the session frame's githubRepo rides the Session and survives a chatTail d
 
 test("postal bodies link against the SENDER's frame-known repo only: outbound = the writer's own, inbound = senderPrRepo over the session map by the card's host and name, never the reader's as a fallback", () => {
   // 2026-09-08 (the notice-vocabulary pass): ONE render path — the full message is the notice body (the summary is the head)
-  assert.match(RENDER, /body\.innerHTML = md\(ev\.body, postalRepoFor\(ev\)\);/);
+  assert.match(RENDER, /body\.innerHTML = md\(fullMd, postalRepoFor\(ev\)\);/);   // T294: the fold's markdown is postalHead's body (the message when the gist does not carry all of it)
   const fn = RENDER.match(/function postalRepoFor\([\s\S]*?\n\}/)?.[0] || "";
   assert.match(fn, /if \(ev\.direction === "out"\) return prRepoFor\(\);/);
   assert.match(fn, /const cardHost = hostOf\(renderingOwnerSid \?\? renderingSid \?\? activeId \?\? ""\);/,
