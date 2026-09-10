@@ -330,10 +330,11 @@ verdict: a peer's line, the agent's own record, romp bookkeeping; never a top th
 merely lacks an anchor) is rendered inside the session's human-asked top that was current
 when it was minted; word overlap with the transcript's recorded background
 launches only picks which launch supplies the why and, among several open tops,
-the parent. A blocked top keeps its card until the block lifts (needs-you breaks
-through), a live prompt or error floor that lands on a nested top shows on its
-host's card, and a nested row stays with its host when the ask completes and
-goes with it when the user clears it. Deterministic on the same store and stream
+the parent. Hosts are the session's human-asked tops only, never a cleared one
+(completed ones still hold their rows). A blocked top keeps its card until the
+block lifts (needs-you breaks through) and still wears the face that says what
+it is; a live prompt or error floor that lands on a nested top shows on its
+host's card. Deterministic on the same store and stream
 (nothing moves between builds without a new record), never written back, and
 said once per rise on stderr. A tree row born
 of the session carries `born` with its why; a session-started root that still

@@ -205,8 +205,9 @@ class HealOlderStores(_Feed):
         self.assertNotIn(fresh, nested)
         self.assertEqual(err, "")
 
-    def test_a_blocked_machine_top_keeps_its_needs_you_card(self):
-        # needs-you breaks through: the heal never takes a pending question off the board
+    def test_a_blocked_machine_top_keeps_its_needs_you_card_and_wears_the_face(self):
+        # needs-you breaks through: the heal never takes a pending question off the board, and the card still says
+        # what it is instead of posing as an ask
         ask, wf = SID + ":g1", SID + ":g2"
         self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human"),
                      wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine", blocked=True)},
@@ -215,6 +216,22 @@ class HealOlderStores(_Feed):
         asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
         self.assertIn(wf, asks, "still a card")
         self.assertEqual(asks[wf]["column"], "needs_input")
+        self.assertIn("matched a background workflow", asks[wf]["sessionStarted"]["why"])
+        self.assertIsNone(asks[wf]["sessionStarted"]["parent"], "not nested: no parent named")
+        self.assertEqual(err, "", "nothing nested, nothing counted")
+
+    def test_a_cleared_ask_never_hosts_and_a_tracker_never_hosts(self):
+        # a row under a cleared host would vanish with it (and a live floor resolved to the row with it); a delegate's
+        # tracker is hidden by the delegation fold, taking any row along: neither is a host, so the machine top keeps
+        # its card and says what it is
+        ask, wf, tracker = SID + ":g1", SID + ":g2", SID + ":g5"
+        self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human", cleared=True),
+                     tracker: self._node(tracker, "delegated: review the retry diff", t=T0 + 100, handoff={"peer": "22222222-3333-4444-5555-666666666666", "msgId": "m1"}),
+                     wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine")})
+        feed, err = self._feed()
+        asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
+        self.assertIn(wf, asks, "no host: still a card")
+        self.assertEqual(asks[wf]["sessionStarted"]["parent"], None)
         self.assertEqual(err, "")
 
     def test_a_completed_host_keeps_its_healed_row(self):

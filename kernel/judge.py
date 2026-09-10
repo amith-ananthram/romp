@@ -6394,24 +6394,36 @@ def _top_of(nodes, nid):
     return nid if nid in nodes else None
 
 
+def _seg_trigger_author(seg):
+    atoms = seg.get("atoms") or []
+    trig = next((a for a in atoms if a.get("uuid") == seg.get("trigger")), None) or (atoms[0] if atoms else None)
+    return trig.get("author") if trig else None
+
+
 def _demote_session_mints(ops, seg, store, menu, p_target, human):
     """The origin rule at minting time (T319, the user 2026-09-10: a card appears only for work that traces to
     something they asked for; the sessions' own process, a Workflow run, a review round, an agent, never
-    stands as a top-level card). EVENT FIRST, TEXT SECOND (the manager's amendment): in a segment whose trigger
-    is not a human ask (a seam tail, an autonomous stretch, a sender-less delivery), EVERY top mint demotes to a
-    step under the goal the turn ran in; in a human-triggered segment the mints demote when the segment's
-    assistant turns started background work (_seg_launches: an Agent/Task/Workflow tool_use, the event model's
-    own launch record), whatever their words. The ask itself keeps its card: when the segment already has a
-    placement (its prompt-run placed the message when it landed) that goal is the parent and every mint
-    demotes; when it has none (an ended segment planned in one work-run), the reply's FIRST mint is the ask's
-    placement and stays a top, the rest nest under it. Token overlap never decides top versus step: it only
-    picks WHICH launch supplies the step's one-line why and, when the turn ran in no goal and several are open,
-    which open goal is the parent (ties: the newest). With nothing to nest under, a demoted mint files nothing
-    (the bookkeeping floor's shape: our own process is never an ask). Demoted steps carry born {kind: session,
-    via: workflow|agent|work, why}; same-reply refs stay valid since a mint and a sub both create a node in
-    order."""
+    stands as a top-level card). EVENT FIRST, TEXT SECOND (the manager's amendment):
+    - a segment whose trigger is not a human ask (a seam tail a notification woke, an autonomous stretch, a
+      sender-less delivery): EVERY top mint demotes to a step under the goal the turn ran in (the seam's own
+      top, the segment's prompt-run placement, its standing placement, else the open top nearest in words to
+      the work, ties the newest); with nothing to nest under it files nothing, the bookkeeping floor's shape;
+    - a human-triggered segment that started background work (_seg_launches, the event model's own criterion):
+      the ask's own mint keeps its card, chosen by its WORDS against the user's message (never by position: the
+      planner's op order is unspecified), and of the other mints only those nearer a launch's words (in the
+      mint's text or its why) than the user's own demote under the ask; a second deliverable the user asked for
+      in the same message stays a top. With a placement already (the prompt run placed the message) the launch-matching
+      mints nest under it.
+    - a scheduled or programmatic prompt (trigger author "sdk") traces to the user's earlier setup: its mints are
+      never demoted or dropped.
+    Word overlap otherwise only picks WHICH launch supplies the step's one-line why and, when the turn ran in no
+    goal and several are open, which open goal is the parent. Demoted steps carry born {kind: session, via:
+    workflow|agent|work, why, parentText}; a dropped mint takes the ops chained onto it and surviving refs are
+    remapped (a demoted mint still creates a node, so positions hold)."""
     if not any(o.get("do") == "mint" for o in ops):
         return ops
+    if _seg_trigger_author(seg) == "sdk":
+        return ops                                     # a scheduled firing is the user's, set up earlier
     launches = _seg_launches(seg)
     if human and not launches:
         return ops
@@ -6424,44 +6436,60 @@ def _demote_session_mints(ops, seg, store, menu, p_target, human):
             break
     open_tops = [m["id"] for m in menu if m.get("id") in nodes and nodes[m["id"]].get("parentId") is None
                  and not nodes[m["id"]].get("nodeComplete") and not nodes[m["id"]].get("cleared")]
-    # `ref` indexes the reply's CREATED nodes in order (mints and subs). A demoted mint still creates a node, so
-    # positions hold; a DROPPED mint shifts every later one and orphans the ops chained onto it, which apply_plan
-    # would then place as tops (the hole _strip_top_mints closes for bookkeeping segments). newpos[i] is created
-    # node i's new 1-based position, None when dropped; chained ops on a dropped node are dropped with it.
-    out, newpos, created_new = [], [], 0
+    def launch_match(o):
+        return max([_overlap(l["desc"], o.get("text")) for l in launches] + [_overlap(l["desc"], o.get("why")) for l in launches] + [0.0])
+    prompt = _prompt_text(seg.get("atoms") or []) if human else ""
+    def prompt_match(o):
+        return _overlap(prompt, o.get("text")) if prompt else 0.0
+    mints = [o for o in ops if o.get("do") == "mint"]
+    ask_op = None
+    if human and parent is None:
+        # the ask's own placement: the mint nearest the user's words (the first mint when none is near)
+        ask_op = max(mints, key=lambda o: (prompt_match(o), -mints.index(o)))
+    # `ref` indexes the reply's CREATED nodes (mints and subs) in the reply's own order. The ask's mint is processed
+    # FIRST so a demoted mint can nest under it wherever the planner listed it; every op keeps its original created
+    # position for ref resolution (orig -> new), and a dropped mint takes the ops chained onto it.
+    orig = {}
+    for o in ops:
+        if o.get("do") in ("mint", "sub"):
+            orig[id(o)] = len(orig) + 1
+    order = ([ask_op] if ask_op is not None else []) + [o for o in ops if o is not ask_op]
+    out, newpos, created_new = [], {}, 0
     ask_ref, ask_text = None, ""
     def dead(o):
         r = o.get("ref")
-        return bool(r) and (r > len(newpos) or newpos[r - 1] is None)
+        return bool(r) and newpos.get(r) is None
     def remap(o):
         r = o.get("ref")
-        return dict(o, ref=newpos[r - 1]) if r else o
-    for o in ops:
+        return dict(o, ref=newpos[r]) if r else o
+    for o in order:
         do = o.get("do")
         if do == "sub":
             if dead(o):
-                newpos.append(None)                    # its parent died with a dropped mint: dropped with it
+                newpos[orig[id(o)]] = None            # its parent died with a dropped mint: dropped with it
                 continue
-            created_new += 1; newpos.append(created_new); out.append(remap(o))
+            created_new += 1; newpos[orig[id(o)]] = created_new; out.append(remap(o))
             continue
         if do != "mint":
             if dead(o):
                 continue                               # a verdict aimed at a dropped node
             out.append(remap(o))
             continue
-        if human and parent is None and ask_ref is None:
-            created_new += 1; newpos.append(created_new)
-            ask_ref, ask_text = created_new, str(o.get("text") or "")
-            out.append(o)                              # the ask's own placement: the first mint of an unplaced human segment
+        keep = o is ask_op or (human and (launch_match(o) <= 0.0 or prompt_match(o) >= launch_match(o)))
+        if keep:                                       # the user's own ask, or a deliverable nearer their words than any launch's
+            created_new += 1; newpos[orig[id(o)]] = created_new
+            if o is ask_op:
+                ask_ref, ask_text = created_new, str(o.get("text") or "")
+            out.append(o)
             continue
         text = str(o.get("text") or "")
-        launch = max(launches, key=lambda l: _overlap(l["desc"], text)) if launches else None
+        launch = max(launches, key=lambda l: max(_overlap(l["desc"], text), _overlap(l["desc"], o.get("why")))) if launches else None
         via = launch["via"] if launch else "work"
         why = ("started a background %s (%s)" % (via, launch["desc"]) if launch and launch["desc"]
                else str(o.get("why") or "the session started this on its own"))
         born = {"kind": "session", "via": via, "why": " ".join(why.split())[:200]}
         if ask_ref is not None:
-            created_new += 1; newpos.append(created_new)
+            created_new += 1; newpos[orig[id(o)]] = created_new
             born["parentText"] = ask_text[:120]
             out.append({"do": "sub", "why": str(o.get("why") or why), "ref": ask_ref, "text": text, "born": born})
             continue
@@ -6470,9 +6498,9 @@ def _demote_session_mints(ops, seg, store, menu, p_target, human):
             p = max(open_tops, key=lambda nid: (_overlap(nodes[nid].get("text"), (launch or {}).get("desc") or text),
                                                 nodes[nid].get("t") or 0))
         if p is None:
-            newpos.append(None)                        # nothing the user asked for to nest under: files nothing
+            newpos[orig[id(o)]] = None                 # nothing the user asked for to nest under: files nothing
             continue
-        created_new += 1; newpos.append(created_new)
+        created_new += 1; newpos[orig[id(o)]] = created_new
         born["parentText"] = str(nodes[p].get("text") or "")[:120]
         out.append({"do": "sub", "why": str(o.get("why") or why), "parentId": p, "text": text, "born": born})
     return out
@@ -6708,7 +6736,8 @@ def apply_plan(store, seg_id, seg_t, ops, menu, place_key=None, prompt_uuid=None
                     nodes[dup]["mt"] = seg_t
                     if not o.get("coerced"):           # a coerced landing is bookkeeping, not re-engagement
                         _unblock_branch(dup)           #  (the user 2026-07-21) — blocks on the branch stand
-                    focus = touched = dup
+                    created.append(dup)                # the reply's created-node positions hold: a later `ref` to this
+                    focus = touched = dup              #   sub lands on the twin, never on a neighbour (T319 review)
                     continue
                 nid = new_node(o["text"] or "(step)", parent, o["why"], born=o.get("born"))
             # A _coerce_place sub is the never-vanish floor, not the user re-engaging this branch: it must

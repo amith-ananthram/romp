@@ -171,15 +171,45 @@ class WorkflowMidGoal(_Harness):
         self.assertEqual(rev["parentId"], tops[0]["id"])
         self.assertEqual(rev["born"]["via"], "workflow")
 
-    def test_a_launch_with_unrelated_words_still_demotes_the_mint(self):
-        # the event decides: the session started background work in this segment, so the narration's mint is a
-        # step whatever the launch was called; the unrelated launch's words still supply the why (the only one)
+    def test_in_a_human_segment_a_mint_matching_no_launch_keeps_its_card(self):
+        # the manager's second ruling: in a human-triggered segment only a mint that matches a launch (its words in
+        # the mint's text or why) is the session's process; a mint like no launch may be a second thing the user
+        # asked for, so it stays a card (the trigger-less rule below still demotes everything)
         calls, store = self._run(self._records(script=WF_UNRELATED), [("adversarial review workflow", REVIEW_AS_TOP), (ASK[:40], PLACE_ASK)])
-        self.assertEqual(len(self._tops(store)), 1, "no new top")
+        self.assertEqual(sorted(nd["text"] for nd in self._tops(store)),
+                         ["Add retries to the notes-api client", "Adversarial review of the retry diff"])
+        self.assertIsNone(self._by_text(store, "Adversarial review").get("born"))
+
+    def test_the_asks_own_mint_is_chosen_by_its_words_not_its_position(self):
+        # a review-first reply: the mint nearest the user's words is the ask and keeps the card; the review nests
+        swapped = ('{"ops":[{"why":"a distinct review deliverable","do":"mint","text":"Adversarial review of the retry diff"},'
+                   '{"why":"the user asked for retries","do":"mint","text":"Add retries to the notes-api client"},'
+                   '{"why":"progress on the retries","do":"sub","ref":2,"text":"Wrote the retry loop"}]}')
+        calls, store = self._run(self._records(), [("adversarial review workflow", swapped), (ASK[:40], PLACE_ASK)])
+        tops = self._tops(store)
+        self.assertEqual([nd["text"] for nd in tops], ["Add retries to the notes-api client"])
         rev = self._by_text(store, "Adversarial review")
-        self.assertIsNotNone(rev)
-        self.assertEqual(rev["parentId"], self._tops(store)[0]["id"])
-        self.assertIn("Count the apples", rev["born"]["why"])
+        self.assertEqual(rev["parentId"], tops[0]["id"])
+        self.assertEqual(rev["born"]["via"], "workflow")
+        step = self._by_text(store, "Wrote the retry loop")
+        self.assertEqual(step["parentId"], tops[0]["id"], "the same-reply ref followed the ask's remapped position")
+
+    def test_a_two_ask_message_with_a_launch_keeps_both_asks_and_nests_the_review(self):
+        records = [
+            uline(T0, ASK + " and also write me a comparison of the two retry libraries", "u1"),
+            aline(T0 + 60, "Adding the retry loop now.", "a1", "u1", stop="tool_use", launch=("Workflow", {"script": WF_SCRIPT})),
+            tresult(T0 + 61, "u2", "a1", "toolu_a1"),
+            aline(T0 + 400, "Wrote the retry loop, the comparison, and launched an adversarial review workflow over the diff.", "a2", "u2"),
+        ]
+        three = ('{"ops":[{"why":"the user asked for retries","do":"mint","text":"Add retries to the notes-api client"},'
+                 '{"why":"a write-up the user asked to read","do":"mint","text":"Compare the two retry libraries"},'
+                 '{"why":"a distinct review deliverable","do":"mint","text":"Adversarial review of the retry diff"}]}')
+        calls, store = self._run(records, [("adversarial review workflow", three)])
+        self.assertEqual(sorted(nd["text"] for nd in self._tops(store)),
+                         ["Add retries to the notes-api client", "Compare the two retry libraries"], "two asks, two cards")
+        rev = self._by_text(store, "Adversarial review")
+        self.assertEqual(rev["parentId"], self._by_text(store, "Add retries")["id"])
+        self.assertIsNone(self._by_text(store, "Compare the two").get("born"))
 
     def test_the_planner_prompt_names_the_rule_in_one_sentence(self):
         self.assertIn("The session's own background workflows, review rounds and agents are its process, not deliverables: "
@@ -289,6 +319,37 @@ class TriggerlessSegments(unittest.TestCase):
         self.assertEqual(got[1]["ref"], 1, "the demoted mint still created node 1")
         self.assertEqual(got[2]["ref"], 1)
         self.assertEqual(got[3]["under"], 1, "a menu-targeted sub is untouched")
+
+    def test_a_scheduled_prompt_is_the_users_and_its_mints_are_never_demoted(self):
+        store = self._store()
+        seg = {"id": "s1", "trigger": "c1", "atoms": [
+            {"type": "user", "uuid": "c1", "author": "sdk", "message": {"content": [{"type": "text", "text": "[SCHEDULED TASK - AUTOMATED FIRING OF A CONFIGURED PROMPT] nightly review"}]}},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "w1", "name": "Workflow", "input": {"script": "export const meta = { name: 'nightly', description: 'Nightly guard review' }"}}]}}]}
+        ops = [dict(self.MINT)]
+        self.assertEqual(jd._demote_session_mints(ops, seg, store, self._menu(store), None, False), ops, "user-chained: kept as a top, never dropped")
+
+    def test_a_trigger_less_segment_demotes_even_a_mint_unlike_its_launch(self):
+        # the trigger is the event: no launch words needed; the unrelated launch still supplies the why
+        store = self._store()
+        seg = {"id": "s1", "trigger": None, "atoms": [{"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "w1", "name": "Workflow", "input": {"script": WF_UNRELATED}}]}}], "seamOf": {"top": SID + ":g1", "text": "..."}}
+        ops = jd._demote_session_mints([dict(self.MINT)], seg, store, self._menu(store), None, False)
+        self.assertEqual(ops[0]["do"], "sub"); self.assertEqual(ops[0]["parentId"], SID + ":g1")
+        self.assertIn("Count the apples", ops[0]["born"]["why"])
+
+    def test_a_demoted_mint_that_lands_on_a_twin_keeps_every_later_ref_in_place(self):
+        # the demoted step's title matches an open sibling under the parent: apply_plan lands on the twin (no new node)
+        # and the reply's created positions must still hold, so `sub ref 1` nests under the twin, never as a fresh top
+        store = self._store()
+        parent = SID + ":g1"; twin = SID + ":g5"
+        store["nodes"][twin] = {"id": twin, "text": "Guard review of the notes-api retry loop", "parentId": parent, "nodeComplete": False, "cleared": False, "t": T0 + 50}
+        ops = [{"do": "sub", "parentId": parent, "why": "round two", "text": "Guard review of the notes-api retry loop", "born": {"kind": "session", "via": "work", "why": "round two"}},
+               {"do": "sub", "ref": 1, "why": "ran it", "text": "Ran the lens reviewers"}]
+        jd.apply_plan(store, "s9", T0 + 900, ops, self._menu(store), prompt_uuid=None, quote=None)
+        tops = [nd for nd in store["nodes"].values() if nd.get("parentId") is None]
+        self.assertEqual(len(tops), 2, "no fresh top")
+        ran = next(nd for nd in store["nodes"].values() if nd["text"] == "Ran the lens reviewers")
+        self.assertEqual(ran["parentId"], twin, "the ref followed the twin the demoted step landed on")
 
     def test_a_human_segment_without_a_launch_is_left_alone(self):
         store = self._store()
