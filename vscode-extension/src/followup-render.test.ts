@@ -12,7 +12,7 @@ const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "
 
 test("queued payload is per-message {md, followUp?, goal?, fuCtx?}, not raw strings", () => {
   // `optimistic` (romp's own unconfirmed echo) rides along at the end — see optimistic-send.test.ts
-  assert.match(SRC, /kind: "queued"; texts: \{ md: string; followUp\?: boolean; goal\?: string; fuCtx\?: string; idx\?: number; park\?: number; cancelable\?: boolean; optimistic\?: boolean; romp\?: boolean; rompSystem\?: boolean; rompAuto\?: boolean; gist\?: string; imgPaths\?: string\[\]; lost\?: string; qts\?: number; qid\?: string; hiddenByPending\?: boolean; landing\?: boolean \}\[\]/);   // gist: a queued romp notice's user-facing head (2026-09-08)
+  assert.match(SRC, /kind: "queued"; texts: \{ md: string; followUp\?: boolean; goal\?: string; fuCtx\?: string; idx\?: number; park\?: number; cancelable\?: boolean; optimistic\?: boolean; romp\?: boolean; rompSystem\?: boolean; rompAuto\?: boolean; gist\?: string; imgPaths\?: string\[\]; lost\?: string; qts\?: number; qid\?: string; held\?: boolean; hiddenByPending\?: boolean; landing\?: boolean \}\[\]/);   // gist: a queued romp notice's user-facing head (2026-09-08)
 });
 
 test("renderQueued renders markdown (not raw text) + the follow-up header", () => {

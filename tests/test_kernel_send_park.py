@@ -543,7 +543,8 @@ class QueuedEdit(unittest.TestCase):
         self.assertIn('_edit_backend_queued(be, sid, int(msg["idx"]), str(msg.get("md") or ""), str(msg.get("text") or ""))', src)
         self.assertIn('elif t == "editQueued" and msg.get("md"):', src,
                       "the optimistic stage: locate by body, the FIFO first, then the backend queue")
-        self.assertEqual(src.count('"type": "editResult"'), 3, "every arm answers with an authoritative frame")
+        self.assertEqual(src.count("_edit_frame("), 3, "every edit arm answers with an authoritative frame, one shape for the three (T306)")
+        self.assertEqual(src.count('"type": "editResult"'), 1, "and the holdQueued arm answers with its own (T306)")
         ksrc = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertIn('"apiRetry", "editQueued"', ksrc, "the op routes to the owning kernel across linked machines (ID_OPS)")
 
