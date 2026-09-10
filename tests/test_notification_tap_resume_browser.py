@@ -458,10 +458,10 @@ class ServedTapLanding(unittest.TestCase):
                      r"\[reveal\] sw sid=%s wid=\S+: delivered" % re.escape(SID_B[:8]),
                      r"\[push\] landed sid=%s endpoint=%s" % (re.escape(SID_B[:8]), ep_host)):
             self.assertRegex(klog, line, "the kernel logged it: %s" % klog[-2000:])
-        self.assertLess(klog.index("[push] ack stage=shown"), klog.index("[push] ack stage=clicked"))
-        self.assertLess(klog.index("[push] ack stage=clicked"), klog.index("[reveal] sw "))
-        # (the /reveal and the /push/landed leave the page together and the kernel serves them on two threads: both are
-        # on the trail, their relative order is not a fact of the design)
+        self.assertLess(klog.index("[push] ack stage=shown"), klog.index("[push] ack stage=clicked"), "the push settled before the click was dispatched")
+        # (the worker STARTS the clicked ack before it tells the page, but that ack and the page's /reveal — like the
+        # /reveal and the /push/landed — travel on two connections the kernel serves on two threads: all are on the
+        # trail, their relative order is not a fact of the design, and pinning it flaked on 2026-09-10)
         # the shell's trail: the worker's message row, structure only
         rows = self._diag_rows("sw-message")
         self.assertTrue(rows, "an sw-message row is on file")
