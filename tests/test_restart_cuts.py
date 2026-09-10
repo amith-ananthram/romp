@@ -204,7 +204,8 @@ class CutRow(unittest.TestCase):
         import types as _t
         sbmod = km.sb if hasattr(km, "sb") else None
         src = open(os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py")).read()
-        self.assertIn("cut = [{\"sid\": s.sid, \"name\": s.name} for s in sessions if s.inflight]", src,
+        # …and a session under a per-session host is detached, never cut (T315): the join keeps that filter
+        self.assertIn("cut = [{\"sid\": s.sid, \"name\": s.name} for s in sessions if s.inflight and getattr(s, \"_host\", None) is None]", src,
                       "every in-flight session is a cut — ended included (the join, not a filter)")
         self.assertIn("if s.thread is not None:", src,
                       "a threadless session can no longer crash the drain")

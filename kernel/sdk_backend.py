@@ -57,6 +57,17 @@ _pal = load_source("romp_palette", _HERE / "palette.py")
 # the standalone judges and the kernel share one copy). romp holds no key of its own since 2026-09-08:
 # the module reads Claude Code's apiKeyHelper for the kernel's two calls and checks the boot environment.
 _cred = sys.modules.get("romp_credentials") or load_source("romp_credentials", _HERE / "credentials.py")
+
+
+class CLIConnectionErrorLike(RuntimeError):
+    """A host launch or attach refusal, raised out of the connect like the SDK's own CLIConnectionError so
+    the launch-error path records it (T315)."""
+
+
+def _ht():
+    """kernel/host_transport.py (the per-session host's kernel side, T315), loaded on first use: the
+    hosts are a setting, and a kernel with the setting off never needs the module."""
+    return sys.modules.get("romp_host_transport") or load_source("romp_host_transport", _HERE / "host_transport.py")
 # The by-text KEY RULES (session_backend.echo_text_key, and command_text_key for a slash send): the one
 # normalization under which an input echo's text is compared with a transcript record's, shared with the
 # kernel's _atom_user_texts so the landing scan below can never find what prune_live cannot retire. The
@@ -3732,9 +3743,27 @@ def lease_census(ps_lines: list[str], lastsids: list[str], own_pid: int, leases:
     for pid, lease in by_pid.items():
         if pid in clis:
             continue
+        # The lease's process is not among the CLIs whose argv names a CURRENT conversation id. Two cases: the
+        # process is gone (or the pid was reused: the start time differs) — a dead lease; or it is alive with
+        # the lease's own identity, an SDK CLI whose argv names a conversation the registry has moved past (a
+        # /clear flips lastSid while the running CLI still carries its --resume of the old id). The lease's
+        # identity is the authority there: valid → owned; not valid → an orphan with the lease's reason.
+        if start(pid) is not None and start(pid) == str(lease.get("start") or ""):
+            why = states.get(pid)
+            if why == "valid":
+                owned[pid] = "lease"
+                if version and str(lease.get("version") or "") != version:
+                    row("lease.version-skew", "lease of session %s (pid %d) was written by code version %s; this kernel runs %s"
+                        % (str(lease.get("sid") or "")[:8], pid, lease.get("version") or "unknown", version), pid, lease)
+            else:
+                orphans.append(pid)
+                row("lease." + why, "CLI pid %d of session %s has a lease that does not hold (%s); reaped as an orphan"
+                    % (pid, str(lease.get("sid") or "")[:8], why.replace("-", " ")), pid, lease)
+            continue
         row("lease.no-live-process", "lease of session %s names pid %d, which is not a live CLI of that session; lease dropped"
             % (str(lease.get("sid") or "")[:8], pid), pid, lease)
-    dead = [str(lease.get("sid")) for pid, lease in by_pid.items() if pid not in clis]
+    dead = [str(lease.get("sid")) for pid, lease in by_pid.items()
+            if pid not in clis and pid not in owned and pid not in orphans]
     return {"orphans": orphans, "owned": owned, "dead_leases": dead, "problems": problems}
 
 # ENDING A CUT TURN'S WHOLE TREE (T276, the user 2026-09-08). Reaping the orphaned CLI alone left its Bash
@@ -3753,6 +3782,8 @@ _SESSION_SCOPE_RE = re.compile(r"romp-session-([0-9a-fA-F]{1,8})-(\d+)-\d+\.scop
 SCOPE_LIST_ARGV = ["systemctl", "--user", "list-units", "--all", "--plain", "--no-legend", "--no-pager",
                    SESSION_SCOPE_PREFIX + "*.scope"]
 SCOPE_STOP_TIMEOUT = 15.0     # systemd's own stop: SIGTERM to the cgroup, SIGKILL at its TimeoutStopSec
+HOST_SCOPE_LIST_ARGV = ["systemctl", "--user", "list-units", "--all", "--plain", "--no-legend", "--no-pager",
+                        "romp-host-*.scope"]   # the per-session hosts' own scopes (T315)
 TREE_KILL_GRACE = 1.0         # seconds for SIGTERM to land on the tree before SIGKILL
 
 
@@ -4724,6 +4755,13 @@ class SdkSession:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.client = None
         self.inflight = 0
+        # the per-session host (T315): the live HostTransport while attached; `detached` latches a deliberate
+        # detach (the kernel leaving, the host keeping the CLI) so _on_session_gone never reads it as a crash;
+        # `_host_end_grace` is the bound the next `end` carries (kill sets the short one)
+        self._host = None
+        self.detached = False
+        self._host_end_grace = None
+        self._host_ack_t = 0.0
         # The TEXTS of turns fed to the current client whose ResultMessage hasn't landed — the fed-turn
         # twin of `inflight` (append at feed, cleared at the authoritative settle), all on the loop
         # thread. Exists for the reconnect teardown: a turn fed into a client being torn down is in NO
@@ -5247,7 +5285,17 @@ class SdkSession:
     def _signal_cli(self, sig, action):
         """Deliver an escalated interrupt as a real signal to this session's own CLI (the child of THIS
         kernel resuming our sid — find_session_cli can't match anything else). Loud on every outcome:
-        the whole bug was a stop that vanished without a trace."""
+        the whole bug was a stop that vanished without a trace. Under a host (T315) the rung is a request
+        to the host, which signals its own child: the kernel never knows the CLI's pid."""
+        host = self._host
+        if host is not None and self.loop is not None:
+            name = "INT" if sig == signal.SIGINT else "KILL"
+            if self.inflight > 0:
+                self._interrupted = True
+            self.loop.call_soon_threadsafe(lambda: asyncio.ensure_future(host.signal(name)))
+            self.backend._log("interrupt (%s): escalated to %s, sent to the session's host" % (self.name, action))
+            self.backend._poke()
+            return
         pid = self.backend._session_cli_pid(self)
         if pid is None:
             self.backend._log("interrupt (%s): %s escalation found no CLI process — nothing to signal" % (self.name, action))
@@ -5959,7 +6007,12 @@ class SdkSession:
             #   toggle sent on the old one — never hold a pre-reconnect expectation against it
             connected = False
             try:
-                async with ClaudeSDKClient(options=opts) as client:
+                transport = None
+                if self.backend.session_hosts_on():
+                    # T315: the CLI runs under a per-session host; this client speaks to it over the host's
+                    # socket (attach to a live host, or spawn one), never to a child of its own
+                    transport = await self.backend._host_transport_for(self, opts, (AssistantMessage, ResultMessage, SystemMessage))
+                async with ClaudeSDKClient(options=opts, transport=transport) as client:
                     connected = True
                     self.client = client
                     # The handshake IS the "this session is open" event (snapshot `connected`, the flip
@@ -5969,7 +6022,9 @@ class SdkSession:
                     # create, the ready chip landing at 5-12s with the cycle).
                     self.backend._push_session(self.sid)
                     self._connected.set()   # the control channel exists from here (move() waits on this)
-                    self.backend._lease_open(self, client)   # ownership by lease (T305): pid + start time, heartbeat
+                    if self._host is None:
+                        self.backend._lease_open(self, client)   # ownership by lease (T305): pid + start time, heartbeat
+                    #   (under a host the HOST holds the lease)
                     self._seed_spend_watermarks()   # a fresh CLI process starts its cumulative counters at
                     #   zero, or at what it restores from the resumed transcript's cost-state record
                     # The CLI is demonstrably up, so any recorded launch failure is HISTORY — clear it
@@ -6058,8 +6113,13 @@ class SdkSession:
                 raise
             finally:
                 # the client has closed (the SDK's own close ends the process), or never opened: the
-                # lease is dropped either way — only a kernel DEATH leaves one behind (T305)
-                self.backend._lease_close(self)
+                # lease is dropped either way — only a kernel DEATH leaves one behind (T305). Under a host
+                # the lease is the host's: a detach leaves it, an `end` makes the host remove it.
+                if self._host is None:
+                    self.backend._lease_close(self)
+                else:
+                    self.backend._write_host_ack(self, force=True)
+                    self._host = None
             if self.ended or not self._reconnect:
                 break        # drain ended on its own (process exit) or we're shutting down → done
 
@@ -8374,6 +8434,8 @@ class SdkBackend:
         self.code_version = str(code_version or "")   # the kernel's git sha, stamped on every lease this kernel
         #                                               writes (lease_census reports a skew as lease.version-skew)
         self._leases: dict = {}            # sid -> (session, lease dict): the leases this kernel holds (T305)
+        self._boot_attach_sids: set = set()   # sids the boot reconcile attached to a live host (T315)
+        self._host_log_pos: dict = {}      # sid -> host.log lines already filed as problem rows
         self._lease_thread = None          # the heartbeat, started at the first lease, ends when none are held
         self.thread_wake_model = None      # kernel-installed: model_id -> replacement or None, consulted
         #                                    ONLY when a comment THREAD is explicitly woken (T223 rider) —
@@ -8716,6 +8778,185 @@ class SdkBackend:
         problem_row(self.state_dir, prob.get("text") or prob.get("kind"), prob["kind"], sid=sid, log=self._log,
                     cliPid=prob.get("cliPid"), fsid=prob.get("fsid"))
 
+    # ── the per-session host (T315): attach or spawn, offsets, rows ──────────────────────────────
+    def session_hosts_on(self) -> bool:
+        return _ht().session_hosts_on(self.state_dir)
+
+    def _kernel_identity(self) -> dict:
+        h = self._lease_holder()
+        h["version"] = self.code_version
+        return h
+
+    async def _host_transport_for(self, sess, opts, msg_classes):
+        """The HostTransport for `sess`'s connect: attach to the live host its valid lease names (a restart
+        survived), or, after replaying an orphan journal and waiting for a dead host's CLI to exit, spawn a
+        fresh host. Raises when a live CLI of ours holds the lease under a kernel (the single-writer rule)."""
+        ht = _ht()
+        now = time.time()
+        lease = read_lease(self.state_dir, sess.sid)
+        state = ht.host_lease_state(lease, now)
+        hdir = ht.host_dir(self.state_dir, sess.sid)
+        if state == "orphan" or (state == "none" and lease is None and any(hdir.glob("journal-*.jsonl"))):
+            await self._host_orphan_recover(sess, opts, lease, msg_classes)
+            lease, state = None, "none"
+        if state == "attach":
+            reg = read_reg(self.state_dir, sess.sid) or {}
+            ack = reg.get("hostAck") if isinstance(reg.get("hostAck"), dict) else {}
+            holder = lease.get("holder") or {}
+            same_host = str(ack.get("host") or "") == "%s:%s" % (holder.get("pid"), holder.get("start"))
+            offset = int(ack.get("offset", -1)) if same_host else -1
+            t = self._new_host_transport(sess, ht.host_sock(self.state_dir, sess.sid), offset)
+            sess._host = t
+            self._log("host (%s): attaching to the live host (pid %s), replay from %d" % (sess.name, holder.get("pid"), offset + 1))
+            return t
+        if lease is not None and lease_state(lease, now) == "valid":
+            raise CLIConnectionErrorLike("a live CLI already holds this session's lease (held by a kernel); not starting a second")
+        spec = ht.spawn_spec(opts, sess.sid, sess.name, self.state_dir, self.code_version, ht.session_host_grace_s(self.state_dir))
+        spec_path = ht.write_spawn_spec(self.state_dir, sess.sid, spec)
+        sock = ht.host_sock(self.state_dir, sess.sid)
+        try:
+            sock.unlink()
+        except OSError:
+            pass
+        proc = self._spawn_host(sess, spec_path)
+        deadline = time.time() + ht.SOCKET_WAIT_S
+        while not sock.exists():                          # loop-ok: a bounded wait on the socket appearing
+            if proc.poll() is not None:
+                raise CLIConnectionErrorLike("the session host exited before serving its socket (code %s); see hosts/%s/host.log"
+                                             % (proc.returncode, sess.sid))
+            if time.time() > deadline:
+                raise CLIConnectionErrorLike("the session host did not serve its socket within %.0f s" % ht.SOCKET_WAIT_S)
+            await asyncio.sleep(0.05)
+        t = self._new_host_transport(sess, sock, -1)
+        sess._host = t
+        self._log("host (%s): started a session host (pid %d)" % (sess.name, proc.pid))
+        return t
+
+    def _new_host_transport(self, sess, sock, offset):
+        ht = _ht()
+        return ht.HostTransport(str(sock), kernel=self._kernel_identity(), ack=offset,
+                                end_grace=sess._host_end_grace or ht.sh.END_GRACE_DEFAULT_S,
+                                on_ack=lambda off, s=sess: self._write_host_ack(s),
+                                on_hello=lambda hello, s=sess: self._on_host_hello(s, hello),
+                                on_stderr=sess._on_cli_stderr,
+                                on_exit=lambda ex, s=sess: self._log("host (%s): the CLI exited (%s, code %s)" % (s.name, ex.get("cause"), ex.get("code"))),
+                                on_fault=lambda f, s=sess: self._log("host (%s): fault %s: %s" % (s.name, f.get("kind"), f.get("text")), problem=True))
+
+    def _spawn_host(self, sess, spec_path):
+        """Start bin/romp-session-host detached: in a transient scope of its own on Linux when scopes are on
+        (outside the service cgroup, like the CLI's), a plain new-session child elsewhere."""
+        ht = _ht()
+        launcher = str(Path(__file__).resolve().parent.parent / "bin" / "romp-session-host")
+        argv = [sys.executable, launcher, str(spec_path)]
+        if self.cli_scope and shutil.which("systemd-run"):
+            argv = ["systemd-run", "--user", "--scope", "--quiet", "--collect", "--unit=" + ht.host_scope_unit(sess.sid),
+                    "--description=romp session host %s" % sess.sid] + argv
+        errlog = open(str(Path(spec_path).parent / "host.stderr"), "ab")
+        return subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errlog,
+                                start_new_session=True, close_fds=True)
+
+    async def _host_orphan_recover(self, sess, opts, lease, msg_classes):
+        """A host died (its lease does not hold, or a journal has no lease): say so, wait for its CLI to be
+        gone (the lease's pid and start time; the process finishing its turn on stdin end-of-file), replay
+        the orphan journal through the ONE consumer path (a client over the replay transport, drained by the
+        session's own receive loop), then clear the host's directory and lease."""
+        ht = _ht()
+        hdir = ht.host_dir(self.state_dir, sess.sid)
+        problem_row(self.state_dir, "the session host for %s died; its CLI finishes its turn, then the session resumes from "
+                    "the transcript after the journal is replayed" % sess.name, "host.died", sid=sess.sid, name=sess.name, log=self._log)
+        if isinstance(lease, dict):
+            try:
+                pid, start = int(lease.get("pid")), str(lease.get("start") or "")
+            except (TypeError, ValueError):
+                pid, start = None, ""
+            waited = 0
+            while pid and start and proc_start(pid) == start:   # loop-ok: the exact event is the CLI's exit
+                await asyncio.sleep(1.0)
+                waited += 1
+                if waited % 60 == 0:
+                    self._log("host (%s): still waiting for the dead host's CLI (pid %d) to finish its turn" % (sess.name, pid))
+        reg = read_reg(self.state_dir, sess.sid) or {}
+        ack = reg.get("hostAck") if isinstance(reg.get("hostAck"), dict) else {}
+        offset = int(ack.get("offset", -1)) if ack else -1
+        if any(hdir.glob("journal-*.jsonl")):
+            from claude_agent_sdk import ClaudeSDKClient
+            replay = ht.HostTransport.from_journal(hdir, ack=offset)
+            try:
+                async with ClaudeSDKClient(options=opts, transport=replay) as client:
+                    await self._replay_drain(sess, client, msg_classes)
+            except Exception as e:
+                self._log("host (%s): orphan journal replay ended on %s" % (sess.name, type(e).__name__))
+            self._log("host (%s): replayed the orphan journal from offset %d" % (sess.name, offset + 1))
+        remove_lease(self.state_dir, sess.sid)
+        shutil.rmtree(str(hdir), ignore_errors=True)
+        self._update_reg_dropping(sess.sid, drop=("hostAck",))
+
+    async def _replay_drain(self, sess, client, msg_classes):
+        AssistantMessage, ResultMessage, SystemMessage = msg_classes
+        await sess._drain(client, AssistantMessage, ResultMessage, SystemMessage)
+
+    def _write_host_ack(self, sess, force: bool = False) -> None:
+        """hostAck in the registry (the kernel is its only writer): the offset the kernel has consumed, at most
+        once a second, and always on detach. Acknowledged means received by this process, not persisted:
+        derived state is rebuilt from the transcript and the journal anyway."""
+        t = sess._host
+        if t is None or getattr(t, "hello", None) is None:
+            return
+        now = time.time()
+        if not force and now - sess._host_ack_t < 1.0:
+            return
+        sess._host_ack_t = now
+        h = t.hello.get("host") or {}
+        c = t.hello.get("cli") or {}
+        try:
+            self._update_reg(sess.sid, hostAck={"host": "%s:%s" % (h.get("pid"), h.get("start")),
+                                                 "cli": "%s:%s" % (c.get("pid"), c.get("start")), "offset": int(t.ack_offset)})
+        except Exception as e:
+            self._log("host (%s): hostAck write failed: %s" % (sess.name, e))
+
+    def _on_host_hello(self, sess, hello: dict) -> None:
+        """Attached: the `host.attached` session-events row (boot or later), then every host.log line since
+        the last attach that names a fault, a self-answered hook or a forced end becomes a problem row —
+        the host never writes the ledger itself."""
+        boot = sess.sid in self._boot_attach_sids
+        self._boot_attach_sids.discard(sess.sid)
+        h, c, j = hello.get("host") or {}, hello.get("cli") or {}, hello.get("journal") or {}
+        append_session_event(self.state_dir, "host.attached", sid=sess.sid, name=sess.name, boot=boot,
+                             hostPid=h.get("pid"), cliPid=c.get("pid"), fsid=c.get("fsid"),
+                             replayFrom=int(sess._host.ack_offset) + 1 if sess._host else None, journalNext=j.get("next"),
+                             parked=len(hello.get("parked") or []))
+        self._file_host_log_rows(sess)
+
+    def _file_host_log_rows(self, sess) -> None:
+        p = _ht().host_dir(self.state_dir, sess.sid) / "host.log"
+        try:
+            lines = p.read_text().splitlines()
+        except OSError:
+            return
+        pos = self._host_log_pos.get(sess.sid, 0)
+        kinds = {"hook-self-answered": "host.hook-self-answered", "reader-behind": "host.reader-behind",
+                 "end-forced": "host.end-forced", "cli-spawn-failed": "host.spawn-failed"}
+        for ln in lines[pos:]:
+            try:
+                row = json.loads(ln)
+            except ValueError:
+                continue
+            kind = kinds.get(row.get("kind"))
+            if not kind:
+                continue
+            fields = {k: v for k, v in row.items() if k not in ("kind", "t")}
+            if kind == "host.hook-self-answered":
+                prose = ("the host answered a %s hook for %s itself after %s s with no kernel attached; the kernel never saw it"
+                         % (row.get("event") or "?", sess.name, row.get("parkedS")))
+            elif kind == "host.reader-behind":
+                prose = "the host's journal for %s fell behind the CLI's output" % sess.name
+            elif kind == "host.end-forced":
+                prose = "the host had to SIGKILL %s's CLI: it did not exit within the grace after stdin closed" % sess.name
+            else:
+                prose = "the host for %s could not spawn its CLI" % sess.name
+            problem_row(self.state_dir, prose, kind, sid=sess.sid, name=sess.name, log=self._log, t=row.get("t"), **fields)
+        self._host_log_pos[sess.sid] = len(lines)
+
     def _session_cli_pid(self, session) -> int | None:
         """The live CLI pid for `session` — its LEASED CLI when the lease's pid is still that process
         (T305: a re-parented CLI is reachable), else a child of THIS kernel resuming its sid (or lastSid,
@@ -8857,6 +9098,24 @@ class SdkBackend:
                             sid8=(m.group(1).lower() if m else ""), cliPid=sp)
             except Exception as e:
                 self._log("cut-turn reap: stopping leftover %s failed: %s" % (unit, e))
+        # T315: a host's own scope (romp-host-<sid8>-<t>) outlives its host when the host died; stop those
+        # whose session has no VALID lease (a live host's lease is valid, so its scope stays)
+        try:
+            hl = run(HOST_SCOPE_LIST_ARGV, capture_output=True, text=True, timeout=10).stdout
+        except Exception:
+            hl = ""
+        if isinstance(hl, str) and hl.strip():
+            now = time.time()
+            leases = {str(l.get("sid")): l for l in list_leases(self.state_dir)}
+            for unit, sid8 in _ht().host_scope_units(hl.splitlines(), list(lastsids) + list(leases)).items():
+                lease = next((l for s, l in leases.items() if s[:8].lower() == sid8), None)
+                if lease is not None and lease_state(lease, now) == "valid":
+                    continue
+                try:
+                    run(["systemctl", "--user", "stop", unit], capture_output=True, text=True, timeout=SCOPE_STOP_TIMEOUT)
+                    stopped += 1
+                except Exception as e:
+                    self._log("cut-turn reap: stopping leftover host scope %s failed: %s" % (unit, e))
         return stopped
 
     def _boot_reconcile(self, regs: list[dict]) -> None:
@@ -8954,6 +9213,7 @@ class SdkBackend:
                 except Exception:
                     self._log("boot reconcile: orphan reap failed: %s" % traceback.format_exc())
             resumed, restored, notified = 0, 0, 0
+            attached_boot = 0
             to_start: list[str] = []   # sids to spawn — collected first, spawned STAGGERED below
             boot_t = int(time.time())
             down_t = newest_down_stop(self.state_dir)   # the previous kernel was stopped by `romp down`?
@@ -9003,6 +9263,12 @@ class SdkBackend:
                     # record read as the user's Esc (INTERRUPT_BLOCK_WHY) and nothing ever resumed
                     # the session. "permission"/"picker" stay excluded: those turns were already
                     # waiting on the user, so blocked-on-you is the truth there.
+                    if self.session_hosts_on() and _ht().host_lease_state(read_lease(self.state_dir, sid), time.time()) == "attach":
+                        # T315: a live host holds this session's CLI and its turn; attach, no notice, no cut row
+                        attached_boot += 1
+                        to_start.append(sid)
+                        self._boot_attach_sids.add(sid)
+                        continue
                     cut = last_state_value(self.state_dir, sid) in MACHINE_ACTIVE_STATES
                     # a turn `romp down` cut hears so, with the stop and start times. The `down` audit
                     # row must be no older than the START of the cut turn (cut_turn_start), not its
@@ -9049,6 +9315,8 @@ class SdkBackend:
                 except Exception:
                     self._log("boot reconcile: session %s failed (sweep continues): %s"
                               % (r.get("sid"), traceback.format_exc()))
+            if attached_boot:
+                self._log("boot reconcile: attached to %d live session host(s) (their turns were never cut)" % attached_boot)
             if reaped or resumed or restored or notified or scopes_stopped:
                 self._log("boot reconcile: resumed %d cut turn(s), restored %d queued message(s), "
                           "notified %d session(s) of dead background tasks, reaped %d orphaned CLI(s) with their "
@@ -9061,7 +9329,7 @@ class SdkBackend:
             # build leaves the state directory untouched); `resumed` counts the continuation notices queued
             if alive:
                 append_session_event(self.state_dir, "reconcile.boot", sessions=len(alive), resumed=resumed,
-                                     restored=restored, notified=notified, reaped=reaped, scopesStopped=scopes_stopped,
+                                     restored=restored, notified=notified, reaped=reaped, scopesStopped=scopes_stopped, attached=attached_boot,
                                      toStart=len(to_start), durationS=round(time.time() - t_boot0, 3))
             # STAGGERED spawn (see BOOT_RESUME_CONCURRENCY): every reg above is already fixed —
             # queues persisted, heals applied — so even a death mid-stagger loses nothing (the next
@@ -9309,7 +9577,13 @@ class SdkBackend:
         # (mid-shutdown with a live turn: its CLI is reaped below all the same). The old
         # `and not s.ended` clause was a FILTER where a join was meant (T143: romp_cards counted 10
         # transcript-verified cuts against 7 ledger rows — the missing three were mid-shutdown).
-        cut = [{"sid": s.sid, "name": s.name} for s in sessions if s.inflight]
+        # T315: a session under a host is DETACHED, not cut: the host keeps the CLI and its turn; the next kernel
+        # attaches. Latched before shutdown so the session's own teardown sends `detach`, never `end`.
+        for s in sessions:
+            if getattr(s, "_host", None) is not None:
+                s.detached = True
+                s._host.detach_mode = True
+        cut = [{"sid": s.sid, "name": s.name} for s in sessions if s.inflight and getattr(s, "_host", None) is None]
         inflight = len(cut)
         for s in sessions:
             try:
@@ -9326,6 +9600,8 @@ class SdkBackend:
         reaped = []
         reaped_sids = set()
         for s in unjoined:
+            if getattr(s, "detached", False):
+                continue                                 # its CLI is the host's to keep
             try:
                 pid = self._session_cli_pid(s)
                 if pid is None:
@@ -10408,6 +10684,13 @@ class SdkBackend:
             kw["env"] = dict(kw["env"], **helper_fast_org_env(self._log, sess.cwd))
         sess._launched_keyed = launch_keyed
         sess._launched_unkeyed_pick = side == "key" and not launch_keyed
+        if self.session_hosts_on():
+            # under a host, a hook the kernel cannot answer in time (a restart in progress) is answered by the
+            # host itself before the CLI's own 600 s budget cancels it; every matcher carries the bound
+            for matchers in (kw.get("hooks") or {}).values():
+                for m in matchers:
+                    if getattr(m, "timeout", None) is None:
+                        m.timeout = _ht().sh.HOOK_TIMEOUT_S
         return ClaudeAgentOptions(**kw)
 
     # ---- lifecycle (kernel-thread API) ----
@@ -11543,6 +11826,8 @@ class SdkBackend:
                     write_reg(self.state_dir, sid, reg)
             s = self.sessions.pop(sid, None)
         if s:
+            if s._host is not None:                # a kill is not graceful today: the host's `end` gets the short bound (T315)
+                s._host.end_grace = _ht().sh.END_GRACE_KILL_S
             s.shutdown()
         self._poke()
         return True
@@ -13219,7 +13504,7 @@ class SdkBackend:
         with self._lock:
             if self.sessions.get(sess.sid) is sess:
                 self.sessions.pop(sess.sid, None)
-        if not sess.ended:
+        if not sess.ended and not sess.detached:
             if sess.inflight > 0 and not sess._interrupted:
                 # ABNORMAL death mid-turn (killed / crashed — not a user interrupt, not a clean
                 # ResultMessage finish, not our own shutdown). Do NOT settle 'waiting': that masked

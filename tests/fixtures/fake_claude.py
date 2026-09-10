@@ -30,7 +30,18 @@ import threading
 import time
 import uuid
 
-SESSION_ID = os.environ.get("FAKE_CLI_SESSION_ID") or str(uuid.uuid4())
+def _argv_session_id():
+    """Like the real CLI: a `--resume=<id>` or `--session-id=<id>` on the command line IS the session id."""
+    for i, a in enumerate(sys.argv[1:], 1):
+        for flag in ("--resume", "--session-id"):
+            if a.startswith(flag + "="):
+                return a.split("=", 1)[1]
+            if a == flag and i < len(sys.argv) - 1:
+                return sys.argv[i + 1]
+    return None
+
+
+SESSION_ID = os.environ.get("FAKE_CLI_SESSION_ID") or _argv_session_id() or str(uuid.uuid4())
 _out_lock = threading.Lock()
 _log = os.environ.get("FAKE_CLI_LOG")
 _tdir = os.environ.get("FAKE_CLI_TRANSCRIPT_DIR")
@@ -85,8 +96,8 @@ def run_turn(text: str) -> None:
         _init_sent = True
         emit({"type": "system", "subtype": "init", "session_id": SESSION_ID, "model": "fake-model",
               "cwd": os.getcwd(), "tools": [], "apiKeySource": "none"})
-    emit({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "working on it"}]},
-          "session_id": SESSION_ID})
+    emit({"type": "assistant", "message": {"role": "assistant", "model": "fake-model", "content": [{"type": "text", "text": "working on it"}]},
+          "session_id": SESSION_ID, "uuid": str(uuid.uuid4())})
     cancel_after = float(opts["cancel-after"]) if "cancel-after" in opts else None
     if "after" in opts:                       # the scripted extras wait this long (a test detaches meanwhile)
         time.sleep(float(opts["after"]))
@@ -96,8 +107,8 @@ def run_turn(text: str) -> None:
               "request": {"subtype": "can_use_tool", "tool_name": "Write", "input": {"file_path": "note.txt", "content": "x"},
                           "tool_use_id": "toolu_" + rid[:8]}})
         got = wait_response(rid, cancel_after)
-        emit({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text",
-              "text": "permission " + ("answered" if got else "cancelled")}]}, "session_id": SESSION_ID})
+        emit({"type": "assistant", "message": {"role": "assistant", "model": "fake-model", "content": [{"type": "text",
+              "text": "permission " + ("answered" if got else "cancelled")}]}, "session_id": SESSION_ID, "uuid": str(uuid.uuid4())})
     if "hook" in opts:
         event = opts["hook"]
         cid = (_hooks.get(event) or ["hook_0"])[0]
@@ -106,15 +117,15 @@ def run_turn(text: str) -> None:
               "request": {"subtype": "hook_callback", "callback_id": cid, "tool_use_id": "toolu_" + rid[:8],
                           "input": {"hook_event_name": event, "session_id": SESSION_ID}}})
         got = wait_response(rid, cancel_after)
-        emit({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text",
-              "text": "hook " + ("answered" if got else "cancelled")}]}, "session_id": SESSION_ID})
+        emit({"type": "assistant", "message": {"role": "assistant", "model": "fake-model", "content": [{"type": "text",
+              "text": "hook " + ("answered" if got else "cancelled")}]}, "session_id": SESSION_ID, "uuid": str(uuid.uuid4())})
     sleep = float(opts.get("sleep", "0.2"))
     end = time.time() + sleep
     while time.time() < end and not _interrupted.is_set():   # loop-ok: a bounded wait on the scripted turn length
         time.sleep(0.05)
-    emit({"type": "result", "subtype": "success", "is_error": False, "duration_ms": int(sleep * 1000),
-          "result": "interrupted" if _interrupted.is_set() else "done", "session_id": SESSION_ID,
-          "total_cost_usd": 0.0, "usage": {"input_tokens": 1, "output_tokens": 1}})
+    emit({"type": "result", "subtype": "success", "is_error": False, "duration_ms": int(sleep * 1000), "duration_api_ms": 1,
+          "num_turns": 1, "result": "interrupted" if _interrupted.is_set() else "done", "session_id": SESSION_ID,
+          "total_cost_usd": 0.0, "usage": {"input_tokens": 1, "output_tokens": 1}, "uuid": str(uuid.uuid4())})
     _interrupted.clear()
 
 
