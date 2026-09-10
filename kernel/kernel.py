@@ -48470,7 +48470,19 @@ def _landing():
             "(crypto.randomUUID?crypto.randomUUID():String(Math.random()).slice(2)));}catch(e){}"
             "if(navigator.standalone){document.documentElement.className+=' ios-standalone';"
             "var _vp=document.querySelector('meta[name=viewport]');"
-            "_vp.setAttribute('content',_vp.getAttribute('content')+',viewport-fit=cover');}</script>"
+            "_vp.setAttribute('content',_vp.getAttribute('content')+',viewport-fit=cover');}"
+            # The token this page was opened with (`/?token=`: the login page, `romp url`, the CLI's open) is
+            # spent by the time this runs: the response that served the page turned it into the cookie every
+            # later request rides (_authorize, then _send's Set-Cookie). The URL copy would otherwise outlive
+            # it for the page's lifetime, as what a Referer carries, what every same-origin pane iframe reads
+            # as document.referrer, and what the address bar shows. Dropped HERE, in the head, before the
+            # manifest link or the first <iframe> can make a request, so no request this document makes ever
+            # carries it; the other params (panes, wid, a push deep link the reveal script strips later) and
+            # the hash stay, re-serialized by URLSearchParams (a comma becomes %2C, which every reader's
+            # searchParams.get decodes). A reload rides the cookie, as the pane iframes already do.
+            "try{var _u=new URL(location.href);if(_u.searchParams.has('token')){_u.searchParams['delete']('token');"
+            "history.replaceState(null,'',_u.pathname+(_u.searchParams.toString()?'?'+_u.searchParams.toString():'')+_u.hash);}}"
+            "catch(e){}</script>"
             # the install surface (plans/ios-app.md proposal 1): manifest + touch icon + Apple metas on
             # the SHELL only — the chat/feed/timeline pages are panes inside it, never install targets.
             # status-bar-style black (opaque), not black-translucent: opaque keeps the webview BELOW the
@@ -49731,6 +49743,15 @@ class Handler(BaseHTTPRequestHandler):
         # Phone and tailnet frame the kernel's own origin, which 'self' permits.
         self.send_header("X-Frame-Options", "SAMEORIGIN")
         self.send_header("Content-Security-Policy", "frame-ancestors 'self'")
+        # Referrer policy: a document's URL is what its requests send as Referer, and the shell's URL is
+        # `/?token=` on its first load (the address scrub in _landing's head script drops it; a pane page
+        # opened bare as `/chat?token=` keeps it). same-origin sends the full Referer on requests to this
+        # origin and nothing cross-origin (a transcript's <img> from another host, a link out), whatever
+        # the browser's default, on every page the kernel serves: the SECURITY.md claim that a cross-site
+        # page cannot obtain the token then holds by construction. same-origin and not no-referrer: a
+        # same-origin GET carries no Origin header, so the Referer is the one header that names the page
+        # origin behind it to the kernel, and this keeps it.
+        self.send_header("Referrer-Policy", "same-origin")
         for k, v in (headers or {}).items():
             self.send_header(k, v)
         if cache:                                     # e.g. "no-cache" — keeps a tab from running a stale bundle
