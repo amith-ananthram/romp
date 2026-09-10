@@ -36,7 +36,7 @@ import socket as _socket
 import tempfile
 import textwrap
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -49,8 +49,8 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 STATE_HOME = os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
-pm = SourceFileLoader("romp_postal_selfhost", os.path.join(BIN, "romp-postal-service")).load_module()
-km = SourceFileLoader("romp_kernel_selfhost", os.path.join(BIN, "romp-kernel")).load_module()
+pm = load_source("romp_postal_selfhost", os.path.join(BIN, "romp-postal-service"))
+km = load_source("romp_kernel_selfhost", os.path.join(BIN, "romp-kernel"))
 
 JUNK = "TEST\x04HOST"          # a control byte mid-name, the 2026-08-11 shape — fails _safe_id
 
@@ -108,8 +108,8 @@ class BusSelfHost(_HostnameSeams):
         saved = os.environ.get("XDG_STATE_HOME")
         os.environ["XDG_STATE_HOME"] = STATE_HOME
         try:
-            pm2 = SourceFileLoader("romp_postal_selfhost_reload",
-                                   os.path.join(BIN, "romp-postal-service")).load_module()
+            pm2 = load_source("romp_postal_selfhost_reload",
+                                   os.path.join(BIN, "romp-postal-service"))
         finally:
             os.environ["XDG_STATE_HOME"] = saved
         pm2._host_name_candidates = lambda: []

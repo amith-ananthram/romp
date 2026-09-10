@@ -11,7 +11,7 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -19,7 +19,7 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-pal = SourceFileLoader("romp_palette", os.path.join(BIN, "romp_palette.py")).load_module()
+pal = load_source("romp_palette", os.path.join(BIN, "romp_palette.py"))
 
 ROMP_BG = ["#1EA1EB", "#54B204", "#4EA8A9", "#DD42FF", "#E87221",
            "#98998A", "#F85B5A", "#F9D849", "#9088F0", "#E0629C",

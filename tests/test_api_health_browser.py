@@ -23,7 +23,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 # Hermetic state BEFORE the loads: they resolve their state root at import time, and only pytest runs
 # conftest's floor (a bare unittest or script run otherwise writes REAL state).
@@ -34,7 +34,7 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
 EXT = os.path.join(os.path.dirname(HERE), "vscode-extension")
-km = SourceFileLoader("romp_kernel_apih_browser", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_apih_browser", os.path.join(BIN, "romp-kernel"))
 
 SID = "77777777-aaaa-4bbb-8ccc-00000000000"     # + a digit: the rail test module's private synthetic family
 

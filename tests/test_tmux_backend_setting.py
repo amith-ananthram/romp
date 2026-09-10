@@ -17,7 +17,7 @@ import tempfile
 import threading as _real_threading
 import types
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -26,7 +26,7 @@ os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
-km = SourceFileLoader("romp_kernel_tmuxbackend", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_tmuxbackend", os.path.join(BIN, "romp-kernel"))
 jd = km.jd
 T_OLD, T_NEW = 1_700_000_000_000, 1_700_000_360_000
 

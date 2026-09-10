@@ -11,6 +11,40 @@
     sudo apt install python3 nodejs npm    # Ubuntu / Debian
     ```
 
+### Which Python runs the kernel
+
+`romp-serve` chooses the interpreter each time it starts the kernel, and the
+choice follows the Agent SDK venv (`sdkvenv` under the state directory), whose
+compiled extensions import into the kernel process and so must be built for the
+interpreter the kernel runs. The order is: `ROMP_PYTHON` if set, refused with
+one line when it is not an executable interpreter; otherwise the interpreter
+the venv's `pyvenv.cfg` records, if it still runs and still reports the venv's
+version and build; otherwise another Python of that same minor and build on
+`PATH` or in `~/.local/bin`, which the venv still matches; otherwise the newest
+`python3.X` on `PATH` or in `~/.local/bin`, then `python3`, the rule for a
+machine that has no venv yet (`pick_python` in `bin/romp-serve`;
+`bin/romp-sdk-setup` and `bin/romp-codex-setup` carry the same function, so
+each venv is built with the interpreter the kernel runs). `install.sh` only
+checks that a `python3` exists. The full rules, and what the kernel reports
+when the two disagree, are in the [reference](reference.md#the-kernels-python).
+
+Because the venv comes first, installing another interpreter does not move the
+kernel onto it. One hazard remains: `uv python install <version>` puts a
+`python3.X` shim in `~/.local/bin`, which the newest-first fallback searches, so
+on a machine with no SDK venv (or a venv whose recorded interpreter is gone) the
+next restart runs the newest Python it finds. Install extra interpreters with
+`uv python install --no-bin <version>` and reach them through `uv python find
+<version>` or a venv, never as a bare `python3.X` on `PATH`. To move the kernel
+to another Python on purpose, whether another version or the free-threaded build
+(`3.14t`) of the same one, go in this order: set `ROMP_PYTHON` to the new
+interpreter (in `~/.config/romp/service.env` for the login service), rebuild the
+SDK venv for it with `ROMP_PYTHON=<path> bin/romp-sdk-setup` (the same value the
+service reads; run plainly, the script follows the existing venv's interpreter
+and rebuilds nothing), run the test suite there, then restart.
+Skipping a step leaves a kernel that cannot start sessions; the setup script says
+from what to what it rebuilds, and the kernel names the mismatch on every
+session's card if it comes up on the wrong interpreter anyway.
+
 ## Install
 
 ```bash

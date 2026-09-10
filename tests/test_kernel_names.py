@@ -33,7 +33,7 @@ import unittest
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 from unittest import mock
 
@@ -44,11 +44,11 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
+load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "test-token-DO-NOT-USE")
-km = SourceFileLoader("romp_kernel_names", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_names", os.path.join(BIN, "romp-kernel"))
 _REAL_LIVE_NAMES = km._live_names   # the real registry reader, for the classes that exercise it
 _REAL_TMUX_SESSIONS = km._tmux_sessions   # the real liveness read, for the class that exercises the cycle scope
 _REAL_THREAD_NAMES = km._thread_names     # the real store walk, for the class that parks a door inside it
@@ -998,8 +998,8 @@ class RenameFaultsThroughTheDoors(_Routes):
         # A REAL CodexBackend over its own state dir: a dead Codex tab is not owned (owns() is alive-only),
         # so the doors route it to the tmux backend, whose dead path renames the Codex registry's
         # durable name first; the fault is beneath its real names writer (the atomic publish)
-        cb = SourceFileLoader("romp_codex_backend_names",
-                              os.path.join(os.path.dirname(HERE), "kernel", "codex_backend.py")).load_module()
+        cb = load_source("romp_codex_backend_names",
+                              os.path.join(os.path.dirname(HERE), "kernel", "codex_backend.py"))
         st = Path(tempfile.mkdtemp())
         cx = cb.CodexBackend(st, client_factory=lambda: None)
         self.assertEqual(cx.spawn("web", "/work/web", sid=SID), SID)

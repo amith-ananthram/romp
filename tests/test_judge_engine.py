@@ -16,7 +16,7 @@ import stat
 import tempfile
 import time
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -24,7 +24,7 @@ ROOT = os.path.dirname(HERE)
 
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
-jd = SourceFileLoader("romp_judge_engine_t", os.path.join(ROOT, "bin", "romp-judge")).load_module()
+jd = load_source("romp_judge_engine_t", os.path.join(ROOT, "bin", "romp-judge"))
 
 STUB = r"""#!/usr/bin/env bash
 # stub codex: record argv + stdin, honor -o, reply with canned JSON

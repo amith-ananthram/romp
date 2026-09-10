@@ -17,7 +17,7 @@ import threading
 import time
 import unittest
 from unittest import mock
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -39,9 +39,9 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "test-token-DO-NOT-USE")
 # (2026-08-14: the converge route, hit by this suite while genuine main-drift existed, posted an
 # IMMEDIATE restart-all to the LIVE manager — every suite run bounced every kernel on the box.)
 os.environ["ROMP_MANAGER_PORT"] = "1"
-SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-jd = SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
-km = SourceFileLoader("romp_kernel_update", os.path.join(BIN, "romp-kernel")).load_module()
+load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+jd = load_source("romp_judge", os.path.join(BIN, "romp-judge"))
+km = load_source("romp_kernel_update", os.path.join(BIN, "romp-kernel"))
 if _PREV_STATE_DIR is None:
     os.environ.pop("ROMP_STATE_DIR", None)
 else:

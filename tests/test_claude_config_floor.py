@@ -23,7 +23,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -73,7 +73,7 @@ class ClaudeConfigFloor(unittest.TestCase):
     def test_a_module_loaded_under_the_floor_resolves_its_projects_root_inside_it(self):
         # the judge computes PROJECTS at import: a test that imports it and writes a project dir lands
         # inside the floor, never under the real ~/.claude/projects (the incident's shape)
-        jd = SourceFileLoader("romp_judge_claude_cfg_floor", os.path.join(ROOT, "bin", "romp-judge")).load_module()
+        jd = load_source("romp_judge_claude_cfg_floor", os.path.join(ROOT, "bin", "romp-judge"))
         self.assertEqual(Path(jd.PROJECTS), Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects")
         self.assertTrue(_under_the_run_root(jd.PROJECTS), str(jd.PROJECTS))
         d = jd._proj_dir("/TESTDIR/notes-api")

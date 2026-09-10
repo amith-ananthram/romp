@@ -40,7 +40,7 @@ import sys
 import tempfile
 import types
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -52,7 +52,7 @@ os.environ["ROMP_CLI_SCOPE"] = "0"   # the conftest floor, re-asserted for a bar
 for _v in ("ROMP_CLI_SCOPE_MEMORY_MAX", "ROMP_CLI_SCOPE_MEMORY_HIGH", "ROMP_CLI_SCOPE_MEMORY_SWAP_MAX",
            "ROMP_CLI_SCOPE_OOM_SCORE_ADJ"):
     os.environ.pop(_v, None)         # and the limits floor (the same reasoning: tool shells inherit them)
-sb = SourceFileLoader("romp_sdk_backend_cli_scope", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+sb = load_source("romp_sdk_backend_cli_scope", os.path.join(BIN, "romp_sdk_backend.py"))
 
 SID = "11111111-2222-3333-4444-555555555555"
 PROBE = ["systemd-run", "--user", "--scope", "--quiet", "--collect", "--", "true"]

@@ -21,7 +21,7 @@ import threading
 import time
 import unittest
 from datetime import datetime, timezone
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -32,7 +32,7 @@ os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "test-token-DO-NOT-USE")
-km = SourceFileLoader("romp_kernel_chat_memos", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_chat_memos", os.path.join(BIN, "romp-kernel"))
 jd = km.jd                                       # the kernel's own judge module
 
 # PRIVATE synthetic sids: these tests mint goal stores, and the shared placeholder sid's override journal

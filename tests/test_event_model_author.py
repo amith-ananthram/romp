@@ -5,7 +5,7 @@ so without this it rendered as the gray 'sdk' author instead of the blue human b
 set, an UNMARKED 'sdk' prompt is the human; romp-injected / postal markers still win."""
 import os
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 import tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -14,7 +14,7 @@ SCRIPTS = os.path.join(os.path.dirname(HERE), "bin")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-em = SourceFileLoader("romp_event_model", os.path.join(SCRIPTS, "romp-event-model")).load_module()
+em = load_source("romp_event_model", os.path.join(SCRIPTS, "romp-event-model"))
 
 TEXT = [{"type": "text", "text": "do the thing"}]
 INJECTED = [{"type": "text", "text": "status update <!-- romp-injected -->"}]

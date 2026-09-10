@@ -35,7 +35,7 @@ import unittest
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -57,7 +57,7 @@ os.environ["ROMP_SESSIONS_FILE"] = _SESS
 _prev_serve_token = os.environ.get("ROMP_SERVE_TOKEN")
 os.environ["ROMP_SERVE_TOKEN"] = "bus-test-token-DO-NOT-USE"
 try:
-    ps = SourceFileLoader("romp_postal_token", os.path.join(BIN, "romp-postal-service")).load_module()
+    ps = load_source("romp_postal_token", os.path.join(BIN, "romp-postal-service"))
 finally:
     if _prev_serve_token is None:
         os.environ.pop("ROMP_SERVE_TOKEN", None)

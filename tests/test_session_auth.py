@@ -30,7 +30,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -49,8 +49,8 @@ os.environ["ROMP_SERVICE_ENV"] = os.environ["ROMP_SERVICE_ENV_FILE"]
 os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
 for _n in ("ANTHROPIC_API_KEY", "ROMP_API_KEY_CMD", "ROMP_API_KEY_REF"):
     os.environ.pop(_n, None)
-sb = SourceFileLoader("romp_sdk_backend_auth", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
-km = SourceFileLoader("romp_kernel_auth", os.path.join(BIN, "romp-kernel")).load_module()
+sb = load_source("romp_sdk_backend_auth", os.path.join(BIN, "romp_sdk_backend.py"))
+km = load_source("romp_kernel_auth", os.path.join(BIN, "romp-kernel"))
 
 FAKE_KEY = "synthetic-helper-output-auth"           # what the fixture helper prints: not key-shaped on purpose
 

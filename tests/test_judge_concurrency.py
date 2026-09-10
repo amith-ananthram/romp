@@ -21,7 +21,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -30,7 +30,7 @@ os.environ.pop("ROMP_STATE_DIR", None)   # a live kernel's export outranks the X
 os.environ.pop("ROMP_JUDGE_CONCURRENCY", None)   # the default case below must see NO variable
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
-km = SourceFileLoader("romp_kernel_conc", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_conc", os.path.join(BIN, "romp-kernel"))
 jd = km.jd
 
 
@@ -45,7 +45,7 @@ def _load_judge_with_env(value, name):
     err = io.StringIO()
     try:
         with contextlib.redirect_stderr(err):
-            mod = SourceFileLoader(name, os.path.join(BIN, "romp-judge")).load_module()
+            mod = load_source(name, os.path.join(BIN, "romp-judge"))
     finally:
         if saved is None:
             os.environ.pop("ROMP_JUDGE_CONCURRENCY", None)

@@ -4,7 +4,7 @@ import os
 import subprocess
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 from unittest import mock
 
@@ -12,7 +12,7 @@ os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
 
 HERE = Path(__file__).resolve().parents[1]
-rt = SourceFileLoader('test_romp_codex_runtime', str(HERE / 'kernel/codex_runtime.py')).load_module()
+rt = load_source('test_romp_codex_runtime', str(HERE / 'kernel/codex_runtime.py'))
 
 
 def package(target, version=None):
@@ -114,7 +114,7 @@ class ManagedRuntime(unittest.TestCase):
 
 class BackendRuntimeSelection(unittest.TestCase):
     def test_managed_executable_and_helpers_win_over_path(self):
-        cb = SourceFileLoader('runtime_selection_backend', str(HERE / 'kernel/codex_backend.py')).load_module()
+        cb = load_source('runtime_selection_backend', str(HERE / 'kernel/codex_backend.py'))
         with tempfile.TemporaryDirectory() as state:
             exe = package(Path(state) / 'codex-runtime' / rt.VERSION)
             with mock.patch.dict('os.environ', {'PATH': '/TESTBIN'}):
@@ -131,7 +131,7 @@ class BackendRuntimeSelection(unittest.TestCase):
             self.assertNotIn('":root"', profile)
 
     def test_missing_runtime_does_not_fall_back_to_sdk_or_path(self):
-        cb = SourceFileLoader('runtime_missing_backend', str(HERE / 'kernel/codex_backend.py')).load_module()
+        cb = load_source('runtime_missing_backend', str(HERE / 'kernel/codex_backend.py'))
         with tempfile.TemporaryDirectory() as state:
             config = mock.Mock()
             with self.assertRaisesRegex(RuntimeError, 'romp-codex-setup'):
@@ -139,7 +139,7 @@ class BackendRuntimeSelection(unittest.TestCase):
             config.assert_not_called()
 
     def test_explicit_packaged_runtime_keeps_its_matching_helpers(self):
-        cb = SourceFileLoader('runtime_override_backend', str(HERE / 'kernel/codex_backend.py')).load_module()
+        cb = load_source('runtime_override_backend', str(HERE / 'kernel/codex_backend.py'))
         with tempfile.TemporaryDirectory() as state:
             exe = package(Path(state) / 'custom')
             config = cb._codex_config(lambda **kwargs: kwargs, str(exe))
@@ -147,7 +147,7 @@ class BackendRuntimeSelection(unittest.TestCase):
             self.assertTrue(config['env']['PATH'].startswith(str(exe.parent.parent / 'codex-path')))
 
     def test_bare_executable_does_not_grant_reads_to_its_parent(self):
-        cb = SourceFileLoader('runtime_bare_backend', str(HERE / 'kernel/codex_backend.py')).load_module()
+        cb = load_source('runtime_bare_backend', str(HERE / 'kernel/codex_backend.py'))
         with tempfile.TemporaryDirectory(prefix='romp runtime ') as state:
             exe = Path(state) / 'codex'
             exe.touch()

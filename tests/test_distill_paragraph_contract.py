@@ -25,7 +25,7 @@ changes only what the audit named.
 """
 import pathlib
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 import os
 import tempfile
 
@@ -34,7 +34,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-jd = SourceFileLoader("romp_judge_paras", str(ROOT / "kernel" / "judge.py")).load_module()
+jd = load_source("romp_judge_paras", str(ROOT / "kernel" / "judge.py"))
 
 PROMPTS = {
     "distiller": jd.DISTILL_SYS,

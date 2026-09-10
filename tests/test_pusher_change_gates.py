@@ -16,7 +16,7 @@ import shutil
 import tempfile
 import time
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 from unittest import mock
 
@@ -31,9 +31,9 @@ os.environ.pop("ROMP_STATE_DIR", None)
 os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ["ROMP_SERVE_TOKEN"] = "testtok"
-jd = SourceFileLoader("romp_judge_gates", os.path.join(BIN, "romp-judge")).load_module()
-km = SourceFileLoader("romp_kernel_gates", os.path.join(BIN, "romp-kernel")).load_module()
-sb = SourceFileLoader("romp_sdk_backend_gates", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+jd = load_source("romp_judge_gates", os.path.join(BIN, "romp-judge"))
+km = load_source("romp_kernel_gates", os.path.join(BIN, "romp-kernel"))
+sb = load_source("romp_sdk_backend_gates", os.path.join(BIN, "romp_sdk_backend.py"))
 
 SID = "11111111-2222-3333-4444-555555555555"
 
