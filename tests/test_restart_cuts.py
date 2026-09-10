@@ -9,6 +9,7 @@ watch primitive is the fix), and un-write the CLI's own interrupted-by-user tran
 (romp never rewrites CLI transcripts; romp's own records already distinguish machine cuts).
 Hermetic state; synthetic sids only."""
 import errno
+import io
 import json
 import os
 import signal
@@ -312,13 +313,21 @@ class UnrequestedSignal(unittest.TestCase):
     def test_a_raising_reason_helper_still_leaves_the_cut_row(self):
         # the helper reads ROMP_MANAGER_PID (a pid too large for os.kill raises OverflowError out of
         # _pid_alive) and writes to a stderr the dying supervisor may have closed; a raise there used
-        # to skip the cut row this exit exists to leave. The row lands with the plain verdict instead.
-        with mock.patch.object(km, "_unrequested_signal_reason", side_effect=OverflowError("pid")):
+        # to skip the cut row this exit exists to leave. The row lands with the plain verdict instead,
+        # and names the fault: the helper died before it filed the `signal` row, so the cut row is the
+        # only record of this exit, and without the field it read as a healthy unrequested one
+        with mock.patch.object(km, "_unrequested_signal_reason", side_effect=OverflowError("pid")), \
+             mock.patch.object(km.sys, "stderr", new_callable=io.StringIO) as err:
             self._fire()
         cuts = self._rows(km.RESTART_CUTS_FILE)
         self.assertEqual(len(cuts), 1, "the cut row is written whether or not the reason helper survives")
         self.assertEqual(cuts[0]["reason"], km.SIGNAL_REASON_UNREQUESTED)
         self.assertEqual(cuts[0]["cutTurns"], [])
+        self.assertEqual(cuts[0]["reasonError"], "OverflowError: pid",
+                         "the row names the fault the helper died of, as drainError names a drain's")
+        self.assertNotIn("drainError", cuts[0], "the drain itself ran clean; the fault is the helper's")
+        self.assertEqual(self._rows(self.AUDIT), [], "no `signal` row on this path: the cut row is the only record")
+        self.assertIn("reasonError", err.getvalue(), "and the fault is said on stderr")
 
     def test_an_unlabeled_row_is_neither_the_request_nor_consumed(self):
         # the CLI's actionless refresh row alone, fresh, and the SIGTERM arrives (the manager's note never

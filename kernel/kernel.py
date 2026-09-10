@@ -53614,6 +53614,7 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
     (_unrequested_signal_reason: an empty reason used to be all restart-cuts.jsonl had for such a restart)."""
     res = {}
     err = ""
+    reason_err = ""
     be = _sdk_backend or None
     try:
         sys.stderr.write("romp-kernel: %s, draining SDK sessions\n" % what)
@@ -53630,17 +53631,28 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
             if not reason and signum is not None:
                 # the helper's own guard: it reads ROMP_MANAGER_PID and writes to stderr, and a raise
                 # there (a pid too large for os.kill, a stderr the dying supervisor closed) must not
-                # skip the cut row this exit exists to leave; the reason falls back to the plain verdict
+                # skip the cut row this exit exists to leave. The reason falls back to the plain verdict
+                # and the row names the fault (reasonError, drainError's recipe): the helper's raise
+                # paths precede its `signal` row, so this exit has none, and a row with the plain verdict
+                # alone read as a healthy exit of that kind with the row it promises missing
                 try:
                     reason = _unrequested_signal_reason(signum, be)
                 except Exception:
                     reason = SIGNAL_REASON_UNREQUESTED
+                    reason_err = traceback.format_exc().strip().splitlines()[-1][:200]
+                    try:                              # best-effort: a closed stderr is one of the causes
+                        sys.stderr.write("romp-kernel: the signal's reason helper failed, the cut row "
+                                         "carries the plain verdict and reasonError: %s\n" % reason_err)
+                    except Exception:
+                        pass
             row = _restart_cut_row(res, watches_armed=len(_pr_watches) + len(_watches),
                                    audit_reason=reason)
             if audit:
                 row["auditT"] = int(audit["t"])     # the audit row this cut CONSUMED (see _recent_restart_audit)
             if err:
                 row["drainError"] = err.strip().splitlines()[-1][:200]
+            if reason_err:
+                row["reasonError"] = reason_err     # the reason helper's fault: no `signal` row was filed
             _append_restart_cut(row)
         except Exception:
             sys.stderr.write("romp-kernel: cut ledger failed: %s\n" % traceback.format_exc())
