@@ -1247,7 +1247,12 @@ frames it received is measured in the panes themselves, by
   hosts (the VS Code bundle directly; the kernel page's inline boot through
   the `window.__rompPerf` that `federation.js` publishes before it runs), so
   `data`, `bars`, `hover`, `activeChat`, `revealEvent` and `models` are timed
-  like any pane's frames.
+  like any pane's frames. The file viewer (`ui/webview/file-view.ts`) brackets
+  each paint of a shown document's text body (a file on disk or a markdown URL,
+  as rendered markdown or as the code view) as `fileview:paint` under the pane
+  that hosts it (`chat` or `feed`), so painting a large document shows per
+  minute beside the pane's frames, with the main-thread-free sample the
+  collector takes after it.
 - Per type and minute: count, summed and maximum handler time, the exact
   number of frames over 16.7 ms (one dropped frame at 60 Hz) and at or over
   100 ms, and a 14-bucket log2 histogram (under 1 ms, 1-2, 2-4, ..., 2048-4096,
