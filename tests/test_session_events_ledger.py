@@ -319,12 +319,14 @@ class TurnLedgerRow(unittest.TestCase):
         import inspect
         src = inspect.getsource(sb.SdkSession._on_message)
         i_fin = src.index("finally:\n                # T304: one durable row per settled turn")
-        i_row = src.index("append_turn_row(self.backend.state_dir, self._turn_ledger_row(msg, delta, turn_u))")
+        i_row = src.index("append_turn_row(self.backend.state_dir, self._turn_ledger_row(msg, _sp[0], _sp[1]))")
         i_reset = src.index("self._fed_t = None               # the turn's feed stamps are spent")
         i_settle = src.index("everything that makes the turn over for the kernel")   # the finally's own comment
         self.assertTrue(i_fin < i_row < i_reset < i_settle, "row, then the reset, then the settle, all inside the finally")
-        self.assertIn("elif isinstance(msg, ResultMessage):\n            delta = turn_u = None", src,
-                      "the fold's names exist before the branch's try, so the finally can always read them")
+        self.assertIn("elif isinstance(msg, ResultMessage):\n            try:", src,
+                      "the branch stays ONE try (the settle pins), so the fold hands its figures over by attribute")
+        self.assertIn("self._turn_spend = (delta, turn_u)", src[src.index("turn_u = self._turn_usage(msg)"):i_fin])
+        self.assertIn("self._turn_spend = None", src[i_row:i_settle], "spent with the row")
 
     def test_row_fields_and_stamps(self):
         s = self._sess(["do the thing"], first_out=1700000004.25, fed_t=1700000000)

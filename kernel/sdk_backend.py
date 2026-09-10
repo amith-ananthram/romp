@@ -4384,6 +4384,8 @@ class SdkSession:
         #                                instructions payload (parent_tool_use_id link) as a skillMd atom
         self.since = 0
         self._first_out_t = None   # the turn's first streamed WORK atom (turns.jsonl firstOutT; reset per fresh feed)
+        self._turn_spend = None    # (delta usd, turn usage) the spend fold recorded for the turn in flight, read by the
+        #                            turn ledger row at the settle and spent with it
         self._fed_t = None         # the fresh feed's pop at millisecond resolution (turns.jsonl fedT; `since` stays whole
         #                            seconds for its other readers); both are spent at the settle, so a turn the CLI
         #                            opens by itself never inherits the previous fed turn's stamps
@@ -6481,7 +6483,6 @@ class SdkSession:
         elif isinstance(msg, ResultMessage) and self._consume_move_settle(msg):
             pass   # the accepted move's turn-less result — nothing ended, so nothing settles (see the def)
         elif isinstance(msg, ResultMessage):
-            delta = turn_u = None            # the spend fold's figures for the turn ledger row (set when the fold ran)
             try:
                 # (This try is the whole branch: its body is the result's BOOKKEEPING, its finally is
                 # THE SETTLE — the finally's comment has the rule. The spend accounting runs LAST in the
@@ -6539,6 +6540,7 @@ class SdkSession:
                     # the tokens: THIS turn's counts, from whichever result counter is a running total —
                     # the two are not the same kind (see _turn_usage; the flat `usage` is per-turn now)
                     turn_u = self._turn_usage(msg)
+                    self._turn_spend = (delta, turn_u)   # for the turn ledger row the finally writes (T304)
                     self.backend._record_spend(delta, turn_u, keyed=self.api_key_auth,
                                                sid=self.thread_of or self.sid)   # the rail's spend —
                     #   a comment THREAD bills its owning session (T144: whole-session truth for the
@@ -6565,9 +6567,11 @@ class SdkSession:
                 # still leaves its row (review find, 2026-09-10); guarded on its own, so a failing append
                 # costs the row alone and never the settle below.
                 try:
-                    append_turn_row(self.backend.state_dir, self._turn_ledger_row(msg, delta, turn_u))
+                    _sp = getattr(self, "_turn_spend", None) or (None, None)   # the fold's figures, when it ran
+                    append_turn_row(self.backend.state_dir, self._turn_ledger_row(msg, _sp[0], _sp[1]))
                 except Exception as e:
                     self.backend._log("turn ledger (%s): %s" % (self.name, e), problem=False)
+                self._turn_spend = None          # spent with the row, like the feed stamps below
                 self._fed_t = None               # the turn's feed stamps are spent (see _turn_ledger_row)
                 self._first_out_t = None
                 # THE SETTLE — everything that makes the turn over for the kernel — runs whatever the
