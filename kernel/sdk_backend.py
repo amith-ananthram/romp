@@ -7470,7 +7470,7 @@ class SdkBackend:
         #                                           writes come from kernel AND loop threads)
         self._pending_ask: dict[str, bool] = {}   # sid -> has an ask awaiting answer
         self._live: dict[str, dict] = {}          # sid -> {key -> atom}: the in-memory LIVE TAIL (ahead of disk)
-        self._live_rev: dict[str, int] = {}       # sid -> count of changes to its live tail (add/edit/drop/flag) —
+        self._live_rev: dict[str, int] = {}       # sid -> count of changes to its live tail (add/edit/drop/flag):
         #                                           the exact "the live tail moved" event the kernel's chat-build
         #                                           signature keys every tab on (Sessions.live_rev); bumped by
         #                                           _touch_live once per mutating call, never read as a value
