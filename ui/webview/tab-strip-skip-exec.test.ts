@@ -12,7 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
 import { planStrip, parseTabGroups, headWords } from "./tab-groups";
-import { tabStateClass, tabDotClass, sectionPip, sectionPipMembers, sectionPipTitle } from "./tab-state";
+import { tabStateClass, tabDotClass, tabDotTitle, sectionPip, sectionPipMembers, sectionPipTitle } from "./tab-state";
 import { newSkeletonState, renderKind } from "./skeleton-tabs";
 import type { TagUnion } from "./session-views";
 
@@ -43,6 +43,7 @@ class FakeEl {
   append(...cs: FakeEl[]): void { for (const c of cs) this.appendChild(c); }
   replaceChildren(...cs: FakeEl[]): void { this.wipes++; this.children = []; this.append(...cs); }
   get firstChild(): FakeEl | null { return this.children[0] ?? null; }
+  get lastElementChild(): FakeEl | null { return this.children[this.children.length - 1] ?? null; }   // the dot's hover title lands on the slot just appended
   contains(n: unknown): boolean { return n === this || this.children.some((c) => c.contains(n)); }
   setAttribute(k: string, v: string): void { this.attrs[k] = v; }
   addEventListener(t: string, f: Function): void { (this.listeners[t] ??= []).push(f); }
@@ -63,7 +64,7 @@ type Hooks = {
   phone: boolean;             // the phone layout: the plan is the flat strip there
   heads: HeadCall[];          // every group header the paint minted, in order
   planStrip: typeof planStrip; parseTabGroups: typeof parseTabGroups; headWords: typeof headWords;
-  tabStateClass: typeof tabStateClass; tabDotClass: typeof tabDotClass; sectionPip: typeof sectionPip; sectionPipMembers: typeof sectionPipMembers; sectionPipTitle: typeof sectionPipTitle;
+  tabStateClass: typeof tabStateClass; tabDotClass: typeof tabDotClass; tabDotTitle: typeof tabDotTitle; sectionPip: typeof sectionPip; sectionPipMembers: typeof sectionPipMembers; sectionPipTitle: typeof sectionPipTitle;
   newSkeletonState: typeof newSkeletonState; renderKind: typeof renderKind;   // the skeleton strip (2026-09-07): empty here, so every listed id is a loaded tab or a placeholder
   skeletons: number;          // skeleton tabs minted (none expected: the set stays empty in these worlds)
 };
@@ -110,7 +111,7 @@ function lift(): (hooks: Hooks) => Api {
     const readTabGroups = (u) => H.parseTabGroups(H.groupsRaw, u);
     const tabGroups = () => readTabGroups(H.unions); const writeTabGroups = () => {};
     const phoneLayout = () => H.phone;
-    const tabStateClass = H.tabStateClass, tabDotClass = H.tabDotClass, sectionPip = H.sectionPip, sectionPipMembers = H.sectionPipMembers, sectionPipTitle = H.sectionPipTitle;   // tabDotClass: the state-dot slot every tab carries (the tab-strip fix, 2026-09-08)
+    const tabStateClass = H.tabStateClass, tabDotClass = H.tabDotClass, tabDotTitle = H.tabDotTitle, sectionPip = H.sectionPip, sectionPipMembers = H.sectionPipMembers, sectionPipTitle = H.sectionPipTitle;   // tabDotClass: the state-dot slot every tab carries (the tab-strip fix, 2026-09-08); tabDotTitle: what the slot says on hover
     function makeGroupHead(sec, folded, active, hidden) {
       const h = el("div", "tab-group-head" + (folded ? " collapsed" : ""));
       h.dataset.group = String(sec.name);
@@ -153,7 +154,7 @@ function world(): { H: Hooks; api: Api; sessions: Map<string, any>; tabMeta: Map
   const H: Hooks = { FakeEl, bar: new FakeEl("div"), mslot: null, only: "", hidden: new Set(), down: new Set(), notes: {},
                      keyHint: "Open a session (K)", lens: { all: true }, unions: [], tips: [], aftermaths: [], rowPaints: 0, tagSyncs: 0, placeholders: 0,
                      groupsRaw: null, phone: false, heads: [],
-                     planStrip, parseTabGroups, headWords, tabStateClass, tabDotClass, sectionPip, sectionPipMembers, sectionPipTitle,
+                     planStrip, parseTabGroups, headWords, tabStateClass, tabDotClass, tabDotTitle, sectionPip, sectionPipMembers, sectionPipTitle,
                      newSkeletonState, renderKind, skeletons: 0 };
   const api = lift()(H);
   const sessions = new Map<string, any>([["a", session("web", "ready")], ["b", session("api", "working")]]);
@@ -288,6 +289,39 @@ test("the paint wears the shared state → class rule (tab-state.ts), and the si
   assert.equal(H.bar.wipes, 2);
   const tab2 = H.bar.tabs().find((t) => t.dataset.id === "a")!;
   assert.ok(tab2.has("tab-retrying") && !tab2.has("tab-blocked"), "a transient API error auto-retries: amber");
+});
+
+test("the dot slot explains its state on hover: a visible dot carries the feed's phrase for that state, the hidden slot says nothing", () => {
+  // the phrases are the feed's (feed.ts DOT_TIP), read from its source so the two surfaces cannot drift apart
+  const FEED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "feed.ts"), "utf8");
+  const at = FEED.indexOf("const DOT_TIP");
+  const tip: Record<string, string> = Object.fromEntries([...FEED.slice(at, FEED.indexOf("};", at)).matchAll(/^\s*(work|await|unknown): "([^"]+)",/gm)].map((m) => [m[1], m[2]]));
+  assert.deepEqual(Object.keys(tip).sort(), ["await", "unknown", "work"]);
+  const sep = /^working(\s\S\s)/.exec(tip.work)![1];   // the feed's separator: the opening phrase (no feed twin) keeps the feed's shape
+  const { H, api, sessions } = world();
+  api.renderTabs();
+  // the dot is found BY CLASS: the label, the context gauge and the close button follow it, so once the paint is
+  // done it is not the tab's last child (it is at the moment applyTabStatus writes the title)
+  const dot = (id: string): FakeEl => {
+    const d = H.bar.tabs().find((t) => t.dataset.id === id)!.children.filter((c) => c.has("tab-dot"));
+    assert.equal(d.length, 1, id + ": one dot slot");
+    return d[0];
+  };
+  assert.ok(!dot("b").has("none"), "working: a visible dot");
+  assert.equal(dot("b").title, tip.work, "the working dot speaks the feed's working phrase");
+  assert.ok(dot("a").has("none"), "ready: the hidden slot");
+  assert.equal(dot("a").title, "", "the hidden slot says nothing");
+  const a = sessions.get("a");
+  a.status = { state: "awaitingBg" }; api.renderTabs();
+  assert.ok(dot("a").has("await")); assert.equal(dot("a").title, tip.await, "awaiting background work: the feed's awaiting phrase");
+  a.status = {}; api.renderTabs();
+  assert.ok(dot("a").has("unknown")); assert.equal(dot("a").title, tip.unknown, "no state: the feed's unknown phrase");
+  a.status = { state: "opening" }; api.renderTabs();
+  assert.ok(dot("a").has("opening")); assert.equal(dot("a").title, "opening" + sep + "this session is still starting up", "opening: the strip's own phrase (the feed draws no opening pip)");
+  a.status = { state: "compacting" }; api.renderTabs();
+  const tabA = H.bar.tabs().find((t) => t.dataset.id === "a")!;
+  assert.equal(tabA.children.filter((c) => c.has("tab-dot")).length, 0, "compacting: no dot");
+  assert.ok(tabA.children.find((c) => c.has("tab-compacting-bar"))!.title.startsWith("compacting"), "the bar carries its own title");
 });
 
 test("a render held by the pressed-tab or rename guard is not lost to the skip", () => {
