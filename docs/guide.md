@@ -649,6 +649,13 @@ switches indented under it, and a button:
   switch off, the answer adds that real notifications will not arrive until it
   is on.
 
+A restart of the kernel (an update deploys one) announces nothing by itself.
+What Romp has told you about is written down beside its other state, so the
+cards already waiting on you or already finished when it comes back stay
+quiet. A card that stops needing you and then needs you again is announced
+once, not at every turn, unless you acted on the card in between (answered
+it, resolved it, crossed it off) or it finished in the meantime.
+
 The handler that answers a tap lives on the phone, and the phone refreshes it
 whenever you open the app and whenever a notification arrives. If a tap ever
 opens Romp on the wrong session, close the app from the app switcher and open
