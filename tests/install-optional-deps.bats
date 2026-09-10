@@ -438,9 +438,10 @@ EOF
 
 # A stub python that claims one X.Y (and, with a third argument `t`, a free-threaded build): answers
 # pick_python's minor check for that X.Y only, the >= 3.10 gate, the version and tag prints and the
-# ensurepip probe, and stands in for `python -m venv` by laying down a pip and a python that read stdin
-# and exit 0, plus the tagged lib/python3.X{t} directory a real venv has, logging which python built
-# which venv.
+# ensurepip probe, and stands in for `python -m venv` by laying down a pip and a python that exit 0
+# (the python's cat reads /dev/null, never the caller's stdin: romp-codex-setup runs it once with no
+# heredoc, and a bats run from a terminal would otherwise hang there until that stdin closed), plus the
+# tagged lib/python3.X{t} directory a real venv has, logging which python built which venv.
 write_stub_py() {   # $1 path, $2 the X.Y it claims, [$3 abi suffix: t]
     mkdir -p "$(dirname "$1")"
     cat > "$1" <<EOF
@@ -449,7 +450,7 @@ if [ "\${1:-}" = "-m" ] && [ "\${2:-}" = "venv" ]; then
   echo "venv-build $2${3:-} \$3" >> "\$CALL_LOG"
   mkdir -p "\$3/bin" "\$3/lib/python$2${3:-}/site-packages"
   printf '#!/usr/bin/env bash\nexit 0\n' > "\$3/bin/pip"
-  printf '#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n' > "\$3/bin/python"
+  printf '#!/usr/bin/env bash\ncat >/dev/null </dev/null\nexit 0\n' > "\$3/bin/python"
   chmod +x "\$3/bin/pip" "\$3/bin/python"
   printf 'version = $2.0\nexecutable = $1\n' > "\$3/pyvenv.cfg"
   exit 0
