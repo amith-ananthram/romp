@@ -141,6 +141,9 @@ installMenuEcho();
     registerCommand({
       id: "pane." + label, title: "Show or hide the " + label + " pane",
       run: () => { if (w.__rompPaneToggle) w.__rompPaneToggle(key); },
+      // the Files control hidden by its gear setting (T317): the shell's body wears no-files-control, the toggle refuses,
+      // so the entry is not listed either (re-read at every open: the gear's change reaches the body class live)
+      when: key === "files" ? () => !document.body.classList.contains("no-files-control") : undefined,
     });
   }
 

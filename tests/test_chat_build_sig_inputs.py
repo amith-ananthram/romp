@@ -118,6 +118,7 @@ CENSUS = {
     "_notify_session_effective": ("sig", "ncards", "the master bell; the session's own override is in flags"),
     "_op_qid": ("pure", "over a parked op"),
     "_orphan_replies": ("sig", "states"),
+    "_parked_held": ("pure", "over a parked op and the parked holds, which the ops component folds (T306: a held send reads 'editing')"),
     "_parked_md": ("pure", "over a parked op"),
     "_parse": ("sig", "transcript", "memoized on the transcript's (mtime, size), the pending cut (cut) and the states file (states)"),
     "_parse_task_notification": ("pure", "over a reminder string"),

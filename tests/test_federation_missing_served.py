@@ -246,7 +246,11 @@ class ServedFederationMissing(unittest.TestCase):
                        ROMP_MANAGER_PORT="1", ROMP_KERNEL_NO_OPEN="1",
                        ROMP_SERVE_TOKEN=cls.token, ROMP_KERNEL_PORT=str(cls.port),
                        ROMP_DIST_DIR=dist, ROMP_MODEL_CATALOG="off",
-                       ROMP_TMUX_SOCKET="romp-fedmissing-%d" % cls.port)
+                       ROMP_TMUX_SOCKET="romp-fedmissing-%d" % cls.port,
+                       # a postal bus of its own that is never started (the trio kernel_env gives every lab kernel):
+                       # without it the kernel's boot-time ensure started a detached bus on the FIXED port, which
+                       # outlived this kernel and held the machine's shared bus port after a restart (2026-09-10)
+                       ROMP_POSTAL_PORT=str(_free_port()), ROMP_POSTAL_PEERS="0", ROMP_POSTAL_CLIENT_ONLY="1")
         cls.env.pop("ROMP_STATE_DIR", None)
         for k in [k for k in cls.env if k in _cred.RETIRED_VARS or _cred.is_op_env_name(k)]:   # the kernel's own boot rule (module top)
             cls.env.pop(k, None)

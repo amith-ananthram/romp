@@ -213,7 +213,7 @@ type ChatEvent = (
   // `held` DOES come from the kernel (_limit_hold): the queue is stuck on the ACCOUNT rather than on this
   // session — a usage limit or a monthly spend cap holds every send — so the head names what it is waiting
   // for, and how long is left when the API reported a reset (the user 2026-07-24).
-  | { kind: "queued"; texts: { md: string; followUp?: boolean; goal?: string; fuCtx?: string; idx?: number; park?: number; cancelable?: boolean; optimistic?: boolean; romp?: boolean; rompSystem?: boolean; rompAuto?: boolean; gist?: string; imgPaths?: string[]; lost?: string; qts?: number; qid?: string; hiddenByPending?: boolean; landing?: boolean }[]; ts?: string; uuid?: string; bare?: boolean; held?: { reason: string; resetsAt?: number | null; what: string; detail?: string } }   // imgPaths: an optimistic echo's dragged-image attachments → thumbnails, the landed form's own renderer (the user 2026-08-25); lost: client-only, the connection dropped after this unconfirmed send; qts: on OUR optimistic copy the pending entry's identity (its press time) so the ✕ removes ITS entry, on a kernel copy its enqueue stamp (T252c); qid: the copy's identity (T252c): minted at the press on OUR copy and posted with the send, so the kernel's copy wears the same one; the ✕ names it on both (send-pending.ts)
+  | { kind: "queued"; texts: { md: string; followUp?: boolean; goal?: string; fuCtx?: string; idx?: number; park?: number; cancelable?: boolean; optimistic?: boolean; romp?: boolean; rompSystem?: boolean; rompAuto?: boolean; gist?: string; imgPaths?: string[]; lost?: string; qts?: number; qid?: string; held?: boolean; hiddenByPending?: boolean; landing?: boolean }[]; ts?: string; uuid?: string; bare?: boolean; held?: { reason: string; resetsAt?: number | null; what: string; detail?: string } }   // imgPaths: an optimistic echo's dragged-image attachments → thumbnails, the landed form's own renderer (the user 2026-08-25); lost: client-only, the connection dropped after this unconfirmed send; qts: on OUR optimistic copy the pending entry's identity (its press time) so the ✕ removes ITS entry, on a kernel copy its enqueue stamp (T252c); qid: the copy's identity (T252c): minted at the press on OUR copy and posted with the send, so the kernel's copy wears the same one; the ✕ names it on both (send-pending.ts)
   // The turn stopped on an API error (event-based: transcript isApiErrorMessage). The session is BLOCKED
   // until retried — a red-dot card at the bottom with a Retry button (the user 2026-06-16).
   | { kind: "apiError"; text: string; status?: number; ts?: string; uuid?: string }
@@ -1425,11 +1425,12 @@ document.addEventListener("click", (e) => {
 // own event, never a per-click guess (no reading the parent's DOM, no polling). Standalone /chat never
 // hears one and reads as all-off, which the framed gate makes moot anyway.
 let panesOn: Record<string, boolean> = {};
+let panesAvail: Record<string, boolean> = {};   // …and which panes EXIST to bring forward (avail: the Files control's setting, T317); absent = available
 function openPath(path: string, sid?: string | null, ev?: MouseEvent | null): void {
   if (!vscodeApi) return;
   if (location.protocol === "http:" || location.protocol === "https:") {
     const to = sid || activeId || null;
-    const route = fileLinkRoute(settings.fileLinkPane, window.parent !== window, panesOn.files === true);
+    const route = fileLinkRoute(settings.fileLinkPane, window.parent !== window, panesOn.files === true, panesAvail.files !== false);
     // with its gesture, read first: a Cmd/Ctrl- or middle-click on a PDF takes the browser's own tab wherever
     // the plain click would have landed; a plain click routed to the Files pane is handed to the shell
     openFileClick(ev, path, to, route === "pane" ? () => {
@@ -1462,7 +1463,7 @@ function onMiddleClick(a: HTMLElement, fn: (e: MouseEvent) => void): void {
 // tells the person where Browse files will land, so the two cannot disagree.
 function browseRouteNow(): BrowseRoute {
   const web = location.protocol === "http:" || location.protocol === "https:";
-  return browseRoute(web, settings.fileLinkPane, window.parent !== window, panesOn.files === true);
+  return browseRoute(web, settings.fileLinkPane, window.parent !== window, panesOn.files === true, panesAvail.files !== false);
 }
 // Surface the FILE BROWSER at `path` for the session: the folder shown under the chat, the system context
 // card's Directory row, a tab menu's Browse files, a chat-hosted viewer's directory link. The listing goes
@@ -4160,7 +4161,8 @@ const pendingGroupNode = new Map<string, { sig: string; node: HTMLElement }>();
 function renderPendingGroup(ev: Extract<ChatEvent, { kind: "queued" }>): HTMLElement {
   const sid = renderingSid || activeId || "";
   const sig = JSON.stringify(ev.texts.map((t) => [t.md, !!t.lost, t.qts, t.imgPaths || null])) + "|" + JSON.stringify(ev.held || null)
-    + (ev.held && ev.held.resetsAt ? "|" + Math.floor(Date.now() / 60000) : "");   // a held countdown reads the minute: re-rendered as it ticks
+    + (ev.held && ev.held.resetsAt ? "|" + Math.floor(Date.now() / 60000) : "")   // a held countdown reads the minute: re-rendered as it ticks
+    + "|" + JSON.stringify(ev.texts.map((t) => { const e = queuedEditorFor(sid, t); return e ? [e.eid, e.open, e.text, e.note] : null; }));   // an editor on one of OUR copies (T306): the cached node predates it
   const fresh = renderQueued(ev);
   const cached = pendingGroupNode.get(sid);
   if (cached && cached.node.isConnected !== undefined) {
@@ -4315,6 +4317,18 @@ function renderQueued(ev: Extract<ChatEvent, { kind: "queued" }>): HTMLElement {
     }
     if (!t.romp && !isCmd) bubble.innerHTML = userMd(t.md);   // the user's words, newlines kept — byte-for-byte what the landed bubble shows
     if (!t.romp && !isCmd) markMentions(bubble);   // and a typed @name chipped, as the landed bubble wears it (renderEventInner). A statement of its own, not a brace around both: tests pin the line above verbatim (chat-md, queued-indicator)
+    // EDITING IN PLACE (T306): an open editor paints its field instead of the words; a closed one carrying the kernel's
+    // refusal says so under them; a copy another client is editing (the kernel's hold) reads "editing" beside them
+    const qsid = renderingSid || activeId || "";
+    const qed = qsid && !t.romp && !isCmd ? queuedEditorFor(qsid, t) : undefined;
+    if (qed && qed.open) { bubble.innerHTML = ""; renderQueuedEditor(bubble, qed); }
+    else if (qed && qed.note && t.held) { const n = el("div", "queued-editnote"); n.textContent = qed.note; bubble.appendChild(n); }
+    else if (qed && qed.note) queuedEditors.delete(qed.key);   // the hold the note spoke of is gone (the other client cancelled or saved): the bubble stops saying it
+    else if (t.held && !t.romp && !isCmd) {
+      bubble.classList.add("held");
+      const h = el("span", "queued-held-label"); h.textContent = "editing"; h.title = "being edited — it goes when the edit is done";
+      bubble.appendChild(h);
+    }
     // An optimistic echo's dragged images render as THUMBNAILS, not just their trailing paths (the
     // user 2026-08-25: composer preview → path-only provisional → thumbnail landing flashed). Same
     // machinery end to end: userImage with the landed form's exact "path:" shape — buildPathImg's
@@ -4349,9 +4363,10 @@ function renderQueued(ev: Extract<ChatEvent, { kind: "queued" }>): HTMLElement {
     // still the user's to change. The same three stages the ✕ covers (backend queue, parked, optimistic),
     // and the same recall gate (cancelable); romp's own words and slash commands are not edited — a
     // command is cancelled and typed again, and romp's notices are not the user's to reword. Delegated
-    // like the ✕ (data-act="qedit"); the composer takes the text under an editing pill (beginQueuedEdit),
-    // and send replaces the message where it sits — see the editQueued path in sendComposer.
-    if (t.cancelable && !t.romp && !isCmd && (t.idx !== undefined || t.park !== undefined || t.optimistic)) {
+    // like the ✕ (data-act="qedit"); the bubble's text becomes a field where it sits (openQueuedEditor, T306),
+    // and its Save replaces the message in place — the composer is never touched. An open field has its own
+    // Save and Cancel, so the ✎ steps aside while it is open.
+    if (t.cancelable && !t.romp && !isCmd && (t.idx !== undefined || t.park !== undefined || t.optimistic) && !(qed && qed.open)) {
       bubble.classList.add("editable");
       const ed = el("button", "queued-edit");
       ed.textContent = "✎";
@@ -4361,6 +4376,7 @@ function renderQueued(ev: Extract<ChatEvent, { kind: "queued" }>): HTMLElement {
       if (t.park !== undefined) ed.dataset.qpark = String(t.park);
       if (t.optimistic) ed.dataset.qopt = "1";
       if (t.optimistic && t.qts !== undefined) ed.dataset.qts = String(t.qts);   // OUR entry's identity, as on the ✕: a kernel copy's qts is its enqueue stamp, not an entry (T252c)
+      if (t.qid) ed.dataset.qid = t.qid;   // the copy's id: the hold and the edit name exactly this copy (T306)
       (ed as any)._qmd = t.md;
       xHost.appendChild(ed);
     }
@@ -6907,6 +6923,7 @@ function typeFromAnywhereTarget(e: Event): HTMLTextAreaElement | null {
   const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
   if (!ta || ta.disabled || document.activeElement === ta) return null;   // no box / read-only session / already in the box (covers key repeat; a paste there is native)
   if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return null;
+  for (const ed of queuedEditors.values()) if (ed.open && ed.focused) return null;   // a queued message's field owns the keys, across the tail's rebuild (T306)
   if (activeId && liveAsks.has(activeId)) return null;   // the live-ask card owns input while it is up (digits are its number keys)
   if (ctxMenuEl || document.querySelector(".picker-overlay")) return null;   // an open menu / #picker / #confirm owns the keys
   if (document.getElementById("romp-fileview") || document.getElementById("romp-filebrowse")
@@ -10374,18 +10391,7 @@ function landToast(msg: string) {
 // additive noise-removal, not a key the rest of the UI loses — and overlay consumers
 // that capture Escape (the lightbox, the viewer) still peel first by construction.
 function warnToast(msg: string): HTMLElement {
-  let box = document.getElementById("warn-toasts");
-  if (!box) {
-    box = el("div", "");
-    box.id = "warn-toasts";
-    document.body.appendChild(box);
-    box.addEventListener("click", (e) => {
-      (e.target as HTMLElement | null)?.closest(".warn-toast")?.remove();
-    });
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") for (const w of Array.from(box!.children)) w.remove();
-    });
-  }
+  const box = ensureToastBox();
   const t = el("div", "warn-toast");
   const txt = el("span", "warn-toast-msg");
   txt.textContent = msg;
@@ -10400,6 +10406,44 @@ function warnToast(msg: string): HTMLElement {
   setTimeout(() => t.remove(), 12000);
   return t;   // the toast, for a caller that marks it (ephemeralWarnToast)
 }
+function ensureToastBox(): HTMLElement {
+  let box = document.getElementById("warn-toasts");
+  if (!box) {
+    box = el("div", "");
+    box.id = "warn-toasts";
+    document.body.appendChild(box);
+    box.addEventListener("click", (e) => {
+      (e.target as HTMLElement | null)?.closest(".warn-toast")?.remove();   // the Copy button stops its own click short of here
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") for (const w of Array.from(box!.children)) w.remove();
+    });
+  }
+  return box;
+}
+// A toast that never fades and carries the words: for typed words that have nowhere else to live (a queued message's
+// edit refused after the copy left the queue, T306 review). No timers; dismissed by its ✕, Escape or a click on its
+// text; the Copy button puts the words on the clipboard and stays put.
+function stickyToast(msg: string, copyText: string): HTMLElement {
+  const box = ensureToastBox();
+  const t = el("div", "warn-toast sticky");
+  const txt = el("span", "warn-toast-msg");
+  txt.textContent = msg;
+  const c = el("button", "warn-toast-copy");
+  c.textContent = "Copy";
+  c.title = "copy the words to the clipboard";
+  c.addEventListener("click", (e) => {
+    e.stopPropagation();
+    try { navigator.clipboard?.writeText(copyText); c.textContent = "Copied"; } catch (_) { c.textContent = "Select the text above"; }
+  });
+  const x = el("button", "warn-toast-x");
+  x.setAttribute("aria-label", "Dismiss");
+  x.title = "dismiss (Esc)";
+  x.textContent = "✕";
+  t.append(txt, c, x);
+  box.appendChild(t);
+  return t;
+}
 // A toast the page that follows a reload must not repeat: a refusal that reports a STATE rather than an event. The
 // staged sends' "Can't send yet" says the session's host is unreachable (hostIsDown, a remote host's tunnel) or its tab
 // is still being created (isProvisionalId); the plain send's refusal on a disconnected host (sendComposer's deliver)
@@ -10411,7 +10455,7 @@ function warnToast(msg: string): HTMLElement {
 // mark and the transcript foot, from the kernel's tunnel health, which the page reads afresh into a disconnected set
 // that starts empty; the staged strip; the picker, the attachments and the roster come back from the kernel and the
 // persisted drafts, the refused message among them) or no longer has it (a provisional tab, pending or failed, does not
-// survive a reload; composerEdits and queuedEdits are in memory alone, so no edit is in progress on a fresh page, and a
+// survive a reload; composerEdits and the in-place queued editors are in memory alone, so no edit is in progress on a fresh page, and a
 // "send again" there would post the words as a new message), so kept by persistNoticesForReload and shown again by the
 // page that follows, it would be redundant at best and false at worst; a replay also posts no redial, so the
 // disconnected-host refusal's "re-dialing now" would not be true there. The mark keeps it out of the replay
@@ -14327,6 +14371,7 @@ window.addEventListener("romp:wsup", () => {
 window.addEventListener("romp:hostRelayUp", (e) => {
   const h = String((((e as CustomEvent).detail || {}) as any).host || "");
   if (h) reshipPendingUploads([h]);
+  if (h) reholdQueuedEditors(true);   // the remote kernel released this page's holds with the old relay socket (T306)
   // …and the figure previews parked on that host's link (T291): the relay socket's open is the reconnect-class
   // event a remote kernel's restart produces (it fires neither romp:wsup nor hostUp), so settled previews
   // make their one attempt here as well
@@ -14631,52 +14676,182 @@ function renderStagedStrip(id: string | null, opts?: { reveal?: "last" }): void 
   list.scrollTop = opts?.reveal === "last" ? list.scrollHeight : (stagedScroll.get(id) || 0);
 }
 
-// ---- editing a QUEUED message (the user 2026-09-08) --------------------------------------------------
-// A message that has not reached the session yet — parked in romp's FIFO, held in the SDK backend's own
-// queue, or still at the optimistic "sending…" stage — is the user's to change until it goes. The ✎ on its
-// bubble loads the text into the composer under an EDITING pill (the rewind edit's grammar, one level
-// deeper: "Editing queued message"), and send REPLACES it in place: same queue slot, same follow-up
-// context, only the words. The kernel verifies the entry by body (editQueued's md — the ✕'s drift guard)
-// and answers editResult; ok:false means the message left the queue meanwhile, so the typed words go
-// back to the composer and the queue repaints from the kernel — nothing is lost, nothing is sent twice.
-type QueuedEditRef = { md: string; idx?: number; park?: number; qts?: number; optimistic?: boolean };
-const queuedEdits = new Map<string, QueuedEditRef>();
-// the typed text + the entry it replaced, keyed sid + " " + old body, so a failed edit can give the words
-// back and undo the optimistic repaint (one-shot, ok or not — pendingCancelRestores' twin)
+// ---- editing a QUEUED message IN PLACE (T306, the user 2026-09-10) --------------------------------------
+// A message that has not reached the session yet — parked in romp's FIFO, held in the SDK backend's own queue, or
+// still at the optimistic "sending…" stage — is the user's to change until it goes. The ✎ on its bubble turns the
+// bubble's text into a field where it sits (the same width, the dashed provisional look kept) with Save and Cancel;
+// the composer is never touched (the 2026-09-08 design pulled the text into the composer, where a message that went
+// meanwhile left its words behind as a stray context chip). While the field is open the entry is HELD: the open
+// posts holdQueued and the kernel's drains skip the entry until the Save (the editQueued itself releases it), the
+// Cancel (holdQueued hold:false) or this page's socket closing releases it. Save posts editQueued with the new words
+// and the kernel replaces the entry in place (same slot, a follow-up's wrapper kept), answering editResult: ok:false
+// on a Save means the message left the queue meanwhile — the optimistic repaint is reversed and the typed words ride
+// a sticky toast, never the composer; ok:false on the hold (the entry fed before the field could hold it) closes the
+// field and the bubble says so. The editor's state is keyed by the entry (session + body + the copy's id and stamp)
+// and lives in memory, so the tail's rebuild on every push repaints the field from it — text, caret and focus — and
+// a fresh page has no edit in progress (the kernel released the hold with the old socket).
+type QueuedEditRef = { md: string; idx?: number; park?: number; qts?: number; qid?: string; optimistic?: boolean };
+type QueuedEditor = { eid: number; sid: string; key: string; ref: QueuedEditRef; text: string; sel: [number, number] | null;
+                      focused: boolean; open: boolean; note: string; width: number; height: number };
+const queuedEditors = new Map<string, QueuedEditor>();   // sid + the entry's key → its editor (open, or a closed one carrying a note)
+let queuedEditorSeq = 0;
+// the typed text + the entry it replaced, keyed sid + " " + old body, so a refused Save can undo the optimistic
+// repaint and hand the words back (one-shot, ok or not — pendingCancelRestores' twin)
 const pendingEditRestores = new Map<string, { typed: string; ref: QueuedEditRef }>();
-// the in-progress draft the ✎ displaced, per session, handed back when the edit ends (cancelled or sent) so
-// correcting a queued message never costs a half-typed one (review find, 2026-09-08)
-const queuedEditHeld = new Map<string, string>();
-
-function beginQueuedEdit(sid: string, ref: QueuedEditRef): void {
-  if (composerEdits.has(sid)) cancelComposerEdit(sid);   // one edit at a time: a rewind edit yields to this one
-  queuedEdits.set(sid, ref);
-  composerCitations.delete(sid);   // the queued text carries its own context (a follow-up keeps it kernel-side)
+// the copy's identity: its id when it has one (every kernel copy, and every press this page minted), else the press
+// stamp (an id-less optimistic copy of ours) — never the stamp BESIDE an id: a kernel copy's stamp is its enqueue time,
+// which the ✎ does not carry, so keying on it left the field unfindable and the copy held (review find)
+const queuedEditorKey = (sid: string, t: { md: string; qid?: string; qts?: number }): string =>
+  sid + "\u0001" + t.md + "\u0001" + (t.qid ? "id:" + t.qid : "ts:" + (t.qts === undefined ? "" : String(t.qts)));
+function queuedEditorFor(sid: string, t: { md: string; qid?: string; qts?: number }): QueuedEditor | undefined {
+  return queuedEditors.get(queuedEditorKey(sid, t));
+}
+function queuedEditorByEid(eid: number): QueuedEditor | undefined {
+  for (const ed of queuedEditors.values()) if (ed.eid === eid) return ed;
+  return undefined;
+}
+function repaintQueuedFor(sid: string): void {
   if (sid !== activeId) return;
-  const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
-  if (ta) {
-    if (ta.value.trim()) queuedEditHeld.set(sid, ta.value);   // hold the draft this edit displaces
-    ta.value = ref.md; growComposer(ta); ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+  const v = views.get(sid);
+  if (v) { v.stale = true; appendActive(); }
+}
+function holdQueuedMsg(sid: string, ref: QueuedEditRef, hold: boolean): Record<string, unknown> {
+  const m: Record<string, unknown> = { type: "holdQueued", id: sid, md: ref.md, hold };
+  if (ref.idx !== undefined) m.idx = ref.idx;
+  if (ref.park !== undefined) m.park = ref.park;
+  if (ref.qid) m.qid = ref.qid;
+  return m;
+}
+// the ✎: the field opens where the bubble is (the acknowledgement), and the hold goes out with it. A session that
+// cannot be reached (a down host, a provisional tab) gets no hold posted: there is no kernel entry to hold yet, and the
+// Save's own guard says so if it is still unreachable then.
+let queuedEditorListenersOn = false;
+// the field's focus is tracked by the USER's own acts, never by blur: the tail's rebuild removes the focused field (a
+// blur Chromium fires before the node reads as disconnected, after the container is cleared), so a blur listener and a
+// render-time snapshot both read the rebuild as the user leaving. A pointer press outside the field, or focus landing on
+// some other element, is the user leaving; nothing else clears the flag, and the rebuilt field takes focus back
+// (preventScroll: the tail's scroll position is the reader's).
+function installQueuedEditorListeners(): void {
+  if (queuedEditorListenersOn) return;
+  queuedEditorListenersOn = true;
+  const isField = (t: EventTarget | null, ed: QueuedEditor) =>
+    !!t && t instanceof HTMLElement && t.classList.contains("queued-editbox") && (t as any)._eid === ed.eid;
+  const insideBox = (t: EventTarget | null, ed: QueuedEditor) =>
+    !!t && t instanceof Node && !!(t as HTMLElement).closest?.(".queued-editor") && ((t as HTMLElement).closest(".queued-editor") as any)?._eid === ed.eid;
+  document.addEventListener("pointerdown", (e) => {
+    for (const ed of queuedEditors.values()) if (ed.open && ed.focused && !insideBox(e.target, ed)) ed.focused = false;
+  }, true);
+  document.addEventListener("focusin", (e) => {
+    for (const ed of queuedEditors.values()) if (ed.open && ed.focused && !isField(e.target, ed) && !insideBox(e.target, ed)) ed.focused = false;
+  }, true);
+}
+function openQueuedEditor(sid: string, ref: QueuedEditRef, width = 0): void {
+  installQueuedEditorListeners();
+  const key = queuedEditorKey(sid, ref);
+  const cur = queuedEditors.get(key);
+  if (cur && cur.open) return;
+  // the bubble's width as it stood (measured at the click): the field keeps it, so the words do not re-wrap in a
+  // box that shrank to the textarea's own size; the editor carries it across the tail's rebuilds
+  queuedEditors.set(key, { eid: ++queuedEditorSeq, sid, key, ref, text: ref.md, sel: [ref.md.length, ref.md.length],
+                           focused: true, open: true, note: "", width: Math.round(width), height: 0 });
+  if (!isProvisionalId(sid) && !hostIsDown(sid)) vscodeApi?.postMessage(holdQueuedMsg(sid, ref, true));
+  repaintQueuedFor(sid);
+}
+// Cancel (the button, Esc): the field goes, the bubble is as it was, the hold is released
+function cancelQueuedEditor(ed: QueuedEditor): void {
+  queuedEditors.delete(ed.key);
+  if (!isProvisionalId(ed.sid) && !hostIsDown(ed.sid)) vscodeApi?.postMessage(holdQueuedMsg(ed.sid, ed.ref, false));
+  repaintQueuedFor(ed.sid);
+}
+// a closed tab takes its editors with it and RELEASES their holds: the session and its queue live on, and so does this
+// page's socket, so the kernel's socket-close release would never come (review find)
+function closeQueuedEditorsFor(sid: string): void {
+  for (const [k, ed] of queuedEditors) {
+    if (ed.sid !== sid) continue;
+    if (ed.open && !isProvisionalId(sid) && !hostIsDown(sid)) vscodeApi?.postMessage(holdQueuedMsg(sid, ed.ref, false));
+    queuedEditors.delete(k);
   }
-  renderComposerChips(sid);
 }
-
-function cancelQueuedEdit(sid: string): void {
-  if (!queuedEdits.delete(sid)) return;
-  restoreHeldDraft(sid);
+// the socket came back (a kernel restart, a dropped link, a relay re-dial): the kernel released the old socket's holds
+// with it, so every field still open re-holds its entry; a copy that fed meanwhile answers ok:false (op hold) and the
+// field closes with the words in the toast (review find: the kernel's comments promised this and nothing did it)
+function reholdQueuedEditors(remoteOnly = false): void {
+  for (const ed of queuedEditors.values()) {
+    if (!ed.open || isProvisionalId(ed.sid) || hostIsDown(ed.sid)) continue;
+    if (remoteOnly && !String(ed.sid).includes(":")) continue;
+    vscodeApi?.postMessage(holdQueuedMsg(ed.sid, ed.ref, true));
+  }
 }
-
-// The queued edit is over (cancelled, or sent): the box goes back to the draft the ✎ displaced, or empties,
-// and the pill goes with it. The draft store follows either way, so a tab switch or a reload sees the same.
-function restoreHeldDraft(sid: string): void {
-  const held = queuedEditHeld.get(sid) || "";
-  queuedEditHeld.delete(sid);
-  if (held) drafts.set(sid, held); else { drafts.delete(sid); draftStartedAt.delete(sid); }
-  persistDrafts();
-  if (sid !== activeId) return;
-  const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
-  if (ta) { ta.value = held; composerManualH = null; ta.style.height = ""; if (held) growComposer(ta); }
-  renderComposerChips(sid);
+// Save (the button, Enter): editQueued with the new words; the kernel replaces the entry in place and drops the hold
+// with the edit. Three refusals leave the field exactly as it is: an empty edit (to drop the message, use its ✕), a
+// slash command (the kernel would deliver it as text, skipping the routing every typed command gets — it refuses too),
+// and a session that cannot be reached (deliver()'s guard: a down host drops the frame and no editResult would ever
+// come back). None of them touches the composer.
+function saveQueuedEditor(ed: QueuedEditor): void {
+  const typed = ed.text.trim();
+  if (!typed) { ephemeralWarnToast("Nothing to send — to drop the message, use its ✕."); return; }
+  if (SLASH_CMD_RE.test(typed)) { warnToast("A queued message cannot become a command. Cancel it with its ✕ and type the command."); return; }
+  if (hostIsDown(ed.sid) || isProvisionalId(ed.sid)) {
+    if (hostIsDown(ed.sid)) vscodeApi?.postMessage({ type: "redial", host: String(ed.sid).slice(0, String(ed.sid).indexOf(":")) });
+    ephemeralWarnToast("Can't reach the session right now, so the edit wasn't saved. It's still in the message: save again when the link is back.");
+    return;
+  }
+  const qmsg: Record<string, unknown> = { type: "editQueued", id: ed.sid, md: ed.ref.md, text: typed };
+  if (ed.ref.idx !== undefined) qmsg.idx = ed.ref.idx;
+  if (ed.ref.park !== undefined) qmsg.park = ed.ref.park;
+  if (ed.ref.qid) qmsg.qid = ed.ref.qid;
+  vscodeApi?.postMessage(qmsg);
+  pendingEditRestores.set(ed.sid + " " + ed.ref.md, { typed, ref: ed.ref });
+  queuedEditors.delete(ed.key);
+  applyQueuedEditLocally(ed.sid, ed.ref, typed);   // the bubble shows the new words at once (acknowledge the click)
+}
+// the field the bubble wears while its editor is open: the text, then Save and Cancel (delegated: qsave / qcancel).
+// Enter saves, Shift+Enter breaks a line, Escape cancels. The tail rebuilds on every push, so the field is repainted
+// from the editor's state — its words, its caret and its focus — instead of losing them to the rebuild.
+function renderQueuedEditor(bubble: HTMLElement, ed: QueuedEditor): void {
+  bubble.classList.add("editing");
+  if (ed.width > 0) bubble.style.width = ed.width + "px";   // the same width as the bubble it replaces (max-width still caps it)
+  // whether THIS editor's previous field holds the focus right now: read off the DOM before the rebuild swaps it out,
+  // because the old field's blur fires during its removal, before it reads as disconnected, and would otherwise cancel
+  // the refocus on every push (the served-page harness lost focus within a second)
+  const prev = document.activeElement as HTMLElement | null;
+  const wasFocused = !!prev && prev.classList.contains("queued-editbox") && (prev as any)._eid === ed.eid;
+  const box = el("div", "queued-editor");
+  (box as any)._eid = ed.eid;
+  const field = document.createElement("textarea");
+  (field as any)._eid = ed.eid;
+  field.className = "queued-editbox";
+  field.value = ed.text;
+  field.rows = Math.max(1, ed.text.split("\n").length);   // sized on the spot: the rebuild must not paint one row and grow a frame later
+  if (ed.height > 0) field.style.height = ed.height + "px";
+  field.setAttribute("aria-label", "edit the queued message");
+  const grow = () => { field.style.height = "auto"; field.style.height = field.scrollHeight + "px"; ed.height = field.scrollHeight; };
+  const remember = () => { ed.sel = [field.selectionStart, field.selectionEnd]; };
+  field.addEventListener("input", () => { ed.text = field.value; remember(); grow(); });
+  field.addEventListener("select", remember);
+  field.addEventListener("keyup", remember);
+  field.addEventListener("focus", () => { ed.focused = true; });   // (no blur listener: see installQueuedEditorListeners)
+  field.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveQueuedEditor(ed); }
+    else if (e.key === "Escape") { e.preventDefault(); cancelQueuedEditor(ed); }
+  });
+  box.appendChild(field);
+  if (ed.note) { const n = el("div", "queued-editnote"); n.textContent = ed.note; box.appendChild(n); }   // a refused Save's reason, beside the words it kept
+  const btns = el("div", "queued-editbtns");
+  const cancel = el("button", "queued-editbtn");
+  cancel.textContent = "Cancel"; cancel.title = "leave the message as it was (Esc)";
+  cancel.dataset.act = "qcancel"; cancel.dataset.eid = String(ed.eid);
+  const save = el("button", "queued-editbtn save");
+  save.textContent = "Save"; save.title = "replace the queued message with these words (Enter)";
+  save.dataset.act = "qsave"; save.dataset.eid = String(ed.eid);
+  btns.appendChild(cancel);
+  btns.appendChild(save);
+  box.appendChild(btns);
+  bubble.appendChild(box);
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => {
+    grow();
+    if ((wasFocused || ed.focused) && document.body.contains(field)) { ed.focused = true; field.focus({ preventScroll: true }); if (ed.sel) field.setSelectionRange(ed.sel[0], ed.sel[1]); }
+  });
 }
 
 // The optimistic half of an edit: the queued bubble shows the NEW words at once (the acknowledge-the-click
@@ -14709,7 +14884,6 @@ function applyQueuedEditLocally(sid: string, ref: QueuedEditRef, text: string, b
 }
 
 function beginComposerEdit(sid: string, uuid: string, orig: string): void {
-  if (queuedEdits.has(sid)) cancelQueuedEdit(sid);   // …and a queued edit yields to a rewind edit
   composerEdits.set(sid, { uuid, orig });
   composerCitations.delete(sid);   // an edit replaces the message wholesale — mixed goal/quote context would mislead
   if (sid !== activeId) return;
@@ -14759,22 +14933,6 @@ function renderComposerChips(id: string | null): void {
     chip.appendChild(label);
     const x = el("button", "composer-chip-x"); x.setAttribute("aria-label", "Cancel edit"); x.textContent = "✕";
     x.addEventListener("click", (e) => { e.stopPropagation(); cancelComposerEdit(id); });
-    chip.appendChild(x);
-    strip.appendChild(chip);
-    return;
-  }
-  // the QUEUED edit's pill (the user 2026-09-08): the rewind pill's grammar, saying what send does instead
-  const qedit = id ? queuedEdits.get(id) : undefined;
-  if (qedit && id) {
-    strip.style.display = "flex";
-    const chip = el("div", "composer-chip composer-chip-edit");
-    chip.title = "the message keeps its place in the queue and goes as edited — ✕ (or Esc) leaves it as it was";
-    const mark = el("span", "composer-chip-mark"); mark.textContent = "✎"; chip.appendChild(mark);
-    const label = el("span", "composer-chip-label");
-    label.textContent = "Editing queued message — send replaces it in the queue";
-    chip.appendChild(label);
-    const x = el("button", "composer-chip-x"); x.setAttribute("aria-label", "Cancel edit"); x.textContent = "✕";
-    x.addEventListener("click", (e) => { e.stopPropagation(); cancelQueuedEdit(id); });
     chip.appendChild(x);
     strip.appendChild(chip);
     return;
@@ -15901,7 +16059,7 @@ function dismissSession(id: string, why: DismissWhy, doomed?: ReadonlySet<string
     // closed session was ACTIVE: the shared chip strip above the composer still shows its chip until
     // someone repaints it, and that stale chip's ✕ targets the dead id (whose map entry is gone), so the
     // click early-returns and the chip can't even be dismissed — hence the repaint below.
-    queuedEdits.delete(id); queuedEditHeld.delete(id);   // a queued edit goes with the rewind edit's pill (review find, 2026-09-08)
+    closeQueuedEditorsFor(id);   // its in-place queued editors go with the tab; the kernel releases their holds with the socket (T306)
     drafts.delete(id); composerCitations.delete(id); composerEdits.delete(id); composerFiles.delete(id); persistDrafts();
   } else {
     persistDrafts();   // a host drop / omission KEEPS it all (see DismissWhy) — the stash above may have updated the copy
@@ -16017,6 +16175,10 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
       for (const k of Object.keys(m.on)) on[k] = m.on[k] === true;
       panesOn = on;
     }
+    // which panes exist to bring forward (the Files control's setting): whole-set replace as well
+    const avail: Record<string, boolean> = {};
+    if (m.avail && typeof m.avail === "object") for (const k of Object.keys(m.avail)) avail[k] = m.avail[k] !== false;
+    panesAvail = avail;
     return;
   }
   // the pipe's down edge is the VS Code twin of the shim's romp:wsdown: unconfirmed sends say so (markPendingLost)
@@ -16050,7 +16212,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   else if (m.type === "chatEpisode") chatEpisode(m);
   else if (m.type === "subagent") applySubagentFrame(m);
   else if (m.type === "update") update(m);
-  else if (m.type === "wsup") { onSocketUp(skeletonTabs); skeletonDiagArmed = true; }   // the shim's socket-flip marker, in FRAME order: the dead socket's frames may still be draining from the FIFO when onopen fires (review find 2026-09-07)
+  else if (m.type === "wsup") { onSocketUp(skeletonTabs); skeletonDiagArmed = true; reholdQueuedEditors(); }   // the shim's socket-flip marker, in FRAME order: the dead socket's frames may still be draining from the FIFO when onopen fires (review find 2026-09-07)
   else if (m.type === "status") statusOnly(m);
   else if (m.type === "focus") {
     revealSelfPane();   // every focus is someone jumping HERE — on mobile, come forward (incl. from a remote kernel)
@@ -16177,29 +16339,44 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
       if (rv) { rv.stale = true; appendActive(); }
     }
   }
-  // The kernel's verdict on an editQueued (the user 2026-09-08) — cancelResult's twin. ok:false: the message
-  // left the queue before the edit reached it (or the chip was never a message), so the optimistic repaint is
-  // reversed, the typed words go back to the composer (never lost, never sent twice), and the queue repaints
-  // from the kernel's events, which hold what the session actually has.
+  // The kernel's verdict on an editQueued or a holdQueued (T306) — cancelResult's twin. A refused SAVE (ok:false, the
+  // message left the queue before the edit reached it): the optimistic repaint is reversed, the queue repaints from the
+  // kernel's events, and the typed words ride a sticky toast — never the composer, which this flow does not touch. A
+  // refused HOLD (op "hold": the entry fed before the field could hold it): the field closes and the bubble says so
+  // until the kernel's push retires it, with the same words in a toast so the reason is not missed.
   else if (m.type === "editResult" && typeof m.id === "string") {
-    const key = m.id + " " + (typeof m.md === "string" ? m.md : "");
-    const stash = pendingEditRestores.get(key);
-    pendingEditRestores.delete(key);
+    const md = typeof m.md === "string" ? m.md : "";
+    const key = m.id + " " + md;
+    const isSave = m.op !== "hold" && m.op !== "release";   // a hold's or a release's acknowledgement carries the same body: it must not consume a Save's stash
+    const stash = isSave ? pendingEditRestores.get(key) : undefined;
+    if (isSave) pendingEditRestores.delete(key);
     if (!m.ok) {
-      if (typeof m.text === "string" && m.text) warnToast(m.text);
-      if (stash) {
-        applyQueuedEditLocally(m.id, stash.ref, stash.typed, true);
-        if (m.id === activeId) restoreToComposer(stash.typed);
-        else {
-          // the tab changed mid-round-trip (review find, 2026-09-08): the words land in THAT session's draft,
-          // which setActive puts back in the box on the next switch to it, as the paste-verify restore does
-          const d = drafts.get(m.id);
-          drafts.set(m.id, d && d.trim() ? d.replace(/\s*$/, "") + "\n" + stash.typed : stash.typed);
-          persistDrafts();
+      const why = typeof m.text === "string" && m.text ? m.text : "";
+      if (m.op === "hold") {
+        let edited = "";
+        for (const ed of queuedEditors.values()) {
+          if (ed.sid !== m.id || ed.ref.md !== md || !ed.open) continue;
+          if (typeof m.qid === "string" && m.qid && ed.ref.qid && ed.ref.qid !== m.qid) continue;   // two same-words copies: only the refused one closes
+          ed.open = false; ed.note = why || "too late to edit — the message already reached the session as it was";
+          if (ed.text.trim() && ed.text !== ed.ref.md) edited = ed.text;
         }
+        if (edited) stickyToast((why || "The message could not be held for editing.") + " Your edit: " + edited, edited);   // never fades: the words live here now
+        else if (why) warnToast(why);
+      } else if (m.op !== "release") {
+        if (stash) applyQueuedEditLocally(m.id, stash.ref, stash.typed, true);
+        if (stash && m.gone) {
+          // the copy left the queue (fed already): no bubble to hold a field, so the words go to a toast that never fades
+          stickyToast((why || "The edit was not applied.") + " Your edit: " + stash.typed, stash.typed);
+        } else if (stash) {
+          // the copy is still queued (another client holds it, the words were a command, the session is not running):
+          // the field reopens with the typed words and the refusal beside them, so nothing typed is lost (review find)
+          const key = queuedEditorKey(m.id, stash.ref);
+          queuedEditors.set(key, { eid: ++queuedEditorSeq, sid: m.id, key, ref: stash.ref, text: stash.typed, sel: [stash.typed.length, stash.typed.length],
+                                   focused: true, open: true, note: why || "The edit was not applied.", width: 0, height: 0 });
+          if (!isProvisionalId(m.id) && !hostIsDown(m.id)) vscodeApi?.postMessage(holdQueuedMsg(m.id, stash.ref, true));
+        } else if (why) warnToast(why);
       }
-      const rv = m.id === activeId && activeId ? views.get(activeId) : null;
-      if (rv) { rv.stale = true; appendActive(); }
+      repaintQueuedFor(m.id);
     }
   }
   // The identity palette changed (gear → Session colors): refresh the right-click menu's swatch set so a
@@ -16684,7 +16861,6 @@ function setupComposer() {
     if (!typed && !(composerCitations.get(activeId) || []).some((c) => c.quote)) return;
     if (composerAnswersAsk()) { ephemeralWarnToast("A picker is waiting on this box — answer it, or send normally."); return; }
     if (composerEdits.has(activeId)) { ephemeralWarnToast("An edit replaces a past message — send it normally."); return; }
-    if (queuedEdits.has(activeId)) { ephemeralWarnToast("This edit replaces a queued message. Send it normally."); return; }   // staged, the words would go as a NEW message behind the unchanged original (review find, 2026-09-08)
     if ((composerFiles.get(activeId) || []).length) { ephemeralWarnToast("Attachments can't be staged — send them with a normal message."); return; }
     stagedMsgs.push(activeId, { text: typed, cites: (composerCitations.get(activeId) || []).slice() });
     composerCitations.delete(activeId); renderComposerChips(activeId);   // the chips now live on the staged item
@@ -16762,39 +16938,6 @@ function setupComposer() {
       if (s) { reconcileRewind(s); appendActive(); }   // paint the overlay NOW (stale → window re-render)
       drafts.delete(activeId); draftStartedAt.delete(activeId); persistDrafts();
       clearBox();
-      return;
-    }
-    // A QUEUED-message edit → editQueued: the entry is replaced in place, kernel-side. No registerOptimistic
-    // (nothing new is sent — the bubble already exists and only changes words; applyQueuedEditLocally shows
-    // them now). The kernel's push confirms; editResult ok:false (the message left the queue meanwhile)
-    // hands the typed words back to the composer. Attachments wait for the next normal send, as for an edit.
-    const qedit = queuedEdits.get(activeId);
-    if (qedit) {
-      if (!typed) return;   // an empty edit is not a send — to drop the message, use its ✕
-      // Two refusals that leave the box exactly as it is (review finds, 2026-09-08). A down host DROPS the
-      // frame (federation posts nothing to a closed socket) and no editResult ever comes back to hand the
-      // words over, so the plain send's deliver() guard applies here, BEFORE the box is cleared; a provisional
-      // tab has no session behind it and nothing queued. And a slash command cannot be edited INTO a queued
-      // message: the kernel would deliver it as text, skipping the routing every typed command gets (the
-      // fire-alone park, the /model and /effort setters, the /clear confirm below), so the kernel refuses it
-      // too; this mirror keeps the words in the box instead of round-tripping them.
-      // The refusal reports a state (an edit in progress on a session that cannot be reached), and the edit is in
-      // memory alone: on the page that follows a reload no edit is in progress and "send again" would post the
-      // words as a new message, so it does not ride one (ephemeralWarnToast).
-      if (hostIsDown(activeId) || isProvisionalId(activeId)) {
-        if (hostIsDown(activeId)) vscodeApi?.postMessage({ type: "redial", host: String(activeId).slice(0, String(activeId).indexOf(":")) });
-        ephemeralWarnToast("Can't reach the session right now, so the edit wasn't sent. It's still in the box: send again when the link is back.");
-        return;
-      }
-      if (SLASH_CMD_RE.test(typed)) { warnToast("A queued message cannot become a command. Cancel it with its ✕ and type the command."); return; }
-      const qmsg: Record<string, unknown> = { type: "editQueued", id: activeId, md: qedit.md, text: typed };
-      if (qedit.idx !== undefined) qmsg.idx = qedit.idx;
-      if (qedit.park !== undefined) qmsg.park = qedit.park;
-      vscodeApi?.postMessage(qmsg);
-      pendingEditRestores.set(activeId + " " + qedit.md, { typed, ref: qedit });
-      queuedEdits.delete(activeId);
-      applyQueuedEditLocally(activeId, qedit, typed);
-      restoreHeldDraft(activeId);   // the pill goes; the box gets back the draft the ✎ displaced, or empties
       return;
     }
     const sid = activeId;   // the session this send (and any confirm below) was armed for
@@ -17395,7 +17538,6 @@ function setupComposer() {
       // for "tab mode" — focus the active tab so ←/→ switch sessions (the user 2026-06-25). Enter on a
       // tab drops back in (onTabKey). Any draft text stays in the box, untouched.
       e.preventDefault();
-      if (activeId && queuedEdits.has(activeId)) { cancelQueuedEdit(activeId); return; }
       if (activeId && composerEdits.has(activeId)) { cancelComposerEdit(activeId); return; }
       focusActiveTab();
       return;
@@ -17855,7 +17997,11 @@ setupSettings();
         // the composer's before/after so the kernel's cancelResult ok:false can undo it (untouched only).
         const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
         const before = ta ? ta.value : "";
-        restoreToComposer(qmd);
+        // a field open on this bubble (T306): the editor goes with the entry, and the words the user was working on are
+        // what comes back, not the message as it stood (review find)
+        const edx = queuedEditorFor(sidQ, { md: qmd, qid: el.dataset.qid || undefined, qts: el.dataset.qts !== undefined ? Number(el.dataset.qts) : undefined });
+        if (edx) queuedEditors.delete(edx.key);
+        restoreToComposer(edx && edx.open && edx.text.trim() ? edx.text : qmd);
         // a provisional ✕ gets no cancelResult (nothing was posted) — no stash to consume, none kept
         if (!provisional) pendingCancelRestores.set(activeId + " " + qmd, { before, after: ta ? ta.value : "" });
       }
@@ -17871,23 +18017,27 @@ setupSettings();
       if (grp) reflowQueuedGroup(grp);
       if (contentX && wasAtBottom) writeScroll(contentX, contentX.scrollHeight, "queued-x", true);
     },
-    // ✎ on a queued bubble (the user 2026-09-08): edit the message while it is still romp's to change.
-    // Delegated like the ✕ (the tail rebuilds every push). The edit rides the ACTIVE composer, so a bubble
-    // owned by another session (a comment thread's popover) is declined with a pointer rather than edited
-    // in the wrong box. The acknowledgement is the composer filling + the editing pill, at once.
+    // ✎ on a queued bubble (the user 2026-09-08; in place since T306): the bubble's text becomes a field where it
+    // sits, the hold goes out, and the composer is never touched. Delegated like the ✕ (the tail rebuilds every push);
+    // the bubble's owner (a comment thread's popover, or the chat) is the session the edit belongs to.
     qedit: (el) => {
-      if (!activeId) return;
       const qmd = (el as any)._qmd as string | undefined;
       if (!qmd) return;
       const sidQ = owningSidOf(el) || activeId;
-      if (sidQ !== activeId) { warnToast("open that session's chat to edit its queued message"); return; }
+      if (!sidQ) return;
+      if (sidQ !== activeId) { warnToast("open that session's chat to edit its queued message"); return; }   // the field is painted by the active chat's render; a bubble owned elsewhere gets a pointer, not a silent hold
       const ref: QueuedEditRef = { md: qmd };
       if (el.dataset.qidx !== undefined) ref.idx = Number(el.dataset.qidx);
       if (el.dataset.qpark !== undefined) ref.park = Number(el.dataset.qpark);
       if (el.dataset.qts !== undefined) ref.qts = Number(el.dataset.qts);
+      if (el.dataset.qid) ref.qid = el.dataset.qid;
       if (el.dataset.qopt === "1") ref.optimistic = true;
-      beginQueuedEdit(sidQ, ref);
+      const bub = el.closest(".queued-bubble") as HTMLElement | null;
+      openQueuedEditor(sidQ, ref, bub ? bub.getBoundingClientRect().width : 0);
     },
+    // the field's Save and Cancel (T306): delegated too, keyed by the editor's id (the field is rebuilt every push)
+    qsave: (el) => { const ed = queuedEditorByEid(Number(el.dataset.eid)); if (ed) saveQueuedEditor(ed); },
+    qcancel: (el) => { const ed = queuedEditorByEid(Number(el.dataset.eid)); if (ed) cancelQueuedEditor(ed); },
     // a comment highlight or its turn badge (the user 2026-08-13): open the thread's popover at the
     // click. Delegated — marks and badges are re-created on every transcript rebuild — and so is
     // every popover BUTTON below: the popover's conversation refreshes on comments frames, and a
