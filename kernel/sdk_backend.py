@@ -29,6 +29,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -2133,6 +2134,56 @@ def _pid_alive(pid: int) -> bool:
     except OSError:
         return True                                     # exists; not ours to signal
     return True
+
+
+TEST_ROOT_PREFIX = "romp-tests-"
+TEST_ROOT_OWNER_MARKER = "romp-tests-owner.json"    # tests/conftest.py writes it at mint time
+
+
+def sweep_dead_test_roots(tmpdir: str, log=None) -> int:
+    """Remove the test suite's `romp-tests-*` temp roots under `tmpdir` whose OWNER IS DEAD; return the
+    count removed. tests/conftest.py mints one root per run, redirects TMPDIR into it and removes it
+    at run end — but a run that dies without reaching that removal (pytest-timeout's os._exit, a kernel
+    restart cutting the tool shell, the cut-turn reaper's kill) leaves the whole root standing, and on
+    a shared machine those roots piled into millions of files that the next boot's /tmp cleanup spent
+    39 minutes deleting (2026-09-10). Nothing in the dead run can clean up, so the kernel does, at boot
+    reconcile: it already reaps orphaned CLIs and leftover scopes there.
+    The marker inside the root names the owning pid. A root whose pid is ALIVE is a run in progress
+    and stays (a sibling test kernel booting inside a run's TMPDIR sees the run's own live root); a
+    root with NO marker, or one this code cannot read, stays too — the sweep cannot tell a foreign
+    directory or a pre-marker root from a leak, and refusing is the safe direction. Only a readable
+    marker naming a dead pid is a leak by construction. Never raises; a failure is logged and skipped.
+    Under the test suite the kernel's own tmpdir IS a run's root (TMPDIR is redirected), so the sweep
+    never reaches the real system temp dir from inside a test."""
+    swept = 0
+    try:
+        names = os.listdir(tmpdir)
+    except OSError:
+        return 0
+    for name in names:
+        if not name.startswith(TEST_ROOT_PREFIX):
+            continue
+        root = os.path.join(tmpdir, name)
+        marker = os.path.join(root, TEST_ROOT_OWNER_MARKER)
+        try:
+            if os.path.islink(root) or not os.path.isdir(root):
+                continue
+            with open(marker, "r", encoding="utf-8") as fh:
+                pid = int(json.load(fh)["pid"])
+        except (OSError, ValueError, TypeError, KeyError):
+            continue                                    # no marker, or not one we wrote: not ours to remove
+        if pid == os.getpid() or _pid_alive(pid):
+            continue
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+            if not os.path.isdir(root):
+                swept += 1
+            elif log:
+                log("boot reconcile: dead test root not fully removed: %s" % root)
+        except Exception as e:                          # rmtree(ignore_errors) should not raise; belt and braces
+            if log:
+                log("boot reconcile: dead test root %s: %s" % (root, e))
+    return swept
 
 
 class ApiHealth:
@@ -8055,6 +8106,13 @@ class SdkBackend:
                 except Exception:
                     self._log("boot reconcile: cwdPending heal for %s failed: %s"
                               % (r.get("sid"), traceback.format_exc()))
+        # Dead-owner test roots: `romp-tests-*` dirs left in the temp dir by suites that died without
+        # their run-end cleanup (see sweep_dead_test_roots). Independent of the sessions below.
+        try:
+            swept_roots = sweep_dead_test_roots(tempfile.gettempdir(), self._log)
+        except Exception:
+            swept_roots = 0
+            self._log("boot reconcile: test-root sweep failed (continuing): %s" % traceback.format_exc())
         try:
             alive = [r for r in regs if r.get("alive") and r.get("sid")]
             reaped = 0
@@ -8161,11 +8219,11 @@ class SdkBackend:
                 except Exception:
                     self._log("boot reconcile: session %s failed (sweep continues): %s"
                               % (r.get("sid"), traceback.format_exc()))
-            if reaped or resumed or restored or notified or scopes_stopped:
+            if reaped or resumed or restored or notified or scopes_stopped or swept_roots:
                 self._log("boot reconcile: resumed %d cut turn(s), restored %d queued message(s), "
                           "notified %d session(s) of dead background tasks, reaped %d orphaned CLI(s) with their "
-                          "process trees, stopped %d leftover session scope(s)"
-                          % (resumed, restored, notified, reaped, scopes_stopped))
+                          "process trees, stopped %d leftover session scope(s), swept %d dead test root(s)"
+                          % (resumed, restored, notified, reaped, scopes_stopped, swept_roots))
                 self._poke()
             # STAGGERED spawn (see BOOT_RESUME_CONCURRENCY): every reg above is already fixed —
             # queues persisted, heals applied — so even a death mid-stagger loses nothing (the next

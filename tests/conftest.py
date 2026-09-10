@@ -6,11 +6,13 @@ test module, so this is a suite-wide floor; per-class _rebind_state/tempdir isol
 top exactly as before."""
 import atexit
 import importlib.util
+import json
 import os
 import re
 import shutil
 import sys
 import tempfile
+import time
 
 import pytest
 from _pytest._code.code import ReprExceptionInfo, ReprFileLocation, ReprTracebackNative
@@ -47,6 +49,32 @@ _TMP_ROOT = tempfile.mkdtemp(prefix="romp-tests-")
 tempfile.tempdir = _TMP_ROOT
 os.environ["TMPDIR"] = _TMP_ROOT
 _PACKAGE_STATE_DIR = getattr(sys.modules.get("tests"), "STATE_DIR", None)
+
+# Owner marker (2026-09-10): a run that dies without reaching any removal below — pytest-timeout's
+# os._exit, a kernel restart cutting the tool shell, the cut-turn reaper's kill — leaves its root
+# standing, and on a shared machine those roots piled into millions of files that the next boot's
+# /tmp cleanup spent 39 minutes deleting. Nothing in this process can run after such a death, so the
+# removal has to come from outside: the kernel's boot reconcile sweeps `romp-tests-*` roots under the
+# system temp dir whose owner is dead (sdk_backend.sweep_dead_test_roots). This marker is what it
+# reads — the owning pid, written at mint time so it is there for the whole life of the root. A root
+# WITHOUT a marker is not touched (the sweep cannot tell a foreign directory from a pre-marker one).
+# The package state dir sits beside the root, not inside it, so it carries its own copy.
+TEST_ROOT_OWNER_MARKER = "romp-tests-owner.json"
+
+
+def _write_owner_marker(d):
+    if not d:
+        return
+    try:
+        with open(os.path.join(d, TEST_ROOT_OWNER_MARKER), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"pid": os.getpid(), "started": time.time(),
+                                 "argv": [os.path.basename(a) for a in sys.argv[:3]]}))
+    except OSError:
+        pass                                 # a root we cannot write into is one we cannot leak into either
+
+
+_write_owner_marker(_TMP_ROOT)
+_write_owner_marker(_PACKAGE_STATE_DIR)
 
 
 def _remove_run_dirs(report=False):
