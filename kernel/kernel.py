@@ -45009,11 +45009,13 @@ def _reveal_request(sid, wid, boot=False, via=""):
     2026-09-06, whose tap on the phone did nothing — the phone is where sockets die without a
     close: a suspended app, a VPN link that dropped with the screen):
       boot  — the shell says the page is BOOTING (the deep-link arrival: iOS opens the installed
-              app's one window on the link, or the app comes back from a kill). Its own chat pane
-              cannot be connected yet, so a socket wearing its wid is the PREVIOUS page's
-              (sessionStorage keeps the wid across a reload) — dead, and the ping timeout has up to
-              WS_DEAD_S to say so. Park only; "delivering" there parked nothing and the new pane's
-              ready found nothing to consume.
+              app's one window on the link, or the app comes back from a kill). A socket wearing its
+              wid is usually the PREVIOUS page's (sessionStorage keeps the wid across a reload) —
+              dead, and the ping timeout has up to WS_DEAD_S to say so — but it can also be this
+              page's own chat pane, when the pane's ready beat the shell's fetch (T312: a slow
+              machine). So a boot reveal is delivered AND kept parked, the unproven rule below, never
+              parked alone: 2026-09-06 to 2026-09-10 it was park-only, and a pane already ready found
+              it parked after its ready had passed, so the tap never landed.
       unproven — a live tap, but the target has a ping on the wire nobody has answered (pingAt set:
               the peer is unproven since the last heartbeat). Deliver as before AND keep a copy
               parked, tagged with who it went to: the pong that proves that socket alive retires it
@@ -45030,13 +45032,21 @@ def _reveal_request(sid, wid, boot=False, via=""):
     the pane's ready never came for that wid; consumed — the pane got it. Ids clipped: enough to
     match rows, not a transcript of anything."""
     with _clients_lock:
-        targets = [] if boot else [c for c in _clients if c["app"] == "chat" and (c.get("wid") or "") == wid]
+        targets = [c for c in _clients if c["app"] == "chat" and (c.get("wid") or "") == wid]
     delivered, sent = False, []
     for c in targets:
         try:
             c["send"](json.dumps(_reveal_msg(sid)))
             delivered = True
-            if c.get("pingAt") is not None:
+            # A booting page's same-wid socket may be the PREVIOUS page's (dead, its pong never coming) — or
+            # this very page's chat pane, whose ready beat the shell's fetch (T312, 2026-09-10: a slow machine
+            # put the pane's ready first, the boot reveal was parked after it with nothing left to consume it,
+            # and the tap landed on whichever session frame the pane adopted first). Both wear the same wid and
+            # nothing here can tell them apart, so a boot reveal is delivered like an unproven live tap: sent to
+            # every same-wid pane AND kept parked until one of them answers (its pong or next message retires
+            # the copy, _reveal_proven) or a new pane's ready consumes it. A dead socket swallows its send; a
+            # live pane lands the focus; the one thing that no longer happens is a park nobody consumes.
+            if boot or c.get("pingAt") is not None:
                 sent.append(c)
         except Exception:
             pass
@@ -45044,7 +45054,7 @@ def _reveal_request(sid, wid, boot=False, via=""):
         _PENDING_REVEAL[0] = {"sid": str(sid), "wid": str(wid or "")}
     elif sent:
         _PENDING_REVEAL[0] = {"sid": str(sid), "wid": str(wid or ""), "sent": sent}
-    outcome = ("delivered, copy parked (target unproven)" if sent else "delivered") if delivered else "parked"
+    outcome = ("delivered, copy parked (%s)" % ("booting page" if boot else "target unproven") if sent else "delivered") if delivered else "parked"
     print("[reveal] %s sid=%s wid=%s%s: %s" % (via or "shell", str(sid)[:8], str(wid or "")[:8],
                                              " boot" if boot else "", outcome), file=sys.stderr)
     return delivered

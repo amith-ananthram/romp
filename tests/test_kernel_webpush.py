@@ -1310,6 +1310,36 @@ class RevealAiming(unittest.TestCase):
             km._consume_pending_reveal(mine)
             self.assertEqual(len(mine_got), 1, "consumed means consumed")
 
+    def test_a_boot_reveal_reaches_a_pane_whose_ready_beat_the_fetch_and_keeps_a_copy(self):
+        """T312 (2026-09-10): on a slow machine the page's chat pane can say ready BEFORE the shell's boot fetch
+        parks the reveal, and a park nobody consumes lands the tap on whichever session frame the pane adopted
+        first. A boot reveal therefore goes to every same-wid chat pane like an unproven live tap: delivered
+        AND kept parked (the same-wid socket may be the previous page's, dead), retired by the pane's answer
+        or consumed by a new pane's ready. Before the fix a boot reveal was parked alone."""
+        mine, mine_got = self._register("chat", "W-phone")   # ready already, no ping outstanding
+        with mock.patch.object(km, "_tmux_sessions", return_value={"SID-live": {}}):
+            self.assertTrue(km._reveal_request("SID-live", "W-phone", boot=True, via="link"), "delivered to the ready pane")
+        self.assertEqual(mine_got, [{"type": "focus", "id": "SID-live", "live": True}])
+        parked = km._PENDING_REVEAL[0]
+        self.assertEqual((parked["sid"], parked["wid"]), ("SID-live", "W-phone"))
+        self.assertEqual(parked.get("sent"), [mine], "…and a copy stays parked, tagged with who got it")
+        # the pane answers (a pong, any message): the copy is retired, so a later ready never replays the tap
+        km._reveal_proven(mine)
+        self.assertIsNone(km._PENDING_REVEAL[0])
+        # the previous page's DEAD socket wears the same wid: its send fails, nothing is delivered, the park
+        # stands for the real pane's ready — the cold-start norm, unchanged
+        dead, _ = self._register("chat", "W-tablet")
+        dead["send"] = lambda s: (_ for _ in ()).throw(OSError("socket closed"))
+        with mock.patch.object(km, "_tmux_sessions", return_value={"SID-live": {}}):
+            self.assertFalse(km._reveal_request("SID-live", "W-tablet", boot=True, via="link"))
+        self.assertEqual(km._PENDING_REVEAL[0], {"sid": "SID-live", "wid": "W-tablet"})
+        real, real_got = _fake_ws_client("chat", "W-tablet")
+        with mock.patch.object(km, "_tmux_sessions", return_value={"SID-live": {}}):
+            km._consume_pending_reveal(real)
+        self.assertEqual(real_got, [{"type": "focus", "id": "SID-live", "live": True}])
+        self.assertIsNone(km._PENDING_REVEAL[0])
+
+
     def test_a_widless_park_matches_the_first_chat_pane(self):
         # sessionStorage blocked → the shell has no wid; better the first chat pane than a dropped tap
         with mock.patch.object(km, "_tmux_sessions", return_value={"S": {}}):
@@ -1318,17 +1348,21 @@ class RevealAiming(unittest.TestCase):
             km._consume_pending_reveal(c)
         self.assertEqual(got[0]["id"], "S")
 
-    def test_a_booting_page_parks_past_the_previous_pages_socket(self):
-        # the deep-link arrival (2026-09-06, the phone): the page is BOOTING, so its own chat pane
-        # cannot be connected yet — a same-wid chat socket the kernel still holds is the PREVIOUS
-        # page's (sessionStorage keeps the wid across a reload; a suspended phone never sent its
-        # close, and the ping timeout has up to WS_DEAD_S to notice). "Delivering" there parked
-        # nothing, and the new pane's ready found nothing to consume.
+    def test_a_booting_page_reaches_a_same_wid_socket_and_still_parks_for_the_fresh_panes_ready(self):
+        # the deep-link arrival (2026-09-06, the phone): the page is BOOTING, and a same-wid chat socket the
+        # kernel still holds is usually the PREVIOUS page's (sessionStorage keeps the wid across a reload; a
+        # suspended phone never sent its close, and the ping timeout has up to WS_DEAD_S to notice). From
+        # 2026-09-06 to 2026-09-10 a boot reveal was therefore parked ALONE — until T312 found the other owner
+        # of that wid: this page's own chat pane, whose ready beat the shell's fetch on a slow machine, so the
+        # park had nothing left to consume it and the tap never landed. Now the boot reveal is delivered to
+        # the same-wid socket like an unproven live tap AND a copy stays parked: a dead twin swallows its
+        # frame and the fresh pane's ready consumes the copy; a live pane lands it and its answer retires it.
         twin, twin_got = self._register("chat", "W-phone")
         with mock.patch.object(km, "_tmux_sessions", return_value={"S": {}}):
-            self.assertFalse(km._reveal_request("S", "W-phone", boot=True))
-            self.assertEqual(twin_got, [], "a booting page's tap is never aimed at a socket that predates it")
-            self.assertEqual(km._PENDING_REVEAL[0], {"sid": "S", "wid": "W-phone"})
+            self.assertTrue(km._reveal_request("S", "W-phone", boot=True))
+            self.assertEqual(twin_got, [{"type": "focus", "id": "S", "live": True}], "the same-wid socket is told: it may be the page's own pane")
+            parked = km._PENDING_REVEAL[0]
+            self.assertEqual((parked["sid"], parked["wid"], parked.get("sent")), ("S", "W-phone", [twin]), "…and the copy stays for the fresh pane")
             fresh, fresh_got = _fake_ws_client("chat", "W-phone")
             km._consume_pending_reveal(fresh)
         self.assertEqual(fresh_got, [{"type": "focus", "id": "S", "live": True}])
@@ -1411,21 +1445,24 @@ class RevealRoute(unittest.TestCase):
         self.assertEqual(code, 400)
         self.assertIsNone(km._PENDING_REVEAL[0])
 
-    def test_a_boot_flagged_reveal_parks_even_past_a_connected_same_wid_pane(self):
-        # the deep-link arrival says it is booting; the kernel parks for the pane that is about to
-        # connect and never counts the previous page's socket as delivery (RevealAiming has the why)
+    def test_a_boot_flagged_reveal_reaches_a_connected_same_wid_pane_and_keeps_a_copy_parked(self):
+        # the deep-link arrival says it is booting; a connected same-wid pane may be the previous page's dead
+        # socket OR this page's own pane whose ready beat the fetch (T312), so the route delivers to it AND keeps
+        # the copy parked for the pane that is about to connect (RevealAiming has the why)
         twin, twin_got = _fake_ws_client("chat", "W-x")
         with km._clients_lock:
             km._clients.append(twin)
         try:
-            code, body = self._post("/reveal", {"sid": "SID-x", "wid": "W-x", "boot": True})
+            with mock.patch.object(km, "_tmux_sessions", return_value={"SID-x": {}}):
+                code, body = self._post("/reveal", {"sid": "SID-x", "wid": "W-x", "boot": True})
         finally:
             with km._clients_lock:
                 km._clients.remove(twin)
         self.assertEqual(code, 200)
-        self.assertFalse(json.loads(body)["delivered"])
-        self.assertEqual(twin_got, [])
-        self.assertEqual(km._PENDING_REVEAL[0], {"sid": "SID-x", "wid": "W-x"})
+        self.assertTrue(json.loads(body)["delivered"])
+        self.assertEqual(twin_got, [{"type": "focus", "id": "SID-x", "live": True}])
+        parked = km._PENDING_REVEAL[0]
+        self.assertEqual((parked["sid"], parked["wid"], parked.get("sent")), ("SID-x", "W-x", [twin]))
 
     def test_every_tap_leaves_a_line_in_the_kernel_log(self):
         # 2026-09-08: a phone's tap "did nothing" and nothing recorded whether it had reached the kernel.
