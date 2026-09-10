@@ -30,9 +30,10 @@ Three scenarios against the REAL shell, the REAL worker and the REAL kernel (her
   2. THE LINK ROAD (what an iOS tap produces): the page is navigated to the deep link the declarative message's
      `navigate` names — '/?push-reveal=<api>&push-pid=<pid>' — as iOS does on a tap. The page must land it at boot:
      ONE /reveal via 'link' with boot:true, parked by the kernel and consumed on the chat pane's ready (the tab
-     becomes `api`), /push/landed for the pid, the params stripped from the URL, the 'deeplink' row on file. Then the
-     open page GAINS the params without a load (history.pushState + pageshow, the window iOS navigates in place)
-     for a second push: landed live via 'link' (no boot flag), settled, stripped.
+     becomes `api`), /push/landed for the pid, the params stripped from the URL (and the ?token= it was opened
+     with, which the shell drops once the cookie is set), the 'deeplink' row on file. Then the open page GAINS the
+     params without a load (history.pushState + pageshow, the window iOS navigates in place) for a second push:
+     landed live via 'link' (no boot flag), settled, stripped.
   3. THE VANISH ROAD (what a LIVE iOS app leaves): three test pushes (`api`, `tests`, `docs`) filed at the kernel and
      acked shown by pid, as the phone's worker acks them; the page stubs getNotifications by data.pid and comes forward
      three times. Two of three displayed → exactly the missing one lands: ONE /reveal via 'vanish', the tab on `api`,
@@ -167,6 +168,7 @@ const active = () => chat.evaluate(() => (document.querySelector("#tabs .tab.act
 out.landed = await chat.waitForFunction((sid) => (document.querySelector("#tabs .tab.active") || {}).dataset?.id === sid, cfg.sidB, { timeout: 20000 }).then(() => true).catch(() => false);
 out.after = await active();
 out.urlAfterBoot = page.url();
+out.cookies = (await context.cookies(cfg.origin)).map((c) => ({ name: c.name, value: c.value }));   // the token's home once the address drops it
 for (let i = 0; i < 40 && !out.ledger.length; i++) await page.waitForTimeout(50);
 out.boot = { reveals: out.reveals.slice(), ledger: out.ledger.slice() };
 // back to `web`, so the second arrival has something to change
@@ -328,7 +330,7 @@ class ServedTapLanding(unittest.TestCase):
         base = "http://127.0.0.1:%d" % self.port
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
-            json.dump(dict({"origin": base, "landing": base + "/?token=" + self.token, "sidA": SID_A, "sidB": SID_B}, **extra), f)
+            json.dump(dict({"origin": base, "landing": base + "/?token=" + self.token, "token": self.token, "sidA": SID_A, "sidB": SID_B}, **extra), f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(driver_src)
@@ -490,7 +492,16 @@ class ServedTapLanding(unittest.TestCase):
         self.assertEqual(b["ledger"], [{"pid": pid}], "the row the link named is settled")
         self.assertNotIn("push-reveal", out["urlAfterBoot"], "the params are stripped once read: %r" % out["urlAfterBoot"])
         self.assertNotIn("push-pid", out["urlAfterBoot"])
-        self.assertIn("token=", out["urlAfterBoot"], "…and only OUR params go")
+        # The token leaves the address too, by a different hand: the shell's head drops ?token= the moment the page runs,
+        # once the response that served it has turned it into the romp_token cookie (the dashboard token scrub, 2026-09-10,
+        # which landed on main the same morning as this test and after its pin that "only our params go" was written).
+        # What the user has after a tap is a clean address and a signed-in page: the cookie is what every later request
+        # rides, including the second arrival below. Until this change the line read assertIn, and on main it failed for
+        # that reason alone; the tap itself had landed (every assertion above it passed).
+        self.assertNotIn("token=", out["urlAfterBoot"], "the address keeps no token once the cookie is set: %r" % out["urlAfterBoot"])
+        self.assertEqual([c["value"] for c in out["cookies"] if c["name"] == "romp_token"], [self.token],
+                         "the token must live on as the cookie the page rides, or the clean address is a logout: %r" % out["cookies"])
+        self.assertEqual(out["urlAfterBoot"].rstrip("/"), "http://127.0.0.1:%d" % self.port, "nothing else is left on the address: %r" % out["urlAfterBoot"])
         # THE IN-PLACE ARRIVAL: the open page gained the link without a load and landed it live
         self.assertTrue(out["landed2"], "the open page gaining the link must land it; the tab is %r, reveals %r\n  kernel: %s" % (out["after2"], out["later"]["reveals"], self._reveal_lines()))
         l = out["later"]
