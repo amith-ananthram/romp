@@ -402,6 +402,58 @@ class LeaseRules(unittest.TestCase):
         self.assertEqual(len(be.problems()) - base, 1)
         self.assertIn("exposes no CLI pid", be.problems()[-1]["text"])
 
+    def test_two_sessions_opening_at_once_start_one_heartbeat_thread_and_neither_crashes(self):
+        # the T305 review: the beat thread used to be assigned under the lock and STARTED outside it; a second
+        # opener in the first's write window read the unstarted thread as not alive, replaced it, and both then
+        # started one Thread (RuntimeError out of the connect). Two opens held inside the write window at once.
+        d = tempfile.mkdtemp(); be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None)
+        gate, started, errors = threading.Event(), [], []
+        def loop(self_):
+            started.append(threading.current_thread().name); gate.wait(10)
+        barrier = threading.Barrier(2, timeout=10)
+        real_write = sb.write_lease
+        def write_inside_the_window(state_dir, lease):
+            barrier.wait()                                  # both opens are between the lock and the write
+            real_write(state_dir, lease)
+        client = types.SimpleNamespace(_transport=types.SimpleNamespace(_process=types.SimpleNamespace(pid=os.getpid())))
+        def open_(sid):
+            try:
+                be._lease_open(types.SimpleNamespace(sid=sid, name=sid[-2:], resume_sid=None), client)
+            except Exception as e:
+                errors.append(e)
+        sids = ("11111111-2222-3333-4444-0000000000a1", "11111111-2222-3333-4444-0000000000a2")
+        with mock.patch.object(sb.SdkBackend, "_lease_beat_loop", loop), mock.patch.object(sb, "write_lease", write_inside_the_window):
+            ts = [threading.Thread(target=open_, args=(s,)) for s in sids]
+            for t in ts: t.start()
+            for t in ts: t.join(15)
+        gate.set()
+        self.assertEqual(errors, [], "no open may raise")
+        self.assertEqual(len(started), 1, "one heartbeat thread per backend, started once")
+        self.assertEqual(sorted(l["sid"] for l in sb.list_leases(d)), sorted(sids))
+
+    def test_a_close_during_a_beat_leaves_no_lease_file_behind(self):
+        # the T305 review: a beat snapshot is taken under the lock but each write ran without it, so a beat could
+        # rewrite a lease that _lease_close had just popped and unlinked, and the next boot filed a false
+        # no-live-process row for a session that ended cleanly. The close lands mid-beat, from another thread.
+        d = tempfile.mkdtemp(); be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None)
+        client = types.SimpleNamespace(_transport=types.SimpleNamespace(_process=types.SimpleNamespace(pid=os.getpid())))
+        a = types.SimpleNamespace(sid="11111111-2222-3333-4444-0000000000b1", name="a", resume_sid=None)
+        b = types.SimpleNamespace(sid="11111111-2222-3333-4444-0000000000b2", name="b", resume_sid=None)
+        with mock.patch.object(sb.SdkBackend, "_lease_beat_loop", lambda self: None):
+            be._lease_open(a, client); be._lease_open(b, client)
+        real_write = sb.write_lease; closer = []
+        def write_then_close_b(state_dir, lease):
+            real_write(state_dir, lease)
+            if lease["sid"] == a.sid:                       # b ends cleanly while the beat is between a and b
+                t = threading.Thread(target=be._lease_close, args=(b,)); t.start(); closer.append(t)
+                time.sleep(0.2)
+        with mock.patch.object(sb, "write_lease", write_then_close_b):
+            be._lease_beat_once()
+        for t in closer: t.join(5)
+        self.assertIsNone(sb.read_lease(d, b.sid), "the beat must not rewrite a lease the close removed")
+        self.assertIsNotNone(sb.read_lease(d, a.sid))
+        self.assertEqual(be._lease_beat_once(), 1)
+
     def test_source_pins_the_connect_writes_the_close_drops_and_the_cadence_is_the_drain_holds(self):
         src = open(os.path.join(BIN, "romp_sdk_backend.py")).read()
         self.assertIn("self.backend._lease_open(self, client)", src)

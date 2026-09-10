@@ -8607,15 +8607,16 @@ class SdkBackend:
                  "spawnedAt": int(now), "t": now}
         with self._lock:
             self._leases[str(sess.sid)] = (sess, lease)
-            need = self._lease_thread is None or not self._lease_thread.is_alive()
-            if need:
+            if self._lease_thread is None or not self._lease_thread.is_alive():
+                # started UNDER the lock: an unstarted thread reads as not alive, so a second session
+                # connecting in the first's write window would otherwise adopt it too and both would call
+                # start() on one Thread (RuntimeError out of the connect; the review of T305, 2026-09-10)
                 self._lease_thread = threading.Thread(target=self._lease_beat_loop, name="sdk-lease-beat", daemon=True)
+                self._lease_thread.start()
         try:
             write_lease(self.state_dir, lease)
         except Exception as e:
             self._log("lease (%s): write failed: %s" % (sess.name, e), problem=True)
-        if need:
-            self._lease_thread.start()
 
     def _lease_close(self, sess) -> None:
         """The CLI is gone or being ended on purpose (the session's client closed, a drain reap): drop
@@ -8631,12 +8632,20 @@ class SdkBackend:
         with self._lock:
             items = list(self._leases.values())
         for sess, lease in items:
-            lease["t"] = now
-            lease["fsid"] = str(sess.resume_sid or sess.sid)
-            try:
-                write_lease(self.state_dir, lease)
-            except Exception as e:
-                self._log("lease (%s): heartbeat write failed: %s" % (sess.name, e), problem=True)
+            err = None
+            with self._lock:
+                held = self._leases.get(str(sess.sid))
+                if held is None or held[1] is not lease:
+                    continue          # closed since the snapshot: its file is gone and must stay gone (a rewrite
+                #                       would file a false no-live-process row at the next boot; the T305 review)
+                lease["t"] = now
+                lease["fsid"] = str(sess.resume_sid or sess.sid)
+                try:                  # the write sits under the lock so a close can never slip between the
+                    write_lease(self.state_dir, lease)   # membership check and the file landing
+                except Exception as e:
+                    err = e
+            if err is not None:
+                self._log("lease (%s): heartbeat write failed: %s" % (sess.name, err), problem=True)
         return len(items)
 
     def _lease_beat_loop(self) -> None:

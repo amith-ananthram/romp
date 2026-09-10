@@ -391,13 +391,16 @@ class RealProcessTree(unittest.TestCase):
         the tester's own scope, which the reaper would refuse anyway), the scope listing is empty, and every
         process this test starts is killed by it."""
         d = tempfile.mkdtemp(); be = _backend(d)
-        for sid in (SID, OTHER):
+        # sids minted per run: the census is box-wide, so two checkouts running this test at once must never
+        # see each other's fake CLIs as theirs (the T305 review)
+        sid_a, sid_b = str(uuid.uuid4()), str(uuid.uuid4())
+        for sid in (sid_a, sid_b):
             _reg(d, sid)
-        (live, live_pg), (stale, stale_pg) = self._fake_cli(SID), self._fake_cli(OTHER)
+        (live, live_pg), (stale, stale_pg) = self._fake_cli(sid_a), self._fake_cli(sid_b)
         now = time.time()
-        sb.write_lease(d, {"sid": SID, "fsid": SID, "pid": live, "start": sb.proc_start(live),
+        sb.write_lease(d, {"sid": sid_a, "fsid": sid_a, "pid": live, "start": sb.proc_start(live),
                            "holder": {"pid": os.getpid(), "start": sb.proc_start(os.getpid())}, "version": "", "t": now})
-        sb.write_lease(d, {"sid": OTHER, "fsid": OTHER, "pid": stale, "start": sb.proc_start(stale),
+        sb.write_lease(d, {"sid": sid_b, "fsid": sid_b, "pid": stale, "start": sb.proc_start(stale),
                            "holder": {"pid": P + 80, "start": "1"}, "version": "", "t": now})
         real_run = subprocess.run
         def run(argv, **kw):
@@ -406,26 +409,26 @@ class RealProcessTree(unittest.TestCase):
         deadline = time.time() + 5
         while time.time() < deadline:
             ps = real_run(sb.PS_ARGV, capture_output=True, text=True, timeout=10).stdout.splitlines()
-            if set(sb.find_orphan_clis(ps, [SID, OTHER], os.getpid())) >= {live, stale}:
+            if set(sb.find_orphan_clis(ps, [sid_a, sid_b], os.getpid())) >= {live, stale}:
                 break
             time.sleep(0.05)
-        self.assertEqual(set(sb.find_orphan_clis(ps, [SID, OTHER], os.getpid())), {live, stale},
+        self.assertEqual(set(sb.find_orphan_clis(ps, [sid_a, sid_b], os.getpid())), {live, stale},
                          "by parentage alone both are orphans")
         with mock.patch.object(sb.subprocess, "run", side_effect=run), \
              mock.patch.object(sb, "_read_cgroup", lambda p: ""):
-            be._boot_reconcile([sb.read_reg(Path(d), s) for s in (SID, OTHER)])
+            be._boot_reconcile([sb.read_reg(Path(d), s) for s in (sid_a, sid_b)])
         deadline = time.time() + 5
         while time.time() < deadline and self._alive(stale):
             time.sleep(0.05)
         self.assertFalse(self._alive(stale), "the CLI whose lease did not hold is gone")
         self.assertTrue(self._alive(live), "the leased CLI survived the boot")
-        self.assertIsNotNone(sb.read_lease(d, SID))
-        self.assertIsNone(sb.read_lease(d, OTHER))
+        self.assertIsNotNone(sb.read_lease(d, sid_a))
+        self.assertIsNone(sb.read_lease(d, sid_b))
         rows = [r for r in (json.loads(l) for l in (Path(d) / sb.SESSION_EVENTS_FILE).read_text().splitlines())
                 if r["kind"].startswith("lease.")]
-        self.assertEqual([(r["kind"], r["sid"], r["cliPid"]) for r in rows], [("lease.holder-gone", OTHER, stale)])
+        self.assertEqual([(r["kind"], r["sid"], r["cliPid"]) for r in rows], [("lease.holder-gone", sid_b, stale)])
         # the escalation reaches the surviving, re-parented CLI through its lease
-        self.assertEqual(be._session_cli_pid(_Sess(SID)), live)
+        self.assertEqual(be._session_cli_pid(_Sess(sid_a)), live)
         os.killpg(live_pg, signal.SIGKILL)
 
 
