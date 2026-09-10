@@ -3126,6 +3126,16 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
    browser shim's self-injected stale bar. Defined in feed.css too (the .romp-acted precedent). */
 #rpipe { position: fixed; top: 0; left: 0; right: 0; z-index: 99999; text-align: center;
   background: #2b2d30; color: #e6e6e6; border-bottom: 1px solid #4a4d51; padding: 7px 14px; }
+/* A pane that loaded without its federation manager (2026-09-10, render.ts fedMissing): an ERROR state, not a
+   status — the strip shows the kernel's seed unarranged and drags are refused — so it is said above the strip with
+   the one action that fixes it, in the pipe-down bar's dress but IN FLOW (the body is a flex column): the strip
+   below it keeps every working control (select, menu, close); only its order is wrong. A fixed bar across the top
+   would hide exactly those, the host-offline bar's mistake noted below. */
+#rfed { flex: 0 0 auto; text-align: center;
+  background: #2b2d30; color: #e6e6e6; border-bottom: 1px solid #4a4d51; padding: 7px 14px; }
+#rfed button { margin-left: 8px; font: inherit; padding: 2px 10px; border-radius: 5px; border: 1px solid #4a4d51;
+  background: #3a3d41; color: #e6e6e6; cursor: pointer; }
+#rfed button:hover { background: #45484d; }
 /* (#rhostoff, an unreachable-host banner pinned to the top of the pane, lived here for a few hours on
    2026-07-29 and was removed the same day: fixed to the top, it landed squarely on the session tab strip
    and hid the sessions to announce that one machine had gone away. The drop now flashes the rail's

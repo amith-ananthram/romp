@@ -32,7 +32,7 @@ import { awaitWord, awaitBreakdown, groupRows, GROUP_TITLE, workingFor, type Awa
 import { isClearCmd, openTopTitles, clearConfirmDetail, endConfirmDetail } from "./clear-confirm";
 import { prebuildPlan, type ViewState } from "./prebuild";
 import { newSkeletonState, applyTabOrderSkeleton, onStatus, onFull, onDismiss, onSocketUp, nextPrefetch, renderKind } from "./skeleton-tabs";
-import { reconcileTabOrder } from "./tab-order";
+import { reconcileTabOrder, adoptArrival } from "./tab-order";
 import { writeViewOrder } from "./view-order";
 import { planStrip, readTabGroups, writeTabGroups, setSectionCollapsed, sectionRef, isPinned, setPinned, prunePinned, reachableFrom, headWords,
          followAdoption, reorderTagOrder, TABGROUPS_KEY, TABGROUPS_EVENT, type TabSection } from "./tab-groups";
@@ -83,7 +83,7 @@ import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, chipLabe
 import { dragSlotIndex } from "./dragslot";
 import { perfFrameHandler } from "./perf-telemetry";
 import { linkifyPrRefs, senderPrRepo, postalSenderHost } from "./pr-links";
-import { listenForFrames } from "./frame-listener";
+import { listenForFrames, federationMissing, federationLoadEntry, fedRetryKey } from "./frame-listener";
 import { highlightHtml } from "./highlight-cache";
 import { wrapCodeLines, addCopyBtn } from "./code-block";   // a fence's per-line rows and Copy button, shared with the file viewer
 import { turnWorkedSecs as workedSecsOf, workedFooterPlan } from "./worked-footer";
@@ -4838,6 +4838,7 @@ function fadedColor(hex: string): string {
 // layers this over it, and federation re-emits the tab strip, the timeline lanes and the feed's groups
 // together so all three surfaces read the same way.
 function commitTabOrder() {
+  if (fedMissing) return;   // an order that never passed through the arrangement is not an arrangement: never written (see fedMissing)
   writeViewOrder(order.slice());
 }
 // Settle the just-closed tabs against the kernel's authoritative list. Gone from it → the close landed, stop
@@ -5030,9 +5031,10 @@ function flipTabs(mutate: () => void): void {
     });
   });
 }
-function reorderTo(dragId: string, targetId: string, after: boolean) {
+function reorderTo(dragId: string, targetId: string, after: boolean): boolean {   // whether it reordered: a drop that it refused is not a committed drag
+  if (fedMissing) return false;   // no manager: the strip shows the kernel's seed, not an arrangement — a reorder here would be a lie to keep
   const di = order.indexOf(dragId);
-  if (di < 0) return;
+  if (di < 0) return false;
   order.splice(di, 1);
   const ti = order.indexOf(targetId);
   if (ti < 0) order.push(dragId);
@@ -5040,6 +5042,7 @@ function reorderTo(dragId: string, targetId: string, after: boolean) {
   tabDragJustCommitted = true;   // the next render's permutation is this drag, not the bug (order audit)
   commitTabOrder();
   renderTabs();
+  return true;
 }
 
 // Rich tab hover tooltip (the user 2026-06-23): a CUSTOM DOM tooltip (a native `title` can't colour/bold).
@@ -5390,6 +5393,7 @@ function wireTabDrag(tab: HTMLElement, id: string): void {
   // visual, browser-style. dragImageBlank must be a rendered DOM node at dragstart (Chromium
   // snapshots it), hence the fixed off-viewport 1px div installed once below.
   tab.addEventListener("dragstart", (e) => {
+    if (fedMissing) { e.preventDefault(); return; }   // no manager: the strip is the kernel's seed, not an arrangement — nothing to reorder (see fedMissing)
     draggedId = id; draggedEl = tab; tabDragCommitted = false;
     tabStripSig = "";   // the drag live-reorders the strip's DOM: whatever the order ends up, the next render rebuilds
     if (e.dataTransfer) { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setDragImage(dragImageBlank(), 0, 0); }
@@ -5435,7 +5439,7 @@ function makeSkeletonTab(id: string): HTMLElement {
   tab.dataset.id = id;
   tab.dataset.act = "select";   // click → setActive via the stable #tabs delegate (./actions), click-safe as every tab
   tab.addEventListener("keydown", onTabKey);
-  tab.draggable = true;
+  tab.draggable = !fedMissing;
   wireTabDrag(tab, id);
   if (color) {
     tab.style.setProperty("--chip-bg", color.bg);
@@ -5769,7 +5773,7 @@ function renderTabs() {
     tab.addEventListener("keydown", onTabKey);
     // drag-to-reorder (synced with the timeline via the shared session-order file). A subagent viewer
     // stays put: it is client-only, and a reorder would post its id into the kernel's order.
-    tab.draggable = !s.sub;
+    tab.draggable = !s.sub && !fedMissing;   // …and a page without its manager offers no drag at all (fedMissing)
     wireTabDrag(tab, id);   // the dragstart/dragend pair, shared with the skeleton tab (2026-09-07)
     if (s.color) {
       tab.style.setProperty("--chip-bg", s.color.bg);
@@ -6560,7 +6564,7 @@ function startTabRename(id: string, copy?: string) {   // `copy`: which copy of 
     input.remove();
     fixed?.remove();
     label.style.display = "";
-    tab.draggable = true;
+    tab.draggable = !fedMissing;
     renameActive = false;
     if (renderPendingAfterRename) { renderPendingAfterRename = false; renderTabs(); }
     // The bare name, never the display string: the host prefix is this viewer's, and the kernel that
@@ -7795,7 +7799,7 @@ function showReviveLoader(id: string, name: string) {
   // revived session continues it seamlessly.
   if (!sessions.has(id)) {
     sessions.set(id, { id, name, color: null, events: [], status: { state: "opening", sinceEpoch: Date.now() } });
-    order.push(id);
+    if (!order.includes(id)) order.push(id);   // a skeleton the strip already carries is not added twice (review find, 2026-09-10)
   }
   renderTabs();
   setActive(id);
@@ -14683,7 +14687,7 @@ function upsert(msg: any) {
     if (v) v.stale = true;
   }
   if ("ledger" in msg) ledgers.set(msg.id, msg.ledger ?? null);
-  if (!existed) order.push(msg.id);
+  adoptArrival(order, msg.id, existed);   // once: its tabOrder frame usually carried it already (tab-order.ts)
   // The torn-down session is BACK while its hand-over note still holds the box: the user has done nothing
   // since (a click into the box, a tab switch or the ✕ would have retired it), so put them back exactly
   // where they were — its tab active, its kept draft in the box. Merely retiring the note here left the
@@ -15195,6 +15199,46 @@ function pipeBanner(up: boolean, queued: number): void {
 // hid). An event gets a transient cue; the steady state stays on the surfaces already carrying it; no pixel
 // of transcript is spent. hostDownNote is still the one place that note is worded — see host-prefix.ts.)
 
+// A kernel-served page whose federation manager never came up (2026-09-10; frame-listener.ts federationMissing
+// says why): every frame below arrives RAW, no arrangement applied, so the strip would show the kernel's seed order
+// and a drag would write that seed over the browser's arrangement for every other pane. Fail loudly instead: ONE
+// reload to recover, then — retried or recovered — one clientDiag row with what the browser recorded about fetching
+// federation.js each time (the measurement that tells a failed fetch from a bundle that failed to evaluate), and past
+// a failed retry a banner with the reload in hand; the arrangement writer and the drag stand down for as long as the
+// page is in this state (commitTabOrder, reorderTo). The retry is counted in a sessionStorage marker that also carries
+// the first pass's load entry: once per document life, so a bundle that keeps failing cannot loop (blocked storage
+// means no retry at all, since it could not be counted), and the row is filed by the pass that STAYS up — a row posted
+// right before a reload never left the page.
+const fedMissing = federationMissing(window as any);
+{
+  const FED_RETRY = fedRetryKey(location);   // per document: two chat columns of one tab must not share a retry (frame-listener.ts)
+  const entry = fedMissing ? federationLoadEntry(typeof performance !== "undefined" ? (performance.getEntriesByType("resource") as any[]) : []) : null;
+  let first: { load: unknown } | null = null;
+  try { const m = sessionStorage.getItem(FED_RETRY); if (m) first = JSON.parse(m); } catch { /* blocked or corrupt: no earlier pass */ }
+  if (fedMissing && !first) {
+    let counted = false;
+    try { sessionStorage.setItem(FED_RETRY, JSON.stringify({ load: entry })); counted = true; } catch { /* blocked storage */ }
+    if (counted) location.reload();
+  }
+  if (fedMissing && (first || !(() => { try { return !!sessionStorage.getItem(FED_RETRY); } catch { return false; } })())) {
+    vscodeApi?.postMessage({ type: "clientDiag", surface: "chat", what: "federation-missing", data: { load: entry, first: first ? first.load : null } });
+    try { sessionStorage.removeItem(FED_RETRY); } catch { /* */ }   // the incident is filed: the marker goes with it, so the next load gets its own retry (a shell reload, a build drift)
+    // the bar sits IN FLOW above the strip, never over it: the strip's tabs still select, open their menu and close —
+    // only the order is wrong here — and a fixed bar across the top hid exactly those (the host-offline bar removed
+    // on 2026-07-29; styles.css keeps the note)
+    const bar = Object.assign(document.createElement("div"), { id: "rfed" });
+    bar.appendChild(document.createTextNode("Part of this pane failed to load, so its session tabs are out of order and can't be dragged. "));
+    const btn = Object.assign(document.createElement("button"), { type: "button", textContent: "Reload" });
+    btn.addEventListener("click", () => { location.reload(); });
+    bar.appendChild(btn);
+    const strip = document.getElementById("tabbar");
+    if (strip && strip.parentNode) strip.parentNode.insertBefore(bar, strip); else document.body.prepend(bar);
+  }
+  if (!fedMissing && first) {   // the retry fixed it: the incident is still filed, and the marker clears for the next one
+    vscodeApi?.postMessage({ type: "clientDiag", surface: "chat", what: "federation-missing", data: { recovered: true, first: first.load } });
+    try { sessionStorage.removeItem(FED_RETRY); } catch { /* */ }
+  }
+}
 // every frame's synchronous handling time is measured (perf-telemetry.ts: one clientDiag row a
 // minute, read by `romp perf client`); the handler itself is unchanged
 // …and handed the merged frames by direct call from federation.js when this page has it (frame-listener.ts)
@@ -17105,8 +17149,8 @@ setupSettings();
     const next = nextIn ?? (prevIn ? null : walk(dragged.nextElementSibling, fwd, false));
     // committed only when a reorder actually ran: with no neighbour to name the slot (a group holding
     // only this session's copies) dragend takes the cancel path and FLIPs the copy home
-    if (prev?.dataset?.id) { reorderTo(draggedId, prev.dataset.id, true); tabDragCommitted = true; }
-    else if (next?.dataset?.id) { reorderTo(draggedId, next.dataset.id, false); tabDragCommitted = true; }
+    if (prev?.dataset?.id) tabDragCommitted = reorderTo(draggedId, prev.dataset.id, true);
+    else if (next?.dataset?.id) tabDragCommitted = reorderTo(draggedId, next.dataset.id, false);   // a refused reorder is a cancelled drag: dragend FLIPs the strip home
   });
 })();
 // The chat page's hidden word for the kernel's pane shim (chat-visibility.ts): the chat gates no paint, so this

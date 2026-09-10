@@ -782,7 +782,7 @@ test("each pane bundle's one frame listener is installed through listenForFrames
   for (const [file, app] of panes) {
     const src = readUi(file);
     assert.match(src, /import \{ perfFrameHandler \} from "\.\/perf-telemetry";/, file + " imports the wrapper");
-    assert.match(src, /import \{ listenForFrames \} from "\.\/frame-listener";/, file + " imports the helper");
+    assert.match(src, /import \{ listenForFrames(?:, \w+)* \} from "\.\/frame-listener";/, file + " imports the helper");   // the chat also imports the manager-missing check (2026-09-10)
     const installs = src.match(/listenForFrames\(/g) || [];
     assert.equal(installs.length, 1, file + " installs its frame listener once");
     const bare = src.match(/window\.addEventListener\("message", /g) || [];

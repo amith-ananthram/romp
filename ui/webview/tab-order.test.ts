@@ -5,7 +5,7 @@
 // own order tests never reached, which is why the jumping survived every "fix".
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { reconcileTabOrder, retainLiveOmitted } from "./tab-order";
+import { reconcileTabOrder, retainLiveOmitted, adoptArrival } from "./tab-order";
 
 // A tiny stand-in for the client's tab state: the order array + the set of ids whose session is known. The
 // real render.ts drives the SAME three ops (append on a session push, remove on close, reconcile on a kernel
@@ -172,4 +172,15 @@ test("a kernel push omitting a LIVE id keeps its tab; omitting a non-live id rem
   // B NOT live and omitted → not retained → reconcile drops it (the genuine close)
   const goneOrder = retainLiveOmitted(["A"], ["A", "B"], new Set());
   assert.deepEqual(reconcileTabOrder(goneOrder, ["A", "B"], (id) => id === "A" || id === "B", seen), ["A"]);
+});
+
+test("a session frame's id joins the order once: not when its tabOrder frame already carried it, not when the session existed, once when it is new", () => {
+  const order = ["a", "b", "c"];   // c came in a tabOrder frame (tabs-first) before its session frame
+  assert.equal(adoptArrival(order, "c", false), false, "the order already carries it: nothing added");
+  assert.deepEqual(order, ["a", "b", "c"], "…and no duplicate, which a drag's commit would have written into the arrangement");
+  assert.equal(adoptArrival(order, "d", false), true, "a session the order has never seen appends");
+  assert.deepEqual(order, ["a", "b", "c", "d"]);
+  assert.equal(adoptArrival(order, "d", false), false, "a second frame for it adds nothing");
+  assert.equal(adoptArrival(order, "a", true), false, "an existing session's frame never pushes");
+  assert.deepEqual(order, ["a", "b", "c", "d"]);
 });

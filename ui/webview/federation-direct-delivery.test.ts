@@ -300,7 +300,7 @@ test("feed, Outline, chat and the VS Code timeline install their frame handler t
     const src = fs.readFileSync(path.join(UI, file), "utf8");
     assert.ok(src.includes(`listenForFrames(perfFrameHandler("${app}", `), `${file}: installs through the helper`);
     assert.ok(!src.includes('window.addEventListener("message", perfFrameHandler('), `${file}: no bare window install of the frame handler`);
-    assert.match(src, /import \{ listenForFrames \} from "\.\/frame-listener";/, `${file}: imports the helper`);
+    assert.match(src, /import \{ listenForFrames(?:, \w+)* \} from "\.\/frame-listener";/, `${file}: imports the helper`);   // the chat also imports the manager-missing check (2026-09-10)
   }
   const helper = fs.readFileSync(path.join(UI, "frame-listener.ts"), "utf8");
   assert.doesNotMatch(helper, /^import /m, "the helper stays import-free: importing federation.ts would boot a second manager in the pane bundle");
