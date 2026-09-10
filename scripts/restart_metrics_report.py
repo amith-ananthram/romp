@@ -151,19 +151,23 @@ def fig_cut_turns(cp, fr, out):
     f, axs = cp.fig(rows=1, cols=2, w=14, h=max(3.5, 0.5 * len(rows) + 1.5))
     ax1, ax2 = axs if hasattr(axs, "__len__") else (axs, None)
     ys = list(range(len(rows)))
-    ax1.barh(ys, [r["cutTurns"] for r in rows], color=[pal[r["label"]] for r in rows], legend=False)
+    vals = [r["cutTurns"] for r in rows]
+    ax1.barh(ys, vals, color=[pal[r["label"]] for r in rows], legend=False)
     for y, r in zip(ys, rows):
-        ax1.annotate("%d of %d restarts cut a turn" % (r["restarts"] - r["cleanRestarts"], r["restarts"]),
+        ax1.annotate("%d of %d restarts cut" % (r["restarts"] - r["cleanRestarts"], r["restarts"]),
                      (r["cutTurns"], y), xytext=(4, 0), textcoords="offset points", va="center", fontsize=11)
     ax1.set_yticks(ys)
     ax1.set_yticklabels(_ylabels(rows))
     ax1.clean(xlabel="Turns cut by restarts, per window — fewer better", ylabel="")
-    ax1.set_xlim(left=0)
-    ax2.scatter([r["cutTurnsPerRestart"] or 0 for r in rows], ys, color=[pal[r["label"]] for r in rows], legend=False, s=60)
+    ax1.set_xlim(0, max(vals + [1]) * 1.6)         # room for the annotation past the longest bar
+    f.subplots_adjust(wspace=0.3)
+    per = [r["cutTurnsPerRestart"] or 0 for r in rows]
+    ax2.scatter(per, ys, color=[pal[r["label"]] for r in rows], legend=False, s=60)
     ax2.set_yticks(ys)
     ax2.set_yticklabels([""] * len(ys))
     ax2.clean(xlabel="Turns cut per restart — fewer better", ylabel="")
-    ax2.set_xlim(left=0)
+    ax2.set_xlim(0, max(per + [1]) * 1.3)           # from zero, the natural origin; no degenerate tick pair
+    ax2.set_xticks([0, round(max(per + [1]), 2)])
     return _save(f, out, "cut_turns.png")
 
 
@@ -217,10 +221,10 @@ def fig_boot_events(cp, fr, out):
         return None
     import pandas as pd
     df = pd.DataFrame({title: [r["events"][k] for r in rows] for k, title in EVENT_COLUMNS}, index=_ylabels(rows))
-    f, ax = cp.fig(w=11, h=max(4, 0.9 * len(rows) + 1.5))
+    f, ax = cp.fig(w=12, h=max(4, 0.9 * len(rows) + 1.5))
     ax.barh(df)
     ax.clean(xlabel="Sessions gone wrong, per window — fewer better", ylabel="", color_labels="auto")
-    ax.set_xlim(left=0)
+    ax.set_xlim(0, max(float(df.values.max()) if len(df.values) else 1.0, 1.0) * 1.8)   # the labels sit in the clear
     return _save(f, out, "boot_events.png")
 
 
@@ -235,7 +239,8 @@ def fig_redo_cost(cp, fr, out):
                        "Redo turns recorded": [r["redoTurns"] for r in rows]}, index=_ylabels(rows))
     axs[0].barh(df)
     axs[0].clean(xlabel="Turns resumed after a cut, per window — fewer better", ylabel="", color_labels="auto")
-    axs[0].set_xlim(left=0)
+    axs[0].set_xlim(0, max(float(df.values.max()) if len(df.values) else 1.0, 1.0) * 1.8)
+    f.subplots_adjust(wspace=0.3)
     ys = list(range(len(rows)))
     axs[1].barh(ys, [r["redoUsd"] for r in rows], color=[pal[r["label"]] for r in rows], legend=False)
     for y, r in zip(ys, rows):
@@ -257,7 +262,9 @@ def fig_turn_latency(cp, fr, out):
         return None
     pal = _palette(cp, fr["labels"])
     have_first = [(r, r["firstOutSamples"]) for r in rows if r["firstOutSamples"]]
-    f, axs = cp.fig(rows=1, cols=2 if have_first else 1, w=14 if have_first else 8, h=max(4, 0.6 * len(series) + 2))
+    f, axs = cp.fig(rows=1, cols=2 if have_first else 1, w=16 if have_first else 8, h=max(4, 0.6 * len(series) + 2))
+    if have_first:
+        f.subplots_adjust(wspace=0.35)
     ax = axs[0] if have_first else axs
     positions = list(range(len(series)))
     for pos, (r, s, ev) in zip(positions, series):
@@ -266,7 +273,7 @@ def fig_turn_latency(cp, fr, out):
                     xytext=(6, 0), textcoords="offset points", va="center", fontsize=10)
     ax.set_yticks(positions)
     ax.set_yticklabels(["%s · %s" % (r["label"], r["window"]) for r, _, _ in series])
-    ax.clean(xlabel="Turn latency, feed to result (s) — box: quartiles, whiskers to 1.5 IQR; shorter better", ylabel="")
+    ax.clean(xlabel="Feed to result (s): box quartiles, whiskers 1.5 IQR — shorter better", ylabel="")
     ax.set_xlim(left=0)
     if have_first:
         ax2 = axs[1]
@@ -274,8 +281,9 @@ def fig_turn_latency(cp, fr, out):
         for pos, (r, s) in zip(pos2, have_first):
             ax2.box([s], positions=[pos], showfliers=False, color=pal[r["label"]], legend=False, widths=0.6, vert=False)
         ax2.set_yticks(pos2)
-        ax2.set_yticklabels(["%s · %s" % (r["label"], r["window"]) for r, _ in have_first])
-        ax2.clean(xlabel="Feed to first assistant output (s) — shorter better", ylabel="")
+        same_rows = [(r["label"], r["window"]) for r, _ in have_first] == [(r["label"], r["window"]) for r, _, _ in series]
+        ax2.set_yticklabels([""] * len(pos2) if same_rows else ["%s · %s" % (r["label"], r["window"]) for r, _ in have_first])
+        ax2.clean(xlabel="Feed to first output (s) — shorter better", ylabel="")
         ax2.set_xlim(left=0)
     return _save(f, out, "turn_latency.png")
 
@@ -315,7 +323,7 @@ def fig_kernel_memory(cp, fr, out):
                     color=pal[s["label"]], marker="o", linewidth=1.2)
         if boots:
             ax.scatter([p["days"] for p in boots], [p["rssMb"] for p in boots], label="%s, at boot" % s["label"],
-                       color=pal[s["label"]], marker="x", s=30, alpha=0.6)
+                       color=pal[s["label"]], marker="x", s=70, alpha=0.9)
     ax.clean(xlabel="Days since the document's first restart", ylabel="Kernel resident memory (MB) — lower better",
              color_labels="auto")
     ax.set_ylim(bottom=0)
