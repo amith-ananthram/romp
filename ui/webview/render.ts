@@ -87,6 +87,8 @@ import { highlightHtml } from "./highlight-cache";
 import { wrapCodeLines, addCopyBtn } from "./code-block";   // a fence's per-line rows and Copy button, shared with the file viewer
 import { turnWorkedSecs as workedSecsOf, workedFooterPlan } from "./worked-footer";
 import { reconcileRewindPass, type RewindEvent } from "./rewind-reconcile";
+import { watchChatVisibility, browserChatVisibilityDeps } from "./chat-visibility";
+import type { PaneHiddenHost } from "./paint-gate";
 
 for (const [name, lang] of Object.entries({
   bash, sh: bash, shell: bash, python, py: python, javascript, js: javascript,
@@ -10601,10 +10603,13 @@ function schedulePrebuild(): void {
 function cancelPrebuild(): void {
   if (prebuildHandle != null) { cancelIdle(prebuildHandle); prebuildHandle = null; }
 }
-// The pane iframe is display:none (the phone shell parks off-screen panes that way) — the shim's own test,
-// mirrored, so the skeleton prefetch below never spends bytes on a pane nobody can see.
+// The pane iframe is display:none (the phone shell parks off-screen panes that way): the shim's own test, mirrored,
+// so the skeleton prefetch below never spends bytes on a pane nobody can see. Two witnesses, read as their union
+// (paint-gate.ts states the rule): the zero-viewport probe sees a pane hidden since load, and the word this page
+// publishes (window.__rompPaneHidden, chat-visibility.ts) sees one hidden after a first show, which in Chromium
+// keeps its size.
 function paneHidden(): boolean {
-  try { return window.parent !== window && (window.innerWidth === 0 || window.innerHeight === 0); } catch { return false; }
+  try { return (window.parent !== window && (window.innerWidth === 0 || window.innerHeight === 0)) || (window as PaneHiddenHost).__rompPaneHidden === true; } catch { return false; }
 }
 // The prefetch never runs while the browser tab is hidden (nextPrefetch); coming back is the event that re-arms
 // it. (A display:none pane has no event for its CSS flip — it re-arms on the next upsert / click instead.)
@@ -17027,6 +17032,9 @@ setupSettings();
     else if (next?.dataset?.id) { reorderTo(draggedId, next.dataset.id, false); tabDragCommitted = true; }
   });
 })();
+// The chat page's hidden word for the kernel's pane shim (chat-visibility.ts): the chat gates no paint, so this
+// is the one place it measures its own visibility. Once, at top level, over the page's body.
+watchChatVisibility(document.body, browserChatVisibilityDeps());
 // right-click a selection in the transcript → Reply (quote it) / Copy
 document.getElementById("content")?.addEventListener("contextmenu", showSelectionMenu);
 // The chat document hosts the viewer itself (openPath), so it boots the viewer's listener with the

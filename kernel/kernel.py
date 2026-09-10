@@ -42680,7 +42680,19 @@ try{window.dispatchEvent(new Event("romp:wsfresh"));}catch(e){}}   // the pane's
 // checked at RAISE time (there is no event for a CSS display flip). The hidden pane still reconnects in
 // the background; if it is shown again while genuinely stale, its watchdog re-raises within one tick,
 // now visible, and the resync retires it exactly as before.
-function paneHidden(){try{return window.parent!==window&&(window.innerWidth===0||window.innerHeight===0);}catch(e){return false;}}
+// That probe is one of TWO witnesses, and this reads their union (ui/webview/paint-gate.ts states the rule). In
+// Chromium the probe is right for a pane hidden SINCE LOAD only: a display:none iframe keeps the size of its last
+// show there, so it misses every pane the shell hides after the user has looked at it, the phone shell's every
+// tab switch. The pane's own visibility code holds the two measures that do not miss it (document.hidden and its
+// IntersectionObserver) and publishes their union as window.__rompPaneHidden on its own events (paint-gate.ts
+// publishPaneHidden for the feed and Outline panes, ui/webview/chat-visibility.ts for the chat page, the
+// timeline's _publishPaneHidden; never a timer; nothing until the observer has spoken). Firefox is the mirror
+// image: a display:none iframe's viewport reads 0 (the probe is right) but its IntersectionObserver does not run,
+// so the word stays at its last verdict. So hidden is EITHER witness at raise time, the probe or a published
+// word of true, and never the word first. A standalone page (a bare /chat or /feed, no shell) reads the same word:
+// its own reload bar (selfStale) is held while the page's tab is hidden, and if the connection is still stale on
+// the return, the foreground redial's arm raises it, now visible.
+function paneHidden(){try{return (window.parent!==window&&(window.innerWidth===0||window.innerHeight===0))||window.__rompPaneHidden===true;}catch(e){return false;}}
 // every raise (and every hidden-pane suppression) leaves a clientDiag breadcrumb naming the pane, the
 // PATH that raised (reconnect/foreground), the socket state and the quiet gap — so the next "the banner
 // keeps flapping" report is diagnosable from client-diag.jsonl instead of re-hypothesized (the user

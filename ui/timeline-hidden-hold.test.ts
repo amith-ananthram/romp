@@ -263,6 +263,41 @@ test("destroy() unhooks the visibility listener and the observer", () => {
   assert.equal(panel._io, null);
 });
 
+test("the pane publishes its hidden word for the kernel's pane shim on the hold's own events, and not before the observer has spoken", () => {
+  // The shim gates its stale banner on paneHidden(): its zero-viewport probe OR a published word of true. The probe is
+  // blind, in Chromium, to a pane hidden after a first show (the iframe keeps its size), so the panel publishes what
+  // its two measures say (document hidden OR the observer's last word) as window.__rompPaneHidden; here window is g.
+  delete g.__rompPaneHidden;
+  const { panel, io } = mk();
+  assert.equal(typeof g.__rompPaneHidden, "undefined", "boot: nothing published; the shim's probe decides");
+  setVisibility("hidden"); setVisibility("visible");
+  assert.equal(typeof g.__rompPaneHidden, "undefined", "a visibilitychange on either arm before the observer's first entry publishes nothing");
+  io.fire(true);
+  assert.equal(g.__rompPaneHidden, false, "the observer's first word: on screen");
+  io.fire(false);
+  assert.equal(g.__rompPaneHidden, true, "hidden after a first show: the case the probe misses");
+  setVisibility("hidden"); assert.equal(g.__rompPaneHidden, true);
+  setVisibility("visible"); assert.equal(g.__rompPaneHidden, true, "the tab's return is not a show for a display:none pane");
+  io.fire(true); assert.equal(g.__rompPaneHidden, false, "the re-show publishes on the observer's callback");
+  setVisibility("hidden"); assert.equal(g.__rompPaneHidden, true, "the tab hidden with the pane on screen");
+  setVisibility("visible"); assert.equal(g.__rompPaneHidden, false, "the return publishes on visibilitychange");
+  assert.equal(typeof g.__rompPaneHidden, "boolean", "a boolean, the type the shim tests for");
+  done(panel);
+  delete g.__rompPaneHidden;
+});
+
+test("without an IntersectionObserver the pane never publishes: the shim's probe stands for good", () => {
+  const saved = g.IntersectionObserver;
+  g.IntersectionObserver = undefined;
+  delete g.__rompPaneHidden;
+  try {
+    const { panel } = mk();
+    setVisibility("hidden"); setVisibility("visible");
+    assert.equal(typeof g.__rompPaneHidden, "undefined", "a page that published document.hidden alone would have no observer to correct it");
+    done(panel);
+  } finally { g.IntersectionObserver = saved; delete g.__rompPaneHidden; }
+});
+
 test("source pins: the hidden branch of _tickLive returns; both hold sites key on _hiddenForPaint; the release is synchronous", () => {
   const tick = /  _tickLive\(\) \{([\s\S]*?)\n  \}/.exec(SRC)![1];
   assert.match(tick, /if \(!this\._isVisible\(\)\) return;/, "hidden: stop the loop");
@@ -278,6 +313,10 @@ test("source pins: the hidden branch of _tickLive returns; both hold sites key o
   const rel = /  _releasePaintHold\(\) \{([\s\S]*?)\n  \}/.exec(SRC)![1];
   assert.doesNotMatch(rel, /setTimeout|requestAnimationFrame/, "the catch-up paints synchronously in the release event — the compositor shows the cached frame on a tab switch, so this is the earliest fresh one");
   assert.match(rel, /this\._startLiveTick\(\);/);
+  assert.match(SRC, /this\._paneIntersecting = null;/, "the observer's word starts null: nothing is published before it speaks");
+  assert.match(SRC, /this\._onVis = \(\) => \{ this\._publishPaneHidden\(\); this\._releasePaintHold\(\); \};/, "visibilitychange publishes, then releases");
+  assert.match(SRC, /_publishPaneHidden\(\) \{\n\s*if \(typeof window === 'undefined'\) return;\n\s*if \(this\._paneIntersecting === null\) return;/, "one method, silent on a bare host and until the observer speaks");
+  assert.match(SRC, /window\.__rompPaneHidden = docHidden \|\| this\._paneIntersecting === false;/, "the union of both measures, under the name the shim reads");
   assert.match(SRC, /if \(!this\.data \|\| !this\.data\.sessions\) \{ this\._pendingBars = m; return; \}/, "bars ahead of the skeleton are parked");
   assert.match(SRC, /if \(this\._pendingBars\) \{ const pb = this\._pendingBars; this\._pendingBars = null; if \(!ownBars\) this\._mergeBars\(pb\); \}/, "…and update() lands them");
 });
