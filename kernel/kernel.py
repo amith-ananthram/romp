@@ -53438,11 +53438,6 @@ class Handler(BaseHTTPRequestHandler):
             # because cached bundles win the race). Same repair as needFull above, client-wide;
             # ready is posted once per renderer life, so this cannot loop.
             _client_reset_chat_base(client)
-            # From here the pane's bundle LISTENS: a frame sent before this point landed in a document with
-            # no message listener and vanished (the paragraph above). _reveal_request delivers a tap only to
-            # a pane that has said ready and parks for the rest (T312), so the socket's own `ready` message,
-            # which _note_ws_inbound counts as an answer, can never retire a focus this pane never heard.
-            client["ready"] = True
             # Capture the seq of the views blob the pushes below serve — from the frames THIS thread
             # enqueues, so a pusher-thread frame landing meanwhile is not mistaken for the connect push's
             # (the caps frame's viewsSeq, see KERNEL_WS_CAPS)
@@ -53473,6 +53468,12 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     views_seq = None
             _send_caps(client, views_seq=views_seq)
+            # From here the pane LISTENS and holds its frames (the push above): a tap that arrives now is sent
+            # to it directly (_reveal_request targets panes with this stamp only, T312: a socket registered at
+            # its handshake but still loading its bundle has no listener, and its own `ready` message counts
+            # as an answer to _note_ws_inbound, so a frame sent to it earlier was lost and its copy retired);
+            # one that arrived before this point parked, and is consumed right below.
+            client["ready"] = True
             # a push tap parked a reveal for this window's chat pane → deliver it now, AFTER the
             # ready push, so the tab it names already exists on the client (ordered socket)
             _consume_pending_reveal(client)
