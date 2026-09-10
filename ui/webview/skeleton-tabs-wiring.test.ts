@@ -291,7 +291,8 @@ function chipWorld(opts: { clientHeight: number; innerHeight: number; transcript
   const pane = new ChipPane(opts.clientHeight, opts.innerHeight - 40);
   const win = { innerHeight: opts.innerHeight };
   const doc = { getElementById: (id: string): ChipEl | null => id === "content" ? pane : (pane.children.find((c) => c.id === id) ?? null),
-                body: { style: { removeProperty(_k: string): void {} } } };
+                body: { style: { removeProperty(_k: string): void {} },
+                        classList: { add(..._c: string[]): void {}, remove(..._c: string[]): void {}, toggle(_c: string, _on?: boolean): void {}, contains(_c: string): boolean { return false; } } } };   // body.snap-mode (T322): showActive toggles the mode class
   const viewA = new ChipEl("session", opts.transcript);
   pane.appendChild(viewA);
   const viewB = new ChipEl("session", 900); viewB.style.display = "none";   // the stale copy's view, hidden as a non-active view is
