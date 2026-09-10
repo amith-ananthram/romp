@@ -18,7 +18,7 @@ import types
 import unittest
 from datetime import datetime, timezone
 from unittest import mock
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -27,15 +27,15 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-em = SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-jd = SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
+em = load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+jd = load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 # These exercise tmux BEHAVIOUR (they stub subprocess.run and assert on the argv). Declare a tmux
 # host explicitly so they assert the same thing on a machine without tmux installed, where the
 # backend is otherwise inert by design (see TmuxBackend.available).
 os.environ["ROMP_TMUX_AVAILABLE"] = "1"
 os.environ["ROMP_SERVE_TOKEN"] = "testtok"            # known token for the serve-security test
-km = SourceFileLoader("romp_kernel", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
 
 # The ACCOUNT gate (_limit_hold: a usage limit / monthly spend cap parks every drive op, tested in
 # tests/test_kernel_limit_queue.py) is a SEPARATE axis from the compaction/busy gates this module

@@ -33,7 +33,7 @@ import tempfile
 import time
 import unittest
 from datetime import datetime, timezone
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -42,8 +42,8 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
-km = SourceFileLoader("romp_kernel_qid", os.path.join(BIN, "romp-kernel")).load_module()
-sb = SourceFileLoader("romp_sdk_backend_qid", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+km = load_source("romp_kernel_qid", os.path.join(BIN, "romp-kernel"))
+sb = load_source("romp_sdk_backend_qid", os.path.join(BIN, "romp_sdk_backend.py"))
 
 SID = "5a6b7c8d-1e2f-4a3b-9c4d-5e6f7a8b9c0d"   # private synthetic sid (goal-store fixtures rule)
 T0 = 1_800_000_000

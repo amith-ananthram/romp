@@ -14,7 +14,7 @@ de-arrowed label. Nested handoff rows are untouched. SYNTHETIC fixtures only."""
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from inspect import getsource
 from pathlib import Path
 
@@ -26,7 +26,7 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-km = SourceFileLoader("romp_kernel_hocard", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_hocard", os.path.join(BIN, "romp-kernel"))
 jd = km.jd
 
 SID = "11111111-2222-3333-4444-555555555555"    # the delegating session

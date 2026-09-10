@@ -20,7 +20,7 @@ import os
 import re
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 SELF = os.path.basename(os.path.realpath(__file__))
@@ -28,8 +28,8 @@ SELF = os.path.basename(os.path.realpath(__file__))
 # conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-em = SourceFileLoader("romp_event_model_markerform",
-                      os.path.join(os.path.dirname(HERE), "bin", "romp-event-model")).load_module()
+em = load_source("romp_event_model_markerform",
+                      os.path.join(os.path.dirname(HERE), "bin", "romp-event-model"))
 
 # Assembled rather than written out, so this file is not its own first hit.
 MARKER = re.compile("romp-msg-" + r"(?:id|kind)\s*:")

@@ -24,7 +24,7 @@ import time
 import unittest
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -33,15 +33,15 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-SourceFileLoader("romp_event_model", os.path.join(BIN, "romp-event-model")).load_module()
-SourceFileLoader("romp_judge", os.path.join(BIN, "romp-judge")).load_module()
+load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "test-token-DO-NOT-USE")
 # A dead manager port at module level — NEVER pop: a pop here executes at collection time and
 # erases any suite-wide floor for the rest of the run, and an ABSENT var is the one unsafe state
 # (_run_main_update maps absent to the DEFAULT port: a live manager, if one is running).
 os.environ["ROMP_MANAGER_PORT"] = "1"
-km = SourceFileLoader("romp_kernel_port_ack", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_port_ack", os.path.join(BIN, "romp-kernel"))
 
 
 class _RecordingManager(BaseHTTPRequestHandler):

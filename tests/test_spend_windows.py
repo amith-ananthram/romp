@@ -12,7 +12,7 @@ import tempfile
 import time
 import types
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -20,7 +20,7 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
-km = SourceFileLoader("romp_kernel_spendwin", os.path.join(BIN, "romp-kernel")).load_module()
+km = load_source("romp_kernel_spendwin", os.path.join(BIN, "romp-kernel"))
 
 # the 3rd of a month, midday local — the exact shape of the user's screenshot
 FROZEN = time.mktime((2026, 9, 3, 12, 0, 0, 0, 0, -1))

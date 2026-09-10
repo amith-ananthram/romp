@@ -12,7 +12,7 @@ import json
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 from tests.conftest import restore_env
@@ -30,7 +30,7 @@ Path(_SESS).write_text(json.dumps([
     {"id": STABLE, "name": "web", "dir": "/tmp/notes-api", "state": "waiting",
      "working": "", "lastSid": FORK}]))
 os.environ["ROMP_SESSIONS_FILE"] = _SESS
-ps = SourceFileLoader("romp_postal_selfid", os.path.join(BIN, "romp-postal-service")).load_module()
+ps = load_source("romp_postal_selfid", os.path.join(BIN, "romp-postal-service"))
 
 
 class ForkedSelfIdentity(unittest.TestCase):

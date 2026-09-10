@@ -19,7 +19,7 @@ import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -30,10 +30,10 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-jd = SourceFileLoader("romp_judge_rfl", os.path.join(BIN, "romp-judge")).load_module()
-em = SourceFileLoader("romp_em_rfl", os.path.join(BIN, "romp-event-model")).load_module()
-sb = SourceFileLoader("romp_sdk_backend_rfl", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
-km = SourceFileLoader("romp_kernel_rfl", os.path.join(BIN, "romp-kernel")).load_module()
+jd = load_source("romp_judge_rfl", os.path.join(BIN, "romp-judge"))
+em = load_source("romp_em_rfl", os.path.join(BIN, "romp-event-model"))
+sb = load_source("romp_sdk_backend_rfl", os.path.join(BIN, "romp_sdk_backend.py"))
+km = load_source("romp_kernel_rfl", os.path.join(BIN, "romp-kernel"))
 
 SID = "11111111-2222-3333-4444-555555555555"
 F2 = "66666666-7777-8888-9999-aaaaaaaaaaaa"

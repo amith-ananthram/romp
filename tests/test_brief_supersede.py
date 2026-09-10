@@ -11,7 +11,7 @@ then fall through to the staller's fresh where-this-stands note instead.
 """
 import os
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 import tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -22,7 +22,7 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-jd = SourceFileLoader("romp_judge_bsup", os.path.join(BIN, "romp-judge")).load_module()
+jd = load_source("romp_judge_bsup", os.path.join(BIN, "romp-judge"))
 
 SID = "11111111-2222-3333-4444-555555555555"
 TOP, SUB = SID + ":g1", SID + ":g2"

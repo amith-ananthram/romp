@@ -47,14 +47,15 @@ import time
 import traceback
 import types
 import unittest
-from importlib.machinery import ModuleSpec, SourceFileLoader
+from importlib.machinery import ModuleSpec
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()       # hermetic state BEFORE the load (import-time root)
 os.environ.pop("ROMP_STATE_DIR", None)
-sb = SourceFileLoader("romp_sdk_backend_streamsurvive",
-                      os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+sb = load_source("romp_sdk_backend_streamsurvive",
+                      os.path.join(BIN, "romp_sdk_backend.py"))
 
 SID = "11111111-2222-3333-4444-aaaaaaaaaaa1"           # this module's own synthetic sid
 UNKNOWN_SID = "11111111-2222-3333-4444-bbbbbbbbbbb2"   # a session id the kernel never registered

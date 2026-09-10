@@ -10,7 +10,7 @@ steering so it can't quietly drop out of either copy."""
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -21,7 +21,7 @@ SKILL = os.path.join(ROOT, "claude", "skills", "romp-postal", "SKILL.md")
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-pm = SourceFileLoader("romp_postal_steering", os.path.join(BIN, "romp-postal-service")).load_module()
+pm = load_source("romp_postal_steering", os.path.join(BIN, "romp-postal-service"))
 
 
 class NativeSteering(unittest.TestCase):

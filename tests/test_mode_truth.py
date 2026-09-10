@@ -22,7 +22,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -42,7 +42,7 @@ class _PRD:
 _fake.PermissionResultAllow = _PRA
 _fake.PermissionResultDeny = _PRD
 _fake.PermissionUpdate = lambda **kw: kw
-sb = SourceFileLoader("romp_sdk_backend_modetruth", os.path.join(BIN, "romp_sdk_backend.py")).load_module()
+sb = load_source("romp_sdk_backend_modetruth", os.path.join(BIN, "romp_sdk_backend.py"))
 
 SID = "11111111-2222-3333-4444-00000000d139"
 

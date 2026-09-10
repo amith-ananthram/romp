@@ -10,14 +10,14 @@ import json
 import os
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
+from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
 
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()      # hermetic; constants resolve under here at import
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-pm = SourceFileLoader("romp_postal", os.path.join(BIN, "romp-postal-service")).load_module()
+pm = load_source("romp_postal", os.path.join(BIN, "romp-postal-service"))
 
 SID = "11111111-2222-3333-4444-555555555555"
 
