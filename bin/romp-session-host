@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+"""romp-session-host <spawn.json> — run one session's Claude Code CLI under a host that outlives the
+kernel (kernel/session_host.py has the design). This launcher only arranges the import path: the repo's
+kernel directory (for session_host and the lease helpers in sdk_backend), and the Claude Agent SDK's
+site-packages when the SDK is not already importable — the venv bin/romp-sdk-setup builds under the
+state root (`sdkvenv`), for the python this process runs, or the directory ROMP_SDK_SITE names. With no
+SDK the host still runs, on its built-in pipe transport (the hermetic tests' path; a real install always
+has the SDK, since the kernel refuses SDK sessions without it)."""
+import glob
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+KERNEL_DIR = HERE.parent / "kernel"
+if str(KERNEL_DIR) not in sys.path:
+    sys.path.insert(0, str(KERNEL_DIR))
+
+
+def _sdk_on_path() -> None:
+    if importlib.util.find_spec("claude_agent_sdk") is not None:
+        return
+    explicit = os.environ.get("ROMP_SDK_SITE")
+    if explicit and os.path.isdir(explicit):
+        sys.path.insert(0, explicit)
+        return
+    state = Path(os.environ.get("ROMP_STATE_DIR") or Path(os.environ.get("XDG_STATE_HOME")
+                 or str(Path.home() / ".local/state")) / "romp")
+    tag = "python%d.%d%s" % (sys.version_info[0], sys.version_info[1], "t" if "t" in getattr(sys, "abiflags", "") else "")
+    for sp in sorted(glob.glob(str(state / "sdkvenv" / "lib" / tag / "site-packages"))):
+        if sp not in sys.path:
+            sys.path.insert(0, sp)
+
+
+_sdk_on_path()
+import session_host  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(session_host.main())
