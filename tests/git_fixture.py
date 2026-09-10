@@ -45,7 +45,10 @@ def git(repo, *args, env=None, ident=None, timeout=60, check=True, text=True):
 
 def forbid_background(repo, env=None, timeout=60):
     """Write GIT_NO_BACKGROUND into an EXISTING repo's local config: for a clone or a worktree the fixture
-    did not init itself but that the kernel will run git against. Returns repo."""
+    did not init itself but that the kernel will run git against. A linked worktree shares its main
+    repository's config, so on a worktree of an init_repo repo, or of a clone already given this call, the
+    write rewrites the same values; a worktree needs the call only when its parent was made by a plain git.
+    Returns repo."""
     for k, v in GIT_NO_BACKGROUND.items():
         git(repo, "config", k, v, env=env, timeout=timeout)
     return repo

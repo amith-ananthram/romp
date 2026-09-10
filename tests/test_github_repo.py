@@ -78,6 +78,15 @@ def _repo(root, name, origin=None):
     return d
 
 
+def _bare_clone(root, src, name="bare.git"):
+    """A bare clone of `src` at root/name, its own config forbidding background git work: a clone starts
+    without the keys, and the kernel's git runs against it through its own subprocess, not _git."""
+    bare = os.path.join(root, name)
+    _git("clone", "-q", "--bare", src, bare, cwd=root)
+    forbid_background(bare)
+    return bare
+
+
 def _bump_mtime(path):
     """Move a file's mtime forward by a whole second, so a rewrite within the same clock tick still
     reads as a change — the memo keys on mtime, and the test must not depend on filesystem resolution."""
@@ -794,9 +803,7 @@ class BareRepository(unittest.TestCase):
 
     def test_a_bare_repositorys_branch_is_the_one_its_head_names_memoized_on_head(self):
         src = _repo(self.root, "src", HTTPS_ORIGIN)
-        bare = os.path.join(self.root, "bare.git")
-        _git("clone", "-q", "--bare", src, bare, cwd=self.root)
-        forbid_background(bare)
+        bare = _bare_clone(self.root, src)
         self.assertEqual([km._git_branch(bare) for _ in range(3)], ["main"] * 3)
         self.assertEqual(self.forks, {"--show-toplevel": 1, "--abbrev-ref": 1}, "asked once each, then memoized")
         self.assertIsNone(km._github_repo_of(bare), "no work tree, no tree-derived repo — as before")
@@ -808,14 +815,18 @@ class BareRepository(unittest.TestCase):
 
     def test_a_worktree_beside_the_bare_clone_is_an_ordinary_tree(self):
         src = _repo(self.root, "src", HTTPS_ORIGIN)
-        bare = os.path.join(self.root, "bare.git")
-        _git("clone", "-q", "--bare", src, bare, cwd=self.root)
-        forbid_background(bare)
+        bare = _bare_clone(self.root, src)
         wt = os.path.join(self.root, "topic")
         _git("worktree", "add", "-q", "-b", "topic", wt, "main", cwd=bare)
         forbid_background(wt)
         self.assertEqual(km._git_branch(wt), "topic")
         self.assertEqual(km._github_repo_of(wt), None, "the bare clone has no origin remote")
+
+    def test_the_bare_clones_forbid_background_git_work(self):
+        # as _Fixtures' repos are pinned: the kernel's git runs against the bare clone through its own
+        # subprocess, not _git, so the keys must sit in the clone's own config, which a clone starts without
+        bare = _bare_clone(self.root, _repo(self.root, "src", HTTPS_ORIGIN))
+        self.assertEqual(git(bare, "config", "--local", "--get", "maintenance.auto").stdout.strip(), "false", bare)
 
     def test_a_directory_outside_every_repository_is_still_no_branch_and_no_fork(self):
         d = os.path.join(self.root, "notes")
