@@ -46,7 +46,7 @@ class SettingsSectionsTest(unittest.TestCase):
                     "id=rs-conserve", "id=rs-thinksum", "id=rs-fileedit"):
             self.assertTrue(h.index(">Sessions<") < h.index(rid) < h.index(">Chat<"), rid)
         # Chat: transcript prefs AND the comment defaults (comments are part of the chat)
-        for rid in ("id=rs-compact", "id=rs-branch", "id=rs-cmtmodel", "id=rs-cmtfast"):
+        for rid in ("id=rs-compact", "id=rs-branch", "id=rs-striprows", "id=rs-cmtmodel", "id=rs-cmtfast"):
             self.assertTrue(h.index(">Chat<") < h.index(rid) < h.index(">Sessions pane<"), rid)
         # Sessions pane, then Feed, then Colors
         self.assertTrue(h.index(">Sessions pane<") < h.index("id=rs-collapsegaps") < h.index(">Feed<"))
@@ -114,6 +114,16 @@ class SettingsSectionsTest(unittest.TestCase):
         self.assertIn("activeOnly: true", _gear_src())
         self.assertIn("s.activeOnly = ao.checked", _gear_src())
         self.assertIn("ao.checked = s.activeOnly !== false", _gear_src())
+
+    def test_one_group_per_row_is_wired_to_the_shared_stripGroupRows_setting(self):
+        # "One tag group per row in the tab strip": a Chat-section checkbox, default ON, persisted as
+        # romp:settings.stripGroupRows. render.ts is the reader: the strip's row breaks and the trail's
+        # boundary read it, and it rides the strip's rebuild signature so a flip repaints at once.
+        self.assertIn("id=rs-striprows checked", _gear_src())
+        self.assertIn("One tag group per row in the tab strip", _gear_src())
+        self.assertEqual(_gear_src().count("stripGroupRows: true"), 2, "on in both of load()'s default literals")
+        self.assertIn("s.stripGroupRows = sr.checked", _gear_src())
+        self.assertIn("sr.checked = s.stripGroupRows !== false", _gear_src())
 
     def test_section_header_styling_exists(self):
         self.assertIn("#rsettings .rs-sec {", _gear_css_src())

@@ -16,7 +16,7 @@
 // BROWSER (file-browse.ts, feed bundle) opens files through this same viewer in the FEED document, so
 // whichever bundle imports it gets the identical modal.
 import hljs from "highlight.js/lib/core";
-import { marked } from "marked";
+import { marked, type Tokens } from "marked";
 import { sanitizeMd } from "./md-sanitize";
 import { hostOf, bareId, hostNameNodes } from "./host-prefix";
 import { fileUrl } from "./preview";
@@ -28,6 +28,9 @@ const gclock = require("./gesture-clock.js");   // the gesture clock every setti
 import { delegate } from "./actions";
 import { resolveDocRelative, joinDocPath, urlTitleParts, headingSlug, uniqueSlugs } from "./md-links";
 import { readTextCapped, overCapWords, settleUrlResponse } from "./capped-read";
+import { wrapCodeLines, addCopyBtn } from "./code-block";   // a fence's per-line rows and Copy button, the chat's own
+import { fenceCopyQueue, type Fence } from "./fence-source";   // what Copy copies: the fence's text as the file holds it, tabs and all
+import "./viewer-grammars";   // six more grammars for a viewed file, registered on the bundle's hljs core (rust, go, c, java, sql, toml)
 
 // hljs is registered per-bundle. Same language set (and grammar registrations) the chat's fence
 // highlighting uses, dup-guarded, so importing this module alongside render.ts costs nothing.
@@ -59,6 +62,7 @@ const LANG: Record<string, string> = {
   yaml: "yaml", yml: "yaml", sh: "bash", bash: "bash", zsh: "bash", bats: "bash",
   html: "xml", htm: "xml", xml: "xml", svg: "xml", vue: "xml", css: "css", scss: "css",
   md: "markdown", markdown: "markdown", diff: "diff", patch: "diff",
+  rs: "rust", go: "go", c: "c", h: "c", java: "java", sql: "sql", toml: "ini", ini: "ini",   // viewer-grammars.ts (toml is hljs's ini grammar)
 };
 
 function langFor(path: string): string | null {
@@ -295,6 +299,40 @@ function dropUrlRead(): void {
   }
 }
 
+// ── the body's content width, for the sheets ──────────────────────────────────────────────────────
+// A table of the rendered document's own (a direct child of the .fileview-md root) may grow past the prose column, up to
+// the body's content width less the root's inset (`.fileview-md > table` in both sheets reads --fv-body-w; the rule there
+// says how). The value is the body's content width as its ResizeObserver reports it (the layout's own event, never a
+// timer; a scrollbar's width is taken), written on EACH TOP-LEVEL TABLE rather than on the body it describes: the property
+// is registered non-inherited (`@property --fv-body-w { inherits: false }`), so a write restyles the tables alone and not
+// every node under the body, as a write to an inherited property on the body would. mdBlock rebuilds the root on every
+// paint and no report follows a paint, so renderBody stamps the fresh tables itself (the returned function)
+// with the width last reported; before the first report the property is unset and the sheet's fallback holds (the cap is
+// the column). Absent ResizeObserver (a stand-in, an old engine) nothing is written and the fallback holds. One watch at a
+// time: the next open, or the close, drops the last.
+let dropWidthWatch: () => void = () => { /* no watch up */ };
+function watchBodyWidth(body: HTMLElement): () => void {
+  dropWidthWatch();
+  let width = -1;                                      // the body's content width as last reported, -1 before the first report
+  const stamp = (): void => {
+    if (width < 0) return;
+    const md = body.querySelector(".fileview-md");
+    if (!md) return;
+    for (const n of Array.from(md.children)) if (n.tagName === "TABLE") (n as HTMLElement).style.setProperty("--fv-body-w", width + "px");
+  };
+  if (typeof ResizeObserver === "function") {
+    const ro = new ResizeObserver((entries) => {
+      const w = entries.length ? entries[entries.length - 1].contentRect.width : body.clientWidth;
+      if (w === width) return;
+      width = w;
+      stamp();
+    });
+    ro.observe(body);
+    dropWidthWatch = () => { ro.disconnect(); dropWidthWatch = () => { /* dropped */ }; };
+  }
+  return stamp;
+}
+
 // ── viewer action registry (the user 2026-08-22) ── INTERNAL SEAM, no compatibility promise:
 // reshape freely. Anything acting on the OPEN file declares itself here instead of hand-wiring into
 // openFileView's action row, where every file-viewer change used to collide. mount() runs once per
@@ -420,6 +458,7 @@ export function closeFileView(): void {
   gitHooks = null;                                     // a reply landing after the close decorates nothing
   dropMediaUrl();                                      // an image/PDF view's bytes leave with the viewer
   dropUrlRead();                                       // …and a URL view's in-flight read is cancelled
+  dropWidthWatch();                                    // …and the body's width watch (watchBodyWidth)
   wrap.remove();
   document.body.classList.remove("fileview-open");
 }
@@ -664,6 +703,7 @@ export function openFileView(path: string, sid?: string | null, frag?: string | 
   bar.appendChild(name); if (sess) bar.appendChild(sess); bar.appendChild(acts);
 
   const body = el("div", "fileview-body");
+  const stampBodyWidth = watchBodyWidth(body);        // the body's content width, for a top-level table's cap (the sheets read --fv-body-w)
   textSize.bindWheel(body);                    // Ctrl/Cmd + wheel over the text steps the size (textSizeControl)
   // A rendered document's RELATIVE links (`[notes](./notes.md)`, `[fig](plots/a.png)`) open the
   // sibling file in this same viewer — mdBlock stamps each one `data-act="fv-open"` with the joined
@@ -776,6 +816,7 @@ export function openFileView(path: string, sid?: string | null, frag?: string | 
     }
     if (text === null || editing) return;   // loading, or the textarea owns the body right now
     body.replaceChildren(rendered ? mdBlock(text, { kind: "file", path, sid: sid || null }) : codeBlock(text, path, true));
+    if (rendered) stampBodyWidth();           // a fresh root's tables take the width last reported (the property sits on the tables)
     if (rendered && pendingFrag) {
       const h = pendingFrag; pendingFrag = null;
       requestAnimationFrame(() => { if (wrap.isConnected) scrollToFragment(body, h); });
@@ -1126,6 +1167,7 @@ export function openUrlView(href: string): void {
   bar.appendChild(name); bar.appendChild(acts);
 
   const body = el("div", "fileview-body");
+  const stampBodyWidth = watchBodyWidth(body);        // the body's content width, for a top-level table's cap (the sheets read --fv-body-w)
   textSize.bindWheel(body);                            // Ctrl/Cmd + wheel over the text steps the size
   // In-document links land on their heading (mdBlock's fv-anchor stamp): one delegated listener, the
   // local viewer's pattern. No fv-open here — a URL document's sibling links are made absolute and
@@ -1164,6 +1206,7 @@ export function openUrlView(href: string): void {
       ? mdBlock(text, { kind: "url", href: loc })      // relative refs resolve against where it LIVES
       : codeBlock(text, parts.base, true));            // basename → langFor → markdown highlighting
     landFragment();                                    // after the paint, and only a rendered one lands
+    if (fmt.md === "rendered") stampBodyWidth();       // a fresh root's tables take the width last reported
   };
   renderBody();
 
@@ -1338,8 +1381,17 @@ type MdDocLoc = { kind: "url"; href: string } | { kind: "file"; path: string; si
 // the dashboard, and a README's <style>, form or fixed-positioned div must never reach the viewer's chrome.
 function mdBlock(text: string, doc?: MdDocLoc): HTMLElement {
   const box = el("div", "fileview-md");
+  const fences: Fence[] = [];                          // marked's code tokens in document order, for the fence pass's Copy (fence-source.ts)
   try {
-    const dirty = marked.parse(text) as string;
+    // The code tokens are collected as the parse walks them: the lexer expanded the file's leading tabs to spaces before
+    // it cut them, and the fence pass below reads each fence's text back out of the file for its Copy button
+    // (fence-source.ts). Handed to THIS parse only, so the chat's marked singleton learns nothing; a walkTokens an
+    // extension put on the defaults runs as well, since per-call options replace rather than compose.
+    const base = marked.defaults.walkTokens;
+    const dirty = marked.parse(text, { walkTokens: (t) => {
+      if (t.type === "code") { const c = t as Tokens.Code; fences.push({ text: c.text, indented: c.codeBlockStyle === "indented" }); }
+      if (base) void base.call(marked, t);
+    } }) as string;
     // The one sanitizer the chat's md() uses too (md-sanitize.ts): html + svg (a note's own inline SVG), no
     // data-* (a document's `<span data-act="stopRetrying">` would otherwise bubble to render.ts's
     // document-level delegate and interrupt the active session; review find on #958, 2026-09-07), and
@@ -1363,6 +1415,19 @@ function mdBlock(text: string, doc?: MdDocLoc): HTMLElement {
   const heads = Array.from(box.querySelectorAll("h1, h2, h3, h4, h5, h6")) as HTMLElement[];
   const slugs = uniqueSlugs(heads.map((h) => headingSlug(h.textContent || "")));
   heads.forEach((h, i) => { h.id = "md-" + slugs[i]; });
+  // A task item wears GitHub's class: marked emits the checkbox as the li's first node with no hook on the li (inside its
+  // first paragraph in a loose list), and the sheets' `li.task-list-item` rule drops the bullet that sat beside the box
+  // and pulls the box into the gutter. After the sanitize (md-sanitize.ts keeps marked's checkbox as the one control a
+  // note carries, and makes an author's enabled one disabled, so every box the stamp sees is inert), and only for a
+  // checkbox that is the item's FIRST NODE: :first-child counts elements alone, so a checkbox an author's raw HTML puts
+  // after the item's text (`- text then <input type="checkbox" disabled>`) matches the selector, and the previousSibling
+  // check leaves it, and its item's bullet, where the file put them. An author who writes the class on an li of their
+  // own, or a raw checkbox that opens an item, gets the same bullet-less item GitHub would give them.
+  box.querySelectorAll('li > input[type="checkbox"]:first-child:disabled, li > p:first-child > input[type="checkbox"]:first-child:disabled').forEach((input) => {
+    if (input.previousSibling) return;                 // text before the box: an author's checkbox mid-item, not a task item
+    const li = input.closest("li");
+    if (li) li.classList.add("task-list-item");
+  });
   if (doc) {
     box.querySelectorAll("img[src]").forEach((node) => {
       const img = node as HTMLImageElement;
@@ -1409,16 +1474,30 @@ function mdBlock(text: string, doc?: MdDocLoc): HTMLElement {
     a.target = "_blank";
     a.rel = "noopener";
   });
-  // Fenced blocks: highlight only a language the fence NAMES and this bundle registers — the same
-  // no-guessing rule as langFor; an unnamed block stays plain rather than being painted at random.
+  // Fenced blocks: highlight only a language the fence NAMES and this bundle registers (the same no-guessing rule as
+  // langFor; an unnamed block stays plain rather than being painted at random). Then, for EVERY fence, named or not, the
+  // chat's own dress (code-block.ts): the per-line rows that number the lines and make a soft-wrap read distinctly from a
+  // real newline, and the Copy button. Copy copies the fence's text AS THE FILE HOLDS IT (fence-source.ts, off the code
+  // tokens the parse collected): the raw text captured here is read before the rows drop the newlines, but after marked's
+  // lexer turned the file's leading tabs into four spaces each, so a Makefile recipe copied from the rendered text pasted
+  // back with spaces; a fence the module does not find in the file copies the raw text as before.
+  const copySources = fenceCopyQueue(text, fences);
   box.querySelectorAll("pre code").forEach((node) => {
     const codeEl = node as HTMLElement;
+    const raw = codeEl.textContent || "";
+    const pre = codeEl.parentElement;
+    const host = pre && pre.tagName === "PRE" ? pre : null;
+    const queued = copySources.get(raw);
+    const toCopy = (queued && queued.length ? queued.shift() : null) ?? raw;
     const lang = (codeEl.className.match(/language-([\w-]+)/) || [])[1];
-    if (!lang || !hljs.getLanguage(lang)) return;
-    try {
-      codeEl.innerHTML = hljs.highlight(codeEl.textContent || "", { language: lang }).value;
-      codeEl.classList.add("hljs");
-    } catch { /* leave plain */ }
+    if (lang && hljs.getLanguage(lang)) {
+      try {
+        codeEl.innerHTML = hljs.highlight(raw, { language: lang }).value;
+        codeEl.classList.add("hljs");
+      } catch { /* leave plain */ }
+    }
+    wrapCodeLines(codeEl);
+    if (host) addCopyBtn(host, toCopy);
   });
   return box;
 }

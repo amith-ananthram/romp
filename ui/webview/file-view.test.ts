@@ -156,6 +156,98 @@ test("composerWindow, executed: own composer → the same-origin shell's chat pa
   assert.equal(run(self, doc([])), null, "unframed and composer-less: nowhere to seed");
 });
 
+// executed: the body's width observer (watchBodyWidth), lifted from the source with its type annotations stripped (the
+// composerWindow lift above; a hand copy would drift), run over a fake ResizeObserver and stand-in nodes. Both sheets'
+// `.fileview-md > table` read --fv-body-w for a top-level table's cap and its shift into the gutters; what the function
+// promises them is run here: nothing before the first report, the body's content width on EACH TOP-LEVEL TABLE (never a
+// nested one, never the prose) after one, the same width on the fresh tables a paint brings (the returned stamp: mdBlock
+// rebuilds the root and no report follows a paint), a repeated width no write, one watch at a time, and no watch at all
+// without ResizeObserver.
+test("watchBodyWidth, executed: --fv-body-w lands on each top-level table after a report and, through the stamp, on a fresh root's tables; a nested table and the prose get nothing; a repeated width writes nothing; the next watch and the drop disconnect; no ResizeObserver, no writes", () => {
+  const head = "function watchBodyWidth(body: HTMLElement): () => void {";
+  const at = VIEW.indexOf("let dropWidthWatch: () => void = ");
+  const end = VIEW.indexOf("\n}\n", VIEW.indexOf(head, at)) + 3;
+  assert.ok(at >= 0 && VIEW.indexOf(head, at) > at && end > at, "watchBodyWidth and its module-level drop found, the drop first");
+  const js = VIEW.slice(at, end)
+    .replace(/: \(\) => void/g, "")                                    // the let's type and the function's return type
+    .replace("(body: HTMLElement)", "(body)")
+    .replace("const stamp = (): void =>", "const stamp = () =>")
+    .replace(/ as HTMLElement\)/g, ")");
+  assert.doesNotMatch(js, /HTMLElement|: void/, "every annotation the lift knows is gone (a new one needs its strip here)");
+  type Node = { tagName: string; className: string; children: Node[]; clientWidth: number; writes: number; style: { setProperty(k: string, v: string): void; getPropertyValue(k: string): string }; querySelector(sel: string): Node | null };
+  const node = (tagName: string, className = "", children: Node[] = []): Node => {
+    const props = new Map<string, string>();
+    const n: Node = { tagName, className, children, clientWidth: 0, writes: 0,
+      style: { setProperty: (k, v) => { props.set(k, v); n.writes++; }, getPropertyValue: (k) => props.get(k) ?? "" },
+      querySelector: (sel) => { const walk = (m: Node): Node | null => { for (const c of m.children) { if (c.className === sel.slice(1)) return c; const d = walk(c); if (d) return d; } return null; }; return walk(n); } };
+    return n;
+  };
+  type Rec = { cb: (entries: Array<{ contentRect: { width: number } }>) => void; targets: unknown[]; live: boolean };
+  const observers: Rec[] = [];
+  class FakeResizeObserver {
+    private rec: Rec;
+    constructor(cb: Rec["cb"]) { this.rec = { cb, targets: [], live: true }; observers.push(this.rec); }
+    observe(t: unknown): void { this.rec.targets.push(t); }
+    disconnect(): void { this.rec.live = false; }
+  }
+  const report = (entries: Array<{ contentRect: { width: number } }>) => { const live = observers.filter((o) => o.live); assert.equal(live.length, 1, "one live observer"); live[0].cb(entries); };
+  const run = new Function("ResizeObserver", js + "\nreturn { watchBodyWidth, drop: () => dropWidthWatch() };") as (ro: unknown) => { watchBodyWidth: (body: Node) => () => void; drop: () => void };
+  /** A rendered root as mdBlock leaves it: prose, a table inside a paragraph (as inside a quote or a list item), two top-level tables. */
+  const fresh = () => { const nested = node("TABLE"); const p = node("P", "", [nested]); const t1 = node("TABLE"); const t2 = node("TABLE"); return { md: node("DIV", "fileview-md", [p, t1, t2]), p, nested, t1, t2 }; };
+  const w = (n: Node) => n.style.getPropertyValue("--fv-body-w");
+  const lib = run(FakeResizeObserver);
+  let root = fresh();
+  const body = node("DIV", "fileview-body", [root.md]);
+  const stamp = lib.watchBodyWidth(body);
+  assert.equal(observers.length, 1); assert.deepEqual(observers[0].targets, [body], "the body is what the observer watches");
+  stamp();
+  assert.equal(w(root.t1) + w(root.t2), "", "before the first report nothing is written: the sheet's fallback holds (the cap is the column)");
+  report([{ contentRect: { width: 900 } }]);
+  assert.equal(w(root.t1), "900px"); assert.equal(w(root.t2), "900px");
+  assert.equal(w(root.nested), "", "a table inside a paragraph is not the document's own: it keeps the prose width");
+  assert.equal(w(root.p), "", "the prose is never written to (the property is non-inherited; a write there would reach nothing anyway)");
+  // a paint: mdBlock rebuilt the root, no report follows; renderBody's stamp writes the width last reported on the fresh tables
+  root = fresh(); body.children = [root.md];
+  assert.equal(w(root.t1), "", "a fresh root starts unset");
+  stamp();
+  assert.equal(w(root.t1), "900px"); assert.equal(w(root.t2), "900px"); assert.equal(w(root.nested), "");
+  // a report of the width already held is a no-op: a root rebuilt between the two reports is not touched by it
+  root = fresh(); body.children = [root.md];
+  report([{ contentRect: { width: 900 } }]);
+  assert.equal(w(root.t1), "", "a repeated width writes nothing");
+  report([{ contentRect: { width: 700 } }]);
+  assert.equal(w(root.t1), "700px"); assert.equal(w(root.t2), "700px");
+  assert.equal(root.t1.writes, 1, "one write per change");
+  // the last of a callback's entries is the newest; a callback with no entry reads the body itself
+  report([{ contentRect: { width: 300 } }, { contentRect: { width: 800 } }]);
+  assert.equal(w(root.t1), "800px", "the last of the entries is the width kept");
+  body.clientWidth = 640; report([]);
+  assert.equal(w(root.t1), "640px", "a callback with no entry reads the body's clientWidth");
+  // one watch at a time: the next open's watch drops the last, and the close drops the watch up
+  const body2 = node("DIV", "fileview-body", []);
+  lib.watchBodyWidth(body2);
+  assert.equal(observers[0].live, false, "the second watch disconnects the first observer");
+  assert.equal(observers.length, 2); assert.deepEqual(observers[1].targets, [body2]);
+  lib.drop();
+  assert.equal(observers[1].live, false, "the drop disconnects");
+  assert.doesNotThrow(() => lib.drop(), "a second drop is nothing to do");
+  // no ResizeObserver (a stand-in, an old engine): no observer, and the stamp writes nothing
+  const bare = run(undefined);
+  root = fresh(); const body3 = node("DIV", "fileview-body", [root.md]);
+  bare.watchBodyWidth(body3)();
+  assert.equal(observers.length, 2, "no observer was made"); assert.equal(w(root.t1) + w(root.t2), "", "nothing written: the sheet's fallback holds");
+});
+
+test("the width watch is wired: each viewer opens one on the body it builds, each rendered paint stamps the fresh root's tables, and the close drops it", () => {
+  const opens = VIEW.match(/const body = el\("div", "fileview-body"\);\n\s*const stampBodyWidth = watchBodyWidth\(body\);/g) || [];
+  assert.equal(opens.length, 2, "openFileView and openUrlView each watch their body as they build it");
+  assert.match(VIEW, /body\.replaceChildren\(rendered \? mdBlock\(text, \{ kind: "file", path, sid: sid \|\| null \}\) : codeBlock\(text, path, true\)\);\n\s*if \(rendered\) stampBodyWidth\(\);/, "openFileView: a rendered paint stamps its fresh tables (mdBlock rebuilt the root; no report follows a paint)");
+  assert.match(VIEW, /landFragment\(\);[^\n]*\n\s*if \(fmt\.md === "rendered"\) stampBodyWidth\(\);/, "openUrlView: the same, after the fragment lands");
+  const closeAt = VIEW.indexOf("export function closeFileView(): void {");
+  const close = VIEW.slice(closeAt, VIEW.indexOf("\n}\n", closeAt));
+  assert.match(close, /\n\s*dropWidthWatch\(\);/, "closeFileView drops the watch with the viewer");
+});
+
 test("it waits with the romp loader and fails with the kernel's own words, never a blank pane", () => {
   assert.match(VIEW, /romp-swirl-glyph\.svg/, "loading-state rule: the swirl goes up first");
   assert.match(VIEW, /fileview-dot/);
@@ -182,12 +274,20 @@ test("langFor maps known extensions and returns null rather than guessing", () =
     yaml: "yaml", yml: "yaml", sh: "bash", bash: "bash", zsh: "bash", bats: "bash",
     html: "xml", htm: "xml", xml: "xml", svg: "xml", vue: "xml", css: "css", scss: "css",
     md: "markdown", markdown: "markdown", diff: "diff", patch: "diff",
+    rs: "rust", go: "go", c: "c", h: "c", java: "java", sql: "sql", toml: "ini", ini: "ini",   // viewer-grammars.ts
   };
+  // the map above is the module's, row for row (a drift here is a drift in what a file opens as)
+  const src = VIEW.slice(VIEW.indexOf("const LANG: Record<string, string> = {"), VIEW.indexOf("};", VIEW.indexOf("const LANG: Record<string, string> = {")));
+  for (const [ext, lang] of Object.entries(LANG)) assert.match(src, new RegExp("\\b" + ext + ': "' + lang + '"'), ext + " is in file-view.ts's LANG");
+  assert.match(VIEW, /^import "\.\/viewer-grammars";/m, "the six grammars the new rows name are registered by the module the viewer imports");
   const langFor = (p: string): string | null => LANG[p.slice(p.lastIndexOf(".") + 1).toLowerCase()] || null;
   assert.equal(langFor("kernel/kernel.py"), "python");
   assert.equal(langFor("ui/webview/render.TS"), "typescript");   // case-insensitive
   assert.equal(langFor("notes.md"), "markdown");
-  for (const p of ["server.log", "Makefile", "a.conf", "data.csv", "x.rs"]) {
+  assert.equal(langFor("src/main.rs"), "rust");
+  assert.equal(langFor("Cargo.toml"), "ini", "toml is hljs's ini grammar");
+  assert.equal(langFor("include/api.h"), "c");
+  for (const p of ["server.log", "Makefile", "a.conf", "data.csv", "x.hs"]) {
     assert.equal(langFor(p), null, p + " has no registered grammar → plain, not a guess");
   }
   assert.doesNotMatch(VIEW, /hljs\.highlightAuto\(/, "auto-detection is what this map exists to avoid");
@@ -202,8 +302,8 @@ test("the hljs token palette lives in feed.css too, identical to the chat's", ()
   const STYLES = CHAT_CSS;
   // tokenized 2026-09-02 (the light theme re-inks the same names; theme-parity.test.ts holds the
   // token set + its contrast in both themes) — the dark :root values are the exact hexes these
-  // rules always carried: fg #d8c6a8, kw #c98a6a, str #9fb878, num #d4a36a, cmt #6f6a5f,
-  // title #e1c08d, meta #9a8f7a, attr #cdaf7e
+  // rules always carried: fg #d8c6a8, kw #c98a6a, str #9fb878, num #d4a36a, cmt #978f81 (raised from
+  // #6f6a5f, which sat at 2.85:1 on a code block), title #e1c08d, meta #9a8f7a, attr #cdaf7e
   const rules = [
     /\.hljs \{ color: var\(--hl-fg\); background: transparent; \}/,
     /\.hljs-keyword, \.hljs-built_in, \.hljs-literal, \.hljs-type \{ color: var\(--hl-kw\); \}/,
@@ -218,7 +318,7 @@ test("the hljs token palette lives in feed.css too, identical to the chat's", ()
     /\.hljs-addition \{ color: var\(--hl-str\); \}/,
     /\.hljs-deletion \{ color: var\(--err\); \}/,
     /--hl-fg: #d8c6a8; --hl-kw: #c98a6a; --hl-str: #9fb878; --hl-num: #d4a36a;/,
-    /--hl-cmt: #6f6a5f; --hl-title: #e1c08d; --hl-meta: #9a8f7a; --hl-attr: #cdaf7e;/,
+    /--hl-cmt: #978f81; --hl-title: #e1c08d; --hl-meta: #9a8f7a; --hl-attr: #cdaf7e;/,   // --hl-cmt raised to 4.79:1 on a code block (was #6f6a5f, 2.85:1); theme-parity.test.ts holds the pair
   ];
   for (const r of rules) {
     assert.match(FEED_CSS, r, "feed.css is missing a palette rule: " + r.source);
@@ -273,8 +373,14 @@ test("Raw ⇄ Rendered exists for markdown ONLY, and nothing reaches innerHTML u
   // a README's links open a NEW tab rather than navigating the hosting pane's document away
   assert.match(VIEW, /target = "_blank"/);
   assert.match(VIEW, /rel = "noopener"/);
-  // fenced blocks highlight only a NAMED, registered language — same no-guessing rule as langFor
-  assert.match(VIEW, /if \(!lang \|\| !hljs\.getLanguage\(lang\)\) return;/);
+  // fenced blocks highlight only a NAMED, registered language (the same no-guessing rule as langFor); then EVERY fence,
+  // named or not, gets the chat's rows and Copy (code-block.ts), Copy with the fence's text as the file holds it
+  // (fence-source.ts), the rendered text when the fence was not found there (code-block.test.ts pins the pass)
+  assert.match(VIEW, /if \(lang && hljs\.getLanguage\(lang\)\) \{/);
+  assert.match(VIEW, /^import \{ wrapCodeLines, addCopyBtn \} from "\.\/code-block";/m);
+  // the two calls close the forEach's callback, outside the language branch (indentation and the `});` anchor it there)
+  assert.match(VIEW, /\n    wrapCodeLines\(codeEl\);\n    if \(host\) addCopyBtn\(host, toCopy\);\n  \}\);/);
+  assert.match(VIEW, /const toCopy = \(queued && queued\.length \? queued\.shift\(\) : null\) \?\? raw;/);
   // the prose typography exists on BOTH sheets (the chat's .md block is the reference aesthetic)
   assert.match(FEED_CSS, /\.fileview-md \{/);
   assert.match(FEED_CSS, /\.fileview-md pre code \{/);
