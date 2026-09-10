@@ -90,9 +90,13 @@ body.scheme-solarized-dark {
   --err: #c0392b;   /* unified with the awaiting/blocked red (the user 2026-06-24): one "needs you" red. API-error (--st-blocked-bg #e5484d) stays distinct. */
   --warn: #d7a23a;  /* the heads-up amber — "attention, not an error". Was referenced with fallbacks but never
                        defined (a phantom token) until 2026-08-26; mirrored in feed.css (own :root). */
-  /* the postal card's two KIND colours (T302): the pre-rewrite chip colours as text on the dark page (6.4:1 and
-     6.7:1); the light theme re-inks both (they read 2.2:1 and 2.1:1 on cream otherwise) */
-  --postal-delegate: #b08cff;  --postal-coordinate: #14b8a6;  --postal-question: var(--st-working-bg);
+  /* the postal card's three KIND colours (T320, the user 2026-09-10): one SEQUENTIAL ramp in the accent's hue, not
+     three unrelated hues, ranked by how much the kind asks of the reader: coordination lowest (an FYI), delegation
+     next (work handed over), question highest (an answer owed). More asking = more intense against the page: on the
+     dark page the ramp climbs toward the accent's brightness (OKLCH hue 244, L .66 / .76 / .86; 5.4:1, 7.8:1 and
+     10.8:1 on the page, 5.0:1, 7.3:1 and 9.9:1 on a boxed card, whose --box-bg wash the word also sits on); the light
+     theme re-inks the same three ranks toward the deep end of its clay accent (below). */
+  --postal-coordinate: #7996af;  --postal-delegate: #7fb8e7;  --postal-question: #91d9ff;
   /* THE romp accent — light blue (the user 2026-06-24). Use var(--accent) for accent/highlight chrome
      (selected toggles, in-progress loading dots, the Fleet pill, focus) — NOT for STATUS colors, which keep
      their own meaning (--st-working-bg yellow = working, --st-blocked-bg red, etc.). --accent-fg reads on it. */
@@ -226,9 +230,14 @@ body.theme-light {
   --hl-cmt: #67614f; --hl-title: #8C4A00; --hl-meta: #6E6455; --hl-attr: #7A5A20;   /* --hl-cmt from #6E675C (4.39:1 on a code block) to 4.86:1 */
   --box-bg: rgba(0, 0, 0, 0.03);
   --box-border: rgba(0, 0, 0, 0.12);
-  --postal-delegate: #6e3fd0;  --postal-coordinate: #0d6b64;  --postal-question: #7d5600;   /* 5.4:1, 5.3:1 and 5.5:1 on the
-                                                                                            cream page (T302); the working
-                                                                                            amber alone read 4.26:1 there */
+  --postal-coordinate: #974a32;  --postal-delegate: #962b00;  --postal-question: #751000;   /* the kind ramp (T320): the
+                                                                                            accent's clay hue (OKLCH 38)
+                                                                                            deepening with rank, L .50 /
+                                                                                            .45 / .36; 5.3:1, 6.7:1 and
+                                                                                            9.6:1 on the cream page and
+                                                                                            5.0:1, 6.2:1 and 9.0:1 on a
+                                                                                            boxed card (the review's
+                                                                                            floor is the box, 4.5:1) */
   --err: #B02A1C;
   --accent: #C2410C; --accent-fg: #FFF8F2;
   --accent-wash: rgba(194, 65, 12, 0.10);
@@ -585,6 +594,13 @@ body.tabbar-resizing { cursor: ns-resize; user-select: none; }
 .tab-ph-swirl { width: 12px; height: 12px; border-radius: 2px; flex: none;
   animation: tab-ph-swirl-spin 7s linear infinite; }   /* .tab is flex with its own gap, so no margin needed */
 @keyframes tab-ph-swirl-spin { to { transform: rotate(-360deg); } }
+/* the host-down foot's swirl, after "Reconnecting": present only while a dial to the host is in flight as of
+   the last /tunnels poll (render.ts syncHostOfflineFoot), so the spin follows the state; the same motif as the
+   placeholder tab's. A flex item of the head right after the gist (the postal delivery icon's convention), so an
+   ellipsized sentence on a phone-wide pane clips its own tail and never the swirl, the one dynamic cue */
+.notice-head .host-dial-swirl { width: 12px; height: 12px; border-radius: 2px; flex: 0 0 auto; align-self: center;
+  margin-left: -2px; animation: tab-ph-swirl-spin 7s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .notice-head .host-dial-swirl { animation: none; } }
 /* CLASSIC (the default; T113, tightened by T115, tuned by T118 — the user 2026-08-27): the tab
    strip is the PRE-720 strip — verified by pixel-diffing a real pre-720 build — modulo exactly
    four sanctioned deltas: typography (the strip inherits the global Inter/type ladder), the 1px
@@ -1983,6 +1999,25 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   color: var(--dim); background: transparent; border: 0; border-radius: 6px; padding: 0;
 }
 .queued-edit:hover { color: var(--accent); background: rgba(255, 255, 255, 0.08); }
+/* EDITING IN PLACE (T306, the user 2026-09-10): the ✎ turns the bubble's text into a field where it sits — the same
+   width, the dashed provisional look kept, the ✕ still in its corner — with Save and Cancel under the text. The field
+   inherits the bubble's type; the buttons and the labels wear the queued header's 0.82em. A bubble another client is
+   editing reads "editing" beside its text; a refused edit says why on its own line. */
+.queued-bubble.editing { opacity: 1; border-color: var(--accent); padding-right: 52px; box-sizing: border-box; }   /* the width set from the measured bubble is its border box; the idle padding kept, so the words keep their wrap (the ✎'s room stays empty) */
+.queued-editor { display: flex; flex-direction: column; gap: 6px; }
+.queued-editbox {
+  width: 100%; box-sizing: border-box; display: block; resize: none; overflow: hidden;
+  font: inherit; line-height: inherit; color: var(--fg); background: transparent; border: 0; padding: 0; margin: 0; outline: none;
+}
+.queued-editbtns { display: flex; justify-content: flex-end; gap: 6px; }
+.queued-editbtn {
+  font: inherit; font-size: 0.82em; line-height: 1.4; cursor: pointer; padding: 2px 9px; border-radius: 6px;
+  color: var(--fg); background: transparent; border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent);
+}
+.queued-editbtn:hover { border-color: var(--accent); }
+.queued-editbtn.save { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+.queued-held-label { font-size: 0.82em; color: var(--dim); margin-left: 8px; font-style: italic; }
+.queued-editnote { font-size: 0.82em; color: var(--vscode-errorForeground, #f48771); margin-top: 4px; }
 /* A notice romp itself queued (T243) wears the LANDED romp notice card nested inside the queued bubble: the
    dashed "you" dress comes off the wrapper (the card brings its own gray tone), and the ✕ moves inside the
    card's corner so it reads as the card's control. */
@@ -2420,12 +2455,13 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   .turn-postal-service .notice-head > .notice-gist { flex: 1 0 100%; order: 1; min-width: 0;
     white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: break-word; }
 }
-/* T302 (the user 2026-09-10): the interaction KIND is coloured TEXT in the meta slot — a chip reads as a tag now — in
-   the colours the old chips wore: delegation violet, coordination teal, question the working amber. */
-.postal-kind { font-weight: 600; }
-.postal-kind-delegate { color: var(--postal-delegate, #b08cff); }
-.postal-kind-coordinate { color: var(--postal-coordinate, #14b8a6); }
-.postal-kind-question { color: var(--postal-question, var(--st-working-bg)); }
+/* T302 (the user 2026-09-10): the interaction KIND is coloured TEXT in the meta slot — a chip reads as a tag now.
+   T320 (the user, later that day): the word wears the prose weight, not bold, and its three colours are one
+   sequential ramp ranked by how much the kind asks of the reader (the tokens' comment has the ranking). */
+.postal-kind { font-weight: 400; }
+.postal-kind-delegate { color: var(--postal-delegate, #7fb8e7); }
+.postal-kind-coordinate { color: var(--postal-coordinate, #7996af); }
+.postal-kind-question { color: var(--postal-question, #91d9ff); }
 /* BOTH ENDS of a postal card in the head, each in its session's identity colour (the peer's chip as before, and this
    session's own chip after it); a narrow head collapses this session's chip to its coloured dot, so both colours
    still show where the words would not fit */
@@ -3022,6 +3058,9 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 }
 .warn-toast-x:hover { color: var(--fg); background: rgba(255, 255, 255, 0.08); }
 .warn-toast.fade { opacity: 0; }
+.warn-toast.sticky { border-color: var(--accent); }
+.warn-toast-copy { font: inherit; font-size: 0.82em; cursor: pointer; padding: 1px 8px; border-radius: 6px; color: var(--fg); background: transparent; border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent); margin-left: 6px; }
+.warn-toast-copy:hover { border-color: var(--accent); }
 
 /* INTERRUPTING… chip (the user 2026-07-02): the stop is in flight — busy-yellow like working (it still
    is, briefly) but dimmed and static (no pulse, no timer); clears to READY on its own when the stop lands. */
@@ -3422,13 +3461,24 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
    from open until the thread's REAL render (its events) is ready; a backstop falls back so it can
    never trap. Reuses the page's .rl-* pieces, centered in the list. */
 .cmt-boot { display: flex; align-items: center; justify-content: center; min-height: 90px; }
-.cmt-head .cmt-x { cursor: pointer; }
-.cmt-title { font-weight: 600; }
+.cmt-head .cmt-x, .cmt-head .cmt-max { cursor: pointer; }
+.cmt-title { font-weight: 600; user-select: none; }   /* a double-click here maximizes; it must select nothing */
 .cmt-x {
   margin-left: auto; padding: 0 4px; border: 0; background: none;
   color: inherit; opacity: 0.6; font-size: 14px; cursor: pointer;
 }
 .cmt-x:hover { opacity: 1; }
+/* maximize ⇄ restore (the user 2026-09-10): the line glyph right before the ×, so it takes the ×'s
+   push to the far right and the × loses its own. A transparent 1px border at rest holds the box, so
+   the hover's accent border + text + wash (the house button hover) shifts nothing — click-safe. */
+.cmt-max {
+  margin-left: auto; width: 20px; height: 20px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; border-radius: 4px; background: none;
+  color: inherit; opacity: 0.6; cursor: pointer;
+}
+.cmt-max:hover { opacity: 1; border-color: var(--accent); color: var(--accent); background: var(--accent-wash); }
+.cmt-max + .cmt-x { margin-left: 0; }
 .cmt-quote {
   padding: 4px 8px; border-left: 2px solid var(--cmt-hl); border-radius: 2px;
   background: rgba(255, 255, 255, 0.04);

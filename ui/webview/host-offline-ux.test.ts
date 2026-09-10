@@ -41,7 +41,9 @@ test("the transcript says why it ends, at the END, where the eye lands", () => {
   // 2026-09-08 (the notice-vocabulary pass): a slim SESSION notice in the warn severity — the one row that sat
   // outside the vocabulary (centred italic); .notice-foot gives it the prose column's indent off the rail
   assert.match(RENDER, /foot\.id = "host-offline-foot";/);
-  assert.match(RENDER, /notice\(\{ src: "session", glyph: "api", sev: "warn", gist: text, nested: true,/);
+  // `live` since 2026-09-10: the row is live while a dial to the host is in flight, and the romp swirl sits after
+  // the gist as its flex sibling (host-dial-live.test.ts pins that rule) — the wording itself unchanged
+  assert.match(RENDER, /notice\(\{ src: "session", glyph: "api", sev: "warn", gist: text, nested: true, live: dialing,/);
   assert.match(CSS, /\.notice-foot \{/);
   assert.doesNotMatch(CSS, /\.tx-hostoff/);
 });

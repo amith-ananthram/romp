@@ -46,9 +46,13 @@ var AUTONUDGE_SUB = "When a session goes idle but its goal still shows working (
   + "you), automatically nudge it once for a status update. Applies to every connected machine's kernel.";
 // Fast mode's one-line hint, in a var because judgeFastGate() swaps it for the greyed-out reason when no
 // judge tier is on Opus (the opt-in rides only a call whose model is Opus, so the box is inert then).
-var JUDGEFAST_SUB = "Judge calls on Opus run in Claude Code's fast mode (an Opus-only research preview, billed at a premium). "
-  + "Off by default. Follows to every connected machine's kernel.";
-var JUDGEFAST_SUB_OFF = "Fast mode is Opus-only, and no judge tier is on Opus. Pick Opus for triage, distilling or indexing to use it.";
+var JUDGEFAST_SUB = "This tier's judge calls run in Claude Code's fast mode (an Opus-only research preview, billed at a premium, "
+  + "about twice the standard Opus rate). Off by default. Follows to every connected machine's kernel.";
+var JUDGEFAST_SUB_OFF = "Fast mode is Opus-only, and this tier is not on Opus. Pick Opus for it to use fast mode; the setting is kept.";
+function judgeFastSubRefused(word, r) {
+  return "Fast mode was declined by Claude Code for the last " + word + " call (" + ((r && r.reason) || "no reason given")
+    + "); the judges run at normal speed. The setting is kept.";
+}
 
 // The modal markup — ported verbatim from the kernel's _gear_html; the model/
 // effort selects start empty and are filled from /models (see fill()).
@@ -135,6 +139,14 @@ var GEAR_HTML =
   '<option value=chat>The pane you clicked</option><option value=pane>The Files pane</option>' +
   '</select>' +
   '</span></div>' +
+  // the Files control itself (T317, the user 2026-09-10, who recalled a setting for it): the toggle at the bottom of
+  // the dashboard and the Files tab on a phone. Shown by default (today's behaviour). Off hides both, closes an open
+  // Files pane, and a file link set to open in the Files pane opens over the pane you clicked instead (the shell
+  // reads this store key and tells the panes: kernel.py _LANDING_COLLAPSE_JS, render.ts panesAvail).
+  '<label class=rs-row><input type=checkbox id=rs-filesctl checked>' +
+  '<span><b>Files control in the dashboard bar</b>' +
+  '<span class=rs-sub>The Files toggle at the bottom of the dashboard, and the Files tab on a phone. Off hides them and closes the Files pane if it is open; file links set to open in the Files pane then open over the pane you clicked.</span>' +
+  '</span></label>' +
   "<div class='rs-row' style='cursor:default'><span style='flex:1 1 auto;min-width:0'><b>Text scheme</b>" +
   "<span class=rs-sub>Chat text colors only. Each option previews its own tiers — prose, the dimmer tool text, code. (Solarized Light is omitted — its tiers are made for a light page and turn muddy here.)</span>" +
   "<div id=rs-chatscheme style='position:relative;margin-top:5px'></div>" +
@@ -181,9 +193,13 @@ var GEAR_HTML =
   "<label class=rs-fastin id=rs-judgefast-wrap><input type=checkbox id=rs-judgefast>Fast mode<span class=rs-mixed hidden></span>" +
   "<span class=rs-sub id=rs-judgefast-sub>" + JUDGEFAST_SUB + "</span></label></div>" +
   "<div class='rs-row rs-jrow'><b>Triage effort <span class=rs-mixed hidden></span></b><span class=rs-sub>Thinking effort for the triage judges. Default = no effort flag (the judges' standard behavior). Not every model accepts every level. Follows to every connected machine's kernel.</span><select id=rs-judgeeffort></select></div>" +
-  "<div class='rs-row rs-jrow'><b>Distilling model <span class=rs-mixed hidden></span></b><span class=rs-sub>The model for the judges that write the prose you read on cards — distiller, briefer, staller. Follow triage (the default) keeps them on the triage pick; pinning a model here lets the copy you read run richer than the placement judges. Follows to every connected machine's kernel.</span><select id=rs-distillmodel></select></div>" +
+  "<div class='rs-row rs-jrow'><b>Distilling model <span class=rs-mixed hidden></span></b><span class=rs-sub>The model for the judges that write the prose you read on cards — distiller, briefer, staller. Follow triage (the default) keeps them on the triage pick; pinning a model here lets the copy you read run richer than the placement judges. Follows to every connected machine's kernel.</span><select id=rs-distillmodel></select>" +
+  "<label class=rs-fastin id=rs-distillfast-wrap><input type=checkbox id=rs-distillfast>Fast mode<span class=rs-mixed hidden></span>" +
+  "<span class=rs-sub id=rs-distillfast-sub>" + JUDGEFAST_SUB + "</span></label></div>" +
   "<div class='rs-row rs-jrow'><b>Distilling effort <span class=rs-mixed hidden></span></b><span class=rs-sub>Thinking effort for the distilling judges. Follow triage (the default) rides the triage effort; Default pins no effort flag. Follows to every connected machine's kernel.</span><select id=rs-distilleffort></select></div>" +
-  "<div class='rs-row rs-jrow'><b>Indexing model <span class=rs-mixed hidden></span></b><span class=rs-sub>The model the indexing judges use — captioner + archiver (high-volume, low-stakes summarization). Haiku by default for cost. Follows to every connected machine's kernel.</span><select id=rs-indexmodel></select></div>" +
+  "<div class='rs-row rs-jrow'><b>Indexing model <span class=rs-mixed hidden></span></b><span class=rs-sub>The model the indexing judges use — captioner + archiver (high-volume, low-stakes summarization). Haiku by default for cost. Follows to every connected machine's kernel.</span><select id=rs-indexmodel></select>" +
+  "<label class=rs-fastin id=rs-indexfast-wrap><input type=checkbox id=rs-indexfast>Fast mode<span class=rs-mixed hidden></span>" +
+  "<span class=rs-sub id=rs-indexfast-sub>" + JUDGEFAST_SUB + "</span></label></div>" +
   "<div class='rs-row rs-jrow'><b>Indexing effort <span class=rs-mixed hidden></span></b><span class=rs-sub>Thinking effort for the indexing judges. Default keeps this high-volume work cheap: effort low on models with adaptive thinking (Fable, Opus 4.6 and later, Sonnet 4.6 and later); Haiku, Sonnet 4.5 and Opus 4.5 have none, so they run with thinking off and no flag. Follows to every connected machine's kernel.</span><select id=rs-indexeffort></select></div>" +
   "<div class='rs-row rs-jrow'><b>Judge concurrency <span class=rs-mixed hidden></span></b><span class=rs-sub>How many judge calls run at once, across every tier. Default is 6, or the ROMP_JUDGE_CONCURRENCY the kernel's service environment sets. Applies on the judges' next pass; no restart. Follows to every connected machine's kernel.</span><select id=rs-judgeconc></select></div>" +
   '<div class=rs-sec>Updates & debug</div>' +
@@ -255,7 +271,7 @@ function initGear(post) {
     cvm = document.getElementById('rs-conserve'),
     csg = document.getElementById('rs-suggestcompact'),
     dd = document.getElementById('rs-defaultdir'), gb = document.getElementById('rs-branch'),
-    tc = document.getElementById('rs-tabctx'), fl = document.getElementById('rs-filelink'),
+    tc = document.getElementById('rs-tabctx'), fl = document.getElementById('rs-filelink'), fsc = document.getElementById('rs-filesctl'),
     sr = document.getElementById('rs-striprows'),
     dn = document.getElementById('rs-dense'),
     cs = document.getElementById('rs-chatscheme'),
@@ -269,12 +285,12 @@ function initGear(post) {
     dm = document.getElementById('rs-distillmodel'), de = document.getElementById('rs-distilleffort'),
     cmm = document.getElementById('rs-cmtmodel'), cme = document.getElementById('rs-cmteffort'),
     cmf = document.getElementById('rs-cmtfast'),
-    jf = document.getElementById('rs-judgefast'),
+    jf = document.getElementById('rs-judgefast'), df = document.getElementById('rs-distillfast'), xf = document.getElementById('rs-indexfast'),   // T300: one per tier
     tb = document.getElementById('rs-tmuxbackend'), bkn = document.getElementById('rs-backend-note'),
     fe = document.getElementById('rs-fileedit'),
     ths = document.getElementById('rs-thinksum'),
     ans = document.getElementById('rs-autonudge-split'), asub = document.getElementById('rs-autonudge-sub');
-  function load() { try { return Object.assign({ compact: true, colormap: 'aurora', subgoals: true, debug: false, backend: 'sdk', defaultDir: '', showBranch: false, tabCtx: 'over50', fileLinkPane: 'chat', stripGroupRows: true, denseChrome: false, collapseGaps: true, activeOnly: true }, JSON.parse(localStorage.getItem('romp:settings') || 'null')); } catch (e) { return { compact: true, colormap: 'aurora', subgoals: true, debug: false, backend: 'sdk', defaultDir: '', showBranch: false, tabCtx: 'over50', fileLinkPane: 'chat', stripGroupRows: true, denseChrome: false, collapseGaps: true, activeOnly: true }; } }
+  function load() { try { return Object.assign({ compact: true, colormap: 'aurora', subgoals: true, debug: false, backend: 'sdk', defaultDir: '', showBranch: false, tabCtx: 'over50', fileLinkPane: 'chat', filesControl: true, stripGroupRows: true, denseChrome: false, collapseGaps: true, activeOnly: true }, JSON.parse(localStorage.getItem('romp:settings') || 'null')); } catch (e) { return { compact: true, colormap: 'aurora', subgoals: true, debug: false, backend: 'sdk', defaultDir: '', showBranch: false, tabCtx: 'over50', fileLinkPane: 'chat', filesControl: true, stripGroupRows: true, denseChrome: false, collapseGaps: true, activeOnly: true }; } }
   // mirrors settings.ts tabCtxMode (this file can't import the TS module): the gauge shipped for a
   // few hours as a boolean toggle — false was an explicit hide, true the default nobody chose.
   function tabCtxMode(v) { return (v === 'always' || v === 'never') ? v : (v === false ? 'never' : 'over50'); }
@@ -299,6 +315,7 @@ function initGear(post) {
   if (dn) dn.addEventListener('change', function () { var s = load(); s.denseChrome = dn.checked; save(s); });
   if (tc) tc.addEventListener('change', function () { var s = load(); s.tabCtx = tc.value; save(s); });
   if (fl) fl.addEventListener('change', function () { var s = load(); s.fileLinkPane = fl.value; save(s); });   // webview-local pref read at click time (render.ts openPath)
+  if (fsc) fsc.addEventListener('change', function () { var s = load(); s.filesControl = fsc.checked; save(s); });   // the shell hears the store change (its storage listener) and hides or shows the control (T317)
   // ── the settings' value-picker DROPDOWNS (T117, the user 2026-08-27, screenshot: the Chat
   // tabs and Text scheme pickers rendered every option always-expanded, and the description spans
   // ran off the card's right edge). Progressive disclosure: the CLOSED state is ONE row — the
@@ -772,8 +789,11 @@ function initGear(post) {
   // the tmux backend's offer (T288): a kernel setting like the judge knobs (stamped, propagated); the Default
   // backend list repaints at once so the pick and the offer never disagree in the same modal
   if (tb) tb.addEventListener('change', function () { post({ type: 'setTmuxBackend', enabled: tb.checked, gt: gclock.stamp('tmux-backend') }); paintBackendOffer(tb.checked); });
-  // Fast mode for the judges: a kernel setting like the judge knobs (stamped, propagated); the judges read it per call
-  if (jf) jf.addEventListener('change', function () { post({ type: 'setJudgeFast', enabled: jf.checked, gt: gclock.stamp('judge-fast') }); });
+  // Fast mode for the judges, one box per tier (T300, the user 2026-09-10): a kernel setting per tier like the
+  // judge knobs (stamped, propagated); the judges read each tier's flag per call
+  if (jf) jf.addEventListener('change', function () { post({ type: 'setJudgeFast', enabled: jf.checked, gt: gclock.stamp('judge-fast') }); judgeFastGate(); });   // the hint follows the box (a refusal reads only on a checked box)
+  if (df) df.addEventListener('change', function () { post({ type: 'setDistillFast', enabled: df.checked, gt: gclock.stamp('distill-fast') }); judgeFastGate(); });   // the hint follows the box (a refusal reads only on a checked box)
+  if (xf) xf.addEventListener('change', function () { post({ type: 'setIndexFast', enabled: xf.checked, gt: gclock.stamp('index-fast') }); judgeFastGate(); });   // the hint follows the box (a refusal reads only on a checked box)
   // Fast mode is an Opus-only research preview (render.ts fastAvailable and cmtFastGate above, the same rule),
   // and the judges' opt-in rides only a call whose model is Opus: with no tier on Opus the box is inert, so it
   // greys and its hint says why (a review finding on the setting's first cut: with the default tiers the box
@@ -781,16 +801,26 @@ function initGear(post) {
   // nothing fires or toasts while it is inert, and a tier pinned to Opus later brings it back without a
   // second click. Distilling on Follow triage resolves to the triage pick; a tier whose value has not
   // loaded is unknown, never a refusal (the benefit of the doubt fastAvailable gives an unknown model).
+  var fastRefused = {};   // /version's record: judge tier ("triage" | "distill" | "index") -> { reason, model, t }
+  function judgeFastTiers() {
+    return [
+      { box: jf, wrap: 'rs-judgefast-wrap', sub: 'rs-judgefast-sub', tier: 'triage', word: 'triage',
+        model: function () { return jm ? (jm.value || '') : ''; } },
+      { box: df, wrap: 'rs-distillfast-wrap', sub: 'rs-distillfast-sub', tier: 'distill', word: 'distilling',
+        model: function () { var v = dm ? (dm.value || '') : ''; return v === 'triage' ? (jm ? (jm.value || '') : '') : v; } },   // Follow triage resolves
+      { box: xf, wrap: 'rs-indexfast-wrap', sub: 'rs-indexfast-sub', tier: 'index', word: 'indexing',
+        model: function () { return im ? (im.value || '') : ''; } }];
+  }
   function judgeFastGate() {
-    if (!jf) return;
-    var wrap = document.getElementById('rs-judgefast-wrap'), sub = document.getElementById('rs-judgefast-sub');
-    var tri = jm ? (jm.value || '') : '', dis = dm ? (dm.value || '') : '', idx = im ? (im.value || '') : '';
-    if (dis === 'triage') dis = tri;
-    var picks = [tri, dis, idx].filter(function (v) { return !!v; });
-    var can = !picks.length || picks.some(function (v) { return v.toLowerCase().indexOf('opus') !== -1; });
-    jf.disabled = !can;
-    if (wrap) wrap.classList.toggle('rs-off', !can);
-    if (sub) sub.textContent = can ? JUDGEFAST_SUB : JUDGEFAST_SUB_OFF;
+    judgeFastTiers().forEach(function (t) {
+      if (!t.box) return;
+      var wrap = document.getElementById(t.wrap), sub = document.getElementById(t.sub);
+      var v = t.model(), can = !v || v.toLowerCase().indexOf('opus') !== -1;   // unknown (not loaded) = the benefit of the doubt
+      t.box.disabled = !can;
+      if (wrap) wrap.classList.toggle('rs-off', !can);
+      var r = can && t.box.checked ? fastRefused[t.tier] : null;   // the CLI declined this tier's last fast ask: say why
+      if (sub) sub.textContent = !can ? JUDGEFAST_SUB_OFF : (r ? judgeFastSubRefused(t.word, r) : JUDGEFAST_SUB);
+    });
   }
   // "Claude Code (tmux)" is in the Default backend list only while the setting is on; a saved default of tmux
   // while it is off is set aside (the select shows Claude Code and the note says so), never erased: it returns
@@ -869,7 +899,8 @@ function initGear(post) {
     'index-model': 'Indexing model', 'index-effort': 'Indexing effort', 'judge-concurrency': 'Judge concurrency',
     'distill-model': 'Distilling model', 'distill-effort': 'Distilling effort',
     'comment-model': 'Comment model', 'comment-effort': 'Comment effort',
-    'comment-fast': 'Fast comment threads', 'tmux-backend': 'Claude Code tmux backend', 'judge-fast': 'Fast mode (judges)',
+    'comment-fast': 'Fast comment threads', 'tmux-backend': 'Claude Code tmux backend',
+    'judge-fast': 'Fast mode (triage judges)', 'distill-fast': 'Fast mode (distilling judges)', 'index-fast': 'Fast mode (indexing judges)',
     'thinking-summaries': 'Thinking summaries' };
   // store name → the message type that sets it: the whitelist for the toast's Apply anyway (a frame
   // may re-issue the one setting it names, nothing else) and the completeness pin's map
@@ -880,7 +911,7 @@ function initGear(post) {
     'index-model': 'setIndexModel', 'index-effort': 'setIndexEffort', 'judge-concurrency': 'setJudgeConcurrency',
     'distill-model': 'setDistillModel', 'distill-effort': 'setDistillEffort',
     'comment-model': 'setCommentModel', 'comment-effort': 'setCommentEffort', 'comment-fast': 'setCommentFast',
-    'tmux-backend': 'setTmuxBackend', 'judge-fast': 'setJudgeFast' };
+    'tmux-backend': 'setTmuxBackend', 'judge-fast': 'setJudgeFast', 'distill-fast': 'setDistillFast', 'index-fast': 'setIndexFast' };
   // store name → the words its select shows for the sentinel options whose value is not the word. The
   // effort selects' Default is the EMPTY value (no effort flag), which read as no value at all, so a
   // refused Default pick drew the value-less copy and a plain Apply anyway — in the frozen-tab case, the
@@ -1155,7 +1186,7 @@ function initGear(post) {
      ['indexEffort', ie], ['judgeConcurrency', jc], ['distillModel', dm], ['distillEffort', de], ['fileEditing', fe],
      ['compactSuggest', csg],
      ['commentModel', cmm], ['commentEffort', cme], ['commentFast', cmf], ['tmuxBackend', tb],
-     ['judgeFast', jf]].forEach(function (pair) {
+     ['judgeFast', jf], ['distillFast', df], ['indexFast', xf]].forEach(function (pair) {
       var key = pair[0], el = pair[1];
       if (!el) return;
       // the mark nearest the control: a checkbox's own <label> (the fast-mode box shares the Triage model
@@ -1204,8 +1235,11 @@ function initGear(post) {
     if (cmf && typeof v.commentFast === 'string') cmf.checked = v.commentFast === 'on';
     if (tb && typeof v.tmuxBackend === 'string') { tb.checked = v.tmuxBackend === 'on'; paintBackendOffer(tb.checked); }   // T288: the offer, then the list follows it
     if (jf && typeof v.judgeFast === 'string') jf.checked = v.judgeFast === 'on';   // RAW on/off: the kernel's persisted answer
+    if (df && typeof v.distillFast === 'string') df.checked = v.distillFast === 'on';
+    if (xf && typeof v.indexFast === 'string') xf.checked = v.indexFast === 'on';
+    fastRefused = (v.fastRefused && typeof v.fastRefused === 'object') ? v.fastRefused : {};
     cmtFastGate(false);
-    judgeFastGate();   // the tiers are set above; the box follows them
+    judgeFastGate();   // the tiers are set above; the boxes follow them
     if (dd && typeof v.defaultDir === 'string') dd.value = v.defaultDir;   // the kernel's persisted default is authoritative
     // Browse… draws on the KERNEL's screen, and a kernel with no desktop has none — the click used to
     // vanish into a macOS-only dialog. Drop the button rather than offer one that cannot work; the
@@ -1253,7 +1287,7 @@ function initGear(post) {
     // burned the whole 5-frame retry against a display:none pane, latched rs-pane-gone, and the
     // full-viewport fallback box blacked out every pane behind the modal.
     try { if (window.parent !== window) window.parent.postMessage({ romp: 'logUnseenQuery' }, '*'); } catch (e) { /* no shell to ask */ }   // T290: the Open log count
-    p.hidden = false; feedFull(true); setModalCls(true); var s = load(); cc.checked = !!s.compact; jix.checked = (s.showIndexJudges !== undefined ? !!s.showIndexJudges : !!s.debug); jtr.checked = (s.showTriageJudges !== undefined ? !!s.showTriageJudges : !!s.debug); if (gb) gb.checked = s.showBranch === true; if (sr) sr.checked = s.stripGroupRows !== false; if (dn) dn.checked = s.denseChrome === true; if (fl) fl.value = s.fileLinkPane === 'pane' ? 'pane' : 'chat'; if (tc) tc.value = tabCtxMode(s.tabCtx); tcPaint(); csPaint(); ttPaint(); if (cg) cg.checked = s.collapseGaps !== false; if (ao) ao.checked = s.activeOnly !== false; if (fc) fc.checked = s.collapsed === true; cmBuild(); cmPaint(s.colormap || 'aurora'); paintBackendOffer(tb ? tb.checked : false); if (dd) dd.value = s.defaultDir || ''; plFill(); fill(); }
+    p.hidden = false; feedFull(true); setModalCls(true); var s = load(); cc.checked = !!s.compact; jix.checked = (s.showIndexJudges !== undefined ? !!s.showIndexJudges : !!s.debug); jtr.checked = (s.showTriageJudges !== undefined ? !!s.showTriageJudges : !!s.debug); if (gb) gb.checked = s.showBranch === true; if (sr) sr.checked = s.stripGroupRows !== false; if (dn) dn.checked = s.denseChrome === true; if (fl) fl.value = s.fileLinkPane === 'pane' ? 'pane' : 'chat'; if (fsc) fsc.checked = (s.filesControl !== false); if (tc) tc.value = tabCtxMode(s.tabCtx); tcPaint(); csPaint(); ttPaint(); if (cg) cg.checked = s.collapseGaps !== false; if (ao) ao.checked = s.activeOnly !== false; if (fc) fc.checked = s.collapsed === true; cmBuild(); cmPaint(s.colormap || 'aurora'); paintBackendOffer(tb ? tb.checked : false); if (dd) dd.value = s.defaultDir || ''; plFill(); fill(); }
   if (g) g.onclick = function (e) { e.stopPropagation(); openSettings(); };   // hidden anchor; hosts open via the message below
   window.addEventListener('message', function (e) { if (e.data && e.data.romp === 'openSettings') openSettings(); });
   // The shortcuts row: the web shell (same-origin parent) gets the customize link — it opens the

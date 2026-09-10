@@ -8,6 +8,7 @@ popover with the next step. The /send remote forward reports a dead far kernel i
 Synthetic fixtures only."""
 import json
 import os
+import inspect
 import unittest
 from unittest import mock
 from romp_load import load_source
@@ -208,6 +209,39 @@ class RecoveryCounter(unittest.TestCase):
                         "noted before the pass overwrites the status")
         self.assertIn('r["_poll_miss"] = True', src, "a real silent poll leaves its mark")
         self.assertEqual(src.count('r["_demand_miss"] = True'), 2, "both the ssh row's and the checked-in peer's timeout preload")
+
+    def test_the_row_says_when_romp_is_dialing_the_host_right_now(self):
+        """The host-down notice's swirl spins on `dialing` (the user 2026-09-10, who wanted a spinner that means
+        romp is trying right now): true while an ssh dial is spawned and unconfirmed ("starting"; "connecting"
+        is a checked-in row's birth state) or while the pass's health requests to the host are in flight, false
+        while the row waits out its backoff. The in-flight mark is set around the requests, cleared however
+        they end, and never saved: it describes this pass, not the host."""
+        row = lambda **kw: dict({"host": "TESTHOST", "kernel_port": 1, "local_port": 1}, **kw)
+        self.assertTrue(km._row_dialing(row(status="starting")), "an ssh dial spawned, not yet confirmed")
+        self.assertTrue(km._row_dialing(row(status="connecting")), "a checked-in row before its first poll")
+        self.assertTrue(km._row_dialing(row(status="down", _dialing=True)), "the health request is in flight")
+        self.assertFalse(km._row_dialing(row(status="down")), "waiting out the backoff: still")
+        self.assertFalse(km._row_dialing(row(status="down", _dialing=False)))
+        self.assertFalse(km._row_dialing(row(status="up")), "an up row between passes: nothing in flight")
+        self.assertFalse(km._row_dialing(row(status="error")))
+        self.assertIn("_dialing", km._NOT_SAVED, "a per-pass mark, never written to the remotes file")
+        src = open(os.path.join(BIN, "romp-kernel"), encoding="utf-8").read()
+        self.assertIn('"dialing": _row_dialing(r),', src, "_remote_public serves it on the /tunnels row")
+        sup = inspect.getsource(km._tunnel_supervisor)
+        self.assertIn("with _dialing_mark(r):", sup, "the pass's health requests run under the mark")
+        self.assertLess(sup.index("with _dialing_mark(r):"), sup.index('up = _port_open(r["local_port"])'), "…entered before the first round-trip")
+        # the mark's lifetime, behaviourally: on inside the block, off once it ends…
+        r = row(status="down")
+        with km._dialing_mark(r):
+            self.assertTrue(r["_dialing"], "on while the round-trips run")
+        self.assertFalse(r["_dialing"], "…and off once they returned")
+        # …and off when the block RAISES (the port check builds its socket outside its own try: fd exhaustion
+        # unwinds through here), so a row never reads dialing through its next backoff
+        with self.assertRaises(OSError):
+            with km._dialing_mark(r):
+                raise OSError("out of file descriptors")
+        self.assertFalse(r["_dialing"], "a raise clears the mark too")
+
 
 
 class ExpectedRestart(unittest.TestCase):

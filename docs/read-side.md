@@ -93,13 +93,16 @@ completed); the feed just paints columns. (Reflected in `docs/judges.md`.)
   for a reload or a tab the browser discarded; a `resent: true` copy of the
   `return` row means the kept socket proved dead and the row was re-filed onto
   the redial.
-  A redial declares itself (`reconnect=1` on the `/ws` URL) once the bundle's
-  ready has left on a socket; before that, or with the ready still queued, it
-  dials as a fresh page. The kernel then sends the active tab in full and lists
-  every other session as a `skeleton` on the tab strip with one small `status`
-  frame each, and the chat pane loads a skeleton on click or one at a time in
-  idle, never while the tab is hidden; one `skeleton` client-diag row (count,
-  active) records the regime.
+  A redial declares itself (`reconnect=1` on the `/ws` URL) once the kernel's
+  caps frame has answered the bundle's ready; before that, with the ready still
+  queued, or after a socket that died before the caps frame came back, it dials
+  as a fresh page. A page whose ready was never answered dials fresh for its
+  life (the bundle posts ready once), so each of its redials is served whole.
+  On a declared redial the kernel sends the active tab in full and lists every
+  other session as a `skeleton` on the tab strip with one small `status` frame
+  each, and the chat pane loads a skeleton on click or one at a time in idle,
+  never while the tab is hidden; one `skeleton` client-diag row (count, active)
+  records the regime.
 - **The Outline pane's ages run on the kernel's clock.** Its timestamps are the
   kernel's, so the pane never reads the browser's clock against them: it anchors
   on the frame's `now` paired with the moment that frame arrived from the wire
@@ -611,12 +614,19 @@ once per distinct error, and stops retrying until the file changes or a
 write succeeds.
 
 The kernel announces what it can do in a `{type: "caps", caps, viewsSeq}` frame
-in reply to every `ready` and lists the caps on `/version`; `tagEdit` covers the
-targeted op, the acks and the `seq`. A client uses the targeted op only when the
-cap is present and posts the whole blob otherwise. A message no handler takes is
-answered `{type: "unknownOp", op, writeId}`, which the client treats as a refusal
-of that write and as withdrawing the cap. The caps frame is also the reconnect
-signal, and the `ready` handler sends it after its own connect push. `viewsSeq`
+in reply to every `ready` (a pane's bundle posts one per page life; the shell
+page's own socket posts one at every open) and lists the caps on `/version`;
+`tagEdit` covers the targeted op, the acks and the `seq`. A client uses the
+targeted op only when the cap is present and posts the whole blob otherwise. A
+message no handler takes is answered `{type: "unknownOp", op, writeId}`, which
+the client treats as a refusal of that write and as withdrawing the cap. The
+`ready` handler sends the caps frame after its own connect push, and the pane
+shim latches on it as the kernel's word that the ready was processed and the
+page served whole: a redial declares itself only once the frame has arrived.
+It is not a reconnect signal for a pane: a pane's shim re-sends no `ready` on a
+reconnect, so a reconnected pane socket gets a caps frame only when the
+bundle's ready queued across the drop and flushed onto it; the shell's socket,
+which posts `ready` at every open, learns the caps again each time. `viewsSeq`
 is the write seq of the views blob that push put on the socket: the tabOrder
 frame's, the timeline skeleton's or the feed frame's, the highest when the push
 carried more than one. When the push carried no views frame (a chat page that
@@ -673,6 +683,13 @@ same rule. Until the
 2026-09-05 review any adoption cleared the slot, so a re-emit in that window
 cleared the pane's; the pane turned the restored store away while the router
 held it, and the two diverged until the next write.
+
+The adoption on the caps frame and the drop of writes still in flight, above,
+wait on a caps frame, and the kernel sends one only in answer to a `ready` on
+that socket: the shell page's socket, which posts `ready` at every open, gets
+one on every reconnect; a pane's socket gets one at page load and, on a
+reconnect, only when the bundle's ready queued across the drop and flushed onto
+it. A reconnected pane socket that flushed no `ready` gets no caps frame.
 
 The Outline pane's tag filter posts its lens the same way: the frame copy it
 holds with only the outline lens changed, with a `writeId` and `edited: []`, so

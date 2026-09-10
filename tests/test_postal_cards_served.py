@@ -9,7 +9,7 @@ files (the send-time stamp, and the postal ledger's exec / relayed / bounced / r
 both ENDS wear their sessions' colours (the peer's chip, then this session's own chip); no card wears a background
 wash; incoming cards are boxed, sent ones slim; a sent card whose message has not landed wears the pending
 send's own provisional dress (the queued bubble's class). With POSTAL_SHOTS=<dir> the driver also writes
-screenshots at 1000 px, 520 px, 340 px (the phone width: the head wraps, the ends first, the kind word and the icon on
+screenshots at 1000 px, 520 px, 340 px dark and 1000 px, 340 px light, named romp_chat-postal-cards-<theme>-<width>.png (the phone width: the head wraps, the ends first, the kind word and the icon on
 that line or the next as one unit, the gist last on its own full-width line, T313) and the light theme. Skips LOUDLY without the extension deps or a Playwright browser. SYNTHETIC
 fixtures only (the notes-api demo world: web / api / tests; host TESTHOST)."""
 import json
@@ -212,17 +212,31 @@ const measure = () => page.evaluate(() => {
   // the page colour under the text, and the two kind colours, for a contrast check per theme
   const pg = document.createElement("div"); pg.style.background = "var(--bg)"; document.body.appendChild(pg);
   const pageBg = getComputedStyle(pg).backgroundColor; pg.remove();
-  const kinds = {};
-  for (const k of ["delegate", "coordinate", "question"]) { const e = document.querySelector(".postal-kind-" + k); if (e) kinds[k] = getComputedStyle(e).color; }
-  return { boxBg, pageBg, kinds, theme: document.body.classList.contains("theme-light") ? "light" : "dark", cards, pendingBubbleClass: !!document.querySelector(".queued-bubble") };
+  const kinds = {}; const kindWeight = {}; const kindBoxed = {};
+  for (const k of ["delegate", "coordinate", "question"]) {
+    const e = document.querySelector(".postal-kind-" + k);
+    if (e) {
+      kinds[k] = getComputedStyle(e).color; kindWeight[k] = getComputedStyle(e).fontWeight;
+      const card = e.closest(".turn-postal-service");   // the FIRST word of each kind: measured against the card it sits on
+      kindBoxed[k] = !!(card && card.classList.contains("notice-boxed"));
+    }
+  }
+  return { boxBg, pageBg, kinds, kindWeight, kindBoxed, theme: document.body.classList.contains("theme-light") ? "light" : "dark", cards, pendingBubbleClass: !!document.querySelector(".queued-bubble") };
 });
 const contrast = (a, b) => {
   const lum = (css) => { const m = css.match(/\d+(\.\d+)?/g).slice(0, 3).map(Number).map((v) => v / 255).map((c) => c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)); return 0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2]; };
   const la = lum(a), lb = lum(b); return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
 };
+// a boxed card paints --box-bg, an rgba WASH, over the page: the colour the word actually sits on is the composite (the
+// review of 2026-09-10 found the light coordination step at 4.33:1 there while the page read 4.6:1)
+const composite = (washCss, pageCss) => {
+  const nums = (css) => css.match(/\d+(\.\d+)?/g).map(Number);
+  const w = nums(washCss), p = nums(pageCss), a = w.length > 3 ? w[3] : 1;
+  return "rgb(" + [0, 1, 2].map((i) => Math.round(w[i] * a + p[i] * (1 - a))).join(", ") + ")";
+};
 const results = {};
 let page;
-for (const pass of [{ width: 1000, theme: "dark" }, { width: 520, theme: "dark" }, { width: 340, theme: "dark" }, { width: 1000, theme: "light" }]) {
+for (const pass of [{ width: 1000, theme: "dark" }, { width: 520, theme: "dark" }, { width: 340, theme: "dark" }, { width: 1000, theme: "light" }, { width: 340, theme: "light" }]) {
   const width = pass.width;
   page = await browser.newPage({ viewport: { width, height: 1000 }, deviceScaleFactor: 2 });
   await page.goto(cfg.chat);
@@ -241,9 +255,16 @@ for (const pass of [{ width: 1000, theme: "dark" }, { width: 520, theme: "dark" 
   await page.evaluate(() => { const c = document.getElementById("content"); if (c) c.scrollTop = c.scrollHeight; });
   await page.waitForTimeout(300);
   const m = await measure();
-  m.contrast = { delegate: m.kinds.delegate ? contrast(m.kinds.delegate, m.pageBg) : null, coordinate: m.kinds.coordinate ? contrast(m.kinds.coordinate, m.pageBg) : null, question: m.kinds.question ? contrast(m.kinds.question, m.pageBg) : null };
-  results[pass.theme === "light" ? "light" : String(width)] = m;
-  if (cfg.shots) { fs.mkdirSync(cfg.shots, { recursive: true }); await page.screenshot({ path: cfg.shots + "/romp_chat-postal-cards-" + (pass.theme === "light" ? "light" : width) + ".png", fullPage: false }); }
+  const boxOnPage = composite(m.boxBg, m.pageBg);
+  m.contrast = {}; m.contrastOn = {}; m.contrastPage = {};
+  for (const k of ["delegate", "coordinate", "question"]) {
+    if (!m.kinds[k]) { m.contrast[k] = null; continue; }
+    m.contrastOn[k] = m.kindBoxed[k] ? "box" : "page";
+    m.contrast[k] = contrast(m.kinds[k], m.kindBoxed[k] ? boxOnPage : m.pageBg);   // against the card the word sits on
+    m.contrastPage[k] = contrast(m.kinds[k], m.pageBg);
+  }
+  results[pass.theme === "light" ? (width === 1000 ? "light" : "light" + width) : String(width)] = m;
+  if (cfg.shots) { fs.mkdirSync(cfg.shots, { recursive: true }); await page.screenshot({ path: cfg.shots + "/romp_chat-postal-cards-" + pass.theme + "-" + width + ".png", fullPage: false }); }
   await page.close();
 }
 fs.writeSync(1, "RESULT:" + JSON.stringify(results) + "\n");
@@ -349,8 +370,8 @@ class ServedPostalCards(unittest.TestCase):
             else:
                 self.assertIn(c["kind"], ("Delegation", "Coordination", "Question"), c)
             self.assertFalse(c["chip"], "no chip: %r" % c)
-        self.assertEqual(card("Take the retry-loop")["kindColor"], "rgb(176, 140, 255)", "delegation violet")
-        self.assertEqual(card("Heads-up")["kindColor"], "rgb(20, 184, 166)", "coordination teal")
+        self.assertEqual(card("Take the retry-loop")["kindColor"], "rgb(127, 184, 231)", "delegation: the ramp's middle step (T320)")
+        self.assertEqual(card("Heads-up")["kindColor"], "rgb(121, 150, 175)", "coordination: the ramp's low step (T320)")
         # (2) the delivery icon per state, at the head's right edge, with a worded title
         states = {c["gist"][:20]: c["state"] for c in cards}
         self.assertIsNone(card("Take the retry-loop")["state"], "an incoming message in hand: no icon")
@@ -433,11 +454,32 @@ class ServedPostalCards(unittest.TestCase):
         # at 520 px and above the head is one line: the ends, the gist and the kind side by side (no wrap)
         for c in wide["cards"] + narrow["cards"]:
             self.assertEqual(c["headWrap"], "nowrap", "wider than the query the head stays one line: %r" % c)
-        # (light theme) the two raw kind colours re-ink for the cream page: text contrast at or above 4.5:1
+        # the kind colours read at or above 4.5:1 on the card each word actually sits on, in both themes: a boxed
+        # incoming card paints --box-bg over the page (the review of 2026-09-10 caught the light coordination step at
+        # 4.33:1 there while the bare page read 4.6:1), a slim card is the page itself
         self.assertEqual(light["theme"], "light")
         for k in ("delegate", "coordinate", "question"):
-            self.assertGreaterEqual(light["contrast"][k] or 0, 4.5, "%s reads on the light page: %r" % (k, light["contrast"]))
-            self.assertGreaterEqual(wide["contrast"][k] or 0, 4.5, "%s reads on the dark page: %r" % (k, wide["contrast"]))
+            self.assertGreaterEqual(light["contrast"][k] or 0, 4.5, "%s reads on its light card (%s): %r" % (k, light["contrastOn"].get(k), light["contrast"]))
+            self.assertGreaterEqual(wide["contrast"][k] or 0, 4.5, "%s reads on its dark card (%s): %r" % (k, wide["contrastOn"].get(k), wide["contrast"]))
+            self.assertGreaterEqual(light["contrastPage"][k] or 0, 4.5, "%s reads on the bare light page too" % k)
+        self.assertEqual(light["contrastOn"]["coordinate"], "box", "the first coordination word is on a boxed incoming card: the measurement that matters")
+        # T320 (the user 2026-09-10): the kind word wears the prose weight, not bold, in both themes, and its three
+        # colours are ONE sequential ramp ranked coordination < delegation < question: monotone in luminance against
+        # the page (brighter with rank on the dark page, darker with rank on the light one), as the browser computes them
+        for m in (wide, light, r["light340"]):
+            self.assertEqual({k: m["kindWeight"][k] for k in ("delegate", "coordinate", "question")},
+                             {"delegate": "400", "coordinate": "400", "question": "400"}, "prose weight: %r" % m["kindWeight"])
+        def _lum(css):
+            r, g, b = [int(x) for x in re.findall(r"\d+", css)[:3]]
+            ch = lambda c: (c / 255) / 12.92 if (c / 255) <= 0.03928 else (((c / 255) + 0.055) / 1.055) ** 2.4
+            return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+        d = [_lum(wide["kinds"][k]) for k in ("coordinate", "delegate", "question")]
+        self.assertTrue(d[0] < d[1] < d[2], "dark page: the ramp brightens with rank: %r" % wide["kinds"])
+        lt = [_lum(light["kinds"][k]) for k in ("coordinate", "delegate", "question")]
+        self.assertTrue(lt[0] > lt[1] > lt[2], "light page: the ramp deepens with rank: %r" % light["kinds"])
+        # the phone-width light pass reads too (the fourth screenshot the user looks at)
+        for k in ("delegate", "coordinate", "question"):
+            self.assertGreaterEqual(r["light340"]["contrast"][k] or 0, 4.5, "%s reads on the light page at 340 px" % k)
 
 
 if __name__ == "__main__":

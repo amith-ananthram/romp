@@ -491,22 +491,38 @@ through to `install.sh`:
 
 ### Fast mode for the judges
 
-- **Fast mode** (the checkbox beside the gear's Triage model picker; off by
-  default) runs the judges in Claude Code's fast mode, the same Opus-only
-  research preview the chat statusline's Fast badge toggles for a session,
-  billed at a premium over standard Opus rates. The setting is read per call: a
-  judge call whose model is Opus, by the bare alias or a pinned Opus version,
-  carries the CLI's fast-mode opt-in in its per-call settings; a call on any
-  other model runs exactly as before, so with every tier on Sonnet and Haiku the
-  setting changes nothing until a tier is pinned to Opus. The gear says so: while
-  no judge tier (triage, distilling, or indexing) is on Opus, the box is greyed
-  and its hint names the reason. Fast requests draw on fast mode's own rate
-  limits, the pool your sessions' fast toggles share. Whether fast engaged is
-  the CLI's answer, per account (an account with extra usage turned off, or an
-  organisation with fast mode disabled, reports it off with the setting on):
-  each row of `judge-usage.jsonl` keeps that answer in its `fast` field (`on`,
-  `off` or `cooldown`; `null` when the CLI reported none), so a checkbox that
-  reads on beside rows that read off names the account, not the setting. Like
+- **Fast mode** (a checkbox beside each of the gear's judge model pickers:
+  Triage, Distilling, Indexing; off by default) runs that tier's judges in
+  Claude Code's fast mode, the same Opus-only research preview the chat
+  statusline's Fast badge toggles for a session, billed at a premium (about
+  twice the standard Opus rate). One flag per tier: the setting is read per
+  call, for the tier the call runs in, and a call whose tier is on and whose
+  model is Opus, by the bare alias or a pinned Opus version, carries the CLI's
+  fast-mode opt-in in its per-call settings; every other call runs exactly as
+  before. The gear says so per tier: when a tier's effective model cannot run
+  fast (a Distilling pick of Follow triage takes the triage model), its box is
+  greyed and its hint names the reason; the value is kept, not cleared, so
+  pinning Opus for the tier later brings the box back live with no second
+  click. An install that had the earlier single box on gets the same behaviour
+  once: on its first start the kernel turns the new tiers' flags on where the
+  tier's model can run fast and off where it cannot. Fast requests draw on fast
+  mode's own rate limits, the pool your sessions' fast toggles share. Whether
+  fast engaged is the CLI's answer, per account (an account with extra usage
+  turned off, or an organisation with fast mode disabled, reports it off with
+  the setting on): each row of `judge-usage.jsonl` keeps that answer in its
+  `fast` field (`on`, `off` or `cooldown`; `null` when the CLI reported none)
+  and the CLI's reason in `fastReason`, so a checkbox that reads on beside rows
+  that read off names the account, not the setting. A declined ask is loud: the
+  kernel records it per tier (`STATE/fast-refused.json`), the tier's box hint
+  names the reason, and `judge-errors.jsonl` gets one `fast-refused` row per
+  change of reason (never one per call); the next fast call that engages clears
+  the record. A key-billed judge call that asks for fast carries the same
+  org-check switch a key-billed session gets (the CLI's own probe would ask the
+  saved login, not the paying account), asked once per kernel start and again
+  after any refusal the CLI reports. The cost view needs no fast price
+  table: the CLI's own per-call cost, which every usage row carries, already
+  includes the fast premium (measured: the same prompt costs twice as much
+  fast), so a fast row is priced at the fast rate. Like
   the other judge settings, a change applies on the judges' next pass with no
   restart and follows to every connected machine.
 
