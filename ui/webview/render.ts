@@ -77,7 +77,8 @@ import { durLabel } from "./duration";
 import { apiErrorReason } from "./api-error-reason";
 import { chatMdExtensions, userMdHtml } from "./chat-md";
 import { setTip, pruneTip } from "./tip";
-import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAnchorRange, sliceRanges, prunePending, type CommentThread } from "./comments";
+import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAnchorRange, sliceRanges, prunePending, newCommentCreate, commentCreateFrame,
+         type CommentThread, type CommentCreate } from "./comments";
 import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, chipLabel, chipTip, chipAria, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
 import { dragSlotIndex } from "./dragslot";
 import { perfFrameHandler } from "./perf-telemetry";
@@ -8059,8 +8060,11 @@ function cmtLatchReleased(t: CommentThread, base: CmtLatch): boolean {
 // send; a TRANSIENT nack keeps the optimistic mark + latch alive and the create RE-POSTS when the
 // next session frame for the sid arrives (frames are built from the kernel's parse — a new frame IS
 // the parse catching up). Bounded by attempts, not time; a real refusal or the ack drops the hold.
-const cmtCreateInFlight = new Map<string, { sid: string; uuid: string; exact: string; text: string;
-  name: string; model: string; effort: string; fast: string; color: string; tries: number }>();
+// Keyed by the anchor: one create at a time per passage on this viewer. The held create carries the id
+// the send gesture minted, and every re-post sends it again (commentCreateFrame): the kernel answers a
+// repeat of a create it completed with the same thread, and tells a repeat from a fresh comment in the
+// same words by that id.
+const cmtCreateInFlight = new Map<string, CommentCreate>();
 const CMT_CREATE_MAX_TRIES = 12;
 
 function retryCmtCreates(sid: string): void {
@@ -8073,8 +8077,7 @@ function retryCmtCreates(sid: string): void {
       continue;
     }
     c.tries++;
-    vscodeApi?.postMessage({ type: "commentCreate", id: c.sid, uuid: c.uuid, exact: c.exact,
-      text: c.text, name: c.name, model: c.model, effort: c.effort, fast: c.fast, color: c.color });
+    vscodeApi?.postMessage(commentCreateFrame(c));         // the same gesture again: the same id
   }
 }
 
@@ -8823,12 +8826,10 @@ function commentSendFromPop(pop: HTMLElement): void {
     commentThreads.set(create.sid, [...cur0.filter((t) => t.tid !== synth.tid), synth]);
     cmtAwaitBase.set(synth.tid, { ...CMT_LATCH_ZERO });   // the SEND gesture latches the pulse — before any kernel round-trip (T102); released once a frame acknowledges the send (T237)
     applyCommentMarks(create.sid);
-    vscodeApi.postMessage({ type: "commentCreate", id: create.sid, uuid: create.uuid, exact: create.exact,
-      text, name: nm, model: create.model || "", effort: create.effort || "",
-      fast: create.fast || "", color: create.color || "" });
-    cmtCreateInFlight.set(create.uuid, { sid: create.sid, uuid: create.uuid, exact: create.exact,
-      text, name: nm, model: create.model || "", effort: create.effort || "",
-      fast: create.fast || "", color: create.color || "", tries: 0 });
+    // the gesture is stamped once, here; the hold re-posts the same frame while a transient nack stands
+    const held = newCommentCreate(create, text, nm);
+    vscodeApi.postMessage(commentCreateFrame(held));
+    cmtCreateInFlight.set(create.uuid, held);
     return;
   }
   const cur = openCommentThread();
@@ -9952,18 +9953,21 @@ function warnToast(msg: string): HTMLElement {
 }
 // A toast the page that follows a reload must not repeat: a refusal that reports a STATE rather than an event. The
 // staged sends' "Can't send yet" says the session's host is unreachable (hostIsDown, a remote host's tunnel) or its tab
-// is still being created (isProvisionalId); the staging refusals (stageComposer) say a picker is waiting on the
-// composer, an edit is in progress (to a past message, or to a queued one) or attachments are on the composer; the
-// branch jump's refusal (branchjump) says the session is not on this dashboard. The fresh page shows each state for
-// itself (the host mark and the staged strip; the picker, the attachments and the roster come back from the kernel and
-// the persisted drafts) or no longer has it (a provisional tab does not survive a reload; composerEdits and queuedEdits
-// are in memory alone, so no edit is in progress on a fresh page), so kept by persistNoticesForReload and shown again by
-// the page that follows, it would be redundant at best and false at worst. The mark keeps it out of the replay
-// (reload-notices.ts liveNotices reads only the toasts without it).
+// is still being created (isProvisionalId); the send into a tab whose create failed (sendComposer's deliver) says the
+// session never started; the queued edit's send (sendComposer, ahead of deliver) says the session cannot be reached, so
+// the edit was not sent; the staging refusals (stageComposer) say a picker is waiting on the composer, an edit is in
+// progress (to a past message, or to a queued one) or attachments are on the composer; the branch jump's refusal
+// (branchjump) says the session is not on this dashboard. The fresh page shows each state for itself (the host mark and
+// the staged strip; the picker, the attachments and the roster come back from the kernel and the persisted drafts) or no
+// longer has it (a provisional tab, pending or failed, does not survive a reload; composerEdits and queuedEdits are in
+// memory alone, so no edit is in progress on a fresh page, and a "send again" there would post the words as a new
+// message), so kept by persistNoticesForReload and shown again by the page that follows, it would be redundant at best
+// and false at worst. The mark keeps it out of the replay (reload-notices.ts liveNotices reads only the toasts without
+// it).
 // Toasts that report what HAPPENED to a send or a file stay unmarked, since what they say is as true after the reload
 // as before: the nack (the attachment was not saved, the held message not sent), the dismissal and the other-tab ack
-// (the held message not sent), the refusal on a disconnected host (this message was not sent and is still in the
-// composer).
+// (the held message not sent), the plain send's refusal on a disconnected host (this message was not sent and is still
+// in the composer, where the fresh page's persisted draft keeps it, and a send there sends it).
 function ephemeralWarnToast(msg: string): void { warnToast(msg).dataset.ephemeral = "1"; }
 
 // Tail-windowing (see the View comment): a fresh/rewound view renders only the
@@ -15805,9 +15809,12 @@ function setupComposer() {
       // message: the kernel would deliver it as text, skipping the routing every typed command gets (the
       // fire-alone park, the /model and /effort setters, the /clear confirm below), so the kernel refuses it
       // too; this mirror keeps the words in the box instead of round-tripping them.
+      // The refusal reports a state (an edit in progress on a session that cannot be reached), and the edit is in
+      // memory alone: on the page that follows a reload no edit is in progress and "send again" would post the
+      // words as a new message, so it does not ride one (ephemeralWarnToast).
       if (hostIsDown(activeId) || isProvisionalId(activeId)) {
         if (hostIsDown(activeId)) vscodeApi?.postMessage({ type: "redial", host: String(activeId).slice(0, String(activeId).indexOf(":")) });
-        warnToast("Can't reach the session right now, so the edit wasn't sent. It's still in the box: send again when the link is back.");
+        ephemeralWarnToast("Can't reach the session right now, so the edit wasn't sent. It's still in the box: send again when the link is back.");
         return;
       }
       if (SLASH_CMD_RE.test(typed)) { warnToast("A queued message cannot become a command. Cancel it with its ✕ and type the command."); return; }
@@ -15843,8 +15850,11 @@ function setupComposer() {
       if (isProvisionalId(sid)) {
         // a FAILED create's tab: there is no pending spawn to queue onto, and never a session to send
         // to — refuse loudly and leave the text exactly where it is (the box is the only copy)
+        // The refusal reports a state (a tab with no session behind it) that the page following a
+        // reload does not have, since a provisional tab does not survive one, so it does not ride one
+        // (ephemeralWarnToast).
         if (sid !== provisionalId) {
-          warnToast("“" + (sessions.get(sid)?.name || "this session") + "” never started, so there's "
+          ephemeralWarnToast("“" + (sessions.get(sid)?.name || "this session") + "” never started, so there's "
             + "nowhere to send this. It stays in the box — create the session again to use it.");
           return;
         }
