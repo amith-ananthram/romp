@@ -25,9 +25,10 @@ paste the token into the login page a bare open of the dashboard serves) and
 rides an `HttpOnly` cookie afterwards. That cookie authorizes only when the
 request's Origin is one the gate accepts: the dashboard's own origin (the
 `Host` the request arrived at, or the kernel's own port on `127.0.0.1` or
-`localhost`), the VS Code webview, or no `Origin` header at all. The check
-protects the browser surfaces, the WebSocket upgrade included, against
-cross-site requests. It is needed because cookies are scoped by host and
+`localhost`), any `vscode-webview://` origin (every VS Code webview, not
+only romp's own), or no `Origin` header at all. The check protects the
+browser surfaces, the WebSocket upgrade included, against cross-site
+requests. It is needed because cookies are scoped by host and
 **not by port** (RFC 6265 §8.5): every `http://127.0.0.1:<port>` page on your
 machine is same-site with the dashboard, so anything else you run on loopback
 (a dev server in a repo an agent cloned) would otherwise ride your cookie into
@@ -42,8 +43,15 @@ turns, that hold keeps every session from starting a new turn, a side effect no
 subresource load may trigger. A token presented explicitly, as `?token=` or
 `X-Romp-Token`, is accepted from any Origin: federated (cross-machine) calls
 need it, and a cross-site page cannot obtain it.
-The only token-exempt routes are the no-side-effect liveness probes:
-`/healthz`, `/version`, `/busy` on the kernel and `/ping` on the bus.
+The token-exempt routes are the no-side-effect liveness probes (`/healthz`,
+`/version` and `/busy` on the kernel, `/ping` on the bus) and the install files:
+`/manifest.webmanifest` and the three home-screen icons under `/media/`
+(`romp-touch-180.png`, `romp-app-192.png`, `romp-app-512.png`, a fixed allowlist
+of names, not a path prefix). A browser fetches those with credentials omitted
+when the dashboard is added to a home screen, so a token gate there would break
+the install. They are static and read no session state: the manifest is a
+fixed JSON literal (app name, colors, start URL and icon list) and the icons
+are three PNG files.
 
 The practical consequence: another local user on a **shared machine** cannot
 reach your kernel or bus — `/send` (which injects text into a live Claude
