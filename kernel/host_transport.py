@@ -2,8 +2,8 @@
 """The kernel's side of the per-session host (stage 4 of #1317, T315; kernel/session_host.py is the host,
 the T315 design note is the design): a Transport the SDK client drives over the host's Unix socket, the
 same class over an orphan journal file (one consumer path for live attach and for replay after a host
-death), the spawn specification the kernel writes for a host, the settings that turn hosts on, and the
-host-lease classification the backend attaches by.
+death), the spawn specification the kernel writes for a host, the settings (the session-hosts toggle, on by default, and
+the host grace), and the host-lease classification the backend attaches by.
 
 The SDK's `Transport` is documented as unstable; `HostTransport` implements its six methods (connect,
 write, read_messages, close, is_ready, end_input) and a test pins the set against the abstract class.
@@ -67,6 +67,12 @@ def session_hosts_on(state_dir) -> bool:
     is on; a file saying off, 0, false or no is the toggle; an empty file is the default). Read at each connect, so a
     flip needs no restart: a plain-child session becomes hosted at its next respawn, a new one at once."""
     return _setting(state_dir, SESSION_HOSTS_SETTING, "on").lower() in ("on", "1", "true", "yes")
+
+
+def session_hosts_value(state_dir) -> str:
+    """The setting file's text as read (stripped), "" when there is no file: for the log line that names what the
+    machine actually wrote (any content that is not an on word turns hosts off, not only the word off)."""
+    return _setting(state_dir, SESSION_HOSTS_SETTING, "")
 
 
 def session_host_grace_s(state_dir) -> float:

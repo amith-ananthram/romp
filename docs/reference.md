@@ -1062,11 +1062,14 @@ A session can outlive the kernel that started it. By default, on every machine
 on this version, a new session's CLI runs under a small per-session host
 process, `bin/romp-session-host`, instead of as the kernel's child. The
 `session-hosts` setting is the toggle: a bare value file under the state
-directory; write `off` to it to run a machine's sessions as plain kernel
-children again (`on`, or no file at all, leaves hosts on). It is read at each
-connect, so a flip needs no restart: a session already running as a plain
-child becomes hosted at its next respawn (one more cut, at the next kernel
-restart), a new session at once. The host spawns the CLI from a spawn specification the kernel writes
+directory. Write `off` to it to run a machine's sessions as plain kernel
+children again; `on`, or no file at all, leaves hosts on (`on`, `1`, `true` and
+`yes` read as on, any other content as off). It is read at each connect, so a
+flip needs no restart: a session already running as a plain child becomes
+hosted at its next respawn, whatever prompts it (a model or effort switch, a
+crash resume, or the next kernel restart, which cuts a plain child's turn one
+last time); a new session is hosted at once. The host spawns the CLI from a
+spawn specification the kernel writes
 (`hosts/<sid>/spawn.json`, the plain fields of the SDK's options, at mode 0600
 in a 0700 directory, since it carries the environment overlay), through the
 SDK's own subprocess transport, so the command line and the environment are

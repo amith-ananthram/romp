@@ -9325,7 +9325,8 @@ class SdkBackend:
             # one; the session runs the plain SDK subprocess and the connect loop's finally closes a kernel lease.
             # Hosts are on by default (T348), so this branch runs only when the file on this machine says off.
             sess._host_intent = False
-            self._log("host (%s): the session-hosts file says off; running the CLI as a kernel child" % sess.name)
+            self._log("host (%s): the session-hosts file reads %r, not an on word; running the CLI as a kernel child"
+                      % (sess.name, _ht().session_hosts_value(self.state_dir)))
             return None
         if state == "attach":
             sess._host_is_attach = True

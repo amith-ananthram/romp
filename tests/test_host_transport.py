@@ -55,23 +55,31 @@ class Settings(unittest.TestCase):
         self.assertTrue(ht.session_hosts_on(d), "an empty file is the default: on")
         Path(d, "session-hosts").write_text("maybe")
         self.assertFalse(ht.session_hosts_on(d), "a word that is not one of the on words is off, as before")
+        self.assertEqual(ht.session_hosts_value(d), "maybe", "the value reader hands the log line what the file holds")
+        self.assertEqual(ht.session_hosts_value(tempfile.mkdtemp()), "", "…and nothing for a machine with no file")
         self.assertIn('return _setting(state_dir, SESSION_HOSTS_SETTING, "on")', inspect.getsource(ht.session_hosts_on), "the default is the literal on")
 
     def test_the_default_is_stated_where_the_reader_and_the_docs_speak_of_it(self):
         """Every place that states the default says on (T348): the reader's comment, the backend's log line for the
         off branch, and the reference's paragraph on session hosts."""
-        src = open(os.path.join(ROOT, "kernel", "host_transport.py")).read()
-        self.assertIn("on by default\n" + " " * 51 + "# since T348", src, "the setting's comment names the default and its origin")
+        # the pins compare whitespace-FLATTENED text (comment continuations joined, line breaks folded), so a re-wrap
+        # or a re-aligned comment column leaves them standing; only the statements themselves are held
+        flat = lambda s: " ".join(re.sub(r"\n\s*#", "", s).split())
+        src = flat(open(os.path.join(ROOT, "kernel", "host_transport.py")).read())
+        self.assertIn("leaves them on (on by default since T348", src, "the setting's comment names the default and its origin")
         bsrc = open(os.path.join(ROOT, "kernel", "sdk_backend.py")).read()
-        self.assertIn('self._log("host (%s): the session-hosts file says off; running the CLI as a kernel child" % sess.name)', bsrc,
-                      "the off branch names the toggle's state honestly: the file says off")
+        self.assertIn("the session-hosts file reads %r, not an on word; running the CLI as a kernel child", bsrc,
+                      "the off branch names what the file holds: any content that is not an on word, not only off")
+        self.assertIn("_ht().session_hosts_value(self.state_dir)", bsrc, "…read through the value reader")
         self.assertNotIn("session-hosts is off;", bsrc, "the old line, which read as the default, is gone")
         doc = open(os.path.join(ROOT, "docs", "reference.md")).read()
         i = doc.index("A session can outlive the kernel that started it.")
-        para = doc[i:i + 900]
-        self.assertIn("By default, on every machine\non this version, a new session's CLI runs under a small per-session host", para)
-        self.assertIn("write `off` to it to run a machine's sessions as plain kernel\nchildren again", para)
-        self.assertNotIn("off\nby default", para, "the reference no longer says off by default")
+        para = flat(doc[i:i + 1200])
+        self.assertIn("By default, on every machine on this version, a new session's CLI runs under a small per-session host process", para)
+        self.assertIn("Write `off` to it to run a machine's sessions as plain kernel children again", para)
+        self.assertIn("`on`, `1`, `true` and `yes` read as on, any other content as off", para, "the accepted words")
+        self.assertIn("becomes hosted at its next respawn, whatever prompts it", para, "the rollout: a respawn of any kind")
+        self.assertNotIn("off by default", para, "the reference no longer says off by default")
         self.assertNotIn("the devbox opts in first", para, "the rollout wording went with the opt-in")
 
     def test_the_grace_default_and_its_file(self):
@@ -887,11 +895,11 @@ class Pins(unittest.TestCase):
         self.assertIn('user="<!-- romp-tag: " not in body["text"]', ksrc, "POST /send: an untagged send is the user's, a tagged one a machine's")
         self.assertIn('return "user" in inspect.signature(fn).parameters', ksrc, "read from the signature, so a stand-in send without the keyword is called as before")
 
-    def test_a_backend_with_hosts_off_touches_no_host_code_at_construction(self):
+    def test_construction_reads_no_setting_and_the_file_is_the_toggle_read_on_each_ask(self):
         d = tempfile.mkdtemp(); be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None)
-        self.assertTrue(be.session_hosts_on(), "on by default (T348)")
+        self.assertTrue(be.session_hosts_on(), "on by default (T348): a bare state dir")
         Path(d, "session-hosts").write_text("off")
-        self.assertFalse(be.session_hosts_on(), "the file is the toggle, read on each ask")
+        self.assertFalse(be.session_hosts_on(), "the file is the toggle, read on each ask, no restart")
 
     def test_host_log_rows_are_filed_once_per_line(self):
         d = tempfile.mkdtemp(); logs = []

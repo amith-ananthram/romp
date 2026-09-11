@@ -2373,6 +2373,10 @@ class AskRoundTrip(unittest.TestCase):
 
     def setUp(self):
         self.d = tempfile.mkdtemp()
+        os.makedirs(self.d, exist_ok=True)
+        # this class drives the connect loop with a fake client on the plain-child road: hosts OFF explicitly, since
+        # they are on by default (T348) and a bare state dir would send the connect to a real host spawn
+        open(os.path.join(self.d, "session-hosts"), "w").write("off")
         self._orig_client = _sdk.ClaudeSDKClient
 
         QUESTION = {"questions": [{
@@ -2579,6 +2583,10 @@ class CustomAnswerRoundTrip(unittest.TestCase):
 
     def setUp(self):
         self.d = tempfile.mkdtemp()
+        os.makedirs(self.d, exist_ok=True)
+        # this class drives the connect loop with a fake client on the plain-child road: hosts OFF explicitly, since
+        # they are on by default (T348) and a bare state dir would send the connect to a real host spawn
+        open(os.path.join(self.d, "session-hosts"), "w").write("off")
         self.actions = []
         def notify(app, msg):
             if msg.get("type") == "askLive" and self.actions:
@@ -2626,6 +2634,10 @@ class PermissionAndPlanRoundTrip(unittest.TestCase):
 
     def setUp(self):
         self.d = tempfile.mkdtemp()
+        os.makedirs(self.d, exist_ok=True)
+        # this class drives the connect loop with a fake client on the plain-child road: hosts OFF explicitly, since
+        # they are on by default (T348) and a bare state dir would send the connect to a real host spawn
+        open(os.path.join(self.d, "session-hosts"), "w").write("off")
         self.answer = "1"
         def notify(app, msg):
             if msg.get("type") == "askLive":
@@ -3963,6 +3975,10 @@ class InterruptSettlesStall(unittest.TestCase):
 
     def setUp(self):
         self.d = tempfile.mkdtemp()
+        os.makedirs(self.d, exist_ok=True)
+        # this class drives the connect loop with a fake client on the plain-child road: hosts OFF explicitly, since
+        # they are on by default (T348) and a bare state dir would send the connect to a real host spawn
+        open(os.path.join(self.d, "session-hosts"), "w").write("off")
         self._orig = _sdk.ClaudeSDKClient
         import asyncio as _aio
 
@@ -4213,6 +4229,10 @@ class PendingQueueLoop(unittest.TestCase):
 
     def setUp(self):
         self.d = tempfile.mkdtemp()
+        os.makedirs(self.d, exist_ok=True)
+        # this class drives the connect loop with a fake client on the plain-child road: hosts OFF explicitly, since
+        # they are on by default (T348) and a bare state dir would send the connect to a real host spawn
+        open(os.path.join(self.d, "session-hosts"), "w").write("off")
         self._orig_client = _sdk.ClaudeSDKClient
         import asyncio as _aio
 
@@ -4299,6 +4319,10 @@ class InterruptWithQueue(unittest.TestCase):
 
     def setUp(self):
         self.d = tempfile.mkdtemp()
+        os.makedirs(self.d, exist_ok=True)
+        # this class drives the connect loop with a fake client on the plain-child road: hosts OFF explicitly, since
+        # they are on by default (T348) and a bare state dir would send the connect to a real host spawn
+        open(os.path.join(self.d, "session-hosts"), "w").write("off")
         self._orig = _sdk.ClaudeSDKClient
         import asyncio as _aio
 
@@ -4382,6 +4406,10 @@ class ReconnectReconcilesInflight(unittest.TestCase):
 
     def setUp(self):
         self.d = tempfile.mkdtemp()
+        os.makedirs(self.d, exist_ok=True)
+        # this class drives the connect loop with a fake client on the plain-child road: hosts OFF explicitly, since
+        # they are on by default (T348) and a bare state dir would send the connect to a real host spawn
+        open(os.path.join(self.d, "session-hosts"), "w").write("off")
         self._orig = _sdk.ClaudeSDKClient
         import asyncio as _aio
 
