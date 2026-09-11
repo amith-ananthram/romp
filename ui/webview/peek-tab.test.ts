@@ -46,7 +46,7 @@ test("peek AUTO-CLOSE: activating any other tab drops it — same derivation, no
   // peek mechanism (plans/subagent-transcripts.md; chatVisible() answers pinnedSubs for a viewer id).
   // 7 → 8 with the acknowledged views writes: holdViews, onViewsAck and onKernelCaps replace the
   // single postViews site.
-  assert.equal(sites.length, 9, "definition + 8 call sites: setActive, focus fast path, captureViews, holdViews, onViewsAck, onKernelCaps, the feed click echo (2026-08-24 — the instant ack derives the peek before the kernel frame), and the subagent viewer's pin toggle (2026-09-05)");
+  assert.equal(sites.length, 10, "definition + 9 call sites: setActive, focus fast path, captureViews, holdViews, onViewsAck, onKernelCaps, the feed click echo (2026-08-24 — the instant ack derives the peek before the kernel frame), the subagent viewer's pin toggle (2026-09-05), and the ADOPTION of a first-arriving session (2026-09-11: a view-hidden first arrival has a tab, like a pick)");
 });
 
 test("a view change that excludes the ACTIVE session converts it into the peek — never a bounce (the user 2026-08-24)", () => {
