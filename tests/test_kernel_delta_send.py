@@ -149,7 +149,7 @@ class RenderHandlesTheTail(unittest.TestCase):
     def test_render_truncates_to_from_appends_and_repaints_from_the_changed_point(self):
         r = self._render()
         self.assertIn('else if (m.type === "chatTail") chatTail(m);', r)       # dispatched
-        self.assertIn("const from = (msg.from | 0) - (s.headFrom || 0);", r)   # GLOBAL index → resident-tail local
+        self.assertIn("from = (msg.from | 0) - (s.headFrom || 0);", r)   # GLOBAL index → resident-tail local
         # The two rejection cases split on 2026-07-28. Below the loaded head → still a quiet return (the
         # resident tail is fine). A GAP (from past what we hold) → ask for a full session: "wait for the
         # next full" was a promise nothing kept, and the tab froze there until its socket dropped.
@@ -168,7 +168,7 @@ class RenderHandlesTheTail(unittest.TestCase):
         # transcript keeps the resident window instead (T249b, frame-merge.ts)
         self.assertIn("headFrom: kept && prev ? prev.headFrom : (msg.headFrom ?? 0),", r)
         # scroll to the top of the resident tail with older on the server → request the previous chunk
-        self.assertIn('vscodeApi?.postMessage({ type: "loadOlder", id: sid, before: s.headFrom });', r)
+        self.assertIn('vscodeApi?.postMessage({ type: "loadOlder", id: sid, before: s.proto === 2 ? s.firstUuid : s.headFrom });', r)
         self.assertIn("if (moreOnServer && (v.winStart ?? 0) === 0 && st < topH + edgePx) { requestOlder(", r)
         # chatHead PREPENDS the chunk + lowers headFrom + re-anchors
         self.assertIn('else if (m.type === "chatHead") chatHead(m);', r)
