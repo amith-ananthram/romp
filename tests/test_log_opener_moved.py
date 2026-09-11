@@ -101,14 +101,16 @@ catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
 const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
 await page.goto(cfg.url);
 await page.waitForSelector("#rail-gear", { timeout: 20000 });
-const feed = page.frames().find((f) => f.url().includes("/settings"));   // the settings iframe hosts the gear (the feed page mounts none)
-if (!feed) { console.error("no settings frame"); process.exit(1); }
-await feed.waitForSelector(".rs-vermenu-btn", { state: "attached", timeout: 20000 });
 const feedPane = page.frames().find((f) => f.url().includes("/feed"));
 const feedGear = feedPane ? await feedPane.evaluate(() => !!document.getElementById("rsettings")) : null;
 const before = await page.evaluate(() => ({ railErrs: !!document.getElementById("rail-errs"), logHidden: document.getElementById("rerr-back").hidden,
-  acts: Array.from(document.querySelectorAll(".rail-acts .rail-act")).map((e) => e.id) }));
-await feed.evaluate(() => window.postMessage({ romp: "openSettings" }, "*"));
+  acts: Array.from(document.querySelectorAll(".rail-acts .rail-act")).map((e) => e.id),
+  settingsSrc: document.getElementById("f-settings").getAttribute("src") }));   // the settings page is not loaded until the gear is first opened
+await page.click("#rail-gear");   // the shell's opener gives the settings iframe its src and opens the gear once the page has loaded
+await page.waitForFunction(() => { const f = document.getElementById("f-settings"); return f && f.getAttribute("src") === "/settings"; }, null, { timeout: 8000 });
+await page.waitForFunction(() => document.body.classList.contains("settings-open"), null, { timeout: 20000 });
+const feed = page.frames().find((f) => f.url().includes("/settings"));   // the settings iframe hosts the gear (the feed page mounts none)
+if (!feed) { console.error("no settings frame"); process.exit(1); }
 await feed.waitForSelector("#rsettings:not([hidden])", { timeout: 15000 });
 const btn = await feed.evaluate(() => { const b = document.getElementById("rs-log-open"); return { present: !!b, hidden: b ? b.hidden : null }; });
 await feed.click("#rs-log-open");
@@ -174,6 +176,7 @@ class ServedOpener(unittest.TestCase):
         r = json.loads(line[len("RESULT:"):])
         self.assertFalse(r["before"]["railErrs"], "no Log opener in the bottom bar: %r" % r["before"])
         self.assertTrue(r["before"]["logHidden"], "the panel starts closed")
+        self.assertIsNone(r["before"]["settingsSrc"], "the settings page is not loaded before the gear is first opened")
         self.assertEqual(r["before"]["acts"], ["rail-refresh", "rail-net", "rail-bell", "rail-gear"], "the bar's action cluster keeps its few controls (the bell is present, hidden until it has something): %r" % r["before"]["acts"])
         self.assertEqual(r["btn"], {"present": True, "hidden": False}, "the gear shows Open log in the web shell")
         self.assertIs(r["feedGear"], False, "the feed page mounts no gear of its own (it lives on /settings)")

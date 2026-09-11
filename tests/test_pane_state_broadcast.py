@@ -294,6 +294,17 @@ STORAGE.forEach((f) => f({ key: 'romp-pane-grow' }));
 out.otherKey = { chat: last('chat'), hidden: hidden() };
 STORAGE.forEach((f) => f({ key: null }));       // a cleared store is read again
 out.cleared = { chat: last('chat'), hidden: hidden() };
+// the gear turns the Outline on, whose rail default is OFF: it comes on screen (the reason to turn it on), at a
+// fair width, and the set persists so a reload keeps it; the pane's own rail toggle hides it from there
+const GREW = []; window.__rompGrowFair = (k) => GREW.push(k);
+out.fleetBefore = { cls: CLS.has('po-fleet'), store: JSON.parse(STORE['romp-panes'] || 'null') };
+STORE['romp:settings'] = JSON.stringify({ panes: {} });
+STORAGE.forEach((f) => f({ key: 'romp:settings' }));
+out.fleetOn = { cls: CLS.has('po-fleet'), chat: last('chat'), hidden: hidden(), grew: GREW.slice(), store: JSON.parse(STORE['romp-panes'] || 'null'), src: src() };
+window.__rompPaneToggle('fleet');
+out.fleetRailOff = { cls: CLS.has('po-fleet'), chat: last('chat'), store: JSON.parse(STORE['romp-panes'] || 'null') };
+STORAGE.forEach((f) => f({ key: 'romp:settings' }));   // a save that changes no pane's setting moves nothing
+out.fleetStays = { cls: CLS.has('po-fleet'), grew: GREW.slice() };
 console.log(JSON.stringify(out));
 """
 
@@ -352,6 +363,32 @@ class OptionalPanes(unittest.TestCase):
         self.assertIn("fleet", self.out["otherKey"]["chat"]["on"])
         self.assertEqual(self.out["cleared"]["hidden"]["fleet"], True, "a cleared store (key null) is read again")
         self.assertNotIn("fleet", self.out["cleared"]["chat"]["on"])
+
+    def test_a_pane_turned_on_in_the_gear_comes_on_screen_and_the_rail_hides_it_from_there(self):
+        # the Outline's rail default is off, so before this a re-enabled Outline got its button back and nothing else,
+        # while the gear's row says the column and its button are gone when off (so back when on). At boot the stored
+        # rail flag still rules (a pane the gear shows keeps the state the rail left it in)
+        b = self.out["fleetBefore"]
+        self.assertFalse(b["cls"], "the Outline was off screen (the boot default, then hidden by the cleared store)")
+        self.assertEqual((b["store"] or {}).get("fleet"), False, "and its stored rail flag is off (the Files toggle's save wrote the set)")
+        o = self.out["fleetOn"]
+        self.assertTrue(o["cls"], "turned on in the gear: the column comes on screen")
+        self.assertEqual(o["chat"]["on"]["fleet"], True, "and the panes are told")
+        self.assertFalse(o["hidden"]["fleet"], "its rail button and phone tab are back")
+        self.assertEqual(o["grew"], ["fleet"], "at a fair width, as the rail's bring-forward gives")
+        self.assertEqual(o["store"]["fleet"], True, "persisted, so a reload keeps it")
+        self.assertEqual(o["src"]["fleet"], "/fleet", "loaded at boot already: the src is not touched")
+        r = self.out["fleetRailOff"]
+        self.assertFalse(r["cls"], "the rail toggle hides it from there")
+        self.assertEqual(r["store"]["fleet"], False)
+        s = self.out["fleetStays"]
+        self.assertFalse(s["cls"], "a gear save that changes no pane's setting does not bring it back")
+        self.assertEqual(s["grew"], ["fleet"])
+        self.assertEqual(self.out["boot"]["chat"]["on"]["fleet"], False, "at boot the stored rail flag rules (off by default)")
+        js = km._LANDING_COLLAPSE_JS
+        self.assertIn("po[k]=live?true:flagOf(k);", js)
+        self.assertIn("reconcile(true);apply();", js, "the storage listener's reconcile is the live one")
+        self.assertIn("reconcile();   // the optional panes", js, "the boot one is not")
 
     def test_the_markup_and_the_mechanism(self):
         html = km._landing()
@@ -530,10 +567,16 @@ _ARMS_HARNESS = r"""
 const LISTENERS = [], TOGGLES = [], TABS = [];
 const POSTED = { 'f-files': [], 'f-feed': [], 'f-chat': [], 'f-settings': [] };
 const FOCUSED = [], CLASSES = [];   // contentWindow.focus() calls by iframe id; body class toggles as [class, on]
-let MOBILE = false, TAB = 'chat', FILES_READY = 'complete', FILES_LOADS = [];
+let MOBILE = false, TAB = 'chat', FILES_READY = 'complete', FILES_LOADS = [], SETTINGS_LOADS = [];
+// the served markup's attributes, per iframe id (getElementById hands out a fresh stub each call, so they live here):
+// the settings iframe carries data-src, no src, and its document is the empty one until the page loads
+const ATTRS = { 'f-settings': { 'data-src': '/settings' } };
+let SETTINGS_URL = 'about:blank';
 const frame = (id) => ({ contentWindow: { postMessage: (m) => POSTED[id].push(JSON.parse(JSON.stringify(m))), focus: () => FOCUSED.push(id) },
-  contentDocument: { get readyState() { return id === 'f-files' ? FILES_READY : 'complete'; } },
-  addEventListener: (ev, f) => { if (ev === 'load' && id === 'f-files') FILES_LOADS.push(f); },
+  contentDocument: { get readyState() { return id === 'f-files' ? FILES_READY : 'complete'; }, get URL() { return id === 'f-settings' ? SETTINGS_URL : 'http://TESTHOST:1/' + id.slice(2); } },
+  getAttribute: (a) => (ATTRS[id] && a in ATTRS[id] ? ATTRS[id][a] : null),
+  setAttribute: (a, v) => { (ATTRS[id] = ATTRS[id] || {})[a] = v; },
+  addEventListener: (ev, f) => { if (ev === 'load' && id === 'f-files') FILES_LOADS.push(f); if (ev === 'load' && id === 'f-settings') SETTINGS_LOADS.push(f); },
   removeEventListener: (ev, f) => { if (id === 'f-files') FILES_LOADS = FILES_LOADS.filter((g) => g !== f); } });
 global.window = global;
 global.addEventListener = (ev, f) => { if (ev === 'message') LISTENERS.push(f); };
@@ -599,12 +642,22 @@ FILES_LOADS.slice().forEach((f) => f());
 out.reloaded = { files: POSTED['f-files'].slice() }; reset();
 send({ type: 'editorSelection', text: 'the auth check', sid: SID, src: 'src/app.py:12' });
 out.seed = snap(); reset();
-// the gear: a pane's ask and the shell's own opener both land in the settings iframe, never the feed's
+// the gear: a pane's ask and the shell's own opener both land in the settings iframe, never the feed's. The
+// iframe is served with data-src: the FIRST ask gives it its src and waits for the page's load; a second ask
+// while it waits is not queued (the page's opener toggles); the load delivers one open; from then on asks post
 out.opener = typeof window.__rompOpenSettings;
 send({ romp: 'openSettings' });
-out.gearAsk = snap(); reset();
+out.gearAsk = Object.assign(snap(), { src: ATTRS['f-settings'].src, waiting: SETTINGS_LOADS.length }); reset();
 window.__rompOpenSettings();
-out.gearOpen = snap(); reset();
+out.gearAskAgain = Object.assign(snap(), { src: ATTRS['f-settings'].src, waiting: SETTINGS_LOADS.length }); reset();
+SETTINGS_LOADS.slice().forEach((f) => f());   // the empty document's own load, if it comes late: not the page's
+out.gearBlankLoad = snap(); reset();
+SETTINGS_URL = 'http://TESTHOST:1/settings'; SETTINGS_LOADS.slice().forEach((f) => f());
+out.gearLoaded = snap(); reset();
+window.__rompOpenSettings();
+out.gearOpen = Object.assign(snap(), { src: ATTRS['f-settings'].src }); reset();
+SETTINGS_LOADS.slice().forEach((f) => f());   // a later reload of the page replays nothing
+out.gearReloaded = snap(); reset();
 // the Feed pane off in this browser (the gear's Panes section): a browse ask naming no pane takes the Files pane's
 // arm (the feed cannot be lifted), a browseClosed puts nothing back, and a phone gets the Files tab, not the feed's
 FEED_OFF = true;
@@ -703,12 +756,31 @@ class RelayArms(unittest.TestCase):
         # iframe, and a pane asking for the gear (the feed's login card, gear-host.ts openGear) is forwarded
         # there; the feed hears nothing and no pane is toggled (the settings iframe is not a pane)
         self.assertEqual(self.out["opener"], "function", "__rompOpenSettings is the shell's one opener")
-        for k in ("gearAsk", "gearOpen"):
+        for k in ("gearAsk", "gearAskAgain", "gearBlankLoad", "gearLoaded", "gearOpen", "gearReloaded"):
             g = self.out[k]
-            self.assertEqual(g["settings"], [{"romp": "openSettings"}], k)
             self.assertEqual(g["feed"], [], k + ": the feed page hosts no gear")
             self.assertEqual(g["toggles"], [], k + ": no pane moves")
             self.assertEqual(g["tabs"], [], k)
+        self.assertEqual(self.out["gearLoaded"]["settings"], [{"romp": "openSettings"}], "the page's load delivers the open")
+        self.assertEqual(self.out["gearOpen"]["settings"], [{"romp": "openSettings"}], "a later ask posts at once")
+
+    def test_the_settings_page_loads_on_the_first_open_and_the_ask_waits_for_it(self):
+        # the iframe is served with data-src (an eagerly loaded gear cost a kernel socket plus one per attached host on
+        # every dashboard load, idle until opened): the first ask copies it to src and holds the open for the page's
+        # load, since a message into a document still on its way is dropped and the first click would show nothing
+        a = self.out["gearAsk"]
+        self.assertEqual(a["src"], "/settings", "the first ask gives the iframe its src")
+        self.assertEqual(a["settings"], [], "nothing is posted into a page that has not loaded")
+        self.assertEqual(a["waiting"], 1, "one load listener holds the ask")
+        b = self.out["gearAskAgain"]
+        self.assertEqual(b["settings"], [], "a second ask while the page loads is not queued: the page's opener toggles, two would open and close it")
+        self.assertEqual(b["waiting"], 1, "and adds no listener")
+        self.assertEqual(b["src"], "/settings", "the src is set once, never reassigned")
+        self.assertEqual(self.out["gearBlankLoad"]["settings"], [], "the empty document's own load event is not the page's")
+        self.assertEqual(self.out["gearLoaded"]["settings"], [{"romp": "openSettings"}], "the page's load delivers the open, once")
+        self.assertEqual(self.out["gearOpen"]["src"], "/settings")
+        self.assertEqual(self.out["gearReloaded"]["settings"], [], "a later load replays nothing")
+        self.assertIn("<iframe id=f-settings data-src=/settings title=Settings></iframe>", km._landing(), "served without a src")
 
     def test_closing_the_gear_puts_the_keyboard_back_in_the_chat(self):
         # the gear's document is the hidden settings iframe, lifted while open; closing hides it, which drops focus

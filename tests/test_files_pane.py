@@ -252,7 +252,7 @@ class Shell(unittest.TestCase):
         _has(self, "document.body.classList.toggle('no-files-control',!ctl);", js)
         _has(self, "if(k==='files'&&!filesCtl())return;", js)
         _has(self, "return {romp:'panes',on:on,avail:{files:filesCtl()}};", js)
-        _has(self, "window.addEventListener('storage',function(e){if(!e||!e.key||e.key===SK)reconcile();apply();});", js)   # the gear writes from another document: this is the event (a gear save re-reads the optional panes before the titles refresh)
+        _has(self, "window.addEventListener('storage',function(e){if(!e||!e.key||e.key===SK)reconcile(true);apply();});", js)   # the gear writes from another document: this is the event (a gear save re-reads the optional panes before the titles refresh)
         mob = km._LANDING_MOBILE_JS
         _has(self, "function show(p){if(p==='files'&&!filesCtlM())p='chat';", mob)
         # the gear's row, in the panes section beside "File links open in", shown by default; the chat's route reads the word

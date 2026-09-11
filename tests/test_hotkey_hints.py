@@ -33,7 +33,7 @@ class HotkeyHints(unittest.TestCase):
         self.assertIn("(h?' ('+h+')':'')", SRC, "unbound pane commands show no empty parens")
         self.assertIn("window.addEventListener('romp:keys',apply);", SRC,
                       "a rebind (or palette-main's boot nudge) refreshes the titles")
-        self.assertIn("window.addEventListener('storage',function(e){if(!e||!e.key||e.key===SK)reconcile();apply();});",
+        self.assertIn("window.addEventListener('storage',function(e){if(!e||!e.key||e.key===SK)reconcile(true);apply();});",
                       SRC, "a gear save in another tab re-reads the optional panes before refreshing the titles")
 
 

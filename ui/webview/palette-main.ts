@@ -118,8 +118,9 @@ installMenuEcho();
   registerCommand({
     id: "settings.open", title: "Open settings",
     // the gear lives on its own served page, the shell's hidden #f-settings iframe (the user 2026-09-10;
-    // it rode the feed pane before, which made that pane required)
-    run: () => { try { pane("f-settings")!.contentWindow!.postMessage({ romp: "openSettings" }, "*"); } catch (e) { /* settings page not loaded */ } },
+    // it rode the feed pane before, which made that pane required), loaded on the first open: the shell's one
+    // opener (kernel _LANDING_SETTINGS_JS __rompOpenSettings) gives it its src and holds the ask for its load
+    run: () => { if (w.__rompOpenSettings) w.__rompOpenSettings(); },
   });
   // Chat history back/forward (the user 2026-08-14; their own Obsidian nav keys — Ctrl+M / Ctrl+,
   // per their vault's hotkeys.json). The chat pane owns the trail (it knows the tabs + scroll spots);

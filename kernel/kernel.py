@@ -48375,9 +48375,20 @@ _LANDING_SETTINGS_JS = """
 function feedHere(){return !(window.__rompPaneEnabled&&!window.__rompPaneEnabled('feed'));}
 // The ONE opener of the settings gear: it lives in the hidden #f-settings iframe (the served /settings page;
 // the user 2026-09-10 — it rode the feed pane before, which made that pane required). The rail's ⛭, the phone's
-// settings action and the message relay below all come here; the palette posts into the same iframe itself.
-window.__rompOpenSettings=function(){var f=document.getElementById('f-settings');
-try{f&&f.contentWindow&&f.contentWindow.postMessage({romp:'openSettings'},'*');}catch(e){}};
+// settings action, the palette's command and the message relay below all come here. The iframe is served with
+// data-src (review find 2026-09-11: an eagerly loaded gear cost a kernel socket plus one per attached host on
+// every dashboard load, idle until opened), so the FIRST open gives it its src, and an open asked before the
+// page has loaded waits for the iframe's load, once (the files forward's shape): a message posted into the
+// document still on its way would be dropped, and the first click would show nothing. A second ask while that
+// one waits is not queued: the page's opener toggles, so two would open and close it.
+var sPend=false;
+window.__rompOpenSettings=function(){var f=document.getElementById('f-settings');if(!f)return;
+var open=function(){try{f.contentWindow&&f.contentWindow.postMessage({romp:'openSettings'},'*');}catch(e){}};
+if(!f.getAttribute('src')){var u=f.getAttribute('data-src');if(!u)return;sPend=true;f.setAttribute('src',u);
+  f.addEventListener('load',function(){try{if(f.contentDocument&&f.contentDocument.URL==='about:blank')return;}catch(e){}   // the empty document's own load, not the page's
+    if(sPend){sPend=false;open();}});return;}
+if(sPend)return;
+open();};
 window.addEventListener('message',function(e){var m=e.data;if(!m)return;
 if(m.romp==='settings'){document.body.classList.toggle('settings-open',!!m.on);
 // closing hides the iframe that held the keyboard, which drops focus onto the shell body; put it back in the
@@ -49789,25 +49800,29 @@ _LANDING_COLLAPSE_JS = """
   // drops its body class, and the pane-set broadcast omits it), its rail button and phone tab wear hidden,
   // and its iframe, served with data-src in place of src, is never loaded (no document, no socket, nothing
   // built for it); a phone left on its tab goes back to the chat. A pane on gets its src from data-src ONCE
-  // (a src is never reassigned: no reload of a live pane), the rail flag it had (this page's, else the
-  // stored one, else the default) and its button and tab back. Runs at boot before the first apply, and
-  // again on the storage event a gear save raises in this window (the gear is the settings iframe, a
-  // same-origin document, so its localStorage write fires here). The chat is required and not listed; the
-  // Files pane is not optional here (its rail toggle is its off switch). The kernel is not told and does
-  // not care: judging and task tracking run the same with the Feed pane off in a browser.
-  var ALL=KEYS.slice(),OPT=['timeline','fleet','feed'],SK='romp:settings',held={};
+  // (a src is never reassigned: no reload of a live pane) and its button and tab back. Runs at boot before the
+  // first apply, where a shown pane keeps the rail flag it had (the stored one, else the default), and again
+  // on the storage event a gear save raises in this window (the gear is the settings iframe, a same-origin
+  // document, so its localStorage write fires here), where a pane just turned on comes ON SCREEN (review find
+  // 2026-09-11: the Outline's default is off, so re-enabling it brought back its rail button alone, while the
+  // gear's row promises the column back; the rail hides it from there, and the set persists as a rail toggle's
+  // does, so a reload keeps it). The chat is required and not listed; the Files pane is not optional here (its
+  // rail toggle is its off switch). The kernel is not told and does not care: judging and task tracking run
+  // the same with the Feed pane off in a browser.
+  var ALL=KEYS.slice(),OPT=['timeline','fleet','feed'],SK='romp:settings';
   function optOn(){var on={};OPT.forEach(function(k){on[k]=true;});
     try{var s=JSON.parse(localStorage.getItem(SK)||'{}'),p=s&&s.panes;if(p&&typeof p==='object')OPT.forEach(function(k){on[k]=p[k]!==false;});}catch(e){}
     return on;}
-  function flagOf(k){return (k in held)?held[k]:(k in stored)?!!stored[k]:DEF[k];}
-  function reconcile(){var on=optOn();
+  function flagOf(k){return (k in stored)?!!stored[k]:DEF[k];}
+  function reconcile(live){var on=optOn(),shown=false;
     OPT.forEach(function(k){var en=on[k],f=document.getElementById('f-'+k);
       if(en){if(f&&!f.getAttribute('src')&&f.getAttribute('data-src'))f.setAttribute('src',f.getAttribute('data-src'));
-        if(!(k in po)){po[k]=flagOf(k);delete held[k];}}
-      else if(k in po){held[k]=po[k];delete po[k];}
+        if(!(k in po)){po[k]=live?true:flagOf(k);if(live){shown=true;if(window.__rompGrowFair)window.__rompGrowFair(k);}}}   // live: the pane comes on screen, at a fair width (togglePane's bring-forward)
+      else if(k in po)delete po[k];
       Array.prototype.forEach.call(document.querySelectorAll('.rail-btn[data-pane='+k+'],#mtabs button[data-pane='+k+']'),function(b){b.hidden=!en;});
       if(!en&&document.body.getAttribute('data-tab')===k&&window.__rompMobileTab)window.__rompMobileTab('chat');});
-    KEYS=ALL.filter(function(k){return k in po;});}
+    KEYS=ALL.filter(function(k){return k in po;});
+    if(shown&&qp===null)saveP();}   // a ?panes= bookmark stays a view (never written over the stored set)
   function apply(){
     var ctl=filesCtl();
     document.body.classList.toggle('no-files-control',!ctl);
@@ -49839,7 +49854,7 @@ _LANDING_COLLAPSE_JS = """
   apply();
   ALL.forEach(function(k){var f=document.getElementById('f-'+k);if(f)f.addEventListener('load',function(){tell(f,panesMsg());});});   // wired after the boot apply: both orders (iframe first / shell first) are covered; every iframe, since a pane enabled later loads later
   window.addEventListener('romp:keys',apply);   // a rebind (or palette-main's boot nudge) refreshes the titles
-  window.addEventListener('storage',function(e){if(!e||!e.key||e.key===SK)reconcile();apply();});     // …including one made in another tab; a gear save (romp:settings, or a cleared store) re-reads the optional panes first
+  window.addEventListener('storage',function(e){if(!e||!e.key||e.key===SK)reconcile(true);apply();});     // …including one made in another tab; a gear save (romp:settings, or a cleared store) re-reads the optional panes first, and a pane it turned on comes on screen
 })();
 """
 
@@ -51058,9 +51073,12 @@ def _landing():
             "</div></div>"
             # the settings page (the gear): an iframe that is NOT a pane — hidden until lifted full-window (the
             # CSS above), no rail button, no tab, no gutter, no entry in _PANE_ORDER. The rail's ⛭, the phone's
-            # settings action, the palette and a pane's own ask all post {romp:'openSettings'} into it
+            # settings action, the palette and a pane's own ask all go through the shell's one opener
             # (__rompOpenSettings in _LANDING_SETTINGS_JS; the user 2026-09-10 — it rode the feed pane before).
-            "<iframe id=f-settings src=/settings title=Settings></iframe>"
+            # data-src, not src (review find 2026-09-11): the page loads on the FIRST open, so a dashboard whose
+            # gear is never opened pays nothing for it (the page's shim dials the kernel, and federation.js one
+            # socket per attached host, all idle until the gear is up); the opener copies data-src to src once.
+            "<iframe id=f-settings data-src=/settings title=Settings></iframe>"
             "<div class=col>"
             "<div class=row>"
             "<div class=pane id=chat-pane><iframe id=f-chat class=m-on src=/chat></iframe></div>"

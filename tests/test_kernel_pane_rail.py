@@ -81,8 +81,11 @@ class PaneRailTest(unittest.TestCase):
         self.assertIn("<iframe id=f-chat class=m-on src=/chat>", self.html)
         self.assertIn("<iframe id=f-files src=/files>", self.html)
         self.assertIn(".rail-btn[hidden]{display:none}", self.html, "the controller's hidden must beat .rail-btn's display:flex")
-        self.assertIn("var ALL=KEYS.slice(),OPT=['timeline','fleet','feed'],SK='romp:settings',held={};", self.html)
-        self.assertIn("function reconcile(){", self.html)
+        self.assertIn("var ALL=KEYS.slice(),OPT=['timeline','fleet','feed'],SK='romp:settings';", self.html)
+        # reconcile(live): the boot call keeps a shown pane's stored rail flag; the storage listener's call brings a
+        # pane the gear just turned on ON SCREEN (the row promises the column back, not its button alone)
+        self.assertIn("function reconcile(live){", self.html)
+        self.assertIn("reconcile(true);apply();", self.html)
         # the default body class still ships chat+feed+timeline; the controller reconciles before its first apply
         self.assertIn("<body class='po-chat po-feed po-timeline'>", self.html)
 

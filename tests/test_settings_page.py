@@ -12,8 +12,10 @@ opener posted openSettings into #f-feed and the shell lifted that iframe). The k
 - the shell: a hidden #f-settings iframe that is NOT a pane (no _PANE_ORDER row, no rail button, no
   phone tab, no gutter, not inside a .pane), lifted full-window while body.settings-open in place of
   the feed iframe; ONE opener (__rompOpenSettings) that the rail's gear, the phone's settings action
-  and a pane's own ask ({romp:'openSettings'} up to the shell) all use, the palette posting into the
-  same iframe; the Log's unread count told to that document; the models frame sent to app settings.
+  and a pane's own ask ({romp:'openSettings'} up to the shell) and the palette's command all use; the
+  iframe served with data-src and loaded by that opener on the first open (an idle gear cost a kernel
+  socket plus one per attached host on every dashboard load), the ask held for the page's load; the Log's
+  unread count told to that document; the models frame sent to app settings.
 - the feed page: hosts no gear. It sets window.__rompGearOnSettingsPage before feed.js, which then
   skips the mount (ui/webview/gear-host.ts, executed in gear-host.test.ts), and links gear.css no more.
   VS Code's feed panel, which sets no flag, keeps the gear from the same bundle.
@@ -166,7 +168,8 @@ class Shell(unittest.TestCase):
 
     def test_the_settings_iframe_is_embedded_hidden_and_is_not_a_pane(self):
         h = self.html
-        _has(self, "<iframe id=f-settings src=/settings title=Settings></iframe>", h)
+        _has(self, "<iframe id=f-settings data-src=/settings title=Settings></iframe>", h, "served without a src: the page loads on the first open")
+        _lacks(self, "id=f-settings src=", h)
         self.assertLess(h.index("id=f-settings"), h.index("<div class=col>"), "outside the pane grid, never inside a .pane")
         _has(self, "#f-settings{display:none}", h)
         _has(self, "body.settings-open #f-settings{display:block;position:fixed;inset:0;z-index:200;background:transparent}", h)
@@ -181,10 +184,16 @@ class Shell(unittest.TestCase):
     def test_one_opener_and_every_caller_uses_it(self):
         js = km._LANDING_SETTINGS_JS
         _has(self, "window.__rompOpenSettings=function(){var f=document.getElementById('f-settings');", js)
+        # the first open gives the iframe its src and holds the ask for the page's load (a message into a document
+        # still loading is dropped); a second ask while one waits is not queued (the page's opener toggles)
+        _has(self, "if(!f.getAttribute('src')){var u=f.getAttribute('data-src');if(!u)return;sPend=true;f.setAttribute('src',u);", js)
+        _has(self, "if(sPend){sPend=false;open();}});return;}", js)
+        _has(self, "if(sPend)return;", js)
         _has(self, "if(gear)gear.onclick=function(){window.__rompOpenSettings();};", js, "the rail's gear")
         _has(self, "if(m.romp==='openSettings')window.__rompOpenSettings();", js, "a pane's ask is forwarded")
         _has(self, "var A={settings:function(){try{window.__rompOpenSettings&&window.__rompOpenSettings();}catch(e){}},", km._LANDING_MOBILE_JS, "the phone's action")
-        _has(self, 'pane("f-settings")!.contentWindow!.postMessage({ romp: "openSettings" }, "*")', PALETTE, "the palette's settings.open")
+        _has(self, 'run: () => { if (w.__rompOpenSettings) w.__rompOpenSettings(); },', PALETTE, "the palette's settings.open goes through the shell's opener (the page may not be loaded yet)")
+        _lacks(self, 'pane("f-settings")!.contentWindow!.postMessage({ romp: "openSettings" }', PALETTE)
         _lacks(self, 'pane("f-feed")!.contentWindow!.postMessage({ romp: "openSettings" }', PALETTE)
         # nothing in the shell posts the open into the feed any more
         for m in re.finditer(r"getElementById\('f-feed'\)[^\n]*", SRC):
