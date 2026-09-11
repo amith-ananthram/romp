@@ -41,6 +41,9 @@ tsock = load_source("romp_tmux_socket", HERE / "tmux_socket.py")  # where the tm
 # terminal session as dead and started a second, unscoped server on its next spawn). Unmanaged (romp-serve bare, a
 # lab, a test) resolves for itself. The rule that fired is logged at boot and reported on /version.
 _TMUX_TMPDIR, _TMUX_TMPDIR_RULE = tsock.export_tmux_tmpdir(os.environ, managed=bool(os.environ.get("ROMP_MANAGER_PID")))
+# the MANAGER's own rule, passed beside the value (specEnv): "" under a manager from before the rule, so bin/romp can tell
+# that manager (restart it) from a current one that simply has no runtime directory
+_TMUX_MANAGER_RULE = (os.environ.get(tsock.LAUNCHER_MARK) or "") if os.environ.get("ROMP_MANAGER_PID") else ""
 CHAT_VIEW = ROOT / "vscode-extension"               # the tuned UI, current in this worktree via `git merge main`
 # ROMP_DIST_DIR: test seam (romp-lab serves a COPY of the built bundles, so its rebuild simulations —
 # mtime bumps that must raise the reload banner — never touch the dist the LIVE kernel serves).
@@ -1129,7 +1132,7 @@ def _version_info():
             # where this kernel's tmux server keeps its socket ("" = tmux's default) and the rule that chose it
             # (T325): bin/romp compares its own answer with this before it starts a terminal session, so a shell
             # that resolved differently (a cron job, a `sudo -u`, a `docker exec`) never starts a second server
-            "tmuxSocketDir": _TMUX_TMPDIR or "", "tmuxSocketRule": _TMUX_TMPDIR_RULE,
+            "tmuxSocketDir": _TMUX_TMPDIR or "", "tmuxSocketRule": _TMUX_TMPDIR_RULE, "tmuxSocketManagerRule": _TMUX_MANAGER_RULE,
             "uptime_s": int(time.time() - _STARTED), "dist_ver": _dist_ver(), "bundles": bundles,
             # the WS ops beyond the base protocol this kernel answers (KERNEL_WS_CAPS) — the same list
             # the `caps` frame carries at `ready`; `romp version` and a curl can read it here
@@ -56146,7 +56149,7 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
 def main():
     # where the tmux server's socket lives (T325): said once at boot, so a session that cannot be reached is diagnosed
     # from the log, not from the /tmp listing
-    sys.stderr.write("romp-kernel: tmux socket dir: %s\n" % tsock.describe(_TMUX_TMPDIR, _TMUX_TMPDIR_RULE))
+    sys.stderr.write("romp-kernel: tmux socket dir: %s\n" % tsock.describe(_TMUX_TMPDIR, _TMUX_TMPDIR_RULE, _TMUX_MANAGER_RULE))
     # Export the kernel's claude resolution for every judge call (in-process tiers AND `romp-judge
     # --once` subprocesses): judges exec the binary directly, and a kernel started over non-login ssh
     # (a federated host) has no ~/.local/bin on PATH — bare `claude` exec-failed silently there.

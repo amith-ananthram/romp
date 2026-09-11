@@ -156,8 +156,12 @@ function specEnv(spec, base, ids) {
   if (spec.stateDir) env.ROMP_STATE_DIR = spec.stateDir;
   if (spec.claudeConfigDir) env.CLAUDE_CONFIG_DIR = spec.claudeConfigDir;
   if (spec.tmuxSocket) env.ROMP_TMUX_SOCKET = spec.tmuxSocket;
+  // the manager's own rule for the tmux socket directory rides beside the value (T325): a kernel reports it on
+  // /version, and bin/romp tells a manager from before the rule (no word) from a current one on tmux's default
+  if (tmuxSocketRule) env.ROMP_TMUX_TMPDIR_RULE = tmuxSocketRule;
   return env;
 }
+let tmuxSocketRule = '';   // set by startManager once it resolved; '' until then (a kernel spawned before that reads no word)
 
 const kernels = new Map();
 
@@ -787,9 +791,13 @@ function resolveTmuxTmpdir({ env = process.env, fsi = fs } = {}) {
   const op = env.TMUX_TMPDIR || '';                 // as it stands: no trimming, the twins agree byte for byte
   if (op) {
     // the shell twin's word for what IT resolved (bin/romp-tmux-env exports the mark beside the value before `romp
-    // up` starts a manager), so the log names that rule and not the operator
+    // up` starts a manager), honoured only for the value it describes: a mark that leaked into a descendant shell
+    // must not relabel an operator's own TMUX_TMPDIR as the runtime directory
     const mark = env.ROMP_TMUX_TMPDIR_RULE || '';
-    return { dir: op, rule: Object.values(TMUX_DIR_RULES).includes(mark) ? mark : TMUX_DIR_RULES.operator };
+    const run = env.XDG_RUNTIME_DIR || '';
+    const canon = (p) => { try { return fsi.realpathSync(p); } catch { return p.replace(/\/+$/, '') || p; } };
+    if (mark === TMUX_DIR_RULES.runtime && run && canon(op) === path.join(canon(run), 'romp')) return { dir: op, rule: TMUX_DIR_RULES.runtime };
+    return { dir: op, rule: TMUX_DIR_RULES.operator };
   }
   const run0 = env.XDG_RUNTIME_DIR || '';
   if (!run0) return { dir: null, rule: TMUX_DIR_RULES.noRuntime };
@@ -1009,6 +1017,7 @@ function startManager() {
   // session they create must agree on it (T325)
   const tmuxPick = resolveTmuxTmpdir();
   if (tmuxPick.rule === TMUX_DIR_RULES.runtime) process.env.TMUX_TMPDIR = tmuxPick.dir;   // the operator's stands as it is; the default is the variable's absence
+  tmuxSocketRule = tmuxPick.rule;
   log(`tmux socket dir: ${describeTmuxTmpdir(tmuxPick)}`);
   startTmuxServer();
   const server = http.createServer((req, res) => {

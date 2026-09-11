@@ -39,8 +39,19 @@ test('the operator\'s TMUX_TMPDIR wins as it stands, untrimmed, and nothing is m
 test('the runtime dir is canonical (a trailing slash is the same directory) and a launcher\'s mark names its rule', () => {
   const fsi = fakeFs({ dirs: ['/run/user/1000'] });
   assert.equal(tmuxTmpdir({ env: { XDG_RUNTIME_DIR: '/run/user/1000/' }, fsi }), '/run/user/1000/romp');
-  assert.deepEqual(resolveTmuxTmpdir({ env: { TMUX_TMPDIR: '/run/user/1000/romp', ROMP_TMUX_TMPDIR_RULE: 'runtime-dir' }, fsi }), { dir: '/run/user/1000/romp', rule: 'runtime-dir' }, 'bin/romp resolved it before starting this manager');
+  const fsi2 = fakeFs({ dirs: ['/run/user/1000', '/run/user/1000/romp'] });
+  assert.deepEqual(resolveTmuxTmpdir({ env: { TMUX_TMPDIR: '/run/user/1000/romp', ROMP_TMUX_TMPDIR_RULE: 'runtime-dir', XDG_RUNTIME_DIR: '/run/user/1000' }, fsi: fsi2 }), { dir: '/run/user/1000/romp', rule: 'runtime-dir' }, 'bin/romp resolved it before starting this manager');
+  assert.deepEqual(resolveTmuxTmpdir({ env: { TMUX_TMPDIR: '/run/user/1000/romp/', ROMP_TMUX_TMPDIR_RULE: 'runtime-dir', XDG_RUNTIME_DIR: '/run/user/1000/' }, fsi: fsi2 }), { dir: '/run/user/1000/romp/', rule: 'runtime-dir' }, 'the same directory by another spelling');
+  assert.deepEqual(resolveTmuxTmpdir({ env: { TMUX_TMPDIR: '/srv/tmuxsock', ROMP_TMUX_TMPDIR_RULE: 'runtime-dir', XDG_RUNTIME_DIR: '/run/user/1000' }, fsi: fsi2 }), { dir: '/srv/tmuxsock', rule: 'operator' }, 'a leaked mark beside an operator\'s own value relabels nothing');
+  assert.deepEqual(resolveTmuxTmpdir({ env: { TMUX_TMPDIR: '/run/user/1000/romp', ROMP_TMUX_TMPDIR_RULE: 'runtime-dir' }, fsi: fsi2 }), { dir: '/run/user/1000/romp', rule: 'operator' }, 'no runtime dir to describe: the mark cannot be checked');
   assert.deepEqual(resolveTmuxTmpdir({ env: { TMUX_TMPDIR: '/op', ROMP_TMUX_TMPDIR_RULE: 'made-up' }, fsi }), { dir: '/op', rule: 'operator' }, 'an unknown mark is ignored');
+});
+
+test('the manager passes its own rule to every kernel beside the value, once it resolved', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'bin', 'romp-manager'), 'utf8');
+  assert.match(src, /if \(tmuxSocketRule\) env\.ROMP_TMUX_TMPDIR_RULE = tmuxSocketRule;\s*return env;\s*\}/, 'specEnv carries the rule');
+  assert.match(src, /tmuxSocketRule = tmuxPick\.rule;\s*log\(`tmux socket dir:/, 'set right after startManager resolved');
+  assert.ok(src.indexOf('let tmuxSocketRule = ') > src.indexOf('function specEnv('), 'declared beside specEnv');
 });
 
 test('every answer names the rule that chose it, and the log line says it', () => {

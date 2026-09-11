@@ -90,7 +90,7 @@ class Resolver(unittest.TestCase):
         self.assertEqual(ts.describe("/op", ts.RULE_OPERATOR), "/op (TMUX_TMPDIR set by the operator)")
         self.assertEqual(ts.describe(os.path.join(self.run, "romp"), ts.RULE_RUNTIME), os.path.join(self.run, "romp") + " (the user's runtime directory)")
         self.assertEqual(ts.describe(None, ts.RULE_NO_RUNTIME), "tmux default (no XDG_RUNTIME_DIR)")
-        self.assertEqual(ts.describe(None, ts.RULE_MANAGER), "tmux default (the manager's environment, as it stands)")
+        self.assertEqual(ts.describe(None, ts.RULE_MANAGER), "tmux default (the manager's environment, as it stands, a manager from before the rule)")
 
     def test_the_operator_s_value_is_taken_as_it_stands_untrimmed(self):
         # "wins as it stands": no trimming, so the three twins agree byte for byte (the parity case below runs them)
@@ -118,10 +118,20 @@ class Resolver(unittest.TestCase):
         self.assertEqual(ts.tmux_tmpdir({"XDG_RUNTIME_DIR": self.run + "/"}), d)
         link = os.path.join(self.td.name, "runlink"); os.symlink(self.run, link)
         self.assertEqual(ts.tmux_tmpdir({"XDG_RUNTIME_DIR": link}), d)
-        self.assertEqual(ts.canonical(d + "/"), d); self.assertEqual(ts.canonical(""), "/tmp"); self.assertEqual(ts.canonical(None), "/tmp")
-        # the shell twin exported the value and marked what it resolved: the answer carries that rule, not "operator"
-        self.assertEqual(ts.resolve({"TMUX_TMPDIR": d, ts.LAUNCHER_MARK: ts.RULE_RUNTIME}), (d, ts.RULE_RUNTIME))
-        self.assertEqual(ts.resolve({"TMUX_TMPDIR": d, ts.LAUNCHER_MARK: "made-up"}), (d, ts.RULE_OPERATOR), "an unknown mark is ignored")
+        self.assertEqual(ts.canonical(d + "/"), d)
+        # tmux's default canonicalizes through realpath too: /tmp is a symlink to /private/tmp on macOS, and a pane's
+        # $TMUX names the socket by its real path, so a kernel on the default must compare equal to a pane on it
+        self.assertEqual(ts.canonical(""), os.path.realpath("/tmp")); self.assertEqual(ts.canonical(None), os.path.realpath("/tmp"))
+        # the shell twin exported the value and marked what it resolved: the answer carries that rule, not "operator",
+        # but only for the value the mark describes (a leaked mark beside an operator's own value relabels nothing)
+        self.assertEqual(ts.resolve({"TMUX_TMPDIR": d, ts.LAUNCHER_MARK: ts.RULE_RUNTIME, "XDG_RUNTIME_DIR": self.run}), (d, ts.RULE_RUNTIME))
+        self.assertEqual(ts.resolve({"TMUX_TMPDIR": link + "/romp", ts.LAUNCHER_MARK: ts.RULE_RUNTIME, "XDG_RUNTIME_DIR": self.run}), (link + "/romp", ts.RULE_RUNTIME), "the same directory by another spelling")
+        self.assertEqual(ts.resolve({"TMUX_TMPDIR": "/srv/tmuxsock", ts.LAUNCHER_MARK: ts.RULE_RUNTIME, "XDG_RUNTIME_DIR": self.run}), ("/srv/tmuxsock", ts.RULE_OPERATOR), "an operator's own value under a leaked mark")
+        self.assertEqual(ts.resolve({"TMUX_TMPDIR": d, ts.LAUNCHER_MARK: ts.RULE_RUNTIME}), (d, ts.RULE_OPERATOR), "no runtime dir to describe: the mark cannot be checked")
+        self.assertEqual(ts.resolve({"TMUX_TMPDIR": d, ts.LAUNCHER_MARK: "made-up", "XDG_RUNTIME_DIR": self.run}), (d, ts.RULE_OPERATOR), "an unknown mark is ignored")
+        # a managed kernel's line names the manager's own rule, or its absence (a manager from before the rule)
+        self.assertEqual(ts.describe(None, ts.RULE_MANAGER, "no XDG_RUNTIME_DIR"), "tmux default (the manager's environment, as it stands, its rule: no XDG_RUNTIME_DIR)")
+        self.assertEqual(ts.describe(None, ts.RULE_MANAGER), "tmux default (the manager's environment, as it stands, a manager from before the rule)")
 
     def test_the_kernel_s_own_terminal_spawn_says_when_the_launcher_refused(self):
         # the launcher's refusal used to vanish into DEVNULL after /new had answered ok: no tab, nothing said why
@@ -212,9 +222,11 @@ class KernelResolvesAtImport(unittest.TestCase):
             # a managed kernel takes the manager's value as it stands: pinned at the kernel's own call site
             src = open(os.path.join(os.path.dirname(HERE), "kernel", "kernel.py"), encoding="utf-8").read()
             self.assertIn('tsock.export_tmux_tmpdir(os.environ, managed=bool(os.environ.get("ROMP_MANAGER_PID")))', src)
-            # …and /version reports the directory and the rule, for bin/romp to compare against
+            # …and /version reports the directory and the rule, for bin/romp to compare against, plus the manager's own
+            # rule when there is a manager (none here: an unmanaged kernel reports "")
             info = km._version_info()
-            self.assertEqual((info["tmuxSocketDir"], info["tmuxSocketRule"]), (os.path.join(run, "romp"), ts.RULE_RUNTIME))
+            self.assertEqual((info["tmuxSocketDir"], info["tmuxSocketRule"], info["tmuxSocketManagerRule"]), (os.path.join(run, "romp"), ts.RULE_RUNTIME, ""))
+            self.assertIn('_TMUX_MANAGER_RULE = (os.environ.get(tsock.LAUNCHER_MARK) or "") if os.environ.get("ROMP_MANAGER_PID") else ""', src)
         finally:
             for k, v in saved.items():
                 if v is None:

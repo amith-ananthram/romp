@@ -33,6 +33,16 @@ FAKE_CLAUDE = """#!/usr/bin/env bash
 if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
 exec sleep 600
 """
+FAKE_TMUX = """#!/usr/bin/env bash
+# a recording tmux: the socket directory each call would dial is the point under test (tmux's default is the machine's
+# own /tmp/tmux-<uid>, which no lab may touch), so every call logs its TMUX_TMPDIR and answers as an empty server would
+printf '%s TMUX_TMPDIR=%s\\n' "$*" "${TMUX_TMPDIR-unset}" >> "$FAKE_TMUX_LOG"
+case "$1" in
+    has-session) exit 1 ;;                                     # no session yet: the launcher creates one
+    list-sessions|show-hooks|show-environment|show|display-message) exit 0 ;;   # empty answers
+    *) exit 0 ;;                                               # new-session, set, set-hook, respawn-pane, start-server, kill-server
+esac
+"""
 _SUN_PATH_MAX = 104 if sys.platform == "darwin" else 108   # NUL included; the socket is <root>/run/romp/tmux-<uid>/default
 
 
@@ -59,6 +69,8 @@ def _free_port():
 class TmuxSocketUnderTheRuntimeDir(unittest.TestCase):
     """An UNMANAGED lab kernel (no ROMP_MANAGER_PID): it resolves the runtime dir for itself."""
     MANAGED = False
+    MANAGER_HAS_DIR = True     # a managed class: whether the manager's environment carries a TMUX_TMPDIR (else tmux's default)
+    FAKE_TMUX = False          # a recording tmux on PATH instead of a real server (the default-socket shape)
 
     @classmethod
     def setUpClass(cls):
@@ -72,6 +84,11 @@ class TmuxSocketUnderTheRuntimeDir(unittest.TestCase):
         with open(os.path.join(fake, "claude"), "w") as f:
             f.write(FAKE_CLAUDE)
         os.chmod(os.path.join(fake, "claude"), 0o755)
+        cls.fake_tmux_log = os.path.join(cls.lab, "tmux-calls.log")
+        if cls.FAKE_TMUX:
+            with open(os.path.join(fake, "tmux"), "w") as f:
+                f.write(FAKE_TMUX)
+            os.chmod(os.path.join(fake, "tmux"), 0o755)
         cls.proj = os.path.join(cls.lab, "proj"); os.mkdir(cls.proj)
         claude = os.path.join(cls.lab, "claude"); os.makedirs(os.path.join(claude, "projects"))
         dist = os.path.join(cls.lab, "dist"); os.mkdir(dist)   # no page is served here: the API is the whole exercise
@@ -88,24 +105,32 @@ class TmuxSocketUnderTheRuntimeDir(unittest.TestCase):
                           "ROMP_KERNEL_PORT": str(cls.port)}
         cls.romp_dir = os.path.join(cls.runtime, "romp")          # where an unmanaged kernel resolves to
         if cls.MANAGED:
-            # a MANAGED kernel: the manager's environment carries its own TMUX_TMPDIR (the server it started), the
-            # runtime dir is there too, and the kernel must take the manager's value as it stands and resolve nothing;
-            # its own `romp new -t` (the shell twin, ROMP_MANAGER_PID riding along) must agree
-            cls.romp_dir = os.path.join(cls.lab, "mgr"); os.mkdir(cls.romp_dir, 0o700)
+            # a MANAGED kernel: the runtime dir is set, ROMP_MANAGER_PID rides, and the kernel must take the manager's
+            # TMUX_TMPDIR as it stands and resolve nothing; its own `romp new -t` (the shell twin, ROMP_MANAGER_PID
+            # riding along) must agree
             env["ROMP_MANAGER_PID"] = str(os.getpid())            # alive for the test's life: the kernel's parent watchdog reads it
-            env["TMUX_TMPDIR"] = cls.romp_dir
-            cls.client_env["TMUX_TMPDIR"] = cls.romp_dir            # the operator's value in a plain shell: the same server
+            env["ROMP_TMUX_TMPDIR_RULE"] = "operator" if cls.MANAGER_HAS_DIR else "no XDG_RUNTIME_DIR"   # the manager's own rule, as specEnv passes it
+            if cls.MANAGER_HAS_DIR:
+                cls.romp_dir = os.path.join(cls.lab, "mgr"); os.mkdir(cls.romp_dir, 0o700)
+                env["TMUX_TMPDIR"] = cls.romp_dir
+                cls.client_env["TMUX_TMPDIR"] = cls.romp_dir        # the operator's value in a plain shell: the same server
+            else:
+                cls.romp_dir = ""                                   # tmux's default: the manager passed no TMUX_TMPDIR
+        if cls.FAKE_TMUX:
+            env["FAKE_TMUX_LOG"] = cls.fake_tmux_log; cls.client_env["FAKE_TMUX_LOG"] = cls.fake_tmux_log
+            env["ROMP_TMUX_AVAILABLE"] = "1"
         cls.env = env
         # the server the way the manager starts it (exit-empty off, so a session's end never takes the server), on the
         # runtime-dir socket the kernel will resolve; the pane command is `exec env … claude …` since the launcher fix,
         # which every shell runs, so the server's default shell needs no choosing
         if not cls.MANAGED:
             os.mkdir(cls.romp_dir, 0o700)
-        cls.addClassCleanup(cls._kill_server)
-        r = subprocess.run(["tmux", "start-server", ";", "set", "-g", "exit-empty", "off"],
-                           env={**cls.client_env, "TMUX_TMPDIR": cls.romp_dir}, capture_output=True, text=True, timeout=20)
-        if r.returncode != 0:
-            raise unittest.SkipTest("no tmux server could start under the lab's runtime dir: " + r.stderr.strip()[:200])
+        if not cls.FAKE_TMUX:
+            cls.addClassCleanup(cls._kill_server)
+            r = subprocess.run(["tmux", "start-server", ";", "set", "-g", "exit-empty", "off"],
+                               env={**cls.client_env, "TMUX_TMPDIR": cls.romp_dir}, capture_output=True, text=True, timeout=20)
+            if r.returncode != 0:
+                raise unittest.SkipTest("no tmux server could start under the lab's runtime dir: " + r.stderr.strip()[:200])
         cls.klog_path = os.path.join(cls.lab, "kernel.log")
         cls.klog = open(cls.klog_path, "w")
         cls.addClassCleanup(cls._kill_kernel)
@@ -166,16 +191,49 @@ class TmuxSocketUnderTheRuntimeDir(unittest.TestCase):
         klog = open(self.klog_path, encoding="utf-8", errors="replace").read()
         # the kernel says where the socket lives and which rule chose it: an unmanaged lab kernel resolves the runtime
         # dir for itself; a managed one takes the manager's directory as it stands
-        want_line = ("tmux socket dir: %s (the manager's environment, as it stands)" % self.romp_dir if self.MANAGED
-                     else "tmux socket dir: %s (the user's runtime directory)" % self.romp_dir)
+        if self.MANAGED:
+            want_line = "tmux socket dir: %s (the manager's environment, as it stands, its rule: %s)" % (self.romp_dir or "tmux default", self.env["ROMP_TMUX_TMPDIR_RULE"])
+        else:
+            want_line = "tmux socket dir: %s (the user's runtime directory)" % self.romp_dir
         self.assertIn(want_line, klog, "the kernel says where the socket lives at boot: %s" % klog[-1500:])
         code, info = self._kernel("GET", "/version")
-        self.assertEqual((code, info.get("tmuxSocketDir"), info.get("tmuxSocketRule")),
-                         (200, self.romp_dir, "manager" if self.MANAGED else "runtime-dir"), "/version reports it for bin/romp to compare")
+        self.assertEqual((code, info.get("tmuxSocketDir"), info.get("tmuxSocketRule"), info.get("tmuxSocketManagerRule")),
+                         (200, self.romp_dir, "manager" if self.MANAGED else "runtime-dir", self.env.get("ROMP_TMUX_TMPDIR_RULE", "")),
+                         "/version reports it for bin/romp to compare")
         code, res = self._kernel("POST", "/new", {"name": "web", "dir": self.proj, "backend": "tmux"})
         self.assertEqual(code, 200, res)
         self.assertTrue(res.get("ok"), "the create was accepted: %r" % res)
         romp_dir = self.romp_dir
+        if self.FAKE_TMUX:
+            # the recording says which directory every tmux call of the kernel's own launch would have dialed
+            end = time.time() + 90
+            calls = ""
+            while time.time() < end:   # loop-ok: bounded by the deadline
+                calls = open(self.fake_tmux_log, encoding="utf-8", errors="replace").read() if os.path.exists(self.fake_tmux_log) else ""
+                if "new-session -d -s web" in calls:
+                    break
+                time.sleep(0.5)
+            klog = open(self.klog_path, encoding="utf-8", errors="replace").read()
+            self.assertIn("new-session -d -s web", calls, "the launcher created the session; kernel log tail: %s" % klog[-2500:])
+            for line in calls.splitlines():
+                self.assertTrue(line.endswith(" TMUX_TMPDIR=unset"), "every tmux call of a managed kernel with no socket directory dials tmux's default, never the runtime dir: %s" % line)
+            self.assertFalse(os.path.exists(os.path.join(self.runtime, "romp")), "nothing made under the runtime dir")
+            self.assertNotIn("romp new -t exited", klog, "the kernel's own launch was not refused: %s" % klog[-1500:])
+            # a plain shell WITH a runtime dir resolves it and is refused: its tmux calls would reach a server this kernel
+            # (on tmux's default, under a manager that has no runtime directory) cannot see, and the refusal says which
+            # manager this is: a current one without a runtime directory, not one from before the rule
+            r = subprocess.run([os.path.join(BIN, "romp"), "new", "-t", "--detach", "web2"], env=self.client_env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 1, "rc=%s out=%r err=%r" % (r.returncode, r.stdout[-600:], r.stderr[-600:]))
+            self.assertIn("This manager has no runtime directory (its rule: no XDG_RUNTIME_DIR)", r.stderr)
+            self.assertNotIn("before the socket moved", r.stderr)
+            # …and a plain shell WITHOUT one (a cron job's, a `sudo -u` shell's) dials the same default and proceeds
+            bare = {k: v for k, v in self.client_env.items() if k != "XDG_RUNTIME_DIR"}
+            r = subprocess.run([os.path.join(BIN, "romp"), "new", "-t", "--detach", "web3"], env=bare, capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, "rc=%s out=%r err=%r" % (r.returncode, r.stdout[-600:], r.stderr[-600:]))
+            calls = open(self.fake_tmux_log, encoding="utf-8", errors="replace").read()
+            self.assertIn("new-session -d -s web3 ", calls)
+            self.assertTrue(all(l.endswith(" TMUX_TMPDIR=unset") for l in calls.splitlines() if l.strip()), "the plain shell's calls dialed the default too")
+            return
         end = time.time() + 90
         names = ""
         while time.time() < end:   # loop-ok: bounded by the deadline
@@ -223,6 +281,20 @@ class TmuxSocketUnderTheRuntimeDir(unittest.TestCase):
         listed = rows.get("sessions") if isinstance(rows, dict) else rows
         web = next((s for s in (listed or []) if s.get("name") == "web"), None)
         self.assertIsNotNone(web, "the kernel lists the session it created: %r" % (listed if isinstance(listed, list) else rows))
+
+
+class ManagedKernelWithNoSocketDirSpawnsOnTheDefault(TmuxSocketUnderTheRuntimeDir):
+    """Defect (A)'s own shape: a MANAGED kernel whose manager passed NO TMUX_TMPDIR (a manager on tmux's default: no
+    runtime directory, or one from before the rule), with ROMP_MANAGER_PID and XDG_RUNTIME_DIR both set. The kernel
+    dials tmux's default and so must its own launcher: the shell twin's managed branch takes the absent value as it
+    stands, so every tmux call of the spawn runs with TMUX_TMPDIR unset, nothing is made under the runtime dir, and the
+    launch is not refused. tmux's default socket is the machine's own /tmp/tmux-<uid>, which no lab may dial, so a
+    recording tmux on the PATH stands in for the server: the directory each call would reach is what is under test.
+    Without the shell twin's managed branch this fails: the launcher exports the runtime dir, the kernel refuses its
+    own spawn, and the log carries the refusal."""
+    MANAGED = True
+    MANAGER_HAS_DIR = False
+    FAKE_TMUX = True
 
 
 class ManagedKernelTakesTheManagersSocketDir(TmuxSocketUnderTheRuntimeDir):

@@ -1121,6 +1121,28 @@ _stale_server_globals() {
     [[ "$output" == *"under a manager from before the socket moved"* ]]
     [[ "$output" == *"romp refresh"* ]]
     [[ "$output" != *"cron job"* ]]
+    # a CURRENT manager that simply has no runtime directory (launchd, `romp up` from a bare shell) says so: the
+    # manager's own rule rides on /version, and a refresh would restart it into the same state
+    MOCK_CURL_VERSION='{"tmuxSocketDir":"","tmuxSocketRule":"manager","tmuxSocketManagerRule":"no XDG_RUNTIME_DIR"}' run "$ROMP_SCRIPT" new -t --detach myproject
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"This manager has no runtime directory (its rule: no XDG_RUNTIME_DIR)"* ]]
+    [[ "$output" != *"before the socket moved"* ]]
+    # inside a pane the pane's word comes first, whatever the kernel's rule: an export cannot override a pane's own \$TMUX
+    TMUX="$TEST_DIR/other/tmux-$(id -u)/default,4242,0" MOCK_CURL_VERSION='{"tmuxSocketDir":"","tmuxSocketRule":"manager"}' run "$ROMP_SCRIPT" new -t --detach myproject
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"a shell outside that tmux session"* ]]
+    [[ "$output" != *"romp refresh"* ]]
+    [[ "$output" != *"export TMUX_TMPDIR"* ]]
+}
+
+@test "paths compare as real paths: a pane whose \$TMUX spells the kernel's directory through a symlink proceeds" {
+    # what macOS does to tmux's default (/tmp → /private/tmp): the kernel reports one spelling, the pane's socket the other
+    _stub_claude 9.9.9; _stub_curl
+    ln -s "$TMUX_TMPDIR" "$TEST_DIR/socklink"
+    TMUX="$TEST_DIR/socklink/tmux-$(id -u)/default,4242,0" MOCK_CURL_VERSION="{\"tmuxSocketDir\":\"$TMUX_TMPDIR\",\"tmuxSocketRule\":\"runtime-dir\"}" \
+        run "$ROMP_SCRIPT" new -t --detach myproject
+    [ "$status" -eq 0 ]
+    grep -q 'new-session -d -s myproject' "$MOCK_LOG"
 }
 
 @test "launch hands the exec line to respawn-pane, never typed via send-keys (dropped-char bug)" {

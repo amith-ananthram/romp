@@ -3303,17 +3303,19 @@ except ValueError:
     sys.exit(0)
 if "tmuxSocketRule" not in o:
     sys.exit(0)                                   # a kernel from before the rule: nothing to compare
-kdir, krule = o.get("tmuxSocketDir") or "", o.get("tmuxSocketRule") or ""
-canon = lambda d: os.path.realpath(d) if d else "/tmp"
+kdir, krule, mrule = o.get("tmuxSocketDir") or "", o.get("tmuxSocketRule") or "", o.get("tmuxSocketManagerRule") or ""
+canon = lambda d: os.path.realpath(d if d else "/tmp")   # the default realpath'd too: /tmp is a symlink on macOS, and a pane's $TMUX names the real path
 if canon(kdir) == canon(mine):
     sys.exit(0)
 mine_s, kdir_s = mine or "the tmux default", kdir or "the tmux default"
 where = "this shell is inside a tmux session on another server (%s)" % mine_s if how == "pane" else "this shell's tmux socket directory (%s)" % mine_s
 print("[romp] refusing to start '%s': %s is not the kernel's (%s), so the session would start on a server romp cannot see." % (name, where, kdir_s))
-if krule == "manager" and not kdir:
+if how == "pane":
+    print("  Fix: run this from a shell outside that tmux session (a pane's own $TMUX decides which server its tmux calls reach).")
+elif krule == "manager" and not kdir and not mrule:
     print("  The kernel runs under a manager from before the socket moved to the runtime directory: restart the manager (`romp refresh`) and try again; `export TMUX_TMPDIR=/tmp` starts this session on that manager's server for now, and it drops out of sight at the next refresh.")
-elif how == "pane":
-    print("  Fix: run this from a shell outside that tmux session, or `export TMUX_TMPDIR=%s` there is not enough: a pane's own $TMUX wins." % (kdir or "/tmp"))
+elif krule == "manager" and not kdir:
+    print("  This manager has no runtime directory (its rule: %s), so its kernel is on tmux's default socket while this shell's TMUX_TMPDIR differs: `export TMUX_TMPDIR=/tmp` for this session, or start the manager from a login shell where XDG_RUNTIME_DIR is set." % mrule)
 elif not mine:
     print("  Fix: export TMUX_TMPDIR=%s (the kernel's), or launch from a login shell where XDG_RUNTIME_DIR is set: a cron job, sudo -u or docker exec drops it." % (kdir or "/tmp"))
 else:

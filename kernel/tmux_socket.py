@@ -48,6 +48,12 @@ def _usable_dir(p):
     return bool(p) and os.path.isdir(p) and os.access(p, os.W_OK | os.X_OK)
 
 
+def runtime_subdir(env):
+    """<XDG_RUNTIME_DIR>/romp on the canonical runtime path, or None without a runtime dir (no checks: the name only)."""
+    run = env.get("XDG_RUNTIME_DIR") or ""
+    return os.path.join(os.path.realpath(run), ROMP_SUBDIR) if run else None
+
+
 def resolve(env=None, mkdir=True, managed=False):
     """(directory or None, rule): the TMUX_TMPDIR every romp tmux client and server should use, or None for tmux's
     own default, and which branch of the module docstring's rule decided it. `env` defaults to os.environ;
@@ -57,8 +63,13 @@ def resolve(env=None, mkdir=True, managed=False):
     if managed:
         return (op or None), RULE_MANAGER
     if op:
+        # the launcher's mark counts only for the value it describes: a mark that leaked into a descendant shell must
+        # not relabel an operator's own TMUX_TMPDIR as the runtime directory
         mark = env.get(LAUNCHER_MARK) or ""
-        return op, (mark if mark in RULES else RULE_OPERATOR)
+        sub = runtime_subdir(env)
+        if mark == RULE_RUNTIME and sub and canonical(op) == canonical(sub):
+            return op, RULE_RUNTIME
+        return op, RULE_OPERATOR
     run = env.get("XDG_RUNTIME_DIR") or ""
     if not run:
         return None, RULE_NO_RUNTIME
@@ -90,15 +101,18 @@ def export_tmux_tmpdir(env=None, managed=False):
 
 
 def canonical(d):
-    """The directory as a comparison key: tmux's default for None or empty, else its realpath, so `/x/` and `/x` and a
-    symlinked runtime dir read as one directory (bin/romp compares its own answer with the kernel's this way)."""
-    return os.path.realpath(d) if d else "/tmp"
+    """The directory as a comparison key: its realpath, tmux's default (/tmp, itself realpath'd: a symlink to
+    /private/tmp on macOS, and a pane's $TMUX names the socket by its real path) for None or empty, so `/x/` and `/x`
+    and a symlinked runtime dir read as one directory (bin/romp compares its own answer with the kernel's this way)."""
+    return os.path.realpath(d if d else "/tmp")
 
 
-def describe(d, rule):
-    """One log line's worth: the directory (or tmux's default) and the rule that chose it, for the next incident."""
+def describe(d, rule, manager_rule=""):
+    """One log line's worth: the directory (or tmux's default) and the rule that chose it, for the next incident. A
+    managed kernel names the manager's own rule too (the manager passes it beside the value), so a manager from
+    before the rule (no word from it) reads apart from a current manager that has no runtime directory."""
     if rule == RULE_MANAGER:
-        return "%s (the manager's environment, as it stands)" % (d or "tmux default")
+        return "%s (the manager's environment, as it stands%s)" % (d or "tmux default", (", its rule: " + manager_rule) if manager_rule else ", a manager from before the rule")
     if rule == RULE_OPERATOR:
         return "%s (TMUX_TMPDIR set by the operator)" % d
     if rule == RULE_RUNTIME:

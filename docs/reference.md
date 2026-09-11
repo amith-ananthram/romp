@@ -1127,10 +1127,15 @@ pane's tmux calls dial the socket named in its own `$TMUX`. So `romp new -t`
 compares the directory its tmux calls would reach (`$TMUX`'s socket, else
 `TMUX_TMPDIR`, else the default) with the kernel's (`/version` reports
 `tmuxSocketDir` and the rule that chose it), as canonical paths, and refuses
-when they differ, worded by the kernel's rule: a kernel under a manager from
-before the change needs `romp refresh`; a shell without `XDG_RUNTIME_DIR` needs
-`export TMUX_TMPDIR=<the kernel's>` or a login shell; a pane on another server
-needs a shell outside it. With no kernel reachable, or a kernel too old to say,
+when they differ, worded by the kernel's rule: a pane on another server needs a
+shell outside it; a kernel under a manager from before the change (the manager
+passes its own rule to its kernels, so no word means an old manager) needs
+`romp refresh`; a current manager without a runtime directory (macOS under
+launchd, `romp up` from a shell without the variable) is named as such, with
+`export TMUX_TMPDIR=/tmp` for the session or a login shell for the manager; a
+shell without `XDG_RUNTIME_DIR` needs `export TMUX_TMPDIR=<the kernel's>` or a
+login shell. Paths compare as real paths, tmux's default included, since `/tmp`
+is a symlink on macOS and a pane's `$TMUX` names the socket by its real path. With no kernel reachable, or a kernel too old to say,
 it compares nothing and proceeds as before. A kernel's own terminal spawn that
 is refused this way says so: one line in the kernel log and one row in the
 dashboard's error center, instead of a tab that never appears.
