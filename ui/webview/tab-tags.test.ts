@@ -74,10 +74,11 @@ test("New tag… is an inline input (menu vocabulary, no native prompt) that cre
   assert.match(RENDER, /const existing = unionFor\(\)\.find\(\(g\) => g\.name === name\);/);
 });
 
-test("presentation: one chip per NAME, identity dot, ✕ — and never a host prefix in the flyout", () => {
-  assert.match(RENDER, /lb\.textContent = g\.name; bodyE\.appendChild\(lb\);/);
-  assert.match(RENDER, /lb\.textContent = "\+ " \+ g\.name; bodyE\.appendChild\(lb\);/);
-  assert.match(CSS, /\.ctx-tag-dot \{ flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; \}/);
+test("presentation: one chip per NAME (the shared tag chip, T321), the action rows' identity dot, ✕, and never a host prefix in the flyout", () => {
+  assert.match(RENDER, /const chip = tagChip\(g\.name, g\.color \|\| null, \{ inheritSize: true \}\);\s+\/\/ the one tag chip \(T321\)/, "a row that names a tag IS the tag chip, at the label's size");
+  assert.match(RENDER, /chip\.classList\.add\("ctx-tag-chip"\);\s*\n\s*lb\.appendChild\(chip\); bodyE\.appendChild\(lb\);/, "in the label slot");
+  assert.match(RENDER, /lb\.append\("\+ ", named\(\)\); bodyE\.appendChild\(lb\);/, "the + row names its tag as the chip inside the sentence");
+  assert.doesNotMatch(RENDER + CSS, /ctx-tag-dot/, "no swatch-and-name pair is left in the flyout (T321)");
   const fly = RENDER.slice(RENDER.indexOf("const sub = el(\"div\", \"ctx-menu ctx-sub ctx-sub-tags\");"));
   assert.doesNotMatch(fly.slice(0, 2500), /host-prefix|hostNameNodes/, "kernels are plumbing — no host chrome in the flyout");
 });
@@ -86,10 +87,10 @@ test("one-click MOVE between groups (tab groups, 2026-09-04): 'Move to <name>' a
   const fly = RENDER.slice(RENDER.indexOf('const sub = el("div", "ctx-menu ctx-sub ctx-sub-tags");'), RENDER.indexOf("// New tag… — an inline input"));
   assert.match(fly, /const home0 = readTabGroups\(\)\.on \? \(\(copy !== undefined \? holding\(\)\.find\(\(g\) => g\.name === copy\) : undefined\) \?\? holding\(\)\[0\]\) : undefined;\s*\n\s*const home = home0 && !home0\.pending \? home0 : undefined;/,
     "the group THIS COPY sits in (T264b: a session under several tags has a copy per group, and the menu speaks for the right-clicked copy's group), else the first holder; only while the strip is sectioned, and never a tag whose create is still in flight");
-  assert.match(fly, /lb\.textContent = "Move to " \+ g\.name; bodyE\.appendChild\(lb\);/);
+  assert.match(fly, /lb\.append\("Move to ", named\(\)\); bodyE\.appendChild\(lb\);/, "the tag inside the sentence is the chip (T321)");
   assert.match(fly, /moveUnion\(home, g\); build\(\); sb\.textContent = subText\(\);/, "the row IS the move");
   assert.match(fly, /plus\.title = "add this tag too — the session keeps its other tags";/, "…and multi-tag stays one click away");
-  assert.match(fly, /lb\.textContent = "\+ " \+ g\.name; bodyE\.appendChild\(lb\);/, "with no home tag, + <name> is the move");
+  assert.match(fly, /lb\.append\("\+ ", named\(\)\); bodyE\.appendChild\(lb\);/, "with no home tag, + <name> is the move");
   const mv = RENDER.slice(RENDER.indexOf("const moveUnion = (from: TagUnion, to: TagUnion)"), RENDER.indexOf("// HOVER-INTENT open"));
   assert.match(mv, /const a = applyUnionEdit\(nv, to, \{ add: \[id\] \}\);\s*\n\s*const r = applyUnionEdit\(nv, from, \{ remove: \[id\] \}\);/,
     "two edits on ONE blob shown — the strip never shows the half-moved state");

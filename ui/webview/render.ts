@@ -71,7 +71,7 @@ import { hostNameNodes, hostPartsNodes, hostPrefix, hostOf, hostIsDown, hostIsDi
 import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionToken, insertMention, mentionKeyAction, mentionSegments } from "./composer-mention";   // the @-mention card's rules, pure; the DOM is setupComposer's mention block and markMentions
 import type { MentionCandidate, MentionQuery } from "./composer-mention";
 import { defaultCommentName, defaultBreakoutName, defaultForkName, nameToSend } from "./comment-name";
-import { followReader, keepPlaceAcrossShow, followTail, atBottomDist, followBoxBelow, followTailShrink } from "./scroll-keep";
+import { followReader, keepPlaceAcrossShow, followTail, atBottomDist, followBoxBelow, followTailShrink, reshowStick } from "./scroll-keep";
 import { retainLiveOmitted } from "./tab-order";
 import { userTurnShows } from "./user-turn-content";
 import { ScrollDiagBudget, classifyScroll, scrollWriteRow, tailChangeRow, tailLabel, spacerRow, readScrollDiagCap, summarizeTailMutations, tailMutRow, unitChangeRow, unitChanges, boxChanges, boxLabel, BOX_FROM_TAIL } from "./scroll-write";
@@ -1425,11 +1425,12 @@ document.addEventListener("click", (e) => {
 // own event, never a per-click guess (no reading the parent's DOM, no polling). Standalone /chat never
 // hears one and reads as all-off, which the framed gate makes moot anyway.
 let panesOn: Record<string, boolean> = {};
+let panesAvail: Record<string, boolean> = {};   // …and which panes EXIST to bring forward (avail: the Files control's setting, T317); absent = available
 function openPath(path: string, sid?: string | null, ev?: MouseEvent | null): void {
   if (!vscodeApi) return;
   if (location.protocol === "http:" || location.protocol === "https:") {
     const to = sid || activeId || null;
-    const route = fileLinkRoute(settings.fileLinkPane, window.parent !== window, panesOn.files === true);
+    const route = fileLinkRoute(settings.fileLinkPane, window.parent !== window, panesOn.files === true, panesAvail.files !== false);
     // with its gesture, read first: a Cmd/Ctrl- or middle-click on a PDF takes the browser's own tab wherever
     // the plain click would have landed; a plain click routed to the Files pane is handed to the shell
     openFileClick(ev, path, to, route === "pane" ? () => {
@@ -1462,7 +1463,7 @@ function onMiddleClick(a: HTMLElement, fn: (e: MouseEvent) => void): void {
 // tells the person where Browse files will land, so the two cannot disagree.
 function browseRouteNow(): BrowseRoute {
   const web = location.protocol === "http:" || location.protocol === "https:";
-  return browseRoute(web, settings.fileLinkPane, window.parent !== window, panesOn.files === true);
+  return browseRoute(web, settings.fileLinkPane, window.parent !== window, panesOn.files === true, panesAvail.files !== false);
 }
 // Surface the FILE BROWSER at `path` for the session: the folder shown under the chat, the system context
 // card's Directory row, a tab menu's Browse files, a chat-hosted viewer's directory link. The listing goes
@@ -6143,7 +6144,7 @@ function dismissTabMenu() {
 function showSelectionMenu(e: MouseEvent) {
   const content = document.getElementById("content");
   const sel = window.getSelection();
-  const text = sel ? sel.toString() : "";
+  const text = sel ? (mentionCopyText(sel)?.text ?? sel.toString()) : "";   // a chip copies as the @name typed, as Ctrl+C does
   if (!content || !sel || !sel.anchorNode || !content.contains(sel.anchorNode) || !text.trim()) return;
   e.preventDefault();
   dismissTabMenu();
@@ -6514,9 +6515,11 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
         sub.replaceChildren();
         for (const g of holding()) {                             // one chip per NAME — never a host prefix
           const row = el("div", "ctx-item ctx-item-toggle");
-          const chip = el("span", "ctx-tag-dot"); chip.style.background = g.color || "var(--dim)"; row.appendChild(chip);
           const bodyE = el("span", "ctx-item-body");
-          const lb = el("span", "ctx-item-label"); lb.textContent = g.name; bodyE.appendChild(lb);
+          const lb = el("span", "ctx-item-label");
+          const chip = tagChip(g.name, g.color || null, { inheritSize: true });   // the one tag chip (T321): the row's label IS the tag, at the label's size
+          chip.classList.add("ctx-tag-chip");
+          lb.appendChild(chip); bodyE.appendChild(lb);
           row.appendChild(bodyE);
           if (g.pending) {
             // a create still in flight: the row shows, and takes no gesture until the ack names the
@@ -6547,11 +6550,12 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
         const home = home0 && !home0.pending ? home0 : undefined;
         for (const g of others) {
           const row = el("div", "ctx-item ctx-item-toggle");
-          const chip = el("span", "ctx-tag-dot"); chip.style.background = g.color || "var(--dim)"; row.appendChild(chip);
           const bodyE = el("span", "ctx-item-body");
           const lb = el("span", "ctx-item-label");
+          // the tag inside the sentence is the chip (T321): no swatch-and-name pair anywhere a tag shows
+          const named = () => { const c = tagChip(g.name, g.color || null, { inheritSize: true }); c.classList.add("ctx-tag-chip"); return c; };
           if (home) {
-            lb.textContent = "Move to " + g.name; bodyE.appendChild(lb);
+            lb.append("Move to ", named()); bodyE.appendChild(lb);
             row.appendChild(bodyE);
             const plus = el("button", "ctx-tag-x ctx-tag-plus") as HTMLButtonElement;
             plus.type = "button"; plus.textContent = "+"; plus.title = "add this tag too — the session keeps its other tags";
@@ -6559,7 +6563,7 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
             row.appendChild(plus);
             row.addEventListener("click", (e2) => { e2.stopPropagation(); moveUnion(home, g); build(); sb.textContent = subText(); });
           } else {
-            lb.textContent = "+ " + g.name; bodyE.appendChild(lb);
+            lb.append("+ ", named()); bodyE.appendChild(lb);
             row.appendChild(bodyE);
             row.addEventListener("click", (e2) => { e2.stopPropagation(); editUnion(g, { add: [id] }); build(); sb.textContent = subText(); });
           }
@@ -6585,8 +6589,7 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
           const on = isPinned(tabGroups(), sec, id);
           sub.appendChild(el("div", "ctx-sep"));
           const row = el("div", "ctx-item ctx-item-toggle ctx-item-pin" + (on ? " current" : ""));
-          const chip = el("span", "ctx-tag-dot"); chip.style.background = home.color || "var(--dim)"; row.appendChild(chip);
-          const bodyE = el("span", "ctx-item-body");
+          const bodyE = el("span", "ctx-item-body");   // no swatch (T321): the sub-line names the home tag in words
           const lb = el("span", "ctx-item-label"); lb.textContent = "Show when folded"; bodyE.appendChild(lb);
           const sb2 = el("span", "ctx-item-sub");
           sb2.textContent = on ? `stays on the strip while ${home.name} is folded` : `keep this tab on the strip while ${home.name} is folded`;
@@ -7407,6 +7410,14 @@ function backendTakesTags(be: string): boolean { return be === "sdk" || be === "
 // the Tags row is for SDK and Codex sessions (tab groups, 2026-09-04): on the tmux pick the row stays
 // in place but disabled behind a short note, and the create handler sends no `tags`. Without this a
 // chip prefilled from a tagged active tab turns every terminal create into a refusal.
+// The Tags row's option paints as the tag chip itself (T321, the user 2026-09-10): the thin border in the tag's own
+// colour that the tab strip, the feed and the outline draw, and on versus off by the visual the tag toggles already
+// use, the faded chip (tagChip's `off`, TAG_CHIP_OFF_CLASS at 0.45), never a dot and never the Backend row's accent
+// fill. The `sel` class on the button stays the state the create reads; the chip is repainted from it on each click.
+function paintPickerTagChip(b: HTMLButtonElement, u: { name: string; color?: string | null }): void {
+  b.replaceChildren(tagChip(u.name, u.color, { inheritSize: true, off: !b.classList.contains("sel") }));
+}
+
 function syncPickerTags(): void {
   const wrap = document.querySelector("#picker .picker-tags") as HTMLElement | null;
   if (!wrap) return;
@@ -7909,12 +7920,11 @@ function openPicker(pick = false, prompt?: string, allowNew = false) {
     for (const u of unions) {
       const b = el("button", "picker-be-opt" + (preset.has(u.name) ? " sel" : "")) as HTMLButtonElement;
       b.type = "button"; b.dataset.tag = u.name;
-      const d = el("span", "picker-tag-dot"); d.style.background = u.color || "var(--dim)"; b.appendChild(d);
-      b.appendChild(document.createTextNode(u.name));
+      paintPickerTagChip(b, u);   // the tag chip every surface draws, full when selected, faded when not (T321)
       b.title = preset.has(u.name)
         ? `the session you are looking at is in ${u.name} — the new one joins it too unless you unpick this`
         : `put the new session in ${u.name}`;
-      b.addEventListener("click", () => b.classList.toggle("sel"));   // multi-select: each chip on its own
+      b.addEventListener("click", () => { b.classList.toggle("sel"); paintPickerTagChip(b, u); });   // multi-select: each chip on its own
       tgWrapEl.insertBefore(b, tgWrapEl.querySelector(".picker-tags-note"));   // chips before the tmux note
     }
     syncPickerTags();   // the backend toggle was just reset to the gear default above
@@ -11023,7 +11033,15 @@ function rerenderAll(): void {
   // (follow mode lands there); a hidden pane has nothing to keep either. showActive restores it after the land.
   const content = document.getElementById("content");
   const av = activeId ? views.get(activeId) : null;
-  const keep = av && av.shown && content && content.clientHeight > 0 && !atBottom(content) ? captureScrollAnchor(content, av) : null;   // follow mode: only a true tail-sitter lands at the bottom
+  const live = !!(av && av.shown && content && content.clientHeight > 0);
+  const bottom = live && atBottom(content!);
+  // Follow mode is re-derived from the true bottom HERE, before the clear (T262 review find, 2026-09-10): an
+  // emptied scroller reads as the bottom (reading scrollHeight forces layout and the browser clamps scrollTop to
+  // the new maximum, 0 once what is left of #content fits), so showActive's re-show rule would put a scrolled-up
+  // reader into follow mode, and the same frame's tail-shrink and box-below observers would then write them to
+  // the bottom over the anchor restored below. One read of the DOM drives both the flag and the keep.
+  if (live) av!.stick = reshowStick(av!.stick, bottom);
+  const keep = live && !bottom ? captureScrollAnchor(content!, av!) : null;   // follow mode: only a true tail-sitter lands at the bottom
   for (const v of views.values()) { while (v.el.firstChild) v.el.removeChild(v.el.firstChild); v.rendered = 0; v.stale = false; v.winStart = 0; v.winEnd = 0; v.avgTurnH = undefined; v.spacerCount = undefined; v.spacerCountBot = undefined; v.unitTotal = undefined; }
   showActive(keep);
   schedulePrebuild(); // rebuild every off-screen view in idle under the new setting, so switches stay instant
@@ -11512,6 +11530,12 @@ function showActive(keep?: { uuid: string; y: number } | null) {
   // decision, and a restore over its landing would undo the jump the reader asked for (review find, 2026-09-08)
   const navigating = !!pendingAnchor || pendingAnchorT != null || (!!seek && seek.sid === activeId);
   const reshow = keepPlaceAcrossShow(v, v.el.style.display !== "none", content.clientHeight > 0, navigating);
+  // the true bottom decides follow mode at a re-show (T262): the recorded flag can lag the reader (a scroll
+  // that landed during a pending build is not recorded), and a stale `stick` sent a bottom reader to a saved
+  // spot a screen above on every full show — the snap-up the journal filed as `land-saved`
+  // (gated the way the keep below is: a caller that emptied the DOM first, rerenderAll, read the true bottom
+  // before the clear and hands its keep in; the emptied scroller here would read as the bottom for anyone)
+  if (reshow && keep === undefined) v.stick = reshowStick(v.stick, atBottom(content));
   const keepAnchor = reshow ? (keep !== undefined ? keep : (!atBottom(content) ? captureScrollAnchor(content, v) : null)) : null;   // follow mode: off the true bottom keeps its place
   // Bound the switch. A view the user scrolled to the top of has had its window expanded to the WHOLE
   // transcript (winStart crept to 0 via lazy-expand), and compact mode renders the whole folded stream —
@@ -16165,6 +16189,10 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
       for (const k of Object.keys(m.on)) on[k] = m.on[k] === true;
       panesOn = on;
     }
+    // which panes exist to bring forward (the Files control's setting): whole-set replace as well
+    const avail: Record<string, boolean> = {};
+    if (m.avail && typeof m.avail === "object") for (const k of Object.keys(m.avail)) avail[k] = m.avail[k] !== false;
+    panesAvail = avail;
     return;
   }
   // the pipe's down edge is the VS Code twin of the shim's romp:wsdown: unconfirmed sends say so (markPendingLost)
@@ -16825,6 +16853,63 @@ function markMentions(root: HTMLElement): void {
     t.replaceWith(frag);
   }
 }
+
+// A copy over a chip: the chip's text is the bare name, so the browser's own copy (and the selection menu's
+// Copy) would paste "ask api" for a message sent as "ask @api", and the pasted word no longer names the
+// session (the picker put the @ there so that it would). Every chip the selection covers WHOLE gets its "@"
+// back for the moment the clipboard is read, and the DOM is then as it was: insertData and deleteData on the
+// chip's first text node move a live range's offsets and move them back, so the visible selection does not
+// change (the transcript's observers watch child lists, not character data). Whole means the range reaches
+// the chip's first character and its last (Range.comparePoint on the chip's text nodes): a double-clicked
+// chip word counts, a run of letters inside a chip does not and copies as rendered. Every range is read (a
+// multi-select holds several and sel.toString() concatenates them). A selection with no whole chip is left
+// to the browser in both flavours, including a copy inside the composer (the document's selection holds no
+// chip then). The rich flavour is the ranges' own markup with each chip's hover title (live status text) and
+// data attributes dropped, so a paste keeps the chip's class and text and nothing about the session behind it.
+// The Comment/Quote seed (transcriptSelection) keeps reading the rendered text: a thread's quoted passage
+// anchors on what the transcript shows.
+function mentionCopyText(sel: Selection): { text: string; html: string } | null {
+  const firsts = new Set<Text>();
+  for (let i = 0; i < sel.rangeCount; i++) {
+    const r = sel.getRangeAt(i);
+    if (r.collapsed) continue;
+    const c = r.commonAncestorContainer;
+    const scope = c instanceof Element ? c : c.parentElement;
+    if (!scope) continue;
+    const own = scope.closest(".mention-chip");
+    const chips = own ? [own] : Array.from(scope.querySelectorAll(".mention-chip"));
+    for (const chip of chips) {
+      const texts: Text[] = [];
+      const walker = document.createTreeWalker(chip, NodeFilter.SHOW_TEXT);
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) texts.push(n as Text);
+      if (!texts.length) continue;
+      const first = texts[0], last = texts[texts.length - 1];
+      if (r.comparePoint(first, 0) === 0 && r.comparePoint(last, last.length) === 0) firsts.add(first);
+    }
+  }
+  if (!firsts.size) return null;
+  for (const t of firsts) t.insertData(0, "@");
+  try {
+    const scratch = document.createElement("div");
+    for (let i = 0; i < sel.rangeCount; i++) scratch.appendChild(sel.getRangeAt(i).cloneContents());
+    for (const c of Array.from(scratch.querySelectorAll<HTMLElement>(".mention-chip"))) {   // class and text travel; the hover title and the ids do not
+      c.removeAttribute("title");
+      for (const k of Object.keys(c.dataset)) delete c.dataset[k];
+    }
+    return { text: sel.toString(), html: scratch.innerHTML };
+  } finally {
+    for (const t of firsts) t.deleteData(0, 1);
+  }
+}
+document.addEventListener("copy", (e) => {
+  const sel = window.getSelection();
+  if (!e.clipboardData || !sel) return;
+  const out = mentionCopyText(sel);
+  if (!out) return;                        // no whole chip in the selection: the browser's own copy
+  e.preventDefault();
+  e.clipboardData.setData("text/plain", out.text);
+  e.clipboardData.setData("text/html", out.html);
+});
 
 // Composer: Enter sends the message to the active session as its next prompt,
 // Shift+Enter inserts a newline; the box auto-grows a few lines.

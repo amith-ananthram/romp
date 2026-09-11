@@ -67,7 +67,8 @@ without inserting, and it stays closed for that `@` until you delete it: more le
 caret move away and back, do not reopen it. In the sent message, a name that matches a live
 session is shown as a chip: the name without its `@`, in that session's color on a dark
 backing, the way the Awaiting chip names the session it waits on. Hover it for how that
-session is doing; the message itself still carries the `@name` you typed.
+session is doing; the message itself still carries the `@name` you typed, and so does a
+copy of it.
 
 **A message that has not gone yet.** Send to a busy session and your message waits as a
 dashed bubble under an hourglass until the session takes it — while it compacts, while a
@@ -820,14 +821,17 @@ auto-retry paused (a usage limit, the monthly spend cap, or you stopped it), and
 it stays red while a failed attempt sits in the last 15 minutes anywhere. Gray
 means the API is not being used right now: no traffic in the last 15 minutes on
 any machine. A machine whose link is down is named in the popup with what it
-last said and does not colour the dot. Hover for the reading in plain
-words (for example, 4 requests in the last 15 minutes, all succeeded), one
-line per machine when several are connected, the waiting sessions listed, and
-the history under it: a graph of attempts per minute over the last 15 minutes
-with rate-limited attempts in red and server errors in orange, one sentence
-explaining the codes, and the most recent state changes with how long each
-held. A kernel restart shows as its own line there, because the counts start
-over with the kernel. Click the dot, or press Enter on it, for the detail:
+last said and does not colour the dot. Hover for the counts: one line per
+machine, each named by its own name, with its successful requests over the last
+24 hours in the accent and any failures counted in their colours (429s in red,
+5xx in magenta, no connection in gray), the waiting sessions listed, and
+the history under it: a stacked histogram of attempts per quarter hour over
+the last 24 hours in those same colours, a legend for the codes, when the
+reading was taken in words, and the most recent state changes with how long
+each held. A kernel restart shows as its own line there, because the counts
+start over with the kernel. Click the dot, or press Enter on it, for the
+detail: the same lines with a larger histogram per machine and a choice of
+range (1 hour, 24 hours, 7 days),
 each waiting session (click one to open that session), a button that stops
 auto-retry for every session while sessions are waiting and resumes it while
 paused, and links to the usage figures and the Log.
