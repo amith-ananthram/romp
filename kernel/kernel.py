@@ -3460,7 +3460,7 @@ def _relay_store(sid, ents, now, alive_ids=None):
             jd.save_goals(sid, store)                      # the record lands first; a raise here keeps the entry
         if spent:
             nd = store["nodes"].get(str(e["nid"]))
-            if isinstance(nd, dict) and nd.get("relayRecall") and not jd._relay_recall_entry_path(sid, str(e["nid"])).exists():
+            if jd._relay_owes_recall(nd) and not jd._relay_recall_entry_path(sid, str(e["nid"])).exists():   # the rows, like the other readers
                 jd._relay_write_entry(sid, str(e["nid"]), "recall", int(store.get("rev") or 0))   # a recall still owed:
                 quiet = False                              #   its OWN entry beside the marker's (never a rewrite of the
             _relay_spend(f, e)                             #   marker's file, which the judge may have renamed a newer

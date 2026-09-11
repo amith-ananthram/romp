@@ -2296,18 +2296,6 @@ function updateAskCard(card: HTMLElement, it: AskItem) {
     sn.textContent = staleNote;
     (a._distill as HTMLElement).prepend(sn);
   }
-  // A far host still holds a relayed question after its wait ended (it.relayNote, kernel relayCarried: the
-  // question went on before it could be withdrawn, or the host could not be reached to withdraw it). Its OWN
-  // dim line under the brief, never a paragraph OF the brief: the per-paragraph stamps above map briefParts
-  // onto the brief's paragraphs and allow exactly one extra, so a note paragraph dropped every stamp and
-  // citation on a briefed top node. Appended after the parts-split and the stale note (both rewrite the
-  // element), so it survives either rendering; shown on its own while no brief exists yet.
-  if (it.relayNote) {
-    const rn = el("div", "fsum-relaynote");
-    rn.textContent = it.relayNote;
-    (a._distill as HTMLElement).append(rn);
-    (a._distill as HTMLElement).style.display = "";
-  }
   const dl = a._distill as HTMLElement;
   if (distillShown && it.summaryAnchorUuid) {
     dl.classList.add("fask-distill-link");
@@ -2362,6 +2350,27 @@ function updateAskCard(card: HTMLElement, it: AskItem) {
       fe.textContent = "";
       fe.style.display = "none";
     }
+  }
+  // A far host still holds a relayed question after its wait ended (it.relayNote, kernel relayCarried: the
+  // question went on before it could be withdrawn, or the host could not be reached to withdraw it). Its OWN
+  // line like the face above, created once beside the sections, kept OUTSIDE them and set AFTER the section
+  // logic: appended inside the distill element it was hidden with that line (no brief yet → the sections
+  // choose none and set the element's display to none; likewise in collapsed mode, on a card whose open
+  // section is not the summary, and on a working-column card, where the brief is withheld). Never a
+  // paragraph OF the brief either: the per-paragraph stamps map briefParts onto the brief's paragraphs and
+  // allow exactly one extra, so a note paragraph dropped every stamp and citation on a briefed top node.
+  // The effect is RUN in feed-render-incremental.test.ts (no brief, collapsed mode, a working card).
+  {
+    let rn = a._relayNote as HTMLElement | undefined;
+    if (!rn) {
+      rn = el("div", "fask-distill fask-relaynote");
+      const anchor = (a._face as HTMLElement | undefined) || (a._secs as HTMLElement);
+      anchor.parentNode!.insertBefore(rn, anchor.nextSibling);
+      a._relayNote = rn;
+    }
+    const note = (it.relayNote || "").trim();
+    rn.textContent = note;
+    rn.style.display = note ? "" : "none";
   }
   // API error → a red "API error" badge + a Retry button that pastes "retry" into the session to resume
   // the stalled turn (the user 2026-06-16). The card STAYS in Working (the user 2026-06-29) — an API error is

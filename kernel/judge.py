@@ -13200,6 +13200,10 @@ def _relay_retire_marker(store, nd):
     if not isinstance(old, dict):
         return
     _relay_mark_settled(nd, old.get("id") or "")
+    nd.pop("relayCarried", None)                           # this road ends a wait without the kernel's settle (file_block
+    #                                                        deciding the block is the user's, a new wait replacing an ended
+    #                                                        one), and a stale "still parked" note would annotate every
+    #                                                        later block on the node and feed the distiller through _owed_why
     if old.get("pendingMid"):
         lst = [r for r in (nd.get("relayRecall") or []) if isinstance(r, dict)
                and str(r.get("pendingMid") or "") != str(old.get("pendingMid"))]

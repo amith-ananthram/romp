@@ -1307,8 +1307,9 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 /* the STALE-takeaway note above a completed card's summary: the user followed up after reading it */
 .fsum-stale { font-style: italic; opacity: 0.62; font-size: 0.92em; margin-bottom: 3px; }
 /* A far host still holds a relayed question after its wait ended (feed.ts relayNote): the card's own dim line
-   under the brief, never a paragraph of it (the per-paragraph stamps map the brief's paragraphs). */
-.fsum-relaynote { color: var(--dim); font-size: 0.92em; margin-top: 3px; white-space: pre-wrap; overflow-wrap: anywhere; }
+   beside the sections (outside them, like the face), never a paragraph of the brief (the per-paragraph stamps
+   map the brief's paragraphs) and never inside the distill element (the sections hide that without a brief). */
+.fask-relaynote { color: var(--dim); opacity: 1; white-space: pre-wrap; overflow-wrap: anywhere; }
 .fcheck-text.lz-hl { background: rgba(255, 255, 255, 0.12); border-radius: 3px; box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.12); }
 .fcheck-mark.lz-hl { box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.16); }
 /* standalone-completion modal: same tree vocabulary as ask cards; pending

@@ -1752,6 +1752,9 @@ class SaverFlushesItsOwn(_RelayFixture):
         self.assertFalse(jd._relay_recall_entry_path(WORKER, step).exists(), "the junk list's entry is spent, not kept for good")
         self.assertNotIn("relayRecall", jd.load_goals(WORKER)["nodes"][step], "and the junk list is dropped from the node")
         self.assertEqual(jd._requeue_relays_all(), 0, "the boot pass re-queues nothing for it")
+        src = Path(km.__file__).read_text()
+        self.assertIn("if jd._relay_owes_recall(nd) and not jd._relay_recall_entry_path(sid, str(e[\"nid\"])).exists():", src,
+                      "the re-queue on a spent marker entry reads the rows too, like the sweep, the flush and the boot pass")
 
     def test_a_question_a_far_host_still_holds_is_noted_beside_the_block(self):
         st, top, step = self.store(delegated=True)
@@ -1821,6 +1824,31 @@ class SaverFlushesItsOwn(_RelayFixture):
         self.assertNotIn("relayCarried", nd, "any settle of the wait drops the stale line: %s" % outcome)
         self.assertNotIn("relayWanted", nd)
         return nd
+
+    def test_the_parked_note_is_dropped_when_the_users_follow_up_makes_the_block_theirs(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "first question", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-ret-a", "parked": "TESTHOST"})
+        self.assertEqual(km._relay_tick(NOW), 0)
+        st = jd.load_goals(WORKER)
+        jd.record_verdict(st, st["nodes"][step], "romp", "awaiting", NOW + 5, why="", lift=True, end_ev=NOW + 5)
+        self._close(st, step, "still stuck", NOW + 60)     # M1 retired while parked, M2 minted
+        self._save(st)
+        km._bus_recall_relay = lambda sid, mid: "carried"
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-ret-b", "parked": "TESTHOST"})
+        with contextlib.redirect_stderr(io.StringIO()):
+            km._relay_tick(NOW + 70)                       # px-ret-a carried: the note; M2 pending on the far host
+        st = jd.load_goals(WORKER)
+        self.assertIn("relayCarried", st["nodes"][step])
+        jd.record_verdict(st, st["nodes"][top], "user", "reopen", NOW + 80, msg=True)   # the user follows up: the next block is theirs
+        self._close(st, step, "still stuck after the answer", NOW + 85)   # file_block: the user's block, M2 retired on the judge's road
+        nd = st["nodes"][step]
+        self.assertTrue(nd["blocked"])
+        self.assertNotIn("relayWanted", nd)
+        self.assertNotIn("relayCarried", nd, "the retire road drops the note: no kernel settle runs for this wait")
+        self.assertNotIn("still parked", jd._owed_why(nd), "so the distiller's owed why never carries the stale line")
+        self.assertEqual([r["pendingMid"] for r in nd["relayRecall"]], ["px-ret-b"], "M2's recall is still owed")
 
     def test_the_parked_note_is_dropped_when_the_next_relay_is_refused(self):
         nd = self._carried_note_then("refused")
