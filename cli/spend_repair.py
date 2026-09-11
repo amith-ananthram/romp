@@ -104,6 +104,19 @@ def plan(turns: list, restarts: list, day: str) -> dict:
             t, usd = float(r["t"]), float(r["usd"])
             restarted = any(prev_t < x <= t for x in restarts)
             step = False
+            if "usdRecorded" in r or "cumulativeUsd" in r:
+                # already repaired (usdRecorded keeps the staircase figure), or written by a kernel that carries the
+                # CLI's cumulative on the row (T354's fix): never a step again, so a second run finds nothing; the
+                # chain's baseline is the row's own cumulative where it names one
+                ordinary.append(r)
+                if isinstance(r.get("cumulativeUsd"), (int, float)):
+                    prev_cum = float(r["cumulativeUsd"]); between = []
+                elif isinstance(r.get("usdRecorded"), (int, float)):
+                    prev_cum = float(r["usdRecorded"]); between = []
+                else:
+                    between.append(usd)
+                prev_t = t
+                continue
             if restarted:
                 if prev_cum is not None and usd >= prev_cum:
                     step = True                # the surviving process's lifetime again
@@ -202,6 +215,7 @@ def apply_to_turns(path: Path, p: dict) -> int:
         except OSError:
             continue
         out = []
+        n_read = len(lines)
         for ln in lines:
             try:
                 o = json.loads(ln)
@@ -215,6 +229,14 @@ def apply_to_turns(path: Path, p: dict) -> int:
                 o["repairedT"] = int(time.time())
                 changed += 1
             out.append(json.dumps(o))
+        # a result the kernel appended between the read and this write rides along: the file is read again just
+        # before the replace and any line past the count first read is kept (the window left is the replace itself)
+        try:
+            now_lines = f.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            now_lines = lines
+        if len(now_lines) > n_read and now_lines[:n_read] == lines:
+            out.extend(now_lines[n_read:])
         tmp = f.with_name(f.name + ".repair.tmp")
         tmp.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
         os.replace(tmp, f)

@@ -99,6 +99,23 @@ class Plan(unittest.TestCase):
         self.assertEqual([(r["usdRecorded"], r["usd"]) for r in fixed], [(507.0, 3.0), (515.0, 6.0)])
         self.assertEqual(len(rows), 7, "no row lost")
 
+    def test_a_second_run_over_repaired_rows_finds_nothing_and_a_fixed_kernels_rows_are_never_steps(self):
+        p = rp.plan(self.turns, self.restarts, DAY)
+        repaired = []
+        fixes = {(c["sid"], c["t"]): c["corrected"] for c in p["rows"]}
+        for r in self.turns:
+            r = dict(r)
+            if (r["sid"], r["t"]) in fixes:
+                r["usdRecorded"], r["usd"] = r["usd"], fixes[(r["sid"], r["t"])]
+            repaired.append(r)
+        again = rp.plan(repaired, self.restarts, DAY)
+        self.assertEqual(again["rows"], [], "idempotent: the repaired rows are never steps again")
+        self.assertEqual(again["days"][DAY]["before"], again["days"][DAY]["after"])
+        # rows the fixed kernel writes carry the CLI's cumulative: a big first result after a restart with one is a turn
+        fixed_kernel = self.turns + [row(A, "web", at(12, 10), 480.0) | {"cumulativeUsd": 995.0, "spendBaseline": "seeded"}]
+        p2 = rp.plan(fixed_kernel, self.restarts + [at(12, 0)], DAY)
+        self.assertNotIn(at(12, 10), {c["t"] for c in p2["rows"]}, "a row that names its cumulative is not a staircase step")
+
     def test_the_restart_instants_come_from_both_ledgers(self):
         cuts = [{"t": 100, "cutTurns": [], "reason": "main-converge"}, {"t": 150, "firstServe": 1}]      # a bootSettled row is not a restart
         audit = [{"t": 200, "action": "manager-sigterm"}, {"t": 250, "action": "quiet-window"}, {"t": 100, "action": "p2p-update"}]
