@@ -2,35 +2,47 @@
 """T339 (the user 2026-09-11, screenshot): the chat's day divider. Three faults on the real /chat page of a hermetic kernel:
 (1) the rail's vertical line broke above and below the divider; (2) the date sat at the prose edge with the hairline to its
 right alone; (3) a collapsed run of notices whose FIRST member carried yesterday's time among today's rows drew a
-"Yesterday" divider inside today and wore yesterday's clock. The producer, from the kernel's code: a session's LIVE echo
+"Yesterday" divider inside today and wore yesterday's clock. The producer of (3), history now: a session's LIVE echo
 atoms (the kernel's own copies of sent messages, kept until the transcript lands their text; persisted in the registry's
-`echoes` mirror and reseeded at boot) are merged into the chat's LAST turn sorted by their own SEND time (kernel.py, the
-live-atom merge), so a romp notice sent yesterday whose text never landed sits right after the previous turn's rows, among
-today's, stamped yesterday; two such echoes fold into one notice run timed by its first.
+`echoes` mirror and reseeded at boot) were merged into the chat's LAST turn sorted by their own SEND time (kernel.py, the
+live-atom merge), so a romp notice sent yesterday whose text never landed sat right after the previous turn's rows, among
+today's, stamped yesterday, and two such echoes folded into one notice run timed by its first. T339 closed the walk's side
+(a forward-only crossing against a high-water mark, time-marker.ts DayWalk); T344 closed the producer (2026-09-11): an
+echo stamped before the last turn's start is placed by its send time, into the turn whose window holds it or into a
+closed turn of its own in the gap where it was sent (one per gap, so echoes sent together stay a run), and only an echo at
+or after the last turn's start still takes the tail. So the rows the chat reads are in time order and the walk needs no
+special case; this lab reads that order off the served page.
 
 Two synthetic sessions on one kernel. `web`: rows two days ago, yesterday and today (two turns), the registry mirroring two
-echoes of romp notices, the first sent yesterday, the second today between the two turns. `api`: the same shape read a day
-later, rows all yesterday and both echoes two days ago (a run whose latest member is itself stale): against the previous
-row alone the stale run drew no divider but became the reference, and the next in-sequence row crossed "forward" into a
-day already open, a second "Yesterday" mid-day (the review's finding; time-marker.ts DayWalk is the high-water mark that
-closes it). Asserted, dark and light: `web` shows two dividers only (the weekday over two days ago, "Yesterday" over
-yesterday's first row) and none above the notice run, whose head wears its latest member's time; `api` shows exactly one
-"Yesterday"; each divider's label is centered in the column between two hairlines of equal width; the divider's rail
-segment is painted on the turns' own line (the same page x) and reaches the neighbouring turns' boxes above and below
-(painted geometry, not the rule text); a divider that leads the transcript (nothing on the rail above it: the first child,
-or the one after the pinned system-context card, which sits off the rail) draws no segment and the turn after it starts
-its rail where a first turn does. The top-of-view day-context label (render.ts paintRailSticky) over `api`'s stale run,
-scrolled to the top line in a short viewport, reads the walk's day, "Yesterday", while the run's head keeps its own HH:MM
-(T342: it used to read the top row's own epoch and said "2 days ago" there). The browser's clock is pinned to the epoch
-the fixture was stamped from, so a run that crosses local midnight between the boot and the drive still agrees with
-itself.
+echoes of romp notices, the first sent yesterday 09:47 (the gap between the two-days-ago turn and yesterday's), the second
+today 00:12 (the gap between today's two turns). `api`: the same shape read a day later, rows all yesterday and both echoes
+two days ago, before the first turn: one synthetic turn LEADING the transcript. Asserted, dark and light: every timed row
+is in time order and each echo row wears its OWN local HH:MM; `web` shows two dividers only (the weekday over two days
+ago, "Yesterday" whose next row is the 09:47 echo, now yesterday's first row, not the 10:00 row) and no collapsed run
+at all (the two echoes are a day apart, no longer adjacent); `api` shows the weekday divider leading the transcript over
+the notice run (whose head anchors on its latest member, 09:41, its previous sibling the divider), then exactly ONE
+"Yesterday" over the first real row; each divider's label is centered in the column between two hairlines of equal width;
+the divider's rail segment is painted on the turns' own line (the same page x) and reaches the neighbouring turns' boxes
+above and below (painted geometry, not the rule text); a divider that leads the transcript (nothing on the rail above it:
+the first child, or the one after the pinned system-context card, which sits off the rail) draws no segment and the turn
+after it starts its rail where a first turn does. The top-of-view day-context label (render.ts paintRailSticky) reads the
+day WALK's mark at the top row (its marker's data-day, stampWalkDay), not the row's own moment (T342: it used to read the
+row's own epoch, so a stale echo among yesterday's rows said "2 days ago" under a "Yesterday" divider). Under the
+placement `api`'s stale run LEADS the transcript, so the walk's mark at its head is the run's own anchor (nothing passed
+before it): scrolled to the top line in a short viewport, the label reads the run's own day, "2 days ago", the day its
+weekday divider opens, while the run's head keeps its own HH:MM (before T344's placement, with the echoes merged into the last turn, the run sat inside yesterday's turn,
+the same label read "Yesterday", the walk's day there). The browser's clock is pinned to the epoch the fixture was stamped
+from, so a run that crosses local midnight between the boot and the drive still agrees with itself.
 
 With DD_SHOTS=<dir> the driver writes screenshots (dark and light, the `web` session); DD_BEFORE_DIST=<dist> serves another
-tree's bundle for the before shots and skips the assertions, unless DD_BEFORE_ASSERT=1 keeps them (how the test is proven
-red against the bundle before the change: a third divider inside today above `web`'s notice run; and, against the branch
-before the high-water mark, a second "Yesterday" in `api`). Skips LOUDLY without the extension deps or a Playwright
-browser; the extension CI job installs Chromium and runs served files with ROMP_SERVED_TESTS_REQUIRE=1, which turns any
-skip into a failure there. SYNTHETIC fixtures only (sessions web and api, invented notice texts, the notes-api demo world)."""
+tree's bundle for the before shots and skips the assertions, unless DD_BEFORE_ASSERT=1 keeps them (how T339 was proven
+red against the bundle before its change: a third divider inside today above `web`'s notice run; and, against the branch
+before the high-water mark, a second "Yesterday" in `api`). The T344 half is red against a KERNEL before the change, the
+bundle as is: the echoes then sat in the last turn, so `web`'s rows stepped back in time and its "Yesterday" opened the
+10:00 row (not the 09:47 echo), and `api` had no weekday divider leading the transcript (its stale run sat among
+yesterday's rows, with nothing opening its day). Skips LOUDLY without the extension deps or a Playwright browser; the
+extension CI job installs Chromium and runs served files with ROMP_SERVED_TESTS_REQUIRE=1, which turns any skip into a
+failure there. SYNTHETIC fixtures only (sessions web and api, invented notice texts, the notes-api demo world)."""
 import json
 import os
 import re
@@ -54,8 +66,8 @@ EXT = os.path.join(ROOT, "vscode-extension")
 sys.path.insert(0, HERE)
 import test_ship_reship as _lab   # noqa: E402  the lab kernel's environment (the module, not its classes)
 
-SID_A = "aaaaaaaa-1111-2222-3333-444444444444"   # web: today's rows, one stale echo among them
-SID_B = "bbbbbbbb-1111-2222-3333-444444444444"   # api: the same read a day later, both echoes stale
+SID_A = "aaaaaaaa-1111-2222-3333-444444444444"   # web: rows across three days, an echo in two of the gaps
+SID_B = "bbbbbbbb-1111-2222-3333-444444444444"   # api: the same read a day later, both echoes before the first turn
 
 
 def _free_port():
@@ -85,8 +97,10 @@ NOTICE_2 = "[romp] The condition you asked romp to watch now HOLDS: the second l
 
 def _echoes(now, shift):
     """The registry's echo mirror: two romp notices the kernel sent and whose text never landed. Reseeded at boot as live
-    atoms, they merge into the last turn by their own send time: after the first turn's rows, before the second turn's.
-    `shift` 0 (web): the first sent YESTERDAY 09:47, the second today 00:12. `shift` 1 (api): both two days ago."""
+    atoms, each is older than the last turn's start and is placed by its send time (T344): a closed turn of its own in the
+    gap where it was sent, one turn per gap. `shift` 0 (web): the first sent YESTERDAY 09:47 (the gap before yesterday's
+    turn), the second today 00:12 (the gap between today's two turns). `shift` 1 (api): both two days ago, before the
+    first turn, so they share one turn that leads the transcript."""
     if shift == 0:
         return [{"uuid": "echo:" + "a" * 32, "t": _local_day(1, 9, 47, now), "text": NOTICE_1, "author": "romp"},
                 {"uuid": "echo:" + "b" * 32, "t": _local_day(0, 0, 12, now), "text": NOTICE_2, "author": "romp"}]
@@ -96,7 +110,8 @@ def _echoes(now, shift):
 
 def _records(sid, now, shift):
     """The transcript. `shift` 0 (web): a pair two days ago, a pair yesterday (a real day boundary), then today: two turns,
-    the echoes merging between them. `shift` 1 (api): two turns, all yesterday (the transcript read a day later)."""
+    the 00:12 echo in the gap between them, the 09:47 echo in the gap before yesterday's pair. `shift` 1 (api): two turns,
+    all yesterday (the transcript read a day later), both echoes before the first."""
     def user(uuid, parent, t, text):
         return {"type": "user", "timestamp": iso(t), "uuid": uuid, "parentUuid": parent, "promptSource": "typed", "sessionId": sid,
                 "message": {"role": "user", "content": text}}
@@ -114,7 +129,7 @@ def _records(sid, now, shift):
             asst("a2", "u2", d1 + 60, "Five attempts, then surface the failure."),
             user("u3", "a2", t0, "please run the notes-api search suite"),
             asst("a3", "u3", t0 + 60, "Running the search suite now."),
-            # the second turn of today; the two echoes (00:12 today and 09:47 yesterday) sort before its trigger
+            # the second turn of today; the 00:12 echo sits in the gap before its trigger (the 09:47 one before u2)
             user("u4", "a3", t0 + 180, "and the docs suite after it"),
             asst("a4", "u4", t0 + 240, "Both suites are green; the search module is done."),
         ]
@@ -122,7 +137,7 @@ def _records(sid, now, shift):
     return [
         user("u1", None, y0, "please run the notes-api search suite"),
         asst("a1", "u1", y0 + 60, "Running the search suite now."),
-        # the second turn of yesterday; both echoes (two days ago) sort before its trigger
+        # the second turn of yesterday; both echoes (two days ago) precede u1, one run leading the transcript
         user("u2", "a1", y0 + 300, "and the docs suite after it"),
         asst("a2", "u2", y0 + 360, "Both suites are green; the search module is done."),
     ]
@@ -197,10 +212,11 @@ out.api.light = await measure();
 await page.evaluate(() => document.body.classList.remove("theme-light")); await page.waitForTimeout(300);
 out.api.dark = await measure();
 // the stale run's head at the TOP LINE of a short viewport: the sticky day label names the walk's day there (T342)
-await page.setViewportSize({ width: 1100, height: 330 });   // short enough that the rows after the run out-measure the pane, so the head can reach the top
+await page.setViewportSize({ width: 1100, height: 330 });   // a short pane: the head must be able to reach the top line
 await page.evaluate(() => {
   const h = Array.from(document.querySelectorAll("#content .turn-noticegroup")).find((t) => t.offsetParent !== null);
   const c = document.getElementById("content");
+  c.style.paddingBottom = c.clientHeight + "px";   // room below the last row, so the scroll cannot clamp before the head reaches the top whatever sits under the run (the sticky reads tops only)
   h.scrollIntoView({ block: "start" });
   c.scrollTop += h.getBoundingClientRect().top - c.getBoundingClientRect().top;   // the head's top exactly at the pane's top, past the pane's own padding
 });
@@ -212,7 +228,8 @@ out.api.sticky = await page.evaluate(() => {
   const m = h.querySelector(":scope > .time-marker");
   const vis = (n) => !!n && getComputedStyle(n).display !== "none";
   const c = document.getElementById("content");
-  return { headTop: h.getBoundingClientRect().top - content.top, pane: [c.scrollTop, c.scrollHeight, c.clientHeight], headMarker: m ? m.textContent : null, headMarkerVisible: !!m && getComputedStyle(m).visibility !== "hidden",
+  return { headTop: h.getBoundingClientRect().top - content.top, headTracked: h.getBoundingClientRect().top <= content.top + 6, pane: [c.scrollTop, c.scrollHeight, c.clientHeight],
+           headMarker: m ? m.textContent : null, headMarkerVisible: !!m && getComputedStyle(m).visibility !== "hidden",
            headDay: m ? m.dataset.day : null, headEpoch: m ? m.dataset.epoch : null,
            dayLabel: vis(day) ? day.textContent : null, stickyHm: vis(sticky) ? sticky.textContent : null };
 });
@@ -328,45 +345,77 @@ class ServedDayDivider(unittest.TestCase):
         if self.before and not os.environ.get("DD_BEFORE_ASSERT"):
             self.skipTest("a before-the-change dist: screenshots only, the assertions describe the change")
         now = self.now
-        yesterday_first = _local_day(1, 10, 0, now)
         two_days_ago = time.strftime("%a", time.localtime(_local_day(2, 10, 0, now)))   # the marker's weekday label for a day within the week
-        later_t = _echoes(now, 0)[1]["t"]
-        # web: today's rows with one stale echo among them
+
+        def hm(t):
+            return time.strftime("%H:%M", time.localtime(t))
+
+        def timed(m):
+            return [int(row["t"]) for row in m["rows"] if row["t"] is not None]
+
+        def echo_row(m, t):
+            hits = [row for row in m["rows"] if row["t"] == str(t)]
+            self.assertEqual(len(hits), 1, "one row at the echo's send time %s: %r" % (hm(t), [(row["cls"], row["t"]) for row in m["rows"]]))
+            return hits[0]
+        # web: two stale echoes, each in a gap of its own (T344): the rows are in time order and each echo wears its own clock
+        yesterday_echo_t, today_echo_t = (e["t"] for e in _echoes(now, 0))
         for theme in ("dark", "light"):
             m = r["web"][theme]
             self.assertEqual(m["theme"], theme)
-            # (3) two dividers only: the first row (two days ago) opens its day, yesterday's first row opens "Yesterday";
-            # none inside today, where the notice run sits with its first member stamped yesterday
+            ts = timed(m)
+            self.assertEqual(ts, sorted(ts), "the rows the chat reads are in time order (a stale echo sits at its send time, never among later rows) in %s: %r" % (theme, ts))
+            for t in (yesterday_echo_t, today_echo_t):
+                row = echo_row(m, t)
+                self.assertIn("turn-notice", row["cls"], "the echo is a notice row of its own: %r" % row)
+                self.assertNotIn("turn-noticegroup", row["cls"], "…not a run (the two echoes are a day apart, no longer adjacent): %r" % row)
+                self.assertEqual((row["marker"], row["markerEpoch"]), (hm(t), str(t)), "an echo row wears its OWN time: %r" % row)
+            self.assertIsNone(m["head"], "no collapsed notice run in web (the echoes sit in different gaps): %r" % [row["cls"] for row in m["rows"]])
+            # (3) two dividers only: the first row (two days ago) opens its day; "Yesterday" opens on the 09:47 echo, now
+            # yesterday's first row (it sits in the gap before the 10:00 row); none inside today
             self.assertEqual([d["label"] for d in m["divs"]], [two_days_ago, "Yesterday"], "two dividers, the transcript's two past days, in %s: %r" % (theme, [d["label"] for d in m["divs"]]))
-            d = m["divs"][1]
-            self.assertEqual(d["next"]["markerEpoch"], str(yesterday_first), "…yesterday's first row: %r" % d["next"])
-            self.assertIsNotNone(m["head"], "the two echoed notices collapsed into one run: %r" % [row["cls"] for row in m["rows"]])
-            self.assertFalse(m["head"]["prevIsDivider"], "no divider above the notice run (its first member is stamped yesterday, its place is today): %r" % m["head"])
-            self.assertEqual(m["head"]["marker"], time.strftime("%H:%M", time.localtime(later_t)), "the run's head wears its LATEST member's time, today's, not yesterday's: %r" % m["head"])
-            self.assertEqual(m["head"]["t"], str(later_t), "…and anchors on it")
             self.assertTrue(m["divs"][0]["leads"], "the transcript leads with its first day's divider (after the system-context card): %r" % m["divs"][0])
+            d = m["divs"][1]
+            self.assertEqual((d["next"]["t"], d["next"]["markerEpoch"]), (str(yesterday_echo_t), str(yesterday_echo_t)),
+                             "\"Yesterday\" opens on the 09:47 echo, yesterday's first row under the placement, not the 10:00 row: %r" % d["next"])
+            self.assertIn("turn-notice", d["next"]["cls"], "…the echo's own notice row: %r" % d["next"])
             for d in m["divs"]:
                 self._divider_shape(d, m, theme)
-        # api: the same read a day later, both echoes stale: exactly ONE "Yesterday" (the review's duplicate closed)
-        b_later_t = _echoes(now, 1)[1]["t"]
+        # api: both echoes precede the first turn and share one synthetic turn that LEADS the transcript: the weekday
+        # divider opens on the notice run, then exactly ONE "Yesterday" over the first real row
+        b_first_t, b_later_t = _local_day(1, 9, 5, now), _echoes(now, 1)[1]["t"]
         for theme in ("dark", "light"):
             m = r["api"][theme]
             self.assertEqual(m["theme"], theme)
-            self.assertEqual([d["label"] for d in m["divs"]], ["Yesterday"], "one divider: the stale run opens nothing and never becomes the reference, so the return to yesterday's rows opens nothing either, in %s: %r" % (theme, [d["label"] for d in m["divs"]]))
-            self.assertIsNotNone(m["head"], "the two stale echoes collapsed into one run: %r" % [row["cls"] for row in m["rows"]])
-            self.assertFalse(m["head"]["prevIsDivider"], "no divider above the stale run: %r" % m["head"])
-            self.assertEqual(m["head"]["t"], str(b_later_t), "the run's head anchors on its latest member, stale as it is")
-            self.assertTrue(m["divs"][0]["leads"])
-            self._divider_shape(m["divs"][0], m, theme)
-        # T342: the stale run's head scrolled to the top line: the day-context label names the WALK's day there, "Yesterday",
-        # never the run's own "2 days ago"; the rail's HH:MM over it stays the run's own (its stale anchor's clock)
+            ts = timed(m)
+            self.assertEqual(ts, sorted(ts), "the rows are in time order (the stale run leads, it is not among yesterday's rows) in %s: %r" % (theme, ts))
+            self.assertEqual([d["label"] for d in m["divs"]], [two_days_ago, "Yesterday"], "the weekday divider leads (the run's day, two days ago), then one \"Yesterday\", in %s: %r" % (theme, [d["label"] for d in m["divs"]]))
+            self.assertIsNotNone(m["head"], "the two stale echoes, sent together, collapsed into one run: %r" % [row["cls"] for row in m["rows"]])
+            self.assertTrue(m["head"]["prevIsDivider"], "the weekday divider sits right above the run: %r" % m["head"])
+            self.assertEqual((m["head"]["t"], m["head"]["marker"]), (str(b_later_t), hm(b_later_t)), "the run's head anchors on its latest member and wears its own time, two days ago: %r" % m["head"])
+            lead, yday = m["divs"]
+            self.assertTrue(lead["leads"], "the weekday divider leads the transcript (after the system-context card): %r" % lead)
+            self.assertIn("turn-noticegroup", lead["next"]["cls"], "…and opens on the notice run: %r" % lead["next"])
+            self.assertEqual(lead["next"]["t"], str(b_later_t), "…anchored on its latest member: %r" % lead["next"])
+            self.assertFalse(yday["leads"], "\"Yesterday\" has the run on the rail above it: %r" % yday)
+            self.assertIn("turn-noticegroup", yday["prev"]["cls"], "\"Yesterday\" follows the run: %r" % yday["prev"])
+            self.assertEqual(yday["next"]["markerEpoch"], str(b_first_t), "…and opens yesterday's first real row: %r" % yday["next"])
+            for d in m["divs"]:
+                self._divider_shape(d, m, theme)
+        # T342 under the placement: the stale run's head scrolled to the top line. The day-context label names the WALK's
+        # day at that row (the head marker's data-day, the mark after the run; stampWalkDay), never the row's own moment
+        # re-derived. The run LEADS the transcript here (T344), so nothing passed before it and the walk's mark at its head
+        # IS the run's own anchor: the label reads the run's own day, "2 days ago", the day its weekday divider opens (before
+        # T344's placement the run sat inside yesterday's turn and the same label read "Yesterday", the walk's day there).
+        # The rail's HH:MM over it stays the run's own (its stale anchor's clock). Here the walk's mark and the head's own
+        # epoch COINCIDE, so this case cannot tell T342's read (the marker's data-day) from the row's own epoch: that
+        # discrimination is ui/webview/rail-day.test.ts's source pins and time-marker.test.ts's DayWalk cases.
         st = r["api"]["sticky"]
-        self.assertLessEqual(st["headTop"], 6.5, "the head sits at the top line: %r" % st)
-        self.assertEqual(st["dayLabel"], "Yesterday", "the day label over the stale run is the walk's day, not the run's own 2 days ago: %r" % st)
-        stale_hm = time.strftime("%H:%M", time.localtime(b_later_t))
-        self.assertIn(stale_hm, (st["headMarker"] if st["headMarkerVisible"] else None, st["stickyHm"]), "the HH:MM at the top is the run's own, stale as it is: %r" % st)
-        self.assertEqual(st["headDay"], str(_local_day(1, 9, 5, now) + 60), "the head's marker carries the walk's mark after the run: the row before it, yesterday: %r" % st)
-        self.assertEqual(st["headEpoch"], str(b_later_t), "…beside its own moment")
+        self.assertLessEqual(st["headTop"], 0.5, "the head sits exactly at the pane's top once the scroll cannot clamp: %r" % st)
+        self.assertTrue(st["headTracked"], "…within the sticky's own tracking threshold (its 6px buffer), so the head is the tracked turn: %r" % st)
+        self.assertEqual(st["dayLabel"], "2 days ago", "the day label over the LEADING stale run is the walk's day at its head, and with no row before it that is the run's own anchor's day, two days ago (the day its divider opens), not yesterday: %r" % st)
+        self.assertIn(hm(b_later_t), (st["headMarker"] if st["headMarkerVisible"] else None, st["stickyHm"]), "the HH:MM at the top is the run's own, stale as it is: %r" % st)
+        self.assertEqual(st["headDay"], str(b_later_t), "the head's marker carries the walk's mark after the run: nothing precedes the run, so the mark is its own anchor: %r" % st)
+        self.assertEqual(st["headEpoch"], str(b_later_t), "…beside its own moment: %r" % st)
 
 
 if __name__ == "__main__":

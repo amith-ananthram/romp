@@ -80,7 +80,7 @@ class SplitSourcePins(unittest.TestCase):
         self.assertIn("st.activeId=sid;try{localStorage.setItem(BK+n,JSON.stringify(st));}catch(e){}}", km._LANDING_SPLIT_JS)
         self.assertIn('var SKEL=new URLSearchParams(location.search).get("skeleton")==="1";', self.shim)
         self.assertIn('+(SKEL?"&skeleton=1":""));', self.shim, "the term closes the connect query, after the column")
-        self.assertIn('+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1":"")', self.shim,
+        self.assertIn('+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1&proto="+readyProto:"")', self.shim,
                       "the redial gate is untouched (tests/test_pane_shim_return.py runs it)")
 
     def test_the_kernel_stamps_the_column_on_the_client(self):

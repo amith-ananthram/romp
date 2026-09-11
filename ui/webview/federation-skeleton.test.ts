@@ -18,7 +18,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { FederationManager, prefixInbound, routeOutbound } from "./federation";
+import { FederationManager, prefixInbound, routeOutbound, BOOKKEEPING } from "./federation";
 
 const U = "11111111-2222-3333-4444-555555555555";
 const V = "99999999-8888-7777-6666-555555555555";
@@ -217,6 +217,14 @@ test("routeOutbound: needFull's optional `why` passes through untouched — only
   assert.deepEqual(bare, [{ host: "", msg: { type: "needFull", id: "B" } }], "no `why` → no `why` minted");
 });
 
+test("routeOutbound: a re-attach's resident keys go to the owning kernel by the id's host, the id bared, the keys intact (T323 follow-up)", () => {
+  const keys = ["k1", "k2#2"];
+  assert.deepEqual(routeOutbound({ type: "reattachKeys", id: "B", keys }, new Set(["gpu1"])), [{ host: "", msg: { type: "reattachKeys", id: "B", keys } }]);
+  assert.deepEqual(routeOutbound({ type: "reattachKeys", id: "gpu1:" + V, keys }, new Set(["gpu1"])), [{ host: "gpu1", msg: { type: "reattachKeys", id: V, keys } }]);
+  assert.ok(BOOKKEEPING.has("reattachKeys"), "held for the socket's open like the other proto-2 asks, never toasted");
+  assert.equal(BOOKKEEPING.get("reattachKeys")!({ id: "B" }), String(BOOKKEEPING.get("loadNewer")!({ id: "B" })).replace("loadNewer", "reattachKeys"));
+});
+
 test("the manager's outbound puts needFull(+why) on the owning kernel's wire — local send or remote socket", () => {
   withManager((fm, _e, localSent) => {
     const ws = attach(fm, "gpu1");
@@ -225,6 +233,38 @@ test("the manager's outbound puts needFull(+why) on the owning kernel's wire —
     fm.outbound({ type: "needFull", id: "gpu1:" + U, why: "skeleton-delta" });
     assert.deepEqual(ws.sent, [{ type: "needFull", id: U, why: "skeleton-delta" }], "the remote kernel sees its own bare id and the same `why`");
     fm.conns.get("gpu1").closed = true;
+  });
+});
+
+// ── the page's chat protocol reaches every remote kernel (T323 stage 4b, round 2 item 16) ──────────────
+test("the page's ready (proto 2) goes to every OPEN remote socket at once, and to a later socket on its open, after the flush", () => {
+  withManager((fm, _e, localSent) => {
+    const a = attach(fm, "gpu1");
+    fm.outbound({ type: "ready", proto: 2 });
+    assert.deepEqual(localSent.filter((m: any) => m.type === "ready"), [{ type: "ready", proto: 2 }], "the local kernel gets the page's own ready");
+    assert.deepEqual(a.sent, [{ type: "ready", proto: 2 }], "an already-open remote socket is told the protocol now");
+    fm.openRemote("gpu2", true);
+    const b = FakeWS.made[FakeWS.made.length - 1];
+    assert.deepEqual(b.sent, [], "nothing rides a socket that has not opened");
+    fm.outbound({ type: "setting", key: "k", value: 1, host: "gpu2" });   // parked for the socket: the flush sends it first
+    b.open();
+    const kinds = b.sent.map((m: any) => m.type);
+    assert.equal(kinds[kinds.length - 1], "ready", "the ready is the last frame of the open: after whatever the flush sent");
+    assert.deepEqual(b.sent[b.sent.length - 1], { type: "ready", proto: 2 });
+    assert.equal(b.sent.filter((m: any) => m.type === "ready").length, 1, "once per open");
+    fm.conns.get("gpu1").closed = true; fm.conns.get("gpu2").closed = true;
+  });
+});
+
+test("an index page's ready (no proto) is told to no remote socket: an older kernel needs nothing and a newer one defaults to index frames", () => {
+  withManager((fm) => {
+    const a = attach(fm, "gpu1");
+    fm.outbound({ type: "ready" });
+    assert.deepEqual(a.sent, [], "no protocol declared: nothing sent");
+    fm.openRemote("gpu2", true);
+    const b = FakeWS.made[FakeWS.made.length - 1]; b.open();
+    assert.deepEqual(b.sent.filter((m: any) => m.type === "ready"), [], "…nor on a later open");
+    fm.conns.get("gpu1").closed = true; fm.conns.get("gpu2").closed = true;
   });
 });
 

@@ -50,6 +50,8 @@ TOP_KEYS = {"now", "since", "uptime_s", "log", "process", "pusher", "stages_ms",
             "goals", "memos", "judge", "http", "parses",   # parses: cold event-model parses (T323 stage 1)
             "checkpoints",                                 # checkpoints: the folds' checkpoints (T323 stage 3)
             "asmCheckpoint",                               # asmCheckpoint: the assembly documents (T323 stage 4a)
+            "recordCache",                                 # recordCache: the shared reader's byte budget and evictions (2026-09-11)
+            "chatPages",                                   # chatPages: the pre-floor history pages cache (T323 stage 4b)
             "skillLoadIndex"}                              # skillLoadIndex: the judge's skill-load boot pass, its raw reads (T333)
 
 
@@ -501,8 +503,8 @@ class PusherRecords(unittest.TestCase):
             "_end_on_idle_sweep", "_deferral_sweep_tick", "_auto_nudge_tick", "_interrupt_block_tick",
             "_auto_pause_on_limit", "_usage_poll_tick", "_auto_pause_on_spend_limit", "_auto_resume_retry",
             "_auto_resume_session_retry", "_auto_retry_tick", "_idle_queue_drive_tick",
-            "_clear_done_working_notes", "_push_all",
-            "_api_health_frame", "_api_health_push")   # the bottom bar's API cell
+            "_clear_done_working_notes", "_spend_guard_tick", "_push_all",
+            "_api_health_frame", "_api_health_push")   # the bottom bar's API cell; the spend guard (T350)
 
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()

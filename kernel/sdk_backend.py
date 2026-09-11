@@ -3193,6 +3193,10 @@ BOOT_RESUME_CONCURRENCY = max(1, int(os.environ.get("ROMP_BOOT_RESUME_CONCURRENC
 # Backstop ONLY (never the mechanism): a CLI that wedges before init would otherwise hold its slot
 # forever and trap the whole sweep — after this long the sweep proceeds anyway, loudly.
 BOOT_RESUME_SLOT_S = float(os.environ.get("ROMP_BOOT_RESUME_SLOT_S", "180"))
+# Boot RE-ATTACHES to live session hosts (T315) are socket connects and a replay of a few hundred small records,
+# not the launch of a claude process, so they do not take the spawn stagger's slots: they run on a wider bound of
+# their own (the restart-path work, 2026-09-11: twelve attaches paced three at a time cost 4 s of a 20 s restart).
+BOOT_ATTACH_CONCURRENCY = max(1, int(os.environ.get("ROMP_BOOT_ATTACH_CONCURRENCY", "8")))
 
 # The rename ping (the user 2026-08-24): a renamed session hears its OWN new name — one line ahead
 # of whatever next enters it (send() below), never a wake of its own. Same [romp] mechanics-notice
@@ -8903,7 +8907,7 @@ class SdkBackend:
     def __init__(self, state_dir, claude_bin: str, notify, poke=None, push=None,
                  push_session=None,
                  mcp_config: str | None = None, append_prompt_path: str | None = None,
-                 log=None, reconcile: bool = False, boot_at=None, code_version=None):
+                 log=None, reconcile: bool = False, boot_at=None, code_version=None, boot_phase=None):
         self.state_dir = Path(state_dir)
         self.claude_bin = claude_bin
         self.code_version = str(code_version or "")   # the kernel's git sha, stamped on every lease this kernel
@@ -9043,6 +9047,10 @@ class SdkBackend:
         #                                           overlap on one sid — an overlap let a stand-down's mark
         #                                           restore clobber the newer worker's watermark and the model
         #                                           heard the same notifications twice (2026-08-18 review)
+        self._boot_phase = boot_phase            # the kernel's boot-milestone hook (censusDone, attachDone), or None
+        self._boot_attach_pending = 0            # boot attaches whose hello (or death) has not landed yet
+        self._boot_attach_lock = threading.Lock()
+        self._attach_sem = threading.Semaphore(BOOT_ATTACH_CONCURRENCY)   # boot re-attaches: socket connects, not launches
         self._spawn_sem = threading.Semaphore(BOOT_RESUME_CONCURRENCY)   # the ONE machine-wide spawn-stagger
         #                                           budget: boot reconcile's resume sweep AND the idle-queue
         #                                           drive's dormant spawns draw slots from this same semaphore
@@ -9320,11 +9328,14 @@ class SdkBackend:
             # records no kernel consumed. Replay that tail through the same road (no wait: no holder to wait
             # for; no host.died row: nothing died), then clear the directory.
             await self._host_orphan_recover(sess, opts, None, msg_classes, died=False)
-        if state == "none" and not self.session_hosts_on():
-            # the kill switch: with the setting off nothing SPAWNS a host, whatever happened to the last one;
-            # the session runs the plain SDK subprocess and the connect loop's finally closes a kernel lease
+        hosts_on, hosts_value = _ht().session_hosts_read(self.state_dir)   # one read: the branch and its log agree
+        if state == "none" and not hosts_on:
+            # the kill switch: with the setting file saying off nothing SPAWNS a host, whatever happened to the last
+            # one; the session runs the plain SDK subprocess and the connect loop's finally closes a kernel lease.
+            # Hosts are on by default (T348), so this branch runs only when the file on this machine says off.
             sess._host_intent = False
-            self._log("host (%s): session-hosts is off; running the CLI as a kernel child" % sess.name)
+            self._log("host (%s): the session-hosts file reads %r, not an on word; running the CLI as a kernel child"
+                      % (sess.name, hosts_value))
             return None
         if state == "attach":
             sess._host_is_attach = True
@@ -9941,6 +9952,7 @@ class SdkBackend:
             # recovered nothing is the baseline the restart monitors compare against; a boot with no
             # sessions at all measures nothing and writes nothing, so a read-only route's lazy backend
             # build leaves the state directory untouched); `resumed` counts the continuation notices queued
+            self._boot_milestone("censusDone")   # the process table, the leases and every registry row are read
             if alive:
                 append_session_event(self.state_dir, "reconcile.boot", sessions=len(alive), resumed=resumed,
                                      restored=restored, notified=notified, reaped=reaped, scopesStopped=scopes_stopped, attached=attached_boot,
@@ -9961,16 +9973,30 @@ class SdkBackend:
             # Compact each paid in full the reload the gate existed to avoid, leaving Skip as the only
             # option that did what the card said. Context is managed by hand for now. Every cut/queued
             # session resumes here, exactly as it did before the gate.
-            for sid in to_start:
-                slot = self._spawn_sem.acquire(timeout=BOOT_RESUME_SLOT_S)
+            to_start = [s for s in to_start if s in self._boot_attach_sids] + [s for s in to_start if s not in self._boot_attach_sids]
+            with self._boot_attach_lock:
+                self._boot_attach_pending = sum(1 for s in to_start if s in self._boot_attach_sids)
+            if not self._boot_attach_pending:
+                self._boot_milestone("attachDone")       # nothing to attach: the phase is over before it began
+            for sid in to_start:                         # re-attaches first, then the cold launches
+                attach = sid in self._boot_attach_sids
+                # a RE-ATTACH (a live host holds the CLI) is a socket connect, first and on its own wider bound; a
+                # cold launch keeps the spawn stagger (the CPU burst the stagger exists for)
+                sem = self._attach_sem if attach else self._spawn_sem
+                slot = sem.acquire(timeout=BOOT_RESUME_SLOT_S)
                 if not slot:
                     self._log("boot reconcile: resume slot backstop expired (a CLI is wedged "
                               "pre-init?) — continuing the sweep anyway")
+                settled = (self._boot_attach_settled(sem.release if slot else None) if attach
+                           else (sem.release if slot else None))
                 try:   # same per-session isolation as above: one bad spawn must not strand the rest
-                    self._ensure(sid, on_boot_settled=(self._spawn_sem.release if slot else None))
+                    if self._ensure(sid, on_boot_settled=settled) is None and attach:
+                        settled()                        # never started (stood down, dead): the phase must not wait on it
                 except Exception:
                     if slot:
-                        self._spawn_sem.release()   # the parked release never got attached — free the slot here
+                        sem.release()                    # the parked release never got attached — free the slot here
+                    if attach:
+                        self._boot_attach_count_down()
                     self._log("boot reconcile: spawn %s failed (sweep continues): %s"
                               % (sid, traceback.format_exc()))
         except Exception:
@@ -9980,6 +10006,40 @@ class SdkBackend:
         # dead pile of roots is minutes of rmtree that must never sit in front of them. Budgeted per
         # boot; the remainder waits for the next boot. Daemon: a kernel shutdown does not wait on it.
         self._start_test_root_sweep()
+
+    def _boot_milestone(self, kind: str) -> None:
+        """Tell the kernel a boot phase ended (censusDone: the process table, leases and registry rows are read;
+        attachDone: every boot re-attach has its hello or died). Best-effort: the hook is the kernel's, and a
+        raising hook must not touch the reconcile."""
+        try:
+            if self._boot_phase:
+                self._boot_phase(kind)
+        except Exception as e:
+            self._log("boot milestone %s: %s" % (kind, e))
+
+    def _boot_attach_count_down(self) -> None:
+        with self._boot_attach_lock:
+            self._boot_attach_pending -= 1
+            done = self._boot_attach_pending <= 0
+        if done:
+            self._boot_milestone("attachDone")
+
+    def _boot_attach_settled(self, release):
+        """The on_boot_settled callback for one boot re-attach: frees its attach slot and counts the attach down;
+        fires exactly once (the session fires it at hello or at its thread's death, and the reconcile fires it
+        for a session it never started)."""
+        fired = []
+        def settled():
+            if fired:
+                return
+            fired.append(1)
+            if release:
+                try:
+                    release()
+                except Exception:
+                    pass
+            self._boot_attach_count_down()
+        return settled
 
     def _start_test_root_sweep(self) -> None:
         def run():
@@ -10167,6 +10227,21 @@ class SdkBackend:
                 #                                     reconnect, raise — frees the sid for the next
                 #                                     parse's acceptance
 
+    @staticmethod
+    def cut_list(sessions) -> list:
+        """The turns a restart would CUT among `sessions`: every session with an in-flight turn that no host holds
+        (T315: a session under a host, or mid-attach by intent, is detached, never cut; T143: `ended` is not a filter,
+        a mid-shutdown session with a live turn is a cut too). The drain's ledger row and the deploy gates read this
+        one predicate (T352), so "would a restart now cut anything" is answered exactly as the drain would record."""
+        return [{"sid": s.sid, "name": s.name} for s in sessions
+                if s.inflight and getattr(s, "_host", None) is None and not getattr(s, "_host_intent", False)]
+
+    def would_cut(self) -> list:
+        """The turns a restart NOW would cut (cut_list over the live sessions): the converge gates' input (T352)."""
+        with self._lock:
+            sessions = list(self.sessions.values())
+        return self.cut_list(sessions)
+
     def drain(self, timeout: float = 2.0, kill=os.kill) -> dict:
         """Graceful-shutdown drain (the kernel's SIGTERM handler): stop every running session cleanly
         within `timeout` — interrupt any in-flight turn and close the SDK clients so the claude
@@ -10198,8 +10273,7 @@ class SdkBackend:
                 s.detached = True                       # by intent too: a session mid-attach must not be ended
                 if s._host is not None:
                     s._host.detach_mode = True
-        cut = [{"sid": s.sid, "name": s.name} for s in sessions
-               if s.inflight and getattr(s, "_host", None) is None and not getattr(s, "_host_intent", False)]
+        cut = self.cut_list(sessions)
         inflight = len(cut)
         for s in sessions:
             try:

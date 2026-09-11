@@ -106,7 +106,10 @@ test("a reconnect clears parked asks — a dead socket's pending needFull can ne
 test("the kernel's ready branch resets the client's WHOLE chat base before its push", () => {
   const i = KERNEL.indexOf('msg.get("type") == "ready"');
   assert.ok(i > 0);
-  const body = KERNEL.slice(i, i + 2600);   // the arm's comments grew (the skeleton client's re-arm, 2026-09-11): the window follows tests/test_chat_skeleton_reconnect.py's
+  // the arm's window: it grew with the focused-session send (T347), the metrics team's connect-time reads and the
+  // skeleton client's re-arm (the chat split) landing together on 2026-09-11, past the 1600 characters this read;
+  // the connect push sits near 2400 now
+  const body = KERNEL.slice(i, i + 3000);
   assert.ok(body.includes("_client_reset_chat_base(client)"), "ready = the renderer holds nothing");
   assert.ok(body.includes("_push_one(client)"), "the connect push is in the arm");
   assert.ok(body.indexOf("_client_reset_chat_base(client)") < body.indexOf("_push_one(client)"),
