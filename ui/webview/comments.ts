@@ -8,6 +8,8 @@
 export type CommentMsg = { who: "you" | "agent"; text: string; t: number };
 
 export type CommentThread = {
+  /** the thread's mail is off (T356): a comment thread neither sends nor receives peer mail until broken out */
+  mailOff?: boolean;
   tid: string;
   name?: string;              // the thread's editable name (<session>-comment-<N> by default)
   color?: string;             // the comment's identity color — picked distinct from its parent's

@@ -402,6 +402,13 @@ a subproject that became its own repository, right-click its tab and choose
 name, mail and history stay with the session, and from the next turn on the
 agent works in the new folder and reads its `CLAUDE.md`.
 
+A comment thread's mail is off, both directions, until you break it out: peers
+cannot see or mail the thread, and its own mail is refused with a line saying
+so. The popover says "mail off" while it lasts, and the moment you break the
+thread out it is a session like any other, mail on unless you toggle its
+mailbox off (the user 2026-09-11, after a thread received a manager's mail and
+acted as the manager).
+
 A session started from another one joins its tags. Forking a session, breaking
 a comment thread out into its own session, and running `romp new` inside a
 session's shell all put the new session in the parent's groups, so a session's

@@ -137,8 +137,12 @@ os.environ["ROMP_POSTAL_HERMETIC"] = "1"
 # No test spawns a per-session HOST by omission (2026-09-11, T348): hosts are on by default now, so a backend built over
 # a state dir with no `session-hosts` file starts a real bin/romp-session-host for any session it connects. The root the
 # runner floors carries the toggle set to off from the start, re-asserted per test below (a test that deletes or rewrites
-# it gets it back); the deliberate hosts-on tests write `on` into their OWN state roots and are unaffected. A test that
-# builds its own bare state dir pins the setting itself (kernel/host_transport.py session_hosts_read).
+# it gets it back); the deliberate hosts-on tests write `on` into their OWN state roots and are unaffected.
+# THE BELT'S REACH: it covers this one root and nothing else. A test that mints its own temp state root (a bare
+# tempfile.mkdtemp() handed to SdkBackend, a lab kernel's xdg root) stands outside it and MUST write `off` into
+# `<its root>/session-hosts` itself unless it means to run a host, or the first connect it drives spawns a real
+# bin/romp-session-host on the developer's box (tests/test_cut_turn_tree_kill.py did, 2026-09-11). The rule for test
+# authors is in CLAUDE.md under Testing.
 _SESSION_HOSTS_OFF = os.path.join(os.environ["XDG_STATE_HOME"], "romp", "session-hosts")
 
 

@@ -148,6 +148,7 @@ CENSUS = {
     "_session_chip": ("pure", "over classified inputs: the parse and live tail, the row, the backend brackets, the clock booleans, the live task rows, the watches, the states overlay, the store and the downtime list"),
     "_session_cwd": ("sig", "cwd", "the names entry's cwd, else the transcript's stamp"),
     "_session_flag": ("sig", "flags"),
+    "_postal_isolated": ("sig", "flags", "the effective mail state: the mailbox flag with its legacy twin, and a comment thread's default from its reg (T356)"),
     "_session_meta": ("pure", "over the transcript's records, memoized by record identity (transcript)"),
     "_session_retry_suppressed": ("sig", "retry"),
     "_session_working": ("sig", "downtime", "over the turns, and the host suspensions recorded since boot"),
