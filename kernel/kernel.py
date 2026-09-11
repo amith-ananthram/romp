@@ -2194,14 +2194,15 @@ def _models_changed():
     list. Sent per landing, not only on the closed-to-open flip: a door cannot observe the flip without the
     backend counting closings (two first creates can both land before either checks; a kill between a door's
     check and its landing hides a close-and-reopen), and a repeated frame costs one GET /models per open
-    picker, which the payload's rev reconciles. The FEED app is
-    on the list because the settings gear lives in the feed bundle (feed.ts requires gear.js; the shell's
-    rail gear and VS Code's settings command both open it in the feed pane). The feed shim and the VS Code
-    pipe hand every non-keepalive frame to the window as a message; feed.ts's own listener ignores a type
-    it does not know."""
+    picker, which the payload's rev reconciles. The SETTINGS app is
+    on the list because the dashboard's settings gear lives on its own served page (/settings,
+    ui/webview/settings-page.ts, the user 2026-09-10); the FEED app stays on it because VS Code's feed
+    panel still hosts the gear from the feed bundle (feed.ts requires gear.js; VS Code's settings command
+    opens it there). Every pane shim and the VS Code pipe hand every non-keepalive frame to the window as
+    a message; feed.ts's own listener ignores a type it does not know."""
     _models_rev[0] += 1
     frame = {"type": "models", "rev": _models_rev[0]}
-    for app in ("chat", "timeline", "feed"):
+    for app in ("chat", "timeline", "feed", "settings"):
         _send_to_app(app, frame)
 
 
@@ -46982,11 +46983,13 @@ def _chat_page():
 # opens a small panel with the build version: the kernel sha + what dist_ver it serves vs the ?v= THIS
 # tab loaded, flagged ⚠ when the tab is stale (a reload is owed). This is the version display the user
 # asked for, off the Clear-all/Undo bar and behind the gear.
-# The settings gear (the full-screen modal + token-usage analytics) lives in the FEED BUNDLE now
-# (ui/webview/gear.js + the feed.css gear section, 2026-07-13) so the kernel page and the VS Code
-# feed panel render the SAME modal. It opens on a {romp:'openSettings'} window message; its
-# model/effort options come from /models, palette from /palette, and its kernel ops ride the
-# feed's own channel.
+# The settings gear (the full-screen modal + token-usage analytics) moved from kernel-inline strings into
+# the FEED BUNDLE on 2026-07-13 (ui/webview/gear.js + gear.css) so the kernel page and the VS Code feed
+# panel render the SAME modal. Since 2026-09-10 (the user, who wanted the Feed pane optional) the
+# dashboard serves it on its OWN page instead, /settings (_settings_page below): this feed page sets
+# window.__rompGearOnSettingsPage before feed.js so the bundle mounts no gear here (ui/webview/gear-host.ts),
+# and a control in the feed that wants the modal asks the shell, which forwards the open into the
+# settings iframe. VS Code's feed panel sets no flag and keeps hosting the gear from the same bundle.
 
 
 def _feed_page():
@@ -46994,12 +46997,12 @@ def _feed_page():
     return ("<!DOCTYPE html><html lang=en><head><meta charset=UTF-8>"
             "<meta name=viewport content='width=device-width,initial-scale=1'>"
             "<link rel=icon type=image/svg+xml href=/media/romp-swirl-glyph.svg>"
-            "<link href=/dist/feed.css?v=%d rel=stylesheet>"
-            "<link href=/dist/gear.css?v=%d rel=stylesheet><title>Romp · feed</title>"
+            "<link href=/dist/feed.css?v=%d rel=stylesheet><title>Romp · feed</title>"
             "<style>%s</style></head><body>%s%s<script>%s</script>"
-            "<script src=/dist/federation.js?v=%d></script>"   # multi-kernel manager (also hosts the attach UI in the gear)
-            "<script src=/dist/feed.js?v=%d></script></body></html>"   # feed.js builds + wires the gear modal itself
-            % (v, v, THEME_CSS,
+            "<script>window.__rompGearOnSettingsPage=true;</script>"   # the gear is on /settings; feed.js mounts none here (gear-host.ts)
+            "<script src=/dist/federation.js?v=%d></script>"   # multi-kernel manager
+            "<script src=/dist/feed.js?v=%d></script></body></html>"
+            % (v, THEME_CSS,
                '<div id="feed-head"></div><div id="feed-list"></div><div id="feed-foot"></div>',
                _pane_spin("feed-list"), _shim("feed", v), v, v))
 
@@ -47065,6 +47068,33 @@ def _files_page():
             "<script>%s</script><script src=/dist/federation.js?v=%d></script>"   # multi-kernel manager: after the shim
             "<script src=/dist/files.js?v=%d></script></body></html>"
             % (v, THEME_CSS, files_css, _shim("files", v, no_stale=True), v, v))
+
+
+# Settings: the ⛭ gear on a page of its own (the user 2026-09-10). Inside the feed bundle (2026-07-13) the
+# gear made the Feed pane structurally required in the dashboard: every opener posted openSettings into
+# #f-feed and the shell lifted that iframe. This page hosts gear.js alone (ui/webview/settings-page.ts),
+# embedded by _landing as the hidden #f-settings iframe — NOT a pane: no rail button, no tab, no gutter —
+# and lifted full-window while the modal is open (the {romp:'settings',on} bridge, body.settings-open).
+# Like the Files pane it receives no pushed view: app=settings is outside every build audience and the
+# conserve-memory viewer set, the shim runs with the stale opt-out, and the gear's kernel ops
+# (setJudgeModel, browseDir, …) and their replies ride its own socket; the models frame goes to app
+# settings so the gear's cached /models list follows a pick (_models_changed). feed.css is linked for
+# the theme tokens and the gear's dress (gear.css was cut out of it and reads its variables), so the modal
+# renders as it did inside the feed; the page's own background is transparent so the dimmed dashboard shows
+# through the lifted iframe (the panels rule, ui/CLAUDE.md). No _pane_spin: nothing loads to wait for.
+# VS Code's feed panel still mounts the gear from the feed bundle (it has no settings page).
+def _settings_page():
+    v = _dist_ver()
+    return ("<!DOCTYPE html><html lang=en><head><meta charset=UTF-8>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'>"
+            "<link rel=icon type=image/svg+xml href=/media/romp-swirl-glyph.svg>"
+            "<link href=/dist/feed.css?v=%d rel=stylesheet>"
+            "<link href=/dist/gear.css?v=%d rel=stylesheet><title>Romp · settings</title>"
+            "<style>%s\nhtml,body.settings-page{background:transparent}</style></head><body class=settings-page>"
+            "<script>%s</script>"
+            "<script src=/dist/federation.js?v=%d></script>"   # multi-kernel manager: the gear's kernel-side settings fan out to every attached host
+            "<script src=/dist/settings-page.js?v=%d></script></body></html>"
+            % (v, v, THEME_CSS, _shim("settings", v, no_stale=True), v, v))
 
 
 # The romp-tl-* wrapper styles live in ui/webview/timeline-pane.css — ONE file, read live here (like the
@@ -47397,8 +47427,9 @@ el.classList.toggle('has',n>0||(kindOn('conn')&&liveDown()));
 var t=el.querySelector('.rerr-n');if(t)t.textContent=n<=0?'!':(n>9?'+':String(n));});
 tell(n);if(!back.hidden)renderList();}
 // The bar's opener carried the unread count (T290 took it off the bar): the count now rides the gear's
-// "Open log" button, in the feed pane's document — told on every repaint and on the panel's own query.
-function tell(n){var f=document.getElementById('f-feed');
+// "Open log" button, in the settings iframe's document (the /settings page, 2026-09-10; the feed pane's
+// before) — told on every repaint and on the panel's own query.
+function tell(n){var f=document.getElementById('f-settings');
 try{f&&f.contentWindow&&f.contentWindow.postMessage({romp:'logUnseen',n:(n===undefined?unseen():n)},'*');}catch(e){}}
 window.addEventListener('message',function(e){var m=e.data;if(m&&m.romp==='logUnseenQuery')tell();});
 // each entry leads with the chip its card wears in the feed, so the vocabulary matches across surfaces
@@ -47450,12 +47481,26 @@ del.addEventListener('click',function(ev){ev.stopPropagation();NOTES.splice(i,1)
 // to opening the session if the card is gone). The x keeps its own handler (stopPropagation above).
 if(n.tgt&&(n.tgt.itemId||n.tgt.sid)){row.className+=' link';row.title='Jump to this card';
 row.addEventListener('click',function(){close();
+// the Feed pane off in this browser (the gear's Panes section; feedHere below): there is no card here to scroll
+// to, and a pane that is not in the dashboard cannot be revealed, so the jump opens the SESSION in the chat, the
+// way a card's own session link does ({type:'openSession'} on the shell socket, whose wid aims the kernel's
+// reveal at this dashboard). A shell socket that is down says so in the Log rather than dropping the click.
+if(!feedHere()){jumpChat(n.tgt.sid||'');return;}
 try{window.__rompPaneToggle&&window.__rompPaneToggle('feed',true);}catch(e){}
 var f=document.getElementById('f-feed');
 try{f&&f.contentWindow&&f.contentWindow.postMessage({romp:'revealCard',itemId:n.tgt.itemId||'',sid:n.tgt.sid||''},'*');}catch(e){}});}
 row.appendChild(tx);row.appendChild(tm);row.appendChild(del);list.appendChild(row);})(NOTES[i],i);
 if(!shown){var e=document.createElement('div');e.className='rerr-empty';
 e.textContent=NOTES.length?'Nothing to show \\u2014 hidden by the filters above':'Nothing logged';list.appendChild(e);}}
+// the Feed pane is in this browser's dashboard (window.__rompPaneEnabled, the head script's reader of the gear's
+// Panes section; a shell without it shows every pane). With the pane off here, a card's Log entry (the feed's
+// badge mirror posts them with the card's itemId) is not logged, since no card is shown here to open, and a jump
+// opens the session in the chat instead. The kernel is not party to any of this: judging and task tracking
+// run unchanged, and another browser with the pane on sees every card.
+function feedHere(){return !(window.__rompPaneEnabled&&!window.__rompPaneEnabled('feed'));}
+function jumpChat(sid){if(!sid)return;var ok=false;
+try{ok=!!(window.__rompShellSend&&window.__rompShellSend({type:'openSession',id:sid}));}catch(e){}
+if(!ok)window.__rompNotify('locate','Could not open the session: the dashboard has no live connection to the kernel');}
 // One write path. A repeat of the NEWEST entry (same kind+text — e.g. a reconnect loop dropping over and
 // over) coalesces into it with a count instead of flooding the feed: event-exact, no time window.
 window.__rompNotify=function(kind,text,tgt){if(!text)return;
@@ -47464,10 +47509,13 @@ if(last&&last.kind===kind&&last.text===String(text)){last.n=(last.n||1)+1;last.t
 else{NOTES.push({kind:String(kind||'error'),text:String(text),t:Math.floor(Date.now()/1000),n:1,seen:false,tgt:tgt||null});
 if(NOTES.length>MAX)NOTES=NOTES.slice(-MAX);}
 save();paint();};
-// pane iframes can feed the center too; sid/itemId ride along as the entry's jump target
+// pane iframes can feed the center too; sid/itemId ride along as the entry's jump target. An entry naming a CARD
+// (itemId: the feed's badge mirror, a card still loaded in a pane hidden mid-page) is not this browser's while its
+// Feed pane is off (feedHere above); an entry naming only a session, or nothing, lands as ever.
 window.addEventListener('message',function(e){var m=e&&e.data;
-if(m&&m.romp==='notify'&&m.text)window.__rompNotify(m.kind||'error',m.text,
-(m.sid||m.itemId)?{sid:String(m.sid||''),itemId:String(m.itemId||'')}:null);});
+if(m&&m.romp==='notify'&&m.text){if(m.itemId&&!feedHere())return;
+window.__rompNotify(m.kind||'error',m.text,
+(m.sid||m.itemId)?{sid:String(m.sid||''),itemId:String(m.itemId||'')}:null);}});
 // Connection tracking (was the #romp-offline top banner). Only a VISIBLE pane counts (the user 2026-07-06):
 // a pane toggled OFF still holds a live socket (the Fleet pane is hidden by default, its iframe always
 // loaded), so a blip on a pane you can't even see shouldn't cry wolf while the chat pane you interact
@@ -47505,7 +47553,12 @@ paint();})();
 # cleanup lives in those closures); this block only decides which panel Escape means, topmost first
 # (shortcuts dialog z300 — whose close() first CANCELS an in-progress chord recording, one Escape
 # level at a time — then usage z300 > Log z210 > net z200). With no shell modal open it touches
-# nothing, so pane-local Escapes (dialogs, menus inside the chat) keep working.
+# nothing, so pane-local Escapes (dialogs, menus inside the chat) keep working. The gear is the last
+# step (the /settings page in the hidden #f-settings iframe, lifted full-window at z200 while open,
+# 2026-09-10): the shell knows it is up from body.settings-open and asks the page's own
+# __rompSettingsClose (gear.js) to close it, which reports whether it did, since a dialog inside the
+# gear (the login card, an open dropdown) takes the Escape itself, one level at a time. Its document
+# is wired with the panes' so the press is heard where the gear's fields hold the keyboard.
 _LANDING_ESC_JS = """
 (function(){
 function onEsc(e){if(e.key!=='Escape')return;
@@ -47521,10 +47574,14 @@ if(er&&!er.hidden&&window.__rompCloseErrs){window.__rompCloseErrs();closed=true;
 else{var bp=document.getElementById('rbell-back');
 if(bp&&!bp.hidden&&window.__rompCloseBellPop){window.__rompCloseBellPop();closed=true;}
 else{var nt=document.getElementById('rnet-back');
-if(nt&&!nt.hidden&&window.__rompCloseNet){window.__rompCloseNet();closed=true;}}}}}}
+if(nt&&!nt.hidden&&window.__rompCloseNet){window.__rompCloseNet();closed=true;}
+else if(document.body.classList.contains('settings-open')&&settingsClose()){closed=true;}}}}}}
 if(closed){e.preventDefault();e.stopPropagation();}}
+// the gear's own document says whether the press closed it (false with one of its dialogs up, or no page yet)
+function settingsClose(){var f=document.getElementById('f-settings');
+try{var w=f&&f.contentWindow;return !!(w&&w.__rompSettingsClose&&w.__rompSettingsClose());}catch(e){return false;}}
 document.addEventListener('keydown',onEsc,true);
-['f-chat','f-fleet','f-feed','f-files','f-timeline'].forEach(function(id){var f=document.getElementById(id);if(!f)return;
+['f-chat','f-fleet','f-feed','f-files','f-timeline','f-settings'].forEach(function(id){var f=document.getElementById(id);if(!f)return;
 var wire=function(){try{if(f.contentDocument)f.contentDocument.addEventListener('keydown',onEsc,true);}catch(e){}};
 f.addEventListener('load',wire);wire();});
 })();
@@ -48690,13 +48747,38 @@ if(held){dirty=true;return;}render();};
 """
 
 
-# Full-screen bridges (the user 2026-06-23; picker 2026-07-05): an iframe posts {romp:'settings',on} (feed
-# gear) or {romp:'picker',on} (chat new-session picker) when its modal opens/closes; the shell lifts that
-# iframe over the whole window (body.settings-open / body.picker-open) so the modal's backdrop covers the full
-# screen, and restores it on close.
+# Full-screen bridges (the user 2026-06-23; picker 2026-07-05): an iframe posts {romp:'settings',on} (the
+# gear, on the /settings page since 2026-09-10) or {romp:'picker',on} (chat new-session picker) when its modal
+# opens/closes; the shell lifts that iframe over the whole window (body.settings-open / body.picker-open) so
+# the modal's backdrop covers the full screen, and restores it on close.
 _LANDING_SETTINGS_JS = """
-(function(){window.addEventListener('message',function(e){var m=e.data;if(!m)return;
-if(m.romp==='settings')document.body.classList.toggle('settings-open',!!m.on);
+(function(){
+// the Feed pane is in this browser's dashboard (window.__rompPaneEnabled, the head script's reader of the gear's
+// Panes section; a shell without it shows every pane): the browse relay below routes by it
+function feedHere(){return !(window.__rompPaneEnabled&&!window.__rompPaneEnabled('feed'));}
+// The ONE opener of the settings gear: it lives in the hidden #f-settings iframe (the served /settings page;
+// the user 2026-09-10 — it rode the feed pane before, which made that pane required). The rail's ⛭, the phone's
+// settings action, the palette's command and the message relay below all come here. The iframe is served with
+// data-src (review find 2026-09-11: an eagerly loaded gear cost a kernel socket plus one per attached host on
+// every dashboard load, idle until opened), so the FIRST open gives it its src, and an open asked before the
+// page has loaded waits for the iframe's load, once (the files forward's shape): a message posted into the
+// document still on its way would be dropped, and the first click would show nothing. A second ask while that
+// one waits is not queued: the page's opener toggles, so two would open and close it.
+var sPend=false;
+window.__rompOpenSettings=function(){var f=document.getElementById('f-settings');if(!f)return;
+var open=function(){try{f.contentWindow&&f.contentWindow.postMessage({romp:'openSettings'},'*');}catch(e){}};
+if(!f.getAttribute('src')){var u=f.getAttribute('data-src');if(!u)return;sPend=true;f.setAttribute('src',u);
+  f.addEventListener('load',function(){try{if(f.contentDocument&&f.contentDocument.URL==='about:blank')return;}catch(e){}   // the empty document's own load, not the page's
+    if(sPend){sPend=false;open();}});return;}
+if(sPend)return;
+open();};
+window.addEventListener('message',function(e){var m=e.data;if(!m)return;
+if(m.romp==='settings'){document.body.classList.toggle('settings-open',!!m.on);
+// closing hides the iframe that held the keyboard, which drops focus onto the shell body; put it back in the
+// chat (the dashboard's default focus, _LANDING_FOCUS_JS rings it) so the next keystroke lands in a pane
+if(!m.on){var fc=document.getElementById('f-chat');try{fc&&fc.contentWindow&&fc.contentWindow.focus();}catch(e){}}}
+// a pane asking for the gear (the feed's login card, ui/webview/gear-host.ts openGear: the feed page hosts no gear)
+if(m.romp==='openSettings')window.__rompOpenSettings();
 // the gear's "Open log" (T290): the settings modal closes itself first, then asks the shell for the Log panel
 if(m.romp==='openLog'&&window.__rompOpenErrs)window.__rompOpenErrs();
 // the /chat iframe's new-session picker asks the shell to lift it full-window (see body.picker-open CSS)
@@ -48737,8 +48819,10 @@ if(m.romp==='filesViewerClosed'){var back=window.__rompFilesTabFrom;window.__rom
 // The pane STAYS up, so none of the feed route's was-off flag or browseClosed restore below applies; on a
 // phone the tab the click came from is remembered, and the pane's own close edge (filesViewerClosed above)
 // puts the person back, exactly as the viewFile pane arm does. The forward waits for a Files page still
-// loading the same way. A browseFiles naming no pane is the feed's, the arm that follows.
-if(m.romp==='browseFiles'&&m.pane==='pane'){var fb=document.getElementById('f-files');
+// loading the same way. A browseFiles naming no pane is the feed's, the arm that follows, unless the Feed pane
+// is off in this browser (the gear's Panes section, feedHere below): a pane that is not in the dashboard cannot
+// be lifted, so the ask comes here, to the one file browser this dashboard has.
+if(m.romp==='browseFiles'&&(m.pane==='pane'||!feedHere())){var fb=document.getElementById('f-files');
   try{window.__rompPaneToggle&&window.__rompPaneToggle('files',true);}catch(e){}
   try{if(window.__rompMobileOn&&window.__rompMobileOn()){var curb=document.body.getAttribute('data-tab')||'chat';
     if(curb!=='files'){window.__rompFilesTabFrom=curb;window.__rompMobileTab&&window.__rompMobileTab('files');}}}catch(e){}
@@ -48766,17 +48850,18 @@ if(m.type==='editorSelection'&&typeof m.text==='string'){var fc=document.getElem
   // way the browseFiles arm does for the feed — desktop only; the phone's one-pane tab swap is untouched.
   if(!document.body.classList.contains('po-chat')){try{window.__rompPaneToggle&&window.__rompPaneToggle('chat',true);}catch(e){}}
   try{fc&&fc.contentWindow&&fc.contentWindow.postMessage(m,'*');}catch(e){}}
-// the browser owns the restore: browseClosed alone puts a brought-forward feed back the way it was
+// the browser owns the restore: browseClosed alone puts a brought-forward feed back the way it was. With the
+// Feed pane off in this browser there is nothing to put back (the pane is out of the toggle's set): the flag
+// is dropped and no pane moves, so a pane hidden in the gear while its browser was up cannot be re-toggled.
 if(m.romp==='browseClosed'&&window.__rompFeedWasOff){window.__rompFeedWasOff=false;
-  try{window.__rompPaneToggle&&window.__rompPaneToggle('feed',false);}catch(e){}}});
+  if(feedHere())try{window.__rompPaneToggle&&window.__rompPaneToggle('feed',false);}catch(e){}}});
 // The dashboard's one id (sessionStorage 'romp:wid') is minted by the HEAD script, before the parser reaches an
 // <iframe>, so no pane can connect ahead of it. It was minted here until 2026-09-09 — after the iframes — and
 // the chat pane's socket sometimes carried no wid, so a reveal aimed at this dashboard parked for good.
-// the rail's ⛭ opens the feed iframe's settings modal (the feed owns the modal); the CSS lifts the iframe
-// full-window while body.settings-open, so it works even when the feed pane is toggled off (the user 2026-06-25).
+// the rail's ⛭ opens the settings iframe's modal (__rompOpenSettings above); the CSS lifts that iframe
+// full-window while body.settings-open. No pane is party to it: the Feed pane may be toggled off or, later, unloaded.
 var gear=document.getElementById('rail-gear');
-if(gear)gear.onclick=function(){var f=document.getElementById('f-feed');
-try{f&&f.contentWindow&&f.contentWindow.postMessage({romp:'openSettings'},'*');}catch(e){}};
+if(gear)gear.onclick=function(){window.__rompOpenSettings();};
 // the rail's ↻ restarts the kernel (POST /restart), puts the romp boot splash back up, and reloads only
 // when /healthz answers from the NEW kernel — its X-Romp-Boot differs from the id this page was served
 // under (__ROMP_BOOT__, spliced in by _landing). Polling for a bare 200 raced: the OLD kernel keeps
@@ -49548,8 +49633,8 @@ document.addEventListener('focusout',refit);
 if(window.visualViewport){window.visualViewport.addEventListener('resize',refit);
 window.visualViewport.addEventListener('scroll',refit);}
 function hearBlur(f){try{if(!f.contentDocument)return;f.contentWindow.addEventListener('focusout',refit);}catch(e){}}   // cross-origin → nothing to hear
-['f-chat','f-fleet','f-feed','f-files','f-timeline'].forEach(function(id){var f=document.getElementById(id);if(!f)return;
-f.addEventListener('load',function(){hearBlur(f);});hearBlur(f);});   // now (already loaded) + on every (re)load, as the Alt+Arrow wiring does
+['f-chat','f-fleet','f-feed','f-files','f-timeline','f-settings'].forEach(function(id){var f=document.getElementById(id);if(!f)return;
+f.addEventListener('load',function(){hearBlur(f);});hearBlur(f);});   // now (already loaded) + on every (re)load, as the Alt+Arrow wiring does; the gear's document too (its login field)
 // The mobile LAYOUT, as the stylesheet decides it: the SAME media query the grid collapses on (_MOBILE_MQ,
 // one constant for the CSS and this probe), one pane at a time, bottom tabs, the po-* classes ignored. Read by
 // the pane-set broadcast (on a phone "on" means the tab showing, not the po flag) and by the viewFile relay's
@@ -49568,7 +49653,8 @@ var F={chat:document.getElementById('f-chat'),fleet:document.getElementById('f-f
 var B=bar.querySelectorAll('button[data-pane]'),KT='romp-mobile-tab';
 function filesCtlM(){try{var st=JSON.parse(localStorage.getItem('romp:settings')||'null');return !!(st&&st.showFilesControl===true);}catch(e){return false;}}   // the gear's Files-control setting (T317; off by default since T317b: shown only when the store holds the literal true under the fresh key, never the T317-era filesControl a whole-object save merged in): the same read the pane controller makes, which parses after this script
 function show(p){if(p==='files'&&!filesCtlM())p='chat';   // the Files tab is hidden while its control is off: the chat shows instead
-if(!F[p])return;document.body.setAttribute('data-tab',p);for(var k in F)if(F[k])F[k].classList.toggle('m-on',k===p);   // a pane this shell lacks is skipped, never a TypeError
+if(!F[p])return;for(var i=0;i<B.length;i++)if(B[i].getAttribute('data-pane')===p&&B[i].hidden)return;   // a tab the controller hid (its pane is off in the gear's Panes section) is not a place to go
+document.body.setAttribute('data-tab',p);for(var k in F)if(F[k])F[k].classList.toggle('m-on',k===p);   // a pane this shell lacks is skipped, never a TypeError
 for(var i=0;i<B.length;i++)B[i].classList.toggle('on',B[i].getAttribute('data-pane')===p);
 try{localStorage.setItem(KT,p);}catch(e){}
 // a tab switch changes what is on screen: re-tell the panes (the collapse script's broadcast; absent only
@@ -49590,10 +49676,11 @@ function reveal(p){try{window.__rompPaneToggle&&window.__rompPaneToggle(p,true);
 // dropped, so closing a file much later cannot jump them back to a tab they left on their own
 function userSwitch(p){window.__rompFilesTabFrom=null;show(p);}
 for(var i=0;i<B.length;i++)(function(b){var pk=b.getAttribute('data-pane');b.addEventListener('click',function(){userSwitch(pk);});})(B[i]);
-// the rail's actions on mobile: settings opens the feed iframe's modal (same path as the desktop
-// gear), net opens the shell's remotes panel, usage opens the tooltip's window bars as a modal, and
-// restart reuses the rail refresh's kernel restart (the user 2026-07-22 — the rail is hidden on mobile)
-var A={settings:function(){var f=F.feed;try{f&&f.contentWindow&&f.contentWindow.postMessage({romp:'openSettings'},'*');}catch(e){}},
+// the rail's actions on mobile: settings opens the settings iframe's modal (the same __rompOpenSettings
+// the desktop gear calls, _LANDING_SETTINGS_JS), net opens the shell's remotes panel, usage opens the
+// tooltip's window bars as a modal, and restart reuses the rail refresh's kernel restart (the user
+// 2026-07-22 — the rail is hidden on mobile)
+var A={settings:function(){try{window.__rompOpenSettings&&window.__rompOpenSettings();}catch(e){}},
 net:function(){try{window.__rompOpenNet&&window.__rompOpenNet();}catch(e){}},
 usage:function(){try{window.__rompUsagePanel&&window.__rompUsagePanel();}catch(e){}},
 restart:function(){try{window.__rompRestart&&window.__rompRestart();}catch(e){}},
@@ -49614,9 +49701,12 @@ ws.onmessage=function(ev){var m;try{m=JSON.parse(ev.data);}catch(e){return;}
 if(m&&m.type==='ka'){if(m.dv&&window.__rompReload)window.__rompReload.noteDv(m.dv);}   // build drift on the shell's own keepalive (T265)
 else if(m&&m.type==='reveal'&&m.pane)reveal(m.pane);
 // the app-icon badge: setAppBadge only exists where badging works (installed apps) — everyone
-// else falls through silently, so this needs no capability gymnastics
+// else falls through silently, so this needs no capability gymnastics. The count is the feed's needs-you
+// column; with the Feed pane off in this browser (the gear's Panes section, window.__rompPaneEnabled) the
+// icon wears none: the frame still arrives (the kernel builds and counts as ever) and clears the badge here.
 else if(m&&m.type==='badge'&&'setAppBadge' in navigator){
-try{(m.n?navigator.setAppBadge(m.n):navigator.clearAppBadge())['catch'](function(e){});}catch(e){}}
+var bn=(window.__rompPaneEnabled&&!window.__rompPaneEnabled('feed'))?0:m.n;
+try{(bn?navigator.setAppBadge(bn):navigator.clearAppBadge())['catch'](function(e){});}catch(e){}}
 // the master bell toggled somewhere (this tab included) — repaint ours from the kernel's word
 else if(m&&m.type==='notifyAll'&&window.__rompNotifyAllPaint)window.__rompNotifyAllPaint(!!m.on);
 else if(m&&m.type==='notifyTurns'&&window.__rompNotifyTurnsPaint)window.__rompNotifyTurnsPaint(!!m.on);
@@ -49829,7 +49919,11 @@ function wid(){try{return sessionStorage.getItem('romp:wid')||'';}catch(e){retur
 function fail(e){try{window.__rompNotify&&window.__rompNotify('error','Could not open the session this notification was about: '+((e&&e.message)||e));}catch(err){}}
 function diag(what,data){try{window.__rompShellDiag&&window.__rompShellDiag(what,data);}catch(e){}}
 var feedReady=false,pendingCard=null,chatUp=false;   // chatUp: this page's own chat pane has reported its socket up (latched; the block above)
-function revealCard(itemId,sid){if(!feedReady){pendingCard={itemId:itemId,sid:sid};return;}
+// the Feed pane off in this browser (the gear's Panes section; window.__rompPaneEnabled, the head script's reader):
+// the card scroll has no feed to wait for (its iframe is never loaded, so its ready never comes), and the /reveal
+// land() posted before this call has already put the session in front in the chat, which is the whole landing here
+function revealCard(itemId,sid){if(window.__rompPaneEnabled&&!window.__rompPaneEnabled('feed'))return;
+if(!feedReady){pendingCard={itemId:itemId,sid:sid};return;}
 var f=document.getElementById('f-feed');
 try{f&&f.contentWindow&&f.contentWindow.postMessage({romp:'revealCard',itemId:itemId,sid:sid},'*');}catch(e){}}
 window.addEventListener('message',function(e){var m=e&&e.data;
@@ -50044,11 +50138,13 @@ _STALE_JS = (
 # ({romp:'panes',on:{key:bool}} into every pane iframe on every apply, on each iframe's load, and, from
 # _LANDING_MOBILE_JS, on a mobile tab switch or layout flip; the keys are _PANE_ORDER's, baked in below like
 # the bell's PN map): the chat routes file links by it. Defined after _PANE_ORDER because the string is built
-# from it at import.
+# from it at import. Since 2026-09-10 it also reads the gear's Panes section (romp:settings.panes, per browser,
+# ui/webview/settings.ts paneSet): a pane hidden THERE is not in this dashboard at all (reconcile below),
+# where the rail toggle only hides a loaded one.
 _LANDING_COLLAPSE_JS = """
 (function(){
-  var PK='romp-panes',po={chat:true,fleet:false,feed:true,timeline:true,files:false};
-  try{var s=JSON.parse(localStorage.getItem(PK)||'null');if(s)po=Object.assign(po,s);}catch(e){}
+  var PK='romp-panes',po={chat:true,fleet:false,feed:true,timeline:true,files:false},DEF=Object.assign({},po),stored={};
+  try{var s=JSON.parse(localStorage.getItem(PK)||'null');if(s){stored=s;po=Object.assign(po,s);}}catch(e){}
   var qp=new URLSearchParams(location.search).get('panes');
   if(qp!==null){po={chat:false,fleet:false,feed:false,timeline:false,files:false};qp.split(',').forEach(function(k){k=k.trim();if(k in po)po[k]=true;});}
   function saveP(){try{localStorage.setItem(PK,JSON.stringify(po));}catch(e){}}
@@ -50083,6 +50179,36 @@ _LANDING_COLLAPSE_JS = """
   function tell(f,m){try{f&&f.contentWindow&&f.contentWindow.postMessage(m,'*');}catch(e){}}
   function broadcast(){var m=panesMsg();KEYS.forEach(function(k){tell(document.getElementById('f-'+k),m);});}
   window.__rompPanesTell=broadcast;   // the mobile script re-tells on a tab switch / layout flip
+  // The OPTIONAL panes (the user 2026-09-10): the gear's Panes section (romp:settings.panes, per browser,
+  // settings.ts paneSet: only an explicit false hides) says whether Sessions (timeline), the Outline (fleet)
+  // and the Feed are in this dashboard AT ALL, a different thing from the rail toggle, which hides a loaded
+  // pane. A pane off there is not a pane here: its key leaves po and KEYS (so togglePane refuses it, apply()
+  // drops its body class, and the pane-set broadcast omits it), its rail button and phone tab wear hidden,
+  // and its iframe, served with data-src in place of src, is never loaded (no document, no socket, nothing
+  // built for it); a phone left on its tab goes back to the chat. A pane on gets its src from data-src ONCE
+  // (a src is never reassigned: no reload of a live pane) and its button and tab back. Runs at boot before the
+  // first apply, where a shown pane keeps the rail flag it had (the stored one, else the default), and again
+  // on the storage event a gear save raises in this window (the gear is the settings iframe, a same-origin
+  // document, so its localStorage write fires here), where a pane just turned on comes ON SCREEN (review find
+  // 2026-09-11: the Outline's default is off, so re-enabling it brought back its rail button alone, while the
+  // gear's row promises the column back; the rail hides it from there, and the set persists as a rail toggle's
+  // does, so a reload keeps it). The chat is required and not listed; the Files pane is not optional here (its
+  // rail toggle is its off switch). The kernel is not told and does not care: judging and task tracking run
+  // the same with the Feed pane off in a browser.
+  var ALL=KEYS.slice(),OPT=['timeline','fleet','feed'],SK='romp:settings';
+  function optOn(){var on={};OPT.forEach(function(k){on[k]=true;});
+    try{var s=JSON.parse(localStorage.getItem(SK)||'{}'),p=s&&s.panes;if(p&&typeof p==='object')OPT.forEach(function(k){on[k]=p[k]!==false;});}catch(e){}
+    return on;}
+  function flagOf(k){return (k in stored)?!!stored[k]:DEF[k];}
+  function reconcile(live){var on=optOn(),shown=false;
+    OPT.forEach(function(k){var en=on[k],f=document.getElementById('f-'+k);
+      if(en){if(f&&!f.getAttribute('src')&&f.getAttribute('data-src'))f.setAttribute('src',f.getAttribute('data-src'));
+        if(!(k in po)){po[k]=live?true:flagOf(k);if(live){shown=true;if(window.__rompGrowFair)window.__rompGrowFair(k);}}}   // live: the pane comes on screen, at a fair width (togglePane's bring-forward)
+      else if(k in po)delete po[k];
+      Array.prototype.forEach.call(document.querySelectorAll('.rail-btn[data-pane='+k+'],#mtabs button[data-pane='+k+']'),function(b){b.hidden=!en;});
+      if(!en&&document.body.getAttribute('data-tab')===k&&window.__rompMobileTab)window.__rompMobileTab('chat');});
+    KEYS=ALL.filter(function(k){return k in po;});
+    if(shown&&qp===null)saveP();}   // a ?panes= bookmark stays a view (never written over the stored set)
   function apply(){
     var ctl=filesCtl();
     document.body.classList.toggle('no-files-control',!ctl);
@@ -50110,10 +50236,11 @@ _LANDING_COLLAPSE_JS = """
   window.__rompPaneToggle=togglePane;
   Array.prototype.forEach.call(document.querySelectorAll('.rail-btn[data-pane]'),function(b){
     b.addEventListener('click',function(){togglePane(b.getAttribute('data-pane'));});});
+  reconcile();   // the optional panes this browser shows, before the first apply (the body class ships with the defaults)
   apply();
-  KEYS.forEach(function(k){var f=document.getElementById('f-'+k);if(f)f.addEventListener('load',function(){tell(f,panesMsg());});});   // wired after the boot apply: both orders (iframe first / shell first) are covered
+  ALL.forEach(function(k){var f=document.getElementById('f-'+k);if(f)f.addEventListener('load',function(){tell(f,panesMsg());});});   // wired after the boot apply: both orders (iframe first / shell first) are covered; every iframe, since a pane enabled later loads later
   window.addEventListener('romp:keys',apply);   // a rebind (or palette-main's boot nudge) refreshes the titles
-  window.addEventListener('storage',apply);     // …including one made in another tab
+  window.addEventListener('storage',function(e){if(!e||!e.key||e.key===SK)reconcile(true);apply();});     // …including one made in another tab; a gear save (romp:settings, or a cleared store) re-reads the optional panes first, and a pane it turned on comes on screen
 })();
 """
 
@@ -50406,6 +50533,15 @@ def _landing():
             # shell's script count is pinned, and both must run before anything else does.
             "<script>try{if(!sessionStorage.getItem('romp:wid'))sessionStorage.setItem('romp:wid',"
             "(crypto.randomUUID?crypto.randomUUID():String(Math.random()).slice(2)));}catch(e){}"
+            # Is this pane in this browser's dashboard at all? The gear's Panes section (romp:settings.panes, per
+            # browser, settings.ts paneSet: only an explicit false hides; the pane controller's reconcile is the
+            # other reader) answered by ONE function every shell script asks at its event: the badge frame, a Log
+            # entry's click, a notification's landing, a browse ask. Read from the store on every call, never
+            # cached: the gear's save lands in the same store from the settings iframe, and the answer wanted is the
+            # one true at the event. Defined HERE, in the head, so no script runs before it exists (the reveal
+            # script lands a deep link at its own boot). A corrupt store reads as every pane shown, like reconcile.
+            "window.__rompPaneEnabled=function(k){try{var s=JSON.parse(localStorage.getItem('romp:settings')||'{}'),p=s&&s.panes;"
+            "return !(p&&typeof p==='object'&&p[k]===false);}catch(e){return true;}};"
             "if(navigator.standalone){document.documentElement.className+=' ios-standalone';"
             "var _vp=document.querySelector('meta[name=viewport]');"
             "_vp.setAttribute('content',_vp.getAttribute('content')+',viewport-fit=cover');}"
@@ -50478,20 +50614,21 @@ def _landing():
             # Fleet toggle (the user 2026-06-23): the chat pane holds a SECOND iframe (/fleet, the by-session
             # open-work view); a top-right button flips the pane between the session chat and the Fleet. f-fleet
             # loads hidden so the swap is instant. The toggle floats above the iframe + the focus veil (z 6).
-            # Settings modal (the user 2026-06-23): the gear lives in the feed iframe, so when it opens its
-            # full-window modal it asks the shell (postMessage) to lift the feed iframe over the whole window;
-            # the modal's backdrop + card then cover the full screen. Restored on close.
-            # the settings modal lives in the feed iframe; the rail gear opens it (postMessage), so the feed
-            # iframe must render + lift over the whole window EVEN WHEN the feed pane is toggled off (the user
-            # 2026-06-25) — un-hide the pane and pin the iframe full-screen while the modal is open.
-            "body.settings-open #feed-pane{display:block!important}"
+            # Settings modal (the user 2026-06-23; its own page 2026-09-10): the gear lives in the hidden
+            # #f-settings iframe (the served /settings page — not a pane: no rail button, no tab, no gutter).
+            # Hidden until the gear opens its full-window modal and asks the shell (postMessage
+            # {romp:'settings',on}) to lift the iframe over the whole window; the modal's backdrop + card then
+            # cover the full screen. Restored on close. Until 2026-09-10 the gear rode the feed iframe, which
+            # the shell had to un-hide and lift even with the Feed pane toggled off (the user 2026-06-25); no
+            # pane is party to the lift now.
+            "#f-settings{display:none}"
             # inset:0 alone sizes a fixed box to the viewport; the explicit 100vw/100vh OVERRODE it and
             # overshot on iOS, hanging the modal's own actions below the fold (the user 2026-07-29).
             # background:transparent — the shell paints every iframe #1e1e1e (no white flash while a pane
             # loads), but a LIFTED iframe must show the dashboard through it: its page goes transparent
             # (rs-modal-open / picker-lifted), and with the element still opaque the modal's dim composited
             # over solid #1e1e1e — the whole window went black (the user 2026-08-08).
-            "body.settings-open #f-feed{display:block;position:fixed;inset:0;z-index:200;background:transparent}"
+            "body.settings-open #f-settings{display:block;position:fixed;inset:0;z-index:200;background:transparent}"
             # New-session PICKER full-screen (the user 2026-07-05): the picker lives INSIDE the /chat iframe, so
             # its position:fixed;inset:0 only covered the chat PANE — a short pane couldn't scroll the session
             # list. Same bridge as settings: render.ts posts {romp:'picker',on} and the shell lifts the chat
@@ -50523,6 +50660,10 @@ def _landing():
             "padding:4px 9px;border-radius:5px;border:1px solid transparent;cursor:pointer;user-select:none;display:flex;align-items:center;"
             "justify-content:center;transition:color .1s,background .1s,border-color .1s}"
             ".rail-btn:hover{color:#cfe6ff;background:rgba(255,255,255,0.06)}"
+            # a pane hidden from this browser in the gear (romp:settings.panes) has no rail button: the controller
+            # sets hidden, and the author display:flex above would defeat the UA's [hidden]{display:none} without
+            # this rule (the #mtabs button[hidden] idiom below)
+            ".rail-btn[hidden]{display:none}"
             ".rail-btn.on{color:var(--accent);background:rgba(156,210,255,0.12);border-color:rgba(156,210,255,0.35)}"
             # the Files control hidden by its gear setting (T317): the rail's toggle and the phone's tab both go
             "body.no-files-control .rail-btn[data-pane=files],body.no-files-control #mtabs button[data-pane=files]{display:none}"
@@ -51316,13 +51457,26 @@ def _landing():
             "<div id=rerr-filters><span class=rerr-flabel>show</span><div id=rerr-fgrid></div></div>"
             "<div id=rerr-list></div>"
             "</div></div>"
+            # the settings page (the gear): an iframe that is NOT a pane — hidden until lifted full-window (the
+            # CSS above), no rail button, no tab, no gutter, no entry in _PANE_ORDER. The rail's ⛭, the phone's
+            # settings action, the palette and a pane's own ask all go through the shell's one opener
+            # (__rompOpenSettings in _LANDING_SETTINGS_JS; the user 2026-09-10 — it rode the feed pane before).
+            # data-src, not src (review find 2026-09-11): the page loads on the FIRST open, so a dashboard whose
+            # gear is never opened pays nothing for it (the page's shim dials the kernel, and federation.js one
+            # socket per attached host, all idle until the gear is up); the opener copies data-src to src once.
+            "<iframe id=f-settings data-src=/settings title=Settings></iframe>"
             "<div class=col>"
             "<div class=row>"
             "<div class=pane id=chat-pane><iframe id=f-chat class=m-on src=/chat></iframe></div>"
             "<div class=gv id=gv-a></div>"
-            "<div class=pane id=fleet-pane><iframe id=f-fleet src=/fleet></iframe></div>"
+            # the OPTIONAL panes (the Outline, the Feed, and the Sessions band below) are served with data-src, not
+            # src: the gear's Panes section (romp:settings.panes, per browser; the user 2026-09-10) says whether
+            # this browser shows each at all, and the pane controller (_LANDING_COLLAPSE_JS reconcile) copies
+            # data-src to src once for a pane it shows. A pane it does not show never loads: no document, no
+            # socket, nothing built for it. The chat is required (src) and the Files pane keeps its rail toggle.
+            "<div class=pane id=fleet-pane><iframe id=f-fleet data-src=/fleet></iframe></div>"
             "<div class=gv id=gv-b></div>"
-            "<div class=pane id=feed-pane><iframe id=f-feed src=/feed></iframe></div>"
+            "<div class=pane id=feed-pane><iframe id=f-feed data-src=/feed></iframe></div>"
             "<div class=gv id=gv-c></div>"
             "<div class=pane id=files-pane><iframe id=f-files src=/files></iframe></div>"
             "</div>"
@@ -51330,7 +51484,7 @@ def _landing():
             # the timeline BOTTOM BAND: full-width below the pane row, with a row-resize gutter above it. Both
             # are hidden (CSS) unless po-timeline (the rail's Timeline toggle).
             "<div class=gh id=gh></div>"
-            "<div class=pane id=tl-pane><iframe id=f-timeline src=/timeline></iframe></div>"
+            "<div class=pane id=tl-pane><iframe id=f-timeline data-src=/timeline></iframe></div>"
             # pane rail as a BOTTOM BAR (the user 2026-07-05): the toolbar runs horizontally across the very
             # bottom of .col, BELOW the timeline band. A SCROLLABLE group (.rail-scroll) — Chat / Timeline / Outline /
             # Feed toggles (this rail order is user-chosen, the user 2026-07-05, independent of the panes' layout
@@ -52503,6 +52657,9 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/files":
                 _client_seen[0] = time.time()
                 return self._send(200, _files_page(), "text/html; charset=utf-8", cache="no-cache")
+            if p == "/settings":
+                _client_seen[0] = time.time()
+                return self._send(200, _settings_page(), "text/html; charset=utf-8", cache="no-cache")
             if p == "/sw.js":
                 # the push service worker (see _SW_JS). Behind the gate on purpose: the browser's
                 # register() fetch is same-origin and carries the cookie, and only an authed shell

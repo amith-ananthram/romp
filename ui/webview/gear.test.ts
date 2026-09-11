@@ -20,9 +20,11 @@ test("the kernel no longer carries an inline gear (single source: the feed bundl
     assert.ok(!KERNEL.includes(twin), `${twin} must stay deleted from the kernel`);
 });
 
-test("the feed bundle builds and wires the gear", () => {
+test("the feed bundle builds and wires the gear where it hosts it (VS Code's feed panel), the settings page always", () => {
   assert.ok(FEED.includes('require("./gear.js")'), "feed.ts must load the gear module");
-  assert.ok(FEED.includes("initGear("), "feed.ts must init the gear on its kernel channel");
+  assert.ok(FEED.includes("if (hostsGear(window)) initGear("), "feed.ts inits the gear on its kernel channel, unless the kernel's feed page said the gear is on /settings");
+  const PAGE = read("ui", "webview", "settings-page.ts");
+  assert.ok(PAGE.includes('require("./gear.js")') && PAGE.includes("initGear("), "the settings page is the dashboard's gear host");
   assert.ok(GEAR.includes("module.exports = { initGear }"));
 });
 
@@ -263,7 +265,7 @@ test("the gear owns its browseResult (the reply lands in the FEED document, not 
 test("gear.css carries the modal styling for every pane that hosts it", () => {
   for (const sel of ["#rsettings", ".rs-card", "#rs-cmap-btn", "#rs-pal-btn", ".ra-openbtn", "#ranalytics"])
     assert.ok(GEAR_CSS.includes(sel), `gear.css must style ${sel}`);
-  assert.ok(KERNEL.includes("/dist/gear.css"), "the kernel feed page must link the extracted stylesheet");
+  assert.ok(KERNEL.includes("/dist/gear.css"), "the kernel settings page must link the extracted stylesheet");
 });
 
 test("one tooltip per settings row: the Account row's live status is NOT a second rs-sub", () => {

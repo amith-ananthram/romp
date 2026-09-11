@@ -57,7 +57,7 @@ class OneHeightBasis(unittest.TestCase):
         # inset:0 already IS the viewport box for a fixed element; the explicit 100vw/100vh overrode it.
         # (background:transparent rides the same rules: an opaque lifted iframe blacks out the window —
         # see test_kernel.test_settings_is_a_fullscreen_modal.)
-        self.assertIn("body.settings-open #f-feed{display:block;position:fixed;inset:0;z-index:200;background:transparent}", self.html)
+        self.assertIn("body.settings-open #f-settings{display:block;position:fixed;inset:0;z-index:200;background:transparent}", self.html)
         # The PICKER lift is the one exception on the VERTICAL axis: its height follows --app-h (the
         # shell's live visible height) because the layout viewport ignores the phone keyboard — inset:0
         # left the picker's lower rows behind it — and the --app-h sizing is also what turns the keyboard
