@@ -18,7 +18,9 @@ PostalPeerTunnels.test_notify_bus_peer_is_guarded (an in-process kernel, a peer 
 here scans every process spawn whose argv names the kernel (Popen, run, check_output, check_call, call; the argument
 span read across lines, whatever spells the path, a path held in a name included), and the in-process shape is met in
 the bus itself: `romp-postal-service serve` and `ensure` refuse the fixed port under a test (PYTEST_CURRENT_TEST set, or the
-state root under a temporary directory) unless ROMP_POSTAL_PORT names the port, pinned by tests/test_postal_fixed_port_belt.py.
+state root under a temporary directory) unless ROMP_POSTAL_PORT names the port as the run's own (ROMP_POSTAL_HERMETIC beside
+it, as the runner, the shell suite's setup and kernel_env set; an inherited name does not count), pinned by
+tests/test_postal_fixed_port_belt.py.
 A module that loads the kernel in-process and exercises the bus still carries the trio, before its load (the tunnel
 tests) or around the call that provokes the revive (the peer-notify test), so its kernel never even asks.
 
@@ -72,6 +74,15 @@ class HermeticKernelPostal(unittest.TestCase):
         self.assertEqual(env.get("ROMP_POSTAL_PEERS"), "0")
         port = int(env.get("ROMP_POSTAL_PORT") or 0)
         self.assertTrue(port and port != 25302, "an ephemeral port, never the machine's fixed bus port: %r" % env.get("ROMP_POSTAL_PORT"))
+        self.assertEqual(env.get("ROMP_POSTAL_HERMETIC"), "1", "…marked as the run's own, so the bus honours it under a test (2026-09-11)")
+
+    def test_the_runner_pops_an_inherited_bus_port_and_marks_the_runs_own(self):
+        src = open(os.path.join(HERE, "conftest.py"), encoding="utf-8", errors="replace").read()
+        self.assertIn('os.environ.pop("ROMP_POSTAL_PORT", None)', src, "a machine's named bus port never reaches a lab or an in-process kernel")
+        self.assertIn('os.environ["ROMP_POSTAL_HERMETIC"] = "1"', src)
+        floor = src.index('os.environ.pop("ROMP_STATE_DIR", None)')
+        self.assertLess(floor, src.index('os.environ.pop("ROMP_POSTAL_PORT", None)'), "…beside the state floor, at import, before any test module loads")
+        self.assertLess(src.index('os.environ.pop("ROMP_POSTAL_PORT", None)') - floor, 600, "…right beside it")
 
     def test_every_test_that_starts_a_kernel_process_carries_the_trio(self):
         offenders = []
