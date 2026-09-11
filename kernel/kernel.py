@@ -40369,7 +40369,7 @@ def _new_ws_client(app, wid, sock, lock=None, q=None, start_sender=True):
     q = q if q is not None else queue.Queue()
     lock = lock if lock is not None else threading.Lock()
     now = _ws_clock()
-    client = {"app": app, "wid": wid, "alive": True, "qbytes": 0, "qlock": threading.Lock(),
+    client = {"app": app, "wid": wid, "alive": True, "qbytes": 0, "qlock": threading.Lock(), "t0": now,
               "cid": uuid.uuid4().hex[:12],   # this connection's id: the owner of the queued-edit holds it opens (T306)
               "dlock": threading.RLock(),   # serializes _send_slot per client: the handler's connect push and the
               #                               pusher both send slots to one client (see _send_slot)
@@ -41079,6 +41079,21 @@ def _client_reset_chat_sid(client, sid):
         _release_skeleton_locked(client, sid)   # a needFull for a skeleton tab (a click, the idle prefetch) loads it
 
 
+def _reattach_edge(client, sid, msg):
+    """The base a proto-2 client's needFull("reattach") leaves behind the reset (round 3, A): its run's first and last
+    edges under a `reattach` marker, so the full frame the repair push sends (the marker asks for it) keeps the run's older
+    first edge when the frame overlaps the run, as the client's merge does. Without it the kernel re-based the first to
+    the wire tail's while the client kept the older one: a later window into the walked part read detached here and
+    attached there, and the client froze. None for any other ask, an index client, or a client with no base."""
+    if msg.get("why") != "reattach" or client.get("proto") != 2:
+        return None
+    with _client_lock(client):
+        old = (client.get("echat") or {}).get(sid)
+    if not isinstance(old, dict) or not old.get("first"):
+        return None
+    return {"first": old["first"], "last": old.get("last"), "detached": False, "reattach": True}
+
+
 def _client_reset_chat_base(client):
     """Forget every session tail we believe this client holds. Both suppressors must go: the echat
     entries (their absence is what routes _send_chat down its full-session path) AND the ("chat", sid)
@@ -41755,7 +41770,9 @@ def _send_chat(c, m, ms, change_from, led_changed):
 
 
 _UUID_POS = {}                                   # sid → (the current events list, {key: index}); one live entry per session
-_BASE_ALIVE_MEMO = {}                            # sid → ((first, last), the parse's turns, alive): _base_alive's memo
+_BASE_ALIVE_MEMO = {}                            # (sid, first, last) → (id of the parse's turns, alive): _base_alive's memo, bounded
+_BASE_ALIVE_MAX = 256
+_WIRE_MEMO_LOCK = threading.Lock()               # the two memos above: handler threads write, the pusher forgets
 PAGE_TURNS = 16                                  # turns per rendered page of pre-floor history (aligned to multiples)
 WINDOW_TURNS = 8                                 # turns each side of a loadAround anchor
 _PAGE_CACHE = {}                                 # (sid, lo, hi, sig) → (events, bytes); LRU by insertion order
@@ -41811,7 +41828,7 @@ def _chat_history_page(sid, lo, hi, now, sess=None, tmux=None):
 
 def _turn_of_uuid(turns, uuid):
     """The index of the turn holding an event's uuid: a record's uuid is an atom's; a note's synthetic uuid
-    ("retried:<t>:<n>", "orphan:<t>") names the second it was flushed at, so the turn holding the first atom
+    ("retried:<t>:<n>", "orphan:<t>:<n>") names the second it was flushed at, so the turn holding the first atom
     stamped at or after it. None when unknown. Reads no body (uuids, times and the lazy scalars only)."""
     if not uuid:
         return None
@@ -41902,6 +41919,7 @@ def _chat_history_reply(sid, msg, now, base=None):
             a = _snap_turn_start(tix, max(0, p - WIRE_CHUNK // 2))
             b = _snap_turn_end(tix, min(len(evs), p + WIRE_CHUNK // 2))
             out = evs[a:b]
+            body_first = _event_key(out[0]) if out else None
             more_before, more_after = a > 0 or floor > 0, b < len(evs)
             w_span = (tix[a], tix[b - 1]) if b > a else (None, None)
         else:
@@ -41910,6 +41928,7 @@ def _chat_history_reply(sid, msg, now, base=None):
                 return {"type": "chatWindow", "id": sid, "anchor": anchor, "events": [], "moreBefore": False, "moreAfter": False, "missing": True}
             lo, hi = max(0, j - WINDOW_TURNS), min(floor, j + WINDOW_TURNS)
             out = pages(lo, hi)
+            body_first = _event_key(out[0]) if out else None   # the first EVENT: a head card's key places in no turn (round 3, B)
             more_before = lo > 0
             if lo == 0:
                 out = head_cards + out
@@ -41932,9 +41951,11 @@ def _chat_history_reply(sid, msg, now, base=None):
                 connected = True
         nb = None
         if out:
-            _first = _event_key(out[0])
-            if connected and _bf <= w_span[0]:
-                _first = base["first"]                    # the run's own first edge is the older one
+            _first = body_first or _event_key(out[0])
+            if connected and (_bf < w_span[0] or (_bf == w_span[0] and (pos.get(base["first"]) is None or pos.get(_first) is None
+                                                                        or pos[base["first"]] <= pos[_first]))):
+                _first = base["first"]                    # the run's own first edge is the older one (a same-turn tie: by position,
+            #                                                a first frame's tail is not turn-snapped)
             nb = {"first": _first, "last": base["last"] if connected else _last_anchor(out),
                   "detached": False if connected else bool(more_after)}
         return {"type": "chatWindow", "id": sid, "anchor": anchor, "events": out, "moreBefore": more_before,
@@ -41970,22 +41991,32 @@ def _chat_history_reply(sid, msg, now, base=None):
     return None
 
 
-def _chat_floor0_of(chat_clients):
+READY_WAIT_S = 30                                # a socket with no protocol and no ready this long counts as an index client
+
+
+def _chat_floor0_of(chat_clients, now=None):
     """The pusher's render-floor decision over the CONNECTED chat clients: True (every tab built from turn 0) while one
     speaks the index wire. A client's protocol is what its ready declared (1 when the field is absent: an older bundle)
     or what its redial's dial term carried (round 2, item 4: a redial posts no ready, and the redialed page's tabs were
     pinned at floor 0 for the page's life). A socket whose ready has not arrived has NO protocol yet and moves no floor
     (counted as index, every fresh page load flipped the floor for the cycles before its ready: two whole-prefix
-    rebuilds); one stamped ready by its redial with no protocol (an older shim) is an index client."""
-    return any(c.get("proto") == 1 or (c.get("proto") is None and c.get("ready")) for c in chat_clients)
+    rebuilds); one stamped ready by its redial with no protocol (an older shim) is an index client, and so is a socket
+    with no protocol and no ready after READY_WAIT_S (round 3, C: a page whose ready the kernel never answered dials
+    fresh for its life with no ready of its own, and would otherwise be served index frames over a floor'd list; the
+    shim's re-sent ready on such a dial is the belt, this the braces)."""
+    now = _ws_clock() if now is None else now
+    return any(c.get("proto") == 1 or (c.get("proto") is None and (c.get("ready") or now - c.get("t0", now) > READY_WAIT_S))
+               for c in chat_clients)
 
 
 def _forget_chat_positions(live_sids):
     """Drop the per-session position maps and base-liveness memos of sessions no longer listed as chat tabs (round 2,
     item 14: a closed session kept its last events list alive for the kernel's life)."""
-    for d in (_UUID_POS, _BASE_ALIVE_MEMO):
-        for sid in [s for s in d if s not in live_sids]:
-            d.pop(sid, None)
+    with _WIRE_MEMO_LOCK:                             # handler threads insert meanwhile: snapshot and pop under the lock
+        for sid in [s for s in list(_UUID_POS) if s not in live_sids]:
+            _UUID_POS.pop(sid, None)
+        for k in [k for k in list(_BASE_ALIVE_MEMO) if k[0] not in live_sids]:
+            _BASE_ALIVE_MEMO.pop(k, None)
 
 
 def _uuid_positions(evs, sid=None):
@@ -42001,7 +42032,8 @@ def _uuid_positions(evs, sid=None):
         if u is not None and u not in pos:
             pos[u] = i
     if sid is not None:
-        _UUID_POS[sid] = (evs, pos)
+        with _WIRE_MEMO_LOCK:
+            _UUID_POS[sid] = (evs, pos)
     return pos
 
 
@@ -42017,15 +42049,19 @@ def _base_alive(sid, base, now=None):
         turns = _parse(sess["path"], sid, now)["turns"]
     except Exception:
         return False
-    key = (base.get("first"), base.get("last"))
-    hit = _BASE_ALIVE_MEMO.get(sid)                   # per (sid, edges, parse): it runs on every push for every detached
-    if hit is not None and hit[0] == key and hit[1] is turns:   # client under the client lock (round 2, item 8)
-        return hit[2]
+    key = (sid, base.get("first"), base.get("last"))
+    with _WIRE_MEMO_LOCK:                             # per (sid, edges), valid for one parse tree (its identity, re-read from
+        hit = _BASE_ALIVE_MEMO.get(key)               #  the store above on every call, never the tree itself): it runs on
+    if hit is not None and hit[0] == id(turns):       #  every push for every detached client under the client lock (round 2, 8)
+        return hit[1]
     # ATOM-keyed edges only (round 2, item 8): a note's key (orphan:<t>:<n>, retried:<t>:<n>, branch:<cut>) resolves by
     # time, to turn 0 on any newer transcript, so a run whose edge was a note read as alive after a /clear
-    edges = [str(k) for k in key if k and ":" not in str(k)]
+    edges = [str(k) for k in key[1:] if k and ":" not in str(k)]
     alive = any(_turn_of_uuid(turns, e) is not None for e in edges)
-    _BASE_ALIVE_MEMO[sid] = (key, turns, alive)
+    with _WIRE_MEMO_LOCK:
+        _BASE_ALIVE_MEMO[key] = (id(turns), alive)
+        while len(_BASE_ALIVE_MEMO) > _BASE_ALIVE_MAX:
+            _BASE_ALIVE_MEMO.pop(next(iter(_BASE_ALIVE_MEMO)))
     return alive
 
 
@@ -42080,7 +42116,7 @@ def _send_chat_proto2(c, m, ms, change_from, led_changed, st, pc):
     sid = m["id"]
     evs = m.get("events") or []
     total = len(evs)
-    if isinstance(pc, dict) and total:
+    if isinstance(pc, dict) and total and not pc.get("reattach"):   # a re-attach marker asks for the full frame below
         pos = _uuid_positions(evs, sid)
         pf, pl = pos.get(pc.get("first")), pos.get(pc.get("last"))
         if pc.get("detached"):
@@ -42124,7 +42160,16 @@ def _send_chat_proto2(c, m, ms, change_from, led_changed, st, pc):
     m_send["firstUuid"] = _event_key(evs[head_from]) if head_from < total else None
     m_send["lastUuid"] = _event_key(evs[-1]) if total else None
     _send_client(c, ("chat", sid), m_send)
-    st[sid] = {"first": m_send["firstUuid"], "last": _last_anchor(evs), "detached": False}
+    first = m_send["firstUuid"]
+    if isinstance(pc, dict) and pc.get("reattach") and pc.get("first") and total:
+        # the frame answers the client's own re-attach ask (round 3, A): the client merges it into the run it holds when
+        # the run's newest event is inside the frame, and the run's first edge stays the older of the two; a run whose
+        # newest event left the list (a fork, a /clear) is replaced on the client, and the frame's first is the base's
+        pos = _uuid_positions(evs, sid)
+        pf, pl = pos.get(pc["first"]), pos.get(pc.get("last"))
+        if pl is not None and pl >= head_from and (pf is None or pf < head_from):
+            first = pc["first"]
+    st[sid] = {"first": first, "last": _last_anchor(evs), "detached": False}
     return ms
 
 
@@ -47102,7 +47147,7 @@ def _shim(app, v=0, no_stale=False):
     return """
 %s
 (function(){/*shim-core*/var queue=[],ws=null,everConnected=false;
-var bundleReady=false,readyQueued=false,readyAcked=false,readyProto=0;   // the BUNDLE's own {type:"ready"} has passed through send() on this page / is waiting in `queue` for an open (onopen clears it once the flush has carried it) / has been ANSWERED: the kernel's caps frame has arrived on a socket of this page (onmessage), the ready arm's own statement (_send_caps, sent after that arm's pushes) that it processed the bundle's ready and served the page whole ahead of it; the dial's reconnect term (connect) keys on all three
+var bundleReady=false,readyQueued=false,readyAcked=false,readyProto=0,readyMsg=null;   // the BUNDLE's own {type:"ready"} has passed through send() on this page / is waiting in `queue` for an open (onopen clears it once the flush has carried it) / has been ANSWERED: the kernel's caps frame has arrived on a socket of this page (onmessage), the ready arm's own statement (_send_caps, sent after that arm's pushes) that it processed the bundle's ready and served the page whole ahead of it; the dial's reconnect term (connect) keys on all three
 var queuedDiag=0,DIAG_QUEUE_MAX=20;   // clientDiag rows waiting in `queue` for a reconnect, capped (an outage must not pile up breadcrumbs); other queued messages are untouched
 var failedConnects=0,firstFailT=0;   // handshakes that never OPENED since the last open: reported as ONE wsconnfail row on the next open, never one wsclose per redial
 // This pane's DASHBOARD id. ?wid= when the host supplies one (the VS Code extension builds its own pane
@@ -47269,7 +47314,8 @@ ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponen
 // socket dropped (the pane's romp loader) needs the socket's RETURN as its event to come back down. The
 // first connect deliberately doesn't fire it — nothing is waiting on it, and the loader must stay up until
 // real content lands.
-ws.onopen=function(){lastRecv=Date.now();openT=lastRecv;openSock=this;netState("up");resumeProvisional=0;var wasReconn=everConnected;everConnected=true;for(var i=0;i<queue.length;i++)ws.send(queue[i]);readyQueued=false;queue=[];queuedDiag=0;
+ws.onopen=function(){lastRecv=Date.now();openT=lastRecv;openSock=this;netState("up");resumeProvisional=0;var wasReconn=everConnected;everConnected=true;var flushedReady=readyQueued;for(var i=0;i<queue.length;i++)ws.send(queue[i]);readyQueued=false;queue=[];queuedDiag=0;
+if(bundleReady&&!readyAcked&&!flushedReady&&readyMsg)ws.send(readyMsg);   // the bundle's ready left on an earlier socket and no caps frame answered it (the socket died between the pushes and the frame): this fresh dial posts it again, so the kernel serves the page whole, answers, and the redials after carry the flag (round 3, C)
 try{if(window.__rompReload)window.__rompReload.ended();}catch(e){}   // T265: the flush is the ending event for the "sends" hold — a reload owed while a prompt sat in the queue goes now
 if(failedConnects){send({type:"clientDiag",surface:"pane-shim",what:"wsconnfail",data:{app:APP,attempts:failedConnects,firstFailMs:Date.now()-firstFailT}});failedConnects=0;firstFailT=0;}   // the redials that never opened since the last open, as ONE row: how many, and how long ago the first failed
 if(wasReconn){var ann=restartAnnounced&&Date.now()-restartAnnounced<30000;restartAnnounced=0;   // one-shot: spent here
@@ -47325,7 +47371,7 @@ if(inWin){d=eagerDial?0:250;eagerDial=false;}   // …so the FIRST such close re
 if(restartAnnounced&&Date.now()-restartAnnounced<30000)d=Math.min(d,250);   // an announced death keeps its tight redial
 setTimeout(connect,d);};   // the blind 1.5 s stays for unannounced drops outside any return window
 ws.onerror=function(){try{ws.close();}catch(e){}};}
-function send(m){var s=JSON.stringify(m);if(m&&m.type==="ready"){bundleReady=true;readyProto=(m.proto===2?2:1);}   // the bundle's listener is installed: from here a redial may declare itself (the dial term in connect)
+function send(m){var s=JSON.stringify(m);if(m&&m.type==="ready"){bundleReady=true;readyProto=(m.proto===2?2:1);readyMsg=s;}   // the bundle's listener is installed: from here a redial may declare itself (the dial term in connect)
 if(ws&&ws.readyState===1){ws.send(s);return;}
 if(m&&m.type==="ready")readyQueued=true;   // ...and this one waits for the open: the redial that carries it dials as a fresh page (onopen clears the bit after the flush)
 if(m&&m.type==="clientDiag"){if(queuedDiag>=DIAG_QUEUE_MAX)return;queuedDiag++;}   // breadcrumbs waiting for a reconnect are capped; everything else queues as before
@@ -55151,7 +55197,11 @@ class Handler(BaseHTTPRequestHandler):
             # whole session (_send_chat's full path fires when echat has no entry for the sid) and the
             # delta stream re-bases from there. Per-CLIENT, so one stale pane never re-sends for the rest.
             sid = str(msg["id"])
+            _keep = _reattach_edge(client, sid, msg)          # round 3, A (see the helper)
             _client_reset_chat_sid(client, sid)               # …and drop the dedup slot, so the full send lands
+            if _keep:
+                with _client_lock(client):
+                    client.setdefault("echat", {})[sid] = _keep
             self._push_one(client)                            # repair NOW, not on the next 0.5-3s tick
             return
         if msg and msg.get("type") in ("loadOlder", "loadAround", "loadNewer") and msg.get("id") \

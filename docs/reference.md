@@ -1656,9 +1656,10 @@ announces `chatProto2` in its `caps`:
   the reply then carries the frame's status and ledger), or a `needFull`
   re-attaches it (the page's "Return to live" strip and its jump chip ask for
   one, and the full frame answering that ask merges into the held run it
-  overlaps, so the pages the reader walked stay; every other full frame
-  replaces the run, its in-list events being the fresh copies); a reconnect's
-  `ready` starts a fresh base. A window that overlaps the run the client holds
+  overlaps, so the pages the reader walked stay, the kernel's base keeping the
+  run's older first edge with it; every other full frame replaces the run, its
+  in-list events being the fresh copies); a reconnect's `ready` starts a fresh
+  base. A window that overlaps the run the client holds
   through the live tail, by turn span, keeps it attached (`connected`; a
   `loadOlder` advances the run's first edge, so the kernel's picture of the run
   follows the page's). A
@@ -1668,8 +1669,10 @@ announces `chatProto2` in its `caps`:
   Every slice of the list is turn-aligned. A remote kernel learns the protocol
   from a `ready` the page sends on each host socket's open; a redialed local
   socket carries it on its dial term (`&proto=`), since a redial posts no
-  `ready`. A socket whose `ready` has not arrived has no protocol yet and moves
-  no render floor.
+  `ready`, and a page whose `ready` the kernel never answered posts it again on
+  its next fresh dial. A socket whose `ready` has not arrived has no protocol
+  yet and moves no render floor for its first thirty seconds; past that it
+  counts as an index client.
 
 The pages before the render floor are rendered on demand from the parse's
 lazy atoms (a page hydrates its own turns), memoized in a bounded cache

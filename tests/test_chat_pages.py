@@ -7,6 +7,8 @@ at every page size (so at every page boundary), with notes interleaved between t
 turns only and the floor'd build hydrates the tail's; the floor drops to 0 while a proto-1 client is connected and
 climbs back when it leaves (the fold entry rebuilt, the prefix released); every event's uuid is unique within a
 list. Synthetic transcripts only (the stage 4a served fixture's builder and the golden compaction scenarios)."""
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -170,6 +172,10 @@ class PagesEqualTheWhole(Harness):
             if r.get("type") == "user" and not r.get("isCompactSummary") and r.get("promptSource") == "typed":
                 t_of[k] = em.parse_z(r["timestamp"]); k += 1
         kept_text = next(r for r in recs if r.get("type") == "assistant")["message"]["content"][0]["text"]
+        # a page boundary of the PARSE's turns (each compact boundary record is its own turn, so prompt 96 is not turn 96):
+        # the first multiple of 16 whose turn starts a clean second after the turn before ends
+        pturns = km._parse(self.leaf, SID, NOW)["turns"]
+        self.boundary = next(b for b in (96, 80, 112, 64) if (pturns[b - 1].get("end") or 0) < int(pturns[b]["t"]) - 1)
         rows = [{"t": int(t_of[3]) + 30, "retriesRecovered": 2},
                 {"t": int(t_of[16]) - 1, "retriesGaveUp": 5, "errorKind": "overloaded"},     # a page boundary (16-turn pages)
                 {"t": int(t_of[32]) - 1, "effortApplied": "high"},
@@ -177,7 +183,7 @@ class PagesEqualTheWhole(Harness):
                 {"t": int(t_of[64]) - 1, "orphanReply": {"uuid": "orph-1", "text": "a reply the transcript never kept"}},
                 {"t": int(t_of[7]) + 5, "orphanReply": {"uuid": "orph-2", "text": kept_text}},
                 {"t": int(t_of[80]) - 1, "effortApplied": "low"},
-                {"t": int(t_of[96]) - 1, "orphanReply": {"uuid": "orph-3", "text": kept_text}}]   # RENDERED, at a page boundary
+                {"t": int(pturns[self.boundary]["t"]) - 1, "orphanReply": {"uuid": "orph-3", "text": kept_text}}]   # RENDERED, at a page boundary
         (jd.STATE / "states" / (SID + ".jsonl")).write_text("".join(json.dumps(r) + "\n" for r in rows))
         return recs
 
@@ -224,7 +230,16 @@ class PagesEqualTheWhole(Harness):
         self.assertNotIn("missing", ow); self.assertIn(onote["uuid"], [e["uuid"] for e in ow["events"]])
         wu = [e["uuid"] for e in whole]
         full_index = wu.index(onote["uuid"])
-        self.assertEqual(self.pages(m["floor"], 16)[full_index]["uuid"], onote["uuid"], "the note is the 96th turn's page's first event")
+        b16 = self.boundary
+        self.assertEqual(self.pages(m["floor"], 16)[full_index]["uuid"], onote["uuid"])
+        page_at = km._chat_history_page(SID, b16, b16 + 16, NOW)
+        self.assertEqual(page_at[0]["uuid"], onote["uuid"], "the note is the boundary page's FIRST event")
+        before = km._chat_history_page(SID, b16 - 16, b16, NOW)
+        self.assertFalse(before[-1].get("orphaned"), "the page before it ends clean")
+        turns_b = km._parse(self.leaf, SID, NOW)["turns"]
+        first_atom = next(a["uuid"] for a in turns_b[b16]["atoms"] if a.get("uuid"))
+        ob0 = km._chat_history_reply(SID, {"type": "loadOlder", "id": SID, "before": first_atom}, NOW)
+        self.assertNotIn(onote["uuid"], [e["uuid"] for e in ob0["events"]], "older than the boundary turn's first atom excludes the note")
         ob = km._chat_history_reply(SID, {"type": "loadOlder", "id": SID, "before": onote["uuid"]}, NOW)
         self.assertNotIn("missing", ob); self.assertTrue(ob["events"], "older than the note: the pages before its boundary")
         older = [e["uuid"] for e in ob["events"]]
@@ -322,6 +337,229 @@ class RestartSeam(Harness):
                 self.assertEqual(len(keys), len(set(keys)), "no event twice on the wire")
 
 
+def _fake_self(path):
+    """A connect handler whose peer speaks through the stubbed _ws_recv (tests/test_chat_skeleton_reconnect.py's shape)."""
+    class FakeSelf:
+        headers = {"Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ=="}
+        rfile = io.BytesIO(); wfile = io.BytesIO()
+        connection = type("FakeSock", (), {"sendall": lambda self, b: None, "shutdown": lambda self, how: None})()
+        close_connection = False
+        def send_response(self, *a): pass
+        def send_header(self, *a): pass
+        def end_headers(self): pass
+    FakeSelf.path = path
+    for name in ("_dispatch_ws", "_push_one"):                            # the handler's own arms, on the fake
+        setattr(FakeSelf, name, getattr(km.Handler, name))
+    return FakeSelf()
+
+
+class RealArm(Harness):
+    """The socket handler's own arms driven with frames (the ready, the history requests, needFull): the base the kernel
+    keeps for the client is the real arm's, not a re-implementation's (round 3, D)."""
+
+    def _drive(self, path, next_frame, alive_rows=True):
+        got, sent = [], []
+        real = (km._register_ws_client, km._ws_recv, km._mk_ws_send, km._alive_sessions)
+        km._register_ws_client = lambda c: (got.append(c), km._clients.append(c))
+        km._ws_recv = lambda rfile: next_frame(sent)
+        km._mk_ws_send = lambda q, sock, client: (lambda s: sent.append(json.loads(s)))
+        if alive_rows:
+            km._alive_sessions = lambda now, tmux: list(self.rows)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                km.Handler._ws(_fake_self(path))
+        finally:
+            km._register_ws_client, km._ws_recv, km._mk_ws_send, km._alive_sessions = real
+            with km._clients_lock:
+                for c in got:
+                    if c in km._clients:
+                        km._clients.remove(c)
+        self.assertEqual(len(got), 1)
+        return got[0], sent
+
+    @staticmethod
+    def _frame(msg):
+        return (0x1, json.dumps(msg).encode("utf-8"), True)
+
+    def test_the_registration_reads_the_redials_protocol(self):
+        """Round 2 item 4 / round 3 D: the dial term's proto lands on the client at the handshake."""
+        for path, want in (("/ws?app=chat&delta=1&iid=p1&active=%s&reconnect=1&proto=2" % SID, 2),
+                           ("/ws?app=chat&delta=1&iid=p1&active=%s&reconnect=1&proto=1" % SID, 1),
+                           ("/ws?app=chat&delta=1&iid=p1&active=%s&reconnect=1" % SID, None),
+                           ("/ws?app=chat&delta=1&iid=p1&active=%s&proto=2" % SID, None)):   # not a redial: the ready says
+            c, _ = self._drive(path, lambda sent: (0x8, b"", True), alive_rows=False)
+            self.assertEqual(c.get("proto"), want, path)
+            self.assertIsInstance(c.get("t0"), (int, float), "the registration is stamped for the ready wait")
+
+    def test_a_return_to_live_keeps_the_runs_first_edge_and_a_window_into_the_walked_part_stays_attached(self):
+        """Round 3, A: deep link, loadNewer into the list (still detached), Return to live (needFull reattach), a deep link
+        into the walked part, then a tail change reaches the client as a chatTail. Before the fix the re-attach frame
+        re-based the kernel's first to the wire tail's while the client's merged run kept its older first."""
+        recs = transcript(NOW - 86400, turns=600, compact_every=150)      # ~300 events after the cut: longer than the wire tail
+        self.write(recs)
+        whole = self.whole()
+        self.document()
+        m = self.restored()
+        evs = m["events"]; list_keys = {e.get("key") or e["uuid"] for e in evs}
+        deep = whole[10]["uuid"]
+        run = []                                                          # what the page holds, as the frames build it
+        state = {"step": "ready", "fulls": 0}
+
+        def next_frame(sent):
+            fresh = sent[state.get("seen", 0):]                            # the frames since the last request (the caps frame and
+            state["seen"] = len(sent)                                     #  the tab strip ride the same socket: rarely the last one)
+
+            def newest(kind):
+                return next((f for f in reversed(fresh) if f.get("type") == kind and f.get("id") == SID), None)
+            if state["step"] == "ready":
+                state["step"] = "window"; return self._frame({"type": "ready", "proto": 2})
+            if state["step"] == "window":
+                if newest("session") is not None:
+                    state["fulls"] += 1; state["step"] = "newer"
+                    return self._frame({"type": "loadAround", "id": SID, "uuid": deep})
+            elif state["step"] == "newer":
+                w = newest("chatWindow"); mo = newest("chatMore") if w is None else None
+                if w is not None:
+                    run[:] = list(w["events"])
+                    self.assertTrue(w["moreAfter"])
+                if mo is not None:
+                    run.extend(mo["events"])
+                    self.assertTrue(mo["more"], "the walk stops inside the list, still detached")
+                if w is not None or mo is not None:
+                    if any((e.get("key") or e["uuid"]) in list_keys for e in run):
+                        state["step"] = "reattach"
+                        return self._frame({"type": "needFull", "id": SID, "why": "reattach"})   # Return to live
+                    return self._frame({"type": "loadNewer", "id": SID, "after": run[-1].get("key") or run[-1]["uuid"]})
+            elif state["step"] == "reattach":
+                f = newest("session")
+                if f is not None:
+                    state["fulls"] += 1; state["step"] = "walked"
+                    # the client merges the frame into its run (they overlap: the run's newest is inside the frame)
+                    fk = {e.get("key") or e["uuid"] for e in f["events"]}
+                    self.assertTrue(any((e.get("key") or e["uuid"]) in fk for e in run), "the frame overlaps the held run")
+                    inside = run[len(run) // 3]["uuid"]                 # into the walked pages, far from the tail
+                    return self._frame({"type": "loadAround", "id": SID, "uuid": inside})
+            elif state["step"] == "walked":
+                w = newest("chatWindow")
+                if w is not None:
+                    state["window"] = w; state["step"] = "done"
+            return (0x8, b"", True)
+        c, sent = self._drive("/ws?app=chat&delta=1&iid=p2&active=%s" % SID, next_frame)
+        self.assertEqual(state["step"], "done", "the sequence ran to its end: %s" % state)
+        self.assertEqual(state["fulls"], 2)
+        base = c["echat"][SID]
+        hc = {h["uuid"] for h in self.head_cards}
+        first_event = next(e for e in run if e["uuid"] not in hc)         # the window reached the head: its cards ride first (B)
+        self.assertEqual(base["first"], first_event.get("key") or first_event["uuid"], "the kernel's base keeps the run's older first edge")
+        self.assertFalse(base["detached"])
+        w = state["window"]
+        self.assertTrue(w["connected"], "a window into the walked part overlaps the run: attached on both ends")
+        self.assertTrue(w["moreAfter"])
+        n = len(sent)
+        km._send_chat_locked(c, m, None, len(evs) - 1, False)             # the next tail change
+        self.assertEqual(len(sent), n + 1); self.assertEqual(sent[-1]["type"], "chatTail", "a delta, not silence")
+
+    def test_a_window_reaching_the_head_keys_the_base_on_the_first_event_and_the_walk_to_the_tail_reattaches(self):
+        """Round 3, B: the head cards ride a window that reaches turn 0; the base's first is the first EVENT's key, which
+        places in a turn, so the walk to the tail re-attaches and the next tail change is a delta."""
+        recs = transcript(NOW - 86400, turns=200, compact_every=25)
+        self.write(recs)
+        whole = self.whole()
+        self.document()
+        m = self.restored()
+        self.assertTrue(self.head_cards, "the fixture has head cards")
+        c, sent = _client()
+        km._send_chat_locked(c, m, None, 0, False)
+        w = km._chat_history_reply(SID, {"type": "loadAround", "id": SID, "uuid": whole[0]["uuid"]}, NOW, base=c["echat"][SID])
+        self.assertFalse(w["moreBefore"]); self.assertEqual(w["events"][0]["uuid"], self.head_cards[0]["uuid"], "the head cards ride first")
+        self.assertEqual(w["_base"]["first"], whole[0]["uuid"], "the base's first is the first EVENT, not a head card")
+        c["echat"][SID] = w.pop("_base")
+        held = list(w["events"])
+        for _ in range(200):
+            r = km._chat_history_reply(SID, {"type": "loadNewer", "id": SID, "after": held[-1].get("key") or held[-1]["uuid"]}, NOW, base=c["echat"][SID])
+            held += r["events"]
+            b = r.pop("_base"); b["first"] = c["echat"][SID]["first"] if b.pop("keepFirst", False) else b["first"]
+            c["echat"][SID] = b
+            if not r["more"]:
+                break
+        self.assertFalse(c["echat"][SID]["detached"], "back at the tail")
+        n = len(sent)
+        km._send_chat_locked(c, m, None, len(m["events"]) - 1, False)
+        self.assertEqual(sent[-1]["type"], "chatTail"); self.assertEqual(len(sent), n + 1)
+        # a window back into the head part now overlaps the run [turn 0 .. the tail]: attached
+        w2 = km._chat_history_reply(SID, {"type": "loadAround", "id": SID, "uuid": whole[4]["uuid"]}, NOW, base=c["echat"][SID])
+        self.assertTrue(w2["connected"])
+
+
+class OrphanGate(Harness):
+    """Round 2 item 11, executed: the fold's orphan demotion gate reads the note's own window."""
+
+    def _sealed_note(self):
+        """A rendered orphan note in the (soon sealed) last turn of a 200-turn transcript, its text turn 0's reply: the parse
+        keeps the text far away, so the near-window rule renders the note; then a typed prompt opens turn 200, which seals
+        turn 199 with the note into the fold's prefix. Returns (records, kept_text, the open prompt's uuid)."""
+        recs = transcript(NOW - 86400, turns=200, compact_every=1000)     # no compaction: one fold over the whole list
+        self.write(recs)
+        turns = km._parse(self.leaf, SID, NOW)["turns"]
+        kept_text = next(r for r in recs if r.get("type") == "assistant")["message"]["content"][0]["text"]
+        rows = [{"t": int(turns[199]["t"]) - 1, "orphanReply": {"uuid": "orph-g", "text": kept_text}}]
+        (jd.STATE / "states" / (SID + ".jsonl")).write_text("".join(json.dumps(r) + "\n" for r in rows))
+        last = next(r for r in reversed(recs) if r.get("uuid"))
+        t_last = em.parse_z(last["timestamp"])
+        recs2 = recs + [G.uline(t_last + 60, "one more, please", "u_g200", last["uuid"])]
+        self.write(recs2)
+        m = km.build_session(SID, NOW, {}, floor=0)                       # turn 199 sealed, the note in it
+        self.assertTrue(any(e.get("orphanOf") == "orph-g" for e in m["events"]), "the note rendered")
+        fe = km._chat_fold_get(SID)
+        self.assertIsNotNone(fe)
+        self.assertTrue(any(isinstance(x, (list, tuple)) and x[1] == kept_text for x in fe["orphan_texts"]), "sealed as (t, text)")
+        return recs2, kept_text, t_last
+
+    def test_a_reply_landing_in_the_notes_window_retires_it_and_one_far_from_it_does_not(self):
+        recs2, kept_text, t_last = self._sealed_note()
+        # the far case: the open turn's reply says something else, then a later turn repeats the salvaged text
+        far = recs2 + [G.aline(t_last + 90, "quite another reply", "a_g200", "u_g200", stop="end_turn"),
+                       G.uline(t_last + 120, "and again", "u_g201", "a_g200"),
+                       G.aline(t_last + 150, kept_text, "a_g201", "u_g201", stop="end_turn")]
+        self.write(far)
+        km.build_session(SID, NOW + 1, {}, floor=0)
+        info = km._chat_fold_last_info()
+        self.assertNotEqual(info.get("why"), "orphan", "a match two turns past the note's window is not its reply: %s" % info)
+        self.assertEqual(info.get("fold"), 1, "the fold stands")
+        # the near case: the reply landing in the turn right after the note's (its window) retires it
+        self.fresh(); (jd.STATE / "states" / (SID + ".jsonl")).unlink()
+        recs2, kept_text, t_last = self._sealed_note()
+        near = recs2 + [G.aline(t_last + 90, kept_text, "a_g200", "u_g200", stop="end_turn")]
+        self.write(near)
+        km.build_session(SID, NOW + 1, {}, floor=0)
+        self.assertEqual(km._chat_fold_last_info().get("why"), "orphan", "a new reply in the note's window retires it: a refold")
+
+
+class KeyCounts(unittest.TestCase):
+    """Round 2 item 13, executed: the sealed part is keyed before its key counts are memoized, else a uuid-less event in a
+    just-sealed turn is missing from the next build's seen map and a later event of its kind gets the same key."""
+
+    def test_counts_taken_after_the_pass_carry_the_uuid_less_events_key(self):
+        prefix = [{"kind": "user", "uuid": "u0"}]
+        sealed = [{"kind": "assistant", "uuid": "a0"}, {"kind": "todo"}]          # the overlay card has no uuid: the pass names it
+        tail = [{"kind": "todo"}]
+        events = prefix + sealed + tail
+        p, b = len(prefix), len(prefix) + len(sealed)
+        stale = km._key_counts(events[:b])                                       # the pre-fix order: counts before the pass
+        self.assertNotIn("todo", stale)
+        km._uniq_event_uuids(events[p:b], events[:p])                            # the commit's order now
+        counts = km._key_counts(events[:b])
+        self.assertEqual(counts.get("todo"), 1, "the sealed card's key is in the seen map")
+        km._uniq_event_uuids(events[b:], events[:b], seen=counts)
+        self.assertEqual(events[b:][0].get("key"), "todo#2", "the tail's card is a second of its kind")
+        stale_tail = [{"kind": "todo"}]
+        km._uniq_event_uuids(stale_tail, [], seen=stale)
+        self.assertIsNone(stale_tail[0].get("key"), "with the stale counts the same key would have been minted twice")
+        src = open(os.path.join(BIN, "romp-kernel")).read()
+        i = src.index('"keyCounts": _key_counts(events[:_b])')
+        self.assertIn("_uniq_event_uuids(events[_pref_len:_b], events[:_pref_len],", src[i - 1200:i], "the pass precedes the commit")
+
+
 class UniqueUuids(Harness):
     def test_every_event_carries_a_uuid_unique_within_the_list(self):
         recs = transcript(NOW - 86400, turns=60, compact_every=25)
@@ -417,13 +655,17 @@ class FloorDecision(Harness):
         self.assertTrue(f([{"proto": 1, "ready": True}]))
         self.assertTrue(f([{"proto": None, "ready": True}]), "ready with no protocol: an index client")
         self.assertTrue(f([{"proto": 2}, {"proto": 1}]))
+        t = km._ws_clock()
+        self.assertFalse(f([{"proto": None, "ready": False, "t0": t - 5}], now=t), "a socket five seconds old waits for its ready")
+        self.assertTrue(f([{"proto": None, "ready": False, "t0": t - km.READY_WAIT_S - 1}], now=t),
+                        "no protocol and no ready past the wait: an index client (a page whose ready was never answered)")
         src = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertIn('_live_scope.chat_floor0 = _chat_floor0_of(_all_chat)', src)
         reg = src[src.index('            client["reconnect"] = True'):src.index('        _register_ws_client(client)')]
         self.assertIn('_rp = (q.get("proto") or [""])[0]', reg, "the redial's registration reads the protocol from its dial term")
         self.assertIn('client["proto"] = int(_rp)', reg)
         self.assertIn('?"&reconnect=1&proto="+readyProto:""', src, "the shim's dial term carries the protocol the bundle's ready declared")
-        self.assertIn('if(m&&m.type==="ready"){bundleReady=true;readyProto=(m.proto===2?2:1);}', src)
+        self.assertIn('if(m&&m.type==="ready"){bundleReady=true;readyProto=(m.proto===2?2:1);readyMsg=s;}', src)
 
     def test_a_connect_push_counts_every_connected_client_and_a_pre_ready_socket_moves_nothing(self):
         """Review find E, executed through _push: the decision reads km._clients, not the push's targets."""
@@ -686,16 +928,19 @@ class Proto2Wire(Harness):
         atom_base = {"first": "orphan:%d:1" % (NOW - 90000), "last": whole[30]["uuid"], "detached": True}
         self.assertTrue(km._base_alive(SID, atom_base, NOW), "an atom-keyed edge the transcript holds: alive")
         turns = km._parse(self.leaf, SID, NOW)["turns"]
-        hit = km._BASE_ALIVE_MEMO[SID]
-        self.assertIs(hit[1], turns); self.assertTrue(hit[2])
-        km._BASE_ALIVE_MEMO[SID] = (hit[0], turns, "memo")               # a repeat with the same edges and parse reads the memo
+        key = (SID, atom_base["first"], atom_base["last"])                # per (sid, edges), valid for one parse tree's identity
+        hit = km._BASE_ALIVE_MEMO[key]
+        self.assertEqual(hit, (id(turns), True))
+        km._BASE_ALIVE_MEMO[key] = (id(turns), "memo")                   # a repeat with the same edges and parse reads the memo
         self.assertEqual(km._base_alive(SID, atom_base, NOW), "memo")
+        km._BASE_ALIVE_MEMO[key] = (-1, "stale")                         # another parse tree: re-read, never the stale verdict
+        self.assertIs(km._base_alive(SID, atom_base, NOW), True)
         c, sent = _client()
         c["echat"][SID] = dict(note_base)
         km._send_chat_locked(c, m, None, len(m["events"]) - 1, False)
         self.assertEqual(sent[-1]["type"], "session", "the detached client edged on notes gets its full frame")
         km._forget_chat_positions(set())
-        self.assertNotIn(SID, km._BASE_ALIVE_MEMO); self.assertNotIn(SID, km._UUID_POS)
+        self.assertFalse([k for k in km._BASE_ALIVE_MEMO if k[0] == SID]); self.assertNotIn(SID, km._UUID_POS)
 
     def test_the_fold_entry_carries_the_prefixs_key_counts(self):
         whole, m = self._restored_tail()

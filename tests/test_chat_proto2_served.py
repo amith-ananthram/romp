@@ -164,6 +164,15 @@ class Proto2Wire(A.RestartOverACheckpointedSession):
             self.assertEqual(records(whole1), records(whole2) + ["u_after"],
                              "the proto-2 pages plus the tail are the index client's transcript, the cards aside")
             c3.close()
+            # the index client left: the next build's floor climbs back and every proto-2 client gets a full tail frame
+            # from it (a floor move is a full frame by design; round 3)
+            f4b = None                                     # (the floor-0 frame c3's connect caused may still be queued ahead of it)
+            for fr in c4.frames(60):
+                if fr.get("type") == "session" and fr.get("id") == WEB and (fr.get("floor") or 0) > 0:
+                    f4b = fr; break
+            self.assertIsNotNone(f4b, "the floor climbed back after the index client left and c4 got the frame")
+            self.assertEqual(f4b.get("proto"), 2)
+            self.assertFalse(f4b.get("headKnown"), "…and the head is unknown again to the proto-2 client")
             perf = self._get(p2, "/perf")
             by = perf["checkpoints"]["readByPath"]
             leaf_read = by.get(os.path.realpath(self.leaf), by.get(self.leaf, 0))

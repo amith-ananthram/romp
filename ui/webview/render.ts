@@ -16083,15 +16083,17 @@ function chatWindow(msg: any) {
   if (target) { pendingAnchor = target; pendingAnchorIntent = null; pendingAnchorT = null; pendingAnchorKind = null; flashedAnchor = null; pendingAnchorKeepY = null; anchorPendingOlder = false; }
   showActive();
   updateLivePaused();
-  window.requestAnimationFrame(() => {
-    // a window that does not overflow never scrolls: the edge check runs once (review find M). A DETACHED window whose
-    // content fits the viewport cannot reach the newer edge through that check (it returns on "everything rendered", or
-    // asks for older first), so its next page is asked for directly (round 2, item 7)
-    const c = document.getElementById("content");
-    const cur = sessions.get(msg.id);
-    if (cur && cur.detached && c && c.scrollHeight <= c.clientHeight + 1) { requestNewer(msg.id); return; }
-    virtualizeToViewport();
-  });
+  window.requestAnimationFrame(() => edgeCheckAfterWindow(msg.id));
+}
+// After a window or a page of newer history painted: a window that does not overflow never scrolls, so the edge check runs
+// once here (review find M). A DETACHED run whose content fits the viewport cannot reach the newer edge through that check
+// (it returns on "everything rendered", or asks for older first), so its next page is asked for directly (round 2, item 7;
+// round 3: chatMore too, so a short page appended to a short run keeps walking).
+function edgeCheckAfterWindow(sid: string): void {
+  const c = document.getElementById("content");
+  const cur = sessions.get(sid);
+  if (cur && cur.detached && c && c.scrollHeight <= c.clientHeight + 1) { requestNewer(sid); return; }
+  virtualizeToViewport();
 }
 function chatMore(msg: any) {
   loadingOlder.delete(msg.id);
@@ -16119,6 +16121,7 @@ function chatMore(msg: any) {
   if (v) { v.stale = true; }
   if (msg.id === activeId) showActive();
   updateLivePaused();
+  if (msg.id === activeId && s.detached) window.requestAnimationFrame(() => edgeCheckAfterWindow(msg.id));   // the appended page may still fit
 }
 
 // ── the detached client's way back (review find M) ──────────────────────────────────────────────────────────
