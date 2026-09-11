@@ -33,13 +33,10 @@ Every bug fix or feature change lands with a test (repo rule). Five suites:
   `ROMP_CLI_SCOPE=0` in setup: under `ROMP_SUPERVISED` (set by the service's
   unit, and inherited by a tool shell under a self-hosted install) the kernel
   spawns session CLIs through `systemd-run --scope`, so such a suite would
-  otherwise leave a transient scope on the developer's user manager. Today the
-  floor comes from `load tmux-private` and `tmux_private_socket_dir
-  "$TEST_DIR"`, the helper the retired terminal backend's suites shared (its
-  socket-directory isolation is now dead weight and goes with that helper in a
-  later stage; the floor it sets is what the suites still load it for), with
-  `tmux_private_kill && rm -rf "$TEST_DIR"` as teardown's last line. pytest's
-  floor is
+  otherwise leave a transient scope on the developer's user manager. The
+  floor is `load cli-scope-floor` and `cli_scope_floor` in setup()
+  (`tests/cli-scope-floor.bash`; until 2026-09-11 it rode the retired
+  terminal backend's socket-directory helper). pytest's floor is
   `conftest.py`; `test_cli_scope_floor.py` pins both halves of it on the
   source, since a test that reads the value cannot tell the floor from
   `test_cli_scope.py`'s own import-time set.
@@ -202,7 +199,7 @@ when the live manager restarted (`ROMP_MANAGER_PID`, the kernel's parent-death
 watchdog), bound where the live kernel serves (`ROMP_SERVE_HOST`) and dialled
 the machine's postal bus, or started one that nothing stops. From the runner
 `kernel_env` takes `PATH`, `HOME`, the `XDG_*` names and, of the floor
-`tests/conftest.py` sets for the run's children, `TMPDIR`, `TMUX_TMPDIR`,
+`tests/conftest.py` sets for the run's children, `TMPDIR`,
 `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM`, `ROMP_SERVICE_ENV_FILE`,
 `ROMP_SERVICE_ENV`, `ROMP_CLAUDE_BIN` and `ROMP_CLI_SCOPE`; over those go the
 lab's roots and seams, any seam the lab adds by keyword, and a postal bus of its
@@ -212,7 +209,7 @@ driver kills and relaunches the kernel (`test_ship_reship.py`,
 `test_dashboard_reload_served.py`) write the relaunch's command, environment and
 log to the lab's `cfg.json` through `relaunch_cfg`, and the environment in that
 file is narrowed once more by `relaunch_env`: the `ROMP_*` and `XDG_*` names,
-`CLAUDE_CONFIG_DIR`, `PATH`, `HOME`, `TMPDIR`, `TMUX_TMPDIR`,
+`CLAUDE_CONFIG_DIR`, `PATH`, `HOME`, `TMPDIR`,
 `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_NOSYSTEM`, less the `ROMP_TESTS_*` names,
 which conftest exports for the run's own tests (such as
 `ROMP_TESTS_SYSTEM_TMPDIR` above) and no kernel reads. Nothing else a lab put in

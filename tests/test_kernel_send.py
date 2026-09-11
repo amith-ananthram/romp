@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """POST /send body parsing — the human->agent input channel the Obsidian track-changes
-plugin posts to. The kernel then injects the text via _tmux_send (the same delivery the
-chat composer's WS sendMessage uses), so the plugin never touches tmux itself.
+plugin posts to. The kernel then hands the text to whichever backend drives the session
+(Claude Code via the SDK, or Codex; Sessions.backend_for), the same delivery the chat
+composer's WS sendMessage uses, so the plugin never touches a backend itself. Before the
+SessionBackend contract (2026-06-26) the route called the terminal backend's _tmux_send
+directly; that backend itself left on 2026-09-11.
 """
 import os
 import unittest
@@ -56,9 +59,11 @@ class ParseSendBody(unittest.TestCase):
 
 
 class SessionList(unittest.TestCase):
-    """GET /sessions — the UNIFIED (tmux + SDK) romp session list external tools read (the Obsidian Cmd+M
-    picker + diff chips, the postal bus) instead of shelling tmux. _session_rows assembles each LIVE session
-    from Sessions.live() (the backend query) + the names registry + working-notes."""
+    """GET /sessions — the UNIFIED romp session list across every backend (Claude Code via the SDK, and
+    Codex) that external tools read (the Obsidian Cmd+M picker + diff chips, the postal bus) instead of
+    asking a backend themselves; it replaced the terminal-backend-only listing those tools once shelled tmux
+    for. _session_rows assembles each LIVE session from Sessions.live() (the backend query) + the names
+    registry + working-notes."""
 
     def _stub(self, live, notes, names):
         saved = (km.Sessions.live, km._working_notes, km._name_of, km._cwd_of, km._identity_of)
@@ -73,19 +78,19 @@ class SessionList(unittest.TestCase):
 
     def test_session_rows_assembles_both_backends(self):
         self._stub(
-            live={"sid-t": {"state": "working", "backend": "tmux"},
+            live={"sid-c": {"state": "working", "backend": "codex"},
                   "sid-s": {"state": "waiting", "backend": "sdk"}},
-            notes={"sid-t": "owns feed.ts"},           # SDK has no working-note yet (P3) → ''
-            names={"sid-t": ("alpha", "/work/a", "#112233", "#ffffff"),
+            notes={"sid-c": "owns feed.ts"},           # no note published for sid-s → ''
+            names={"sid-c": ("alpha", "/work/a", "#112233", "#ffffff"),
                    "sid-s": ("beta", "/work/b", "blue", "white")})
         rows = {r["id"]: r for r in km._session_rows()}
-        self.assertEqual(set(rows), {"sid-t", "sid-s"})
+        self.assertEqual(set(rows), {"sid-c", "sid-s"})
         # lastSid = the session's CURRENT transcript fsid (self-identity join, the user 2026-07-27);
         # with no diverged SDK registry it is the sid itself.
-        self.assertEqual(rows["sid-t"], {"id": "sid-t", "name": "alpha", "state": "working", "dir": "/work/a",
-                                         "bg": "#112233", "fg": "#ffffff", "lastSid": "sid-t",
+        self.assertEqual(rows["sid-c"], {"id": "sid-c", "name": "alpha", "state": "working", "dir": "/work/a",
+                                         "bg": "#112233", "fg": "#ffffff", "lastSid": "sid-c",
                                          "compacting": False,          # romp compact --wait polls this
-                                         "working": "owns feed.ts", "backend": "tmux"})
+                                         "working": "owns feed.ts", "backend": "codex"})
         self.assertEqual(rows["sid-s"], {"id": "sid-s", "name": "beta", "state": "waiting", "dir": "/work/b",
                                          "bg": "blue", "fg": "white", "lastSid": "sid-s",
                                          "compacting": False,
@@ -96,18 +101,18 @@ class SessionList(unittest.TestCase):
         # reads as death downstream, so one sid's helper blowing up keeps the session listed as a
         # minimal honest row — and never takes the WHOLE listing down with it
         self._stub(
-            live={"sid-t": {"state": "working", "backend": "tmux"},
+            live={"sid-c": {"state": "working", "backend": "codex"},
                   "sid-s": {"state": "waiting", "backend": "sdk"}},
             notes={}, names={"sid-s": ("beta", "/work/b", "blue", "white")})
         saved = km._identity_of
         km._identity_of = lambda sid: (_ for _ in ()).throw(RuntimeError("mid-cycle")) \
-            if sid == "sid-t" else saved(sid)
+            if sid == "sid-c" else saved(sid)
         try:
             rows = {r["id"]: r for r in km._session_rows()}
         finally:
             km._identity_of = saved
-        self.assertEqual(set(rows), {"sid-t", "sid-s"}, "the failing row stays PRESENT")
-        self.assertEqual((rows["sid-t"]["state"], rows["sid-t"]["backend"]), ("working", "tmux"),
+        self.assertEqual(set(rows), {"sid-c", "sid-s"}, "the failing row stays PRESENT")
+        self.assertEqual((rows["sid-c"]["state"], rows["sid-c"]["backend"]), ("working", "codex"),
                          "the minimal row keeps what the live() meta already knew")
         self.assertEqual(rows["sid-s"]["name"], "beta", "the healthy sibling is untouched")
 
@@ -135,8 +140,8 @@ class SessionList(unittest.TestCase):
         # containment (review find, 2026-08-31): a discover raise (names-dir permission fault,
         # remove race) degrades to pathless FULL rows — compacting reads False that build — and
         # never turns GET /sessions into a 500 (absence reads as death downstream).
-        self._stub(live={"sid-t": {"state": "working", "backend": "tmux"}},
-                   notes={}, names={"sid-t": ("alpha", "/w", "#112233", "#ffffff")})
+        self._stub(live={"sid-c": {"state": "working", "backend": "codex"}},
+                   notes={}, names={"sid-c": ("alpha", "/w", "#112233", "#ffffff")})
         saved = km._sessions
         km._sessions = lambda now, window=None, forks=True: (_ for _ in ()).throw(OSError("names dir EACCES"))
         try:
@@ -154,8 +159,10 @@ class SessionList(unittest.TestCase):
 
 class WorkingNoteStore(unittest.TestCase):
     """The backend-agnostic working-note store (working/<sid> files): the postal bus's set_working goes
-    through the kernel (Sessions.set_working_note, served at POST /working), works for ANY sid incl. an SDK
-    session, and the note surfaces in _working_notes (→ GET /sessions). Replaces the tmux @romp-working var."""
+    through the kernel (Sessions.set_working_note, served at POST /working), works for ANY sid whichever
+    backend drives it (Claude Code via the SDK, or Codex), and the note surfaces in _working_notes (→ GET
+    /sessions). It replaced the terminal backend's @romp-working tmux variable on 2026-06-26; the backend
+    itself left on 2026-09-11."""
 
     def setUp(self):
         import tempfile
@@ -175,9 +182,11 @@ class WorkingNoteStore(unittest.TestCase):
         self.assertEqual(km._working_notes(), {})
 
     def test_any_backend_sid_can_publish(self):
-        # no backend gate: an SDK session's sid stores + reads the same way a tmux one does
+        # no backend gate: an SDK session's sid stores + reads the same way a Codex one does
         km.Sessions.set_working_note("sdk-sid", "drafting api")
+        km.Sessions.set_working_note("codex-sid", "triaging tests")
         self.assertEqual(km._working_notes().get("sdk-sid"), "drafting api")
+        self.assertEqual(km._working_notes().get("codex-sid"), "triaging tests")
 
     def test_rejects_path_traversal_sid(self):
         km.Sessions.set_working_note("../evil", "x")        # sid is a path component → must not escape the store

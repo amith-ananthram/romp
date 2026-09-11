@@ -48,7 +48,7 @@ class _FeedWorld(unittest.TestCase):
         self.sessions = [{"sid": SID, "name": "web", "path": "/nonexistent/%s.jsonl" % SID,
                           "anchor": 0, "mtime": 0}]
         self.patches = [
-            mock.patch.object(km, "_alive_sessions", lambda now, tmux: list(self.sessions)),
+            mock.patch.object(km, "_alive_sessions", lambda now, live: list(self.sessions)),
             mock.patch.object(km, "_warm_fleet_bg", lambda now: None),
         ]
         for p in self.patches:
@@ -79,7 +79,7 @@ class LiveSessionAfterAbsorbedBadge(_FeedWorld):
 
     def test_later_cards_of_a_live_session_keep_live_true(self):
         self._write_goals(sender_goal_open=False)
-        feed = km.build_feed(NOW, {SID: {"state": "ready"}})   # tmux lists the session → alive
+        feed = km.build_feed(NOW, {SID: {"state": "ready"}})   # the live map lists the session → alive
         cards = {a["itemId"]: a for a in feed["asks"]}
         self.assertIn("gA", cards)
         self.assertIn("gB", cards)
@@ -123,13 +123,13 @@ class LiveSessionAfterAbsorbedBadge(_FeedWorld):
 
 
 class DeadSessionAfterLiveBadge(_FeedWorld):
-    """The REVERSE clobber: DEAD session (not in tmux), LIVE badge (sender's goal still open →
+    """The REVERSE clobber: DEAD session (absent from the live map), LIVE badge (sender's goal still open →
     origin.live True). Later cards must still read live=False — a dead session's cards must not
     offer Continue off the badge's bool."""
 
     def test_later_cards_of_a_dead_session_keep_live_false(self):
         self._write_goals(sender_goal_open=True)
-        feed = km.build_feed(NOW, {})                          # tmux empty → the session is dead
+        feed = km.build_feed(NOW, {})    # build_feed reads the card's live bit from live_map.get(sid): empty → dead
         cards = {a["itemId"]: a for a in feed["asks"]}
         self.assertIn("gA", cards)
         self.assertIn("gB", cards)

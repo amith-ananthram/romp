@@ -212,7 +212,7 @@ class PassHoist(_Memo):
             calls.append(1)
             return real()
 
-        def walk(s, now, tmux, nudged, waitfor, alive_ids=None, wake_only=False, cleared=None):
+        def walk(s, now, live, nudged, waitfor, alive_ids=None, wake_only=False, cleared=None):
             seen.append(cleared)
             return False
         saved = {n: getattr(km, n) for n in
@@ -220,7 +220,7 @@ class PassHoist(_Memo):
                   "_debt_backstop_tick", "_dead_wait_sweep", "_awaiting_wake_outcomes", "_push_soon",
                   "_pop_walk_gate", "_put_walk_gate")}
         km._cleared_ids = counting
-        km._alive_sessions = lambda now, tmux: [{"sid": A, "path": "/nonexistent-a.jsonl"},
+        km._alive_sessions = lambda now, live: [{"sid": A, "path": "/nonexistent-a.jsonl"},
                                                 {"sid": B, "path": "/nonexistent-b.jsonl"}]
         km._wait_for_graph = lambda now, alive_ids: {}
         km._auto_nudge_session = walk

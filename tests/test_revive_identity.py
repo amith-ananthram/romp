@@ -4,7 +4,7 @@
 The incident: a machine kernel-panicked and the relaunch brought a session back under a NAME nobody
 chose, carrying its whole history — the spawn-frozen env made the new name permanent. The mechanism:
 SdkBackend.resume() trusted the CALLER's name outright, and the callers read it from the names/
-registry or a discovery row — both rewritten by other machinery (the tmux launcher frees a dead
+registry or a discovery row — both rewritten by other machinery (the tmux launcher, until its removal on 2026-09-11, freed a dead
 session's name by renaming its names/ entry; fork lanes emit rows whose "sid" is a transcript stem).
 
 The rule now: when the reg already carries a name, that name WINS; the caller's is adopted only on a

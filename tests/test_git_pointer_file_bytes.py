@@ -341,7 +341,7 @@ class PushCycle(unittest.TestCase):
         from its target's stat, so the report reaching the registry is what says it was re-derived."""
         sessions = [{"sid": A, "name": "web", "path": self.paths[A], "anchor": 0, "mtime": NOW},
                     {"sid": B, "name": "api", "path": self.paths[B], "anchor": 0, "mtime": NOW}]
-        tmux = {A: _tm(), B: _tm()}
+        live = {A: _tm(), B: _tm()}
         sent = []
         dotgit = str(self.torn / ".git")
         real_fault = km._git_file_fault
@@ -352,14 +352,14 @@ class PushCycle(unittest.TestCase):
             return real_fault(path, exc)
         with mock.patch.object(km, "_git_file_fault", reported), \
                 mock.patch.object(km, "_sessions", lambda now, window=None, forks=True: list(sessions)), \
-                mock.patch.object(km, "_live_map", lambda: dict(tmux)), \
+                mock.patch.object(km, "_live_map", lambda: dict(live)), \
                 mock.patch.object(km, "_chat_tab_sessions", lambda now, tm: list(sessions)), \
                 mock.patch.object(km, "build_feed", lambda *a, **k: {"working": [], "asks": []}), \
                 mock.patch.object(km, "build_timeline", lambda *a, **k: None), \
                 mock.patch.object(km, "_send_client",
                                   lambda c, key, msg, pre=None, sig=None: sent.append((key, msg))), \
                 _stderr() as err:
-            km._push([{"app": "chat", "alive": True}], live_map=tmux)
+            km._push([{"app": "chat", "alive": True}], live_map=live)
         return sent, err.getvalue()
 
     @staticmethod

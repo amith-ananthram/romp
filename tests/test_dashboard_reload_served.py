@@ -199,8 +199,7 @@ class ServedAutoReload(unittest.TestCase):
         cls.port = _free_port()
         cls.token = "testtok-autoreload"
         cls.env = _lab.kernel_env(cls.lab, claude, dist, cls.port, cls.token,
-                                  ROMP_WS_KEEPALIVE="2",                       # the dv rides the keepalive: keep the wait short
-                                  ROMP_TMUX_SOCKET="romp-autoreload-%d" % cls.port)
+                                  ROMP_WS_KEEPALIVE="2")                       # the dv rides the keepalive: keep the wait short
         # a name outside the relaunch list, planted in the lab kernel's environment so the check on the cfg.json the
         # driver reads has something the file must not carry
         cls.env["RUNNER_SECRET_PROBE"] = "abc"
@@ -229,7 +228,6 @@ class ServedAutoReload(unittest.TestCase):
                     pass
         if getattr(cls, "kernel", None):
             cls.kernel.wait()
-        subprocess.run(["tmux", "-L", cls.env.get("ROMP_TMUX_SOCKET", ""), "kill-server"], capture_output=True)
         shutil.rmtree(getattr(cls, "lab", ""), ignore_errors=True)
 
     def test_build_drift_reloads_after_the_gesture_ends_and_a_restart_reloads_too(self):

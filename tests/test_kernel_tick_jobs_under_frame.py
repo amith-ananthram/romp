@@ -68,7 +68,7 @@ class TickJobUnderAFrame(unittest.TestCase):
         self._saved = (km._working_notes, km._alive_sessions, km._open_top_goal, km._set_working_note,
                        km._suspended_after)
         km._working_notes = lambda: {SID: "owns the api worktree"}
-        km._alive_sessions = lambda now, tmux: [{"sid": SID, "path": str(self.path)}]
+        km._alive_sessions = lambda now, live: [{"sid": SID, "path": str(self.path)}]
         km._open_top_goal = lambda sid: False
         km._set_working_note = lambda sid, text: self.lifted.append((sid, text))
         km._suspended_after = lambda t: False

@@ -9,7 +9,7 @@ stretch while the CLI minted the fresh transcript had no observable state at all
     build_session's read-only path_override mode, capped with an honest truncated count, and FAILS
     LOUDLY (an error string, never a silent empty) when the old transcript is missing;
   - the SDK backend brackets the in-flight /clear (SdkSession._clearing) so the chip and the chat
-    show "clearing" while it runs (_is_clear_cmd; the tmux TUI /clear keeps its known fork-lane gap).
+    show "clearing" while it runs (_is_clear_cmd; the removed tmux backend's TUI /clear kept its known fork-lane gap).
 Synthetic data only.
 """
 import inspect
