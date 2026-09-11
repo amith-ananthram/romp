@@ -14709,8 +14709,8 @@ def _live_prompt_since(fsid):
     Memoized on the states file's (ino, mtime_ns, size) since 2026-09: the scan read every session's whole
     states log on every distiller pass, 31 ms of the tier's 135 ms idle pass on a 31-session state copy
     against under 1 ms of stats. The key is exact for this file's writers: every one APPENDS a row (the
-    tmux and SDK status hooks, the kernel's picker watcher and its interrupt idle row, the idle-dots CLI
-    all open it "a"), so no two versions share a size; the one write an identity memo cannot see, a
+    tmux and SDK status hooks, the kernel's picker watcher and its interrupt idle row all open it
+    "a"), so no two versions share a size; the one write an identity memo cannot see, a
     rewrite in place of equal size within one mtime tick, is a pattern nothing uses on this file (the
     evidence gate's value inputs are read by value because their fixtures did). Stat before read: a row
     landing between the two pairs an old identity with new content, which costs one extra scan next

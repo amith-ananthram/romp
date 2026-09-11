@@ -16858,9 +16858,8 @@ class TmuxBackend(sb.SessionBackend):
         behind into the open turn: a parked slash command landed as text. UserPromptSubmit flips the row to
         working the instant the CLI accepts a prompt — no transcript write, no parse, no lag.
 
-        Why not the row alone: Claude Code fires NO hook on an Esc-interrupt (hooks/tmux-status.sh and
-        romp-idle-dots both say so), so an interrupted session's row reads working until romp-idle-dots
-        heals it — two minutes at the earliest, and only once the pane looks idle. Trusted alone, every send
+        Why not the row alone: Claude Code fires NO hook on an Esc-interrupt (hooks/tmux-status.sh says
+        so), so an interrupted session's row reads working until the next pane prompt. Trusted alone, every send
         typed after a Stop parked for minutes; the cached parse had corrected exactly this, because the
         CLI's interrupt record (or the kernel's own idle record, _record_idle) ENDS the turn. So the two
         sources are ordered by the events they record, the way _compacting disbelieves a compacting row: the
@@ -16870,7 +16869,7 @@ class TmuxBackend(sb.SessionBackend):
         hook and its verdict wins (_session_working); otherwise the hook wins. "Newest record" is the
         largest atom `t` of the last turn — never turn["end"], which for an idle span at the tail is the
         PARSE time and would outrank every hook write; an idle atom's `t` is a real event (a states-file
-        record: the Stop hook's waiting, the kernel's interrupt idle, the idle-dots heal). The two shapes:
+        record: the Stop hook's waiting, the kernel's interrupt idle). The two shapes:
           * a turn just STARTED — row working with a fresh since, the transcript not yet written (the cache
             matches the file; the last turn ended BEFORE since) → the hook wins → True. The gap stays shut.
           * an Esc-INTERRUPT — row working with an old since; the interrupt record (or the idle record)
@@ -16885,7 +16884,7 @@ class TmuxBackend(sb.SessionBackend):
         assistant record; the permission notification after the tool_use) or before any record exists
         (UserPromptSubmit, before the prompt is written), so a same-second row is the later word. The one
         sticky exception is accepted: a PostToolUse rewrite and an Esc in the same second leave working
-        standing until romp-idle-dots heals it or the next pane prompt.
+        standing until the next pane prompt.
 
         This never parses — it also serves the WS handler, which must stay cheap — so headless (no chat or
         timeline client, or every session after a kernel restart until one connects) nothing would fill
@@ -31017,7 +31016,7 @@ def _refresh_parked_parse(sid, now):
     (build_session, build_timeline), the client-gated warmer, and a few gesture paths; headless — no chat or
     timeline client, or every session after a kernel restart until one connects — every live tmux session's
     cache is None from its first transcript write on, so busy() was the hook verbatim, and after a pane Esc
-    every `romp send` parked until romp-idle-dots healed the row, two minutes at the earliest: a regression
+    every `romp send` parked until the next pane prompt cleared the row: a regression
     the parent did not have, whose stale-cache read was idle. A cache miss IS the event "the transcript
     moved since we last read it", and this job answers it with the evidence the corroboration needs,
     bounded four ways: only sids whose backend DECLARES that its busy() may be overruled by the transcript

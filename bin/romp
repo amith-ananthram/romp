@@ -194,9 +194,9 @@ _romp_free_title() {   # <new-sid> <name>
 # rather than assumed from the user's dotfiles, so a packaged install works on
 # a stock tmux. Two scopes:
 #
-# SERVER glue (hooks + interrupt bindings) — functional, installed once per
-# launch and ONLY when absent, so a user's own config always wins. All hooked
-# scripts no-op for non-romp sessions.
+# SERVER glue (hooks) — functional, installed once per launch and ONLY when
+# absent, so a user's own config always wins. All hooked scripts no-op for
+# non-romp sessions.
 _romp_provision_server() {
     local bin_dir
     bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -208,20 +208,6 @@ _romp_provision_server() {
     # Drop dead sessions from postal peer rows the moment one closes.
     grep -q '^session-closed' <<<"$hooks" || tmux set-hook -g session-closed \
         "run-shell -b \"$bin_dir/romp-postal-service prune\""
-    # Clear the unread-mail badge when the user switches to a session's window.
-    grep -q '^client-session-changed' <<<"$hooks" || tmux set-hook -g client-session-changed \
-        "run-shell -b \"$bin_dir/romp-mail-clear #{q:client_session}\""
-    # Heal the stuck-working badge on a typed interrupt (Claude Code fires no
-    # hook on Esc/Ctrl-C). Pass-through bindings; skipped entirely if the user
-    # binds these keys themselves (the dotfiles versions match these).
-    local keys
-    keys="$(tmux list-keys -T root 2>/dev/null || true)"
-    if ! grep -q 'romp-interrupt-reset' <<<"$keys"; then
-        grep -Eq 'bind-key +(-T root +)?C-c\b' <<<"$keys" || \
-            tmux bind -n C-c send-keys C-c \; run-shell -b "$bin_dir/romp-interrupt-reset #{q:session_name}"
-        grep -Eq 'bind-key +(-T root +)?Escape\b' <<<"$keys" || \
-            tmux bind -n Escape send-keys Escape \; run-shell -b "$bin_dir/romp-interrupt-reset #{q:session_name}"
-    fi
 }
 
 # SESSION display decorations — the romp status line (live summary on the

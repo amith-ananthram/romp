@@ -42,7 +42,7 @@ PY
     [ -L "$HOME/.claude/hooks/tmux-status.sh" ]
     [[ "$(readlink "$HOME/.claude/hooks/tmux-status.sh")" == *"/hooks/tmux-status.sh" ]]
     [ "$(count_cmd Stop tmux-status.sh)" = "1" ]
-    [ "$(count_cmd Stop romp-summarize.sh)" = "1" ]
+    [ "$(count_cmd Stop romp-summarize.sh)" = "0" ]   # retired 2026-09-11, never registered again
     [ "$(count_cmd Stop romp-postal-drain.sh)" = "1" ]
     [ "$(count_cmd SessionStart romp-postal-ensure.sh)" = "1" ]
     [ "$(count_cmd PostToolUse tmux-status.sh)" = "1" ]
@@ -59,7 +59,7 @@ PY
     [ "$status" -eq 0 ]
     [[ "$output" == *"already registered"* ]]
     [ "$(count_cmd Stop tmux-status.sh)" = "1" ]
-    [ "$(count_cmd UserPromptSubmit romp-summarize.sh)" = "1" ]
+    [ "$(count_cmd UserPromptSubmit romp-summarize.sh)" = "0" ]
     # regression: a re-run used to FOLLOW the existing skill dir-symlink and drop a new link INSIDE
     # the repo (claude/skills/romp-postal/romp-postal → an absolute personal path). ln -sfn replaces
     # the link.
@@ -109,6 +109,102 @@ PY
     [ "$status" -eq 0 ]
 
     [ -f "$HOME/.claude/skills/romp/SKILL.md" ]
+}
+
+@test "install.sh: upgrading de-registers the retired announcer hook and unlinks it, leaving other hooks alone" {
+    # hooks/romp-summarize.sh (the live tmux phrase) was removed 2026-09-11 with the tmux backend's
+    # dead leaves. An install from before still registers it on UserPromptSubmit and Stop and holds a
+    # symlink to a file this repo no longer ships; upgrading must clear both, or Claude Code shells a
+    # missing path on every prompt and every turn end. Other hooks, romp's and the user's, stay.
+    mkdir -p "$HOME/.claude/hooks"
+    ln -s "$ROMP_DIR/hooks/romp-summarize.sh" "$HOME/.claude/hooks/romp-summarize.sh"
+    cat > "$HOME/.claude/settings.json" <<'JSON'
+{
+  "hooks": {
+    "UserPromptSubmit": [ { "hooks": [
+      { "type": "command", "command": "~/.claude/hooks/romp-summarize.sh", "timeout": 10, "async": true } ] } ],
+    "Stop": [ { "hooks": [
+      { "type": "command", "command": "my-own-hook.sh" },
+      { "type": "command", "command": "~/.claude/hooks/romp-summarize.sh", "timeout": 10, "async": true } ] } ],
+    "SubagentStop": [ { "hooks": [
+      { "type": "command", "command": "~/.claude/hooks/romp-summarize.sh", "timeout": 10, "async": true } ] } ]
+  }
+}
+JSON
+    run "$ROMP_DIR/install.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"romp-summarize.sh"* ]]          # the upgrade says what it removed
+    [ ! -L "$HOME/.claude/hooks/romp-summarize.sh" ]
+    [ ! -e "$HOME/.claude/hooks/romp-summarize.sh" ]
+    [ "$(count_cmd UserPromptSubmit romp-summarize.sh)" = "0" ]
+    [ "$(count_cmd Stop romp-summarize.sh)" = "0" ]
+    [ "$(count_cmd Stop my-own-hook.sh)" = "1" ]       # the user's own hook survives
+    [ "$(count_cmd Stop tmux-status.sh)" = "1" ]       # the live hooks are registered as before
+    python3 - "$HOME/.claude/settings.json" <<'PY'
+import json, sys
+s = json.load(open(sys.argv[1]))
+assert "SubagentStop" not in s["hooks"], list(s["hooks"])   # an event emptied by the removal is pruned, no litter
+PY
+}
+
+@test "install.sh: a real file named like the retired announcer hook is left alone" {
+    # Someone's own hook of that name is theirs; only the symlink install.sh once wrote is removed.
+    mkdir -p "$HOME/.claude/hooks"
+    echo "mine" > "$HOME/.claude/hooks/romp-summarize.sh"
+    run "$ROMP_DIR/install.sh"
+    [ "$status" -eq 0 ]
+    [ -f "$HOME/.claude/hooks/romp-summarize.sh" ]
+    [ "$(cat "$HOME/.claude/hooks/romp-summarize.sh")" = "mine" ]
+}
+
+@test "install.sh: the retired-hook prune leaves a user's own empty and matcher-only groups alone" {
+    # The prune drops only a group OUR removal emptied and an event it left with no groups. A user's
+    # placeholder group (a matcher with no hooks yet, an empty group on an event romp never registers)
+    # is theirs and must survive both a fresh install (which writes the file) and an upgrade re-run.
+    mkdir -p "$HOME/.claude"
+    cat > "$HOME/.claude/settings.json" <<'JSON'
+{
+  "hooks": {
+    "PreToolUse": [ { "matcher": "Bash", "hooks": [] } ],
+    "SubagentStart": [ { "hooks": [] } ],
+    "Stop": [ { "hooks": [
+      { "type": "command", "command": "~/.claude/hooks/romp-summarize.sh", "timeout": 10, "async": true } ] } ]
+  }
+}
+JSON
+    for _pass in fresh upgrade; do
+        run "$ROMP_DIR/install.sh"
+        [ "$status" -eq 0 ]
+        python3 - "$HOME/.claude/settings.json" <<'PY'
+import json, sys
+s = json.load(open(sys.argv[1]))["hooks"]
+assert s["PreToolUse"] == [{"matcher": "Bash", "hooks": []}], s.get("PreToolUse")
+assert s["SubagentStart"] == [{"hooks": []}], s.get("SubagentStart")
+stop = [h["command"] for g in s["Stop"] for h in g["hooks"]]
+assert not any(c.endswith("romp-summarize.sh") for c in stop), stop
+assert any(c.endswith("tmux-status.sh") for c in stop), stop
+PY
+    done
+}
+
+@test "install.sh: a symlink to someone else's live script of the retired hook's name survives" {
+    # Only a link install.sh could have written goes: one into this checkout, or a dangling one of that
+    # shape (a checkout since moved). A user's own live script linked from their dotfiles is theirs.
+    mkdir -p "$HOME/dotfiles/hooks" "$HOME/.claude/hooks"
+    echo "mine" > "$HOME/dotfiles/hooks/romp-summarize.sh"
+    ln -s "$HOME/dotfiles/hooks/romp-summarize.sh" "$HOME/.claude/hooks/romp-summarize.sh"
+    run "$ROMP_DIR/install.sh"
+    [ "$status" -eq 0 ]
+    [ -L "$HOME/.claude/hooks/romp-summarize.sh" ]
+    [ "$(cat "$HOME/.claude/hooks/romp-summarize.sh")" = "mine" ]
+    [[ "$output" != *"retired romp-summarize.sh"* ]]
+    # ...while a DANGLING link of that shape (a romp checkout that has since moved) is still removed
+    rm "$HOME/.claude/hooks/romp-summarize.sh"
+    ln -s "$HOME/old-romp/hooks/romp-summarize.sh" "$HOME/.claude/hooks/romp-summarize.sh"
+    run "$ROMP_DIR/install.sh"
+    [ "$status" -eq 0 ]
+    [ ! -L "$HOME/.claude/hooks/romp-summarize.sh" ]
+    [ ! -e "$HOME/.claude/hooks/romp-summarize.sh" ]
 }
 
 @test "install.sh: preflight fails clearly when node is missing" {

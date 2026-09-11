@@ -27,7 +27,6 @@ PY_SURFACES = [
     ("kernel/judge.py", "STATE", ""),
     ("postal/postal_service.py", "STATE", "/postal"),
     ("postal/postal_service.py", "NAMES_DIR", "/names"),
-    ("cli/idle_dots.py", "STATE", ""),
     # The live Codex smoke helper reads the root to find the installed Codex runtime before it
     # rebinds XDG_STATE_HOME to a scratch dir; nothing else executes it, so it is a row here.
     ("tests/smoke_codex_live.py", "RUNTIME_STATE", ""),
