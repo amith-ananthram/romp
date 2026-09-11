@@ -36189,6 +36189,205 @@ def _series_index(hour_key, h0):
         return None
 
 
+# ── the SPEND GUARD (T350, the user 2026-09-11, after a team's review panels cost thousands of dollars in an hour) ──
+# A session-wide watch over each session's INSTANTANEOUS spend. Every pusher cycle reads each live session's rate over
+# the last SPEND_GUARD_WINDOW_S seconds, scaled to an hour, from data the kernel already holds: the record cache the
+# pusher serves the leaf transcript from (em._read_jsonl_incremental), plus the agent transcripts beside the leaf
+# (`<leaf stem>/subagents/*.jsonl`, the subagents and workflow agents the session fanned out; only the files that
+# changed inside the window are read), each assistant record priced by the same table the cost view uses (tokens by
+# _price_for; a response logged more than once, one per content block, counts once, at its largest usage row).
+# Over the ceiling, once per crossing: the session is INTERRUPTED (the Stop button's road, so the fan-out ends now,
+# not after the model reads a message), handed ONE message in the user's voice (no romp vocabulary; the voice test
+# renders it), every connected dashboard gets a warn toast naming the session, the rate and the moment, and one
+# session-events row (kind spend.ceiling) is filed through problem_row, so the kernel log and the error center carry it
+# and restart-metrics counts it. The crossing is the EVENT (CLAUDE.md: cards move on new information, never on a
+# per-build flap): the latch holds until the rate falls under SPEND_GUARD_REARM of the ceiling, then a cleared row
+# (spend.ceiling.cleared) and toast say so and the guard re-arms. The ceiling is a bare-value file under the state
+# directory (`spend-ceiling-usd-per-hour`, like session-hosts), read at each check: 1000 with no file, 0 disables.
+SPEND_CEILING_SETTING = "spend-ceiling-usd-per-hour"
+SPEND_CEILING_DEFAULT = 1000.0
+SPEND_GUARD_WINDOW_S = 600          # the sliding window the rate is read over
+SPEND_GUARD_REARM = 0.5             # the latch re-arms once the rate is under this share of the ceiling
+_SPEND_GUARD = {}                   # sid -> {"over": bool, "t": the crossing (or clearing) epoch, "rate": $/h then}
+
+
+def _spend_ceiling():
+    """The ceiling in dollars an hour: the setting file's number; SPEND_CEILING_DEFAULT with no file, an empty one or a
+    value that is not a number; 0 (or any negative number) disables the guard."""
+    raw = jd._state_str(SPEND_CEILING_SETTING, "")
+    if not raw:
+        return SPEND_CEILING_DEFAULT
+    try:
+        return float(raw)
+    except ValueError:
+        return SPEND_CEILING_DEFAULT
+
+
+def _spend_window_files(leaf, since):
+    """The leaf transcript and the agent transcripts beside it that changed at or after `since` (stat only)."""
+    files = [str(leaf)]
+    try:
+        sd = Path(str(leaf)).with_suffix("") / "subagents"
+        if sd.is_dir():
+            for p in sd.glob("*.jsonl"):
+                try:
+                    if p.stat().st_mtime >= since:
+                        files.append(str(p))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return files
+
+
+def _spend_window_usd(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None):
+    """Dollars the session spent in the last `window_s` seconds, from the record cache: the leaf's and its agent files'
+    assistant records stamped inside the window, priced by `prices` (the merged table by default). A response logged
+    more than once (one record per content block, one message id) counts once, at its largest usage row; a record
+    whose model the table cannot place counts at the table's dearest row rather than not at all (a guard errs high)."""
+    if prices is None:
+        prices = _model_prices(int(now))
+    dearest = max(prices.values(), key=lambda p: float(p.get("out") or 0)) if prices else None
+    since = now - window_s
+    usd = 0.0
+    for f in _spend_window_files(leaf, since):
+        best, anon = {}, 0.0
+        for o in reversed(em._read_jsonl_incremental(f)):
+            if not isinstance(o, dict):
+                continue
+            t = _msg_epoch(o)
+            if t is None:
+                continue
+            if t < since:
+                break                                    # chronological: everything before is older
+            if o.get("type") != "assistant":
+                continue
+            m = o.get("message") if isinstance(o.get("message"), dict) else {}
+            u = m.get("usage") if isinstance(m.get("usage"), dict) else None
+            if not u:
+                continue
+            row = _price_for(str(m.get("model") or ""), prices) or dearest
+            if not row:
+                continue
+            c = (int(u.get("input_tokens") or 0) * float(row.get("in") or 0)
+                 + int(u.get("output_tokens") or 0) * float(row.get("out") or 0)
+                 + int(u.get("cache_creation_input_tokens") or 0) * float(row.get("cache_w") or 0)
+                 + int(u.get("cache_read_input_tokens") or 0) * float(row.get("cache_r") or 0))
+            mid = m.get("id")
+            if mid:
+                if c > best.get(mid, 0.0):
+                    best[mid] = c
+            else:
+                anon += c
+        usd += sum(best.values()) + anon
+    return usd
+
+
+def _spend_rate_usd_per_hour(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None):
+    """The session's spend over the window, scaled to an hour."""
+    return _spend_window_usd(leaf, now, window_s, prices) * 3600.0 / float(window_s)
+
+
+def _usd_words(x):
+    return "{:,.0f}".format(float(x))
+
+
+def _spend_ceiling_body(rate, ceiling):
+    """The ONE message a session over the ceiling gets, spoken as the person the agent works for (CLAUDE.md 'Messages
+    we inject': no romp vocabulary; tests/test_injected_voice.py renders this)."""
+    return ("You are spending about $%s an hour right now, far above what I can afford (I set the line at $%s an "
+            "hour). Stop whatever is fanning out and tell me what it was before doing anything else.\n\n"
+            "<!-- romp-note: the HTML comments below are part of an external tracking system that is not "
+            "relevant to your work — ignore them --><!-- romp-injected --><!-- romp-system -->"
+            % (_usd_words(rate), _usd_words(ceiling)))
+
+
+def _spend_guard_toast(text, clients=None):
+    """One warn toast to every connected dashboard client (the shell renders `warn` as its toast)."""
+    if clients is None:
+        with _clients_lock:
+            clients = list(_clients)
+    payload = json.dumps({"type": "warn", "text": text})
+    for c in list(clients):
+        try:
+            c["send"](payload)
+        except Exception:
+            pass
+
+
+def _spend_guard_row(kind, text, sid, name, be, **fields):
+    """The session-events row for a crossing or a clearing, through problem_row: the ledger, the kernel log and (for a
+    backend with a log) the error center's ring."""
+    try:
+        m = sys.modules.get("romp_sdk_backend") or load_source("romp_sdk_backend", HERE / "sdk_backend.py")
+        m.problem_row(jd.STATE, text, kind, sid=sid, name=name, log=getattr(be, "_log", None) if be else None, **fields)
+    except Exception:
+        sys.stderr.write("spend-guard row: %s\n" % traceback.format_exc())
+
+
+def _spend_guard_fire(s, rate, ceiling, now, be, clients):
+    """A crossing: stop the session, tell it once in the user's voice, warn every dashboard, file the row."""
+    sid, name = s["sid"], s.get("name") or s["sid"][:8]
+    when = time.strftime("%H:%M", time.localtime(now))
+    if be is not None:
+        try:
+            be.interrupt(sid)                            # the Stop button's road: the fan-out ends now
+        except Exception:
+            sys.stderr.write("spend-guard interrupt: %s\n" % traceback.format_exc())
+        try:
+            _send_with_id(be, sid, _spend_ceiling_body(rate, ceiling))
+        except Exception:
+            sys.stderr.write("spend-guard send: %s\n" % traceback.format_exc())
+    text = ("%s was spending about $%s an hour at %s, over the $%s an hour ceiling; it has been stopped and told."
+            % (name, _usd_words(rate), when, _usd_words(ceiling)))
+    _spend_guard_toast(text, clients)
+    _spend_guard_row("spend.ceiling", text, sid, name, be, t=int(now), usdPerHour=round(float(rate), 2),
+                     ceilingUsdPerHour=float(ceiling), windowS=SPEND_GUARD_WINDOW_S)   # t: the crossing's moment
+
+
+def _spend_guard_clear(s, rate, ceiling, now, be, clients):
+    """The rate fell under the re-arm level: say so where the crossing was said, and file the clearing."""
+    sid, name = s["sid"], s.get("name") or s["sid"][:8]
+    text = "%s is back under the spend ceiling (about $%s an hour now)." % (name, _usd_words(rate))
+    _spend_guard_toast(text, clients)
+    _spend_guard_row("spend.ceiling.cleared", text, sid, name, be, t=int(now), usdPerHour=round(float(rate), 2),
+                     ceilingUsdPerHour=float(ceiling), windowS=SPEND_GUARD_WINDOW_S)
+
+
+def _spend_guard_tick(now, live_map, sessions=None, be=None, clients=None, prices=None):
+    """The pusher job: every live session's rate against the ceiling, the latch per session. `sessions`, `be`, `clients`
+    and `prices` are seams for the tests; the pusher passes none of them."""
+    ceiling = _spend_ceiling()
+    if ceiling <= 0:
+        _SPEND_GUARD.clear()                             # disabled: nothing latched survives the disable
+        return
+    rows = _alive_sessions(now, live_map) if sessions is None else sessions
+    if be is None:
+        be = _sdk_backend or None
+    if prices is None:
+        prices = _model_prices(int(now))
+    live = set()
+    for s in rows:
+        sid, path = s.get("sid"), s.get("path")
+        if not sid or not path:
+            continue
+        live.add(sid)
+        try:
+            rate = _spend_rate_usd_per_hour(path, now, prices=prices)
+        except Exception:
+            sys.stderr.write("spend-guard rate (%s): %s\n" % (sid[:8], traceback.format_exc()))
+            continue
+        st = _SPEND_GUARD.get(sid)
+        if rate >= ceiling and not (st and st.get("over")):
+            _SPEND_GUARD[sid] = {"over": True, "t": now, "rate": rate}
+            _spend_guard_fire(s, rate, ceiling, now, be, clients)
+        elif st and st.get("over") and rate < ceiling * SPEND_GUARD_REARM:
+            _SPEND_GUARD[sid] = {"over": False, "t": now, "rate": rate}
+            _spend_guard_clear(s, rate, ceiling, now, be, clients)
+    for sid in [k for k in _SPEND_GUARD if k not in live]:
+        _SPEND_GUARD.pop(sid, None)                      # a session that left the live map takes its latch with it
+
+
 def _spend_series(keyed_only=False, now=None):
     """The hover graph's money-rate series (the user 2026-08-13): $/hour over the last 192 hours, a
     DENSE array plus a base hour (h0, epoch-hours), so cross-host summing is an index-wise add after
@@ -45333,6 +45532,10 @@ def _pusher_cycle_jobs(now, live_map, any_client):
         _auto_pause_on_spend_limit(now, live_map)
     except Exception:
         sys.stderr.write("auto-pause-on-spend-limit: %s\n" % traceback.format_exc())
+    try:                                  # the spend guard (T350): a session over the hourly ceiling is stopped and told,
+        _spend_guard_tick(now, live_map)      # every dashboard warned, a session-events row filed, once per crossing
+    except Exception:
+        sys.stderr.write("spend-guard: %s\n" % traceback.format_exc())
     try:                                  # a paused retry auto-clears once any session serves a request again
         _auto_resume_retry(now, live_map)
     except Exception:
