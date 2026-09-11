@@ -9055,6 +9055,8 @@ except Exception:
 
 
 _CKPT_SETTLE_SEEN = {}          # sid -> (turn-end key, states-log stat) at the last checkpoint write of its files
+_CKPT_PERIODIC_SEEN = {}        # sid -> (leaf stat, monotonic time) at the last PERIODIC write (see _persist_checkpoints)
+CKPT_PERIOD_S = float(os.environ.get("ROMP_CKPT_PERIOD_S", "30"))   # a session mid-turn for hours writes at least this often
 
 
 def _session_fold_files(sid, leaf):
@@ -9101,15 +9103,25 @@ def _persist_checkpoints(now):
     it. A session whose turn runs for hours still writes at every states-log row (a working/awaiting transition is an
     event; a timer is not). Only dirty checkpoints are written; a session with no evidence change writes nothing.
     Every leaf fold is brought current first (_prime_leaf_folds), so the write holds a cursor for each of them.
-    Exit writes everything dirty (_drain_and_exit). Returns how many files were written."""
+    A second trigger (the restart-path work, 2026-09-11): a session whose LEAF moved since its last periodic
+    write, at most once per CKPT_PERIOD_S, so a turn that runs for an hour with no states-log row still keeps
+    its checkpoints and assembly document close to current, and the exit path finds little left to write (the
+    exit's own writes cost 4 to 6 s of a 20 s restart when they carried everything). Exit still writes everything
+    dirty (_drain_and_exit). Returns how many files were written."""
     written = 0
+    mono = time.monotonic()
     for s in _sessions(now):
         sid, leaf = s.get("sid"), s.get("path")
         if not sid or not leaf:
             continue
         key = (_turn_end_key(sid), _stat_key(jd.STATE / "states" / (sid + ".jsonl")))
-        if _CKPT_SETTLE_SEEN.get(sid) == key:
+        settle_due = _CKPT_SETTLE_SEEN.get(sid) != key
+        leaf_stat = _stat_key(leaf)
+        last = _CKPT_PERIODIC_SEEN.get(sid)
+        periodic_due = last is None or (last[0] != leaf_stat and mono - last[1] >= CKPT_PERIOD_S)
+        if not settle_due and not periodic_due:
             continue
+        _CKPT_PERIODIC_SEEN[sid] = (leaf_stat, mono)
         _prime_leaf_folds(leaf)
         dirty = set(em.checkpoint_dirty())
         mine = _session_fold_files(sid, leaf) & dirty
@@ -9123,6 +9135,8 @@ def _persist_checkpoints(now):
         _CKPT_SETTLE_SEEN[sid] = key
     if len(_CKPT_SETTLE_SEEN) > 4096:
         _CKPT_SETTLE_SEEN.clear()
+    if len(_CKPT_PERIODIC_SEEN) > 4096:
+        _CKPT_PERIODIC_SEEN.clear()
     return written
 
 
@@ -15000,6 +15014,7 @@ def _sdk_locked():
                 log=_backend_log,   # best-effort, through _exit_log: SdkBackend.drain logs its summary after
                 #                     its work is done, and a stderr that raises there must not carry the result away
                 reconcile=True,   # boot reconcile: reap orphaned CLIs, resume cut turns, deliver persisted queues
+                boot_phase=_mark_boot,   # censusDone / attachDone land on the boot row and release the judges' first pass
                 # the API-health aggregator's boot clock: this kernel's own _STARTED, which the aggregator
                 # truncates to the millisecond (the precision of every stamp in the payload) and serves as
                 # /api-health's bootAt, so a bucket the boot seeded is unknown since the kernel's own start
@@ -21801,7 +21816,10 @@ def _audit_parent_gone(manager_pid, now=None):
 RESTART_CUTS_FILE = jd.STATE / "restart-cuts.jsonl"
 
 
-def _restart_cut_row(drain_res, watches_armed=0, audit_reason="", now=None):
+EXIT_ASM_BUDGET_S = float(os.environ.get("ROMP_EXIT_ASM_BUDGET_S", "1.5"))   # the exit's assembly-document writes, bounded
+
+
+def _restart_cut_row(drain_res, watches_armed=0, audit_reason="", now=None, phases=None):
     """One ledger row per restart — what THIS restart cut (T121: the drain's effect is measurable
     only if every restart writes its row, so a clean drain's row with an empty cutTurns list is the
     success metric, not noise). cutTurns names the sessions whose in-flight turns the drain
@@ -21824,6 +21842,8 @@ def _restart_cut_row(drain_res, watches_armed=0, audit_reason="", now=None):
            "reaped": int(d.get("reaped") or 0),
            "watchesArmed": int(watches_armed or 0),
            "reason": str(audit_reason or "")}
+    if isinstance(phases, dict):           # the exit's phases: ckptS (folds primed, checkpoints and assembly documents
+        row.update({k: v for k, v in phases.items() if k in ("ckptS", "drainS")})   # written), drainS (the sessions closed)
     row.update(_kernel_process_sample())   # T304: the kernel's own size and CPU at the end of its life
     return row
 
@@ -21852,10 +21872,22 @@ def _append_restart_cut(row):
         pass
 
 
-_BOOT_MARKS = {}                                   # {"firstServe": t, "reconcileDone": t} — see _mark_boot
-_BOOT_MARKS_LOCK = threading.Lock()                # the two marks land on DIFFERENT threads (main vs the
-#                                                    lazy backend builder) — without this, both could see
-#                                                    "both present" and double-append the boot row
+_BOOT_MARKS = {}                                   # {"firstServe": t, "reconcileDone": t, "censusDone": t, "attachDone": t} — see _mark_boot
+_BOOT_MARKS_LOCK = threading.Lock()                # the marks land on DIFFERENT threads (main, the lazy backend
+#                                                    builder, the boot reconcile) — without this, two could see
+#                                                    "all present" and double-append the boot row
+_BOOT_ATTACHED = threading.Event()                 # set at attachDone: every boot re-attach to a live session host has
+#                                                    its hello (or died), or there was none — the producer's first
+#                                                    judges' pass waits on this (bounded) so the census and the
+#                                                    attaches are not slowed by cold refolds in the same interpreter
+BOOT_JUDGE_HOLD_S = float(os.environ.get("ROMP_BOOT_JUDGE_HOLD_S", "8"))   # the bound on that wait
+BOOT_ROW_BACKSTOP_S = 30.0                         # the boot row is written without attachDone after this long (the pusher's tick)
+
+
+def _wait_boot_attached(timeout=None):
+    """The producer's first pass waits here: True when attachDone landed, False when the bound passed first
+    (a wedged attach must never hold the judges; the bound is loud in the boot row's attachTimedOut)."""
+    return _BOOT_ATTACHED.wait(BOOT_JUDGE_HOLD_S if timeout is None else timeout)
 
 
 def _append_boot_settled(first_serve, reconcile_done):
@@ -21879,6 +21911,13 @@ def _append_boot_settled(first_serve, reconcile_done):
         row = {"t": int(time.time()), "pid": os.getpid(), "bootSettled": True,
                "firstServe": round(first_serve, 2), "reconcileDone": round(reconcile_done, 2),
                "settleS": round(reconcile_done - first_serve, 2)}
+        with _BOOT_MARKS_LOCK:                 # the restart-path phases (2026-09-11): when the census ended and when
+            marks = dict(_BOOT_MARKS)          # the last boot re-attach settled, both relative to firstServe
+        for kind, field in (("censusDone", "censusS"), ("attachDone", "attachS")):
+            if isinstance(marks.get(kind), float):
+                row[field] = round(marks[kind] - first_serve, 2)
+        if "attachDone" not in marks:
+            row["attachTimedOut"] = True       # the backstop wrote the row: an attach never settled in time
         row.update(_kernel_process_sample())   # T304: the just-born kernel's size, the series' other bookend
         if prev_cut and isinstance(prev_cut.get("t"), int) and first_serve >= prev_cut["t"]:
             row["prevCutT"] = prev_cut["t"]
@@ -21889,23 +21928,52 @@ def _append_boot_settled(first_serve, reconcile_done):
 
 
 def _mark_boot(kind):
-    """One boot milestone (firstServe = the accept loop starts; reconcileDone = the SDK backend's
-    boot reconcile returned, or was found unavailable — the phase is over either way). The backend
-    builds LAZILY, so the two marks land in either order; whichever lands second appends the
-    boot-settled row. Idempotent per kind, never raises."""
+    """One boot milestone: firstServe (the accept loop starts), reconcileDone (the SDK backend was built, or found
+    unavailable), censusDone (the boot reconcile has read the process table, the leases and every registry row)
+    and attachDone (every boot re-attach to a live session host has its hello or died; immediate when there is
+    none). The marks land on different threads in any order. The boot-settled row is appended once, when
+    firstServe, reconcileDone and attachDone are all in, or BOOT_ROW_BACKSTOP_S after reconcileDone when an
+    attach never settles (the row then says attachTimedOut). attachDone also releases the producer's first
+    judges' pass (_wait_boot_attached). Idempotent per kind, never raises."""
     try:
         with _BOOT_MARKS_LOCK:
             if kind in _BOOT_MARKS:
                 return
             _BOOT_MARKS[kind] = time.time()
-            write = "firstServe" in _BOOT_MARKS and "reconcileDone" in _BOOT_MARKS \
-                and not _BOOT_MARKS.get("_row")
-            if write:
-                _BOOT_MARKS["_row"] = True         # exactly one row per boot, whichever thread wins
+            write = _boot_row_due_locked()
+        if kind == "attachDone":
+            _BOOT_ATTACHED.set()
         if write:
             _append_boot_settled(_BOOT_MARKS["firstServe"], _BOOT_MARKS["reconcileDone"])
     except Exception:
         pass
+
+
+def _boot_row_due_locked():
+    """Under _BOOT_MARKS_LOCK: claim the one boot row when its three marks are in."""
+    if _BOOT_MARKS.get("_row"):
+        return False
+    if all(k in _BOOT_MARKS for k in ("firstServe", "reconcileDone", "attachDone")):
+        _BOOT_MARKS["_row"] = True             # exactly one row per boot, whichever thread wins
+        return True
+    return False
+
+
+def _boot_row_backstop(now=None):
+    """The pusher's tick (no thread of its own): BOOT_ROW_BACKSTOP_S after reconcileDone with attachDone still missing,
+    write the row without it (the row then says attachTimedOut). Idempotent; a no-op once the row is written."""
+    try:
+        now = time.time() if now is None else now
+        with _BOOT_MARKS_LOCK:
+            if _BOOT_MARKS.get("_row") or "firstServe" not in _BOOT_MARKS or "reconcileDone" not in _BOOT_MARKS:
+                return False
+            if now - _BOOT_MARKS["reconcileDone"] < BOOT_ROW_BACKSTOP_S:
+                return False
+            _BOOT_MARKS["_row"] = True
+        _append_boot_settled(_BOOT_MARKS["firstServe"], _BOOT_MARKS["reconcileDone"])
+        return True
+    except Exception:
+        return False
 
 
 # ── going down (`romp down`) ─────────────────────────────────────────────────────
@@ -46045,6 +46113,11 @@ def _run_tier(fn):
 
 def _producer():
     _prev_wall = _prev_mono = None
+    # the FIRST pass waits (bounded) for the boot's census and re-attaches: the producer's cold refolds and the
+    # boot reconcile share one interpreter, and a census that competes with them took 5.6 s where 1.4 s is the
+    # uncontended figure (the restart-path work, 2026-09-11); a wedged attach never holds the judges past the bound
+    if not _wait_boot_attached():
+        sys.stderr.write("producer: the boot's attaches did not settle within %.0f s; judging anyway\n" % BOOT_JUDGE_HOLD_S)
     while not _LOOPS_STOP.is_set():
         _nw, _nm = time.time(), time.monotonic()        # detect a host suspension (laptop slept) since the
         _iv = _detect_suspend(_prev_wall, _prev_mono, _nw, _nm)   # last tick: wall jumped past monotonic
@@ -46235,6 +46308,10 @@ def _pusher_cycle_jobs(now, live_map, any_client):
         _persist_checkpoints(now)         # move (T323 stage 3): the next kernel folds the tails, not the files
     except Exception:
         sys.stderr.write("checkpoints: %s\n" % traceback.format_exc())
+    try:                                  # the boot row's backstop: written without attachDone once the bound has passed
+        _boot_row_backstop(now)
+    except Exception:
+        pass
     try:                                  # hitting a usage limit auto-engages the retry-pause (before the resume check)
         _auto_pause_on_limit()
     except Exception:
@@ -56403,6 +56480,7 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
         _drain_sessions = [_s for _s in _sessions(time.time()) if _s.get("sid") and _s.get("path")]
     except Exception:
         _drain_sessions = []
+    _phases = {}                          # the exit's phase timings, for the cut row (the restart-path work, 2026-09-11)
     _prime_t0, _primed, _skipped = time.monotonic(), 0, 0
     for _s in _drain_sessions:            # every RESIDENT leaf's folds current, so each leaves a cursor for the next kernel;
         if time.monotonic() - _prime_t0 > 1.0:   # bounded: the SDK drain keeps its 2 s under the manager's 5 s grace
@@ -56414,11 +56492,18 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
         em.checkpoint_write_dirty()       # every fold checkpoint that moved since its last write (T323 stage 3)
     except Exception:
         pass
+    _asm_t0, _asm_skipped = time.monotonic(), 0
     try:                                  # the assembly documents of every session's leaf (T323 stage 4a): a whole entry
-        for _s in _drain_sessions:        # with a boundary writes, the rest are counted skips; bounded by the drain
+        for _s in _drain_sessions:        # with a boundary writes, the rest are counted skips; BOUNDED (the periodic
+            if time.monotonic() - _asm_t0 > EXIT_ASM_BUDGET_S:   # writer keeps them close; what is left waits for the next settle)
+                _asm_skipped += 1; continue
             em.asm_checkpoint_write(_s["path"], _s["sid"], _display_sdk_human(_s["sid"]))
     except Exception:
         pass
+    if _asm_skipped:
+        _exit_log("romp-kernel: drain left %d assembly document(s) unwritten (%.1f s budget)\n" % (_asm_skipped, EXIT_ASM_BUDGET_S))
+    _phases["ckptS"] = round(time.monotonic() - _prime_t0, 2)
+    _drain_t0 = time.monotonic()
     try:
         if be is not None and hasattr(be, "drain"):
             res = be.drain(2.0)
@@ -56444,8 +56529,9 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
                     reason_err = traceback.format_exc().strip().splitlines()[-1][:200]
                     _exit_log("romp-kernel: the signal's reason helper failed, the cut row carries the "
                               "plain verdict and reasonError: %s\n" % reason_err)
+            _phases["drainS"] = round(time.monotonic() - _drain_t0, 2)
             row = _restart_cut_row(res, watches_armed=len(_pr_watches) + len(_watches),
-                                   audit_reason=reason)
+                                   audit_reason=reason, phases=_phases)
             if audit:
                 row["auditT"] = int(audit["t"])     # the audit row this cut CONSUMED (see _recent_restart_audit)
             if err:
