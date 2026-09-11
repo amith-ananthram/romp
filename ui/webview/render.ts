@@ -6786,8 +6786,10 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
 }
 // A remote host coming or going flips the disconnected marks on its tabs. The federation manager fires
 // this only when the reachable set actually CHANGES (its own /tunnels poll is the event), so this is a
-// repaint per connect/drop, not per poll (the user 2026-07-29).
-window.addEventListener("romp-hosts", () => { renderTabs(); });
+// repaint per connect/drop, not per poll (the user 2026-07-29). The composer's overlay names the active session
+// with the same host span (T328), so it re-syncs on the same event: its mark would otherwise lag the tab's until
+// the next keystroke, resize, rename or tab switch.
+window.addEventListener("romp-hosts", () => { renderTabs(); syncComposerPh(); });
 // a dial attempt to a remote host began or ended (federation.ts dialEvent): the host-down foot's swirl
 // spins while one is in flight, as of the last /tunnels poll, so it repaints on this event and on nothing else
 window.addEventListener("romp:hostDial", () => { syncHostOfflineFoot(); });
@@ -13100,13 +13102,19 @@ function syncComposerPh(): void {
   const live = liveSession(activeId);
   const meta = activeId ? tabMeta.get(activeId) : undefined;
   const colorBg = (live?.color?.bg || meta?.color?.bg) || null;
-  const parts = phParts(ta.placeholder, live?.name || meta?.name || "");
+  const parts = phParts(ta.placeholder, live?.name || meta?.name || "", activeId);   // the sid tells a remote host's prefix from a name (host-prefix.ts)
   const show = parts.kind === "named" && !ta.value && !ta.disabled && ta.offsetParent !== null;
   ph.style.display = show ? "" : "none";
   ta.classList.toggle("ph-on", show);
   if (!show || parts.kind !== "named") return;
   ph.replaceChildren();
   ph.appendChild(document.createTextNode(parts.before));
+  if (parts.host) {
+    // a remote session's "host:" is metadata, not part of the name (T328, the user 2026-09-10: the box read the whole
+    // "host:name" bold in the identity colour): the tab label's own renderer paints it (host-prefix.ts hostNameNodes),
+    // the quiet .host-prefix span, marked when the host's link is down, and only the name below is bold and coloured
+    ph.appendChild(hostNameNodes(parts.host + parts.name, activeId)[0]);
+  }
   const nm = el("b", "composer-ph-name"); nm.textContent = parts.name;
   if (colorBg) nm.style.color = colorBg; else nm.style.removeProperty("color");
   ph.appendChild(nm);

@@ -55,16 +55,4 @@ no separate implementation to point at.
 |---|---|---|
 | `romp-update` | `cli/update.py` | Pushes this machine's committed romp to attached remote kernels and restarts them (`romp update [host]`). |
 | `romp-version` | `cli/version.py` | Version report across the moving parts (`romp version`). |
-| `romp-idle-dots` | `cli/idle_dots.py` | tmux backend only: heals stranded `working` state / fades idle tab dots by inspecting tmux panes. Fired from `hooks/tmux-status.sh`. |
 | `romp-spend-rebuild` | `cli/spend_rebuild.py` | Recounts the token columns of the spend ledger (`spend.json`) from the transcripts' per-call usage; dollars and turn counts untouched. Dry run by default, `--apply` writes with a backup (`romp spend-rebuild`). |
-
-## tmux backend only (real files)
-
-Still wired, only meaningful for tmux sessions. If the tmux backend is ever
-dropped, these (plus `romp-askparse`, `romp-idle-dots`, and the tmux glue in
-`romp` + dotfiles `tmux.conf`) go with it.
-
-| File | Lang | What it is |
-|---|---|---|
-| `romp-interrupt-reset` | Bash | tmux Ctrl-C/Esc bind: resets a stuck `working` state (Claude fires no interrupt hook). |
-| `romp-mail-clear` | Bash | Clears the postal badge in the tmux status bar on session switch. |

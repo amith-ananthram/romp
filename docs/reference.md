@@ -2430,9 +2430,3 @@ Effective immediately, no restart.
 `touch` to **disable**, `rm` to re-enable:
 
 - `~/.claude/romp-postal-off`: the postal service
-
-`touch` to **enable**, `rm` to turn back off:
-
-- `~/.claude/romp-summarize-on`: the live tmux activity phrase. Off by default,
-  because it spends tokens on every turn and the Claude Code backend reports
-  what a session is doing without it.
