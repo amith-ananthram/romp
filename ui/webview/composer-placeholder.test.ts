@@ -16,15 +16,23 @@ const SHORT = "Message this session…  (/ for commands)";
 const PHONE = "Message this session…";
 
 test("every resting form takes the session's name in place of 'this session', keeping the ellipsis and the hint", () => {
-  assert.deepEqual(phParts(FULL, "web"), { kind: "named", before: "Message ", name: "web", after: "…  (⏎ send · ⇧⏎ newline · ⌘⏎ stage · ↑ history · / for commands)" });
-  assert.deepEqual(phParts(SHORT, "api"), { kind: "named", before: "Message ", name: "api", after: "…  (/ for commands)" });
-  assert.deepEqual(phParts(PHONE, "tests"), { kind: "named", before: "Message ", name: "tests", after: "…" });
+  assert.deepEqual(phParts(FULL, "web"), { kind: "named", before: "Message ", host: null, name: "web", after: "…  (⏎ send · ⇧⏎ newline · ⌘⏎ stage · ↑ history · / for commands)" });
+  assert.deepEqual(phParts(SHORT, "api"), { kind: "named", before: "Message ", host: null, name: "api", after: "…  (/ for commands)" });
+  assert.deepEqual(phParts(PHONE, "tests"), { kind: "named", before: "Message ", host: null, name: "tests", after: "…" });
   assert.equal(RESTING_PREFIX, "Message this session", "the prefix the resting forms share (composerRestingPlaceholder)");
 });
 
-test("the name is trimmed and a remote session's host prefix rides along as the tab shows it", () => {
+test("the name is trimmed; a remote session's host is split off as the tab label splits it (T328): the host quiet, only the name bold", () => {
   assert.equal((phParts(FULL, "  web ") as any).name, "web");
-  assert.equal((phParts(FULL, "TESTHOST:api") as any).name, "TESTHOST:api");
+  const LOCAL = "aaaaaaaa-1111-2222-3333-444444444444", REMOTE = "TESTHOST:" + LOCAL;
+  // the split is the sid's own prefix (host-prefix.ts hostPrefix): federation prefixes both the name and the sid
+  assert.deepEqual(phParts(PHONE, "TESTHOST:api", REMOTE), { kind: "named", before: "Message ", host: "TESTHOST:", name: "api", after: "…" });
+  assert.deepEqual(phParts(FULL, "TESTHOST:api", REMOTE).kind === "named" && (phParts(FULL, "TESTHOST:api", REMOTE) as any).host, "TESTHOST:");
+  // a LOCAL session with a colon in its name is not a remote one: the sid carries no prefix, so the name stays whole
+  assert.deepEqual(phParts(PHONE, "TESTHOST:api", LOCAL), { kind: "named", before: "Message ", host: null, name: "TESTHOST:api", after: "…" });
+  assert.deepEqual(phParts(PHONE, "api", LOCAL), { kind: "named", before: "Message ", host: null, name: "api", after: "…" }, "a local session: unchanged");
+  assert.deepEqual(phParts(PHONE, "api", REMOTE), { kind: "named", before: "Message ", host: null, name: "api", after: "…" }, "a remote sid whose name lacks the prefix (an older frame): whole, never a false host");
+  assert.deepEqual(phParts(PHONE, "web"), { kind: "named", before: "Message ", host: null, name: "web", after: "…" }, "no sid at all (the pure callers): a local form");
 });
 
 test("other placeholders show as they are, and a session with no name yet keeps the plain resting text", () => {
@@ -39,7 +47,14 @@ test("render.ts: the overlay mirrors the placeholder, wears the identity colour,
   assert.match(RENDER, /import \{ phParts \} from "\.\/composer-placeholder";/);
   const fn = RENDER.slice(RENDER.indexOf("function syncComposerPh(): void {"), RENDER.indexOf("\n}\n", RENDER.indexOf("function syncComposerPh(): void {")));
   assert.ok(fn.length > 0, "syncComposerPh exists");
-  assert.match(fn, /const parts = phParts\(ta\.placeholder, live\?\.name \|\| meta\?\.name \|\| ""\);/);
+  assert.match(fn, /const parts = phParts\(ta\.placeholder, live\?\.name \|\| meta\?\.name \|\| "", activeId\);/, "the sid rides along: a remote host's prefix is told from the name by the sid (host-prefix.ts)");
+  // T328: the host is the tab label's own quiet span (hostNameNodes: .host-prefix, marked when the host is down), a
+  // sibling of the bold name, never inside it
+  assert.match(fn, /if \(parts\.host\) \{[\s\S]*?ph\.appendChild\(hostNameNodes\(parts\.host \+ parts\.name, activeId\)\[0\]\);\s*\n\s*\}\s*\n\s*const nm = el\("b", "composer-ph-name"\); nm\.textContent = parts\.name;/);
+  assert.doesNotMatch(CSS, /#composer-ph \.host-prefix/, "no dress of the overlay's own for the host: the global .host-prefix rule, the tab label's, is the one");
+  // the host's link dropping or returning flips the span's .off mark on the tab (the romp-hosts event, host-offline.test.ts);
+  // the overlay's span is repainted on the same event, so the two never disagree until the next keystroke
+  assert.match(RENDER, /window\.addEventListener\("romp-hosts", \(\) => \{ renderTabs\(\); syncComposerPh\(\); \}\)/);
   assert.match(fn, /parts\.kind === "named" && !ta\.value/, "the styled form only for the resting placeholder, only while the box is empty");
   assert.match(fn, /ta\.classList\.toggle\("ph-on", show\);/, "the native placeholder goes transparent beneath the overlay");
   assert.match(fn, /const colorBg = \(live\?\.color\?\.bg \|\| meta\?\.color\?\.bg\) \|\| null;/, "the identity colour: the live session's, else the strip's own word on the tab (a skeleton's), never a stale session (skeleton-tabs-wiring)");
