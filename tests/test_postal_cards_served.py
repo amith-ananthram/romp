@@ -170,6 +170,12 @@ catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
 const measure = () => page.evaluate(() => {
   const probe = document.createElement("div"); probe.style.background = "var(--box-bg)"; document.body.appendChild(probe);
   const boxBg = getComputedStyle(probe).backgroundColor; probe.remove();
+  // an oklch() relative colour (the incoming card's tint, T337b) comes back as oklch(...) from getComputedStyle; the
+  // contrast arithmetic below reads rgb, so a 1x1 canvas resolves it (an rgba() carrying alpha is left as it is)
+  const asRGB = (css) => { if (!/^(oklch|oklab|color)\(/.test(css) || /\//.test(css)) return css;
+    const cv = document.createElement("canvas"); cv.width = cv.height = 1; const ctx = cv.getContext("2d");
+    ctx.fillStyle = css; ctx.fillRect(0, 0, 1, 1); const d = ctx.getImageData(0, 0, 1, 1).data;
+    return "rgb(" + d[0] + ", " + d[1] + ", " + d[2] + ")"; };
   const cards = Array.from(document.querySelectorAll(".turn-postal-service")).map((t) => {
     const n = t.querySelector(".notice");
     const kind = t.querySelector(".postal-kind");
@@ -219,7 +225,7 @@ const measure = () => page.evaluate(() => {
       peerText: peer ? peer.textContent : null, peerBg: peer ? getComputedStyle(peer).backgroundColor : null,
       selfText: self ? self.textContent : null, selfBg: self ? getComputedStyle(self).backgroundColor : null,
       selfWidth: self ? Math.round(self.getBoundingClientRect().width) : null,
-      bg: cs.backgroundColor, border: cs.borderTopStyle, provisional: n.classList.contains("queued-bubble"),
+      bg: asRGB(cs.backgroundColor), border: cs.borderTopStyle, provisional: n.classList.contains("queued-bubble"),
       opacity: cs.opacity,   // T337: the provisional dress fades by its colours, never by an element opacity
       // the provisional dress at either density: the card's max-width as computed, and the box it actually takes
       maxWidth: cs.maxWidth, width: Math.round(n.getBoundingClientRect().width),
@@ -452,14 +458,15 @@ class ServedPostalCards(unittest.TestCase):
         self.assertEqual(card("Take the cap decision")["mark"]["paths"], 2, "bounced keeps the cross")
         self.assertEqual(card("Ignore my last note")["mark"]["paths"], 2, "recalled keeps the return arrow")
         self.assertIn("isolated", card("Take the cap decision")["title"], "a bounce carries its reason")
-        # (3) both ends, each in its session's colour; no wash; boxed vs slim
+        # (3) both ends, each in its session's colour; the incoming card's tint in the peer's hue (the user 2026-09-11,
+        # restoring what T302 removed the day before); boxed vs slim
         for c in cards:
             self.assertTrue(c["peerText"], c)
             self.assertTrue(c["selfText"] and "web" in c["selfText"], "this session's own end: %r" % c)
             self.assertEqual(c["selfBg"], "rgb(156, 210, 255)", "web's own colour on its chip: %r" % c)
             if c["dir"] == "in":
                 self.assertTrue(c["boxed"] and not c["slim"], "incoming is boxed: %r" % c)
-                self.assertEqual(c["bg"], wide["boxBg"], "no wash: the box is the plain box colour: %r" % c)
+                self.assertNotEqual(c["bg"], wide["boxBg"], "the tint: the peer's hue on the ground, never the plain box: %r" % c)
                 if not c["collapsible"]:
                     self.assertEqual(c["gistWrap"], "normal", "a boxed one-liner with nothing to fold wraps, never an ellipsis with nothing behind it: %r" % c)
             else:
@@ -467,6 +474,18 @@ class ServedPostalCards(unittest.TestCase):
             self.assertFalse(c["selfDot"], "the own chip wears no working dot: %r" % c)
         self.assertEqual(card("Take the retry-loop")["peerBg"], "rgb(30, 161, 235)", "api's colour on its chip")
         self.assertEqual(card("Heads-up")["peerBg"], "rgb(84, 178, 4)", "tests' colour on its chip")
+        # the tint is the PEER's hue: two peers' incoming cards wear two grounds, in both themes, and a landed sent card none
+        for m, name in ((wide, "dark"), (light, "light")):
+            grounds = {}
+            for c in m["cards"]:
+                if c["dir"] == "in":
+                    self.assertNotEqual(c["bg"], m["boxBg"], "%s: the incoming card is tinted: %r" % (name, c))
+                    grounds.setdefault(c["peerText"], set()).add(c["bg"])
+                elif c["boxed"] and not c["provisional"]:
+                    self.assertEqual(c["bg"], m["boxBg"], "%s: a landed boxed sent card keeps the plain box: %r" % (name, c))
+            self.assertGreaterEqual(len(grounds), 2, "%s: two peers seen: %r" % (name, grounds))
+            self.assertTrue(all(len(v) == 1 for v in grounds.values()), "%s: one ground per peer: %r" % (name, grounds))
+            self.assertEqual(len({next(iter(v)) for v in grounds.values()}), len(grounds), "%s: each peer its own ground: %r" % (name, grounds))
         # (amendment) the provisional dress: the pending send's own class on the not-yet-landed sent cards only
         prov = {c["gist"][:20]: c["provisional"] for c in cards}
         self.assertTrue(card("Please run the whole")["provisional"], "parked → provisional")
