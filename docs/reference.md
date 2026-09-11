@@ -976,8 +976,10 @@ transcript's and the states file's stat pair, the pending rollback cut, and
 whether a backend owns the session, which one owner hook answers for both).
 A session read under a new pending cut gets a slot of its own and the spent
 cut's slot is dropped with it, so one tree per session holds through a
-rollback; the store evicts the least recently used entry past 256 instead of
-clearing wholesale. The gain is one tree per session, about
+rollback. A parse of another transcript under a session's id (a subagent
+viewer's agent file, an episode render) has a slot of its own beside the live
+leaf's, so the two never evict each other; the store evicts the least recently
+used entry past 256 instead of clearing wholesale. The gain is one tree per session, about
 a quarter of the record cost the T311 report measured (0.25 GB of 6.6); the
 record cache itself, the bulk, is the checkpoint work's target.
 

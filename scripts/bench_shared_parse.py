@@ -6,10 +6,15 @@ For each romp tree given, a child process loads that tree's event model, judge a
 root (nothing against live state), builds N synthetic sessions whose transcripts are S times a base of invented text,
 then asks BOTH sides for every session (the kernel's _parse, the way the chat build asks, and jd.parsed_session, the
 way a judge pass asks) and reports the process's CURRENT resident size (VmRSS from /proc/self/statm, never the peak)
-after the display's parses and again after the judges', and the cold parses counted. One child per (tree, size),
-sequential, small worlds, under `capped`. The figure draws, per tree, the second side's resident delta (after both
-minus after the display alone) against size: the cost of the second tree, present before the shared store and gone
-after it. The bars are one measurement each, not a distribution.
+after the display's parses and again after the judges', and the event-model parses counted at em.parse_session
+itself (so the count reads the same on a tree where the kernel called the event model directly and on one where it
+goes through the judges' store; the judges' own miss counter is reported beside it and is NOT comparable across such
+trees). One child per (tree, size), sequential, small worlds, under `capped`. The figure draws, per tree, the second
+side's resident delta (after both minus after the display alone) against size: the cost of the second tree, present
+before the shared store and gone after it. Sizes are decimal megabytes (1e6 bytes) on both axes. The points are one
+measurement each, not a distribution, and the resident read has a FLOOR: a small second tree can land in pages the
+allocator already held, so a delta of zero means the read saw no new resident pages, not that no tree was built; the
+parse count says whether one was.
 
     capped bash -c 'uvx --with cleanplots --with matplotlib --with pandas python scripts/bench_shared_parse.py \\
         --tree before=/path/to/stage1-tree --tree after=/path/to/stage2-tree --sizes 1,4,16 --sessions 6 --out DIR'
@@ -56,6 +61,11 @@ def rss():
         return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
 now = int(time.time())
 r0 = rss()
+em_mod = sys.modules["romp_event_model"]; n_em = [0]; _orig_parse = em_mod.parse_session
+def _counted(*a, **k):
+    n_em[0] += 1
+    return _orig_parse(*a, **k)
+em_mod.parse_session = _counted             # both callers reach the event model here, on every tree
 for sid, p in paths:
     km._parse(p, sid, now)                 # the display's ask
 r1 = rss()
@@ -63,7 +73,8 @@ for sid, p in paths:
     jd.parsed_session(sid, [p], now)      # a judge pass's ask
 r2 = rss()
 misses = getattr(jd, "parse_misses", lambda: None)()
-print(json.dumps({"worldBytes": total, "afterKernelBytes": r1 - r0, "afterBothBytes": r2 - r0, "coldParses": misses,
+print(json.dumps({"worldBytes": total, "afterKernelBytes": r1 - r0, "afterBothBytes": r2 - r0, "coldParses": n_em[0],
+                  "judgeMisses": misses,
                   "sessions": sessions, "turns": turns}))
 import shutil; shutil.rmtree(root, ignore_errors=True)
 '''
@@ -89,13 +100,16 @@ def draw(rows, out):
         rs = sorted([r for r in rows if r["label"] == label and not r.get("error")], key=lambda r: r["worldBytes"])
         if not rs:
             sys.stderr.write("figure: every run of %r errored; the label is left out\n" % label); continue
-        xs = [r["worldBytes"] / 1048576 for r in rs]
-        ys = [max(0.0, r["afterBothBytes"] - r["afterKernelBytes"]) / 1048576 for r in rs]   # the SECOND tree's own cost
+        xs = [r["worldBytes"] / 1e6 for r in rs]                                          # decimal MB, as the axes say
+        ys = [max(0.0, r["afterBothBytes"] - r["afterKernelBytes"]) / 1e6 for r in rs]   # the SECOND tree's own cost
         top = max(top, max(ys))
         ax.line(xs, ys, label=label, color=cols[i % len(cols)], marker="o")
     ax.clean(xlabel="Transcripts on disk (MB), all sessions",
              ylabel="Resident size added by the judges' parse\nafter the display had parsed (MB), zero is the goal")
     ax.set_xlim(0, None); ax.set_ylim(0, top * 1.25); ax.set_yticks([0, round(top, 1) if top < 10 else round(top)])
+    f.text(0.5, -0.04, "One measurement per point. A zero is the resident read's floor: a second tree that fits in pages\n"
+                       "the allocator already held adds nothing visible; the parse count in bench.json says whether one was built.",
+           ha="center", va="top", fontsize=8, color="#555555", transform=f.transFigure)
     path = os.path.join(out, "trees_vs_size.png")
     f.savefig(path, dpi=150, bbox_inches="tight")
     return path

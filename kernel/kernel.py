@@ -28554,7 +28554,9 @@ def _parse(path, sid, now):
     # function keyed on (the transcript's and the states file's stat pair, the pending cut it reads through the provider
     # this kernel installs, sdk_human through the owner hook) and expands the same candidate set (the leaf plus the
     # session's anchor file), so the tree it returns is the tree the judges walk: parsed once per file version, held
-    # once. The old per-path cache is a view over that store (_SharedParseView).
+    # once. The old per-path cache is a view over that store (_SharedParseView). The store's slot carries the leaf, so
+    # a parse of another transcript under this sid (a subagent viewer's agent file, an episode's transcript: build_session
+    # with path_override hands it here as sess["path"]) sits beside the live leaf's tree rather than evicting it.
     _mode, stats = [], {}
     states = str(jd.STATE / "states" / (sid + ".jsonl"))   # the kernel's states log path (the judges default to the same file)
     session = jd.parsed_session(sid, [path], now, asm_mode_out=_mode, stats=stats, states=states,

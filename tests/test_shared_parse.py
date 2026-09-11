@@ -2,8 +2,9 @@
 """T323 stage 2 (the user 2026-09-10; built 2026-09-11): ONE parse for the kernel and the judges. The judges' cache is
 the shared store: the kernel's _parse delegates to jd.parsed_session, so a transcript is parsed once per file version
 and its tree is held once, whichever side asked first. The store keys on every fact either side keyed on (the fileset
-stat pair over the candidates and the states file, the pending cut, sdk_human), keeps a slot per pending cut so two
-callers reading different cuts never share one wrong tree, evicts least recently used instead of clearing wholesale,
+stat pair over the candidates and the states file, the pending cut, sdk_human), keeps a slot per pending cut and per
+leaf transcript so a spent cut's tree goes and an override render of another file under the same sid never evicts
+the live leaf's tree, evicts least recently used instead of clearing wholesale,
 and answers the kernel's path-keyed readers through a view. Hermetic: synthetic transcripts under a temp root."""
 import json
 import os
@@ -91,7 +92,12 @@ class OneParseForBoth(unittest.TestCase):
         id; the cache-only read and the view's drop go by leaf path and the entry's own sid, never a filename stem."""
         other = "55555555-6666-4777-8888-000000000777"
         p = _transcript(self.d, other, n=3)                  # a leaf named after the CLI session id
+        states = Path(jd.STATE) / "states" / (A + ".jsonl")  # the romp sid's states log: part of the key, so a read that
+        states.parent.mkdir(parents=True, exist_ok=True)     #  derived the states path from the leaf's stem would miss (review find)
+        states.write_text(json.dumps({"t": self.now, "state": "idle"}) + "\n")
+        self.addCleanup(lambda: states.unlink(missing_ok=True))
         km._parse(p, A, self.now)                            # parsed for romp sid A
+        self.assertIn(str(states), [f for f in jd._parse_key_files(A, [p], str(states))[2]], "the states log is in the key")
         self.assertIsNotNone(km._parse_cached(p), "the cache-only read finds the display's tree by leaf path")
         self.assertIs(km._parse_cached(p), jd._PARSE_CACHE[A][1])
         self.assertIn(p, km._parse_cache)
@@ -129,7 +135,7 @@ class OneParseForBoth(unittest.TestCase):
             judge_tree = jd.parsed_session(A, [p], self.now)                      # the judges: registry absent → False
             disp_tree = jd.parsed_session(A, [p], self.now, sdk_human=True)      # the display: its backend owns → True
             self.assertIsNot(judge_tree, disp_tree)
-            self.assertEqual(sorted(jd._PARSE_CACHE[(A, "")].keys()), [False, True], "one tree per answer in the slot")
+            self.assertEqual(sorted(jd._PARSE_CACHE[(A, "", p)].keys()), [False, True], "one tree per answer in the slot")
             m0 = self._misses()
             self.assertIs(jd.parsed_session(A, [p], self.now), judge_tree, "the judges hit their own tree")
             self.assertIs(jd.parsed_session(A, [p], self.now, sdk_human=True), disp_tree, "the display hits its own")
@@ -148,17 +154,46 @@ class OneParseForBoth(unittest.TestCase):
             jd.set_pending_cut_provider(lambda fsid: "a1")          # a bare rollback armed: the world cut at a1
             cut = jd.parsed_session(A, [p], self.now)
             self.assertIsNot(plain, cut)
-            self.assertIn((A, "a1"), jd._PARSE_CACHE)
-            self.assertNotIn((A, ""), jd._PARSE_CACHE, "a slot stored under a new cut drops the fsid's other cut slots: one tree per session (review find)")
+            self.assertIn((A, "a1", p), jd._PARSE_CACHE)
+            self.assertNotIn((A, "", p), jd._PARSE_CACHE, "a slot stored under a new cut drops the fsid's other cut slots: one tree per session (review find)")
             jd.set_pending_cut_provider(lambda fsid: "")        # the cut is spent (the next record landed)
             m0 = self._misses()
             again = jd.parsed_session(A, [p], self.now)
             self.assertEqual(self._misses() - m0, 1, "the spent cut's tree is gone, the plain world is parsed once more")
-            self.assertNotIn((A, "a1"), jd._PARSE_CACHE, "and the spent cut's slot went with it")
+            self.assertNotIn((A, "a1", p), jd._PARSE_CACHE, "and the spent cut's slot went with it")
             self.assertIs(jd._PARSE_CACHE[A][1], again, "a bare id reads the newest slot")
             self.assertEqual(len([k for k in jd._PARSE_CACHE if k[0] == A]), 1)
         finally:
             jd.set_pending_cut_provider(saved)
+
+    def test_an_override_render_keeps_its_own_slot_beside_the_live_leaf(self):
+        """Review find (2026-09-11): build_session(path_override=agent file) parses ANOTHER transcript under the parent
+        romp sid (a subagent viewer open on a running agent, an episode render). With a slot per (sid, cut) the two keys
+        never matched, so each miss stored over the other's tree: two builds per cycle for one session, the chat fold
+        seeing a new object every build, the feed's cache-only read flipping with build order. The leaf is in the slot:
+        both hit, one tree each, no eviction, in either order."""
+        p = _transcript(self.d, A, n=3)                                  # the live leaf
+        os.makedirs(os.path.join(self.d, "subagents"), exist_ok=True)
+        sub = _transcript(os.path.join(self.d, "subagents"), "agent-aaaa", n=2)   # an agent's own transcript
+        cut = jd._pending_cut(A)
+        for order in ((sub, p), (p, sub)):
+            jd.parse_cache_clear()
+            m0 = self._misses()
+            first = km._parse(order[0], A, self.now)
+            second = km._parse(order[1], A, self.now)
+            self.assertEqual(self._misses() - m0, 2, "two transcripts, two cold parses")
+            self.assertIs(km._parse(order[0], A, self.now), first, "the first still hits after the second parsed")
+            self.assertIs(km._parse(order[1], A, self.now), second)
+            self.assertEqual(self._misses() - m0, 2, "and neither evicted the other")
+            self.assertIn((A, cut, p), jd._PARSE_CACHE)
+            self.assertIn((A, cut, sub), jd._PARSE_CACHE)
+            leaf_tree = first if order[0] == p else second
+            self.assertIs(km._parse_cached(p), leaf_tree, "the feed's cache-only read sees the live leaf's tree while the agent's is held")
+            self.assertIs(jd.parsed_session(A, [p], self.now), leaf_tree, "a judge pass reads the live leaf's tree")
+            self.assertEqual(self._misses() - m0, 2)
+        self.assertEqual(len([k for k in jd._PARSE_CACHE if k[0] == A]), 2, "one slot per transcript under the sid")
+        self.assertEqual(km._parse_cache.pop(sub)[1], second if order[1] == sub else first)
+        self.assertIn(p, km._parse_cache, "dropping the agent's slot leaves the leaf's")
 
     def test_sdk_human_comes_from_the_owner_hook_and_is_part_of_the_match(self):
         p = _transcript(self.d, B)

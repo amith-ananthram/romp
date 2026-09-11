@@ -2698,18 +2698,22 @@ def _fileset_key(files):
     return out
 
 
-# THE parse cache (T323 stage 2, 2026-09-11): one parsed session tree per (fsid, pending cut), shared by the judges
-# and the kernel's display parse (kernel._parse delegates here), least-recently-used, _PARSE_CACHE_MAX entries.
-# Entry: (key, session, leaf_path, sdk_human) with key = (fileset stat pair over the candidates and the states file,
-# the pending cut), the pass frame's pair shape unchanged, and sdk_human beside it: every fact either caller keyed on
-# before the two caches were one. The cut is in the SLOT as well as the key, so a caller reading a different cut than
-# another (the kernel arming a bare rollback the judges do not see, or the reverse) gets an entry of its own rather
-# than the other's view: two trees are cheaper than one wrong tree.
+# THE parse cache (T323 stage 2, 2026-09-11): one parsed session tree per (fsid, pending cut, leaf transcript), shared
+# by the judges and the kernel's display parse (kernel._parse delegates here), least-recently-used, _PARSE_CACHE_MAX
+# slots. A slot holds {sdk_human: entry}; an entry is (key, session, leaf_path, sdk_human, fsid, asm_mode) with
+# key = (fileset stat pair over the candidates and the states file, the pending cut), the pass frame's pair shape
+# unchanged: every fact either caller keyed on before the two caches were one, plus the sid the parse ran under (the
+# kernel's path-keyed view never derives one from a filename) and the assembly mode of the parse that built the tree
+# (a hit reports it). The cut is in the SLOT as well as the key so a store under a new cut can drop the spent cut's
+# slot: one tree per session through a rollback. The LEAF is in the slot because the kernel parses OTHER transcripts
+# under a session's sid (a subagent viewer's agent file, an episode render, build_session's path_override) whose keys
+# can never equal the live leaf's: sharing the slot made each miss evict the other's tree every pusher cycle (review
+# find, 2026-09-11), so an override parse sits beside the live leaf's tree, never in its place.
 class _ParseStore(collections.OrderedDict):
-    """The shared store's dictionary: slots are (fsid, cut) tuples, least recently used first. A bare fsid string
+    """The shared store's dictionary: slots are (fsid, cut, leaf) tuples, least recently used first. A bare fsid string
     reads as that session's NEWEST slot (the pass-frame tests and the courier keys look a session up by id), and
     writes under a bare fsid land in the slot of the live cut, so a stand-in dict a test installs and the readers
-    that predate the (fsid, cut) slots keep working."""
+    that predate the (fsid, cut, leaf) slots keep working."""
 
     @staticmethod
     def _k(k):
@@ -2745,11 +2749,12 @@ class _ParseStore(collections.OrderedDict):
     def __setitem__(self, k, v):
         if not isinstance(k, tuple):                     # a bare id write (a test stand-in): one tree under the live cut
             flag = bool(v[3]) if isinstance(v, tuple) and len(v) > 3 else False
-            k, v = (k, _pending_cut(k)), {flag: v}
+            leaf = str(v[2]) if isinstance(v, tuple) and len(v) > 2 else ""
+            k, v = (k, _pending_cut(k), leaf), {flag: v}
         super().__setitem__(k, v)
 
 
-_PARSE_CACHE = _ParseStore()   # (fsid, cut) -> {sdk_human: (key, session, leaf, sdk_human, fsid, asm_mode)}; a bare fsid reads the newest slot
+_PARSE_CACHE = _ParseStore()   # (fsid, cut, leaf) -> {sdk_human: (key, session, leaf, sdk_human, fsid, asm_mode)}; a bare fsid reads the newest slot
 _PARSE_CACHE_MAX = 256
 _PARSE_CACHE_LOCK = threading.Lock()
 _PARSE_HITS = [0]              # served from the cache (whoever asked); misses are _PARSE_MISSES
@@ -2777,54 +2782,67 @@ def _newest_of(trees):
     return trees[next(reversed(trees))] if trees else None
 
 
-def _parse_slot(fsid, cut, human=None):
-    """The cache entry for (fsid, cut) under the sdk_human flag `human`, marked most recently used; None when absent.
+def _parse_slot(fsid, cut, leaf, human=None):
+    """The cache entry for (fsid, cut, leaf) under the sdk_human flag `human`, marked most recently used; None when absent.
     A slot holds one tree per flag: a display parse and a judge parse that answer "is the composer input the human"
     differently (a process with no owner hook: the kernel asks its backend, the judges the registry file) each keep
     their own tree rather than one reading the other's; with the hook both answer alike and share one tree. `human`
     None (a judge caller) takes the slot's only tree when it has exactly one and no hook is installed, so a hit reads
     no registry file (the stage gate's signature lists none); otherwise the judges' own answer picks."""
+    slot = (fsid, cut, str(leaf))
     with _PARSE_CACHE_LOCK:
-        trees = _PARSE_CACHE.get((fsid, cut))
+        trees = _PARSE_CACHE.get(slot)
         if not trees:
             return None
-        _lru_touch(_PARSE_CACHE, (fsid, cut))
+        _lru_touch(_PARSE_CACHE, slot)
         if human is None and _SDK_OWNER_FN is None and len(trees) == 1:
             return _newest_of(trees)
     if human is None:
         human = _sdk_owned(fsid)
     with _PARSE_CACHE_LOCK:
-        trees = _PARSE_CACHE.get((fsid, cut)) or {}
+        trees = _PARSE_CACHE.get(slot) or {}
         return trees.get(bool(human))
 
 
 def _parse_store(fsid, cut, key, session, leaf, human, mode="full"):
-    """Store a parse under (fsid, cut). A slot stored under a NEW cut drops the fsid's other cut slots: a bare
+    """Store a parse under (fsid, cut, leaf). A slot stored under a NEW cut drops the fsid's other cut slots: a bare
     rollback parses under its cut, the next record spends the cut and every caller parses under the plain one, and
     the spent cut's tree was staying resident until the store filled (review find, 2026-09-11); a cut is never read
     again once spent, so one tree per session holds. The entry carries the fsid (the kernel's path-keyed view must
     never derive a sid from a filename: a /clear's leaf is named after the CLI session, not the romp sid) and the
-    assembly mode of the parse that built it (a hit reports it, so the chat fold sees fold or serve, never a blank)."""
+    assembly mode of the parse that built it (a hit reports it, so the chat fold sees fold or serve, never a blank).
+    The leaf is part of the slot: a parse of another transcript under the same sid (a subagent viewer's agent file
+    while the live leaf is parsed by the lanes, the feed and the judges) keeps a slot of its own instead of evicting
+    the live leaf's tree and being evicted by it in turn, twice per cycle (review find, 2026-09-11). A leaf a /clear
+    rotated away keeps its slot until the least-recently-used eviction reaches it, as the kernel's path-keyed cache
+    always did."""
+    slot = (fsid, cut, str(leaf))
     with _PARSE_CACHE_LOCK:
         for k in [k for k in _PARSE_CACHE if k[0] == fsid and k[1] != cut]:
             del _PARSE_CACHE[k]
-        trees = _PARSE_CACHE.get((fsid, cut))
+        trees = _PARSE_CACHE.get(slot)
         if trees is None:
-            trees = _PARSE_CACHE[(fsid, cut)] = {}
+            trees = _PARSE_CACHE[slot] = {}
         trees.pop(bool(human), None)
         trees[bool(human)] = (key, session, str(leaf), bool(human), str(fsid), str(mode or "full"))
-        _lru_touch(_PARSE_CACHE, (fsid, cut))
+        _lru_touch(_PARSE_CACHE, slot)
         while len(_PARSE_CACHE) > _PARSE_CACHE_MAX:
             del _PARSE_CACHE[next(iter(_PARSE_CACHE))]   # the least recently used goes, never everything at once
 
 
-def _parse_entry(fsid):
-    """The newest cached entry for fsid across cuts and flags (the chain and courier keys compare its session by
-    identity)."""
+def _parse_entry(fsid, session=None):
+    """The newest cached entry for fsid across cuts, leaves and flags, or with `session` given the entry holding
+    that very tree (the chain and courier keys hold the judges' session object; the newest slot may be an override
+    parse of another transcript under the same sid). None when absent."""
     with _PARSE_CACHE_LOCK:
         for k in reversed(_PARSE_CACHE):
-            if k[0] == fsid:
+            if k[0] != fsid:
+                continue
+            if session is None:
                 return _newest_of(_PARSE_CACHE[k])
+            for ent in reversed(list(_PARSE_CACHE[k].values())):
+                if ent[1] is session:
+                    return ent
     return None
 
 
@@ -2883,7 +2901,7 @@ def parse_cached(fsid, files, states=None, sdk_human=None):
     except Exception:
         return None
     cut = _pending_cut(fsid)
-    ent = _parse_slot(fsid, cut, None if sdk_human is None else bool(sdk_human))
+    ent = _parse_slot(fsid, cut, str(files[0]), None if sdk_human is None else bool(sdk_human))
     if ent is not None and ent[0] == (pair, cut):
         return ent[1]
     return None
@@ -2957,7 +2975,7 @@ def _plan_key(fsid, path, session, now):
     session after a /clear), the captions file (the floor-title heal reads it), and each running background
     launch with whether it has crossed its deadline under the pass clock `now` (_bg_expiry_key: the settle
     reads that crossing and no file records it)."""
-    pk = _parse_entry(fsid)
+    pk = _parse_entry(fsid, session)
     if pk is None or pk[1] is not session:
         return None
     return (str(path), pk[0], _store_key(fsid), _file_key(str(EPIDIR / (fsid + ".jsonl"))),
@@ -2980,7 +2998,7 @@ def _courier_scan_key(fsid, path, session):
     """Every input run_courier's per-session scan reads, or None when the parse is not the cache's own
     (never skip what cannot be keyed). Taken before the store read, so a write landing during the scan
     moves the key the next pass takes."""
-    pk = _parse_entry(fsid)
+    pk = _parse_entry(fsid, session)
     if pk is None or pk[1] is not session:
         return None
     return (str(path), pk[0], _file_key(str(GOALDIR / (fsid + ".json"))), _journal_key(fsid), _archive_key(fsid),
@@ -3361,6 +3379,8 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None, states=None,
     # went into, and the parse below is pinned into that same frame.
     pair, cut, fr = _frame_parse_key(fsid, files, states)
     states = Path(states) if states else STATESDIR / (fsid + ".jsonl")   # the same log the key was taken over
+    leaf = str(files[0])                   # the transcript this parse is OF: part of the slot (an override parse of
+    #                                        another file under the same sid never takes the live leaf's slot)
     # A FORKED leaf (SDK /clear: discover hands the lastSid file under the stable romp sid) parses with
     # the session's anchor transcript among the candidates, so a fork whose chain back-links across files
     # (a resume-style fork) keeps its history — the FileAdapter walk crosses files by design, and a /clear
@@ -3379,7 +3399,7 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None, states=None,
     if cut is None:                        # a pin answered and read nothing: the live cut is ours to read
         cut = _pending_cut(fsid)
     key = (pair[0], cut) if pair is not None else None   # the frame's pair shape; sdk_human is the slot's tree pick (stage 2)
-    hit = _parse_slot(fsid, cut, None if sdk_human is None else bool(sdk_human))
+    hit = _parse_slot(fsid, cut, leaf, None if sdk_human is None else bool(sdk_human))
     if key is not None and hit and hit[0] == key:
         _PARSE_HITS[0] += 1
         if stats is not None:
@@ -3398,7 +3418,7 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None, states=None,
         stats["miss"] = True
     _PARSE_MISSES[0] += 1                                  # a cold parse (T323: /perf parses)
     if key is not None:
-        _parse_store(fsid, cut, key, session, files[0], human, (_am[-1] if _am else "full"))   # LRU, never a wholesale clear
+        _parse_store(fsid, cut, key, session, leaf, human, (_am[-1] if _am else "full"))   # LRU, never a wholesale clear
     if fr is not None:                     # pin under the frame the KEY went into (never a re-read _frame: a
         with _frame_lock:                  #  parse spanning a pass boundary must not land keyless in the next
             return _frame_pin_parse(fr, fsid, session, key)   # frame); a concurrent first toucher wins
