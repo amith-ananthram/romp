@@ -153,10 +153,10 @@ class HiddenControlBookmark(unittest.TestCase):
     def setUpClass(cls):
         keys = [k for k, _ in km._PANE_ORDER]
         stored = json.dumps({"chat": True, "fleet": False, "feed": True, "timeline": True, "files": False})
+        # the store is seeded through the harness's __SEED__ slot (the OptionalPanes convention): the declaration
+        # line it once rewrote grew the optional-pane collections and no longer matched, leaving the slot unfilled
         harness = (_COLLAPSE_HARNESS.replace("__KEYS__", json.dumps(keys))
-                   .replace("const POSTED = {}, LOADS = {}, CLS = new Set(['po-chat', 'po-feed', 'po-timeline']), STORE = {};",
-                            "const POSTED = {}, LOADS = {}, CLS = new Set(['po-chat', 'po-feed', 'po-timeline']), STORE = {"
-                            "'romp:settings': JSON.stringify({ filesControl: false }), 'romp-panes': " + json.dumps(stored) + " };")
+                   .replace("__SEED__", "STORE['romp:settings'] = JSON.stringify({ filesControl: false }); STORE['romp-panes'] = " + json.dumps(stored) + ";")
                    .replace("global.location = { search: '' };", "global.location = { search: '?panes=chat,files' };")
                    .replace("global.URLSearchParams = class { get() { return null; } };", "global.URLSearchParams = class { get(k) { return k === 'panes' ? 'chat,files' : null; } };"))
         cls.stored = stored
@@ -174,13 +174,12 @@ class HiddenControl(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         keys = [k for k, _ in km._PANE_ORDER]
+        # seeded through __SEED__ (see HiddenControlBookmark); the harness already collects the storage listeners
+        # (STORAGE) and the phone's tab switches (TABS), which the driver reads under its own names
         harness = (_COLLAPSE_HARNESS.replace("__KEYS__", json.dumps(keys))
-                   .replace("const POSTED = {}, LOADS = {}, CLS = new Set(['po-chat', 'po-feed', 'po-timeline']), STORE = {};",
-                            "const POSTED = {}, LOADS = {}, CLS = new Set(['po-chat', 'po-feed', 'po-timeline']), STORE = {"
-                            "'romp:settings': JSON.stringify({ filesControl: false }), 'romp-panes': JSON.stringify({ chat: true, fleet: false, feed: true, timeline: true, files: true }) };"
-                            "const STORAGE_LISTENERS = [], SWITCHED = [];")
-                   .replace("global.addEventListener = () => {};", "global.addEventListener = (ev, f) => { if (ev === 'storage') STORAGE_LISTENERS.push(f); };")
-                   + "window.__rompMobileTab = (p) => { SWITCHED.push(p); TAB = p; };\n")
+                   .replace("__SEED__", "STORE['romp:settings'] = JSON.stringify({ filesControl: false }); "
+                            "STORE['romp-panes'] = JSON.stringify({ chat: true, fleet: false, feed: true, timeline: true, files: true });"
+                            "const STORAGE_LISTENERS = STORAGE, SWITCHED = TABS;"))
         cls.out = _run(harness + km._LANDING_COLLAPSE_JS + _HIDDEN_DRIVER)
 
     def test_the_boot_apply_hides_the_control_and_closes_the_open_pane(self):
