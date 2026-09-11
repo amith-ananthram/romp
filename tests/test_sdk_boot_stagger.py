@@ -453,5 +453,38 @@ class BootAttachesOffTheStagger(unittest.TestCase):
         self.assertEqual(phases2, ["censusDone", "attachDone"], "a never-started attach counts down at once")
 
 
+class BootBudget(unittest.TestCase):
+    """A regression tripwire for the boot (the performance metrics, 2026-09-11): the reconcile over forty alive sessions
+    with cut turns, every start stubbed, must read its census and reach its first start within a generous bound, and
+    the census milestone must land before any start. Generous on purpose (a shared CI box): it catches a boot that
+    started reading transcripts or waiting on something before it starts sessions, not a slow disk."""
+
+    def test_forty_sessions_census_then_starts_inside_the_bound(self):
+        import time as _time
+        d = tempfile.mkdtemp()
+        phases = []
+        be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None, boot_phase=lambda k: phases.append((k, _time.monotonic())))
+        regs = _cut_regs(d, 40)
+        starts = []
+        def fake_ensure(sid, on_boot_settled=None):
+            starts.append(_time.monotonic())
+            if on_boot_settled:
+                on_boot_settled()           # the CLI proves up at once: the stagger never waits here
+            return object()
+        t0 = _time.monotonic()
+        with mock.patch.object(be, "_ensure", fake_ensure):
+            be._boot_reconcile(regs)
+        total = _time.monotonic() - t0
+        self.assertEqual(len(starts), 40)
+        census = dict(phases).get("censusDone")
+        self.assertIsNotNone(census, "the census milestone landed")
+        self.assertLess(census, min(starts), "the census ends before the first start")
+        self.assertLess(total, 5.0, "forty sessions reconciled and started within the bound: took %.2f s" % total)
+        import json as _json
+        rows = [_json.loads(l) for l in open(os.path.join(d, sb.SESSION_EVENTS_FILE)) if '"reconcile.boot"' in l]
+        self.assertEqual(len(rows), 1)
+        self.assertLess(rows[0]["durationS"], 5.0)
+
+
 if __name__ == "__main__":
     unittest.main()

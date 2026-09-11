@@ -21988,6 +21988,51 @@ def _audit_parent_gone(manager_pid, now=None):
 
 
 RESTART_CUTS_FILE = jd.STATE / "restart-cuts.jsonl"
+KERNEL_SAMPLES_FILE = jd.STATE / "kernel-samples.jsonl"   # the kernel's own size over each life (the performance metrics, 2026-09-11)
+KERNEL_SAMPLE_MARKS_S = (300.0, 1800.0, 3600.0)          # samples at 5, 30 and 60 minutes of uptime, then every hour
+_KERNEL_SAMPLES_TAKEN = []                                # the uptimes sampled this life, in order
+
+
+def _kernel_sample_due(uptime_s):
+    """The next sample mark this life has not taken yet, or None: the fixed marks first, then each whole hour."""
+    taken = len(_KERNEL_SAMPLES_TAKEN)
+    if taken < len(KERNEL_SAMPLE_MARKS_S):
+        mark = KERNEL_SAMPLE_MARKS_S[taken]
+    else:
+        mark = 3600.0 * (taken - len(KERNEL_SAMPLE_MARKS_S) + 2)
+    return mark if uptime_s >= mark else None
+
+
+def _kernel_sample_tick(now=None):
+    """The pusher's tick: at 5, 30 and 60 minutes of uptime and every hour after, one row in kernel-samples.jsonl with
+    the kernel's resident size, processor seconds, thread count and the record cache's held bytes (when the event model
+    reports them), so the kernel's growth within a life is a series beside the restart ledger's two bookends and a
+    change that lets it climb again shows in the file, not in the machine's swap. Best-effort; never raises."""
+    try:
+        now = time.time() if now is None else now
+        up = now - _STARTED
+        mark = _kernel_sample_due(up)
+        if mark is None:
+            return False
+        _KERNEL_SAMPLES_TAKEN.append(mark)
+        row = {"t": int(now), "pid": os.getpid(), "uptimeS": round(up, 1), "markS": mark}
+        try:
+            ps = _process_stats()
+            row.update({"rssKb": int(ps.get("rss_kb") or 0), "cpuS": round(float(ps.get("cpu_s") or 0.0), 2), "threads": int(ps.get("threads") or 0)})
+        except Exception:
+            pass
+        rc = getattr(em, "record_cache_stats", None)
+        if rc is not None:
+            try:
+                st = rc()
+                row["recordCacheBytes"] = int(st.get("bytes") or 0); row["recordCacheEntries"] = int(st.get("entries") or 0)
+            except Exception:
+                pass
+        with open(KERNEL_SAMPLES_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, separators=(",", ":")) + "\n")
+        return True
+    except Exception:
+        return False
 
 
 EXIT_PRIME_BUDGET_S = float(os.environ.get("ROMP_EXIT_PRIME_BUDGET_S", "0.5"))       # the exit's fold priming
@@ -47143,6 +47188,10 @@ def _pusher_cycle_jobs(now, live_map, any_client):
         sys.stderr.write("checkpoints: %s\n" % traceback.format_exc())
     try:                                  # the boot row's backstop: written without attachDone once the bound has passed
         _boot_row_backstop(now)
+    except Exception:
+        pass
+    try:                                  # the kernel's own size at 5, 30 and 60 minutes and every hour (kernel-samples.jsonl)
+        _kernel_sample_tick(now)
     except Exception:
         pass
     try:                                  # hitting a usage limit auto-engages the retry-pause (before the resume check)
