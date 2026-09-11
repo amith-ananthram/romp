@@ -1385,7 +1385,18 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
 - `chatPages`: the rendered pages of chat history before a session's render
   floor (the chat wire's `loadOlder`, `loadAround` and `loadNewer` answers, below):
   `hits`, `misses`, `evictions`, `pages` and `bytes` resident (a bound of 32
-  pages or 16 MB per kernel), `renderMs` spent rendering.
+  pages or 16 MB per kernel), `renderMs` spent rendering; the warming, after
+  the pusher's send stage (`push.warm`), with a board client and a proto-2 chat
+  client connected: `warmed` pages rendered ahead of a click for the feed's
+  cards' anchors (the distilled summary's own targets first, a completed card's
+  too, then the active cards' heads and open rows; at most 32 anchors probed
+  and 16 pages rendered per cycle, a resident page costing a dictionary read,
+  so an unchanged board settles to a probe and an evicted page is warmed
+  again), `warmPending` (pages over the cycle's render budget, rendered on the
+  cycles after), `warmMs`, `warmCycles`, and `warmSkipped` (cycles the warm
+  stood down because the pusher's last cycle ran over 1.5 s). A page's cache
+  key reads what a pre-floor render reads and none of the live tail, so a
+  warmed page survives the turns that stream after it.
 - `parses`: the cold event-model parses through the one parse store the
   kernel and the judges share: `total` (every miss, whoever asked), `kernel`
   (the display's asks among them, with `bytes`, the parsed files' sizes, and
