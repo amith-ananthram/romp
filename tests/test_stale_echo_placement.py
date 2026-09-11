@@ -209,6 +209,59 @@ class StaleEchoPlacement(unittest.TestCase):
         self.assertIn("live-reply-1", [a["uuid"] for a in merged["turns"][-1]["atoms"]])
         self.assertFalse(merged["turns"][-1]["ended"])
 
+    def test_a_send_the_cli_still_owes_keeps_the_tail_however_old_its_stamp(self):
+        # a held copy (T306) keeps its send stamp while the queue behind it feeds: on release it is older than
+        # the last turn's start but still pending, listed by the CLI's queue ledger, and rides the tail
+        saved = km._pending_ledger
+        km._path_of = lambda sid, now=None: "/nonexistent/notes-api/%s.jsonl" % SID
+        km._pending_ledger = lambda path: ["one more thing"]
+        try:
+            owed = _echo(T_DAY1 + 22 * 3600 + 28 * 60, key="echo:" + "ab" * 16, author="human", _echo_text="one more thing")
+            owed["message"]["content"][0]["text"] = "one more thing"
+            merged, _ = self._merge(_two_days(), [owed])
+        finally:
+            km._pending_ledger = saved
+        self.assertEqual(len(merged["turns"]), 2, "no placement for an owed send")
+        self.assertEqual(merged["turns"][-1]["atoms"][0]["uuid"], owed["uuid"], "it sorts into the tail by time, as before")
+        self.assertEqual(merged["_placed"], ())
+
+    def test_the_synthetic_turn_is_marked_and_names_its_echoes(self):
+        stale = _echo(T_DAY1 + 22 * 3600 + 28 * 60)
+        merged, _ = self._merge(_two_days(), [stale])
+        gap = merged["turns"][1]
+        self.assertTrue(gap.get("echoTurn"))
+        self.assertEqual(gap.get("placedEchoes"), [stale["uuid"]])
+        inside = _echo(T_DAY1 + 22 * 3600 + 30, key="echo:" + "f" * 32)
+        merged2, _ = self._merge(_two_days(), [inside])
+        self.assertEqual(merged2["turns"][0].get("placedEchoes"), [inside["uuid"]], "a window placement is named on the turn")
+        self.assertFalse(merged2["turns"][0].get("echoTurn"), "…which is a real turn")
+
+    def test_a_placed_echo_never_splits_a_judged_turns_segments(self):
+        # a judged turn's segment ids mirror the judge's parse, which never sees an echo: the segmenters
+        # read the turn without its placed echoes, so the bar and its captions keep their keys
+        inside = _echo(T_DAY1 + 22 * 3600 + 30, key="echo:" + "f" * 32)
+        turns = _two_days()
+        merged, _ = self._merge(turns, [inside])
+        before = [seg["id"] for seg in km.em.segments(turns[0])]
+        after = [seg["id"] for seg in km.em.segments(km._turn_sans_placed_echoes(merged["turns"][0]))]
+        self.assertEqual(after, before)
+        self.assertNotEqual([seg["id"] for seg in km.em.segments(merged["turns"][0])], before,
+                            "(the raw placed turn WOULD split: that is what the helper prevents)")
+        self.assertEqual([seg["id"] for seg in km._segs_seam(merged["turns"][0], {})], before, "the seam-aware segmenter reads it too")
+        untouched = merged["turns"][-1]
+        self.assertIs(km._turn_sans_placed_echoes(untouched), untouched, "a turn with nothing placed is handed back as is")
+
+    def test_the_feeds_plain_prompt_reader_never_reads_an_echo_as_a_prompt(self):
+        # a stale HUMAN echo (a swallowed send) is not the user talking on the thread: the re-judging latch
+        # must never arm off it (the code's own rule: the parse's plain-reply turn, never the echo)
+        stale = _echo(T_DAY1 + 22 * 3600 + 28 * 60, author="human", _echo_text="are we done here?")
+        stale["message"]["content"][0]["text"] = "are we done here?"
+        inside = _echo(T_DAY1 + 22 * 3600 + 30, key="echo:" + "f" * 32, author="human", _echo_text="and this?")
+        inside["message"]["content"][0]["text"] = "and this?"
+        merged, _ = self._merge(_two_days(), [stale, inside])
+        self.assertEqual(km._last_plain_user_turn_t(merged["turns"]), T_DAY2 + 7 * 3600 + 300, "the later day's real prompt, not an echo")
+        self.assertEqual(km._last_plain_user_turn_t([merged["turns"][1]]), 0, "an echo's own turn is no prompt turn")
+
     def test_the_parse_object_is_not_mutated(self):
         turns = _two_days()
         before = [(t["id"], len(t["atoms"])) for t in turns]

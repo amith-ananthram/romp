@@ -962,8 +962,8 @@ def _last_plain_user_turn_t(turns):
         trig = turn.get("trigger") or {}
         tuid = trig.get("uuid") if isinstance(trig, dict) else trig
         a = next((x for x in atoms if x.get("uuid") == tuid), None) or (atoms[0] if atoms else None)
-        if not a or a.get("author") != "human":
-            continue
+        if not a or a.get("author") != "human" or a.get("_echo_text") or turn.get("echoTurn"):
+            continue    # an echo (a send the transcript never took; since T344 placed by time) is never a prompt turn
         if "romp-goal-id" in (_atom_user_text(a) or ""):   # a nudge / typed card-reply → targeted, not a plain reply
             continue
         best = max(best, a.get("t") or turn.get("t") or 0)
@@ -31201,6 +31201,15 @@ def _merge_live_atoms(session, sid, shown_texts=()):
     # stamped after the last turn's start and takes the tail below, as before.
     last_start = turns[-1].get("t") or 0
     stale = [a for a in fresh if a.get("_echo_text") and a.get("t", 0) < last_start]
+    if stale:
+        # Only a send NOBODY still owes is stale: a held copy (T306) keeps its send stamp while the queue
+        # behind it feeds, so on release it is older than the last turn's start yet still a pending
+        # message, and it must ride the tail until it lands. Owed = queued behind a busy turn
+        # (`shown_texts`, the backend's pending_queued) or listed by the CLI's own queue ledger
+        # (_pending_ledger, the settle's "still owed" read); read only when a candidate exists.
+        p = _path_of(sid)
+        owed = {sb.echo_text_key(t) for t in shown_texts if t} | {sb.echo_text_key(t) for t in (_pending_ledger(p) if p else ())}
+        stale = [a for a in stale if not _echo_landed_in(a["_echo_text"], owed)]
     placed = ()
     if stale:
         turns = _place_stale_echoes(turns, stale)
@@ -31246,13 +31255,28 @@ def _place_stale_echoes(turns, echoes):
         if i is not None and t <= (out[i].get("end") or out[i].get("t") or 0):
             out[i] = dict(out[i])
             out[i]["atoms"] = sorted(list(out[i]["atoms"]) + [a], key=key)
+            out[i]["placedEchoes"] = list(out[i].get("placedEchoes") or []) + [a.get("uuid")]
         else:
             gaps.setdefault(0 if i is None else i + 1, []).append(a)
     for idx in sorted(gaps, reverse=True):      # back to front, so earlier indices stay valid
         atoms = sorted(gaps[idx], key=key)
         out.insert(idx, {"id": "live-" + str(atoms[0].get("uuid") or atoms[0].get("t", 0)), "trigger": None,
-                         "t": atoms[0].get("t", 0), "end": atoms[-1].get("t", 0), "ended": True, "atoms": atoms})
+                         "t": atoms[0].get("t", 0), "end": atoms[-1].get("t", 0), "ended": True, "atoms": atoms,
+                         "echoTurn": True, "placedEchoes": [a.get("uuid") for a in atoms]})
     return out
+
+
+def _turn_sans_placed_echoes(turn):
+    """The turn without the stale echoes _place_stale_echoes put into it (`placedEchoes`), for the
+    segmenters: a judged turn's segments and their ids must mirror the judge's own parse, which never
+    sees an echo, so a placed echo (a user atom, hence a segment input) must not split the turn's bar or
+    re-key its captions. A turn with nothing placed is returned as is; the tail's live echoes are not
+    placed and keep splitting the last turn as before."""
+    placed = turn.get("placedEchoes")
+    if not placed:
+        return turn
+    placed = set(placed)
+    return {**turn, "atoms": [a for a in turn.get("atoms") or [] if a.get("uuid") not in placed]}
 
 
 def _sdk_transcript_path(sid):
@@ -32607,7 +32631,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     # ── the ledger memo (2026-09-09): the tree walk and the live roots below are a function of exactly these
     # inputs, each in the key or held by identity: the parse (seg_trig and seg_work come from it; by the parsed
     # object's identity, and only while no live atoms were merged, since the merge reshapes the last turn's
-    # segments); the store's seams (_seams_sig, from the store this build's seg maps were cut with: the
+    # segments and, since T344, places a stale echo into an earlier turn); the store's seams (_seams_sig, from the store this build's seg maps were cut with: the
     # build loads the store twice, once at the top for the seg ids and once here for the nodes, and a
     # publish landing between the two loads pairs the old seams' seg maps with the new store object, so
     # the seams stay a key component beside the store's identity or that build's tree would serve next
@@ -33042,7 +33066,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
             # every other pane, whose payloads dedup correctly, stayed instant.) The spawn time is
             # persisted and fixed; None when genuinely unknown, which the client tolerates — render.ts
             # keeps what it already had (`msg.firstSeen ?? prev.firstSeen`).
-            "firstSeen": session["turns"][0]["t"] if session["turns"] else _sdk_spawned_at(sid)}
+            "firstSeen": next((_t["t"] for _t in session["turns"] if not _t.get("echoTurn")), None) or _sdk_spawned_at(sid)}
 
 
 EPISODE_EVENT_CAP = 200   # events shipped per pre-clear episode expand — bounded, honest about the cut
@@ -37137,7 +37161,7 @@ def _segs_seam(turn, store):
     """Seam-aware segmentation — MUST mirror the judge's jd._segs (plans/segment-regrowth.md): seg ids
     the judges place/anchor against a settle-split have to be the same ids the kernel renders/resolves,
     or trails and deep-links written for a tail would silently stop matching."""
-    return jd.apply_seams(em.segments(turn), store or {})
+    return jd.apply_seams(em.segments(_turn_sans_placed_echoes(turn)), store or {})
 
 
 def _atom_prose_chars(a):
@@ -37906,6 +37930,8 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None):
     st_turns = session["turns"]
     bars, last_t, seg_ends, nsegs, complained = [], None, {}, 0, False   # seg_ends: seg-start t → work-END t (for completion marks)
     for ti, turn in enumerate(st_turns):
+        if turn.get("echoTurn"):
+            continue        # a stale echo's own turn (T344): a send the transcript never took draws no bar
         turn_open = (live and ti == len(st_turns) - 1 and not turn["ended"]
                      and not any(x["type"] == "idle" for x in turn["atoms"])
                      and not _suspended_after(turn["end"]))   # dead lane (live False) or pre-sleep freeze → not an open bar
@@ -37917,7 +37943,7 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None):
             _bars_complain(sid, "seams", e)
             complained = True
             try:
-                segs = em.segments(turn)
+                segs = em.segments(_turn_sans_placed_echoes(turn))
             except Exception:
                 segs = []
         for si, seg in enumerate(segs):
