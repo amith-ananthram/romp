@@ -561,7 +561,7 @@ out({got:delivered.map(function(m){return m.id;}),fifo:FIFO.length,armed:flushAr
 
 
 class ReconnectFlag(unittest.TestCase):
-    """The redial declares itself (2026-09-07). A redial's URL ends with &reconnect=1 when THIS page has opened a
+    """The redial declares itself (2026-09-07). A redial's URL ends with &reconnect=1&proto=N when THIS page has opened a
     socket before AND its bundle has said ready AND the kernel's caps frame has answered that ready AND the ready is
     not still waiting in the shim's queue for the open (`everConnected&&bundleReady&&readyAcked&&!readyQueued`): the
     one party that knows it holds the sessions the kernel served it, which it can reload lazily, so the kernel
@@ -597,11 +597,45 @@ out({first:first,second:second,third:third,n:sockets.length});""")
         self.assertNotIn("reconnect", r["first"], "a fresh page holds nothing: no flag on the first dial")
         self.assertTrue(r["first"].startswith("ws://TESTHOST/ws?app=test&delta=1&iid="), r["first"])
         self.assertTrue(r["second"].startswith("ws://TESTHOST/ws?app=test&delta=1&iid="), r["second"])
-        self.assertTrue(r["second"].endswith("&active=S1&reconnect=1"),
+        self.assertTrue(r["second"].endswith("&active=S1&reconnect=1&proto=1"),
                         "the flag is APPENDED after the active hint, so the kernel's active-first build is untouched: " + r["second"])
-        self.assertTrue(r["third"].endswith("&reconnect=1") and "active=" not in r["third"],
+        self.assertTrue(r["third"].endswith("&reconnect=1&proto=1") and "active=" not in r["third"],
                         "no hint → the kernel sends everything, but the page still names itself a reconnect (the kernel's answer stands for the page's life; no later socket carries a ready): " + r["third"])
         self.assertEqual(r["third"].count("&reconnect=1"), 1)
+
+    def test_the_redial_carries_the_protocol_the_bundles_ready_declared(self):
+        """T323 stage 4b, round 3: a redial posts no ready of its own, so the dial term carries the chat wire the bundle's
+        ready declared (proto 2: uuid frames; an older bundle's bare ready: 1), and the kernel's registration reads it."""
+        r = _run(r"""
+function redial(){var live=timers.filter(function(t){return t.live&&t.fn.name==="connect";});live[live.length-1].fn();}
+localStorage.getItem=function(){return JSON.stringify({activeId:"S1"});};
+open();window.__rompLocalSend({type:"ready",proto:2});caps();recv({type:"ka"});sock().readyState=3;sock().onclose();redial();var second=sock().url;
+out({second:second,readyProto:readyProto});""")
+        self.assertTrue(r["second"].endswith("&active=S1&reconnect=1&proto=2"), "the proto-2 page's redial says so: " + r["second"])
+        self.assertEqual(r["readyProto"], 2)
+
+    def test_a_ready_the_kernel_never_answered_is_posted_again_on_the_fresh_dial(self):
+        """Round 3, C: the socket died between the kernel's pushes and its caps frame. The page dials fresh (no flag), and
+        that dial posts the bundle's ready AGAIN, so the kernel processes it (the page served whole, the protocol
+        recorded), answers with its caps frame, and the redials after carry the flag. A ready that flushed from the
+        queue on this open is not doubled."""
+        r = _run(r"""
+function redial(){var live=timers.filter(function(t){return t.live&&t.fn.name==="connect";});live[live.length-1].fn();}
+function readys(s){return s.sent.map(function(x){return JSON.parse(x);}).filter(function(m){return m.type==="ready";});}
+localStorage.getItem=function(){return JSON.stringify({activeId:"S1"});};
+open();window.__rompLocalSend({type:"ready",proto:2});recv({type:"ka"});                  // the ready left; no caps frame came back
+sock().readyState=3;sock().onclose();redial();var fresh=sock().url;var s2=sock();open();     // the fresh dial: no flag…
+var reposted=readys(s2);
+caps();recv({type:"ka"});sock().readyState=3;sock().onclose();redial();var designed=sock().url;   // …the kernel answers on THIS socket: the next redial declares itself
+var s3=sock();open();var reposted3=readys(s3);
+// a ready QUEUED while the socket was down flushes once on the open and is not posted a second time
+sock().readyState=3;sock().onclose();window.__rompLocalSend({type:"ready",proto:2});redial();var s4=sock();open();var flushed4=readys(s4);
+out({fresh:fresh,reposted:reposted,designed:designed,reposted3:reposted3,flushed4:flushed4});""")
+        self.assertNotIn("reconnect", r["fresh"], "unanswered: the page dials fresh")
+        self.assertEqual(r["reposted"], [{"type": "ready", "proto": 2}], "…and posts its ready again on that socket")
+        self.assertTrue(r["designed"].endswith("&active=S1&reconnect=1&proto=2"), "answered on the second socket: the third redial declares itself: " + r["designed"])
+        self.assertEqual(r["reposted3"], [], "an answered ready is not posted again")
+        self.assertEqual(len(r["flushed4"]), 1, "a queued ready flushes once and is not doubled by the re-post")
 
     def test_a_first_socket_that_died_before_the_bundles_ready_redials_without_the_flag(self):
         # the mid-load drop: the shim dials during HTML parse while the bundle is still downloading or evaluating
@@ -625,7 +659,7 @@ out({midLoad:midLoad,midLoad2:midLoad2,readySent:readySent,designed:designed,n:s
         self.assertTrue(r["midLoad"].endswith("&active=S1"), "the active hint still rides: " + r["midLoad"])
         self.assertNotIn("reconnect", r["midLoad2"], "however many sockets died before the bundle: " + r["midLoad2"])
         self.assertEqual(r["readySent"], 1, "the bundle's own ready went out on the third socket")
-        self.assertTrue(r["designed"].endswith("&active=S1&reconnect=1"),
+        self.assertTrue(r["designed"].endswith("&active=S1&reconnect=1&proto=1"),
                         "once the kernel has answered the bundle's ready, a redial declares itself: " + r["designed"])
 
     def test_a_ready_that_queued_while_the_socket_was_down_redials_without_the_flag_and_goes_out_once_on_the_redial(self):
@@ -650,7 +684,7 @@ out({onDead:onDead,queued:queued,flushed:flushed,designed:designed,n:sockets.len
         self.assertNotIn("reconnect", r["queued"], "the bundle's ready is still queued: no flag, the page holds nothing: " + r["queued"])
         self.assertTrue(r["queued"].endswith("&active=S1"), "the active hint still rides: " + r["queued"])
         self.assertEqual(r["flushed"], 1, "the queued ready goes out on the redial socket, once: the flush carries it")
-        self.assertTrue(r["designed"].endswith("&active=S1&reconnect=1"),
+        self.assertTrue(r["designed"].endswith("&active=S1&reconnect=1&proto=1"),
                         "the ready has left on a socket and the kernel answered it: the next redial declares itself: " + r["designed"])
 
     def test_a_ready_posted_while_the_first_socket_is_still_connecting_queues_flushes_once_at_its_open_and_the_next_redial_declares_itself(self):
@@ -684,7 +718,7 @@ out({first:first,firstState:firstState,connecting:connecting,opened:opened,desig
         self.assertEqual(r["opened"]["sent"], 1, "the first open flushes the queued ready onto its socket, once")
         self.assertFalse(r["opened"]["readyQueued"], "the flush clears the queue bit on the FIRST open, not only on a reconnect's")
         self.assertEqual(r["opened"]["inQueue"], 0, "the flush emptied the queue: no second copy waits for a later open")
-        self.assertTrue(r["designed"].endswith("&active=S1&reconnect=1"),
+        self.assertTrue(r["designed"].endswith("&active=S1&reconnect=1&proto=1"),
                         "the ready has left on a socket, none is queued and the kernel answered it: the next redial declares itself: " + r["designed"])
         self.assertEqual(r["designed"].count("&reconnect=1"), 1)
         self.assertEqual((r["onFirst"], r["onRedial"]), (1, 0), "one ready on the first socket, none on the redial's: the bundle's ready went out exactly once")
@@ -710,7 +744,7 @@ out({unanswered:unanswered,stillFresh:stillFresh,answered:answered,n:sockets.len
         self.assertTrue(r["unanswered"].endswith("&active=S1"), "the active hint still rides: " + r["unanswered"])
         self.assertNotIn("reconnect", r["stillFresh"],
                          "no later socket carries a ready and no caps frame comes: the page dials fresh for its life: " + r["stillFresh"])
-        self.assertTrue(r["answered"].endswith("&active=S1&reconnect=1"),
+        self.assertTrue(r["answered"].endswith("&active=S1&reconnect=1&proto=1"),
                         "the caps frame is the latch, on whichever socket of the page it arrives: " + r["answered"])
 
     def test_a_pushed_view_frame_after_the_ready_is_not_the_kernels_answer_only_the_caps_frame_is(self):
@@ -747,7 +781,7 @@ out({noReady:noReady,onConnecting:onConnecting,queued:queued,flushed:flushed,des
         self.assertEqual(r["onConnecting"], 0, "nothing goes out on a socket that has not opened")
         self.assertNotIn("reconnect", r["queued"], "the ready is still queued: the frame on record does not stand in for its flush: " + r["queued"])
         self.assertEqual(r["flushed"], 1, "the flush carries the queued ready onto the socket that opened, once")
-        self.assertTrue(r["designed"].endswith("&active=S1&reconnect=1"), "ready, flush and answer all on record: the redial declares itself: " + r["designed"])
+        self.assertTrue(r["designed"].endswith("&active=S1&reconnect=1&proto=1"), "ready, flush and answer all on record: the redial declares itself: " + r["designed"])
 
 
 class SocketFlipMarker(unittest.TestCase):

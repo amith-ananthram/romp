@@ -50,6 +50,7 @@ TOP_KEYS = {"now", "since", "uptime_s", "log", "process", "pusher", "stages_ms",
             "goals", "memos", "judge", "http", "parses",   # parses: cold event-model parses (T323 stage 1)
             "checkpoints",                                 # checkpoints: the folds' checkpoints (T323 stage 3)
             "asmCheckpoint",                               # asmCheckpoint: the assembly documents (T323 stage 4a)
+            "chatPages",                                   # chatPages: the pre-floor history pages cache (T323 stage 4b)
             "skillLoadIndex"}                              # skillLoadIndex: the judge's skill-load boot pass, its raw reads (T333)
 
 

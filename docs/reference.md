@@ -1382,6 +1382,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   the harness's own skill load): `filesRead` and `bytesRead` (transcripts read raw this
   boot, appended tails only once the persisted index holds a file), `filesIndexed`, and
   `checked` (prompt anchors known not to be a wrapper, never read again).
+- `chatPages`: the rendered pages of chat history before a session's render
+  floor (the chat wire's `loadOlder`, `loadAround` and `loadNewer` answers, below):
+  `hits`, `misses`, `evictions`, `pages` and `bytes` resident (a bound of 32
+  pages or 16 MB per kernel), `renderMs` spent rendering.
 - `parses`: the cold event-model parses through the one parse store the
   kernel and the judges share: `total` (every miss, whoever asked), `kernel`
   (the display's asks among them, with `bytes`, the parsed files' sizes, and
@@ -1570,6 +1574,60 @@ a copy of a state directory and with no live kernel, `tools/perf-bench.py`
 loads a checkout's kernel in-process and reports each builder's cost on
 real-sized data; two checkouts can run against one copy for a before-and-after
 comparison. Its module docstring is the reference.
+
+### The chat wire's two protocols
+
+A chat page announces the protocol it speaks in its `ready` frame. A bundle
+that sends `{type: "ready"}` (an older page or extension) gets today's INDEX
+frames: a session frame trimmed to the last 250 events with `headFrom` and
+`headTotal` as indexes, `chatTail` deltas by index, `loadOlder` by index
+answered by `chatHead`, all from a build over the whole transcript (its render
+floor at turn 0 while such a client is connected). A bundle that sends
+`{type: "ready", proto: 2}` gets the uuid-anchored frames, and the kernel
+announces `chatProto2` in its `caps`:
+
+- the session frame carries `proto: 2`, the post-boundary tail (the events from
+  the assembly cut on, at most 250), `firstUuid` and `lastUuid`, `headKnown`
+  (false until the head has been reached) and `headTotal` (a count only when
+  the head is known, else null: the page shows no number); the cards above the
+  first event (the system card, a `/clear` notice) ride as `headCards`;
+- `chatTail` names the last unchanged event by `afterUuid`: the page truncates
+  after it and appends; an anchor it does not hold is a gap (`needFull`);
+- `loadOlder {id, before: <oldest resident uuid>}` is answered by `chatHead {id,
+  beforeUuid, events, more}`; `more: false` is the head;
+- `loadAround {id, uuid}` is answered by `chatWindow {id, anchor, events,
+  moreBefore, moreAfter}` in one round trip (`missing: true` when the anchor is
+  in no page); a window with `moreAfter` leaves the client DETACHED: it gets no
+  delta until `loadNewer {id, after: <newest resident uuid>}`, answered by
+  `chatMore {id, afterUuid, events, more}`, reaches the tail (`more: false`,
+  the reply then carries the frame's status and ledger), or a `needFull`
+  re-attaches it (the page's "Return to live" strip and its jump chip ask for
+  one, and the full frame answering that ask merges into the held run it
+  overlaps, so the pages the reader walked stay, the kernel's base keeping the
+  run's older first edge with it; every other full frame replaces the run, its
+  in-list events being the fresh copies); a reconnect's `ready` starts a fresh
+  base. A window that overlaps the run the client holds
+  through the live tail, by turn span, keeps it attached (`connected`; a
+  `loadOlder` advances the run's first edge, so the kernel's picture of the run
+  follows the page's). A
+  detached run whose edges left the transcript (a `/clear`, a fork, a rewind)
+  gets a full frame; a `missing` reply on a held key is a gap the page answers
+  with `needFull`. A reply that reaches the head carries the head cards first.
+  Every slice of the list is turn-aligned. A remote kernel learns the protocol
+  from a `ready` the page sends on each host socket's open; a redialed local
+  socket carries it on its dial term (`&proto=`), since a redial posts no
+  `ready`, and a page whose `ready` the kernel never answered posts it again on
+  its next fresh dial. A socket whose `ready` has not arrived has no protocol
+  yet and moves no render floor for its first thirty seconds; past that it
+  counts as an index client.
+
+The pages before the render floor are rendered on demand from the parse's
+lazy atoms (a page hydrates its own turns), memoized in a bounded cache
+(`/perf` `chatPages`), and equal the whole build's slice byte for byte
+(`tests/test_chat_pages.py`). Every event carries a uuid, and a
+`key` unique within its list (the uuid, or `uuid#n` for a second event built
+from one record); the notes romp adds (a retry recovered, an effort change, an
+orphan reply) carry synthetic uuids keyed by their second and ordinal.
 
 ## Browser-side performance telemetry
 

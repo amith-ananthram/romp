@@ -4431,8 +4431,11 @@ def _asm_restore(key, leaf_path, candidate_files, links, rompuuid, postal_index,
 
 
 def _hydrate_one(a, rec):
-    """Fill a lazy atom's body fields from its record, the way the emit built them."""
-    lz = a["lazy"]
+    """Fill a lazy atom's body fields from its record, the way the emit built them. An atom another thread finished
+    meanwhile (its marker gone) is left as it is (review find C)."""
+    lz = a.get("lazy")
+    if lz is None:
+        return
     k = lz["k"]
     if k == "a":
         a["message"] = _norm_message(rec.get("message"))
@@ -4482,7 +4485,9 @@ def hydrate(atoms, rompuuid=None, by=None):
             if hit is not None:
                 _HYDRATED.pop(u, None); _HYDRATED[u] = hit      # a served body is a used one: to the LRU tail
         if hit is not None:
-            _hydrate_one(a, hit[0]); filled += 1
+            if a.get("lazy") is not None:                       # another thread may have finished it since the filter (C)
+                _hydrate_one(a, hit[0])
+            filled += 1
             continue
         sid = a.get("session_id") or rompuuid
         path = (_LAZY_FILES.get(str(sid)) or {}).get(a.get("fsid"))
@@ -4493,14 +4498,17 @@ def hydrate(atoms, rompuuid=None, by=None):
         # the file's read stripe is held across the group: two threads hydrating the same atoms (the judges' unit text
         # and the frame's markdown at a boot) would both miss the memo and both read; the second now waits and hits it
         with _READ_STRIPES[hash(path) % len(_READ_STRIPES)], open(path, "rb") as fh:
-            for a in sorted(group, key=lambda x: x["lazy"].get("at") or (0, 0)):
-                u = a.get("uuid")
+            for a in sorted(group, key=lambda x: (x.get("lazy") or {}).get("at") or (0, 0)):
+                lz = a.get("lazy")
+                if lz is None:
+                    filled += 1; continue                 # another thread hydrated it between the filter and here (the feed's
+                u = a.get("uuid")                         #  build and the judges both ask): its body is in place
                 with _ASM_CKPT_LOCK:
                     hit = _HYDRATED.get(u) if u else None
                 if hit is not None:
                     _hydrate_one(a, hit[0]); filled += 1
                     continue
-                at_ln = a["lazy"].get("at")
+                at_ln = lz.get("at")
                 if not at_ln:
                     raise LazyBodyRead("atom %s: the document carries no record location" % a.get("uuid"))
                 at, ln = at_ln
@@ -4661,7 +4669,14 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
                      "end": turn["end"], "ended": turn["ended"], "atoms": turn["atoms"]}
         turn.clear()
         turn.update(turn_keys)
-    return {"rompUuid": rompuuid, "name": name or rompuuid, "dir": dir,
+    # the cut turn (T323 stage 4b): the first turn after the last one holding a lazy (pre-cut) atom, taken here before
+    # any consumer hydrates; 0 for a whole parse. The chat build renders from it (its render floor).
+    cut_turn = 0
+    for _i in range(len(turns) - 1, -1, -1):
+        if any(a.get("lazy") is not None for a in turns[_i]["atoms"]):
+            cut_turn = min(_i + 1, len(turns) - 1)
+            break
+    out = {"rompUuid": rompuuid, "name": name or rompuuid, "dir": dir,
             "color": color, "leafFsid": leaf_path.stem, "turns": turns,
             # for the kernel chat build's own marker interleave: its dedup reads the KEPT turns
             # only, so without this a marker whose reply landed on an abandoned branch would
@@ -4670,6 +4685,9 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
             # the harness's own skill-load wrappers the emit skipped, {uuid: skill name}, over every file the
             # walk crossed: the judge stamps the tops older stores minted from them off this (T333)
             "skillLoads": skill_loads}
+    if cut_turn:
+        out["cutTurn"] = cut_turn                   # a restored tree only (T323 stage 4b): where its lazy atoms ended
+    return out
 
 
 def task_store_dir(fsid):

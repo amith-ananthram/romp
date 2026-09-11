@@ -3139,6 +3139,17 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 }
 #jump-bottom:hover { border-color: var(--accent); color: var(--accent); }
 #jump-bottom[hidden] { display: none; }   /* author display:flex defeats [hidden] — the login-modal lesson */
+/* live updates paused (T323 stage 4b): a proto-2 reader on an older window gets no live delta; the strip says so and
+   offers the return. The jump chip's dress: menu-card background, the hairline border, the toast shadow, pill radius. */
+#live-paused {
+  position: fixed; left: 14px; z-index: 40; display: flex; align-items: center; gap: 10px;
+  padding: 4px 10px; border-radius: var(--radius-pill); font-size: 12px; color: var(--dim);
+  background: var(--vscode-menu-background, var(--surface-raised)); border: 1px solid var(--menu-border); box-shadow: var(--shadow-toast);
+}
+#live-paused[hidden] { display: none; }
+#live-paused .live-paused-btn { cursor: pointer; border: 1px solid var(--menu-border); border-radius: var(--radius-pill); padding: 2px 10px;
+  background: transparent; color: var(--accent); font: inherit; }
+#live-paused .live-paused-btn:hover { border-color: var(--accent); }
 @media (pointer: coarse) { #jump-bottom { width: 64px; height: 32px; } }   /* the phone half: WIDEN for the hit area, never heighten — the compact look is the ask */
 /* replies ready (the user 2026-09-08): two chips stacked ABOVE the jump chip in the SAME slot and dress —
    "↑ 2 replies unread" / "↓ 1 reply unread" — for the unread landed replies whose marks sit off-screen in

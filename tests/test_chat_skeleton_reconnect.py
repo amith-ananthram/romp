@@ -416,7 +416,7 @@ class SkeletonReconnect(unittest.TestCase):
         self.assertIn("_send_chat_or_status(c, m, ms, change_from, led_changed)", s)
         self.assertNotIn("= _send_chat(c, m, ms, change_from, led_changed)", s,
                          "the pusher's per-client send goes through the skeleton-aware twin")
-        self.assertIn('+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1":"")', km._shim("chat", 1),
+        self.assertIn('+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1&proto="+readyProto:"")', km._shim("chat", 1),
                       "the shim declares the redial once the kernel's caps frame has answered its bundle's ready")
         self.assertIn('if(msg&&msg.type==="caps")readyAcked=true;', km._shim("chat", 1),
                       "the latch is the caps frame, the ready arm's reply (_send_caps)")
@@ -478,7 +478,7 @@ class SkeletonReconnect(unittest.TestCase):
             self.assertLess(s.index("with _client_lock("), s.index('"skeleton"'), name + ": the lock comes first")
         # the two lock-free helpers are reached only from bodies that hold the lock
         self.assertEqual(owners("_release_skeleton_locked("),
-                         {"_release_skeleton", "_send_chat_locked", "_client_reset_chat_sid"})
+                         {"_release_skeleton", "_send_chat_locked", "_send_chat_proto2", "_client_reset_chat_sid"})   # _send_chat_proto2: reached from _send_chat_locked alone (T323 stage 4b)
         self.assertEqual(owners("_tab_order_frame("), {"_send_tab_order"})
         for name in ("_release_skeleton", "_client_reset_chat_sid", "_send_tab_order"):
             s = inspect.getsource(getattr(km, name))
