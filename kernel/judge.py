@@ -13,6 +13,7 @@ CLI:
   romp-judge --once               # one caption pass over the live fleet (writes captions/)
   romp-judge --test <transcript>  # caption one transcript's recent units, print them (no write)
 """
+import collections
 import contextlib, copy, hashlib, json, os, re, secrets, shutil, signal, stat, sys, time, subprocess, threading, traceback, importlib.util
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -2696,7 +2697,146 @@ def _fileset_key(files):
     return out
 
 
-_PARSE_CACHE = {}          # fsid -> (fileset_key, parsed_session)
+# THE parse cache (T323 stage 2, 2026-09-11): one parsed session tree per (fsid, pending cut), shared by the judges
+# and the kernel's display parse (kernel._parse delegates here), least-recently-used, _PARSE_CACHE_MAX entries.
+# Entry: (key, session, leaf_path, sdk_human) with key = (fileset stat pair over the candidates and the states file,
+# the pending cut), the pass frame's pair shape unchanged, and sdk_human beside it: every fact either caller keyed on
+# before the two caches were one. The cut is in the SLOT as well as the key, so a caller reading a different cut than
+# another (the kernel arming a bare rollback the judges do not see, or the reverse) gets an entry of its own rather
+# than the other's view: two trees are cheaper than one wrong tree.
+class _ParseStore(collections.OrderedDict):
+    """The shared store's dictionary: slots are (fsid, cut) tuples, least recently used first. A bare fsid string
+    reads as that session's NEWEST slot (the pass-frame tests and the courier keys look a session up by id), and
+    writes under a bare fsid land in the slot of the live cut, so a stand-in dict a test installs and the readers
+    that predate the (fsid, cut) slots keep working."""
+
+    @staticmethod
+    def _k(k):
+        return k if isinstance(k, tuple) else None
+
+    def _newest(self, fsid):
+        for k in reversed(list(self.keys())):
+            if isinstance(k, tuple) and k[0] == fsid:
+                return k
+        return None
+
+    def __getitem__(self, k):
+        if not isinstance(k, tuple):
+            nk = self._newest(k)
+            if nk is None:
+                raise KeyError(k)
+            return super().__getitem__(nk)
+        return super().__getitem__(k)
+
+    def get(self, k, default=None):
+        try:
+            return self[k]
+        except KeyError:
+            return default
+
+    def __contains__(self, k):
+        return (self._newest(k) is not None) if not isinstance(k, tuple) else super().__contains__(k)
+
+    def __setitem__(self, k, v):
+        if not isinstance(k, tuple):
+            k = (k, _pending_cut(k))
+        super().__setitem__(k, v)
+
+
+_PARSE_CACHE = _ParseStore()   # (fsid, cut) -> (key, session, leaf, sdk_human); a bare fsid reads the newest slot
+_PARSE_CACHE_MAX = 256
+_PARSE_CACHE_LOCK = threading.Lock()
+_PARSE_HITS = [0]              # served from the cache (whoever asked); misses are _PARSE_MISSES
+_SDK_OWNER_FN = None           # kernel wiring: fn(fsid) -> whether an SDK or Codex backend owns the session
+
+
+def set_sdk_owner_provider(fn):
+    """Kernel wiring: the ONE answer to "is this session's composer input the human" (sdk_human), the backends'
+    owns(); without it _sdk_owned falls back to the SDK registry file, which misses Codex sessions."""
+    global _SDK_OWNER_FN
+    _SDK_OWNER_FN = fn
+
+
+def _lru_touch(cache, k):
+    """Mark k most recently used; a plain dict standing in for the store (a test's raced cache) has no order."""
+    touch = getattr(cache, "move_to_end", None)
+    if touch is not None:
+        touch(k)
+
+
+def _parse_slot(fsid, cut):
+    """The cache entry for (fsid, cut), marked most recently used; None when absent."""
+    with _PARSE_CACHE_LOCK:
+        ent = _PARSE_CACHE.get((fsid, cut))
+        if ent is not None:
+            _lru_touch(_PARSE_CACHE, (fsid, cut))
+        return ent
+
+
+def _parse_store(fsid, cut, key, session, leaf, human):
+    with _PARSE_CACHE_LOCK:
+        _PARSE_CACHE[(fsid, cut)] = (key, session, str(leaf), bool(human))
+        _lru_touch(_PARSE_CACHE, (fsid, cut))
+        while len(_PARSE_CACHE) > _PARSE_CACHE_MAX:
+            del _PARSE_CACHE[next(iter(_PARSE_CACHE))]   # the least recently used goes, never everything at once
+
+
+def _parse_entry(fsid):
+    """The newest cached entry for fsid across cuts (the chain and courier keys compare its session by identity)."""
+    with _PARSE_CACHE_LOCK:
+        for k in reversed(_PARSE_CACHE):
+            if k[0] == fsid:
+                return _PARSE_CACHE[k]
+    return None
+
+
+def parse_entry_for_leaf(leaf):
+    """The newest cached entry whose parse read `leaf` as its leaf transcript (the kernel's path-keyed view)."""
+    leaf = str(leaf)
+    with _PARSE_CACHE_LOCK:
+        for k in reversed(_PARSE_CACHE):
+            if _PARSE_CACHE[k][2] == leaf:
+                return _PARSE_CACHE[k]
+    return None
+
+
+def parse_cache_paths():
+    """The leaf paths of every cached parse, newest last (the kernel's view iterates these)."""
+    with _PARSE_CACHE_LOCK:
+        return [ent[2] for ent in _PARSE_CACHE.values()]
+
+
+def parse_cache_drop(fsid):
+    """Drop every cut's entry for fsid (a dead timeline lane releasing its parse); returns how many went."""
+    with _PARSE_CACHE_LOCK:
+        gone = [k for k in _PARSE_CACHE if k[0] == fsid]
+        for k in gone:
+            del _PARSE_CACHE[k]
+    return len(gone)
+
+
+def parse_cache_clear():
+    with _PARSE_CACHE_LOCK:
+        _PARSE_CACHE.clear()
+
+
+def parse_hits():
+    return int(_PARSE_HITS[0])
+
+
+def parse_cached(fsid, files):
+    """The cached session for fsid under the LIVE key (files as they stand now, the live cut, sdk_human), or None:
+    NEVER parses, so the feed's cache-only read costs nothing cold (kernel._parse_cached)."""
+    try:
+        cands, states, keyfiles = _parse_key_files(fsid, files)
+        pair = _fileset_key(keyfiles)
+    except Exception:
+        return None
+    cut = _pending_cut(fsid)
+    ent = _parse_slot(fsid, cut)
+    if ent is not None and ent[0] == (pair, cut) and ent[3] == bool(_sdk_owned(fsid)):
+        return ent[1]
+    return None
 
 # ── the courier's change gate (2026-09-09) ──
 # run_courier scanned every session's transcript and goal store on every triage pass, loading the store
@@ -2767,7 +2907,7 @@ def _plan_key(fsid, path, session, now):
     session after a /clear), the captions file (the floor-title heal reads it), and each running background
     launch with whether it has crossed its deadline under the pass clock `now` (_bg_expiry_key: the settle
     reads that crossing and no file records it)."""
-    pk = _PARSE_CACHE.get(fsid)
+    pk = _parse_entry(fsid)
     if pk is None or pk[1] is not session:
         return None
     return (str(path), pk[0], _store_key(fsid), _file_key(str(EPIDIR / (fsid + ".jsonl"))),
@@ -2790,7 +2930,7 @@ def _courier_scan_key(fsid, path, session):
     """Every input run_courier's per-session scan reads, or None when the parse is not the cache's own
     (never skip what cannot be keyed). Taken before the store read, so a write landing during the scan
     moves the key the next pass takes."""
-    pk = _PARSE_CACHE.get(fsid)
+    pk = _parse_entry(fsid)
     if pk is None or pk[1] is not session:
         return None
     return (str(path), pk[0], _file_key(str(GOALDIR / (fsid + ".json"))), _journal_key(fsid), _archive_key(fsid),
@@ -3002,6 +3142,11 @@ def _sdk_owned(fsid):
     human (it parses with sdk_human=True), the dotted placeholder sticks for the whole open turn — forever if
     the turn reads as 'working' indefinitely — and each new message just re-renders a fresh one (the user
     2026-06-29). Computed from the live STATE global so it follows _rebind_state in tests."""
+    if _SDK_OWNER_FN is not None:
+        try:
+            return bool(_SDK_OWNER_FN(fsid))
+        except Exception:
+            pass
     return (STATE / "sdk" / (fsid + ".json")).exists()
 
 
@@ -3130,7 +3275,7 @@ def _frame_pin_parse(fr, fsid, session, key):
     return won
 
 
-def parsed_session(fsid, files, now):
+def parsed_session(fsid, files, now, asm_mode_out=None, stats=None):
     """ONE event-model parse per (transcript+states, mtime+size), reused across the captioner, planner,
     sweep, courier, and grouper — which all re-parsed the SAME leaf every pass (up to 4× per change, and
     once per pass even when nothing changed, which is what forced the PLAN_SESSIONS cap). In-memory: the
@@ -3182,22 +3327,26 @@ def parsed_session(fsid, files, now):
     # shows up as a served pair that differs from the pinned one, which withholds the gate's stamp.
     if cut is None:                        # a pin answered and read nothing: the live cut is ours to read
         cut = _pending_cut(fsid)
-    key = (pair[0], cut) if pair is not None else None
-    hit = _PARSE_CACHE.get(fsid)
-    if key is not None and hit and hit[0] == key:
+    human = bool(_sdk_owned(fsid))
+    key = (pair[0], cut) if pair is not None else None   # the frame's pair shape; sdk_human rides the entry (stage 2)
+    hit = _parse_slot(fsid, cut)
+    if key is not None and hit and hit[0] == key and hit[3] == human:
+        _PARSE_HITS[0] += 1
+        if stats is not None:
+            stats["miss"] = False
         if fr is not None:                 # a WARM first touch pins too (review 2026-09-06): this path used to
             with _frame_lock:              #  return unpinned, so a session already in the cache froze nothing
                 return _frame_pin_parse(fr, fsid, hit[1], key)   # and a mid-pass append reached a later stage
         return hit[1]                      #  only - the two-worlds shape the frame exists to prevent
     session = em.parse_session(files[0], rompuuid=fsid, candidate_files=list(files),
                                states=str(states), postal_log=str(MESSAGES), now=now,
-                               sdk_human=_sdk_owned(fsid),   # SDK session → composer input is promptSource "sdk" = the human (mirrors the kernel)
-                               leaf_override=cut or None)
+                               sdk_human=human,   # SDK session → composer input is promptSource "sdk" = the human (one owner hook)
+                               leaf_override=cut or None, asm_mode_out=asm_mode_out)
+    if stats is not None:
+        stats["miss"] = True
+    _PARSE_MISSES[0] += 1                                  # a cold parse (T323: /perf parses)
     if key is not None:
-        if len(_PARSE_CACHE) > 256:        # bounded by fleet size; a wholesale clear on overflow is fine
-            _PARSE_CACHE.clear()
-        _PARSE_MISSES[0] += 1                              # a cold parse (T323: /perf parses.judge)
-        _PARSE_CACHE[fsid] = (key, session)
+        _parse_store(fsid, cut, key, session, files[0], human)   # LRU, never a wholesale clear (T323 stage 2)
     if fr is not None:                     # pin under the frame the KEY went into (never a re-read _frame: a
         with _frame_lock:                  #  parse spanning a pass boundary must not land keyless in the next
             return _frame_pin_parse(fr, fsid, session, key)   # frame); a concurrent first toucher wins

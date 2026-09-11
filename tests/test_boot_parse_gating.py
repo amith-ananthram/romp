@@ -285,7 +285,8 @@ class PerfCountsColdParses(unittest.TestCase):
         km._PERF_STATS.parse(SID_OLD, 10)
         km._PERF_STATS.parse(SID_NEW, 5)
         snap = km._PERF_STATS.snapshot()
-        self.assertEqual((snap["parses"]["total"], snap["parses"]["bytes"]), (3, 1249))
+        self.assertEqual((snap["parses"]["kernel"], snap["parses"]["bytes"]), (3, 1249), "the kernel's own asks (stage 2 splits the counters)")
+        self.assertIsInstance(snap["parses"]["total"], int)
         self.assertEqual(snap["parses"]["bySid"], {SID_OLD[:8]: 2, SID_NEW[:8]: 1})
         self.assertIsInstance(snap["parses"]["judge"], int)
 
@@ -297,7 +298,8 @@ class PerfCountsColdParses(unittest.TestCase):
         now = int(time.time())
         km._parse(r["path"], SID_NEW, now)
         km._parse(r["path"], SID_NEW, now)
-        self.assertEqual(km._PERF_STATS.snapshot()["parses"]["total"], 1, "the second call is a cache hit")
+        snap = km._PERF_STATS.snapshot()["parses"]
+        self.assertEqual((snap["kernel"], snap["hits"]), (1, 1), "the second call is served from the shared store")
 
     def test_judge_parse_misses(self):
         d = tempfile.mkdtemp()

@@ -966,6 +966,20 @@ enumerates, which the checkpoint work that follows removes. `/perf`'s `parses`
 counts the cold parses, and `scripts/bench_boot_parse.py` measures a boot's
 cost against transcript size on synthetic worlds.
 
+The kernel and the judges share one parse. Until 2026-09-11 each kept its own
+cache of parsed session trees (the kernel's keyed by transcript path, the
+judges' by session), so every live transcript was parsed twice per file
+version and held twice. The judges' cache is now the one store: the kernel's
+display parse delegates to it, the tree the chat renders is the tree the
+judges walk, and the store keys on every fact either side keyed on (the
+transcript's and the states file's stat pair, the pending rollback cut, and
+whether a backend owns the session, which one owner hook answers for both).
+A session read under two different cuts keeps a slot per cut rather than one
+side reading the other's view; the store evicts the least recently used entry
+past 256 instead of clearing wholesale. The gain is one tree per session, about
+a quarter of the record cost the T311 report measured (0.25 GB of 6.6); the
+record cache itself, the bulk, is the checkpoint work's target.
+
 What the CLI itself does when its parent goes quiet was measured on Claude Code
 2.1.257 (2026-09-10, the restart-surviving sessions program's stage 3 probe, run
 against a throwaway config directory): a permission request (`can_use_tool`)
@@ -1279,12 +1293,14 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   longer wait between cycles would have skipped; a conservative undercount,
   since a wake set by another thread or a periodic repost of an unchanged
   frame marks a cycle busy).
-- `parses`: the cold event-model parses this kernel ran, `total`, `bytes`
-  (the parsed files' sizes) and `bySid` (per session, by the first eight
-  characters of its id), plus `judge`, the judges' own cold parses through
-  their separate cache. The acceptance number of the lazy-transcript work: a
-  boot with no client connected reads zero here, and a connecting chat client
-  adds exactly its shown tabs.
+- `parses`: the cold event-model parses through the one parse store the
+  kernel and the judges share: `total` (every miss, whoever asked), `kernel`
+  (the display's asks among them, with `bytes`, the parsed files' sizes, and
+  `bySid`, per session by the first eight characters of its id), `judge` (the
+  rest), `hits` (the display's asks served from the store) and `sharedHits`
+  (every hit). The acceptance number of the lazy-transcript work: a boot with
+  no client connected reads `kernel` zero, and a connecting chat client adds
+  at most its shown tabs.
 - `stages_ms`: `jobs` (the cycle's tick jobs outside the push), `push`, and
   inside it `push.chat`, `push.feed`, `push.timeline`, `push.send`. The
   `push.*` stages count every push, including the one a connecting page gets,

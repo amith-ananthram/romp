@@ -132,8 +132,11 @@ def boot_once(tree, dist, sessions, turns, settle_s):
             parses = {}
         row = {"tree": tree, "sessions": sessions, "turnsPerSession": turns, "worldBytes": total_bytes,
                "firstServeS": round(first_serve, 2), "settleS": settle_s, "readBytes": io.get("rchar"),
-               "rssKb": io.get("rssKb"), "parses": parses.get("total"), "parseBytes": parses.get("bytes"),
-               "judgeParses": parses.get("judge")}
+               "rssKb": io.get("rssKb"),
+               # /perf parses: since stage 2 `kernel` is the display's cold parses and `total` every miss through the
+               # shared store; a stage 1 tree reports `total` as the display's (no shared store yet)
+               "parses": parses.get("kernel", parses.get("total")), "parseBytes": parses.get("bytes"),
+               "judgeParses": parses.get("judge"), "totalParses": parses.get("total")}
         proc.terminate()
         try:
             proc.wait(timeout=15)
