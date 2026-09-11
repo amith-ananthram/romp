@@ -575,7 +575,10 @@ class KernelFolds(Base):
             self.assertIn(self.leaf, em.checkpoint_dirty())
             self.assertEqual(km._persist_checkpoints(TS0 + 1), 0, "no settle, no states move: nothing written")
             turn_end[0] = TS0 + 100                                # the Stop hook stamped the settle
+            em._ASM_CKPT_STATS["skipped"] = {}
             self.assertEqual(km._persist_checkpoints(TS0 + 2), 1)
+            self.assertGreaterEqual(em.asm_checkpoint_stats()["skipped"].get("noEntry", 0) + em.asm_checkpoint_stats()["skipped"].get("noBoundary", 0), 1,
+                                    "the settle write asked for the leaf's assembly document too (a counted skip here: no parse, no boundary)")
             self.assertNotIn(self.leaf, em.checkpoint_dirty())
             _append(self.agent, _assistant([{"type": "tool_use", "id": "toolu_s9", "name": "Bash", "input": {"command": "true"}}], "s9", "s2", TS0 + 101))
             km._agent_steps(self.agent)

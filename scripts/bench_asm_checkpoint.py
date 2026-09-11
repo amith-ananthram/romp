@@ -59,12 +59,20 @@ for i in range(sessions):
             f.write(json.dumps({"type": "user", "uuid": u, "parentUuid": parent, "timestamp": iso(t), "promptSource": "typed",
                                 "cwd": "/w/notes-api", "version": "2.1.0", "gitBranch": "web",
                                 "message": {"role": "user", "content": " ".join(rnd.choice(WORDS) for _ in range(40)) + " %d" % k}}) + "\n")
-            blocks = [{"type": "text", "text": " ".join(rnd.choice(WORDS) for _ in range(120))}]
+            blocks = [{"type": "text", "text": " ".join(rnd.choice(WORDS) for _ in range(300))}]   # records the size a real
             if k % 7 == 3: blocks.append({"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": "sleep 1", "run_in_background": True, "description": "lint"}})
             if k % 5 == 1: blocks.append({"type": "tool_use", "id": tid + "e", "name": "Edit", "input": {"file_path": "/w/notes-api/web/app%d.ts" % k}})
             f.write(json.dumps({"type": "assistant", "uuid": a, "parentUuid": u, "timestamp": iso(t + 20), "cwd": "/w/notes-api", "version": "2.1.0",
                                 "gitBranch": "web", "message": {"role": "assistant", "content": blocks, "stop_reason": "end_turn"}}) + "\n")
-            parent = a; t += 60
+            parent = a
+            if k % 3 == 2:                                  # transcript's are (about 2 KB on average, T311): a tool call and its result
+                tu, tr = "t%d" % k, "x%d" % k
+                f.write(json.dumps({"type": "assistant", "uuid": tu, "parentUuid": parent, "timestamp": iso(t + 25), "message": {"role": "assistant", "stop_reason": "tool_use",
+                                    "content": [{"type": "tool_use", "id": "toolu_r%d_%d" % (i, k), "name": "Read", "input": {"file_path": "/w/notes-api/web/app%d.ts" % k}}]}}) + "\n")
+                f.write(json.dumps({"type": "user", "uuid": tr, "parentUuid": tu, "timestamp": iso(t + 26), "message": {"role": "user", "content": [
+                                    {"type": "tool_result", "tool_use_id": "toolu_r%d_%d" % (i, k), "content": " ".join(rnd.choice(WORDS) for _ in range(250))}]}}) + "\n")
+                parent = tr
+            t += 60
     sub = os.path.join(proj, sid, "subagents"); os.makedirs(sub, exist_ok=True)
     with open(os.path.join(sub, "agent-%08x.jsonl" % (i + 1)), "w") as f:
         p2 = None
@@ -145,8 +153,8 @@ written = 0
 if phase == "first":
     if hasattr(em, "checkpoint_write_dirty"): em.checkpoint_write_dirty()
     if hasattr(em, "asm_checkpoint_write"):
-        for sid in sids:
-            written += 1 if em.asm_checkpoint_write(os.path.join(proj, sid + ".jsonl"), sid, False) else 0
+        for sid in sids:                                        # under the key the judges' parse used (their sdk_human answer)
+            written += 1 if em.asm_checkpoint_write(os.path.join(proj, sid + ".jsonl"), sid, bool(jd._sdk_owned(sid))) else 0
 stats = em.asm_checkpoint_stats() if hasattr(em, "asm_checkpoint_stats") else {}
 print(json.dumps({"phase": phase, "byClass": by, "total": sum(by.values()), "rssBytes": r1, "rssDelta": r1 - r0,
                   "modes": {m: modes.count(m) for m in set(modes)}, "asmWritten": written,

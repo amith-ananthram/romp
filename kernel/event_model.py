@@ -826,8 +826,10 @@ def _ckpt_pending(path, ent):
     key = str(path)
     with _CKPT_LOCK:
         pend = _CKPT_PENDING.get(key)
-    if pend is not None or ent is None or ent[5] != 0 or _CKPT_DIR_FN is None:
-        return pend
+    if pend is not None or ent is None or _CKPT_DIR_FN is None:
+        return pend                                       # a tail entry the assembly checkpoint's cut read created (T323
+    #                                                       stage 4a) is consulted like a whole one: the fold's recorded
+    #                                                       count must lie within the records the entry holds
     with _CKPT_LOCK:
         if key in _CKPT_SEQ:                          # already consulted (or written) in this process: nothing new
             return None
@@ -848,8 +850,12 @@ def _ckpt_pending(path, ent):
         _count_read(key, len(guard))
     except OSError:
         ok = False
-    if not ok or count > ent[5] + len(ent[4]):
+    if not ok:
         _ckpt_fallback(path, "guard", "whole reader first"); return None
+    if count < ent[5] or count > ent[5] + len(ent[4]):
+        with _CKPT_LOCK:
+            _CKPT_SEQ[key] = int(doc.get("seq") or 0)
+        return None                                       # the fold's count is outside the held records: a cold fold, no fallback
     pend = {"count": count, "gen": ent[6], "folds": dict(doc.get("folds") or {})}
     with _CKPT_LOCK:
         _CKPT_PENDING[key] = pend
@@ -3888,7 +3894,7 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
             files[fsid] = f
         # the pre-cut records: identity, verdict, type, order, time, file, landed
         type_code = {"user": "u", "assistant": "a", "system": "s", "attachment": "t"}
-        rows, row_of = [], {}
+        rows, row_of, files_order = [], {}, {}
         for u, r in ad.by_uuid.items():                   # insertion order = read order
             sq = ad.seq_of.get(u, 0)
             if sq >= cut_seq:
@@ -3897,8 +3903,11 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
             fp = fsid_paths.get(fsid)
             idx = sq - first_seq[fp] if fp is not None else -1
             row_of[u] = len(rows)
+            fsids = files_order.setdefault("_", [])
+            if fsid not in fsids:
+                fsids.append(fsid)
             rows.append([u, verdicts.get(u, "broken")[0], type_code.get(r.get("type"), "?"), r.get("subtype") if r.get("type") == "system" else None,
-                         sq, ad.ts_of.get(u, 0), fsid, idx, 1 if u in entry["landed"] else 0])
+                         sq, ad.ts_of.get(u, 0), fsids.index(fsid), idx, 1 if u in entry["landed"] else 0, r.get("parentUuid")])
         # the pre-cut atoms in emit order
         pre_atoms = []
         for a in atoms:
@@ -3919,9 +3928,23 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
             fsid = a.get("fsid")
             fp = fsid_paths.get(fsid)
             idx = (sq - first_seq[fp]) if fp is not None else -1
-            row = {"s": scal, "seq": a.get("_seq", sq), "i": idx}
+            ri = row_of.get(u)
+            if ri is not None:                             # the record row carries uuid, type, t, fsid and parentUuid: derive them
+                rr = rows[ri]
+                for k_, v_ in (("uuid", u), ("fsid", fsid), ("session_id", rompuuid), ("t", rr[5]), ("parentUuid", rr[9])):
+                    if scal.get(k_) == v_:
+                        scal.pop(k_, None)
+                if scal.get("type") == {"u": "user", "a": "assistant", "s": "system"}.get(rr[2]):
+                    scal.pop("type", None)
+            row = {"s": scal, "i": idx}
+            if ri is not None:
+                row["r"] = ri
+            if a.get("_seq", sq) != sq:
+                row["seq"] = a.get("_seq", sq)             # an adopted boundary's emit order differs from its read order
             if kind in _LAZY_KINDS:
                 row["lz"] = _lazy_of(a, kind, idx)
+                if row["lz"]["k"] == "u" and not row["lz"].get("tur"):
+                    row["lz"].pop("tur", None)
             pre_atoms.append(row)
         # the pre-cut spine, root to cut
         chain, u, guard_n = [], ad.leaf_uuid, 0
@@ -3947,10 +3970,11 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
             if q["seq"] < cut_seq and q["ts"] is not None and (q["uuid"] is None or q["uuid"] in entry["kept"]):
                 st["absorbed_keys"].add((q["ts"], _th(" ".join(q["text"].split()))))
         st = dict(st); st.pop("postal_miss_rec", None); st.pop("postal_miss_att", None)
-        pre_lazy = _restore_prefix_atoms(pre_atoms, rompuuid)
+        fsids = files_order.get("_", [])
+        pre_lazy = _restore_prefix_atoms(pre_atoms, rompuuid, rows, fsids)
         identity = _pre_tree_identity(pre_lazy, rompuuid)
         doc = {"av": _ASM_CKPT_V, "path": os.path.realpath(str(leaf_path)), "rompuuid": str(rompuuid), "sdkHuman": bool(sdk_human),
-               "cands": list(entry["cands"]), "links": dict(entry["links"]), "files": files, "cutSeq": cut_seq,
+               "cands": list(entry["cands"]), "links": dict(entry["links"]), "files": files, "fsids": fsids, "cutSeq": cut_seq,
                "records": rows, "atoms": pre_atoms, "spine": spine, "seqTs": seq_ts, "lastTs": last_ts,
                "gates": {"prompt_ids": sorted(ad.prompt_ids), "boundary_pids": sorted(ad.boundary_pids),
                          "skill_use_ids": sorted(ad.skill_use_ids), "src_tool_links": sorted(ad.src_tool_links),
@@ -3974,13 +3998,24 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
         return True
 
 
-def _restore_prefix_atoms(pre_atoms, rompuuid):
-    """The pre-cut atoms as the tree holds them: the recorded scalars, a _LazyBody where a message was, the lazy
-    scalars under `lazy`, and the read-order tiebreak the segmentation sorts by."""
+def _restore_prefix_atoms(pre_atoms, rompuuid, rows, fsids):
+    """The pre-cut atoms as the tree holds them: the identity fields from the record row (uuid, type, t, fsid, session,
+    parentUuid), the recorded scalars over them, a _LazyBody where a message was, the lazy scalars under `lazy`, and
+    the read-order tiebreak the segmentation sorts by."""
+    tname = {"u": "user", "a": "assistant", "s": "system"}
     out = []
     for row in pre_atoms:
-        a = dict(row["s"])
-        a["_seq"] = row["seq"]
+        a = {}
+        ri = row.get("r")
+        if ri is not None:
+            rr = rows[ri]
+            a.update({"type": tname.get(rr[2], "user"), "uuid": rr[0], "session_id": rompuuid, "t": rr[5],
+                      "fsid": fsids[rr[6]] if 0 <= rr[6] < len(fsids) else None, "parentUuid": rr[9]})
+            seq = rr[4]
+        else:
+            seq = row.get("seq", 0)
+        a.update(row["s"])
+        a["_seq"] = row.get("seq", seq)
         lz = row.get("lz")
         if lz is not None:
             a["lazy"] = dict(lz)
@@ -4054,9 +4089,10 @@ def _asm_restore(key, leaf_path, candidate_files, links, rompuuid, postal_index,
             seed["types"][u] = (type_of.get(tc), sub)
             if row[8]:
                 landed.add(u)
+        fsids = list(doc.get("fsids") or [])
         for fsid, f in doc["files"].items():
             seed["cuts"][fsid] = "skip" if f.get("skip") else (int(f["cut"][0]), int(f["cut"][1]), bytes.fromhex(f["cut"][2]))
-        prefix = _restore_prefix_atoms(doc["atoms"], rompuuid)
+        prefix = _restore_prefix_atoms(doc["atoms"], rompuuid, doc["records"], fsids)
         if _pre_tree_identity(prefix, rompuuid) != doc.get("identity"):
             _asm_ckpt_note(leaf_path, "identity"); return None
         ad = FileAdapter(candidate_files, leaf_path, resume_links=links, seed=seed)
