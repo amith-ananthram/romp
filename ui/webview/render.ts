@@ -91,7 +91,7 @@ import { apiErrorReason } from "./api-error-reason";
 import { chatMdExtensions, userMdHtml } from "./chat-md";
 import { setTip, pruneTip } from "./tip";
 import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAnchorRange, sliceRanges, prunePending, newCommentCreate, commentCreateFrame,
-         pickMarkToOpen, type CommentThread, type CommentCreate } from "./comments";
+         pickMarkToOpen, type CommentThread, type CommentCreate, markSkipsParent } from "./comments";
 import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, chipLabel, chipTip, chipAria, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
 import { dragSlotIndex } from "./dragslot";
 import { perfFrameHandler } from "./perf-telemetry";
@@ -8907,6 +8907,10 @@ function ensureCommentMark(turn: HTMLElement, th: CommentThread): void {
     if (!r) return;                             // rendered text drifted — the badge still reaches it
     for (const sl of sliceRanges(nodes.map((t) => t.data.length), r.start, r.end)) {
       const t = nodes[sl.idx];
+      // never BETWEEN a table's cells (T349, the user 2026-09-11: a comment on a table's row broke the table): the
+      // newline text between <td>s and <tr>s is part of the contiguous match, and an inline element there gets its
+      // own anonymous cell, so the columns shifted; each cell's own text is wrapped and the table's boxes stay
+      if (markSkipsParent(t.parentElement?.tagName)) continue;
       const mid = sl.s > 0 ? t.splitText(sl.s) : t;
       if (sl.e - sl.s < mid.data.length) mid.splitText(sl.e - sl.s);
       const m = document.createElement("mark");

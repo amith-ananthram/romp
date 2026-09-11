@@ -49,3 +49,16 @@ test("unread is the kernel's bit on an open thread, cleared by opening the threa
   const click = RENDER.slice(at, RENDER.indexOf("new ResizeObserver(updateReplyChips)", at));
   assert.doesNotMatch(click, /"commentSeen"|\.unread = false/);
 });
+
+// T349 (the user 2026-09-11): a comment on a line inside a rendered TABLE broke the table. The mark pass wraps every text
+// node of the matched range, and marked's table HTML carries newline text nodes between the cells and rows, directly
+// under <tr>, <tbody>, <thead> and <table>; an inline <mark> there gets its own anonymous cell, so the columns shifted.
+// The pass now skips those nodes (comments.ts markSkipsParent, executed in comments.test.ts) and wraps each cell's own
+// text, so the mark rides the row cell by cell and the table's boxes stay; the served lab measures the table before and
+// after the marks land (tests/test_comment_table_mark_browser.py).
+test("the mark pass skips a table's structural whitespace: no mark ever sits directly in a row or a table (T349)", () => {
+  const fn = RENDER.slice(RENDER.indexOf("function ensureCommentMark("), RENDER.indexOf("function styleCommentMark("));
+  assert.match(fn, /for \(const sl of sliceRanges\(nodes\.map\(\(t\) => t\.data\.length\), r\.start, r\.end\)\) \{\s*\n\s*const t = nodes\[sl\.idx\];\s*\n(\s*\/\/[^\n]*\n)*\s*if \(markSkipsParent\(t\.parentElement\?\.tagName\)\) continue;/, "asked of each slice's parent before any split or wrap");
+  assert.match(RENDER, /^import \{[^}]*\bmarkSkipsParent\b[^}]*\} from "\.\/comments";/m, "the one pure predicate, shared with its executed test");
+  assert.match(fn, /const mid = sl\.s > 0 \? t\.splitText\(sl\.s\) : t;/, "…and the wrap itself is unchanged for every other node");
+});
