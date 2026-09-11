@@ -19,6 +19,23 @@ from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote, unquote, urlencode
 
+
+def _cap_malloc_arenas(n=2):
+    """glibc's per-thread malloc arenas keep what they freed: this kernel's record cache churns gigabytes through them
+    (2026-09-11: 125 arena heaps of 64 MiB, 12 GB resident over a 1 GiB cache), and a KERNEL-ONLY restart never sees the
+    service unit's MALLOC_ARENA_MAX=2, which the manager reads at its own start. mallopt(M_ARENA_MAX) before any thread
+    exists is the same cap from inside; an environment that already sets it wins. True when the cap was applied."""
+    if os.environ.get("MALLOC_ARENA_MAX") or not sys.platform.startswith("linux"):
+        return False
+    try:
+        import ctypes
+        return bool(ctypes.CDLL("libc.so.6").mallopt(-8, int(n)))    # M_ARENA_MAX is -8 (malloc.h)
+    except Exception:
+        return False
+
+
+_MALLOC_ARENAS_CAPPED = _cap_malloc_arenas()   # before the first load_source: no module of ours has started a thread yet
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 BIN = ROOT / "bin"
@@ -9116,10 +9133,23 @@ def _persist_checkpoints(now):
         if not sid or not leaf:
             continue
         key = (_turn_end_key(sid), _stat_key(jd.STATE / "states" / (sid + ".jsonl")))
-        settle_due = _CKPT_SETTLE_SEEN.get(sid) != key
+        seen = _CKPT_SETTLE_SEEN.get(sid)
+        if seen is None:
+            # first sight: the settle evidence predates this kernel life, so it is not NEW; record it and write nothing
+            # (a first sight that wrote primed every session at once in the first pusher cycle after a boot)
+            _CKPT_SETTLE_SEEN[sid] = key
+        settle_due = seen is not None and seen != key
         leaf_stat = _stat_key(leaf)
         last = _CKPT_PERIODIC_SEEN.get(sid)
-        periodic_due = last is None or (last[0] != leaf_stat and mono - last[1] >= CKPT_PERIOD_S)
+        if last is None:
+            # first sight (a boot, a new session): record the leaf as it stands and write NOTHING here; the settle
+            # trigger still writes at a turn end. A first sight that wrote primed every session's folds in the first
+            # pusher cycle after a boot (52 leaves, 21 cold refolds) and held the boot census to 5.7 s behind the
+            # interpreter lock (measured 2026-09-11, the restart-path deploy)
+            _CKPT_PERIODIC_SEEN[sid] = (leaf_stat, mono)
+            periodic_due = False
+        else:
+            periodic_due = last[0] != leaf_stat and mono - last[1] >= CKPT_PERIOD_S
         if not settle_due and not periodic_due:
             continue
         _CKPT_PERIODIC_SEEN[sid] = (leaf_stat, mono)
@@ -21817,7 +21847,12 @@ def _audit_parent_gone(manager_pid, now=None):
 RESTART_CUTS_FILE = jd.STATE / "restart-cuts.jsonl"
 
 
-EXIT_ASM_BUDGET_S = float(os.environ.get("ROMP_EXIT_ASM_BUDGET_S", "1.5"))   # the exit's assembly-document writes, bounded
+EXIT_PRIME_BUDGET_S = float(os.environ.get("ROMP_EXIT_PRIME_BUDGET_S", "0.5"))       # the exit's fold priming
+EXIT_CKPT_WRITE_BUDGET_S = float(os.environ.get("ROMP_EXIT_CKPT_WRITE_BUDGET_S", "1.0"))   # its fold checkpoint writes
+EXIT_ASM_BUDGET_S = float(os.environ.get("ROMP_EXIT_ASM_BUDGET_S", "1.0"))   # the exit's assembly-document writes, bounded
+# the three above plus the 2 s SDK drain stay under the manager's 5 s SIGTERM grace with margin for one slow file:
+# the first exit under the bounded path (2026-09-11, 1:19 PM Pacific) still met the SIGKILL, its checkpoint writes unbounded,
+# and the restart lost its cut row
 
 
 def _restart_cut_row(drain_res, watches_armed=0, audit_reason="", now=None, phases=None):
@@ -21919,6 +21954,11 @@ def _append_boot_settled(first_serve, reconcile_done):
                 row[field] = round(marks[kind] - first_serve, 2)
         if "attachDone" not in marks:
             row["attachTimedOut"] = True       # the backstop wrote the row: an attach never settled in time
+            be = _sdk_backend or None          # and WHICH attaches (2026-09-11: 23 hellos landed, the mark never came)
+            pend = getattr(be, "_boot_attach_unsettled", None)
+            if pend:
+                row["attachUnsettled"] = sorted(str(x)[:8] for x in pend)[:40]
+                row["attachPending"] = getattr(be, "_boot_attach_pending", None)
         row.update(_kernel_process_sample())   # T304: the just-born kernel's size, the series' other bookend
         if prev_cut and isinstance(prev_cut.get("t"), int) and first_serve >= prev_cut["t"]:
             row["prevCutT"] = prev_cut["t"]
@@ -56497,13 +56537,16 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
     _phases = {}                          # the exit's phase timings, for the cut row (the restart-path work, 2026-09-11)
     _prime_t0, _primed, _skipped = time.monotonic(), 0, 0
     for _s in _drain_sessions:            # every RESIDENT leaf's folds current, so each leaves a cursor for the next kernel;
-        if time.monotonic() - _prime_t0 > 1.0:   # bounded: the SDK drain keeps its 2 s under the manager's 5 s grace
+        if time.monotonic() - _prime_t0 > EXIT_PRIME_BUDGET_S:   # bounded: the SDK drain keeps its 2 s under the manager's 5 s grace
             _skipped += 1; continue
         _primed += 1 if _prime_leaf_folds(_s["path"]) else 0
     if _skipped:
-        _exit_log("romp-kernel: drain primed %d leaves' folds, %d sessions left to their checkpoints (1 s budget)\n" % (_primed, _skipped))
-    try:
-        em.checkpoint_write_dirty()       # every fold checkpoint that moved since its last write (T323 stage 3)
+        _exit_log("romp-kernel: drain primed %d leaves' folds, %d sessions left to their checkpoints (%.1f s budget)\n" % (_primed, _skipped, EXIT_PRIME_BUDGET_S))
+    try:                                  # the fold checkpoints that moved since their last write (T323 stage 3), BOUNDED
+        _ckpt_n = em.checkpoint_write_dirty(budget_s=EXIT_CKPT_WRITE_BUDGET_S)
+        _ckpt_left = len(em.checkpoint_dirty())
+        if _ckpt_left:
+            _exit_log("romp-kernel: drain wrote %d fold checkpoint(s), %d left dirty (%.1f s budget)\n" % (_ckpt_n, _ckpt_left, EXIT_CKPT_WRITE_BUDGET_S))
     except Exception:
         pass
     _asm_t0, _asm_skipped = time.monotonic(), 0

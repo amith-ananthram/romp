@@ -1083,10 +1083,16 @@ def checkpoint_dirty():
         return sorted(_FOLD_DIRTY)
 
 
-def checkpoint_write_dirty(paths=None):
-    """Write the checkpoints of `paths` (default: every dirty path); returns how many were written."""
+def checkpoint_write_dirty(paths=None, budget_s=None):
+    """Write the checkpoints of `paths` (default: every dirty path); returns how many were written. `budget_s`
+    bounds the pass (the exit path, 2026-09-11: an unbounded write over a kernel life's dirty files outran the
+    manager's 5 s grace and the SIGKILL lost the cut row): the first file always writes, the pass stops once the
+    budget has passed, and what is left stays dirty for the next writer."""
     n = 0
+    t0 = time.monotonic()
     for p in (checkpoint_dirty() if paths is None else [str(p) for p in paths]):
+        if budget_s is not None and n and time.monotonic() - t0 > budget_s:
+            break
         if checkpoint_write(p):
             n += 1
     return n

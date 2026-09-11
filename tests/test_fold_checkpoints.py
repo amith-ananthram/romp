@@ -600,7 +600,10 @@ class KernelFolds(Base):
         km._turn_end_key = lambda sid, reg=None: turn_end[0]
         try:
             self.assertGreater(len(em.checkpoint_dirty()), 0)
-            km._persist_checkpoints(TS0)                          # the first sight of a session is new evidence
+            self.assertEqual(km._persist_checkpoints(TS0 - 1), 0, "the first sight of a session records its evidence and writes nothing: "
+                             "the evidence predates this kernel life, and a boot must not prime every session at once (2026-09-11)")
+            turn_end[0] = TS0 + 50                                 # a settle after the first sight: new evidence
+            km._persist_checkpoints(TS0)
             self.assertEqual(sorted(set(em.checkpoint_dirty()) & {self.leaf, self.agent, self.states, self.postal}), [])
             self.assertIn(self.queue_leaf, em.checkpoint_dirty(), "a file of no session waits for exit")
             _append(self.leaf, _user("more", "u9", "a3", TS0 + 100))
@@ -632,9 +635,12 @@ class KernelFolds(Base):
         km._session_meta(self.leaf)                               # the one fold a build happened to run
         rows = [{"sid": SID, "path": self.leaf}]
         saved_sessions, saved_turn = km._sessions, km._turn_end_key
+        turn_end = [0]
         km._sessions = lambda now: rows
-        km._turn_end_key = lambda sid, reg=None: 0
+        km._turn_end_key = lambda sid, reg=None: turn_end[0]
         try:
+            self.assertEqual(km._persist_checkpoints(TS0 - 1), 0, "first sight: recorded, nothing written")
+            turn_end[0] = TS0
             self.assertGreaterEqual(km._persist_checkpoints(TS0), 1)
         finally:
             km._sessions, km._turn_end_key = saved_sessions, saved_turn
@@ -670,10 +676,13 @@ class KernelFolds(Base):
         km._session_meta(self.leaf)                                   # the one fold a build stepped; the other four lag
         rows = [{"sid": SID, "path": self.leaf}]
         saved_sessions, saved_turn = km._sessions, km._turn_end_key
+        turn_end = [TS0]
         km._sessions = lambda now: rows
-        km._turn_end_key = lambda sid, reg=None: TS0 + 500
+        km._turn_end_key = lambda sid, reg=None: turn_end[0]
         size = os.path.getsize(self.leaf)
         try:
+            self.assertEqual(km._persist_checkpoints(TS0 + 499), 0, "first sight: recorded, nothing written")
+            turn_end[0] = TS0 + 500                                   # the settle after the new prompt
             self.assertGreaterEqual(km._persist_checkpoints(TS0 + 501), 1)
         finally:
             km._sessions, km._turn_end_key = saved_sessions, saved_turn
@@ -694,8 +703,8 @@ class KernelFolds(Base):
         self.assertEqual(sorted(snap["checkpoints"]), ["coldFolds", "coldWrites", "dirty", "documentBytes", "droppedRestores", "fallbacks", "oversizeFolds", "readByPath",
                                                         "readBytes", "restored", "restoredFolds", "skippedFolds", "swept", "writes"])
         src = open(os.path.join(BIN, "romp-kernel")).read()
-        self.assertIn("em.checkpoint_write_dirty()       # every fold checkpoint that moved since its last write", src,
-                      "exit writes every dirty checkpoint in _drain_and_exit")
+        self.assertIn("em.checkpoint_write_dirty(budget_s=EXIT_CKPT_WRITE_BUDGET_S)", src,
+                      "exit writes the dirty checkpoints in _drain_and_exit, bounded (2026-09-11: unbounded, it met the manager's SIGKILL)")
         self.assertIn("_persist_checkpoints(now)", src)
         self.assertIn("em.checkpoint_sweep()", src)
 
