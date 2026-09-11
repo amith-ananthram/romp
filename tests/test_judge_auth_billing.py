@@ -264,7 +264,7 @@ class JudgeArgvBilling(_JudgeAuthBase):
         self.assertNotIn("--settings", jd._judge_cmd("sonnet", "SYS", None), "the default: no auth argument")
 
     def test_a_fast_login_billed_call_rides_one_overlay_with_both_keys(self):
-        # `--settings` takes ONE value. With Fast judging on (STATE/judge-fast "on"), an Opus login-billed call
+        # `--settings` takes ONE value. With the triage tier's Fast mode on (STATE/judge-fast "on"), an Opus login-billed call
         # carries the fastMode opt-in and the helper suppression in one JSON overlay; a login-billed call on a
         # model that cannot run fast keeps HELPER_OFF byte for byte; a key-billed or unpicked Opus call carries
         # the opt-in alone, and the helper key never appears in it.
@@ -490,7 +490,7 @@ class JudgeRunBilling(_JudgeAuthBase):
         self.assertEqual(seen["cmd"][i:i + 2], HELPER_OFF)
 
     def test_a_fast_login_pick_on_opus_launches_with_one_overlay_and_logs_the_readback(self):
-        # end to end through _judge_run: Fast judging on, a login pick, an Opus model. The child gets ONE
+        # end to end through _judge_run: the triage tier's Fast mode on, a login pick, an Opus model. The child gets ONE
         # --settings overlay carrying both keys, the login tokens, no key; the usage row keeps the envelope's
         # fast_mode_state, the CLI's own word on whether fast engaged.
         jd._LOGIN_AUTH_ENV_FN = lambda: {"CLAUDE_CODE_OAUTH_TOKEN": "synthetic-login-token"}
