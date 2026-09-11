@@ -503,8 +503,8 @@ class PusherRecords(unittest.TestCase):
             "_end_on_idle_sweep", "_deferral_sweep_tick", "_auto_nudge_tick", "_interrupt_block_tick",
             "_auto_pause_on_limit", "_usage_poll_tick", "_auto_pause_on_spend_limit", "_auto_resume_retry",
             "_auto_resume_session_retry", "_auto_retry_tick", "_idle_queue_drive_tick",
-            "_clear_done_working_notes", "_push_all",
-            "_api_health_frame", "_api_health_push")   # the bottom bar's API cell
+            "_clear_done_working_notes", "_spend_guard_tick", "_push_all",
+            "_api_health_frame", "_api_health_push")   # the bottom bar's API cell; the spend guard (T350)
 
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()

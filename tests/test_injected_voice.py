@@ -124,6 +124,8 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
                  {"who": "assistant", "text": "Yes: write-through avoids the stale-read window and "
                                               "the extra invalidation pass; the cost is one write "
                                               "per update, which this workload absorbs."}]),
+            # the spend guard's one message to a session over the hourly ceiling (T350, the user 2026-09-11)
+            "spend ceiling": km._spend_ceiling_body(1240.0, 1000.0),
             "debt reminder (question)": km._debt_reminder_body(
                 [("web", T0, "question", "Which port should the staging server use?")]),
             "debt reminder (handoff)": km._debt_reminder_body(
@@ -266,10 +268,12 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
             # the session) — telling, not asking; a status question bolted on would be noise
             # …and the MERGE handoff is a record handed over with direction ("account for it"),
             # never a status ask — bolting a progress question onto it would be noise
+            # …and the spend ceiling's message is a STOP order with one question (what was fanning out), not a
+            # progress ask: the session is to halt, not to report where things stand
             if name in ("typed follow-up on a summary",
                         "debt reminder (question)", "debt reminder (handoff)",
                         "debt reminder (several)", "comment thread opener", "edit trace",
-                        "comment-thread merge", "compaction suggestion"):
+                        "comment-thread merge", "compaction suggestion", "spend ceiling"):
                 #        ^ a housekeeping suggestion, not a progress ask — it elicits nothing
                 continue
             text = prose(body).lower()

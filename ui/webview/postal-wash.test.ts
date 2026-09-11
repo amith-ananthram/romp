@@ -4,7 +4,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { oklabLightness, groundOf, syncPostalWash } from "./postal-wash";
+import { oklabLightness, groundOf, syncPostalWash, resolveColour } from "./postal-wash";
 
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
@@ -29,6 +29,35 @@ test("a document that cannot draw leaves the token to the sheet", () => {
   } as unknown as Document;
   assert.equal(syncPostalWash(doc), false);
   assert.deepEqual(removed, ["--postal-wash-l"], "an unmeasurable page clears any stale inline value");
+});
+
+// a canvas as the probe sees it: a value it takes becomes the fill (reported as a colour string); one it refuses leaves
+// the previous fill in place, which is exactly how a real 2d context behaves on an unparsable fillStyle
+function fakeDoc(accepts: (v: string) => string | null): Document {
+  let fill = "";
+  const ctx = {
+    set fillStyle(v: string) { const r = accepts(v); if (r !== null) fill = r; },
+    get fillStyle() { return fill; },
+    clearRect() {}, fillRect() {},
+    getImageData() { const m = /rgb\((\d+), (\d+), (\d+)\)/.exec(fill)!; return { data: [+m[1], +m[2], +m[3], 255] }; },
+  };
+  return { createElement: () => ({ getContext: () => ctx }) } as unknown as Document;
+}
+const CANVAS_TAKES = (v: string) => {
+  if (v === "#010203") return "rgb(1, 2, 3)";
+  if (v === "#040506") return "rgb(4, 5, 6)";
+  if (/^rgb\(0 0 0\)$|^#000000ff$|^black$/.test(v)) return "rgb(0, 0, 0)";
+  if (v === "#1e1e1e") return "rgb(30, 30, 30)";
+  return null;                                       // refused: the fill stays
+};
+
+test("the probe resolves every spelling of black and refuses garbage by two sentinels, not an enumeration", () => {
+  for (const black of ["rgb(0 0 0)", "#000000ff", "black"]) {
+    assert.deepEqual(resolveColour(fakeDoc(CANVAS_TAKES), black), [0, 0, 0, 1], black + " is the measured ground, not a fallback");
+  }
+  assert.deepEqual(resolveColour(fakeDoc(CANVAS_TAKES), "#1e1e1e"), [30, 30, 30, 1]);
+  assert.equal(resolveColour(fakeDoc(CANVAS_TAKES), "not a colour"), null, "a refused value leaves each sentinel: null");
+  assert.equal(resolveColour(fakeDoc(CANVAS_TAKES), ""), null);
 });
 
 test("the chat installs the measurement at boot, and the sheet's rule reads the token with the shipped fallback", () => {

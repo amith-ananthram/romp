@@ -18,7 +18,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { FederationManager, prefixInbound, routeOutbound } from "./federation";
+import { FederationManager, prefixInbound, routeOutbound, BOOKKEEPING } from "./federation";
 
 const U = "11111111-2222-3333-4444-555555555555";
 const V = "99999999-8888-7777-6666-555555555555";
@@ -215,6 +215,14 @@ test("routeOutbound: needFull's optional `why` passes through untouched — only
   assert.deepEqual(remote, [{ host: "gpu1", msg: { type: "needFull", id: V, why: "prefetch" } }], "a remote id: stripped for its kernel, `why` intact");
   const bare = routeOutbound({ type: "needFull", id: "B" }, new Set(["gpu1"]));
   assert.deepEqual(bare, [{ host: "", msg: { type: "needFull", id: "B" } }], "no `why` → no `why` minted");
+});
+
+test("routeOutbound: a re-attach's resident keys go to the owning kernel by the id's host, the id bared, the keys intact (T323 follow-up)", () => {
+  const keys = ["k1", "k2#2"];
+  assert.deepEqual(routeOutbound({ type: "reattachKeys", id: "B", keys }, new Set(["gpu1"])), [{ host: "", msg: { type: "reattachKeys", id: "B", keys } }]);
+  assert.deepEqual(routeOutbound({ type: "reattachKeys", id: "gpu1:" + V, keys }, new Set(["gpu1"])), [{ host: "gpu1", msg: { type: "reattachKeys", id: V, keys } }]);
+  assert.ok(BOOKKEEPING.has("reattachKeys"), "held for the socket's open like the other proto-2 asks, never toasted");
+  assert.equal(BOOKKEEPING.get("reattachKeys")!({ id: "B" }), String(BOOKKEEPING.get("loadNewer")!({ id: "B" })).replace("loadNewer", "reattachKeys"));
 });
 
 test("the manager's outbound puts needFull(+why) on the owning kernel's wire — local send or remote socket", () => {

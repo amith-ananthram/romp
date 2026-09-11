@@ -399,8 +399,18 @@ Fable 5) are drawn once, aggregated across every connected host's login as the
 worst reading per window, and an `API` cell beside them carries the
 key-billed dollars (5-hour burn and month-to-date, numbers only). Hovering
 breaks both down per host, one column per host, side by side, and a host
-can show its login's windows and its key's spend together. The key-billed
-dollars come from the sessions whose CLI reported a key source at init, judged
+can show its login's windows and its key's spend together. A click on the
+readout opens the spend detail: a chart of spend over time stacked by session,
+and under it the list of sessions with their dollars, turns and tokens. The
+list follows the chart's range (one day by hour, seven days by hour, ninety
+days by day): its rows are summed from exactly the buckets the chart draws, so
+the list's total is the chart's total for every range, the header names the
+range, and a session with nothing in the range has no row and no stack. An
+attached machine on an older build sends its series without turns or
+key-billed dollars per bucket: its rows show a dash in those columns, never a
+zero that would read as a count, and a note under the list names the machine
+on the ranges where such a row shows. The
+key-billed dollars come from the sessions whose CLI reported a key source at init, judged
 against the declaration; a login turn's computed cost is dollars nobody pays
 and is left out.
 
@@ -1625,7 +1635,10 @@ announces `chatProto2` in its `caps`:
   re-attaches it (the page's "Return to live" strip and its jump chip ask for
   one, and the full frame answering that ask merges into the held run it
   overlaps, so the pages the reader walked stay, the kernel's base keeping the
-  run's older first edge with it; every other full frame replaces the run, its
+  run's older first edge with it (the page sends its newest resident keys with
+  the ask, `reattachKeys`, and the kernel keeps the older edge when the highest
+  of them still in the list lies inside the frame); every other full frame
+  replaces the run, its
   in-list events being the fresh copies); a reconnect's `ready` starts a fresh
   base. A window that overlaps the run the client holds
   through the live tail, by turn span, keeps it attached (`connected`; a
@@ -2360,6 +2373,18 @@ the same note) is not the delivery either: that cut is named by the note,
 the self-bounce's `refresh` note, is the delivery: the cut row names the
 request and consumes it.
 
+The automatic converge spaces itself: after a deploy restart lands on a box
+(its own converge, a peer's push, a clicked Update), the next automatic
+converge waits 25 minutes, so a batch of merges costs one restart, and it
+stands down while a quiet deploy is parked for the code already on disk. Both
+waits exist to spare in-flight turns from the restart's cut, so neither applies
+to a restart that would cut none: when every working session runs under a host
+(the default), the converge proceeds at once. Every pass in which main has
+moved and the box does not converge says why on the kernel's log, each time it
+holds: the cool-down's remaining seconds and the turns a restart would cut, the
+parked quiet deploy, or that main could not be read (`git ls-remote` at the
+release remote failed or timed out).
+
 When no row qualifies, the kernel writes a row with action `signal`: the signal
 name, its pid and its parent's pid, the manager pid it was started with,
 whether a manager restart was pending, `managerRequested: false`, and
@@ -2456,6 +2481,28 @@ kind. At start the bus removes the temporary files a crash left behind (a
 message written but never placed, a store record never finished), closes each
 one's receipt as refused, and says so once. The sidecars are yours to inspect
 or delete.
+
+## The spend ceiling
+
+Every pusher cycle the kernel reads each live session's spend rate: the
+dollars its transcript and the agent transcripts beside it (the subagents and
+workflow agents it fanned out) record over the last ten minutes, priced by the
+same per-model table the cost view uses, scaled to an hour. The data is what
+the kernel already holds for the chat and the feed (the record cache), so the
+check reads nothing new; only an agent file that changed inside the window is
+read. The ceiling is the `spend-ceiling-usd-per-hour` setting, a bare value
+file under the state directory read at each check: 1000 dollars an hour with
+no file, any number in the file, and `0` disables the guard. When a session's
+rate crosses the ceiling, once per crossing, the kernel interrupts its turn
+(the Stop button's road, so the fan-out ends at once), hands it one message in
+your voice (about how much it is spending, and to stop whatever is fanning out
+and say what it was before doing anything else), warns every connected
+dashboard with a toast naming the session, the rate and the moment, and files
+a `spend.ceiling` row in `session-events.jsonl` (with `usdPerHour`,
+`ceilingUsdPerHour` and `windowS`), which the kernel log and the error center
+carry and restart metrics count. The crossing is the event: nothing repeats
+while the rate stays high. Once the rate falls under half the ceiling a
+`spend.ceiling.cleared` row and a toast say so, and the guard is armed again.
 
 ## Restart metrics
 
