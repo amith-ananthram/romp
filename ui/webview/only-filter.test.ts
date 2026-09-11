@@ -72,19 +72,20 @@ test("chat tabs filter by the #only tag", () => {
   assert.match(RENDER, /const plan = planStrip\(visibleIds,/);
 });
 
-test("a filtered view re-points the CHAT BODY, not just the tab bar", () => {
+test("a filtered view blanks the CHAT BODY too: the active tab it hides goes unfocused, never re-pointed", () => {
   // the filter hid a non-matching TAB but left its transcript rendering — a real session's chat
   // (nimbus) sat in a `#only=api,tests,web` frame, statusline and all (the user 2026-07-16). The
   // whole point of the filter is a clean recording frame, so the selection must follow it.
   // the re-point covers BOTH filters since session views landed (2026-08-18): a hidden or
   // filtered-out active session must not keep its transcript on screen
-  assert.match(RENDER, /if \(activeId && ids\.includes\(activeId\) && !visibleIds\.includes\(activeId\) && visibleIds\.length\)/);
+  // (T357: the #only= filter is applied on top of tabInView and is no peek input, so an active tab it hides reaches
+  // this check; the pane goes UNFOCUSED naming it (its transcript leaves the screen, the filter's clean frame holds)
+  // and is never re-pointed at the first visible session; the fire-time check reads the predicate visibleIds uses)
+  assert.match(RENDER, /if \(activeId && ids\.includes\(activeId\) && !visibleIds\.includes\(activeId\)\) \{\s*\n\s*const hid = activeId;\s*\n\s*setTimeout\(\(\) => \{ if \(activeId === hid && !stripShows\(hid\)\) unfocusHiddenByView\(hid\); \}, 0\);/);
+  assert.doesNotMatch(RENDER, /setActive\(next\); \}, 0\);/, "no re-point");
   // the deferred bounce re-validates at FIRE time since the ephemeral peek (2026-08-24): an
   // activation between schedule and fire (a feed click opening a peek) makes the active tab
   // visible again — bouncing then would kick the user off the tab they just opened
-  // (T357: the fallback no longer re-points the pane at another session; it goes UNFOCUSED naming the tab the view
-  // hides, which still takes the hidden transcript off screen, and comes back to it when the view shows it again)
-  assert.match(RENDER, /setTimeout\(\(\) => \{ if \(activeId !== next && activeId && !tabInView\(activeId\)\) unfocusHiddenByView\(activeId\); \}, 0\);/);
 });
 
 test("feed cards filter by the #only tag; clear bookkeeping still uses the FULL payload", () => {
