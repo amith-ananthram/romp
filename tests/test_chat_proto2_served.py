@@ -110,6 +110,13 @@ class Proto2Wire(A.RestartOverACheckpointedSession):
             self.assertGreater(perf["chatPages"]["misses"], 0, "the pages were rendered on demand: %s" % perf["chatPages"])
             # (the pages' own hydration is proven deterministically in tests/test_chat_pages.py: here the judges' first pass
             #  over a fresh store may already have filled the memo the pages read from)
+            # the lazy index (T323 stage 4c): the restored kernel's pre-cut turns came from the document's turns section, and
+            # the chat's first opens built no pre-cut atom; only a page render (the walk above) builds, and only its own turns
+            idx = self._get(p2, "/perf")["asmIndex"]
+            self.assertGreater(idx["restoredTurns"], 0, "the document carried a turns section: %s" % idx)
+            for who in ("build_session", "_cursors_before", "_fold_tasks_turn", "_turn_index_of_events", "_turn_of_uuid"):
+                self.assertNotIn(who, idx["materializedBy"], "the chat build reached for pre-cut atoms: %s" % idx["materializedBy"])
+            self.assertLessEqual(idx["materialized"], idx["restoredTurns"] * 4, "the pages walked built their turns' atoms, no more: %s" % idx)
             # a deep anchor in one round trip: the window lands it and the client is detached
             anchor = whole2[5]["uuid"]
             c4, f4, _ = self._open(p2, 2)

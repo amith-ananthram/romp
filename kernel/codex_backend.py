@@ -1601,6 +1601,7 @@ class CodexBackend:
             raise
         turn_id = started.turn.id
         ack_persisted = False
+        stream_failed = False
         try:
             with s.lock:
                 if s.queue[:len(batch)] != batch or s.queue_ids[:len(batch_ids)] != batch_ids:
@@ -1632,7 +1633,11 @@ class CodexBackend:
                 except Exception as e:
                     self.log("kill interrupt %s: %s" % (s.name, e))
             while True:
-                n = c.next_turn_notification(turn_id)
+                try:
+                    n = c.next_turn_notification(turn_id)
+                except Exception:
+                    stream_failed = True       # the transport is down: see the except below
+                    raise
                 method = getattr(n, "method", "")
                 wrote = False
                 with s.norm_lock:
@@ -1645,14 +1650,45 @@ class CodexBackend:
                     self.push_session(s.sid)
                 if method == "turn/completed":
                     break
-        except Exception:
-            if not ack_persisted:
-                # The request is still durable, so prevent an untracked acknowledged turn from
-                # continuing alongside its retry. unregister in finally always releases routing.
+        except Exception as exc:
+            # Whatever ended the loop, the app-server's turn is now UNTRACKED: unregister in finally
+            # releases its routing, so its later notifications are dropped, and with turn_id cleared
+            # neither interrupt() nor kill() can reach it. Before the ACK the request is still durable,
+            # so this keeps the acknowledged turn from continuing alongside its retry; after it, the
+            # turn would keep executing in the sandbox with busy() False and no way to stop it.
+            # ONLY when the failure was on our side (a transcript write, a normalizer raise) with the
+            # transport up, though. A raise from the READ means the SDK's reader thread is gone: the one
+            # writer of an exception into a turn queue is the router's fail_all, run once from that
+            # thread's own except (pinned wheel, client.py _reader_loop). An RPC now would wedge this
+            # worker for good: _request_raw waits on its reply with no timeout, fail_all has already
+            # failed every waiter it will ever fail, and close() fails none, so the request is written to
+            # a process nothing reads answers from. busy() would read True forever, mode_lock stay held,
+            # kill() time out on the join and skip the drain. The global pump reads the same failure and
+            # closes that client, terminating the app-server, so the turn dies with it and there is
+            # nothing left to interrupt.
+            if not stream_failed:
                 try:
                     c.turn_interrupt(tid, turn_id)
                 except Exception as e:
-                    self.log("unpersisted turn interrupt %s: %s" % (s.name, e))
+                    if ack_persisted:
+                        self.log("abandoned turn interrupt %s: %s" % (s.name, e))
+                    else:
+                        self.log("unpersisted turn interrupt %s: %s" % (s.name, e))
+            if ack_persisted:
+                # The ACK consumed the prompt from the queue, so this turn has no retry and the file is
+                # the only place its end can be recorded: settle it there (the held final reply lands,
+                # then an end_turn record carrying the failure, codex_events.abandoned). No notification
+                # will do it — a dead transport sends none, and a turn the SDK no longer routes drops its
+                # own turn/completed — and an open file turn reads as working on every surface and
+                # absorbs the next prompt. The finally's poke/push announce the records. The append may
+                # be exactly what raised: its failure is logged, never allowed to mask the original.
+                try:
+                    with s.norm_lock:
+                        recs = norm.abandoned(turn_id, "codex turn failed: %s" % exc)
+                        if recs:
+                            self._append(s, recs)
+                except Exception:
+                    self.log("abandoned turn settle %s: %s" % (s.name, traceback.format_exc()))
             raise
         finally:
             try:

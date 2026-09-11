@@ -27,6 +27,7 @@ KERNEL_ALLOWED = {
     "_last_assistant_report", "_comment_prose_record", "_comment_cut_target", "_comment_msg_text", "_thread_messages",
     "_undelivered_wake_tail", "_gist_step", "_launch_ids_step", "_launch_step", "_api_error_pass", "_session_meta_step",
     "_transcript_tok_rows", "_rewind_target", "_subagent_meta_map", "_read_task_output",
+    "_spend_file_rows",                                 # the spend guard prices the record cache's raw jsonl rows (T350)
     # live SDK atoms and echoes (constructed in-process, never lazy)
     "_merge_live_atoms", "_interrupt_marks_atoms", "_stamp_agents", "_ask_fill_answers", "_ask_fill_chosen", "_patch_rows",
     "_claudemd_paths", "_stamp_steps", "_hydrate_postal", "build_subagent", "_agent_alive",
