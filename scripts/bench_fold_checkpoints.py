@@ -15,10 +15,11 @@ and state root, each a fresh process loading the tree's event model, judge and k
 
 Bytes are counted at the reader itself (the event model's per-path counter on this branch; on a tree without it, a
 counting wrapper over the module's open() for .jsonl paths), so the count is what the reader pulled, not what the page
-cache served. The figure draws the second boot's total against transcript size per tree, and beside it the second
-boot's bytes per file class on the newest tree, so the residual that stays whole (the leaf transcript's parse, stage
-4's; the postal log's whole readers) is on the page, not left out. Decimal megabytes throughout; one measurement per
-point, not a distribution.
+cache served, and on this branch the checkpoint documents' own reads count too (they are a class of their own on the
+figure: a document carries every fold's state, and the postal log fold's state grows with the log). The figure draws
+the second boot's total against transcript size per tree, and beside it the second boot's bytes per file class on the
+newest tree, so the residual that stays whole (the leaf transcript's parse, stage 4's; the postal log's whole readers)
+is on the page, not left out. Decimal megabytes throughout; one measurement per point, not a distribution.
 
     capped bash -c 'uvx --with cleanplots --with matplotlib --with pandas python scripts/bench_fold_checkpoints.py \\
         --tree before=/path/to/main-tree --tree after=. --sizes 1,4,16 --sessions 6 --out DIR'
@@ -121,10 +122,11 @@ km._postal_index()
 km._fold_records(km._postal_log_cache, jd.STATE / "timeline" / "messages.jsonl", km._postal_log_fresh, km._postal_log_step,
                  **({"ckpt": "postalLog"} if hasattr(em, "checkpoint_write_dirty") else {}))
 rb = em.read_bytes_report() if hasattr(em, "read_bytes_report") else dict(counted, total=sum(counted.values()))
-by = {"leaf": 0, "agent": 0, "states": 0, "postal": 0, "other": 0}
+by = {"leaf": 0, "agent": 0, "states": 0, "postal": 0, "checkpoint": 0, "other": 0}
 for p, n in rb.items():
     if p == "total": continue
-    cls = "agent" if "/subagents/" in p else "states" if "/states/" in p else "postal" if p.endswith("messages.jsonl") else "leaf" if p.startswith(proj) else "other"
+    cls = ("checkpoint" if "/checkpoints/" in p else "agent" if "/subagents/" in p else "states" if "/states/" in p
+           else "postal" if p.endswith("messages.jsonl") else "leaf" if p.startswith(proj) else "other")
     by[cls] += n
 if phase == "first" and hasattr(em, "checkpoint_write_dirty"):
     em.checkpoint_write_dirty()                                # the exit path's write
@@ -181,8 +183,9 @@ def draw(rows, out):
     ax.set_xlim(0, None); ax.set_ylim(0, top * 1.25)
     newest = labels[-1]
     rs = sorted([r for r in rows if r["label"] == newest and not r.get("error")], key=lambda r: r["worldBytes"])
-    classes = ["leaf", "postal", "states", "agent"]
-    names = {"leaf": "leaf transcripts (the parse, stage 4)", "postal": "postal log (whole readers)", "states": "states logs", "agent": "agent files"}
+    classes = ["leaf", "postal", "checkpoint", "states", "agent"]
+    names = {"leaf": "leaf transcripts (the parse, stage 4)", "postal": "postal log (whole readers)", "states": "states logs",
+             "agent": "agent files", "checkpoint": "checkpoint documents (the fold states, chiefly the postal fold's)"}
     for j, c in enumerate(classes):
         xs = [r["worldBytes"] / 1e6 for r in rs]
         ys = [r["second"]["byClass"][c] / 1e6 for r in rs]
@@ -190,8 +193,9 @@ def draw(rows, out):
     ax2.clean(xlabel="Same worlds (MB)", ylabel="Bytes read at the restart on %s,\nper file class (MB)" % newest)
     ax2.set_xlim(0, None); ax2.set_ylim(0, None)
     f.subplots_adjust(wspace=0.45)
-    f.text(0.5, -0.16, "One measurement per point. Bytes are counted at the reader, not the page cache. A checkpointed file still costs\n"
-                       "its guard bytes (up to 64) plus everything appended since the checkpoint; here nothing was appended between the two boots.",
+    f.text(0.5, -0.16, "One measurement per point. Bytes are counted at the reader, not the page cache, the checkpoint documents' own reads included.\n"
+                       "A checkpointed file still costs its document, its guard bytes twice (up to 64 each) and everything appended since the checkpoint;\n"
+                       "here nothing was appended between the two boots.",
            ha="center", va="top", fontsize=8, color="#555555", transform=f.transFigure)
     path = os.path.join(out, "boot_read_vs_size.png")
     f.savefig(path, dpi=150, bbox_inches="tight")

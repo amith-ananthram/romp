@@ -297,10 +297,10 @@ class ExitThenBoot(unittest.TestCase):
             self._drive(p2)
             perf = self._get(p2, "/perf")["checkpoints"]
             by = perf["readByPath"]
-            report = {"agent": 0, "states": 0, "leaf": 0, "postal": 0, "other": 0}
+            report = {"agent": 0, "states": 0, "leaf": 0, "postal": 0, "checkpoint": 0, "other": 0}
             for path, n in by.items():
-                cls_ = ("agent" if "/subagents/" in path else "states" if "/states/" in path else "postal" if path.endswith("messages.jsonl")
-                        else "leaf" if path.endswith(".jsonl") and "/projects/" in path else "other")
+                cls_ = ("checkpoint" if "/checkpoints/" in path else "agent" if "/subagents/" in path else "states" if "/states/" in path
+                        else "postal" if path.endswith("messages.jsonl") else "leaf" if path.endswith(".jsonl") and "/projects/" in path else "other")
                 report[cls_] += n
             self.assertEqual(perf["fallbacks"], {}, "every checkpoint verified: %s" % perf)
             self.assertGreaterEqual(perf["restored"], len(ALL), "one restore per states log at least: %s" % perf)

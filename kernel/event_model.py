@@ -651,7 +651,15 @@ def read_bytes_report():
 # settle, its states log moving, exit), never by a timer.
 _CKPT_V = 1
 _CKPT_DIR_FN = None               # () -> Path of the checkpoint directory; None = checkpoints off
-_CKPT_STATS = {"restored": 0, "writes": 0, "swept": 0, "skippedFolds": 0, "fallbacks": {}, "restoredFolds": {}}
+_CKPT_STATS = {"restored": 0, "writes": 0, "swept": 0, "skippedFolds": 0, "fallbacks": {}, "restoredFolds": {}, "droppedRestores": 0,
+               "oversizeFolds": {}}
+_CKPT_FOLD_CAP = 64 * 1024        # bytes of encoded state a fold may put in a checkpoint. A state that grows with its file (the postal
+#                                   log fold's map of every sent row, the state intervals' list of every transition, the every-task
+#                                   background view on a long transcript) would make the document a second copy of the file: reading
+#                                   it at boot costs what the checkpoint exists to save (measured 2026-09-11: 11 MB of documents in a
+#                                   44 MB world). Such a fold is left out, counted per name, and cold-folds at first touch; the folds
+#                                   whose state is bounded (the gist's capped steps, the running tasks, the newest rows) are the ones
+#                                   the checkpoint pays for. A bounded projection for the growing ones is a later stage's item.
 _CKPT_LOCK = threading.Lock()
 _CKPT_PENDING = {}                # path -> {"count": N, "gen": g, "folds": {name: {"count", "state"}}} restores not yet taken
 _CKPT_SEQ = {}                    # path -> the seq of the last checkpoint read or written for it
@@ -758,7 +766,9 @@ def _ckpt_load(path):
     if cp is None or not cp.exists():
         return None
     try:
-        doc = json.loads(cp.read_text())
+        text = cp.read_bytes()
+        _count_read(str(cp), len(text))                   # the document is a read of the boot too (/perf, the bench)
+        doc = json.loads(text.decode("utf-8"))
     except (OSError, ValueError) as e:
         _ckpt_fallback(path, "corrupt", str(e)[:80]); return None
     if not isinstance(doc, dict) or doc.get("v") != _CKPT_V:
@@ -859,7 +869,15 @@ def _restored_cursor(key, name, ent):
     base = ent[5]
     try:
         count = int(f["count"])
-        if count != pend["count"] or count < base or count > base + len(ent[4]) or pend["gen"] != ent[6]:
+        if pend["gen"] != ent[6]:                          # the entry is not the one the restore was taken for: another
+            with _CKPT_LOCK:                              # read replaced it (the stripe lock makes this a residual)
+                _CKPT_STATS["droppedRestores"] += 1
+            try:
+                sys.stderr.write("checkpoint restore dropped for fold %s of %s: the reader's entry moved under it\n" % (name, key))
+            except Exception:
+                pass
+            return None
+        if count != pend["count"] or count < base or count > base + len(ent[4]):
             return None
         state = _ckpt_decode(f["state"])
         with _CKPT_LOCK:
@@ -888,7 +906,12 @@ def checkpoint_write(path, force=False):
         if cur is None or cur[0] != count or cur[1] != gen:
             continue
         try:
-            folds[name] = {"count": count, "state": _ckpt_encode(cur[2])}
+            enc = _ckpt_encode(cur[2])
+            if len(json.dumps(enc, separators=(",", ":"))) > _CKPT_FOLD_CAP:
+                with _CKPT_LOCK:                          # a state the size of its file: the document must not become the file
+                    _CKPT_STATS["oversizeFolds"][name] = _CKPT_STATS["oversizeFolds"].get(name, 0) + 1
+                continue
+            folds[name] = {"count": count, "state": enc}
         except TypeError:
             with _CKPT_LOCK:
                 _CKPT_STATS["skippedFolds"] += 1
@@ -939,7 +962,9 @@ def checkpoint_sweep():
     for cp in Path(d).glob("*.json"):
         keep = False
         try:
-            doc = json.loads(cp.read_text())
+            text = cp.read_bytes()
+            _count_read(str(cp), len(text))
+            doc = json.loads(text.decode("utf-8"))
             keep = isinstance(doc, dict) and isinstance(doc.get("path"), str) and os.path.exists(doc["path"])
         except (OSError, ValueError):
             keep = False
@@ -956,6 +981,10 @@ def checkpoint_sweep():
 def checkpoint_stats():
     with _CKPT_LOCK:
         out = dict(_CKPT_STATS); out["fallbacks"] = dict(_CKPT_STATS["fallbacks"]); out["restoredFolds"] = dict(_CKPT_STATS["restoredFolds"])
+        out["oversizeFolds"] = dict(_CKPT_STATS["oversizeFolds"])
+    d = _ckpt_dir()
+    with _READ_BYTES_LOCK:
+        out["documentBytes"] = sum(n for p_, n in _READ_BYTES.items() if d is not None and p_.startswith(str(d) + os.sep))
         out["dirty"] = len(_FOLD_DIRTY)
     rb = read_bytes_report()
     out["readBytes"] = rb.pop("total")
@@ -999,7 +1028,42 @@ _READER_TRACE = bool(os.environ.get("ROMP_READER_TRACE"))   # one stderr line pe
 _LAST_ENTRY = threading.local()   # .ent: the entry the last _read_jsonl_incremental on this thread served
 
 
+_READ_STRIPES = [threading.RLock() for _ in range(64)]   # per-path serialization of the reads that pull bytes: two threads
+#                                                            meeting a file's first read at once (the judges' parse and the pusher's
+#                                                            folds at boot) used to read it twice and, with a checkpoint in play, the
+#                                                            later store's generation orphaned the earlier restore's pending fold
+#                                                            states (review find, 2026-09-11); the second thread now waits and hits.
+#                                                            Striped by path hash, so at most one in 64 unrelated files waits behind another.
+
+
+def _read_stripe(path):
+    return _READ_STRIPES[hash(path) % len(_READ_STRIPES)]
+
+
 def _read_jsonl_entry(path, on_fail=None, tail_ok=False):
+    """The reader's cache entry for `path`, current as of this call (the contract at _read_jsonl_entry_unlocked). A hit
+    is served under the cache lock alone; a read that would pull bytes runs under the path's stripe lock and re-checks
+    the cache first, so concurrent first reads of one file cost one read and one generation."""
+    path = str(path)
+    try:
+        st = os.stat(path)
+    except OSError as e:
+        with _JSONL_CACHE_LOCK:
+            _JSONL_CACHE.pop(path, None)
+        if on_fail is not None and not isinstance(e, FileNotFoundError):
+            on_fail(e)
+        return None
+    with _JSONL_CACHE_LOCK:
+        hit = _JSONL_CACHE.get(path)
+        if hit is not None and hit[0] == st.st_mtime and hit[1] == st.st_size and (tail_ok or hit[5] == 0):
+            _JSONL_CACHE.pop(path, None)  # reinsert at the LRU tail: a served entry is a USED entry
+            _JSONL_CACHE[path] = hit
+            return hit
+    with _read_stripe(path):
+        return _read_jsonl_entry_unlocked(path, on_fail=on_fail, tail_ok=tail_ok)
+
+
+def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False):
     """The reader's cache entry for `path`, (mtime, size, offset, tail, records, base, gen), current as of this call,
     or None when the file is absent or unreadable (`on_fail` as in _read_jsonl_incremental). With `tail_ok` a caller
     accepts a TAIL entry (base > 0: records[0] is the file's record number base), and a first touch with no entry

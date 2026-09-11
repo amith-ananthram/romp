@@ -997,7 +997,11 @@ cursor stood at that count. A fresh kernel verifies the guard bytes on disk,
 reads only the bytes past the offset and resumes each fold from its recorded
 state; a checkpoint that does not verify (its version, its path, a file that
 shrank, a rewrite under the guard, a corrupt document) falls back to a whole
-read, is counted per reason in `/perf` and said once on stderr. Checkpoints
+read, is counted per reason in `/perf` and said once on stderr. A fold whose
+encoded state would exceed 64 KB is left out of the document and counted (a
+state that grows with its file, such as the postal log fold's map of every
+sent row, would make the document a second copy of the file); it cold-folds
+at first touch, while the bounded folds beside it restore. Checkpoints
 are written when a session's turn settles or its states log moves, and all of
 them at exit; checkpoints of files that no longer exist are swept at boot. A
 compaction appends records and changes nothing here. The parse trees and the
@@ -1323,7 +1327,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
 - `checkpoints`: the folds' checkpoints since boot: `restored` (files whose
   folds resumed from one), `restoredFolds` (restores per fold name), `writes`,
   `swept` (checkpoints of vanished files removed at boot), `skippedFolds`
-  (fold states the codec could not encode),
+  (fold states the codec could not encode), `oversizeFolds` (per fold name,
+  states over the 64 KB cap left out of a document), `droppedRestores` (a
+  restore lost to a read that replaced the entry under it; the reader
+  serializes reads per path, so this should stay at zero), `documentBytes`
+  (what reading the checkpoint documents themselves cost since boot),
   `fallbacks` per reason (`version`, `path`, `shrunk`, `guard`, `rewrite`,
   `corrupt`), `dirty` (files whose folds moved since their last write),
   `readBytes` and `readByPath` (what the JSONL reader pulled off disk since

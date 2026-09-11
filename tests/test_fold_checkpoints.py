@@ -12,6 +12,7 @@ states-log move and never otherwise; /perf carries the counters. Hermetic: synth
 import json
 import os
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -87,7 +88,7 @@ class Base(unittest.TestCase):
         (jd.STATE / "states").mkdir(parents=True, exist_ok=True)
         (jd.STATE / "timeline").mkdir(parents=True, exist_ok=True)
         self.fresh_process()
-        em._CKPT_STATS.update(restored=0, writes=0, swept=0, skippedFolds=0, fallbacks={}, restoredFolds={})
+        em._CKPT_STATS.update(restored=0, writes=0, swept=0, skippedFolds=0, fallbacks={}, restoredFolds={}, droppedRestores=0, oversizeFolds={})
 
     def tearDown(self):
         jd._rebind_state(self.saved_state)
@@ -189,6 +190,9 @@ class GenericFold(Base):
                          "the tail, the guard check before it and the guard captured after it: nothing of the prefix")
         self.assertEqual(em.checkpoint_stats()["restored"], 1)
         self.assertEqual(em.checkpoint_stats()["fallbacks"], {})
+        cp = em._ckpt_file(self.p)
+        self.assertEqual(em.read_bytes_report()[str(cp)], cp.stat().st_size, "the checkpoint document's own read is counted")
+        self.assertEqual(em.checkpoint_stats()["documentBytes"], cp.stat().st_size)
         self.assertEqual(self.fold(), [0, 1, 2, 3, 4]); self.assertEqual(self.kinds[-1], "hit")
         self.assertEqual(self.cache[self.p][0], 5, "the cursor's count is first, as every reader of it knew")
         self.assertEqual(self.cold(), [0, 1, 2, 3, 4])
@@ -309,6 +313,70 @@ class GenericFold(Base):
                 self.assertEqual(em.checkpoint_stats()["fallbacks"], {reason: 1}, reason)
                 self.assertEqual(got, self.cold()); self.assertEqual(self.kinds[-1], "refold")
                 self.assertFalse(em._ckpt_file(self.p).exists(), "the checkpoint that did not verify is gone")
+
+    def test_two_threads_meeting_a_checkpointed_files_first_read_cost_one_read_and_lose_no_restore(self):
+        """Review find (2026-09-11): the reader held its lock for the lookup and the store only, so a fold's tail restore
+        (generation N, pending fold states under N) and a concurrent whole read (generation N+1, stored last) left the
+        pending states orphaned: every other fold of the file refolded over a whole read, silently. Reads that pull bytes
+        are serialized per path now and re-check the cache under the lock: the second thread waits and hits."""
+        _write(self.p, [{"n": i} for i in range(200)])
+        other = {}
+        self.fold(); self.fold("u", other); em.checkpoint_write(self.p)
+        size = os.stat(self.p).st_size
+        for trial in range(8):
+            with self.subTest(trial=trial):
+                self.fresh_process(); other.clear()
+                em._CKPT_STATS.update(restored=0, restoredFolds={}, droppedRestores=0, fallbacks={})
+                gate = threading.Barrier(2)
+                results, errors = {}, []
+
+                def fold_first():
+                    try:
+                        gate.wait(5); results["fold"] = self.fold()
+                    except Exception as e:                                # noqa: BLE001
+                        errors.append(e)
+
+                def whole_first():
+                    try:
+                        gate.wait(5); results["whole"] = len(em._read_jsonl_incremental(self.p))
+                    except Exception as e:                                # noqa: BLE001
+                        errors.append(e)
+                ts = [threading.Thread(target=fold_first), threading.Thread(target=whole_first)]
+                for th in ts:
+                    th.start()
+                for th in ts:
+                    th.join(10)
+                self.assertEqual(errors, [])
+                self.assertEqual((results["fold"], results["whole"]), (list(range(200)), 200))
+                self.assertEqual(em.fold_records(other, self.p, list, self._step, on=self.kinds.append, ckpt="u"), list(range(200)))
+                self.assertEqual(self.kinds[-1], "restore", "the second fold of the file restores too: no orphaned pending states")
+                st = em.checkpoint_stats()
+                self.assertEqual((st["droppedRestores"], st["fallbacks"]), (0, {}))
+                self.assertEqual(sorted(st["restoredFolds"]), ["t", "u"])
+                read = em.read_bytes_report()[self.p]
+                self.assertLessEqual(read, size + 4 * 64, "the file's content was read once, whichever thread went first (%d bytes for a %d-byte file)" % (read, size))
+
+    def test_a_fold_whose_state_is_the_size_of_its_file_is_left_out_of_the_document(self):
+        """Review find (2026-09-11): a checkpoint carried every fold's state, and a state that grows with its file (the postal
+        fold's map of every sent row) made the document a second copy of the file, read at every boot. A fold's encoded
+        state past the cap is left out, counted per name, and cold-folds; the bounded folds beside it restore."""
+        _write(self.p, [{"n": i, "pad": "x" * 400} for i in range(400)])           # ~170 KB of records
+        big = {}
+        self.fold()                                                               # "t": a list of 400 ints, small
+        em.fold_records(big, self.p, list, lambda st, o: st + [o], ckpt="big")    # "big": every record whole, over the cap
+        self.assertTrue(em.checkpoint_write(self.p))
+        d = self.doc(self.p)
+        self.assertEqual(sorted(d["folds"]), ["t"], "the oversize fold is not in the document")
+        self.assertLess(em._ckpt_file(self.p).stat().st_size, em._CKPT_FOLD_CAP, "and the document stays small")
+        self.assertEqual(em.checkpoint_stats()["oversizeFolds"], {"big": 1})
+        self.fresh_process(); big.clear()
+        self.assertEqual(self.fold(), list(range(400))); self.assertEqual(self.kinds[-1], "restore")
+        got = em.fold_records(big, self.p, self.__class__._noop_init, lambda st, o: st + [o], on=self.kinds.append, ckpt="big")
+        self.assertEqual(len(got), 400); self.assertEqual(self.kinds[-1], "refold", "the oversize fold cold-folds over the whole file")
+
+    @staticmethod
+    def _noop_init():
+        return []
 
     def test_nothing_is_written_when_no_fold_stands_at_the_witness_unless_forced(self):
         _write(self.p, [{"n": 0}])
@@ -521,7 +589,8 @@ class KernelFolds(Base):
 
     def test_perf_carries_the_checkpoint_counters_and_the_kernel_wires_the_three_events(self):
         snap = km._PERF_STATS.snapshot()
-        self.assertEqual(sorted(snap["checkpoints"]), ["dirty", "fallbacks", "readByPath", "readBytes", "restored", "restoredFolds", "skippedFolds", "swept", "writes"])
+        self.assertEqual(sorted(snap["checkpoints"]), ["dirty", "documentBytes", "droppedRestores", "fallbacks", "oversizeFolds", "readByPath",
+                                                        "readBytes", "restored", "restoredFolds", "skippedFolds", "swept", "writes"])
         src = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertIn("em.checkpoint_write_dirty()       # every fold checkpoint that moved since its last write", src,
                       "exit writes every dirty checkpoint in _drain_and_exit")
