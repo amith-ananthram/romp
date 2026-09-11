@@ -47522,6 +47522,50 @@ window.addEventListener('message',function(e){var m=e.data;if(m&&m.romp==='usage
 # backdrop (#ru-back, one modal at a time).
 # The web shell's rail only, for now; the VS Code strip twin (strip.ts apiCell's sibling, with a --st-retrying
 # token) and the phone's Usage-modal section (no rail on the phone) are named follow-ups.
+_TIMELINE_AXIS_PARTS = (r"^const NICE = \[[^\n]*\];", r"^function clock\(t\) \{[^\n]*\}", r"^function niceStep\(W\) \{[^\n]*\}")
+
+
+_TIMELINE_AXIS_MEMO = [None]   # [(the view file's key, the lifted script)] as ONE tuple: re-read only when the file changes, so an
+#                                edit still goes live while the landing's hot path pays one stat; one slot, so two GETs overlapping an
+#                                edit can never pair a new key with an old lift (review find)
+
+
+def _timeline_axis_js():
+    """The timeline pane's axis formatter and tick rule, lifted VERBATIM from ui/romp-timeline-view.js for the API
+    health histograms' x-axis (T338, the user 2026-09-11: clock times the way the timeline labels its axis, never
+    ages): clock (the local HH:MM), NICE and niceStep (the nice step for a span: eight intervals), published as
+    window.__rompTimelineAxis so the landing's inline script runs the timeline's own functions and an edit to them
+    goes live for both. One formatter, no second copy. A missing file or a moved line publishes null and says so on
+    stderr ONCE per file version (the null is memoized under the same key, a missing file under its own sentinel, so a
+    landing GET never re-reads or re-reports); the histograms then draw their gridlines with no clocks rather than a
+    second, drifting formatter."""
+    p = UI / "romp-timeline-view.js"
+    stat_err = None
+    try:
+        key = p.stat().st_mtime_ns
+    except OSError as e:
+        key, stat_err = "missing", e
+    held = _TIMELINE_AXIS_MEMO[0]
+    if held and held[0] == key:
+        return held[1]
+    try:
+        if stat_err is not None:
+            raise OSError("%s: %s" % (p, stat_err.strerror or stat_err))
+        src = p.read_text()
+        parts = []
+        for p_ in _TIMELINE_AXIS_PARTS:
+            m = re.search(p_, src, re.M)
+            if m is None:
+                raise ValueError("%s: no line matches %s (the view's formatter moved or was reformatted)" % (p, p_))
+            parts.append(m.group(0))
+        out = "window.__rompTimelineAxis=(function(){" + "\n".join(parts) + "\nreturn {NICE:NICE,clock:clock,niceStep:niceStep};})();"
+    except Exception as e:
+        sys.stderr.write("timeline axis lift: the API health histograms draw no clocks: %s\n" % e)
+        out = "window.__rompTimelineAxis=null;"
+    _TIMELINE_AXIS_MEMO[0] = (key, out)
+    return out
+
+
 _LANDING_APIH_JS = """
 (function(){var el=document.getElementById('rail-api');if(!el)return;
 // the merge and reading rules (ui/webview/api-health-merge.ts via api-health-global.ts); absent (a stale dist), the
@@ -47536,9 +47580,10 @@ function armAge(){if(!ageTimer)ageTimer=setInterval(ageTick,60000);}
 function disarmAge(){if(ageTimer){clearInterval(ageTimer);ageTimer=null;}}
 var moving=false;  // the readout is re-parenting the cell (moveApiCell): its blur and focus are not the user's
 var DOTWORD={fine:'fine',errors:'errors',quiet:'no traffic'};
-// the legend (T316, the user's design): vertical and left-justified, a swatch in each bar's colour, 429 on one line and
-// 5xx on its own below it; the gray line only when the range holds a no-connection or other-status failure
-var LEGEND_ROWS=[['r429','429 = the API told us to slow down (rate limit)'],['r5xx','5xx = the API itself failed (server error)'],['none','gray = no connection, or another error']];
+// the legend (T316, the user's design; T340, the user 2026-09-11): vertical and left-justified, no swatches: the class token
+// itself wears its colour and the explanation sits beside it as plain text, 429 on one line and 5xx on its own below it;
+// the other line (no connection, or another error) only when the range holds such a failure
+var LEGEND_ROWS=[['r429','429','rate limit: the API told us to slow down'],['r5xx','5xx','server error: the API itself failed'],['none','other','no connection, or another error']];
 // the histograms' ranges (T316): the hover draws the day; the detail (the dot's click) offers 1 hour, 24 hours and 7 days
 // in the spend modal's range-chip grammar. Each names the ledger tier it reads and how many bins make one bar.
 var RANGES={hour:{tier:'minute',per:1,label:'1 hour',s:3600},day:{tier:'fiveMin',per:3,label:'24 hours',s:86400},week:{tier:'hour',per:1,label:'7 days',s:604800}};
@@ -47546,6 +47591,7 @@ var range='day';
 function SELF(){return (LAST&&LAST.host)||'this machine';}   // this kernel's own name, from its frame (T316)
 var STATE_WORD={thrashing:'rate-limit storm',degraded:'API failing',recovering:'recovering',healthy:'fine',unknown:'quiet'};
 var tip=document.createElement('div');tip.id='ah-tip';tip.style.display='none';
+if(window.ResizeObserver)new ResizeObserver(function(){fitAxisLabels(tip);}).observe(tip);   // the labels' fit follows the tip's width (the pinned detail is min(720px, 92vw))
 tip.setAttribute('role','tooltip');tip.setAttribute('aria-label','API health');tip.tabIndex=-1;document.body.appendChild(tip);
 // what the cell is described by while the hover shows (aria-describedby): a SHORT visually-hidden summary, refreshed
 // when the read lands, never the tip's whole text (the tip runs to hundreds of characters of rows, and at focus time,
@@ -47577,9 +47623,9 @@ var HIST_ROWS=4;   // the State changes list, capped (T301: a glance, not a log)
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 function hm(ep){return new Date(ep*1000).toTimeString().slice(0,5);}
 function hms(ep){return new Date(ep*1000).toTimeString().slice(0,8);}
-// a stamp from another day carries its date (a quiet tail can span days): '09-07 14:02'
+// a stamp from another day carries its date (a quiet tail can span days): '09-07 14:02' (dateWords below, the axis's form too)
 function hmd(ep){var d=new Date(ep*1000),n=new Date();if(d.toDateString()===n.toDateString())return hm(ep);
-return ('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2)+' '+hm(ep);}
+return dateWords(ep)+' '+hm(ep);}
 function dur(s){s=Math.max(0,Math.round(s));if(s<60)return s+' s';var m=Math.round(s/60);if(m<60)return m+' min';
 var h=Math.floor(m/60);m-=h*60;if(h<24)return h+' h'+(m?' '+m+' min':'');var d=Math.floor(h/24);h-=d*24;return d+' d'+(h?' '+h+' h':'');}
 function pl(n,w){n=n||0;return n+' '+w+(n===1?'':'s');}
@@ -47590,8 +47636,11 @@ manual:'Auto-retry and the judges are paused: you stopped them.'};
 var RESUME='Resume all auto-retries',STOP='Stop all auto-retries';   // the chat card's own words
 var NOTSENT='Not sent: the dashboard is disconnected. Try again.';
 var LOST='Connection lost before the answer arrived. When it is back, the button shows the current state.';
-function clsWords(r){if(r.cls==='429')return '429 rate limited';if(r.cls==='529')return '529 overloaded';
-if(r.cls==='offline')return 'offline';return 'error'+(r.status?' '+r.status:'');}
+// a waiting row's class words (T340, the user 2026-09-11): the status code itself wears its class ink, the 5xx magenta for a
+// 529 or any other 5xx, the 429 red for a 429, so the number says what it is; the words beside it stay plain
+function clsWords(r){var st=r.status?esc(r.status):'';
+if(r.cls==='429')return '<span class=ah-c-r429>429</span> rate limited';if(r.cls==='529')return '<span class=ah-c-r5xx>529</span> overloaded';
+if(r.cls==='offline')return 'offline';if(/^5[0-9][0-9]$/.test(st))return 'error <span class=ah-c-r5xx>'+st+'</span>';return 'error'+(st?' '+st:'');}
 // The pause control. A press is acknowledged at once (disabled, flipped label, .romp-acted) and STAYS so across
 // frames until the one that answers it: an in-flight pre-press frame must not repaint an enabled button.
 function btnHTML(m){if(pending!==null)return '<button class="ah-btn romp-acted" disabled data-act=pause data-val='+pending+'>'+(pending?RESUME:STOP)+'</button>';
@@ -47600,7 +47649,7 @@ return '<button class=ah-btn data-act=pause data-val='+v+'>'+(v?STOP:RESUME)+'</
 // A pinned row is a keyboard button too (role, tabindex; Enter / Space run it from the keydown below).
 function rowHTML(r,full){var bg=r.color&&r.color.bg?esc(r.color.bg):'';
 return '<div class="ru-tip-row ah-row'+(full?'':' ah-ro')+'"'+(full?' role=button tabindex=0 data-act=reveal data-sid="'+esc(r.sid)+'"':'')+'>'
-+(bg?'<i class=ah-sw style="background:'+bg+'"></i><span class=ah-nm style="color:'+bg+'">':'<i class=ah-sw></i><span class=ah-nm>')+esc(r.name)+'</span>'
++(bg?'<span class=ah-nm style="color:'+bg+'">':'<span class=ah-nm>')+esc(r.name)+'</span>'   // the name in its colour is the whole cue: no square beside it (T340)
 +'<span class=ah-desc>'+(r.kind==='retrying'?'retrying':'stopped')+' · '+clsWords(r)+(r.since?' · since '+hm(r.since):'')
 +(r.suppressed?' · auto-retry off for this session (you interrupted it)':'')+'</span></div>';}
 // -- History: GET /api-health at show time. The shell authenticates the way its other fetches do (the romp_token
@@ -47648,13 +47697,55 @@ return dup?fam+' · '+(b.auth||key.split('|')[0]):fam;}
 // window counts every attempt once and says how many of them had no status, with the shares' base named beside them:
 // '15 attempts, 7 of them without a status · 25% 429 · 0% 5xx of the other 8'.
 // the histogram (T316, the user's design): one bar per bin, STACKED bottom-up, successes in the accent, 429 attempts in
-// the blocked red, 5xx (529 included) in the 5xx magenta, and a gray band for no-connection and other-status failures
-// only when the range holds any; one ceiling label, no peak text; a tick at each quarter of the span in ago words. The
+// the blocked red, 5xx (529 included) in the 5xx magenta, and the other band (no connection, another status) in a hue of
+// its own only when the range holds any; one ceiling label, no peak text; the timeline's clocks along the bottom. The
 // hover draws the day as 96 quarter-hour bars; the detail draws the chosen range, larger. Colours through the tokens
 // (fallbacks for a var-less harness). EVERY attribute quoted: this goes through innerHTML (the spend chart's lesson).
 var BAR_CLASSES=['ok','rateLimited','serverErrors','noStatus','other'];   // the stack order; each fill is a CSS class per theme (.ah-seg-<class>)
 function niceTopAh(mx){var p=Math.pow(10,Math.floor(Math.log(mx)/Math.LN10)),m=mx/p;return (m<=1?1:m<=2?2:m<=5?5:10)*p;}   // a 1-2-5 ceiling at any magnitude
-function tickWords(sec){if(sec>=86400)return Math.round(sec/86400)+'d';if(sec>=3600)return Math.round(sec/3600)+'h';return Math.round(sec/60)+'m';}
+// the x-axis (T338, the user 2026-09-11): clock times, never ages, by the timeline pane's own formatter and tick rule
+// (romp-timeline-view.js clock + niceStep, lifted verbatim by the kernel into window.__rompTimelineAxis): clock ticks at
+// the nice step for the span (eight intervals; nine ticks when the span starts on a step multiple), each labelled with its
+// local HH:MM, at the timeline's epoch multiples; PLUS a tick at each local midnight the span crosses, carrying that day's
+// date (MM-DD, the State changes rows' own form) in place of a clock, so a day boundary is a gridline of its own and never
+// a clock an hour or two into the day (review find). At a step of a day or more the midnights alone, all dates (a date
+// names a calendar day; the timeline's window never reaches that step, so it had no rule to lend). No 'now' and no span
+// word: the as-of line already says when the read is from. Every label is emitted; which ones stand is decided after the
+// paint from their MEASURED widths (fitAxisLabels), a day's date outranking the clock it collides with, so the guard reads
+// the rendered text and not an estimate of it. With no formatter on the page (the lift found nothing) the gridlines stand
+// at the quarters with no clocks, never a second formatter's guesses.
+var TL=window.__rompTimelineAxis||null;
+function dayKey(ep){var d=new Date(ep*1000);return d.getFullYear()+'/'+d.getMonth()+'/'+d.getDate();}
+function dateWords(ep){var d=new Date(ep*1000);return ('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2);}
+// the local midnights inside (t0, t1], every `days` days: the Date walks calendar days and is re-normalised to 00:00 after
+// each step, so a DST day keeps its boundary and a midnight that does not exist (a spring-forward gap at 00:00) lands on
+// that day's first moment without dragging the days after it
+function midnights(t0,t1,days){var out=[],d=new Date(t0*1000);d.setHours(0,0,0,0);if(d.getTime()/1000<=t0){d.setDate(d.getDate()+1);d.setHours(0,0,0,0);}
+for(;d.getTime()/1000<=t1;d.setDate(d.getDate()+days),d.setHours(0,0,0,0))out.push(d.getTime()/1000);return out;}
+// the tick moments: under a day-step the timeline's epoch multiples (clocks) merged with each local midnight the span
+// crosses (the day's date, a coincident pair being the day tick); at a day or more the midnights alone
+function tickMoments(t0,t1,step){var out=[];
+if(step>=86400){midnights(t0,t1,Math.max(1,Math.round(step/86400))).forEach(function(m){out.push({t:m,day:true});});return out;}
+var mids=midnights(t0,t1,1),mi=0;
+for(var tk=Math.ceil(t0/step)*step;tk<=t1;tk+=step){while(mi<mids.length&&mids[mi]<tk){out.push({t:mids[mi],day:true});mi++;}
+if(mi<mids.length&&mids[mi]===tk){out.push({t:tk,day:true});mi++;}else out.push({t:tk,day:false});}
+while(mi<mids.length){out.push({t:mids[mi],day:true});mi++;}
+return out;}
+function axisTicks(t0,span,W){if(!(span>0))return [];
+if(!TL){var q=[];for(var i=1;i<4;i++)q.push({x:i/4*W,label:'',date:false});return q;}
+var step=TL.niceStep(span),t1=t0+span;
+return tickMoments(t0,t1,step).map(function(k){return {x:(k.t-t0)/span*W,label:k.day?dateWords(k.t):TL.clock(k.t),date:k.day};});}
+// which labels stand, left to right over MEASURED boxes ({x: the centre, w: the width, date}, px): a label that would overlap
+// the last shown one yields, unless it is a day's date, which takes the slot and hides the clock before it (a crossing is
+// always named). Pure, so the rule is unit-tested; fitAxisLabels measures and applies it after each paint.
+function fitLabels(items,gap){var shown=[],lastI=-1;for(var i=0;i<items.length;i++){var it=items[i],ok=lastI<0||it.x-it.w/2>items[lastI].x+items[lastI].w/2+gap;
+if(!ok&&it.date&&lastI>=0&&!items[lastI].date){shown[lastI]=false;ok=true;}
+shown.push(ok);if(ok)lastI=i;}return shown;}
+function fitAxisLabels(root){var rows=root.querySelectorAll('.ru-tip-gx');for(var r=0;r<rows.length;r++){var spans=Array.prototype.slice.call(rows[r].querySelectorAll('span'));
+for(var i=0;i<spans.length;i++)spans[i].hidden=false;   // measure every label in place
+var items=spans.map(function(s){var b=s.getBoundingClientRect();return {x:b.left+b.width/2,w:b.width,date:s.hasAttribute('data-date')};});
+if(!items.length||!items.some(function(it){return it.w>0;}))continue;   // not laid out (display none): nothing to decide yet
+var shown=fitLabels(items,4);for(var j=0;j<spans.length;j++)spans[j].hidden=!shown[j];}}
 function sumArr(a){var t=0;(a||[]).forEach(function(v){t+=v||0;});return t;}
 function barsHTML(led,big){var n=led.ok.length,W=big?560:168,H=big?110:48,tot=[],mx=0;
 for(var i=0;i<n;i++){var v=0;BAR_CLASSES.forEach(function(c){v+=(led[c]||[])[i]||0;});tot.push(v);if(v>mx)mx=v;}
@@ -47665,17 +47756,15 @@ var bars='';
 for(var i=0;i<n;i++){if(!(tot[i]>0))continue;var x=i*slot+gap/2,acc=0;
 BAR_CLASSES.forEach(function(c){var v=(led[c]||[])[i]||0;if(!(v>0))return;var yb=Y(acc),yt=Y(acc+v);acc+=v;var hgt=Math.max(0.6,yb-yt);
 bars+='<rect class="ah-seg ah-seg-'+c+'" x="'+x.toFixed(1)+'" y="'+(yb-hgt).toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+hgt.toFixed(1)+'"></rect>';});}
-var ty=Y(top),grid='<line x1="0" y1="'+ty.toFixed(1)+'" x2="'+W+'" y2="'+ty.toFixed(1)+'" stroke="rgba(255,255,255,0.10)" stroke-width="1" vector-effect="non-scaling-stroke"></line>',xlab='';
-// ticks at round ages for the span (45/30/15 min, 18/12/6 h, 6/4/2 d), the span itself at the left edge, now at the right
-var span=n*(led.binS||60),marks=span>=604800?[6*86400,4*86400,2*86400]:span>=86400?[18*3600,12*3600,6*3600]:[2700,1800,900];
-xlab+='<span style="left:0%">'+tickWords(span)+'</span>';
-marks.forEach(function(ago){if(ago>=span)return;var gx=(1-ago/span)*W;grid+='<line x1="'+gx.toFixed(1)+'" y1="0" x2="'+gx.toFixed(1)+'" y2="'+H+'" stroke="rgba(255,255,255,0.06)" stroke-width="1" vector-effect="non-scaling-stroke"></line>';
-xlab+='<span style="left:'+((1-ago/span)*100).toFixed(1)+'%">'+tickWords(ago)+'</span>';});
-xlab+='<span style="left:100%">now</span>';
+var ty=Y(top),grid='<line class="ah-gridy" x1="0" y1="'+ty.toFixed(1)+'" x2="'+W+'" y2="'+ty.toFixed(1)+'" stroke-width="1" vector-effect="non-scaling-stroke"></line>',xlab='';
+// the clocks: a gridline at every tick of the timeline's nice step over the ledger's real span, its label when it fits
+var span=n*(led.binS||60);
+axisTicks(led.from||0,span,W).forEach(function(k){var gx=k.x;grid+='<line class="ah-gridx" x1="'+gx.toFixed(1)+'" y1="0" x2="'+gx.toFixed(1)+'" y2="'+H+'" stroke-width="1" vector-effect="non-scaling-stroke"></line>';
+if(k.label)xlab+='<span'+(k.date?' data-date="1"':'')+' style="left:'+(gx/W*100).toFixed(1)+'%">'+esc(k.label)+'</span>';});   // every label; fitAxisLabels decides which stand
 return '<div class="ru-tip-graph ah-bars'+(big?' ah-big':'')+'" data-bars="'+n+'"><svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+grid+bars+'</svg>'
 +'<span class=ru-tip-gy style="top:'+(big?ty:ty/H*56).toFixed(0)+'px">'+top+'</span><div class=ru-tip-gx>'+xlab+'</div></div>';}
-function legendHTML(gray){var h='<div class=ah-legend>';LEGEND_ROWS.forEach(function(r){if(r[0]==='none'&&!gray)return;
-h+='<div class=ah-lrow><i class="ah-lsw ah-sw-'+r[0]+'"></i><span>'+r[1]+'</span></div>';});return h+'</div>';}
+function legendHTML(other){var h='<div class=ah-legend>';LEGEND_ROWS.forEach(function(r){if(r[0]==='none'&&!other)return;
+h+='<div class=ah-lrow><span class="ah-lt ah-c-'+r[0]+'">'+r[1]+'</span> <span>'+r[2]+'</span></div>';});return h+'</div>';}
 function rangeHTML(){var h='<div class="rsp-ctl ah-range">';Object.keys(RANGES).forEach(function(k){h+='<button class="rsp-btn'+(range===k?' on':'')+'" data-act="range:'+k+'">'+RANGES[k].label+'</button>';});return h+'</div>';}
 // a machine's line pieces, each class in its colour (the merge's Seg kinds: ok, r429, r5xx, none, plain)
 function partsHTML(parts){return '<span class=ah-desc>'+parts.map(function(p){return '<span class="ah-c-'+esc(p.kind)+'">'+esc(p.text)+'</span>';}).join(' \u00b7 ')+'</span>';}
@@ -47714,12 +47803,12 @@ function histHTML(){var loc=HIST&&HIST[''],R=RANGES[pinned?range:'day'];
 // the read's age: the time since this machine's document LANDED, on this clock alone (the kernel's asOf is another host's clock)
 var ago=(loc&&!loc.error&&!loc.pending&&LANDED&&MERGE)?'<span class="ru-tip-reset ah-ago">'+esc(ageWords())+'</span>':'';
 var h='<div class="ru-tip-win ah-hist"><div class=ru-tip-name><span>History</span>'+ago+'</div>';
-var hs=HIST?Object.keys(HIST).sort(localFirst):[],many=hs.length>1,gray=false;
-// the gray legend line applies when any machine's drawn range OR any machine's counted line holds a no-connection or
+var hs=HIST?Object.keys(HIST).sort(localFirst):[],many=hs.length>1,other=false;
+// the other legend line applies when any machine's drawn range OR any machine's counted line holds a no-connection or
 // other-status failure (the lines count the day whatever the range): known up front
-hs.forEach(function(host){var d=HIST[host];if(!d||d.error||d.pending)return;var l=ledgerOf(d,R);if(l&&sumArr(l.noStatus)+sumArr(l.other)>0)gray=true;
-var rd=READINGS[host];if(rd&&rd.counts&&(rd.counts.none+rd.counts.other)>0)gray=true;});
-if(pinned)h+=rangeHTML()+legendHTML(gray);   // the detail: the chips, then the colours named where the eye starts
+hs.forEach(function(host){var d=HIST[host];if(!d||d.error||d.pending)return;var l=ledgerOf(d,R);if(l&&sumArr(l.noStatus)+sumArr(l.other)>0)other=true;
+var rd=READINGS[host];if(rd&&rd.counts&&(rd.counts.none+rd.counts.other)>0)other=true;});
+if(pinned)h+=rangeHTML()+legendHTML(other);   // the detail: the chips, then the colours named where the eye starts
 if(!HIST)return h+'<div class="rl-dots ah-wait"><i></i><i></i><i></i></div></div>';
 hs.forEach(function(host){var d=HIST[host],name=host||SELF();
 // a machine whose answer is still in flight: its loader line (alone, the section's loader), never a blank
@@ -47729,7 +47818,7 @@ if(many)h+='<div class="ru-tip-row ah-gname"><span class=ah-nm>'+esc(name)+'</sp
 var led=ledgerOf(d,R),bars=led?barsHTML(led,pinned):'',span=(led&&led.older)?'last 15 min (an older kernel)':R.label;
 if(!bars){h+='<div class="ah-line ru-tip-reset">no attempts in the '+esc(span)+'</div>';return;}
 h+=bars;if(led.older)h+='<div class="ah-line ru-tip-reset">the last 15 min: an older kernel serves no longer history</div>';});
-if(!pinned)h+=legendHTML(gray);   // the hover: the legend under the bars
+if(!pinned)h+=legendHTML(other);   // the hover: the legend under the bars
 var tr=(loc&&!loc.error&&!loc.pending)?transRows(loc):'';if(tr)h+='<div class="ru-tip-name ah-hname"><span>State changes'+(many?' \u00b7 '+esc(SELF()):'')+'</span></div>'+tr;
 return h+'</div>';}
 // the cell's description while the hover shows: the state word and its since, then how to reach the rest. Before the
@@ -47782,7 +47871,7 @@ tip.style.top=Math.max(6,r.top-h-8)+'px';}
 // leave the dialog: the same control (by act and sid) takes focus again in the new markup, else the card does.
 function focusKey(n){return (n&&n.getAttribute)?(n.getAttribute('data-act')||'')+'|'+(n.getAttribute('data-sid')||''):'';}
 function render(){if(!LAST)return;var a=document.activeElement,key=(pinned&&a&&a!==tip&&tip.contains(a))?focusKey(a):null;
-tip.innerHTML=html(LAST,pinned);if(!pinned)anchor();desc.textContent=descText();
+tip.innerHTML=html(LAST,pinned);if(!pinned)anchor();fitAxisLabels(tip);desc.textContent=descText();   // the axis labels' fit is read off the paint
 if(key!==null){var n=null,all=tip.querySelectorAll('[data-act]');for(var i=0;i<all.length;i++)if(focusKey(all[i])===key){n=all[i];break;}
 try{if(n)n.focus();if(!n||document.activeElement!==n)tip.focus();}catch(e){}}}
 // The shown, unpinned tip is a TOOLTIP (the role, the cell described by the short summary, no aria-modal): a keyboard
@@ -50188,31 +50277,43 @@ def _landing():
             # apart before the first frame and jumped when the dot appeared)
             ".ah-slot{display:contents}"
             # the detail card's own rows, in the tip's font and palette (#ah-tip shares #ru-tip's skin below)
-            ".ah-head{gap:7px}.ah-word{font-weight:700;color:#e8eef5}.ah-since{opacity:.55;margin-left:auto}"
+            ".ah-head{gap:7px}.ah-word{font-weight:700;color:#e8eef5}.ah-since{color:#8b939c;margin-left:auto}"
             ".ah-line{margin-top:4px;max-width:340px}"
             ".ah-btn{margin-top:6px;font:inherit;padding:3px 9px;border-radius:5px;border:1px solid #3a3a3a;background:#2a2a2a;color:#cfd6dd;cursor:pointer}"
             ".ah-btn[disabled]{opacity:.55;cursor:default}#ah-tip .romp-acted{opacity:.6}"
             ".ah-row{cursor:pointer;border-radius:4px;margin:2px -4px 0;padding:1px 4px}"
             ".ah-row:hover{background:rgba(255,255,255,0.06)}"
-            ".ah-sw{width:8px;height:8px;border-radius:2px;background:#6b7a8c;flex:0 0 auto}"
             ".ah-nm{font-weight:600}.ah-desc{opacity:.75}"
+            # a waiting row's words are muted by COLOUR, not opacity (T340 review: the 429/529 tokens inside composited under 4.5:1
+            # at the description's 75%); the tokens keep their inks at full strength
+            ".ah-row .ah-desc{opacity:1;color:#a9b1ba}"
             ".ah-foot{margin-top:7px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.08);gap:12px}"
             ".ah-link{cursor:pointer;color:var(--accent)}"
             # T316: a machine line's pieces in their class colours (successes the accent, 429 the blocked red, 5xx the 5xx
-            # magenta, no connection and other statuses the label gray), the vertical legend with swatches in the bar
-            # colours, the stacked bars (the hover's small, the detail's large), the detail's range chips and width
+            # magenta, no connection and other statuses the other band's hue), the vertical legend with the class tokens in
+            # those inks (T340: no swatches), the stacked bars (the hover's small, the detail's large), the detail's range
+            # chips and width. The other band (T340, the user 2026-09-11): the label gray sat on the accent in the dark; the
+            # band is a pale lime in the dark (#d9f99d) and an indigo in the light (#4f46e5), each at least 8 OKLab CVD units
+            # and 15 normal-vision units from the accent, the 429 red and its ink, the 5xx magenta and its ink, the retrying
+            # amber and the working yellow of its theme (the dataviz validator, all pairs; no one hue clears both themes:
+            # blues and violets fold into the magenta or its pink ink under red-green CVD in the dark, greens fold into the
+            # clay accent, the red and the amber in the light, warm neutrals sit within 15 of the pale accent in the dark)
             # the counts' TEXT inks per theme (review find: the chip colours as text sit under 4.5:1 on the tip; the
             # failure line's precedent is #ef6b6f dark / #B02A1C light): 429 the error-text red, 5xx a lighter magenta in
             # the dark, a deeper one in the light; the swatches and the bars keep the chip colours
             ".ah-c-ok{color:var(--accent,#9cd2ff)}.ah-c-r429{color:#ef6b6f}.ah-c-r5xx{color:#e879f9}"
-            ".ah-c-none{color:#9aa4ad}.ah-mline .ah-desc{opacity:1}.ah-mline .ah-c-plain{opacity:.85}"
+            ".ah-c-none{color:#d9f99d}.ah-mline .ah-desc{opacity:1}.ah-mline .ah-c-plain{color:#a9b1ba}"
             ".ah-win,.ah-ago{margin-left:auto}"
-            ".ah-legend{display:flex;flex-direction:column;align-items:flex-start;gap:3px;margin-top:7px;opacity:.75}"
-            ".ah-lrow{display:flex;align-items:center;gap:6px}.ah-lsw{width:8px;height:8px;border-radius:2px;flex:0 0 auto}"
-            ".ah-sw-r429{background:var(--st-blocked-bg,#e5484d)}.ah-sw-r5xx{background:var(--st-5xx-bg,#c026d3)}.ah-sw-none{background:#9aa4ad}"
-            # the bars' fills, one class per stack segment (the landing defines no --dim, so the gray is written out)
+            # the legend carries no group opacity (T340 review: a descendant cannot exceed its group's, so a faded legend put every
+            # coloured token under 4.5:1); only the explanation span is dimmed, the tokens stand at full strength
+            ".ah-legend{display:flex;flex-direction:column;align-items:flex-start;gap:3px;margin-top:7px}"
+            ".ah-lrow{display:flex;align-items:center;gap:6px}.ah-lt{font-weight:600}.ah-lrow > span:last-child{opacity:.75}"
+            # the bars' fills, one class per stack segment; the other band's hue written out per theme (no token: a class of
+            # this popup alone, not a status the rest of the dashboard names)
             ".ah-seg-ok{fill:var(--accent,#9cd2ff)}.ah-seg-rateLimited{fill:var(--st-blocked-bg,#e5484d)}.ah-seg-serverErrors{fill:var(--st-5xx-bg,#c026d3)}"
-            ".ah-seg-noStatus,.ah-seg-other{fill:#9aa4ad}"
+            ".ah-seg-noStatus,.ah-seg-other{fill:#d9f99d}"
+            # the gridlines as classes too (T338): the ceiling's and the ticks', a hairline the light card can see
+            ".ah-gridy{stroke:rgba(255,255,255,0.10)}.ah-gridx{stroke:rgba(255,255,255,0.06)}"
             ".ah-gname{margin-top:6px}.ah-bars.ah-big svg{height:110px}.ah-bars.ah-big{margin-bottom:12px}"
             ".ah-range{margin:4px 0 6px}"
             "#ah-tip.ru-modal{width:min(720px,92vw)}"
@@ -50228,7 +50329,7 @@ def _landing():
             # pinned card, which scrolls as before.
             ".ah-hword{opacity:.8}.ah-hsub{opacity:.55}.ah-boot .ah-hword{font-style:italic;opacity:.6}"
             # the graph (T301): the usage hover's own .ru-tip-graph grammar; the legend and the machine lines are sub-lines
-            ".ah-legend{opacity:.6;margin-top:4px;max-width:340px}.ah-mline{gap:7px}.ah-mline .ah-desc{opacity:.9}"
+            ".ah-legend{margin-top:4px;max-width:340px}.ah-mline{gap:7px}"
             ".ah-hname{margin-top:6px}.ah-err{color:#ef6b6f}.ah-wait{margin:5px 0 2px}"
             ".ah-row.ah-ro{cursor:default}.ah-row.ah-ro:hover{background:transparent}"
             "#ah-tip:focus{outline:none}#ah-tip{overflow:hidden;box-sizing:border-box}"
@@ -50336,9 +50437,11 @@ def _landing():
             ".ru-tip-graph{position:relative;margin-top:4px}"
             ".ru-tip-graph svg{display:block;width:100%;height:56px;background:rgba(255,255,255,0.04);"
             "border-radius:3px}"
-            ".ru-tip-gy{position:absolute;left:3px;font-size:8px;opacity:.5;line-height:1;"
+            # the graph's small labels (the ceiling, the axis clocks) are muted by COLOUR at opacity 1 (T338 review: at 50% the
+            # clocks sat at 3.85:1 dark and 3.27:1 light); the inks clear 4.5:1 on each card at 8 px
+            ".ru-tip-gy{position:absolute;left:3px;font-size:8px;color:#8b939c;line-height:1;"
             "pointer-events:none;transform:translateY(1px)}"
-            ".ru-tip-gx{position:relative;height:9px;margin-top:1px;font-size:8px;opacity:.5}"
+            ".ru-tip-gx{position:relative;height:9px;margin-top:1px;font-size:8px;color:#8b939c}"
             ".ru-tip-gx span{position:absolute;transform:translateX(-50%);line-height:1}"
             ".ru-tip-track i{display:block;height:100%;border-radius:3px;transition:width .3s ease}"
             # margin-left:auto right-aligns every value to one edge, so the bar rows and the numbers-only
@@ -50665,13 +50768,15 @@ def _landing():
             # the dark line's #ef6b6f is 3.0:1 there)
             "body.theme-light .ah-err{color:#B02A1C}"
             # T316, the light tip is white: the counts' inks (the clay accent, the light error red, a deep magenta 6.5:1, the
-            # light label gray 7.15:1), the swatches and the bars' fills in the light palette's chip colours
-            "body.theme-light .ah-c-ok{color:#C2410C}body.theme-light .ah-c-r429{color:#B02A1C}body.theme-light .ah-c-r5xx{color:#86198F}body.theme-light .ah-c-none{color:#5D574E}"
-            "body.theme-light .ah-sw-r5xx{background:#A21CAF}body.theme-light .ah-sw-none{background:#5D574E}"
-            "body.theme-light .ah-seg-ok{fill:#C2410C}body.theme-light .ah-seg-serverErrors{fill:#A21CAF}body.theme-light .ah-seg-noStatus,body.theme-light .ah-seg-other{fill:#5D574E}"
+            # other band's indigo 6.3:1) and the bars' fills in the light palette's chip colours (T340: no swatches)
+            "body.theme-light .ah-c-ok{color:#C2410C}body.theme-light .ah-c-r429{color:#B02A1C}body.theme-light .ah-c-r5xx{color:#86198F}body.theme-light .ah-c-none{color:#4f46e5}"
+            "body.theme-light .ah-seg-ok{fill:#C2410C}body.theme-light .ah-seg-serverErrors{fill:#A21CAF}body.theme-light .ah-seg-noStatus,body.theme-light .ah-seg-other{fill:#4f46e5}"
+            "body.theme-light .ah-gridy{stroke:rgba(0,0,0,0.14)}body.theme-light .ah-gridx{stroke:rgba(0,0,0,0.08)}"
             "body.theme-light .ah-word{color:#1F1E1D}"
             "body.theme-light .ah-btn{background:#F1EAE2;border-color:rgba(0,0,0,0.12);color:#1F1E1D}"
             "body.theme-light .ah-row:hover{background:rgba(0,0,0,0.05)}"
+            "body.theme-light .ah-row .ah-desc{color:#5D574E}body.theme-light .ah-mline .ah-c-plain{color:#5D574E}body.theme-light .ah-since{color:#6b6560}"
+            "body.theme-light .ru-tip-gy{color:#6b6560}body.theme-light .ru-tip-gx{color:#6b6560}"
             "body.theme-light .ah-row.ah-ro:hover{background:transparent}"
             "body.theme-light .ah-foot{border-top-color:rgba(0,0,0,0.10)}"
             "body.theme-light .ru-track{background:rgba(0,0,0,0.10)}"
@@ -50947,7 +51052,9 @@ def _landing():
             ("<script src=/dist/api-health-global.js?v=%d></script>" % v) +
             "<script>" + _LANDING_ERRS_JS + "</script>"
             "<script>" + _LANDING_USAGE_JS.replace("__ROMP_LOADER__", json.dumps(_loader_inner())) + "</script>"
-            "<script>" + _LANDING_APIH_JS + "</script>"
+            # the timeline's axis formatter and tick rule, lifted for the histograms' clocks (T338), ahead of the script that
+            # reads it, in the same element (the landing's script count is pinned: no new script element for a helper)
+            "<script>" + _timeline_axis_js() + _LANDING_APIH_JS + "</script>"
             "<script>" + _LANDING_JS + "</script>"
             "<script>" + _LANDING_FOCUS_JS + "</script>"
             "<script>" + _LANDING_ESC_JS + "</script>"

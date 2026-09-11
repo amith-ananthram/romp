@@ -1914,7 +1914,8 @@ in the windows. The hover reads the document as counts, never as the state
 machine's vocabulary: one line per machine, named by its kernel's own name,
 with its successful requests in the accent and each failure class counted in
 its own colour only when present (429s in the blocked red, 5xx with 529 in the
-5xx magenta, no-connection and other-status failures in the label gray); no
+5xx magenta, no-connection and other-status failures in the other band's own
+hue: a pale lime in the dark theme, an indigo in the light); no
 traffic reads as "no API traffic"; a machine whose sessions are waiting or
 whose kernel is paused shows that kernel's own words instead. The window the
 lines count is named once at the top, this kernel's: the ledger's last 24
@@ -1924,11 +1925,17 @@ and a machine not reachable keeps its own line saying so. The word `unknown`
 stays in the document and appears nowhere on the dashboard. Under the lines,
 the **History** draws one stacked histogram per machine from the `ledger`:
 one bar per bin, successes in the accent, 429 attempts in red and 5xx in
-magenta stacked on them, and a gray band for no-connection and other-status
-failures only when the range or a counted line holds any; one ceiling label,
-no peak figure; a vertical, left-justified legend with a swatch for each
-failure colour (429 on one line, 5xx below it, the gray line only when it
-applies; the accent band needs no row); the age of the read in words ("read
+magenta stacked on them, and a band of its own hue (a pale lime in the dark
+theme, an indigo in the light) for no-connection and other-status failures
+only when the range or a counted line holds any; one ceiling label, no peak
+figure; along the bottom the clock times of the timeline pane's own axis (its
+formatter and tick rule, lifted verbatim: local clock times at the timeline's
+tick step (ten minutes on the hour range, three hours on the day), a tick of its
+own at each local midnight the span crosses carrying that
+day's date, and dates alone once the step is a day or more), never ages; a vertical, left-justified
+legend whose class tokens (`429`, `5xx`, `other`) wear their colours with the
+explanation beside them in plain text (429 on one line, 5xx below it, the other
+line only when it applies; the accent band needs no row); the age of the read in words ("read
 now", "read 3 minutes ago"), the time since this machine's document landed
 measured on the browser's clock alone, recomputed at every repaint. The hover
 draws the last 24 hours as 96 quarter-hour bars. A click on the dot (or Enter)

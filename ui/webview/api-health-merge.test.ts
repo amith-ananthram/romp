@@ -202,7 +202,7 @@ test("the as-of stamp reads as an age in words, and a window as its plain name",
 
 test("the shell loads the merge module before its API-health script and the bundle lists it", () => {
   const KERNEL = read("kernel", "kernel.py");
-  const i = KERNEL.indexOf("/dist/api-health-global.js?v=%d"), j = KERNEL.indexOf('"<script>" + _LANDING_APIH_JS + "</script>"');
+  const i = KERNEL.indexOf("/dist/api-health-global.js?v=%d"), j = KERNEL.indexOf('"<script>" + _timeline_axis_js() + _LANDING_APIH_JS + "</script>"');   // T338: the timeline axis lift rides the same element
   assert.ok(i > 0 && j > i, "the global module is included, and before the script that reads it");
   assert.match(read("vscode-extension", "esbuild.js"), /"\.\.\/ui\/webview\/api-health-global\.ts"/);
   assert.match(read("ui", "webview", "api-health-global.ts"), /__rompApiHealthMerge = \{\s*mergeFrames, readHistory, mergeHistories, documentSeries, documentLedger, rebin, frameDot, machineText, machineLine, countsParts, agoWords, windowWords,/);
@@ -214,7 +214,7 @@ test("the 5xx magenta is a token in both theme blocks of both sheets (theme pari
   assert.match(root, /--st-5xx-bg: #c026d3; --st-5xx-fg: #ffffff;/);
   assert.match(light, /--st-5xx-bg: #A21CAF; --st-5xx-fg: #ffffff;/);
   assert.match(FEED, /--st-5xx-bg: #A21CAF; --st-5xx-fg: #ffffff;/, "mirrored where the feed mirrors the blocked red");
-  assert.ok(KERNEL.includes(".ah-sw-r5xx{background:var(--st-5xx-bg,#c026d3)}"), "the 5xx legend swatch wears the token");
+  assert.ok(!KERNEL.includes(".ah-sw-r5xx") && !KERNEL.includes(".ah-lsw"), "no legend swatches (T340): the class tokens wear the inks pinned below");
   assert.ok(KERNEL.includes(".ah-c-r5xx{color:#e879f9}") && KERNEL.includes("body.theme-light .ah-c-r5xx{color:#86198F}"), "a 5xx count's text is inked for each theme's tip (the chip colour as text sits under 4.5:1)");
   assert.ok(KERNEL.includes(".ah-seg-serverErrors{fill:var(--st-5xx-bg,#c026d3)}"), "and so does the 5xx band of the bars (a class per segment, so the light theme can re-ink it)");
   assert.ok(KERNEL.includes("body.theme-light .ah-seg-serverErrors{fill:#A21CAF}"), "the light palette's magenta on the bars");

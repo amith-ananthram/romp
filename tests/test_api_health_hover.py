@@ -709,8 +709,9 @@ class Script(unittest.TestCase):
 
     def test_the_section_draws_stacked_bars_a_vertical_legend_and_an_age_in_words(self):
         # T316 (the user's design): one stacked histogram per machine (successes in the accent, 429 in the blocked red, 5xx
-        # in the 5xx magenta, a gray band for no-connection and other-status failures only when present), no peak text,
-        # one ceiling label; the legend vertical with swatches, the gray line only when it applies; the as-of stamp an age
+        # in the 5xx magenta, the other band for no-connection and other-status failures only when present), no peak text,
+        # one ceiling label; the legend vertical, its class tokens in their inks (T340), the other line only when it applies;
+        # the as-of stamp an age
         self.assertIn("var h='<div class=\"ru-tip-win ah-hist\"><div class=ru-tip-name><span>History</span>'+ago+'</div>';", HIST)
         self.assertIn("'<span class=\"ru-tip-reset ah-ago\">'+esc(ageWords())+'</span>'", HIST)
         self.assertIn("function ageWords(){return LANDED&&MERGE?'read '+MERGE.agoWords((Date.now()-LANDED)/1000):'';}", JS,
@@ -718,28 +719,30 @@ class Script(unittest.TestCase):
         self.assertIn("if(h==='')LANDED=Date.now();", HIST)
         self.assertNotIn("Date.now()/1000-loc.asOf", HIST, "never the browser's clock against the kernel's")
         self.assertIn("if(fresh){READINGS={};LANDED=null;}", HIST, "a fresh show drops the last hover's counts with its rows")
-        self.assertIn("var rd=READINGS[host];if(rd&&rd.counts&&(rd.counts.none+rd.counts.other)>0)gray=true;", HIST, "the gray legend row follows the counted lines too")
+        self.assertIn("var rd=READINGS[host];if(rd&&rd.counts&&(rd.counts.none+rd.counts.other)>0)other=true;", HIST, "the other legend row follows the counted lines too")
         self.assertIn("other:[],older:true}", HIST, "an older kernel's series is marked and named")
         self.assertNotIn("peak '+mx", HIST, "no peak text")
         self.assertNotIn("hms(loc.asOf)", HIST)
-        self.assertIn("var BAR_CLASSES=['ok','rateLimited','serverErrors','noStatus','other'];", HIST, "the stack order: successes, 429, 5xx, then the gray classes")
+        self.assertIn("var BAR_CLASSES=['ok','rateLimited','serverErrors','noStatus','other'];", HIST, "the stack order: successes, 429, 5xx, then the other classes")
         self.assertIn("bars+='<rect class=\"ah-seg ah-seg-'+c+'\" x=\"'+x.toFixed(1)+'\" y=\"'+(yb-hgt).toFixed(1)+'\" width=\"'+bw.toFixed(1)+'\" height=\"'+hgt.toFixed(1)+'\"></rect>';", HIST,
                       "one rect per class per bar, stacked bottom-up, every attribute quoted, the fill a class per theme")
         self.assertNotIn("style=\"fill:", HIST, "no inline fill: the light theme must be able to re-ink a segment")
         self.assertNotIn("<polyline", HIST, "no overlaid lines")
         self.assertIn("'<span class=ru-tip-gy style=\"top:'+(big?ty:ty/H*56).toFixed(0)+'px\">'+top+'</span><div class=ru-tip-gx>'+xlab+'</div></div>';}", HIST, "one ceiling label; the ticks under")
-        self.assertIn("var LEGEND_ROWS=[['r429','429 = the API told us to slow down (rate limit)'],['r5xx','5xx = the API itself failed (server error)'],['none','gray = no connection, or another error']];", JS)
-        self.assertIn("function legendHTML(gray){var h='<div class=ah-legend>';LEGEND_ROWS.forEach(function(r){if(r[0]==='none'&&!gray)return;", HIST, "the gray line only when the range holds any")
-        self.assertIn("h+='<div class=ah-lrow><i class=\"ah-lsw ah-sw-'+r[0]+'\"></i><span>'+r[1]+'</span></div>';});return h+'</div>';}", HIST, "a swatch in the bar's colour, one line each")
-        self.assertIn("if(!pinned)h+=legendHTML(gray);", HIST, "the hover: the legend under the histograms, once")
-        self.assertIn("if(pinned)h+=rangeHTML()+legendHTML(gray);", HIST, "the detail: the legend under the range chips, where the eye starts (a short window folded the bottom one away)")
-        self.assertEqual(HIST.count("legendHTML(gray);"), 2, "drawn in exactly one of the two places")
-        self.assertIn(".ah-legend{display:flex;flex-direction:column;align-items:flex-start;gap:3px;margin-top:7px;opacity:.75}", km._landing(), "vertical, left-justified")
+        # T340 (the user 2026-09-11): no swatches; the class token wears its ink and the explanation sits beside it as plain text
+        self.assertIn("var LEGEND_ROWS=[['r429','429','rate limit: the API told us to slow down'],['r5xx','5xx','server error: the API itself failed'],['none','other','no connection, or another error']];", JS)
+        self.assertIn("function legendHTML(other){var h='<div class=ah-legend>';LEGEND_ROWS.forEach(function(r){if(r[0]==='none'&&!other)return;", HIST, "the other line only when the range holds any")
+        self.assertIn("h+='<div class=ah-lrow><span class=\"ah-lt ah-c-'+r[0]+'\">'+r[1]+'</span> <span>'+r[2]+'</span></div>';});return h+'</div>';}", HIST, "the class token in its ink, the explanation beside it, no swatch")
+        self.assertNotIn("ah-lsw", JS, "the legend swatches are gone"); self.assertNotIn("ah-sw", JS, "…and the waiting rows' coloured squares with them")
+        self.assertIn("if(!pinned)h+=legendHTML(other);", HIST, "the hover: the legend under the histograms, once")
+        self.assertIn("if(pinned)h+=rangeHTML()+legendHTML(other);", HIST, "the detail: the legend under the range chips, where the eye starts (a short window folded the bottom one away)")
+        self.assertEqual(HIST.count("legendHTML(other);"), 2, "drawn in exactly one of the two places")
+        self.assertIn(".ah-legend{display:flex;flex-direction:column;align-items:flex-start;gap:3px;margin-top:7px}", km._landing(), "vertical, left-justified; no group opacity (T340 review: the tokens must stand at full strength)")
         self.assertIn("if(many)h+='<div class=\"ru-tip-row ah-gname\"><span class=ah-nm>'+esc(name)+'</span></div>';", HIST, "several machines: each histogram under its machine's name")
         self.assertIn("var RANGES={hour:{tier:'minute',per:1,label:'1 hour',s:3600},day:{tier:'fiveMin',per:3,label:'24 hours',s:86400},week:{tier:'hour',per:1,label:'7 days',s:604800}};", JS,
                       "the hover draws the day as quarter-hours; the detail offers the three ranges")
         self.assertIn("R=RANGES[pinned?range:'day'];", HIST, "the hover draws the day; the detail its chosen range")
-        self.assertIn("if(pinned)h+=rangeHTML()+legendHTML(gray);", HIST, "the range chips only in the detail")
+        self.assertIn("if(pinned)h+=rangeHTML()+legendHTML(other);", HIST, "the range chips only in the detail")
         self.assertIn("else if(act.indexOf('range:')===0){range=act.slice(6);render();}", JS)
         self.assertNotIn("winRow", JS, "the per-window rows are gone")
         self.assertNotIn("worst of", JS, "and the bucket-count caveat with them")
@@ -766,12 +769,10 @@ class Script(unittest.TestCase):
         for dark, light in ((".ah-c-ok{color:var(--accent,#9cd2ff)}", "body.theme-light .ah-c-ok{color:#C2410C}"),
                             (".ah-c-r429{color:#ef6b6f}", "body.theme-light .ah-c-r429{color:#B02A1C}"),
                             (".ah-c-r5xx{color:#e879f9}", "body.theme-light .ah-c-r5xx{color:#86198F}"),
-                            (".ah-c-none{color:#9aa4ad}", "body.theme-light .ah-c-none{color:#5D574E}"),
-                            (".ah-sw-r5xx{background:var(--st-5xx-bg,#c026d3)}", "body.theme-light .ah-sw-r5xx{background:#A21CAF}"),
-                            (".ah-sw-none{background:#9aa4ad}", "body.theme-light .ah-sw-none{background:#5D574E}"),
+                            (".ah-c-none{color:#d9f99d}", "body.theme-light .ah-c-none{color:#4f46e5}"),   # T340: the other band's hue as ink
                             (".ah-seg-ok{fill:var(--accent,#9cd2ff)}", "body.theme-light .ah-seg-ok{fill:#C2410C}"),
                             (".ah-seg-serverErrors{fill:var(--st-5xx-bg,#c026d3)}", "body.theme-light .ah-seg-serverErrors{fill:#A21CAF}"),
-                            (".ah-seg-noStatus,.ah-seg-other{fill:#9aa4ad}", "body.theme-light .ah-seg-noStatus,body.theme-light .ah-seg-other{fill:#5D574E}")):
+                            (".ah-seg-noStatus,.ah-seg-other{fill:#d9f99d}", "body.theme-light .ah-seg-noStatus,body.theme-light .ah-seg-other{fill:#4f46e5}")):
             self.assertIn(dark, html, dark)
             self.assertIn(light, html, "the light twin: " + light)
         for rule in ("#ah-tip.ru-modal{width:min(720px,92vw)}", ".ah-bars.ah-big svg{height:110px}"):
@@ -802,7 +803,7 @@ class Script(unittest.TestCase):
         self.assertIn("el.addEventListener('focus',function(){if(moving||skipFocus||winFocusEl===el||pinned||tip.style.display==='block')return;show(null);});", JS)
         self.assertNotIn("winFocus=true", JS, "the mark is an element, not a flag")
         self.assertIn("var desc=document.createElement('span');desc.id='ah-summary';desc.className='ah-vh';document.body.appendChild(desc);", JS)
-        self.assertIn("tip.innerHTML=html(LAST,pinned);if(!pinned)anchor();desc.textContent=descText();", JS, "refreshed on every render")
+        self.assertIn("tip.innerHTML=html(LAST,pinned);if(!pinned)anchor();fitAxisLabels(tip);desc.textContent=descText();", JS, "refreshed on every render")
         # T301: the description is the head's plain words, a failed read said as such, and the read in flight named
         self.assertIn("function descText(){var tail=' Press Enter to open it.';var mg=merged();var m0=mg.machines[0];", HIST, "this machine's own line")
         self.assertIn("var w=m0?(m0.parts||[]).map(function(p){return p.text;}).join(' \u00b7 '):'';", HIST, "its words alone: the counts, or the kernel's own words")
