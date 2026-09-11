@@ -5095,8 +5095,8 @@ function render() {
     //                     wordmark never rendered (the user 2026-07-08; payload-audit fallout). Goal cards are
     //                     the only feed unit now, so an empty asks list IS an empty feed.
     askEls.clear(); groupEls.clear();
-    removeFocusSection();   // an empty board is the wordmark alone; the section returns with the cards (T347)
     skipFlipOnce = false;   // this IS the release paint when the board emptied while away — the snap is spent
+    removeFocusSection();   // an empty board is the wordmark alone; the section returns with the cards (T347)
     // inbox zero → the romp wordmark (a CSS background). role/aria-label + title keep the meaning for hover /
     // screen readers, since a background image carries no accessible text. Created ONCE (idempotent): on the
     // transition from cards→empty we mint it (its CSS fade-in plays once, the user 2026-06-25), and every
