@@ -1408,7 +1408,7 @@ function makeAskCard(it: AskItem): HTMLElement {
     // never fires and the timeline/chat highlight stuck until you moved the mouse (the user 2026-07-03). The
     // synthetic mouseleave runs the exact leave logic (clears the highlight, or restores a pinned card's).
     card.dispatchEvent(new MouseEvent("mouseleave"));
-    dressHeaderIfLast(card, it.sid);   // the run's last card takes its header with it — one motion (2026-08-24)
+    dressHeaderIfLast(askEls.get(it.itemId) ?? card, it.sid);   // the run's last card takes its header with it — one motion (2026-08-24); the BOARD's element when Clear came from the section's copy (T347)
     pendingCleared.add(it.itemId);   // suppress from incoming pushes until the kernel confirms the clear
     clearedStack.push([(card as any)._it ?? it]);   // cache the FRESHEST payload copy for an instant optimistic Undo (the closure's `it` is the card's creation-time object)
     // BY ITEM, not by this element (T347): the focused-session section holds a second element for the same
@@ -1670,7 +1670,11 @@ function applySections(a: any, it: AskItem, distillShown: boolean): void {
   const pick = (want: "bg" | "summary" | "subgoals" | "tasks" | "stall") => (ev: Event) => {
     ev.stopPropagation();
     secChoice.set(id, choice === want ? "none" : want);   // click the showing one → off; else switch to it
-    applySections(a, it, distillShown);
+    // both elements of the card (T347): the disclosure is the CARD's, so the board's element and the focused
+    // section's copy show the same section after a pick on either
+    const twins = cardTwins(id);
+    if (twins.length) { for (const c of twins) applySections(c as any, (c as any)._it ?? it, distillShown); }
+    else applySections(a, it, distillShown);
   };
   // Background toggle — visible only when there IS background; pressed (.on) when its body is showing
   a._bgBtn.style.display = bg ? "" : "none";
@@ -2695,7 +2699,7 @@ function makeGroupCard(g: AskGroup): HTMLElement {
     ev.stopPropagation();
     card.dispatchEvent(new MouseEvent("mouseleave"));   // flush the group's stuck hover highlight (see the ask card's clear)
     const cur = (card as any)._g as AskGroup;
-    dressHeaderIfLast(card, cur.sid);   // a group is one session's turn — same one-motion rule (2026-08-24)
+    dressHeaderIfLast(groupEls.get(cur.turnId) ?? card, cur.sid);   // a group is one session's turn — same one-motion rule (2026-08-24); the board's element from a copy (T347)
     for (const c of groupTwins(cur.turnId)) c.classList.add("dismissing");   // both copies of the group (T347), see the ask card's Clear
     clearedStack.push(cur.members.slice());   // cache the whole batch for an instant optimistic Undo
     for (const m of cur.members) pendingCleared.add(m.itemId);
@@ -5333,7 +5337,7 @@ function render() {
   // control's element, and a rebuild must not eat keyboard focus (click-safety, applied to the
   // keyboard). Find the control again by LOGICAL identity — class + label, then the old slot.
   if (tabScopeKey && tabScopeSig) {
-    const card = cardElByKey(tabScopeKey);
+    const card = cardElByKey(tabScopeKey, tabScopeCopy);
     const ae = document.activeElement;
     if (!card) releaseTabScope();
     else if (!ae || ae === document.body || !card.contains(ae)) {
@@ -5707,10 +5711,17 @@ function paintFreezeBadges(): void {
 // is inside, the card holds the payload gate hover-freeze uses, so the board cannot move the card
 // being keyed (same gate as the pointer).
 let tabScopeKey: string | null = null;
+let tabScopeCopy = false;   // the scope holds the focused section's copy, not the board's element (T347)
 let tabScopeSig: { sig: string; idx: number } | null = null;
-function cardElByKey(key: string): HTMLElement | null {
-  return document.querySelector<HTMLElement>('[data-key="' + (key.startsWith("g:") ? key : "a:" + key) + '"]');
+function cardElByKey(key: string, copy = false): HTMLElement | null {
+  // `copy`: the focused-session section's element for the card (T347), keyed one prefix over the board's;
+  // the keyboard scope re-finds the element it holds, never the other twin (a Tab from a hovered copy used to
+  // resolve to the board's card and scroll away from the pointer)
+  const k = key.startsWith("g:") ? key : "a:" + key;
+  return document.querySelector<HTMLElement>('[data-key="' + (copy ? "f:" + k : k) + '"]');
 }
+/** Is this card element the focused section's copy (T347)? Its key wears the section's prefix. */
+function isFocusCopy(card: HTMLElement | null): boolean { return !!card && (card.dataset.key || "").startsWith("f:"); }
 function cardControls(card: HTMLElement): HTMLElement[] {
   // the card's own DOM order IS its visual reading order — title row, pills, tail controls
   return Array.from(card.querySelectorAll<HTMLElement>(KB_EL_SEL)).filter((e) => e.offsetParent !== null);
@@ -5723,6 +5734,7 @@ function tabScopeFocus(card: HTMLElement, els: HTMLElement[], i: number): void {
   const el2 = els[i];
   if (!el2) return;
   tabScopeKey = kbHoverId(card);
+  tabScopeCopy = isFocusCopy(card);   // which twin the scope holds (T347)
   tabScopeSig = { sig: ctrlSig(el2), idx: i };
   if (el2.tabIndex < 0 && !el2.matches("button, a, input")) el2.tabIndex = -1;   // focusable, outside page order
   el2.classList.add("kbd-focus");
@@ -5731,6 +5743,7 @@ function tabScopeFocus(card: HTMLElement, els: HTMLElement[], i: number): void {
 function releaseTabScope(): void {
   if (!tabScopeKey) return;
   tabScopeKey = null;
+  tabScopeCopy = false;
   tabScopeSig = null;
   document.querySelectorAll(".kbd-focus").forEach((n) => n.classList.remove("kbd-focus"));
   const ae = document.activeElement as HTMLElement | null;
@@ -5745,8 +5758,10 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   if (e.key === "Tab") {
-    let card = tabScopeKey ? cardElByKey(tabScopeKey) : null;
-    if (!card) card = (freezeKey ? cardElByKey(freezeKey) : null) || kbCardEl;   // hover/click, else the kb cursor
+    let card = tabScopeKey ? cardElByKey(tabScopeKey, tabScopeCopy) : null;
+    // the HOVERED element itself, copy or board (T347): the freeze key names the card, not which twin the
+    // pointer rests on, and Tab must land where the pointer is
+    if (!card) card = document.querySelector<HTMLElement>(".fitem:hover") || (freezeKey ? cardElByKey(freezeKey) : null) || kbCardEl;
     if (!card || !card.isConnected) return;
     const ae = document.activeElement as HTMLElement | null;
     if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName) && !card.contains(ae)) return;   // typing elsewhere
@@ -5771,7 +5786,7 @@ window.addEventListener("keydown", (e) => {
   }
   if ((e.key === "Enter" || e.key === " ") && tabScopeKey) {
     const ae = document.activeElement as HTMLElement | null;
-    const card = cardElByKey(tabScopeKey);
+    const card = cardElByKey(tabScopeKey, tabScopeCopy);
     if (!ae || !card || !card.contains(ae)) return;
     if (ae.matches("button, a, input")) return;   // native activation already fires the click
     e.preventDefault();
