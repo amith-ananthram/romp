@@ -146,7 +146,7 @@ def _free_port():
 # (kernel.py's _ensure_postal_bus), or on a machine with none started a detached bus nothing stops. From the runner a
 # lab kernel takes PATH (bin/romp-kernel runs under `env python3`) and HOME, the XDG_* names (kernel/credentials.py
 # resolves the service.env default under XDG_CONFIG_HOME) and, of what tests/conftest.py sets for every child of the
-# run, TMPDIR and TMUX_TMPDIR, the private roots conftest gives the run's temp files, GIT_CONFIG_GLOBAL and
+# run, TMPDIR, the private root conftest gives the run's temp files, GIT_CONFIG_GLOBAL and
 # GIT_CONFIG_NOSYSTEM, which keep the kernel's boot-time git (the build sha, the release-tag probe) off the
 # developer's git configuration, and the four ROMP_ names of its floor the lab does not set itself:
 # ROMP_SERVICE_ENV_FILE and ROMP_SERVICE_ENV (no real service.env), ROMP_CLAUDE_BIN (no real claude CLI) and
@@ -160,7 +160,7 @@ def _free_port():
 # kernel reads one, so a lab kernel's environment carries one only if the lab put it there, and the file never does.
 RELAUNCH_ENV_PREFIXES = ("ROMP_", "XDG_")
 RELAUNCH_ENV_EXCLUDED_PREFIXES = ("ROMP_TESTS_",)
-RELAUNCH_ENV_NAMES = frozenset(("CLAUDE_CONFIG_DIR", "PATH", "HOME", "TMPDIR", "TMUX_TMPDIR",
+RELAUNCH_ENV_NAMES = frozenset(("CLAUDE_CONFIG_DIR", "PATH", "HOME", "TMPDIR",
                                 "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"))
 KERNEL_ENV_NAMES = RELAUNCH_ENV_NAMES | frozenset(("ROMP_SERVICE_ENV_FILE", "ROMP_SERVICE_ENV",
                                                     "ROMP_CLAUDE_BIN", "ROMP_CLI_SCOPE"))
@@ -451,7 +451,7 @@ class RelaunchEnv(unittest.TestCase):
         # the floor tests/conftest.py sets for the run's children, planted here so the test asserts on values it
         # chose rather than on conftest having set them
         runner = {"ROMP_STATE_DIR": os.path.join(lab, "live"),
-                  "TMPDIR": os.path.join(lab, "tmp"), "TMUX_TMPDIR": os.path.join(lab, "tmux"),
+                  "TMPDIR": os.path.join(lab, "tmp"),
                   "GIT_CONFIG_GLOBAL": os.path.join(lab, "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
         with mock.patch.dict(os.environ, runner):
             env = kernel_env(lab, os.path.join(lab, "claude"), os.path.join(lab, "dist"), 4321, "testtok")
@@ -468,7 +468,7 @@ class RelaunchEnv(unittest.TestCase):
             self.assertIn(name, names, "the relaunched kernel needs %s" % name)
         self.assertEqual(out["XDG_STATE_HOME"], os.path.join(lab, "xdg"))
         self.assertEqual(out["ROMP_KERNEL_PORT"], "4321")
-        for name in ("TMPDIR", "TMUX_TMPDIR", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"):
+        for name in ("TMPDIR", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"):
             self.assertEqual(out.get(name), runner[name], "the run's %s reaches the relaunched kernel" % name)
 
     def test_a_live_sessions_identity_and_the_runs_own_names_never_reach_the_relaunch_env(self):
@@ -513,7 +513,7 @@ class LabKernelEnv(unittest.TestCase):
     FLOOR = {"ROMP_SERVICE_ENV_FILE": os.path.join(LAB, "no-such-service.env"),
              "ROMP_SERVICE_ENV": os.path.join(LAB, "no-such-service.env"),
              "ROMP_CLAUDE_BIN": "/bin/false", "ROMP_CLI_SCOPE": "0",
-             "TMPDIR": os.path.join(LAB, "tmp"), "TMUX_TMPDIR": os.path.join(LAB, "tmux"),
+             "TMPDIR": os.path.join(LAB, "tmp"),
              "GIT_CONFIG_GLOBAL": os.path.join(LAB, "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
     # an XDG_ name of the runner's: a lab kernel takes the XDG_* names (kernel/credentials.py resolves the service.env
     # default under XDG_CONFIG_HOME); XDG_STATE_HOME is the one XDG_ name the lab sets itself

@@ -207,7 +207,6 @@ class ServedSessionName(unittest.TestCase):
                        ROMP_MANAGER_PORT="1", ROMP_KERNEL_NO_OPEN="1",
                        ROMP_SERVE_TOKEN=cls.token, ROMP_KERNEL_PORT=str(cls.port),
                        ROMP_DIST_DIR=dist, ROMP_MODEL_CATALOG="off",
-                       ROMP_TMUX_SOCKET="romp-sessionname-%d" % cls.port,
                        # a postal bus of its own that is never started (the trio kernel_env gives every lab kernel):
                        # the kernel's boot-time ensure must never take the machine's fixed bus port (tests/test_hermetic_kernel_postal.py)
                        ROMP_POSTAL_PORT=str(_free_port()), ROMP_POSTAL_PEERS="0", ROMP_POSTAL_CLIENT_ONLY="1")
@@ -270,7 +269,6 @@ class ServedSessionName(unittest.TestCase):
             except (ProcessLookupError, PermissionError):
                 pass
             k.wait()
-        subprocess.run(["tmux", "-L", getattr(cls, "env", {}).get("ROMP_TMUX_SOCKET", ""), "kill-server"], capture_output=True)
         shutil.rmtree(getattr(cls, "lab", ""), ignore_errors=True)
 
     def _r(self):

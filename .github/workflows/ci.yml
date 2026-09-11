@@ -1,7 +1,7 @@
 name: CI
 
 # Run the test suites that gate romp: the Python pipeline (kernel/, cli/,
-# postal/), the shell surfaces (tmux hooks / postal / manager), and the VS Code
+# postal/), the shell surfaces (hooks / postal / manager), and the VS Code
 # extension build; and scan the whole history for credentials (the secrets job).
 #
 # LINUX runs on every push and PR — it is free on a public repo, no minute cap.
@@ -9,9 +9,9 @@ name: CI
 # the bats suite alone is ~16 macOS-minutes = ~160 billable minutes per run, so
 # it does NOT run automatically. Trigger it by hand from the Actions tab ("Run
 # workflow") when you want a cross-platform check before a release or after
-# touching a platform-sensitive surface (tmux, launchd, the folder opener).
+# touching a platform-sensitive surface (launchd, the folder opener, the CLI scope).
 # On a macOS dev box, the pre-push hook runs the same suites locally, so the
-# common macOS-only breakages (a real browser opening, a tmux-binary dependency)
+# common macOS-only breakages (a real browser opening, a GNU-only flag)
 # are caught before the push rather than waiting on this manual run.
 #
 # Python spans 3.10 (the floor docs/install.md promises) through 3.13 (the dev
@@ -45,8 +45,8 @@ jobs:
   python:
     name: Python ${{ matrix.python-version }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Every job is time-boxed. Without this a test that BLOCKS (waiting on a tmux
-    # server, a socket, a prompt that never comes) burns the 6h default before
+    # Every job is time-boxed. Without this a test that BLOCKS (waiting on a socket,
+    # a prompt that never comes) burns the 6h default before
     # anyone finds out, and a required check that hangs blocks merges silently.
     # T230b follow-up (the review's catch): the job cap must EXCEED the pytest phase plus the
     # 600 s per-test timeout plus setup, or a stall that begins late in the run is killed by
@@ -106,8 +106,8 @@ jobs:
       # bats comes from the pinned release tarball, NOT apt: an Azure apt-mirror outage hung
       # `apt-get update` to the job timeout three runs in a row (2026-08-19, ~35 wasted minutes
       # each). GitHub itself is already on the critical path (checkout), so this adds no new
-      # dependency — and no bats test needs a real tmux (every suite PATH-prepends its own mock),
-      # so nothing else is installed at all. The step timeout kills any residual network hang in
+      # dependency — and no bats test needs anything else installed (every suite mocks its subjects
+      # on PATH), so nothing else is installed at all. The step timeout kills any residual network hang in
       # minutes instead of letting it eat the job's budget.
       - name: Install bats (Linux)
         if: runner.os == 'Linux'
@@ -117,10 +117,10 @@ jobs:
             https://github.com/bats-core/bats-core/archive/refs/tags/v1.11.1.tar.gz
           tar -xzf /tmp/bats.tar.gz -C /tmp
           sudo /tmp/bats-core-1.11.1/install.sh /usr/local
-      - name: Install bats + tmux (macOS)
+      - name: Install bats (macOS)
         if: runner.os == 'macOS'
         timeout-minutes: 15
-        run: brew install bats-core tmux
+        run: brew install bats-core
       - name: Install gitleaks (Linux)
         # tests/gitleaks-config.bats skips itself when gitleaks is absent, so without this step the
         # repo's scanning rules (.gitleaks.toml: the value-anchored allowlist, the merge-commit scan)
