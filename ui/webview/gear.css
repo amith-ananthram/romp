@@ -83,8 +83,11 @@ body.rs-lifted.rs-pane-gone::before { display: none; }
    no judge tier is on Opus. Hover shows ONE description: the box's own over the box, the row's elsewhere. */
 #rsettings .rs-fastin { display: inline-flex; align-items: center; gap: 5px; margin-left: 10px; flex: 0 0 auto; white-space: nowrap; cursor: pointer; }
 #rsettings .rs-fastin input { margin: 0; }
-#rsettings .rs-fastin.rs-off { opacity: .4; cursor: default; }
-#rsettings .rs-fastin.rs-off input { cursor: default; }
+/* the greyed look fades the BOX alone (the #rrefresh:disabled look) and greys the word by token: opacity on the whole
+   label faded the hint span inside it too, and made the label a stacking context that the rows beneath painted over,
+   so the reason the box was greyed read dim and overdrawn. The hint keeps the colour the hover rule above gives it. */
+#rsettings .rs-fastin.rs-off { color: var(--text-faint, #6e7681); cursor: default; }
+#rsettings .rs-fastin.rs-off input { opacity: .4; cursor: default; }
 #rsettings .rs-row:hover .rs-fastin .rs-sub { display: none; }
 #rsettings .rs-row:has(.rs-fastin:hover) > .rs-sub { display: none; }
 #rsettings .rs-row:has(.rs-fastin:hover) .rs-fastin .rs-sub { display: block; }

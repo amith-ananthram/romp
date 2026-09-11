@@ -192,7 +192,7 @@ test("executed: new information yields a NEW model: a state change, a new event,
 });
 
 test("executed: the words: the heading's count and label, the row's spoken label and hover title", () => {
-  assert.deepEqual(snapshotHeading("infra", 3), { count: "3 sessions", label: "infra: 3 sessions; click one to open it" });
+  assert.deepEqual(snapshotHeading("infra", 3), { count: "3 sessions", label: "Overview of infra: 3 sessions; click one to open it" });
   assert.equal(snapshotHeading("qa", 1).count, "1 session");
   const m = snapshotModel(sec, look(sessions), look(ledgers), null);
   assert.equal(rowWords(m.rows[0]).label, "web; working; Add the notes list page; its note: editing the list page template", "the task first, the note last, named as the session's own");

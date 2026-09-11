@@ -7,8 +7,9 @@ colours), never a chip; the DELIVERY STATE is one icon per state at the head's r
 (delivered, read, parked, bounced, recalled, and sent for a message handed to the relay), from what the kernel
 files (the send-time stamp, and the postal ledger's exec / relayed / bounced / recall rows joined by message id);
 both ENDS wear their sessions' colours (the peer's chip, then this session's own chip); no card wears a background
-wash; incoming cards are boxed, sent ones slim; a sent card whose message has not landed wears the pending
-send's own provisional dress (the queued bubble's class). With POSTAL_SHOTS=<dir> the driver also writes
+wash; incoming cards are boxed, sent ones slim unless a fold boxes them; a sent card whose message has not landed wears
+the pending send's own provisional dress (the queued bubble's class) at either density, slim or boxed, at the column's
+full width. With POSTAL_SHOTS=<dir> the driver also writes
 screenshots at 1000 px, 520 px, 340 px dark and 1000 px, 340 px light, named romp_chat-postal-cards-<theme>-<width>.png (the phone width: the head wraps, the ends first, the kind word and the icon on
 that line or the next as one unit, the gist last on its own full-width line, T313) and the light theme. Skips LOUDLY without the extension deps or a Playwright browser. SYNTHETIC
 fixtures only (the notes-api demo world: web / api / tests; host TESTHOST)."""
@@ -95,7 +96,14 @@ def sent_row(mid, frm, frm_id, to_id, body, t, kind, park=False):
 KINDLESS = "Merged the fixtures branch; nothing else is pending on my side."
 
 
-# The world: ten cards, every kind and every state, plus one legacy card with no kind. Bodies are invented notes-api chatter.
+# a sent one-liner OVER the 90-char clip: its gist cannot carry the whole line, so the card has a fold and is boxed; parked,
+# it must wear the same provisional dress as the slim parked card beside it (the box rule used to win its border and
+# background, and the bubble's 72% cap its width)
+LONG_PARKED = "Once the fixtures land, run the whole integration suite against notes-api and write every flaky case into the README."
+
+
+# The world: eleven cards, every kind and every state, among them one legacy card with no kind and one parked card with a
+# fold. Bodies are invented notes-api chatter.
 def world(t0):
     msgs = {
         "in-deleg": ("api", API, "delegate", "Take the retry-loop rewrite in notes-api: exponential backoff with jitter, cap at two minutes, tests included."),
@@ -104,6 +112,7 @@ def world(t0):
         "out-deliv": ("web", WEB, "coordinate", "The backoff branch is up; review when you have a moment."),
         "out-read": ("web", WEB, "question", "Did the fixtures land on your side yet?"),
         "out-parked": ("web", WEB, "delegate", "Please run the whole integration suite once the fixtures are in."),
+        "out-parked-long": ("web", WEB, "delegate", LONG_PARKED),
         "out-queued": ("web", WEB, "coordinate", "The remote build is green; merging in an hour unless you object."),
         "out-bounced": ("web", WEB, "delegate", "Take the cap decision and write it down in the README."),
         "out-recalled": ("web", WEB, "coordinate", "Ignore my last note, wrong thread."),
@@ -128,6 +137,7 @@ def world(t0):
         ("out-read", "api", API, "Delivered to 'api' as a question — you are now recorded as waiting on their answer.", False,
          [lambda t: {"t": t + 20, "ev": "exec", "id": "out-read"}]),
         ("out-parked", "tests", TESTS, "parked for tests (unreachable) — delivers on reconnect · id out-parked", False, []),
+        ("out-parked-long", "tests", TESTS, "parked for tests · id out-parked-long", False, []),   # the plain park text; the state reads the word
         ("out-queued", "TESTHOST:api", "peer:TESTHOST", "Delivered to 'TESTHOST:api'.", False, []),
         ("out-bounced", "api", API, "Delivered to 'api' as a handoff — they own it now.", False,
          [lambda t: {"t": t + 30, "ev": "bounced", "id": "out-bounced", "why": "refused: the mailbox is isolated"}]),
@@ -203,6 +213,8 @@ const measure = () => page.evaluate(() => {
       selfText: self ? self.textContent : null, selfBg: self ? getComputedStyle(self).backgroundColor : null,
       selfWidth: self ? Math.round(self.getBoundingClientRect().width) : null,
       bg: cs.backgroundColor, border: cs.borderTopStyle, provisional: n.classList.contains("queued-bubble"),
+      // the provisional dress at either density: the card's max-width as computed, and the box it actually takes
+      maxWidth: cs.maxWidth, width: Math.round(n.getBoundingClientRect().width),
       gist: (t.querySelector(".notice-gist") || {}).textContent || "",
       gistWrap: t.querySelector(".notice-gist") ? getComputedStyle(t.querySelector(".notice-gist")).whiteSpace : null,
       collapsible: n.classList.contains("notice-collapsible"),
@@ -318,7 +330,7 @@ class ServedPostalCards(unittest.TestCase):
         proj = os.path.join(claude, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd)))
         os.makedirs(proj, exist_ok=True)
         Path(proj, WEB + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
-        cls.count = 10
+        cls.count = 11
         cls.port, cls.token = _free_port(), "testtok-postal"
         env = _lab.kernel_env(cls.lab, claude, dist, cls.port, cls.token, ROMP_HOST_NAME="TESTHOST")
         cls.klog = os.path.join(cls.lab, "kernel.log")
@@ -357,7 +369,7 @@ class ServedPostalCards(unittest.TestCase):
         r = json.loads(line[len("RESULT:"):])
         wide, narrow, phone, light = r["1000"], r["520"], r["340"], r["light"]
         cards = wide["cards"]
-        self.assertEqual(len(cards), 10, cards)
+        self.assertEqual(len(cards), 11, cards)
         by = {c["gist"][:24]: c for c in cards}
         def card(prefix):
             m = [c for c in cards if c["gist"].startswith(prefix)]
@@ -380,6 +392,7 @@ class ServedPostalCards(unittest.TestCase):
         self.assertEqual(card("The backoff branch")["state"], "delivered")
         self.assertEqual(card("Did the fixtures")["state"], "read", "the ledger's exec row: the recipient consumed it")
         self.assertEqual(card("Please run the whole")["state"], "parked")
+        self.assertEqual(card("Once the fixtures land")["state"], "parked")
         self.assertEqual(card("The remote build")["state"], "sent", "handed to the relay, no far-host ack yet")
         self.assertEqual(card("Take the cap decision")["state"], "bounced")
         self.assertEqual(card("Ignore my last note")["state"], "recalled")
@@ -405,7 +418,7 @@ class ServedPostalCards(unittest.TestCase):
                 if not c["collapsible"]:
                     self.assertEqual(c["gistWrap"], "normal", "a boxed one-liner with nothing to fold wraps, never an ellipsis with nothing behind it: %r" % c)
             else:
-                self.assertTrue(c["slim"], "sent stays slim: %r" % c)
+                self.assertEqual(c["slim"], not c["collapsible"], "a sent card is slim unless it has a fold: %r" % c)
             self.assertFalse(c["selfDot"], "the own chip wears no working dot: %r" % c)
         self.assertEqual(card("Take the retry-loop")["peerBg"], "rgb(30, 161, 235)", "api's colour on its chip")
         self.assertEqual(card("Heads-up")["peerBg"], "rgb(84, 178, 4)", "tests' colour on its chip")
@@ -416,6 +429,18 @@ class ServedPostalCards(unittest.TestCase):
         for pfx in ("The backoff branch", "Did the fixtures", "Take the cap decision", "Ignore my last note", "Take the retry-loop"):
             self.assertFalse(card(pfx)["provisional"], "landed, bounced, recalled and incoming are solid: %r" % pfx)
         self.assertEqual(card("Please run the whole")["border"], "dashed", "the bubble's dashed border by the shared rule")
+        # the dress reaches a sent card of EITHER density: a parked delegation whose line outgrows the head has a fold, so it
+        # is boxed, and it wears the dashed dress at the slim parked card's width. Before the shared rule named the boxed
+        # card, the box rule won its border and background and the bubble's 72% cap its width, so it stood as a solid box
+        # three-quarters of the column wide until the receipt landed, then snapped to the full width.
+        long_parked, slim_parked = card("Once the fixtures land"), card("Please run the whole")
+        self.assertTrue(long_parked["collapsible"] and not long_parked["slim"], "a sent card with a fold is boxed: %r" % long_parked)
+        self.assertTrue(slim_parked["slim"] and not slim_parked["collapsible"], "the one-liner beside it is slim: %r" % slim_parked)
+        self.assertTrue(long_parked["provisional"], "parked with a fold → provisional too")
+        self.assertEqual(long_parked["border"], "dashed", "the boxed provisional card wears the bubble's dashed border, not the box's solid one: %r" % long_parked)
+        self.assertEqual(long_parked["bg"], slim_parked["bg"], "…and the bubble's wash, not the box colour: %r" % long_parked)
+        self.assertEqual(long_parked["maxWidth"], "none", "the width reset reaches the boxed card: %r" % long_parked)
+        self.assertEqual(long_parked["width"], slim_parked["width"], "one width for the provisional card of either density: %r vs %r" % (long_parked["width"], slim_parked["width"]))
         # (narrow) both colours still show: this session's chip collapses to its dot
         for c in narrow["cards"]:
             self.assertTrue(c["selfBg"] == "rgb(156, 210, 255)" and c["selfWidth"] is not None and c["selfWidth"] <= 12,
@@ -425,7 +450,7 @@ class ServedPostalCards(unittest.TestCase):
         # (phone) under the 360 px container query the head WRAPS (T313): the two ends keep the first line; the kind word
         # and the icon stay on it when they fit and otherwise move to the next line as one unit; the gist comes last on its
         # own full-width line and breaks by words, never into a letter column — every card, slim, boxed and provisional
-        self.assertEqual(len(phone["cards"]), 10, phone["cards"])
+        self.assertEqual(len(phone["cards"]), 11, phone["cards"])
         for c in phone["cards"]:
             self.assertFalse(c["kindClipped"], "at 340 px the kind word is whole: %r" % c)
             self.assertEqual(c["headWrap"], "wrap", "the head wraps at phone width: %r" % c)
@@ -448,7 +473,7 @@ class ServedPostalCards(unittest.TestCase):
                             "the first gist line spans the head (at least 60%% of it, 150 px), no letter column: %r" % c)
         self.assertTrue(any(c["gistLines"] >= 2 for c in phone["cards"]), "at least one gist wraps at 340 px, so the wrapped branch is exercised: %r" % [c["gistLines"] for c in phone["cards"]])
         prov = [c for c in phone["cards"] if c["provisional"]]
-        self.assertEqual(len(prov), 2, "the two provisional cards (parked, relayed) are boxed at phone width too: %r" % prov)
+        self.assertEqual(len(prov), 3, "the three provisional cards (parked, parked with a fold, relayed) are boxed at phone width too: %r" % prov)
         slim = [c for c in phone["cards"] if c["slim"]]
         self.assertGreaterEqual(len(slim), 3, "and slim cards are covered: %r" % [c["gist"][:20] for c in slim])
         # at 520 px and above the head is one line: the ends, the gist and the kind side by side (no wrap)

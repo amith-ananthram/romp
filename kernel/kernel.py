@@ -40070,6 +40070,29 @@ def _cards_for_segments(sid, seg_ids):
     return tops
 
 
+def _glow_groups(sid, uuids):
+    """The chat glow's group for one session (glowTurns): its atom uuids plus, for the pane's overview ruler, each
+    uuid's GLOBAL index in the chat payload (`idx`) and the payload's length (`total`) (T318b, 2026-09-10). The pane
+    holds only the newest WIRE_TAIL events, so a hovered card whose source turns are older has no row to light; with
+    the positions it marks them on the ruler's history strip instead of painting nothing. Read from the pusher's
+    built payload (_built_chat, the same events the pane was sent, in wire order: an event's index there IS the
+    global index the pane maps through headFrom); a session with no built payload gets a group without positions,
+    and no uuids means no group."""
+    if not uuids:
+        return []
+    g = {"sid": sid, "uuids": uuids}
+    hit = _built_chat.get(sid)
+    evs = (hit[1].get("events") if hit is not None and isinstance(hit[1], dict) else None) or []
+    if evs:
+        want, idx = set(uuids), {}
+        for i, e in enumerate(evs):
+            u = e.get("uuid") if isinstance(e, dict) else None
+            if u in want and u not in idx:
+                idx[u] = i                      # a multi-block atom's FIRST event is where its row sits
+        g["idx"], g["total"] = idx, len(evs)
+    return [g]
+
+
 def _segment_atom_uuids(sid, seg_ids, now):
     """The chat .turn[data-uuid]s inside the given segments — for the timeline->chat glow, so a bar hover
     lights EXACTLY that segment's chat rows BY ID instead of a +/-2s time window (the user 2026-06-19). Each
@@ -47636,6 +47659,10 @@ function spMany(d){return spHosts(d).length>1;}
 // .tab-label with the identity color as --chip-bg (styles.css keys the color and weight on the SAME
 // rule the strip uses, so the two cannot drift) and the quiet .host-prefix — no swatch
 function spTitle(s,many){return '<span class="tab-label colored" style="--chip-bg:'+spColor(s)+'">'+(many&&s.host?'<span class=host-prefix>'+esc(s.host)+':</span>':'')+esc(spName(s))+'</span>';}
+// a merge-by-tag row names its TAG, and a tag is the one tag chip everywhere (T321): the landing page loads no module,
+// so this is tagChip's pill inlined (ui/webview/tag-menu.ts; the row's size, weight 400, normal tracking), never the
+// session title's bold. tests/test_spend_detail.py pins it against the renderer.
+function spTagChip(s){var c=spColor(s);return '<span class=rsp-tag-chip style="display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:9px;border:1px solid '+c+';color:'+c+';background:transparent;white-space:nowrap;font-weight:400;letter-spacing:normal;">'+esc(s.name)+'</span>';}
 // ── T247g (the user 2026-09-08): three ranges, and "merge by tag"
 // the series for the range: "1 day" is the hourly series' last 24 buckets and "7 days" its last 168 (T293, the
 // user 2026-09-09; the ledger holds 192 hours, a day of slack past the view, and 90 days; a range is a slice of
@@ -47722,7 +47749,7 @@ var h='<table class=rsp-tbl><thead><tr><th>session</th><th class=n>dollars</th>'
 var many=spMany(d);
 var model=spRows(d);
 model.rows.forEach(function(s){h+='<tr data-sid="'+esc(s.sid||'')+'"'+(s.live?' class=rsp-live':' class=rsp-dead')+(s.kind==='tag'?' data-tag="'+esc(s.name)+'"':'')+'>'
-+'<td class=rsp-name>'+(s.kind==='tag'?('<span class="tab-label colored" style="--chip-bg:'+spColor(s)+'">'+esc(s.name)+'</span><span class=ru-tip-reset> \u00b7 '+s.members.length+' session'+(s.members.length===1?'':'s')+'</span>'):spTitle(s.s,many))+(s.live?'':'<span class=ru-tip-reset> \u00b7 not running</span>')+'</td>'
++'<td class=rsp-name>'+(s.kind==='tag'?(spTagChip(s)+'<span class=ru-tip-reset> \u00b7 '+s.members.length+' session'+(s.members.length===1?'':'s')+'</span>'):spTitle(s.s,many))+(s.live?'':'<span class=ru-tip-reset> \u00b7 not running</span>')+'</td>'
 +'<td class=n>'+fmtUsd(s.usd)+'</td>'+(keyCol?'<td class=n>'+(s.key?fmtUsd(s.key.usd):'\u2014')+'</td>':'')
 +'<td class=n>'+(s.turns||0)+'</td><td class=n>'+fmtTok(s.tok||0)+'</td></tr>';});
 // spend recorded before per-session attribution existed (T100, 2026-08-24), or the part of a bucket no
@@ -54587,7 +54614,7 @@ class Handler(BaseHTTPRequestHandler):
             _send_to_app("timeline", {"type": "hover", "ids": seg_ids, "nonce": _next_nonce()})
             gsid = item_id.rsplit(":", 1)[0] if (item_id and not msg.get("off")) else ""
             uuids = _segment_atom_uuids(gsid, seg_ids, time.time()) if gsid else []
-            groups = [{"sid": gsid, "uuids": uuids}] if uuids else []
+            groups = _glow_groups(gsid, uuids)   # with each uuid's global index, for turns outside the pane's tail (T318b)
             _send_to_app("chat", {"type": "glowTurns", "groups": groups, "mids": []})
         elif msg and msg.get("type") == "dotOpen":
             # chat rail CLICK → NAVIGATE the other two panes (the user 2026-07-23): the timeline pans to
@@ -54619,7 +54646,7 @@ class Handler(BaseHTTPRequestHandler):
                 _send_to_app("feed", {"type": "hoverCards",
                                       "keys": _cards_for_segments(hsid, [seg_id]) if seg_id else [],
                                       "eid": None})
-                groups = [{"sid": hsid, "uuids": seg_uuids}] if seg_uuids else []
+                groups = _glow_groups(hsid, seg_uuids)
                 _send_to_app("chat", {"type": "glowTurns", "groups": groups, "mids": []})
         elif msg and msg.get("type") == "timelineHover":
             # the REVERSE of the feed/chat→timeline hovers: a timeline bar hover lights the feed
@@ -54635,7 +54662,7 @@ class Handler(BaseHTTPRequestHandler):
                 _send_to_app("feed", {"type": "hoverCards",
                                       "keys": _cards_for_segments(hsid, seg_ids), "eid": None})
                 uuids = _segment_atom_uuids(hsid, seg_ids, time.time())
-                groups = [{"sid": hsid, "uuids": uuids}] if uuids else []
+                groups = _glow_groups(hsid, uuids)
                 _send_to_app("chat", {"type": "glowTurns", "groups": groups, "mids": []})
         # ---- pasted-image hydration + dropped-file handling (ported from the old TS kernel) ----
         elif msg and msg.get("type") == "imgRequest" and msg.get("path"):

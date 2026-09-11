@@ -3,10 +3,12 @@
 // never changes, or a gate that reads an unfilled select (a painted select reads its first option before /version
 // answers). So the gear is opened against a fake kernel (the /models, /version, /tunnels, /palette routes answered
 // with synthetic payloads), and the DOM is read after each gesture: a fill with triage on Opus, distilling following
-// triage and indexing on Haiku greys only the indexing box, with the flags shown as stored; a Triage pick of Sonnet
-// greys the triage and distilling boxes, keeps them checked, swaps their hints, and posts nothing for them; picking
-// Opus again ungreys them with the hints back; a checked box on a capable model whose last fast ask the CLI declined
-// shows the refusal; ticking a box posts its op; pinning Distilling to Opus keeps its box live under a Sonnet triage.
+// triage and indexing on Haiku greys only the indexing box, with the flags shown as stored, the greyed look on the
+// box alone (its hint's ancestors all opaque, its word in the section grey, its hint unfaded and in the colour a live
+// box's hint shows); a Triage pick of Sonnet greys the triage and distilling boxes, keeps them checked, swaps their
+// hints, and posts nothing for them; picking Opus again ungreys them with the hints back; a checked box on a capable
+// model whose last fast ask the CLI declined shows the refusal; ticking a box posts its op; pinning Distilling to
+// Opus keeps its box live under a Sonnet triage.
 // Skips with a stated reason without a playwright browser (CI installs none), the md-sanitize-browser.test.ts
 // pattern. Synthetic values only.
 import { test } from "node:test";
@@ -52,7 +54,7 @@ let pw: any = null;
 try { pw = requireCjs("playwright"); } catch { pw = null; }
 
 type Snap = { disabled: Record<string, boolean>; off: Record<string, boolean>; opacity: Record<string, string>;
-  checked: Record<string, boolean>; hint: Record<string, string> };
+  hintFade: Record<string, string>; wordColor: Record<string, string>; checked: Record<string, boolean>; hint: Record<string, string> };
 
 async function withGear(t: any, body: (page: any, errors: string[]) => Promise<void>): Promise<void> {
   if (!pw) { t.skip("playwright is not installed under vscode-extension; the browser leg needs it (CI installs no browsers)"); return; }
@@ -90,15 +92,23 @@ async function withGear(t: any, body: (page: any, errors: string[]) => Promise<v
 
 const snap = (page: any): Promise<Snap> => page.evaluate(() => {
   const disabled: Record<string, boolean> = {}, off: Record<string, boolean> = {}, opacity: Record<string, string> = {};
+  const hintFade: Record<string, string> = {}, wordColor: Record<string, string> = {};
   const checked: Record<string, boolean> = {}, hint: Record<string, string> = {};
   for (const tier of ["judgefast", "distillfast", "indexfast"]) {
     const box = document.getElementById("rs-" + tier) as HTMLInputElement;
     const wrap = document.getElementById("rs-" + tier + "-wrap") as HTMLElement;
     const sub = document.getElementById("rs-" + tier + "-sub") as HTMLElement;
-    disabled[tier] = box.disabled; off[tier] = wrap.classList.contains("rs-off"); opacity[tier] = getComputedStyle(wrap).opacity;
+    disabled[tier] = box.disabled; off[tier] = wrap.classList.contains("rs-off");
+    opacity[tier] = getComputedStyle(box).opacity;   // the box's own: the greyed look fades the box alone
+    // the fade the hint is seen through: opacity is not inherited, so the hint's own computed value reads 1 whatever
+    // its ancestors do; the most faded ancestor below the settings backdrop is the one the eye sees the hint through
+    let fade = 1;
+    for (let el = sub.parentElement; el && el.id !== "rsettings"; el = el.parentElement) fade = Math.min(fade, parseFloat(getComputedStyle(el).opacity));
+    hintFade[tier] = String(fade);
+    wordColor[tier] = getComputedStyle(wrap).color;   // the label's colour is the word's: "Fast mode" is a bare text node
     checked[tier] = box.checked; hint[tier] = sub.textContent || "";
   }
-  return { disabled, off, opacity, checked, hint };
+  return { disabled, off, opacity, hintFade, wordColor, checked, hint };
 });
 const posts = (page: any, type: string): Promise<any[]> => page.evaluate((ty: string) => (window as any).__posts.filter((m: any) => m && m.type === ty), type);
 // the judge selects are display:none behind versionMenu's button; a pick is what the user does: open the menu
@@ -120,12 +130,28 @@ test("each tier's box greys on its own effective model, keeps its value, says wh
     let s = await snap(page);
     assert.deepEqual(s.disabled, { judgefast: false, distillfast: false, indexfast: true }, "greyed for the Haiku tier only");
     assert.deepEqual(s.off, { judgefast: false, distillfast: false, indexfast: true });
-    assert.equal(s.opacity.indexfast, "0.4", "the greyed look renders"); assert.equal(s.opacity.judgefast, "1");
+    assert.equal(s.opacity.indexfast, "0.4", "the greyed look renders on the box"); assert.equal(s.opacity.judgefast, "1");
+    assert.deepEqual(s.hintFade, { judgefast: "1", distillfast: "1", indexfast: "1" }, "the hint's ancestors are all opaque: the greyed reason stays legible");
+    assert.notEqual(s.wordColor.indexfast, s.wordColor.judgefast, "the greyed word takes the section grey; the live word keeps the row's colour");
     assert.deepEqual(s.checked, { judgefast: true, distillfast: true, indexfast: true }, "the boxes reflect the kernel's raw flags, greyed or not");
     assert.match(s.hint.judgefast, /^This tier's judge calls run in Claude Code's fast mode/, "a live box: the description");
     assert.match(s.hint.distillfast, /^Fast mode was declined by Claude Code for the last distilling call \(sdk_opt_in_required\)/, "a declined ask: the CLI's reason");
     assert.match(s.hint.indexfast, /^Fast mode is Opus-only, and this tier is not on Opus\./, "a greyed box: why");
     for (const ty of ["setJudgeFast", "setDistillFast", "setIndexFast"]) assert.deepEqual(await posts(page, ty), [], `${ty}: a fill posts nothing`);
+    // hovering the greyed box shows its hint unfaded, in the colour a live box's hint shows: the label's grey stops at
+    // the word, and no rule fades the hint itself (its own opacity reads 1 before the fix too, so this is a guard)
+    const hovered = (tier: string) => page.evaluate((id: string) => {
+      const sub = document.getElementById("rs-" + id + "-sub") as HTMLElement, wrap = document.getElementById("rs-" + id + "-wrap") as HTMLElement;
+      return { display: getComputedStyle(sub).display, color: getComputedStyle(sub).color, opacity: getComputedStyle(sub).opacity, word: getComputedStyle(wrap).color };
+    }, tier);
+    await page.hover("#rs-indexfast-wrap");
+    const shown = await hovered("indexfast");
+    await page.hover("#rs-judgefast-wrap");
+    const live = await hovered("judgefast");
+    assert.equal(shown.display, "block", "hovering the greyed box shows its hint");
+    assert.equal(shown.opacity, "1", "the hint itself is not faded");
+    assert.notEqual(shown.color, shown.word, "the hint keeps its own colour, not the greyed word's");
+    assert.equal(live.display, "block"); assert.equal(shown.color, live.color, "the greyed box's hint shows in the colour a live box's hint does");
 
     // 2. the user picks Sonnet for triage: the model post, both dependent boxes grey and KEEP their value, hints swap, no box post
     await pickModel(page, "rs-judgemodel", "Sonnet");
