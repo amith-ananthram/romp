@@ -1316,7 +1316,7 @@ def _sig_inputs(tier, fsid, path):
     if tier in ("group", "consolidate"):
         ident += [STATE / "cleared.jsonl"]
     if tier == "distill":
-        ident += [STATESDIR / (fsid + ".jsonl")]
+        ident += [(STATE / "states") / (fsid + ".jsonl")]
         value += [STATE / "auto-nudge.json"]
     return ident, value
 
@@ -2752,9 +2752,12 @@ _SDK_OWNER_FN = None           # kernel wiring: fn(fsid) -> whether an SDK or Co
 
 def set_sdk_owner_provider(fn):
     """Kernel wiring: the ONE answer to "is this session's composer input the human" (sdk_human), the backends'
-    owns(); without it _sdk_owned falls back to the SDK registry file, which misses Codex sessions."""
+    owns(); without it _sdk_owned falls back to the SDK registry file, which misses Codex sessions. Installing
+    the hook drops every cached parse: the flag rides each entry (read at parse time, never on a hit, so a hit
+    reads no registry file the stage gate's signature would have to list) and a new answer must re-parse."""
     global _SDK_OWNER_FN
     _SDK_OWNER_FN = fn
+    parse_cache_clear()
 
 
 def _lru_touch(cache, k):
@@ -2834,7 +2837,7 @@ def parse_cached(fsid, files):
         return None
     cut = _pending_cut(fsid)
     ent = _parse_slot(fsid, cut)
-    if ent is not None and ent[0] == (pair, cut) and ent[3] == bool(_sdk_owned(fsid)):
+    if ent is not None and ent[0] == (pair, cut):
         return ent[1]
     return None
 
@@ -3046,7 +3049,7 @@ def _chain_membership(fsid, path, cut):
     from _CHAIN_MEMO when the inputs are unchanged. Returns the five-way dict with FROZENSET values,
     shared with the memo (immutable, so no per-hit copy; the dict itself is a fresh shallow copy).
     A build that raises propagates and leaves the memo untouched."""
-    states = STATESDIR / (fsid + ".jsonl")
+    states = (STATE / "states") / (fsid + ".jsonl")
     states_s = str(states) if states.exists() else None
     cands = _judge_candidates(fsid, [str(path)])
     try:
@@ -3217,7 +3220,7 @@ def _parse_key_files(fsid, files):
     append a fork lane's anchor a second time, and a key computed that way would never equal the one the
     parse cache holds (one spurious parse per fork lane per pass)."""
     cands = _judge_candidates(fsid, files)
-    states = STATESDIR / (fsid + ".jsonl")
+    states = (STATE / "states") / (fsid + ".jsonl")
     return cands, states, list(cands) + ([str(states)] if states.exists() else [])
 
 
@@ -3309,7 +3312,7 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None):
     # fileset component for the pass; a first toucher pins the live one here. `fr` is the frame the pin
     # went into, and the parse below is pinned into that same frame.
     pair, cut, fr = _frame_parse_key(fsid, files)
-    states = STATESDIR / (fsid + ".jsonl")
+    states = (STATE / "states") / (fsid + ".jsonl")
     # A FORKED leaf (SDK /clear: discover hands the lastSid file under the stable romp sid) parses with
     # the session's anchor transcript among the candidates, so a fork whose chain back-links across files
     # (a resume-style fork) keeps its history — the FileAdapter walk crosses files by design, and a /clear
@@ -3327,10 +3330,9 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None):
     # shows up as a served pair that differs from the pinned one, which withholds the gate's stamp.
     if cut is None:                        # a pin answered and read nothing: the live cut is ours to read
         cut = _pending_cut(fsid)
-    human = bool(_sdk_owned(fsid))
     key = (pair[0], cut) if pair is not None else None   # the frame's pair shape; sdk_human rides the entry (stage 2)
     hit = _parse_slot(fsid, cut)
-    if key is not None and hit and hit[0] == key and hit[3] == human:
+    if key is not None and hit and hit[0] == key:
         _PARSE_HITS[0] += 1
         if stats is not None:
             stats["miss"] = False
@@ -3340,7 +3342,7 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None):
         return hit[1]                      #  only - the two-worlds shape the frame exists to prevent
     session = em.parse_session(files[0], rompuuid=fsid, candidate_files=list(files),
                                states=str(states), postal_log=str(MESSAGES), now=now,
-                               sdk_human=human,   # SDK session → composer input is promptSource "sdk" = the human (one owner hook)
+                               sdk_human=(human := bool(_sdk_owned(fsid))),   # SDK session → the composer input is the human (one owner hook; read on a miss only)
                                leaf_override=cut or None, asm_mode_out=asm_mode_out)
     if stats is not None:
         stats["miss"] = True
@@ -5887,7 +5889,7 @@ def reconcile_rewound_goals(fsid, path, now):
     either side moved, archiving only on a hit (one-way, identity-keyed, tombstone-idempotent: no
     flap, no store re-publish on a miss)."""
     files = _judge_candidates(fsid, [str(path)])
-    states = STATESDIR / (fsid + ".jsonl")
+    states = (STATE / "states") / (fsid + ".jsonl")
     epi = EPIDIR / (fsid + ".jsonl")
     key_files = (list(files) + ([str(states)] if states.exists() else [])
                  + ([str(epi)] if epi.exists() else []))
@@ -12989,7 +12991,7 @@ def _write_death_marker(fsid, m):
 def _newest_states_t(fsid):
     """The newest states-row t for a sid, any row shape — the finalize's supersession read."""
     try:
-        rows = (STATESDIR / (fsid + ".jsonl")).read_text().splitlines()
+        rows = ((STATE / "states") / (fsid + ".jsonl")).read_text().splitlines()
         for ln in reversed(rows):
             try:
                 r = json.loads(ln)
@@ -14323,7 +14325,7 @@ def _live_prompt_since(fsid):
     the running stage incomplete and logs a `states-unreadable` row (_read_failed): the distiller's
     signature carries this file by identity, and a stamp over an answer that never read it would skip the
     session until the file moved (a brief owed to a parked session would wait on an unrelated row)."""
-    path_s = str(STATESDIR / (fsid + ".jsonl"))
+    path_s = str((STATE / "states") / (fsid + ".jsonl"))
     try:
         st = os.stat(path_s)
     except OSError:

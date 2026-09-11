@@ -248,12 +248,16 @@ class ParseCut(unittest.TestCase):
 
     def test_kernel_parse_keys_the_cache_on_the_cut(self):
         # arming and clearing both change the parse with NO file change — the cut must ride the key
+        # stage 2 (2026-09-11): the kernel's parse is the judges' parsed_session; the cut rides ITS key and its slot
         src = inspect.getsource(km._parse)
-        self.assertIn("cut = _be.pending_cut(sid) if _be else \"\"", src)
-        self.assertIn("key = (st.st_mtime, st.st_size, cut)", src)
-        self.assertIn("leaf_override=cut or None", src)
-        # the never-parsing feed reader compares the file identity prefix only
-        self.assertIn("tuple(hit[0][:2]) == key", inspect.getsource(km._parse_cached))
+        self.assertIn("jd.parsed_session(sid, [path], now, asm_mode_out=_mode, stats=stats)", src)
+        jsrc = inspect.getsource(km.jd.parsed_session)
+        self.assertIn("cut = _pending_cut(fsid)", jsrc)
+        self.assertIn("key = (pair[0], cut) if pair is not None else None", jsrc)
+        self.assertIn("hit = _parse_slot(fsid, cut)", jsrc, "the slot is per cut: two callers reading different cuts never share a tree")
+        self.assertIn("leaf_override=cut or None", jsrc)
+        # the never-parsing feed reader asks the shared store under the live key
+        self.assertIn("jd.parse_cached(", inspect.getsource(km._parse_cached))
 
     def test_the_built_chat_cache_sig_carries_the_cut_too(self):
         # same lesson one level up: the BUILT payload cache would otherwise keep pushing a

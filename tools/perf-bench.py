@@ -1035,7 +1035,7 @@ def _bench(args, state, repo, out, shadow, rec, maps):
     bench = out["benchmarks"] = {}
     profiles = out["profiles"] = {}
     iters = max(1, args.iters)
-    out["cold_caches"] = {"kernel": [n for n in COLD_KERNEL_CACHES + ("_chat_fold",) if isinstance(getattr(km, n, None), dict)],
+    out["cold_caches"] = {"kernel": [n for n in COLD_KERNEL_CACHES + ("_chat_fold",) if callable(getattr(getattr(km, n, None), "clear", None))],
                           "event_model": [n for n, _lock in COLD_EM_CACHES if isinstance(getattr(em, n, None), dict)]}
 
     def now():
@@ -1064,7 +1064,7 @@ def _bench(args, state, repo, out, shadow, rec, maps):
         """The kernel-side caches a freshly started kernel lacks (build_session's inputs above the parse)."""
         for name in COLD_KERNEL_CACHES:
             d = getattr(km, name, None)
-            if isinstance(d, dict):
+            if callable(getattr(d, "clear", None)):   # a dict, or the kernel's view over the shared parse store (T323 stage 2)
                 d.clear()
         if hasattr(km, "_chat_fold"):
             lock = getattr(km, "_chat_fold_lock", None)
@@ -1080,7 +1080,7 @@ def _bench(args, state, repo, out, shadow, rec, maps):
         sample cold)."""
         for name, lock_name in COLD_EM_CACHES:
             d = getattr(em, name, None)
-            if not isinstance(d, dict):
+            if not callable(getattr(d, "clear", None)):
                 continue
             lock = getattr(em, lock_name, None)
             if lock is not None:

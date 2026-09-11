@@ -337,7 +337,7 @@ class MemoAcrossTheCycle(_MemoHarness):
         km.build_feed(NOW, self.tmux)
         judge = km._intr_marks_memo[(SID, "judge")]
         disp = km._intr_marks_memo[(SID, "display")]
-        self.assertIsNot(judge[0], disp[0], "two distinct parse objects, one slot each")
+        self.assertIs(judge[0], disp[0], "ONE parse object since stage 2 (the kernel and the judges share the store); still one slot per family")
         km._interrupt_block_tick(NOW, self.tmux)
         self.assertIs(km._intr_marks_memo[(SID, "display")], disp, "the tick left the display slot alone")
         km.build_feed(NOW, self.tmux)
