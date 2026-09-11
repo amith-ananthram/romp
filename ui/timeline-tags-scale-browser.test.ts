@@ -172,7 +172,7 @@ const toggleFilters = (page: any) => page.evaluate(() => {
 // (review find, 2026-09-09: the assertions read the cell's scrollHeight, which overflow of any kind grows)
 const matrix = (page: any) => page.evaluate(() => {
   const card = ((window as any).panel._viewsDialog as HTMLElement).firstElementChild as HTMLElement;
-  const chips = Array.from(card.querySelectorAll("span")).filter((n) => (n.getAttribute("style") || "").startsWith("cursor:pointer;padding:1px 8px;border-radius:9px;"));
+  const chips = Array.from(card.querySelectorAll("span")).filter((n) => { const s = n.getAttribute("style") || ""; return s.startsWith("display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:9px;font-size:0.82em;border:1px solid ") && s.includes("cursor:pointer;"); });   // the shared chip plus the pointer (T321)
   const cb = card.getBoundingClientRect();
   const rows = new Set(chips.map((n) => Math.round(n.getBoundingClientRect().top)));
   const allLabel = Array.from(card.querySelectorAll("span")).find((n) => n.textContent === "All surfaces" && (n.getAttribute("style") || "").includes("flex:0 0 88px"));

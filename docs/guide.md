@@ -338,16 +338,20 @@ The timeline draws an arc for each message. Hover one for its gist:
 Underneath, a local message bus writes the message into a mailbox on disk that
 belongs to the recipient, then delivers it: straight away if that session is
 idle, otherwise when its current turn ends. The recipient reads it as a message
-in its chat, and it appears in the user interface as a card naming the sender
-and the kind:
+in its chat, and it appears in the user interface as a card. The card's head
+names both ends, the other session and this one, each in its session's color. A
+message this session sent also carries a delivery mark at the head's right edge,
+the way a messaging app does: sent, delivered, read, parked while the recipient
+is unreachable, bounced, or recalled. A send that failed has no mark; its tool
+call's result says what happened. An incoming message that waited while this
+session was offline wears the parked mark. Hover a mark for the state and when
+it was reached.
 
-![A message from another session, as the recipient's chat shows it](assets/guide/postal-chat.png){ width="100%" }
+Every message declares its kind, which the card shows as colored text:
 
-Every message declares its kind, which the card wears as a chip:
-
-- <span class="romp-chip-kind romp-chip-delegate">delegation</span> — the recipient owns the work now.
-- <span class="romp-chip-kind romp-chip-coordinate">coordination</span> — a heads-up; a reply is optional.
-- <span class="romp-chip-kind romp-chip-question">question</span> — an answer is required.
+- <span class="romp-kind romp-kind-delegate">Delegation</span>: the recipient owns the work now.
+- <span class="romp-kind romp-kind-coordinate">Coordination</span>: a heads-up; a reply is optional.
+- <span class="romp-kind romp-kind-question">Question</span>: an answer is required.
 
 The same mailbox is on the command line, for you and for scripts:
 
@@ -821,14 +825,17 @@ auto-retry paused (a usage limit, the monthly spend cap, or you stopped it), and
 it stays red while a failed attempt sits in the last 15 minutes anywhere. Gray
 means the API is not being used right now: no traffic in the last 15 minutes on
 any machine. A machine whose link is down is named in the popup with what it
-last said and does not colour the dot. Hover for the reading in plain
-words (for example, 4 requests in the last 15 minutes, all succeeded), one
-line per machine when several are connected, the waiting sessions listed, and
-the history under it: a graph of attempts per minute over the last 15 minutes
-with rate-limited attempts in red and server errors in orange, one sentence
-explaining the codes, and the most recent state changes with how long each
-held. A kernel restart shows as its own line there, because the counts start
-over with the kernel. Click the dot, or press Enter on it, for the detail:
+last said and does not colour the dot. Hover for the counts: one line per
+machine, each named by its own name, with its successful requests over the last
+24 hours in the accent and any failures counted in their colours (429s in red,
+5xx in magenta, no connection in gray), the waiting sessions listed, and
+the history under it: a stacked histogram of attempts per quarter hour over
+the last 24 hours in those same colours, a legend for the codes, when the
+reading was taken in words, and the most recent state changes with how long
+each held. A kernel restart shows as its own line there, because the counts
+start over with the kernel. Click the dot, or press Enter on it, for the
+detail: the same lines with a larger histogram per machine and a choice of
+range (1 hour, 24 hours, 7 days),
 each waiting session (click one to open that session), a button that stops
 auto-retry for every session while sessions are waiting and resumes it while
 paused, and links to the usage figures and the Log.

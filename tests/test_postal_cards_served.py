@@ -7,9 +7,10 @@ colours), never a chip; the DELIVERY STATE is one icon per state at the head's r
 (delivered, read, parked, bounced, recalled, and sent for a message handed to the relay), from what the kernel
 files (the send-time stamp, and the postal ledger's exec / relayed / bounced / recall rows joined by message id);
 both ENDS wear their sessions' colours (the peer's chip, then this session's own chip); no card wears a background
-wash; incoming cards are boxed, sent ones slim; a sent card whose message has not landed wears the pending
-send's own provisional dress (the queued bubble's class). With POSTAL_SHOTS=<dir> the driver also writes
-screenshots at 1000 px, 520 px, 340 px (the phone width: the head wraps, the ends first, the kind word and the icon on
+wash; incoming cards are boxed, sent ones slim unless a fold boxes them; a sent card whose message has not landed wears
+the pending send's own provisional dress (the queued bubble's class) at either density, slim or boxed, at the column's
+full width. With POSTAL_SHOTS=<dir> the driver also writes
+screenshots at 1000 px, 520 px, 340 px dark and 1000 px, 340 px light, named romp_chat-postal-cards-<theme>-<width>.png (the phone width: the head wraps, the ends first, the kind word and the icon on
 that line or the next as one unit, the gist last on its own full-width line, T313) and the light theme. Skips LOUDLY without the extension deps or a Playwright browser. SYNTHETIC
 fixtures only (the notes-api demo world: web / api / tests; host TESTHOST)."""
 import json
@@ -95,7 +96,14 @@ def sent_row(mid, frm, frm_id, to_id, body, t, kind, park=False):
 KINDLESS = "Merged the fixtures branch; nothing else is pending on my side."
 
 
-# The world: ten cards, every kind and every state, plus one legacy card with no kind. Bodies are invented notes-api chatter.
+# a sent one-liner OVER the 90-char clip: its gist cannot carry the whole line, so the card has a fold and is boxed; parked,
+# it must wear the same provisional dress as the slim parked card beside it (the box rule used to win its border and
+# background, and the bubble's 72% cap its width)
+LONG_PARKED = "Once the fixtures land, run the whole integration suite against notes-api and write every flaky case into the README."
+
+
+# The world: eleven cards, every kind and every state, among them one legacy card with no kind and one parked card with a
+# fold. Bodies are invented notes-api chatter.
 def world(t0):
     msgs = {
         "in-deleg": ("api", API, "delegate", "Take the retry-loop rewrite in notes-api: exponential backoff with jitter, cap at two minutes, tests included."),
@@ -104,6 +112,7 @@ def world(t0):
         "out-deliv": ("web", WEB, "coordinate", "The backoff branch is up; review when you have a moment."),
         "out-read": ("web", WEB, "question", "Did the fixtures land on your side yet?"),
         "out-parked": ("web", WEB, "delegate", "Please run the whole integration suite once the fixtures are in."),
+        "out-parked-long": ("web", WEB, "delegate", LONG_PARKED),
         "out-queued": ("web", WEB, "coordinate", "The remote build is green; merging in an hour unless you object."),
         "out-bounced": ("web", WEB, "delegate", "Take the cap decision and write it down in the README."),
         "out-recalled": ("web", WEB, "coordinate", "Ignore my last note, wrong thread."),
@@ -128,6 +137,7 @@ def world(t0):
         ("out-read", "api", API, "Delivered to 'api' as a question — you are now recorded as waiting on their answer.", False,
          [lambda t: {"t": t + 20, "ev": "exec", "id": "out-read"}]),
         ("out-parked", "tests", TESTS, "parked for tests (unreachable) — delivers on reconnect · id out-parked", False, []),
+        ("out-parked-long", "tests", TESTS, "parked for tests · id out-parked-long", False, []),   # the plain park text; the state reads the word
         ("out-queued", "TESTHOST:api", "peer:TESTHOST", "Delivered to 'TESTHOST:api'.", False, []),
         ("out-bounced", "api", API, "Delivered to 'api' as a handoff — they own it now.", False,
          [lambda t: {"t": t + 30, "ev": "bounced", "id": "out-bounced", "why": "refused: the mailbox is isolated"}]),
@@ -203,6 +213,8 @@ const measure = () => page.evaluate(() => {
       selfText: self ? self.textContent : null, selfBg: self ? getComputedStyle(self).backgroundColor : null,
       selfWidth: self ? Math.round(self.getBoundingClientRect().width) : null,
       bg: cs.backgroundColor, border: cs.borderTopStyle, provisional: n.classList.contains("queued-bubble"),
+      // the provisional dress at either density: the card's max-width as computed, and the box it actually takes
+      maxWidth: cs.maxWidth, width: Math.round(n.getBoundingClientRect().width),
       gist: (t.querySelector(".notice-gist") || {}).textContent || "",
       gistWrap: t.querySelector(".notice-gist") ? getComputedStyle(t.querySelector(".notice-gist")).whiteSpace : null,
       collapsible: n.classList.contains("notice-collapsible"),
@@ -212,17 +224,31 @@ const measure = () => page.evaluate(() => {
   // the page colour under the text, and the two kind colours, for a contrast check per theme
   const pg = document.createElement("div"); pg.style.background = "var(--bg)"; document.body.appendChild(pg);
   const pageBg = getComputedStyle(pg).backgroundColor; pg.remove();
-  const kinds = {};
-  for (const k of ["delegate", "coordinate", "question"]) { const e = document.querySelector(".postal-kind-" + k); if (e) kinds[k] = getComputedStyle(e).color; }
-  return { boxBg, pageBg, kinds, theme: document.body.classList.contains("theme-light") ? "light" : "dark", cards, pendingBubbleClass: !!document.querySelector(".queued-bubble") };
+  const kinds = {}; const kindWeight = {}; const kindBoxed = {};
+  for (const k of ["delegate", "coordinate", "question"]) {
+    const e = document.querySelector(".postal-kind-" + k);
+    if (e) {
+      kinds[k] = getComputedStyle(e).color; kindWeight[k] = getComputedStyle(e).fontWeight;
+      const card = e.closest(".turn-postal-service");   // the FIRST word of each kind: measured against the card it sits on
+      kindBoxed[k] = !!(card && card.classList.contains("notice-boxed"));
+    }
+  }
+  return { boxBg, pageBg, kinds, kindWeight, kindBoxed, theme: document.body.classList.contains("theme-light") ? "light" : "dark", cards, pendingBubbleClass: !!document.querySelector(".queued-bubble") };
 });
 const contrast = (a, b) => {
   const lum = (css) => { const m = css.match(/\d+(\.\d+)?/g).slice(0, 3).map(Number).map((v) => v / 255).map((c) => c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)); return 0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2]; };
   const la = lum(a), lb = lum(b); return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
 };
+// a boxed card paints --box-bg, an rgba WASH, over the page: the colour the word actually sits on is the composite (the
+// review of 2026-09-10 found the light coordination step at 4.33:1 there while the page read 4.6:1)
+const composite = (washCss, pageCss) => {
+  const nums = (css) => css.match(/\d+(\.\d+)?/g).map(Number);
+  const w = nums(washCss), p = nums(pageCss), a = w.length > 3 ? w[3] : 1;
+  return "rgb(" + [0, 1, 2].map((i) => Math.round(w[i] * a + p[i] * (1 - a))).join(", ") + ")";
+};
 const results = {};
 let page;
-for (const pass of [{ width: 1000, theme: "dark" }, { width: 520, theme: "dark" }, { width: 340, theme: "dark" }, { width: 1000, theme: "light" }]) {
+for (const pass of [{ width: 1000, theme: "dark" }, { width: 520, theme: "dark" }, { width: 340, theme: "dark" }, { width: 1000, theme: "light" }, { width: 340, theme: "light" }]) {
   const width = pass.width;
   page = await browser.newPage({ viewport: { width, height: 1000 }, deviceScaleFactor: 2 });
   await page.goto(cfg.chat);
@@ -241,9 +267,16 @@ for (const pass of [{ width: 1000, theme: "dark" }, { width: 520, theme: "dark" 
   await page.evaluate(() => { const c = document.getElementById("content"); if (c) c.scrollTop = c.scrollHeight; });
   await page.waitForTimeout(300);
   const m = await measure();
-  m.contrast = { delegate: m.kinds.delegate ? contrast(m.kinds.delegate, m.pageBg) : null, coordinate: m.kinds.coordinate ? contrast(m.kinds.coordinate, m.pageBg) : null, question: m.kinds.question ? contrast(m.kinds.question, m.pageBg) : null };
-  results[pass.theme === "light" ? "light" : String(width)] = m;
-  if (cfg.shots) { fs.mkdirSync(cfg.shots, { recursive: true }); await page.screenshot({ path: cfg.shots + "/romp_chat-postal-cards-" + (pass.theme === "light" ? "light" : width) + ".png", fullPage: false }); }
+  const boxOnPage = composite(m.boxBg, m.pageBg);
+  m.contrast = {}; m.contrastOn = {}; m.contrastPage = {};
+  for (const k of ["delegate", "coordinate", "question"]) {
+    if (!m.kinds[k]) { m.contrast[k] = null; continue; }
+    m.contrastOn[k] = m.kindBoxed[k] ? "box" : "page";
+    m.contrast[k] = contrast(m.kinds[k], m.kindBoxed[k] ? boxOnPage : m.pageBg);   // against the card the word sits on
+    m.contrastPage[k] = contrast(m.kinds[k], m.pageBg);
+  }
+  results[pass.theme === "light" ? (width === 1000 ? "light" : "light" + width) : String(width)] = m;
+  if (cfg.shots) { fs.mkdirSync(cfg.shots, { recursive: true }); await page.screenshot({ path: cfg.shots + "/romp_chat-postal-cards-" + pass.theme + "-" + width + ".png", fullPage: false }); }
   await page.close();
 }
 fs.writeSync(1, "RESULT:" + JSON.stringify(results) + "\n");
@@ -297,7 +330,7 @@ class ServedPostalCards(unittest.TestCase):
         proj = os.path.join(claude, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd)))
         os.makedirs(proj, exist_ok=True)
         Path(proj, WEB + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
-        cls.count = 10
+        cls.count = 11
         cls.port, cls.token = _free_port(), "testtok-postal"
         env = _lab.kernel_env(cls.lab, claude, dist, cls.port, cls.token, ROMP_HOST_NAME="TESTHOST")
         cls.klog = os.path.join(cls.lab, "kernel.log")
@@ -336,7 +369,7 @@ class ServedPostalCards(unittest.TestCase):
         r = json.loads(line[len("RESULT:"):])
         wide, narrow, phone, light = r["1000"], r["520"], r["340"], r["light"]
         cards = wide["cards"]
-        self.assertEqual(len(cards), 10, cards)
+        self.assertEqual(len(cards), 11, cards)
         by = {c["gist"][:24]: c for c in cards}
         def card(prefix):
             m = [c for c in cards if c["gist"].startswith(prefix)]
@@ -349,8 +382,8 @@ class ServedPostalCards(unittest.TestCase):
             else:
                 self.assertIn(c["kind"], ("Delegation", "Coordination", "Question"), c)
             self.assertFalse(c["chip"], "no chip: %r" % c)
-        self.assertEqual(card("Take the retry-loop")["kindColor"], "rgb(176, 140, 255)", "delegation violet")
-        self.assertEqual(card("Heads-up")["kindColor"], "rgb(20, 184, 166)", "coordination teal")
+        self.assertEqual(card("Take the retry-loop")["kindColor"], "rgb(127, 184, 231)", "delegation: the ramp's middle step (T320)")
+        self.assertEqual(card("Heads-up")["kindColor"], "rgb(121, 150, 175)", "coordination: the ramp's low step (T320)")
         # (2) the delivery icon per state, at the head's right edge, with a worded title
         states = {c["gist"][:20]: c["state"] for c in cards}
         self.assertIsNone(card("Take the retry-loop")["state"], "an incoming message in hand: no icon")
@@ -359,6 +392,7 @@ class ServedPostalCards(unittest.TestCase):
         self.assertEqual(card("The backoff branch")["state"], "delivered")
         self.assertEqual(card("Did the fixtures")["state"], "read", "the ledger's exec row: the recipient consumed it")
         self.assertEqual(card("Please run the whole")["state"], "parked")
+        self.assertEqual(card("Once the fixtures land")["state"], "parked")
         self.assertEqual(card("The remote build")["state"], "sent", "handed to the relay, no far-host ack yet")
         self.assertEqual(card("Take the cap decision")["state"], "bounced")
         self.assertEqual(card("Ignore my last note")["state"], "recalled")
@@ -384,7 +418,7 @@ class ServedPostalCards(unittest.TestCase):
                 if not c["collapsible"]:
                     self.assertEqual(c["gistWrap"], "normal", "a boxed one-liner with nothing to fold wraps, never an ellipsis with nothing behind it: %r" % c)
             else:
-                self.assertTrue(c["slim"], "sent stays slim: %r" % c)
+                self.assertEqual(c["slim"], not c["collapsible"], "a sent card is slim unless it has a fold: %r" % c)
             self.assertFalse(c["selfDot"], "the own chip wears no working dot: %r" % c)
         self.assertEqual(card("Take the retry-loop")["peerBg"], "rgb(30, 161, 235)", "api's colour on its chip")
         self.assertEqual(card("Heads-up")["peerBg"], "rgb(84, 178, 4)", "tests' colour on its chip")
@@ -395,6 +429,18 @@ class ServedPostalCards(unittest.TestCase):
         for pfx in ("The backoff branch", "Did the fixtures", "Take the cap decision", "Ignore my last note", "Take the retry-loop"):
             self.assertFalse(card(pfx)["provisional"], "landed, bounced, recalled and incoming are solid: %r" % pfx)
         self.assertEqual(card("Please run the whole")["border"], "dashed", "the bubble's dashed border by the shared rule")
+        # the dress reaches a sent card of EITHER density: a parked delegation whose line outgrows the head has a fold, so it
+        # is boxed, and it wears the dashed dress at the slim parked card's width. Before the shared rule named the boxed
+        # card, the box rule won its border and background and the bubble's 72% cap its width, so it stood as a solid box
+        # three-quarters of the column wide until the receipt landed, then snapped to the full width.
+        long_parked, slim_parked = card("Once the fixtures land"), card("Please run the whole")
+        self.assertTrue(long_parked["collapsible"] and not long_parked["slim"], "a sent card with a fold is boxed: %r" % long_parked)
+        self.assertTrue(slim_parked["slim"] and not slim_parked["collapsible"], "the one-liner beside it is slim: %r" % slim_parked)
+        self.assertTrue(long_parked["provisional"], "parked with a fold → provisional too")
+        self.assertEqual(long_parked["border"], "dashed", "the boxed provisional card wears the bubble's dashed border, not the box's solid one: %r" % long_parked)
+        self.assertEqual(long_parked["bg"], slim_parked["bg"], "…and the bubble's wash, not the box colour: %r" % long_parked)
+        self.assertEqual(long_parked["maxWidth"], "none", "the width reset reaches the boxed card: %r" % long_parked)
+        self.assertEqual(long_parked["width"], slim_parked["width"], "one width for the provisional card of either density: %r vs %r" % (long_parked["width"], slim_parked["width"]))
         # (narrow) both colours still show: this session's chip collapses to its dot
         for c in narrow["cards"]:
             self.assertTrue(c["selfBg"] == "rgb(156, 210, 255)" and c["selfWidth"] is not None and c["selfWidth"] <= 12,
@@ -404,7 +450,7 @@ class ServedPostalCards(unittest.TestCase):
         # (phone) under the 360 px container query the head WRAPS (T313): the two ends keep the first line; the kind word
         # and the icon stay on it when they fit and otherwise move to the next line as one unit; the gist comes last on its
         # own full-width line and breaks by words, never into a letter column — every card, slim, boxed and provisional
-        self.assertEqual(len(phone["cards"]), 10, phone["cards"])
+        self.assertEqual(len(phone["cards"]), 11, phone["cards"])
         for c in phone["cards"]:
             self.assertFalse(c["kindClipped"], "at 340 px the kind word is whole: %r" % c)
             self.assertEqual(c["headWrap"], "wrap", "the head wraps at phone width: %r" % c)
@@ -427,17 +473,38 @@ class ServedPostalCards(unittest.TestCase):
                             "the first gist line spans the head (at least 60%% of it, 150 px), no letter column: %r" % c)
         self.assertTrue(any(c["gistLines"] >= 2 for c in phone["cards"]), "at least one gist wraps at 340 px, so the wrapped branch is exercised: %r" % [c["gistLines"] for c in phone["cards"]])
         prov = [c for c in phone["cards"] if c["provisional"]]
-        self.assertEqual(len(prov), 2, "the two provisional cards (parked, relayed) are boxed at phone width too: %r" % prov)
+        self.assertEqual(len(prov), 3, "the three provisional cards (parked, parked with a fold, relayed) are boxed at phone width too: %r" % prov)
         slim = [c for c in phone["cards"] if c["slim"]]
         self.assertGreaterEqual(len(slim), 3, "and slim cards are covered: %r" % [c["gist"][:20] for c in slim])
         # at 520 px and above the head is one line: the ends, the gist and the kind side by side (no wrap)
         for c in wide["cards"] + narrow["cards"]:
             self.assertEqual(c["headWrap"], "nowrap", "wider than the query the head stays one line: %r" % c)
-        # (light theme) the two raw kind colours re-ink for the cream page: text contrast at or above 4.5:1
+        # the kind colours read at or above 4.5:1 on the card each word actually sits on, in both themes: a boxed
+        # incoming card paints --box-bg over the page (the review of 2026-09-10 caught the light coordination step at
+        # 4.33:1 there while the bare page read 4.6:1), a slim card is the page itself
         self.assertEqual(light["theme"], "light")
         for k in ("delegate", "coordinate", "question"):
-            self.assertGreaterEqual(light["contrast"][k] or 0, 4.5, "%s reads on the light page: %r" % (k, light["contrast"]))
-            self.assertGreaterEqual(wide["contrast"][k] or 0, 4.5, "%s reads on the dark page: %r" % (k, wide["contrast"]))
+            self.assertGreaterEqual(light["contrast"][k] or 0, 4.5, "%s reads on its light card (%s): %r" % (k, light["contrastOn"].get(k), light["contrast"]))
+            self.assertGreaterEqual(wide["contrast"][k] or 0, 4.5, "%s reads on its dark card (%s): %r" % (k, wide["contrastOn"].get(k), wide["contrast"]))
+            self.assertGreaterEqual(light["contrastPage"][k] or 0, 4.5, "%s reads on the bare light page too" % k)
+        self.assertEqual(light["contrastOn"]["coordinate"], "box", "the first coordination word is on a boxed incoming card: the measurement that matters")
+        # T320 (the user 2026-09-10): the kind word wears the prose weight, not bold, in both themes, and its three
+        # colours are ONE sequential ramp ranked coordination < delegation < question: monotone in luminance against
+        # the page (brighter with rank on the dark page, darker with rank on the light one), as the browser computes them
+        for m in (wide, light, r["light340"]):
+            self.assertEqual({k: m["kindWeight"][k] for k in ("delegate", "coordinate", "question")},
+                             {"delegate": "400", "coordinate": "400", "question": "400"}, "prose weight: %r" % m["kindWeight"])
+        def _lum(css):
+            r, g, b = [int(x) for x in re.findall(r"\d+", css)[:3]]
+            ch = lambda c: (c / 255) / 12.92 if (c / 255) <= 0.03928 else (((c / 255) + 0.055) / 1.055) ** 2.4
+            return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+        d = [_lum(wide["kinds"][k]) for k in ("coordinate", "delegate", "question")]
+        self.assertTrue(d[0] < d[1] < d[2], "dark page: the ramp brightens with rank: %r" % wide["kinds"])
+        lt = [_lum(light["kinds"][k]) for k in ("coordinate", "delegate", "question")]
+        self.assertTrue(lt[0] > lt[1] > lt[2], "light page: the ramp deepens with rank: %r" % light["kinds"])
+        # the phone-width light pass reads too (the fourth screenshot the user looks at)
+        for k in ("delegate", "coordinate", "question"):
+            self.assertGreaterEqual(r["light340"]["contrast"][k] or 0, 4.5, "%s reads on the light page at 340 px" % k)
 
 
 if __name__ == "__main__":

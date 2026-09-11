@@ -89,7 +89,12 @@ test("the judges' fast-mode box sits on the Triage model row in the chat's words
   // the mixed mark is the one inside the box's own label, not the picker's (both share the row now)
   assert.ok(GEAR.includes("el.closest('label') || el.closest('.rs-row')"), "fillMixedMarks scopes to the control's own label first");
   const CSS = read("ui", "webview", "gear.css");
-  assert.ok(CSS.includes("#rsettings .rs-fastin.rs-off { opacity: .4;"), "the greyed look");
+  // the greyed look fades the BOX alone: opacity on the whole label faded the hint span inside it too, and made the
+  // label a stacking context the rows beneath paint over, so the reason the box was greyed read dim and overdrawn
+  assert.ok(CSS.includes("#rsettings .rs-fastin.rs-off input { opacity: .4;"), "the greyed look fades the box alone");
+  assert.doesNotMatch(CSS, /#rsettings \.rs-fastin\.rs-off \{[^}]*opacity/,
+    "no opacity on the label: the hint span lives inside it and would fade with it, and the label would become a stacking context the rows beneath paint over");
+  assert.match(CSS, /#rsettings \.rs-fastin\.rs-off \{[^}]*color: var\(--text-faint/, "the word greys by token, not by fading");
   assert.ok(CSS.includes("#rsettings .rs-row:has(.rs-fastin:hover) > .rs-sub { display: none; }"), "one hover description at a time");
   assert.ok(CSS.includes("#rsettings .rs-fastin .rs-sub { white-space: normal; }"), "the hint wraps: the label's nowrap (box + word on one line) must not reach the hint, or it runs off the card");
   assert.ok(CSS.includes("#rsettings .rs-row:has(.rs-fastin .rs-mixed:hover) .rs-fastin .rs-sub { display: none; }"), "the box's mixed mark keeps its title alone: no hint under it");

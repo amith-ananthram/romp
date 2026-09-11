@@ -196,8 +196,9 @@ class ChatAndFeedHoverRouting(unittest.TestCase):
         self.assertIn('_send_to_app("feed", {"type": "hoverCards"', self.SRC)
 
     def test_chat_dot_hover_glows_its_whole_segment(self):
-        # #3: the same branch glows EVERY atom uuid in the hovered segment (the sibling dots), by id
-        self.assertIn('"sid": hsid, "uuids": seg_uuids', self.SRC)
+        # #3: the same branch glows EVERY atom uuid in the hovered segment (the sibling dots), by id; the group is
+        # built by _glow_groups, which adds each uuid's global index for the ruler's history strip (T318b)
+        self.assertIn("_glow_groups(hsid, seg_uuids)", self.SRC)
 
     def test_ledger_bullet_hover_stays_timeline_only(self):
         # the feed/chat extension is gated to dotHover; a ledgerHover (TOC bullet) must not stomp the glow

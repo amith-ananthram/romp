@@ -279,25 +279,23 @@
 .romp-chip-ready     { background: #2b7fb8; color: #ffffff; }
 .romp-chip-await     { background: #54b204; color: #0c1a00; }
 
-/* The kind chip a postal card carries, drawn the way the card draws it: an
-   outlined pill in the kind's own colour, uppercase, with the border taking the
-   text colour. Mirrors styles.css .postal-service-intent and its three colours.
-   The app sets 0.7em against a card's own type; in body prose that lands smaller
-   than every other inline chip here, so this reuses the 0.85em the chips and
-   buttons above already share. */
-.romp-chip-kind {
-  border: 1px solid currentColor;
-  border-radius: 9px;
-  padding: 0.05em 0.5em;
-  font-size: 0.85em;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+/* The kind word a postal card carries, drawn the way the card draws it: coloured
+   text at the prose weight and no pill (a chip reads as a tag; the user
+   2026-09-10). Mirrors ui/webview/styles.css .postal-kind (font-weight 400, set
+   rather than inherited, as the app sets it, so the word keeps the prose weight
+   wherever the span lands) and the dark values of its --postal-* tokens, one
+   ramp ranked by how much the kind asks of the reader: coordination lowest,
+   delegation next, question highest. Dark values only, like the status chips
+   above: the docs site is dark only and does not load the app's stylesheet;
+   keep them in step. No size of its own: the word sits in the prose at the
+   prose's size. */
+.romp-kind {
+  font-weight: 400;
   white-space: nowrap;
 }
-.romp-chip-delegate   { color: #b08cff; }   /* delegation — a peer handed off work */
-.romp-chip-coordinate { color: #14b8a6; }   /* coordination — a heads-up */
-.romp-chip-question   { color: #e0b020; }   /* question — an answer is needed */
+.romp-kind-delegate   { color: #7fb8e7; }   /* delegation: a peer handed off work */
+.romp-kind-coordinate { color: #7996af; }   /* coordination: a heads-up */
+.romp-kind-question   { color: #91d9ff; }   /* question: an answer is needed */
 
 /* ── Mermaid legibility ───────────────────────────────────────────────
    Every node in our diagrams carries an explicit LIGHT fill (the classDef

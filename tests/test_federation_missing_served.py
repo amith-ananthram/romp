@@ -4,7 +4,9 @@ healthy leg's first drag writes a doubled arrangement and the wait for the rever
 then shows the banner, refuses drags and writes nothing to the browser's arrangement (romp:vieworder), and the kernel's
 client-diag.jsonl gains one federation-missing row carrying the load entry. With the bundle served the same page shows the
 arrangement, not the kernel's seed, and a drag persists exactly one copy of every id (the duplicate-id fix). Skips LOUDLY
-when the extension deps or a playwright browser are absent (CI installs none). Synthetic sessions and text only."""
+when the extension deps or a playwright browser are absent. The lab kernel's environment is kernel_env's list of
+names, never a copy of the runner's; FedMissingLabKernelEnv pins that and runs everywhere. Synthetic sessions and text
+only."""
 import json
 import os
 import re
@@ -12,11 +14,12 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
-from romp_load import load_source
 from pathlib import Path
+from unittest import mock
 
 try:
     from tests.dist_copy import copy_dist
@@ -27,13 +30,12 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
 BIN = os.path.join(ROOT, "bin")
 EXT = os.path.join(ROOT, "vscode-extension")
-# Hermetic state BEFORE the loads — they resolve their state root at import time, and only
-# pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
+sys.path.insert(0, HERE)
+import test_ship_reship as _lab   # noqa: E402  the lab kernel's environment: a list of names, never a copy of the runner's
+# Hermetic state for a bare unittest or script run, which has no conftest floor: the runner's own process must never
+# resolve REAL state (the lab kernel's roots come from kernel_env below).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
-# the kernel refuses to boot with a retired key variable or a 1Password name in its environment (kernel/credentials.py
-# check_boot_environment): the lab's kernel env is scrubbed by the kernel's own rule, read from the module itself
-_cred = load_source("romp_credentials_fedmissing", os.path.join(ROOT, "kernel", "credentials.py"))
 SID_A = "11111111-2222-4333-8444-000000000701"
 SID_B = "11111111-2222-4333-8444-000000000702"
 SID_C = "11111111-2222-4333-8444-000000000703"
@@ -45,6 +47,17 @@ def _free_port():
     p = s.getsockname()[1]
     s.close()
     return p
+
+
+def lab_kernel_env(lab, claude, dist, port, token):
+    """The lab kernel's environment: kernel_env's list of names, never a copy of the runner's (a shell on a machine
+    running romp carries the live kernel's exports, and the list carries none of the retired key names or 1Password
+    names the kernel refuses to boot with either), plus this lab's tmux socket, named after its port. With the list
+    comes the postal trio kernel_env gives every lab kernel (ROMP_POSTAL_CLIENT_ONLY=1, its own ROMP_POSTAL_PORT,
+    ROMP_POSTAL_PEERS=0), a bus of its own that is never started: without it this kernel's boot-time ensure started a
+    detached bus on the machine's FIXED port, which outlived the kernel and held the shared bus port after a restart
+    (2026-09-10); tests/test_hermetic_kernel_postal.py guards every spawn site for it."""
+    return _lab.kernel_env(lab, claude, dist, port, token, ROMP_TMUX_SOCKET="romp-fedmissing-%d" % port)
 
 
 def _transcript(sid, cwd, pairs):
@@ -240,16 +253,7 @@ class ServedFederationMissing(unittest.TestCase):
         cls.diag = os.path.join(state, "client-diag.jsonl")
         cls.port = _free_port()
         cls.token = "testtok-fedmissing"
-        cls.env = dict(os.environ,
-                       XDG_STATE_HOME=os.path.join(cls.lab, "xdg"),
-                       CLAUDE_CONFIG_DIR=claude,
-                       ROMP_MANAGER_PORT="1", ROMP_KERNEL_NO_OPEN="1",
-                       ROMP_SERVE_TOKEN=cls.token, ROMP_KERNEL_PORT=str(cls.port),
-                       ROMP_DIST_DIR=dist, ROMP_MODEL_CATALOG="off",
-                       ROMP_TMUX_SOCKET="romp-fedmissing-%d" % cls.port)
-        cls.env.pop("ROMP_STATE_DIR", None)
-        for k in [k for k in cls.env if k in _cred.RETIRED_VARS or _cred.is_op_env_name(k)]:   # the kernel's own boot rule (module top)
-            cls.env.pop(k, None)
+        cls.env = lab_kernel_env(cls.lab, claude, dist, cls.port, cls.token)
         cls.klog = os.path.join(cls.lab, "kernel.log")
         cls.kernel = subprocess.Popen([os.path.join(BIN, "romp-kernel")],
                                       stdout=open(cls.klog, "w"), stderr=subprocess.STDOUT, env=cls.env)
@@ -427,6 +431,46 @@ class ServedFederationMissing(unittest.TestCase):
         self.assertNotEqual(t["arrangement"][-1], SID_C, "the drag moved it off the end")
         self.assertEqual(len(t["sessionList"]), len(set(t["sessionList"])), "the pane's own list holds each id once: %r" % t["sessionList"])
         self.assertEqual(t["strip"], t["arrangement"])
+
+
+class FedMissingLabKernelEnv(unittest.TestCase):
+    """The lab kernel's environment is built from a list of names (kernel_env in test_ship_reship.py, the function
+    every lab that boots a kernel uses), never from a copy of the runner's. A run from a shell on a machine running
+    romp carries the live kernel's exports, and a lab kernel that inherited them exited when the live manager
+    restarted (ROMP_MANAGER_PID, the kernel's parent-death watchdog), bound where the live kernel serves
+    (ROMP_SERVE_HOST) and, with no ROMP_POSTAL_PORT of its own, dialled the machine's postal bus. No kernel and no
+    browser, so this runs everywhere the served leg above skips."""
+
+    LAB = os.path.join(os.sep, "lab")
+    # a live kernel's exports as a session's shell carries them, the run's own state root, an auth declaration and a
+    # stand-in for a key the shell carries: planted here so the case asserts on names it chose rather than on what
+    # the runner happened to export (conftest scrubs some of these before every test)
+    LIVE = {"ROMP_MANAGER_PID": "4242", "ROMP_SERVE_HOST": "0.0.0.0",
+            "ROMP_SID": "cccccccc-1111-2222-3333-444444444444", "ROMP_SESSION_NAME": "web",
+            "ROMP_STATE_DIR": os.path.join(LAB, "live"), "ROMP_EXPECTED_AUTH": "key", "RUNNER_SECRET_PROBE": "abc"}
+    # what the lab itself puts in: its roots, the serve seams, its tmux socket, and a postal bus of its own
+    OWN = {"XDG_STATE_HOME": os.path.join(LAB, "xdg"), "CLAUDE_CONFIG_DIR": os.path.join(LAB, "claude"),
+           "ROMP_MANAGER_PORT": "1", "ROMP_KERNEL_NO_OPEN": "1", "ROMP_SERVE_TOKEN": "testtok",
+           "ROMP_KERNEL_PORT": "4321", "ROMP_DIST_DIR": os.path.join(LAB, "dist"), "ROMP_MODEL_CATALOG": "off",
+           "ROMP_TMUX_SOCKET": "romp-fedmissing-4321", "ROMP_POSTAL_PEERS": "0", "ROMP_POSTAL_CLIENT_ONLY": "1"}
+    # the port a kernel with no ROMP_POSTAL_PORT of its own dials: the machine's bus
+    MACHINE_BUS_PORT = "25302"
+
+    def test_a_live_kernels_exports_never_reach_the_lab_kernel(self):
+        with mock.patch.dict(os.environ, self.LIVE):
+            os.environ.pop("ROMP_POSTAL_PORT", None)   # the runner names no bus: the lab must still get one of its own
+            env = lab_kernel_env(self.LAB, os.path.join(self.LAB, "claude"), os.path.join(self.LAB, "dist"), 4321,
+                                 "testtok")
+        names = sorted(env)   # the names alone: a failure reports the leaked name, not the runner's values
+        for name in self.LIVE:
+            self.assertNotIn(name, names, "a live kernel's %s reached the lab kernel" % name)
+        for name, value in self.OWN.items():
+            self.assertEqual(env.get(name), value, "the lab's own %s" % name)
+        bus = env.get("ROMP_POSTAL_PORT", "")
+        self.assertTrue(bus.isdigit(), "a postal bus port of the lab's own: %r" % bus)
+        self.assertNotEqual(bus, self.MACHINE_BUS_PORT, "never the machine's bus")
+        for name in ("PATH", "HOME"):
+            self.assertIn(name, names, "the runner's %s reaches the lab kernel" % name)
 
 
 if __name__ == "__main__":

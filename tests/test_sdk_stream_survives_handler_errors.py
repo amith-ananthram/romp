@@ -37,6 +37,7 @@ Every id here is synthetic (the placeholder uuid family); no message content is 
 """
 import asyncio
 import inspect
+import json
 import os
 import re
 import shutil
@@ -1082,6 +1083,33 @@ class TheDeferredReconnectTakesTheHeldQueueWithIt(unittest.TestCase):
         c1 = self._Client.instances[0]
         self.assertEqual(c1.writes, [("first turn", "before-result")])
         return c1
+
+    def test_a_fed_turn_gets_the_pop_stamp_and_its_row_carries_both_event_stamps(self):
+        """The two event stamps the latency figures read: the feeder's pop stamps fedT as it hands the
+        fresh turn's text to the client, the first streamed work atom stamps firstOutT, and the settle's
+        row carries both (rounded to the millisecond) and then spends them. Driven through the real
+        _amain on the stand-in SDK; every cross-thread read waits on its event, and what is asserted is
+        presence and order, never a duration."""
+        t0 = time.time()
+        c1 = self._first_turn()
+        s = self.s
+        self._wait(lambda: s._fed_t is not None, "the pop stamp")
+        self.assertIsInstance(s._fed_t, float)
+        self.assertTrue(t0 <= s._fed_t <= time.time(), "the pop's own clock reading")
+        self._wait(lambda: s._first_out_t is not None, "the first work atom")
+        fed_seen, first_seen = s._fed_t, s._first_out_t
+        self.assertLessEqual(fed_seen, first_seen, "fed, then the first output")
+        s.loop.call_soon_threadsafe(c1.release.set)          # the turn's ResultMessage: the settle runs
+        self._wait(lambda: s.inflight == 0, "the settle")
+        rows = [json.loads(ln) for ln in (self.be.state_dir / sb.TURNS_FILE).read_text().splitlines()]
+        self.assertEqual(len(rows), 1, "one row for the settled turn")
+        row = rows[0]
+        self.assertEqual((row["fedT"], row["firstOutT"]), (round(fed_seen, 3), round(first_seen, 3)))
+        self.assertTrue(row["fedT"] <= row["firstOutT"] <= row["resultT"])
+        self.assertEqual((row["fedTexts"], row["opener"]), (1, "human"))
+        self.assertIn("usd", row, "the spend accounting's figure rode along")
+        self.assertTrue(s._fed_t is None and s._first_out_t is None and s._turn_spend is None,
+                        "spent with the row")
 
     def test_a_head_held_behind_an_interrupted_turn_is_fed_to_the_new_client_and_never_flagged(self):
         s = self.s

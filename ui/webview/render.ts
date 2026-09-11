@@ -34,6 +34,7 @@ import { flash } from "./actions";   // its own line: the import above is pinned
 import { awaitWord, awaitBreakdown, groupRows, rowIds, waitsNote, GROUP_TITLE, workingFor, type AwaitRow } from "./spin-caption";
 import { isClearCmd, openTopTitles, clearConfirmDetail, endConfirmDetail } from "./clear-confirm";
 import { prebuildPlan, type ViewState } from "./prebuild";
+import { historyMarks, historyBands, windowSpans, HIST_H, HIST_GAP } from "./glow-history";
 import { newSkeletonState, applyTabOrderSkeleton, onStatus, onFull, onDismiss, onSocketUp, nextPrefetch, renderKind } from "./skeleton-tabs";
 import { reconcileTabOrder, adoptArrival } from "./tab-order";
 import { writeViewOrder } from "./view-order";
@@ -71,7 +72,7 @@ import { hostNameNodes, hostPartsNodes, hostPrefix, hostOf, hostIsDown, hostIsDi
 import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionToken, insertMention, mentionKeyAction, mentionSegments } from "./composer-mention";   // the @-mention card's rules, pure; the DOM is setupComposer's mention block and markMentions
 import type { MentionCandidate, MentionQuery } from "./composer-mention";
 import { defaultCommentName, defaultBreakoutName, defaultForkName, nameToSend } from "./comment-name";
-import { followReader, keepPlaceAcrossShow, followTail, atBottomDist, followBoxBelow, followTailShrink } from "./scroll-keep";
+import { followReader, keepPlaceAcrossShow, followTail, atBottomDist, followBoxBelow, followTailShrink, reshowStick } from "./scroll-keep";
 import { retainLiveOmitted } from "./tab-order";
 import { userTurnShows } from "./user-turn-content";
 import { ScrollDiagBudget, classifyScroll, scrollWriteRow, tailChangeRow, tailLabel, spacerRow, readScrollDiagCap, summarizeTailMutations, tailMutRow, unitChangeRow, unitChanges, boxChanges, boxLabel, BOX_FROM_TAIL } from "./scroll-write";
@@ -1425,11 +1426,12 @@ document.addEventListener("click", (e) => {
 // own event, never a per-click guess (no reading the parent's DOM, no polling). Standalone /chat never
 // hears one and reads as all-off, which the framed gate makes moot anyway.
 let panesOn: Record<string, boolean> = {};
+let panesAvail: Record<string, boolean> = {};   // …and which panes EXIST to bring forward (avail: the Files control's setting, T317); absent = available
 function openPath(path: string, sid?: string | null, ev?: MouseEvent | null): void {
   if (!vscodeApi) return;
   if (location.protocol === "http:" || location.protocol === "https:") {
     const to = sid || activeId || null;
-    const route = fileLinkRoute(settings.fileLinkPane, window.parent !== window, panesOn.files === true);
+    const route = fileLinkRoute(settings.fileLinkPane, window.parent !== window, panesOn.files === true, panesAvail.files !== false);
     // with its gesture, read first: a Cmd/Ctrl- or middle-click on a PDF takes the browser's own tab wherever
     // the plain click would have landed; a plain click routed to the Files pane is handed to the shell
     openFileClick(ev, path, to, route === "pane" ? () => {
@@ -1462,7 +1464,7 @@ function onMiddleClick(a: HTMLElement, fn: (e: MouseEvent) => void): void {
 // tells the person where Browse files will land, so the two cannot disagree.
 function browseRouteNow(): BrowseRoute {
   const web = location.protocol === "http:" || location.protocol === "https:";
-  return browseRoute(web, settings.fileLinkPane, window.parent !== window, panesOn.files === true);
+  return browseRoute(web, settings.fileLinkPane, window.parent !== window, panesOn.files === true, panesAvail.files !== false);
 }
 // Surface the FILE BROWSER at `path` for the session: the folder shown under the chat, the system context
 // card's Directory row, a tab menu's Browse files, a chat-hosted viewer's directory link. The listing goes
@@ -2400,8 +2402,30 @@ function railLastDotFrom(turn: HTMLElement, hostR: DOMRect): number | null {
 // time window — plus any postal card carrying a hovered message id. Empty
 // groups+mids = clear. Glow is hover-transient, so a re-render that drops it
 // mid-hover self-heals on the next hover tick (the user 2026-06-19).
-function applyGlow(groups: Array<{ sid: string; uuids: string[] }>, mids: string[]) {
+// T318b (the user 2026-09-10): a group also carries `idx` (each uuid's GLOBAL event index in the kernel's chat
+// payload) so a source turn OUTSIDE the resident tail, which has no row here to light, is marked on the ruler's
+// history strip by its position in the unloaded prefix [0, headFrom) instead of painting nothing (glow-history.ts).
+let glowHistory: number[] = [];   // the active view's unloaded glow turns, as fractions of its unloaded prefix
+let glowUnits: number[] = [];     // …and its RESIDENT glow turns with no rendered row, as display units (a spacer's)
+// The display units of hovered uuids that are RESIDENT (in s.events) but have no rendered row: outside the render
+// window they sit inside a spacer, and paintGlowRuler places them by windowSpans; inside the window without a row
+// (folded, off the active path) they have no place and paintGlowRuler drops them. Same lookup as scrollToAnchor's.
+function residentUnits(s: Session, uuids: string[]): number[] {
+  if (!uuids.length) return [];
+  const items = displayItems(s);
+  const out: number[] = [];
+  for (const uuid of uuids) {
+    const idx = s.events.findIndex((e) => e.uuid === uuid);
+    if (idx < 0) continue;
+    let u = items.findIndex((it) => it.kind === "toolgroup" || it.kind === "noticegroup" ? it.indices.includes(idx) : it.index === idx);
+    if (u < 0) u = items.findIndex((it) => itemFirstEvent(it) >= idx);
+    if (u >= 0) out.push(u);
+  }
+  return out;
+}
+function applyGlow(groups: Array<{ sid: string; uuids: string[]; idx?: Record<string, number>; total?: number }>, mids: string[]) {
   document.querySelectorAll(".ext-glow").forEach((n) => n.classList.remove("ext-glow"));
+  glowHistory = []; glowUnits = [];
   const midSet = new Set(mids);
   if (midSet.size) {
     document.querySelectorAll<HTMLElement>(".turn[data-mid]").forEach((n) => {
@@ -2413,9 +2437,19 @@ function applyGlow(groups: Array<{ sid: string; uuids: string[] }>, mids: string
     if (!v) continue;
     const uset = new Set(g.uuids || []);
     if (!uset.size) continue;
+    const lit = new Set<string>();
     v.el.querySelectorAll<HTMLElement>(".turn[data-uuid]").forEach((n) => {
-      if (uset.has(n.dataset.uuid || "")) n.classList.add("ext-glow");   // every row of a matched atom lights
+      const u = n.dataset.uuid || "";
+      if (uset.has(u)) { n.classList.add("ext-glow"); lit.add(u); }   // every row of a matched atom lights
     });
+    // the rest have no row: outside the resident tail they go on the ruler's history strip, resident but outside
+    // the render window on the ruler proper at their spacer's slice (the active view's only, whose #content the
+    // ruler mirrors; other views are display:none)
+    if (g.sid === activeId) {
+      const s = liveSession(g.sid);
+      glowHistory = historyMarks(g.uuids || [], g.idx, lit, s?.headFrom ?? 0);
+      glowUnits = s ? residentUnits(s, (g.uuids || []).filter((u) => !lit.has(u))) : [];
+    }
   }
   paintGlowRuler();   // mirror the glow as bands on the overview ruler (link_audit's #4)
   paintRailBand();    // one continuous measured band over the rail line (the user 2026-07-02)
@@ -2531,7 +2565,9 @@ function paintRailBand(): void {
 // map CONTENT space → ruler space, so a plain scroll never moves them (they mark absolute transcript
 // position); only a glow change or a #content relayout repaints. v1 is a pure indicator (pointer-events:none
 // so the native scrollbar still works underneath) — the optional click-a-band-to-scroll is intentionally
-// skipped so it can't swallow scrollbar clicks.
+// skipped so it can't swallow scrollbar clicks. T318b (the user 2026-09-10): when the hovered turns include some
+// OUTSIDE the resident tail, the top of the strip is a HISTORY cap marking them by global event index over the
+// unloaded prefix (applyGlow → glowHistory), and the resident scroll maps into what is left below a hairline gap.
 const RULER_W = 10;   // == the webkit scrollbar width (styles.css ::-webkit-scrollbar) so bands sit in its gutter
 let glowRuler: HTMLElement | null = null;
 function ensureGlowRuler(): HTMLElement {
@@ -2547,15 +2583,30 @@ function paintGlowRuler(): void {
   const v = activeId ? views.get(activeId) : null;
   // only the ACTIVE view's glows map onto its #content scroll (other views are display:none → zero rects)
   const glows = (content && v) ? Array.from(v.el.querySelectorAll<HTMLElement>(".turn.ext-glow")) : [];
-  if (!content || !glows.length) { ruler.style.display = "none"; ruler.replaceChildren(); return; }
+  const hist = (content && v) ? glowHistory : [];
+  const units = (content && v) ? glowUnits : [];
+  if (!content || !v || (!glows.length && !hist.length && !units.length)) { ruler.style.display = "none"; ruler.replaceChildren(); return; }
   const rect = content.getBoundingClientRect();
   const scrollH = content.scrollHeight || 1;
   const rulerH = content.clientHeight;          // the strip spans #content's VISIBLE height
+  const capH = hist.length ? HIST_H + HIST_GAP : 0;   // the history cap, when there is history to mark
+  const mapH = Math.max(1, rulerH - capH);            // …and the resident scroll maps into the rest
   // each glowing turn → a [top, bot] span in CONTENT space (scroll-independent: + scrollTop, − content top)
   const segs = glows.map((turn) => {
     const top = turn.getBoundingClientRect().top - rect.top + content.scrollTop;
     return { top, bot: top + turn.offsetHeight };
-  }).sort((a, b) => a.top - b.top);
+  });
+  // T318b: a hovered turn that is resident but outside the render window sits inside a spacer; its span is the
+  // spacer's slice for its unit, so the ruler bands it like a row it cannot see (windowSpans; the geometry is read
+  // here, at paint time, so a window that moved since the hover is placed as it stands now)
+  if (units.length) {
+    const yOf = (e: HTMLElement | null) => e ? e.getBoundingClientRect().top - rect.top + content.scrollTop : 0;
+    const topSp = v.el.querySelector<HTMLElement>(".tx-spacer-top"), botSp = v.el.querySelector<HTMLElement>(".tx-spacer-bot");
+    segs.push(...windowSpans(units, { winStart: v.winStart ?? 0, winEnd: v.winEnd ?? (v.unitTotal ?? 0), unitTotal: v.unitTotal ?? 0,
+                                      topY: yOf(topSp), topH: topSp ? topSp.offsetHeight : 0, botY: yOf(botSp), botH: botSp ? botSp.offsetHeight : 0,
+                                      avg: v.avgTurnH ?? 60 }));
+  }
+  segs.sort((a, b) => a.top - b.top);
   // coalesce contiguous / overlapping turns into ONE band; a multi-segment goal hover → a few disjoint bands
   const bands: Array<{ top: number; bot: number }> = [];
   for (const s of segs) {
@@ -2571,9 +2622,21 @@ function paintGlowRuler(): void {
   ruler.replaceChildren();
   for (const b of bands) {
     const band = el("div", "glow-ruler-band");
-    band.style.top = (b.top / scrollH * rulerH) + "px";
-    band.style.height = Math.max(3, (b.bot - b.top) / scrollH * rulerH) + "px";   // min 3px so a short turn still reads
+    band.style.top = (capH + b.top / scrollH * mapH) + "px";
+    band.style.height = Math.max(3, (b.bot - b.top) / scrollH * mapH) + "px";   // min 3px so a short turn still reads
     ruler.appendChild(band);
+  }
+  if (hist.length) {
+    const strip = el("div", "glow-ruler-hist");
+    strip.style.height = HIST_H + "px";
+    for (const hb of historyBands(hist, HIST_H)) {
+      const band = el("div", "glow-ruler-band");
+      band.classList.add("hist");
+      band.style.top = hb.top + "px";
+      band.style.height = hb.height + "px";
+      strip.appendChild(band);
+    }
+    ruler.appendChild(strip);
   }
   ruler.style.display = "";
 }
@@ -5374,6 +5437,9 @@ function makeGroupHead(sec: TabSection, collapsed: boolean, holdsActive: boolean
   // (headWords) and its own way back are derived from
   const shown = snapView === name;
   if (shown) head.classList.add("snap-shown");
+  // the tag's colour as the row's --chip-bg (the tab sets the same variable from its identity colour): the shown
+  // row's box wears the selected tab's inset ring in it (styles.css .tab-group-head.snap-shown, T322)
+  if (sec.color) head.style.setProperty("--chip-bg", sec.color);
   // THE WAY BACK: the header whose section the pane shows, OPEN, holding the tab being read, is the click that
   // put the section in the pane; a second click puts the transcript back (show-transcript, leaveSnapshot)
   // instead of folding the section under its reader. Derived from the rendered state, as the fold is, and
@@ -5965,7 +6031,7 @@ function renderTabs() {
     // ...and the whole tab dims when that host is unreachable, so a disconnected session reads as one at
     // a glance rather than only on inspection (the user 2026-07-29). The marked "host:" carries the why.
     if (hostIsDown(id)) { tab.classList.add("host-off"); tab.title = hostDownNote(id); }
-    if (s.status.faded && id !== activeId && s.color) {
+    if (s.status.faded && (id !== activeId || snapView) && s.color) {   // in the overview mode the active tab fades like any other (no residual selection cue, T322)
       const full = s.color.bg;
       label.style.color = fadedColor(full);
       // The "host:" prefix declares its OWN color (quiet gray), so the parent's faded color can't inherit
@@ -6514,9 +6580,11 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
         sub.replaceChildren();
         for (const g of holding()) {                             // one chip per NAME — never a host prefix
           const row = el("div", "ctx-item ctx-item-toggle");
-          const chip = el("span", "ctx-tag-dot"); chip.style.background = g.color || "var(--dim)"; row.appendChild(chip);
           const bodyE = el("span", "ctx-item-body");
-          const lb = el("span", "ctx-item-label"); lb.textContent = g.name; bodyE.appendChild(lb);
+          const lb = el("span", "ctx-item-label");
+          const chip = tagChip(g.name, g.color || null, { inheritSize: true });   // the one tag chip (T321): the row's label IS the tag, at the label's size
+          chip.classList.add("ctx-tag-chip");
+          lb.appendChild(chip); bodyE.appendChild(lb);
           row.appendChild(bodyE);
           if (g.pending) {
             // a create still in flight: the row shows, and takes no gesture until the ack names the
@@ -6547,11 +6615,12 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
         const home = home0 && !home0.pending ? home0 : undefined;
         for (const g of others) {
           const row = el("div", "ctx-item ctx-item-toggle");
-          const chip = el("span", "ctx-tag-dot"); chip.style.background = g.color || "var(--dim)"; row.appendChild(chip);
           const bodyE = el("span", "ctx-item-body");
           const lb = el("span", "ctx-item-label");
+          // the tag inside the sentence is the chip (T321): no swatch-and-name pair anywhere a tag shows
+          const named = () => { const c = tagChip(g.name, g.color || null, { inheritSize: true }); c.classList.add("ctx-tag-chip"); return c; };
           if (home) {
-            lb.textContent = "Move to " + g.name; bodyE.appendChild(lb);
+            lb.append("Move to ", named()); bodyE.appendChild(lb);
             row.appendChild(bodyE);
             const plus = el("button", "ctx-tag-x ctx-tag-plus") as HTMLButtonElement;
             plus.type = "button"; plus.textContent = "+"; plus.title = "add this tag too — the session keeps its other tags";
@@ -6559,7 +6628,7 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
             row.appendChild(plus);
             row.addEventListener("click", (e2) => { e2.stopPropagation(); moveUnion(home, g); build(); sb.textContent = subText(); });
           } else {
-            lb.textContent = "+ " + g.name; bodyE.appendChild(lb);
+            lb.append("+ ", named()); bodyE.appendChild(lb);
             row.appendChild(bodyE);
             row.addEventListener("click", (e2) => { e2.stopPropagation(); editUnion(g, { add: [id] }); build(); sb.textContent = subText(); });
           }
@@ -6585,8 +6654,7 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
           const on = isPinned(tabGroups(), sec, id);
           sub.appendChild(el("div", "ctx-sep"));
           const row = el("div", "ctx-item ctx-item-toggle ctx-item-pin" + (on ? " current" : ""));
-          const chip = el("span", "ctx-tag-dot"); chip.style.background = home.color || "var(--dim)"; row.appendChild(chip);
-          const bodyE = el("span", "ctx-item-body");
+          const bodyE = el("span", "ctx-item-body");   // no swatch (T321): the sub-line names the home tag in words
           const lb = el("span", "ctx-item-label"); lb.textContent = "Show when folded"; bodyE.appendChild(lb);
           const sb2 = el("span", "ctx-item-sub");
           sb2.textContent = on ? `stays on the strip while ${home.name} is folded` : `keep this tab on the strip while ${home.name} is folded`;
@@ -7407,6 +7475,14 @@ function backendTakesTags(be: string): boolean { return be === "sdk" || be === "
 // the Tags row is for SDK and Codex sessions (tab groups, 2026-09-04): on the tmux pick the row stays
 // in place but disabled behind a short note, and the create handler sends no `tags`. Without this a
 // chip prefilled from a tagged active tab turns every terminal create into a refusal.
+// The Tags row's option paints as the tag chip itself (T321, the user 2026-09-10): the thin border in the tag's own
+// colour that the tab strip, the feed and the outline draw, and on versus off by the visual the tag toggles already
+// use, the faded chip (tagChip's `off`, TAG_CHIP_OFF_CLASS at 0.45), never a dot and never the Backend row's accent
+// fill. The `sel` class on the button stays the state the create reads; the chip is repainted from it on each click.
+function paintPickerTagChip(b: HTMLButtonElement, u: { name: string; color?: string | null }): void {
+  b.replaceChildren(tagChip(u.name, u.color, { inheritSize: true, off: !b.classList.contains("sel") }));
+}
+
 function syncPickerTags(): void {
   const wrap = document.querySelector("#picker .picker-tags") as HTMLElement | null;
   if (!wrap) return;
@@ -7909,12 +7985,11 @@ function openPicker(pick = false, prompt?: string, allowNew = false) {
     for (const u of unions) {
       const b = el("button", "picker-be-opt" + (preset.has(u.name) ? " sel" : "")) as HTMLButtonElement;
       b.type = "button"; b.dataset.tag = u.name;
-      const d = el("span", "picker-tag-dot"); d.style.background = u.color || "var(--dim)"; b.appendChild(d);
-      b.appendChild(document.createTextNode(u.name));
+      paintPickerTagChip(b, u);   // the tag chip every surface draws, full when selected, faded when not (T321)
       b.title = preset.has(u.name)
         ? `the session you are looking at is in ${u.name} — the new one joins it too unless you unpick this`
         : `put the new session in ${u.name}`;
-      b.addEventListener("click", () => b.classList.toggle("sel"));   // multi-select: each chip on its own
+      b.addEventListener("click", () => { b.classList.toggle("sel"); paintPickerTagChip(b, u); });   // multi-select: each chip on its own
       tgWrapEl.insertBefore(b, tgWrapEl.querySelector(".picker-tags-note"));   // chips before the tmux note
     }
     syncPickerTags();   // the backend toggle was just reset to the gear default above
@@ -11023,7 +11098,15 @@ function rerenderAll(): void {
   // (follow mode lands there); a hidden pane has nothing to keep either. showActive restores it after the land.
   const content = document.getElementById("content");
   const av = activeId ? views.get(activeId) : null;
-  const keep = av && av.shown && content && content.clientHeight > 0 && !atBottom(content) ? captureScrollAnchor(content, av) : null;   // follow mode: only a true tail-sitter lands at the bottom
+  const live = !!(av && av.shown && content && content.clientHeight > 0);
+  const bottom = live && atBottom(content!);
+  // Follow mode is re-derived from the true bottom HERE, before the clear (T262 review find, 2026-09-10): an
+  // emptied scroller reads as the bottom (reading scrollHeight forces layout and the browser clamps scrollTop to
+  // the new maximum, 0 once what is left of #content fits), so showActive's re-show rule would put a scrolled-up
+  // reader into follow mode, and the same frame's tail-shrink and box-below observers would then write them to
+  // the bottom over the anchor restored below. One read of the DOM drives both the flag and the keep.
+  if (live) av!.stick = reshowStick(av!.stick, bottom);
+  const keep = live && !bottom ? captureScrollAnchor(content!, av!) : null;   // follow mode: only a true tail-sitter lands at the bottom
   for (const v of views.values()) { while (v.el.firstChild) v.el.removeChild(v.el.firstChild); v.rendered = 0; v.stale = false; v.winStart = 0; v.winEnd = 0; v.avgTurnH = undefined; v.spacerCount = undefined; v.spacerCountBot = undefined; v.unitTotal = undefined; }
   showActive(keep);
   schedulePrebuild(); // rebuild every off-screen view in idle under the new setting, so switches stay instant
@@ -11220,9 +11303,17 @@ function snapshotHost(): HTMLElement | null {
   host.addEventListener("pointerdown", () => { tabPointerHeld = true; });
   return host;
 }
+/** The overview MODE's one switch (T322): the body carries the class (the footer hides by it, the Classic strip's active
+ *  tab is neutralised by it) and so does the strip itself, because the Yatharth theme's neutraliser is a tint rule and
+ *  every tint rule starts with the theme's body class (tab-theme.test.ts), so that rule reads the mode off #tabs. */
+function setSnapMode(on: boolean): void {
+  document.body.classList.toggle("snap-mode", on);
+  document.getElementById("tabs")?.classList.toggle("snap-mode", on);
+}
 function hideSnapshot(): void {
   const host = document.getElementById("tab-snapshot");
   if (host) host.style.display = "none";
+  setSnapMode(false);
   snapModel = null;
   // the transcript comes back where the reader left it, not where the view's scrolls put the spot (snapKeep)
   if (snapKeep) { snapKeep.v.scrollTop = snapKeep.scrollTop; snapKeep.v.stick = snapKeep.stick; snapKeep = null; }
@@ -11306,16 +11397,18 @@ function renderSnapshot(): boolean {
   let list = host.querySelector<HTMLElement>(":scope > .snap-list");
   if (!list) {
     const h = document.createElement("h2"); h.className = "snap-head";
-    // the heading's own bar (snap-swatch) and the name: the strip's header wears the tag chip; this heading
-    // keeps a bar + name pair, whose parts the patch below rewrites in place (the rows' rule: nothing is remade)
-    const sw = el("span", "snap-swatch"); sw.setAttribute("aria-hidden", "true");
-    h.append(sw, el("span", "snap-name"), el("span", "snap-count"));
+    // the heading reads "Overview of <the tag's ordinary chip> <count>" (T322, the user 2026-09-10: a name beside a
+    // little colour bar was not it): the words, a slot the tag chip is placed in (tagChip, the same builder the
+    // strip's row and the tag menu use — never a chip rule of its own), and the count; the patch below rewrites
+    // the slot's chip and the count in place (the rows' rule: nothing else is remade)
+    const of = el("span", "snap-of"); of.textContent = "Overview of";
+    h.append(of, el("span", "snap-chip-slot"), el("span", "snap-count"));
     list = el("div", "snap-list"); list.setAttribute("role", "list");
     host.replaceChildren(h, list);
   }
   const part = (cls: string) => host.querySelector<HTMLElement>(".snap-head > ." + cls)!;
-  part("snap-swatch").style.background = next.color || "";
-  part("snap-name").textContent = next.name;
+  const chip = tagChip(next.name, next.color, { inheritSize: true }); chip.classList.add("snap-chip");
+  part("snap-chip-slot").replaceChildren(chip);
   part("snap-count").textContent = words.count;
   // a MOVED row: insertBefore detaches and re-attaches its node, which blurs it (the browser's focus fixup); the
   // same event puts focus back on it (the strip's refocus rule, by node instead of by id). A row GONE from under
@@ -11394,7 +11487,9 @@ function showActive(keep?: { uuid: string; y: number } | null) {
   // kernel's active hint, the MRU and the drafts still point at the session being read, and its header wears
   // the mark. renderSnapshot answers false when the section is gone from the strip (a tag deleted, its last
   // member hidden): then the transcript.
+  const wasSnap = document.body.classList.contains("snap-mode");   // read before renderSnapshot's gone-section path can clear it
   if (snapView && renderSnapshot()) {
+    setSnapMode(true);   // the overview is a mode: the message box goes, no tab is selected (styles.css, T322)
     for (const v of views.values()) v.el.style.display = "none";
     // the reader's place (snapKeep; once per visit): the hide above only queues the clamp's scroll event, so the
     // view's fields still hold what the reader's last scroll recorded
@@ -11416,6 +11511,11 @@ function showActive(keep?: { uuid: string; y: number } | null) {
     if (sendBtn) sendBtn.disabled = true;
     updateStatusline();
     return;
+  }
+  setSnapMode(false);   // a session's transcript: the message box and the selected tab are back
+  if (wasSnap) {   // the box was measured while the footer was display:none (a pick's draft swap): measure it now it has a layout box
+    const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
+    if (ta) growComposer(ta);
   }
   hideSnapshot();
   const s = activeId ? liveSession(activeId) : null;
@@ -11512,6 +11612,12 @@ function showActive(keep?: { uuid: string; y: number } | null) {
   // decision, and a restore over its landing would undo the jump the reader asked for (review find, 2026-09-08)
   const navigating = !!pendingAnchor || pendingAnchorT != null || (!!seek && seek.sid === activeId);
   const reshow = keepPlaceAcrossShow(v, v.el.style.display !== "none", content.clientHeight > 0, navigating);
+  // the true bottom decides follow mode at a re-show (T262): the recorded flag can lag the reader (a scroll
+  // that landed during a pending build is not recorded), and a stale `stick` sent a bottom reader to a saved
+  // spot a screen above on every full show — the snap-up the journal filed as `land-saved`
+  // (gated the way the keep below is: a caller that emptied the DOM first, rerenderAll, read the true bottom
+  // before the clear and hands its keep in; the emptied scroller here would read as the bottom for anyone)
+  if (reshow && keep === undefined) v.stick = reshowStick(v.stick, atBottom(content));
   const keepAnchor = reshow ? (keep !== undefined ? keep : (!atBottom(content) ? captureScrollAnchor(content, v) : null)) : null;   // follow mode: off the true bottom keeps its place
   // Bound the switch. A view the user scrolled to the top of has had its window expanded to the WHOLE
   // transcript (winStart crept to 0 via lazy-expand), and compact mode renders the whole folded stream —
@@ -12161,7 +12267,7 @@ if (typeof ResizeObserver === "function") {
       const h = entries[0]?.contentRect?.height ?? 0;
       const content = document.getElementById("content");
       const v = activeId ? views.get(activeId) : null;
-      if (content && lastH >= 0 && content.clientHeight > 0 && v && v.shown && followBoxBelow(v.stick, h - lastH)) {
+      if (content && !snapView && lastH >= 0 && content.clientHeight > 0 && v && v.shown && followBoxBelow(v.stick, h - lastH)) {   // a transcript rule: it stands down while the overview owns #content (the footer's hide is not a box below the reader, T322)
         writeScroll(content, content.scrollHeight, "box-below", true);
         v.scrollTop = content.scrollTop;                      // keep the per-view saved position in sync
       }
@@ -16165,6 +16271,10 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
       for (const k of Object.keys(m.on)) on[k] = m.on[k] === true;
       panesOn = on;
     }
+    // which panes exist to bring forward (the Files control's setting): whole-set replace as well
+    const avail: Record<string, boolean> = {};
+    if (m.avail && typeof m.avail === "object") for (const k of Object.keys(m.avail)) avail[k] = m.avail[k] !== false;
+    panesAvail = avail;
     return;
   }
   // the pipe's down edge is the VS Code twin of the shim's romp:wsdown: unconfirmed sends say so (markPendingLost)

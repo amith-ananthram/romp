@@ -291,7 +291,8 @@ function chipWorld(opts: { clientHeight: number; innerHeight: number; transcript
   const pane = new ChipPane(opts.clientHeight, opts.innerHeight - 40);
   const win = { innerHeight: opts.innerHeight };
   const doc = { getElementById: (id: string): ChipEl | null => id === "content" ? pane : (pane.children.find((c) => c.id === id) ?? null),
-                body: { style: { removeProperty(_k: string): void {} } } };
+                body: { style: { removeProperty(_k: string): void {} },
+                        classList: { add(..._c: string[]): void {}, remove(..._c: string[]): void {}, toggle(_c: string, _on?: boolean): void {}, contains(_c: string): boolean { return false; } } } };   // body.snap-mode (T322): showActive toggles the mode class
   const viewA = new ChipEl("session", opts.transcript);
   pane.appendChild(viewA);
   const viewB = new ChipEl("session", 900); viewB.style.display = "none";   // the stale copy's view, hidden as a non-active view is
@@ -321,6 +322,7 @@ function chipWorld(opts: { clientHeight: number; innerHeight: number; transcript
     // the section-at-a-glance view, inert: no section shows (snapView null), so showActive's branch is not taken
     let snapView = null, snapKeep = null;
     const renderSnapshot = () => false, hideSnapshot = () => {}, composerRestingPlaceholder = () => "";
+    const setSnapMode = () => {}, growComposer = () => {};   // the overview mode's switch and the box re-measure on leaving it (T322)
     const requestFullSession = (id, why) => { HOOKS.fulls.push(why + ":" + id); };
   `;
   const epilogue = `

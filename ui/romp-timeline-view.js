@@ -417,7 +417,8 @@ let MENU_STYLE = null, MENU_CHECK_STYLE = null;   // set by applyPal() below (da
 // THE TAG CHIP in the views menu (T283b, the user 2026-09-09: menus wear one vocabulary): the shared tag-lens
 // menu renders each tag as the tag chip itself acting as a toggle (ui/webview/tag-menu.ts tagChip + T283's
 // loop); this pane inlines the RESOLVED twin, since it may live in a foreign document that loads no module.
-// TAG_CHIP_STYLE is tagChip's pill byte for byte up to the colour (a drift test compares); the fade is the
+// TAG_CHIP_STYLE is tagChip's pill byte for byte up to the colour (a drift test compares), and the tail after the
+// colour carries tagChip's weight 400 and normal tracking (T321: a tag is never bold, on any surface); the fade is the
 // shared TAG_CHIP_OFF_OPACITY, and the class names the state for a host that does load the sheets.
 const TAG_CHIP_STYLE = 'display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:9px;font-size:0.82em;border:1px solid ';
 const TAG_CHIP_OFF_OPACITY = '0.45';
@@ -1119,6 +1120,7 @@ class TimelinePanel {
     this._laneRefusal = null;    // {sid, flag, text}: the kernel's refusal of the last lane-gear toggle, shown in the gear until dismissed or retried
     this._laneMenuBuild = null;  // the last-opened lane gear's rebuild-in-place, so a refusal arriving while it is open repaints it (like _viewsDialogBuild; every use is gated on _laneMenu being open)
     this._dismissed = new Set(); // sids cleared via the dead-lane Clear pill, held STICKY the same way (see _reconcileDismissed)
+    this._dismissedRows = new Map(); // sid -> [row, index] a Clear took out of the frame, so a Clear the kernel refuses puts it straight back (settingRefused, gesture 'lane')
     this._views = null;          // the kernel-echoed views blob (data.views); null until the first push
     this._rejectedViews = null;  // the last blob the seq gate turned away since it last adopted one — what the caps frame adopts (setCaps)
     this._announcedViewsSeq = null; // the seq the last caps frame announced as the kernel's current store when it adopted no kept blob — a LATER blob at exactly that seq is adopted below the held one (_takeViews); cleared by the next adoption that changes the held blob (viewsAnnouncedAfter)
@@ -1271,7 +1273,7 @@ class TimelinePanel {
           + '.romp-tl-cbtn:hover{border-color:var(--accent,#9cd2ff);color:var(--accent,#9cd2ff);background:rgba(156,210,255,0.12)}'
           + '.romp-tl-cbtn.on{color:var(--accent,#9cd2ff);border-color:var(--accent,#9cd2ff);background:rgba(156,210,255,0.12);opacity:1}'
           + '.romp-tl-chip{display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:9px;'
-          + 'font-size:0.82em;border:1px solid;background:transparent;white-space:nowrap}'
+          + 'font-size:0.82em;border:1px solid;background:transparent;white-space:nowrap;font-weight:400;letter-spacing:normal}'
           + '.romp-tl-chipx{cursor:pointer;opacity:0.75;color:#9aa0a6;font-size:0.9em}'
           + '.romp-tl-ctail{color:#9aa0a6;opacity:0.7;font-size:12px;cursor:pointer;user-select:none;white-space:nowrap}'
           // LIGHT theme re-skin, scoped so the sheet is theme-flip-safe without re-injection: muted ink,
@@ -3406,6 +3408,16 @@ class TimelinePanel {
       this._laneRefusal = { sid, flag, text };
       if (this._laneMenu && this._laneMenu._sid === sid && this._laneMenuBuild) this._laneMenuBuild();
     }
+    if (m && m.gesture === 'lane' && sid) {
+      // the kernel could not record this Clear: release the sticky removal and put the row back in the slot
+      // the click took it from, so the lane is visible again on THIS event (see _holdDismissed)
+      this._dismissed.delete(sid);
+      const rows = this._dismissedRows || new Map(), held = rows.get(sid);
+      rows.delete(sid);
+      if (held && this.data && Array.isArray(this.data.sessions) && !this.data.sessions.some((x) => x.id === sid)) {
+        this.data.sessions.splice(Math.min(Math.max(held[1], 0), this.data.sessions.length), 0, held[0]);
+      }
+    }
     let shell = false;
     try {
       shell = !!(typeof window !== 'undefined' && window.parent && window.parent !== window);
@@ -3524,7 +3536,7 @@ class TimelinePanel {
       const ch = box.createSpan();
       ch.setAttribute('style', 'display:inline-flex;align-items:center;gap:5px;'
         + 'padding:2px 7px;border-radius:9px;font-size:0.82em;cursor:pointer;white-space:nowrap;'
-        + 'color:' + tc + ';border:1px solid ' + tc + ';background:transparent;');
+        + 'color:' + tc + ';border:1px solid ' + tc + ';background:transparent;font-weight:400;letter-spacing:normal;');   // the one tag chip (T321)
       ch.addEventListener('mouseenter', () => { ch.style.background = HOVER_BG; });
       ch.addEventListener('mouseleave', () => { ch.style.background = 'transparent'; });
       ch.createSpan({ text: g.name });
@@ -3567,8 +3579,8 @@ class TimelinePanel {
       if (!rowIds.some((id) => g.members.indexOf(id) < 0)) continue;
       const tc = g.color || MENU_FG;
       const opt = box.createSpan({ text: g.name });
-      opt.setAttribute('style', 'padding:1px 8px;border-radius:9px;font-size:0.82em;cursor:pointer;'
-        + 'color:' + tc + ';border:1px solid ' + tc + ';background:transparent;');
+      opt.setAttribute('style', 'display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:9px;font-size:0.82em;cursor:pointer;white-space:nowrap;'
+        + 'color:' + tc + ';border:1px solid ' + tc + ';background:transparent;font-weight:400;letter-spacing:normal;');   // the one tag chip (T321): the join option is the tag
       opt.addEventListener('mouseenter', () => { opt.style.background = HOVER_BG; });
       opt.addEventListener('mouseleave', () => { opt.style.background = 'transparent'; });
       opt.addEventListener('click', () => {
@@ -4233,7 +4245,7 @@ class TimelinePanel {
       row.setAttribute('style', TAG_CHIP_ROW_STYLE);
       const col = color || MODEL_FG;
       const chip = row.createSpan({ text: name });
-      chip.setAttribute('style', TAG_CHIP_STYLE + col + ';color:' + col + ';background:transparent;white-space:nowrap;'
+      chip.setAttribute('style', TAG_CHIP_STYLE + col + ';color:' + col + ';background:transparent;white-space:nowrap;font-weight:400;letter-spacing:normal;'
         + (on ? '' : 'opacity:' + TAG_CHIP_OFF_OPACITY + ';'));
       if (!on) chip.classList.add(TAG_CHIP_OFF_CLASS);
       chip.setAttribute('role', 'button');
@@ -4653,8 +4665,9 @@ class TimelinePanel {
             }, 0);
           } else {
             const pill = pillCell.createSpan({ text: tg.name });
-            pill.setAttribute('style', 'display:inline-flex;align-items:center;padding:2px 9px;'
-              + 'border-radius:10px;border:1px solid ' + tc + ';color:' + tc + ';background:transparent;font-weight:650;'
+            // the one tag chip (T321): the shared pill's bytes at the ROW's size (the inherit case: a row that sizes its chip
+            // drops the chip's own 0.82em, as the strip's group row does), so the table's row height is the row's own
+            pill.setAttribute('style', TAG_CHIP_STYLE.replace('font-size:0.82em;', '') + tc + ';color:' + tc + ';background:transparent;white-space:nowrap;font-weight:400;letter-spacing:normal;'
               + (gid && tg.ids.indexOf(gid) >= 0 ? 'outline:1px solid ' + OUTLINE_FG + ';outline-offset:2px;' : ''));
             // tag federation v2: a queued edit for an unreachable home is VISIBLE, never
             // gone-but-not-gone — the kernel stamps the cached remote entry with `pending`
@@ -4871,11 +4884,13 @@ class TimelinePanel {
             const pill = (text, selected, color, apply) => {
               const c2 = color || MODEL_FG;
               const s2 = cell.createSpan({ text });
-              s2.setAttribute('style', 'cursor:pointer;padding:1px 8px;border-radius:9px;font-size:0.82em;'
-                + 'border:1px solid ' + c2 + ';color:' + c2 + ';'
-                + (selected ? 'background:' + SEL_BG + ';opacity:1;font-weight:650;' : 'background:transparent;opacity:0.6;'));
+              // the one tag chip (T321): selected = the full chip, unselected = the faded chip (the shared off fade and class),
+              // never a fill or a weight; the pointer is the only addition, this pill being a toggle
+              s2.setAttribute('style', TAG_CHIP_STYLE + c2 + ';color:' + c2 + ';background:transparent;white-space:nowrap;font-weight:400;letter-spacing:normal;cursor:pointer;'
+                + (selected ? '' : 'opacity:' + TAG_CHIP_OFF_OPACITY + ';'));
+              if (!selected) s2.classList.add(TAG_CHIP_OFF_CLASS);
               s2.addEventListener('mouseenter', () => { s2.style.opacity = '1'; });
-              s2.addEventListener('mouseleave', () => { if (!selected) s2.style.opacity = '0.6'; });
+              s2.addEventListener('mouseleave', () => { if (!selected) s2.style.opacity = TAG_CHIP_OFF_OPACITY; });
               s2.addEventListener('click', apply);
               return s2;
             };
@@ -5222,9 +5237,23 @@ class TimelinePanel {
     const byId = new Map(this.data.sessions.map((s) => [s.id, s]));
     for (const id of Array.from(this._dismissed)) {
       const s = byId.get(id);
-      if (!s || s.live) this._dismissed.delete(id);   // kernel caught up, or the sid revived → stop holding it
+      if (!s || s.live) { this._dismissed.delete(id); if (this._dismissedRows) this._dismissedRows.delete(id); }   // kernel caught up, or the sid revived → stop holding it
     }
     if (this._dismissed.size) this.data.sessions = this.data.sessions.filter((s) => !this._dismissed.has(s.id));
+  }
+
+  // The Clear pill's state step: drop the lane from the current frame so it vanishes at once, hold its sid in
+  // _dismissed so a stale or federation-merged push can't put it back before the kernel confirms
+  // (_reconcileDismissed), and keep the row and its slot so a Clear the kernel REFUSES (settingRefused with
+  // gesture 'lane') puts it straight back on that event: an unchanged lanes frame dedups on the kernel side
+  // for up to a minute, so waiting for the next push would leave the refused lane hidden that long.
+  _holdDismissed(s) {
+    if (!this._dismissedRows) this._dismissedRows = new Map();   // a panel built without the constructor (the node harnesses)
+    this._dismissed.add(s.id);
+    if (this.data && Array.isArray(this.data.sessions)) {
+      this._dismissedRows.set(s.id, [s, this.data.sessions.findIndex((x) => x.id === s.id)]);
+      this.data.sessions = this.data.sessions.filter((x) => x.id !== s.id);
+    }
   }
 
   // Persist a per-session flag. Web dashboard: the host WS hook (→ kernel setSessionFlag → rebuild
@@ -6083,8 +6112,7 @@ class TimelinePanel {
           // a stale or federation-merged push can't put it back before the kernel confirms (_reconcileDismissed).
           // The kernel persists the dismissal (2026-08-14), so restarts and reconnects keep it cleared;
           // only the session coming back live resurfaces the lane.
-          this._dismissed.add(s.id);
-          if (this.data && this.data.sessions) this.data.sessions = this.data.sessions.filter((x) => x.id !== s.id);
+          this._holdDismissed(s);
           this._dismissLane(s.id); this.draw();
         });
         svg.appendChild(chit);

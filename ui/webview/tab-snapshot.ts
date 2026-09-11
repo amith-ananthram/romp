@@ -226,10 +226,11 @@ export function snapshotModel(sec: SnapSectionLike, session: (id: string) => Sna
   return prev && sameModel(prev, next) ? prev : next;
 }
 
-/** The heading's words: the section's name and its count, and the spoken label for the region. */
+/** The heading's words: the count, and the spoken label for the region — "Overview of <tag>: N sessions", the
+ *  words the heading shows (T322: "Overview of", the tag's chip, the count). */
 export function snapshotHeading(name: string, n: number): { count: string; label: string } {
   const count = `${n} session${n === 1 ? "" : "s"}`;
-  return { count, label: `${name}: ${count}; click one to open it` };
+  return { count, label: `Overview of ${name}: ${count}; click one to open it` };
 }
 
 /** A row's spoken label (name, needs you, state, what it is doing, its own note) and its hover title.

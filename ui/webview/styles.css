@@ -90,9 +90,13 @@ body.scheme-solarized-dark {
   --err: #c0392b;   /* unified with the awaiting/blocked red (the user 2026-06-24): one "needs you" red. API-error (--st-blocked-bg #e5484d) stays distinct. */
   --warn: #d7a23a;  /* the heads-up amber — "attention, not an error". Was referenced with fallbacks but never
                        defined (a phantom token) until 2026-08-26; mirrored in feed.css (own :root). */
-  /* the postal card's two KIND colours (T302): the pre-rewrite chip colours as text on the dark page (6.4:1 and
-     6.7:1); the light theme re-inks both (they read 2.2:1 and 2.1:1 on cream otherwise) */
-  --postal-delegate: #b08cff;  --postal-coordinate: #14b8a6;  --postal-question: var(--st-working-bg);
+  /* the postal card's three KIND colours (T320, the user 2026-09-10): one SEQUENTIAL ramp in the accent's hue, not
+     three unrelated hues, ranked by how much the kind asks of the reader: coordination lowest (an FYI), delegation
+     next (work handed over), question highest (an answer owed). More asking = more intense against the page: on the
+     dark page the ramp climbs toward the accent's brightness (OKLCH hue 244, L .66 / .76 / .86; 5.4:1, 7.8:1 and
+     10.8:1 on the page, 5.0:1, 7.3:1 and 9.9:1 on a boxed card, whose --box-bg wash the word also sits on); the light
+     theme re-inks the same three ranks toward the deep end of its clay accent (below). */
+  --postal-coordinate: #7996af;  --postal-delegate: #7fb8e7;  --postal-question: #91d9ff;
   /* THE romp accent — light blue (the user 2026-06-24). Use var(--accent) for accent/highlight chrome
      (selected toggles, in-progress loading dots, the Fleet pill, focus) — NOT for STATUS colors, which keep
      their own meaning (--st-working-bg yellow = working, --st-blocked-bg red, etc.). --accent-fg reads on it. */
@@ -100,6 +104,7 @@ body.scheme-solarized-dark {
   /* THE faint accent wash — the one alpha behind every selected/hovered accent chrome (0.10 and 0.14
      variants drifted in before 2026-08-26). Mirrored in feed.css (own :root). */
   --accent-wash: rgba(156, 210, 255, 0.12);
+  --tab-active-bg: rgba(255, 255, 255, 0.14);   /* the selected tab's fill, and the tag row's while its overview shows (T322) */
   /* the menu vocabulary (CLAUDE.md "Menus and dropdowns wear ONE vocabulary") — every dropdown's
      radius and shadow resolve through these; two menus had drifted onto their own shadows before
      2026-08-26. Mirrored in feed.css (own :root). */
@@ -179,6 +184,9 @@ body.scheme-solarized-dark {
   --st-awaitbg-bg: #54B204; --st-awaitbg-fg: #0c1a00;
   --st-compacting-bg: #14b8a6; --st-compacting-fg: #ffffff;   /* teal — the compacting accent (text + compression bar) */
   --st-blocked-bg: #e5484d; --st-blocked-fg: #ffffff;   /* alarm red — session stopped on an API error */
+  /* magenta — a 5xx answer (529 included) in the API-health histograms and counts (T316): distinct from the 429 red
+     and the retrying amber, so a storm of one kind never reads as the other */
+  --st-5xx-bg: #c026d3; --st-5xx-fg: #ffffff;
   /* amber-orange — the API is backing off and retrying (the tab ring, the chip, the chat's retry notices); the
      hue sat RAW in seven rules until 2026-09-08 (5.38:1 on the chat's card surface) */
   --st-retrying-bg: #e67e22; --st-retrying-fg: #2a1500;
@@ -226,12 +234,18 @@ body.theme-light {
   --hl-cmt: #67614f; --hl-title: #8C4A00; --hl-meta: #6E6455; --hl-attr: #7A5A20;   /* --hl-cmt from #6E675C (4.39:1 on a code block) to 4.86:1 */
   --box-bg: rgba(0, 0, 0, 0.03);
   --box-border: rgba(0, 0, 0, 0.12);
-  --postal-delegate: #6e3fd0;  --postal-coordinate: #0d6b64;  --postal-question: #7d5600;   /* 5.4:1, 5.3:1 and 5.5:1 on the
-                                                                                            cream page (T302); the working
-                                                                                            amber alone read 4.26:1 there */
+  --postal-coordinate: #974a32;  --postal-delegate: #962b00;  --postal-question: #751000;   /* the kind ramp (T320): the
+                                                                                            accent's clay hue (OKLCH 38)
+                                                                                            deepening with rank, L .50 /
+                                                                                            .45 / .36; 5.3:1, 6.7:1 and
+                                                                                            9.6:1 on the cream page and
+                                                                                            5.0:1, 6.2:1 and 9.0:1 on a
+                                                                                            boxed card (the review's
+                                                                                            floor is the box, 4.5:1) */
   --err: #B02A1C;
   --accent: #C2410C; --accent-fg: #FFF8F2;
   --accent-wash: rgba(194, 65, 12, 0.10);
+  --tab-active-bg: rgba(255, 255, 255, 0.14);   /* the same fill the dark tab wears: a whiter sheet over cream (T322) */
   --cmt-hl: #FFDF70;
   --cmt-hl-outline: #8f6a00;   /* amber ink: 4.2:1 on the cream page — the fill's yellow measures 1.1:1 there, invisible as a line (T310) */
   --fast: #D45500;
@@ -246,6 +260,7 @@ body.theme-light {
   --st-awaitbg-bg: #54B204; --st-awaitbg-fg: #0c1a00;
   --st-compacting-bg: #0F766E; --st-compacting-fg: #ffffff;
   --st-blocked-bg: #e5484d; --st-blocked-fg: #ffffff;
+  --st-5xx-bg: #A21CAF; --st-5xx-fg: #ffffff;   /* the 5xx magenta in the light palette: 5.3:1 on the card, white on it 6.7:1 */
   --st-retrying-bg: #9C4A0C; --st-retrying-fg: #ffffff;   /* the retrying amber in the light palette: 4.86:1 on the card, white on it 6.18:1 */
   --radius-menu: 6px;
   --shadow-menu: 0 4px 12px rgba(31, 26, 20, 0.16);
@@ -387,33 +402,30 @@ body.tabbar-resizing { cursor: ns-resize; user-select: none; }
    2026-09-06): a disclosure chevron that flips with the fold, the tag as THE CHIP it wears everywhere
    (T251), and the member count (the folded-away count while folded). No state class, no close, no pip
    of its own — none of a tab's dress; folded, one small MEMBER-derived mark follows the count (the
-   state pip below), and hover/focus brighten the label and color the chevron in the accent (a fold
-   cue), never a row wash (a "select me" cue). The chip is coloured by IDENTITY, so it brightens by a
+   state pip below), The chip is coloured by IDENTITY, so it brightens by a
    filter rather than to --fg (T251b: --fg would erase the tag; the chip's inline colour is what the
    header's colour rule cannot reach) — the same lift the plain name used to get, on the tag's own hue. The header is focusable (Enter or Space fold),
    drags to reorder the groups (tagOrder), and the header under a dragged group wears the accent
    insertion cue. 0.82em is the surface's sub-line size (the menus' sub-lines) — labels match labels,
    and nothing here nests an em inside it. Tokens only, so the header reads in every theme without a
    light override. */
-.tab-group-head { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; padding: 6px 7px 6px 6px;
+.tab-group-head { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; padding: 6px 7px;
   font-size: 0.82em; letter-spacing: 0.04em; color: var(--dim); cursor: pointer; white-space: nowrap;
   user-select: none; border-radius: 6px 6px 0 0; outline: none; }
-.tab-group-head:hover, .tab-group-head:focus-visible { color: var(--fg); }
-.tab-group-head:hover .tab-group-caret, .tab-group-head:focus-visible .tab-group-caret { color: var(--accent); }
-/* the chip's fold cue (T251b): a brightness lift keeps the tag's identity colour (a --fg swap would erase
-   it) and, unlike a background wash, is a property the chip's inline style never sets — so the rule wins
-   by construction; the uncoloured "(no tags)" chip lifts from --dim toward --fg, the old label's exact cue */
-.tab-group-head:hover .tab-group-chip, .tab-group-head:focus-visible .tab-group-chip { filter: brightness(1.3); }
+/* A tag row is NOT a tab (T322, the user 2026-09-10): it takes a tab's allotment of space (the same 6px 7px padding
+   as .tab around the chip, the caret and the count; no border of its own, so a row never sets the strip's height,
+   a tab does — dense-chrome-layout.test.ts measures that) but wears none of a tab's dress — no hover lift of the
+   words, the caret or the chip, no wash, no rest outline. The keyboard's focus ring stays: it is not a dress, it
+   is where the focus is. */
 .tab-group-head:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-/* the section holding the tab being read, open or folded: it folds like any other (its cursor promises the
-   click), and its header says whose it is by the tag's chip, accent-underlined (the chip is coloured by
-   identity inline, which a colour rule cannot reach; the underline is a property it never sets), so the
-   header that stands in for a folded-away tab is found by the same mark it wore while open. Distinct from
-   the hover lift (a fold cue) and from .snap-shown (the pane shows the section). */
-.tab-group-head.holds-active .tab-group-chip { text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: 2px; }
-/* the section whose sessions the pane is SHOWING at a glance (render.ts sets .snap-shown on its header): the
-   accent wash the picker's active row wears, on the header the chip's inline style never reaches */
-.tab-group-head.snap-shown { background: var(--accent-wash); }
+/* the section holding the tab being read wears NO mark of its own any more (T322, the user 2026-09-10: the
+   accent underline on the tag's chip read as a second selection): the highlight on the tab itself says which
+   session is active. The class stays (aria-current, the folded stand-in's focus and arrows key on it). */
+/* the section whose sessions the pane is SHOWING at a glance (render.ts sets .snap-shown on its header) wears
+   the SELECTED TAB's box (T322): the same fill token .tab.active wears and the same inset identity ring
+   .tab.active.colored wears (--chip-bg, set inline from the tag's colour by makeGroupHead), so the one selected
+   thing on the strip, tab or row, always looks the same; no tab is selected while it shows (body.snap-mode). */
+.tab-group-head.snap-shown { color: var(--fg); background: var(--tab-active-bg); box-shadow: inset 0 0 0 1.5px var(--chip-bg, transparent); }
 .tab-group-head.dragging { opacity: 0.45; }
 .tab-group-head.drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 /* the disclosure chevron: ▸ folded, turned down while open — the fold-caret idiom (a CSS transition on
@@ -423,8 +435,9 @@ body.tabbar-resizing { cursor: ns-resize; user-select: none; }
 .tab-group-head:not(.collapsed) .tab-group-caret { transform: rotate(90deg); }
 /* the tag's color as a short bar, not a dot: a dot beside a name is a session pip */
 /* the tag's CHIP (T251) — the shared tag-menu builder's pill, sized by the header (no nested em); flex-none
-   so a wrapping strip never squeezes it, and a tab's own vertical rhythm stays the ceiling */
-.tab-group-chip { flex: 0 0 auto; font-weight: 600; line-height: 1.2; }
+   so a wrapping strip never squeezes it, and a tab's own vertical rhythm stays the ceiling. No weight here:
+   the chip is weight 400 everywhere (T321), bold is the session names' */
+.tab-group-chip { flex: 0 0 auto; line-height: 1.2; }
 .tab-group-count { opacity: 0.7; }
 /* the folded header's member-state pip (after the count, small — subordinate to the label): the tab's
    status colors by the tab's own rule (tab-state.ts) — working gold, blocked/waiting red, retrying the
@@ -600,7 +613,7 @@ body.tabbar-resizing { cursor: ns-resize; user-select: none; }
    background everywhere). No identity tint at any state, the
    thick 1.5px inset identity ring on the selected tab, the neutral line under the strip. The
    Yatharth theme below is the opt-in restoration of the contributor's merged strip aesthetic. */
-.tab.active { color: var(--fg); background: rgba(255, 255, 255, 0.14); }
+.tab.active { color: var(--fg); background: var(--tab-active-bg); }
 /* T123 (the user 2026-08-27, redirecting T118's resting-tab distinction — the merged 2% fill
    came out for this): resting tabs wear a SUPER-THIN outline at all times, no fill — the tab body
    stays the dark background, ringed by 1px in EXACTLY the gray the hover fill uses
@@ -680,9 +693,9 @@ body.chat-theme-yatharth .tab.active.colored:not(.tab-blocked) {
    gray + slashed. So the same blue marks "enabled" in both the menu and the timeline. */
 .ctx-item-toggle .ctx-icon { flex: 0 0 auto; margin-top: 1px; color: var(--accent); display: flex; }
 .ctx-item-toggle .ctx-icon.off { color: var(--dim); }
-/* the tab menu's Tags flyout (the user 2026-08-24): identity dot per union tag, ✕ = remove-
-   everywhere, an inline New tag… input — all in the menu vocabulary, no new font sizes */
-.ctx-tag-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; }
+/* the tab menu's Tags flyout (the user 2026-08-24): the tag chip per union tag (T321: the one chip, in the
+   label slot at the label's size, no identity dot), ✕ = remove-everywhere, an inline New tag… input, all in
+   the menu vocabulary, no new font sizes */
 /* a tag chip standing for an UNSELECTED toggle (the tag-lens menu, T283): faded, its colour kept —
    the state class; tag-menu.ts paints the same opacity inline for a sheet-less host (TAG_CHIP_OFF_OPACITY) */
 .tag-chip-off { opacity: 0.45; }
@@ -1004,6 +1017,22 @@ body.chat-theme-yatharth .tab.active.colored:not(.tab-blocked) {
 .bg-deeper { flex: 0 0 auto; font-size: 0.82em; color: var(--dim); white-space: nowrap; }
 .sub-head-waits { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }   /* the viewer header's "· waiting on …" tail */
 
+/* THE OVERVIEW IS A MODE, NOT A SESSION (T322, the user 2026-09-10, twice): while a tag's overview shows
+   (body.snap-mode, set by showActive), the message box and the bottom bar go entirely — a message typed here
+   has no session to go to — and no tab renders as selected: the row's box (.tab-group-head.snap-shown) is the
+   one selection on the strip. The active tab's classes stay (activeId is the way back; focus and the arrows key
+   on them), only its dress is neutralised to a resting tab's. Selecting any tab clears the mode (setActive). */
+body.snap-mode #footer { display: none; }
+/* the neutralised active tab is a RESTING tab of its theme (review finds): a hard-blocked tab keeps its red fill (the
+   user's standing rule: the blocked fill survives on the active tab), hover still lifts it, and under the Yatharth theme
+   it wears that theme's resting wash with no border (Yatharth's selection mark IS the 55% identity border). The strip
+   (#tabs) carries the mode class beside the body (setSnapMode, one switch): a tint rule must start with the theme's
+   body class (tab-theme.test.ts: every identity wash lives under it), so the mode is read off the strip there. */
+body.snap-mode #tabs .tab.active:not(.tab-blocked) { color: var(--dim); background: transparent; box-shadow: none; }
+body.snap-mode #tabs .tab.active:not(.tab-blocked):hover { color: var(--fg); background: rgba(255, 255, 255, 0.06); }
+body.snap-mode:not(.chat-theme-yatharth) #tabs .tab.active:not(.tab-blocked):not(.tab-add) { border-color: rgba(255, 255, 255, 0.06); }
+body.chat-theme-yatharth #tabs.snap-mode .tab.active.colored:not(.tab-blocked) { background: color-mix(in srgb, var(--chip-bg) 9%, transparent); border-color: transparent; }
+body.chat-theme-yatharth #tabs.snap-mode .tab.active.colored:not(.tab-blocked):hover { background: color-mix(in srgb, var(--chip-bg) 15%, transparent); }
 #footer {
   position: relative;   /* anchors #composer-resize on the top-edge divider */
   flex: 0 0 auto;
@@ -1258,7 +1287,7 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
    identity color inline. Tokens only, so it reads in every theme without a light override. */
 #tab-snapshot { padding: 6px 14px 14px; }
 .snap-head { display: flex; align-items: center; gap: 6px; margin: 4px 0 8px; font-size: 0.82em; font-weight: 600; letter-spacing: 0.04em; color: var(--dim); }
-.snap-swatch { flex: 0 0 auto; width: 3px; height: 12px; border-radius: 1px; background: var(--dim); }
+/* (the heading's colour bar is gone, T322: the tag's ordinary chip carries the colour, between the words "Overview of" and the count) */
 .snap-count { font-weight: 400; opacity: 0.7; }
 .snap-list { display: flex; flex-direction: column; gap: 2px; }
 .snap-row { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; width: 100%; min-width: 0; padding: 5px 8px; border: 1px solid transparent; border-radius: 6px;
@@ -1966,14 +1995,19 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 .turn-queued { display: flex; flex-direction: column; align-items: flex-end; padding: 6px 0 10px; gap: 5px; }
 .queued-head { display: inline-flex; align-items: center; gap: 5px; font-size: 0.82em; color: var(--dim); letter-spacing: 0.02em; }
 .queued-head .queued-icon { color: var(--accent); display: flex; }   /* wireframe hourglass in the accent blue */
-.queued-bubble, .notice.notice-slim.queued-bubble {   /* …and a SENT postal card whose message has not landed yet wears the
-                                                         same dress by the same class (T302): one provisional vocabulary */
+.queued-bubble, .notice.queued-bubble, .notice.notice-slim.queued-bubble {   /* …and a SENT postal card whose message has
+   not landed yet wears the same dress by the same class (T302): one provisional vocabulary. Named at BOTH densities:
+   slim, and boxed by a fold (a first line past the head's clip, or a second line). On the boxed card `.notice` alone,
+   later in the file at `.queued-bubble`'s specificity, took the border, background and radius back and left a solid
+   box at the bubble's 72% width until the receipt landed; `.notice.queued-bubble` outranks it. The slim selector stays:
+   `.notice.notice-slim`, later in the file too, would otherwise beat `.notice.queued-bubble` on the slim card. */
   max-width: 72%; overflow-wrap: anywhere; display: flow-root;
   background: color-mix(in srgb, var(--you) 10%, transparent); border: 1px dashed color-mix(in srgb, var(--you) 65%, transparent);
   border-radius: 14px; padding: 7px 12px; color: var(--fg); opacity: 0.85;
 }
-.notice.notice-slim.queued-bubble { max-width: none; display: block; }   /* the notice keeps its row width and flex head; only the
-                                                                            dress is the bubble's (same specificity as the shared rule, later) */
+.notice.queued-bubble, .notice.notice-slim.queued-bubble { max-width: none; display: block; }   /* the notice keeps its row
+   width and flex head at either density; only the dress is the bubble's (the shared rule's specificities, later in the
+   file). The boxed card too: it fills the column while provisional, so nothing snaps when the receipt lands. */
 /* A CANCELABLE queued bubble carries an explicit ✕ (the user 2026-07-08 — the old whole-bubble click was
    undiscoverable and re-render-fragile). The bubble itself is no longer clickable; only the ✕ acts. It sits
    in the top-right corner (the bubble reserves padding for it) — dim until the bubble is hovered, red on
@@ -2454,12 +2488,13 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   .turn-postal-service .notice-head > .notice-gist { flex: 1 0 100%; order: 1; min-width: 0;
     white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: break-word; }
 }
-/* T302 (the user 2026-09-10): the interaction KIND is coloured TEXT in the meta slot — a chip reads as a tag now — in
-   the colours the old chips wore: delegation violet, coordination teal, question the working amber. */
-.postal-kind { font-weight: 600; }
-.postal-kind-delegate { color: var(--postal-delegate, #b08cff); }
-.postal-kind-coordinate { color: var(--postal-coordinate, #14b8a6); }
-.postal-kind-question { color: var(--postal-question, var(--st-working-bg)); }
+/* T302 (the user 2026-09-10): the interaction KIND is coloured TEXT in the meta slot — a chip reads as a tag now.
+   T320 (the user, later that day): the word wears the prose weight, not bold, and its three colours are one
+   sequential ramp ranked by how much the kind asks of the reader (the tokens' comment has the ranking). */
+.postal-kind { font-weight: 400; }
+.postal-kind-delegate { color: var(--postal-delegate, #7fb8e7); }
+.postal-kind-coordinate { color: var(--postal-coordinate, #7996af); }
+.postal-kind-question { color: var(--postal-question, #91d9ff); }
 /* BOTH ENDS of a postal card in the head, each in its session's identity colour (the peer's chip as before, and this
    session's own chip after it); a narrow head collapses this session's chip to its coloured dot, so both colours
    still show where the words would not fit */
@@ -2897,12 +2932,18 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 /* the Billing row's single-choice text: written out where the buttons would sit (the user 2026-08-09) —
    the buttons' 0.82em, plain, no button chrome (it is a fact, not a control) */
 .picker-auth-fixed { flex: 0 0 auto; color: var(--fg); font-size: 0.82em; padding: 4px 0; }
-/* the picker's Tags row (tab groups, the user 2026-09-04): the Backend row's chips, each with its
-   tag's identity dot; several may be selected — a session can hold several tags */
+/* the picker's Tags row (tab groups, the user 2026-09-04): one option per tag; several may be selected, a session
+   can hold several tags. Each option IS the tag chip every surface draws (T321, the user 2026-09-10): the thin
+   border in the tag's colour, the faded chip (.tag-chip-off) for unselected, so the button around it carries no
+   chrome: no border, no padding, the page's typeface (a bare button wears the browser's control face), and never
+   the Backend row's accent fill or hover wash; the hover cue is the strip's own, the chip brightened */
 .picker-tags { flex-wrap: wrap; }
-.picker-tag-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
-/* the tmux pick: the chips stay in place, disabled, behind the note (tags apply to SDK and Codex sessions) */
-.picker-tags.disabled .picker-be-opt { opacity: 0.45; cursor: default; pointer-events: none; }
+.picker-tags .picker-be-opt { padding: 0; border: none; background: transparent; font-family: inherit; }
+.picker-tags .picker-be-opt:hover, .picker-tags .picker-be-opt.sel { background: transparent; border-color: transparent; color: inherit; }
+.picker-tags .picker-be-opt:hover { filter: brightness(1.3); }
+/* the tmux pick: the chips stay in place, disabled, behind the note (tags apply to SDK and Codex sessions). Greyed
+   and nothing else: the off chip's own 0.45 stays the only fade, so on and off still read in both themes */
+.picker-tags.disabled .picker-be-opt { filter: grayscale(1); cursor: default; pointer-events: none; }
 .picker-list { overflow-y: auto; }
 /* The resume list's heading (the user 2026-08-12): the list sits LAST in the dialog — typing in the
    name box re-filters it, and its changing height used to jump every control below it — so this line
@@ -3118,6 +3159,12 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 .glow-ruler-band { position: absolute; left: 1px; right: 1px; border-radius: 3px;
   background: color-mix(in srgb, var(--active-accent, #fff) 50%, transparent);
   box-shadow: 0 0 3px color-mix(in srgb, var(--active-accent, #fff) 40%, transparent); }
+/* The ruler's HISTORY strip (T318b, the user 2026-09-10): a hovered card's source turns outside the resident tail are
+   marked at the top of the ruler by global event index; a hairline under the strip separates the unloaded prefix
+   from the resident scroll map below. The same ink as the bands, so it reads as the same hover. */
+.glow-ruler-hist { position: absolute; left: 0; right: 0; top: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--active-accent, #fff) 35%, transparent); }
+.glow-ruler-band.hist { border-radius: 2px; }
 
 /* Fleet inbox-zero (the user 2026-06-29): when the fleet has loaded but has no open work, show the romp
    tri-color WORDMARK centered + faded in — the SAME calm at-rest mark as the feed's .feed-empty, mirrored
@@ -4087,7 +4134,7 @@ body.dense-chrome .tab-add { padding: 3px 8px; font-size: 1.1em; }              
    the 18px line + 2 x 3px dense padding + the 1px border; #tabs stretches every item on a row to the tallest, so
    without this the row holding the + and the tag control would stay 31px beside 25px rows */
 body.dense-chrome .tab-tagbox { min-height: 25px; }                                     /* 31px */
-body.dense-chrome .tab-group-head { gap: 4px; padding: 3px 5px 3px 4px; }               /* 5px; 6px 7px 6px 6px */
+body.dense-chrome .tab-group-head { gap: 4px; padding: 3px 5px; }                       /* 5px; 6px 7px — the dense tab's own padding, so the row keeps a tab's box here too (T322) */
 /* the untagged trail's divider (the inline layout, stripGroupRows off): its 1px line is the content area under fixed
    gutters, so the 8px gutters sized for the 32px row would leave a 9px line in the 25px row; 6px keeps the default's
    half-row proportion (about 13px). Scoped off the row break, which must keep no footprint; the width stays 13px,

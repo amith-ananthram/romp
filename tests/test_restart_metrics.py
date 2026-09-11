@@ -83,6 +83,10 @@ def _fixture(state: Path):
         {"t": t1 + 100, "sid": SID2, "name": "api", "fedT": t1 + 90, "firstOutT": t1 + 91.0, "resultT": t1 + 100.0,
          "durationMs": 10000, "apiMs": 8000, "usd": 0.1, "opener": "human", "resumeNotice": False, "fedTexts": 1},
         {"t": t2 + 50, "sid": SID2, "name": "api", "fedT": 0, "resultT": t2 + 50.0, "opener": "", "resumeNotice": False},
+        # a turn the CLI opened itself at 02:01, written by a kernel before the 2026-09-10 writer fix: nothing fed
+        # (fedTexts 0), and the stamps still in memory were the 01:00 turn's (its fedT and firstOutT)
+        {"t": t2 + 60, "sid": SID, "name": "web", "fedT": t1 + 3, "firstOutT": t1 + 5.5, "resultT": t2 + 60.0,
+         "opener": "injected", "resumeNotice": False, "fedTexts": 0},
     ])
     _write(state, "states/%s.jsonl" % SID, [
         {"t": int(t1 - 100), "state": "working"}, {"t": int(t1 - 70), "state": "waiting"},
@@ -136,11 +140,27 @@ class Parsers(unittest.TestCase):
         self.assertEqual(turns[0]["feedToResultS"], 37.0)
         self.assertEqual(turns[0]["feedToFirstOutS"], 2.5)
         self.assertNotIn("feedToResultS", turns[2], "fedT 0 (no feed stamp) → no interval, never a bogus one")
+        # the self-opened turn (fedTexts 0) carries the previous fed turn's stamps: an hour of feed-to-result and
+        # a duplicated first-output interval if read; it counts as a turn and measures nothing
+        self.assertEqual(turns[3]["fedTexts"], 0)
+        self.assertNotIn("feedToResultS", turns[3], "nothing fed: the stamps are another turn's, never an interval")
+        self.assertNotIn("feedToFirstOutS", turns[3])
         lines = (self.state / "states" / (SID + ".jsonl")).read_text().splitlines()
         sl, cuts = rm.state_log_turns(lines)
         self.assertEqual([x["feedToResultS"] for x in sl], [30.0, 37.0],
                          "working→waiting pairs; an interrupt's by-marked settle and an idle close are not turns")
         self.assertEqual(cuts, {"restart": 1, "crash": 1})
+        self.assertEqual(rm.spend_by_day(json.loads((self.state / "spend.json").read_text())), {"2026-09-10": 12.5, "2026-09-12": 3.0})
+
+    def test_parse_turns_gates_on_a_zero_count_alone(self):
+        """The fedTexts gate keys on the count 0 and nothing else: a row without the key is read by its stamps
+        (a writer that never wrote the key), and a bool is not a count. Direct rows, so the fixture's turn
+        count and buckets stay as they are."""
+        stamped = {"t": 100, "sid": SID, "fedT": 10, "firstOutT": 12.0, "resultT": 15.0}
+        rows = [dict(stamped), dict(stamped, fedTexts=0), dict(stamped, fedTexts=False), dict(stamped, fedTexts=1)]
+        got = [(r.get("feedToResultS"), r.get("feedToFirstOutS")) for r in rm.parse_turns(rows)]
+        self.assertEqual(got, [(5.0, 2.0), (None, None), (5.0, 2.0), (5.0, 2.0)],
+                         "no key: read by its stamps; the count 0: unmeasured; a bool: not a count; a count: measured")
 
     def test_state_log_pair_breaks_at_a_machine_cut(self):
         """Review find (2026-09-10): a cut turn's `working` row was closed by the RESUMED turn's `waiting`, so
@@ -151,7 +171,6 @@ class Parsers(unittest.TestCase):
         sl, cuts = rm.state_log_turns(lines)
         self.assertEqual([(x["fedT"], x["feedToResultS"]) for x in sl], [(1400, 10.0)])
         self.assertEqual(cuts, {"restart": 1})
-        self.assertEqual(rm.spend_by_day(json.loads((self.state / "spend.json").read_text())), {"2026-09-10": 12.5, "2026-09-12": 3.0})
 
 
 class BootJoin(unittest.TestCase):
@@ -232,7 +251,7 @@ class Document(unittest.TestCase):
                           b["drainLeftClosing"], b["leaseProblems"]), (1, 1, 1, 1, 1, 1, 1))
         self.assertEqual((b["drainUnjoinedCount"], b["drainReapedCount"]), (1, 1))
         self.assertEqual(b["redo"], {"turns": 1, "usd": 0.5, "tokens": 3700})
-        self.assertEqual(b["turns"], 3)
+        self.assertEqual(b["turns"], 4, "the self-opened turn counts as a turn; only its latency is unmeasured")
         self.assertEqual((b["latency"]["feedToResultS"]["n"], b["latency"]["feedToResultS"]["max"]), (2, 37.0))
         self.assertEqual(b["latency"]["feedToFirstOutS"]["p50"], 1.0)
         self.assertEqual(b["latency"]["apiS"]["max"], 30.0)

@@ -89,6 +89,27 @@ class SessionEventsRoute(unittest.TestCase):
         self.assertEqual(code, 200, "bad parameters fall back to the defaults")
         self.assertEqual(len(d["rows"]), 3)
 
+    def test_a_row_in_the_boot_second_is_counted_and_listed(self):
+        """The default `since` is the boot's whole second, the resolution every row's `t` has, the same stamp
+        `bootAt` reports and `count` filters by. A real _STARTED is fractional, so a row stamped in the boot
+        second (the previous kernel's drain row, written as it exited and this kernel was spawned) sits at
+        t == int(_STARTED) < _STARTED: with a float default it was counted and not listed. Both defaults, the
+        one a missing ?since= gets and the one an unparseable ?since= falls back to, are that whole second."""
+        km._STARTED = BOOT + 0.6
+        with open(self.tmp / "session-events.jsonl", "a") as f:
+            f.write(json.dumps({"t": BOOT, "pid": 1, "kind": "drain.unjoined", "sid": SID, "name": "web",
+                                "inflight": 1, "reaped": True}) + "\n")
+        for qs in ("", "?since=garbage"):
+            with self.subTest(query=qs or "none"):
+                code, d = self._get(qs)
+                self.assertEqual(code, 200)
+                kinds = [r["kind"] for r in d["rows"]]
+                self.assertIn("drain.unjoined", kinds, "the boot-second row is listed with this boot's rows")
+                self.assertEqual(d["count"], len([k for k in kinds if k != "reconcile.boot"]),
+                                 "count and rows are one predicate but for the boot summary: %s" % kinds)
+                self.assertEqual(d["since"], BOOT, "the default since is the boot's whole second")
+                self.assertEqual(d["since"], d["bootAt"])
+
     def test_missing_ledger_is_empty_not_an_error(self):
         (self.tmp / "session-events.jsonl").unlink()
         code, d = self._get()
