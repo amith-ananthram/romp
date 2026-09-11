@@ -9101,19 +9101,23 @@ def _prime_leaf_folds(leaf):
     cursor for the next process: without one, that fold's first run after the restart reads the file whole (measured
     in the served test: the judges' background-task fold upgraded a restored tail entry to the whole leaf, 3.8 MB).
     Over the resident whole entry a first fold costs its step over the records and no read; a current cursor costs a
-    stat. Only a leaf whose WHOLE entry is resident is primed: over a tail entry (a restored one, or a fold's own) a
-    fold with no cursor would read the file whole, and a leaf this process never read would be read from disk, so
-    those are left to their callers. The leaf's folds: the kernel's two background-task views, the judges' pairing,
+    stat. Over a WHOLE resident entry every leaf fold is primed; over a tail entry (a restored one, or a fold's own) only
+    the folds holding a cursor at that entry, whose step is an append over records in hand (a lagging judges' fold
+    would otherwise drop out of the settle write and read the leaf whole at the next boot), while a fold with no
+    cursor there, and a leaf this process never read, are left to their callers. The leaf's folds: the kernel's two background-task views, the judges' pairing,
     the session meta and the agent launch state (the agent files' and the logs' folds are their own callers').
     Best-effort per fold; True when the leaf was primed."""
-    if not em.entry_whole_resident(leaf):
-        return False                          # a tail entry or no entry: a fold with no cursor would read the file whole
-    for fn in (_bg_scan_cached, _bg_scan_all_cached, jd._bg_scan, _session_meta, _agent_launch_state):
-        try:
-            fn(leaf)
+    whole = em.entry_whole_resident(leaf)
+    primed = False
+    for fn, cache in ((_bg_scan_cached, _bgtasks_cache), (_bg_scan_all_cached, _bgall_cache), (jd._bg_scan, jd._BG_SCAN_CACHE),
+                      (_session_meta, _session_meta_cache), (_agent_launch_state, _AGENT_LAUNCH_CACHE)):
+        if not whole and not em.fold_cursor_appendable(cache, leaf):
+            continue                          # over a tail entry only a fold with a cursor at this entry (an append, no read):
+        try:                                  #  one with none would read the file whole, and a leaf with no entry is left alone
+            fn(leaf); primed = True
         except Exception:
             pass
-    return True
+    return primed
 
 
 def _persist_checkpoints(now):

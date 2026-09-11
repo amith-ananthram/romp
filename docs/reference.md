@@ -1413,7 +1413,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   folds resumed from one), `restoredFolds` (restores per fold name), `writes`,
   `swept` (checkpoints of vanished files removed at boot), `skippedFolds`
   (fold states the codec could not encode), `oversizeFolds` (per fold name,
-  states over the 64 KB cap left out of a document), `droppedRestores` (a
+  states over the 64 KB cap: the document keeps that fold's cursor without its
+  state, and the next kernel starts the fold cold at the cut over the tail
+  only), `coldFolds` (per fold name, folds that started cold that way this
+  boot), `coldWrites` (per fold name, writes that kept such a tail-only state
+  out of the document so no later kernel restores it as complete), `droppedRestores` (a
   restore lost to a read that replaced the entry under it; the reader
   serializes reads per path, so this should stay at zero), `documentBytes`
   (what reading the checkpoint documents themselves cost since boot),

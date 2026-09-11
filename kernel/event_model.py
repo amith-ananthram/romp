@@ -681,8 +681,10 @@ def read_bytes_report():
 _CKPT_V = 1
 _CKPT_DIR_FN = None               # () -> Path of the checkpoint directory; None = checkpoints off
 _CKPT_STATS = {"restored": 0, "writes": 0, "swept": 0, "skippedFolds": 0, "fallbacks": {}, "restoredFolds": {}, "droppedRestores": 0,
-               "oversizeFolds": {}, "coldFolds": {}}
+               "oversizeFolds": {}, "coldFolds": {}, "coldWrites": {}}
 _COLD = object()                  # a restored cursor with no state (its fold was oversize): fold_records inits it and steps the tail
+_COLD_FOLDS = set()               # (path, fold name) whose state in this process began cold at a cut: a TAIL-ONLY state, written as a
+                                  #  cursor without state until a whole refold, never as a complete one (review find, 2026-09-11)
 _SAID = set()
 
 
@@ -728,6 +730,15 @@ def entry_whole_resident(path):
     with _JSONL_CACHE_LOCK:
         ent = _JSONL_CACHE.get(str(path))
     return ent is not None and ent[5] == 0
+
+
+def fold_cursor_appendable(cache, path):
+    """True when `cache` holds a cursor for `path` at the reader's current entry generation: a fold over it is a stat or
+    an append over the entry's records in hand, never a whole read. False with no cursor, no entry or another generation."""
+    with _JSONL_CACHE_LOCK:
+        ent = _JSONL_CACHE.get(str(path))
+    cur = cache.get(str(path))
+    return ent is not None and cur is not None and cur[1] == ent[6]
 
 
 def name_fold_cache(cache, name):
@@ -969,6 +980,13 @@ def checkpoint_write(path, force=False):
         cur = cache.get(key)
         if cur is None or cur[0] != count or cur[1] != gen:
             continue
+        with _CKPT_LOCK:
+            cold = (key, name) in _COLD_FOLDS
+        if cold:                                          # a state that began cold at a cut covers the tail only: it must not
+            with _CKPT_LOCK:                              #  be written as a complete one (the next process would restore it
+                _CKPT_STATS["coldWrites"][name] = _CKPT_STATS["coldWrites"].get(name, 0) + 1   #  as whole and say nothing)
+            folds[name] = {"count": count}
+            continue
         try:
             enc = _ckpt_encode(cur[2])
             if len(json.dumps(enc, separators=(",", ":"))) > _CKPT_FOLD_CAP:
@@ -1055,6 +1073,7 @@ def checkpoint_stats():
     with _CKPT_LOCK:
         out = dict(_CKPT_STATS); out["fallbacks"] = dict(_CKPT_STATS["fallbacks"]); out["restoredFolds"] = dict(_CKPT_STATS["restoredFolds"])
         out["oversizeFolds"] = dict(_CKPT_STATS["oversizeFolds"]); out["coldFolds"] = dict(_CKPT_STATS["coldFolds"])
+        out["coldWrites"] = dict(_CKPT_STATS["coldWrites"])
     d = _ckpt_dir()
     with _READ_BYTES_LOCK:
         out["documentBytes"] = sum(n for p_, n in _READ_BYTES.items() if d is not None and p_.startswith(str(d) + os.sep))
@@ -1328,6 +1347,8 @@ def fold_records(cache, path, init, step, on=None, ckpt=None):
             kind = "restore"
             if hit[2] is _COLD:                           # the cursor without its state: the fold starts at the entry's
                 hit = (base, hit[1], init()); kind = "cold"   #  base and steps the tail it holds
+                with _CKPT_LOCK:
+                    _COLD_FOLDS.add((key, ckpt))          # and stays a tail-only state until a whole refold
     if hit is not None:
         n0, g0, state0 = hit
         if g0 == gen and n0 == total:
@@ -1354,6 +1375,9 @@ def fold_records(cache, path, init, step, on=None, ckpt=None):
             gen = ent[6] if ent is not None else 0
             total = len(recs)
         state, start, kind = init(), 0, "refold"
+        if ckpt is not None:
+            with _CKPT_LOCK:
+                _COLD_FOLDS.discard((key, ckpt))          # every record stepped: the state is complete again
     for r in recs[start:]:
         if isinstance(r, dict):
             state = step(state, r)
@@ -3873,7 +3897,7 @@ def _asm_fold(entry, delta, leaf_recs, leaf_key, leaf_stem, rompuuid, postal_ind
 # ids and atom uuids. Bodies come back on demand (hydrate). Anything that does not verify is a counted fallback to a
 # whole parse; a compaction landing after the document demotes the tail fold to a whole parse exactly as before, and
 # the next settle writes a new document with the new cut.
-_ASM_CKPT_V = 2                       # 2: atom rows carry their record's [offset, len]; nt is written for every atom
+_ASM_CKPT_V = 3                       # 2: atom rows carry [offset, len], nt for every atom; 3: the carry holds skill_loads (T333)
 _ASM_CKPT_CAP = 16 * 1024 * 1024   # a document past this is not written (counted): that session parses whole as today
 _ASM_CKPT_STATS = {"written": 0, "restored": 0, "fallbacks": {}, "skipped": {}, "hydratedBytes": 0, "hydratedAtoms": 0,
                    "hydratedBy": {}}     # bytes per calling function: a whole-tree hydration anywhere shows here
@@ -3988,6 +4012,9 @@ def _pre_tree_identity(atoms, rompuuid):
     return h.hexdigest()
 
 
+_ASM_SKIP_STRUCTURAL = ("unsplittable", "reconstruction", "unencodable", "oversize")   # true of a cut until it moves
+
+
 def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
     """Write the leaf's assembly checkpoint from its WHOLE assembly entry. False when there is nothing to write: no
     entry, an entry restored from a document (its cut stands until a compaction moves it), no compaction boundary in
@@ -4020,8 +4047,14 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
             return _asm_ckpt_skip(memo[1])               # this cut already failed to write: nothing rebuilt until it moves
 
         def skip(reason):
-            entry["docSkip"] = (last_b["uuid"], reason)   # memoized like a success (docWritten); re-armed when the cut moves
-            _say_once("assembly checkpoint: %s not written: %s (said once until its cut moves)" % (leaf_path, reason))
+            if reason in _ASM_SKIP_STRUCTURAL:            # a property of this cut: memoized like a success (docWritten),
+                entry["docSkip"] = (last_b["uuid"], reason)   #  re-armed when the cut moves
+                _say_once("assembly checkpoint: %s not written: %s (said once until its cut moves)" % (leaf_path, reason))
+            else:                                         # a blip (a stat or a write failing, a record landing between the
+                try:                                      #  parse and the offsets): said each time, tried again next settle
+                    sys.stderr.write("assembly checkpoint: %s not written this settle: %s\n" % (leaf_path, reason))
+                except Exception:
+                    pass
             return _asm_ckpt_skip(reason)
         bi = next(i for i, t in enumerate(turns) if any(a.get("uuid") == last_b["uuid"] for a in t["atoms"]))
         if last_b["uuid"] in ad._adopted and bi > 0:

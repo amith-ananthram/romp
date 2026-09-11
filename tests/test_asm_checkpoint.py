@@ -408,6 +408,20 @@ class WriteValves(Harness):
         self.assertEqual(em.asm_checkpoint_stats()["skipped"], {"reconstruction": 1}, "counted again, nothing rebuilt")
         self.assertEqual(em._ASM_CACHE[next(iter(em._ASM_CACHE))].get("docSkip", (None, None))[1], "reconstruction")
 
+    def test_a_transient_failure_is_not_memoized_against_the_cut(self):
+        """Review find (third round): a stat, offsets or write failure is a blip, not a property of the cut; memoizing it left
+        the session without a document until its next compaction. It is counted and tried again at the next settle."""
+        path = self._whole("blip")
+        real = em.record_offsets
+        em.record_offsets = lambda fp, base: None                   # a record landing between the parse and the offsets
+        try:
+            self.assertFalse(em.asm_checkpoint_write(path, SID))
+        finally:
+            em.record_offsets = real
+        self.assertEqual(em.asm_checkpoint_stats()["skipped"], {"offsets": 1})
+        self.assertIsNone(em._ASM_CACHE[next(iter(em._ASM_CACHE))].get("docSkip"), "not memoized")
+        self.assertTrue(em.asm_checkpoint_write(path, SID), "the next settle writes")
+
     def test_a_whole_entry_writes_its_document_once(self):
         """Review find (H): a fold appends after the cut and changes nothing before it, so the settles after the first
         write skip the build (`written`), until the entry is replaced."""
