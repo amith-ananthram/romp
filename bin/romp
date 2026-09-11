@@ -58,6 +58,7 @@ EOF
     _romp_cmd "romp version"               romp-version "Versions across the parts (tree, kernel, served vs built bundles)"
     _romp_cmd "romp spend-rebuild"         romp-spend-rebuild "Recount the spend ledger's token columns from the transcripts (dry run; --apply writes, dollars untouched)"
     _romp_cmd "romp restart-metrics [--json|--window day|week]" romp-restart-metrics "What kernel restarts do to the sessions, from the state ledgers and the kernel's routes: turns cut, outage and reconcile times, quiet-window waits, orphans and reaps, crash heals, redo cost, turn latency, per-session memory and CPU"
+    _romp_cmd "romp spend-repair [--day D] [--apply]" romp-spend-repair "Recompute a day's spend from the turn ledger's re-attach staircase (a first result after a kernel restart that carried a surviving CLI's cumulative total): before and after per hour and per session; dry run unless --apply"
     _romp_cmd "romp uninstall"             romp-uninstall "Remove romp's installed footprint (--purge also deletes recorded state)"
     _romp_cmd "romp help"                  -            "Show this help"
     cat <<'EOF'
@@ -161,6 +162,12 @@ fi
 if [[ "${1:-}" == "restart-metrics" ]]; then
     shift
     exec romp-restart-metrics "$@"
+fi
+# `romp spend-repair [--day YYYY-MM-DD] [--apply] [--state DIR]`: the T354 ledger repair. Read-only unless --apply;
+# never loads a kernel module. Delegates to romp-spend-repair (python, cli/spend_repair.py).
+if [[ "${1:-}" == "spend-repair" ]]; then
+    shift
+    exec romp-spend-repair "$@"
 fi
 
 # The kernel serve token — required on EVERY kernel/bus request, loopback included (Jupyter's

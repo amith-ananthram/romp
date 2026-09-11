@@ -177,7 +177,9 @@ def rebuild(ledger, per, reg, now=None, allow_lower=False):
     LOWER than recorded and were left as they were (missing evidence, see the module doc) — empty when
     allow_lower is set, in which case they are rewritten and listed in changes."""
     now = time.time() if now is None else now
-    out = {"days": {}, "hours": {}}
+    out = {k: v for k, v in (ledger or {}).items() if k not in ("days", "hours")}   # every other top-level key rides through
+    #   unchanged (repairJournal, the spend repair's folded refs: dropped, every past journal entry read as pending again)
+    out.update({"days": {}, "hours": {}})
     changes, kept = [], []
     for kind in ("days", "hours"):
         buckets = dict(ledger.get(kind) or {}) if isinstance(ledger.get(kind), dict) else {}

@@ -2715,6 +2715,50 @@ private and must not reach a repository, an issue or a pull request; `--named`
 shows them, and inside your own state root they show by default. Without
 cleanplots the script says so and draws nothing.
 
+## Repairing the spend ledger
+
+`romp spend-repair [--day D] [--since INSTANT] [--apply]` recomputes a day's
+`spend.json` hour and day buckets, their per-session rows and `turns.jsonl`
+dollars after the re-attach re-bill (the section above on the ledger across a
+host re-attach: before the fix, every kernel restart recorded each hosted
+session's whole CLI lifetime as one turn, a staircase of rows on each session).
+It reads the turn rows and the restart instants (each boot row of
+`restart-cuts.jsonl` gives its `firstServe`, the epoch the new kernel began
+serving; the row's own `t` is the settle, which can lag the first serve by
+minutes; nothing else is an instant: a restart request in the audit ledger is
+most often a parked one that no restart followed, and the dying kernel records
+results for seconds after both a request and its own cut row) and judges each
+session's first result strictly after a restart, a result at the first-serve
+second being the old kernel's:
+it is that process's cumulative when it stands at or above the previous
+cumulative plus the rows recorded between (a process's total grows by at least
+what its own rows recorded; a figure below that is a fresh process's first turn
+and stands), and its true cost is the cumulative less the previous cumulative
+less those rows. The day's first cumulative row counts as a typical turn (the
+median of the session's rows that follow no restart) and only when a staircase
+follows it. A row bearing the signature with no restart instant on record (a
+crash leaves no audit row) is taken as a step only on a chain the session has
+already shown. `--since` is the instant the per-session hosts came on: before
+it every restart killed the CLI, so nothing there is a step. Rows the fixed
+kernel writes (`cumulativeUsd`, `spendBaseline`) are never touched.
+
+It prints before and after per hour and per session and changes nothing unless
+`--apply` is given. A corrected row keeps the kernel's figure as `usdRecorded`,
+and every run judges a repaired row again on that figure, so a tightened rule
+or a later `--since` restores what an earlier run took, and a run over a
+repaired day changes nothing. Per-session figures fold under the session a row
+bills (a comment thread's owner, the registry's `threadOf`), and the buckets'
+`key` split moves only for sessions the registry marks as API-key billed; the
+report says how many rows' split was left as recorded. The kernel may be
+running: `--apply` copies both files beside themselves first
+(`spend.json.bak-<stamp>`, `turns.jsonl.bak-<stamp>`), rewrites `turns.jsonl`
+first carrying every row appended since its read, journals the rows' deltas
+(`spend-repair.jsonl`), then reads `spend.json` again and folds the deltas on
+what is there; a run that fails between the two writes leaves its deltas
+journaled and the next run folds them first. A standing correction of a day's
+first cumulative row is kept as it was made, so the day's later rows never
+rewrite it.
+
 ## Switches
 
 Effective immediately, no restart.
