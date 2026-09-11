@@ -11,6 +11,18 @@
 // Which events are foldable is the caller's call (render.ts isFoldableNotice, passed per event): peers,
 // API errors, compaction/clear boundaries, asks, to-dos, dividers and every bubble stay standalone.
 
+/** The events compact mode may sweep into a noticegroup: the low-stakes, self-similar rows (a recovery, an effort
+ *  change, a model swap, a reload, an interrupt marker and its settle, an injected notice: a system reminder or a
+ *  romp notice on a user row). Peers, API errors, boundaries, asks, to-dos and every real bubble stay standalone.
+ *  Pure over the event's shape so render.ts (the fold) and reveal-progress.ts (what counts as a message) share ONE
+ *  reading (T336 review: the progress count took injected notices for messages). */
+export function isFoldableNoticeShape(ev: { kind: string; interruptMarker?: unknown; interruptSettle?: unknown; rompSystem?: unknown; md?: unknown; source?: unknown; human?: unknown; undelivered?: unknown }): boolean {
+  if (ev.kind === "retried" || ev.kind === "effortApplied" || ev.kind === "modelFallback" || ev.kind === "reconnecting") return true;
+  if (ev.kind === "user") return !!(ev.interruptMarker || (ev.rompSystem && ev.md) || (ev.source && !ev.human && !ev.undelivered));
+  if (ev.kind === "assistant") return !!ev.interruptSettle;
+  return false;
+}
+
 export type DisplayItem =
   | { kind: "event"; index: number }            // a pass-through event, by its index in the source array
   | { kind: "toolgroup"; indices: number[] }    // a collapsed run of ≥2 consecutive tool uses (a lone tool is an "event")

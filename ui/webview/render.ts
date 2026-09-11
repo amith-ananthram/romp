@@ -26,7 +26,7 @@ import { openTagMenu, tagMenuButton, syncTagFilter, tagChip } from "./tag-menu";
 import { syncSessionsFromTabMeta, applyMetaToSession, notePendingMeta, PendingTabMeta } from "./tab-meta";
 import { markerLabel, dayContext } from "./time-marker";
 import { REVEAL_LABEL, revealFraction, revealShownFraction, residentSpan, revealCountWords, revealPercentWords, messageCount } from "./reveal-progress";
-import { compactDisplay, toolCounts, type DisplayItem } from "./compact";
+import { compactDisplay, isFoldableNoticeShape, toolCounts, type DisplayItem } from "./compact";
 import { senderKind, SenderKind } from "./sender-identity";
 import { loadSettings, onExternalSettingsChange, installSettingsSync, type RompSettings } from "./settings";
 import { backendLabel, effectiveDefaultBackend } from "./backend-names";
@@ -1041,14 +1041,14 @@ let anchorPendingOlder = false; // scrollToAnchor kicked off a loadOlder fetch f
 // or the standing can't-trap backstop expires into the honest failure. While it outlives the
 // immediate landing, a small pane-local notice says so ("finding the passage…") with the ✕ —
 // cancel leaves the reader exactly where they are, scroll fully theirs.
-let seek: { sid: string; uuid: string; kind: string | null; t: number | null } | null = null;   // t: the anchor turn's own moment when the kernel resolved it (anchorEventT), read by the reveal progress line (T336)
+let seek: { sid: string; uuid: string; kind: string | null; t: number | null; from0: number | null } | null = null;   // t: the anchor turn's own moment when the kernel resolved it (anchorEventT); from0: the session's headFrom when the seek was armed. Both read by the reveal progress line (T336)
 let seekBackstop: number | undefined;
 const SEEK_BACKSTOP_MS = 30_000;
 
 function armSeek(sid: string, uuid: string, kind: string | null, t: number | null = null): void {
   if (seek && seek.sid === sid && seek.uuid === uuid) return;   // same target mid-seek: idempotent, never a restart
   clearSeek();                                                  // a different target supersedes cleanly
-  seek = { sid, uuid, kind, t };
+  seek = { sid, uuid, kind, t, from0: sessions.get(sid)?.headFrom ?? null };
   seekBackstop = window.setTimeout(() => failSeek(), SEEK_BACKSTOP_MS);
 }
 
@@ -1120,21 +1120,18 @@ function showSeekNote(): void {
 // (the user 2026-09-10: a distilled summary far back in a long session took a long time to reveal, with nothing
 // saying how far along it was). It hangs off the loop's START (a landing pass that kicked, or is waiting on, an
 // older fetch for the anchor while the index wire's headFrom count is above 0; the anchor turn's own moment rides the
-// seek, from the kernel's anchorEventT, never the card's time) and its END (the anchor lands,
+// seek, from the kernel's anchorEventT, never the card's time; the count of messages loaded is read off the state from the
+// seek's headFrom at its arm) and its END (the loop's own anchor lands,
 // the loop stops asking, the seek is cleared or cancelled, the tab changes), and off nothing else: the
 // one-round-trip window (T323 stage 4b, proto 2) carries no headFrom count, so under it the line never begins.
 // The fraction is the resident span over the span back to the anchor's moment (revealFraction), honest or
 // absent; absent, the line carries the count of older messages loaded and the oldest loaded time. The composer
 // placeholder's dim ink, a thin bar, no motion. It takes the seek note's slot and its ✕ while it shows.
-let revealProgress: { sid: string; uuid: string; anchorT: number | null; loaded: number } | null = null;
-function revealProgressBegin(sid: string, uuid: string, anchorT: number | null): void {
-  revealProgress = { sid, uuid, anchorT, loaded: 0 };
+let revealProgress: { sid: string; uuid: string; anchorT: number | null; from0: number } | null = null;
+function revealProgressBegin(sid: string, uuid: string, anchorT: number | null, from0: number): void {
+  revealProgress = { sid, uuid, anchorT, from0 };
   hideLoadingPill();                                  // one message for the wait, not two
   document.getElementById("seek-note")?.remove();     // the line takes the seek note's slot (showSeekNote yields to it)
-}
-// A chunk landed for the loop's session: the count grows (chatHead); the paint rides the re-land pass.
-function revealProgressChunk(sid: string, count: number): void {
-  if (revealProgress && revealProgress.sid === sid) revealProgress.loaded += count;
 }
 function revealProgressEnd(): void {
   revealProgress = null;
@@ -1148,6 +1145,10 @@ function revealProgressPaint(): void {
   if (!s || p.sid !== activeId) { existing?.remove(); return; }
   const { oldestT, newestT } = residentSpan(s.events, eventEpoch);
   const fraction = revealFraction(newestT, oldestT, p.anchorT);
+  // the count is read off the state, never accumulated: the messages among the events the loop has prepended, from the
+  // seek's headFrom at its arm (a tab round trip or a full frame cannot restart it) down to the session's headFrom now
+  const from0 = seek && seek.uuid === p.uuid && seek.from0 != null ? seek.from0 : p.from0;
+  const loaded = messageCount(s.events.slice(0, Math.max(0, from0 - (s.headFrom ?? 0))));
   let n = existing;
   if (!n) {   // built once per loop, updated in place: click-safe by construction
     n = el("div", "");
@@ -1156,6 +1157,9 @@ function revealProgressPaint(): void {
     const label = el("span", "rp-label");
     label.textContent = REVEAL_LABEL;
     n.appendChild(label);
+    const dots = metaDots();                          // the loading rule's pulsing dots while no honest fraction exists (count mode)
+    dots.classList.add("rp-dots");
+    n.appendChild(dots);
     const bar = el("div", "rp-bar");
     bar.appendChild(el("div", "rp-fill"));
     n.appendChild(bar);
@@ -1173,26 +1177,31 @@ function revealProgressPaint(): void {
   const bar = n.querySelector(".rp-bar") as HTMLElement;
   const fill = n.querySelector(".rp-fill") as HTMLElement;
   const detail = n.querySelector(".rp-detail") as HTMLElement;
-  n.dataset.loaded = String(p.loaded);
+  const dots = n.querySelector(".rp-dots") as HTMLElement;
+  n.dataset.loaded = String(loaded);
   if (fraction != null) {
     const shown = revealShownFraction(fraction);          // floored below 1: the bar never reads complete before the event lands
     n.dataset.fraction = shown.toFixed(3);
     bar.hidden = false; bar.title = revealPercentWords(fraction);
     fill.style.width = (shown * 100).toFixed(1) + "%";
     detail.textContent = "";
+    dots.hidden = true;                                 // the still bar is the motion here
   } else {
     delete n.dataset.fraction;
     bar.hidden = true; bar.title = "";
     fill.style.width = "0%";
-    detail.textContent = revealCountWords(p.loaded, oldestT, Date.now());
+    detail.textContent = revealCountWords(loaded, oldestT, Date.now());
+    dots.hidden = false;
   }
 }
 // Once per landing pass, after the attempt: the loop's start and end are read off the pass itself.
-function revealProgressTick(scrolled: boolean): void {
+function revealProgressTick(scrolled: boolean, attAnchor: string | null): void {
   if (revealProgress) {
     const p = revealProgress;
     const inFlight = loadingOlder.has(p.sid) && pendingOlderAnchor.get(p.sid) === p.uuid;
-    if (scrolled || p.sid !== activeId || (!anchorPendingOlder && !inFlight)) { revealProgressEnd(); return; }
+    // the END: this loop's own anchor landed (another anchor's landing in the same session leaves a loop whose fetch is
+    // still on the wire alone), the tab changed, or the pass neither kicked nor waits on a fetch for the anchor
+    if ((scrolled && attAnchor === p.uuid) || p.sid !== activeId || (!anchorPendingOlder && !inFlight)) { revealProgressEnd(); return; }
     revealProgressPaint();
     return;
   }
@@ -1200,7 +1209,7 @@ function revealProgressTick(scrolled: boolean): void {
   if (anchorPendingOlder && pendingAnchor && s && (s.headFrom ?? 0) > 0) {   // the index wire's loop, by its own count
     // the anchor turn's OWN moment, carried on the seek from the kernel's anchorEventT: the card's `t` is the card's newest
     // activity, later than the turn it points at, and a fraction over it would read more progress than exists
-    revealProgressBegin(activeId!, pendingAnchor, seek && seek.uuid === pendingAnchor ? seek.t : null);
+    revealProgressBegin(activeId!, pendingAnchor, seek && seek.uuid === pendingAnchor ? seek.t : null, s.headFrom ?? 0);
     revealProgressPaint();
   }
 }
@@ -11100,12 +11109,7 @@ function noticeGroupKey(first: ChatEvent): string { return "ng:" + (first.uuid |
 // recovery, an effort change, a model swap, a reload, an interrupt + its settle, a background report, a
 // system reminder, a romp notice); peers, API errors, compaction/clear boundaries, asks, to-dos and every
 // bubble stay standalone (they are either owed a reply or mark a boundary)
-function isFoldableNotice(ev: ChatEvent): boolean {
-  if (ev.kind === "retried" || ev.kind === "effortApplied" || ev.kind === "modelFallback" || ev.kind === "reconnecting") return true;
-  if (ev.kind === "user") return !!((ev as any).interruptMarker || ((ev as any).rompSystem && ev.md) || (ev.source && !ev.human && !ev.undelivered));
-  if (ev.kind === "assistant") return !!(ev as any).interruptSettle;
-  return false;
-}
+function isFoldableNotice(ev: ChatEvent): boolean { return isFoldableNoticeShape(ev as any); }   // the one reading lives in compact.ts (shared with the reveal progress count)
 // the head words of a foldable notice, as its own renderer would show them (the gist helpers are shared)
 function noticeBrief(ev: ChatEvent): { src: string; glyph: NoticeGlyphKind; gist: string } {
   if (ev.kind === "retried") return { src: "API", glyph: "retry", gist: retriedGist(ev.retries || 0) };
@@ -11817,7 +11821,7 @@ function landActive(content: HTMLElement | null, v: View): void {
   // and never dead-ending. If the moment predates the loaded history, the oldest loaded message is
   // the nearest reachable point — the note names that too (fail loudly, land nearest).
   if (!scrolled && !att.anchor && att.t != null) scrolled = landNearestMoment(att.t);
-  revealProgressTick(scrolled);          // the reveal loop's progress line begins, repaints or ends on this pass, decided BEFORE the
+  revealProgressTick(scrolled, att.anchor);   // the reveal loop's progress line begins, repaints or ends on this pass, decided BEFORE the
                                          // seek note: the pass that ends the loop without landing gets its note (and ✕) back at once (T336)
   if (seek && att.anchor === seek.uuid) {
     if (scrolled) clearSeek();             // the landing event — the indicator dies with the seek
@@ -15635,6 +15639,7 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   if (anchor) flashedAnchor = null;        // a fresh navigation re-arms the one-per-navigation flash
   pendingAnchorIntent = anchor ? (anchorKind ?? null) : null;
   if (anchor) armSeek(id, anchor, anchorKind ?? null, anchorEventT ?? null);   // durable until land / ✕ / backstop (see armSeek)
+  else if (anchorT != null) clearSeek();   // a time-only navigation supersedes a seek (and the reveal progress line with it)
   activeId = id;
   try { vscodeApi?.setState?.({ ...(vscodeApi.getState?.() || {}), activeId: id }); } catch { /* ignore */ }
   renderTabs();
@@ -15989,7 +15994,6 @@ function chatHead(msg: any) {
   if (before !== (s.headFrom ?? 0)) { forget(msg.id); return; }   // stale / overlapping → ignore
   const older = (msg.events || []) as ChatEvent[];
   if (older.length) s.events = older.concat(s.events);
-  revealProgressChunk(msg.id, messageCount(older));   // the reveal loop's count of messages (T336); its paint rides the re-land pass
   s.headFrom = from;
   const v = views.get(msg.id);
   if (msg.id !== activeId) { forget(msg.id); if (v) v.stale = true; return; }

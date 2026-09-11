@@ -7,6 +7,7 @@
 //
 // Pure: the fraction and the words. render.ts owns the state machine (revealProgressTick) and the DOM.
 import { markerLabel } from "./time-marker";
+import { isFoldableNoticeShape } from "./compact";
 
 export const REVEAL_LABEL = "Loading older messages…";
 
@@ -41,7 +42,9 @@ export function revealCountWords(loaded: number, oldestT: number | null, nowMs: 
   if (loaded > 0) parts.push(`${loaded} older ${loaded === 1 ? "message" : "messages"} loaded`);
   if (oldestT != null) {
     const m = markerLabel(oldestT, null, nowMs);
-    parts.push("back to " + (m.date ? m.date + " " + m.hm : m.hm));
+    const y = new Date(oldestT * 1000).getFullYear(), yn = new Date(nowMs).getFullYear();
+    const date = m.date && y !== yn ? m.date + " " + y : m.date;       // the year when it differs (the day context's form)
+    parts.push("back to " + (date ? date + " " + m.hm : m.hm));
   }
   return parts.join(" · ");
 }
@@ -57,10 +60,15 @@ export function revealPercentWords(fraction: number): string {
   return `${Math.min(99, Math.floor(fraction * 100))}% of the way back`;
 }
 
-/** How many of a chunk's events are messages: the turns and postal cards a reader counts as messages, not the tool
- *  atoms, thinking blocks and notices between them. */
+/** How many of the events are messages: the turns and postal cards a reader counts as messages, not the tool atoms and
+ *  thinking blocks between them, and not the injected notices (system reminders, romp notices, interrupt markers and
+ *  their settles) that ride user and assistant rows: compact mode's own reading of a notice (isFoldableNoticeShape). */
 export function messageCount<E extends { kind?: string }>(events: readonly E[]): number {
   let n = 0;
-  for (const e of events) if (e.kind === "user" || e.kind === "assistant" || e.kind === "postal-service") n++;
+  for (const e of events) {
+    if (!(e.kind === "user" || e.kind === "assistant" || e.kind === "postal-service")) continue;
+    if (isFoldableNoticeShape(e as { kind: string })) continue;
+    n++;
+  }
   return n;
 }

@@ -3062,6 +3062,7 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 #reveal-progress .rp-bar[hidden] { display: none; }
 #reveal-progress .rp-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 2px; background: var(--dim); }
 #reveal-progress .rp-detail:empty { display: none; }
+#reveal-progress .rp-dots[hidden] { display: none; }   /* the loader's pulsing dots stand in only while no honest fraction exists */
 #reveal-progress .rp-x {
   flex: 0 0 auto; border: none; background: none; cursor: pointer; color: var(--dim);
   font-size: 11px; line-height: 1.4; padding: 2px 4px; border-radius: 8px;
