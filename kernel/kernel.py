@@ -11492,7 +11492,8 @@ def _nudge_placement_gate(sid, turns, store):
     A parse the cache does not hold, or a store that is not the current shared view, is derived every time
     and never cached. The exception path is unchanged: a gate that cannot be computed waves nothing through
     silently, and is never cached."""
-    pk = jd._PARSE_CACHE.get(sid)
+    pk = jd._parse_entry(sid, turns=turns)     # the entry holding THESE turns, never the sid's newest slot (an agent
+    #                                             view stored between the walk's parse and this read: review find)
     parse_key = pk[0] if (pk is not None and pk[1] is not None and pk[1].get("turns") is turns) else None
     epi = _stat_key(jd.EPIDIR / (sid + ".jsonl")) if parse_key is not None else None
     hit = _nudge_gate_memo.get(sid) if parse_key is not None else None

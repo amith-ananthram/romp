@@ -173,6 +173,7 @@ def _rebind_state(path):
     CODEXDIR = STATE / "codex"
     EPIDIR = STATE / "episodes"
     _lastsid_memo.clear()   # sdk-registry reads are mtime-memoized per sid — a rebind must not serve the old root's values
+    _LEAF_SEEN.clear()      # the leaves discover handed out belong to the old root
     _STORE_FAULTS.clear()   # unreadable-store episodes belong to the old root's files
     _CHAIN_MEMO.clear()     # the write-moment chain memo keys on paths under STATESDIR; a new root is a new world
     parse_cache_clear()      # the parses belong to the old root too
@@ -2814,8 +2815,8 @@ def _parse_store(fsid, cut, key, session, leaf, human, mode="full"):
     The leaf is part of the slot: a parse of another transcript under the same sid (a subagent viewer's agent file
     while the live leaf is parsed by the lanes, the feed and the judges) keeps a slot of its own instead of evicting
     the live leaf's tree and being evicted by it in turn, twice per cycle (review find, 2026-09-11). A leaf a /clear
-    rotated away keeps its slot until the least-recently-used eviction reaches it, as the kernel's path-keyed cache
-    always did."""
+    or a resume fork rotated away is released at the event that rotates it: discover, on first handing out the
+    session's new leaf, drops the previous leaf's slots (_note_leaf), so one tree per session holds across clears."""
     slot = (fsid, cut, str(leaf))
     with _PARSE_CACHE_LOCK:
         for k in [k for k in _PARSE_CACHE if k[0] == fsid and k[1] != cut]:
@@ -2830,18 +2831,19 @@ def _parse_store(fsid, cut, key, session, leaf, human, mode="full"):
             del _PARSE_CACHE[next(iter(_PARSE_CACHE))]   # the least recently used goes, never everything at once
 
 
-def _parse_entry(fsid, session=None):
-    """The newest cached entry for fsid across cuts, leaves and flags, or with `session` given the entry holding
-    that very tree (the chain and courier keys hold the judges' session object; the newest slot may be an override
-    parse of another transcript under the same sid). None when absent."""
+def _parse_entry(fsid, session=None, turns=None):
+    """The newest cached entry for fsid across cuts, leaves and flags, or with `session` (or its `turns` list)
+    given the entry holding that very tree: the chain and courier keys hold the judges' session object and the
+    nudge gate its turns, and the newest slot may be an override parse of another transcript under the same sid
+    (a subagent viewer's agent file stored between the walk's parse and the gate's read). None when absent."""
     with _PARSE_CACHE_LOCK:
         for k in reversed(_PARSE_CACHE):
             if k[0] != fsid:
                 continue
-            if session is None:
+            if session is None and turns is None:
                 return _newest_of(_PARSE_CACHE[k])
             for ent in reversed(list(_PARSE_CACHE[k].values())):
-                if ent[1] is session:
+                if ent[1] is session or (turns is not None and isinstance(ent[1], dict) and ent[1].get("turns") is turns):
                     return ent
     return None
 
@@ -7711,6 +7713,22 @@ def _custom_title(p):
     return None
 
 
+_LEAF_SEEN = {}      # sid -> the leaf path discover last handed out for it: the parse store releases the previous
+
+
+def _note_leaf(sid, path_str):
+    """discover hands out `path_str` as sid's CURRENT leaf. When that differs from the leaf it handed out last (a
+    /clear minted a new fsid under the same romp sid, or a resume fork moved the head to a fresh file), the previous
+    leaf's parse slots are dropped: nothing reads them again (the anchor is a non-leaf candidate of the new parse,
+    read through the record cache, never through the parse store), and without this every clear left one more full
+    tree resident until restart (review find, 2026-09-11). The event is the flip itself, observed at the one read
+    that gives every caller the new leaf; a candidate-based drop would release only the first anchor."""
+    prev = _LEAF_SEEN.get(sid)
+    if prev is not None and prev != path_str:
+        parse_cache_drop_leaf(prev)
+    _LEAF_SEEN[sid] = path_str
+
+
 _lastsid_memo = {}   # sid -> (sdk-registry mtime, diverged lastSid or None) — the registry is rewritten
                      # constantly while a session works (ctx%, queue mirror), but lastSid flips only on a
                      # /clear-style fork, so an mtime memo keeps the fingerprint's per-push reads cheap
@@ -8149,11 +8167,13 @@ def _discover_impl(now, window=None, forks=True):
         fork = next(((p, m) for st, p, m in listing if st == last), None) if last else None
         if fork is not None:
             path_str, mt = fork
+            _note_leaf(sid, path_str)                    # the leaf flipped here: the previous leaf's trees go
             if mt >= cutoff and path_str not in seen:
                 seen.add(path_str); out.append((sid, Path(path_str), sid, name))
         else:
             for stem, path_str, mt in listing:           # anchor (<sid>.jsonl) first — mirrors the old exists()/stat() block
                 if stem == sid:
+                    _note_leaf(sid, path_str)
                     if mt >= cutoff and path_str not in seen:
                         seen.add(path_str); out.append((sid, Path(path_str), sid, name))
                     break

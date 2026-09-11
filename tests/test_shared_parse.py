@@ -97,7 +97,13 @@ class OneParseForBoth(unittest.TestCase):
         states.write_text(json.dumps({"t": self.now, "state": "idle"}) + "\n")
         self.addCleanup(lambda: states.unlink(missing_ok=True))
         km._parse(p, A, self.now)                            # parsed for romp sid A
-        self.assertIn(str(states), [f for f in jd._parse_key_files(A, [p], str(states))[2]], "the states log is in the key")
+        st = states.stat()
+        stored = jd._PARSE_CACHE[A][0]                       # the STORED key: (fileset pair, cut)
+        self.assertIn([st.st_mtime, st.st_size], stored[0], "the stored key carries states/<A>.jsonl's stat")
+        stem_states = Path(jd.STATE) / "states" / (other + ".jsonl")   # a states path derived from the leaf's stem
+        self.assertFalse(stem_states.exists())
+        self.assertNotEqual(jd._fileset_key(jd._parse_key_files(A, [p], str(stem_states))[2]), stored[0],
+                            "a key built over the stem-derived states path would not match the stored one")
         self.assertIsNotNone(km._parse_cached(p), "the cache-only read finds the display's tree by leaf path")
         self.assertIs(km._parse_cached(p), jd._PARSE_CACHE[A][1])
         self.assertIn(p, km._parse_cache)
@@ -214,6 +220,63 @@ class OneParseForBoth(unittest.TestCase):
             jd._SDK_OWNER_FN = saved
         src = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertIn("jd.set_sdk_owner_provider(", src, "the kernel installs the backends' owns() as the one answer")
+
+    def test_a_clear_releases_the_previous_leafs_tree(self):
+        """Review find (2026-09-11): with the leaf in the slot, a /clear (the SDK registry's lastSid flips to a new
+        fsid, discover hands out <lastSid>.jsonl) left the pre-clear leaf's full tree resident until restart: no cut
+        changed, the LRU is 256 deep, nothing popped it. discover drops the previous leaf's slots when it first hands
+        out the new one, so exactly one slot remains per session; twice, for two clears."""
+        import re
+        C = "33333333-2222-4333-8444-000000000303"
+        L1, L2 = "44444444-2222-4333-8444-000000000441", "44444444-2222-4333-8444-000000000442"
+        saved = (jd.STATE, jd.NAMES, jd.PROJECTS, os.environ.get("CLAUDE_CONFIG_DIR"))
+        td = Path(tempfile.mkdtemp())
+        try:
+            jd._rebind_state(td / "state")
+            cfg = td / "claude"; os.environ["CLAUDE_CONFIG_DIR"] = str(cfg)
+            cdir = td / "launchdir"; cdir.mkdir()
+            proj_dir = cfg / "projects" / re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(str(cdir)))
+            proj_dir.mkdir(parents=True)
+            names = td / "names"; names.mkdir()
+            (names / C).write_text("worker\t%s\t#abcdef\n" % cdir)
+            jd.NAMES, jd.PROJECTS = names, cfg / "projects"
+            jd.SDKDIR.mkdir(parents=True, exist_ok=True)
+            reg = jd.SDKDIR / (C + ".json")
+            anchor_path = _transcript(str(proj_dir), C, n=2)
+            reg.write_text(json.dumps({"sid": C, "name": "worker", "cwd": str(cdir)}))
+            now = time.time()
+
+            def current_leaf():
+                rows = [r for r in jd.discover(now) if r[0] == C]
+                self.assertEqual(len(rows), 1, rows)
+                return str(rows[0][1])
+
+            def slots():
+                return [k for k in jd._PARSE_CACHE if k[0] == C]
+
+            self.assertEqual(current_leaf(), anchor_path)
+            t0 = km._parse(anchor_path, C, now)
+            jd.parsed_session(C, [anchor_path], now)
+            self.assertEqual(len(slots()), 1)
+            for i, L in enumerate((L1, L2), start=1):
+                time.sleep(0.02)                                   # the registry rewrite must move its mtime
+                leaf = _transcript(str(proj_dir), L, n=1)         # /clear: a fresh-headed transcript under a new fsid
+                reg.write_text(json.dumps({"sid": C, "name": "worker", "cwd": str(cdir), "lastSid": L}))
+                self.assertEqual(current_leaf(), leaf, "clear %d: discover hands out the new leaf" % i)
+                t = km._parse(leaf, C, now)
+                self.assertIsNot(t, t0)
+                jd.parsed_session(C, [leaf], now)                  # the judges read the same slot
+                self.assertEqual(slots(), [(C, jd._pending_cut(C), leaf)],
+                                 "clear %d: exactly one slot remains for the session, the new leaf's" % i)
+                self.assertIsNone(km._parse_cached(anchor_path if i == 1 else prev_leaf), "the previous leaf's tree is gone")
+                prev_leaf, t0 = leaf, t
+        finally:
+            jd.NAMES, jd.PROJECTS = saved[1], saved[2]
+            if saved[3] is None:
+                os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            else:
+                os.environ["CLAUDE_CONFIG_DIR"] = saved[3]
+            jd._rebind_state(saved[0])
 
     def test_the_kernel_view_reads_the_store(self):
         p = _transcript(self.d, A)
