@@ -402,6 +402,16 @@ a subproject that became its own repository, right-click its tab and choose
 name, mail and history stay with the session, and from the next turn on the
 agent works in the new folder and reads its `CLAUDE.md`.
 
+The chat pane never jumps to another session on its own. If the tab you are
+on disappears (a kernel restart that hides a remote host's sessions until the
+host reconnects, a relay down, a session that ended), the pane goes blank: no
+tab is selected, the body names the session that vanished (and says it is
+reconnecting when that is known), and the message box is disabled with no
+session name in it. When that same session's tab returns, the pane goes back
+to it. Focus moves to a different session only when you pick a tab, or when you
+close the active tab yourself (then the pane returns to the tab you used before
+it).
+
 A session started from another one joins its tags. Forking a session, breaking
 a comment thread out into its own session, and running `romp new` inside a
 session's shell all put the new session in the parent's groups, so a session's

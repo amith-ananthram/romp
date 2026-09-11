@@ -72,6 +72,7 @@ import { initFileBrowse, openFileBrowse } from "./file-browse";   // the browser
 import { pastedFilePath } from "./paste-path";
 import { insertAtCaret } from "./composer-insert";
 import { hostNameNodes, hostPartsNodes, hostPrefix, hostOf, hostIsDown, hostIsDialing, hostDownNote } from "./host-prefix";
+import { focusAfterDismiss, emptyStateParts } from "./pane-focus";   // where focus goes when a tab leaves, and the empty body's line (T357)
 import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionToken, insertMention, mentionKeyAction, mentionSegments } from "./composer-mention";   // the @-mention card's rules, pure; the DOM is setupComposer's mention block and markMentions
 import type { MentionCandidate, MentionQuery } from "./composer-mention";
 import { defaultCommentName, defaultBreakoutName, defaultForkName, nameToSend } from "./comment-name";
@@ -1007,6 +1008,15 @@ fetch(kernelUrl("/palette"), { cache: "no-store" }).then((r) => r.json())
   .then((d) => { if (Array.isArray(d.colors)) paletteColors = d.colors; }).catch(() => { /* menu omits the swatch row */ });
 const mru: string[] = [];             // recency stack, front = most-recently-active (close → return to previous)
 let activeId: string | null = null;
+// UNFOCUSED (T357, the user 2026-09-11): the tab the user was on left the strip on its own (a kernel restart that
+// dropped the remote tabs until their host came back, a host relay down, a session gone). The pane never jumps to
+// ANOTHER session on its own: no active tab, a body that names the session that vanished, the composer disabled with
+// no session name, and focus RESTORED to that same session when its tab returns (the arrival path and applyTabOrder
+// read vanishedId). Only the user's own ✕ keeps the recency fallback, and only a pick by the user moves focus
+// (setActive clears these). pane-focus.ts holds the rule and the words.
+let vanishedId: string | null = null;
+let vanishedWhy: DismissWhy | null = null;
+let vanishedName = "";
 let renderingSid: string | null = null;   // the session id syncView is currently building (for per-session fold keys)
 // The SESSION whose transcript DOM is being built — the id preview/image URLs must bake in, host prefix
 // included. Distinct from renderingSid, which is a fold KEY the comment popover retargets to its thread id.
@@ -5290,6 +5300,9 @@ function applyTabOrder(o: any, tabs?: any, report?: OrderReport, live?: any) {
   order.length = 0;
   for (const id of next) order.push(id);
   for (const id of kernelOrder) kernelListed.add(id);
+  // T357: the tab the user was on is re-listed (a host re-attach, a relay redial) → focus goes back to it; the
+  // skeleton branch of showActive asks for its frame. Another session's tab appearing does nothing here.
+  if (vanishedId && order.includes(vanishedId)) setActive(vanishedId);
   renderTabs();
 }
 // The tabOrder frame's `skeleton` list (2026-09-07): the tabs the kernel is withholding from this page after a
@@ -11727,6 +11740,26 @@ function fillSnapshotRow(btn: HTMLElement, r: SnapRow, now: number): void {
 // `keep` (review find, 2026-09-08): a caller that must EMPTY the view before showing it (rerenderAll on a
 // settings change) captures the reader's anchor first and hands it here — by the time this runs there is
 // no DOM left to capture from and the emptied box no longer overflows. undefined = capture here.
+// The empty body's line (pane-focus.ts emptyStateParts, T357): which session vanished and why, its name dressed the way
+// the strip dresses it (host prefix, identity colour), "reconnecting" when its host is dialing; or the plain invitation.
+function paintEmptyState(empty: HTMLElement): void {
+  const v = vanishedId && vanishedWhy && vanishedWhy !== "close"
+    ? { name: vanishedName || tabMeta.get(vanishedId)?.name || vanishedId, why: vanishedWhy, dialing: hostIsDialing(vanishedId) }
+    : null;
+  const parts = emptyStateParts(v, order.length > 0);
+  empty.replaceChildren(document.createTextNode(parts.head));
+  if (parts.name != null) {
+    const b = el("b", "empty-state-name");
+    b.replaceChildren(...hostNameNodes(parts.name, vanishedId));
+    const c = vanishedId ? tabMeta.get(vanishedId)?.color?.bg : null;
+    if (c) b.style.color = c;
+    empty.appendChild(b);
+  }
+  empty.appendChild(document.createTextNode(parts.tail));
+  empty.classList.toggle("unfocused", !!v);
+  empty.dataset.vanished = vanishedId || "";
+}
+
 function showActive(keep?: { uuid: string; y: number } | null) {
   const content = document.getElementById("content");
   if (!content) return;
@@ -11811,11 +11844,18 @@ function showActive(keep?: { uuid: string; y: number } | null) {
       // design. AFTER notifyActive above, so `activeTab` precedes `needFull` on the wire and the kernel builds
       // this tab first; the awaitingFull guard makes it one ask per outstanding load.
       if (skeleton) requestFullSession(activeId, "skeleton-click");
-    } else if (!empty) {
-      empty = el("div", "empty-state"); empty.id = "empty-state";
-      empty.textContent = "No session open — click + to add one.";
-      content.appendChild(empty);
-    } else { empty.style.display = ""; }
+    } else {
+      // UNFOCUSED, or no tab at all (T357): the body says which session vanished and that a pick is the way on; the
+      // box takes no input and names no session (a pick re-enables it: the skeleton branch above, or the session
+      // frame's own showActive through setComposerAskMode)
+      if (!empty) { empty = el("div", "empty-state"); empty.id = "empty-state"; content.appendChild(empty); }
+      paintEmptyState(empty);
+      empty.style.display = "";
+      const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
+      if (ta) { ta.disabled = true; ta.placeholder = order.length ? "Pick a tab to start" : "Click + to add a session"; syncComposerPh(); }
+      const sendBtn = document.getElementById("composer-send") as HTMLButtonElement | null;
+      if (sendBtn) sendBtn.disabled = true;
+    }
     document.body.style.removeProperty("--active-accent"); // no session → neutral window border
     updateStatusline();
     // Take the leaving tab's go-to-bottom and reply chips down with it. They were measured against ITS transcript,
@@ -14476,7 +14516,7 @@ function updateStatusline() {
     sl.replaceChildren(openingLine(loading ? "Loading session" : "Opening session"));
     return;
   }
-  if (!s) return;
+  if (!s) { sl.replaceChildren(); return; }   // no tab at all, or the UNFOCUSED pane (T357): the line says nothing, not the last session's chips
   sl.replaceChildren();
   if (s.sub) {
     // a subagent viewer has no session state, model or context to show — the header above the
@@ -15845,6 +15885,7 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
     clearSeek();
   }
   activeId = id;
+  vanishedId = null; vanishedWhy = null; vanishedName = "";   // any activation ends the unfocused state (T357)
   updateLivePaused();   // the entering tab's own detached state shows or hides the strip (round 2, item 7)
   try { vscodeApi?.setState?.({ ...(vscodeApi.getState?.() || {}), activeId: id }); } catch { /* ignore */ }
   renderTabs();
@@ -16009,7 +16050,10 @@ function upsert(msg: any) {
   // fallback tab active with the box unheld, and the next blind keystroke landed there after all (the
   // T236 harness, omission path: the tab is re-listed within seconds). setActive clears the note.
   if (composerNoteSid === msg.id) setActive(msg.id);
-  const adopted = !activeId;
+  // T357: the session the user was on is back (its host re-attached, the relay redialed) → its focus is restored;
+  // and while it is away, an arrival of ANY OTHER session adopts nothing — the pane stays unfocused
+  if (vanishedId === msg.id) setActive(msg.id);
+  const adopted = !activeId && !vanishedId;
   if (adopted) { activeId = msg.id; loadComposerFor(msg.id, true); }   // adopted as the only tab → its draft too (T236: the once-per-page restore below never covers a session that LEFT and came back)
   if (wantActive && msg.id === wantActive) { wantActive = null; setActive(msg.id); }   // restore persisted tab on arrival
   renderTabs();                                   // a new id appended to `order` above → strip repaints in kernel order
@@ -16633,15 +16677,19 @@ function dismissSession(id: string, why: DismissWhy, doomed?: ReadonlySet<string
   const mi = mru.indexOf(id); if (mi >= 0) mru.splice(mi, 1);   // before the fallback read below — never the dead id
   renderTabs();                          // tab removed from `order` above → repaint without it
   if (wasActive) {
-    // MRU: return to the previously-active tab, not the positional neighbor — one still on the strip (the
-    // dead id left `mru` above; an id `order` no longer carries would bind the box to a tab nobody can see,
-    // and the next keystroke would file under it) and not one this same teardown takes next.
+    // Where the box goes (pane-focus.ts focusAfterDismiss; T357, the user 2026-09-11): only the user's OWN ✕ hands it
+    // to the recency fallback — MRU, then the first tab still on the strip (the dead id left `mru` above; an id `order`
+    // no longer carries would bind the box to a tab nobody can see), never one this same teardown takes next — since
+    // they closed the tab and the box changing hands is the one case they already know. Every other departure (a
+    // kernel restart that dropped the remote tabs until their host came back, a host relay down, a session gone)
+    // leaves the pane UNFOCUSED: activeId null with the strip still showing, the body naming what vanished, and focus
+    // restored to THAT session when its tab returns — never to another session on the pane's own initiative (the
+    // user ended up typing to a box they had not chosen). The arrival path guards its adoption on vanishedId.
     const home = hostOf(id);   // "" for a local id, and then no sibling rule: every local tab would "share" it
     const goingToo = (x: string) => (doomed?.has(x) ?? false) || (why === "hostDrop" && !!home && hostOf(x) === home);
-    // …and with no recency left (the user only ever looked at this one tab), the first tab still on the
-    // strip: leaving activeId null with tabs showing read "No session open" under a visible strip, and
-    // handed the box to whichever session frame happened to arrive next (the harness caught both, T236).
-    activeId = mru.find((x) => order.includes(x) && !goingToo(x)) || order.find((x) => !goingToo(x)) || null;
+    const next = focusAfterDismiss(why, mru, order, goingToo);
+    activeId = next.activeId;
+    if (next.unfocused) { vanishedId = id; vanishedWhy = why; vanishedName = name; }
     loadComposerFor(activeId);   // the strip was showing the CLOSED session's chip/thumbnails/draft — swap in the new active tab's (usually none)
     // The box just changed hands under the user. Their own ✕ is the one case they already know; for every
     // other reason BLUR it — a keystroke a moment later must not land in the survivor's session unnoticed
