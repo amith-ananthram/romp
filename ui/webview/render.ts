@@ -34,6 +34,7 @@ import { flash } from "./actions";   // its own line: the import above is pinned
 import { awaitWord, awaitBreakdown, groupRows, rowIds, waitsNote, GROUP_TITLE, workingFor, type AwaitRow } from "./spin-caption";
 import { isClearCmd, openTopTitles, clearConfirmDetail, endConfirmDetail } from "./clear-confirm";
 import { prebuildPlan, type ViewState } from "./prebuild";
+import { historyMarks, historyBands, windowSpans, HIST_H, HIST_GAP } from "./glow-history";
 import { newSkeletonState, applyTabOrderSkeleton, onStatus, onFull, onDismiss, onSocketUp, nextPrefetch, renderKind } from "./skeleton-tabs";
 import { reconcileTabOrder, adoptArrival } from "./tab-order";
 import { writeViewOrder } from "./view-order";
@@ -2401,8 +2402,30 @@ function railLastDotFrom(turn: HTMLElement, hostR: DOMRect): number | null {
 // time window — plus any postal card carrying a hovered message id. Empty
 // groups+mids = clear. Glow is hover-transient, so a re-render that drops it
 // mid-hover self-heals on the next hover tick (the user 2026-06-19).
-function applyGlow(groups: Array<{ sid: string; uuids: string[] }>, mids: string[]) {
+// T318b (the user 2026-09-10): a group also carries `idx` (each uuid's GLOBAL event index in the kernel's chat
+// payload) so a source turn OUTSIDE the resident tail, which has no row here to light, is marked on the ruler's
+// history strip by its position in the unloaded prefix [0, headFrom) instead of painting nothing (glow-history.ts).
+let glowHistory: number[] = [];   // the active view's unloaded glow turns, as fractions of its unloaded prefix
+let glowUnits: number[] = [];     // …and its RESIDENT glow turns with no rendered row, as display units (a spacer's)
+// The display units of hovered uuids that are RESIDENT (in s.events) but have no rendered row: outside the render
+// window they sit inside a spacer, and paintGlowRuler places them by windowSpans; inside the window without a row
+// (folded, off the active path) they have no place and paintGlowRuler drops them. Same lookup as scrollToAnchor's.
+function residentUnits(s: Session, uuids: string[]): number[] {
+  if (!uuids.length) return [];
+  const items = displayItems(s);
+  const out: number[] = [];
+  for (const uuid of uuids) {
+    const idx = s.events.findIndex((e) => e.uuid === uuid);
+    if (idx < 0) continue;
+    let u = items.findIndex((it) => it.kind === "toolgroup" || it.kind === "noticegroup" ? it.indices.includes(idx) : it.index === idx);
+    if (u < 0) u = items.findIndex((it) => itemFirstEvent(it) >= idx);
+    if (u >= 0) out.push(u);
+  }
+  return out;
+}
+function applyGlow(groups: Array<{ sid: string; uuids: string[]; idx?: Record<string, number>; total?: number }>, mids: string[]) {
   document.querySelectorAll(".ext-glow").forEach((n) => n.classList.remove("ext-glow"));
+  glowHistory = []; glowUnits = [];
   const midSet = new Set(mids);
   if (midSet.size) {
     document.querySelectorAll<HTMLElement>(".turn[data-mid]").forEach((n) => {
@@ -2414,9 +2437,19 @@ function applyGlow(groups: Array<{ sid: string; uuids: string[] }>, mids: string
     if (!v) continue;
     const uset = new Set(g.uuids || []);
     if (!uset.size) continue;
+    const lit = new Set<string>();
     v.el.querySelectorAll<HTMLElement>(".turn[data-uuid]").forEach((n) => {
-      if (uset.has(n.dataset.uuid || "")) n.classList.add("ext-glow");   // every row of a matched atom lights
+      const u = n.dataset.uuid || "";
+      if (uset.has(u)) { n.classList.add("ext-glow"); lit.add(u); }   // every row of a matched atom lights
     });
+    // the rest have no row: outside the resident tail they go on the ruler's history strip, resident but outside
+    // the render window on the ruler proper at their spacer's slice (the active view's only, whose #content the
+    // ruler mirrors; other views are display:none)
+    if (g.sid === activeId) {
+      const s = liveSession(g.sid);
+      glowHistory = historyMarks(g.uuids || [], g.idx, lit, s?.headFrom ?? 0);
+      glowUnits = s ? residentUnits(s, (g.uuids || []).filter((u) => !lit.has(u))) : [];
+    }
   }
   paintGlowRuler();   // mirror the glow as bands on the overview ruler (link_audit's #4)
   paintRailBand();    // one continuous measured band over the rail line (the user 2026-07-02)
@@ -2532,7 +2565,9 @@ function paintRailBand(): void {
 // map CONTENT space → ruler space, so a plain scroll never moves them (they mark absolute transcript
 // position); only a glow change or a #content relayout repaints. v1 is a pure indicator (pointer-events:none
 // so the native scrollbar still works underneath) — the optional click-a-band-to-scroll is intentionally
-// skipped so it can't swallow scrollbar clicks.
+// skipped so it can't swallow scrollbar clicks. T318b (the user 2026-09-10): when the hovered turns include some
+// OUTSIDE the resident tail, the top of the strip is a HISTORY cap marking them by global event index over the
+// unloaded prefix (applyGlow → glowHistory), and the resident scroll maps into what is left below a hairline gap.
 const RULER_W = 10;   // == the webkit scrollbar width (styles.css ::-webkit-scrollbar) so bands sit in its gutter
 let glowRuler: HTMLElement | null = null;
 function ensureGlowRuler(): HTMLElement {
@@ -2548,15 +2583,30 @@ function paintGlowRuler(): void {
   const v = activeId ? views.get(activeId) : null;
   // only the ACTIVE view's glows map onto its #content scroll (other views are display:none → zero rects)
   const glows = (content && v) ? Array.from(v.el.querySelectorAll<HTMLElement>(".turn.ext-glow")) : [];
-  if (!content || !glows.length) { ruler.style.display = "none"; ruler.replaceChildren(); return; }
+  const hist = (content && v) ? glowHistory : [];
+  const units = (content && v) ? glowUnits : [];
+  if (!content || !v || (!glows.length && !hist.length && !units.length)) { ruler.style.display = "none"; ruler.replaceChildren(); return; }
   const rect = content.getBoundingClientRect();
   const scrollH = content.scrollHeight || 1;
   const rulerH = content.clientHeight;          // the strip spans #content's VISIBLE height
+  const capH = hist.length ? HIST_H + HIST_GAP : 0;   // the history cap, when there is history to mark
+  const mapH = Math.max(1, rulerH - capH);            // …and the resident scroll maps into the rest
   // each glowing turn → a [top, bot] span in CONTENT space (scroll-independent: + scrollTop, − content top)
   const segs = glows.map((turn) => {
     const top = turn.getBoundingClientRect().top - rect.top + content.scrollTop;
     return { top, bot: top + turn.offsetHeight };
-  }).sort((a, b) => a.top - b.top);
+  });
+  // T318b: a hovered turn that is resident but outside the render window sits inside a spacer; its span is the
+  // spacer's slice for its unit, so the ruler bands it like a row it cannot see (windowSpans; the geometry is read
+  // here, at paint time, so a window that moved since the hover is placed as it stands now)
+  if (units.length) {
+    const yOf = (e: HTMLElement | null) => e ? e.getBoundingClientRect().top - rect.top + content.scrollTop : 0;
+    const topSp = v.el.querySelector<HTMLElement>(".tx-spacer-top"), botSp = v.el.querySelector<HTMLElement>(".tx-spacer-bot");
+    segs.push(...windowSpans(units, { winStart: v.winStart ?? 0, winEnd: v.winEnd ?? (v.unitTotal ?? 0), unitTotal: v.unitTotal ?? 0,
+                                      topY: yOf(topSp), topH: topSp ? topSp.offsetHeight : 0, botY: yOf(botSp), botH: botSp ? botSp.offsetHeight : 0,
+                                      avg: v.avgTurnH ?? 60 }));
+  }
+  segs.sort((a, b) => a.top - b.top);
   // coalesce contiguous / overlapping turns into ONE band; a multi-segment goal hover → a few disjoint bands
   const bands: Array<{ top: number; bot: number }> = [];
   for (const s of segs) {
@@ -2572,9 +2622,21 @@ function paintGlowRuler(): void {
   ruler.replaceChildren();
   for (const b of bands) {
     const band = el("div", "glow-ruler-band");
-    band.style.top = (b.top / scrollH * rulerH) + "px";
-    band.style.height = Math.max(3, (b.bot - b.top) / scrollH * rulerH) + "px";   // min 3px so a short turn still reads
+    band.style.top = (capH + b.top / scrollH * mapH) + "px";
+    band.style.height = Math.max(3, (b.bot - b.top) / scrollH * mapH) + "px";   // min 3px so a short turn still reads
     ruler.appendChild(band);
+  }
+  if (hist.length) {
+    const strip = el("div", "glow-ruler-hist");
+    strip.style.height = HIST_H + "px";
+    for (const hb of historyBands(hist, HIST_H)) {
+      const band = el("div", "glow-ruler-band");
+      band.classList.add("hist");
+      band.style.top = hb.top + "px";
+      band.style.height = hb.height + "px";
+      strip.appendChild(band);
+    }
+    ruler.appendChild(strip);
   }
   ruler.style.display = "";
 }

@@ -3159,6 +3159,12 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 .glow-ruler-band { position: absolute; left: 1px; right: 1px; border-radius: 3px;
   background: color-mix(in srgb, var(--active-accent, #fff) 50%, transparent);
   box-shadow: 0 0 3px color-mix(in srgb, var(--active-accent, #fff) 40%, transparent); }
+/* The ruler's HISTORY strip (T318b, the user 2026-09-10): a hovered card's source turns outside the resident tail are
+   marked at the top of the ruler by global event index; a hairline under the strip separates the unloaded prefix
+   from the resident scroll map below. The same ink as the bands, so it reads as the same hover. */
+.glow-ruler-hist { position: absolute; left: 0; right: 0; top: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--active-accent, #fff) 35%, transparent); }
+.glow-ruler-band.hist { border-radius: 2px; }
 
 /* Fleet inbox-zero (the user 2026-06-29): when the fleet has loaded but has no open work, show the romp
    tri-color WORDMARK centered + faded in — the SAME calm at-rest mark as the feed's .feed-empty, mirrored
