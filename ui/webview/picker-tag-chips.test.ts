@@ -21,7 +21,6 @@ test("each option is the shared tag chip: the tag's colour on a thin border, the
   assert.match(REBUILD, /b\.addEventListener\("click", \(\) => \{ b\.classList\.toggle\("sel"\); paintPickerTagChip\(b, u\); \}\);/, "…and on every click (multi-select: each chip on its own)");
   assert.match(RENDER, /function paintPickerTagChip\(b: HTMLButtonElement, u: \{ name: string; color\?: string \| null \}\): void \{\s*\n\s*b\.replaceChildren\(tagChip\(u\.name, u\.color, \{ inheritSize: true, struck: !b\.classList\.contains\("sel"\) \}\)\);/,
     "selected = the full chip, unselected = the STRUCK chip (T321b: a diagonal in the chip's colour, the fade alone read too faint); the button's size, not a second 0.82em");
-  assert.match(REBUILD, /b\.addEventListener\("click", \(\) => \{ b\.classList\.toggle\("sel"\); paintPickerTagChip\(b, u\); \}\);/, "the click flips it: repainted from the state class");
   assert.doesNotMatch(RENDER, /picker-tag-dot/, "the dot is gone from the pane");
   assert.doesNotMatch(CSS, /picker-tag-dot/, "…and from the sheet");
   assert.doesNotMatch(RENDER, /ctx-tag-dot/, "the tab menu's Tags flyout wears the chip too: no dot anywhere a tag shows (T321)");

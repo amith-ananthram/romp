@@ -7921,7 +7921,7 @@ function openPicker(pick = false, prompt?: string, allowNew = false) {
     for (const u of unions) {
       const b = el("button", "picker-be-opt" + (preset.has(u.name) ? " sel" : "")) as HTMLButtonElement;
       b.type = "button"; b.dataset.tag = u.name;
-      paintPickerTagChip(b, u);   // the tag chip every surface draws, full when selected, faded when not (T321)
+      paintPickerTagChip(b, u);   // the tag chip every surface draws, full when selected, struck when not (T321, T321b)
       b.title = preset.has(u.name)
         ? `the session you are looking at is in ${u.name} — the new one joins it too unless you unpick this`
         : `put the new session in ${u.name}`;

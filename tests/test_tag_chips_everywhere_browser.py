@@ -3,7 +3,8 @@
 ui/webview/tag-menu.ts) builds every tag chip: the tab strip's group rows and its filter chips at the strip's right,
 the feed's and the outline's filter chips, the tag-lens menu, the tab menu's Tags flyout, the feed's session dialog,
 and the new-session picker's Tags row, where each tag shows as the chip (a thin border in the tag's own colour) and on
-versus off by the visual the tag toggles already use: the faded chip (TAG_CHIP_OFF_CLASS at 0.45). No identity dot.
+versus off as the full chip against the STRUCK chip (T321b: a diagonal in the chip's colour over a lighter fade, since
+the fade alone did not read as off there). No identity dot.
 
 The strip guard reads the LIVE computed style of a group row's chip and of the same tag's filter chip at the strip's
 right (a chat lens seeded with two tags, so both rows and both filter chips show) and asserts they are one rendering:
@@ -239,7 +240,7 @@ class ServedPickerTagChips(unittest.TestCase):
             self.assertEqual((f["borderColor"], f["color"]), (_rgb(colors[name]), _rgb(colors[name])), "…on the filter chip too: %r" % f)
             self.assertEqual(r["borderW"], "1px")
 
-    def test_each_tag_is_the_shared_chip_and_a_click_flips_the_faded_look_with_the_state_class(self):
+    def test_each_tag_is_the_shared_chip_and_a_click_flips_the_struck_look_with_the_state_class(self):
         out = self._once()
         o = out["open"]
         by = {x["tag"]: x for x in o["opts"]}
@@ -265,8 +266,11 @@ class ServedPickerTagChips(unittest.TestCase):
             self.assertEqual((x["chipClass"], x["chipOpacity"], x["chipPos"]), ("tag-chip-struck", "0.7", "relative"), "unselected = the STRUCK chip (T321b): %r" % x)
             a = x["after"]
             self.assertEqual((a["content"], a["pos"], a["events"]), ('""', "absolute", "none"), "the diagonal is a pseudo-element over the chip: %r" % a)
-            self.assertEqual((a["w"], a["h"]), ("%gpx" % x["chipW"], "%gpx" % x["chipH"]), "…covering the chip's padding box, so the gradient's line runs corner to corner inside the border: %r vs %r" % (a, x))
+            # the padding box may be fractional where glyphs advance by subpixels; clientWidth rounds, the computed width does not
+            self.assertLess(abs(float(a["w"].rstrip("px")) - x["chipW"]) + abs(float(a["h"].rstrip("px")) - x["chipH"]), 2,
+                            "…covering the chip's padding box, so the gradient's line runs corner to corner inside the border: %r vs %r" % (a, x))
             self.assertIn("linear-gradient", a["bg"]); self.assertIn("0.5px", a["bg"])
+            self.assertIn("to right bottom", a["bg"], "the keyword whose middle stop runs bottom-left to top-right, as the browser serialises it: %r" % a["bg"])
             self.assertEqual(x["chipColor"], _rgb(colors[name]), "the line is currentColor, the tag's colour: %r" % x)
         # the flip: the state class and the chip's look move together, and back
         on = {x["tag"]: x for x in out["on"]["opts"]}

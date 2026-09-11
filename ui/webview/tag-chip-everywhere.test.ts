@@ -53,10 +53,16 @@ test("the renderer pins the standard inline: thin border and text in the tag's c
     assert.match(struck.attrs.style, /position:relative;opacity:0\.7;/, "positioned for the diagonal, faded lighter than the plain off");
     assert.doesNotMatch(struck.attrs.style, /opacity:0\.45/);
     assert.match(struck.attrs.style, /border:1px solid #3355aa;color:#3355aa;/, "the colour kept: the line is drawn in it");
+    const both = tagChip("qa", "#3355aa", { off: true, struck: true });
+    assert.equal(both.attrs["class"], "tag-chip-struck", "struck wins when both are passed (stated in the docblock)");
+    assert.match(both.attrs.style, /opacity:0\.7;/); assert.doesNotMatch(both.attrs.style, /0\.45/);
   } finally { g.document = saved; g.window = savedWin; }
   assert.match(MENU, /export const TAG_CHIP_STRUCK_CLASS = "tag-chip-struck";/);
   assert.match(MENU, /export const TAG_CHIP_STRUCK_OPACITY = "0\.7";/);
-  const STRUCK_RULE = ".tag-chip-struck::after { content: \"\"; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(to top right, transparent calc(50% - 0.5px), currentColor calc(50% - 0.5px), currentColor calc(50% + 0.5px), transparent calc(50% + 0.5px)); }";
+  // the sheets: the class alone positions the chip; the diagonal runs bottom-left to top-right (`to bottom right` puts the
+  // gradient's middle stop through the two corners the keyword does not name), clipped to the pill's radius
+  const STRUCK_RULE = ".tag-chip-struck { position: relative; }\n"
+    + ".tag-chip-struck::after { content: \"\"; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; background: linear-gradient(to bottom right, transparent calc(50% - 0.5px), currentColor calc(50% - 0.5px), currentColor calc(50% + 0.5px), transparent calc(50% + 0.5px)); }";
   for (const [name, sheet] of [["styles.css", CSS], ["feed.css", FEED_CSS]] as const)
     assert.ok(sheet.includes("\n" + STRUCK_RULE + "\n"), name + ": the diagonal, corner to corner in the chip's own colour (currentColor: theme parity by construction), the same bytes on both sheets");
 });

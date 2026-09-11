@@ -207,9 +207,11 @@ export const TAG_CHIP_STRUCK_OPACITY = "0.7";              // lighter than the f
  *  and off = the faded chip (`off`: TAG_CHIP_OFF_CLASS at TAG_CHIP_OFF_OPACITY) or, where a fade alone reads too faint,
  *  the STRUCK chip (`struck`, T321b, the user 2026-09-10 on the picker's Tags row): a 1px diagonal from the chip's
  *  bottom-left to its top-right in the chip's own colour (the sheets' TAG_CHIP_STRUCK_CLASS rule, currentColor, so it
- *  follows the tag on either theme) over a lighter fade. The picker uses `struck`; the filter chips and the tag-lens
- *  menu keep `off` until the user says otherwise, one word away. A host adds layout (flex, margins) and state cues
- *  the chip never sets inline (a filter, an underline), never a weight, size, border or colour. */
+ *  follows the tag on either theme) over a lighter fade; `struck` wins when both are passed. The picker uses `struck`;
+ *  the tag-lens menu keeps `off` and the filter chips take neither (a selected filter is never off) until the user
+ *  says otherwise, one word away. A document that loads neither sheet (the Obsidian view, the kernel's inline pages)
+ *  must inline the rule before it uses `struck`, or its chip fades without the line. A host adds layout (flex,
+ *  margins) and state cues the chip never sets inline (a filter, an underline), never a weight, size, border or colour. */
 export function tagChip(label: string, color?: string | null, opts?: { inheritSize?: boolean; off?: boolean; struck?: boolean }): HTMLElement {
   const col = color || ("var(--dim, " + TAG_BTN_GRAY + ")");
   const chip = document.createElement("span");
