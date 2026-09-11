@@ -166,7 +166,9 @@ test("the session bell is a command (the user 2026-09-11): the palette asks the 
   // the pane: the same override the tab menu's bell row writes, on the ACTIVE session only, never a placeholder tab
   assert.match(RENDER, /if \(m\.romp === "notifyToggle"\) \{\s*const s = activeId && !isProvisionalId\(activeId\) \? liveSession\(activeId\) : undefined;/,
     "the LIVE session only: a skeleton tab's copy is stale, and a placeholder has no session to flag");
-  assert.match(RENDER, /const on = !s\.notify;\s*setSessionFlag\(activeId, "notify", on\);\s*ephemeralWarnToast\(\(on \? "Notifications on for " : "Notifications off for "\)/);
+  assert.match(RENDER, /const on = !s\.notify;\s*setSessionFlag\(activeId, "notify", on\);\s*ephemeralWarnToast\(\(on \? "Notifications enabled for " : "Notifications disabled for "\)/);
+  // the tab menu's bell row reveals the command's chord once one is bound (keyHint reads the shared bindings store)
+  assert.match(RENDER, /const bellKey = keyHint\("session\.notify"\);[\s\S]{0,400}?\+ \(bellKey \? " · " \+ bellKey : ""\),/);
   assert.match(RENDER, /\(\) => setSessionFlag\(id, "notify", !onBell\)\);/, "the tab menu's row still writes the same flag");
   // the other column (or browser) learns on the flip: the flags ride the tail frame and the tail handler applies them
   const tail = RENDER.split("function chatTail(msg: any) {")[1].split("\n}")[0];

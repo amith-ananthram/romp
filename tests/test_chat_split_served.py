@@ -330,12 +330,12 @@ const runPalette = async (fid, query) => {   // the chord from inside a column's
 const toasts = (fid) => page.evaluate((fid) => Array.from(document.getElementById(fid).contentDocument.querySelectorAll(".warn-toast-msg")).map((t) => t.textContent), fid);
 out.bell = { before: await bellLabel("f-chat", cfg.sidA), beforeCol2: await bellLabel("f-chat-2", cfg.sidA) };
 await runPalette("f-chat", "toggle notif");
-await waitFn((fid) => Array.from(document.getElementById(fid).contentDocument.querySelectorAll(".warn-toast-msg")).some((t) => /Notifications on for/.test(t.textContent || "")), "f-chat", "no toast said the bell went on");
+await waitFn((fid) => Array.from(document.getElementById(fid).contentDocument.querySelectorAll(".warn-toast-msg")).some((t) => /Notifications enabled for/.test(t.textContent || "")), "f-chat", "no toast said the bell went on");
 out.bell.toastOn = await toasts("f-chat");
 out.bell.afterOn = await bellLabel("f-chat", cfg.sidA);                                       // this column: at once
 out.bell.col2AfterOn = await bellReads("f-chat-2", cfg.sidA, "Stop notifying", "column 2 never learned the bell went on");   // the other: from the kernel
 await runPalette("f-chat", "toggle notif");
-await waitFn((fid) => Array.from(document.getElementById(fid).contentDocument.querySelectorAll(".warn-toast-msg")).some((t) => /Notifications off for/.test(t.textContent || "")), "f-chat", "no toast said the bell went off");
+await waitFn((fid) => Array.from(document.getElementById(fid).contentDocument.querySelectorAll(".warn-toast-msg")).some((t) => /Notifications disabled for/.test(t.textContent || "")), "f-chat", "no toast said the bell went off");
 out.bell.toastOff = await toasts("f-chat");
 out.bell.afterOff = await bellLabel("f-chat", cfg.sidA);
 out.bell.col2AfterOff = await bellReads("f-chat-2", cfg.sidA, "Notify me", "column 2 never learned the bell went off");
@@ -673,10 +673,10 @@ class ServedChatSplit(unittest.TestCase):
         # other) writes the same per-session override the tab menu's bell row writes, and says what it did
         b = self._r()["bell"]
         self.assertEqual((b["before"], b["beforeCol2"]), ("Notify me", "Notify me"), "off to begin with: the lab's master is off and the session has no override")
-        self.assertTrue(any(t == "Notifications on for web" for t in b["toastOn"]), "the toast names the session and the new state: %r" % b["toastOn"])
+        self.assertTrue(any(t == "Notifications enabled for web" for t in b["toastOn"]), "the toast names the session and the new state: %r" % b["toastOn"])
         self.assertEqual(b["afterOn"], "Stop notifying", "the tab menu reads the other way at once")
         self.assertEqual(b["col2AfterOn"], "Stop notifying", "…and in the other column, from the kernel's push: the flag reached the kernel")
-        self.assertTrue(any(t == "Notifications off for web" for t in b["toastOff"]), b["toastOff"])
+        self.assertTrue(any(t == "Notifications disabled for web" for t in b["toastOff"]), b["toastOff"])
         self.assertEqual((b["afterOff"], b["col2AfterOff"]), ("Notify me", "Notify me"), "a second run turns it off again, everywhere")
         # the kernel's store, once the story has run: the override is off again — stored as such or dropped as the default
         p = os.path.join(self.lab, "xdg", "romp", "session-flags.json")
