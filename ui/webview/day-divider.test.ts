@@ -130,7 +130,7 @@ test("every day walk decides against a DayWalk mark and never a raw epoch; windo
   for (const c of calls) assert.match(c, /^dayDividerFor\(\w+, walk\)$/, "each hands the walk, not a number: " + c);
   const ai = RENDER.slice(RENDER.indexOf("function appendItem("), RENDER.indexOf("function renderWindowItems("));
   assert.match(ai, /^function appendItem\(v: View, s: Session, items: DisplayItem\[\], u: number, prevEpoch: number \| null, walk: DayWalk, working: boolean\): number \| null \{/m);
-  assert.match(ai, /walk\.pass\(unitExit\(s, it\)\);\s*\n\s*return prevEpoch;\s*\n\}/, "the unit's exit passes the mark on the way out");
+  assert.match(ai, /walk\.pass\(unitExit\(s, it\)\);\s*\n\s*for \(const n of nodes\) stampWalkDay\(n, walk\);\s*\n\s*return prevEpoch;\s*\n\}/, "the unit's exit passes the mark on the way out, and every node the unit appended is stamped with the walk's day (T342)");
   const rw = RENDER.slice(RENDER.indexOf("function renderWindowItems("), RENDER.indexOf("function sizeSpacers("));
   assert.match(rw, /const walk = dayWalkBefore\(s, items, unitStart\);[^\n]*\n\s*for \(let u = unitStart; u < unitEnd; u\+\+\) prevEpoch = appendItem\(v, s, items, u, prevEpoch, walk, working\);/, "a window seeds the mark by walking the units before it");
   assert.match(RENDER, /function dayWalkBefore\(s: Session, items: DisplayItem\[\], unitStart: number\): DayWalk \{\s*\n\s*const w = new DayWalk\(\);\s*\n\s*for \(let u = 0; u < unitStart && u < items\.length; u\+\+\) w\.pass\(unitExit\(s, items\[u\]\)\);/);
@@ -141,7 +141,7 @@ test("every day walk decides against a DayWalk mark and never a raw epoch; windo
   assert.match(ue, /const open = openFolds\.has\(toolGroupKey\(s\.events\[it\.indices\[0\]\]\)\);\s*\n\s*return eventEpoch\(s\.events\[open \? it\.indices\[it\.indices\.length - 1\] : it\.indices\[0\]\]\);/);
   // the normal-mode tail: the mark seeded over the events before `from`, passed per row; the rail keeps its raw chain
   assert.match(RENDER, /const walk = dayWalkBeforeEvent\(s\.events, from\);[^\n]*\n\s*for \(let i = from; i < len; i\+\+\) \{\s*\n\s*const prev = prevTimedEpoch\(s\.events, i\);/);
-  assert.match(RENDER, /v\.el\.appendChild\(node\);\s*\n\s*walk\.pass\(ep\);\s*\n\s*\}/, "…and passes each row");
+  assert.match(RENDER, /v\.el\.appendChild\(node\);\s*\n\s*walk\.pass\(ep\);\s*\n\s*stampWalkDay\(node, walk\);\s*\n\s*\}/, "…and passes each row, stamping it with the walk's day (T342)");
   // the cleared-episode fold and the comment popover carry their own walk
   assert.match(RENDER, /const walk = new DayWalk\(\);   \/\/ the fold divides days/);
   assert.match(RENDER, /prevEp = ep; walk\.pass\(ep\);/);

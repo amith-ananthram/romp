@@ -148,3 +148,21 @@ test("DayWalk: passing an earlier epoch or null leaves the mark; a forward cross
   w.pass(at(2026, 5, 11, 8, 0));
   assert.strictEqual(w.open(at(2026, 5, 12, 8, 0), NOW), "", "today never opens");
 });
+
+// T342: the top-of-view day label names the WALK's day at a row, the mark after passing it, which pass() returns. On the
+// two reported sequences the label over the stale echo reads the surrounding rows' day, never the echo's own.
+test("DayWalk.pass returns the mark after the row: a stale echo sits under the walk's day, never its own", () => {
+  const TOMORROW = new Date(2026, 5, 13, 12, 0, 0).getTime();
+  // rows all yesterday, two echoes two days ago between them (the served lab's `api`), read the next day
+  const w = new DayWalk();
+  const labels = [at(2026, 5, 12, 9, 5), at(2026, 5, 12, 9, 6), at(2026, 5, 11, 9, 40), at(2026, 5, 11, 9, 41), at(2026, 5, 12, 9, 10)]
+    .map((ep) => dayContext(w.pass(ep)!, TOMORROW));
+  assert.deepStrictEqual(labels, ["Yesterday", "Yesterday", "Yesterday", "Yesterday", "Yesterday"], "the echoes read Yesterday, never 2 days ago");
+  assert.deepStrictEqual([dayContext(at(2026, 5, 11, 9, 40), TOMORROW)], ["2 days ago"], "…which their own moment would have said");
+  // today's rows with one echo stamped yesterday among them (the served lab's `web`): today wears no label at all
+  const w2 = new DayWalk();
+  const labels2 = [at(2026, 5, 12, 0, 10), at(2026, 5, 12, 0, 11), at(2026, 5, 11, 9, 47), at(2026, 5, 12, 0, 12)]
+    .map((ep) => dayContext(w2.pass(ep)!, NOW));
+  assert.deepStrictEqual(labels2, ["", "", "", ""], "no day word over today's rows, the stale echo included");
+  assert.strictEqual(new DayWalk().pass(null), null, "nothing passed yet: no mark");
+});
