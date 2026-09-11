@@ -3338,8 +3338,13 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 /* ...but it must FADE with the name it precedes. Because the rule above is a declaration on the child,
    the at-rest tab's inline faded color can't inherit into it, so a remote session's "host:" stayed bright
    while its name dimmed (the user 2026-07-22). renderTabs adds .name-faded whenever it applies the faded
-   name color, and drops it on hover, so the two always move together. */
-.tab-label.name-faded .host-prefix { opacity: 0.5; }
+   name color, and drops it on hover, so the two always move together. The composer's name overlay wears the
+   class too (#composer-ph, T335): its name is painted at the at-rest label's faded colour, so its host fades
+   by this same rule; one selector for both carriers, never two values. The compound second selector keeps the
+   fade WINNING over the stale-link cue below (.host-prefix.off, opacity 0.75) by specificity, as the scoped
+   rule did before: an at-rest label on a down host fades with its name, and the cue's italic and dotted
+   underline still show. A state rule wins the cascade by construction, never by order. */
+.name-faded .host-prefix, .name-faded .host-prefix.off { opacity: 0.5; }
 /* DISCONNECTED host (the user 2026-07-29): its sessions keep their tabs, lanes and cards — dropping them
    would lose the thread — but the "host:" token says the link is down, so nobody reads a frozen transcript
    thinking it is live. Struck + dimmed, the strike on the HOST only: a struck WHOLE name already means a
