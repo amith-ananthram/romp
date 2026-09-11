@@ -118,8 +118,8 @@ class LandingShell(unittest.TestCase):
         # the desktop shell is the flex pane row (chat | fleet | feed | timeline)
         self.assertIn(".col{display:flex", html)
         self.assertIn("src=/chat", html)
-        self.assertIn("src=/feed", html)
-        self.assertIn("src=/timeline", html)
+        self.assertIn("data-src=/feed", html)   # optional panes load from data-src (the Panes setting)
+        self.assertIn("data-src=/timeline", html)
 
     def test_the_shell_leaves_a_hair_of_slack_down_the_right_edge(self):
         # The panes tiled flush to the window, so whatever sat hard right inside one — a feed card's

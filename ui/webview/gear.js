@@ -161,7 +161,7 @@ var GEAR_HTML =
   '</span></label>' +
   // Panes (the user 2026-09-10): which optional panes this browser's dashboard shows at all. The chat is
   // required and not listed; the rows are Sessions, Outline and Feed (the rail's own words for the panes
-  // keyed timeline, fleet and feed), on by default. A pane off here is not in the dashboard: no rail button,
+  // keys: timeline, 'fleet', feed), on by default. A pane off here is not in the dashboard: no rail button,
   // no phone tab, no palette command, its iframe never given a src (nothing loads, no socket). The kernel
   // keeps judging and tracking every session regardless; this is where THIS browser looks. The section is
   // for the dashboard's own gear (ownPage): the VS Code panels have no dashboard, so initGear hides it there.

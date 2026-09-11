@@ -7773,7 +7773,7 @@ class ServeSecurity(unittest.TestCase):
         import urllib.request
         with urllib.request.urlopen("http://127.0.0.1:%d/?token=testtok" % self.port, timeout=5) as r:
             body = r.read().decode("utf-8", "replace")
-        for pane in ("src=/chat", "src=/feed", "src=/timeline"):
+        for pane in ("src=/chat", "data-src=/feed", "data-src=/timeline"):   # the optional panes load from data-src (the gear's Panes setting decides); an eager src returning would fail this
             self.assertIn(pane, body)
 
     def test_landing_has_a_focused_pane_cue(self):
