@@ -958,6 +958,42 @@ class Lifecycle(unittest.TestCase):
                              "chain broke across the restart at %s" % r["uuid"])
         self.assertEqual(len({r["uuid"] for r in recs}), len(recs))
 
+    def test_a_torn_trailing_line_does_not_swallow_the_next_record(self):
+        # A torn write (write(2) short under ENOSPC, a kill between pages) leaves the transcript ending
+        # mid-record with no newline. The next batch's first record was written straight after the
+        # fragment: one unparseable line every reader skips, so the record vanished — after a restart
+        # that is the user's next prompt — while _append still retired its echo by text, leaving the
+        # prompt nowhere in the UI. The fix closes the fragment's line before writing.
+        be, fake, tmp = build()
+        sid = be.spawn("web", "/TESTDIR")
+        self.assertTrue(be.send(sid, "first"))
+        self.assertTrue(until(lambda: not be.busy(sid)))
+        p = Path(be.transcript_path(sid))
+        whole = p.read_text()
+        before = [json.loads(l) for l in whole.splitlines()]
+        self.assertEqual([r["type"] for r in before], ["user", "assistant"])
+        fragment = json.dumps({"type": "user", "uuid": "11111111-2222-4333-8444-555555555555",
+                               "parentUuid": before[-1]["uuid"], "timestamp": "2026-06-01T00:00:00.000Z",
+                               "message": {"role": "user", "content": "a record the tear cut short"}})[:60]
+        p.write_text(whole + fragment)          # the tear: a partial record, no line end
+        be2 = cb.CodexBackend(tmp, client_factory=lambda: fake)   # the restart after the kill
+        self.assertTrue(be2.send(sid, "now add a test"))
+        self.assertTrue(until(lambda: not be2.busy(sid) and not be2.pending_queued(sid)))
+        lines = p.read_text().split("\n")
+        parsed = []
+        for l in lines:
+            try:
+                parsed.append(json.loads(l))
+            except ValueError:
+                pass                             # the fragment: skipped, as every reader skips it
+        landed = [r for r in parsed if r["type"] == "user" and "now add a test" in json.dumps(r)]
+        self.assertEqual(len(landed), 1, "the prompt sent after the torn line is not in the transcript")
+        self.assertIn(fragment, lines, "the fragment must stay its own line, not carry the next record")
+        # the chain continues off the last WHOLE record; the fragment is not a link
+        self.assertEqual(landed[0]["parentUuid"], before[-1]["uuid"])
+        # and the echo retire that ran for the landed prompt is now a retire for a record readers can see
+        self.assertTrue(until(lambda: be2.live_atoms(sid) == []))
+
     def test_load_registry_logs_malformed_json_and_falls_back_empty(self):
         tmp = tempfile.mkdtemp()
         root = Path(tmp) / "codex"
