@@ -168,6 +168,34 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 def strip_ansi(s: str) -> str:
     """Remove ANSI CSI/SGR escape sequences (color, cursor) from captured terminal output."""
     return ANSI_RE.sub("", s) if s else s
+# The harness's OWN skill load (the user 2026-09-10, confused by feed cards titled after a skill their worker
+# sessions never asked for): when the CLI loads a skill for the model by itself (its orchestration mode loads
+# the workflow-authoring reference with the prompt whenever that mode is on), it writes the command wrapper
+# as an isMeta user record with a BARE name and a <skill-format> tag and NO arguments slot, the three tags and
+# nothing else, and the skill's markdown follows in its own isMeta record. Nobody typed it: a typed command or
+# skill carries its leading slash ("/jld", "/compact") in both wrapper orders, and a typed skill in the new
+# format carries the same <skill-format> tag with its <command-args>, so the tag alone tells nothing and the
+# three together are the shape (the arguments slot is absent only when nothing was typed at all). The command branch read the bare
+# wrapper as a typed "/workflow-authoring": a human command atom that opened a segment of its own right
+# after the real prompt, so the work that answered the prompt was filed under a card titled from the skill's
+# name, anchored on a record the feed took for the user's words. It is harness noise of the same class as the
+# other wrappers: no atom and no twin, and the prompt it rode in on keeps its segment and its work. The pre-pass
+# records each one it skips on the carry, and the parse reports them as session["skillLoads"] for the judge's
+# stamp on the tops older stores minted from them.
+SKILL_FORMAT_RE = re.compile(r"<skill-format>")
+
+
+def is_skill_load_wrapper(text):
+    """True for the harness's own skill-load wrapper: a record that begins with a command wrapper, carries a
+    <skill-format> tag, has NO <command-args> slot and names its command WITHOUT a leading slash. A typed
+    invocation has the slash, and one with anything typed after the name has the slot; a bare name with a
+    slot (the shape the echo-retire test guards) stays a command."""
+    if not text or not CMD_WRAP_RE.match(text) or not SKILL_FORMAT_RE.search(text) or COMMAND_ARGS_RE.search(text):
+        return False
+    m = COMMAND_NAME_ANY_RE.search(text)
+    return bool(m) and not m.group(1).strip().startswith("/")
+
+
 # The Skill tool's INSTRUCTIONS record (the user 2026-07-08): after a `Skill` tool_use + its "Launching
 # skill: X" tool_result, the CLI writes the skill's full markdown as an isMeta user record opening with
 # this line. It's the ONE isMeta payload worth keeping — surfaced as a flagged, content-EMPTY atom (the
@@ -1744,6 +1772,7 @@ def _emit_state():
             "summaries": {},           # boundary uuid -> its compaction summary text
             "skill_ids": set(),        # Skill tool_use ids among kept assistants
             "cmd_names": {},           # promptId -> {command names} (slash-invocation twins)
+            "skill_loads": {},         # wrapper uuid -> skill name: the harness's own skill loads the emit skips (T333)
             "absorbed_keys": set(),    # _absorbed's (ts, hash of the collapsed text) dedup memory
             "postal_miss_rec": set(),  # kept records whose postal marker missed the index
             "postal_miss_att": set(),  # absorbed (ts, hash of the collapsed text) keys likewise
@@ -2600,6 +2629,7 @@ class FileAdapter:
         st = _emit_state()
         order = _chrono(self, kept)
         self._prepass(order, st)
+        self.skill_loads = st["skill_loads"]   # read by _assemble beside the atoms (T333)
         out = list(self._emit_fold(order, st, rompuuid, postal_index))
         out += self._absorbed(self.qatts, kept, st, rompuuid, postal_index)
         return out
@@ -2705,11 +2735,17 @@ class FileAdapter:
         # a genuine HUMAN atom — and the planner minted a feed card from a /compact ("Compact
         # conversation context", the rescue thread). Collect wrapper promptIds so the twin drops as the
         # invocation echo it is.
-        cmd_prompt_names = st["cmd_names"]
+        cmd_prompt_names, skill_loads = st["cmd_names"], st["skill_loads"]
         for u in order:
             r = self.by_uuid.get(u) or {}
-            if r.get("type") == "user" and r.get("promptId"):
+            if r.get("type") == "user":
                 btext = _text_of(_content(r.get("message"))) or ""
+                if is_skill_load_wrapper(btext):   # the harness's own skill load: no invocation, so no twin to drop;
+                    m = COMMAND_NAME_ANY_RE.search(btext)   # recorded for the judge's stamp (session["skillLoads"]),
+                    skill_loads[u] = (m.group(1).strip() if m else "") or "skill"   # across every file this walk crossed
+                    continue
+                if not r.get("promptId"):
+                    continue
                 # the SAME matcher the emit path uses (COMMAND_NAME_ANY_RE inside a wrapper record): the
                 # anchored-only form missed every <command-message>-FIRST invocation (skills / custom
                 # commands), so shape-B twins survived as phantom human segments beside the real command
@@ -2757,6 +2793,8 @@ class FileAdapter:
                 # reply and ENDS naturally). The `command` flag makes the planner/judge skip it (never a goal /
                 # feed card — see _seg_command). This runs BEFORE the isMeta skip because some Claude versions
                 # mark these records isMeta. The other wrappers (message/args/contents/caveat) stay skipped.
+                if is_skill_load_wrapper(btext):
+                    continue   # the harness's own skill load (bare name + <skill-format>): noise, never a command turn
                 mcmd = COMMAND_NAME_RE.match(btext) or (COMMAND_NAME_ANY_RE.search(btext)
                                                         if CMD_WRAP_RE.match(btext) else None)
                 if mcmd and u not in replay_uuids:
@@ -3606,8 +3644,10 @@ def _asm_serve(entry):
     """A caller-owned copy of the entry's emit outputs: fresh top-level atom dicts (parse_session
     pops _seq and the turn builder sorts in place; the pristine list keeps both), a landed copy,
     and no pending cut (cut parses never reach the cache). A restored entry's prefix (the lazy atoms
-    before the checkpoint's cut, T323 stage 4) comes first, in emit order, like a whole parse's."""
-    return [dict(a) for a in entry.get("prefix") or []] + [dict(a) for a in entry["atoms"]], set(entry["landed"]), None
+    before the checkpoint's cut, T323 stage 4) comes first, in emit order, like a whole parse's; its skill loads
+    (T333) are the carried pre-cut ones plus the tail's, in the seeded emit state."""
+    return ([dict(a) for a in entry.get("prefix") or []] + [dict(a) for a in entry["atoms"]], set(entry["landed"]), None,
+            dict(entry["st"].get("skill_loads") or {}))
 
 
 def _asm_full(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human):
@@ -3708,9 +3748,10 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
             # re-seat the adopted card's splice without changing kept — invisible to the
             # invariance check). Everything else folds: the carried twins map serves the DELTA
             # record's own classification record-locally.
+            _wtxt = _text_of(_content(r.get("message"))) or ""
             if r["promptId"] in ad.boundary_pids or \
-                    CMD_WRAP_RE.match(_text_of(_content(r.get("message"))) or ""):
-                return _asm_demote("promptid")
+                    (CMD_WRAP_RE.match(_wtxt) and not is_skill_load_wrapper(_wtxt)):   # the harness's skill load
+                return _asm_demote("promptid")                                        #   re-classifies nothing (T333)
         if t == "assistant":
             for b in _content(r.get("message")) or []:
                 if isinstance(b, dict) and b.get("type") == "tool_use" and \
@@ -4161,7 +4202,8 @@ def _carry_encode(st):
             "seen_text": sorted(st["seen_text"]), "compacted": bool(st["compacted"]), "restoring": bool(st["restoring"]),
             "last_boundary": st["last_boundary"], "summaries": dict(st["summaries"]), "skill_ids": sorted(st["skill_ids"]),
             "cmd_names": {k: sorted(v) for k, v in st["cmd_names"].items()},
-            "absorbed_keys": sorted([list(k) for k in st["absorbed_keys"]]), "max_ppt": st["max_ppt"]}
+            "absorbed_keys": sorted([list(k) for k in st["absorbed_keys"]]), "max_ppt": st["max_ppt"],
+            "skill_loads": dict(st.get("skill_loads") or {})}     # wrapper uuid -> skill name before the cut (T333)
 
 
 def _carry_decode(c):
@@ -4170,7 +4212,7 @@ def _carry_decode(c):
             "summaries": dict(c.get("summaries") or {}), "skill_ids": set(c.get("skill_ids") or []),
             "cmd_names": {k: set(v) for k, v in (c.get("cmd_names") or {}).items()},
             "absorbed_keys": {tuple(k) for k in c.get("absorbed_keys") or []}, "max_ppt": float(c.get("max_ppt") or 0),
-            "postal_miss_rec": set(), "postal_miss_att": set()}
+            "skill_loads": dict(c.get("skill_loads") or {}), "postal_miss_rec": set(), "postal_miss_att": set()}
 
 
 def atom_tool_uses(atom):
@@ -4449,7 +4491,7 @@ def hydrate(atoms, rompuuid=None, by=None):
 
 def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human, leaf_override,
               mode_out=None):
-    """(atoms, landed, cut_t) for parse_session — atoms are caller-owned copies. The one entry
+    """(atoms, landed, cut_t, skill_loads) for parse_session; atoms are caller-owned copies. The one entry
     point that decides bypass vs serve vs fold vs full; see the block comment above. `mode_out`,
     when a list, receives the path taken ("serve" | "fold" | "full" | "bypass" | "fallback"): the
     kernel's chat-payload fold (issue 903) keys the validity of its cached prefix on it — a serve or
@@ -4469,7 +4511,7 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
         cut_t = None
         if leaf_override in ad.by_uuid:
             cut_t = ad.ts_of.get(leaf_override)
-        return ad.atoms(rompuuid, postal_index), ad.landed_text_uuids(), cut_t
+        return ad.atoms(rompuuid, postal_index), ad.landed_text_uuids(), cut_t, dict(getattr(ad, "skill_loads", None) or {})
     key = (os.path.realpath(str(leaf_path)), str(rompuuid), bool(sdk_human))
     try:
         with _asm_key_lock(key):
@@ -4515,7 +4557,7 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
             _ASM_CACHE.pop(key, None)
         ad = FileAdapter(candidate_files, leaf_path, resume_links=links)
         ad.sdk_human = sdk_human
-        return ad.atoms(rompuuid, postal_index), ad.landed_text_uuids(), None
+        return ad.atoms(rompuuid, postal_index), ad.landed_text_uuids(), None, dict(getattr(ad, "skill_loads", None) or {})
 
 
 def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None,
@@ -4559,7 +4601,7 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
     # The assembly cache serves/folds/rebuilds as the gates decide — a streamed append folds only
     # the new records through the shared emit code; everything else is a full parse. atoms/landed
     # come back caller-owned (fresh top-level dicts), so the mutations below never reach the cache.
-    atoms, landed, cut_t = _assemble(leaf_path, candidate_files, links, rompuuid,
+    atoms, landed, cut_t, skill_loads = _assemble(leaf_path, candidate_files, links, rompuuid,
                                      postal_index, sdk_human, leaf_override, mode_out=asm_mode_out)
     orphans = synthesize_orphans(_srows, atoms, landed_text_uuids=landed, rompuuid=rompuuid)
     #                                            # salvaged replies FIRST: they are real atoms the turn
@@ -4589,7 +4631,10 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
             # for the kernel chat build's own marker interleave: its dedup reads the KEPT turns
             # only, so without this a marker whose reply landed on an abandoned branch would
             # ghost back through that second door (sorted → deterministic payloads).
-            "landedTextUuids": sorted(landed)}
+            "landedTextUuids": sorted(landed),
+            # the harness's own skill-load wrappers the emit skipped, {uuid: skill name}, over every file the
+            # walk crossed: the judge stamps the tops older stores minted from them off this (T333)
+            "skillLoads": skill_loads}
 
 
 def task_store_dir(fsid):

@@ -57,6 +57,7 @@ JUDGE_ALLOWED = {
     "_atom_text", "_unit_text", "_has_asst_work", "_seg_launches", "_human_prompt_record", "_awaiting_bg_hold",
     # raw records, the states log, captions
     "transcript_head", "_bg_step", "_bg_unresolved",
+    "_skill_load_index",                                # the skill-load boot pass reads raw jsonl rows it json.loads itself (T333)
 }
 
 

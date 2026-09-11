@@ -1428,6 +1428,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `reconstruction`, `oversize`, `unencodable`, `offsets`, `stat`, `write`),
   `hydratedAtoms` and `hydratedBytes` (bodies read on demand for atoms before
   a cut) and `hydratedBy` (those bytes per calling function).
+- `skillLoadIndex`: the judge's skill-load boot pass (the tops older stores minted from
+  the harness's own skill load): `filesRead` and `bytesRead` (transcripts read raw this
+  boot, appended tails only once the persisted index holds a file), `filesIndexed`, and
+  `checked` (prompt anchors known not to be a wrapper, never read again).
 - `parses`: the cold event-model parses through the one parse store the
   kernel and the judges share: `total` (every miss, whoever asked), `kernel`
   (the display's asks among them, with `bytes`, the parsed files' sizes, and

@@ -229,7 +229,10 @@ class PlacementIdentityCanary(unittest.TestCase):
         # but its id is pinned as it now derives, and the rest carry no such trigger — the bump seals sessions
         # whose restart-notice and stop-record segments aliased under one key (tests/test_restart_notice_segments.py
         # covers the derivation and the card anchors it protects).
-        self.assertEqual(jd.PLACEMENTS_V, 13, "EXPECTED_SEG_IDS was pinned under PLACEMENTS_V=13 — "
+        # v14 (2026-09-11, T333, the harness skill-load wrapper skip): this fixture carries no such
+        # wrapper, so every pinned id is UNCHANGED; the bump seals transcripts that DO carry it, whose
+        # command atom drops out and whose prompt segment grows to hold the work.
+        self.assertEqual(jd.PLACEMENTS_V, 14, "EXPECTED_SEG_IDS was pinned under PLACEMENTS_V=14: "
                          "re-pin the ids and this version together, in the same commit")
 
 

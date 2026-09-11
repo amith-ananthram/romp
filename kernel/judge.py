@@ -477,7 +477,12 @@ JUDGE_FAIL_CAP = 3                       # the same rule for every other retryin
 #                                          consolidator / courier; the
 #                                          planner (PLAN_PARSE_RETRIES) and distiller/briefer (DISTILL_FAIL_CAP)
 #                                          already had their own.
-PLACEMENTS_V = 13                        # placements-identity schema version (plan P2, the user 2026-07-06).
+PLACEMENTS_V = 14                        # placements-identity schema version (plan P2, the user 2026-07-06).
+#                                          v14 (T333, 2026-09-11): the harness's own skill-load wrapper (the bare-named
+#                                          <skill-format> command wrapper with no arguments slot that the orchestration
+#                                          mode writes right after the prompt) no longer parses to a command atom, so on
+#                                          every transcript carrying it the prompt's segment grows to hold the work the
+#                                          wrapper's own segment used to hold. v8's shape (a SMALLER atom set), same seal.
 #                                          v13 (T318, 2026-09-10): a segment opened by a machine-written trigger (a romp
 #                                          injection, the CLI's stop record, a scheduled task's fired prompt) keys on its
 #                                          anchor atom's uuid; the tasks memo (tasks_for) steps to v7 with it. Recorded
@@ -3470,7 +3475,8 @@ def tasks_for(fsid, leaf, files, now):
     cf = PCACHE / (fsid + ".json")
     try:
         o = json.loads(cf.read_text())
-        if o.get("key") == key and o.get("v") == 7:    # v7 = machine-written triggers key their segment on the anchor uuid, so those seg ids moved (T318, 2026-09-10; with PLACEMENTS_V 13);
+        if o.get("key") == key and o.get("v") == 8:    # v8 = the harness skill-load wrapper no longer emits a command atom, so the prompt segment grows (T333, 2026-09-11; with PLACEMENTS_V 14);
+            #                                             v7 = machine-written triggers key their segment on the anchor uuid, so those seg ids moved (T318, 2026-09-10; with PLACEMENTS_V 13);
             #                                             v6 = absorbed atoms placed at their landing time, so their seg ids moved (T252d, 2026-09-08);
             #                                             v5 = absorbed SDK-injection atoms carry real text (2026-07-06); older caches regenerate
             return o["tasks"]
@@ -3491,7 +3497,7 @@ def tasks_for(fsid, leaf, files, now):
     try:
         PCACHE.mkdir(parents=True, exist_ok=True)
         tmp = cf.with_suffix(".tmp.%d" % os.getpid())
-        tmp.write_text(json.dumps({"key": key, "v": 7, "tasks": tasks}))
+        tmp.write_text(json.dumps({"key": key, "v": 8, "tasks": tasks}))
         tmp.rename(cf)
     except Exception:
         pass
@@ -10555,6 +10561,303 @@ def _mirror_mint_ctx(session, store, fsid, path, latest_seg, now):
     return ctx
 
 
+_SKILL_LOAD_WHY = ("rooted in the %s skill the harness loaded for the session, never a request; "
+                   "its work stays in the session's own view")
+ROMP_BLOCK_SRCS = ("nudge", "interrupt", "romp")   # a block romp's own machinery filed; every other block source (planner,
+#                                                    closer, user, agent) is the agent's question to the user, a real needs-you
+
+
+def _asks_user(nodes, nid):
+    """True when `nid` or any node under it is blocked by a block romp did not file itself (ROMP_BLOCK_SRCS): the
+    agent asked the user something and is waiting. Read by the skill-load stamp (never resolved away) and by the
+    feed's heal (such a top keeps its card)."""
+    kids = {}
+    for k, v in nodes.items():
+        if isinstance(v, dict) and v.get("parentId") in nodes:
+            kids.setdefault(v["parentId"], []).append(k)
+    todo = [nid]
+    for x in todo:
+        xn = nodes.get(x)
+        if isinstance(xn, dict) and xn.get("blocked") and not xn.get("cleared"):
+            src = next((e.get("src") for e in reversed(xn.get("log") or []) if e.get("kind") == "block"), None)
+            if src not in ROMP_BLOCK_SRCS:
+                return True
+        todo.extend(kids.get(x, []))
+    return False
+
+
+def _latch_skill_load_anchors(store, loads, now=None):
+    """Stamp every parentless, promptUuid-bearing, origin-less top anchored on one of `loads` (T333, 2026-09-11:
+    {record uuid: skill name} of the harness's own skill-load wrappers, the parse's own report of the records
+    its emit skipped, session["skillLoads"], so it spans exactly the files the walk crossed and costs no read)
+    askAnchor "machine" with askAnchorRecord {kind: skill-load, skill}, for
+    the feed's heal (its why, and the no-host rule). Such a wrapper no longer parses to an atom, so the class
+    is read off the RECORD; an older "human" latch on one is re-stamped once (it was the wrapper's reading as
+    a typed command, since corrected: new information about the record), and the stamp is idempotent. Runs
+    before _latch_ask_anchors, which then skips these as latched. The stamp also RESOLVES the top: romp's
+    done verdict (the obsolete verdict, done with the why saying so) on the top and every open node under
+    it, so the rollup never reads it as working, the nudge walk never asks about it and the stall gate never
+    holds it (the manager's review of T333, item 1: a hidden top that stayed a live working goal came back as
+    a nudge-failed root card). A top whose subtree holds a block romp did not file (_asks_user: the closer's or
+    planner's block, the agent's own question to the user) is stamped but NOT resolved: that question must
+    keep its card. Returns the number stamped."""
+    n = 0
+    nodes = store.get("nodes", {})
+    for nid, nd in list(nodes.items()):
+        if not (isinstance(nd, dict) and nd.get("parentId") is None and nd.get("promptUuid") in (loads or {})
+                and not isinstance(nd.get("origin"), dict) and not isinstance(nd.get("handoff"), dict)
+                and not isinstance(nd.get("askAnchorRecord"), dict)):
+            continue
+        skill = loads[nd["promptUuid"]]
+        nd["askAnchor"] = "machine"                     # the harness loading a skill for the model: nobody asked
+        nd["askAnchorRecord"] = {"kind": "skill-load", "skill": skill, "at": int(now or time.time())}
+        n += 1
+    _resolve_skill_load_tops(store, now)
+    return n
+
+
+def _resolve_skill_load_tops(store, now=None):
+    """Romp's done verdict on every stamped skill-load top not yet resolved and its open subtree, unless the agent is
+    waiting on the user under it (_asks_user): that top keeps its block and is revisited on every later call (the
+    planner pass runs this each time), so it resolves once the answer clears the block (the manager's second
+    review, item 2). The done's EVIDENCE time is the top's own mint time (else the stamp's), never the pass clock
+    (the manager's fourth review): it predates any user gesture, so once the user has replied on the card the
+    follow-up floor (_floor_of) stands above it and may_apply refuses the done; such a top is skipped outright
+    here and keeps its card, and a node born after the stamp (the reply's own step) is never resolved either.
+    Returns the number of tops resolved."""
+    nodes = store.get("nodes", {})
+    kids = {}
+    for k, v in nodes.items():
+        if isinstance(v, dict) and v.get("parentId") in nodes:
+            kids.setdefault(v["parentId"], []).append(k)
+    n = 0
+    for nid, nd in list(nodes.items()):
+        rec = nd.get("askAnchorRecord") if isinstance(nd, dict) else None
+        if not (isinstance(rec, dict) and rec.get("kind") == "skill-load" and nd.get("parentId") is None
+                and not nd.get("nodeComplete") and not nd.get("cleared")):
+            continue
+        if _asks_user(nodes, nid) or _floor_of(store, nd):
+            continue                                    # the agent is waiting on the user under it, or the user replied
+        at = int(rec.get("at") or now or time.time())   #   on the card: theirs now, it stays open and keeps its card
+        ev_t = int(nd.get("t") or at)                   # the mint time: evidence that predates any user gesture
+        todo = [nid]                                    # the top and its whole subtree, open nodes resolved
+        for x in todo:
+            xn = nodes.get(x)
+            if isinstance(xn, dict) and not xn.get("nodeComplete") and not xn.get("cleared") and (xn.get("t") or 0) <= at:
+                record_verdict(store, xn, "romp", "done", ev_t, why=_SKILL_LOAD_WHY % rec.get("skill"))
+            todo.extend(kids.get(x, []))
+        n += 1
+    return n
+
+
+_WRAP_INDEX = {}             # transcript path -> (size, offset, tail, {wrapper uuid: skill name}): append-incremental,
+#                              persisted under STATE (skill-load-index.json) so a later boot reads only what grew
+_WRAP_READS = {"n": 0, "bytes": 0}   # files and bytes read raw this boot (the sweep's log line and /perf)
+_CHECKED = set()             # prompt anchors known NOT to be skill-load wrappers (the negative memo, persisted)
+_WRAP_DIRTY = {"v": False}   # the index or the memo changed since the last save
+_WRAP_LOADED = {"v": False}  # the persisted index was read this boot
+_SKILL_SWEEP = {"done": False}
+SKILL_SWEEP_WINDOW = 180 * 86400
+SKILL_SWEEP_BYTE_BUDGET = 2 * 1024 * 1024 * 1024   # raw bytes one boot may read for the pass; the rest waits for the next
+
+
+_SKILL_INDEX_FAILED = set()   # paths whose read raised this boot: said once each
+
+
+def _skill_index_fail(path, e):
+    if str(path) not in _SKILL_INDEX_FAILED:
+        _SKILL_INDEX_FAILED.add(str(path))
+        _log_judge_error("skill-load-index", "-", "transcript %s unreadable for the skill-load index (%r): its directory stays "
+                         "incomplete and no anchor there is checked" % (path, e))
+    return None
+
+
+def _skill_load_index(path):
+    """{uuid: skill} of the harness's skill-load wrappers in ONE transcript file, from a raw line scan that is
+    APPEND-INCREMENTAL: the memo keeps the byte offset after the last complete line and the bytes just before
+    it, so a grown file (every live transcript, between any two boots) is read from that offset only after the
+    kept bytes still match (a rewrite that happens to be larger would otherwise splice), and a shrunk or
+    mismatching file is re-read whole; an unchanged size serves the memo. Only lines carrying <skill-format>
+    are decoded, and the records never enter the parse's cache. The memo persists under STATE
+    (skill-load-index.json) for the next boot. uuids are unique, so a directory indexes as one map.
+    A file that cannot be read answers None, said once per path in judge-errors: an unreadable transcript is no
+    evidence of absence, so the caller leaves its directory incomplete and its candidates unchecked."""
+    try:
+        size = os.stat(path).st_size
+    except OSError as e:
+        return _skill_index_fail(path, e)
+    ent = _WRAP_INDEX.get(str(path))              # (size, offset, tail, map)
+    if ent and ent[0] == size:
+        return ent[3]
+    start, out = 0, {}
+    if ent and size > ent[0] and ent[1] <= size:
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(max(0, ent[1] - len(ent[2])))
+                if fh.read(len(ent[2])) == ent[2].encode("latin-1"):
+                    start, out = ent[1], dict(ent[3])   # the kept prefix stands: read the tail only
+        except OSError as e:
+            return _skill_index_fail(path, e)
+    offset, tail = start, ""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            _WRAP_READS["n"] += 1
+            for raw in fh:
+                if not raw.endswith(b"\n"):
+                    break                              # a writer caught mid-append: picked up next time
+                offset += len(raw)
+                _WRAP_READS["bytes"] += len(raw)
+                if b"<skill-format>" not in raw:
+                    continue
+                try:
+                    r = json.loads(raw.decode("utf-8", errors="replace"))
+                except Exception:
+                    continue
+                if r.get("type") != "user" or not r.get("uuid"):
+                    continue
+                c = (r.get("message") or {}).get("content")
+                txt = c if isinstance(c, str) else (em._text_of(c) or "") if isinstance(c, list) else ""
+                if em.is_skill_load_wrapper(txt):
+                    m = em.COMMAND_NAME_ANY_RE.search(txt)
+                    out[r["uuid"]] = (m.group(1).strip() if m else "") or "skill"
+            fh.seek(max(0, offset - 64))
+            tail = fh.read(offset - max(0, offset - 64)).decode("latin-1")
+    except OSError as e:
+        return _skill_index_fail(path, e)
+    _WRAP_INDEX[str(path)] = (size, offset, tail, out)
+    _WRAP_DIRTY["v"] = True
+    return out
+
+
+def _skill_load_candidates(nodes):
+    """The tops a store may still hold from the old parse: parentless, promptUuid-bearing, latched human or absent
+    (or not yet), origin-less, handoff-less, not cleared, not stamped, and not yet CHECKED (_CHECKED: the prompt
+    anchors a parse showed to be atoms, or a complete directory index showed to be no wrapper; the memo that
+    makes the boot pass converge instead of re-checking every real prompt every boot)."""
+    return [nd for nd in nodes.values() if isinstance(nd, dict) and nd.get("parentId") is None and nd.get("promptUuid")
+            and nd.get("askAnchor") in (None, "human", "absent") and not nd.get("cleared")
+            and not isinstance(nd.get("origin"), dict) and not isinstance(nd.get("handoff"), dict)
+            and not isinstance(nd.get("askAnchorRecord"), dict) and nd["promptUuid"] not in _CHECKED]
+
+
+def _note_checked(store, atom_uuids):
+    """The planner pass's converge step: a candidate top whose prompt anchor IS an atom of the current parse is
+    anchored on something the parse emits (a prompt, a mail, the agent's own record), never on the harness's
+    wrapper (which emits nothing), so it is checked for good and the boot pass never reads a file for it.
+    Returns how many were noted."""
+    n = 0
+    for nd in _skill_load_candidates(store.get("nodes") or {}):
+        if nd["promptUuid"] in atom_uuids:
+            _CHECKED.add(nd["promptUuid"])
+            _WRAP_DIRTY["v"] = True
+            n += 1
+    return n
+
+
+def _wrap_index_load():
+    """The persisted index and negative memo (skill-load-index.json under STATE), read once per boot."""
+    if _WRAP_LOADED["v"]:
+        return
+    _WRAP_LOADED["v"] = True
+    idx_path = STATE / "skill-load-index.json"
+    if not idx_path.exists():
+        return
+    try:
+        o = json.loads(idx_path.read_text())
+        for k, v in (o.get("files") or {}).items():
+            if isinstance(v, list) and len(v) == 4:
+                _WRAP_INDEX[k] = (v[0], v[1], v[2], v[3])
+        _CHECKED.update(str(u) for u in (o.get("checked") or []))
+    except Exception as e:                             # a bad index is rebuilt from the transcripts, said once
+        _log_judge_error("skill-load-index", "-", "skill-load-index.json unreadable (%r): re-indexing" % (e,))
+
+
+def _wrap_index_save():
+    """Persist the index and the negative memo when either changed this boot; vanished files are dropped first."""
+    if not _WRAP_DIRTY["v"]:
+        return
+    for k in [k for k in _WRAP_INDEX if not os.path.exists(k)]:
+        del _WRAP_INDEX[k]
+    idx_path = STATE / "skill-load-index.json"
+    try:
+        tmp = idx_path.with_name(idx_path.name + ".tmp.%d" % os.getpid())
+        tmp.write_text(json.dumps({"v": 2, "files": {k: list(v) for k, v in _WRAP_INDEX.items()}, "checked": sorted(_CHECKED)}))
+        tmp.rename(idx_path)
+        _WRAP_DIRTY["v"] = False
+    except Exception as e:
+        _log_judge_error("skill-load-index", "-", "skill-load-index.json not written (%r): the next boot re-reads" % (e,))
+
+
+def restamp_skill_load_tops_all(now=None, window=SKILL_SWEEP_WINDOW, byte_budget=None):
+    """The STORE-SIDE pass (the manager's review of T333, item 2): the planner's stamp reaches only the wrappers
+    on the walked chain of a session it passes over, so a top minted before a /clear (its wrapper in a file the
+    lineage no longer links) or in a session idle beyond the planner's discover window kept its human latch,
+    stood as a root card titled from the skill and hosted other tops. Once per boot (run_plan's first pass),
+    for every store with a candidate top (_skill_load_candidates: not yet checked), the candidates' prompt
+    anchors are looked up RAW by uuid in the skill-load index of every transcript in the session's project
+    directory (_skill_load_index: append-incremental, one tail read per grown file, persisted across boots),
+    the stores' OWN transcripts indexed first and the rest of each directory after, so a budget cut still
+    stamps every store whose wrapper sits where it almost always does (the budget is checked before each file,
+    so the last file read may run past it by its own size),
+    and a hit is stamped and resolved like the planner's (_latch_skill_load_anchors), rolled up before the
+    save. CONVERGENCE (the manager's second review, item 1): a candidate a COMPLETE directory index does not
+    hold is checked for good (_CHECKED), and the pass reads at most `byte_budget` bytes per boot
+    (SKILL_SWEEP_BYTE_BUDGET): a directory the budget cut is left incomplete, its candidates unchecked, for
+    the next boot. The discover window is wide (`window`, 180 days) so idle sessions are reached. Returns
+    (stores, tops)."""
+    now = now or int(time.time())
+    budget = SKILL_SWEEP_BYTE_BUDGET if byte_budget is None else byte_budget
+    _wrap_index_load()
+    lanes = {fsid: Path(path) for fsid, path, anchor, name in discover(now, window, forks=False)}
+    stores = tops = 0
+    todo = []                                          # (sid, candidates, leaf) for every store with a candidate top in reach
+    for p in (sorted(GOALDIR.glob("*.json")) if GOALDIR.is_dir() else []):
+        try:
+            raw = json.loads(p.read_text())
+        except Exception:
+            continue
+        cands = _skill_load_candidates(raw.get("nodes") or {}) if isinstance(raw, dict) else []
+        leaf = lanes.get(p.stem)
+        if cands and leaf is not None:                 # no transcript in reach: nothing to look the anchor up in
+            todo.append((p.stem, cands, leaf))
+    dirs = {}                                          # dir -> [index, files done]
+    def index(f, d):
+        idx, done = dirs.setdefault(d, [{}, set()])
+        if str(f) in done or _WRAP_READS["bytes"] >= budget:
+            return                                     # done, or the budget is spent: the rest waits for the next boot
+        got = _skill_load_index(f)
+        if got is None:
+            return                                     # unreadable: not done, so the directory stays incomplete
+        idx.update(got)
+        done.add(str(f))
+    for sid, cands, leaf in todo:                      # phase one: every store's OWN transcript, where the wrapper almost
+        index(leaf, str(leaf.parent))                  #   always is, so a cut budget still stamps every such store
+    for sid, cands, leaf in todo:                      # phase two: the rest of each directory (a pre-/clear file, and the
+        for f in sorted(leaf.parent.glob("*.jsonl")):  #   completeness a negative memo needs)
+            index(f, str(leaf.parent))
+    for sid, cands, leaf in todo:
+        idx, done = dirs.get(str(leaf.parent)) or ({}, set())
+        complete = all(str(f) in done for f in leaf.parent.glob("*.jsonl"))
+        want = {nd["promptUuid"]: idx[nd["promptUuid"]] for nd in cands if nd["promptUuid"] in idx}
+        if complete:
+            for nd in cands:
+                if nd["promptUuid"] not in idx:
+                    _CHECKED.add(nd["promptUuid"])   # looked up in every file the directory holds: not a wrapper, for good
+                    _WRAP_DIRTY["v"] = True
+        if not want:
+            continue
+        store = load_goals(sid)
+        n = _latch_skill_load_anchors(store, want, now)
+        if n:
+            rollup_status(store, False)                # the exports (status, confirming) never staler than the flags
+            save_goals(sid, store)
+            stores += 1
+            tops += n
+    _wrap_index_save()
+    return stores, tops
+
+
 def _latch_ask_anchors(fsid, session, store):
     """LATCH the ask-unit exemption's anchor verdict durably on the node. The kernel's
     _pure_delegation_top must decide "is this promptUuid-anchored top the dictated ask?" by
@@ -10573,7 +10876,8 @@ def _latch_ask_anchors(fsid, session, store):
     parentless, promptUuid-bearing, no origin (a courier top's evidence is T105's userAsk, never
     its mail anchor), not itself a tracker. A parse with NO atoms at all latches nothing — a
     missing/unreadable transcript is no evidence of absence, and 'absent' must never be minted
-    from one. Returns the number latched; the caller's unconditional save persists them."""
+    from one. Returns the number latched; the caller's unconditional save persists them. A top anchored
+    on the harness's own skill-load wrapper is stamped by _latch_skill_load_anchors first (T333)."""
     cands = [nd for nd in store.get("nodes", {}).values()
              if isinstance(nd, dict) and nd.get("parentId") is None and nd.get("promptUuid")
              and not isinstance(nd.get("origin"), dict)
@@ -11107,6 +11411,9 @@ def _plan_session(fsid, path, now):
         #   segment's chain liveness, not about anchor suitability.
         _group_store(store, fsid, now)
         save_goals(fsid, store)
+    _note_checked(store, {a.get("uuid") for turn in session.get("turns") or [] for a in turn.get("atoms") or [] if a.get("uuid")})
+    _latch_skill_load_anchors(store, session.get("skillLoads") or {}, now)   # the parse's own report of the wrappers its
+    #                                                   emit skipped: a top the harness's skill load minted (T333)
     _latch_ask_anchors(fsid, session, store)          # durable ask-unit anchor verdicts — no LLM,
     #                                                   idempotent (latched nodes skip), persisted
     #                                                   by the save just below
@@ -11147,6 +11454,18 @@ def run_plan(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=Fal
     time-order is the courier's need; the planner's tree is per-session.)"""
     if now is None:
         now = int(time.time())
+    _wrap_index_load()                                # T333: the persisted index and negative memo, once per boot
+    if not _SKILL_SWEEP["done"]:                      # T333: the store-side skill-load pass, once per boot, before the first plan
+        _SKILL_SWEEP["done"] = True
+        try:
+            _t0 = time.time()
+            _sw_stores, _sw_tops = restamp_skill_load_tops_all(now)
+            if _WRAP_READS["n"] or _sw_tops:            # said whenever it read or wrote anything: the cost is visible
+                sys.stderr.write("judge: skill-load sweep read %d transcript(s), %.1f MB, raw (%d indexed) in %.1fs; re-stamped "
+                                 "and resolved %d top(s) in %d store(s)\n" % (_WRAP_READS["n"], _WRAP_READS["bytes"] / 1e6,
+                                                                              len(_WRAP_INDEX), time.time() - _t0, _sw_tops, _sw_stores))
+        except Exception as e:
+            _log_judge_error("skill-load-sweep", "-", "the store-side skill-load pass raised: %r" % (e,))
     fleet = [s for s in discover(now) if not _hidden_from_feed(s[0])][:sessions_cap]   # muted sessions are out of task tracking
     for _gone in [f for f in _PLANNER_SEEN if f not in {s[0] for s in fleet}]:
         _PLANNER_SEEN.pop(_gone, None)                # the planner gate, bounded by the sessions this pass discovered
@@ -11166,6 +11485,7 @@ def run_plan(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=Fal
     _gate_evict("plan", {f[0] for f in fleet})
     if verbose:
         sys.stderr.write("romp-judge: planner placed %d segments across %d sessions\n" % (placed, len(fleet)))
+    _wrap_index_save()                                # T333: the negative memo grew this pass? persist it
     return placed
 
 
