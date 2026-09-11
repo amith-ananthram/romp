@@ -22,9 +22,11 @@ test("the pane asks the shell which column a session-focus belongs to, and acts 
   assert.match(RENDER, /function focusIsOurs\(sid: string\): boolean \{[\s\S]*?if \(!window\.parent \|\| window\.parent === window\) return true;[\s\S]*?const t = \(window\.parent as any\)\.__rompChatTarget;[\s\S]*?if \(typeof t !== "function"\) return true;[\s\S]*?return !f \|\| f === window\.frameElement;/);
   // a kernel focus and a revive prompt aimed at another column are swallowed BEFORE the real branches
   assert.match(RENDER, /else if \(m\.type === "focus" && !m\.own && !focusIsOurs\(m\.id\)\) \{[^}]*\}\n\s*else if \(m\.type === "focus"\) \{/);
-  // the shell's hand-over to a NEW column is addressed to it (`own`), so opening a tab in a new split works even
-  // when a column already shows that session
-  assert.ok(KERNEL.includes("f.contentWindow.postMessage({type:'focus',id:sid,own:true},'*')"));
+  // the shell hands a NEW column no focus any more (2026-09-11): it seeds the column's state blob with the session
+  // before the frame exists, and the page's own wantActive activates it when its frame lands (tests/test_chat_split.py
+  // pins the seed); a column opened on a session another column shows still takes it, since wantActive never arbitrates
+  assert.ok(!KERNEL.includes("f.contentWindow.postMessage({type:'focus',id:sid,own:true},'*')"), "no hand-over focus");
+  assert.ok(!KERNEL.includes("if(sid)f.addEventListener('load'"), "…and no load listener carrying one");
   assert.match(RENDER, /else if \(m\.type === "confirmRevive" && m\.id && !m\.own && !focusIsOurs\(m\.id\)\) \{[^}]*\}\n\s*else if \(m\.type === "confirmRevive" && m\.id\) \{/);
   // …and the kernel marks the parked push-tap reveal it hands ONE column `own` (tests/test_chat_split.py pins the kernel side)
   // the feed's click echo reaches every column's storage listener: the same gate, after the known-session check

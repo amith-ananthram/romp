@@ -13,6 +13,7 @@ import { createRequire } from "node:module";
 import { atBottomDist } from "./scroll-keep";
 import { isReplyReady } from "./reply-ready";
 import { hostOf } from "./host-prefix";
+import { isProvisionalId } from "./provisional";   // the loading branch's one "opening" gate (2026-09-11): the real module
 
 const requireCjs = createRequire(__filename);
 const WEBVIEW = path.resolve(process.cwd(), "..", "ui", "webview");
@@ -125,8 +126,8 @@ test("chatTail and update ask for the full on a skeleton id BEFORE their no-base
 test("showActive gates the active session on the set, shows the loader with LOADING copy, and asks after notifyActive", () => {
   const sa = fn("showActive");
   assert.match(sa, /const s = activeId \? liveSession\(activeId\) : null;\s*\n\s*if \(!s\) \{/, "a skeleton active takes the existing !s branch");
-  assert.match(sa, /const skeleton = skeletonTabs\.ids\.has\(activeId\);\s*\n\s*skeletonLoading = skeleton \? activeId : null;[^\n]*\n\s*if \(skeleton\) wait\.appendChild\(rompLoaderInner\("loading " \+ what \+ "…"\)\);\s*\n\s*else wait\.appendChild\(rompLoaderInner\("opening " \+ what \+ "…"\)\);/,
-    "a running session is LOADING; 'opening' would claim a start that is not happening (the placeholder keeps its line)");
+  assert.match(sa, /const skeleton = skeletonTabs\.ids\.has\(activeId\);\s*\n\s*skeletonLoading = skeleton \? activeId : null;[^\n]*\n\s*if \(isProvisionalId\(activeId\)\) wait\.appendChild\(rompLoaderInner\("opening " \+ what \+ "…"\)\);\s*\n\s*else wait\.appendChild\(rompLoaderInner\("loading " \+ what \+ "…"\)\);/,
+    "a running session is LOADING, a skeleton or not; 'opening' is the provisional's alone — a new split column's session on its way said 'opening' and read as a create (2026-09-11)");
   assert.match(sa, /if \(skeleton\) requestFullSession\(activeId, "skeleton-click"\);/);
   // activeTab (notifyActive) precedes needFull on the wire → the kernel builds the new active first
   assert.ok(sa.indexOf("notifyActive();") < sa.indexOf('requestFullSession(activeId, "skeleton-click")'));
@@ -239,7 +240,8 @@ test("the click path's loader latch: showActive latches the skeleton it is loadi
 
 test("the statusline over a skeleton tab says Loading, the word its loader uses, not Opening", () => {
   const usl = fn("updateStatusline");
-  assert.match(usl, /const loading = skeletonTabs\.ids\.has\(activeId\) \|\| skeletonLoading === activeId;\s*\n\s*sl\.replaceChildren\(openingLine\(loading \? "Loading session" : "Opening session"\)\);/);
+  assert.match(usl, /sl\.replaceChildren\(openingLine\(isProvisionalId\(activeId\) \? "Opening session" : "Loading session"\)\);/,
+    "Loading for every id whose payload has not landed, a skeleton or not; Opening only for a provisional (2026-09-11: a new split column's session on its way is not being created)");
   assert.match(RENDER, /function openingLine\(text = "Opening session"\): HTMLElement \{/);
 });
 
@@ -310,13 +312,13 @@ function chipWorld(opts: { clientHeight: number; innerHeight: number; transcript
     // B's stale copy carries an unread open reply: with its view kept and a ready thread, the liveSession read is
     // the ONE clause of updateReplyChips' gate that hides the chips over the skeleton (the read #1226 narrowed)
     commentThreads: new Map<string, unknown[]>([["B", [{ tid: "t1", anchorUuid: "22222222-3333-4444-5555-666666666666", status: "open", unread: true }]]]),
-    jumpBtn, replyChips, atBottomDist, isReplyReady, hostOf, HOOKS,
+    jumpBtn, replyChips, atBottomDist, isReplyReady, hostOf, isProvisionalId, HOOKS,
     el: (_tag: string, cls?: string): ChipEl => new ChipEl(cls || "", cls === "tab-loading-wait" ? Math.round(LOADER_VH / 100 * win.innerHeight) : 0),
     rompLoaderInner: (caption: string): ChipEl => { HOOKS.captions.push(caption); return new ChipEl("romp-loader", 0); },
   };
   const js = requireCjs("esbuild").transformSync(["liveSession", "atBottom", "showActive", "updateJumpBtn", "updateReplyChips"].map(fn).join("\n"), { loader: "ts" }).code;
   const prelude = `
-    const { sessions, views, tabMeta, skeletonTabs, commentThreads, jumpBtn, replyChips, atBottomDist, isReplyReady, hostOf, el, rompLoaderInner, HOOKS } = W;
+    const { sessions, views, tabMeta, skeletonTabs, commentThreads, jumpBtn, replyChips, atBottomDist, isReplyReady, hostOf, isProvisionalId, el, rompLoaderInner, HOOKS } = W;
     let activeId = null, skeletonLoading = null, replyChipSig = "";
     const placeReviveLoader = () => {}, notifyActive = () => {}, renderLedger = () => {}, renderLiveAsk = () => {}, renderBgTasks = () => {}, renderSubHead = () => {}, updateStatusline = () => {};
     // the section-at-a-glance view, inert: no section shows (snapView null), so showActive's branch is not taken

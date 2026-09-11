@@ -46,7 +46,8 @@ class SplitSourcePins(unittest.TestCase):
         self.assertGreater(self.html.index("var CK='romp-chat-cols'"), self.html.index("window.__rompPaneToggle=togglePane"),
                            "the split runs after the controller: a restored column registers with the gutters and takes a fair "
                            "grow at boot, and a split of a hidden chat group calls __rompPaneToggle")
-        self.assertIn("f.src='/chat?col='+n;", km._LANDING_SPLIT_JS, "every later column is /chat?col=N")
+        self.assertIn("seed(n,sid);f.src='/chat?col='+n+'&skeleton=1';", km._LANDING_SPLIT_JS,
+                      "every later column is /chat?col=N, dialled as a skeleton client of the session its seeded blob names (2026-09-11)")
 
     def test_the_shim_keys_each_column_s_state_and_names_it_on_the_connect(self):
         # the column comes from the URL; the first column ("" or 1) keeps the unsuffixed key it always had, so no
@@ -56,6 +57,15 @@ class SplitSourcePins(unittest.TestCase):
         self.assertIn('(COL?"&col="+encodeURIComponent(COL):"")', self.shim, "the kernel can tell the columns apart in its logs")
         # the ?active= connect hint reads the SAME key, so each column redials with ITS tab first
         self.assertIn('var st0=JSON.parse(localStorage.getItem(SK)||"null");active=(st0&&st0.activeId)||"";', self.shim)
+        # …and a later column's FIRST dial has the hint too (2026-09-11): the shell seeds that very key with the session
+        # the column opens on before the frame exists, and the frame's src says skeleton=1, which the shim puts on the
+        # connect query, so the kernel serves the hinted session whole and the rest as skeleton tabs
+        self.assertIn("var BK='romp-vscode-state-chat:';", km._LANDING_SPLIT_JS, "the shell's seed key is the shim's SK for /chat?col=N")
+        self.assertIn("st.activeId=sid;try{localStorage.setItem(BK+n,JSON.stringify(st));}catch(e){}}", km._LANDING_SPLIT_JS)
+        self.assertIn('var SKEL=new URLSearchParams(location.search).get("skeleton")==="1";', self.shim)
+        self.assertIn('+(SKEL?"&skeleton=1":""));', self.shim, "the term closes the connect query, after the column")
+        self.assertIn('+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1":"")', self.shim,
+                      "the redial gate is untouched (tests/test_pane_shim_return.py runs it)")
 
     def test_the_kernel_stamps_the_column_on_the_client(self):
         src = inspect.getsource(km.Handler)
@@ -63,6 +73,35 @@ class SplitSourcePins(unittest.TestCase):
         self.assertIn('if col:\n            client["col"] = col', src)
         with open(os.path.join(BIN, "romp-kernel"), encoding="utf-8") as fh:
             self.assertIn("(wid=%s col=%s slot=%s queued=%dB frame=%dB)", fh.read(), "the drop log names the column")
+
+    def test_a_later_column_s_skeleton_dial_survives_the_ready_arm_s_reset(self):
+        # The handshake records both flags: `reconnect` so the pusher cycle that lands before the bundle's ready serves
+        # the skeleton set (one full, not the board) into a document that may not hear it; `skeletonOnReady` so the
+        # ready arm, whose _client_reset_chat_base pops `reconnect` with the set, can re-arm it for the connect push
+        # the page CAN hear (tests/test_chat_skeleton_reconnect.py runs the whole cycle)
+        src = inspect.getsource(km.Handler)
+        self.assertIn('skeleton = (q.get("skeleton") or [""])[0] == "1"', src)
+        self.assertIn('if skeleton:', src)
+        self.assertIn('client["reconnect"] = True\n            client["skeletonOnReady"] = True', src)
+        # the ready arm re-arms the flag PAST the reset and BEFORE its connect push
+        i = src.index('msg.get("type") == "ready"')
+        body = src[i:i + 3500]
+        self.assertIn('if client.pop("skeletonOnReady", False):\n                client["reconnect"] = True', body)
+        self.assertLess(body.index("_client_reset_chat_base(client)"), body.index('client.pop("skeletonOnReady", False)'))
+        self.assertLess(body.index('client.pop("skeletonOnReady", False)'), body.index("self._push_one(client)"))
+        # a pre-ready pop (the flag still set) neither stamps the client ready nor lets its caller consume a parked reveal:
+        # _reveal_request aims taps at stamped clients, and this page has no listener yet
+        rr = inspect.getsource(km._resolve_reconnect)
+        self.assertIn('fresh = bool(c.get("skeletonOnReady"))', rr)
+        self.assertIn('if not fresh:', rr)
+        self.assertLess(rr.index('c.pop("reconnect", False)'), rr.index('fresh = bool(c.get("skeletonOnReady"))'))
+        self.assertLess(rr.index('if not fresh:'), rr.index('c["ready"] = True'))
+        self.assertEqual(rr.count("return not fresh"), 2, "the no-hint return and the set's return both say whether a REDIAL popped")
+        self.assertNotIn("return True", rr)
+        # the hand-over is GONE: the seeded blob's activeId is the page's wantActive, so nothing is posted into the frame
+        split = km._LANDING_SPLIT_JS
+        self.assertNotIn("postMessage({type:'focus'", split)
+        self.assertNotIn("addEventListener('load'", split)
 
     def test_the_rail_carries_no_split_button(self):
         # the split opens from a tab's menu ("Open in new split") and the palette; a bottom-bar button for it
@@ -127,8 +166,10 @@ class SplitSourcePins(unittest.TestCase):
         self.assertIn("window.__rompCanSplit=canSplit;", split)
         self.assertIn("Four chat columns at most", split)
         self.assertIn("The phone shows one pane at a time", split)
-        # the hand-over is the opening's only: a later reload of the frame keeps the tab its own state names
-        self.assertIn("},{once:true});", split)
+        # no hand-over focus (2026-09-11): the seeded blob names the tab, and a later reload of the frame keeps the tab
+        # its own state names — the same key, written by the page itself from then on
+        self.assertNotIn("{once:true}", split)
+        self.assertNotIn("type:'focus'", split)
 
     def test_the_parked_push_tap_reveal_is_addressed_to_the_column_that_consumes_it(self):
         # one chat client consumes the parked tap (_consume_pending_reveal), so the pane's column arbitration
@@ -214,11 +255,14 @@ const out = {};
 // 1) a fresh desktop dashboard: one column, nothing made
 boot({}, false);
 out.fresh = { ids: window.__rompChatFrameIds(), order: order(), lastPane: window.__rompLastChatPane() };
-// 2) open a split ON a session (the tab menu's ask): a new column + its gutter before gv-a, persisted, wired
+// 2) open a split ON a session (the tab menu's ask): a new column + its gutter before gv-a, persisted, wired; the
+//    column's state blob names the session BEFORE the frame exists (merged: what a reused number's blob held survives)
+STORE['romp-vscode-state-chat:2'] = JSON.stringify({ activeId: '11111111-2222-3333-4444-555555555500', drafts: { '11111111-2222-3333-4444-555555555500': 'a draft kept' }, scroll: 12 });
 const f2 = window.__rompSplitChat('11111111-2222-3333-4444-555555555501');
-f2.fire('load'); f2.fire('load');   // a later reload of the frame must not re-post the opening's hand-over
+f2.fire('load'); f2.fire('load');   // the frame's load posts nothing, however often it fires: there is no hand-over any more
 out.opened = {
   id: f2.id, src: f2.src, col: f2.getAttribute('data-col'), pane: f2.parentElement.id, paneCls: f2.parentElement.className,
+  blob: JSON.parse(STORE['romp-vscode-state-chat:2']),
   flex: f2.parentElement.style.flex, order: order(), stored: STORE['romp-chat-cols'],
   register: CALLS.register.slice(), growFair: CALLS.growFair.slice(), wireFocus: CALLS.wireFocus.slice(), wireEsc: CALLS.wireEsc.slice(),
   gutter: CALLS.gutter.map((g) => ({ gid: g.gid, left: g.leftPick(), right: g.rightId })),
@@ -261,19 +305,23 @@ out.closedFocused = { ids: window.__rompChatFrameIds(), stored: STORE['romp-chat
 FOCUSED = 'f-chat';
 // 7) the tab menu's message from a pane, and the × on the column
 CALLS.posted = [];
+STORE['romp-vscode-state-chat:2'] = 'not json{';   // a corrupt blob is replaced by the seed, never a throw
 window.dispatchEvent({ type: 'message', data: { romp: 'openSplit', sid: '11111111-2222-3333-4444-555555555502' } });
 const f2b = BYID['f-chat-2']; f2b.fire('load');
-out.viaMessage = { ids: window.__rompChatFrameIds(), posted: CALLS.posted.slice(), src: f2b.src };
+out.viaMessage = { ids: window.__rompChatFrameIds(), posted: CALLS.posted.slice(), src: f2b.src, blob: JSON.parse(STORE['romp-vscode-state-chat:2']) };
 f2b.parentElement.children.filter((c) => c.className === 'col-x')[0].fire('click', { stopPropagation() {} });
 out.viaX = { ids: window.__rompChatFrameIds(), stored: STORE['romp-chat-cols'] };
 // 8) the palette's split opens an empty column — and brings a hidden chat group forward first
 BODY_CLASSES.delete('po-chat'); CALLS.toggle = [];
 window.__rompSplitChat();
-out.viaRail = { ids: window.__rompChatFrameIds(), posted: CALLS.posted.length, toggle: CALLS.toggle.slice(), canSplit: window.__rompCanSplit() };
+out.viaRail = { ids: window.__rompChatFrameIds(), posted: CALLS.posted.length, toggle: CALLS.toggle.slice(), canSplit: window.__rompCanSplit(),
+                blob: JSON.parse(STORE['romp-vscode-state-chat:2']) };   // an EMPTY column seeds nothing: the reused number's blob stands
 BODY_CLASSES.add('po-chat');
 // 9) the columns a browser had open come back, each on its own state (no focus posted: the pane restores its tab)
-boot({ 'romp-chat-cols': '[2,5]' }, false);
+const BLOB5 = '{"activeId":"11111111-2222-3333-4444-555555555505","scroll":3}';
+boot({ 'romp-chat-cols': '[2,5]', 'romp-vscode-state-chat:5': BLOB5 }, false);
 out.restored = { ids: window.__rompChatFrameIds(), order: order(), posted: CALLS.posted.slice(), srcs: [BYID['f-chat-2'].src, BYID['f-chat-5'].src],
+                 blob5: STORE['romp-vscode-state-chat:5'], blob5Was: BLOB5, blob2: STORE['romp-vscode-state-chat:2'] || null,
                  lastPane: window.__rompLastChatPane(), nextNumber: (window.__rompSplitChat() || {}).id };
 // 10) the phone: nothing is restored and nothing opens
 boot({ 'romp-chat-cols': '[2]' }, true);
@@ -305,7 +353,7 @@ class SplitExecutes(unittest.TestCase):
     def test_opening_a_split_on_a_session_makes_a_wired_column_before_the_outline_gutter(self):
         o = self.out["opened"]
         self.assertEqual(o["id"], "f-chat-2")
-        self.assertEqual(o["src"], "/chat?col=2")               # its own state blob + connect param (the shim)
+        self.assertEqual(o["src"], "/chat?col=2&skeleton=1")    # its own state blob + connect param (the shim); a skeleton client of its session
         self.assertEqual(o["col"], "2")
         self.assertEqual(o["pane"], "chat-pane-2")
         self.assertEqual(o["paneCls"], "pane chat-col")
@@ -319,10 +367,12 @@ class SplitExecutes(unittest.TestCase):
         self.assertEqual(o["wireEsc"], ["f-chat-2"])
         self.assertEqual(o["gutter"], [{"gid": "gv-chat-2", "left": "chat-pane", "right": "chat-pane-2"}])
         self.assertEqual(o["event"], [{"col": 2, "open": True, "frame": "f-chat-2"}], "palette-main wires its chords on this")
-        # opened ON a session: the pane takes the focus on load, before its frames land
-        self.assertEqual(o["posted"], [{"id": "f-chat-2", "m": {"type": "focus", "id": "11111111-2222-3333-4444-555555555501", "own": True}}],
-                         "`own`: addressed to this column — the pane's arbitration must not hand it to a column already showing the "
-                         "session; and ONCE, though the frame's load fired twice")
+        # opened ON a session (2026-09-11): the column's state blob names it BEFORE the frame exists — the shim's ?active=
+        # hint and render.ts's wantActive read that key — and nothing is posted into the frame, however often it loads
+        self.assertEqual(o["blob"], {"activeId": "11111111-2222-3333-4444-555555555501",
+                                     "drafts": {"11111111-2222-3333-4444-555555555500": "a draft kept"}, "scroll": 12},
+                         "activeId set, every other field the reused number's blob held kept")
+        self.assertEqual(o["posted"], [], "no hand-over focus: the seeded blob does the work, and load fired twice")
         self.assertEqual(o["focused"], ["f-chat-2"], "the new column takes the keyboard")
         self.assertEqual(o["closeBtn"], 1)
         self.assertEqual(o["ids"], ["f-chat", "f-chat-2"])
@@ -371,20 +421,25 @@ class SplitExecutes(unittest.TestCase):
     def test_a_pane_s_ask_the_column_s_x_and_the_palette_all_drive_the_same_code(self):
         m = self.out["viaMessage"]
         self.assertEqual(m["ids"], ["f-chat", "f-chat-2"], "the lowest free number is reused")
-        self.assertEqual(m["src"], "/chat?col=2")
-        self.assertEqual(m["posted"], [{"id": "f-chat-2", "m": {"type": "focus", "id": "11111111-2222-3333-4444-555555555502", "own": True}}])
+        self.assertEqual(m["src"], "/chat?col=2&skeleton=1")
+        self.assertEqual(m["posted"], [], "no focus into the frame: the blob names the session")
+        self.assertEqual(m["blob"], {"activeId": "11111111-2222-3333-4444-555555555502"}, "a corrupt blob is replaced by the seed")
         self.assertEqual(self.out["viaX"]["ids"], ["f-chat"])
         self.assertEqual(json.loads(self.out["viaX"]["stored"]), [])
         self.assertEqual(self.out["viaRail"]["ids"], ["f-chat", "f-chat-2"])
-        self.assertEqual(self.out["viaRail"]["posted"], 1, "an EMPTY column: no focus is handed over")
+        self.assertEqual(self.out["viaRail"]["posted"], 0, "an EMPTY column: nothing is posted either")
+        self.assertEqual(self.out["viaRail"]["blob"], {"activeId": "11111111-2222-3333-4444-555555555502"},
+                         "…and nothing is seeded: the reused number's blob stands, so the column comes up on the tab it last held")
         self.assertEqual(self.out["viaRail"]["toggle"], [["chat", True]], "a split of a hidden chat group brings the group forward")
         self.assertTrue(self.out["viaRail"]["canSplit"])
 
     def test_the_columns_a_browser_had_open_come_back_on_their_own_state(self):
         r = self.out["restored"]
         self.assertEqual(r["ids"], ["f-chat", "f-chat-2", "f-chat-5"])
-        self.assertEqual(r["srcs"], ["/chat?col=2", "/chat?col=5"])
+        self.assertEqual(r["srcs"], ["/chat?col=2&skeleton=1", "/chat?col=5&skeleton=1"], "a restored column dials as a skeleton client too: its blob's activeId is the hint")
         self.assertEqual(r["posted"], [], "no focus: each column's own state blob names its tab")
+        self.assertEqual(r["blob5"], r["blob5Was"], "a restore seeds nothing: the blob is byte for byte what the page left")
+        self.assertIsNone(r["blob2"], "…and writes none where there was none (the shim's hint is then empty: the kernel serves the column whole)")
         self.assertEqual(r["order"][:5], ["chat-pane", "gv-chat-2", "chat-pane-2", "gv-chat-5", "chat-pane-5"])
         self.assertEqual(r["lastPane"], "chat-pane-5")
         self.assertEqual(r["nextNumber"], "f-chat-3", "a new column takes the lowest free number")

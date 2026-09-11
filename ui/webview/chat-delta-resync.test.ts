@@ -104,8 +104,9 @@ test("a reconnect clears parked asks — a dead socket's pending needFull can ne
 test("the kernel's ready branch resets the client's WHOLE chat base before its push", () => {
   const i = KERNEL.indexOf('msg.get("type") == "ready"');
   assert.ok(i > 0);
-  const body = KERNEL.slice(i, i + 1600);
+  const body = KERNEL.slice(i, i + 2600);   // the arm's comments grew (the skeleton client's re-arm, 2026-09-11): the window follows tests/test_chat_skeleton_reconnect.py's
   assert.ok(body.includes("_client_reset_chat_base(client)"), "ready = the renderer holds nothing");
+  assert.ok(body.includes("_push_one(client)"), "the connect push is in the arm");
   assert.ok(body.indexOf("_client_reset_chat_base(client)") < body.indexOf("_push_one(client)"),
     "…reset first, so the push that follows is full frames");
 });

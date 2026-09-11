@@ -11729,11 +11729,14 @@ function showActive(keep?: { uuid: string; y: number } | null) {
       const what = meta?.name ? "“" + meta.name + "”" : (hostOf(activeId) ? "a session on " + hostOf(activeId) : "“session”");
       // A SKELETON active (2026-09-07) — a running session this page holds no current copy of — takes this
       // same branch: every view hidden, the loader up (this IS the click acknowledgement, before any kernel
-      // round trip), but it is LOADING, not opening: "opening" would claim a start that is not happening.
+      // round trip). The word: "opening" ONLY for a provisional tab (a session being created — the one start
+      // that is happening); every other tab whose payload has not landed — a skeleton, a placeholder the strip
+      // listed, a new split column's own session on its way, a federated id — is LOADING (the user 2026-09-11,
+      // who read a new column's "opening" as a session being created).
       const skeleton = skeletonTabs.ids.has(activeId);
       skeletonLoading = skeleton ? activeId : null;   // latched for upsert (see the declaration)
-      if (skeleton) wait.appendChild(rompLoaderInner("loading " + what + "…"));
-      else wait.appendChild(rompLoaderInner("opening " + what + "…"));
+      if (isProvisionalId(activeId)) wait.appendChild(rompLoaderInner("opening " + what + "…"));
+      else wait.appendChild(rompLoaderInner("loading " + what + "…"));
       content.appendChild(wait);
       if (empty) empty.style.display = "none";
       // a pick that lands here from the section view (a row's "opening…" session): the view disabled the box
@@ -14396,11 +14399,12 @@ function updateStatusline() {
   if (activeId && !s) {
     // the tab is a loading placeholder (its session payload hasn't arrived) — the statusline said
     // whatever the PREVIOUS tab said, or a spawn stub's "Working" over a broken clock (the user
-    // 2026-08-05, who wanted "opening" and animated dots until it's ready). A skeleton tab is a RUNNING
-    // session whose transcript is on its way, not one being opened: its line says so, the word the
-    // tab's own loader uses (review find 2026-09-08: "Opening session" over a "loading" tab)
-    const loading = skeletonTabs.ids.has(activeId) || skeletonLoading === activeId;
-    sl.replaceChildren(openingLine(loading ? "Loading session" : "Opening session"));
+    // 2026-08-05, who wanted "opening" and animated dots until it's ready). "Opening" ONLY for a
+    // provisional tab (a session being created); every other id whose payload has not landed — a skeleton,
+    // a placeholder, a new split column's session on its way — is a RUNNING session, and its line says so,
+    // the word the tab's own loader uses (review find 2026-09-08: "Opening session" over a "loading" tab;
+    // the user 2026-09-11, who read a new column's "Opening session" as a create)
+    sl.replaceChildren(openingLine(isProvisionalId(activeId) ? "Opening session" : "Loading session"));
     return;
   }
   if (!s) return;

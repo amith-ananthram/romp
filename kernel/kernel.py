@@ -39879,8 +39879,9 @@ def _resolve_reconnect(c, chat_list):
     strip can reach a reconnecting client before its set exists: a close confirmation landing in the gap before
     the pusher's first pass would otherwise paint the page's stale sessions as loaded tabs. No active hint (no
     localStorage) → the kernel cannot know what the page shows → no set → today's full push (fail safe).
-    Returns whether the flag was popped HERE, so the caller knows the strip it is about to send is the redial's
-    first. That strip stands in for the `ready` a redial never posts: the bundle posted its one ready on an
+    Returns whether the flag was popped HERE by a REDIAL, so the caller knows the strip it is about to send is the
+    redial's first (a skeleton client's pre-ready pop returns False: see the fresh guard below). That strip stands in
+    for the `ready` a redial never posts: the bundle posted its one ready on an
     earlier socket of this page, so no ready arm runs for this socket, and the pop stamps the client `ready` in
     the arm's place (the target filter of _reveal_request reads the stamp); the caller then consumes a reveal
     parked for the page's window right behind the strip (_consume_pending_reveal): strip, then focus, the order
@@ -39899,18 +39900,27 @@ def _resolve_reconnect(c, chat_list):
     with _client_lock(c):
         if not c.pop("reconnect", False):
             return False
-        # The redial's stamp (2026-09-10): the page listens (the shim dials ?reconnect=1 only once the kernel's caps
-        # frame has answered its bundle's ready), and the bundle posts ready once, so nothing else would ever stamp
-        # this socket; without the stamp a tap for this window parked for the rest of the page's life.
-        c["ready"] = True
+        # A SKELETON client's pre-ready pop (the chat split, 2026-09-11): a later column dials ?skeleton=1 and _ws arms
+        # the flag at the handshake, so this pop can run before the page's bundle has said ready — into a document
+        # with no listener. The set is built all the same (the cycle's frames are the cheap ones, and the ready arm
+        # re-arms the flag past its reset for the push the page CAN hear), but the client is NOT stamped ready
+        # (_reveal_request aims taps at stamped clients, and this page cannot hear one yet) and the caller consumes
+        # no parked reveal (the return): the ready arm's own stamp and consume run as for any fresh page. The arm
+        # pops `skeletonOnReady` before re-arming, so its own pop here is not fresh.
+        fresh = bool(c.get("skeletonOnReady"))
+        if not fresh:
+            # The redial's stamp (2026-09-10): the page listens (the shim dials ?reconnect=1 only once the kernel's caps
+            # frame has answered its bundle's ready), and the bundle posts ready once, so nothing else would ever stamp
+            # this socket; without the stamp a tap for this window parked for the rest of the page's life.
+            c["ready"] = True
         act = c.get("active")
         if not act:
-            return True
+            return not fresh
         held = c.get("echat") or {}
         skel = [sid for sid in _skeleton_for(c, str(act), chat_list) if sid not in held]
         c["skeleton"] = set(skel)
         c["skeletonOrder"] = skel
-    return True
+    return not fresh
 
 
 def _send_tab_order(c, tab_order, tab_meta, live):
@@ -45447,6 +45457,12 @@ try{if(!wid)wid=window.sessionStorage.getItem("romp:wid")||"";}catch(e){}
 // and the WS connect, so the kernel can tell one dashboard's columns apart in its logs. "" for the first
 // column, a standalone page and every non-chat pane; the shim is shared, so absent means exactly today.
 var COL=new URLSearchParams(location.search).get("col")||"";if(COL==="1")COL="";
+// A SKELETON client (the chat split, 2026-09-11): the shell opens every later column as /chat?col=N&skeleton=1, a view
+// of the one session its state blob names (the shell seeds activeId before the frame exists, so the ?active= hint
+// below carries it). The dial says so, and the kernel serves that session whole and every other tab as a skeleton
+// (Handler._ws → _resolve_reconnect: the redial diet, for a fresh page that has a hint). false everywhere else: the
+// first column, a standalone page and every non-chat pane dial exactly as today.
+var SKEL=new URLSearchParams(location.search).get("skeleton")==="1";
 // This PAGE's instance id — minted once per load, never stored: every connect of this page carries it, so the
 // kernel retires this page's previous socket on a reconnect, and never another page's (a duplicated tab copies
 // sessionStorage, and with it wid; it must not copy this).
@@ -45592,7 +45608,7 @@ function connect(){if(ws&&(ws.readyState===0||ws.readyState===1))return;   // on
 if(returnAt)returnRedialed=true;   // a dial inside a return window (whatever path led here) → the return-fresh row says so
 connT=Date.now();var proto=location.protocol==="https:"?"wss://":"ws://";
 var active="";try{var st0=JSON.parse(localStorage.getItem(SK)||"null");active=(st0&&st0.activeId)||"";}catch(e){}
-ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1":"")+(COL?"&col="+encodeURIComponent(COL):""));   // reconnect=1: this page has held a socket before AND its bundle has said ready AND the kernel's caps frame has answered that ready AND the ready is not still waiting in the queue for this open, so it holds the sessions the kernel served it; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own); a ready that left on an open socket the kernel never answered (the socket died before its caps frame came back) served the page nothing either: all three redials dial as a fresh page, the last for the page's life, since the bundle posts ready once and no later socket carries one for a caps frame to answer (2026-09-10)
+ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1":"")+(COL?"&col="+encodeURIComponent(COL):"")+(SKEL?"&skeleton=1":""));   // skeleton=1: a later chat column, served as a view of the session its ?active= names (above). reconnect=1: this page has held a socket before AND its bundle has said ready AND the kernel's caps frame has answered that ready AND the ready is not still waiting in the queue for this open, so it holds the sessions the kernel served it; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own); a ready that left on an open socket the kernel never answered (the socket died before its caps frame came back) served the page nothing either: all three redials dial as a fresh page, the last for the page's life, since the bundle posts ready once and no later socket carries one for a caps frame to answer (2026-09-10)
 // onopen: flush the queue; a RECONNECT (after a drop) also PROMPTS a reload — the fresh socket resyncs live via
 // the kernel's next push, and the banner offers a full reload for anything a live push doesn't cover. This
 // replaced the old silent location.reload() (the user 2026-07-05: don't foist a reload; let me click). Narrowed by
@@ -49504,8 +49520,9 @@ _LANDING_COLLAPSE_JS = """
 # through them). Every chat column past the first is a client-made twin of #chat-pane — <div class="pane
 # chat-col"> around an iframe at /chat?col=N, inserted before gv-a with a .gv.gv-chat gutter ahead of it — so
 # the row reads chat | chat … | outline | feed. Each column is a FULL chat pane: its own tab strip, its own
-# persisted active tab, drafts and scroll (the shim keys its state blob by ?col=), its own socket (the kernel
-# already serves N chat clients per dashboard and builds every watched tab first), its own grow weight
+# persisted active tab, drafts and scroll (the shim keys its state blob by ?col=), its own socket — dialled as a
+# SKELETON client of the one session it opened on (the shell seeds the blob's activeId, the frame's src carries
+# skeleton=1, the kernel serves that tab whole and the rest as skeleton tabs; 2026-09-11) — and its own grow weight
 # (--g-chatN, in the gutters' store). The set of open columns persists per browser (romp-chat-cols); a
 # reopened column number finds its state where it left it. Desktop only: the phone shows one pane at a time.
 # A dashboard-aimed focus (a feed click, a kernel focus, a revive prompt) reaches EVERY column's socket, so the
@@ -49514,6 +49531,7 @@ _LANDING_COLLAPSE_JS = """
 _LANDING_SPLIT_JS = """
 (function(){
 var CK='romp-chat-cols',MAX=4,cols=[];   // cols: the open column numbers in ROW order (2, 3, …); MAX counts the first column too
+var BK='romp-vscode-state-chat:';   // a column's state blob (the shim's SK for /chat?col=N): its activeId is the shim's ?active= connect hint and render.ts's wantActive
 var row=document.querySelector('.row'),gva=document.getElementById('gv-a');
 if(!row||!gva)return;
 function mobile(){var b=document.getElementById('mtabs');try{return !!b&&getComputedStyle(b).display!=='none';}catch(e){return false;}}
@@ -49528,11 +49546,20 @@ function focused(){var id=(window.__rompFocusedChatId&&window.__rompFocusedChatI
 // Which column a session-focus belongs to: the column already showing that session, else the column the
 // user last worked in, else the first. The panes ask this before acting on a dashboard-aimed focus.
 function target(sid){var fs=frames();if(sid){for(var i=0;i<fs.length;i++){if(activeIn(fs[i])===sid)return fs[i];}}return focused()||fs[0]||null;}
+// Opened ON a session (the user 2026-09-11, who found a new column slow to open and its copy reading as a create):
+// the column's state blob names the session BEFORE the frame exists. The shim's connect reads activeId from that
+// blob and dials ?active=<sid>&skeleton=1, so the kernel serves ONE full frame (the session) and skeletons the rest
+// (Handler._ws), and render.ts's wantActive activates it when its frame lands — the first frame on the socket, by
+// construction; no focus is handed over. Merged, never replaced: a reused number's drafts survive. No sid (a
+// restore) leaves the blob as it is: the column comes back on the tab its own state names.
+function seed(n,sid){if(!sid)return;var st=null;try{st=JSON.parse(localStorage.getItem(BK+n)||'null');}catch(e){}
+if(!st||typeof st!=='object'||Array.isArray(st))st={};st.activeId=sid;try{localStorage.setItem(BK+n,JSON.stringify(st));}catch(e){}}
 function make(n,sid){var have=document.getElementById(frameId(n));if(have)return have;
 var g=document.createElement('div');g.className='gv gv-chat';g.id='gv-chat-'+n;
 var p=document.createElement('div');p.className='pane chat-col';p.id=paneId(n);p.setAttribute('data-col',String(n));
 p.style.flex='var(--g-chat'+n+',60) 1 0';
-var f=document.createElement('iframe');f.id=frameId(n);f.className='chat-col';f.setAttribute('data-col',String(n));f.src='/chat?col='+n;
+var f=document.createElement('iframe');f.id=frameId(n);f.className='chat-col';f.setAttribute('data-col',String(n));
+seed(n,sid);f.src='/chat?col='+n+'&skeleton=1';   // the blob first, then the src: the shim reads the hint at its connect. skeleton=1: a later column is a VIEW of its one session (the kernel serves that tab whole and the rest as skeleton tabs that load on a click)
 var x=document.createElement('div');x.className='col-x';x.title='Close this split';x.setAttribute('role','button');x.textContent='×';
 x.addEventListener('click',function(ev){ev.stopPropagation();close(n);});
 p.appendChild(f);p.appendChild(x);
@@ -49542,11 +49569,6 @@ if(window.__rompGrowFairIfNew)window.__rompGrowFairIfNew('chat'+n);else if(windo
 if(window.__rompGutter)window.__rompGutter(g.id,function(){var i=cols.indexOf(n);return i>0?paneId(cols[i-1]):'chat-pane';},p.id);
 if(window.__rompWireFocus)window.__rompWireFocus(f);if(window.__rompWireEsc)window.__rompWireEsc(f);
 try{window.dispatchEvent(new CustomEvent('romp-chat-cols',{detail:{frame:f,col:n,open:true}}));}catch(e){}   // palette-main wires its keys
-// opened ON a session: the pane takes a focus before its frames land (render.ts latches it), so the new
-// column shows that session and not whatever its state blob last held. `own` says this focus is addressed
-// to THIS column — the pane's arbitration (focusIsOurs) would otherwise hand it to a column already
-// showing the session, which is exactly the case when a tab is opened in a new split.
-if(sid)f.addEventListener('load',function(){try{f.contentWindow.postMessage({type:'focus',id:sid,own:true},'*');}catch(e){}},{once:true});   // the opening only: a later reload of the frame keeps the tab its own state names
 return f;}
 function canSplit(){return !mobile()&&cols.length+1<MAX;}
 // a refused split says why (the click-acknowledgement rule): the cap, or the phone's one-pane layout
@@ -53770,6 +53792,13 @@ class Handler(BaseHTTPRequestHandler):
             # because cached bundles win the race). Same repair as needFull above, client-wide;
             # ready is posted once per renderer life, so this cannot loop.
             _client_reset_chat_base(client)
+            # A SKELETON client (a later chat column, ?skeleton=1 at its handshake, 2026-09-11): the reset above popped
+            # the `reconnect` the handshake armed, with the set a pre-ready pusher cycle may have built into a document
+            # that could not hear it. Re-armed here, past the reset, so the connect push below serves the page the same
+            # view — the strip with a skeleton list, one full for the session it opened on, a status per other tab —
+            # instead of the whole board. Popped once: the bundle posts one ready, and a redial finds nothing to re-arm.
+            if client.pop("skeletonOnReady", False):
+                client["reconnect"] = True
             # Capture the seq of the views blob the pushes below serve — from the frames THIS thread
             # enqueues, so a pusher-thread frame landing meanwhile is not mistaken for the connect push's
             # (the caps frame's viewsSeq, see KERNEL_WS_CAPS)
@@ -54737,6 +54766,7 @@ class Handler(BaseHTTPRequestHandler):
         iid = (q.get("iid") or [""])[0]         # which page INSTANCE: a reconnect carrying it retires its old socket
         active = (q.get("active") or [""])[0]   # the tab this client is looking at → _push builds it FIRST
         reconnect = (q.get("reconnect") or [""])[0] == "1"   # the shim's own statement: this page opened a socket before and its bundle has said ready, with no ready waiting in its queue
+        skeleton = (q.get("skeleton") or [""])[0] == "1"     # the shell's statement (the chat split, 2026-09-11): a later column, a VIEW of the one session its active hint names
         col = (q.get("col") or [""])[0]         # which chat COLUMN of that dashboard (split screen, 2026-09-08) — for the logs;
         #                                         the columns arbitrate a dashboard-aimed focus among themselves (render.ts focusIsOurs)
         self.send_response(101)
@@ -54774,6 +54804,20 @@ class Handler(BaseHTTPRequestHandler):
             # frame follows. Every redial of such a page is served whole, the cost before 2026-09-07, never a
             # false skeleton.
             client["reconnect"] = True
+        if skeleton:
+            # A later chat column dials as a SKELETON client (the user 2026-09-11, who found a new column slow to open):
+            # the shell seeded the column's state blob with the session it opens on, so `active` names it, and the
+            # redial's diet fits a fresh page exactly — the strip with a skeleton list, ONE full for the active tab, a
+            # status per other tab: a view of one session instead of the whole board (17 frames, 9 MB measured above).
+            # `reconnect` makes the pusher cycle that lands before the bundle's ready serve that set (into a document
+            # that may not hear it yet: one frame, not the board); `skeletonOnReady` survives the ready arm's
+            # _client_reset_chat_base (which pops `reconnect` with the set) and re-arms the flag there, so the connect
+            # push the bundle CAN hear is the same set. Until that ready, _resolve_reconnect neither stamps the client
+            # ready nor lets its caller consume a parked reveal (the fresh guard): the page has no listener yet, and
+            # the arm's own stamp and consume run as for any fresh page. No `active` (a corrupt blob): the whole push,
+            # the fail-safe _resolve_reconnect already has.
+            client["reconnect"] = True
+            client["skeletonOnReady"] = True
         if col:
             client["col"] = col
         _register_ws_client(client)
