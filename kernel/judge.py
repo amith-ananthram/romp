@@ -4552,17 +4552,33 @@ def _rebase_onto_disk(fsid, store):
                 mnd["log"] = sorted((mnd.get("log") or []) + add,
                                     key=lambda e: (int(e.get("ev_t") or 0), int(e.get("at") or 0)))
         # T334: the relay's record rides plain node keys two writers touch (the judge marks relayWanted; the kernel's tick
-        # replaces it with relayed): the newer fact on disk wins over a stale in-memory copy, in either direction
+        # replaces it with relayed): the NEWER record wins in either direction (by its t, the tick's clock, so a stale
+        # holder never republishes an older record over a newer one), and a marker is settled only by a record that
+        # NAMES it (its id): a re-block with the same words after a lift is a new marker, never popped by the record
+        # that settled the earlier one (the manager's fourth review)
         for key in ("relayed", "relayDone"):        # the kernel's records of a relay sent, stood down or refused
-            if isinstance(dnd.get(key), dict) and not isinstance(mnd.get(key), dict):
-                mnd[key] = dnd[key]
-        def _settled(node, want):                    # a record at or after the marker settles it
-            return any(isinstance(node.get(k), dict) and int(node[k].get("t") or 0) >= int((want or {}).get("t") or 0)
-                       and node[k].get("why") == (want or {}).get("why") for k in ("relayed", "relayDone"))
-        if isinstance(dnd.get("relayWanted"), dict) and "relayWanted" not in mnd and not _settled(mnd, dnd["relayWanted"]):
-            mnd["relayWanted"] = dnd["relayWanted"]
-        if isinstance(mnd.get("relayWanted"), dict) and _settled(mnd, mnd["relayWanted"]):
-            mnd.pop("relayWanted", None)
+            d_, m_ = dnd.get(key), mnd.get(key)
+            if isinstance(d_, dict) and (not isinstance(m_, dict) or int(d_.get("t") or 0) > int(m_.get("t") or 0)):
+                mnd[key] = d_
+        if isinstance(dnd.get("relaySettled"), list):   # the settled markers: the union (each record slot is overwritten
+            ms = [x for x in (mnd.get("relaySettled") or []) if isinstance(x, str)]   #   by the next marker's; the list
+            mnd["relaySettled"] = (ms + [x for x in dnd["relaySettled"]           #   remembers, so a holder stale
+                                         if isinstance(x, str) and x not in ms])[-RELAY_SETTLED_CAP:]   # across two relays
+        #                                                                                never re-mints the first)
+        if isinstance(mnd.get("relayWanted"), dict) and _relay_settled(mnd, mnd["relayWanted"]):
+            mnd.pop("relayWanted", None)               # ours is settled: popped FIRST, so the disk's live marker is adopted
+        d_rw, m_rw = dnd.get("relayWanted"), mnd.get("relayWanted")
+        if isinstance(d_rw, dict) and not _relay_settled(mnd, d_rw):
+            if not isinstance(m_rw, dict):
+                mnd["relayWanted"] = d_rw                  # the other writer's live marker
+            elif d_rw.get("id") == m_rw.get("id"):
+                for k in ("pendingMid", "pendingAt", "pendingHost"):   # the SAME marker on both sides: the kernel's pending
+                    if k in d_rw and k not in m_rw:        #   stamp (a relay handed to a far host) is a fact a marker only
+                        m_rw[k] = d_rw[k]                  #   gains; a stale copy without it would send the question again
+            elif d_rw.get("pendingMid") or not m_rw.get("pendingMid"):
+                mnd["relayWanted"] = d_rw                  # two holders minted a marker for one wait: the one already handed
+                                                           #   to a far host wins, else the published one (its entry is
+                                                           #   flushed); the loser never reaches the queue
         # `mt` is a monotonic last-touched stamp the read side orders and anchors on (a block's mt feeds the
         # card's disp_t), so it must not regress to our older snapshot — take the newer of the two. The
         # verdict FLAGS need no such care: rollup_status below re-derives them all from the merged log.
@@ -4922,8 +4938,9 @@ def _replay_overrides(fsid, store, lines=None):
     return applied
 
 
-_NONCONTENT_KEYS = ("rev", "_baseRev", "_unread")   # the revision counter + the transient CAS base and
-#                                                      unread-journal mark (_replay_overrides): not store CONTENT
+_NONCONTENT_KEYS = ("rev", "_baseRev", "_unread", "_relayPending")   # the revision counter + the transient CAS base,
+#                                                      unread-journal mark (_replay_overrides) and the relay entries
+#                                                      awaiting this holder's publish (_relay_enqueue): not store CONTENT
 
 
 def _store_content(store):
@@ -5600,9 +5617,12 @@ def save_goals(fsid, store):
     GOALDIR.mkdir(parents=True, exist_ok=True)
     mine = _own_hash(store) if "_baseRev" in store else None
     if mine is not None and _matches_disk(fsid, store, mine):
+        if store.get("_relayPending"):               # the file already holds our markers: their entries go out now
+            _relay_flush(fsid, store, store.pop("_relayPending", None))
         return                                       # nothing of ours to publish → leave the file (and its
     base = store.pop("_baseRev", None)               # mtime) alone.  transient: never serialized
     unread = store.pop("_unread", None)              # likewise transient (_replay_overrides' unread-journal mark)
+    pending = store.pop("_relayPending", None)       # likewise: the relay entries this publish carries (_relay_enqueue)
     rebased = published = False
     try:
         if base is not None:
@@ -5625,8 +5645,9 @@ def save_goals(fsid, store):
         tmp.rename(GOALDIR / (fsid + ".json"))        # atomic publish
         published = True
         _shared_forget(str(GOALDIR / (fsid + ".json")))   # the shared read-only view of the old version goes
-        _relay_flush(fsid)                            # T334: the relay entries of markers this save just published
         #                                               with it (its identity check would miss anyway; this frees the bytes)
+        if pending:
+            _relay_flush(fsid, store, pending)        # T334: the relay entries of the markers this publish carried
     finally:
         if base is not None:
             # published: the file holds exactly this content at this revision, so the holder's NEXT save
@@ -5636,6 +5657,8 @@ def save_goals(fsid, store):
             store["_baseRev"] = store["rev"] if published else base
         if not published and unread is not None:
             store["_unread"] = unread                # the mark describes the object still held
+        if not published and pending:
+            store["_relayPending"] = pending         # the holder's retry publishes the markers, then flushes
 
 
 def load_goal_archive(fsid):
@@ -10607,22 +10630,28 @@ def _asks_user(nodes, nid):
 
 
 def _latch_prompt_msg_ids(session, store):
-    """Stamp promptMsgId on every parentless promptUuid-bearing top whose anchor atom the parse holds: the postal message
-    id its delivery text carries (em.postal_pairs, the first marker), or "" when it carries none (checked). The
-    delegating peer of a top is then the sender of THAT mail (_delegator_of), never merely the latest delegate the
-    session received (a worker dispatched by two managers relays each block to the manager that asked, T334)."""
+    """Stamp promptMsgId on every parentless promptUuid-bearing top whose anchor atom the parse holds: the id of the
+    DELEGATE-kind postal marker its delivery text carries (em.postal_pairs pairs each id with the kind declared after
+    it; the last delegate when a drained inbox holds several, the rule author_of applies to the delivery's peer), or ""
+    when it carries no delegate (checked: a batched inbox whose first mail is a peer's coordinate and whose second the
+    manager's dispatch is the manager's, and a delivery with no dispatch in it leaves _delegator_of its fallback, the
+    latest delegate at or before the mint; the manager's fourth review). The delegating peer of a top is then the
+    sender of THAT mail (_delegator_of), never merely the latest delegate the session received (a worker dispatched by
+    two managers relays each block to the manager that asked, T334)."""
     cands = [nd for nd in store.get("nodes", {}).values()
              if isinstance(nd, dict) and nd.get("parentId") is None and nd.get("promptUuid") and "promptMsgId" not in nd]
     if not cands:
         return 0
     by_uuid = {a["uuid"]: a for turn in session.get("turns") or [] for a in turn.get("atoms") or [] if a.get("uuid")}
+    sid = str(store.get("rompUuid") or "")
     n = 0
     for nd in cands:
         a = by_uuid.get(nd["promptUuid"])
         if a is None:
             continue                                    # not in this parse: left for a parse that holds it
-        pairs = em.postal_pairs(_atom_text(a))
-        nd["promptMsgId"] = str(pairs[0][0]) if pairs else ""
+        dels = [m for m, k in em.postal_pairs(_atom_text(a)) if k == "delegate" and _delegate_sender(m, sid)]
+        nd["promptMsgId"] = str(dels[-1]) if dels else ""   # a delegate marker QUOTED in a body (another session's
+        #                                                       dispatch) is no dispatch to this session: not the anchor
         n += 1
     return n
 
@@ -12705,7 +12734,7 @@ def _peer_name(sid):
 
 
 _DELEG_CACHE = [None, {}]    # (mtime_ns, size), {to_sid: [(t, from_id), ...] ascending}: one scan per log change
-_DELEG_BY_MID = {}           # message id -> from_id of that delegate row (filled by the same scan)
+_DELEG_BY_MID = {}           # message id -> (from_id, to_sid) of that delegate row (filled by the same scan)
 
 
 def _delegates_to():
@@ -12738,7 +12767,7 @@ def _delegates_to():
                 continue
             out.setdefault(str(t_), []).append((int(ts), str(f)))
             if o.get("id"):
-                by_mid[str(o["id"])] = str(f)
+                by_mid[str(o["id"])] = (str(f), str(t_))
         for v in out.values():
             v.sort()
     except OSError:
@@ -12748,10 +12777,15 @@ def _delegates_to():
     return out
 
 
-def _delegate_sender(mid):
-    """The from_id of the DELEGATE row with message id `mid` (the mail a top's anchor record names), or None."""
+def _delegate_sender(mid, sid=None):
+    """The from_id of the DELEGATE row with message id `mid` (the mail a top's anchor record names), or None; with `sid`,
+    only when that row was addressed TO `sid` (a dispatch to another session, quoted in a body, names nobody here)."""
     _delegates_to()
-    return _DELEG_BY_MID.get(str(mid))
+    ent = _DELEG_BY_MID.get(str(mid))
+    if not ent:
+        return None
+    frm, to = ent
+    return frm if sid is None or str(to) == str(sid) else None
 
 
 def _delegator_of(store, nid):
@@ -12770,10 +12804,11 @@ def _delegator_of(store, nid):
     if not top or tn.get("askAnchor") != "machine":
         return None
     sid = str(store.get("rompUuid") or str(nid).rsplit(":", 1)[0])
-    peer = _delegate_sender(tn["promptMsgId"]) if tn.get("promptMsgId") else None   # the mail the anchor names, first
-    if not peer and not tn.get("promptMsgId"):    # no mail id on the anchor: the latest delegate at or before the mint
-        before = [r for r in _delegates_to().get(sid, []) if r[0] <= int(tn.get("t") or 0)]
-        peer = before[-1][1] if before else None
+    peer = _delegate_sender(tn["promptMsgId"], sid) if tn.get("promptMsgId") else None   # the mail the anchor names, first
+    if not peer:                                  # no mail id on the anchor, or one that is no dispatch to this session (a
+        before = [r for r in _delegates_to().get(sid, []) if r[0] <= int(tn.get("t") or 0)]   # stamp from before the
+        peer = before[-1][1] if before else None  #   delegate-kind rule, a quoted marker): the latest delegate at or
+                                                  #   before the mint, as for an anchor that names none
     return None if not peer or ":" in peer else peer   # an ext: mailer or an unresolved cross-host key is no session that
                                                        #   could ever be asked (judge _presumed_closed: closed by construction)
 
@@ -12851,13 +12886,43 @@ def file_block(store, nd, src, why, ev_t, t=None, seg=None):
     # a peer wait on the same peer already standing is not re-filed, whatever the re-asserted words: the stamp keeps
     # its since-time, so the relay sent after it (and the peer's reply after that) end exactly this wait
     if via == "delegator" and not prior_standing and not isinstance(nd.get("relayWanted"), dict):
-        nd["relayWanted"] = {"peer": peer, "why": str(why), "t": int(t if t is not None else ev_t)}   # the kernel's
-        _relay_enqueue(store, nd)                  #   relay tick sends it as the worker's question, once per block: a
-        landed = True                              #   re-asserted block on a standing relayed wait never relays twice
+        nd["relayWanted"] = {"peer": peer, "why": str(why), "t": int(t if t is not None else ev_t),
+                             "id": _relay_marker_id(t if t is not None else ev_t)}   # its identity: the records that
+        _relay_enqueue(store, nd)                  #   settle it name it. The kernel's relay tick sends it as the worker's
+        landed = True                              #   question, once per block: a re-asserted block on a standing
+                                                   #   relayed wait never relays twice
     return "peer", landed
 
 
-_RELAY_PENDING = []          # (sid, nid) marked this pass, written to the queue only once the store is SAVED (save_goals)
+def _relay_marker_id(ev_t):
+    """A relay marker's identity: the block's evidence time and a nonce. The records that settle a marker (relayed,
+    relayDone) name it and the queue entry carries it, so a re-block with the same words after a lift is a new marker
+    nothing older can settle (the manager's fourth review)."""
+    return "%d-%s" % (int(ev_t or 0), secrets.token_hex(4))
+
+
+RELAY_SETTLED_CAP = 8        # settled marker ids a node remembers (relaySettled), newest last
+
+
+def _relay_mark_settled(nd, marker):
+    """Remember `marker` as settled on the node: the kernel's record slots (relayed, relayDone) hold one record each and
+    the next marker's record overwrites them, so a holder stale across two relays would find nothing naming the first
+    marker and republish it; the capped list remembers what the slots forgot."""
+    if not marker:
+        return
+    lst = [x for x in (nd.get("relaySettled") or []) if isinstance(x, str) and x != str(marker)]
+    nd["relaySettled"] = (lst + [str(marker)])[-RELAY_SETTLED_CAP:]
+
+
+def _relay_settled(node, want):
+    """True when the marker `want` is settled on `node`: a record (relayed, relayDone) or the settled list NAMES its id.
+    Words and times never settle a marker. A marker with no id (none is written today) is settled by any record, the
+    reading the kernel's tick gives such an entry, so the two rules agree."""
+    mk = str((want or {}).get("id") or "")
+    recs = [node.get(k) for k in ("relayed", "relayDone") if isinstance(node.get(k), dict)]
+    if not mk:
+        return bool(recs)
+    return mk in (node.get("relaySettled") or []) or any(str(r.get("marker") or "") == mk for r in recs)
 
 
 def _relay_queue_dir():
@@ -12869,21 +12934,31 @@ def _relay_entry_path(sid, nid):
 
 
 def _relay_enqueue(store, nd):
-    """Remember (sid, nid) for the kernel's relay tick. The queue is a DIRECTORY of one file per entry (append = create,
-    consume = unlink: two writers, the judge's thread and the kernel's tick, never rewrite each other's list), and the
-    entry is written only after the store carrying the marker is saved (_relay_flush from save_goals), so the tick
-    never reads a store that lacks the marker and drops the entry. A failed write is said; the boot pass re-queues
-    every marker without an entry (_requeue_relays_all)."""
-    sid = str(store.get("rompUuid") or str(nd.get("id") or "").rsplit(":", 1)[0])
-    _RELAY_PENDING.append((sid, str(nd.get("id") or "")))
+    """Remember `nd` on the STORE OBJECT for the kernel's relay tick. save_goals writes the entry (one file per entry
+    in a queue directory: append = create, consume = unlink, so the judge's thread and the kernel's tick never rewrite
+    each other's list) once THIS object is published, and only the saver holding the object flushes its own entries:
+    a save of the same sid by another holder, whose copy may not carry the marker yet, flushes nothing of ours (the
+    manager's fourth review; a module-level list shared by every tier and thread needed a lock and still flushed on
+    any save of the sid). The list is transient, a non-content key never serialized. A failed write is said; the
+    boot pass re-queues every marker without an entry (_requeue_relays_all)."""
+    pend = store.get("_relayPending")
+    if not isinstance(pend, list):
+        pend = store["_relayPending"] = []
+    nid = str(nd.get("id") or "")
+    if nid not in pend:
+        pend.append(nid)
 
 
-def _relay_write_entry(sid, nid):
+def _relay_write_entry(sid, nid, marker="", rev=0):
+    """One queue entry: the node, the marker it was written for (its id) and the store revision whose publish carried
+    the marker, so the tick can tell a spent entry (a record names the marker; the node moved on to a newer marker; a
+    published revision at or past this one lacks the marker) from one whose publish it has not read yet."""
     try:
         d = _relay_queue_dir()
         d.mkdir(parents=True, exist_ok=True)
         tmp = d / (".tmp-%s-%d" % (re.sub(r"[^A-Za-z0-9_.-]", "_", nid), os.getpid()))
-        tmp.write_text(json.dumps({"sid": sid, "nid": nid, "t": int(time.time())}))
+        tmp.write_text(json.dumps({"sid": sid, "nid": nid, "t": int(time.time()), "marker": str(marker or ""),
+                                   "rev": int(rev or 0)}))
         tmp.rename(_relay_entry_path(sid, nid))
         return True
     except OSError as e:
@@ -12891,18 +12966,23 @@ def _relay_write_entry(sid, nid):
         return False
 
 
-def _relay_flush(fsid):
-    """Write the queue entries of the store just saved (save_goals calls this after its publish)."""
-    mine = [(s_, n_) for s_, n_ in _RELAY_PENDING if s_ == str(fsid)]
-    if not mine:
-        return 0
-    _RELAY_PENDING[:] = [e for e in _RELAY_PENDING if e[0] != str(fsid)]
-    return sum(1 for s_, n_ in mine if _relay_write_entry(s_, n_))
+def _relay_flush(fsid, store, pending):
+    """Write the queue entries of the nodes in `pending` (the store object's own list, popped by save_goals) now that
+    `store` is on disk at store["rev"]. A node whose marker the publish's rebase settled and popped gets none (nothing
+    is left to relay). Returns the number written."""
+    n = 0
+    for nid in pending or []:
+        nd = (store.get("nodes") or {}).get(nid)
+        rw = nd.get("relayWanted") if isinstance(nd, dict) else None
+        if isinstance(rw, dict):
+            n += 1 if _relay_write_entry(str(fsid), str(nid), rw.get("id") or "", store.get("rev") or 0) else 0
+    return n
 
 
 def _requeue_relays_all():
     """Once per boot: every node carrying relayWanted with no queue entry gets one (a marker whose entry was lost to a
-    failed write or a stale merge would otherwise wait forever). Returns the number re-queued."""
+    failed write, a kernel restart between the publish and the flush, or a stale merge would otherwise wait forever).
+    Returns the number re-queued."""
     n = 0
     for p in (sorted(GOALDIR.glob("*.json")) if GOALDIR.is_dir() else []):
         try:
@@ -12911,7 +12991,7 @@ def _requeue_relays_all():
             continue
         for nid, nd in ((raw or {}).get("nodes") or {}).items():
             if isinstance(nd, dict) and isinstance(nd.get("relayWanted"), dict) and not _relay_entry_path(p.stem, nid).exists():
-                n += 1 if _relay_write_entry(p.stem, nid) else 0
+                n += 1 if _relay_write_entry(p.stem, nid, nd["relayWanted"].get("id") or "", (raw or {}).get("rev") or 0) else 0
     return n
 
 

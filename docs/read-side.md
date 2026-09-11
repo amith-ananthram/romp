@@ -138,8 +138,10 @@ completed); the feed just paints columns. (Reflected in `docs/judges.md`.)
   awaiting-a-peer stamp instead of the block, so the card shows the "Awaiting
   <peer>" chip in working and never a needs-you; when the worker never mailed
   that peer, the kernel relays the block's why to it as the worker's own question,
-  once per block, so the reply can end the wait; a refusal the bus cannot retry
-  reverts the block to yours. A block in a delegated goal that
+  once per block (each marker has an identity its queue entry and its record
+  name), so the reply can end the wait; a relay handed to a far host stays
+  pending by its id up to the far host's delivered row or the peer's answer; a
+  refusal the bus cannot retry reverts the block to yours. A block in a delegated goal that
   names you still goes to the delegating manager; a worker's card reaches you only
   when the debt ladder escalates, and for a manager debtor only at an idle turn end
   with no unread mail waiting for it. Your own sessions' blocks are untouched,

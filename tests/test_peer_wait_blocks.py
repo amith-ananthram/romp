@@ -64,7 +64,6 @@ class _Peer(unittest.TestCase):
         (jd.NAMES, jd.GOALDIR, jd.MESSAGES, jd.STATE, km.NAMES) = self.saved
         jd._PEER_ASK_CACHE[0] = None
         jd._DELEG_CACHE[0] = None
-        jd._RELAY_PENDING[:] = []
         self.td.cleanup()
 
     def _write_mail(self):
@@ -141,7 +140,9 @@ class CloserBlocks(_Peer):
         nd = self._close(st, step, "PR is green and cannot move further without you")
         self.assertFalse(nd["blocked"])
         self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER])
-        self.assertEqual(nd["relayWanted"], {"peer": MANAGER, "why": "PR is green and cannot move further without you", "t": T0 + 400},
+        rw = dict(nd["relayWanted"])
+        self.assertTrue(rw.pop("id", "").startswith("%d-" % (T0 + 400)), "the marker's identity: the block's evidence time and a nonce")
+        self.assertEqual(rw, {"peer": MANAGER, "why": "PR is green and cannot move further without you", "t": T0 + 400},
                          "no question was ever sent: the kernel relays it as the worker's own")
         st2, top2, step2 = self.store(delegated=True)
         self.ask(WORKER, MANAGER, T0 + 300)
@@ -325,9 +326,10 @@ class RowsAlreadyFiled(_Peer):
         self.assertTrue(got[step]["blocked"] and got[top]["blocked"])
 
 
-class RelayEndToEnd(_Peer):
-    """A worker's closer block under a delegated goal with no open ask: one relayed question in the manager's inbox,
-    the manager's reply lifts the wait, and a re-asserted block never relays twice."""
+class _RelayFixture(_Peer):
+    """The relay harness: a fake bus that answers as the local /send does and lands the mail in the manager's maildir
+    and the postal log; the real save path (the entry is written once the store is published); the queue directory.
+    No tests of its own: the classes below inherit it, each running only its own cases."""
 
     def setUp(self):
         super().setUp()
@@ -344,12 +346,13 @@ class RelayEndToEnd(_Peer):
             test.rows.append({"id": mid, "from_id": payload["from_id"], "to_id": payload["to"], "from": payload["from"],
                               "t": NOW, "kind": payload["kind"], "relayed": True})
             test._write_mail()
-            return True, "", False, {"ok": True, "id": mid}
+            return True, "", False, {"ok": True, "to": payload["to"]}   # the local route's answer (no id)
         km._bus_send_relay = fake_bus
 
     def tearDown(self):
         km._bus_send_relay = self._orig_send
         km._RELAY_SAID.clear()
+        km._RELAY_QUIET.clear()
         km._RELAY_BAD["n"] = 0
         super().tearDown()
 
@@ -363,6 +366,11 @@ class RelayEndToEnd(_Peer):
     def _close(self, st, step, why, t):
         with contextlib.redirect_stderr(io.StringIO()):
             jd.apply_close(st, [st["nodes"][step]], {"done": {}, "block": {1: why}, "awaiting": {}}, t=t)
+
+
+class RelayEndToEnd(_RelayFixture):
+    """A worker's closer block under a delegated goal with no open ask: one relayed question in the manager's inbox,
+    the manager's reply lifts the wait, and a re-asserted block never relays twice."""
 
     def test_the_relay_creates_the_edge_the_reply_lifts_and_a_re_asserted_block_never_relays_twice(self):
         st, top, step = self.store(delegated=True)
@@ -436,7 +444,7 @@ class RelayEndToEnd(_Peer):
         self.assertEqual(nd["relayDone"]["outcome"], "stood-down")
 
 
-class RelayEdges(RelayEndToEnd):
+class RelayEdges(_RelayFixture):
     """The manager's third review: the guard reads the state before the write, two writers never lose an entry, an
     unsaved marker keeps its entry, a parked relay is pending until it lands or comes back, malformed entries drop alone."""
 
@@ -453,29 +461,83 @@ class RelayEdges(RelayEndToEnd):
         self._close(st, step, "now stuck on the second question", NOW + 60)   # a NEW block on the same node
         self.assertEqual(st["nodes"][step]["relayWanted"]["why"], "now stuck on the second question", "a second relay")
         self.assertNotIn("relayed", st["nodes"][step], "the ended wait took its relay record with it")
+        self._save(st)
+        entry = json.loads((jd._relay_queue_dir() / self._queue()[0]).read_text())
+        self.assertEqual(entry["marker"], st["nodes"][step]["relayWanted"]["id"], "the entry names the new marker")
+        self.assertEqual(entry["rev"], st["rev"], "and the revision whose publish carried it")
+        self.assertEqual(km._relay_tick(NOW + 90), 1, "the second question goes out")
+        nd = jd.load_goals(WORKER)["nodes"][step]
+        self.assertEqual(nd["relayed"]["marker"], entry["marker"], "the record names the marker it settled")
 
-    def test_an_entry_whose_marker_is_not_saved_yet_is_kept_not_dropped(self):
+    def test_a_re_block_with_the_same_words_after_a_lift_is_a_new_marker(self):
         st, top, step = self.store(delegated=True)
-        self._save(st)                                     # the store on disk carries no marker...
-        jd._relay_write_entry(WORKER, step)                # ...but an entry exists (the save carrying it has not landed)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        self.assertEqual(km._relay_tick(NOW), 1)
+        st = jd.load_goals(WORKER)
+        first = st["nodes"][step]["relayed"]
+        self.rows.append(mail(MANAGER, WORKER, NOW + 5, kind="coordinate"))
+        self._write_mail()
+        jd.record_verdict(st, st["nodes"][step], "romp", "awaiting", NOW + 5, why="", lift=True, end_ev=NOW + 5)
+        self._close(st, step, "cannot move further without you", NOW + 60)     # the SAME words, a new block
+        rw = st["nodes"][step]["relayWanted"]
+        self.assertNotEqual(rw["id"], first["marker"], "its own identity")
+        theirs = jd.load_goals(WORKER)                     # another holder publishes in between...
+        theirs["nodes"][top]["text"] = "Ship the exporter (renamed)"
+        base = st["_baseRev"]
+        self._save(theirs)
+        self._save(st)                                     # ...so this publish REBASES onto the disk holding the first record
+        st2 = jd.load_goals(WORKER)
+        self.assertEqual(st2["rev"], base + 2, "the rebase happened")
+        self.assertIn("relayWanted", st2["nodes"][step], "the earlier record settles only the marker it names")
+        self.assertEqual(km._relay_tick(NOW + 90), 1, "relayed again")
+
+    def test_an_entry_is_kept_only_when_the_disk_predates_its_publish_and_bounded_after(self):
+        st, top, step = self.store(delegated=True)
+        self._save(st)                                     # the store on disk (rev 1) carries no marker...
+        rev = jd.load_goals(WORKER)["rev"]
+        jd._relay_write_entry(WORKER, step, "mk-1", rev + 1)   # ...and an entry names a publish the disk does not show yet
         self.assertEqual(km._relay_tick(NOW), 0)
-        self.assertEqual(len(self._queue()), 1, "kept for the save to land, never dropped")
-        st2, top2, step2 = self.store(delegated=True)
-        st2["nodes"][step2]["relayed"] = {"peer": MANAGER, "why": "x", "t": NOW}
-        self._save(st2)
+        self.assertEqual(len(self._queue()), 1, "kept: the publish that wrote it is not on disk")
+        st = jd.load_goals(WORKER)
+        st["nodes"][step]["text"] = "Ask which client to change (edited)"
+        self._save(st)                                     # rev 2 published, still no marker and no record
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(km._relay_tick(NOW), 0)
+        self.assertEqual(self._queue(), [], "bounded: the revision passed without the marker, the entry is spent")
+        self.assertIn("gone with no record", err.getvalue())
+
+    def test_an_entry_is_spent_by_a_record_naming_its_marker_or_a_newer_marker(self):
+        st, top, step = self.store(delegated=True)
+        st["nodes"][step]["relayed"] = {"peer": MANAGER, "why": "x", "t": NOW, "marker": "mk-1"}
+        self._save(st)
+        jd._relay_write_entry(WORKER, step, "mk-1", 1)
         self.assertEqual(km._relay_tick(NOW), 0)
-        self.assertEqual(self._queue(), [], "a settled node's entry is spent")
+        self.assertEqual(self._queue(), [], "the record names the marker: spent")
+        st = jd.load_goals(WORKER)
+        st["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400, "id": "mk-3"}
+        self._save(st)
+        jd._relay_write_entry(WORKER, step, "mk-2", 1)     # an older marker's entry: the node moved on to mk-3
+        self.assertEqual(km._relay_tick(NOW), 0, "nothing is sent for the stale entry")
+        entry = json.loads((jd._relay_queue_dir() / self._queue()[0]).read_text())
+        self.assertEqual(entry["marker"], "mk-3", "the entry is REWRITTEN for the live marker, never unlinked (the path may "
+                                                  "already be the newer flush)")
+        self.assertEqual(jd.load_goals(WORKER)["nodes"][step]["relayWanted"]["id"], "mk-3", "the newer marker stands")
+        self.assertEqual(km._relay_tick(NOW + 1), 0)       # mk-3 has no standing stamp here: the next tick stands it down
+        self.assertEqual(self._queue(), [])
+        self.assertEqual(jd.load_goals(WORKER)["nodes"][step]["relayDone"]["marker"], "mk-3")
 
     def test_two_writers_never_lose_an_entry(self):
         st, top, step = self.store(delegated=True)
         self._close(st, step, "cannot move further without you", T0 + 400)
         self._save(st)
         other = WORKER + ":g9"
-        st["nodes"][other] = node(other, "Another question", parent=top, t=T0 + 700, relayWanted={"peer": MANAGER, "why": "q", "t": T0 + 700})
+        st["nodes"][other] = node(other, "Another question", parent=top, t=T0 + 700,
+                                  relayWanted={"peer": MANAGER, "why": "q", "t": T0 + 700, "id": "mk-other"})
         self._save(st)
         real = km._bus_send_relay
         def slow_bus(payload):                            # the judge appends an entry WHILE the tick is mid-send
-            jd._relay_write_entry(WORKER, other)
+            jd._relay_write_entry(WORKER, other, "mk-other", st["rev"])
             return real(payload)
         km._bus_send_relay = slow_bus
         self.assertGreaterEqual(km._relay_tick(NOW), 1)
@@ -489,7 +551,7 @@ class RelayEdges(RelayEndToEnd):
         km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "relay-far-1", "parked": "TESTHOST"})
         self.assertEqual(km._relay_tick(NOW), 0, "parked is not sent")
         nd = jd.load_goals(WORKER)["nodes"][step]
-        self.assertEqual(nd["relayWanted"]["parkedMid"], "relay-far-1")
+        self.assertEqual((nd["relayWanted"]["pendingMid"], nd["relayWanted"]["pendingHost"]), ("relay-far-1", "TESTHOST"))
         self.assertEqual(len(self._queue()), 1, "pending")
         self.rows.append({"id": "relay-far-1", "ev": "bounced", "t": NOW + 30, "to_id": MANAGER, "from_id": WORKER})
         self._write_mail()
@@ -511,6 +573,166 @@ class RelayEdges(RelayEndToEnd):
         self.assertEqual(nd["relayed"]["mid"], "relay-far-2")
         self.assertEqual(self._queue(), [])
 
+    def test_a_relay_in_flight_to_a_host_that_is_up_is_pending_until_the_far_host_delivers(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-far-3", "note": "relaying to 'web' on TESTHOST"})
+        self.assertEqual(km._relay_tick(NOW), 0, "the relay leg's answer is pending, host up or not")
+        nd = jd.load_goals(WORKER)["nodes"][step]
+        self.assertEqual(nd["relayWanted"]["pendingMid"], "px-far-3")
+        self.assertEqual(km._relay_tick(NOW + 10), 0, "still pending: no delivered row, no answer")
+        self.rows.append({"t": NOW + 30, "ev": "relayed", "id": "px-far-3", "host": "TESTHOST"})   # the far host's ack
+        self._write_mail()
+        self.assertEqual(km._relay_tick(NOW + 60), 1, "delivered: the relay stands as sent")
+        nd = jd.load_goals(WORKER)["nodes"][step]
+        self.assertEqual((nd["relayed"]["mid"], nd["relayed"]["marker"]), ("px-far-3", st["nodes"][step]["relayWanted"]["id"]))
+        self.assertNotIn("relayWanted", nd)
+        self.assertEqual(self._queue(), [])
+
+    def test_a_relay_in_flight_that_bounces_reverts_to_the_users_block(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-far-4", "note": "relaying"})
+        self.assertEqual(km._relay_tick(NOW), 0)
+        self.rows.append({"t": NOW + 30, "ev": "bounced", "id": "px-far-4", "host": "TESTHOST", "why": "no live session"})
+        self._write_mail()
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(km._relay_tick(NOW + 60), 0)
+        nd = jd.load_goals(WORKER)["nodes"][step]
+        self.assertTrue(nd["blocked"], "the bounce is the definitive refusal: the user's block")
+        self.assertEqual((nd["relayDone"]["outcome"], nd["relayDone"]["marker"]), ("refused", st["nodes"][step]["relayWanted"]["id"]))
+        self.assertEqual(self._queue(), [])
+
+    def test_an_entry_whose_node_is_gone_is_spent(self):
+        st, top, step = self.store(delegated=True)
+        self._save(st)
+        jd._relay_write_entry(WORKER, WORKER + ":gone", "mk-x", 1)
+        self.assertEqual(km._relay_tick(NOW), 0)
+        self.assertEqual(self._queue(), [], "a rewound or archived node's entry is spent, nothing sent")
+        self.assertEqual(self.sent, [])
+
+    def test_a_pending_relay_the_worker_withdrew_reverts_as_withdrawn(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-far-5", "note": "relaying"})
+        self.assertEqual(km._relay_tick(NOW), 0)
+        self.rows.append({"t": NOW + 30, "ev": "recall", "id": "px-far-5"})
+        self._write_mail()
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(km._relay_tick(NOW + 60), 0)
+        nd = jd.load_goals(WORKER)["nodes"][step]
+        self.assertTrue(nd["blocked"])
+        self.assertIn("the message was withdrawn", nd["log"][-1]["why"])
+
+    def test_a_bounce_carries_the_far_hosts_reason_into_the_users_block(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-far-6", "note": "relaying"})
+        self.assertEqual(km._relay_tick(NOW), 0)
+        self.rows.append({"t": NOW + 30, "ev": "bounced", "id": "px-far-6", "host": "TESTHOST", "why": "no live session named web"})
+        self._write_mail()
+        with contextlib.redirect_stderr(io.StringIO()):
+            km._relay_tick(NOW + 60)
+        nd = jd.load_goals(WORKER)["nodes"][step]
+        self.assertIn("came back from TESTHOST: no live session named web", nd["log"][-1]["why"])
+
+    def test_an_answer_in_the_sends_own_second_is_not_the_answer(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-far-7", "note": "relaying"})
+        self.assertEqual(km._relay_tick(NOW), 0)
+        self.rows.append(mail(MANAGER, WORKER, NOW, kind="coordinate"))        # the same second as the send
+        self._write_mail()
+        self.assertEqual(km._relay_tick(NOW + 1), 0, "still pending")
+        self.rows.append(mail(MANAGER, WORKER, NOW + 2, kind="coordinate"))
+        self._write_mail()
+        self.assertEqual(km._relay_tick(NOW + 3), 1, "a later message is the answer")
+
+    def test_the_pending_stamp_survives_a_holders_save_so_the_question_is_sent_once(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        holder = jd.load_goals(WORKER)                     # a judge holder loads before the tick...
+        calls = []
+        km._bus_send_relay = lambda payload: calls.append(payload) or (True, "", False, {"ok": True, "id": "px-far-8", "note": "relaying"})
+        self.assertEqual(km._relay_tick(NOW), 0)
+        holder["nodes"][top]["text"] = "Ship the exporter (renamed)"
+        self._save(holder)                                 # ...and saves after it: its copy lacked the pending stamp
+        self.assertEqual(jd.load_goals(WORKER)["nodes"][step]["relayWanted"]["pendingMid"], "px-far-8", "the merge kept the stamp")
+        self.assertEqual(km._relay_tick(NOW + 10), 0)
+        self.assertEqual(len(calls), 1, "the far-host manager gets the question once")
+
+    def test_a_record_lands_before_its_entry_is_spent(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        real = jd.save_goals
+        state = {"raised": False}
+        def failing_save(fsid, store):
+            if not state["raised"]:
+                state["raised"] = True
+                raise OSError("disk full")
+            return real(fsid, store)
+        jd.save_goals = failing_save
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(km._relay_tick(NOW), 0, "the save raised: nothing counted")
+            self.assertEqual(len(self._queue()), 1, "the entry is kept for the next tick")
+            self.assertEqual(len(self.sent), 1)
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(km._relay_tick(NOW + 1), 1)
+        finally:
+            jd.save_goals = real
+        self.assertEqual(self._queue(), [])
+        self.assertEqual(jd.load_goals(WORKER)["nodes"][step]["relayed"]["peer"], MANAGER)
+
+    def test_a_later_markers_transient_failure_is_said_after_an_earlier_one_stood_down(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (False, "bus down", False, {})
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(km._relay_tick(NOW), 0)
+        self.assertIn("retried next tick", err.getvalue())
+        st = jd.load_goals(WORKER)
+        jd.record_verdict(st, st["nodes"][step], "romp", "awaiting", NOW + 5, why="", lift=True, end_ev=NOW + 5)   # the wait ends
+        self._save(st)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(km._relay_tick(NOW + 6), 0)   # stood down
+        st = jd.load_goals(WORKER)                         # a fresh holder files the next block
+        self._close(st, step, "now stuck again", NOW + 60)
+        self._save(st)
+        with contextlib.redirect_stderr(io.StringIO()) as err2:
+            self.assertEqual(km._relay_tick(NOW + 61), 0)
+        self.assertIn("retried next tick", err2.getvalue(), "the new marker's failure is said once too")
+
+    def test_a_quiet_pass_is_not_repeated_until_something_moves(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-far-9", "parked": "TESTHOST"})
+        self.assertEqual(km._relay_tick(NOW), 0)           # pending, parked
+        real = jd.load_goals
+        loads = []
+        jd.load_goals = lambda sid: loads.append(sid) or real(sid)
+        try:
+            self.assertEqual(km._relay_tick(NOW + 1), 0)
+            self.assertEqual(loads, [WORKER], "the first pass reads the store and finds nothing to do")
+            self.assertEqual(km._relay_tick(NOW + 2), 0)
+            self.assertEqual(km._relay_tick(NOW + 3), 0)
+            self.assertEqual(loads, [WORKER], "nothing moved: no store parse per tick for a parked relay")
+            self.rows.append({"t": NOW + 30, "ev": "relayed", "id": "px-far-9", "host": "TESTHOST"})
+            self._write_mail()                             # the log moved: the far host delivered
+            self.assertEqual(km._relay_tick(NOW + 60), 1)
+            self.assertEqual(loads, [WORKER, WORKER])
+        finally:
+            jd.load_goals = real
+
     def test_a_malformed_entry_drops_alone(self):
         st, top, step = self.store(delegated=True)
         self._close(st, step, "cannot move further without you", T0 + 400)
@@ -523,11 +745,14 @@ class RelayEdges(RelayEndToEnd):
 
     def test_the_boot_pass_requeues_an_orphaned_marker(self):
         st, top, step = self.store(delegated=True)
-        st["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400}
+        st["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400, "id": "mk-boot"}
+        st["rev"] = 7
         (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(st))   # a marker on disk with no entry
         self.assertEqual(self._queue(), [])
         self.assertEqual(jd._requeue_relays_all(), 1)
         self.assertEqual(len(self._queue()), 1)
+        entry = json.loads((jd._relay_queue_dir() / self._queue()[0]).read_text())
+        self.assertEqual((entry["marker"], entry["rev"]), ("mk-boot", 7))
         self.assertEqual(jd._requeue_relays_all(), 0, "idempotent")
 
 
@@ -547,6 +772,8 @@ class TwoDelegators(_Peer):
         self.assertEqual(list(nd2.get("awaitingPeers") or ()), [OTHER], "no mail id on the anchor: the latest delegate")
 
     def test_the_planner_pass_latches_the_anchors_mail_id_from_the_parse(self):
+        self.rows.append(mail(MANAGER, WORKER, T0 - 200, kind="delegate", mid="m-web-1"))
+        self._write_mail()
         st, top, step = self.store()
         session = {"turns": [{"atoms": [{"uuid": "u1", "type": "user", "message": {"role": "user", "content": [{"type": "text",
                    "text": "Ship the exporter\n<!-- romp-msg-id: m-web-1 -->\n<!-- romp-msg-kind: delegate -->"}]}}]}]}
@@ -555,10 +782,73 @@ class TwoDelegators(_Peer):
         self.assertEqual(st["nodes"][top]["promptMsgId"], "m-web-1")
         self.assertEqual(jd._latch_prompt_msg_ids(session, st), 0, "latched once")
 
+    def test_a_batched_inbox_is_attributed_to_its_delegate_marker_not_its_first(self):
+        self.rows.append(mail(OTHER, WORKER, T0 - 300, kind="coordinate", mid="m-tests-c"))
+        self.rows.append(mail(MANAGER, WORKER, T0 - 200, kind="delegate", mid="m-web-1"))
+        self._write_mail()
+        st, top, step = self.store()
+        text = ("Heads up, the tests are flaky today\n<!-- romp-msg-id: m-tests-c -->\n<!-- romp-msg-kind: coordinate -->\n"
+                "Ship the exporter\n<!-- romp-msg-id: m-web-1 -->\n<!-- romp-msg-kind: delegate -->")
+        session = {"turns": [{"atoms": [{"uuid": "u1", "type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}}]}]}
+        st["nodes"][top]["promptUuid"] = "u1"; st["nodes"][top]["askAnchor"] = "machine"
+        self.assertEqual(jd._latch_prompt_msg_ids(session, st), 1)
+        self.assertEqual(st["nodes"][top]["promptMsgId"], "m-web-1", "the delegate marker, though a peer's coordinate came first")
+        nd = self._close_block(st, step, "cannot move further without you")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER])
+
+    def test_a_delivery_with_no_delegate_marker_leaves_the_fallback_to_the_latest_delegate(self):
+        self.rows.append(mail(MANAGER, WORKER, T0 - 200, kind="delegate", mid="m-web-1"))
+        self._write_mail()
+        st, top, step = self.store()
+        text = "Heads up\n<!-- romp-msg-id: m-tests-c -->\n<!-- romp-msg-kind: coordinate -->"
+        session = {"turns": [{"atoms": [{"uuid": "u1", "type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}}]}]}
+        st["nodes"][top]["promptUuid"] = "u1"; st["nodes"][top]["askAnchor"] = "machine"
+        jd._latch_prompt_msg_ids(session, st)
+        self.assertEqual(st["nodes"][top]["promptMsgId"], "", "no delegate in the delivery")
+        nd = self._close_block(st, step, "cannot move further without you")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER], "the latest delegate at or before the mint")
+
     def _close_block(self, st, step, why):
         with contextlib.redirect_stderr(io.StringIO()):
             jd.apply_close(st, [st["nodes"][step]], {"done": {}, "block": {1: why}, "awaiting": {}}, t=T0 + 400)
         return st["nodes"][step]
+
+    def _session(self, text):
+        return {"turns": [{"atoms": [{"uuid": "u1", "type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}}]}]}
+
+    def test_two_delegates_in_one_delivery_attribute_to_the_last(self):
+        self.rows.append(mail(MANAGER, WORKER, T0 - 300, kind="delegate", mid="m-web-1"))
+        self.rows.append(mail(OTHER, WORKER, T0 - 200, kind="delegate", mid="m-tests-1"))
+        self._write_mail()
+        st, top, step = self.store()
+        st["nodes"][top]["promptUuid"] = "u1"; st["nodes"][top]["askAnchor"] = "machine"
+        jd._latch_prompt_msg_ids(self._session("A\n<!-- romp-msg-id: m-web-1 -->\n<!-- romp-msg-kind: delegate -->\n"
+                                               "B\n<!-- romp-msg-id: m-tests-1 -->\n<!-- romp-msg-kind: delegate -->"), st)
+        self.assertEqual(st["nodes"][top]["promptMsgId"], "m-tests-1", "the last dispatch of a drained inbox, the delivery's own peer")
+        self.assertEqual(list(self._close_block(st, step, "stuck").get("awaitingPeers") or ()), [OTHER])
+
+    def test_a_delegate_marker_quoted_from_another_sessions_dispatch_names_nobody_here(self):
+        third = "11111111-2222-3333-4444-dddddddddddd"
+        self.rows.append(mail(OTHER, third, T0 - 400, kind="delegate", mid="m-foreign"))    # a dispatch to a THIRD session
+        self.rows.append(mail(MANAGER, WORKER, T0 - 200, kind="", mid="m-web-plain"))      # the manager's plain mail quoting it
+        self._write_mail()
+        st, top, step = self.store()
+        st["nodes"][top]["promptUuid"] = "u1"; st["nodes"][top]["askAnchor"] = "machine"
+        jd._latch_prompt_msg_ids(self._session("FYI, here is what I got:\n<!-- romp-msg-id: m-foreign -->\n<!-- romp-msg-kind: delegate -->\n"
+                                               "<!-- romp-msg-id: m-web-plain -->"), st)
+        self.assertEqual(st["nodes"][top]["promptMsgId"], "", "a quoted foreign dispatch is no dispatch to this session")
+        self.assertIsNone(jd._delegate_sender("m-foreign", WORKER))
+        self.assertEqual(jd._delegate_sender("m-foreign"), OTHER, "without a recipient, the row's sender as before")
+        self.assertEqual(self._close_block(st, step, "stuck").get("awaitingPeers"), None, "no delegate at all: the user's block")
+
+    def test_a_stamp_naming_no_dispatch_to_this_session_leaves_the_fallback(self):
+        self.rows.append(mail(MANAGER, WORKER, T0 - 200, kind="delegate", mid="m-web-1"))
+        self.rows.append(mail(OTHER, WORKER, T0 - 100, kind="coordinate", mid="m-tests-c"))
+        self._write_mail()
+        st, top, step = self.store()
+        st["nodes"][top]["askAnchor"] = "machine"; st["nodes"][top]["promptMsgId"] = "m-tests-c"   # an older stamp (the first-marker rule)
+        nd = self._close_block(st, step, "cannot move further without you")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER], "as for an anchor that names none: the latest delegate")
 
 
 class MoreRules(_Peer):
@@ -648,17 +938,102 @@ class MergeCarriesTheRelay(_Peer):
     def test_a_stale_judge_copy_does_not_resurrect_a_relay_the_kernel_sent(self):
         st, top, step = self.store(delegated=True)
         mem = json.loads(json.dumps(st)); disk = json.loads(json.dumps(st))
-        mem["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "cannot move further", "t": T0 + 400}
-        disk["nodes"][step]["relayed"] = {"peer": MANAGER, "why": "cannot move further", "t": NOW}
+        mem["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "cannot move further", "t": T0 + 400, "id": "mk-a"}
+        disk["nodes"][step]["relayed"] = {"peer": MANAGER, "why": "cannot move further", "t": NOW, "marker": "mk-a"}
         (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(disk))
         jd._rebase_onto_disk(WORKER, mem)
         self.assertEqual(mem["nodes"][step]["relayed"]["peer"], MANAGER)
         self.assertNotIn("relayWanted", mem["nodes"][step])
 
+    def test_a_record_settles_only_the_marker_it_names(self):
+        st, top, step = self.store(delegated=True)
+        mem = json.loads(json.dumps(st)); disk = json.loads(json.dumps(st))
+        mem["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "cannot move further", "t": T0 + 400, "id": "mk-b"}
+        disk["nodes"][step]["relayed"] = {"peer": MANAGER, "why": "cannot move further", "t": NOW, "marker": "mk-a"}
+        (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(disk))
+        jd._rebase_onto_disk(WORKER, mem)
+        self.assertEqual(mem["nodes"][step]["relayWanted"]["id"], "mk-b", "same words, later clock: a NEW marker stands")
+
+    def test_the_newer_record_wins_in_either_direction(self):
+        st, top, step = self.store(delegated=True)
+        mem = json.loads(json.dumps(st)); disk = json.loads(json.dumps(st))
+        mem["nodes"][step]["relayed"] = {"peer": MANAGER, "why": "a", "t": NOW + 50, "marker": "mk-b"}
+        disk["nodes"][step]["relayed"] = {"peer": MANAGER, "why": "a", "t": NOW, "marker": "mk-a"}
+        mem["nodes"][step]["relayDone"] = {"peer": MANAGER, "why": "a", "t": NOW, "marker": "mk-a", "outcome": "stood-down"}
+        disk["nodes"][step]["relayDone"] = {"peer": MANAGER, "why": "a", "t": NOW + 50, "marker": "mk-c", "outcome": "refused"}
+        (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(disk))
+        jd._rebase_onto_disk(WORKER, mem)
+        self.assertEqual(mem["nodes"][step]["relayed"]["marker"], "mk-b", "memory's newer record stays")
+        self.assertEqual(mem["nodes"][step]["relayDone"]["marker"], "mk-c", "disk's newer record is adopted")
+
+    def test_the_same_marker_on_both_sides_keeps_the_kernels_pending_stamp_either_way(self):
+        st, top, step = self.store(delegated=True)
+        mem = json.loads(json.dumps(st)); disk = json.loads(json.dumps(st))
+        mem["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400, "id": "mk-a"}
+        disk["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400, "id": "mk-a",
+                                              "pendingMid": "px-1", "pendingAt": NOW, "pendingHost": "TESTHOST"}
+        (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(disk))
+        jd._rebase_onto_disk(WORKER, mem)
+        self.assertEqual(mem["nodes"][step]["relayWanted"]["pendingMid"], "px-1", "a holder's stale copy gains the tick's stamp")
+        mem2 = json.loads(json.dumps(st)); disk2 = json.loads(json.dumps(st))
+        mem2["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400, "id": "mk-a", "pendingMid": "px-1", "pendingAt": NOW}
+        disk2["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400, "id": "mk-a"}
+        (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(disk2))
+        jd._rebase_onto_disk(WORKER, mem2)
+        self.assertEqual(mem2["nodes"][step]["relayWanted"]["pendingMid"], "px-1", "the kernel's own copy keeps it")
+
+    def test_a_settled_marker_is_popped_before_the_disks_live_marker_is_adopted(self):
+        st, top, step = self.store(delegated=True)
+        mem = json.loads(json.dumps(st)); disk = json.loads(json.dumps(st))
+        mem["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400, "id": "mk-1"}
+        disk["nodes"][step]["relayed"] = {"peer": MANAGER, "why": "q", "t": NOW, "marker": "mk-1"}
+        disk["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q2", "t": NOW + 50, "id": "mk-2"}
+        (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(disk))
+        jd._rebase_onto_disk(WORKER, mem)
+        self.assertEqual(mem["nodes"][step]["relayWanted"]["id"], "mk-2", "ours was settled and popped; the live one is adopted")
+
+    def test_two_holders_markers_for_one_wait_converge(self):
+        st, top, step = self.store(delegated=True)
+        mem = json.loads(json.dumps(st)); disk = json.loads(json.dumps(st))
+        mem["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400, "id": "mk-mine"}
+        disk["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400, "id": "mk-theirs"}
+        (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(disk))
+        jd._rebase_onto_disk(WORKER, mem)
+        self.assertEqual(mem["nodes"][step]["relayWanted"]["id"], "mk-theirs", "the published one wins: its entry is flushed")
+        mem2 = json.loads(json.dumps(st)); disk2 = json.loads(json.dumps(st))
+        mem2["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400, "id": "mk-mine", "pendingMid": "px-9", "pendingAt": NOW}
+        disk2["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400, "id": "mk-theirs"}
+        (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(disk2))
+        jd._rebase_onto_disk(WORKER, mem2)
+        self.assertEqual(mem2["nodes"][step]["relayWanted"]["id"], "mk-mine", "the one already handed to a far host wins")
+
+    def test_the_settled_list_survives_the_record_slot_and_merges_as_a_union(self):
+        st, top, step = self.store(delegated=True)
+        mem = json.loads(json.dumps(st)); disk = json.loads(json.dumps(st))
+        mem["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400, "id": "mk-1"}
+        mem["nodes"][step]["relaySettled"] = ["mk-0"]
+        disk["nodes"][step]["relayed"] = {"peer": MANAGER, "why": "q2", "t": NOW + 50, "marker": "mk-2"}   # the slot moved on
+        disk["nodes"][step]["relaySettled"] = ["mk-1", "mk-2"]
+        (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(disk))
+        jd._rebase_onto_disk(WORKER, mem)
+        self.assertNotIn("relayWanted", mem["nodes"][step], "the list remembers what the slot forgot: mk-1 is settled")
+        self.assertEqual(mem["nodes"][step]["relaySettled"], ["mk-0", "mk-1", "mk-2"])
+
+    def test_a_stale_holder_never_re_mints_a_retired_marker(self):
+        st, top, step = self.store(delegated=True)
+        mem = json.loads(json.dumps(st)); disk = json.loads(json.dumps(st))
+        mem["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400, "id": "mk-a"}
+        mem["nodes"][step]["relayed"] = {"peer": MANAGER, "why": "old", "t": NOW - 500, "marker": "mk-0"}
+        disk["nodes"][step]["relayDone"] = {"peer": MANAGER, "why": "q", "t": NOW, "marker": "mk-a", "outcome": "stood-down"}
+        (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(disk))
+        jd._rebase_onto_disk(WORKER, mem)
+        self.assertNotIn("relayWanted", mem["nodes"][step], "the kernel retired mk-a; the holder's copy follows")
+        self.assertEqual(mem["nodes"][step]["relayed"]["marker"], "mk-0", "an unrelated older record is untouched")
+
     def test_a_stale_kernel_copy_keeps_a_relay_the_judge_just_asked_for(self):
         st, top, step = self.store(delegated=True)
         mem = json.loads(json.dumps(st)); disk = json.loads(json.dumps(st))
-        disk["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "cannot move further", "t": T0 + 400}
+        disk["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "cannot move further", "t": T0 + 400, "id": "mk-a"}
         (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(disk))
         jd._rebase_onto_disk(WORKER, mem)
         self.assertEqual(mem["nodes"][step]["relayWanted"]["peer"], MANAGER)
@@ -666,8 +1041,8 @@ class MergeCarriesTheRelay(_Peer):
     def test_a_removal_the_kernel_recorded_is_never_resurrected(self):
         st, top, step = self.store(delegated=True)
         mem = json.loads(json.dumps(st)); disk = json.loads(json.dumps(st))
-        mem["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400}
-        disk["nodes"][step]["relayDone"] = {"peer": MANAGER, "why": "q", "t": NOW, "outcome": "stood-down"}
+        mem["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400, "id": "mk-a"}
+        disk["nodes"][step]["relayDone"] = {"peer": MANAGER, "why": "q", "t": NOW, "outcome": "stood-down", "marker": "mk-a"}
         (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(disk))
         jd._rebase_onto_disk(WORKER, mem)
         self.assertNotIn("relayWanted", mem["nodes"][step], "the stand-down stands")
@@ -749,3 +1124,164 @@ class ManagerEscalation(_Peer):
         keys, blocked = self._outcomes(unread=3)
         self.assertEqual(keys, [], "an ordinary peer with mail waiting that moved on still escalates")
         self.assertTrue(blocked)
+
+
+class SaverFlushesItsOwn(_RelayFixture):
+    """The pending relay entries ride the STORE OBJECT: only the saver holding the object writes them, once its own
+    publish (which carries the marker) is on disk; another holder's save of the same sid flushes nothing, and the
+    list never reaches the file (the manager's fourth review)."""
+
+    def test_another_holders_save_flushes_nothing_of_ours(self):
+        st, top, step = self.store(delegated=True)
+        self._save(st)
+        mine = jd.load_goals(WORKER)                       # the closer's copy
+        theirs = jd.load_goals(WORKER)                     # the planner's copy of the same store
+        self._close(mine, step, "cannot move further without you", T0 + 400)
+        self.assertEqual(mine["_relayPending"], [step], "remembered on the object that holds the marker")
+        theirs["nodes"][top]["text"] = "Ship the exporter (renamed)"
+        self._save(theirs)                                 # a save of the sid by another holder, no marker in it
+        self.assertEqual(self._queue(), [], "nothing of ours flushed by their save")
+        self.assertNotIn("relayWanted", jd.load_goals(WORKER)["nodes"][step])
+        self._save(mine)                                   # our publish rebases onto theirs and carries the marker
+        self.assertEqual(len(self._queue()), 1)
+        raw = json.loads((jd.GOALDIR / (WORKER + ".json")).read_text())
+        self.assertEqual(raw["nodes"][step]["relayWanted"]["id"], mine["nodes"][step]["relayWanted"]["id"])
+        self.assertEqual(raw["rev"], theirs["rev"] + 1, "our publish rebased onto theirs")
+        self.assertNotIn("_relayPending", raw, "transient: never serialized")
+        self.assertNotIn("_relayPending", mine, "popped by the publish")
+        self.assertEqual(km._relay_tick(NOW), 1)
+
+    def test_a_no_op_save_still_flushes_when_the_file_already_holds_the_marker(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        self.assertEqual(len(self._queue()), 1)
+        (jd._relay_queue_dir() / self._queue()[0]).unlink()   # the entry is lost (a failed write, say)
+        st["_relayPending"] = [step]                       # the holder still remembers it and saves nothing new
+        self._save(st)
+        self.assertEqual(len(self._queue()), 1, "the file holds the marker: its entry goes out on the no-op save")
+
+    def test_a_marker_the_publishs_rebase_settled_gets_no_entry(self):
+        st, top, step = self.store(delegated=True)
+        self._save(st)
+        a = jd.load_goals(WORKER)
+        self._close(a, step, "cannot move further without you", T0 + 400)
+        self._save(a)                                      # holder A publishes the marker and its entry
+        self.assertEqual(km._relay_tick(NOW), 1)           # the tick relays it: relayed names the marker on disk
+        self.assertEqual(self._queue(), [])
+        a["_relayPending"] = [step]                        # A still remembers it (a second flush attempt, say)
+        a["nodes"][top]["text"] = "Ship the exporter (renamed)"
+        self._save(a)                                      # A's publish rebases: the marker is settled and popped
+        self.assertNotIn("relayWanted", jd.load_goals(WORKER)["nodes"][step])
+        self.assertEqual(self._queue(), [], "nothing left to relay: no entry")
+
+    def test_a_failed_publish_keeps_the_pending_list_for_the_retry(self):
+        st, top, step = self.store(delegated=True)
+        self._save(st)
+        st = jd.load_goals(WORKER)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        real = jd._publish_tmp
+        jd._publish_tmp = lambda d, f: (_ for _ in ()).throw(OSError("disk full"))
+        try:
+            with self.assertRaises(OSError):
+                self._save(st)
+        finally:
+            jd._publish_tmp = real
+        self.assertEqual(st["_relayPending"], [step], "kept on the object: the retry publishes and flushes")
+        self.assertEqual(self._queue(), [])
+        self._save(st)
+        self.assertEqual(len(self._queue()), 1)
+
+
+class FarHostRelayMark(unittest.TestCase):
+    """The relayed mark rides the bus's relay leg to a far host and the far side's deliver (trusted, or held and
+    approved), so a far-host manager's inbox says a relayed question is one, as a local one does."""
+
+    def _postal(self):
+        return load_source("romp_postal_service_pw_far", os.path.join(os.path.dirname(HERE), "postal", "postal_service.py"))
+
+    def test_the_relay_leg_carries_the_mark_and_answers_with_an_id_and_no_to(self):
+        ps = self._postal()
+        parked = []
+        saved = (ps.resolve_recipient, ps.outbox_put, dict(ps.PEERS))
+        ps.resolve_recipient = lambda to, frm_id="": {"kind": "relay", "host": "TESTHOST", "agent": {"name": "web", "id": MANAGER}}
+        ps.outbox_put = lambda host, msg: parked.append((host, msg)) or True
+        ps.PEERS["TESTHOST"] = {"up": True}
+        try:
+            h = object.__new__(ps.Handler)
+            raw = json.dumps({"to": "web", "from": "api", "from_id": WORKER, "kind": "question", "relayed": True,
+                              "body": "api cannot move further: which client?"}).encode()
+            h.path = "/send"; h.headers = {"Content-Length": str(len(raw)), "X-Romp-Token": ps.SERVE_TOKEN}; h.rfile = io.BytesIO(raw)
+            out = []; h._send = lambda obj, code=200: out.append((obj, code))
+            h.do_POST()
+        finally:
+            ps.resolve_recipient, ps.outbox_put = saved[0], saved[1]
+            ps.PEERS.clear(); ps.PEERS.update(saved[2])
+        obj, code = out[0]
+        self.assertEqual(code, 200, obj)
+        self.assertTrue(obj.get("id") and "to" not in obj and not obj.get("parked"), "the relay leg's answer: an id, no to")
+        self.assertEqual(len(parked), 1)
+        self.assertEqual((parked[0][0], parked[0][1]["relayed"], parked[0][1]["kind"]), ("TESTHOST", True, "question"))
+
+    def test_the_far_side_delivers_a_relayed_question_marked(self):
+        ps = self._postal()
+        saved = ps.local_agents_checked
+        ps.local_agents_checked = lambda threads=False: ([{"id": MANAGER, "name": "web"}], True)
+        try:
+            verdict, bounce = ps._relay_in("TESTHOST", {"mid": "px-far-9", "to": "web", "toId": MANAGER, "frm": "api", "frm_id": WORKER,
+                                                        "body": "api cannot move further: which client?", "kind": "question",
+                                                        "relayed": True, "t": NOW}, token_proven=True)
+        finally:
+            ps.local_agents_checked = saved
+        self.assertEqual(verdict, "ack", bounce)
+        box = ps._mailbox(MANAGER) / "new"
+        texts = [p.read_text() for p in box.iterdir()]
+        self.assertTrue(texts and any("X-Relayed: romp\n" in t and "which client?" in t for t in texts), texts)
+        rows = [json.loads(l) for l in (ps.TLDIR / "messages.jsonl").read_text().splitlines()]
+        self.assertTrue(any(r.get("relayed") and r.get("from_id") == WORKER for r in rows))
+
+    def test_a_held_relayed_question_keeps_its_mark_through_the_approve(self):
+        ps = self._postal()
+        m = {"mid": "px-held-1", "to": "web", "toId": MANAGER, "frm": "api", "frm_id": WORKER, "body": "api cannot move further: x",
+             "kind": "question", "relayed": True}
+        self.assertTrue(ps._quarantine_put("TESTHOST", m, MANAGER, via="TESTHOST", wire_id=MANAGER))
+        rec = json.loads((ps.QUARANTINE / "px-held-1.json").read_text())
+        self.assertTrue(rec.get("relayed"), "held with its mark")
+        saved = ps.local_agents_checked
+        ps.local_agents_checked = lambda threads=False: ([{"id": MANAGER, "name": "web"}], True)
+        try:
+            ok, err = ps.quarantine_decide("px-held-1", "approve")
+        finally:
+            ps.local_agents_checked = saved
+        self.assertTrue(ok, err)
+        texts = [p.read_text() for p in (ps._mailbox(MANAGER) / "new").iterdir()]
+        self.assertTrue(any("X-Relayed: romp\n" in t and "cannot move further: x" in t for t in texts), "approved: delivered marked")
+
+    def test_the_relay_legs_sent_row_carries_the_mark(self):
+        ps = self._postal()
+        saved = (ps.resolve_recipient, ps.outbox_put, dict(ps.PEERS))
+        ps.resolve_recipient = lambda to, frm_id="": {"kind": "relay", "host": "TESTHOST", "agent": {"name": "web", "id": MANAGER}}
+        ps.outbox_put = lambda host, msg: True
+        ps.PEERS["TESTHOST"] = {"up": True}
+        try:
+            h = object.__new__(ps.Handler)
+            raw = json.dumps({"to": "web", "from": "api", "from_id": WORKER, "kind": "question", "relayed": True,
+                              "body": "api cannot move further: the row"}).encode()
+            h.path = "/send"; h.headers = {"Content-Length": str(len(raw)), "X-Romp-Token": ps.SERVE_TOKEN}; h.rfile = io.BytesIO(raw)
+            out = []; h._send = lambda obj, code=200: out.append((obj, code))
+            h.do_POST()
+        finally:
+            ps.resolve_recipient, ps.outbox_put = saved[0], saved[1]
+            ps.PEERS.clear(); ps.PEERS.update(saved[2])
+        obj, code = out[0]
+        self.assertEqual(code, 200, obj)
+        rows = [json.loads(l) for l in (ps.TLDIR / "messages.jsonl").read_text().splitlines()]
+        row = next(r for r in rows if r.get("id") == obj["id"])
+        self.assertEqual((row.get("ev"), row.get("relayed"), row.get("kind")), ("sent", True, "question"), "the sender's ledger says relayed")
+
+    def test_deliver_holds_the_invariant_only_a_question_is_relayed(self):
+        ps = self._postal()
+        mid = ps.deliver(MANAGER, "api", WORKER, "a dispatch that claims the mark", kind="delegate", relayed=True)
+        self.assertNotIn("X-Relayed", (ps._mailbox(MANAGER) / "new" / mid).read_text())
+        rows = [json.loads(l) for l in (ps.TLDIR / "messages.jsonl").read_text().splitlines()]
+        self.assertNotIn("relayed", next(r for r in rows if r.get("id") == mid))

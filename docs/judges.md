@@ -215,19 +215,36 @@ reply the lift); an already-blocked node is unblocked by romp first. When the
 worker never mailed that peer, nothing could end the wait, so the kernel RELAYS
 it: the block's why goes to the delegating peer as the worker's own question
 (kind question, from the worker, "<worker> cannot move further: <why>", marked
-relayed in the row, the header and the inbox's bookkeeping comment), once per
-block off a marker the judge
-leaves on the node and an entry the judge writes to a queue directory once the
-store is saved (one file per entry, so the two writers never rewrite each
-other's list), so the reply lifts the stamp and the reminder ladder covers it;
-a wait that ended before the tick is never relayed, a far-host relay stays
-pending until it lands or comes back, and a refusal the bus cannot retry (no
-live recipient, a bounced parked message) reverts the node to your block with
-the refusal in its why, since nobody can be asked. A block filed again after
-the peer's reply ended the wait relays again; a block re-asserted on a
-standing wait never does. A top is attributed to the delegate mail its anchor
-names, so a worker two managers dispatched relays each block to the manager
-that asked.
+relayed in the row, the header and the inbox's bookkeeping comment, on a far
+host too), once per block off a marker the judge leaves on the node (each
+marker has an identity that its queue entry and the record settling it name,
+and the node remembers the markers it settled, so a block filed again with
+the same words after a lift is a new marker nothing older can settle, and a
+holder stale across two relays never re-mints the first; two holders that
+mint a marker for one wait converge on the published one) and an entry the
+saver holding the store writes to a queue directory once its own publish
+carried the marker (one file per entry, so the two writers never rewrite
+each other's list; another holder's save of the same session flushes nothing
+of it; an entry whose node carries a newer marker is rewritten for it; an
+entry whose marker is gone with no record is spent once the store's
+published revision passed the entry's; the boot pass re-queues a marker that
+lost its entry; a pass that changed nothing is not repeated until the store,
+the log or the entries move), so the reply lifts the stamp and the reminder
+ladder covers it; a wait that ended before the tick is never relayed, a relay
+the bus handed to a far host (parked, or in flight to a host that is up)
+stays pending by its id up to the far host's delivered row or the peer's
+answer (the pending stamp survives every holder's save), and a refusal the
+bus cannot retry (no live recipient, a message that came back, with the far
+host's reason) reverts the node to your block with the refusal in its why,
+since nobody can be asked; each record lands before its entry is spent. A
+block filed again after the peer's reply ended the wait relays again; a block
+re-asserted on a standing wait never does. A top is attributed to the
+delegate mail its anchor names (the delegate-kind marker of the delivery that
+is a dispatch to this session, never one quoted from another session's, so a
+batched inbox whose first mail is a peer's heads-up still belongs to the
+manager whose dispatch follows it; a stamp naming no such dispatch leaves the
+latest delegate as the fallback), so a worker two managers dispatched relays
+each block to the manager that asked.
 An open question to a peer the block never names does not capture a block in
 the delegator's work: that block goes to the delegator, relayed. Rows filed before the rule convert once per boot. The debt ladder judges a debtor's
 reminder only at an idle turn end (the nudge walk's own gates); for a manager

@@ -569,7 +569,8 @@ def deliver(to_id, from_name, from_id, body, park=False, kind="", from_host="",
     # from — stamped into headers so the read receipt can flow back when the recipient actually reads
     # it (read_box/restore queue it into the readbox). The maildir file is the durable record: the
     # receipt route survives a bus restart exactly as long as the unread mail does.
-    mb = _mailbox(to_id)
+    relayed = bool(relayed) and kind == "question"   # the invariant every path shares (the /send gate, the far side's
+    mb = _mailbox(to_id)                             #   deliver, a held message's approve): only a question is relayed
     name = _unique()
     tmp = mb / "tmp" / name
     # THE header write point — every value that lands in a header line goes through _hdr_val
@@ -1920,7 +1921,7 @@ def _bounce_oversize(sid, m):
         return
     if not restore(sid, mid):
         deliver(sid, m.get("from", "?"), frm_id, m.get("body", ""), park=m.get("park", False),
-                kind=m.get("kind", ""), from_host=m.get("from_host", ""))
+                kind=m.get("kind", ""), from_host=m.get("from_host", ""), relayed=bool(m.get("relayed")))
     if mid not in _OVERSIZE_NAMED:
         _OVERSIZE_NAMED.add(mid)
         _log("push to %s: message %s is %d bytes, over the %d-byte /deliver limit, and has no local sender "
@@ -1985,7 +1986,7 @@ def _push(sid, agent):
             if not restore(sid, m.get("id", "")):
                 deliver(sid, m.get("from", "?"), m.get("from_id", ""), m.get("body", ""),
                         park=m.get("park", False), kind=m.get("kind", ""),
-                        from_host=m.get("from_host", ""))
+                        from_host=m.get("from_host", ""), relayed=bool(m.get("relayed")))
         _log("push to %s deferred (%s); %d msg(s) restored for the drain backstop%s"
              % (sid, cause, len(held), (" after %d landed" % landed) if landed else ""))
         return False
@@ -2369,6 +2370,9 @@ class Handler(BaseHTTPRequestHandler):
                     ua = _walk_root_record(frm_id)
                     if ua:
                         relay_msg["userAsk"] = ua
+                if relayed:
+                    relay_msg["relayed"] = True    # the far side's deliver marks it (T334): a relayed question
+                    #                                reaches a far-host manager marked, exactly as a local one does
                 # `to_sid` (2026-09-08): the recipient's STABLE id, the same value the wire's toId
                 # carries. The row used to name the recipient only ("<host>:<name>"), so every
                 # reader of the wait (the kernel's wait maps, the judge's ask maps) had to join it
@@ -2387,7 +2391,8 @@ class Handler(BaseHTTPRequestHandler):
                                                      "to_id": "peer:%s" % phost,
                                                      "toName": "%s:%s" % (phost, hit.get("name") or to),
                                                      "to_sid": str(hit.get("id") or ""),
-                                                     "body": body, "kind": kind}):
+                                                     "body": body, "kind": kind,
+                                                     **({"relayed": True} if relayed else {})}):   # as deliver's row (T334)
                     return self._send({"ok": False, "error": NOT_RECORDED_TEXT}, 503)
                 if not outbox_put(phost, relay_msg):
                     _tl_append("messages.jsonl", {"t": int(time.time()), "ev": "bounced", "id": mid,
@@ -3779,6 +3784,8 @@ def _quarantine_put(origin, m, to_id, via="", wire_id=None):
         rec["toWireId"] = wire
     if isinstance(m.get("userAsk"), dict):
         rec["userAsk"] = m["userAsk"]                # held with its provenance; approve replays it (T126)
+    if m.get("relayed"):
+        rec["relayed"] = True                        # held with its mark; approve replays it (T334)
     try:
         QUARANTINE.mkdir(parents=True, exist_ok=True)
         tmp = QUARANTINE / (mid + ".tmp")
@@ -3911,7 +3918,7 @@ def quarantine_decide(mid, action, text=None, feedback=None):
             deliver(to_id, rec.get("frm") or "?", rec.get("frmId") or "", body, kind=rec.get("kind") or "",
                     from_host=rec.get("origin") or "",
                     relay_mid=rec.get("mid") or "", relay_via=rec.get("via") or rec.get("origin") or "",
-                    user_ask=rec.get("userAsk"))
+                    user_ask=rec.get("userAsk"), relayed=bool(rec.get("relayed")))
         except DeliveryNotRecorded as e:
             return False, "%s — the held message is untouched" % e
         quarantine_del(mid)
@@ -3985,7 +3992,8 @@ def _relay_in(host, m, token_proven=False):
                 deliver(match[0]["id"], m.get("frm") or "?", m.get("frm_id") or "", m.get("body") or "",
                         kind=m.get("kind") or "", from_host=origin,
                         relay_mid=mid, relay_via=host,       # read-receipt route: back through the direct peer
-                        user_ask=m.get("userAsk"))           # origin-kernel walked record rides through (T126)
+                        user_ask=m.get("userAsk"),           # origin-kernel walked record rides through (T126)
+                        relayed=bool(m.get("relayed")))      # romp sent it on the sender's behalf (T334)
             except DeliveryNotRecorded as e:
                 # nothing landed → NOT acked and not marked seen: silence crosses the wire as
                 # 'retry', the sender's outbox keeps it parked and re-relays it next exchange

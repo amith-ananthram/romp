@@ -2982,23 +2982,70 @@ def _bus_send_relay(payload):
         return False, repr(e), False, {}
 
 
-_RELAY_SAID = set()           # (sid, nid) whose relay failed and was said once this boot
+_RELAY_SAID = set()           # (sid, nid, marker) whose relay failed and was said once this boot
 _RELAY_BAD = {"n": 0}         # malformed queue entries dropped this boot (said once each)
+_RELAY_QUIET = {}             # sid -> what a pass that changed nothing read (_relay_quiet_key): not repeated until it moves
 
 
-def _relay_parked_status(sid, peer, mid, at):
-    """A parked relay's outcome so far: "bounced" when a terminal row names its id (the far host refused, the mail was
-    destroyed or withdrawn), "answered" when the peer wrote to the worker after the park, else None (still pending)."""
+def _relay_pending_status(sid, peer, mid, at):
+    """A pending relay's outcome so far, as (status, detail): ("bounced", where and why) when a bounced row names its
+    id (the far host refused it, or it was destroyed), ("withdrawn", "") when a recall row does, ("delivered", "")
+    when the far host's end-to-end ack names it (the postal log's `relayed` row), ("answered", "") when the peer wrote
+    to the worker AFTER the send (strictly after its second: a message in the send's own second is not its answer),
+    else (None, ""). Every row about the id was appended after the send, so the scan walks the log's tail down to
+    the send time (a margin for clock skew), never the whole log per pending entry per tick."""
     try:
-        for r in _messages_rows():
-            if str(r.get("id") or "") == str(mid) and r.get("ev") in ("bounced", "recall"):
-                return "bounced"
+        delivered = False
+        floor = int(at or 0) - 600
+        for r in reversed(_messages_rows()):
+            if int(r.get("t") or 0) < floor:
+                break
+            if str(r.get("id") or "") != str(mid):
+                continue
+            ev = r.get("ev")
+            if ev == "bounced":
+                host, why = str(r.get("host") or ""), str(r.get("why") or "").strip()
+                return "bounced", ("%s: %s" % (host, why) if host and why else (why or host))
+            if ev == "recall":
+                return "withdrawn", ""
+            if ev == "relayed":
+                delivered = True
+        if delivered:
+            return "delivered", ""
         last_any, _la, _aw = _postal_wait_maps()
-        if last_any.get((str(peer), str(sid)), 0) >= int(at or 0):
-            return "answered"
+        if last_any.get((str(peer), str(sid)), 0) > int(at or 0):
+            return "answered", ""
     except Exception as e:
-        sys.stderr.write("relay parked status (%s): %r\n" % (str(mid)[:12], e))
-    return None
+        sys.stderr.write("relay pending status (%s): %r\n" % (str(mid)[:12], e))
+    return None, ""
+
+
+def _relay_record(rw, now, **more):
+    """A relay record (relayed, relayDone) for the marker `rw`: names the peer, the words and the MARKER it settles."""
+    return dict({"peer": str(rw.get("peer") or ""), "why": str(rw.get("why") or ""), "t": int(now),
+                 "marker": str(rw.get("id") or "")}, **more)
+
+
+def _relay_record_names(nd, marker):
+    """True when a record on the node (relayed, relayDone) or its settled list names the marker `marker`; an entry
+    with no marker id (none is written today) is settled by any record."""
+    if not isinstance(nd, dict):
+        return False
+    if marker and str(marker) in (nd.get("relaySettled") or []):
+        return True
+    for k in ("relayed", "relayDone"):
+        r = nd.get(k)
+        if isinstance(r, dict) and (not marker or str(r.get("marker") or "") == str(marker)):
+            return True
+    return False
+
+
+def _relay_settle(nd, rw, now, key, **more):
+    """Write the record `key` (relayed or relayDone) for the marker `rw`, remember the marker as settled (the record
+    slot is overwritten by the next marker's; jd._relay_mark_settled's list is not) and drop the marker."""
+    nd[key] = _relay_record(rw, now, **more)
+    jd._relay_mark_settled(nd, rw.get("id") or "")
+    nd.pop("relayWanted", None)
 
 
 def _relay_revert(store, nd, rw, err, now):
@@ -3008,82 +3055,120 @@ def _relay_revert(store, nd, rw, err, now):
     why = "%s (a relay to %s was refused: %s)" % (str(rw.get("why") or "").strip(), _name_of(peer) or peer[:8], str(err)[:160])
     if jd.record_verdict(store, nd, "romp", "block", int(now), why=why):
         nd["mt"] = int(now)
-    nd["relayDone"] = {"peer": peer, "why": str(rw.get("why") or ""), "t": int(now), "outcome": "refused"}
-    nd.pop("relayWanted", None)
+    _relay_settle(nd, rw, now, "relayDone", outcome="refused")
     _mark_views_dirty()
 
 
+def _relay_entry(store, sid, f, e, rev, now):
+    """One queue entry against the loaded store: (sent, changed, spent, quiet). `changed` means the store must be saved,
+    `spent` that the entry file is done once that save landed, `quiet` that nothing here needs another look until the
+    store, the log or the entries move (a pending relay, a kept entry); a transient failure is never quiet."""
+    nid = str(e["nid"])
+    marker = str(e.get("marker") or "")
+    nd = store["nodes"].get(nid)
+    rw = nd.get("relayWanted") if isinstance(nd, dict) else None
+    if not isinstance(rw, dict) or (marker and str(rw.get("id") or "") != marker):
+        if nd is None or _relay_record_names(nd, marker):
+            return 0, False, True, False                   # spent: the node is gone, or a record names the marker
+        if isinstance(rw, dict):                           # the node carries another marker: the entry is REWRITTEN for
+            jd._relay_write_entry(sid, nid, rw.get("id") or "", rev)   #   the live one, never unlinked (the path may
+            return 0, False, False, False                  #   already be that newer flush); the next tick sends it
+        if rev >= int(e.get("rev") or 0):
+            sys.stderr.write("relay (%s, %s): marker %s gone with no record at rev %d; the entry is dropped\n"
+                             % (sid[:8], nid, marker[:16] or "?", rev))
+            return 0, False, True, False                   # the publish that wrote the entry (or a later one) is on disk
+        return 0, False, False, True                       # the store on disk predates the entry's publish: kept
+    peer = str(rw.get("peer") or "")
+    said = (sid, nid, str(rw.get("id") or ""))
+    standing = (nd.get("awaitingKind") == "peer" and peer in (nd.get("awaitingPeers") or ())
+                and not nd.get("nodeComplete") and not nd.get("cleared") and not nd.get("blocked"))
+    if not standing:
+        _relay_settle(nd, rw, now, "relayDone", outcome="stood-down")   # the wait ended or moved on before the relay
+        _RELAY_SAID.discard(said)
+        return 0, True, True, False
+    if rw.get("pendingMid"):                               # handed to a far host: pending up to its landing or its return
+        status, detail = _relay_pending_status(sid, peer, rw["pendingMid"], rw.get("pendingAt"))
+        if status in ("bounced", "withdrawn"):
+            err = ("the message was withdrawn" if status == "withdrawn"
+                   else "the message came back from %s" % (detail or rw.get("pendingHost") or "the far host"))
+            _relay_revert(store, nd, rw, err, now)
+            _RELAY_SAID.discard(said)
+            return 0, True, True, False
+        if status in ("delivered", "answered"):
+            _relay_settle(nd, rw, now, "relayed", mid=str(rw["pendingMid"]))
+            _RELAY_SAID.discard(said)
+            return 1, True, True, False
+        return 0, False, False, True
+    who = _name_of(sid) or sid[:8]
+    body = "%s cannot move further: %s" % (who, str(rw.get("why") or "").strip())
+    ok, err, definitive, resp = _bus_send_relay({"to": peer, "from": who, "from_id": sid, "body": body,
+                                                 "kind": "question", "relayed": True})
+    if ok and (resp.get("parked") or ("to" not in resp and resp.get("id"))):
+        rw["pendingMid"] = str(resp.get("id") or "")       # the relay leg answered (parked, or in flight to a host that
+        rw["pendingAt"] = int(now)                         #   is up): the sent row is there, and the relay completes only
+        rw["pendingHost"] = str(resp.get("parked") or "")  #   when the far host's delivered row or the peer's answer
+        return 0, True, False, False                       #   names it; a bounce reverts it (a local send answers `to`)
+    if ok:
+        _relay_settle(nd, rw, now, "relayed", mid=str(resp.get("id") or ""))
+        _RELAY_SAID.discard(said)
+        return 1, True, True, False
+    if definitive:                                         # nobody can be asked: the block is the user's after all
+        _relay_revert(store, nd, rw, err, now)
+        _RELAY_SAID.discard(said)
+        sys.stderr.write("relay (%s, %s -> %s) refused for good: %s; the block stands as the user's\n"
+                         % (sid[:8], nid, peer[:8], err))
+        return 0, True, True, False
+    if said not in _RELAY_SAID:
+        _RELAY_SAID.add(said)
+        sys.stderr.write("relay (%s, %s -> %s): %s; retried next tick\n" % (sid[:8], nid, peer[:8], err))
+    return 0, False, False, False
+
+
 def _relay_store(sid, ents, now):
-    """One store's queued relays (see _relay_tick): returns the number sent. Per entry (a file in the queue directory):
-    a node with no marker is consumed when a record (relayed, relayDone) settled it and KEPT when neither exists (the
-    save carrying the marker has not landed yet, never dropped); a node no longer waiting on that peer stands down
-    (relayDone stood-down); a parked relay is watched by its id until the peer answers (relayed) or the mail comes back
-    (a revert); a fresh one is sent, recorded relayed, or reverted on a definitive refusal, or kept on a transient one."""
+    """One store's queued relays (see _relay_tick): (sent, quiet). Per entry (a file in the queue directory naming
+    the node, the marker it was written for and the store revision whose publish carried the marker): an entry whose
+    node carries no marker is SPENT when a record names its marker, when the node is gone, or when the store's
+    published revision is at or past the entry's without the marker (the marker was lost with no record: said, and
+    the boot pass re-queues what it finds), and kept only when the store on disk predates the publish that wrote it;
+    an entry whose node carries a DIFFERENT marker is rewritten for that one. A node no longer waiting on that peer
+    stands down (relayDone stood-down). A pending relay (the bus's relay leg answered with an id, parked or in flight
+    to a far host) is watched by its id: the far host's delivered row or the peer's answer completes it (relayed),
+    the mail coming back reverts it. A fresh one is sent: a local delivery is complete at once, a relay-leg answer is
+    pending, a definitive refusal reverts, a transient failure keeps the entry and is said once. Every record names
+    the marker it settled and the node remembers it. Each entry's change is SAVED before its entry is spent (a save
+    that raises keeps the entry, and the next tick reads the marker again), and one entry's fault never skips the
+    others."""
     store = jd.load_goals(sid)
     n = 0
-    dirty = False
+    quiet = True
     for f, e in ents:
-        nid = str(e["nid"])
-        nd = store["nodes"].get(nid)
-        rw = nd.get("relayWanted") if isinstance(nd, dict) else None
-        if not isinstance(rw, dict):
-            if nd is None or isinstance(nd.get("relayed"), dict) or isinstance(nd.get("relayDone"), dict):
-                f.unlink(missing_ok=True)                  # settled (or the node is gone): the entry is spent
-            continue                                       # else the marker's save has not landed yet: keep the entry
-        peer = str(rw.get("peer") or "")
-        standing = (nd.get("awaitingKind") == "peer" and peer in (nd.get("awaitingPeers") or ())
-                    and not nd.get("nodeComplete") and not nd.get("cleared") and not nd.get("blocked"))
-        if not standing:
-            nd["relayDone"] = {"peer": peer, "why": str(rw.get("why") or ""), "t": int(now), "outcome": "stood-down"}
-            del nd["relayWanted"]                          # the wait ended or moved on before the relay: stand down
+        try:
+            sent, changed, spent, q = _relay_entry(store, sid, f, e, int(store.get("rev") or 0), now)
+        except Exception:
+            sys.stderr.write("relay (%s, %s): %s\n" % (sid[:8], str(e.get("nid"))[:32], traceback.format_exc()))
+            quiet = False
+            continue
+        n += sent
+        quiet = quiet and q
+        if changed:
+            jd.rollup_status(store, False)
+            jd.save_goals(sid, store)                      # the record lands first; a raise here keeps the entry
+        if spent:
             f.unlink(missing_ok=True)
-            dirty = True
-            continue
-        if rw.get("parkedMid"):                            # a far-host relay: pending until it lands or comes back
-            status = _relay_parked_status(sid, peer, rw["parkedMid"], rw.get("parkedAt"))
-            if status == "bounced":
-                _relay_revert(store, nd, rw, "the parked message came back", now)
-                f.unlink(missing_ok=True)
-                dirty = True
-            elif status == "answered":
-                nd["relayed"] = {"peer": peer, "why": str(rw.get("why") or ""), "t": int(now), "mid": rw["parkedMid"]}
-                del nd["relayWanted"]
-                f.unlink(missing_ok=True)
-                dirty = True
-                n += 1
-            continue
-        who = _name_of(sid) or sid[:8]
-        body = "%s cannot move further: %s" % (who, str(rw.get("why") or "").strip())
-        ok, err, definitive, resp = _bus_send_relay({"to": peer, "from": who, "from_id": sid, "body": body,
-                                                     "kind": "question", "relayed": True})
-        if ok and resp.get("parked"):
-            rw["parkedMid"] = str(resp.get("id") or "")   # the sent row is there; the entry watches for a bounce
-            rw["parkedAt"] = int(now)
-            dirty = True
-            continue
-        if ok:
-            nd["relayed"] = {"peer": peer, "why": str(rw.get("why") or ""), "t": int(now), "mid": str(resp.get("id") or "")}
-            del nd["relayWanted"]
-            f.unlink(missing_ok=True)
-            _RELAY_SAID.discard((sid, nid))
-            dirty = True
-            n += 1
-            continue
-        if definitive:                                     # nobody can be asked: the block is the user's after all
-            _relay_revert(store, nd, rw, err, now)
-            f.unlink(missing_ok=True)
-            _RELAY_SAID.discard((sid, nid))
-            dirty = True
-            sys.stderr.write("relay (%s, %s -> %s) refused for good: %s; the block stands as the user's\n"
-                             % (sid[:8], nid, peer[:8], err))
-            continue
-        if (sid, nid) not in _RELAY_SAID:
-            _RELAY_SAID.add((sid, nid))
-            sys.stderr.write("relay (%s, %s -> %s): %s; retried next tick\n" % (sid[:8], nid, peer[:8], err))
-    if dirty:
-        jd.rollup_status(store, False)
-        jd.save_goals(sid, store)
-    return n
+    return n, quiet
+
+
+def _relay_quiet_key(sid, ents):
+    """What a pass over `sid`'s entries reads, by identity: the store file, the postal log and the entries themselves
+    (mtime and size). A pass that changed nothing (every entry pending or kept) is not repeated until one moves, so
+    a relay parked for a host that is down costs no store parse per tick. None when a stat fails (never quiet)."""
+    try:
+        s1 = (jd.GOALDIR / (sid + ".json")).stat()
+        s2 = jd.MESSAGES.stat() if jd.MESSAGES.exists() else None
+        ek = tuple(sorted((f.name, f.stat().st_mtime_ns, f.stat().st_size) for f, _e in ents))
+        return ((s1.st_mtime_ns, s1.st_size), (s2.st_mtime_ns, s2.st_size) if s2 else None, ek)
+    except OSError:
+        return None
 
 
 def _relay_tick(now):
@@ -3096,7 +3181,9 @@ def _relay_tick(now):
     <why>", marked relayed (the row, the header and the inbox's comment say so, for the recipient and the courier).
     That creates the edge: the peer's reply lifts the stamp, the reminder ladder covers it, and the idle-manager
     escalation is the only door to the user. The recipient is always the delegating peer the record names, never
-    anyone else. A malformed entry is dropped and counted, never the others. Returns the number relayed."""
+    anyone else. Every marker has an identity (its id) that its entry and the record settling it name. A malformed
+    entry is dropped and counted, never the others. A store whose pass changed nothing is not read again until the
+    store, the log or its entries move. Returns the number relayed."""
     d = jd._relay_queue_dir()
     if not d.is_dir():
         return 0
@@ -3112,11 +3199,22 @@ def _relay_tick(now):
             f.unlink(missing_ok=True)
             continue
         by_sid.setdefault(str(e["sid"]), []).append((f, e))
+    for sid in [s for s in _RELAY_QUIET if s not in by_sid]:
+        _RELAY_QUIET.pop(sid, None)
     n = 0
     for sid, ents in by_sid.items():
         try:
-            n += _relay_store(sid, ents, now)
+            key = _relay_quiet_key(sid, ents)
+            if key is not None and _RELAY_QUIET.get(sid) == key:
+                continue                                   # nothing it reads has moved since a pass that changed nothing
+            sent, quiet = _relay_store(sid, ents, now)
+            n += sent
+            if quiet and key is not None:
+                _RELAY_QUIET[sid] = key
+            else:
+                _RELAY_QUIET.pop(sid, None)
         except Exception:
+            _RELAY_QUIET.pop(sid, None)
             sys.stderr.write("relay (%s): %s\n" % (sid[:8], traceback.format_exc()))   # one store's fault never skips the others
     return n
 
