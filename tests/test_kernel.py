@@ -4729,9 +4729,9 @@ class ViewBuilder(unittest.TestCase):
 
     def test_feed_live_picker_floors_focus_card_to_blocked(self):
         """An SDK AskUserQuestion reports live state "picker" (it IS a picker, not a permission Allow/Deny;
-        tmux's Notification hook calls the same prompt "permission"). The hard blocked floor must honor
-        "picker" too, else an SDK session stopped on a question never registers as blocked the way a tmux
-        one does (the user 2026-06-27). The card text says "awaiting your input" (vs "approval")."""
+        the removed tmux backend's Notification hook called the same prompt "permission"). The hard blocked
+        floor must honor "picker" too, else an SDK session stopped on a question never registers as blocked
+        the way a terminal one did (the user 2026-06-27). The card text says "awaiting your input" (vs "approval")."""
         g = "%s:g8" % SID
         (jd.GOALDIR / (SID + ".json")).write_text(json.dumps({
             "rompUuid": SID, "seq": 8, "lastNode": g,

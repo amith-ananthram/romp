@@ -129,7 +129,7 @@ class DriveOpPins(unittest.TestCase):
 
     def test_rewind_send_gates_on_backend_and_busy(self):
         src = inspect.getsource(km._rewind_send)
-        self.assertIn('if not hasattr(be, "rewind"):', src)          # SDK-only (tmux has Esc Esc natively)
+        self.assertIn('if not hasattr(be, "rewind"):', src)          # Claude Code only (the removed tmux backend had Esc Esc natively)
         self.assertIn("if _ops_gate(sid):", src)                     # busy/compacting/parked-queue → refuse
         self.assertIn("target, err = _rewind_target(", src)          # transcript validation before the backend
 
@@ -159,7 +159,7 @@ class DeleteRollback(unittest.TestCase):
         # arms the rewind at the turn's end; compacting/queued keep honest refusals there). The
         # edit rewind keeps its gate (test above): its replacement turn must not race a dying one.
         src = inspect.getsource(km._rewind_rollback)
-        self.assertIn('if not hasattr(be, "rollback"):', src)    # SDK-only (tmux has Esc Esc natively)
+        self.assertIn('if not hasattr(be, "rollback"):', src)    # Claude Code only (the removed tmux backend had Esc Esc natively)
         self.assertNotIn("if _ops_gate(sid):", src)              # busy is the BACKEND's decision now
         self.assertIn("target, err = _rewind_target(", src)      # the SAME cut point as an edit
         # the arm-time re-check rides along: a mid-window compaction can move the boundary past

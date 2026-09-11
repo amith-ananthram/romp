@@ -1304,7 +1304,7 @@ class PruneLive(unittest.TestCase):
     bars logged a live-merge failure). The call shape is pinned across every backend in
     tests/test_backend_call_parity.py; this class covers the behaviour in the kernel's REAL shapes:
     record times are parse_z's whole seconds (the mapping's values are floats of them), and the echo's
-    own stamp is int(time.time()), as the SDK and tmux echoes stamp theirs."""
+    own stamp is int(time.time()), as the SDK echo stamps its own (and the removed tmux echo did)."""
 
     def _with_echo(self, text="ship it", t=1000):
         be, fake, _ = build()
@@ -1339,7 +1339,7 @@ class PruneLive(unittest.TestCase):
         self.assertEqual(be.live_atoms(sid), [], "a record at the send's second lands it")
 
     def test_a_record_later_in_the_sends_own_second_lands_the_echo(self):
-        # The echo is stamped in WHOLE seconds like the SDK's and the tmux echo's. A float stamp (1000.3)
+        # The echo is stamped in WHOLE seconds like the SDK's (and the removed tmux echo's). A float stamp (1000.3)
         # would keep an echo whose record was written at 1000.7: parse_z reads that record as 1000, and
         # 1000 >= 1000.3 is false, the same-second case the SDK retires.
         be, fake, _ = build()

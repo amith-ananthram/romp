@@ -1118,7 +1118,7 @@ class HealHasABoundaryInTheBuild(_ViewsFaultMixin, _TagRouteHarness):
         p = km._views_path()
         before = p.read_bytes()
         saved_alive = km._alive_sessions
-        km._alive_sessions = lambda now, tmux: [{"sid": SID2, "name": "api", "path": "/api", "mtime": now - 5},
+        km._alive_sessions = lambda now, live: [{"sid": SID2, "name": "api", "path": "/api", "mtime": now - 5},
                                                 {"sid": self.FORK, "name": "web", "path": "/web", "mtime": now - 1},
                                                 {"sid": SID, "name": "web", "path": "/web", "mtime": now - 9}]
         err = io.StringIO()
@@ -1368,7 +1368,7 @@ class AFaultWithNothingGoodToShowSaysSo(_ViewsFaultMixin, _TagRouteHarness):
     def setUp(self):
         super().setUp()
         self._saved_alive = km._alive_sessions
-        km._alive_sessions = lambda now, tmux: []                          # build_feed with no sessions: the frame's views half is the subject
+        km._alive_sessions = lambda now, live: []                          # build_feed with no sessions: the frame's views half is the subject
 
     def tearDown(self):
         km._alive_sessions = self._saved_alive
@@ -1539,7 +1539,7 @@ class TheHealRepaintsAtOnce(_ViewsFaultMixin, _TagRouteHarness):
     def setUp(self):
         super().setUp()
         self._saved_alive = km._alive_sessions
-        km._alive_sessions = lambda now, tmux: []                          # build_feed with no sessions: the views half is the subject
+        km._alive_sessions = lambda now, live: []                          # build_feed with no sessions: the views half is the subject
 
     def tearDown(self):
         km._alive_sessions = self._saved_alive

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """A slash command that fires lifecycle hooks (e.g. /compact) echoes each one back in its OUTPUT as
-"PreCompact [~/.claude/hooks/tmux-status.sh] completed successfully" — internal plumbing the user never wants
+"PreCompact [~/.claude/hooks/tmux-status.sh] completed successfully" (a hook name from before the tmux backend's
+removal on 2026-09-11; the shape is what matters), internal plumbing the user never wants
 to see (the user 2026-06-30, who asked what the pre-compact thing was). build_session strips those notices from a
 command's output text via _strip_hook_notices; when nothing else remains, the atom is dropped entirely (the
 ✦ Compacted boundary already marks the compaction). This tests the stripper directly.

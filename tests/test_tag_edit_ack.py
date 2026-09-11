@@ -1009,7 +1009,7 @@ class Capability(_Wire):
             km.NAMES = names
             km._live_map = lambda: {}
             km._mark_views_dirty = lambda: None
-            km._chat_tab_sessions = lambda now, tmux: [{"sid": SID1, "name": "web", "path": os.path.join(tmp, "none.jsonl"),
+            km._chat_tab_sessions = lambda now, live: [{"sid": SID1, "name": "web", "path": os.path.join(tmp, "none.jsonl"),
                                                          "anchor": SID1}]
             km._cached_feed = lambda *a, **k: None
             self.client["app"] = "chat"
@@ -1050,10 +1050,10 @@ class ReadyStripSource(_Wire):
         self.client["app"] = "chat"                  # _push sends the strip to chat clients only
         self.seed()                                  # a stamped store: every frame's views blob carries a seq
         # the liveness reads a strip built at ready would make: pinned, so should such a strip return, these
-        # tests fail the same way with or without tmux on this machine
+        # tests fail the same way whatever is live on this machine
         saved = (km._live_map, km._alive_sessions)
         km._live_map = lambda: {self.LIVE: {}}
-        km._alive_sessions = lambda now, tmux: [{"sid": self.LIVE, "name": "web", "path": "/nonexistent/live.jsonl"}]
+        km._alive_sessions = lambda now, live: [{"sid": self.LIVE, "name": "web", "path": "/nonexistent/live.jsonl"}]
         self.addCleanup(lambda: setattr(km, "_live_map", saved[0]))
         self.addCleanup(lambda: setattr(km, "_alive_sessions", saved[1]))
 
@@ -2531,7 +2531,7 @@ class BlobLessConnectPushCaps(_Wire):
             km.NAMES = names
             km._live_map = lambda: {}
             km._mark_views_dirty = lambda: None
-            km._chat_tab_sessions = lambda now, tmux: [{"sid": SID1, "name": "web", "path": os.path.join(tmp, "none.jsonl"),
+            km._chat_tab_sessions = lambda now, live: [{"sid": SID1, "name": "web", "path": os.path.join(tmp, "none.jsonl"),
                                                          "anchor": SID1}]
             km._cached_feed = lambda *a, **k: None
             self.client["app"] = "chat"
