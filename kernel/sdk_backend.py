@@ -6885,6 +6885,8 @@ class SdkSession:
         self._last_usage_totals = {}  # and its cumulative token counters
         self._spend_first_result = True
         self._spend_baseline = "fresh"
+        self._spend_unknown_open = False   # no unknown window on a fresh seed (the follow-up's second round, low 3)
+        self._spend_seed_epoch_seen = False
         self._spend_seed_session = ""
         self._replay_cli = ""         # a dead CLI's replay is over once a connect seeds
         if getattr(self, "_host_is_attach", False) and getattr(self, "_host", None) is not None:
@@ -7557,9 +7559,15 @@ class SdkSession:
                     unknown = baseline == "attach-unknown" and (first or (duplicate and getattr(self, "_spend_unknown_open", False)))
                     if not duplicate:
                         self._spend_unknown_open = False
-                    if not duplicate or unknown:                       # a replayed record names the replayed epoch, not the
-                        #                                                watermark's, unless the replay IS the watermark's source
-                        self._spend_session_id = str(getattr(msg, "session_id", "") or "")   # the CLI's session epoch (a /clear moves it)
+                    epoch = str(getattr(msg, "session_id", "") or "")
+                    seed_epoch = str(getattr(self, "_spend_seed_session", "") or "")
+                    if not duplicate or unknown or (epoch and epoch == seed_epoch):
+                        # the CLI's session epoch (a /clear moves it): a live record names it; a replayed record names the
+                        # replayed epoch, which is the watermark's only when the replay IS its source (the unknown window)
+                        # or when it is the seed's own (the seeded road: persisted, so the next drain's guard has it;
+                        # an OLDER epoch's replay must not overwrite it). A record without one keeps the epoch on record
+                        # (the follow-up's second round, lows 1 and 2)
+                        self._spend_session_id = epoch or str(getattr(self, "_spend_session_id", "") or "")
                     if unknown or duplicate:
                         delta = 0.0       # unknown: the lifetime's total, this turn's share unknowable; duplicate: already folded
                     else:

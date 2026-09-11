@@ -365,15 +365,15 @@ class Rebill(unittest.TestCase):
         # the whole cumulative once per session, each by its own lifetime (a synthetic sequence below)
         s = self._session(attach=True, hello_cli=("4242", "s1"), journal_next=10, tags=[{"offset": 9, "replay": True}, {"offset": 10, "replay": False}])
         self.assertEqual(s._spend_baseline, "attach-pending")
-        self._run(s, _result(308.15, 90000))                # replayed, no watermark on record: attach-unknown
+        self._run(s, _result(120.5, 40000))                # replayed, no watermark on record: attach-unknown
         self.assertEqual(self._day(), {}, "the lifetime's total is not a turn")
         rows = self._turns()
         self.assertEqual((rows[0].get("usd"), rows[0]["spendBaseline"], rows[0].get("redelivered")), (0.0, "attach-unknown", True))
-        self.assertEqual((s._last_cost_total, s._last_usage_totals.get("input_tokens")), (308.15, 90000), "the watermarks start from the replayed lifetime")
-        self._run(s, _result(309.71, 90400))                # the next LIVE result
-        self.assertAlmostEqual(self._day()["usd"], 1.56, msg="its own delta, not the whole cumulative")
-        self.assertEqual(self._day()["tokIn"], 400)
-        self.assertEqual(self._cost_state()["total"], 309.71)
+        self.assertEqual((s._last_cost_total, s._last_usage_totals.get("input_tokens")), (120.5, 40000), "the watermarks start from the replayed lifetime")
+        self._run(s, _result(123.0, 40300))                # the next LIVE result
+        self.assertAlmostEqual(self._day()["usd"], 2.5, msg="its own delta, not the whole cumulative")
+        self.assertEqual(self._day()["tokIn"], 300)
+        self.assertEqual(self._cost_state()["total"], 123.0)
 
     def test_the_seeded_road_is_unchanged_by_the_unknown_baseline_rule(self):
         # a replay below a KNOWN watermark moves nothing, and an unfolded replay above it is absorbed by the next live
@@ -392,18 +392,20 @@ class Rebill(unittest.TestCase):
         # on the connect's first result alone, the watermark stayed at the first replay's total and the next live result
         # folded the span (replays 100/200/300 then live 301.50 billed 201.50 and 2100 tokens where 1.50 and 100 were due)
         s = self._session(attach=True, hello_cli=("4242", "s1"), journal_next=10,
-                          tags=[{"offset": 7, "replay": True}, {"offset": 8, "replay": True}, {"offset": 9, "replay": True},
-                                {"offset": 10, "replay": False}])
+                          tags=[{"offset": 6, "replay": True}, {"offset": 7, "replay": True}, {"offset": 8, "replay": True},
+                                {"offset": 9, "replay": True}, {"offset": 10, "replay": False}])
         for total, toks in ((100.0, 1000), (200.0, 2000), (300.0, 3000)):
             self._run(s, _result(total, toks, session="e1"))
             self.assertEqual((s._last_cost_total, s._last_usage_totals.get("input_tokens")), (total, toks), "each replay advances the watermarks")
             self.assertEqual((self._cost_state()["total"], self._cost_state()["session"]), (total, "e1"),
                              "and persists them with the replayed epoch (the road 1469's guard compares against)")
+        self._run(s, _result(300.5, 3050))                   # a replayed record naming no epoch (low 2 of the follow-up's second round)
+        self.assertEqual((self._cost_state()["total"], self._cost_state()["session"]), (300.5, "e1"), "the epoch on record is kept, the watermark advances")
         self.assertEqual(self._day(), {}, "replays fold nothing")
-        self.assertEqual([(r.get("usd"), r.get("redelivered")) for r in self._turns()], [(0.0, True)] * 3)
+        self.assertEqual([(r.get("usd"), r.get("redelivered")) for r in self._turns()], [(0.0, True)] * 4)
         self._run(s, _result(301.5, 3100, session="e1"))     # the first LIVE result closes the window
-        self.assertAlmostEqual(self._day()["usd"], 1.5, msg="its own delta over the LAST replay, not the span")
-        self.assertEqual(self._day()["tokIn"], 100)
+        self.assertAlmostEqual(self._day()["usd"], 1.0, msg="its own delta over the LAST replay, not the span")
+        self.assertEqual(self._day()["tokIn"], 50)
         self.assertEqual((self._cost_state()["total"], self._cost_state()["session"]), (301.5, "e1"))
         self.assertFalse(s._spend_unknown_open, "closed by the live result")
     def test_an_orphan_replay_from_another_epoch_or_under_an_unnamed_seed_folds_nothing(self):
@@ -420,11 +422,13 @@ class Rebill(unittest.TestCase):
         pre = _result(8.0, 10); pre.session_id = "e1"       # pre-clear, another epoch, above the post-clear watermark
         self._run(s, pre)
         self.assertEqual(self._day(), {}, "(a) not comparable to the watermark's epoch: folds nothing")
+        self.assertEqual(self._cost_state()["session"], "e2", "an older epoch's replay does not overwrite the watermark's epoch")
         post = _result(5.0, 10); post.session_id = "e2"
         self._run(s, post)
         self.assertEqual(self._day(), {})
         self.assertEqual(s._last_cost_total, 5.0)
-        self.assertEqual(self._cost_state()["session"], "e2", "a drain of duplicates alone keeps the watermark's epoch on record (low b)")
+        self.assertEqual((s._spend_session_id, self._cost_state()["session"]), ("e2", "e2"),
+                         "the seeded road stamps the epoch from a replay of the watermark's own epoch and persists it (low b)")
         # (b): no watermark on record for the dead CLI
         Path(self.d, "spend.json").unlink(missing_ok=True); Path(self.d, "turns.jsonl").unlink(missing_ok=True)
         sb.write_reg(Path(self.d), SID, {"sid": SID, "name": "web", "cwd": self.d, "alive": True})
@@ -449,6 +453,13 @@ class Rebill(unittest.TestCase):
             self._run(s3, _result(total, 10, session="e1"))
         self.assertEqual(self._day(), {}, "the re-drain re-bills nothing")
         self.assertEqual(len(self._turns()), 6)
+
+    def test_a_fresh_seed_closes_the_unknown_window_and_forgets_the_seen_epoch(self):
+        # low 3 of the follow-up's second round: _seed_spend_watermarks reset every spend field but these two
+        s = self._session()
+        s._spend_unknown_open = True; s._spend_seed_epoch_seen = True
+        s._seed_spend_watermarks()
+        self.assertEqual((s._spend_unknown_open, s._spend_seed_epoch_seen, s._spend_baseline), (False, False, "fresh"))
 
     def test_an_orphan_tail_from_other_epochs_is_judged_by_position_and_a_re_drain_folds_nothing(self):
         # the follow-up's second round (low c): the epoch guard could not tell an OLDER epoch (before the watermark
