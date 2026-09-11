@@ -1058,12 +1058,15 @@ _stale_server_globals() {
     run "$ROMP_SCRIPT" new -t --detach myproject
     [ "$status" -eq 0 ]
     grep -qE 'tmux respawn-pane -k -t myproject exec env ROMP_SID=\S+ ROMP_SESSION_NAME="myproject" claude ' "$MOCK_LOG"
-    ! grep -qE 'respawn-pane .* exec ROMP_SID=' "$MOCK_LOG"
-    # the rule itself, on the shells a tmux server may run the pane with
+    # (`run` and a status check: a bare `!`-inverted command is exempt from errexit and the ERR trap, so it
+    # would assert nothing here)
+    run grep -qE 'respawn-pane .* exec ROMP_SID=' "$MOCK_LOG"
+    [ "$status" -ne 0 ]
+    # the rule itself, on the shells a tmux server may run the pane with (`run -127`: the expected exit code,
+    # so bats files no command-not-found warning for the very status under test)
     for sh in sh bash zsh; do
         command -v "$sh" >/dev/null || continue
-        run "$sh" -c 'exec FOO=1 true'
-        [ "$status" -eq 127 ]
+        run -127 "$sh" -c 'exec FOO=1 true'
         run "$sh" -c 'exec env FOO=1 true'
         [ "$status" -eq 0 ]
     done
