@@ -73,6 +73,8 @@ def local_hour(t) -> str:
 REPAIR_JOURNAL = "spend-repair.jsonl"   # beside the ledger: each --apply's row deltas; the mark that their buckets were folded
 #                                          lives INSIDE spend.json (repairJournal.folded), written in the same atomic replace
 REPAIR_RULE = 4                          # stamped on every row this rule corrects (repairRule); a standing correction is kept
+REPAIR_RULE_LIFETIME = 5                 # stamped on a row the lifetime road corrects (a lifetime billed once more after an
+#                                          attach-unknown row) and carried in the journal's deltas, so a row is auditable per rule
 #                                          only when this rule wrote it and it reads as a plausible typical turn
 
 
@@ -276,7 +278,7 @@ def plan(turns: list, restarts: list, day: str, since=None, owners=None, keyed=N
     for r in rows:
         by_sid.setdefault(str(r.get("sid") or ""), []).append(r)
     day_start = datetime.strptime(day, "%Y-%m-%d").timestamp()
-    corrections, all_ordinary = [], []
+    corrections, all_ordinary, notes = [], [], []
     # first pass per session: which rows are staircase steps, which are ordinary. A row already repaired (usdRecorded
     # keeps the figure the kernel wrote) is judged AGAIN on that figure, so a run over repaired rows finds nothing new
     # when the judgement stands and restores the row when it does not (a rule tightened after the first run brings a
@@ -304,22 +306,50 @@ def plan(turns: list, restarts: list, day: str, since=None, owners=None, keyed=N
             restarted = id(r) in firsts
             step = False
             if isinstance(r.get("cumulativeUsd"), (int, float)) or r.get("spendBaseline"):
-                # written by a kernel that carries the CLI's cumulative on the row, or names a first result's
-                # baseline (the fix): right, never a step, with ONE exception the fix's first boot showed (2026-09-11
-                # 22:38Z, the rule the manager approved): a row whose dollars EQUAL its cumulative and follow the same
-                # session's attach-unknown row is the lifetime billed once more (the replayed first result left the
-                # watermark at zero), corrected to the cumulative less that row's cumulative less the rows between
+                # written by a kernel that carries the CLI's cumulative on the row, or names a first result's baseline
+                # (the fix): right, never a step, with ONE rule of its own (the fix's first boot, 2026-09-11 22:38Z): a
+                # row whose KERNEL figure equals its cumulative, following the same session's attach-unknown row with
+                # only ordinary rows between, is the lifetime billed once more (the replayed first result left the
+                # watermark at zero), corrected to the cumulative less that row's cumulative less the rows between. The
+                # match requires the cumulative ABOVE the attach-unknown row's and a positive remainder: the first paid
+                # turn after a mid-life /clear is written with its dollars equal to its cumulative BY DESIGN (the
+                # watermark is zeroed on the /clear), a counter reset that the first cut of this rule zeroed to
+                # max(0, small less large) in silence (the 1473 review's HIGH); the arithmetic contradicting itself is
+                # void evidence, said in a note, never a clamp. The chain disarms on the row it judged (corrected or
+                # not), on a counter reset and on a fresh or seeded baseline row; a corrected row is judged again on
+                # its recorded figure every run (idempotent) and restored when the rule no longer believes it
                 cum = float(r["cumulativeUsd"]) if isinstance(r.get("cumulativeUsd"), (int, float)) else None
-                if cum is not None and not r.get("spendBaseline") and abs(usd - cum) < 1e-6 and usd > 0 \
-                        and unknown_cum is not None:
-                    corrected = max(0.0, cum - unknown_cum - sum(since_unknown))
-                    if abs(corrected - usd) > 1e-6:
-                        lifetime.append((r, usd, corrected, unknown_cum, list(since_unknown)))
+                base = r.get("spendBaseline")
+                rec_k = _kernel_usd(r)
+                repaired = isinstance(r.get("usdRecorded"), (int, float))
+                candidate = cum is not None and not base and abs(rec_k - cum) < 1e-6 and rec_k > 0
+                who = "%s %s" % (str(r.get("name") or sid[:8]), datetime.fromtimestamp(t).strftime("%H:%M:%S"))
+                if candidate and unknown_cum is not None:
+                    remainder = cum - unknown_cum - sum(since_unknown)
+                    if cum > unknown_cum + 1e-6 and remainder > 1e-6:
+                        if abs(remainder - usd) > 1e-6:
+                            lifetime.append((r, usd, remainder, unknown_cum, list(since_unknown), None))
+                    else:
+                        why = ("its cumulative %.4f is at or below the attach-unknown row's %.4f: a counter reset (a /clear's "
+                               "first paid turn is written with its dollars equal to its cumulative), the turn stands"
+                               % (cum, unknown_cum) if cum <= unknown_cum + 1e-6 else
+                               "cumulative %.4f less the attach-unknown row's %.4f less %d row(s) between (%.4f) is not positive: "
+                               "the arithmetic contradicts itself, the turn stands" % (cum, unknown_cum, len(since_unknown), sum(since_unknown)))
+                        notes.append("%s: the lifetime rule stood down, %s" % (who, why))
+                        if repaired and abs(usd - rec_k) > 1e-9:
+                            lifetime.append((r, usd, rec_k, unknown_cum, list(since_unknown), why))   # a restore
                     unknown_cum, since_unknown = None, []
-                elif cum is not None and r.get("spendBaseline") == "attach-unknown":
+                elif candidate and repaired and abs(usd - rec_k) > 1e-9:
+                    # a correction whose attach-unknown row no longer arms a chain before it: restored
+                    lifetime.append((r, usd, rec_k, None, [], "no attach-unknown row arms a chain before it"))
+                elif cum is not None and base == "attach-unknown":
                     unknown_cum, since_unknown = cum, []
+                elif base in ("fresh", "seeded") or (cum is not None and prev_cum is not None and cum < prev_cum - 1e-6):
+                    unknown_cum, since_unknown = None, []             # a new or seeded process, or a counter reset: no lifetime follows
                 elif unknown_cum is not None:
-                    since_unknown.append(usd)
+                    # a row between: its current figure is its cost, unless a mark this rule did not write sits on it
+                    # (then the kernel's figure), so the sum can tell a lifetime-corrected row from one an older rule zeroed
+                    since_unknown.append(usd if (not repaired or r.get("repairRule") == REPAIR_RULE_LIFETIME) else rec_k)
                 if cum is not None:
                     prev_cum = cum; between = []
                 prev_t = t
@@ -413,10 +443,14 @@ def plan(turns: list, restarts: list, day: str, since=None, owners=None, keyed=N
             if abs(corrected - cur) < 1e-6:
                 continue                       # already right: a run over repaired rows
             corrections.append(entry(r, sid, rec, cur, corrected, reason))
-        for r, cur, corrected, ucum, between in lifetimes.get(sid, []):
-            corrections.append(entry(r, sid, cur, cur, corrected,
-                                     "the lifetime billed once more after the attach-unknown row (cumulative %.4f less that row's cumulative %.4f less %d row(s) between (%.4f))"
-                                     % (cur, ucum, len(between), sum(between))))
+        for r, cur, corrected, ucum, between, why in lifetimes.get(sid, []):
+            rec_k = _kernel_usd(r)
+            if why is None:
+                corrections.append(entry(r, sid, rec_k, cur, corrected,
+                                         "the lifetime billed once more after the attach-unknown row (cumulative %.4f less that row's cumulative %.4f less %d row(s) between (%.4f))"
+                                         % (rec_k, ucum, len(between), sum(between)), rule=REPAIR_RULE_LIFETIME))
+            else:
+                corrections.append(entry(r, sid, rec_k, cur, rec_k, "restored: %.4f is no lifetime billed once more: %s" % (rec_k, why), restore=True))
         for r, rec, cur, prev_cum, between in restores:
             if prev_cum == "since":
                 reason = "restored: %.4f precedes the hosts' start (%s), a fresh process's turn" % (
@@ -446,6 +480,7 @@ def plan(turns: list, restarts: list, day: str, since=None, owners=None, keyed=N
     before = round(sum(h["before"] for h in hours.values()), 6)
     after = round(sum(h["after"] for h in hours.values()), 6)
     return {"day": day, "since": since, "rows": sorted(corrections, key=lambda c: c["t"]), "hours": dict(sorted(hours.items())),
+            "stoodDown": notes,                        # the lifetime rule's refusals, said (never a clamp)
             "unkeyedRows": sum(1 for c in corrections if not c["keyed"]),
             "days": {day: {"before": before, "after": after}}, "bySid": sids, "restarts": len([x for x in restarts if local_day(x) == day])}
 
@@ -534,7 +569,7 @@ def apply_to_turns(path: Path, p: dict, write: bool = True) -> list:
                     o.setdefault("usdRecorded", o["usd"])
                     o["usd"] = c["corrected"]
                     o["repairedT"] = int(time.time())
-                    o["repairRule"] = REPAIR_RULE
+                    o["repairRule"] = int(c.get("rule") or REPAIR_RULE)   # the rule that wrote it, auditable per row
                 done.append(c)
             out.append(json.dumps(o))
         if not done or not write:
@@ -586,9 +621,9 @@ def report(p: dict) -> str:
     for c in p["rows"]:
         lines.append("  %-16s %s %10.2f -> %8.2f  %s" % (c["name"][:16], datetime.fromtimestamp(c["t"]).strftime("%H:%M:%S"),
                                                         c["current"], c["corrected"], c["reason"]))
-    if p.get("notes"):
+    if p.get("notes") or p.get("stoodDown"):
         lines.append("")
-        lines.extend("note: " + n for n in p["notes"])
+        lines.extend("note: " + n for n in list(p.get("stoodDown") or []) + list(p.get("notes") or []))
     return "\n".join(lines)
 
 
@@ -698,7 +733,8 @@ def main(argv=None) -> int:
     planned = apply_to_turns(state / "turns.jsonl", p, write=False)
     stamp_t = time.time()
     deltas = [{"sid": c["sid"], "t": c["t"], "hour": c["hour"], "owner": c["owner"], "keyed": c["keyed"], "name": c["name"],
-               "delta": round(c["corrected"] - c["current"], 6), "corrected": round(c["corrected"], 6)} for c in planned]
+               "delta": round(c["corrected"] - c["current"], 6), "corrected": round(c["corrected"], 6),
+               "rule": (0 if c.get("restore") else int(c.get("rule") or REPAIR_RULE)), "reason": c.get("reason", "")} for c in planned]
     if deltas:
         journal_append(state, {"t": stamp_t, "phase": "rows", "day": day, "deltas": deltas})
     done = apply_to_turns(state / "turns.jsonl", p)
