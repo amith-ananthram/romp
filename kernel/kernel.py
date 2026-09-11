@@ -15960,8 +15960,25 @@ def _drive(msg, client):
         else:
             _push_soon()
     elif t == "interrupt":
-        be.interrupt(sid)                                 # Esc/stop AND settle idle (in the backend)
-        _interrupt_clicked[str(sid)] = time.time()        # chip → "interrupting" NOW (event-cleared on settle)
+        # The stamp lands only when the backend TOOK the stop (2026-09-11). A session with no turn in flight
+        # (Ctrl+C in an idle composer, a Stop click reaching the kernel just as the turn ends, a dead tab)
+        # has nothing to interrupt: the Codex backend answers False and sends nothing, and since the merged
+        # liveness row carries no `interrupting` flag, _interrupting could clear the stamp only on a stop
+        # record that never comes or at its 120 s cap — so the chip, the lane and the feed badge read
+        # Interrupting… for two minutes with nothing in flight, and a turn started inside that window read
+        # Interrupting… over Working. Only an explicit False is a refusal (the ABC's bool; the SDK's False
+        # is an unknown sid): a backend with no verdict keeps the optimistic chip.
+        if be.interrupt(sid) is not False:                # Esc/stop AND settle idle (in the backend)
+            _interrupt_clicked[str(sid)] = time.time()    # chip → "interrupting" NOW (event-cleared on settle)
+        elif be.busy(sid):
+            # A refusal WITH work in flight is a stop that did NOT land, not a stop with nothing to stop
+            # (review find, 2026-09-11): the Codex backend also answers False while a turn's start is still
+            # being acknowledged (queued, no turn id yet), when its app-server client is gone, and when the
+            # interrupt RPC raised (kernel log only). Read as an idle press those left the chip on Working
+            # and the click with no visible effect at all. busy() is the ABC's authoritative in-flight
+            # signal: True in exactly those cases, None or False when there was nothing to stop, so an idle
+            # Ctrl+C stays quiet. The sendMessage arm's warn idiom (fail loudly).
+            client["send"](json.dumps({"type": "warn", "text": "the stop was not delivered: the session is still working"}))
         err = _suppress_session_retry(sid)                # interrupting a thread STOPS romp's auto-retry into it until a
                                                           # successful turn re-arms (the user 2026-07-06) — the interrupt
                                                           # already aborted any in-flight CLI retry; this stops the relapse
@@ -17125,8 +17142,20 @@ def _rename_session(sid, name):
 
 
 def _num(x):
+    """A backend row's `since` as an epoch int, else None. A float string parses too, truncated
+    (2026-09-11): the Codex backend stamps since = time.time() and ships it raw (the SDK backend ships
+    str(int(...))), and the SDK backend's dormant read serves the state log's LAST record, whose
+    machineCut and resume-fork lines carry a float t. The digits-only test read every such since as
+    None, so _idle_faded never fired: a Codex session idle past FADED_S stayed a solid "ready" in the
+    chat tab and the timeline lane while every idle SDK tab and lane dimmed. Non-numbers, nan and inf
+    stay None."""
     x = (x or "").strip()
-    return int(x) if x.lstrip("-").isdigit() else None
+    if x.lstrip("-").isdigit():
+        return int(x)
+    try:
+        return int(float(x))
+    except (ValueError, OverflowError):
+        return None
 
 
 # One liveness snapshot per PUSHER CYCLE (the 2026-08-10 CPU fix). Every Sessions.live() read sweeps the
@@ -30299,7 +30328,20 @@ def _route_meta_command(be, sid, text, client=None, floating=False, state=None):
     # ours to swallow: it stays the CLI's, verbatim, and the user sees the CLI's own error.
     if not value or len(value.split()) != 1:
         return False
-    is_meta = ((head == "/model" and _vouched_model(value)) or (head == "/effort" and value in _EFFORT_VALUES)
+    # A Codex session's model vocabulary is its engine's (gpt-…), which the catalog behind _vouched_model
+    # never carries, so such a pick is vouched by the owning backend's own acceptance rule instead
+    # (CodexBackend.set_model refuses every other value). Before this the lane menu's "/model gpt-…" was no
+    # meta command at all and fell through to _send_or_park, so the Codex agent read the pick as a literal
+    # prompt (idle: sent; working: parked as a command chip that fired alone) while the chat statusline's
+    # setModel op landed the same pick — the two surfaces disagreed on one gesture (review find, 2026-09-11).
+    # The unowned route is vouched for the same shape: a DEAD Codex session still reports its backend (the
+    # lane reads the durable row, _session_backend), so its menu still offers gpt-… while backend_for says
+    # _UNOWNED (CodexBackend.owns is False once dead) — and the refusal arm below is the one place the client
+    # hears that the pick went nowhere; _UNOWNED.send refuses on stderr alone (review find, 2026-09-11).
+    model_pick = head == "/model" and (_vouched_model(value)
+                                        or (value.startswith("gpt") and be is not None
+                                            and (be is _UNOWNED or be is _codex())))
+    is_meta = (model_pick or (head == "/effort" and value in _EFFORT_VALUES)
                or (head == "/fast" and value in ("on", "off")))
     if is_meta and be is _UNOWNED:
         # a session no running backend owns takes no setting: refuse before any stamp (the switching dots
@@ -30312,7 +30354,7 @@ def _route_meta_command(be, sid, text, client=None, floating=False, state=None):
             client["send"](json.dumps({"type": "warn", "text": why}))
         sys.stderr.write("meta command %s for %s refused: no backend owns this session\n" % (head, sid))
         return True
-    if head == "/model" and _vouched_model(value):
+    if model_pick:
         # the model setter has its OWN rule (an open turn fires it live only on a backend that declares
         # model_switches_live — none shipped does yet, so the SDK still parks; #923), so its verdict is
         # read, not inferred from _ops_gate, which would say `queued` for a pick that had already applied
@@ -53863,8 +53905,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, json.dumps(res), "application/json")
                 be = Sessions.backend_for(sid)
                 if u.path == "/interrupt":
-                    be.interrupt(sid)                           # Esc/stop AND settle idle (in the backend)
-                    _interrupt_clicked[str(sid)] = time.time()  # chip → "interrupting" NOW, same as the WS op
+                    # the WS op's gate: a stop the backend refused (nothing in flight) paints nothing
+                    if be.interrupt(sid) is not False:          # Esc/stop AND settle idle (in the backend)
+                        _interrupt_clicked[str(sid)] = time.time()  # chip → "interrupting" NOW, same as the WS op
+                    elif be.busy(sid):
+                        # …and a refusal WITH work in flight is a stop that did not land (the WS arm's toast):
+                        # said, never answered ok, so `romp interrupt` prints this and exits non-zero — the
+                        # /send route's refusal shape (review find, 2026-09-11)
+                        return self._send(200, json.dumps({"ok": False, "error":
+                            "the stop was not delivered: %s is still working" % who}), "application/json")
                 elif isinstance(b, dict) and b.get("when") == "idle":
                     # SELF-CLOSE deferral (the user 2026-08-15): record the wish; the pusher's sweep
                     # kills at the turn's settle, so a session ending itself finishes its goodbye first
