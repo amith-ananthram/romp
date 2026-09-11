@@ -370,12 +370,14 @@ class Plan(unittest.TestCase):
 
     def test_the_restart_instants_are_the_boots_and_the_cuts_and_a_request_only_when_no_boot_answers_it(self):
         cuts = [{"t": 100, "cutTurns": [], "reason": "main-converge"},                       # the dying kernel's cut row: not an instant
-                {"t": 107, "firstServe": 107.2, "settleS": 0.1, "pid": 1, "bootSettled": True}]   # the new kernel's boot: the instant
-        audit = [{"t": 100, "action": "p2p-update"},                # the request the boot at 107 answers: not an instant of its own
-                 {"t": 200, "action": "manager-sigterm"},           # no boot within five minutes: kept (a crash's row-less restart)
+                {"t": 290, "firstServe": 107.2, "settleS": 0.1, "pid": 1, "bootSettled": True},   # the new kernel: its FIRST SERVE is the instant, not its settle (t), which lagged three minutes here
+                {"t": 400, "settleS": 0.1, "pid": 2}]                                          # a boot row with no firstServe: its t
+        audit = [{"t": 100, "action": "p2p-update"},                # the request the first serve at 107 answers: not an instant of its own
+                 {"t": 200, "action": "manager-sigterm"},           # no first serve within five minutes... the boot at 400 is 200 s later: answered
+                 {"t": 900, "action": "manager-sigterm"},           # nothing answers this one: kept (a crash's row-less restart)
                  {"t": 250, "action": "quiet-window"}, {"t": 260, "action": "bootSettled"}]     # neither a restart action
-        self.assertEqual(rp.restart_instants(cuts, audit), [107, 200])
-        self.assertEqual(rp.plan([], rp.restart_instants(cuts, audit), "1970-01-01")["restarts"], 2, "the report counts instants, one per restart")
+        self.assertEqual(rp.restart_instants(cuts, audit), [107, 400, 900])
+        self.assertEqual(rp.plan([], rp.restart_instants(cuts, audit), "1970-01-01")["restarts"], 3, "the report counts instants, one per restart")
 
     def test_a_result_the_old_kernel_recorded_during_its_drain_is_an_ordinary_turn_not_a_fresh_process(self):
         # web: 300 (its lifetime after the 9:30 boot), then at 9:59:53 the restart is REQUESTED and the old kernel records

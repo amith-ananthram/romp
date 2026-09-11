@@ -74,20 +74,25 @@ BOOT_ANSWER_S = 300                 # an audit row (a restart REQUEST) that a bo
 
 
 def restart_instants(cuts: list, audit: list) -> list:
-    """The moments a new kernel took over, sorted, deduplicated to the second: every restart-cuts BOOT row (written by
-    the new kernel once its reconcile is done: pid, settleS, firstServe, its `t` the instant), plus an audit row whose
-    action asks for a restart only when no boot row answers it within BOOT_ANSWER_S. Neither the audit row nor the cut
-    row is the instant: the audit row is the REQUEST, and the cut row is written by the DYING kernel after its drain
-    while sessions are still unjoined, so results land for seconds after both and are the old kernel's (ordinary
-    deltas). Either taken for the instant read such a row as a fresh process's first result and the next real re-bill
-    was corrected against that small figure (2026-09-11: 33 rows in those gaps, one session's $1,030 lifetime read as
-    a $1,025 turn). Every row before a boot row's second is the old kernel's, a row at that very second too."""
+    """The moments a new kernel took over, sorted, deduplicated to the second: every restart-cuts BOOT row's
+    `firstServe` (the epoch the new kernel began serving; the row's `t` when it has none), plus an audit row whose
+    action asks for a restart only when no boot's first serve answers it within BOOT_ANSWER_S. Neither the audit row,
+    the cut row nor the boot row's own `t` is the instant: the audit row is the REQUEST, the cut row is written by the
+    DYING kernel after its drain while sessions are still unjoined (results land for seconds after both and are the old
+    kernel's, ordinary deltas), and the boot row's `t` is the SETTLE, written once the reconcile is done, which lagged
+    the first serve by three minutes on 2026-09-11 at 20:19Z while the re-billed first results landed from 20:19:44Z
+    (firstServe 20:19:39.99Z; the two earlier boots that day settled within 9 s, which hid it). A request taken for
+    the instant read a drain-time row as a fresh process's first result and the next real re-bill was corrected against
+    that small figure (33 rows in those gaps that day, one session's $1,030 lifetime read as a $1,025 turn). Every row
+    before the first-serve second is the old kernel's, a row at that very second too."""
     boots, out = [], set()
     for r in cuts:
         if not isinstance(r.get("t"), (int, float)):
             continue
         if "firstServe" in r or "settleS" in r or "bootSettled" in r:
-            boots.append(int(r["t"])); out.add(int(r["t"]))
+            fs = r.get("firstServe")
+            t = int(fs) if isinstance(fs, (int, float)) and fs > 0 else int(r["t"])
+            boots.append(t); out.add(t)
     for r in audit:
         if isinstance(r.get("t"), (int, float)) and str(r.get("action") or "") in RESTART_ACTIONS:
             t = int(r["t"])
