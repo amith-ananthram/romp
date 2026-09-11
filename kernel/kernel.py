@@ -1533,6 +1533,10 @@ background:#9cd2ff;color:#0c1a2e;font-weight:600;cursor:pointer">Open</button>
 
 _clients = []                                # connected WS clients: {app, wid, send, alive}
 _clients_lock = threading.Lock()
+# wid -> the session id the chat pane of that dashboard window shows (None: no tab), from the chat's activeTab
+# (T347: the feed's focused-session section is a view of the chat pane's active tab; one window's panes share
+# a wid, so the chat's report is filed under it and read by that window's feed — _relay_active_chat below)
+_ACTIVE_CHAT_BY_WID = {}   # type: dict[str, str | None]
 _client_seen = [0.0]
 # SIDs seen ALIVE at any point during THIS kernel run. (Retained for diagnostics; it no longer drives
 # tabs — the user 2026-06-17 reversed the earlier keep-a-tab-when-it-dies rule: a dead session is now TIMELINE-ONLY,
@@ -40127,7 +40131,12 @@ def _client_reset_chat_base(client):
         # is nothing it could lazily reload — every tab must arrive whole, and the status slots go with the set
         client.pop("skeleton", None); client.pop("skeletonOrder", None); client.pop("reconnect", None)
         snt = client.get("sent", {})
-        for k in [k for k in snt if isinstance(k, tuple) and k and k[0] in ("chat", "status", "taborder")]:
+        # …and the ("activeChat",) slot (T347): a feed page that reloads registers while its bundle still
+        # evaluates, and a tab switch in its window relays a frame to a document with no listener yet; the
+        # slot remembers that frame, so the ready arm's re-send would be deduped for _DEDUP_REPOST_S and the
+        # section would read "no session is focused" until the next tab click. A renderer that just
+        # evaluated holds nothing: the slot goes with the others.
+        for k in [k for k in snt if isinstance(k, tuple) and k and k[0] in ("chat", "status", "taborder", "activeChat")]:
             snt.pop(k, None)
 
 
@@ -44812,6 +44821,58 @@ def _apih_resend(client):
             client["send"](_APIH_LAST[0])
         except Exception:
             pass
+
+
+def _active_chat_wid(client):
+    """The window key a chat's active tab is filed under: the client's wid as a string, "" for a pane that reported
+    none (a page opened outside a dashboard), so the record and every read use one key shape."""
+    return str(client.get("wid") or "")
+
+
+def _send_active_chat(client):
+    """Tell ONE feed client which session the chat pane of its window shows — {type: "activeChat", id: sid|null},
+    the value recorded for its wid — on the ("activeChat",) dedup slot, so an unchanged value is not re-sent
+    (_send_client, within _DEDUP_REPOST_S). Nothing when no chat of that window has reported yet: the feed keeps
+    its own resting state rather than reading a null the kernel never learned. Returns whether a frame was
+    offered to the slot. A socket that fails is marked dead by _client_send; the relay's other feeds go on.
+
+    Called from two arms of Handler._dispatch_ws: the chat's activeTab (through _relay_active_chat, every feed of
+    the window) and a FEED client's `ready`, between that arm's reset and its connect push, so a reloaded feed's
+    first paint already knows its focused session. The ready arm and not the WS handshake: a frame sent before
+    the bundle's ready lands in a document with no message listener (the ready arm's own comment), and a
+    reloaded feed is exactly the client that has to learn the focus."""
+    wid = _active_chat_wid(client)
+    if wid not in _ACTIVE_CHAT_BY_WID:
+        return False
+    try:
+        _send_client(client, ("activeChat",), {"type": "activeChat", "id": _ACTIVE_CHAT_BY_WID[wid]})
+    except Exception:
+        return False
+    return True
+
+
+def _forget_active_chat_if_last(client):
+    """Drop the window's active-chat record when the client leaving was the last pane of that wid: the dict
+    is keyed by dashboard window id, and a window closed for good must not keep an entry for the kernel's
+    life (one per window ever opened). Called under _clients_lock, after the client left _clients; a window
+    with another pane still connected (its chat, a second feed) keeps the record for that pane's reload."""
+    wid = _active_chat_wid(client)
+    if wid in _ACTIVE_CHAT_BY_WID and not any(_active_chat_wid(c) == wid for c in _clients):
+        _ACTIVE_CHAT_BY_WID.pop(wid, None)
+
+
+def _relay_active_chat(client, sid):
+    """A chat client's activeTab: record the session under its window's wid (None for no tab) and send the window's
+    live feed clients the frame (T347: the feed's focused-session section is a view of the chat pane's active tab,
+    never a move of a card; one window's panes share a wid, and a pane outside a dashboard files under ""). The
+    two chat columns of a split window both report here and the later report stands. The client list is copied
+    under _clients_lock; the sends run outside it, as every other fan-out does."""
+    wid = _active_chat_wid(client)
+    _ACTIVE_CHAT_BY_WID[wid] = str(sid) if sid else None
+    with _clients_lock:
+        feeds = [c for c in _clients if c.get("alive") and c.get("app") == "feed" and _active_chat_wid(c) == wid]
+    for c in feeds:
+        _send_active_chat(c)
 
 
 # ── Web Push: the same bell events, delivered to the phone (plans/ios-app.md proposal 2; the user
@@ -54623,7 +54684,10 @@ class Handler(BaseHTTPRequestHandler):
             if msg.get("id"):
                 _release_skeleton(client, str(msg["id"]))   # a skeleton tab clicked: its full rides that push (2026-09-07)
             _pusher_wake.set()                 # …and that push starts when the in-flight cycle ends, not
-            return                             #    after the 0.5 s backstop (the tab switch IS the event)
+            #                                     after the 0.5 s backstop (the tab switch IS the event)
+            if client.get("app") == "chat":
+                _relay_active_chat(client, msg.get("id"))   # …and the window's feed learns which session is focused (T347)
+            return
         if msg and msg.get("type") == "needSlot" and msg.get("slot") in _DELTA_SLOTS:
             # The shim could not apply a view delta (its base revision did not match what it holds — a
             # frame it never saw, a reload mid-stream): forget what we believe it holds and re-send the
@@ -54755,6 +54819,8 @@ class Handler(BaseHTTPRequestHandler):
             # because cached bundles win the race). Same repair as needFull above, client-wide;
             # ready is posted once per renderer life, so this cannot loop.
             _client_reset_chat_base(client)
+            if client.get("app") == "feed":
+                _send_active_chat(client)      # T347: the window's focus, ahead of the first paint
             # Capture the seq of the views blob the pushes below serve — from the frames THIS thread
             # enqueues, so a pusher-thread frame landing meanwhile is not mistaken for the connect push's
             # (the caps frame's viewsSeq, see KERNEL_WS_CAPS)
@@ -55801,6 +55867,8 @@ class Handler(BaseHTTPRequestHandler):
                 if client in _clients:
                     _clients.remove(client)
             _release_client_holds(client)          # its open editors' holds go with it: the disconnect is the event (T306)
+            with _clients_lock:
+                _forget_active_chat_if_last(client)   # the window's focus record goes with its last pane (T347)
 
     def _remote_ws(self, host, query):
         """GET /remote/<host>/ws — relay a federated-dashboard WebSocket to an attached host's

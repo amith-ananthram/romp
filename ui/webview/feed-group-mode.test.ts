@@ -69,6 +69,7 @@ test("clearing a run's last card drops its session header at once, not on the ne
   assert.match(FEED, /function dropDismissed\(ids: string\[\]\): void \{/);
   assert.match(FEED, /asks = asks\.filter\(\(a\) => !gone\.has\(a\.itemId\)\);\s*\n\s*render\(\);/);
   // both optimistic dismiss paths finish through it: the single ask card and the sibling-group card
-  assert.match(FEED, /card\.remove\(\); askEls\.delete\(it\.itemId\); dropDismissed\(\[it\.itemId\]\);/);
-  assert.match(FEED, /groupEls\.delete\(cur\.turnId\); dropDismissed\(cur\.members\.map\(\(m\) => m\.itemId\)\);/);
+  assert.match(FEED, /for \(const c of twins\) \{ c\.remove\(\); if \(askEls\.get\(it\.itemId\) === c\) askEls\.delete\(it\.itemId\);[^\n]*\n\s*dropDismissed\(\[it\.itemId\]\);/);
+  // the group card's finish, by ITEM across both copies since T347: every copy still dismissing leaves, both caches forget it, then the members drop
+  assert.match(FEED, /if \(fsGroupEls\.get\(cur\.turnId\) === c\) fsGroupEls\.delete\(cur\.turnId\); \}\s*\n\s*dropDismissed\(cur\.members\.map\(\(m\) => m\.itemId\)\);/);
 });
