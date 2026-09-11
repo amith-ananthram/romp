@@ -51,13 +51,16 @@ class Settings(unittest.TestCase):
         for word in ("on", "1", "true", "yes", "On\n"):
             Path(d, "session-hosts").write_text(word)
             self.assertTrue(ht.session_hosts_on(d), "a file saying %r stays on" % word)
-        Path(d, "session-hosts").write_text("")
-        self.assertTrue(ht.session_hosts_on(d), "an empty file is the default: on")
+        for blank in ("", "  \n\t"):
+            Path(d, "session-hosts").write_text(blank)
+            self.assertTrue(ht.session_hosts_on(d), "an empty file, or one holding only whitespace, is the default: on")
         Path(d, "session-hosts").write_text("maybe")
         self.assertFalse(ht.session_hosts_on(d), "a word that is not one of the on words is off, as before")
-        self.assertEqual(ht.session_hosts_value(d), "maybe", "the value reader hands the log line what the file holds")
-        self.assertEqual(ht.session_hosts_value(tempfile.mkdtemp()), "", "…and nothing for a machine with no file")
-        self.assertIn('return _setting(state_dir, SESSION_HOSTS_SETTING, "on")', inspect.getsource(ht.session_hosts_on), "the default is the literal on")
+        self.assertEqual(ht.session_hosts_read(d), (False, "maybe"), "one read hands the branch its verdict and the log the value")
+        self.assertEqual(ht.session_hosts_read(tempfile.mkdtemp()), (True, ""), "…and (on, nothing) for a machine with no file")
+        src = inspect.getsource(ht.session_hosts_read)
+        self.assertIn("(True if not value else value.lower() in SESSION_HOSTS_ON_WORDS), value", src, "the default is on: no file, or an empty one")
+        self.assertEqual(ht.SESSION_HOSTS_ON_WORDS, ("on", "1", "true", "yes"))
 
     def test_the_default_is_stated_where_the_reader_and_the_docs_speak_of_it(self):
         """Every place that states the default says on (T348): the reader's comment, the backend's log line for the
@@ -70,17 +73,34 @@ class Settings(unittest.TestCase):
         bsrc = open(os.path.join(ROOT, "kernel", "sdk_backend.py")).read()
         self.assertIn("the session-hosts file reads %r, not an on word; running the CLI as a kernel child", bsrc,
                       "the off branch names what the file holds: any content that is not an on word, not only off")
-        self.assertIn("_ht().session_hosts_value(self.state_dir)", bsrc, "…read through the value reader")
+        self.assertIn("hosts_on, hosts_value = _ht().session_hosts_read(self.state_dir)", bsrc,
+                      "ONE read for the branch and its log: a flip between two reads cannot log a value the branch did not decide on")
+        self.assertIn('if state == "none" and not hosts_on:', bsrc)
+        self.assertIn("% (sess.name, hosts_value))", bsrc, "the log names the value the branch read")
+        self.assertNotIn("session_hosts_value(", bsrc, "no second read of the file on that road")
         self.assertNotIn("session-hosts is off;", bsrc, "the old line, which read as the default, is gone")
         doc = open(os.path.join(ROOT, "docs", "reference.md")).read()
         i = doc.index("A session can outlive the kernel that started it.")
         para = flat(doc[i:i + 1200])
         self.assertIn("By default, on every machine on this version, a new session's CLI runs under a small per-session host process", para)
         self.assertIn("Write `off` to it to run a machine's sessions as plain kernel children again", para)
-        self.assertIn("`on`, `1`, `true` and `yes` read as on, any other content as off", para, "the accepted words")
+        self.assertIn("`on`, `1`, `true` and `yes` read as on; an empty file, or one holding only whitespace, is the default, on; any other content reads as off", para,
+                      "the accepted words, the empty file and the stray word, all three stated")
         self.assertIn("becomes hosted at its next respawn, whatever prompts it", para, "the rollout: a respawn of any kind")
         self.assertNotIn("off by default", para, "the reference no longer says off by default")
         self.assertNotIn("the devbox opts in first", para, "the rollout wording went with the opt-in")
+
+    def test_the_runners_floored_state_root_reads_hosts_off(self):
+        """The belt (T348): tests/conftest.py writes `off` into the state root it floors for the run and re-asserts it per
+        test, so no test spawns a real host by omission under the new default. Skipped outside that runner."""
+        root = os.path.join(os.environ.get("XDG_STATE_HOME", ""), "romp")
+        marker = os.path.join(root, "session-hosts")
+        if not os.path.exists(marker):
+            self.skipTest("the runner's floor (tests/conftest.py) is not in play")
+        self.assertEqual(Path(marker).read_text().strip(), "off")
+        self.assertEqual(ht.session_hosts_read(root), (False, "off"), "a fresh floored root reads hosts off")
+        Path(marker).unlink()                                     # a test that removes it gets it back before the next test
+        self.assertTrue(ht.session_hosts_on(root), "…and a bare root is on, which is exactly what the belt prevents")
 
     def test_the_grace_default_and_its_file(self):
         d = tempfile.mkdtemp()

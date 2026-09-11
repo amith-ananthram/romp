@@ -62,17 +62,22 @@ def _setting(state_dir, name: str, default: str) -> str:
     return v or default
 
 
+SESSION_HOSTS_ON_WORDS = ("on", "1", "true", "yes")
+
+
+def session_hosts_read(state_dir) -> "tuple[bool, str]":
+    """ONE read of the setting: (on, value). `value` is the file's stripped text, "" with no file. On unless the file
+    says otherwise: a machine with no file is on; an empty file (or one holding only whitespace) is the default, on; a
+    file saying off, 0, false or no is the toggle; any other word reads as off too. A caller that decides and then logs
+    reads once through this, so the decision and the value it names agree (a flip between two reads cannot contradict)."""
+    value = _setting(state_dir, SESSION_HOSTS_SETTING, "")
+    return (True if not value else value.lower() in SESSION_HOSTS_ON_WORDS), value
+
+
 def session_hosts_on(state_dir) -> bool:
-    """Whether NEW sessions start through a host: on unless the setting file says otherwise (a machine with no file
-    is on; a file saying off, 0, false or no is the toggle; an empty file is the default). Read at each connect, so a
-    flip needs no restart: a plain-child session becomes hosted at its next respawn, a new one at once."""
-    return _setting(state_dir, SESSION_HOSTS_SETTING, "on").lower() in ("on", "1", "true", "yes")
-
-
-def session_hosts_value(state_dir) -> str:
-    """The setting file's text as read (stripped), "" when there is no file: for the log line that names what the
-    machine actually wrote (any content that is not an on word turns hosts off, not only the word off)."""
-    return _setting(state_dir, SESSION_HOSTS_SETTING, "")
+    """Whether NEW sessions start through a host (session_hosts_read's verdict). Read at each connect, so a flip needs no
+    restart: a plain-child session becomes hosted at its next respawn, a new one at once."""
+    return session_hosts_read(state_dir)[0]
 
 
 def session_host_grace_s(state_dir) -> float:

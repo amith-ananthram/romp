@@ -1064,7 +1064,8 @@ process, `bin/romp-session-host`, instead of as the kernel's child. The
 `session-hosts` setting is the toggle: a bare value file under the state
 directory. Write `off` to it to run a machine's sessions as plain kernel
 children again; `on`, or no file at all, leaves hosts on (`on`, `1`, `true` and
-`yes` read as on, any other content as off). It is read at each connect, so a
+`yes` read as on; an empty file, or one holding only whitespace, is the default,
+on; any other content reads as off). It is read at each connect, so a
 flip needs no restart: a session already running as a plain child becomes
 hosted at its next respawn, whatever prompts it (a model or effort switch, a
 crash resume, or the next kernel restart, which cuts a plain child's turn one

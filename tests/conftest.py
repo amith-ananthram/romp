@@ -129,6 +129,25 @@ os.environ["GIT_AUTHOR_EMAIL"] = os.environ["GIT_COMMITTER_EMAIL"] = "tests@exam
 
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="romp-tests-state-")   # inside the root; the hook records it
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel exports this to its sessions; it outranks the XDG floor
+# No test spawns a per-session HOST by omission (2026-09-11, T348): hosts are on by default now, so a backend built over
+# a state dir with no `session-hosts` file starts a real bin/romp-session-host for any session it connects. The root the
+# runner floors carries the toggle set to off from the start, re-asserted per test below (a test that deletes or rewrites
+# it gets it back); the deliberate hosts-on tests write `on` into their OWN state roots and are unaffected. A test that
+# builds its own bare state dir pins the setting itself (kernel/host_transport.py session_hosts_read).
+_SESSION_HOSTS_OFF = os.path.join(os.environ["XDG_STATE_HOME"], "romp", "session-hosts")
+
+
+def _floor_session_hosts_off():
+    try:
+        os.makedirs(os.path.dirname(_SESSION_HOSTS_OFF), exist_ok=True)
+        if not os.path.exists(_SESSION_HOSTS_OFF) or open(_SESSION_HOSTS_OFF).read().strip().lower() != "off":
+            with open(_SESSION_HOSTS_OFF, "w") as f:
+                f.write("off\n")
+    except OSError:
+        pass
+
+
+_floor_session_hosts_off()
 # the postal bus port likewise (2026-09-11): a machine whose bus runs on a named port hands ROMP_POSTAL_PORT to every
 # session's shell, and a test run from one would carry the machine's name into every lab and in-process kernel; the
 # bus refuses its fixed port under a test unless the port is the run's own, which the marker beside a port says
@@ -253,6 +272,14 @@ def _no_real_service_env():
 @pytest.fixture(autouse=True)
 def _no_real_claude_config():
     os.environ["CLAUDE_CONFIG_DIR"] = _CLAUDE_CONFIG
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _hosts_off_in_the_floored_root():
+    """The floored state root reads hosts OFF before every test (T348): the file is re-written when a test removed or
+    changed it, so no later test spawns a real host by omission."""
+    _floor_session_hosts_off()
     yield
 
 
