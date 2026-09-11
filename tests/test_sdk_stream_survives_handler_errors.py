@@ -1029,12 +1029,17 @@ class TheDeferredReconnectTakesTheHeldQueueWithIt(unittest.TestCase):
         self._Client.instances = []
         fake = types.ModuleType("claude_agent_sdk")
         fake.__spec__ = ModuleSpec("claude_agent_sdk", loader=None)   # sdk_importable's find_spec reads it
-        fake.ClaudeSDKClient, fake.ClaudeAgentOptions, fake.HookMatcher = self._Client, self._Options, (lambda **kw: kw)
+        # the matcher stand-in bears attributes like the SDK's dataclass: the options loop sets each matcher's `timeout`
+        # under hosts (the default since T348), which a plain dict refused
+        fake.ClaudeSDKClient, fake.ClaudeAgentOptions, fake.HookMatcher = self._Client, self._Options, (lambda **kw: types.SimpleNamespace(**kw))
         fake.AssistantMessage, fake.ResultMessage = _AssistantMessage, _ResultMessage
         fake.SystemMessage, fake.TextBlock = _SystemMessage, _TextBlock
         self._saved_sdk = sys.modules.get("claude_agent_sdk")
         sys.modules["claude_agent_sdk"] = fake
         self.state = tempfile.mkdtemp()
+        # this class runs the REAL connect loop against the fake client on the plain-child road: hosts OFF explicitly,
+        # since they are on by default (T348) and a bare state dir would send the connect to a real host spawn
+        open(os.path.join(self.state, "session-hosts"), "w").write("off")
         cwd = os.path.join(self.state, "proj")
         os.makedirs(cwd)
         self.lines = []

@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { threadsByAnchor, threadBusy, threadStuck, replyOwed, agentCount, findExact, findAnchorRange, sliceRanges, prunePending,
+import { threadsByAnchor, threadBusy, threadStuck, replyOwed, agentCount, findExact, findAnchorRange, sliceRanges, prunePending, markSkipsParent,
          newCommentCreate, commentCreateFrame, type CommentThread, type CommentCreate } from "./comments";
 import { compactDisplay } from "./compact";
 
@@ -174,7 +174,7 @@ test("marks, badges AND every popover button ride the stable document.body deleg
 });
 
 test("highlights re-apply after every render path", () => {
-  assert.match(UI, /m\.type === "session" \|\| m\.type === "chatTail" \|\| m\.type === "chatHead" \|\| m\.type === "chatEpisode"\)\)\s*\n\s*applyCommentMarks\(String\(m\.id\)\)/);
+  assert.match(UI, /m\.type === "session" \|\| m\.type === "chatTail" \|\| m\.type === "chatHead" \|\| m\.type === "chatWindow" \|\| m\.type === "chatMore" \|\| m\.type === "chatEpisode"\)\)\s*\n\s*applyCommentMarks\(String\(m\.id\)\)/);   // chatWindow / chatMore: the proto-2 pages rebuild DOM too (T323 stage 4b)
   assert.match(UI, /applyCommentMarks\(activeId\);\s+\/\/ the re-window rebuilt turns/,
                "the scroll re-window path re-anchors too");
   // the syncView wrapper covers renders that run OFF the message handlers (tab switch, prebuild)
@@ -833,4 +833,18 @@ test("a promoted thread's popup is the quote, one line, and Open the session in 
                "one line saying where the talk went");
   // and the quote never flexes in this state, whatever size the box is (the .sized rule hands it the free room otherwise)
   assert.match(CSS, /\.cmt-pop\.sized\[data-status="promoted"\] \.cmt-quote \{ flex: 0 0 auto; min-height: 0; \}/);
+});
+
+// ── the mark never lands between a table's cells (T349, the user 2026-09-11) ──────────────────────
+// The whitespace text between <td>s and <tr>s sits directly under the table's structural elements; an inline <mark>
+// placed there gets its own anonymous cell and the columns shift. The DOM pass asks this before wrapping each slice.
+test("markSkipsParent: a table's structural parents are skipped, every text-bearing parent is wrapped", () => {
+  for (const tag of ["TABLE", "THEAD", "TBODY", "TFOOT", "TR"]) assert.equal(markSkipsParent(tag), true, tag);
+  for (const tag of ["TD", "TH", "P", "LI", "CODE", "STRONG", "EM", "SPAN", "DIV", "CAPTION", "A"]) assert.equal(markSkipsParent(tag), false, tag);
+  assert.equal(markSkipsParent(null), false); assert.equal(markSkipsParent(undefined), false); assert.equal(markSkipsParent(""), false);
+  // a selection across a row: the cells' own text nodes are wrapped, the separators between them are not
+  const nodes = [{ text: "Charlie", parent: "TD" }, { text: "\n", parent: "TR" }, { text: "12", parent: "TD" }, { text: "\n", parent: "TR" }, { text: "done", parent: "TD" }];
+  const r = findExact(nodes.map((n) => n.text).join(""), "Charlie 12 done")!;
+  const wrapped = sliceRanges(nodes.map((n) => n.text.length), r.start, r.end).filter((sl) => !markSkipsParent(nodes[sl.idx].parent)).map((sl) => nodes[sl.idx].text);
+  assert.deepEqual(wrapped, ["Charlie", "12", "done"], "one mark per cell, none in the row itself");
 });

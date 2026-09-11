@@ -130,7 +130,13 @@ test("the day label reads the walk's day at the top row (data-day), never the ro
   assert.match(st, /const m = node\.firstChild as HTMLElement \| null;/);
   assert.match(st, /if \(walk\.mark != null && m && m\.nodeType === 1 && m\.classList && m\.classList\.contains\("time-marker"\)\) m\.dataset\.day = String\(walk\.mark\);/, "the marker carries the mark; a divider or an untimed row is left alone");
   // stamped by both walks that paint the chat: the unit path after its exit passed, the tail loop after each row
-  assert.match(RENDER, /walk\.pass\(unitExit\(s, it\)\);\s*\n\s*for \(const n of nodes\) stampWalkDay\(n, walk\);/);
+  assert.match(RENDER, /walk\.pass\(unitExit\(s, it\)\);[^\n]*\n\s*for \(const n of nodes\) if \(!stamped\.has\(n\)\) stampWalkDay\(n, walk\);/);
+  // an EXPANDED tool run: the head is timed by its first member and each row by its own, so each is stamped as the walk passes
+  // it (a run spanning midnight put today's mark on yesterday's rows otherwise: the review's find); the exit stamp skips them
+  const tg = RENDER.slice(RENDER.indexOf('if (it.kind === "toolgroup") {', RENDER.indexOf("function appendItem(")), RENDER.indexOf('} else if (it.kind === "noticegroup") {', RENDER.indexOf("function appendItem(")));
+  assert.match(tg, /walk\.pass\(eventEpoch\(first\)\); stampWalkDay\(head, walk\); stamped\.add\(head\);/, "the head in the first member's day");
+  assert.match(tg, /v\.el\.appendChild\(tag\(child\)\); adv\(i\);\s*\n\s*walk\.pass\(eventEpoch\(s\.events\[i\]\)\); stampWalkDay\(child, walk\); stamped\.add\(child\);/, "each row in its own");
+  assert.match(RENDER, /const stamped = new Set<HTMLElement>\(\);/);
   assert.match(RENDER, /walk\.pass\(ep\);\s*\n\s*stampWalkDay\(node, walk\);/);
   assert.match(RENDER, /const tag = \(node: HTMLElement\): HTMLElement => \{ node\.dataset\.unit = String\(u\); nodes\.push\(node\); return node; \};/, "every node the unit appends is collected for the stamp");
   assert.match(RENDER, /m\.dataset\.epoch = String\(epoch\);/, "the row's own moment still rides the marker (deep links, hover, the fallback)");

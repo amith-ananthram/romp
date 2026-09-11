@@ -101,9 +101,12 @@ KINDLESS = "Merged the fixtures branch; nothing else is pending on my side."
 # it must wear the same provisional dress as the slim parked card beside it (the box rule used to win its border and
 # background, and the bubble's 72% cap its width)
 LONG_PARKED = "Once the fixtures land, run the whole integration suite against notes-api and write every flaky case into the README."
+# a sent card that LANDED and folds (a body past the head's clip): boxed, read, and so the one landed boxed sent card, whose
+# ground must stay the plain box while the incoming cards wear the tint (T337c review, 2026-09-11)
+LONG_READ = "Review the schema change before the rest: it touches the export path, and the retry budget now sits in the README beside the jitter cap of two minutes."
 
 
-# The world: eleven cards, every kind and every state, among them one legacy card with no kind and one parked card with a
+# The world: twelve cards, every kind and every state, among them one legacy card with no kind and one parked card with a
 # fold. Bodies are invented notes-api chatter.
 def world(t0):
     msgs = {
@@ -118,6 +121,7 @@ def world(t0):
         "out-bounced": ("web", WEB, "delegate", "Take the cap decision and write it down in the README."),
         "out-recalled": ("web", WEB, "coordinate", "Ignore my last note, wrong thread."),
         "out-nokind": ("web", WEB, None, KINDLESS),
+        "out-long-read": ("web", WEB, "coordinate", LONG_READ),
     }
     log, recs = [], []
     t = t0
@@ -145,6 +149,8 @@ def world(t0):
         ("out-recalled", "tests", TESTS, "Delivered to 'tests'.", False,
          [lambda t: {"t": t + 40, "ev": "recall", "id": "out-recalled"}]),
         ("out-nokind", "api", API, "Delivered to 'api'.", False, []),   # a legacy send: no kind anywhere, an icon all the same
+        ("out-long-read", "api", API, "Delivered to 'api'.", False,
+         [lambda t: {"t": t + 20, "ev": "exec", "id": "out-long-read"}]),   # landed, read, and boxed by its fold
     ]
     for i, (mid, to_name, to_id, result, err, later) in enumerate(outs):
         t += 60
@@ -170,6 +176,12 @@ catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
 const measure = () => page.evaluate(() => {
   const probe = document.createElement("div"); probe.style.background = "var(--box-bg)"; document.body.appendChild(probe);
   const boxBg = getComputedStyle(probe).backgroundColor; probe.remove();
+  // an oklch() relative colour (the incoming card's tint, T337b) comes back as oklch(...) from getComputedStyle; the
+  // contrast arithmetic below reads rgb, so a 1x1 canvas resolves it (an rgba() carrying alpha is left as it is)
+  const asRGB = (css) => { if (!/^(oklch|oklab|color)\(/.test(css) || /\//.test(css)) return css;
+    const cv = document.createElement("canvas"); cv.width = cv.height = 1; const ctx = cv.getContext("2d");
+    ctx.fillStyle = css; ctx.fillRect(0, 0, 1, 1); const d = ctx.getImageData(0, 0, 1, 1).data;
+    return "rgb(" + d[0] + ", " + d[1] + ", " + d[2] + ")"; };
   const cards = Array.from(document.querySelectorAll(".turn-postal-service")).map((t) => {
     const n = t.querySelector(".notice");
     const kind = t.querySelector(".postal-kind");
@@ -219,7 +231,7 @@ const measure = () => page.evaluate(() => {
       peerText: peer ? peer.textContent : null, peerBg: peer ? getComputedStyle(peer).backgroundColor : null,
       selfText: self ? self.textContent : null, selfBg: self ? getComputedStyle(self).backgroundColor : null,
       selfWidth: self ? Math.round(self.getBoundingClientRect().width) : null,
-      bg: cs.backgroundColor, border: cs.borderTopStyle, provisional: n.classList.contains("queued-bubble"),
+      bg: asRGB(cs.backgroundColor), border: cs.borderTopStyle, provisional: n.classList.contains("queued-bubble"),
       opacity: cs.opacity,   // T337: the provisional dress fades by its colours, never by an element opacity
       // the provisional dress at either density: the card's max-width as computed, and the box it actually takes
       maxWidth: cs.maxWidth, width: Math.round(n.getBoundingClientRect().width),
@@ -343,7 +355,7 @@ class ServedPostalCards(unittest.TestCase):
         proj = os.path.join(claude, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd)))
         os.makedirs(proj, exist_ok=True)
         Path(proj, WEB + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
-        cls.count = 11
+        cls.count = 12
         cls.port, cls.token = _free_port(), "testtok-postal"
         env = _lab.kernel_env(cls.lab, claude, dist, cls.port, cls.token, ROMP_HOST_NAME="TESTHOST")
         cls.klog = os.path.join(cls.lab, "kernel.log")
@@ -382,7 +394,7 @@ class ServedPostalCards(unittest.TestCase):
         r = json.loads(line[len("RESULT:"):])
         wide, narrow, phone, light = r["1000"], r["520"], r["340"], r["light"]
         cards = wide["cards"]
-        self.assertEqual(len(cards), 11, cards)
+        self.assertEqual(len(cards), 12, cards)
         by = {c["gist"][:24]: c for c in cards}
         def card(prefix):
             m = [c for c in cards if c["gist"].startswith(prefix)]
@@ -452,14 +464,15 @@ class ServedPostalCards(unittest.TestCase):
         self.assertEqual(card("Take the cap decision")["mark"]["paths"], 2, "bounced keeps the cross")
         self.assertEqual(card("Ignore my last note")["mark"]["paths"], 2, "recalled keeps the return arrow")
         self.assertIn("isolated", card("Take the cap decision")["title"], "a bounce carries its reason")
-        # (3) both ends, each in its session's colour; no wash; boxed vs slim
+        # (3) both ends, each in its session's colour; the incoming card's tint in the peer's hue (the user 2026-09-11,
+        # restoring what T302 removed the day before); boxed vs slim
         for c in cards:
             self.assertTrue(c["peerText"], c)
             self.assertTrue(c["selfText"] and "web" in c["selfText"], "this session's own end: %r" % c)
             self.assertEqual(c["selfBg"], "rgb(156, 210, 255)", "web's own colour on its chip: %r" % c)
             if c["dir"] == "in":
                 self.assertTrue(c["boxed"] and not c["slim"], "incoming is boxed: %r" % c)
-                self.assertEqual(c["bg"], wide["boxBg"], "no wash: the box is the plain box colour: %r" % c)
+                self.assertNotEqual(c["bg"], wide["boxBg"], "the tint: the peer's hue on the ground, never the plain box: %r" % c)
                 if not c["collapsible"]:
                     self.assertEqual(c["gistWrap"], "normal", "a boxed one-liner with nothing to fold wraps, never an ellipsis with nothing behind it: %r" % c)
             else:
@@ -467,6 +480,21 @@ class ServedPostalCards(unittest.TestCase):
             self.assertFalse(c["selfDot"], "the own chip wears no working dot: %r" % c)
         self.assertEqual(card("Take the retry-loop")["peerBg"], "rgb(30, 161, 235)", "api's colour on its chip")
         self.assertEqual(card("Heads-up")["peerBg"], "rgb(84, 178, 4)", "tests' colour on its chip")
+        # the tint is the PEER's hue: two peers' incoming cards wear two grounds, in both themes, and a landed sent card none
+        for m, name in ((wide, "dark"), (light, "light")):
+            grounds = {}
+            landed_boxed = 0
+            for c in m["cards"]:
+                if c["dir"] == "in":
+                    self.assertNotEqual(c["bg"], m["boxBg"], "%s: the incoming card is tinted: %r" % (name, c))
+                    grounds.setdefault(c["peerText"], set()).add(c["bg"])
+                elif c["boxed"] and not c["provisional"]:
+                    landed_boxed += 1
+                    self.assertEqual(c["bg"], m["boxBg"], "%s: a landed boxed sent card keeps the plain box: %r" % (name, c))
+            self.assertGreaterEqual(landed_boxed, 1, "%s: the fixture holds a landed boxed sent card, so the branch above runs" % name)
+            self.assertGreaterEqual(len(grounds), 2, "%s: two peers seen: %r" % (name, grounds))
+            self.assertTrue(all(len(v) == 1 for v in grounds.values()), "%s: one ground per peer: %r" % (name, grounds))
+            self.assertEqual(len({next(iter(v)) for v in grounds.values()}), len(grounds), "%s: each peer its own ground: %r" % (name, grounds))
         # (amendment) the provisional dress: the pending send's own class on the not-yet-landed sent cards only
         prov = {c["gist"][:20]: c["provisional"] for c in cards}
         self.assertTrue(card("Please run the whole")["provisional"], "parked → provisional")
@@ -495,7 +523,7 @@ class ServedPostalCards(unittest.TestCase):
         # (phone) under the 360 px container query the head WRAPS (T313): the two ends keep the first line; the kind word
         # and the icon stay on it when they fit and otherwise move to the next line as one unit; the gist comes last on its
         # own full-width line and breaks by words, never into a letter column — every card, slim, boxed and provisional
-        self.assertEqual(len(phone["cards"]), 11, phone["cards"])
+        self.assertEqual(len(phone["cards"]), 12, phone["cards"])
         for c in phone["cards"]:
             self.assertFalse(c["kindClipped"], "at 340 px the kind word is whole: %r" % c)
             self.assertEqual(c["headWrap"], "wrap", "the head wraps at phone width: %r" % c)

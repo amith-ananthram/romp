@@ -55,8 +55,9 @@ test("the feed dot matches too: dotFor picks work/await per name, the dot retint
   assert.match(FEED, /else if \(st && has\) paint\(prev!\);/);
   assert.match(FEED, /d\.classList\.toggle\(k, st === k\);/);
   // every name-dot site routes through dotFor: cards, group cards, both modal headers, grouped
-  // headers, and the session-filter button (2026-08-08; its menu rows route via setWorkDot(label,…))
-  assert.equal((FEED.match(/setWorkDot\((?:a\._name|agent|nm), dotFor\(/g) || []).length, 6);
+  // headers, the session-filter button (2026-08-08; its menu rows route via setWorkDot(label,…)), and the
+  // focused-session section's head (T347)
+  assert.equal((FEED.match(/setWorkDot\((?:a\._name|agent|nm), dotFor\(/g) || []).length, 7);
   assert.match(FEEDCSS, /\.fwork-dot\.await \{ background: #54B204; \}/);
   assert.match(FED, /const ARRAY_ID = \["order", "names", "working", "awaiting", "stateUnknown", "live", "skeleton"\];/);   // + the tabOrder frame's live set (T258) + skeleton (2026-09-07: the reconnect strip's not-yet-loaded tabs ride the merged order)
   assert.match(FED, /if \(Array\.isArray\(f\.awaiting\)\) merged\.awaiting\.push\(\.\.\.f\.awaiting\);/);

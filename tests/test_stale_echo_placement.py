@@ -309,6 +309,25 @@ class StaleEchoPlacement(unittest.TestCase):
         self.assertEqual(km._last_plain_user_turn_t(merged["turns"]), T_DAY2 + 7 * 3600 + 300, "the later day's real prompt, not an echo")
         self.assertEqual(km._last_plain_user_turn_t([merged["turns"][1]]), 0, "an echo's own turn is no prompt turn")
 
+    def test_two_echoes_into_one_turns_window_land_in_one_copy_and_the_placement_returns(self):
+        # the live regression of 2026-09-11 (every feed build failed on a session with two such echoes): the
+        # second echo into the same turn re-copied it, the destinations kept the first copy, and the index
+        # lookup at the end raised KeyError. Each turn is copied once; both echoes sit in that one copy.
+        turns = _two_days()
+        e1 = _echo(T_DAY1 + 22 * 3600 + 20, key="echo:" + "aa" * 16)
+        e2 = _echo(T_DAY1 + 22 * 3600 + 40, key="echo:" + "bb" * 16, dropped=True)
+        placed_turns, placed = km._place_stale_echoes(turns, [e1, e2])
+        self.assertEqual([a["uuid"] for a in placed_turns[0]["atoms"]], ["u1", e1["uuid"], e2["uuid"], "a1"])
+        self.assertEqual(placed, ((0, e1["uuid"], False), (0, e2["uuid"], True)))
+        self.assertEqual(placed_turns[0].get("placedEchoes"), [e1["uuid"], e2["uuid"]])
+        self.assertIsNot(placed_turns[0], turns[0], "…in a copy, the parse's turn untouched")
+        self.assertEqual([a["uuid"] for a in turns[0]["atoms"]], ["u1", "a1"])
+        # the whole merge, with a third echo in the gap after that turn: every destination resolves
+        gap = _echo(T_DAY1 + 22 * 3600 + 28 * 60, key="echo:" + "cc" * 16)
+        merged, _ = self._merge(_two_days(), [e1, e2, gap])
+        self.assertEqual([t["id"] for t in merged["turns"]][::2], ["t1", "t2"])
+        self.assertEqual(merged["_placed"], ((0, e1["uuid"], False), (0, e2["uuid"], True), (1, gap["uuid"], False)))
+
     def test_the_parse_object_is_not_mutated(self):
         turns = _two_days()
         before = [(t["id"], len(t["atoms"])) for t in turns]
