@@ -44,7 +44,7 @@ const dist = (x: { L: number; a: number; b: number }, y: { L: number; a: number;
 // beside the tokens says the same
 const MAPS = {
   dark: { block: ":root {", hue: 244, from: { L: 0.65, C: 0.1 }, to: { L: 0.85, C: 0.078 } },
-  light: { block: "body.theme-light {", hue: 38, from: { L: 0.5, C: 0.11 }, to: { L: 0.3, C: 0.1 } },
+  light: { block: "body.theme-light {", hue: 38, from: { L: 0.5, C: 0.11 }, to: { L: 0.3, C: 0.098 } },   // C .098 is the hue's gamut edge at L .30
 };
 const STEPS = ["--postal-coordinate", "--postal-delegate", "--postal-question"];
 
@@ -62,6 +62,11 @@ for (const [theme, map] of Object.entries(MAPS)) {
     // even: the two lightness steps match
     const d1 = steps[1].L - steps[0].L, d2 = steps[2].L - steps[1].L;
     assert.ok(Math.abs(d1 - d2) <= 0.012, `${theme}: uneven steps ${d1.toFixed(3)} vs ${d2.toFixed(3)}`);
+    // the span may not shrink further: the two floors (the provisional wash below, the prose ink above) already squeeze
+    // the dark line to .20 of lightness, about T320's .19, so the three steps' separation rests on the chroma gradient
+    // (the deep step the most saturated, the far step the palest) and on the hue held; a wider spread would have to
+    // spend hue, which is the user's call, not a re-ink's
+    assert.ok(Math.abs(steps[2].L - steps[0].L) >= 0.19, `${theme}: the tokens span ${Math.abs(steps[2].L - steps[0].L).toFixed(3)} of lightness, below the .19 floor`);
     // the far end keeps its distance from the prose ink (--fg): a lone Question is a colour, not body text. The dark end
     // sits at the ink's own lightness, so its distance is all chroma, the hue's gamut edge there; .075 is just under it
     const gap = dist(oklab(token(b, "--postal-question")), oklab(token(b, "--fg")));
@@ -71,7 +76,7 @@ for (const [theme, map] of Object.entries(MAPS)) {
 
 test("the comment beside the tokens names the same two endpoints, and the tokens hold their theme's accent hue", () => {
   assert.match(CSS, /L \.65, C \.10[\s\S]{0,500}L \.85, C \.078/, "the dark line's two endpoints, in the :root comment");
-  assert.match(CSS, /L \.50, C \.11[\s\S]{0,300}L \.30, C \.10/, "the light line's two endpoints, in the light comment");
+  assert.match(CSS, /L \.50, C \.11[\s\S]{0,300}L \.30, C \.098/, "the light line's two endpoints, in the light comment");
   assert.match(CSS, /hue pinned\s+at the accent's 244/);
   assert.match(CSS, /The trade-off is span against distance from the ink/, "the comment states the trade-off the far end makes");
   assert.match(CSS, /reads at 4\.5:1 on the PROVISIONAL card, the darkest ground a kind word sits on/, "the comment names the wash as the floor, not the box");

@@ -246,7 +246,7 @@ body.theme-light {
   --box-border: rgba(0, 0, 0, 0.12);
   /* the kind ramp (T320, T337): the accent's clay hue (OKLCH 38) deepening with rank, sampled evenly along the line
      from L .50, C .11 (the same first step as T320, the lightest clay that reads at 4.5:1 on the provisional wash) to
-     L .30, C .10 (a deep rust that stays red, short of the prose ink --fg at L .236: 0.118 from it in OKLab); 5.3:1, 8.1:1 and 11.8:1
+     L .30, C .098 (the hue's gamut edge there; a deep rust that stays red, short of the prose ink --fg at L .236: 0.118 from it in OKLab); 5.3:1, 8.1:1 and 11.8:1
      on the cream page, 4.9:1, 7.6:1 and 11.1:1 on a boxed card, 4.8:1, 7.3:1 and 10.7:1 on the provisional wash */
   --postal-coordinate: #974a32;  --postal-delegate: #752f18;  --postal-question: #551400;
   --err: #B02A1C;
@@ -1437,8 +1437,8 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 /* a remote session's "host:" on either chip sits on that shared backing, which is the same in both themes,
    so its colour is too: the global .host-prefix rule's var(--dim) is tuned for the page, and the light
    theme's dim (#5D574E) reads about 2.2 to 2.7:1 on this backing. White at 0.7 alpha reads 9.1:1 on the
-   Awaiting chip and 9.5:1 on the user bubble, the same in both themes (a queued bubble's 0.85 opacity dims the
-   whole chip alike, and the prefix still clears 4.5:1 there), and stays visibly quieter than the #fff peer name
+   Awaiting chip and 9.5:1 on the user bubble, the same in both themes (a queued bubble fades by its text ink, not
+   by an element opacity, so a chip inside it keeps this backing whole: T337), and stays visibly quieter than the #fff peer name
    and the identity-coloured mention name. Not color: inherit (.fileview-sess's idiom): on the mention chip that
    is the identity colour, and the palette's darker swatches are already the faintest text on this backing. */
 .chip-peer-name .host-prefix, .mention-chip .host-prefix { color: rgba(255, 255, 255, 0.7); }
@@ -2045,8 +2045,9 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    undiscoverable and re-render-fragile). The bubble itself is no longer clickable; only the ✕ acts. It sits
    in the top-right corner (the bubble reserves padding for it) — dim until the bubble is hovered, red on
    its own hover, matching the "remove" reading everywhere else. */
-.queued-bubble.cancelable { position: relative; padding-right: 30px; transition: opacity .1s, border-color .1s, background .1s; }
-.queued-bubble.cancelable:hover { opacity: 1; border-color: var(--accent); }
+.queued-bubble.cancelable { position: relative; padding-right: 30px; transition: color .1s, border-color .1s, background .1s; }
+.queued-bubble.cancelable:hover { --prov-ink: var(--fg); border-color: var(--accent); }   /* hovered, the words lift to full ink
+   (the old opacity lift, now that the fade is the ink: T337) */
 .queued-x {
   position: absolute; top: 3px; right: 4px; width: 20px; height: 20px;
   display: flex; align-items: center; justify-content: center;
@@ -2069,7 +2070,7 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    width, the dashed provisional look kept, the ✕ still in its corner — with Save and Cancel under the text. The field
    inherits the bubble's type; the buttons and the labels wear the queued header's 0.82em. A bubble another client is
    editing reads "editing" beside its text; a refused edit says why on its own line. */
-.queued-bubble.editing { opacity: 1; border-color: var(--accent); padding-right: 52px; box-sizing: border-box; }   /* the width set from the measured bubble is its border box; the idle padding kept, so the words keep their wrap (the ✎'s room stays empty) */
+.queued-bubble.editing { --prov-ink: var(--fg); border-color: var(--accent); padding-right: 52px; box-sizing: border-box; }   /* full ink while editing (the old opacity lift, now the ink: T337); the width set from the measured bubble is its border box; the idle padding kept, so the words keep their wrap (the ✎'s room stays empty) */
 .queued-editor { display: flex; flex-direction: column; gap: 6px; }
 .queued-editbox {
   width: 100%; box-sizing: border-box; display: block; resize: none; overflow: hidden;
@@ -2087,7 +2088,8 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 /* A notice romp itself queued (T243) wears the LANDED romp notice card nested inside the queued bubble: the
    dashed "you" dress comes off the wrapper (the card brings its own gray tone), and the ✕ moves inside the
    card's corner so it reads as the card's control. */
-.queued-bubble.queued-romp { background: transparent; border: 0; padding: 0; opacity: 1; }
+.queued-bubble.queued-romp { background: transparent; border: 0; padding: 0; --prov-ink: var(--fg); }   /* the nested card's
+   gist reads at the landed card's full ink, not the dress's faded ink (T337) */
 .queued-bubble.queued-romp.cancelable { padding-right: 0; }
 .queued-bubble.queued-romp.cancelable:hover { border-color: transparent; }
 .queued-bubble.queued-romp > .notice { margin-top: 0; }
