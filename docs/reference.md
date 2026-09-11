@@ -1321,8 +1321,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   since a wake set by another thread or a periodic repost of an unchanged
   frame marks a cycle busy).
 - `checkpoints`: the folds' checkpoints since boot: `restored` (files whose
-  folds resumed from one), `writes`, `swept` (checkpoints of vanished files
-  removed at boot), `skippedFolds` (fold states the codec could not encode),
+  folds resumed from one), `restoredFolds` (restores per fold name), `writes`,
+  `swept` (checkpoints of vanished files removed at boot), `skippedFolds`
+  (fold states the codec could not encode),
   `fallbacks` per reason (`version`, `path`, `shrunk`, `guard`, `rewrite`,
   `corrupt`), `dirty` (files whose folds moved since their last write),
   `readBytes` and `readByPath` (what the JSONL reader pulled off disk since
