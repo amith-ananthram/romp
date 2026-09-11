@@ -306,7 +306,7 @@ class TmuxBusyFromHookState(unittest.TestCase):
     now and before _push_all refreshes the cache, so the stale read was the common case, not a corner.
 
     The row is not trusted alone (review find on this change's first cut): Claude Code fires NO hook on an
-    Esc-interrupt, so an interrupted session's row reads working until romp-idle-dots heals it minutes later
+    Esc-interrupt, so an interrupted session's row reads working until the next pane prompt
     — every send after a Stop would have parked. busy() corroborates by EVENT ORDER: when the cached parse
     matches the file on disk and the last turn's newest record is NEWER than the row's since, the transcript
     spoke after the hook and its verdict wins; otherwise the hook's does. compacting is no answer at all —

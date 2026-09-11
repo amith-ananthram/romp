@@ -37,9 +37,9 @@ exit 0
 MOCK
     chmod +x "$MOCK_DIR/tmux"
 
-    # ── Mock romp-idle-dots ────────────────────────────────────────────
-    # The hook ensures the idle-dot watcher when a session goes idle; mock it so
-    # the test captures the call without spawning the real (forking) daemon.
+    # ── Tripwire romp-idle-dots ────────────────────────────────────────
+    # The tmux-only idle-dot watcher went with the tmux backend's dead leaves (2026-09-11); a
+    # stand-in on PATH logs any call the hook still makes, so the no-watcher test can fail.
     cat > "$MOCK_DIR/romp-idle-dots" << 'MOCK'
 #!/usr/bin/env bash
 echo "romp-idle-dots $*" >> "$MOCK_LOG"
@@ -202,24 +202,18 @@ run_hook() {
     grep -q '@romp-emoji 🔵' "$MOCK_LOG"
 }
 
-# ─── Idle-dot watcher tests (fades the tab dot to ⚪ after 1h idle) ───
+# ─── No timer-side watcher: the tmux-only healer (romp-idle-dots) went with the tmux backend's
+# dead leaves, 2026-09-11. The hook must not shell out for it on any event. ───
 
-@test "Stop ensures the idle-dot watcher (session just went idle)" {
+@test "no event spawns the retired idle-dot watcher" {
     run run_hook '{"hook_event_name":"Stop","cwd":"/tmp"}'
     [ "$status" -eq 0 ]
-    grep -q 'romp-idle-dots --ensure' "$MOCK_LOG"
-}
-
-@test "idle_prompt ensures the idle-dot watcher" {
     run run_hook '{"hook_event_name":"Notification","notification_type":"idle_prompt","cwd":"/tmp"}'
     [ "$status" -eq 0 ]
-    grep -q 'romp-idle-dots --ensure' "$MOCK_LOG"
-}
-
-@test "working does NOT ensure the watcher (high-frequency path stays cheap)" {
-    run run_hook '{"hook_event_name":"PostToolUse","cwd":"/tmp"}'
+    run run_hook '{"hook_event_name":"UserPromptSubmit","cwd":"/tmp"}'
     [ "$status" -eq 0 ]
-    ! grep -q 'romp-idle-dots' "$MOCK_LOG"
+    run grep -q 'romp-idle-dots' "$MOCK_LOG"
+    [ "$status" -ne 0 ]
 }
 
 # ─── Unknown event test ──────────────────────────────────────────────

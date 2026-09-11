@@ -78,11 +78,33 @@ fi
 
 mkdir -p "$HOME/.claude/hooks" "$HOME/.claude/skills"
 
-for h in romp-summarize.sh romp-postal-drain.sh romp-postal-ensure.sh \
+for h in romp-postal-drain.sh romp-postal-ensure.sh \
          romp-postal-revive.sh romp-postal-context.sh romp-wake.sh tmux-status.sh; do
     ln -sf "$ROMP_DIR/hooks/$h" "$HOME/.claude/hooks/$h"
 done
 echo "  Symlinked romp hooks into ~/.claude/hooks/"
+
+# Retired hooks. hooks/romp-summarize.sh (the live tmux phrase, off by default since 2026-07-24)
+# left the repo 2026-09-11 with the tmux backend's dead leaves. An install from before still has
+# the symlink, now dangling, and Claude Code would shell the missing path on every prompt and every
+# turn end; upgrading removes the link. Only ever a SYMLINK, and only one install.sh could have
+# written: a link into THIS checkout's hooks/ (the manager-skill retirement below matches the same
+# way), or a link of that shape into a checkout that has since moved or gone, which is dangling. A
+# link to someone's own LIVE script of that name (their dotfiles) is theirs and stays.
+for h in romp-summarize.sh; do
+    if [ -L "$HOME/.claude/hooks/$h" ]; then
+        _rh_target="$(readlink "$HOME/.claude/hooks/$h")"
+        _rh_gone=""
+        case "$_rh_target" in
+            "$ROMP_DIR"/hooks/"$h") _rh_gone=1 ;;
+            */hooks/"$h") [ -e "$HOME/.claude/hooks/$h" ] || _rh_gone=1 ;;
+        esac
+        if [ -n "$_rh_gone" ]; then
+            rm -f "$HOME/.claude/hooks/$h"
+            echo "  Removed the retired $h hook link"
+        fi
+    fi
+done
 
 # Install the git pre-push identifier hook. Symlinked into the SHARED git hooks
 # dir (git rev-parse --git-common-dir), so it fires from every worktree; the hook
@@ -107,7 +129,9 @@ fi
 
 # Register the hooks in ~/.claude/settings.json so Claude Code actually fires
 # them. Idempotent merge: adds only missing romp entries, never touches any
-# other hooks you have registered.
+# other hooks you have registered. Retired romp hooks (RETIRED below) are
+# de-registered on the way, so an upgrade never leaves Claude Code calling a
+# path this repo no longer ships.
 python3 - <<'PYEOF'
 import json, os
 
@@ -118,11 +142,9 @@ WANT = {  # event -> [(hook script, timeout secs, async)]
                          ("romp-postal-revive.sh", 8, False),
                          ("romp-postal-context.sh", 5, False)],  # romp sessions: load the romp-postal skill
     "UserPromptSubmit": [("tmux-status.sh", 5, False),
-                         ("romp-summarize.sh", 10, True),
                          ("romp-wake.sh", 5, True)],     # poke the kernel → judges run NOW, not on the 20s tick
     "PostToolUse":      [("tmux-status.sh", 5, False)],
     "Stop":             [("tmux-status.sh", 5, False),
-                         ("romp-summarize.sh", 10, True),
                          ("romp-postal-drain.sh", 10, False),
                          ("romp-wake.sh", 5, True)],     # turn ended → wake the producer immediately
 
@@ -140,6 +162,36 @@ except FileNotFoundError:
     settings = {}
 hooks = settings.setdefault("hooks", {})
 
+# Hooks this repo no longer ships (retired 2026-09-11 with the tmux backend's dead leaves). An
+# install from before registered them; drop those entries wherever they sit, matched on the exact
+# command string install.sh once wrote. Only a group OUR removal emptied is dropped, and only an
+# event our removal left with no groups, so no `"Stop": [{"hooks": []}]` litter is left behind
+# while a user's own empty or matcher-only group, on any event, stays exactly as found.
+RETIRED = {"romp-summarize.sh"}
+removed = []
+for event in list(hooks):
+    kept, touched = [], False
+    for g in (hooks.get(event) or []):
+        keep, hit = [], False
+        for h in g.get("hooks", []):
+            cmd = h.get("command", "")
+            if cmd.startswith("~/.claude/hooks/") and cmd.rsplit("/", 1)[-1] in RETIRED:
+                removed.append(event + ":" + cmd.rsplit("/", 1)[-1])
+                hit = True
+            else:
+                keep.append(h)
+        if hit:
+            touched = True
+            if not keep:
+                continue                                # a group we emptied goes
+            g["hooks"] = keep
+        kept.append(g)
+    if touched:
+        if kept:
+            hooks[event] = kept
+        else:
+            hooks.pop(event, None)                      # an event we emptied goes
+
 added = []
 for event, entries in WANT.items():
     groups = hooks.setdefault(event, [])
@@ -156,10 +208,13 @@ for event, entries in WANT.items():
             {"type": "command", "command": cmd, "timeout": timeout, "async": is_async})
         added.append(event + ":" + name)
 
-if added:
+if added or removed:
     with open(SETTINGS, "w") as f:
         json.dump(settings, f, indent=2)
         f.write("\n")
+if removed:
+    print("  De-registered retired hooks in ~/.claude/settings.json: " + ", ".join(removed))
+if added:
     print("  Registered in ~/.claude/settings.json: " + ", ".join(added))
 else:
     print("  Hooks already registered in ~/.claude/settings.json")
