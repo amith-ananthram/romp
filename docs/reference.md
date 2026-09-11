@@ -589,6 +589,8 @@ and their memory limits, the perf log), never a key. The service reads the file
 at manager startup, so a change needs a manager restart. `ROMP_SERVICE_ENV_FILE`
 overrides the file's path.
 
+The installed unit also sets `MALLOC_ARENA_MAX=2` for the manager and every kernel it spawns (2026-09-11): the kernel is a many-threaded Python process that rebuilds large record lists, and the allocator's per-thread arenas kept hundreds of megabytes of freed memory between restarts; two arenas return it. A line in `service.env` overrides it.
+
 Romp holds no API key (the user 2026-09-08, who wants romp to hold no key). A
 session's credential is Claude Code's own resolution: the `apiKeyHelper` in its
 settings (the helper) for a key, the login otherwise. Romp injects no credential

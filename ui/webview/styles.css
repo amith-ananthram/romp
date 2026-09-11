@@ -107,6 +107,11 @@ body.scheme-solarized-dark {
      postal-kind-ramp.test.ts holds the positions and the distance from the ink, theme-parity.test.ts the contrast on
      all three grounds. */
   --postal-coordinate: #5696c8;  --postal-delegate: #7cb5e3;  --postal-question: #a2d4fe;
+  --postal-wash-l: 0.263;  --postal-wash-c: 0.03;   /* the incoming card's tint: the peer's hue at the box ground's own
+                                                       OKLab lightness (the page under the 3% box), a gentle chroma (T337b).
+                                                       The lightness here is the shipped theme's FALLBACK: the chat measures
+                                                       the real ground at run time and writes the token on the body
+                                                       (postal-wash.ts), since --bg is host-derived in the webview (T337c) */
   /* THE romp accent — light blue (the user 2026-06-24). Use var(--accent) for accent/highlight chrome
      (selected toggles, in-progress loading dots, the Fleet pill, focus) — NOT for STATUS colors, which keep
      their own meaning (--st-working-bg yellow = working, --st-blocked-bg red, etc.). --accent-fg reads on it. */
@@ -251,6 +256,9 @@ body.theme-light {
      L .30, C .098 (the hue's gamut edge there; a deep rust that stays red, short of the prose ink --fg at L .236: 0.118 from it in OKLab); 5.3:1, 8.1:1 and 11.8:1
      on the cream page, 4.9:1, 7.6:1 and 11.1:1 on a boxed card, 4.8:1, 7.3:1 and 10.7:1 on the provisional wash */
   --postal-coordinate: #974a32;  --postal-delegate: #752f18;  --postal-question: #551400;
+  --postal-wash-l: 0.919;  --postal-wash-c: 0.045;  /* the cream under the 3% box; a stronger chroma: the cream's own hue
+                                                       (71) sits near a warm peer's, and at .03 that tint read at less than half
+                                                       a cool one's distance from the ground (T337c, the review of 2026-09-11) */
   --err: #B02A1C;
   --accent: #C2410C; --accent-fg: #FFF8F2;
   --accent-wash: rgba(194, 65, 12, 0.10);
@@ -2540,6 +2548,22 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    container, not the head: a container query resolves against an element's ANCESTORS, so a rule on the head could
    never query the head's own size (the head-as-container of T302 served only the gist, its child). */
 .turn-postal-service .notice { container-type: inline-size; }
+/* the INCOMING card's TINT (the user 2026-09-11, who missed it): the peer's identity colour, which is the card's rail, as a
+   HUE on the card's own ground: an oklch relative colour, the rail's hue at the box ground's lightness (--postal-wash-l,
+   per theme) and a gentle chroma (--postal-wash-c). History: a 6% mix of the peer's colour over the ground left with T302
+   on 2026-09-10, when a side-by-side ruling read it as this session's colour; the day after, the user asked where the
+   tint had gone and ruled it back. Not the old mix, on purpose: a mix LIFTS a dark ground toward a light peer's colour
+   (and darkens a light one toward a dark peer's), and the dimmest kind word then read under the 4.5:1 floor the kind
+   ramp holds on its ground (T320: 4.38:1 on a green peer's mix), while the ramp's own two floors (postal-kind-ramp.test.ts)
+   leave its deep end no room to move; on a hue at the ground's own lightness every kind word stays above 4.5:1 for every
+   hue, measured (the worst, the dark coordination word, 4.75:1; OKLab lightness is not WCAG luminance, so the ratio moves
+   by up to a third of a point across the hues). One declaration, so a further ruling is one line either way. The sent
+   card keeps its slim line and the provisional dress, untinted. The tokens carry fallbacks: `background` is a shorthand,
+   and a missing token would have made the declaration invalid at computed-value time and the card lose its ground.
+   oklch(from ...) needs Chromium 119 (VS Code from Electron 28): an older host drops the declaration at parse time and
+   the plain box shows, never a transparent card (T337c). */
+.turn-postal-service.postal-service-in .notice:not(.notice-slim) {
+  background: oklch(from var(--notice-rail, var(--box-bg)) var(--postal-wash-l, 0.263) var(--postal-wash-c, 0.03) h); }
 /* the postal meta never shrinks, and it GROWS to the head's right edge: it holds the kind word and, after it, the
    delivery icon (margin-left auto inside it), so the icon sits at the edge as before and, when a phone-width head
    wraps, the kind word and the icon move to the next line as ONE unit (T313) */

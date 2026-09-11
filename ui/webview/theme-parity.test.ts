@@ -43,6 +43,16 @@ function lum(rgb: [number, number, number]): number {
   const ch = (c: number) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
   return 0.2126 * ch(rgb[0]) + 0.7152 * ch(rgb[1]) + 0.0722 * ch(rgb[2]);
 }
+/** OKLCH (L 0..1, C, hue in degrees) to sRGB channels 0..255, clamped to the gamut: the tinted ground of an incoming card. */
+function oklchToRgb(L: number, C: number, hDeg: number): [number, number, number] {
+  const h = (hDeg * Math.PI) / 180, a = C * Math.cos(h), b = C * Math.sin(h);
+  const l_ = L + 0.3963377774 * a + 0.2158037573 * b, m_ = L - 0.1055613458 * a - 0.0638541728 * b, s_ = L - 0.0894841775 * a - 1.2914855480 * b;
+  const l = l_ ** 3, m = m_ ** 3, s = s_ ** 3;
+  const lin = [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s, -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+               -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s];
+  return lin.map((c) => { c = Math.max(0, Math.min(1, c)); const v = c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055; return Math.round(v * 255); }) as [number, number, number];
+}
+
 function contrast(a: [number, number, number], b: [number, number, number]): number {
   const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
   return (hi + 0.05) / (lo + 0.05);
@@ -133,6 +143,23 @@ for (const sheet of ["styles.css", "feed.css"]) {
         for (const tok of ["--postal-coordinate", "--postal-delegate", "--postal-question"]) {
           const fore = rgbOf(theme.get(tok)!, wash)!;
           assert.ok(contrast(fore, wash) >= 4.5, `${sheet} ${name}: ${tok} on the provisional wash = ${contrast(fore, wash).toFixed(2)} < 4.5`);
+        }
+      }
+      // T337c: the INCOMING card no longer wears --box-bg but the peer's hue at the ground's lightness (styles.css: an oklch
+      // relative colour from the rail, the tokens --postal-wash-l and --postal-wash-c), a different ground for every peer;
+      // each kind word reads at 4.5:1 there for EVERY hue (the sent boxed card still wears --box-bg: those pairs stand)
+      if (sheet === "styles.css") {
+        const L = parseFloat(theme.get("--postal-wash-l")!), C = parseFloat(theme.get("--postal-wash-c")!);
+        assert.ok(L > 0 && L < 1 && C > 0, `${sheet} ${name}: the wash tokens parse (${L}, ${C})`);
+        for (const tok of ["--postal-coordinate", "--postal-delegate", "--postal-question"]) {
+          let worst = Infinity, worstHue = -1;
+          for (let h = 0; h < 360; h++) {
+            const ground = oklchToRgb(L, C, h);
+            const fore = rgbOf(theme.get(tok)!, ground)!;
+            const c = contrast(fore, ground);
+            if (c < worst) { worst = c; worstHue = h; }
+          }
+          assert.ok(worst >= 4.5, `${sheet} ${name}: ${tok} on the tinted ground = ${worst.toFixed(2)} at hue ${worstHue} < 4.5`);
         }
       }
       assert.ok(evaluated >= expected,
