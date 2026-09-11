@@ -25140,6 +25140,7 @@ def _bg_tasks(path, spawned_at=None, live=None):
 # (mtime, size) keys, the transcript's own launch↔notification pairing, and the SDK's live sets.
 _AGENT_ID_RE = re.compile(r"^a[0-9a-f]{16}$")
 _SUBAGENT_META_CACHE = {}       # subagents dir -> (dir mtime_ns, {toolUseId: {agentId, agentType, description, spawnDepth}})
+_SUBAGENT_FILE_CACHE = {}       # (parent transcript, agentId) -> (the tree's stamps, the agent file's path or None): the walk, once per change
 _AGENT_GIST_CACHE = {}          # agent jsonl path -> em.fold_records entry (the Agent head's steps fold state)
 _AGENT_LAUNCH_CACHE = {}        # parent jsonl path -> em.fold_records entry (foreground launches + their settles)
 _SUBAGENT_FRAMES = {}           # (sid, agentId) -> (change key, frame, serialized) — shared by every client with it open
@@ -25178,7 +25179,10 @@ def _subagent_meta_map(path):
         _SUBAGENT_META_CACHE.pop(str(d), None)
         _chat_dep_note_taskout(str(d), None)              # a running chat build: the directory's absence is a dependency too
         return {}
-    dirs = _subagent_dirs(str(d)) or [str(d)]
+    dirs = _subagent_dirs(str(d))
+    if not dirs:                                          # a symlinked subagents/ is not this session's tree (never listed)
+        _SUBAGENT_META_CACHE.pop(str(d), None)
+        return {}
     stamps = []
     for sd in dirs:
         try:
@@ -25222,10 +25226,29 @@ def _subagent_meta_map(path):
     return out
 
 
-def _subagent_meta(path, agent_id):
+def _subagent_tree_key(path):
+    """The stamps a resolved agent path stays valid under: the session's own subagents directories' mtimes (a file landing
+    in one moves it) and the project directory's (a sibling fsid's directory appearing moves that). Cheap: one stat per
+    directory under subagents/ plus one, no file listed."""
+    own = _subagents_dir(path)
+    stamps = []
+    for sd in _subagent_dirs(str(own)):
+        try:
+            stamps.append((sd, os.stat(sd).st_mtime_ns))
+        except OSError:
+            pass
+    try:
+        stamps.append(("..", os.stat(Path(str(path)).parent).st_mtime_ns))
+    except OSError:
+        pass
+    return tuple(stamps)
+
+
+def _subagent_meta(path, agent_id, apath=None):
     """One agent's sidecar (agentType, description, spawnDepth, toolUseId) read directly, beside the agent's own file
-    wherever that was found (a workflow agent's sits under workflows/wf_<id>/, T355); {} when absent."""
-    ap = _subagent_file(path, agent_id)
+    wherever that was found (a workflow agent's sits under workflows/wf_<id>/, T355; `apath` when the caller resolved it
+    already, else the memoized resolution); {} when absent."""
+    ap = apath if apath is not None else _subagent_file(path, agent_id)
     mp = (ap.with_name("agent-%s.meta.json" % agent_id) if ap is not None
           else _subagents_dir(path) / ("agent-%s.meta.json" % agent_id))
     try:
@@ -25252,10 +25275,24 @@ def _subagent_file(path, agent_id):
     fork's fsid — the one file of that name anywhere in the project dir, nested or not. None when missing."""
     if not path or not _AGENT_ID_RE.match(str(agent_id or "")):
         return None
+    ckey = (str(path), str(agent_id))
+    tkey = _subagent_tree_key(path)
+    hit = _SUBAGENT_FILE_CACHE.get(ckey)           # the walk once per change of the tree (the pusher asks every cycle per
+    if hit is not None and hit[0] == tkey:          #  open viewer, the chat build once per Agent card): memoized on its stamps
+        return hit[1]
+    found = _subagent_file_walk(path, agent_id)
+    if len(_SUBAGENT_FILE_CACHE) > 1024:
+        _SUBAGENT_FILE_CACHE.clear()
+    _SUBAGENT_FILE_CACHE[ckey] = (tkey, found)
+    return found
+
+
+def _subagent_file_walk(path, agent_id):
+    """_subagent_file's walk itself (no memo)."""
     name = "agent-%s.jsonl" % agent_id
     own = _subagents_dir(path)
     ap = own / name
-    if ap.exists():
+    if os.path.isfile(ap) and not os.path.islink(ap):  # a file, and this tree's own (a symlink at the flat depth is not taken)
         return ap
     nested = _find_agent_file(own, name)
     if nested is not None:
@@ -25535,7 +25572,7 @@ def build_subagent(sid, agent_id, now, live_map=None):
     if apath is None:
         return {**base, "error": "The transcript file for agent %s is missing beside this session's transcript "
                                  "(subagents/agent-%s.jsonl), so it can't be shown." % (agent_id, agent_id)}
-    meta = _subagent_meta(ppath, agent_id)
+    meta = _subagent_meta(ppath, agent_id, apath)
     full = build_session(sid, now, live_map, path_override=str(apath), sidechain=True, meta_path=ppath)
     if not full:
         return {**base, "error": "This session isn't known to romp any more, so its agent can't be shown."}
@@ -25554,7 +25591,7 @@ def _subagent_frame_cached(sid, agent_id, now, live_map=None):
     live_map = _live_map() if live_map is None else live_map
     ppath = _path_of(sid, now)
     apath = _subagent_file(ppath, agent_id) if ppath else None
-    meta = _subagent_meta(ppath, agent_id) if ppath else {}
+    meta = _subagent_meta(ppath, agent_id, apath) if ppath else {}
     running = (_agent_running_for(ppath, meta.get("toolUseId"), agent_id, live_map.get(str(sid)), _sdk_spawned_at(sid))
                if ppath else False)
     key = (ppath, _chat_stat_key(str(apath)) if apath is not None else None, running, bool(meta))

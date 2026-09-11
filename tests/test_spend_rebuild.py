@@ -66,9 +66,10 @@ class SpendRebuild(unittest.TestCase):
                                                  "content": [{"type": "text", "text": "ok"}]}}))
         (self.proj / (sid + ".jsonl")).write_text("\n".join(lines) + "\n")
 
-    def _subagent(self, sid, agent, calls):
-        """A subagent lane's transcript under the session's sidecar folder — same record shape."""
-        d = self.proj / sid / "subagents"
+    def _subagent(self, sid, agent, calls, nested=""):
+        """A subagent lane's transcript under the session's sidecar folder — same record shape; `nested` puts it one level
+        down (a workflow agent's workflows/wf_<id>/)."""
+        d = self.proj / sid / "subagents" / nested if nested else self.proj / sid / "subagents"
         d.mkdir(parents=True, exist_ok=True)
         lines = []
         for off, mid, u, side in calls:
@@ -129,6 +130,18 @@ class SpendRebuild(unittest.TestCase):
         h = self._read()["hours"][self.hour]
         self.assertEqual(h["tokCacheR"], 5000 + 5300 + 1000)
         self.assertEqual(h["bySid"][WEB]["tok"], _tok(U1) + _tok(U2) + _tok(U3), "lanes bill the session that ran them")
+
+    def test_a_workflow_agents_nested_lane_counts_too(self):
+        # Claude Code 2.1.261 writes a workflow agent's transcript under subagents/workflows/wf_<id>/; the flat glob
+        # missed every one, so a recount under-billed exactly the sessions that ran workflows (T355)
+        self._transcript(WEB, [(0, "m1", U1, False)])
+        self._subagent(WEB, "agent-a1", [(20, "s1", U2, True)])
+        self._subagent(WEB, "agent-a2", [(40, "s2", U3, True)], nested="workflows/wf_0123456789abcdef")
+        self._reg(WEB, "web")
+        self._ledger({self.day: self._wrong_bucket()}, {self.hour: self._wrong_bucket()})
+        self.assertEqual(self._run("--apply"), 0)
+        h = self._read()["hours"][self.hour]
+        self.assertEqual(h["bySid"][WEB]["tok"], _tok(U1) + _tok(U2) + _tok(U3), "the nested lane bills its session too")
 
     def test_a_dry_run_writes_nothing(self):
         self._transcript(WEB, [(0, "m1", U1, False), (60, "m2", U2, False)])

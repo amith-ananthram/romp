@@ -25,9 +25,8 @@ test("render.ts asks through askSubagent with the wait armed, re-asks every open
   assert.ok(ask.includes("}, SUBAGENT_OPEN_WAIT_MS);"), "one timer per ask, the module's bound");
   assert.ok(ask.includes("if (!subagentStalled(cur.sub.loaded, Date.now() - asked)) return;"), "the rule decides");
   assert.ok(ask.includes("cur.sub.askedAt !== asked) return;"), "a later ask or a close disarms the earlier timer");
-  assert.ok(RENDER.includes('window.addEventListener("romp:wsup", () => { for (const [id, s] of sessions) if (s.sub) askSubagent(id); });'), "a reconnect re-asks every open viewer");
-  const ph = RENDER.slice(RENDER.indexOf("} else if (s.sub && !s.sub.loaded && s.sub.stalled) {"), RENDER.indexOf("} else if (s.sub && !s.sub.loaded) {"));
-  assert.ok(ph.includes("ph.textContent = subagentStallText();") && ph.includes('retry.textContent = "Retry"; retry.onclick = () => askSubagent(id);'), "the stall replaces the loader and retries through the same ask");
+  assert.ok(RENDER.includes('window.addEventListener("romp:wsup", () => reaskWaitingSubagents());'), "a reconnect re-asks the waiting viewers");
+  assert.ok(RENDER.includes("onRetry: () => askSubagent(id),"), "the stall's Retry asks through the same ask (pane-placeholder.test.ts drives the DOM)");
 });
 
 test("the ask and its frame cross the federation by the session id's host: the ask bared for the owning kernel, the frame prefixed for the page", () => {
