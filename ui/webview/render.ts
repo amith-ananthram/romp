@@ -5017,8 +5017,10 @@ function deliveryIcon(d: PostalDelivery): HTMLElement {
 function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>): HTMLElement {
   // BOTH ENDS in the head, each in its session's colour (T302, the user 2026-09-10, after seeing old and new
   // renderings): "from <peer> to <this session>" for incoming, "to <peer> from <this session>" for sent — the
-  // peer's chip in the peer's identity colour, this session's chip in its own, and NO wash of either colour on
-  // the card (a wash read as this session's colour). Click a name → that session's tab.
+  // peer's chip in the peer's identity colour, this session's chip in its own. The card's wash of the peer's
+  // colour, which that ruling removed as reading like this session's, is back since 2026-09-11 (the user asked
+  // where the tint had gone): styles.css paints the incoming card's ground from its rail, which is the peer's
+  // colour here (`rail` below), so nothing more is set on the card. Click a name → that session's tab.
   const peer = el("span", "notice-src-chip");
   peer.textContent = ev.peer;
   if (ev.color) { peer.style.setProperty("--peer-bg", ev.color.bg); peer.style.setProperty("--peer-fg", ev.color.fg); }
