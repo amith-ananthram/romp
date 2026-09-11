@@ -16407,6 +16407,10 @@ def _reveal_or_confirm(sid, focus_msg, client=None):
     if sid and sid not in _live_map():
         _reveal_chat_for(client, {"type": "confirmRevive", "id": sid, "name": _name_of(sid) or sid})
     else:
+        # a LIVE session's anchored focus also carries the anchor turn's own moment for the chat's reveal progress line
+        # (T336), resolved here and only here: a dead session's card never pays for it (the confirm goes out without it)
+        if focus_msg.get("anchor") and "anchorEventT" not in focus_msg:
+            focus_msg = dict(focus_msg, anchorEventT=_anchor_event_t(sid, focus_msg["anchor"]))
         _reveal_chat_for(client, focus_msg)
 
 
@@ -39372,6 +39376,42 @@ def _cite_for(item_id):
     if not title:
         return None
     return {"itemId": iid, "title": title}
+
+
+def _anchor_event_t(sid, anchor, now=None):
+    """The anchor turn's OWN moment (epoch seconds) for the chat's reveal progress line (T336): a card's `t` is the
+    card's newest activity, later than the turn its anchor names, and a fraction of the way back computed over it
+    would read more progress than exists. Read from what is already in hand, never a build (review: a build_session
+    here ran a cold whole-transcript reshape on the WS reader thread for a dead session's card): first the pusher's
+    built payload (_built_chat, the same events the pane was sent, matched by the four selectors the chat itself
+    resolves an anchor by: the event's uuid, a postal message id (mid, mids), an answered question's resultUuid and a
+    settled group's settleUuids), then the cached parse's atoms by uuid (the judges' tree; lazy atoms carry their
+    time with no body read). None when nothing resolves: the chat counts instead of guessing. Never raises."""
+    if not sid or not anchor:
+        return None
+    try:
+        hit = _built_chat.get(sid)
+        evs = (hit[1].get("events") if hit is not None and isinstance(hit[1], dict) else None) or []
+        for e in evs:
+            if not isinstance(e, dict):
+                continue
+            if (e.get("uuid") == anchor or e.get("mid") == anchor or e.get("resultUuid") == anchor
+                    or anchor in (e.get("mids") or []) or anchor in (e.get("settleUuids") or [])):
+                ts = e.get("ts")
+                t = em.parse_z(ts) if isinstance(ts, str) else (ts if isinstance(ts, (int, float)) else e.get("t"))
+                if t:
+                    return int(t)
+        now = int(now if now is not None else time.time())
+        sess = next((s for s in _sessions(now) if s["sid"] == sid), None)
+        if sess is None:
+            return None
+        for turn in _parse(sess["path"], sid, now).get("turns") or []:
+            for a in turn.get("atoms") or []:
+                if a.get("uuid") == anchor and a.get("t"):
+                    return int(a["t"])
+    except Exception:
+        return None
+    return None
 
 
 def _show_on_timeline_focus(msg):
