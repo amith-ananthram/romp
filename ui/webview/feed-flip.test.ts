@@ -65,5 +65,5 @@ test("a card repaints only when its object or a board-level input it reads chang
   assert.match(SRC, /m\.type === "reviveFailed" && typeof m\.id === "string" && m\.id\) \{[\s\S]*?rearmLatches\(\{ kind: "revive", id: m\.id \}\)/);
   assert.match(SRC, /\(a\._revive as any\)\._idle = a\._revive\.textContent;/);
   // Undo takes .dismissing off a card restored inside its collapse window (the class rewrite no longer does)
-  assert.match(SRC, /askEls\.get\(it\.itemId\)\?\.classList\.remove\("dismissing"\);/);
+  assert.match(SRC, /for \(const c of cardTwins\(it\.itemId\)\) c\.classList\.remove\("dismissing"\);/);
 });

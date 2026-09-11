@@ -163,8 +163,10 @@ test("badges wear the header conventions: accent adds, block-red removes, the co
   assert.match(CSS, /\.freeze-badge \.fz-add \{ color: var\(--accent\); \}/, "never a re-hardcoded accent hex");
   assert.match(CSS, /\.freeze-badge \.fz-del \{ color: var\(--err\); \}/, "the board's existing block red");
   assert.doesNotMatch(CSS, /\.freeze-badge[^}]*font-size/, "no new font sizes — the badge inherits the head's scale");
-  // painted on the build-once column heads and the data-fsid-stamped session headers; cleared when quiet
-  assert.match(FEED, /put\(document\.querySelector\("\.feed-col\.col-" \+ key \+ " \.feed-col-head"\), d\.cols\[key\]\);/);
+  // painted on the build-once column heads and the data-fsid-stamped session headers; cleared when quiet. The
+  // BOARD's heads, under #feed-cols: the focused-session section (T347) above the board carries the same column
+  // classes and comes first in the DOM, so a bare query would hang the badges on the miniature's head instead
+  assert.match(FEED, /put\(document\.querySelector\("#feed-cols \.feed-col\.col-" \+ key \+ " \.feed-col-head"\), d\.cols\[key\]\);/);
   assert.match(FEED, /h\.setAttribute\("data-fsid", e\.sid\);/);
   assert.match(FEED, /if \(h\.getAttribute\("data-fcol"\) !== e\.col\) h\.setAttribute\("data-fcol", e\.col\);/,
     "the column stamp beside the sid, compare-first like it: the two together are the row the hover key names");

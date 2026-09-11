@@ -116,6 +116,8 @@ export const BOOKKEEPING: ReadonlyMap<string, (m: any) => string | null> = new M
   ["needFull",       (m) => "needFull" + K + m.id],                // render.ts requestFullSession: a session's re-send (gap / nobase / skeleton / prefetch)
   ["needSlot",       (m) => "needSlot" + K + m.slot],              // fleet.ts: a view slot's re-send after a rejected delta
   ["loadOlder",      (m) => "loadOlder" + K + m.id],               // render.ts: the head's older page on a scroll-up or a deep link into it
+  ["loadAround",     (m) => "loadAround" + K + m.id],              // render.ts: a window around a deep-link anchor past the resident list (proto 2)
+  ["loadNewer",      (m) => "loadNewer" + K + m.id],               // render.ts: the page after a detached window's newest event (proto 2)
   ["loadEpisode",    (m) => "loadEpisode" + K + m.id],             // render.ts noticeOpened: a clear notice's conversation on first expand
   ["imgRequest",     (m) => "imgRequest" + K + m.id + K + m.path], // render.ts: an inline image's bytes, asked on render
   ["commentSeen",    (m) => "commentSeen" + K + m.id + K + m.tid], // render.ts: a thread's read watermark as its popover opens or a reply lands in it
@@ -385,6 +387,16 @@ export function routeOutbound(msg: any, knownHosts?: ReadonlySet<string>): Route
   // local kernel needs the host prefix INTACT to know which remote machine to SSH into instead of treating
   // the path as local (see bin/romp-kernel's openFolder handler + _split_host_id).
   if (msg.type === "openFolder") return [{ host: LOCAL, msg }];
+
+  // activeTab (render.ts notifyActive) goes to the owning host AND, for a remote session, to the LOCAL kernel
+  // with the id left prefixed (T347): the local kernel records each window's active tab for its feed pane's
+  // focused-session section, and the section names cards by the merged board's prefixed ids, so a remote
+  // session's focus must reach the local record as "host:sid". The owning host still gets the bare id it
+  // builds and streams first, as before. A local session takes the one local route below.
+  if (msg.type === "activeTab" && typeof msg.id === "string") {
+    const h = hostOf(msg.id);
+    if (h && h !== LOCAL) return [{ host: h, msg: { ...msg, id: stripHost(h, msg.id) } }, { host: LOCAL, msg }];
+  }
 
   // a scalar session id picks the owning host.
   let host = LOCAL;
@@ -851,6 +863,7 @@ function pendingTypes(c: Conn): string[] {
 export class FederationManager {
   app = "chat";
   private conns = new Map<string, Conn>();
+  private pageProto: number | null = null;   // the chat protocol the page's ready declared (2), told to every remote kernel's socket
   private frozeAt = 0;   // the Page Lifecycle `freeze` before the current thaw: a socket already overdue at that moment is not stamped by resumed()
   private perHostOrder: Record<string, string[]> = {};
   private perHostTabs: Record<string, any[]> = {};
@@ -1357,6 +1370,16 @@ export class FederationManager {
       for (const h of hosts) this.sendTo(h, m);
       return;
     }
+    if (m && m.type === "ready") {
+      // the page's ready goes to the local kernel; its protocol is remembered for every remote socket (sent on each
+      // open, above) and told now to the ones already open
+      this.pageProto = m.proto === 2 ? 2 : 1;
+      if (this.pageProto === 2) {
+        for (const c of this.conns.values()) {
+          if (c.ws && c.ws.readyState === 1) { try { c.ws.send(JSON.stringify({ type: "ready", proto: 2 })); } catch (e) { /* the socket's own close says */ } }
+        }
+      }
+    }
     const routes = routeOutbound(m, new Set(this.hostSeq.filter((h) => h !== LOCAL)));
     if (m && (m.type === "askClear" || m.type === "askClearMany" || m.type === "clearAll")) {
       this.lastClearHosts = routes.length ? routes.map((r) => r.host) : [LOCAL];
@@ -1593,6 +1616,10 @@ export class FederationManager {
       // also why the relay-up dispatch below comes AFTER the flush: the chat's upload re-ship rides
       // that event, and a re-shipped dropFile must not get ahead of a queued setting on this socket.
       const flushed = this.flushPending(conn);
+      // the chat wire this page speaks, told to THIS host's kernel once the page has said it (T323 stage 4b): the
+      // bundle's own ready reaches the local kernel alone, so a remote kernel would otherwise never learn the protocol
+      // and serve index frames over a floor'd list; an older remote kernel ignores the field and answers as before
+      if (this.pageProto === 2) { try { ws.send(JSON.stringify({ type: "ready", proto: 2 })); } catch (e) { /* the next frame says */ } }
       this.diag("hostconn", flushed.length ? { host: conn.host, ev: "open", flushed }
                                            : { host: conn.host, ev: "open" });
       conn.lastRecv = Date.now();   // the watchdog measures this socket's silence from ITS open
