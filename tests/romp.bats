@@ -992,7 +992,7 @@ MOCK
     # handed to the pane with respawn-pane (atomic), not typed with send-keys.
     # The romp identity rides the CLI's environment on this backend too (the user 2026-08-16):
     # external tools attribute authors env-first (ROMP_SESSION_NAME) instead of asking tmux.
-    grep -qE 'tmux respawn-pane -k -t myproject exec ROMP_SID=[0-9a-f-]{36} ROMP_SESSION_NAME="myproject" claude --name "myproject" --session-id [0-9a-f-]{36}' "$MOCK_LOG"
+    grep -qE 'tmux respawn-pane -k -t myproject exec env ROMP_SID=[0-9a-f-]{36} ROMP_SESSION_NAME="myproject" claude --name "myproject" --session-id [0-9a-f-]{36}' "$MOCK_LOG"
     grep -q 'tmux attach-session -t myproject' "$MOCK_LOG"
 }
 
@@ -1051,6 +1051,24 @@ _stale_server_globals() {
     [ "$status" -ne 0 ]
 }
 
+@test "the pane's exec line runs claude through env: an assignment-led exec is a command named ROMP_SID=… to every shell" {
+    # zsh, bash and sh all answer `exec FOO=1 cmd` with "command not found: FOO=1" (status 127): from 2026-08-16 to
+    # 2026-09-11 a terminal session's pane died the instant it was spawned (a hermetic kernel lab found it)
+    _stub_claude 9.9.9
+    run "$ROMP_SCRIPT" new -t --detach myproject
+    [ "$status" -eq 0 ]
+    grep -qE 'tmux respawn-pane -k -t myproject exec env ROMP_SID=\S+ ROMP_SESSION_NAME="myproject" claude ' "$MOCK_LOG"
+    ! grep -qE 'respawn-pane .* exec ROMP_SID=' "$MOCK_LOG"
+    # the rule itself, on the shells a tmux server may run the pane with
+    for sh in sh bash zsh; do
+        command -v "$sh" >/dev/null || continue
+        run "$sh" -c 'exec FOO=1 true'
+        [ "$status" -eq 127 ]
+        run "$sh" -c 'exec env FOO=1 true'
+        [ "$status" -eq 0 ]
+    done
+}
+
 @test "launch hands the exec line to respawn-pane, never typed via send-keys (dropped-char bug)" {
     # Regression: a fresh shell flushes its tty input on startup, so send-keys'd
     # keys are dropped — the launch once started `ec claude …` (the "ex" eaten).
@@ -1058,8 +1076,8 @@ _stale_server_globals() {
     # line must NEVER appear on a send-keys call.
     run run_romp new -t myproject
     [ "$status" -eq 0 ]
-    grep -qE 'tmux respawn-pane -k -t myproject exec ROMP_SID=\S+ ROMP_SESSION_NAME="myproject" claude' "$MOCK_LOG"
-    ! grep -qE 'send-keys.*exec (ROMP_SID=\S+ ROMP_SESSION_NAME="[^"]*" )?claude' "$MOCK_LOG"
+    grep -qE 'tmux respawn-pane -k -t myproject exec env ROMP_SID=\S+ ROMP_SESSION_NAME="myproject" claude' "$MOCK_LOG"
+    ! grep -qE 'send-keys.*exec (env ROMP_SID=\S+ ROMP_SESSION_NAME="[^"]*" )?claude' "$MOCK_LOG"
 }
 
 @test "old tmux without copy-mode-position-style still launches claude (no set -e abort)" {
@@ -1071,7 +1089,7 @@ _stale_server_globals() {
     export MOCK_TMUX_FAIL_OPT="copy-mode-position-style"
     run run_romp new -t --detach myproject
     [ "$status" -eq 0 ]
-    grep -qE 'tmux respawn-pane -k -t myproject exec ROMP_SID=\S+ ROMP_SESSION_NAME="myproject" claude' "$MOCK_LOG"
+    grep -qE 'tmux respawn-pane -k -t myproject exec env ROMP_SID=\S+ ROMP_SESSION_NAME="myproject" claude' "$MOCK_LOG"
 }
 
 @test "append-system-prompt: omitted when no working-style prompt is installed" {
@@ -1090,7 +1108,7 @@ _stale_server_globals() {
     # stays OUT of the exec line, so the launch shell expands it at exec time.
     grep -F -- "--append-system-prompt \"\$(cat $HOME/.claude/romp-session-prompt.md)\"" "$MOCK_LOG"
     # Still the same single exec line, handed to the pane via respawn-pane.
-    grep -qE 'tmux respawn-pane -k -t myproject exec ROMP_SID=\S+ ROMP_SESSION_NAME="myproject" claude --name "myproject" --session-id [0-9a-f-]{36} --append-system-prompt .*' "$MOCK_LOG"
+    grep -qE 'tmux respawn-pane -k -t myproject exec env ROMP_SID=\S+ ROMP_SESSION_NAME="myproject" claude --name "myproject" --session-id [0-9a-f-]{36} --append-system-prompt .*' "$MOCK_LOG"
 }
 
 @test "append-system-prompt: also appended on the resume path" {
@@ -1122,7 +1140,7 @@ _stale_server_globals() {
     run run_romp new -t "my.task:v2"
     [ "$status" -eq 0 ]
     grep -q 'tmux new-session -d -s my-task-v2' "$MOCK_LOG"
-    grep -qE 'exec ROMP_SID=\S+ ROMP_SESSION_NAME="my-task-v2" claude --name "my-task-v2"' "$MOCK_LOG"
+    grep -qE 'exec env ROMP_SID=\S+ ROMP_SESSION_NAME="my-task-v2" claude --name "my-task-v2"' "$MOCK_LOG"
 }
 
 @test "session name sanitization: shell metacharacters folded to dashes (no command injection)" {
@@ -1229,14 +1247,14 @@ _stale_server_globals() {
     [ "$status" -eq 0 ]
     [[ "$output" != *"retired"* ]]
     grep -q 'tmux new-session -d -s web' "$MOCK_LOG"
-    grep -qE 'tmux respawn-pane -k -t web exec ROMP_SID=abc123-uuid ROMP_SESSION_NAME="web" claude --resume abc123-uuid --name "web"' "$MOCK_LOG"
+    grep -qE 'tmux respawn-pane -k -t web exec env ROMP_SID=abc123-uuid ROMP_SESSION_NAME="web" claude --resume abc123-uuid --name "web"' "$MOCK_LOG"
     ! grep -q 'tmux attach-session' "$MOCK_LOG"
 }
 
 @test "resume: explicit session id resumes that conversation" {
     run run_romp resume abc123-uuid
     [ "$status" -eq 0 ]
-    grep -q 'tmux respawn-pane -k -t myproject exec ROMP_SID=abc123-uuid ROMP_SESSION_NAME="myproject" claude --resume abc123-uuid --name "myproject"' "$MOCK_LOG"
+    grep -q 'tmux respawn-pane -k -t myproject exec env ROMP_SID=abc123-uuid ROMP_SESSION_NAME="myproject" claude --resume abc123-uuid --name "myproject"' "$MOCK_LOG"
 }
 
 @test "resume: name collision uniquifies instead of hijacking the session" {
@@ -1247,7 +1265,7 @@ _stale_server_globals() {
     run grep -qE 'tmux attach-session -t myproject$' "$MOCK_LOG"
     [ "$status" -ne 0 ]
     grep -q 'tmux new-session -d -s myproject-2' "$MOCK_LOG"
-    grep -qE 'tmux respawn-pane -k -t myproject-2 exec ROMP_SID=abc123-uuid ROMP_SESSION_NAME="myproject-2" claude --resume abc123-uuid --name "myproject-2"' "$MOCK_LOG"
+    grep -qE 'tmux respawn-pane -k -t myproject-2 exec env ROMP_SID=abc123-uuid ROMP_SESSION_NAME="myproject-2" claude --resume abc123-uuid --name "myproject-2"' "$MOCK_LOG"
 }
 
 @test "resume: the background picker-check goes through ROMP_POSTAL_BIN, and the stand-in writes nothing" {
@@ -1276,7 +1294,7 @@ _stale_server_globals() {
     run run_romp new -t --detach myproject
     [ "$status" -eq 0 ]
     grep -q 'tmux new-session -d -s myproject' "$MOCK_LOG"
-    grep -qE 'tmux respawn-pane -k -t myproject exec ROMP_SID=\S+ ROMP_SESSION_NAME="myproject" claude --name "myproject" --session-id [0-9a-f-]{36}' "$MOCK_LOG"
+    grep -qE 'tmux respawn-pane -k -t myproject exec env ROMP_SID=\S+ ROMP_SESSION_NAME="myproject" claude --name "myproject" --session-id [0-9a-f-]{36}' "$MOCK_LOG"
     # $output is asserted BEFORE the `run grep` below overwrites it with grep's (empty) output.
     [[ "$output" == *"attach with: tmux attach -t myproject"* ]]
     run grep -q 'tmux attach-session' "$MOCK_LOG"
@@ -1287,7 +1305,7 @@ _stale_server_globals() {
     run run_romp --resume sess-xyz --detach
     [ "$status" -eq 0 ]
     grep -q 'tmux new-session -d -s myproject' "$MOCK_LOG"
-    grep -qE 'tmux respawn-pane -k -t myproject exec ROMP_SID=sess-xyz ROMP_SESSION_NAME="myproject" claude --resume sess-xyz --name "myproject"' "$MOCK_LOG"
+    grep -qE 'tmux respawn-pane -k -t myproject exec env ROMP_SID=sess-xyz ROMP_SESSION_NAME="myproject" claude --resume sess-xyz --name "myproject"' "$MOCK_LOG"
     # $output asserted before the `run grep` overwrites it.
     [[ "$output" == *"(detached)"* ]]
     run grep -q 'tmux attach-session' "$MOCK_LOG"
