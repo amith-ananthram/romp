@@ -25,6 +25,18 @@ set -euo pipefail
 # make them resolvable regardless of the caller's PATH.
 PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd):$PATH"
 
+# The tmux server's socket lives under the user's runtime directory when there is one (T325, 2026-09-11): resolve
+# it the way the manager and the kernel do, BEFORE the first tmux call below, so `romp new -t`, the resume picker
+# and every other client here dial the server the manager started (a tmpfs mounted over /tmp took the default
+# socket away from every session that day). A TMUX_TMPDIR already set wins; inside a pane $TMUX's socket applies.
+# A copy of this script run away from its siblings (the help test does that) keeps working: no helper, no export.
+_romp_tmux_env="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/romp-tmux-env"
+if [[ -r "$_romp_tmux_env" ]]; then
+    # shellcheck source=bin/romp-tmux-env
+    source "$_romp_tmux_env"
+    romp_tmux_tmpdir_export
+fi
+
 # --- Session name <-> Claude session-id map --------------------------------
 # romp launches Claude with a self-assigned --session-id, so it knows the
 # conversation's UUID (which is also the transcript filename under

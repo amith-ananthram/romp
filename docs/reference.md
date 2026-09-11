@@ -1104,6 +1104,39 @@ also appears in the dashboard's error center, since every session then runs
 inside the service cgroup. The macOS launchd path is unchanged: there is no cgroup kill there,
 and the tmux server keeps its launchd lineage.
 
+#### Where the tmux server's socket lives
+
+Since 2026-09-11 romp's tmux server keeps its socket under the user's runtime
+directory whenever there is one: `TMUX_TMPDIR=$XDG_RUNTIME_DIR/romp`, created
+0700, so the socket is `$XDG_RUNTIME_DIR/romp/tmux-<uid>/default`. systemd sets
+`XDG_RUNTIME_DIR` (`/run/user/<uid>`) for every user session and user service,
+and that directory is a per-user tmpfs that no `/tmp` housekeeping, tmpfiles age
+sweep or `/tmp` mount-over can touch. On 2026-09-11 a tmpfs was mounted over a
+populated `/tmp`, `/tmp/tmux-<uid>` vanished beneath it, and every tmux-backed
+session's terminal was unreachable for an hour while the CLIs inside kept
+running; the manager logged `error connecting to /tmp/tmux-<uid>/default` the
+whole time. A `TMUX_TMPDIR` the operator sets, in the service environment file
+or the shell, wins as it stands. Without a writable runtime directory (macOS
+under launchd, a shell with the variable unset) tmux's own default applies, as
+before.
+
+One rule, resolved the same way in three places: the manager, before it starts
+the server, into the environment every kernel inherits; the kernel, before its
+first tmux call, so every dial and every `romp new -t` it spawns agree; and
+`bin/romp`, before its first tmux call (`bin/romp-tmux-env`, also runnable to
+print the directory), so a plain shell's `romp new -t` and the resume picker
+dial the server the manager started. A client already inside a pane uses the
+socket named in its own `$TMUX` and needs none of this. The kernel and the
+manager each log the directory they chose at start (`tmux socket dir: …`).
+
+Migration: a server already running on the `/tmp` socket keeps serving until
+the next `romp refresh` (or service restart), which starts the manager's server
+under the runtime directory. From then on the kernel dials the new server, so a
+tmux-backed session still on the old one is out of romp's sight: its CLI keeps
+running, `tmux -S /tmp/tmux-<uid>/default attach -t <name>` reaches it by hand,
+and `romp new -t <name>` after ending it brings the name back onto the board.
+romp moves no session across servers.
+
 #### Per-session memory limits (opt-in)
 
 A session's scope can carry a memory limit, so a runaway process is killed

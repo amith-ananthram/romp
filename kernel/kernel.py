@@ -32,6 +32,11 @@ cm = load_source("romp_colormap", HERE / "colormap.py")  # age → recency tint
 pal = load_source("romp_palette", HERE / "palette.py")  # session-identity palettes (selectable)
 ap = load_source("romp_askparse", HERE / "askparse.py")  # tmux-pane → live AskUserQuestion picker
 sb = load_source("romp_session_backend", HERE / "session_backend.py")  # the SessionBackend ABC
+tsock = load_source("romp_tmux_socket", HERE / "tmux_socket.py")  # where the tmux server's socket lives (T325)
+# Resolved into THIS process's environment before the first tmux call: every dial below (TmuxBackend shells tmux
+# with the inherited environment) and every `romp new -t` the kernel spawns then agree with the manager's server,
+# which resolved the same rule before starting. None = tmux's default, as before.
+_TMUX_TMPDIR = tsock.export_tmux_tmpdir(os.environ)
 CHAT_VIEW = ROOT / "vscode-extension"               # the tuned UI, current in this worktree via `git merge main`
 # ROMP_DIST_DIR: test seam (romp-lab serves a COPY of the built bundles, so its rebuild simulations —
 # mtime bumps that must raise the reload banner — never touch the dist the LIVE kernel serves).
@@ -16631,7 +16636,9 @@ class TmuxBackend(sb.SessionBackend):
         (-L), so two kernels never see or nudge each other's panes — and since that server is
         started by this kernel, its sessions inherit the profile env (ROMP_STATE_DIR /
         CLAUDE_CONFIG_DIR) for free. Read at call time, not import, so tests can flip it. Unset →
-        the default server, exactly as before."""
+        the default server, exactly as before. WHERE that server's socket lives is the environment's
+        TMUX_TMPDIR, which the kernel resolved at import (tmux_socket.export_tmux_tmpdir, T325): under
+        the user's runtime directory when there is one, so no /tmp event can take it away."""
         sock = os.environ.get("ROMP_TMUX_SOCKET")
         return (["tmux", "-L", sock] if sock else ["tmux"]) + list(args)
 
@@ -56121,6 +56128,10 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
 
 
 def main():
+    # where the tmux server's socket lives (T325): said once at boot, so a session that cannot be reached is diagnosed
+    # from the log, not from the /tmp listing
+    sys.stderr.write("romp-kernel: tmux socket dir: %s\n"
+                     % (_TMUX_TMPDIR + " (the user's runtime directory)" if _TMUX_TMPDIR else "tmux default (no writable XDG_RUNTIME_DIR)"))
     # Export the kernel's claude resolution for every judge call (in-process tiers AND `romp-judge
     # --once` subprocesses): judges exec the binary directly, and a kernel started over non-login ssh
     # (a federated host) has no ~/.local/bin on PATH — bare `claude` exec-failed silently there.

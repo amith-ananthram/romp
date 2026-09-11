@@ -768,6 +768,32 @@ function withoutOpCredentials(env) {
 // path is as it was: launchd owns the lineage there and the TCC rationale above still applies.
 const TMUX_START_ARGV = ['tmux', 'start-server', ';', 'set', '-g', 'exit-empty', 'off'];
 
+// Where the tmux server keeps its socket (T325, 2026-09-11; the node twin of kernel/tmux_socket.py and
+// bin/romp-tmux-env, one rule in three languages): a TMUX_TMPDIR the operator set wins as it stands; else
+// XDG_RUNTIME_DIR naming an existing, writable directory gives <XDG_RUNTIME_DIR>/romp, created 0700 when missing
+// (tmux 3.4 falls back to /tmp silently when TMUX_TMPDIR names a missing directory, so it is made, never assumed);
+// else null, tmux's own default. /run/user/<uid> is a per-user tmpfs that no /tmp housekeeping, tmpfiles age
+// sweep or /tmp mount-over can touch: on 2026-09-11 a tmpfs mounted over a populated /tmp hid /tmp/tmux-<uid>
+// and every tmux-backed session's terminal was unreachable for an hour. startManager resolves it once, before
+// it starts the server, into process.env, so the server, every kernel (specEnv copies the env) and every
+// session the kernels create dial the same socket. `fsi` is the fs to consult (tests hand a fake).
+function tmuxTmpdir({ env = process.env, fsi = fs } = {}) {
+  const op = String(env.TMUX_TMPDIR || '').trim();
+  if (op) return op;
+  const run = String(env.XDG_RUNTIME_DIR || '').trim();
+  if (!run) return null;
+  const usable = (p) => {
+    try { if (!fsi.statSync(p).isDirectory()) return false; fsi.accessSync(p, fs.constants.W_OK | fs.constants.X_OK); return true; } catch { return false; }
+  };
+  if (!usable(run)) return null;
+  const d = path.join(run, 'romp');
+  if (!usable(d)) {
+    try { fsi.mkdirSync(d, { mode: 0o700 }); } catch { /* refused, or made by a sibling meanwhile: judged below */ }
+    if (!usable(d)) return null;
+  }
+  return d;
+}
+
 // Is `name` an executable on the env's PATH? (Node has no `which`.)
 function commandOnPath(name, env = process.env) {
   for (const dir of (env.PATH || '').split(path.delimiter)) {
@@ -943,6 +969,11 @@ function startManager() {
     log(retiredCredentialMessage(retired));   // the supervisor restarts the manager on its backoff, so the line
     process.exit(1);                          // repeats in its log until the file is repaired (the kernel's own shape)
   }
+  // the socket directory first: the server started next, every kernel (specEnv copies process.env) and every
+  // session they create must agree on it (T325)
+  const tmuxDir = tmuxTmpdir();
+  if (tmuxDir) { process.env.TMUX_TMPDIR = tmuxDir; log(`tmux socket dir: ${tmuxDir} (the user's runtime directory, out of /tmp's reach)`); }
+  else log('tmux socket dir: tmux default (no writable XDG_RUNTIME_DIR, or TMUX_TMPDIR unset by choice)');
   startTmuxServer();
   const server = http.createServer((req, res) => {
     const url = new URL(req.url || '/', 'http://x');
@@ -1063,7 +1094,7 @@ function ensureUp() {
 // file is executed directly, so require()-ing it from a test has no side effects.
 module.exports = { restartGate, quietGate, quietTick, loadSpecs, specEnv, fileStamp,
                    kernelToken, fetchBusy, resetDrainNotices, queueQuietRestart, clearPendingQuiet,
-                   tmuxStartArgv, scopedStartFailure, commandOnPath, TMUX_START_ARGV,
+                   tmuxStartArgv, scopedStartFailure, commandOnPath, TMUX_START_ARGV, tmuxTmpdir,
                    placementFromCgroup, tmuxServerPlacement, bareEnsuredLine, TMUX_SERVER_PID_ARGV,
                    withoutOpCredentials, retiredCredentialNames, retiredCredentialMessage, exitLine, auditSigterm,
                    ensureDecision, downMarkerHeld, clearDownMarker, DOWN_MARKER,
