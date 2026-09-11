@@ -122,8 +122,10 @@ class Collector(unittest.TestCase):
         self.assertEqual(set(snap["goals"]), {"loads", "saves", "writes"}, "read through jd.goal_io_stats")
         # the three identity memos' readers land here (review find, 2026-09-08: they had no consumer)
         self.assertEqual(set(snap["memos"]), {"pass", "shared", "chain", "nudgeGate", "cleared", "courierSkip", "backref", "captions", "goalArchive", "plannerSkip",
-                                              "bgTops", "liftGate", "intrMarks", "statesOverlay", "lanes",
+                                              "bgTops", "liftGate", "intrMarks", "statesOverlay", "lanes", "spendTree",
                                               "chatMergeSets", "chatPostal", "chatLedger", "chatFoldTasks"})   # the chat build's fixed-cost memos (2026-09-09)
+        self.assertEqual(set(snap["memos"]["spendTree"]), {"entries", "bytes", "bound"}, "the spend guard's tree memos against their bound")
+        self.assertEqual(snap["memos"]["spendTree"]["bound"], km.SPEND_GUARD_TREE_MEMO_BYTES)
         self.assertEqual(set(snap["memos"]["bgTops"]), {"hit", "miss", "resolve", "walk", "walk_neg", "idx_build", "entries"},
                          "the placed-launch memo (_bg_placed_tops): counters plus its occupancy")
         for k, v in snap["memos"]["bgTops"].items():

@@ -510,6 +510,7 @@ class _PerfStats:
                           ("liftGate", _lift_gate_report), ("bgTops", _bg_tops_report),
                           ("intrMarks", _intr_marks_memo_report), ("statesOverlay", _states_overlay_report),
                           ("lanes", _lanes_memo_report),   # the timeline's per-lane segment memo, live lanes; the dead lanes beside
+                          ("spendTree", _spend_tree_memo_report),   # the spend guard's subagent-tree memos: bytes against their bound
                           # the chat build's fixed-cost memos (2026-09-09): the live merge's transcript-side
                           # sets, the fold's sealed postal cards, the ledger's goal-tree walk, the task fold
                           ("chatMergeSets", _merge_sets_report), ("chatPostal", _chat_postal_report),
@@ -36788,7 +36789,41 @@ SPEND_GUARD_TREE_RESCAN_S = 30      # a COLD agent file (idle since before the w
 #                                     not every cycle; a hot one every cycle
 _SPEND_TREE_CACHE = {}              # leaf -> {"dirs": {dir: mtime}, "files": {path: mtime}, "full": epoch of the last full
 #                                     stat pass, "seen": epoch}: the session's subagents tree, watched by directory mtimes
-SPEND_GUARD_TREE_MEMO_BYTES = 32 * 1024 * 1024   # the tree memos together (their path strings, estimated), least recently seen first
+
+
+def _mem_total_bytes():
+    """The machine's memory (MemTotal from /proc/meminfo; sysconf where there is no procfs), for the bounds that scale
+    with the box (the user's caches direction 2026-09-11: a memo's bound is a fraction of memory, never a small literal)."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, AttributeError):
+        return 8 * 1024 ** 3
+
+
+def _spend_tree_memo_bound():
+    """The tree memos' byte bound: ROMP_SPEND_GUARD_TREE_MEMO_BYTES when it names a positive integer, else a sixty-fourth
+    of the machine's memory (128 MB on an 8 GB box, 2 GB on 128 GB). The memos are the LIVE sessions' path strings,
+    departed sessions dropped every tick, so the bound is a backstop against a runaway tree and not a working-set knob;
+    a literal of 32 MB bound across a day's live sessions and the prune re-listed a tree every cycle (the follow-up
+    review's second round). Read once at import; GET /perf reports it beside the memos' bytes (memos.spendTree)."""
+    raw = os.environ.get("ROMP_SPEND_GUARD_TREE_MEMO_BYTES", "")
+    try:
+        if raw and int(raw) > 0:
+            return int(raw)
+    except ValueError:
+        pass
+    return _mem_total_bytes() // 64
+
+
+SPEND_GUARD_TREE_MEMO_BYTES = _spend_tree_memo_bound()   # the tree memos together (their path strings, estimated); over
+#                                                          it the largest goes first, and only the deficit is shed
 
 
 def _spend_ceiling():
@@ -37167,8 +37202,8 @@ def _spend_tree_memo_size(m):
 def _spend_tree_memo_prune(live_paths):
     """The tree memos of sessions not in this tick's live set are dropped (a departed session's tree is nobody's
     window; bounded by entry count alone the memos of a day's two hundred sessions held tens of MB: the round-three
-    review's low a), and the rest are bounded by bytes, the least recently seen going first (a live session whose memo
-    goes is listed again on its next tick, one first listing)."""
+    review's low a), and the rest are bounded by bytes, the LARGEST going first (the fewest evictions; a live session
+    whose memo goes is listed again on its next tick, one first listing) and only the deficit shed."""
     for k in [k for k in _SPEND_TREE_CACHE if k not in live_paths]:
         _SPEND_TREE_CACHE.pop(k, None)
     total = sum(_spend_tree_memo_size(m) for m in _SPEND_TREE_CACHE.values())
@@ -37176,13 +37211,27 @@ def _spend_tree_memo_prune(live_paths):
         return
     # over the bound every survivor is live and carries this tick's seen stamp, so an oldest-first order was insertion
     # order and one eviction a cycle re-walked whole trees in rotation (the follow-up review): the LARGEST trees go
-    # first, down to three quarters of the bound, so the bound does not bind again next cycle
-    target = SPEND_GUARD_TREE_MEMO_BYTES * 3 // 4
+    # first, and only the deficit is shed (the second round: shedding to three quarters re-listed the largest tree
+    # every cycle once the bound bound across the live sessions). One tree alone over the bound is evicted and listed
+    # again next cycle, every cycle: the bound is the bound, and /perf's memos.spendTree shows it binding
     for k in sorted(_SPEND_TREE_CACHE, key=lambda k: -_spend_tree_memo_size(_SPEND_TREE_CACHE[k])):
-        if total <= target:
+        if total <= SPEND_GUARD_TREE_MEMO_BYTES:
             break
         total -= _spend_tree_memo_size(_SPEND_TREE_CACHE[k])
         _SPEND_TREE_CACHE.pop(k, None)
+
+
+def _spend_tree_memo_report():
+    """The tree memos' occupancy for GET /perf (memos.spendTree): entries, their estimated bytes and the bound they are
+    held under, so a bound that binds (bytes at the bound cycle after cycle) is visible. The pusher thread writes the
+    dict; a resize under the sum is read again."""
+    for _ in range(3):
+        try:
+            size = sum(_spend_tree_memo_size(m) for m in list(_SPEND_TREE_CACHE.values()))
+            break
+        except RuntimeError:
+            size = -1
+    return {"entries": len(_SPEND_TREE_CACHE), "bytes": size, "bound": SPEND_GUARD_TREE_MEMO_BYTES}
 
 
 def _spend_series(keyed_only=False, now=None):

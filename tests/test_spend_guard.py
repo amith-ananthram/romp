@@ -250,17 +250,42 @@ class Memo(unittest.TestCase):
         # over the byte bound the LARGEST memo goes first, down to three quarters of the bound (the follow-up review: with
         # every survivor seen this tick, oldest-first was insertion order and one eviction a cycle re-walked trees in
         # rotation). leaves[1] gets an extra file so it is the largest; the bound sits just under the pair's size
-        extra = os.path.join(os.path.dirname(leaves[1]), "%08d-2222-3333-4444-000000000350" % 1, "subagents", "agent-b.jsonl")
+        # leaves[2], the most recently seen, gets an extra file so it is the largest: the old policy (least recently seen
+        # first) evicted leaves[1]; largest-first evicts leaves[2] and leaves[1] survives (the second round: the earlier
+        # assertion held under both policies)
+        extra = os.path.join(os.path.dirname(leaves[2]), "%08d-2222-3333-4444-000000000350" % 2, "subagents", "agent-b.jsonl")
         write_jsonl(extra, [user(NOW - 100, "u")], mtime=NOW - 100)
-        km._SPEND_TREE_CACHE[leaves[1]]["files"][extra] = NOW - 100
+        km._SPEND_TREE_CACHE[leaves[2]]["files"][extra] = NOW - 100
         sizes = {k: km._spend_tree_memo_size(km._SPEND_TREE_CACHE[k]) for k in leaves[1:]}
+        self.assertGreater(sizes[leaves[2]], sizes[leaves[1]])
         with mock.patch.object(km, "SPEND_GUARD_TREE_MEMO_BYTES", sizes[leaves[1]] + sizes[leaves[2]] - 1):
             km._spend_tree_memo_prune(set(leaves[1:]))
-        self.assertEqual(sorted(km._SPEND_TREE_CACHE), [leaves[2]], "the largest memo went; the smaller one fits under three quarters of the bound")
-        self.assertGreaterEqual(km._spend_tree_memo_size({"files": {"x" * 10: 0}, "dirs": {}}), 2 * 10, "the estimate counts about twice the characters")
-        # a disabled ceiling drops every tree memo instead of stranding them
+        self.assertEqual(sorted(km._SPEND_TREE_CACHE), [leaves[1]], "the largest memo went; the least recently seen survives")
+        # only the deficit is shed: three memos over the bound by one byte lose exactly the largest (three quarters of
+        # the bound would have taken a second)
+        km._SPEND_TREE_CACHE.clear()
+        for i in range(3):
+            km._spend_window_files(leaves[i], NOW - 600, now=NOW + i)
+        sizes = {k: km._spend_tree_memo_size(km._SPEND_TREE_CACHE[k]) for k in leaves}
+        self.assertEqual(max(sizes, key=sizes.get), leaves[2])
+        with mock.patch.object(km, "SPEND_GUARD_TREE_MEMO_BYTES", sum(sizes.values()) - 1):
+            km._spend_tree_memo_prune(set(leaves))
+        self.assertEqual(sorted(km._SPEND_TREE_CACHE), sorted(leaves[:2]), "one eviction closed the deficit; the rest stand")
+        self.assertEqual(km._spend_tree_memo_size({"files": {"x" * 10: 0}, "dirs": {}}), 2 * 10 + 64, "the estimate: twice the characters and a slot")
+        # the bound is a sixty-fourth of the machine's memory unless the environment names one; /perf shows it beside the bytes
+        self.assertEqual(km._spend_tree_memo_bound(), km._mem_total_bytes() // 64)
+        with mock.patch.dict(os.environ, {"ROMP_SPEND_GUARD_TREE_MEMO_BYTES": "4096"}):
+            self.assertEqual(km._spend_tree_memo_bound(), 4096)
+        with mock.patch.dict(os.environ, {"ROMP_SPEND_GUARD_TREE_MEMO_BYTES": "lots"}):
+            self.assertEqual(km._spend_tree_memo_bound(), km._mem_total_bytes() // 64, "an unreadable override falls back to the fraction")
+        self.assertGreater(km.SPEND_GUARD_TREE_MEMO_BYTES, 16 * 1024 * 1024, "no small literal: above 16 MB on any box with a GB or more")
+        rep = km._spend_tree_memo_report()
+        self.assertEqual((rep["entries"], rep["bytes"], rep["bound"]), (2, sizes[leaves[0]] + sizes[leaves[1]], km.SPEND_GUARD_TREE_MEMO_BYTES))
+        # a disabled ceiling drops every tree memo instead of stranding them: the tick itself, with the ceiling at zero
         km._SPEND_TREE_CACHE["ghost"] = {"dirs": {}, "files": {}, "full": 0, "seen": 0}
-        self.assertIn("_SPEND_TREE_CACHE.clear()", inspect.getsource(km._spend_guard_tick).split("_spend_guard_seed()")[0], "cleared before the disabled-ceiling return")
+        with mock.patch.object(km, "_spend_ceiling", lambda: 0.0):
+            km._spend_guard_tick(NOW, {})
+        self.assertEqual(km._SPEND_TREE_CACHE, {}, "the tick under a disabled ceiling cleared every memo, the ghost included")
         self.assertIn("_spend_tree_memo_prune(live_paths)", inspect.getsource(km._spend_guard_tick), "the tick prunes on every cycle")
 
 
