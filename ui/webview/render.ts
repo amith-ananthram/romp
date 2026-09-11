@@ -5438,7 +5438,9 @@ function showTabTip(tab: HTMLElement, s: Session): void {
   if (s.status.effort) rows.push(["Effort", s.status.effort]);
   // Backend is a plain labelled FIELD now, under the others (the user 2026-07-08 — no longer a coloured
   // "SDK backend" badge at the top of the tooltip; it reads as one of the session's config fields).
-  if (be) rows.push(["Backend", backendLabel(be)]);   // the shared names (T288); a session still running on the retired terminal backend (until stage 3) reads its id, never blank (review find)
+  if (be) rows.push(["Backend", backendLabel(be)]);
+  // the session's mail state (T356): off means peers cannot see or mail it and its own sends are refused
+  rows.push(["Mail", s.postalServiceOff ? "off: this session neither sends nor receives peer mail" : "on"]);   // the shared names (T288); a session still running on the retired terminal backend (until stage 3) reads its id, never blank (review find)
   // Billing: whether this tab bills the API key or the Claude login — and WHICH login account (the
   // user 2026-08-09: shown whenever the backend reports it, one-auth machines included). No key material, ever.
   // When the CLI's own init landed on the OTHER side (authLive — say, a key found via apiKeyHelper
@@ -9796,6 +9798,14 @@ function renderCommentPopover(): void {
     crow.append(attach, box, send);
     pop.appendChild(crow);
     if (metaRowPending) pop.appendChild(metaRowPending);   // model/effort under the box, like the chat
+    if (th && th.mailOff) {
+      // T356 (the user 2026-09-11): a thread's mail is off, both directions, until it is broken out; the popover
+      // is the thread's whole surface, so it says so here
+      const mail = el("div", "cmt-note cmt-mail");
+      mail.textContent = "Mail off: this thread neither sends nor receives peer mail until you break it out.";
+      mail.title = "Peers cannot see or mail this thread, and its own mail is refused. Break out turns mail on.";
+      pop.appendChild(mail);
+    }
     if (th && th.status === "open") {
       // the thread is a real session under the hood — its model/effort switch LIVE through the
       // chat's own ops (setModel/setEffort route by sid; be.owns makes the thread reachable).
@@ -9863,6 +9873,10 @@ function renderCommentPopover(): void {
     const note = el("div", "cmt-note");
     note.textContent = "The discussion continues there.";
     pop.appendChild(note);
+    // the break-out flipped its mail on (T356): said once, here, where the user looks after breaking it out
+    const mailOn = el("div", "cmt-note cmt-mail");
+    mailOn.textContent = "Its mail is on now: peers can reach it and it can send.";
+    pop.appendChild(mailOn);
     const row = el("div", "cmt-actions");
     const open = el("button", "cmt-act") as HTMLButtonElement;
     open.type = "button";

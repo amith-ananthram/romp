@@ -3526,7 +3526,7 @@ def _painted_flag_value(sid, flag):
     if flag == "notify":
         return bool(_notify_session_effective(sid))
     if flag == "postalServiceOff":
-        return bool(_session_flag(sid, "postalServiceOff") or _session_flag(sid, "postalOff"))
+        return bool(_postal_isolated(sid))      # a comment thread paints its mail-off default (T356)
     return bool(_session_flag(sid, flag))
 
 
@@ -14242,6 +14242,8 @@ def _comments_frame(sid, live_map=None):
                         "lastUuid": last_uuid,                         # the newest record shown/held — the client's cap-proof "transcript moved" datum
                         "unreachable": unreachable or None,            # a broken thread (missing transcript / lost cut): owes nothing
                         "promotedName": th.get("promotedName") or "",
+                        # the thread's mail state (T356): off by default until broken out; the popover says so
+                        "mailOff": bool(_postal_isolated(tsid)),
                         "model": (reg.get("liveModel") or reg.get("model") or "") if reg else "",
                         "effort": (reg.get("effort") or "") if reg else "",
                         "sinceEpoch": since_ms,
@@ -22808,7 +22810,11 @@ def _thread_rows():
         out.append({"id": tsid, "name": nm or tsid[:8], "state": meta.get("state", ""),
                     "dir": _cwd_of(tsid), "thread": True, "parent": parent,
                     "lastSid": jd._sdk_last_sid(tsid) or tsid,
-                    "working": "", "backend": "sdk"})
+                    "working": "", "backend": "sdk",
+                    # a thread's mail is off until the user breaks it out (T356): the row says so, so a listing
+                    # consumer never has to derive it
+                    "postalServiceOff": _postal_isolated(tsid),
+                    "mailOffWhy": "thread" if _thread_mail_off(tsid) else ""})
     return out
 
 
@@ -23389,9 +23395,24 @@ def _postal_shaped(text):
     return "romp-msg-id" in t or t.startswith("####################") or "\U0001F4EC" in t
 
 
+def _thread_mail_off(sid):
+    """A comment thread's mail is OFF by default, both directions, until the user breaks it out (T356, the user
+    2026-09-11: a comment thread of a manager session received the manager's mail, mailed two of its workers and
+    merged a pull request as if it were the manager). The default derives from the thread-ness itself (the reg's
+    threadOf), so a thread already on disk with no flag reads OFF; the one way on short of a break-out is the fresh
+    key `threadMail` at the literal True (never an old key re-read: the flip-a-default rule). A break-out clears
+    threadOf, so the promoted session falls back to the ordinary rule below: mail on unless the user toggled its
+    mailbox off. The postal bus derives the same answer from the same two files (_mail_off_why)."""
+    if not sid or not _thread_reg(sid).get("threadOf"):
+        return False
+    f = _session_flags().get(sid)
+    return not (isinstance(f, dict) and f.get("threadMail") is True)
+
+
 def _postal_isolated(sid):
-    """The session's postal-isolation flag (the timeline lane's mailbox icon), legacy key included."""
-    return bool(_session_flag(sid, "postalServiceOff") or _session_flag(sid, "postalOff"))
+    """The session's EFFECTIVE postal isolation: a comment thread whose mail is off (_thread_mail_off), else the
+    mailbox flag the timeline lane's icon writes, legacy key included."""
+    return _thread_mail_off(sid) or bool(_session_flag(sid, "postalServiceOff") or _session_flag(sid, "postalOff"))
 
 
 _FOLLOWUP_GOAL_RE = re.compile(r"romp-goal-id:\s*([^\s>]+)")
@@ -33479,7 +33500,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
             # per-session view flags (the user 2026-06-26): the tab right-click menu toggles these too, mirroring
             # the timeline lane's feed checkbox + postal mailbox. Same flags + legacy fallback as build_timeline.
             "hideFromFeed": _session_flag(sid, "hideFromFeed"),
-            "postalServiceOff": _session_flag(sid, "postalServiceOff") or _session_flag(sid, "postalOff"),
+            "postalServiceOff": _postal_isolated(sid),    # EFFECTIVE: a comment thread reads off until broken out (T356)
             "notify": _notify_session_effective(sid),   # session-level bell, EFFECTIVE (override, else the master default): OS notification when its work blocks on you / completes (the user 2026-07-28)
             # NEVER `now`. This rides the chat payload, and _send_client dedups by comparing the
             # SERIALIZED payload against what that client last received — so a firstSeen that ticked
@@ -39787,7 +39808,7 @@ def build_timeline(now, live_map=None, with_bars=True, live_only=False):
             "branch": branch_of.get(sid),
             "comments": _comment_markers(sid),
             "hideFromFeed": _session_flag(sid, "hideFromFeed"),    # lane checkbox → mute from feed (timeline-only)
-            "postalServiceOff": _session_flag(sid, "postalServiceOff") or _session_flag(sid, "postalOff"),  # lane mailbox → isolate from the Romp Postal Service (bin/romp-postal-service)
+            "postalServiceOff": _postal_isolated(sid),  # lane mailbox → isolate from the Romp Postal Service (bin/romp-postal-service); EFFECTIVE, a thread's default included (T356)
             "notify": _notify_session_effective(sid)})   # lane bell, EFFECTIVE (override, else the master default) → OS notification when this session's work blocks on you / completes (the user 2026-07-28)
     if with_bars and not live_only:
         # the live-lane memo releases the lanes that left the timeline here: a full build's lane set (live sessions
@@ -44166,6 +44187,7 @@ def _push(targets, connect=False, live_map=None):
             if chat_sessions or want_fleet:
                 feed["ledgers"] = [{"sid": m["id"], "name": m["name"], "color": m.get("color"),
                                     "status": m.get("status"),
+                                    "postalServiceOff": _postal_isolated(m["id"]),   # the Sessions pane shows a mail-off session (T356)
                                     # attach the archived-completed TOP tasks so the Fleet's "Show completed"
                                     # can surface a finished+archived session (the user 2026-06-27); cached, so
                                     # ~free. The client renders them only when the toggle is on.
