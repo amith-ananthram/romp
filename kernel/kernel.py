@@ -315,7 +315,7 @@ class _PerfStats:
             # cold event-model parses this kernel ran (T323 stage 1): the kernel's own _parse misses, per session
             # (sid8) and in total, plus the bytes of the files parsed; the judges' misses ride the snapshot from
             # jd.parse_misses(). The acceptance number of the lazy-transcript work: a boot with no client parses zero.
-            self.parses = {"total": 0, "bytes": 0, "bySid": {}}
+            self.parses = {"kernel": 0, "hits": 0, "bytes": 0, "bySid": {}}   # kernel-asked cold parses; total/judge from jd
             self.http = {}
 
     # ── writers (hot paths) ──
@@ -358,11 +358,16 @@ class _PerfStats:
         with self.lock:
             self.stages[name] = self.stages.get(name, 0.0) + dt * 1000.0
 
+    def parse_hit(self):
+        """The kernel's _parse served from the shared store (T323 stage 2)."""
+        with self.lock:
+            self.parses["hits"] += 1
+
     def parse(self, sid, nbytes=0):
-        """One COLD parse by the kernel's _parse (a cache miss that ran em.parse_session)."""
+        """One COLD parse the kernel's _parse asked for (a shared-store miss that ran em.parse_session)."""
         with self.lock:
             p = self.parses
-            p["total"] += 1
+            p["kernel"] += 1
             p["bytes"] += int(nbytes or 0)
             k = str(sid or "")[:8]
             if len(p["bySid"]) < 1024 or k in p["bySid"]:
@@ -466,7 +471,8 @@ class _PerfStats:
             stages = dict(self.stages)
             builds = {k: dict(v) for k, v in self.builds.items()}
             builds["chat"]["bg_miss"] = dict(self.builds["chat"]["bg_miss"])   # the nested map: a copy too
-            parses = {"total": self.parses["total"], "bytes": self.parses["bytes"], "bySid": dict(self.parses["bySid"])}
+            parses = {"kernel": self.parses["kernel"], "hits": self.parses["hits"], "bytes": self.parses["bytes"],
+                      "bySid": dict(self.parses["bySid"])}
             sends = {k: {sl: {"count": e[0], "bytes": e[1]} for sl, e in d.items()}
                      for k, d in self.sends.items()}
             judge = dict(self.judge)
@@ -514,7 +520,12 @@ class _PerfStats:
         return {"now": now, "since": since, "uptime_s": now - _STARTED, "log": _PERF,
                 "process": _process_stats(), "pusher": pusher, "stages_ms": stages,
                 "builds": builds, "sends": sends, "goals": goals, "memos": memos, "judge": judge, "http": http,
-                "parses": dict(parses, judge=int(getattr(jd, "parse_misses", lambda: 0)()))}   # T323: cold parses
+                # T323: cold parses through the ONE parse store (stage 2): total = every miss (whoever asked), kernel =
+                # the display's asks among them, judge = the rest, hits = the display's asks served from the store,
+                # sharedHits = every hit. A boot with no client reads kernel 0.
+                "parses": dict(parses, total=int(getattr(jd, "parse_misses", lambda: 0)()),
+                               judge=max(0, int(getattr(jd, "parse_misses", lambda: 0)()) - parses["kernel"]),
+                               sharedHits=int(getattr(jd, "parse_hits", lambda: 0)()))}
 
 
 _PERF_STATS = _PerfStats()
@@ -11482,7 +11493,8 @@ def _nudge_placement_gate(sid, turns, store):
     A parse the cache does not hold, or a store that is not the current shared view, is derived every time
     and never cached. The exception path is unchanged: a gate that cannot be computed waves nothing through
     silently, and is never cached."""
-    pk = jd._PARSE_CACHE.get(sid)
+    pk = jd._parse_entry(sid, turns=turns)     # the entry holding THESE turns, never the sid's newest slot (an agent
+    #                                             view stored between the walk's parse and this read: review find)
     parse_key = pk[0] if (pk is not None and pk[1] is not None and pk[1].get("turns") is turns) else None
     epi = _stat_key(jd.EPIDIR / (sid + ".jsonl")) if parse_key is not None else None
     hit = _nudge_gate_memo.get(sid) if parse_key is not None else None
@@ -14965,6 +14977,11 @@ def _sdk_locked():
             _cut_fn = getattr(_sdk_backend, "pending_cut", None)
             if _cut_fn:
                 jd.set_pending_cut_provider(_cut_fn)
+            # ONE answer to sdk_human for the shared parse (T323 stage 2): the backends' owns(), SDK or Codex,
+            # so the judges and the display never key the same file under two flags
+            _owns = getattr(_sdk_backend, "owns", None)
+            if _owns:
+                jd.set_sdk_owner_provider(lambda fsid: bool(_owns(fsid)) or bool((_cx := _codex()) and _cx.owns(fsid)))
             # The backend's flag-consumption events resolve held rewinds (two-phase goal cleanup:
             # archive at the branch-take, restore on failure — _on_rewind_resolved).
             _sdk_backend.rewind_resolved_cb = _on_rewind_resolved
@@ -27633,7 +27650,42 @@ def _fold_tasks(session, sid=None):
             for t in ordered]
 
 
-_parse_cache = {}                                # realpath → ((mtime, size, pending-rollback cut), parsed session)
+class _SharedParseView:
+    """The kernel's parse cache as a PATH-keyed view over the ONE parse store, jd._PARSE_CACHE (T323 stage 2): the
+    kernel's _parse delegates to jd.parsed_session, so the tree the judges walk and the tree the chat renders are
+    the same object, parsed once per file version instead of twice. Readers that knew the old dict keep their
+    shape: `path in _parse_cache`, `_parse_cache.get(path)` → (key, session), iteration over leaf paths,
+    `.pop(path)` (a dead lane releasing its parse) and `.clear()` (the perf bench's cold sample)."""
+
+    def get(self, path, default=None):
+        ent = jd.parse_entry_for_leaf(str(path))
+        return (ent[0], ent[1]) if ent is not None else default
+
+    def __getitem__(self, path):
+        v = self.get(path)
+        if v is None:
+            raise KeyError(path)
+        return v
+
+    def __contains__(self, path):
+        return self.get(path) is not None
+
+    def __iter__(self):
+        return iter(jd.parse_cache_paths())
+
+    def __len__(self):
+        return len(jd.parse_cache_paths())
+
+    def pop(self, path, default=None):
+        ent = self.get(path)
+        jd.parse_cache_drop_leaf(str(path))          # by LEAF, never by a sid derived from the filename (a /clear's
+        return ent if ent is not None else default   # leaf is named after the CLI session, not the romp sid)
+
+    def clear(self):
+        jd.parse_cache_clear()
+
+
+_parse_cache = _SharedParseView()                # path → (key, parsed session): a view over jd._PARSE_CACHE (stage 2)
 
 # Built-chat cache (the user 2026-06-24, who found the UI sluggish): the pusher rebuilt EVERY open chat tab on
 # every 0.5s poll — a full transcript reshape into ChatEvent[] AND a json.dumps of the whole chat, per tab,
@@ -28613,66 +28665,29 @@ def _parse(path, sid, now):
     to the transcript anyway, busting the cache.) The cut (a chat DELETE's bare rollback, backend
     pending_cut) rides the KEY because it changes the parse with no file change — arming and clearing
     both must bust the cache, and its own spend event (a record landing) moves mtime/size anyway."""
-    _be = _sdk()
-    # pending_cut is hot-path safe: a LIVE SDK session is a dict hit + attr checks (no I/O);
-    # tmux/dormant fall to one small reg read; the transcript-leaf read happens only while
-    # a rollback is actually pending.
-    cut = _be.pending_cut(sid) if _be else ""
-    # states/<sid>.jsonl → REAL idle transitions become idle atoms (the interrupt/settle write lands HERE,
-    # not the transcript). Mirrors jd.parsed_session, which has read states since 2026-06-17 — the kernel's
-    # DISPLAY parse was overlooked, so an SDK interrupt cleared 'working' for the judge/nudge (which read
-    # states) while the chip/card/timeline lane (which read this cache) stayed yellow. Without it the display
-    # only clears on a transcript write, which an SDK stop need not produce (the user 2026-07-22: "pressing
-    # interrupt doesn't clear working"). Safe: _session_working sorts atoms by their START time, so an idle
-    # span whose end runs to `now` never closes a genuinely-working turn — its fresh work atoms sort later.
-    states = jd.STATE / "states" / (sid + ".jsonl")
-    try:
-        st = os.stat(path)
-        key = (st.st_mtime, st.st_size, cut)
-    except OSError:
-        key = None
-    if key is not None:
-        try:                                         # a states-ONLY change (an idle transition that never
-            sst = os.stat(states)                    # touches the transcript) must bust the cache too — else
-            key = key + (sst.st_mtime, sst.st_size)  # the fresh idle atom is invisible and 'working' latches
-        except OSError:
-            pass                                     # no states file yet → nothing to fold
-    hit = _parse_cache.get(path)
-    if hit is not None and key is not None and hit[0] == key:
-        return hit[1]
-    # A FORKED leaf (SDK /clear: discover hands the lastSid file under the stable romp sid) parses with
-    # the session's anchor transcript among the candidates — a resume-style fork's cross-file chain keeps
-    # its history via the FileAdapter walk (a RECORDED fresh-headed resume fork stitches through the
-    # states/ resumeFork lineage inside parse_session, 2026-08-14); a /clear fork (parentUuid null, no
-    # lineage) still starts fresh. Mirrors jd.parsed_session. Cache stays keyed on the LEAF alone plus
-    # the states file (folded above), which moves when a lineage row lands: the anchor file is dead
-    # once forked.
-    cands = [path]
-    anchor = os.path.join(os.path.dirname(path), sid + ".jsonl")
-    if os.path.basename(path) != sid + ".jsonl" and os.path.exists(anchor):
-        cands.append(anchor)
-    _mode = []
-    session = em.parse_session(path, rompuuid=sid, candidate_files=cands,
-                               postal_log=str(jd.MESSAGES), now=now, asm_mode_out=_mode,
-                               # SDK/Codex session: composer input arrives programmatic (promptSource "sdk"),
-                               # so the unmarked prompt is the HUMAN — same flag for both backends
-                               sdk_human=bool((_be and _be.owns(sid)) or ((_cx := _codex()) and _cx.owns(sid))),
-                               states=str(states) if states.exists() else None,   # idle transitions → idle atoms (see above)
-                               leaf_override=cut or None)   # pending bare rollback → render the cut conversation NOW
-    # the assembly path this parse took, read by the chat-payload fold (issue 903) right after the
-    # call: a serve/fold left every earlier atom in place, a full/bypass/fallback may have re-emitted
-    # history. Keyed by path, written by the thread that parsed; the fold reads it under the same
-    # parse it just made, so a racing parse of the same path can only make it MORE conservative
-    # (a "full" read where a "fold" happened) — never less.
+    # T323 stage 2 (2026-09-11): ONE parse for the kernel and the judges. jd.parsed_session keys on the same facts this
+    # function keyed on (the transcript's and the states file's stat pair, the pending cut it reads through the provider
+    # this kernel installs, sdk_human through the owner hook) and expands the same candidate set (the leaf plus the
+    # session's anchor file), so the tree it returns is the tree the judges walk: parsed once per file version, held
+    # once. The old per-path cache is a view over that store (_SharedParseView). The store's slot carries the leaf, so
+    # a parse of another transcript under this sid (a subagent viewer's agent file, an episode's transcript: build_session
+    # with path_override hands it here as sess["path"]) sits beside the live leaf's tree rather than evicting it.
+    _mode, stats = [], {}
+    states = str(jd.STATE / "states" / (sid + ".jsonl"))   # the kernel's states log path (the judges default to the same file)
+    session = jd.parsed_session(sid, [path], now, asm_mode_out=_mode, stats=stats, states=states,
+                                sdk_human=_display_sdk_human(sid))
     _parse_mode[path] = _mode[-1] if _mode else "full"
     try:
-        _PERF_STATS.parse(sid, key[1] if key is not None else 0)   # a cold parse ran (T323: /perf parses)
+        if stats.get("miss"):
+            try:
+                size = os.stat(path).st_size
+            except OSError:
+                size = 0
+            _PERF_STATS.parse(sid, size)             # a cold parse the KERNEL's ask ran (T323: /perf parses.kernel)
+        else:
+            _PERF_STATS.parse_hit()
     except Exception:
         pass
-    if key is not None:
-        if len(_parse_cache) > 256:              # backstop: bounded by fleet size, but never unbounded
-            _parse_cache.clear()
-        _parse_cache[path] = (key, session)
     return session
 
 
@@ -29168,21 +29183,26 @@ def _rewind_holds_boot():
             sys.stderr.write("rewind-hold boot: %s\n" % traceback.format_exc())
 
 
+def _display_sdk_human(sid):
+    """The display parse's answer to sdk_human: a backend (SDK or Codex) owns the session. The same answer the owner
+    hook gives the judges once a backend exists, so both sides share one slot; in a process without one (tests) the
+    judges fall back to the registry file and a differing answer keeps its own slot."""
+    _be = _sdk()
+    return bool((_be and _be.owns(sid)) or ((_cx := _codex()) and _cx.owns(sid)))
+
+
 def _parse_cached(path):
     """The CACHED parse for `path` (matching its (mtime,size)) or None — NEVER parses, so it adds no cold
     cost on the request path. build_feed reads it for the working-dots + deep-link anchors so its CARDS
     (which come from the goal store, cheap) paint AT ONCE on a cold kernel start; the dots/anchors fill in a
     beat later once _warm_fleet_bg has parsed the session in the background (the user 2026-06-26: the feed
     cards lagged the timeline lanes on startup, all of it the ~1s cold parse of the fleet)."""
-    try:
-        st = os.stat(path)
-        key = (st.st_mtime, st.st_size)
-    except OSError:
+    ent = jd.parse_entry_for_leaf(str(path))     # the entry names its romp sid: a leaf's stem is the CLI session's id
+    if ent is None or len(ent) < 5:               # after a /clear or a resume fork, never the romp sid (review find)
         return None
-    hit = _parse_cache.get(path)
-    # prefix compare: _parse's key carries a third element (the pending-rollback cut) this NEVER-parsing
-    # reader can't cheaply recompute — dots/anchors from a cut parse are consistent with what chat shows
-    return hit[1] if (hit is not None and tuple(hit[0][:2]) == key) else None
+    fsid = ent[4]
+    return jd.parse_cached(fsid, [str(path)], states=str(jd.STATE / "states" / (fsid + ".jsonl")),
+                           sdk_human=_display_sdk_human(fsid))   # the store's live-key read, under the display's slot
 
 
 _warm_lock = threading.Lock()

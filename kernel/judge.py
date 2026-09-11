@@ -13,6 +13,7 @@ CLI:
   romp-judge --once               # one caption pass over the live fleet (writes captions/)
   romp-judge --test <transcript>  # caption one transcript's recent units, print them (no write)
 """
+import collections
 import contextlib, copy, hashlib, json, os, re, secrets, shutil, signal, stat, sys, time, subprocess, threading, traceback, importlib.util
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -172,8 +173,10 @@ def _rebind_state(path):
     CODEXDIR = STATE / "codex"
     EPIDIR = STATE / "episodes"
     _lastsid_memo.clear()   # sdk-registry reads are mtime-memoized per sid — a rebind must not serve the old root's values
+    _LEAF_SEEN.clear(); _LEAF_RETIRED.clear()   # the leaves discover handed out belong to the old root
     _STORE_FAULTS.clear()   # unreadable-store episodes belong to the old root's files
     _CHAIN_MEMO.clear()     # the write-moment chain memo keys on paths under STATESDIR; a new root is a new world
+    parse_cache_clear()      # the parses belong to the old root too
     _COURIER_SEEN.clear()   # the courier gate keys on the old root's files
     _PLANNER_SEEN.clear()   # ...and the planner gate
     _BACKREF_MEMO["slot"] = None   # ...and so does the sender-board walk's map
@@ -2704,7 +2707,223 @@ def _fileset_key(files):
     return out
 
 
-_PARSE_CACHE = {}          # fsid -> (fileset_key, parsed_session)
+# THE parse cache (T323 stage 2, 2026-09-11): one parsed session tree per (fsid, pending cut, leaf transcript), shared
+# by the judges and the kernel's display parse (kernel._parse delegates here), least-recently-used, _PARSE_CACHE_MAX
+# slots. A slot holds {sdk_human: entry}; an entry is (key, session, leaf_path, sdk_human, fsid, asm_mode) with
+# key = (fileset stat pair over the candidates and the states file, the pending cut), the pass frame's pair shape
+# unchanged: every fact either caller keyed on before the two caches were one, plus the sid the parse ran under (the
+# kernel's path-keyed view never derives one from a filename) and the assembly mode of the parse that built the tree
+# (a hit reports it). The cut is in the SLOT as well as the key so a store under a new cut can drop the spent cut's
+# slot: one tree per session through a rollback. The LEAF is in the slot because the kernel parses OTHER transcripts
+# under a session's sid (a subagent viewer's agent file, an episode render, build_session's path_override) whose keys
+# can never equal the live leaf's: sharing the slot made each miss evict the other's tree every pusher cycle (review
+# find, 2026-09-11), so an override parse sits beside the live leaf's tree, never in its place.
+class _ParseStore(collections.OrderedDict):
+    """The shared store's dictionary: slots are (fsid, cut, leaf) tuples, least recently used first. A bare fsid string
+    reads as that session's NEWEST slot (the pass-frame tests and the courier keys look a session up by id), and
+    writes under a bare fsid land in the slot of the live cut, so a stand-in dict a test installs and the readers
+    that predate the (fsid, cut, leaf) slots keep working."""
+
+    @staticmethod
+    def _k(k):
+        return k if isinstance(k, tuple) else None
+
+    def _newest(self, fsid):
+        for k in reversed(list(self.keys())):
+            if isinstance(k, tuple) and k[0] == fsid:
+                return k
+        return None
+
+    def __getitem__(self, k):
+        if not isinstance(k, tuple):                     # a bare id: the newest slot's newest tree, as (key, session, leaf, flag)
+            nk = self._newest(k)
+            if nk is None:
+                raise KeyError(k)
+            trees = super().__getitem__(nk)
+            ent = _newest_of(trees)
+            if ent is None:
+                raise KeyError(k)
+            return ent
+        return super().__getitem__(k)
+
+    def get(self, k, default=None):
+        try:
+            return self[k]
+        except KeyError:
+            return default
+
+    def __contains__(self, k):
+        return (self._newest(k) is not None) if not isinstance(k, tuple) else super().__contains__(k)
+
+    def __setitem__(self, k, v):
+        if not isinstance(k, tuple):                     # a bare id write (a test stand-in): one tree under the live cut
+            flag = bool(v[3]) if isinstance(v, tuple) and len(v) > 3 else False
+            leaf = str(v[2]) if isinstance(v, tuple) and len(v) > 2 else ""
+            k, v = (k, _pending_cut(k), leaf), {flag: v}
+        super().__setitem__(k, v)
+
+
+_PARSE_CACHE = _ParseStore()   # (fsid, cut, leaf) -> {sdk_human: (key, session, leaf, sdk_human, fsid, asm_mode)}; a bare fsid reads the newest slot
+_PARSE_CACHE_MAX = 256
+_PARSE_CACHE_LOCK = threading.Lock()
+_PARSE_HITS = [0]              # served from the cache (whoever asked); misses are _PARSE_MISSES
+_SDK_OWNER_FN = None           # kernel wiring: fn(fsid) -> whether an SDK or Codex backend owns the session
+
+
+def set_sdk_owner_provider(fn):
+    """Kernel wiring: the ONE answer to "is this session's composer input the human" (sdk_human), the backends'
+    owns(); without it _sdk_owned falls back to the SDK registry file, which misses Codex sessions. Installing
+    the hook drops every cached parse: the flag rides each entry (read at parse time, never on a hit, so a hit
+    reads no registry file the stage gate's signature would have to list) and a new answer must re-parse."""
+    global _SDK_OWNER_FN
+    _SDK_OWNER_FN = fn
+    parse_cache_clear()
+
+
+def _lru_touch(cache, k):
+    """Mark k most recently used; a plain dict standing in for the store (a test's raced cache) has no order."""
+    touch = getattr(cache, "move_to_end", None)
+    if touch is not None:
+        touch(k)
+
+
+def _newest_of(trees):
+    return trees[next(reversed(trees))] if trees else None
+
+
+def _parse_slot(fsid, cut, leaf, human=None):
+    """The cache entry for (fsid, cut, leaf) under the sdk_human flag `human`, marked most recently used; None when absent.
+    A slot holds one tree per flag: a display parse and a judge parse that answer "is the composer input the human"
+    differently (a process with no owner hook: the kernel asks its backend, the judges the registry file) each keep
+    their own tree rather than one reading the other's; with the hook both answer alike and share one tree. `human`
+    None (a judge caller) takes the slot's only tree when it has exactly one and no hook is installed, so a hit reads
+    no registry file (the stage gate's signature lists none); otherwise the judges' own answer picks."""
+    slot = (fsid, cut, str(leaf))
+    with _PARSE_CACHE_LOCK:
+        trees = _PARSE_CACHE.get(slot)
+        if not trees:
+            return None
+        _lru_touch(_PARSE_CACHE, slot)
+        if human is None and _SDK_OWNER_FN is None and len(trees) == 1:
+            return _newest_of(trees)
+    if human is None:
+        human = _sdk_owned(fsid)
+    with _PARSE_CACHE_LOCK:
+        trees = _PARSE_CACHE.get(slot) or {}
+        return trees.get(bool(human))
+
+
+def _parse_store(fsid, cut, key, session, leaf, human, mode="full"):
+    """Store a parse under (fsid, cut, leaf). A slot stored under a NEW cut drops the fsid's other cut slots: a bare
+    rollback parses under its cut, the next record spends the cut and every caller parses under the plain one, and
+    the spent cut's tree was staying resident until the store filled (review find, 2026-09-11); a cut is never read
+    again once spent, so one tree per session holds. The entry carries the fsid (the kernel's path-keyed view must
+    never derive a sid from a filename: a /clear's leaf is named after the CLI session, not the romp sid) and the
+    assembly mode of the parse that built it (a hit reports it, so the chat fold sees fold or serve, never a blank).
+    The leaf is part of the slot: a parse of another transcript under the same sid (a subagent viewer's agent file
+    while the live leaf is parsed by the lanes, the feed and the judges) keeps a slot of its own instead of evicting
+    the live leaf's tree and being evicted by it in turn, twice per cycle (review find, 2026-09-11). A leaf a /clear
+    or a resume fork rotated away is released at the event that rotates it: discover, on first handing out the
+    session's new leaf, drops the previous leaf's slots (_note_leaf), so one tree per session holds across clears;
+    a parse stored under that retired leaf afterwards (a pass working from rows it snapshotted before the flip, an
+    episode render of the pre-clear transcript) is handed back to its caller and not stored, since the release is
+    a one-shot and nothing would drop it again. A leaf discover never handed out (a subagent's agent file) is
+    never retired and stores as an override slot."""
+    if _leaf_retired(fsid, leaf):
+        return
+    slot = (fsid, cut, str(leaf))
+    with _PARSE_CACHE_LOCK:
+        for k in [k for k in _PARSE_CACHE if k[0] == fsid and k[1] != cut]:
+            del _PARSE_CACHE[k]
+        trees = _PARSE_CACHE.get(slot)
+        if trees is None:
+            trees = _PARSE_CACHE[slot] = {}
+        trees.pop(bool(human), None)
+        trees[bool(human)] = (key, session, str(leaf), bool(human), str(fsid), str(mode or "full"))
+        _lru_touch(_PARSE_CACHE, slot)
+        while len(_PARSE_CACHE) > _PARSE_CACHE_MAX:
+            del _PARSE_CACHE[next(iter(_PARSE_CACHE))]   # the least recently used goes, never everything at once
+
+
+def _parse_entry(fsid, session=None, turns=None):
+    """The newest cached entry for fsid across cuts, leaves and flags, or with `session` (or its `turns` list)
+    given the entry holding that very tree: the chain and courier keys hold the judges' session object and the
+    nudge gate its turns, and the newest slot may be an override parse of another transcript under the same sid
+    (a subagent viewer's agent file stored between the walk's parse and the gate's read). None when absent."""
+    with _PARSE_CACHE_LOCK:
+        for k in reversed(_PARSE_CACHE):
+            if k[0] != fsid:
+                continue
+            if session is None and turns is None:
+                return _newest_of(_PARSE_CACHE[k])
+            for ent in reversed(list(_PARSE_CACHE[k].values())):
+                if ent[1] is session or (turns is not None and isinstance(ent[1], dict) and ent[1].get("turns") is turns):
+                    return ent
+    return None
+
+
+def parse_entry_for_leaf(leaf):
+    """The newest cached entry whose parse read `leaf` as its leaf transcript (the kernel's path-keyed view)."""
+    leaf = str(leaf)
+    with _PARSE_CACHE_LOCK:
+        for k in reversed(_PARSE_CACHE):
+            for ent in reversed(list(_PARSE_CACHE[k].values())):
+                if ent[2] == leaf:
+                    return ent
+    return None
+
+
+def parse_cache_paths():
+    """The leaf paths of every cached parse, one per slot, newest last (the kernel's view iterates these)."""
+    with _PARSE_CACHE_LOCK:
+        return [_newest_of(trees)[2] for trees in _PARSE_CACHE.values() if trees]
+
+
+def parse_cache_drop(fsid):
+    """Drop every cut's entry for fsid (a dead timeline lane releasing its parse); returns how many went."""
+    with _PARSE_CACHE_LOCK:
+        gone = [k for k in _PARSE_CACHE if k[0] == fsid]
+        for k in gone:
+            del _PARSE_CACHE[k]
+    return len(gone)
+
+
+def parse_cache_drop_leaf(leaf, fsid=None):
+    """Drop every slot holding a parse of `leaf` (the kernel's view pops by path; a leaf's stem is not the sid), or
+    with `fsid` only that session's slots of it: a fork child's registry is born naming the PARENT's transcript until
+    its own init flips it, so the child's flip must not take the parent's live slot with it (review find)."""
+    leaf = str(leaf)
+    with _PARSE_CACHE_LOCK:
+        gone = [k for k, trees in _PARSE_CACHE.items()
+                if (fsid is None or k[0] == fsid) and any(ent[2] == leaf for ent in trees.values())]
+        for k in gone:
+            del _PARSE_CACHE[k]
+    return len(gone)
+
+
+def parse_cache_clear():
+    with _PARSE_CACHE_LOCK:
+        _PARSE_CACHE.clear()
+
+
+def parse_hits():
+    return int(_PARSE_HITS[0])
+
+
+def parse_cached(fsid, files, states=None, sdk_human=None):
+    """The cached session for fsid under the LIVE key (files as they stand now, the live cut, the caller's
+    sdk_human or the judges' answer), or None: NEVER parses, so the feed's cache-only read costs nothing cold
+    (kernel._parse_cached)."""
+    try:
+        cands, _states, keyfiles = _parse_key_files(fsid, files, states)
+        pair = _fileset_key(keyfiles)
+    except Exception:
+        return None
+    cut = _pending_cut(fsid)
+    ent = _parse_slot(fsid, cut, str(files[0]), None if sdk_human is None else bool(sdk_human))
+    if ent is not None and ent[0] == (pair, cut):
+        return ent[1]
+    return None
 
 # ── the courier's change gate (2026-09-09) ──
 # run_courier scanned every session's transcript and goal store on every triage pass, loading the store
@@ -2775,7 +2994,7 @@ def _plan_key(fsid, path, session, now):
     session after a /clear), the captions file (the floor-title heal reads it), and each running background
     launch with whether it has crossed its deadline under the pass clock `now` (_bg_expiry_key: the settle
     reads that crossing and no file records it)."""
-    pk = _PARSE_CACHE.get(fsid)
+    pk = _parse_entry(fsid, session)
     if pk is None or pk[1] is not session:
         return None
     return (str(path), pk[0], _store_key(fsid), _file_key(str(EPIDIR / (fsid + ".jsonl"))),
@@ -2798,7 +3017,7 @@ def _courier_scan_key(fsid, path, session):
     """Every input run_courier's per-session scan reads, or None when the parse is not the cache's own
     (never skip what cannot be keyed). Taken before the store read, so a write landing during the scan
     moves the key the next pass takes."""
-    pk = _PARSE_CACHE.get(fsid)
+    pk = _parse_entry(fsid, session)
     if pk is None or pk[1] is not session:
         return None
     return (str(path), pk[0], _file_key(str(GOALDIR / (fsid + ".json"))), _journal_key(fsid), _archive_key(fsid),
@@ -3010,6 +3229,11 @@ def _sdk_owned(fsid):
     human (it parses with sdk_human=True), the dotted placeholder sticks for the whole open turn — forever if
     the turn reads as 'working' indefinitely — and each new message just re-renders a fresh one (the user
     2026-06-29). Computed from the live STATE global so it follows _rebind_state in tests."""
+    if _SDK_OWNER_FN is not None:
+        try:
+            return bool(_SDK_OWNER_FN(fsid))
+        except Exception:
+            pass
     return (STATE / "sdk" / (fsid + ".json")).exists()
 
 
@@ -3073,18 +3297,19 @@ def _pass_frame():
     return _frame if getattr(_judge_ctx, "in_pass", False) else None
 
 
-def _parse_key_files(fsid, files):
+def _parse_key_files(fsid, files, states=None):
     """The files the judge parse of `fsid` reads, as the filesystem shows them now: the candidate
     transcripts (_judge_candidates over the RAW leaf list every caller hands in) plus states/<fsid>.jsonl
     when it exists. Takes the raw list on purpose: _judge_candidates over an already-expanded list would
     append a fork lane's anchor a second time, and a key computed that way would never equal the one the
     parse cache holds (one spurious parse per fork lane per pass)."""
     cands = _judge_candidates(fsid, files)
-    states = STATESDIR / (fsid + ".jsonl")
+    states = Path(states) if states else STATESDIR / (fsid + ".jsonl")   # the caller's states log (the kernel's display
+    #                                                                       parse names its own path) or the judges' default
     return cands, states, list(cands) + ([str(states)] if states.exists() else [])
 
 
-def _frame_parse_key(fsid, files):
+def _frame_parse_key(fsid, files, states=None):
     """The (fileset key, pending cut) pair this pass judges `fsid` under, pinned in the pass frame
     (2026-09-07).
 
@@ -3115,7 +3340,7 @@ def _frame_parse_key(fsid, files):
             hit = fr["keys"].get(("parse", fsid), _NO_PIN)
         if hit is not _NO_PIN:
             return hit, None, fr
-    _cands, _states, key_files = _parse_key_files(fsid, files)
+    _cands, _states, key_files = _parse_key_files(fsid, files, states)
     cut = _pending_cut(fsid)
     try:
         key = (_fileset_key(key_files), cut)
@@ -3138,7 +3363,7 @@ def _frame_pin_parse(fr, fsid, session, key):
     return won
 
 
-def parsed_session(fsid, files, now):
+def parsed_session(fsid, files, now, asm_mode_out=None, stats=None, states=None, sdk_human=None):
     """ONE event-model parse per (transcript+states, mtime+size), reused across the captioner, planner,
     sweep, courier, and grouper — which all re-parsed the SAME leaf every pass (up to 4× per change, and
     once per pass even when nothing changed, which is what forced the PLAN_SESSIONS cap). In-memory: the
@@ -3171,8 +3396,10 @@ def parsed_session(fsid, files, now):
     # The pass's (fileset key, cut) pair, pinned BEFORE this read: a gate that pinned first fixes the
     # fileset component for the pass; a first toucher pins the live one here. `fr` is the frame the pin
     # went into, and the parse below is pinned into that same frame.
-    pair, cut, fr = _frame_parse_key(fsid, files)
-    states = STATESDIR / (fsid + ".jsonl")
+    pair, cut, fr = _frame_parse_key(fsid, files, states)
+    states = Path(states) if states else STATESDIR / (fsid + ".jsonl")   # the same log the key was taken over
+    leaf = str(files[0])                   # the transcript this parse is OF: part of the slot (an override parse of
+    #                                        another file under the same sid never takes the live leaf's slot)
     # A FORKED leaf (SDK /clear: discover hands the lastSid file under the stable romp sid) parses with
     # the session's anchor transcript among the candidates, so a fork whose chain back-links across files
     # (a resume-style fork) keeps its history — the FileAdapter walk crosses files by design, and a /clear
@@ -3190,22 +3417,27 @@ def parsed_session(fsid, files, now):
     # shows up as a served pair that differs from the pinned one, which withholds the gate's stamp.
     if cut is None:                        # a pin answered and read nothing: the live cut is ours to read
         cut = _pending_cut(fsid)
-    key = (pair[0], cut) if pair is not None else None
-    hit = _PARSE_CACHE.get(fsid)
+    key = (pair[0], cut) if pair is not None else None   # the frame's pair shape; sdk_human is the slot's tree pick (stage 2)
+    hit = _parse_slot(fsid, cut, leaf, None if sdk_human is None else bool(sdk_human))
     if key is not None and hit and hit[0] == key:
+        _PARSE_HITS[0] += 1
+        if stats is not None:
+            stats["miss"] = False
+        if asm_mode_out is not None:
+            asm_mode_out.append(hit[5] if len(hit) > 5 else "full")   # the mode of the parse that built this tree (review find)
         if fr is not None:                 # a WARM first touch pins too (review 2026-09-06): this path used to
             with _frame_lock:              #  return unpinned, so a session already in the cache froze nothing
                 return _frame_pin_parse(fr, fsid, hit[1], key)   # and a mid-pass append reached a later stage
         return hit[1]                      #  only - the two-worlds shape the frame exists to prevent
     session = em.parse_session(files[0], rompuuid=fsid, candidate_files=list(files),
                                states=str(states), postal_log=str(MESSAGES), now=now,
-                               sdk_human=_sdk_owned(fsid),   # SDK session → composer input is promptSource "sdk" = the human (mirrors the kernel)
-                               leaf_override=cut or None)
+                               sdk_human=(human := bool(sdk_human) if sdk_human is not None else bool(_sdk_owned(fsid))),   # the caller's answer, else the judges', read on a miss
+                               leaf_override=cut or None, asm_mode_out=(_am := asm_mode_out if asm_mode_out is not None else []))
+    if stats is not None:
+        stats["miss"] = True
+    _PARSE_MISSES[0] += 1                                  # a cold parse (T323: /perf parses)
     if key is not None:
-        if len(_PARSE_CACHE) > 256:        # bounded by fleet size; a wholesale clear on overflow is fine
-            _PARSE_CACHE.clear()
-        _PARSE_MISSES[0] += 1                              # a cold parse (T323: /perf parses.judge)
-        _PARSE_CACHE[fsid] = (key, session)
+        _parse_store(fsid, cut, key, session, leaf, human, (_am[-1] if _am else "full"))   # LRU, never a wholesale clear
     if fr is not None:                     # pin under the frame the KEY went into (never a re-read _frame: a
         with _frame_lock:                  #  parse spanning a pass boundary must not land keyless in the next
             return _frame_pin_parse(fr, fsid, session, key)   # frame); a concurrent first toucher wins
@@ -7759,6 +7991,39 @@ def _custom_title(p):
     return None
 
 
+_LEAF_SEEN = {}      # sid -> the leaf path discover last handed out for it: the parse store releases the previous
+_LEAF_RETIRED = {}   # sid -> the leaves discover handed out for it before the current one: never stored again
+_LEAF_LOCK = threading.Lock()
+
+
+def _note_leaf(sid, path_str):
+    """discover hands out `path_str` as sid's CURRENT leaf. When that differs from the leaf it handed out last (a
+    /clear minted a new fsid under the same romp sid, or a resume fork moved the head to a fresh file), the previous
+    leaf's parse slots OF THIS SID are dropped: nothing reads them again (the anchor is a non-leaf candidate of the
+    new parse, read through the record cache, never through the parse store), and without this every clear left one
+    more full tree resident until restart (review find, 2026-09-11). The event is the flip itself, observed at the
+    one read that gives every caller the new leaf; a candidate-based drop would release only the first anchor. Only
+    this sid's slots go: a fork child's registry names the parent's transcript until its own init flips it, and the
+    parent's live slot is not the child's to drop. The retired leaf is remembered so a parse stored under it AFTER
+    the flip (a pass that snapshotted its rows before a mid-pass /clear) is refused by _parse_store rather than
+    kept as a live slot; a leaf handed out again (the anchor, while a fresh lastSid names a file not yet on disk)
+    is current again and stores as before."""
+    with _LEAF_LOCK:
+        prev = _LEAF_SEEN.get(sid)
+        _LEAF_SEEN[sid] = path_str
+        retired = _LEAF_RETIRED.setdefault(sid, set())
+        retired.discard(path_str)
+        if prev is not None and prev != path_str:
+            retired.add(prev)
+    if prev is not None and prev != path_str:
+        parse_cache_drop_leaf(prev, sid)
+
+
+def _leaf_retired(sid, leaf):
+    with _LEAF_LOCK:
+        return str(leaf) in _LEAF_RETIRED.get(sid, ())
+
+
 _lastsid_memo = {}   # sid -> (sdk-registry mtime, diverged lastSid or None) — the registry is rewritten
                      # constantly while a session works (ctx%, queue mirror), but lastSid flips only on a
                      # /clear-style fork, so an mtime memo keeps the fingerprint's per-push reads cheap
@@ -8197,11 +8462,13 @@ def _discover_impl(now, window=None, forks=True):
         fork = next(((p, m) for st, p, m in listing if st == last), None) if last else None
         if fork is not None:
             path_str, mt = fork
+            _note_leaf(sid, path_str)                    # the leaf flipped here: the previous leaf's trees go
             if mt >= cutoff and path_str not in seen:
                 seen.add(path_str); out.append((sid, Path(path_str), sid, name))
         else:
             for stem, path_str, mt in listing:           # anchor (<sid>.jsonl) first — mirrors the old exists()/stat() block
                 if stem == sid:
+                    _note_leaf(sid, path_str)
                     if mt >= cutoff and path_str not in seen:
                         seen.add(path_str); out.append((sid, Path(path_str), sid, name))
                     break
