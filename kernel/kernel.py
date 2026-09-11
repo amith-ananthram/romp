@@ -32,6 +32,18 @@ cm = load_source("romp_colormap", HERE / "colormap.py")  # age → recency tint
 pal = load_source("romp_palette", HERE / "palette.py")  # session-identity palettes (selectable)
 ap = load_source("romp_askparse", HERE / "askparse.py")  # tmux-pane → live AskUserQuestion picker
 sb = load_source("romp_session_backend", HERE / "session_backend.py")  # the SessionBackend ABC
+tsock = load_source("romp_tmux_socket", HERE / "tmux_socket.py")  # where the tmux server's socket lives (T325)
+# Settled into THIS process's environment before the first tmux call, so every dial below (TmuxBackend shells tmux
+# with the inherited environment) and every `romp new -t` the kernel spawns agree with the server. A MANAGED kernel
+# (ROMP_MANAGER_PID) takes the manager's TMUX_TMPDIR as it stands, absent meaning tmux's default: the manager alone
+# starts the server, and a new-code kernel respawned under a manager that predates the rule must dial the /tmp
+# server that manager started, not a runtime-dir socket nobody serves (review find: it would have read every
+# terminal session as dead and started a second, unscoped server on its next spawn). Unmanaged (romp-serve bare, a
+# lab, a test) resolves for itself. The rule that fired is logged at boot and reported on /version.
+_TMUX_TMPDIR, _TMUX_TMPDIR_RULE = tsock.export_tmux_tmpdir(os.environ, managed=bool(os.environ.get("ROMP_MANAGER_PID")))
+# the MANAGER's own rule, passed beside the value (specEnv): "" under a manager from before the rule, so bin/romp can tell
+# that manager (restart it) from a current one that simply has no runtime directory
+_TMUX_MANAGER_RULE = (os.environ.get(tsock.LAUNCHER_MARK) or "") if os.environ.get("ROMP_MANAGER_PID") else ""
 CHAT_VIEW = ROOT / "vscode-extension"               # the tuned UI, current in this worktree via `git merge main`
 # ROMP_DIST_DIR: test seam (romp-lab serves a COPY of the built bundles, so its rebuild simulations —
 # mtime bumps that must raise the reload banner — never touch the dist the LIVE kernel serves).
@@ -1117,6 +1129,10 @@ def _version_info():
     _mv, _mgt = _mesh_settings_snapshot()   # value AND stamp of each mesh-adopted store from ONE read (T248b)
     return {"kernel_sha": _kernel_sha(), "kernel_ver": _kernel_ver(), "pid": os.getpid(), "started": int(_STARTED),
             "boot": _BOOT_ID,   # lets a page retire update offers from a previous kernel life (2026-08-15)
+            # where this kernel's tmux server keeps its socket ("" = tmux's default) and the rule that chose it
+            # (T325): bin/romp compares its own answer with this before it starts a terminal session, so a shell
+            # that resolved differently (a cron job, a `sudo -u`, a `docker exec`) never starts a second server
+            "tmuxSocketDir": _TMUX_TMPDIR or "", "tmuxSocketRule": _TMUX_TMPDIR_RULE, "tmuxSocketManagerRule": _TMUX_MANAGER_RULE,
             "uptime_s": int(time.time() - _STARTED), "dist_ver": _dist_ver(), "bundles": bundles,
             # the WS ops beyond the base protocol this kernel answers (KERNEL_WS_CAPS) — the same list
             # the `caps` frame carries at `ready`; `romp version` and a curl can read it here
@@ -12881,8 +12897,16 @@ def _spawn_session(name, cwd=None):
     _commands_for_cwd(cwd)   # pre-warm the slash-command list — a new session predicts a composer (the user 2026-08-13)
     env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
     try:
-        subprocess.run([str(BIN / "romp"), "new", "-t", "--detach", name], cwd=cwd, env=env, timeout=25,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        r = subprocess.run([str(BIN / "romp"), "new", "-t", "--detach", name], cwd=cwd, env=env, timeout=25,
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            # said, never swallowed (T325 review): the launcher's refusal (its socket directory not this kernel's,
+            # tmux missing, the CLI below its floor) used to vanish into DEVNULL after /new had already answered
+            # ok, so no tab appeared and nothing said why. One stderr line and one error-center row.
+            detail = (r.stderr or r.stdout or "").strip().splitlines()
+            detail = " / ".join(l.strip() for l in detail if l.strip())[:400] or "romp new exited %d" % r.returncode
+            sys.stderr.write("spawn '%s': romp new -t exited %d: %s\n" % (name, r.returncode, detail))
+            _sdk_problem("terminal session '%s' did not start: %s" % (name, detail))
     except Exception:
         sys.stderr.write("spawn '%s': %s\n" % (name, traceback.format_exc()))
     _reap_if_cancelled(name)   # the ✕ may have fired while this spawn was in flight
@@ -16633,7 +16657,9 @@ class TmuxBackend(sb.SessionBackend):
         (-L), so two kernels never see or nudge each other's panes — and since that server is
         started by this kernel, its sessions inherit the profile env (ROMP_STATE_DIR /
         CLAUDE_CONFIG_DIR) for free. Read at call time, not import, so tests can flip it. Unset →
-        the default server, exactly as before."""
+        the default server, exactly as before. WHERE that server's socket lives is the environment's
+        TMUX_TMPDIR, which the kernel resolved at import (tmux_socket.export_tmux_tmpdir, T325): under
+        the user's runtime directory when there is one, so no /tmp event can take it away."""
         sock = os.environ.get("ROMP_TMUX_SOCKET")
         return (["tmux", "-L", sock] if sock else ["tmux"]) + list(args)
 
@@ -56179,6 +56205,9 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
 
 
 def main():
+    # where the tmux server's socket lives (T325): said once at boot, so a session that cannot be reached is diagnosed
+    # from the log, not from the /tmp listing
+    sys.stderr.write("romp-kernel: tmux socket dir: %s\n" % tsock.describe(_TMUX_TMPDIR, _TMUX_TMPDIR_RULE, _TMUX_MANAGER_RULE))
     # Export the kernel's claude resolution for every judge call (in-process tiers AND `romp-judge
     # --once` subprocesses): judges exec the binary directly, and a kernel started over non-login ssh
     # (a federated host) has no ~/.local/bin on PATH — bare `claude` exec-failed silently there.
