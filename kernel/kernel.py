@@ -31189,16 +31189,62 @@ def _merge_live_atoms(session, sid, shown_texts=()):
     if not turns:
         turns = [{"id": "live", "trigger": None, "t": fresh[0]["t"], "end": fresh[-1]["t"],
                   "ended": not live_work, "atoms": []}]
-    turns[-1] = dict(turns[-1])
-    turns[-1]["atoms"] = sorted(list(turns[-1]["atoms"]) + fresh, key=lambda a: (a.get("t", 0), a.get("_seq", 0)))
-    # Extend the turn's window over the appended tail (the user 2026-07-02): segments() spans [turn.t,
-    # turn.end], so a live atom past the disk turn's end (a /model invocation minutes after the last work)
-    # otherwise falls OUTSIDE every segment — its timeline dot then appeared only retroactively, once the
-    # disk write moved the real end past it.
-    turns[-1]["end"] = max(turns[-1].get("end") or 0, max(a.get("t", 0) for a in fresh))
-    if live_work:
-        turns[-1]["ended"] = False
+    # A STALE echo is placed by its send time, never among later rows (T344, the user 2026-09-11, who saw
+    # a 10:28 PM row between 7:05 AM rows): an echo stamped before the last turn's start is a send the
+    # transcript has moved past (a romp notice that never landed, reseeded at boot from the registry's
+    # echoes), and appended to the last turn it sat among today's rows wearing yesterday's clock, which
+    # the chat's day walk read as a day boundary. _place_stale_echoes puts each such echo into the turn
+    # whose window holds it, or into a closed turn of its own in the gap where it was sent, so the rows
+    # the chat reads are in time order and the day walk needs no special case. A pending send is always
+    # stamped after the last turn's start and takes the tail below, as before.
+    last_start = turns[-1].get("t") or 0
+    stale = [a for a in fresh if a.get("_echo_text") and a.get("t", 0) < last_start]
+    if stale:
+        turns = _place_stale_echoes(turns, stale)
+        stale_ids = {id(a) for a in stale}
+        fresh = [a for a in fresh if id(a) not in stale_ids]
+    if fresh:
+        turns[-1] = dict(turns[-1])
+        turns[-1]["atoms"] = sorted(list(turns[-1]["atoms"]) + fresh, key=lambda a: (a.get("t", 0), a.get("_seq", 0)))
+        # Extend the turn's window over the appended tail (the user 2026-07-02): segments() spans [turn.t,
+        # turn.end], so a live atom past the disk turn's end (a /model invocation minutes after the last work)
+        # otherwise falls OUTSIDE every segment — its timeline dot then appeared only retroactively, once the
+        # disk write moved the real end past it.
+        turns[-1]["end"] = max(turns[-1].get("end") or 0, max(a.get("t", 0) for a in fresh))
+        if live_work:
+            turns[-1]["ended"] = False
     return {**session, "turns": turns}
+
+
+def _place_stale_echoes(turns, echoes):
+    """Place echo atoms stamped before the last turn's start where their send time belongs (T344). Each echo
+    joins the turn whose window [t, end] holds it; an echo that falls in the gap between two turns, or before
+    the first, goes into a closed synthetic turn at that place (trigger None, like the turn a transcript-less
+    session gets), one turn per gap holding every echo sent in it, sorted, so two notices sent together stay
+    a run. The synthetic turn's id derives from its first echo's uuid, so the same echo yields the same turn
+    build after build. Returns a new turns list; the caller's turn dicts are copied before a write (the parse
+    cache is never mutated)."""
+    out = list(turns)
+    key = lambda a: (a.get("t", 0), a.get("_seq", 0))
+    gaps = {}                                   # insertion index in `turns` → the echoes sent in that gap
+    for a in sorted(echoes, key=key):
+        t = a.get("t", 0)
+        i = None                                # the last turn starting at or before the echo
+        for k, turn in enumerate(out):
+            if (turn.get("t") or 0) <= t:
+                i = k
+            else:
+                break
+        if i is not None and t <= (out[i].get("end") or out[i].get("t") or 0):
+            out[i] = dict(out[i])
+            out[i]["atoms"] = sorted(list(out[i]["atoms"]) + [a], key=key)
+        else:
+            gaps.setdefault(0 if i is None else i + 1, []).append(a)
+    for idx in sorted(gaps, reverse=True):      # back to front, so earlier indices stay valid
+        atoms = sorted(gaps[idx], key=key)
+        out.insert(idx, {"id": "live-" + str(atoms[0].get("uuid") or atoms[0].get("t", 0)), "trigger": None,
+                         "t": atoms[0].get("t", 0), "end": atoms[-1].get("t", 0), "ended": True, "atoms": atoms})
+    return out
 
 
 def _sdk_transcript_path(sid):
