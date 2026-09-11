@@ -239,6 +239,19 @@ class Guard(unittest.TestCase):
         km._spend_guard_tick(NOW + 5, {}, sessions=[], be=self.be, clients=self.clients, prices=PRICES)
         self.assertEqual(km._SPEND_GUARD, {})
 
+    def test_the_guard_never_starts_the_price_feed_fetch(self):
+        """The cost view refreshes the remote price feed when its cache is stale; the guard runs on the pusher's path in
+        every kernel, hermetic test kernels included, so it merges the table WITHOUT that refresh."""
+        self._spend(NOW, 200.0)
+        with mock.patch.object(km, "_refresh_remote_prices") as refresh:
+            km._spend_guard_tick(NOW, {SID: {"state": "working"}}, sessions=self.sessions, be=self.be, clients=self.clients)
+            km._spend_window_usd(self.leaf, NOW)
+        refresh.assert_not_called()
+        self.assertEqual(self.be.interrupts, [SID], "…and the crossing still fired on the merged table")
+        with mock.patch.object(km, "_refresh_remote_prices") as refresh:
+            km._model_prices(int(NOW))
+        refresh.assert_called_once_with(int(NOW))
+
     def test_the_pusher_runs_the_guard_every_cycle_after_the_spend_pause_check(self):
         import inspect
         src = inspect.getsource(km._pusher_cycle_jobs)

@@ -36246,7 +36246,7 @@ def _spend_window_usd(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None):
     more than once (one record per content block, one message id) counts once, at its largest usage row; a record
     whose model the table cannot place counts at the table's dearest row rather than not at all (a guard errs high)."""
     if prices is None:
-        prices = _model_prices(int(now))
+        prices = _model_prices(int(now), refresh=False)   # never a network fetch from the pusher's path
     dearest = max(prices.values(), key=lambda p: float(p.get("out") or 0)) if prices else None
     since = now - window_s
     usd = 0.0
@@ -36365,7 +36365,7 @@ def _spend_guard_tick(now, live_map, sessions=None, be=None, clients=None, price
     if be is None:
         be = _sdk_backend or None
     if prices is None:
-        prices = _model_prices(int(now))
+        prices = _model_prices(int(now), refresh=False)   # never a network fetch from the pusher's path
     live = set()
     for s in rows:
         sid, path = s.get("sid"), s.get("path")
@@ -38647,11 +38647,15 @@ def _refresh_remote_prices(now):
     threading.Thread(target=work, name="price-refresh", daemon=True).start()
 
 
-def _model_prices(now=None):
-    """The merged $/token price map: baked-in DEFAULT < best-effort remote feed < user config override."""
+def _model_prices(now=None, refresh=True):
+    """The merged $/token price map: baked-in DEFAULT < best-effort remote feed < user config override. `refresh`
+    (the default) lets a stale feed cache kick its background fetch; the spend guard passes False, since it runs on
+    the pusher's path in every kernel (a hermetic test kernel included) and must never start a network fetch: it
+    merges whatever the cost view's last refresh left in the cache (T350)."""
     if now is None:
         now = int(time.time())
-    _refresh_remote_prices(now)
+    if refresh:
+        _refresh_remote_prices(now)
     prices = {k: dict(v) for k, v in DEFAULT_MODEL_PRICES.items()}
     prices.update({k: dict(v) for k, v in _price_cache["remote"].items()})
     try:
