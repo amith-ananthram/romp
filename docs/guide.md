@@ -408,9 +408,15 @@ host reconnects, a relay down, a session that ended), the pane goes blank: no
 tab is selected, the body names the session that vanished (and says it is
 reconnecting when that is known), and the message box is disabled with no
 session name in it. When that same session's tab returns, the pane goes back
-to it. Focus moves to a different session only when you pick a tab, or when you
-close the active tab yourself (then the pane returns to the tab you used before
-it).
+to it. After a kernel restart the page reloads and remembers the tab you were
+on: until that session is listed again the pane stays blank and names it as not
+listed yet, and it never settles on another session meanwhile; if it never
+returns, the blank body stays until you pick a tab. A tab view that stops
+showing your session (a tag removed) blanks the pane the same way and comes back
+to it when the view shows it again. From the blank pane an arrow key or Next Tab
+lands on the first visible tab. Focus moves to a different session only when
+you pick a tab, or when you close the active tab yourself (then the pane returns
+to the tab you used before it).
 
 A session started from another one joins its tags. Forking a session, breaking
 a comment thread out into its own session, and running `romp new` inside a

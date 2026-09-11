@@ -31,30 +31,50 @@ test("emptyStateParts: the body names the session that vanished and why; reconne
   assert.deepEqual(emptyStateParts({ name: "web", why: "hostDrop", dialing: false }, true).tail, "’s host disconnected. It comes back here when the host does.");
   assert.deepEqual(emptyStateParts({ name: "web", why: "omitted", dialing: false }, true).tail, " is no longer listed by romp. It comes back here if it returns.");
   assert.deepEqual(emptyStateParts({ name: "web", why: "end", dialing: false }, true).tail, " ended.");
+  assert.deepEqual(emptyStateParts({ name: "web", why: "awaited", dialing: false }, true),
+                   { head: "No session selected. Pick a tab to start. ", name: "web", tail: " is not listed yet. It comes back here when its host does." });
+  assert.deepEqual(emptyStateParts({ name: "web", why: "awaited", dialing: true }, true).tail, " is not listed yet; its host is reconnecting… It comes back here when the host does.");
+  assert.deepEqual(emptyStateParts({ name: "web", why: "hidden", dialing: false }, true).tail, " is not shown by this tab view. Pick a tab, or change the view.");
+  assert.deepEqual(emptyStateParts({ name: "web", why: "awaited", dialing: false }, false).head, "No sessions yet. ", "an empty strip invites no pick");
   for (const p of [emptyStateParts({ name: "web", why: "hostDrop", dialing: true }, true), emptyStateParts(null, true)]) {
     assert.doesNotMatch(p.head + p.tail, /\b(card|board|goal|column|nudge)\b/, "no romp nouns in the body's line");
   }
 });
 
 test("the wiring: the dismiss branch, the unfocused body, the composer, the restore on return, no adoption meanwhile", () => {
-  assert.match(RENDER, /^let vanishedId: string \| null = null;\s*\nlet vanishedWhy: DismissWhy \| null = null;\s*\nlet vanishedName = "";/m);
+  assert.match(RENDER, /^let vanishedId: string \| null = null;\s*\nlet vanishedWhy: VanishWhy \| null = null;\s*\nlet vanishedName = "";/m);
   const dismiss = fn("dismissSession");
   assert.match(dismiss, /const next = focusAfterDismiss\(why, mru, order, goingToo\);\s*\n\s*activeId = next\.activeId;\s*\n\s*if \(next\.unfocused\) \{ vanishedId = id; vanishedWhy = why; vanishedName = name; \}/);
   assert.match(dismiss, /if \(why !== "close"\) \{[\s\S]*?ta\.blur\(\);[\s\S]*?renderComposerNote\(id, why, name\);/, "the T236 note above the box still says whose box went away");
   // the pick (and the restore) end the unfocused state
-  assert.match(fn("setActive"), /activeId = id;\s*\n\s*vanishedId = null; vanishedWhy = null; vanishedName = "";/);
+  assert.match(fn("setActive"), /activeId = id;\s*\n\s*vanishedId = null; vanishedWhy = null; vanishedName = ""; wantActive = null;/, "a pick ends the unfocused state AND the awaited tab");
+  assert.match(fn("setActive"), /activeId: id, activeName: liveSession\(id\)\?\.name \|\| tabMeta\.get\(id\)\?\.name \|\| ""/, "the name persists beside the id for the reload's body");
   // the empty body: pane-focus's words, the name dressed as the strip dresses it, the composer disabled and nameless
   const show = fn("showActive");
   assert.match(show, /paintEmptyState\(empty\);\s*\n\s*empty\.style\.display = "";\s*\n[\s\S]{0,200}?ta\.disabled = true; ta\.placeholder = order\.length \? "Pick a tab to start" : "Click \+ to add a session"; syncComposerPh\(\);/);
   assert.match(show, /if \(sendBtn\) sendBtn\.disabled = true;\s*\n\s*\}\s*\n\s*document\.body\.style\.removeProperty\("--active-accent"\);/, "no session colour on the window border either");
   const paint = fn("paintEmptyState");
   assert.match(paint, /dialing: hostIsDialing\(vanishedId\)/, "reconnecting is the host's dial state, never a timer");
-  assert.match(paint, /b\.replaceChildren\(\.\.\.hostNameNodes\(parts\.name, vanishedId\)\);/, "the host prefix the tab wore");
-  assert.match(paint, /empty\.classList\.toggle\("unfocused", !!v\);\s*\n\s*empty\.dataset\.vanished = vanishedId \|\| "";/);
+  assert.match(paint, /b\.replaceChildren\(\.\.\.hostNameNodes\(parts\.name, named\)\);/, "the host prefix the tab wore (the vanished or the awaited id)");
+  assert.match(paint, /empty\.classList\.toggle\("unfocused", !!v\);\s*\n\s*empty\.dataset\.vanished = named \|\| "";/, "the body names the vanished or the awaited id");
   assert.doesNotMatch(RENDER, /empty\.textContent = "No session open/, "the one writer of the empty body is paintEmptyState");
   // the return: the session frame, or the strip re-listing it; no other arrival adopts the box meanwhile
-  assert.match(RENDER, /if \(vanishedId === msg\.id\) setActive\(msg\.id\);\s*\n\s*const adopted = !activeId && !vanishedId;/);
-  assert.match(fn("applyTabOrder"), /for \(const id of kernelOrder\) kernelListed\.add\(id\);[\s\S]{0,400}?if \(vanishedId && order\.includes\(vanishedId\)\) setActive\(vanishedId\);/);
+  assert.match(RENDER, /if \(vanishedId === msg\.id\) setActive\(msg\.id\);\s*\n\s*const adopted = !activeId && !vanishedId && !wantActive;/);
+  assert.match(fn("applyTabOrder"), /for \(const id of kernelOrder\) kernelListed\.add\(id\);[\s\S]{0,500}?const back = vanishedId \|\| wantActive;[^\n]*\n\s*if \(back && order\.includes\(back\)\) setActive\(back\);/);
+  // the reload road (the review's HIGH): the persisted tab is awaited at boot, the body names it, nothing adopts
+  assert.match(RENDER, /^let wantActiveName: string = /m);
+  assert.match(fn("paintEmptyState"), /const awaited = !vanishedId && wantActive \? wantActive : null;/);
+  assert.match(RENDER, /renderBgTasks\(\);\s*\n\s*\} else if \(!activeId\) \{[\s\S]{0,300}?showActive\(\);\s*\n\s*\}/, "a frame landing on an unfocused pane paints the body, adopting nothing");
+  assert.match(fn("paintEmptyState"), /why: "awaited" as const, dialing: hostIsDialing\(awaited\)/);
+  // the body repaints on the dial event; the view filter routes through the same rule; the keyboard picks the first tab
+  assert.match(RENDER, /window\.addEventListener\("romp:hostDial", \(\) => \{ if \(!activeId\) \{ const e = document\.getElementById\("empty-state"\); if \(e\) paintEmptyState\(e\); \} \}\);/);
+  assert.match(fn("renderTabs"), /if \(activeId !== next && activeId && !tabInView\(activeId\)\) unfocusHiddenByView\(activeId\);/, "the view filter never re-points at another session");
+  assert.match(fn("renderTabs"), /if \(!activeId && vanishedId && vanishedWhy === "hidden" && visibleIds\.includes\(vanishedId\)\)/, "…and restores the hidden tab when the view shows it again");
+  assert.match(fn("unfocusHiddenByView"), /activeId = null; vanishedId = id; vanishedWhy = "hidden";/);
+  assert.match(fn("cycleTab"), /if \(pickFirstVisibleTab\(\)\) return;/);
+  assert.match(fn("onTabKey"), /if \(!activeId\) \{[^\n]*\n\s*if \(\(e\.key === "ArrowRight"[\s\S]{0,160}pickFirstVisibleTab\(\)\)/);
+  assert.match(RENDER, /if \(!activeId\) \{ if \(pickFirstVisibleTab\(\)\) e\.preventDefault\(\); return; \}/, "the window arrow step");
+  assert.doesNotMatch(RENDER, /setTimeout\(\(\) => \{ if \(activeId !== next && activeId && !tabInView\(activeId\)\) setActive\(next\); \}, 0\);/, "the old re-point is gone");
   // the feed relay: showActive announces the active tab (null included) on every branch it takes
   assert.match(show, /^\s*notifyActive\(\);/m);
   assert.match(fn("notifyActive"), /vscodeApi\.postMessage\(\{ type: "activeTab", id: activeId \}\)/, "null rides as null");

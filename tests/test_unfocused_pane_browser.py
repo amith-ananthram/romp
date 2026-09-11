@@ -6,6 +6,9 @@ active tab, the body names the session that vanished, the composer disabled with
 the box. A tabOrder push that adds a NEW session changes nothing (no adoption). A tabOrder push listing the vanished
 session again restores focus to it,
 and its transcript comes back. Screenshots of the unfocused state, dark and light (PV_SHOTS names the folder).
+The reload road (the review's HIGH, the user's actual trigger): the persisted state names a REMOTE tab this kernel never
+lists; after a reload the pane stays unfocused naming it, the local sessions adopt nothing, the remote strip entry
+restores focus to it, and a pick made before the relay wins.
 Synthetic fixtures only: placeholder UUIDs, a hermetic state root, an invented notes-api world."""
 import json
 import os
@@ -32,6 +35,7 @@ import test_ship_reship as _lab   # noqa: E402  the lab kernel's environment (th
 SID_A = "11111111-2222-3333-4444-555555555555"
 SID_B = "aaaaaaaa-1111-2222-3333-444444444444"
 SID_C = "bbbbbbbb-1111-2222-3333-444444444444"   # a session that appears while the user's tab is away: never adopted
+REMOTE = "REMOTEBOX:cccccccc-1111-2222-3333-444444444444"   # a remote host's session this kernel never lists: the reload road's awaited tab
 
 
 def _free_port():
@@ -110,6 +114,37 @@ await page.waitForFunction((sid) => { const a = document.querySelector("#tabs .t
 // wears the session's colour again
 await page.waitForFunction(() => { const e = document.getElementById("empty-state"); const ta = document.getElementById("composer-input"); return (!e || getComputedStyle(e).display === "none") && ta && !ta.disabled && document.body.style.getPropertyValue("--active-accent") !== ""; }, null, { timeout: 20000 });
 out.restored = await state();
+
+// ---- the reload road (the review's HIGH, the user's actual trigger): a kernel restart RELOADS the page, so no dismissal
+// runs; the page remembers the REMOTE tab it showed, the local kernel's sessions arrive first, and the remote host relays
+// later. Seed the persisted state with a remote sid and reload: the pane must stay unfocused naming it, adopt nothing,
+// and focus it when its strip entry arrives; a pick in between wins.
+const seed = () => page.evaluate((remote) => {
+  const key = Object.keys(localStorage).find((k) => k.startsWith("romp-vscode-state-"));
+  const st = key ? JSON.parse(localStorage.getItem(key) || "{}") : {};
+  // the name as the page persists it for a remote session: federation prefixes the host (host-prefix.ts hostPrefix)
+  localStorage.setItem(key, JSON.stringify({ ...st, activeId: remote, activeName: "REMOTEBOX:web" }));
+  return key;
+}, cfg.remote);
+out.seedKey = await seed();
+await page.reload();
+await page.waitForFunction((n) => document.querySelectorAll("#tabs .tab[data-id]").length >= n, 2, { timeout: 20000 });
+await page.waitForTimeout(600);   // the local sessions' frames land: nothing may adopt
+out.reloadAwaiting = await state();
+const R_TAB = { id: cfg.remote, name: "web", color: { bg: "#f2b26b", fg: "#1a1206" } };
+await inject({ type: "tabOrder", order: [cfg.remote, cfg.sidA, cfg.sidB, cfg.sidC], tabs: [R_TAB, A_TAB, B_TAB, C_TAB], live: [cfg.remote, cfg.sidA, cfg.sidB, cfg.sidC], skeleton: [cfg.remote, cfg.sidC] });
+await page.waitForFunction((sid) => { const a = document.querySelector("#tabs .tab.active[data-id]"); return !!a && a.dataset.id === sid; }, cfg.remote, { timeout: 10000 });
+out.reloadRestored = await state();
+// …and a pick in between wins: seed again, reload, click B before the remote host relays; the relay then changes nothing
+await seed();
+await page.reload();
+await page.waitForFunction((n) => document.querySelectorAll("#tabs .tab[data-id]").length >= n, 2, { timeout: 20000 });
+await page.waitForTimeout(300);
+await page.click('#tabs .tab[data-id="' + cfg.sidB + '"]');
+await page.waitForFunction((sid) => { const a = document.querySelector("#tabs .tab.active[data-id]"); return !!a && a.dataset.id === sid; }, cfg.sidB, { timeout: 10000 });
+await inject({ type: "tabOrder", order: [cfg.remote, cfg.sidA, cfg.sidB, cfg.sidC], tabs: [R_TAB, A_TAB, B_TAB, C_TAB], live: [cfg.remote, cfg.sidA, cfg.sidB, cfg.sidC], skeleton: [cfg.remote, cfg.sidC] });
+await page.waitForTimeout(500);
+out.pickWins = await state();
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 process.exit(0);
@@ -179,7 +214,7 @@ class ServedUnfocusedPane(unittest.TestCase):
     def test_the_focused_tab_leaving_on_its_own_unfocuses_the_pane_and_its_return_restores_it(self):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
-            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "sidA": SID_A, "sidB": SID_B, "sidC": SID_C,
+            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "sidA": SID_A, "sidB": SID_B, "sidC": SID_C, "remote": REMOTE,
                        "shots": os.environ.get("PV_SHOTS", "")}, f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
@@ -221,6 +256,15 @@ class ServedUnfocusedPane(unittest.TestCase):
         self.assertFalse(s["composer"]["disabled"]); self.assertIn("web", s["composer"]["ph"] or "", "the box names its session again (the name overlay): %r" % s["composer"])
         self.assertEqual(s["accent"], r["before"]["accent"], "the window border wears what it wore before the tab vanished")
         self.assertNotEqual(s["statusline"], "", "the statusline names the restored session's state again")
+        # the reload road: the persisted remote tab is awaited, the body names it, the local sessions adopt nothing
+        self.assertTrue(r["seedKey"], "the shim's persisted state was found and seeded")
+        a = r["reloadAwaiting"]
+        self.assertIsNone(a["active"], "after the reload nothing adopts the box while the remembered tab is awaited: %r" % a)
+        self.assertIsNotNone(a["empty"]); self.assertTrue(a["empty"]["unfocused"]); self.assertEqual(a["empty"]["vanished"], REMOTE)
+        self.assertIn("web", a["empty"]["text"]); self.assertIn("REMOTEBOX", a["empty"]["text"], "the host the tab wore"); self.assertIn("not listed yet", a["empty"]["text"])
+        self.assertTrue(a["composer"]["disabled"]); self.assertEqual(a["statusline"], "")
+        self.assertEqual(r["reloadRestored"]["active"], REMOTE, "the remote host relays its strip: focus goes to the remembered tab")
+        self.assertEqual(r["pickWins"]["active"], SID_B, "a pick before the relay wins; the relay changes nothing: %r" % r["pickWins"])
 
 
 if __name__ == "__main__":
