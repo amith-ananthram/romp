@@ -15957,8 +15957,25 @@ def _drive(msg, client):
         else:
             _push_soon()
     elif t == "interrupt":
-        be.interrupt(sid)                                 # Esc/stop AND settle idle (in the backend)
-        _interrupt_clicked[str(sid)] = time.time()        # chip → "interrupting" NOW (event-cleared on settle)
+        # The stamp lands only when the backend TOOK the stop (2026-09-11). A session with no turn in flight
+        # (Ctrl+C in an idle composer, a Stop click reaching the kernel just as the turn ends, a dead tab)
+        # has nothing to interrupt: the Codex backend answers False and sends nothing, and since the merged
+        # liveness row carries no `interrupting` flag, _interrupting could clear the stamp only on a stop
+        # record that never comes or at its 120 s cap — so the chip, the lane and the feed badge read
+        # Interrupting… for two minutes with nothing in flight, and a turn started inside that window read
+        # Interrupting… over Working. Only an explicit False is a refusal (the ABC's bool; the SDK's False
+        # is an unknown sid): a backend with no verdict keeps the optimistic chip.
+        if be.interrupt(sid) is not False:                # Esc/stop AND settle idle (in the backend)
+            _interrupt_clicked[str(sid)] = time.time()    # chip → "interrupting" NOW (event-cleared on settle)
+        elif be.busy(sid):
+            # A refusal WITH work in flight is a stop that did NOT land, not a stop with nothing to stop
+            # (review find, 2026-09-11): the Codex backend also answers False while a turn's start is still
+            # being acknowledged (queued, no turn id yet), when its app-server client is gone, and when the
+            # interrupt RPC raised (kernel log only). Read as an idle press those left the chip on Working
+            # and the click with no visible effect at all. busy() is the ABC's authoritative in-flight
+            # signal: True in exactly those cases, None or False when there was nothing to stop, so an idle
+            # Ctrl+C stays quiet. The sendMessage arm's warn idiom (fail loudly).
+            client["send"](json.dumps({"type": "warn", "text": "the stop was not delivered: the session is still working"}))
         err = _suppress_session_retry(sid)                # interrupting a thread STOPS romp's auto-retry into it until a
                                                           # successful turn re-arms (the user 2026-07-06) — the interrupt
                                                           # already aborted any in-flight CLI retry; this stops the relapse
@@ -53959,8 +53976,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, json.dumps(res), "application/json")
                 be = Sessions.backend_for(sid)
                 if u.path == "/interrupt":
-                    be.interrupt(sid)                           # Esc/stop AND settle idle (in the backend)
-                    _interrupt_clicked[str(sid)] = time.time()  # chip → "interrupting" NOW, same as the WS op
+                    # the WS op's gate: a stop the backend refused (nothing in flight) paints nothing
+                    if be.interrupt(sid) is not False:          # Esc/stop AND settle idle (in the backend)
+                        _interrupt_clicked[str(sid)] = time.time()  # chip → "interrupting" NOW, same as the WS op
+                    elif be.busy(sid):
+                        # …and a refusal WITH work in flight is a stop that did not land (the WS arm's toast):
+                        # said, never answered ok, so `romp interrupt` prints this and exits non-zero — the
+                        # /send route's refusal shape (review find, 2026-09-11)
+                        return self._send(200, json.dumps({"ok": False, "error":
+                            "the stop was not delivered: %s is still working" % who}), "application/json")
                 elif isinstance(b, dict) and b.get("when") == "idle":
                     # SELF-CLOSE deferral (the user 2026-08-15): record the wish; the pusher's sweep
                     # kills at the turn's settle, so a session ending itself finishes its goodbye first
