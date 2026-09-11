@@ -91,7 +91,8 @@ const measure = () => page.evaluate(() => {
   const barChip = document.querySelector("#statusline .chip");
   const chips = host ? Array.from(host.querySelectorAll(".snap-row")).map((r) => { const c = r.querySelector(".chip"); const pip = r.querySelector(".snap-pip");
     return { id: r.dataset.id, pip: pip ? pip.className : null, flag: !!r.querySelector(".snap-flag"), chip: c ? dress(c) : null }; }) : [];
-  return { body: document.body.className, rows, tabs, activeFill, bar: barChip ? dress(barChip) : null, chips,
+  const tip = document.querySelector(".tab-tip"); const tipShown = !!tip && getComputedStyle(tip).display !== "none" && tip.getBoundingClientRect().width > 0;   // T327: no tip stands after a pick
+  return { body: document.body.className, rows, tabs, activeFill, bar: barChip ? dress(barChip) : null, chips, tipShown,
            footer: footer ? getComputedStyle(footer).display : null, composer: composer ? getComputedStyle(composer).display : null,
            composerVisible: composer ? composer.getBoundingClientRect().height > 0 : null,
            snap: host ? { display: getComputedStyle(host).display, heading: head ? Array.from(head.children).map((c) => ({ cls: c.className, text: c.textContent.trim(), style: c.getAttribute("style") || (c.firstElementChild && c.firstElementChild.getAttribute("style")) || "" })) : null,
@@ -100,14 +101,12 @@ const measure = () => page.evaluate(() => {
 });
 const out = {};
 // the awaiting session read first: the bar under the transcript wears its Awaiting chip (the dress the row's must match)
-await page.click('#tabs .tab[data-id="' + cfg.tests + '"]');
-await page.hover('#tabs .tab[data-id="' + cfg.docs + '"]');   // a tab pick rebuilds the strip under the pointer, and nothing hides the clicked tab's hover tip (render.ts renderTabs): hover-and-leave another tab dismisses it so the shots stay clean
+await page.click('#tabs .tab[data-id="' + cfg.tests + '"]');   // the pick rebuilds the strip under the pointer; renderTabs hides the clicked tab's hover tip as it rebuilds (T327)
 await page.mouse.move(700, 600);
 await page.waitForTimeout(700);
 out.barAwaiting = await measure();
 // a session inside the infra row is active (the strip's default pick is the first tab; make it explicit)
 await page.click('#tabs .tab[data-id="' + cfg.web + '"]');
-await page.hover('#tabs .tab[data-id="' + cfg.docs + '"]');
 await page.mouse.move(700, 600);   // off the strip: no tab tooltip in the shots
 await page.waitForTimeout(500);
 out.active = await measure();
@@ -268,6 +267,10 @@ class ServedTabOverviewMode(unittest.TestCase):
         if os.environ.get("SNAP_BEFORE_DIST"):
             self.skipTest("a before-the-change dist: screenshots only, the assertions describe the change")
         a = r["active"]
+        # T327: a tab pick rebuilds the strip under the pointer; the clicked tab's hover tip (shown by the pointer's arrival
+        # for the click) is hidden by the rebuild itself, so no tip stands over the page after either pick
+        self.assertFalse(r["barAwaiting"]["tipShown"], "no hover tip stands after the first pick (the strip rebuilt under the pointer)")
+        self.assertFalse(a["tipShown"], "…nor after the second")
         infra = next(row for row in a["rows"] if row["group"] == "infra")
         self.assertTrue(infra["holdsActive"], "the web tab is active inside the infra row: %r" % a["rows"])
         # 1. no underline on the holding row's chip
