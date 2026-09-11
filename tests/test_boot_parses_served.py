@@ -178,7 +178,7 @@ class ServedBootParses(unittest.TestCase):
     def test_1_a_boot_with_no_client_parses_nothing_and_the_blocked_card_comes_from_the_store(self):
         self._settled()
         p = self._parses()
-        self.assertEqual(p["total"], 0, "no client asked, so the kernel parsed no transcript at boot: %r" % p)
+        self.assertEqual(p["kernel"], 0, "no client asked, so the kernel parsed no transcript at boot: %r" % p)
         self.assertEqual(p["bySid"], {}, "per session: none")
         # the judges' first pass still parses what it enumerates (their checkpoint resume is stages 3 and 4); this
         # stage only orders it newest first; pin the count so a regression to double parsing shows
@@ -190,7 +190,7 @@ class ServedBootParses(unittest.TestCase):
         self.assertTrue(web, "web's card is in the feed: %r" % [c.get("sid") for c in cards][:10])
         self.assertTrue(any(c.get("column") == "needs_input" for c in web),
                         "web reads blocked (needs_input) from the store the previous kernel wrote: %r" % [c.get("column") for c in web])
-        self.assertEqual(self._parses()["total"], 0, "and the feed route parsed nothing to say so (it is cache-only)")
+        self.assertEqual(self._parses()["kernel"], 0, "and the feed route parsed nothing to say so (it is cache-only; the judges' own parses ride total)")
 
     def test_2_a_chat_client_parses_only_what_it_shows(self):
         if not os.path.isdir(os.path.join(EXT, "node_modules", "playwright")):
@@ -199,7 +199,7 @@ class ServedBootParses(unittest.TestCase):
                                 os.path.join(EXT, "node_modules", "playwright")], capture_output=True, text=True)
         if probe.returncode != 0 or not os.path.exists(probe.stdout.strip()):
             raise unittest.SkipTest("no playwright browser on this box — the served guard needs one (CI installs none)")
-        before = self._parses()["total"]
+        before = self._parses()["kernel"]
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token)}, f)
@@ -210,8 +210,9 @@ class ServedBootParses(unittest.TestCase):
                            env=dict(os.environ, CFG=cfg, EXT_PKG=os.path.join(EXT, "package.json")))
         self.assertEqual(p.returncode, 0, "driver failed:\n" + p.stdout[-2000:] + p.stderr[-2000:] + "\nkernel:\n" + open(self.klog).read()[-1500:])
         after = self._parses()
-        self.assertGreaterEqual(after["total"] - before, 1, "a connected chat client's own tabs are parsed on demand: %r" % after)
-        self.assertLessEqual(after["total"] - before, len(ALL), "and nothing beyond the shown tabs (every living session is a tab here): %r" % after)
+        asked = after["kernel"] + after["hits"]     # stage 2: the judges may have parsed a tab first, then the kernel's ask is a hit
+        self.assertGreaterEqual(asked, 1, "a connected chat client's own tabs are parsed or served on demand: %r" % after)
+        self.assertLessEqual(after["kernel"] - before, len(ALL), "and nothing beyond the shown tabs (every living session is a tab here): %r" % after)
         self.assertTrue(set(after["bySid"]) <= {s[:8] for s in ALL}, after["bySid"])
 
 

@@ -238,6 +238,26 @@ class GateMemo(_Gate):
         self.assertEqual(snap["memos"]["nudgeGate"], {"served": 1, "derived": 1})
 
 
+    def test_served_by_the_turns_held_when_an_agent_view_is_the_newest_slot(self):
+        """Review find (2026-09-11): the gate read the sid's NEWEST parse slot; an openSubagent handler on a socket
+        thread can store the agent file's parse under the same sid between the walk's parse and the gate's read
+        (the store keeps a slot per leaf), and the newest slot then held another tree, so the memo missed and the
+        gate re-derived the whole session that cycle. The gate looks its entry up by the turns it holds."""
+        turns, store = self._turns(), self._view()
+        km._nudge_placement_gate(SID, turns, store)                         # derived once, memoized
+        agent = self.tpath.parent / "subagents" / "agent-aaaa.jsonl"
+        agent.parent.mkdir()
+        agent.write_text("\n".join(json.dumps(r) for r in [uline(T0 + 100, "check the width", "s1"),
+                                                             aline(T0 + 110, "checked", "s2", "s1")]) + "\n")
+        jd.parsed_session(SID, [str(agent)], NOW)                           # the agent view: the sid's newest slot now
+        self.assertEqual(jd._PARSE_CACHE[SID][2], str(agent), "the newest slot is the agent file's")
+        self.assertIsNot(jd._PARSE_CACHE[SID][1].get("turns"), turns)
+        with patch.object(jd, "plan_units", wraps=jd.plan_units) as pu:
+            km._nudge_placement_gate(SID, turns, store)
+        self.assertEqual(pu.call_count, 0, "served from the memo: the entry is found by the turns held, not the newest slot")
+        self.assertEqual(km._NUDGE_GATE_STATS, {"served": 1, "derived": 1})
+
+
 class WalkReadsTheSharedView(_Gate):
     def test_the_walk_reads_through_the_shared_view_and_never_a_fresh_load(self):
         """The walk's own read is the shared view; every writer downstream reloads at its write moment
