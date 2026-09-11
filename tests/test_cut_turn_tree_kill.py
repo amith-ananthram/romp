@@ -210,7 +210,9 @@ class ScopePath(unittest.TestCase):
             runs.append(list(argv)); return mock.Mock(stdout=listing if argv == sb.SCOPE_LIST_ARGV else "", returncode=0)
         n = be._stop_leftover_scopes([SID], run=run)
         self.assertEqual(n, 1)
-        self.assertEqual(runs, [sb.SCOPE_LIST_ARGV, ["systemctl", "--user", "stop", "romp-session-11111111-%d-1757374800.scope" % CLI]])
+        # the session scopes first, then the per-session HOST scopes are listed too (T315; none here, so no stop)
+        self.assertEqual(runs, [sb.SCOPE_LIST_ARGV, ["systemctl", "--user", "stop", "romp-session-11111111-%d-1757374800.scope" % CLI],
+                                sb.HOST_SCOPE_LIST_ARGV])
 
     def test_no_systemctl_means_nothing_to_sweep(self):
         be = _backend()

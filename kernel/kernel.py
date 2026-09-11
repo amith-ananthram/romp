@@ -14492,7 +14492,7 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
             be.fork(nm, parent_sid, cut, bg=col, fg=(pal.fg_for(col) if col else ""), sid=tsid, thread_of=parent_sid,
                     model=model, effort=effort, fast=fast)
             be.connect(tsid)
-            be.send(tsid, text if raw_opener else _comment_first_message(exact, text))
+            _user_send(be, tsid, text if raw_opener else _comment_first_message(exact, text))
         except Exception as e:
             with _comments_lock:                       # loud + lossless: no half-born thread row
                 data = _load_comments(parent_sid)
@@ -14532,7 +14532,7 @@ def _comment_reply(parent_sid, tid, text):
         # back for exactly this gesture, and a later relay sends only the new tail past relayedT
         reg = _thread_reg(tsid)
         be.resume(reg.get("name") or ("thread-" + tsid[:8]), tsid)   # alive again; names/ untouched
-    if not be.send(tsid, str(text)):
+    if not _user_send(be, tsid, str(text)):
         return "couldn't reach this thread's session; it may have been removed."
     _push_soon()
     return None
@@ -14608,9 +14608,11 @@ def _comment_merge(parent_sid, tid):
     body = _merge_body(th.get("exact"), msgs)
     be = Sessions.backend_for(parent_sid)
     try:
-        be.send(parent_sid, body)
+        delivered = _user_send(be, parent_sid, body)     # the merge is the user's gesture (T315: it retries a stood-down attach)
     except Exception as e:
         return _revert("the merge message could not be delivered: %s" % e)
+    if delivered is False:
+        return _revert("the merge message was refused by the parent's backend; nothing was marked merged")
     _comment_update(parent_sid, tid,
                     # a thread the user CLOSED stays closed after its content is sent back (the user
                     # 2026-09-01) — "merged" is the talkable status, and resolved→relay→reply must
@@ -15686,7 +15688,7 @@ def _fire_api_retry(sid, be, manual=False):
     # message, force-pinning a junk goal per retry via the never-skip hard guard ("retry — kept on the
     # board…", 71 of them in one API-error storm). The marker makes author_of return 'romp' (ROMP_INJECT_RE)
     # so the echo + transcript render gray and the planner skips a work-less retry instead of minting a goal.
-    delivered = be.send(sid, RETRY_MSG)
+    delivered = _user_send(be, sid, RETRY_MSG) if manual else be.send(sid, RETRY_MSG)   # the Retry click is the user's (T315)
     _note_retry_sent(sid, manual=manual)
     # the send's own verdict, for the manual route's reply (review find, 2026-09-08): SdkBackend.send and
     # CodexBackend.send return False for a session they cannot reach (no live registry row, no client);
@@ -15974,7 +15976,7 @@ def _drive(msg, client):
         if _route_meta_command(be, sid, str(msg["text"]), client):
             _push_soon()
         else:
-            _send_or_park(be, sid, str(msg["text"]), echo="human", qid=_client_qid(msg, sid, be)); _push_soon()  # idle → instant echo; SDK busy → queued bubble forwarded mid-turn + folded (but a SLASH COMMAND parks to fire alone at turn end — mid-turn it would land as text, not execute); tmux busy → held + merged at turn end
+            _send_or_park(be, sid, str(msg["text"]), echo="human", qid=_client_qid(msg, sid, be), user=True); _push_soon()  # idle → instant echo; SDK busy → queued bubble forwarded mid-turn + folded (but a SLASH COMMAND parks to fire alone at turn end — mid-turn it would land as text, not execute); tmux busy → held + merged at turn end
     elif t == "rewindSend" and msg.get("uuid") and msg.get("text"):
         # Edit a past message (SDK sessions): rewind the conversation to just before it and send the
         # edited text as the branch's next turn. NO optimistic kernel echo — the edit lands mid-chat
@@ -16014,7 +16016,7 @@ def _drive(msg, client):
         # /model, /effort, /fast → the setters (mid-compaction → parked); `floating` is the lane
         # submenu's Latest row (forget the family's pin)
         if not _route_meta_command(be, sid, cmd, client, floating=bool(msg.get("floating"))):
-            _send_or_park(be, sid, cmd)   # mid-compaction → parked as a queued command
+            _send_or_park(be, sid, cmd, user=True)   # mid-compaction → parked as a queued command; the user typed it
     elif t == "askFollowUp":
         iid = str(msg.get("itemId") or "")
         # QUOTE the ask being followed up above the user's text so the recipient has context, and ride the
@@ -16044,7 +16046,7 @@ def _drive(msg, client):
         # PARKED instead (queued bubble; delivered when compaction ends — _send_or_park).
         _send_or_park(be, sid, body,
                       echo=("romp" if msg.get("nudge") else "human") if be is _TMUX else None,
-                      qid=_client_qid(msg, sid, be))
+                      qid=_client_qid(msg, sid, be), user=not msg.get("nudge"))   # a follow-up is the user's; a nudge is romp's
         if iid:                                           # optimistic: reopen the card NOW, before the judge pass
             _predict_working("followup", ids=[iid])       # instant cue to every feed view (chat-typed citation
             #                                               follow-ups included) — the reopen below is what the
@@ -30817,6 +30819,14 @@ def _client_qid(msg, sid, be):
     return q
 
 
+def _op_user(op) -> bool:
+    """Whether a parked send or command is the USER's (its fifth slot, _send_or_park; T315): the replay hands
+    the backend user=True for it, the word that retries a stood-down attach, and nothing for a machine op (a
+    watch notice, a nudge, a re-delivery, a record from a mirror written before the slot existed). Length-
+    guarded like every reader of an optional slot; the fourth slot is None when no id rode."""
+    return op[0] in ("send", "command") and len(op) > 4 and op[4] is True
+
+
 def _op_qid(op):
     """The press-time id a parked send or command carries (its fourth slot, _send_or_park), or None: a kernel-
     parked op (a re-delivery, a nudge, a three-slot record from a mirror written before the slot existed) has
@@ -30839,18 +30849,46 @@ def _takes_qid(fn):
         return False
 
 
-def _send_with_id(be, sid, text, qid=None):
-    """be.send, with the copy's press-time id when one rode and the backend's send takes it (_takes_qid:
-    SdkBackend, whose queued copy and echo then wear the id the chat's bubble already has). A send that takes
-    no id (tmux, whose echo is the kernel's and whose queue is the CLI's; Codex; a stand-in) gets the text
-    alone, as before."""
-    if qid and _takes_qid(be.send):
-        return be.send(sid, text, qid=qid)
+def _takes_user(fn) -> bool:
+    """Whether a backend's send takes the `user` keyword (SdkBackend.send: the text is a message the USER typed,
+    the one word that retries an attach the session stood down from, T315). Read from the signature like
+    _takes_qid; a send without it (tmux, Codex, a stand-in) is called as before."""
+    if fn is None:
+        return False
+    try:
+        return "user" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _user_send(be, sid, text):
+    """be.send for a message the USER typed, with user=True when the backend's send takes it."""
+    if _takes_user(be.send):
+        return be.send(sid, text, user=True)
     return be.send(sid, text)
 
 
-def _send_or_park(be, sid, text, echo=None, qid=None):
-    """Deliver `text` now — or PARK it in the sid's FIFO. Park when: (a) the session is COMPACTING (the user
+def _send_with_id(be, sid, text, qid=None, user=False):
+    """be.send, with the copy's press-time id when one rode and the backend's send takes it (_takes_qid:
+    SdkBackend, whose queued copy and echo then wear the id the chat's bubble already has). A send that takes
+    no id (tmux, whose echo is the kernel's and whose queue is the CLI's; Codex; a stand-in) gets the text
+    alone, as before. `user`: a message the user typed (the composer, the phone, a user's `romp send`, a parked
+    user send replayed), passed on when the send takes it (T315: the word that retries a stood-down attach)."""
+    kw = {}
+    if qid and _takes_qid(be.send):
+        kw["qid"] = qid
+    if user and _takes_user(be.send):
+        kw["user"] = True
+    return be.send(sid, text, **kw)
+
+
+def _send_or_park(be, sid, text, echo=None, qid=None, user=False):
+    """`user` (T315): the text is the USER's (the composer, the phone, an untagged `romp send`, a typed command),
+    handed to the backend as its word to retry a stood-down attach and remembered on a parked op's fifth slot for the
+    replay; a machine caller (a watch notice, a nudge, a tagged `romp send`) passes nothing and is queued behind a
+    stand-down instead. Classified by the caller that knows who speaks, never by the route.
+
+    Deliver `text` now — or PARK it in the sid's FIFO. Park when: (a) the session is COMPACTING (the user
     2026-07-02: a mid-compaction send's live-tail echo opened a turn that KILLED the 'compacting' cue — a
     parked send lands no echo atom, so the cue stays and the send shows as a queued bubble in park order);
     (b) a kernel FIFO already EXISTS for this sid (a parked drive op / earlier held send is ahead — stay
@@ -30903,6 +30941,8 @@ def _send_or_park(be, sid, text, echo=None, qid=None):
     op = ("command", text, echo) if cmd else ("send", text, echo)
     if qid:
         op = op + (qid,)
+    if user:
+        op = op + (None,) * (4 - len(op)) + (True,)     # the fifth slot: the user's words (_op_user); the fourth stays the id or None
     if _compacting_now(sid) or _pending_ops.get(sid) or _limit_hold(sid):
         _park_op(sid, op)
         return True
@@ -30911,7 +30951,7 @@ def _send_or_park(be, sid, text, echo=None, qid=None):
         return True
     if _park_behind_queue(sid, op):
         return True
-    if _send_with_id(be, sid, text, qid) is False:
+    if _send_with_id(be, sid, text, qid, user=user) is False:
         return None                                      # refused by the backend: not parked, not delivered
     if echo:
         _optimistic_echo(sid, text, author=echo)
@@ -30926,7 +30966,8 @@ def _compact_or_park(be, sid):
     tells its caller which ("compacting now" vs "queued")."""
     if _gate_or_park(sid, ("compact",)):
         return True
-    be.send(sid, "/compact")
+    if _user_send(be, sid, "/compact") is False:        # the click is the user's (T315); a refusal shows no cue
+        return None
     _mark_compacting(sid)
     return False
 
@@ -31127,12 +31168,15 @@ def _deliver_send_batch(be, sid, run):
         return
     if _forwards_sends(be):
         for op in run:
-            _send_with_id(be, sid, op[1], _op_qid(op))   # under the id the press minted, when one rode the park
+            _send_with_id(be, sid, op[1], _op_qid(op), user=_op_user(op))   # under the id the press minted, when one rode the park
             if op[2]:
                 _optimistic_echo(sid, op[1], author=op[2])
         return
     merged = "\n\n".join(op[1] for op in run)          # tmux: one message, blank-line separated between turns
-    be.send(sid, merged)
+    if any(_op_user(op) for op in run):
+        _user_send(be, sid, merged)
+    else:
+        be.send(sid, merged)
     author = next((op[2] for op in run if op[2]), None)
     if author:
         _optimistic_echo(sid, merged, author=author)
@@ -31323,6 +31367,7 @@ def _apply_pending_ops(now=None):
                                 run.append(ops.pop(k))
                         elif op[0] != "cwd":
                             _inflight_ops[sid] = op       # (a move hands nothing over below: not recorded)
+                    refused = False
                     if op[0] == "send":
                         changed = True
                         _deliver_send_batch(be, sid, run)
@@ -31343,9 +31388,9 @@ def _apply_pending_ops(now=None):
                         # send batch (or forwarded mid-turn) it reaches the model as text instead of executing
                         # (the user 2026-08-13: /autocompact absorbed mid-turn got a polite reply and no
                         # setting change). Echo stamped at fire time, like a delivered send.
-                        _send_with_id(be, sid, op[1], _op_qid(op))
+                        refused = _send_with_id(be, sid, op[1], _op_qid(op), user=_op_user(op)) is False
                     elif op[0] == "compact":
-                        be.send(sid, "/compact")
+                        refused = _user_send(be, sid, "/compact") is False   # a parked compact click is the user's too (T315)
                     elif op[0] == "model":
                         be.set_model(sid, op[1])
                     elif op[0] == "effort":
@@ -31371,6 +31416,15 @@ def _apply_pending_ops(now=None):
                         _fire_move(be, sid, op[1], tries, _move_askers.pop(sid, ""))
                         break
                     if op[0] in ("command", "compact"):
+                        if refused:
+                            # the backend refused the handover (a session it no longer holds): no echo for a command the
+                            # session never got, no compacting cue for a compaction that never started, and the refusal
+                            # is visible (the commit-14 review's third item); the op is popped, never replayed forever
+                            what = "/compact" if op[0] == "compact" else str(op[1])[:60]
+                            sys.stderr.write("pending ops apply: %s refused %r for %s\n" % (type(be).__name__, what, sid[:8]))
+                            _send_to_app("chat", {"type": "warn", "id": sid,
+                                                  "text": "%s was not delivered: the session's backend refused it" % what})
+                            continue
                         # the backend HAS a turn-opening op: its cue, the hold and the end of this pass follow
                         # regardless of `took` (which is always True here — a ✕ on an in-flight op is refused and
                         # these kinds are never replaced in place)
@@ -53547,7 +53601,11 @@ class Handler(BaseHTTPRequestHandler):
                 if _route_meta_command(be, sid, body["text"], state=meta):
                     queued = bool(meta.get("queued"))              # a parked /model, /effort or /fast says so too
                 else:
-                    queued = bool(_send_or_park(be, sid, body["text"]))
+                    # who speaks (T315): an untagged `romp send` is treated as the user's words (this is the human
+                    # channel, and the composer's own route); a TAGGED one (`romp send --tag`, the route's marker
+                    # for a machine-sent message: a scheduled or scripted sender) is a machine's, and is queued
+                    # behind a stood-down attach instead of retrying it
+                    queued = bool(_send_or_park(be, sid, body["text"], user="<!-- romp-tag: " not in body["text"]))
                 # `queued` says which arm it took (the /compact route's shape): a sender that IS the
                 # target's open turn — an agent running `romp send <self> /clear` from its own Bash tool —
                 # read 'ok' otherwise and could not know the command waits for that turn to end (2026-09-03).
