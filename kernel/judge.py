@@ -2749,7 +2749,7 @@ class _ParseStore(collections.OrderedDict):
         super().__setitem__(k, v)
 
 
-_PARSE_CACHE = _ParseStore()   # (fsid, cut) -> {sdk_human: (key, session, leaf, sdk_human)}; a bare fsid reads the newest slot
+_PARSE_CACHE = _ParseStore()   # (fsid, cut) -> {sdk_human: (key, session, leaf, sdk_human, fsid, asm_mode)}; a bare fsid reads the newest slot
 _PARSE_CACHE_MAX = 256
 _PARSE_CACHE_LOCK = threading.Lock()
 _PARSE_HITS = [0]              # served from the cache (whoever asked); misses are _PARSE_MISSES
@@ -2798,13 +2798,21 @@ def _parse_slot(fsid, cut, human=None):
         return trees.get(bool(human))
 
 
-def _parse_store(fsid, cut, key, session, leaf, human):
+def _parse_store(fsid, cut, key, session, leaf, human, mode="full"):
+    """Store a parse under (fsid, cut). A slot stored under a NEW cut drops the fsid's other cut slots: a bare
+    rollback parses under its cut, the next record spends the cut and every caller parses under the plain one, and
+    the spent cut's tree was staying resident until the store filled (review find, 2026-09-11); a cut is never read
+    again once spent, so one tree per session holds. The entry carries the fsid (the kernel's path-keyed view must
+    never derive a sid from a filename: a /clear's leaf is named after the CLI session, not the romp sid) and the
+    assembly mode of the parse that built it (a hit reports it, so the chat fold sees fold or serve, never a blank)."""
     with _PARSE_CACHE_LOCK:
+        for k in [k for k in _PARSE_CACHE if k[0] == fsid and k[1] != cut]:
+            del _PARSE_CACHE[k]
         trees = _PARSE_CACHE.get((fsid, cut))
         if trees is None:
             trees = _PARSE_CACHE[(fsid, cut)] = {}
         trees.pop(bool(human), None)
-        trees[bool(human)] = (key, session, str(leaf), bool(human))
+        trees[bool(human)] = (key, session, str(leaf), bool(human), str(fsid), str(mode or "full"))
         _lru_touch(_PARSE_CACHE, (fsid, cut))
         while len(_PARSE_CACHE) > _PARSE_CACHE_MAX:
             del _PARSE_CACHE[next(iter(_PARSE_CACHE))]   # the least recently used goes, never everything at once
@@ -2841,6 +2849,16 @@ def parse_cache_drop(fsid):
     """Drop every cut's entry for fsid (a dead timeline lane releasing its parse); returns how many went."""
     with _PARSE_CACHE_LOCK:
         gone = [k for k in _PARSE_CACHE if k[0] == fsid]
+        for k in gone:
+            del _PARSE_CACHE[k]
+    return len(gone)
+
+
+def parse_cache_drop_leaf(leaf):
+    """Drop every slot holding a parse of `leaf` (the kernel's view pops by path; a leaf's stem is not the sid)."""
+    leaf = str(leaf)
+    with _PARSE_CACHE_LOCK:
+        gone = [k for k, trees in _PARSE_CACHE.items() if any(ent[2] == leaf for ent in trees.values())]
         for k in gone:
             del _PARSE_CACHE[k]
     return len(gone)
@@ -3366,6 +3384,8 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None, states=None,
         _PARSE_HITS[0] += 1
         if stats is not None:
             stats["miss"] = False
+        if asm_mode_out is not None:
+            asm_mode_out.append(hit[5] if len(hit) > 5 else "full")   # the mode of the parse that built this tree (review find)
         if fr is not None:                 # a WARM first touch pins too (review 2026-09-06): this path used to
             with _frame_lock:              #  return unpinned, so a session already in the cache froze nothing
                 return _frame_pin_parse(fr, fsid, hit[1], key)   # and a mid-pass append reached a later stage
@@ -3373,12 +3393,12 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None, states=None,
     session = em.parse_session(files[0], rompuuid=fsid, candidate_files=list(files),
                                states=str(states), postal_log=str(MESSAGES), now=now,
                                sdk_human=(human := bool(sdk_human) if sdk_human is not None else bool(_sdk_owned(fsid))),   # the caller's answer, else the judges', read on a miss
-                               leaf_override=cut or None, asm_mode_out=asm_mode_out)
+                               leaf_override=cut or None, asm_mode_out=(_am := asm_mode_out if asm_mode_out is not None else []))
     if stats is not None:
         stats["miss"] = True
     _PARSE_MISSES[0] += 1                                  # a cold parse (T323: /perf parses)
     if key is not None:
-        _parse_store(fsid, cut, key, session, files[0], human)   # LRU, never a wholesale clear (T323 stage 2)
+        _parse_store(fsid, cut, key, session, files[0], human, (_am[-1] if _am else "full"))   # LRU, never a wholesale clear
     if fr is not None:                     # pin under the frame the KEY went into (never a re-read _frame: a
         with _frame_lock:                  #  parse spanning a pass boundary must not land keyless in the next
             return _frame_pin_parse(fr, fsid, session, key)   # frame); a concurrent first toucher wins

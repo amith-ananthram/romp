@@ -27542,10 +27542,6 @@ class _SharedParseView:
     shape: `path in _parse_cache`, `_parse_cache.get(path)` → (key, session), iteration over leaf paths,
     `.pop(path)` (a dead lane releasing its parse) and `.clear()` (the perf bench's cold sample)."""
 
-    @staticmethod
-    def _fsid(path):
-        return os.path.splitext(os.path.basename(str(path)))[0]
-
     def get(self, path, default=None):
         ent = jd.parse_entry_for_leaf(str(path))
         return (ent[0], ent[1]) if ent is not None else default
@@ -27567,8 +27563,8 @@ class _SharedParseView:
 
     def pop(self, path, default=None):
         ent = self.get(path)
-        jd.parse_cache_drop(self._fsid(path))
-        return ent if ent is not None else default
+        jd.parse_cache_drop_leaf(str(path))          # by LEAF, never by a sid derived from the filename (a /clear's
+        return ent if ent is not None else default   # leaf is named after the CLI session, not the romp sid)
 
     def clear(self):
         jd.parse_cache_clear()
@@ -29084,7 +29080,10 @@ def _parse_cached(path):
     (which come from the goal store, cheap) paint AT ONCE on a cold kernel start; the dots/anchors fill in a
     beat later once _warm_fleet_bg has parsed the session in the background (the user 2026-06-26: the feed
     cards lagged the timeline lanes on startup, all of it the ~1s cold parse of the fleet)."""
-    fsid = _SharedParseView._fsid(path)
+    ent = jd.parse_entry_for_leaf(str(path))     # the entry names its romp sid: a leaf's stem is the CLI session's id
+    if ent is None or len(ent) < 5:               # after a /clear or a resume fork, never the romp sid (review find)
+        return None
+    fsid = ent[4]
     return jd.parse_cached(fsid, [str(path)], states=str(jd.STATE / "states" / (fsid + ".jsonl")),
                            sdk_human=_display_sdk_human(fsid))   # the store's live-key read, under the display's slot
 

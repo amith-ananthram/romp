@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""bench_shared_parse: the memory the parsed session trees cost when BOTH the display and the judges parse the same
-transcripts, against transcript size (T323 stage 2's acceptance measurement).
+"""bench_shared_parse: the resident memory the SECOND parsed tree costs when both the display and the judges parse the
+same transcripts, against transcript size (T323 stage 2's acceptance measurement).
 
 For each romp tree given, a child process loads that tree's event model, judge and kernel against a temporary state
 root (nothing against live state), builds N synthetic sessions whose transcripts are S times a base of invented text,
 then asks BOTH sides for every session (the kernel's _parse, the way the chat build asks, and jd.parsed_session, the
-way a judge pass asks) and reports the process's resident-size growth and the cold parses counted. One child per
-(tree, size), sequential, small worlds, under `capped`. Then a cleanplots figure of tree memory against size per tree:
-two trees per session before the shared store, one after.
+way a judge pass asks) and reports the process's CURRENT resident size (VmRSS from /proc/self/statm, never the peak)
+after the display's parses and again after the judges', and the cold parses counted. One child per (tree, size),
+sequential, small worlds, under `capped`. The figure draws, per tree, the second side's resident delta (after both
+minus after the display alone) against size: the cost of the second tree, present before the shared store and gone
+after it. The bars are one measurement each, not a distribution.
 
     capped bash -c 'uvx --with cleanplots --with matplotlib --with pandas python scripts/bench_shared_parse.py \\
         --tree before=/path/to/stage1-tree --tree after=/path/to/stage2-tree --sizes 1,4,16 --sessions 6 --out DIR'
@@ -49,7 +51,9 @@ for i in range(sessions):
     sid = "%08x-1111-2222-3333-444444444444" % (0xb0000000 + i)
     p = os.path.join(d, sid + ".jsonl"); transcript(p, i); paths.append((sid, p))
 total = sum(os.path.getsize(p) for _, p in paths)
-def rss(): return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+def rss():
+    with open("/proc/self/statm") as f:                 # CURRENT resident pages, not ru_maxrss (a peak: differences of peaks are not growth)
+        return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
 now = int(time.time())
 r0 = rss()
 for sid, p in paths:
@@ -86,11 +90,12 @@ def draw(rows, out):
         if not rs:
             sys.stderr.write("figure: every run of %r errored; the label is left out\n" % label); continue
         xs = [r["worldBytes"] / 1048576 for r in rs]
-        ys = [r["afterBothBytes"] / 1048576 for r in rs]
+        ys = [max(0.0, r["afterBothBytes"] - r["afterKernelBytes"]) / 1048576 for r in rs]   # the SECOND tree's own cost
         top = max(top, max(ys))
         ax.line(xs, ys, label=label, color=cols[i % len(cols)], marker="o")
-    ax.clean(xlabel="Transcripts on disk (MB), all sessions", ylabel="Resident growth after the display and the judges\nboth parsed every session (MB), lower is better")
-    ax.set_xlim(0, None); ax.set_ylim(0, top * 1.25); ax.set_yticks([0, round(top)])
+    ax.clean(xlabel="Transcripts on disk (MB), all sessions",
+             ylabel="Resident size added by the judges' parse\nafter the display had parsed (MB), zero is the goal")
+    ax.set_xlim(0, None); ax.set_ylim(0, top * 1.25); ax.set_yticks([0, round(top, 1) if top < 10 else round(top)])
     path = os.path.join(out, "trees_vs_size.png")
     f.savefig(path, dpi=150, bbox_inches="tight")
     return path

@@ -44,6 +44,8 @@ def _transcript(d, sid, n=2):
 
 class OneParseForBoth(unittest.TestCase):
     def setUp(self):
+        km._display_sdk_human(A)                # builds the backend once: its setter installs the owner hook and
+        #                                          clears the store, which must never happen mid-test (review find D)
         jd.parse_cache_clear()
         km._PERF_STATS.reset()
         self.d = tempfile.mkdtemp()
@@ -84,6 +86,57 @@ class OneParseForBoth(unittest.TestCase):
         self.assertIs(s1, s2)
         self.assertEqual(self._misses() - m0, 1, "the grown file costs one parse, shared")
 
+    def test_a_leaf_named_after_the_cli_session_is_found_by_path(self):
+        """Review find (A): after a /clear or a resume fork the leaf is <lastSid>.jsonl while the romp sid is another
+        id; the cache-only read and the view's drop go by leaf path and the entry's own sid, never a filename stem."""
+        other = "55555555-6666-4777-8888-000000000777"
+        p = _transcript(self.d, other, n=3)                  # a leaf named after the CLI session id
+        km._parse(p, A, self.now)                            # parsed for romp sid A
+        self.assertIsNotNone(km._parse_cached(p), "the cache-only read finds the display's tree by leaf path")
+        self.assertIs(km._parse_cached(p), jd._PARSE_CACHE[A][1])
+        self.assertIn(p, km._parse_cache)
+        km._parse_cache.pop(p, None)
+        self.assertNotIn(p, km._parse_cache, "pop by path drops the tree parsed under the romp sid")
+        self.assertIsNone(km._parse_cached(p))
+        self.assertNotIn(A, jd._PARSE_CACHE)
+
+    def test_a_store_hit_reports_the_assembly_mode_so_the_chat_fold_can_fold(self):
+        """Review find (B): the judges parse an appended transcript first; the kernel's build hits the store and must
+        learn the mode of the parse that built the tree (fold or serve), else the fold gate rebuilds the whole chat."""
+        p = _transcript(self.d, B, n=2)
+        km._parse(p, B, self.now)
+        self.assertEqual(km._parse_mode[p], "full", "the first parse is a full assembly")
+        with open(p, "a") as f:
+            f.write(json.dumps({"type": "user", "uuid": "u9", "parentUuid": "a1", "timestamp": "2026-09-10T00:20:00.000Z",
+                                "message": {"role": "user", "content": "one more"}}) + "\n")
+        jd.parsed_session(B, [p], self.now + 1)              # a judge sees the append first (no asm_mode_out of its own)
+        m0 = self._misses()
+        km._parse(p, B, self.now + 1)                        # the kernel's build: a hit
+        self.assertEqual(self._misses() - m0, 0)
+        self.assertIn(km._parse_mode[p], ("fold", "serve"), "the hit carries the judges' assembly mode, never a blank read as full: %r" % km._parse_mode[p])
+        ent = jd._PARSE_CACHE[B]
+        self.assertEqual((ent[4], ent[5]), (B, km._parse_mode[p]), "the entry names its sid and the mode that built it")
+
+    def test_two_answers_in_one_slot_in_a_hookless_process(self):
+        """Review find (F), the case the per-flag trees exist for: with no owner hook, the display passes True (its
+        backend owns the session) while the judges compute False (no registry file); each keeps its own tree in the
+        slot and neither reads the other's."""
+        p = _transcript(self.d, A, n=2)
+        saved = jd._SDK_OWNER_FN
+        jd._SDK_OWNER_FN = None
+        try:
+            jd.parse_cache_clear()
+            judge_tree = jd.parsed_session(A, [p], self.now)                      # the judges: registry absent → False
+            disp_tree = jd.parsed_session(A, [p], self.now, sdk_human=True)      # the display: its backend owns → True
+            self.assertIsNot(judge_tree, disp_tree)
+            self.assertEqual(sorted(jd._PARSE_CACHE[(A, "")].keys()), [False, True], "one tree per answer in the slot")
+            m0 = self._misses()
+            self.assertIs(jd.parsed_session(A, [p], self.now), judge_tree, "the judges hit their own tree")
+            self.assertIs(jd.parsed_session(A, [p], self.now, sdk_human=True), disp_tree, "the display hits its own")
+            self.assertEqual(self._misses() - m0, 0, "no stale hit either way, no re-parse either")
+        finally:
+            jd._SDK_OWNER_FN = saved
+
     def test_different_pending_cuts_get_separate_slots(self):
         """The manager's rule: when the kernel and the judges would read different cuts, each gets its own entry
         rather than one reading the other's view."""
@@ -95,12 +148,15 @@ class OneParseForBoth(unittest.TestCase):
             jd.set_pending_cut_provider(lambda fsid: "a1")          # a bare rollback armed: the world cut at a1
             cut = jd.parsed_session(A, [p], self.now)
             self.assertIsNot(plain, cut)
-            self.assertIn((A, ""), jd._PARSE_CACHE); self.assertIn((A, "a1"), jd._PARSE_CACHE)   # a slot per cut, a tree per flag inside
+            self.assertIn((A, "a1"), jd._PARSE_CACHE)
+            self.assertNotIn((A, ""), jd._PARSE_CACHE, "a slot stored under a new cut drops the fsid's other cut slots: one tree per session (review find)")
+            jd.set_pending_cut_provider(lambda fsid: "")        # the cut is spent (the next record landed)
             m0 = self._misses()
-            jd.set_pending_cut_provider(lambda fsid: "")
-            self.assertIs(jd.parsed_session(A, [p], self.now), plain, "the un-cut slot is still there, not evicted by the cut one")
-            self.assertEqual(self._misses() - m0, 0)
-            self.assertIs(jd._PARSE_CACHE[A][1], plain, "a bare id reads the newest slot")
+            again = jd.parsed_session(A, [p], self.now)
+            self.assertEqual(self._misses() - m0, 1, "the spent cut's tree is gone, the plain world is parsed once more")
+            self.assertNotIn((A, "a1"), jd._PARSE_CACHE, "and the spent cut's slot went with it")
+            self.assertIs(jd._PARSE_CACHE[A][1], again, "a bare id reads the newest slot")
+            self.assertEqual(len([k for k in jd._PARSE_CACHE if k[0] == A]), 1)
         finally:
             jd.set_pending_cut_provider(saved)
 

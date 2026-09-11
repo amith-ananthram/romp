@@ -974,9 +974,10 @@ display parse delegates to it, the tree the chat renders is the tree the
 judges walk, and the store keys on every fact either side keyed on (the
 transcript's and the states file's stat pair, the pending rollback cut, and
 whether a backend owns the session, which one owner hook answers for both).
-A session read under two different cuts keeps a slot per cut rather than one
-side reading the other's view; the store evicts the least recently used entry
-past 256 instead of clearing wholesale. The gain is one tree per session, about
+A session read under a new pending cut gets a slot of its own and the spent
+cut's slot is dropped with it, so one tree per session holds through a
+rollback; the store evicts the least recently used entry past 256 instead of
+clearing wholesale. The gain is one tree per session, about
 a quarter of the record cost the T311 report measured (0.25 GB of 6.6); the
 record cache itself, the bulk, is the checkpoint work's target.
 
