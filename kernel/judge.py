@@ -4573,8 +4573,15 @@ def _rebase_onto_disk(fsid, store):
             done = _relay_recalled_mids(mnd.get("relayRecalled"))   # the recalls owed: the union, minus the ones done on
             mine = {str(r.get("pendingMid") or ""): r for r in (mnd.get("relayRecall") or []) if isinstance(r, dict)}
             for r in (dnd.get("relayRecall") if isinstance(dnd.get("relayRecall"), list) else []):   #   either side, whether
-                if isinstance(r, dict) and str(r.get("pendingMid") or "") not in mine:           #   or not the disk still
-                    mine[str(r.get("pendingMid") or "")] = r                                     #   owes any
+                if not isinstance(r, dict):                                                      #   or not the disk still
+                    continue                                                                     #   owes any
+                mid = str(r.get("pendingMid") or "")
+                if mid not in mine:
+                    mine[mid] = r
+                else:                                      # the same recall on both sides: the tick's hold and count newer-wins
+                    for k in ("unknownAt", "attempts"):
+                        if int(r.get(k) or 0) > int(mine[mid].get(k) or 0):
+                            mine[mid][k] = r[k]
             owed = [r for r in mine.values() if str(r.get("pendingMid") or "") not in done][-RELAY_SETTLED_CAP:]
             if owed:
                 mnd["relayRecall"] = owed
@@ -12970,7 +12977,8 @@ def _relay_retire_marker(store, nd):
 
 
 RELAY_SETTLED_CAP = 8        # settled marker ids a node remembers (relaySettled), newest last
-RELAY_TICK_KEYS = ("pendingMid", "pendingAt", "pendingHost", "unknownAt", "attempts", "recallUnknownAt")   # the tick owns these
+RELAY_TICK_KEYS = ("pendingMid", "pendingAt", "pendingHost", "unknownAt", "attempts", "recallUnknownAt", "recallAttempts")
+#                                                                                        the tick owns these on a marker
 #                                                                                        on a marker; the judge never writes them
 
 
@@ -12991,7 +12999,8 @@ def _relay_carry_tick_keys(mine, theirs):
     for k in RELAY_TICK_KEYS:
         if k not in theirs:
             continue
-        if k not in mine or (k in ("attempts", "unknownAt") and int(theirs.get(k) or 0) > int(mine.get(k) or 0)):
+        if k not in mine or (k in ("attempts", "unknownAt", "recallUnknownAt", "recallAttempts")
+                             and int(theirs.get(k) or 0) > int(mine.get(k) or 0)):
             mine[k] = theirs[k]
 
 
@@ -13024,6 +13033,12 @@ def _relay_entry_path(sid, nid):
     return _relay_queue_dir() / ("%s__%s.json" % (str(sid), re.sub(r"[^A-Za-z0-9_.-]", "_", str(nid))))
 
 
+def _relay_recall_entry_path(sid, nid):
+    """The recalls a node owes ride their OWN entry file beside the marker's (the ninth review): the two are written by
+    different hands at different times, and a rewrite of one path by the other's writer lost whichever entry was there."""
+    return _relay_queue_dir() / ("%s__%s.recall.json" % (str(sid), re.sub(r"[^A-Za-z0-9_.-]", "_", str(nid))))
+
+
 def _relay_enqueue(store, nd):
     """Remember `nd` on the STORE OBJECT for the kernel's relay tick. save_goals writes the entry (one file per entry
     in a queue directory: append = create, consume = unlink, so the judge's thread and the kernel's tick never rewrite
@@ -13043,7 +13058,8 @@ def _relay_enqueue(store, nd):
 def _relay_write_entry(sid, nid, marker="", rev=0):
     """One queue entry: the node, the marker it was written for (its id) and the store revision whose publish carried
     the marker, so the tick can tell a spent entry (a record names the marker; the node moved on to a newer marker; a
-    published revision at or past this one lacks the marker) from one whose publish it has not read yet."""
+    published revision at or past this one lacks the marker) from one whose publish it has not read yet. The marker
+    "recall" names the node's recall entry, its own file beside the marker's."""
     try:
         d = _relay_queue_dir()
         d.mkdir(parents=True, exist_ok=True)
@@ -13051,7 +13067,7 @@ def _relay_write_entry(sid, nid, marker="", rev=0):
         #             the judge's flush and the tick's rewrite share one process: a private name each
         tmp.write_text(json.dumps({"sid": sid, "nid": nid, "t": int(time.time()), "marker": str(marker or ""),
                                    "rev": int(rev or 0)}))
-        tmp.rename(_relay_entry_path(sid, nid))
+        tmp.rename(_relay_recall_entry_path(sid, nid) if marker == "recall" else _relay_entry_path(sid, nid))
         return True
     except OSError as e:
         _log_judge_error("relay-queue", sid, "relay queue entry not written (%r)" % (e,))
@@ -13068,8 +13084,8 @@ def _relay_flush(fsid, store, pending):
         rw = nd.get("relayWanted") if isinstance(nd, dict) else None
         if isinstance(rw, dict):
             n += 1 if _relay_write_entry(str(fsid), str(nid), rw.get("id") or "", store.get("rev") or 0) else 0
-        elif isinstance(nd, dict) and nd.get("relayRecall"):
-            n += 1 if _relay_write_entry(str(fsid), str(nid), "recall", store.get("rev") or 0) else 0   # recalls owed
+        if isinstance(nd, dict) and nd.get("relayRecall"):   # recalls owed ride their own entry, beside the marker's
+            n += 1 if _relay_write_entry(str(fsid), str(nid), "recall", store.get("rev") or 0) else 0
     return n
 
 
@@ -13085,11 +13101,11 @@ def _requeue_relays_all():
         except Exception:
             continue
         for nid, nd in ((raw or {}).get("nodes") or {}).items():
-            if not isinstance(nd, dict) or _relay_entry_path(p.stem, nid).exists():
+            if not isinstance(nd, dict):
                 continue
-            if isinstance(nd.get("relayWanted"), dict):
+            if isinstance(nd.get("relayWanted"), dict) and not _relay_entry_path(p.stem, nid).exists():
                 n += 1 if _relay_write_entry(p.stem, nid, nd["relayWanted"].get("id") or "", (raw or {}).get("rev") or 0) else 0
-            elif nd.get("relayRecall"):                 # recalls owed with no marker: an entry brings the tick to them
+            if nd.get("relayRecall") and not _relay_recall_entry_path(p.stem, nid).exists():   # recalls owed: their own entry
                 n += 1 if _relay_write_entry(p.stem, nid, "recall", (raw or {}).get("rev") or 0) else 0
     return n
 

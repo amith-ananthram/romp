@@ -3012,6 +3012,8 @@ ROMP_VOICE_WORDS = ("romp", "card", "board", "goal", "cleared", "dismissal", "st
 #   tests/test_injected_voice.py's list of the same words, with the why of each, is pinned to this one
 RELAY_GENERIC_BODY = "%s cannot move further on this and needs your call."
 RELAY_UNKNOWN_HOLD = 30        # seconds a send or a recall with an unknown outcome is not repeated (the bus's own timeout, twice)
+RELAY_RECALL_TRIES = 8         # unanswered recall attempts before the hold stretches (about four minutes of asking)...
+RELAY_RECALL_BACKOFF = 60      # ...to thirty minutes between asks: a parked question nobody can withdraw is said, not hammered
 _ROMP_VOICE_RES = [re.compile(r"\b%s(?:s|es|ed|ing)?\b" % re.escape(w).replace(r"\ ", r"[ -]")) for w in ROMP_VOICE_WORDS]
 
 
@@ -3167,13 +3169,26 @@ def _relay_recall_sweep(sid, nd, now):
     if not owed:
         return False
     keep, done, changed = [], list(nd.get("relayRecalled") or []), False
+    next_at = 0                                            # when the earliest hold ends: the tick looks again then
     for r in owed:
-        if r.get("unknownAt") and int(now) - int(r["unknownAt"]) < RELAY_UNKNOWN_HOLD:
+        hold = RELAY_UNKNOWN_HOLD * (RELAY_RECALL_BACKOFF if int(r.get("attempts") or 0) >= RELAY_RECALL_TRIES else 1)
+        if r.get("unknownAt") and int(now) - int(r["unknownAt"]) < hold:
             keep.append(r)                                 # the bus could not be asked a moment ago: held, not hammered
+            next_at = min(next_at or 10**12, int(r["unknownAt"]) + hold)
             continue
         got = _bus_recall_relay(sid, r.get("pendingMid"))
         if got == "unknown":
             r["unknownAt"] = int(now)
+            r["attempts"] = int(r.get("attempts") or 0) + 1
+            next_at = min(next_at or 10**12, int(now) + (RELAY_UNKNOWN_HOLD * (RELAY_RECALL_BACKOFF if r["attempts"] >= RELAY_RECALL_TRIES else 1)))
+            key = (sid, str(r.get("pendingMid") or ""), "recall")
+            if r["attempts"] == 1 and key not in _RELAY_SAID:
+                _RELAY_SAID.add(key)
+                sys.stderr.write("relay recall (%s, %s): the bus could not be asked; asked again every %d s\n"
+                                 % (sid[:8], str(r.get("pendingMid") or "")[:12], RELAY_UNKNOWN_HOLD))
+            if r["attempts"] == RELAY_RECALL_TRIES:
+                sys.stderr.write("relay recall (%s, %s): %d tries unanswered; asked again every %d s from here\n"
+                                 % (sid[:8], str(r.get("pendingMid") or "")[:12], RELAY_RECALL_TRIES, RELAY_UNKNOWN_HOLD * RELAY_RECALL_BACKOFF))
             keep.append(r)
             changed = True
             continue
@@ -3186,7 +3201,7 @@ def _relay_recall_sweep(sid, nd, now):
     else:
         nd.pop("relayRecall", None)
     nd["relayRecalled"] = done[-jd.RELAY_SETTLED_CAP:]
-    return changed
+    return changed, (next_at or 0)
 
 
 def _relay_entry(store, sid, f, e, rev, now, alive_ids=None):
@@ -3200,11 +3215,12 @@ def _relay_entry(store, sid, f, e, rev, now, alive_ids=None):
     nid = str(e["nid"])
     marker = str(e.get("marker") or "")
     nd = store["nodes"].get(nid)
-    changed = False
+    changed, recall_next = False, 0
     if isinstance(nd, dict) and nd.get("relayRecall"):
-        changed = _relay_recall_sweep(sid, nd, now) or changed
-    if marker == "recall":                                 # an entry for recalls owed alone
-        return 0, changed, not (isinstance(nd, dict) and nd.get("relayRecall")), False
+        changed, recall_next = _relay_recall_sweep(sid, nd, now)
+    if marker == "recall":                                 # the node's recall entry (its own file beside the marker's)
+        owed = isinstance(nd, dict) and bool(nd.get("relayRecall"))
+        return 0, changed, not owed, (False if changed else (recall_next or True))
     rw = nd.get("relayWanted") if isinstance(nd, dict) else None
     if not isinstance(rw, dict) or (marker and str(rw.get("id") or "") != marker):
         if nd is None or _relay_record_names(nd, marker):
@@ -3251,11 +3267,17 @@ def _relay_entry(store, sid, f, e, rev, now, alive_ids=None):
             _RELAY_SAID.discard(said)
             return 0, True, True, False
         if not standing:                                   # the wait ended another way: the parked question is withdrawn
-            if rw.get("recallUnknownAt") and int(now) - int(rw["recallUnknownAt"]) < RELAY_UNKNOWN_HOLD:
-                return 0, changed, False, False            # the bus could not be asked a moment ago: held, not hammered
+            hold = RELAY_UNKNOWN_HOLD * (RELAY_RECALL_BACKOFF if int(rw.get("recallAttempts") or 0) >= RELAY_RECALL_TRIES else 1)
+            if rw.get("recallUnknownAt") and int(now) - int(rw["recallUnknownAt"]) < hold:
+                return 0, changed, False, int(rw["recallUnknownAt"]) + hold   # held: quiet until the hold ends
             got = _bus_recall_relay(sid, rw["pendingMid"])  #   so the far host never delivers a stale one
             if got == "unknown":
                 rw["recallUnknownAt"] = int(now)
+                rw["recallAttempts"] = int(rw.get("recallAttempts") or 0) + 1
+                if rw["recallAttempts"] in (1, RELAY_RECALL_TRIES):
+                    sys.stderr.write("relay recall (%s, %s): the bus could not be asked (%d tries); asked again every %d s\n"
+                                     % (sid[:8], nid, rw["recallAttempts"],
+                                        RELAY_UNKNOWN_HOLD * (RELAY_RECALL_BACKOFF if rw["recallAttempts"] >= RELAY_RECALL_TRIES else 1)))
                 return 0, True, False, False               # the bus could not be asked: the entry stays, asked again later
             _relay_settle(nd, rw, now, "relayDone", outcome="stood-down",
                           recall=("withdrawn" if got == "withdrawn" else "carried: could not be withdrawn"))
@@ -3267,8 +3289,8 @@ def _relay_entry(store, sid, f, e, rev, now, alive_ids=None):
         _RELAY_SAID.discard(said)
         return 0, True, True, False
     if rw.get("unknownAt") and int(now) - int(rw["unknownAt"]) < RELAY_UNKNOWN_HOLD:
-        return 0, changed, False, False                    # a send the bus may still be processing: the log is re-read
-                                                           #   each tick (above) and nothing is sent again meanwhile
+        return 0, changed, False, int(rw["unknownAt"]) + RELAY_UNKNOWN_HOLD   # a send the bus may still be processing:
+                                                           #   quiet until the hold ends or the log moves (its row lands)
     if alive_ids is not None and sid not in alive_ids:
         return 0, changed, False, not changed              # a dead worker asks nothing: the entry waits, quiet, for the
                                                            #   sweep's block to stand the marker down or the session to live
@@ -3337,7 +3359,7 @@ def _relay_store(sid, ents, now, alive_ids=None):
     others."""
     store = jd.load_goals(sid)
     n = 0
-    quiet = True
+    quiet, until = True, 0                                 # quiet: nothing to do until the key moves; until: or this time
     for f, e in ents:
         try:
             sent, changed, spent, q = _relay_entry(store, sid, f, e, int(store.get("rev") or 0), now, alive_ids)
@@ -3346,18 +3368,20 @@ def _relay_store(sid, ents, now, alive_ids=None):
             quiet = False
             continue
         n += sent
-        quiet = quiet and q
+        if q is False or q is None:
+            quiet = False
+        elif q is not True:                                # a time: a hold that ends on the clock, not on a file moving
+            until = min(until or 10**12, int(q))
         if changed:
             jd.rollup_status(store, False)
             jd.save_goals(sid, store)                      # the record lands first; a raise here keeps the entry
         if spent:
             nd = store["nodes"].get(str(e["nid"]))
-            if isinstance(nd, dict) and nd.get("relayRecall"):   # a recall still owed on this node (the bus could not be asked):
-                jd._relay_write_entry(sid, str(e["nid"]), "recall", int(store.get("rev") or 0))   # the entry becomes the
-                quiet = False                              #   recall's own, never spent with the marker's send (eighth review)
-            else:
-                _relay_spend(f, e)
-    return n, quiet
+            if isinstance(nd, dict) and nd.get("relayRecall") and not jd._relay_recall_entry_path(sid, str(e["nid"])).exists():
+                jd._relay_write_entry(sid, str(e["nid"]), "recall", int(store.get("rev") or 0))   # a recall still owed:
+                quiet = False                              #   its OWN entry beside the marker's (never a rewrite of the
+            _relay_spend(f, e)                             #   marker's file, which the judge may have renamed a newer
+    return n, (quiet and (until or True))                  #   marker's entry over meanwhile; the ninth review)
 
 
 def _relay_quiet_key(sid, ents, alive_ids=None):
@@ -3416,12 +3440,14 @@ def _relay_tick(now, alive_ids=None):
     for sid, ents in by_sid.items():
         try:
             key = _relay_quiet_key(sid, ents, alive_ids)
-            if key is not None and _RELAY_QUIET.get(sid) == key:
-                continue                                   # nothing it reads has moved since a pass that changed nothing
+            held = _RELAY_QUIET.get(sid)
+            if key is not None and held and held[0] == key and (held[1] is True or int(now) < int(held[1])):
+                continue                                   # nothing it reads has moved since a pass that changed nothing,
+                                                           #   and no hold of its has ended
             sent, quiet = _relay_store(sid, ents, now, alive_ids)
             n += sent
             if quiet and key is not None:
-                _RELAY_QUIET[sid] = key
+                _RELAY_QUIET[sid] = (key, quiet)           # quiet: True (until the key moves) or the time a hold ends
             else:
                 _RELAY_QUIET.pop(sid, None)
         except Exception:

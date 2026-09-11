@@ -1380,10 +1380,21 @@ class MergeCarriesTheRelay(_Peer):
         (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(disk))
         jd._rebase_onto_disk(WORKER, mem)
         rw = mem["nodes"][step]["relayWanted"]
-        self.assertEqual({k: rw[k] for k in jd.RELAY_TICK_KEYS},
+        self.assertEqual({k: rw.get(k) for k in jd.RELAY_TICK_KEYS},
                          {"pendingMid": "px-1", "pendingAt": NOW + 41, "pendingHost": "TESTHOST", "unknownAt": NOW + 40, "attempts": 2,
-                          "recallUnknownAt": NOW + 42})
-        self.assertEqual(jd.RELAY_TICK_KEYS, ("pendingMid", "pendingAt", "pendingHost", "unknownAt", "attempts", "recallUnknownAt"), "named once")
+                          "recallUnknownAt": NOW + 42, "recallAttempts": None})
+        self.assertEqual(jd.RELAY_TICK_KEYS, ("pendingMid", "pendingAt", "pendingHost", "unknownAt", "attempts", "recallUnknownAt", "recallAttempts"), "named once")
+        mem3 = json.loads(json.dumps(st)); disk3 = json.loads(json.dumps(st))
+        mem3["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400, "id": "mk-a", "recallUnknownAt": NOW, "recallAttempts": 1}
+        disk3["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400, "id": "mk-a", "recallUnknownAt": NOW + 90, "recallAttempts": 3}
+        mem3["nodes"][step]["relayRecall"] = [{"id": "mk-0", "pendingMid": "px-r", "unknownAt": NOW, "attempts": 1}]
+        disk3["nodes"][step]["relayRecall"] = [{"id": "mk-0", "pendingMid": "px-r", "unknownAt": NOW + 90, "attempts": 4}]
+        (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(disk3))
+        jd._rebase_onto_disk(WORKER, mem3)
+        rw3 = mem3["nodes"][step]["relayWanted"]
+        self.assertEqual((rw3["recallUnknownAt"], rw3["recallAttempts"]), (NOW + 90, 3), "the recall hold newer-wins, like the send's")
+        self.assertEqual((mem3["nodes"][step]["relayRecall"][0]["unknownAt"], mem3["nodes"][step]["relayRecall"][0]["attempts"]), (NOW + 90, 4),
+                         "the per-recall hold and count newer-wins too")
 
     def test_a_recall_done_on_the_disk_filters_the_holders_owed_list_though_the_disk_owes_none(self):
         st, top, step = self.store(delegated=True)
@@ -1626,7 +1637,7 @@ class SaverFlushesItsOwn(_RelayFixture):
         self.assertTrue(nd["blocked"])
         self.assertEqual([r["pendingMid"] for r in nd["relayRecall"]], ["px-ret-2"])
         self._save(st)
-        self.assertEqual(len(self._queue()), 1, "an entry brings the tick to the node though no marker stands")
+        self.assertEqual(len(self._queue()), 2, "the retired marker's entry (spent on the tick) and the recall's own")
         recalls = []
         km._bus_recall_relay = lambda sid, mid: recalls.append(mid) or "carried"
         self.assertEqual(km._relay_tick(NOW + 70), 0)
@@ -1649,13 +1660,71 @@ class SaverFlushesItsOwn(_RelayFixture):
         km._bus_recall_relay = lambda sid, mid: "unknown"  # the bus is restarting: the recall cannot be asked
         km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "to": payload["to"]})
         self.assertEqual(km._relay_tick(NOW + 70), 1, "M2's question goes out")
-        self.assertEqual(len(self._queue()), 1, "the entry is not spent while a recall is owed")
-        self.assertEqual(json.loads((jd._relay_queue_dir() / self._queue()[0]).read_text())["marker"], "recall", "it became the recall's own")
+        self.assertEqual(self._queue(), [jd._relay_recall_entry_path(WORKER, step).name], "the marker's entry is spent; the recall keeps its own")
         recalls = []
         km._bus_recall_relay = lambda sid, mid: recalls.append(mid) or "withdrawn"
         self.assertEqual(km._relay_tick(NOW + 70 + km.RELAY_UNKNOWN_HOLD), 0)
         self.assertEqual(recalls, ["px-owe-1"], "the recall is asked again once the hold passed")
         self.assertEqual(self._queue(), [], "and the recall's entry is spent once done")
+
+    def test_a_recall_owed_never_touches_the_live_markers_entry_even_mid_send(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "first question", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-mid-1", "parked": "TESTHOST"})
+        self.assertEqual(km._relay_tick(NOW), 0)           # M1 handed to the far host
+        st = jd.load_goals(WORKER)
+        jd.record_verdict(st, st["nodes"][step], "romp", "awaiting", NOW + 5, why="", lift=True, end_ev=NOW + 5)
+        self._close(st, step, "second question", NOW + 60)   # M1 retired (a recall owed), M2 minted
+        self._save(st)                                     # the marker's entry (M2) and the recall's own entry
+        names = self._queue()
+        self.assertEqual(len(names), 2, names)
+        self.assertTrue(any(n.endswith(".recall.json") for n in names), "the recall rides its own file")
+        km._bus_recall_relay = lambda sid, mid: "unknown"
+        marker_path = jd._relay_entry_path(WORKER, step)
+        def send_while_judge_moves_on(payload):            # WHILE the tick sends M2, the judge retires it and mints M3 over the path
+            st3 = jd.load_goals(WORKER)
+            jd.record_verdict(st3, st3["nodes"][step], "romp", "awaiting", NOW + 61, why="", lift=True, end_ev=NOW + 61)
+            self._close(st3, step, "third question", NOW + 62)
+            jd.save_goals(WORKER, st3)
+            return True, "", False, {"ok": True, "to": payload["to"]}
+        km._bus_send_relay = send_while_judge_moves_on
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(km._relay_tick(NOW + 70), 1, "M2 went out")
+        entry = json.loads(marker_path.read_text())
+        st = jd.load_goals(WORKER)
+        self.assertEqual(entry["marker"], st["nodes"][step]["relayWanted"]["id"], "M3's entry survived the tick: never rewritten")
+        self.assertTrue(jd._relay_recall_entry_path(WORKER, step).exists(), "the recall keeps its own entry")
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "to": payload["to"]})
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(km._relay_tick(NOW + 71), 1, "M3's question goes out on the next tick, no boot needed")
+
+    def test_an_unanswerable_recall_is_said_once_and_backs_off(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "first question", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-bo-1", "parked": "TESTHOST"})
+        self.assertEqual(km._relay_tick(NOW), 0)
+        st = jd.load_goals(WORKER)
+        jd.record_verdict(st, st["nodes"][top], "user", "reopen", NOW + 5, msg=True)   # the user's block: the marker retires
+        self._close(st, step, "still stuck", NOW + 60)
+        self._save(st)
+        calls = []
+        km._bus_recall_relay = lambda sid, mid: calls.append(mid) or "unknown"
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            t = NOW + 70
+            for i in range(km.RELAY_RECALL_TRIES):
+                self.assertEqual(km._relay_tick(t), 0)
+                t += km.RELAY_UNKNOWN_HOLD
+        self.assertEqual(len(calls), km.RELAY_RECALL_TRIES, "one ask per hold up to the tries")
+        self.assertEqual(err.getvalue().count("could not be asked"), 1, "said once")
+        self.assertEqual(err.getvalue().count("tries unanswered"), 1, "the back-off said once")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(km._relay_tick(t + km.RELAY_UNKNOWN_HOLD), 0)
+        self.assertEqual(len(calls), km.RELAY_RECALL_TRIES, "inside the stretched hold: not asked")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(km._relay_tick(t + km.RELAY_UNKNOWN_HOLD * km.RELAY_RECALL_BACKOFF), 0)
+        self.assertEqual(len(calls), km.RELAY_RECALL_TRIES + 1, "asked again once the stretched hold passed")
 
     def test_the_boot_pass_requeues_a_node_that_owes_recalls(self):
         st, top, step = self.store(delegated=True)
