@@ -11,6 +11,7 @@ import contextlib
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import tempfile
@@ -1236,6 +1237,102 @@ for i in range(20):
         self.assertFalse(err["limit"])
         self.assertFalse(be.available())
 
+    def test_a_handshake_that_never_answers_is_ended_and_named(self):
+        # A codex that starts, holds stdout open and never writes its first frame (a start-up stalled on a hung
+        # mount, a stub that sleeps) left _get_client in the SDK's untimed wait with _client_lock HELD: every
+        # Codex creation, resume, send and /models read queued behind it, the tab whose receive loop made the
+        # call read no more ops, and nothing was logged or recorded (2026-09-11). The handshake now runs under
+        # a clock whose expiry ends the child, the one event the SDK's wait answers to, and names the reason.
+        # The reason then stands for at least the clock: a re-probe costs the whole clock again, lock held, so
+        # the ordinary backoff (cap 5s) would have re-run it almost continuously while the fault lasted.
+        class SilentClient(FakeClient):
+            """Every account_read parks until the next close(): the shape of a live child that never answers,
+            however often it is probed. (The injected path has no start/initialize; account_read is the
+            handshake call both paths share.)"""
+
+            def __init__(self):
+                super().__init__()
+                self.gate = threading.Event()
+
+            def account_read(self, *a, **k):
+                self._rec("account_read")
+                self.gate = gate = threading.Event()
+                gate.wait()
+                raise RuntimeError("Codex process closed stdout.")   # what the SDK's wait raises after close()
+
+            def close(self):
+                super().close()
+                self.gate.set()
+        saved = getattr(cb, "HANDSHAKE_TIMEOUT_S", None)
+        cb.HANDSHAKE_TIMEOUT_S = 0.3                     # the clock under test
+        self.addCleanup(setattr, cb, "HANDSHAKE_TIMEOUT_S", saved)
+        fake = SilentClient()
+        self.addCleanup(lambda: fake.gate.set())         # without the clock the probe parks forever; let it out
+        logs = []
+        be = cb.CodexBackend(tempfile.mkdtemp(), client_factory=lambda: fake, log=logs.append)
+        out = []
+        probe = threading.Thread(target=lambda: out.append(be.available()), name="probe", daemon=True)
+        probe.start()
+        probe.join(5)
+        self.assertFalse(probe.is_alive(), "available() must return once the handshake clock runs out")
+        self.assertEqual(out, [False])
+        self.assertTrue(fake.called("close"), "the clock ends the child; that is what unblocks the SDK's wait")
+        self.assertIn("did not answer", be._client_err or "")
+        recorded = [m for m in logs if "did not answer" in m]
+        self.assertTrue(recorded, logs)
+        delay = float(re.search(r"retry in ([\d.]+)s", recorded[0]).group(1))
+        self.assertGreaterEqual(delay, cb.HANDSHAKE_TIMEOUT_S,
+                                "a probe that costs the whole clock is not re-run before the clock: %s" % recorded[0])
+        sid = be.spawn("web", "/TESTDIR")                 # the session exists, visibly broken, with the reason
+        self.assertIn("did not answer", be.launch_error(sid)["text"])
+
+    def test_a_handshake_ended_by_its_clock_names_the_reason_not_the_transport(self):
+        # On a real client the parked call is initialize() inside bring_up: the clock's close() ends the child,
+        # the SDK's reader fails its waiter with the transport's text ("Codex process closed stdout. stderr_tail=
+        # ...") and that RAISES out of the handshake, the branch the injected path above never reaches (its
+        # account_read error is swallowed by the login check). The user reads the plain reason, not the
+        # transport's text and a stderr tail; the transport error stays attached as the cause.
+        class EndedClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.ended = threading.Event()
+
+            def close(self):
+                super().close()
+                self.ended.set()
+        fake = EndedClient()
+        transport = RuntimeError("Codex process closed stdout. stderr_tail=")   # the SDK's TransportClosedError shape
+
+        def bring_up():                                   # start + initialize on a real client: parks until the close
+            fake.ended.wait()
+            raise transport
+        saved = getattr(cb, "HANDSHAKE_TIMEOUT_S", None)
+        cb.HANDSHAKE_TIMEOUT_S = 0.3
+        self.addCleanup(setattr, cb, "HANDSHAKE_TIMEOUT_S", saved)
+        self.addCleanup(fake.ended.set)
+        be, _, _ = build(factory=lambda: fake)
+        with self.assertRaises(RuntimeError) as cm:
+            be._handshake(fake, bring_up)
+        self.assertIsInstance(cm.exception, cb._HandshakeTimeout)   # the class the record floors the retry on
+        self.assertIn("did not answer", str(cm.exception))
+        self.assertNotIn("stderr_tail", str(cm.exception))
+        self.assertIs(cm.exception.__cause__, transport)
+        self.assertTrue(fake.called("close"), "the clock ended the child")
+        self.assertEqual(fake.called("account_read"), [], "the login check never ran: the raise came first")
+
+    def test_a_handshake_that_settles_first_dismisses_its_clock(self):
+        # The other side of the gate: a good handshake cancels its clock, so no clock fires after it settled to
+        # close the installed client. The clock's thread ending is the event; a live one could still fire.
+        saved = getattr(cb, "HANDSHAKE_TIMEOUT_S", None)
+        cb.HANDSHAKE_TIMEOUT_S = 0.2
+        self.addCleanup(setattr, cb, "HANDSHAKE_TIMEOUT_S", saved)
+        be, fake, _ = build()
+        self.assertTrue(be.available())
+        self.assertTrue(until(lambda: not any(t.name == "codex-handshake-clock" for t in threading.enumerate())),
+                        "a settled handshake dismisses its clock")
+        self.assertEqual(fake.called("close"), [], "a clock dismissed by the handshake never ends the client")
+        self.assertIs(be._client, fake)
+
     def test_claude_only_knobs_refuse(self):
         be, _, _ = build()
         sid = be.spawn("web", "/TESTDIR")
@@ -1623,6 +1720,92 @@ class LaunchErrorNames(unittest.TestCase):
             name_file = os.path.join(td, "names", sid)
             self.assertTrue(os.path.exists(name_file))
             self.assertIn("webby", open(name_file).read())
+
+
+class RegistryNamesHeal(unittest.TestCase):
+    """spawn writes the durable registry row, then names/<sid>. A kernel death between the two left a
+    LIVE row with no shared identity file: the next boot rebuilt the session from the registry but
+    republished nothing, so every names/-derived surface (sender name and colour, cwd, the duplicate-
+    name claim) was blind to it, and the one heal a user could reach, a rename, wrote an empty colour
+    although the registry knew it (2026-09-11). All data synthetic per CLAUDE.md."""
+
+    def _crash_between_row_and_publish(self):
+        be, fake, tmp = build()
+        sid = be.spawn("web", "/TESTDIR", "#336699", "#ffffff")
+        nf = Path(tmp) / "names" / sid
+        nf.unlink()                            # the crash window: the row landed, the publish never ran
+        return be, fake, tmp, sid, nf
+
+    def test_a_live_row_missing_its_names_entry_is_republished_at_load(self):
+        be, fake, tmp, sid, nf = self._crash_between_row_and_publish()
+        logs = []
+        be2 = cb.CodexBackend(tmp, client_factory=lambda: fake, log=logs.append)
+        self.assertTrue(be2.owns(sid), "the row is live in the registry")
+        self.assertTrue(nf.is_file(), "the next boot republishes the identity file from the registry")
+        parts = nf.read_text().rstrip("\n").split("\t")
+        self.assertEqual(parts[:3], ["web", "/TESTDIR", "#336699"],
+                         "name, cwd and colour come from the registry, the durable source")
+        self.assertEqual(sorted(p.name for p in nf.parent.iterdir()), [sid], "no staging file left behind")
+        self.assertTrue(any(sid in m and "missing at load" in m for m in logs),
+                        "the heal is loud: the log names the sid and the state it repaired")
+
+    def test_a_failed_republish_at_load_leaves_the_boot_alive_and_names_the_unnamed_state(self):
+        # the heal's failure branch: the boot must not die over an identity file, and the log must
+        # NAME the state it leaves — a live row with no published name is the duplicate-name hole.
+        # The REAL writer runs under _disk_full, so the publish (os.replace onto names/<sid>) fails
+        # with ENOSPC exactly as it would on a full disk
+        be, fake, tmp, sid, nf = self._crash_between_row_and_publish()
+        logs = []
+        with _disk_full(nf):
+            be2 = cb.CodexBackend(tmp, client_factory=lambda: fake, log=logs.append)
+        self.assertTrue(be2.owns(sid), "the boot survived the failed write and the row is still live")
+        self.assertFalse(nf.exists(), "a failed publish creates nothing")
+        self.assertEqual(sorted(p.name for p in nf.parent.iterdir()), [], "no staging file left behind")
+        said = [m for m in logs if sid in m and "could not be republished at load" in m]
+        self.assertEqual(len(said), 1, logs)
+        self.assertIn("[Errno 28]", said[0], "the log names the errno")
+        self.assertIn("UNNAMED", said[0], "the log names the state the session is left in")
+
+    def test_a_row_whose_names_entry_exists_is_left_untouched_at_load(self):
+        # green on origin/main as well (it wrote nothing at load): the pin that the heal is for the
+        # MISSING file only — the names producers watch the mtime, and a kernel-side recolour lives
+        # in the file alone, so a rewrite from the registry would both flap and revert it
+        be, fake, tmp = build()
+        sid = be.spawn("web", "/TESTDIR", "#336699", "#ffffff")
+        nf = Path(tmp) / "names" / sid
+        nf.write_text("web\t/TESTDIR\t#abcdef\t#000000\n")   # a kernel-side recolour: names/ only
+        before = (nf.read_bytes(), nf.stat().st_mtime_ns)
+        logs = []
+        cb.CodexBackend(tmp, client_factory=lambda: fake, log=logs.append)
+        self.assertEqual((nf.read_bytes(), nf.stat().st_mtime_ns), before,
+                         "byte-identical and no mtime bump: nothing was missing, so nothing was written")
+        self.assertEqual([m for m in logs if "names/" in m], [])
+
+    def test_a_dead_row_missing_its_names_entry_is_not_republished(self):
+        # green on origin/main as well: a dead row claims no name slot — republishing it would
+        # hold the name against the create it no longer owns
+        be, fake, tmp, sid, nf = self._crash_between_row_and_publish()
+        self.assertTrue(be.kill(sid))
+        cb.CodexBackend(tmp, client_factory=lambda: fake)
+        self.assertFalse(nf.exists(), "a dead row claims no name slot")
+
+    def test_the_rename_heal_carries_the_registry_colour(self):
+        be, fake, tmp, sid, nf = self._crash_between_row_and_publish()
+        self.assertTrue(be.rename(sid, "api"))
+        parts = nf.read_text().rstrip("\n").split("\t")
+        self.assertEqual(parts[:3], ["api", "/TESTDIR", "#336699"],
+                         "the healed file carries the colour the registry knows, not an empty one")
+
+    def test_a_recolour_in_the_names_file_outranks_the_registry_colour(self):
+        # green on origin/main as well: the pin for the ORDER of the fallback (the file first) — a
+        # kernel-side recolour (_set_session_color) writes names/ only and never updates the
+        # registry's colour, so a rename must keep the file's, not revert to spawn's
+        be, fake, tmp = build()
+        sid = be.spawn("web", "/TESTDIR", "#336699", "#ffffff")
+        nf = Path(tmp) / "names" / sid
+        nf.write_text("web\t/TESTDIR\t#abcdef\t#000000\n")
+        self.assertTrue(be.rename(sid, "api"))
+        self.assertEqual(nf.read_text(), "api\t/TESTDIR\t#abcdef\t#000000\n")
 
 
 class RaisingRegistryTransactions(unittest.TestCase):
