@@ -74,8 +74,11 @@ const page = await browser.newPage({ viewport: { width: cfg.W, height: cfg.H } }
 
 async function load() {
   await page.goto(cfg.chat);
-  await page.waitForSelector("#content .turn p", { timeout: 20000 });
-  await page.waitForSelector("mark.cmt-hl[data-tid]", { timeout: 20000 });   // the seeded thread's highlight has landed
+  // 60 s, not 20: the highlight lands after the kernel's comments frame, which on a loaded runner follows the chat frame
+  // by tens of seconds (2026-09-11: red twice on CI for a head that changed nothing on this road; under a 20% CPU quota
+  // main itself misses 20 s two runs in three and lands by 90 s). The wait is still the event, only its ceiling moved.
+  await page.waitForSelector("#content .turn p", { timeout: 60000 });
+  await page.waitForSelector("mark.cmt-hl[data-tid]", { timeout: 60000 });   // the seeded thread's highlight has landed
   await page.waitForTimeout(300);
 }
 const geom = () => page.evaluate(() => {
