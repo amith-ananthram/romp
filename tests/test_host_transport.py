@@ -620,7 +620,6 @@ class BackendHostRules(unittest.TestCase):
              mock.patch.object(sb.SdkSession, "start", lambda self: started.append(self.sid)):
             self.assertTrue(be.send(SID, "<!-- romp-injected --><!-- romp-auto --> a nudge"), "accepted: queued, not dropped")
             self.assertTrue(be.send(SID, "a watch notice <!-- romp-tag: watch -->"))
-            self.assertTrue(be.send(SID, "a watch notice <!-- romp-tag: watch -->"), "asked twice by a record-gated sender: once in the queue")
             reg = sb.read_reg(Path(d), SID) or {}
             self.assertEqual(reg.get("queue"), ["<!-- romp-injected --><!-- romp-auto --> a nudge", "a watch notice <!-- romp-tag: watch -->"])
             self.assertEqual([m["text"] for m in reg.get("queueMeta")], reg["queue"], "the mirror's meta aligns with the queue")
@@ -635,6 +634,62 @@ class BackendHostRules(unittest.TestCase):
         self.assertEqual(s._pending[:2], ["<!-- romp-injected --><!-- romp-auto --> a nudge", "a watch notice <!-- romp-tag: watch -->"],
                          "the session seeds the queued automatic messages first, then the user's")
         self.assertEqual(s._pending[2], "the user's words")
+
+    def test_a_queued_send_that_races_a_lift_lands_in_the_live_session(self):
+        # the commit-14 review's first item: the queue-behind appended to the mirror after an unlocked check; a user's
+        # send lifting the marker in that window started a session whose queue seed had already been read, and the
+        # next _persist_queue erased the automatic text. The re-check under _reg_lock declines and send() falls through.
+        d, be = self._be()
+        self._marked(d); self._host_lease(d)
+        got = []
+        live = types.SimpleNamespace(sid=SID, thread=types.SimpleNamespace(is_alive=lambda: True),
+                                     enqueue=lambda t, qid=None, qts=None: got.append(t))
+        real_holds = be._attach_stand_down_holds
+        def holds_then_lift(sid, reg=None):
+            r = real_holds(sid, reg)
+            be._lift_attach_stand_down(sid)            # the user's send wins the race: marker gone, session live
+            be.sessions[sid] = live
+            return r
+        with mock.patch.object(sb, "proc_start", lambda p, run=None: {999999997: "1", 999999996: "2"}.get(p)), \
+             mock.patch.object(be, "_attach_stand_down_holds", holds_then_lift):
+            self.assertTrue(be.send(SID, "<!-- romp-injected --> a nudge"))
+        self.assertEqual(got, ["<!-- romp-injected --> a nudge"], "enqueued on the live session, not landed in a mirror")
+        self.assertEqual((sb.read_reg(Path(d), SID) or {}).get("queue") or [], [], "nothing written to the mirror")
+
+    def test_a_dead_session_refuses_an_automatic_send_before_the_stand_down_is_consulted(self):
+        # the second item: the alive check lived inside _ensure, unreachable while the marker held, so a stood-down
+        # session the user had ended kept accepting automatic messages into a dead reg's mirror
+        d, be = self._be()
+        self._marked(d, alive=False); self._host_lease(d)
+        with mock.patch.object(sb, "proc_start", lambda p, run=None: {999999997: "1", 999999996: "2"}.get(p)):
+            self.assertFalse(be.send(SID, "<!-- romp-injected --> a nudge"), "refused, as e030cd45 did: the watch row retries")
+        self.assertEqual((sb.read_reg(Path(d), SID) or {}).get("queue") or [], [])
+
+    def test_kill_drops_the_marker_and_ends_the_host_a_stood_down_session_left_running(self):
+        # the second item's other half: kill() on a stood-down session with no object flipped alive and left the
+        # host and its CLI running under a live lease; now it drops the marker and ends the host through its lease
+        d, be = self._be()
+        self._marked(d); self._host_lease(d)
+        ended = []
+        with mock.patch.object(sb, "proc_start", lambda p, run=None: {999999997: "1", 999999996: "2"}.get(p)), \
+             mock.patch.object(be, "_end_host_by_lease", lambda sid: ended.append(sid) or True):
+            self.assertTrue(be.kill(SID))
+        reg = sb.read_reg(Path(d), SID) or {}
+        self.assertFalse(reg.get("alive")); self.assertNotIn("hostAttachFailed", reg)
+        self.assertEqual(ended, [SID], "the live host is ended through its lease")
+        # and the real helper declines when no live host lease holds
+        d2, be2 = self._be()
+        sb.write_reg(Path(d2), SID, {"sid": SID, "name": "web", "alive": True})
+        self.assertFalse(be2._end_host_by_lease(SID))
+
+    def test_two_automatic_messages_with_the_same_words_are_both_queued(self):
+        # the fourth item: a by-text dedupe dropped a legitimately repeated notice and reported it accepted
+        d, be = self._be()
+        self._marked(d); self._host_lease(d)
+        with mock.patch.object(sb, "proc_start", lambda p, run=None: {999999997: "1", 999999996: "2"}.get(p)):
+            self.assertTrue(be.send(SID, "romp watch: the condition holds"))
+            self.assertTrue(be.send(SID, "romp watch: the condition holds"))
+        self.assertEqual((sb.read_reg(Path(d), SID) or {}).get("queue"), ["romp watch: the condition holds"] * 2)
 
     def test_a_boot_leaves_a_stood_down_session_alone_and_counts_no_attach(self):
         # the fourth item: the boot counted an attach, added the sid to the boot set and wrote the reconcile.boot row

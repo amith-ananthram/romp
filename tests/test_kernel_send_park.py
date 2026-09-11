@@ -884,11 +884,13 @@ class WhoSpeaks(unittest.TestCase):
 
     class Speaking:
         def __init__(self):
-            self.calls = []
+            self.calls = []; self.ok = True
         def send(self, sid, text, qid=None, user=False):
-            self.calls.append((text, user)); return True
+            self.calls.append((text, user)); return self.ok
         def forwards_sends(self):
             return True                 # the SDK's shape: a run of parked sends is delivered one by one
+        def pending_queued(self, sid):
+            return []
 
     def setUp(self):
         self.be = self.Speaking()
@@ -924,6 +926,51 @@ class WhoSpeaks(unittest.TestCase):
         km._compacting_now = lambda sid: False
         km._deliver_send_batch(self.be, SID, list(ops))
         self.assertEqual(self.be.calls, [("queued words", True), ("a queued notice", False)])
+
+    def test_a_parked_command_replays_through_the_drain_with_its_speaker_and_a_refusal_is_visible(self):
+        # the commit-14 review's sixth item (the command replay's classification, driven) and third (a refused
+        # replay used to stamp the echo and the compacting cue anyway)
+        km._compacting_now = lambda sid: True
+        km._send_or_park(self.be, SID, "/frobnicate", echo="human", user=True)
+        km._send_or_park(self.be, SID, "/compact-later <!-- romp-tag: cron -->")
+        self.assertEqual([km._op_user(o) for o in km._pending_ops[SID]], [True, False])
+        km._compacting_now = lambda sid: False
+        saved = (km._optimistic_echo, km._mark_compacting, km._send_to_app, km._after_turn_opening)
+        echoes, marks, warns = [], [], []
+        km._optimistic_echo = lambda sid, text, author="human": echoes.append(text)
+        km._mark_compacting = lambda sid: marks.append(sid)
+        km._send_to_app = lambda app, m: warns.append((app, m))
+        km._after_turn_opening = lambda *a, **k: None
+        try:
+            km._apply_pending_ops()
+            self.assertEqual(self.be.calls[-1], ("/frobnicate", True), "the parked command replays as the user's")
+            self.assertEqual(echoes, ["/frobnicate"], "delivered: its echo stamped at fire time")
+            self.assertEqual(warns, [])
+            # the second op (a machine's) is refused by the backend: no echo, no cue, a visible refusal, popped
+            self.be.ok = False
+            km._pending_ops[SID] = [("compact",)]
+            km._apply_pending_ops()
+            self.assertEqual(marks, [], "no compacting cue for a compaction that never started")
+            self.assertEqual([m["type"] for _, m in warns], ["warn"], "the refusal reaches the chat")
+            self.assertEqual(km._pending_ops.get(SID) or [], [], "popped, never replayed forever")
+        finally:
+            km._optimistic_echo, km._mark_compacting, km._send_to_app, km._after_turn_opening = saved
+
+    def test_the_manual_retry_is_the_users_gesture_and_the_automatic_one_is_not(self):
+        # the fifth item: the Retry click sent RETRY_MSG with no user keyword, so on a stood-down session it queued
+        saved = (km._note_retry_sent, km._retry_paused_on, km._session_retry_suppressed, km._retry_suppress_unknown)
+        km._note_retry_sent = lambda *a, **k: None
+        km._retry_paused_on = lambda: False
+        km._session_retry_suppressed = lambda sid: False
+        km._retry_suppress_unknown = lambda: False
+        try:
+            self.assertTrue(km._fire_api_retry(SID, self.be, manual=True))
+            self.assertEqual(self.be.calls[-1], (km.RETRY_MSG, True))
+            n = len(self.be.calls)
+            km._fire_api_retry(SID, self.be, manual=False)   # unblocked: the auto path returns before any send, by design
+            self.assertTrue(all(u is False for _, u in self.be.calls[n:]), "an automatic retry never speaks as the user: %r" % self.be.calls[n:])
+        finally:
+            km._note_retry_sent, km._retry_paused_on, km._session_retry_suppressed, km._retry_suppress_unknown = saved
 
     def test_the_send_route_treats_an_untagged_send_as_the_users_and_a_tagged_one_as_a_machines(self):
         src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "kernel", "kernel.py")).read()

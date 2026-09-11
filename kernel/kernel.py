@@ -15533,7 +15533,7 @@ def _fire_api_retry(sid, be, manual=False):
     # message, force-pinning a junk goal per retry via the never-skip hard guard ("retry — kept on the
     # board…", 71 of them in one API-error storm). The marker makes author_of return 'romp' (ROMP_INJECT_RE)
     # so the echo + transcript render gray and the planner skips a work-less retry instead of minting a goal.
-    delivered = be.send(sid, RETRY_MSG)
+    delivered = _user_send(be, sid, RETRY_MSG) if manual else be.send(sid, RETRY_MSG)   # the Retry click is the user's (T315)
     _note_retry_sent(sid, manual=manual)
     # the send's own verdict, for the manual route's reply (review find, 2026-09-08): SdkBackend.send and
     # CodexBackend.send return False for a session they cannot reach (no live registry row, no client);
@@ -31192,6 +31192,7 @@ def _apply_pending_ops(now=None):
                                 run.append(ops.pop(k))
                         elif op[0] != "cwd":
                             _inflight_ops[sid] = op       # (a move hands nothing over below: not recorded)
+                    refused = False
                     if op[0] == "send":
                         changed = True
                         _deliver_send_batch(be, sid, run)
@@ -31212,9 +31213,9 @@ def _apply_pending_ops(now=None):
                         # send batch (or forwarded mid-turn) it reaches the model as text instead of executing
                         # (the user 2026-08-13: /autocompact absorbed mid-turn got a polite reply and no
                         # setting change). Echo stamped at fire time, like a delivered send.
-                        _send_with_id(be, sid, op[1], _op_qid(op), user=_op_user(op))
+                        refused = _send_with_id(be, sid, op[1], _op_qid(op), user=_op_user(op)) is False
                     elif op[0] == "compact":
-                        _user_send(be, sid, "/compact")   # a parked compact click is the user's too (T315)
+                        refused = _user_send(be, sid, "/compact") is False   # a parked compact click is the user's too (T315)
                     elif op[0] == "model":
                         be.set_model(sid, op[1])
                     elif op[0] == "effort":
@@ -31240,6 +31241,15 @@ def _apply_pending_ops(now=None):
                         _fire_move(be, sid, op[1], tries, _move_askers.pop(sid, ""))
                         break
                     if op[0] in ("command", "compact"):
+                        if refused:
+                            # the backend refused the handover (a session it no longer holds): no echo for a command the
+                            # session never got, no compacting cue for a compaction that never started, and the refusal
+                            # is visible (the commit-14 review's third item); the op is popped, never replayed forever
+                            what = "/compact" if op[0] == "compact" else str(op[1])[:60]
+                            sys.stderr.write("pending ops apply: %s refused %r for %s\n" % (type(be).__name__, what, sid[:8]))
+                            _send_to_app("chat", {"type": "warn", "id": sid,
+                                                  "text": "%s was not delivered: the session's backend refused it" % what})
+                            continue
                         # the backend HAS a turn-opening op: its cue, the hold and the end of this pass follow
                         # regardless of `took` (which is always True here — a ✕ on an in-flight op is refused and
                         # these kinds are never replaced in place)

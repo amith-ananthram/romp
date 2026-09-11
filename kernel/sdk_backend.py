@@ -11522,19 +11522,29 @@ class SdkBackend:
         if isinstance(reg.get("hostAttachFailed"), dict):
             self._update_reg_dropping(sid, drop=("hostAttachFailed",))
 
-    def _queue_behind_stand_down(self, sid: str, text: str, qid: str | None = None) -> None:
+    def _queue_behind_stand_down(self, sid: str, text: str, qid: str | None = None) -> bool:
         """An automatic message for a session that stood down from its host: appended to the persisted queue
         mirror (reg['queue'] + reg['queueMeta'], _persist_queue's shape) behind whatever is queued, so the
         SdkSession the user's next message starts seeds it into _pending and delivers it in order. No thread,
         no attach, no echo (a machine message has none). The chat's queued bubble reads the mirror for a
-        session that is not running (pending_queued_meta), so the message shows as queued."""
+        session that is not running (pending_queued_meta), so the message shows as queued. Returns False, having
+        written nothing, when the stand-down no longer holds under _reg_lock or a session object exists: a user's
+        lifting send raced the caller's unlocked check (the lift drops the marker under _reg_lock, and the session
+        it starts seeds its queue from the mirror), so the caller falls through to the live enqueue instead of
+        landing the text in a mirror the next _persist_queue overwrites (the commit-14 review's first item). No
+        by-text dedupe: two automatic messages with the same words are two messages, as on the live path (its
+        fourth item)."""
         with self._reg_lock:
             reg = read_reg(self.state_dir, sid)
-            if reg is None:
-                return
+            if reg is None or not reg.get("alive"):
+                return False
+            marker = reg.get("hostAttachFailed")
+            lease = read_lease(self.state_dir, sid)
+            still = (isinstance(marker, dict) and _ht().host_lease_state(lease, time.time()) == "attach"
+                     and self._holder_ident(lease) == str(marker.get("host") or ""))
+            if not still or sid in self.sessions:
+                return False
             have = [t for t in (reg.get("queue") or []) if isinstance(t, str) and t]
-            if text in have:
-                return                                   # already queued (a record-gated sender asking twice)
             reg["queue"] = have + [text]
             metas = [m for m in (reg.get("queueMeta") or []) if isinstance(m, dict)]
             metas.append({"text": text, "qid": qid, "qts": int(time.time() * 1000)} if qid else {"text": text})
@@ -11543,6 +11553,7 @@ class SdkBackend:
         self._log("host (%s): an automatic message queued behind the stand-down (%d queued); it rides the attach the "
                   "user's next message makes" % ((reg.get("name") or sid[:8]), len(reg["queue"])))
         self._wake_push()
+        return True
 
     def _attach_stand_down_holds(self, sid: str, reg: dict | None = None) -> bool:
         """True while the registry's hostAttachFailed marker still describes the world: the session's lease is
@@ -11837,9 +11848,15 @@ class SdkBackend:
         dropped the nudge after its ledger row had said fired)."""
         if user:
             self._lift_attach_stand_down(sid)     # the user's message is the word that retries a stood-down attach (T315)
-        elif self._attach_stand_down_holds(sid):
-            self._queue_behind_stand_down(sid, text, qid)
-            return True
+        else:
+            reg = read_reg(self.state_dir, sid)
+            if reg is not None and reg.get("alive") is False:
+                return False                      # a session the user ENDED refuses as ever: the alive check comes BEFORE
+            #   the stand-down, else a stood-down session the user ended kept 'accepting' automatic messages into a dead
+            #   reg's mirror (the commit-14 review's second item). Only the explicit flip (kill writes alive=False): a row
+            #   with no alive key (an echo mirror alone) and no row at all are _ensure's refusal, as before
+            if self._attach_stand_down_holds(sid, reg) and self._queue_behind_stand_down(sid, text, qid):
+                return True                       # queued behind the stand-down; a lift that raced the check falls through
         s = self._ensure(sid)
         if not s:
             return False
@@ -12516,13 +12533,48 @@ class SdkBackend:
                 reg = self._reg_for_flip(sid)
                 if reg:
                     reg["alive"] = False
+                    reg.pop("hostAttachFailed", None)   # a stand-down ends with the session (T315)
                     write_reg(self.state_dir, sid, reg)
             s = self.sessions.pop(sid, None)
         if s:
             if s._host is not None:                # a kill is not graceful today: the host's `end` gets the short bound (T315)
                 s._host.end_grace = _ht().sh.END_GRACE_KILL_S
             s.shutdown()
+        else:
+            # no object (a session that stood down from its host, or one never started this life) while a live
+            # host still holds the CLI under its lease: the user's end must end it. The host gets `end` with the
+            # kill bound through its socket, the road the drain and a shutdown take, on a thread of its own; the
+            # host ends the CLI, removes its lease and leaves (the commit-14 review's second item)
+            self._end_host_by_lease(sid)
         self._poke()
+        return True
+
+    def _end_host_by_lease(self, sid: str) -> bool:
+        """`end` (the kill bound) to the live host a session's lease names, with no SdkSession attached: a
+        HostTransport connects, is refused nothing (a kernel is not attached; a `busy` answer means one is, and
+        that kernel's own kill road applies) and closes in end mode. Runs on a daemon thread: kill() is a route
+        handler and the end waits up to the bound. False when no live host lease holds."""
+        ht = _ht()
+        lease = read_lease(self.state_dir, sid)
+        if ht.host_lease_state(lease, time.time()) != "attach":
+            return False
+        sock = ht.host_sock(self.state_dir, sid)
+        ident = self._kernel_identity()
+        async def go():
+            t = ht.HostTransport(str(sock), kernel=ident, ack=-1, end_grace=ht.sh.END_GRACE_KILL_S)
+            try:
+                await t.connect()
+                await t.close()
+            except Exception as e:
+                self._log("host (%s): end by lease failed: %s: %s" % (sid[:8], type(e).__name__, e))
+        def run():
+            try:
+                asyncio.run(go())
+            except Exception as e:
+                self._log("host (%s): end by lease thread failed: %s" % (sid[:8], e))
+        self._log("host (%s): kill with no session object; ending the live host (pid %s) through its lease"
+                  % (sid[:8], ((lease or {}).get("holder") or {}).get("pid")))
+        threading.Thread(target=run, name="romp-end-host-" + sid[:8], daemon=True).start()
         return True
 
     def running_sids(self) -> list:
