@@ -38633,7 +38633,8 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None):
     memo (_lane_memo; the comment above _lanes_memo names every input) can hold its result: (bars, seg_ends,
     last_t, compactions, cap_marks, other_marks, nsegs, complained). bars are the lane's wire bars in turn order
     (the compact shape below, every default omitted); seg_ends maps a segment's start t to its work-END t; last_t
-    is the lane's last awake activity (its `since` when the liveness snapshot has none); compactions are the
+    is the lane's last recorded activity, the newest atom time of its newest bar (its `since` when the liveness
+    snapshot has none), never a turn's `end`, which for the tail turn is the parse clock (T324); compactions are the
     compact_boundary markers; cap_marks and other_marks are this lane's judging marks, unfiltered
     (_derive_judging_marks); nsegs counts the segments visited (the cost a memo hit saves); complained is True
     when the seams or the marks stage failed, or a mark carries a time the assembly could not compare, and
@@ -38669,8 +38670,16 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None):
             # asleep gaps between pieces read as idle (and collapse under 'collapse gaps'). The segment's
             # atom times go in too: an awake stretch with NO activity in it is a dark-wake sliver, not
             # work, and drawing it redrew this segment's summary all night long (the user 2026-07-23).
-            spans = _awake_spans(seg["t"], seg["end"], [a.get("t") for a in seg["atoms"]])
-            last_t = max(last_t or 0, spans[-1][1])            # the true work END (last awake activity) — drives the lane `since`
+            acts = [a.get("t") for a in seg["atoms"]]
+            # The bar's END is the segment's last recorded EVENT, never the segment's `end` (T324, the user 2026-09-10):
+            # a finished turn's end stretches over the trailing idle atom (synthesize_idle) to the NEXT state record,
+            # or, for the tail turn, to the PARSE CLOCK, and the parse is cached until the transcript moves, so every
+            # dormant session's last bar reached the same instant, the first build after the last kernel boot, and
+            # the board read as every session stopping at once. The idle atom's own `t` is the Stop transition, the
+            # moment work ended, so it stays in; an open turn has no idle atom and ends at its newest record as before.
+            bar_end = min(seg["end"], max(seg["t"], max((t for t in acts if t is not None), default=seg["end"])))
+            spans = _awake_spans(seg["t"], bar_end, acts)
+            last_t = max(last_t or 0, spans[-1][1])            # the true work END (last recorded activity) — drives the lane `since`
             seg_ends[seg["t"]] = spans[-1][1]                  # a completion mark lands at its segment's END (after the work)
             cap = _seg_work_caption(caps, seg["id"])       # WORK caption (the bar) — drift-safe
             msg_cap = _seg_caption(caps, seg["id"])    # MESSAGE caption (the dot) — gist of the ask, ready early; drift-safe
@@ -38710,7 +38719,7 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None):
                 mids = _seg_mids(seg)
                 if mids:
                     bar["d"] = mids
-                if turn_open and si == len(segs) - 1 and sj == len(spans) - 1 and bend == seg["end"]:
+                if turn_open and si == len(segs) - 1 and sj == len(spans) - 1 and bend == bar_end:
                     bar["u"] = True                        # open: the live turn's last piece
                 if sj > 0:
                     bar["t"] = True                        # a post-sleep continuation piece: NO new prompt dot
