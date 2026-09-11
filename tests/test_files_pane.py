@@ -227,8 +227,9 @@ class Shell(unittest.TestCase):
     def test_every_pane_list_in_the_landing_js_names_it(self):
         _has(self, "'f-files':'files-pane'", km._LANDING_FOCUS_JS)
         _has(self, "var COLS=['f-chat','f-fleet','f-feed','f-files']", km._LANDING_FOCUS_JS)
-        _has(self, "['f-chat','f-fleet','f-feed','f-files','f-timeline'].forEach", km._LANDING_ESC_JS)
-        _has(self, "['f-chat','f-fleet','f-feed','f-files','f-timeline'].forEach", km._LANDING_MOBILE_JS)
+        # the settings iframe (the gear's document, not a pane) rides the two keyboard lists with the panes
+        _has(self, "['f-chat','f-fleet','f-feed','f-files','f-timeline','f-settings'].forEach", km._LANDING_ESC_JS)
+        _has(self, "['f-chat','f-fleet','f-feed','f-files','f-timeline','f-settings'].forEach", km._LANDING_MOBILE_JS)
         # the Log's connection-lost label reads the one map, so the pane's row in _PANE_ORDER is the pin
         _has(self, "var PN=" + json.dumps(dict(km._PANE_ORDER)) + ";", km._LANDING_ERRS_JS)
         self.assertEqual(dict(km._PANE_ORDER).get("files"), "Files")

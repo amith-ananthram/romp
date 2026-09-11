@@ -530,8 +530,9 @@ _ARMS_HARNESS = r"""
 'use strict';
 const LISTENERS = [], TOGGLES = [], TABS = [];
 const POSTED = { 'f-files': [], 'f-feed': [], 'f-chat': [], 'f-settings': [] };
+const FOCUSED = [], CLASSES = [];   // contentWindow.focus() calls by iframe id; body class toggles as [class, on]
 let MOBILE = false, TAB = 'chat', FILES_READY = 'complete', FILES_LOADS = [];
-const frame = (id) => ({ contentWindow: { postMessage: (m) => POSTED[id].push(JSON.parse(JSON.stringify(m))) },
+const frame = (id) => ({ contentWindow: { postMessage: (m) => POSTED[id].push(JSON.parse(JSON.stringify(m))), focus: () => FOCUSED.push(id) },
   contentDocument: { get readyState() { return id === 'f-files' ? FILES_READY : 'complete'; } },
   addEventListener: (ev, f) => { if (ev === 'load' && id === 'f-files') FILES_LOADS.push(f); },
   removeEventListener: (ev, f) => { if (id === 'f-files') FILES_LOADS = FILES_LOADS.filter((g) => g !== f); } });
@@ -544,7 +545,7 @@ let FEED_OFF = false;   // the gear's Panes section has the Feed pane off in thi
 global.__rompPaneEnabled = (k) => !(k === 'feed' && FEED_OFF);
 const stub = () => ({ style: {}, classList: { add() {}, remove() {}, toggle() {}, contains: () => false }, appendChild() {}, setAttribute() {}, addEventListener() {}, remove() {} });
 global.document = {
-  body: { classList: { toggle() {}, contains: (c) => c === 'po-chat' || c === 'po-feed' || c === 'po-timeline' },
+  body: { classList: { toggle: (c, on) => CLASSES.push([c, !!on]), contains: (c) => c === 'po-chat' || c === 'po-feed' || c === 'po-timeline' },
           getAttribute: (a) => (a === 'data-tab' ? TAB : null), appendChild() {} },
   getElementById: (id) => (id in POSTED ? frame(id) : null),
   createElement: stub, documentElement: { style: { setProperty() {} } },
@@ -622,6 +623,12 @@ send({ romp: 'browseClosed' });
 out.closedFeedOn = Object.assign(snap(), { wasOff: window.__rompFeedWasOff }); reset(); delete window.__rompFeedWasOff;
 send({ romp: 'browseFiles', path: '/repo/notes-api', sid: SID });
 out.browseFeedOn = snap(); reset();
+// the gear's lift bridge: opening lifts the settings iframe and leaves the keyboard where it is; closing hides that
+// iframe (the keyboard's document) and puts focus back in the chat
+send({ romp: 'settings', on: true });
+out.gearLifted = { focused: FOCUSED.slice(), classes: CLASSES.slice() }; FOCUSED.length = 0; CLASSES.length = 0;
+send({ romp: 'settings', on: false });
+out.gearClosed = { focused: FOCUSED.slice(), classes: CLASSES.slice() };
 console.log(JSON.stringify(out));
 """
 
@@ -703,6 +710,17 @@ class RelayArms(unittest.TestCase):
             self.assertEqual(g["feed"], [], k + ": the feed page hosts no gear")
             self.assertEqual(g["toggles"], [], k + ": no pane moves")
             self.assertEqual(g["tabs"], [], k)
+
+    def test_closing_the_gear_puts_the_keyboard_back_in_the_chat(self):
+        # the gear's document is the hidden settings iframe, lifted while open; closing hides it, which drops focus
+        # onto the shell body (a keystroke there reaches no pane), so the bridge focuses the chat, the dashboard's
+        # default focus. Opening moves nothing: the gear takes the keyboard itself.
+        o = self.out["gearLifted"]
+        self.assertEqual(o["classes"], [["settings-open", True]])
+        self.assertEqual(o["focused"], [], "opening leaves focus alone")
+        c = self.out["gearClosed"]
+        self.assertEqual(c["classes"], [["settings-open", False]])
+        self.assertEqual(c["focused"], ["f-chat"], "closing focuses the chat iframe's window, once")
 
     def test_the_feeds_browse_relay_and_the_quote_seed_forward_are_untouched(self):
         b = self.out["browse"]

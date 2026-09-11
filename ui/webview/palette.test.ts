@@ -83,7 +83,8 @@ test("the defaults hold — Mod+O jump, Mod+Shift+O picker, Mod+P palette — th
 
 test("key wiring mirrors the Alt+Arrow pane nav: capture on the shell doc AND every pane doc, re-wired on load", () => {
   assert.match(MAIN, /document\.addEventListener\("keydown", onKey, true\);/);
-  assert.match(MAIN, /\["f-chat", "f-fleet", "f-feed", "f-files", "f-timeline"\]\.forEach/);
+  // the hidden settings iframe (the gear's document) is wired with the panes: the hotkey works from inside the open gear
+  assert.match(MAIN, /\["f-chat", "f-fleet", "f-feed", "f-files", "f-timeline", "f-settings"\]\.forEach/);
   assert.match(MAIN, /f\.contentDocument\.addEventListener\("keydown", onKey, true\)/);
   assert.match(MAIN, /f\.addEventListener\("load", wire\);\s*\n\s*wire\(\);/);
 });

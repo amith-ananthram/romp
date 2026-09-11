@@ -228,9 +228,11 @@ installMenuEcho();
   // The same dual wiring as the Alt+Arrow pane nav (_LANDING_FOCUS_JS): capture on the shell
   // document AND on every same-origin pane document, re-attached on every iframe (re)load.
   // render.ts's own window-capture Cmd+O handler stands down inside the shell (inRompShell),
-  // so a keystroke in the chat document lands here exactly once.
+  // so a keystroke in the chat document lands here exactly once. The hidden #f-settings iframe
+  // (the /settings page, the gear's document since 2026-09-10) is wired with the panes: the gear
+  // holds the keyboard while it is open, and the hotkey worked from inside it when it rode the feed.
   document.addEventListener("keydown", onKey, true);
-  ["f-chat", "f-fleet", "f-feed", "f-files", "f-timeline"].forEach((id) => {
+  ["f-chat", "f-fleet", "f-feed", "f-files", "f-timeline", "f-settings"].forEach((id) => {
     const f = pane(id);
     if (!f) return;
     const wire = () => {

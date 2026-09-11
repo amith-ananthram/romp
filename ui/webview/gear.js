@@ -1322,6 +1322,11 @@ function initGear(post, opts) {
     p.hidden = false; feedFull(true); setModalCls(true); var s = load(); cc.checked = !!s.compact; jix.checked = (s.showIndexJudges !== undefined ? !!s.showIndexJudges : !!s.debug); jtr.checked = (s.showTriageJudges !== undefined ? !!s.showTriageJudges : !!s.debug); if (gb) gb.checked = s.showBranch === true; if (sr) sr.checked = s.stripGroupRows !== false; if (dn) dn.checked = s.denseChrome === true; if (fl) fl.value = s.fileLinkPane === 'pane' ? 'pane' : 'chat'; if (fsc) fsc.checked = (s.filesControl !== false); if (tc) tc.value = tabCtxMode(s.tabCtx); tcPaint(); csPaint(); ttPaint(); if (cg) cg.checked = s.collapseGaps !== false; if (ao) ao.checked = s.activeOnly !== false; (function (p) { Object.keys(pn).forEach(function (k) { if (pn[k]) pn[k].checked = p[k]; }); })(panesOf(s)); if (fc) fc.checked = s.collapsed === true; cmBuild(); cmPaint(s.colormap || 'aurora'); paintBackendOffer(tb ? tb.checked : false); if (dd) dd.value = s.defaultDir || ''; plFill(); fill(); }
   if (g) g.onclick = function (e) { e.stopPropagation(); openSettings(); };   // hidden anchor; hosts open via the message below
   window.addEventListener('message', function (e) { if (e.data && e.data.romp === 'openSettings') openSettings(); });
+  // Escape, relayed by the web shell's Escape chain (_LANDING_ESC_JS captures keydown in this same-origin
+  // document and calls this synchronously): close the modal and say so, unless one of its own dialogs is up
+  // (the login card, an open house dropdown), which the document's own Escape handlers close one level at a
+  // time; the shell then leaves the press alone. A cross-origin host (VS Code) cannot reach this and has no chain.
+  window.__rompSettingsClose = function () { if (p.hidden || (lgM && !lgM.hidden) || openHousePick) return false; closeSettings(); return true; };
   // The shortcuts row: the web shell (same-origin parent) gets the customize link — it opens the
   // shell's shortcuts dialog and closes this modal so the two never stack; VS Code (cross-origin
   // parent) gets the pointer at its own Keyboard Shortcuts editor instead (the user 2026-08-09).

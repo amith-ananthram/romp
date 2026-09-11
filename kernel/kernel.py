@@ -47170,7 +47170,12 @@ paint();})();
 # cleanup lives in those closures); this block only decides which panel Escape means, topmost first
 # (shortcuts dialog z300 — whose close() first CANCELS an in-progress chord recording, one Escape
 # level at a time — then usage z300 > Log z210 > net z200). With no shell modal open it touches
-# nothing, so pane-local Escapes (dialogs, menus inside the chat) keep working.
+# nothing, so pane-local Escapes (dialogs, menus inside the chat) keep working. The gear is the last
+# step (the /settings page in the hidden #f-settings iframe, lifted full-window at z200 while open,
+# 2026-09-10): the shell knows it is up from body.settings-open and asks the page's own
+# __rompSettingsClose (gear.js) to close it, which reports whether it did, since a dialog inside the
+# gear (the login card, an open dropdown) takes the Escape itself, one level at a time. Its document
+# is wired with the panes' so the press is heard where the gear's fields hold the keyboard.
 _LANDING_ESC_JS = """
 (function(){
 function onEsc(e){if(e.key!=='Escape')return;
@@ -47186,10 +47191,14 @@ if(er&&!er.hidden&&window.__rompCloseErrs){window.__rompCloseErrs();closed=true;
 else{var bp=document.getElementById('rbell-back');
 if(bp&&!bp.hidden&&window.__rompCloseBellPop){window.__rompCloseBellPop();closed=true;}
 else{var nt=document.getElementById('rnet-back');
-if(nt&&!nt.hidden&&window.__rompCloseNet){window.__rompCloseNet();closed=true;}}}}}}
+if(nt&&!nt.hidden&&window.__rompCloseNet){window.__rompCloseNet();closed=true;}
+else if(document.body.classList.contains('settings-open')&&settingsClose()){closed=true;}}}}}}
 if(closed){e.preventDefault();e.stopPropagation();}}
+// the gear's own document says whether the press closed it (false with one of its dialogs up, or no page yet)
+function settingsClose(){var f=document.getElementById('f-settings');
+try{var w=f&&f.contentWindow;return !!(w&&w.__rompSettingsClose&&w.__rompSettingsClose());}catch(e){return false;}}
 document.addEventListener('keydown',onEsc,true);
-['f-chat','f-fleet','f-feed','f-files','f-timeline'].forEach(function(id){var f=document.getElementById(id);if(!f)return;
+['f-chat','f-fleet','f-feed','f-files','f-timeline','f-settings'].forEach(function(id){var f=document.getElementById(id);if(!f)return;
 var wire=function(){try{if(f.contentDocument)f.contentDocument.addEventListener('keydown',onEsc,true);}catch(e){}};
 f.addEventListener('load',wire);wire();});
 })();
@@ -48370,7 +48379,10 @@ function feedHere(){return !(window.__rompPaneEnabled&&!window.__rompPaneEnabled
 window.__rompOpenSettings=function(){var f=document.getElementById('f-settings');
 try{f&&f.contentWindow&&f.contentWindow.postMessage({romp:'openSettings'},'*');}catch(e){}};
 window.addEventListener('message',function(e){var m=e.data;if(!m)return;
-if(m.romp==='settings')document.body.classList.toggle('settings-open',!!m.on);
+if(m.romp==='settings'){document.body.classList.toggle('settings-open',!!m.on);
+// closing hides the iframe that held the keyboard, which drops focus onto the shell body; put it back in the
+// chat (the dashboard's default focus, _LANDING_FOCUS_JS rings it) so the next keystroke lands in a pane
+if(!m.on){var fc=document.getElementById('f-chat');try{fc&&fc.contentWindow&&fc.contentWindow.focus();}catch(e){}}}
 // a pane asking for the gear (the feed's login card, ui/webview/gear-host.ts openGear: the feed page hosts no gear)
 if(m.romp==='openSettings')window.__rompOpenSettings();
 // the gear's "Open log" (T290): the settings modal closes itself first, then asks the shell for the Log panel
@@ -49227,8 +49239,8 @@ document.addEventListener('focusout',refit);
 if(window.visualViewport){window.visualViewport.addEventListener('resize',refit);
 window.visualViewport.addEventListener('scroll',refit);}
 function hearBlur(f){try{if(!f.contentDocument)return;f.contentWindow.addEventListener('focusout',refit);}catch(e){}}   // cross-origin → nothing to hear
-['f-chat','f-fleet','f-feed','f-files','f-timeline'].forEach(function(id){var f=document.getElementById(id);if(!f)return;
-f.addEventListener('load',function(){hearBlur(f);});hearBlur(f);});   // now (already loaded) + on every (re)load, as the Alt+Arrow wiring does
+['f-chat','f-fleet','f-feed','f-files','f-timeline','f-settings'].forEach(function(id){var f=document.getElementById(id);if(!f)return;
+f.addEventListener('load',function(){hearBlur(f);});hearBlur(f);});   // now (already loaded) + on every (re)load, as the Alt+Arrow wiring does; the gear's document too (its login field)
 // The mobile LAYOUT, as the stylesheet decides it: the SAME media query the grid collapses on (_MOBILE_MQ,
 // one constant for the CSS and this probe), one pane at a time, bottom tabs, the po-* classes ignored. Read by
 // the pane-set broadcast (on a phone "on" means the tab showing, not the po flag) and by the viewFile relay's
