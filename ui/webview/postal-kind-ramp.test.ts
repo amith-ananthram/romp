@@ -3,7 +3,7 @@
 // on a boxed card to the far end of the tint the hue holds. The POSITIONS are the pin, not the hexes: a re-ink that keeps
 // the line, the even spacing and the span passes; one that narrows the span (T320's dark steps spanned .19 of lightness
 // against this line's .26, its light steps .14 against .25) or bunches two steps (T320's light steps were .05 then .09
-// apart) fails. The comment beside the tokens in styles.css names the same knots.
+// apart) fails. The comment beside the tokens in styles.css names the same two endpoints.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -52,16 +52,16 @@ for (const [theme, map] of Object.entries(MAPS)) {
       assert.ok(Math.abs(s.C - wantC) <= 0.012, `${theme} ${STEPS[i]}: C ${s.C.toFixed(3)} is off the line (${wantC})`);
       assert.ok(hueGap(s.h, map.hue) <= 8, `${theme} ${STEPS[i]}: hue ${s.h.toFixed(1)} is not the accent's ${map.hue}`);
     });
-    // even: the two lightness steps match; wide: the line is the whole map, not a fifth of it
+    // even: the two lightness steps match; wide: the line is the whole map, not a part of it
     const d1 = steps[1].L - steps[0].L, d2 = steps[2].L - steps[1].L;
     assert.ok(Math.abs(d1 - d2) <= 0.012, `${theme}: uneven steps ${d1.toFixed(3)} vs ${d2.toFixed(3)}`);
     assert.ok(Math.abs(steps[2].L - steps[0].L) >= 0.24, `${theme}: the tokens span ${Math.abs(steps[2].L - steps[0].L).toFixed(3)} of lightness, the map is 0.25 or more`);
   });
 }
 
-test("the comment beside the tokens names the same knots, and the tokens hold their theme's accent hue", () => {
-  assert.match(CSS, /L \.64, C \.085[\s\S]{0,300}L \.90, C \.05/, "the dark line's knots, in the :root comment");
-  assert.match(CSS, /L \.50, C \.11[\s\S]{0,200}L \.25, C \.09/, "the light line's knots, in the light comment");
+test("the comment beside the tokens names the same two endpoints, and the tokens hold their theme's accent hue", () => {
+  assert.match(CSS, /L \.64, C \.085[\s\S]{0,300}L \.90, C \.05/, "the dark line's two endpoints, in the :root comment");
+  assert.match(CSS, /L \.50, C \.11[\s\S]{0,200}L \.25, C \.09/, "the light line's two endpoints, in the light comment");
   assert.match(CSS, /hue pinned\s+at the accent's 244/);
   // the accent itself sits on each line's hue: the ramp is the accent's family, not a neighbour's
   assert.ok(hueGap(oklch(token(block(":root {"), "--accent")).h, MAPS.dark.hue) <= 8, "the dark accent's hue is the dark line's");
