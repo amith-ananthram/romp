@@ -62,7 +62,7 @@ test("the statusline shows Opening + dots for BOTH the pre-payload tab and the k
   // kernel-reported opening rides the same line
   assert.match(RENDER, /s\.status\.state === "opening"/);
   assert.match(RENDER, /"opening"/);
-  assert.ok(RENDER.includes('opening: "Opening…",'), "the chip vocabulary knows the state");
+  assert.ok(fs.readFileSync(path.join(ROOT, "ui", "webview", "status-chip.ts"), "utf8").includes('opening: "Opening…",'), "the chip vocabulary knows the state (CHIP_LABEL lives in status-chip.ts since T322b)");
   // three staggered accent dots — the loader idiom's smallest form, no new fonts
   assert.match(CSS, /\.opening-line-dots span \{ width: 4px; height: 4px; border-radius: 50%; background: var\(--accent\);/);
   assert.match(CSS, /@keyframes opening-line-pulse/);

@@ -110,10 +110,11 @@ export function hostDownNote(sid: string | null | undefined): string {
 /** Same rendering when the host rides its OWN field instead of a sid prefix — the feed card's
  *  "↪ from" chip, whose peerSid stays a bare uuid (the sender may live on a third host neither
  *  the viewer nor the card's kernel can address). No host → plain text, identical to a local name. */
-export function hostPartsNodes(host: string | null | undefined, name: string): Node[] {
-  if (!host) return [document.createTextNode(name)];
-  const h = document.createElement("span");
+export function hostPartsNodes(host: string | null | undefined, name: string,
+                               doc: Pick<Document, "createElement" | "createTextNode"> = document): Node[] {   // `doc`: the document to build in (a test's fake through status-chip.ts statusChip); the page's by default
+  if (!host) return [doc.createTextNode(name)];
+  const h = doc.createElement("span");
   h.className = "host-prefix";
   h.textContent = host + ":";
-  return [h, document.createTextNode(name)];
+  return [h, doc.createTextNode(name)];
 }

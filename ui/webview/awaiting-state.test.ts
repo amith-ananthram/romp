@@ -19,10 +19,12 @@ const FED = W("federation.ts");
 const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "bin", "romp-kernel"), "utf8");
 
 test("the chat chip knows awaitingBg: its own await-green chip, label 'Awaiting', with the elapsed timer", () => {
-  assert.match(RENDER, /"awaiting" \| "awaitingBg" \|/);           // the ChipState union carries both meanings
-  assert.match(RENDER, /awaitingBg: "Awaiting",/);                 // CHIP_LABEL
-  // its own statusline branch: await-green chip + the wait's clock — but NO pulse (nothing computing here)
-  assert.match(RENDER, /\} else if \(s\.status\.state === "awaitingBg"\) \{[\s\S]*?chip chip-awaitingBg[\s\S]*?timer\.id = "work-timer";/);
+  assert.match(W("status-chip.ts"), /"awaiting" \| "awaitingBg" \|/);   // the ChipState union carries both meanings (status-chip.ts since T322b, beside its labels)
+  assert.match(W("status-chip.ts"), /awaitingBg: "Awaiting",/);   // CHIP_LABEL (status-chip.ts since T322b: the bar and the tag overview's rows import one map)
+  assert.match(RENDER, /import \{ CHIP_LABEL, chipWords, statusChip, type ChipState \} from "\.\/status-chip";/);
+  // its own statusline branch: the shared await-green chip (`chip chip-` + the state) + the wait's clock — but NO pulse (nothing computing here)
+  assert.match(RENDER, /\} else if \(s\.status\.state === "awaitingBg"\) \{[\s\S]*?statusChip\(chipWords\(s\.status\), "button"\)[\s\S]*?timer\.id = "work-timer";/);
+  assert.match(W("status-chip.ts"), /chip\.className = "chip chip-" \+ w\.state;/);
   assert.doesNotMatch(RENDER.split('state === "awaitingBg") {')[1].split("} else if")[0], /chip-pulse/);
   // the ticking clock covers it, same as working
   assert.match(RENDER, /if \(s\.status\.state === "working" \|\| s\.status\.state === "awaitingBg"\) \{\s*\n\s*const timer = document\.getElementById\("work-timer"\);/);
