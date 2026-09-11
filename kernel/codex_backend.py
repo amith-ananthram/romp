@@ -102,6 +102,7 @@ SEED_TAIL = 200   # records whose uuids seed the normalizer's dedup on re-attach
 CLIENT_RETRY_MIN = 0.25
 CLIENT_RETRY_MAX = 5.0
 WORKER_JOIN_TIMEOUT = 2.0
+HANDSHAKE_TIMEOUT_S = 30.0   # a new app-server answers its start-up requests within this, or the child is ended
 
 _PERMANENT_RPC_ERRORS = {"ParseError", "InvalidRequestError", "MethodNotFoundError",
                          "InvalidParamsError"}
@@ -140,6 +141,14 @@ class _PermanentRequestRejection(RuntimeError):
         self.operation = operation
         self.change_generation = change_generation
         self.client_generation = client_generation
+
+
+class _HandshakeTimeout(RuntimeError):
+    """The handshake clock ran out and the child was ended (_handshake). Its own class because its retry floor
+    differs: re-probing a child that never answers costs the whole clock again, under _client_lock, so the
+    record does not retry it before HANDSHAKE_TIMEOUT_S. The ordinary backoff (cap CLIENT_RETRY_MAX = 5s) would
+    have re-run the probe almost continuously while the fault lasted, holding the creation door and the
+    models list for the clock out of every clock-plus-cap."""
 
 
 def _execution_permissions(cwd, thread_start=False):
@@ -567,16 +576,19 @@ class CodexBackend:
             try:
                 if self._client_factory:
                     candidate = self._client_factory()
+                    self._handshake(candidate, lambda: None)
                 else:
                     if not ensure_codex_sdk(self.state):
                         raise RuntimeError(SETUP_HINT)
                     from openai_codex.client import CodexClient, CodexConfig
                     cfg = _codex_config(CodexConfig, self.codex_bin, self.state)
                     candidate = CodexClient(config=cfg, approval_handler=self._handle_approval)
-                    candidate.start()
-                    candidate.initialize()
+
+                    def bring_up():
+                        candidate.start()
+                        candidate.initialize()
+                    self._handshake(candidate, bring_up)
                     self.log("app-server runtime: %s" % (self.codex_bin or "ROMP-managed %s" % getattr(_runtime, "VERSION", "")))
-                self._check_auth(candidate)
                 self._client = candidate
                 self._client_err = None
                 self._client_retry_at = 0.0
@@ -593,12 +605,70 @@ class CodexBackend:
                 self._record_client_failure_locked(e, candidate)
                 return None
 
+    def _handshake(self, candidate, bring_up):
+        """Run a new client's start-up requests (`bring_up`: start + initialize on a real client; nothing for
+        an injected one) and the login check under ONE clock, ending the child when it runs out.
+
+        The pinned SDK's request wait has no timeout: the one event that unblocks it is the reader thread
+        failing every waiter, which happens when the child's stdout ends. So a codex that starts, holds stdout
+        open and never writes its first frame (a start-up stalled on a hung ~/.codex or state mount, a stub
+        that sleeps) parked _get_client in that wait with _client_lock HELD, forever: every Codex creation,
+        resume, send and turn worker queued behind it, /models blocked under _catalog_lock, the tab whose
+        receive loop made the call read no more ops, and nothing was logged or recorded (2026-09-11). The
+        child offers no event of its own, so the clock stands in for one; its expiry is candidate.close(),
+        the SDK's own unblocking event (child terminated, reader sees EOF, the wait raises), and the failure
+        is recorded as the plain reason rather than the transport's text. The gate makes the two outcomes
+        exclusive: a clock that fires after the handshake settled must not close an installed client, and a
+        handshake that settled after the clock fired must not install a closed one (_check_auth swallows the
+        account_read error the close provokes, so the flag is read after it, not only on the raise path).
+        The expiry is its own class, _HandshakeTimeout, so _record_client_failure_locked floors the retry at
+        the clock: the next probe costs the whole clock again with the lock held, and the ordinary backoff (cap
+        5s) would have re-run it almost continuously while the fault lasted; inside the floor every caller gets
+        the recorded reason at once."""
+        gate = threading.Lock()
+        state = {"expired": False, "settled": False}
+
+        def expire():
+            with gate:
+                if state["settled"]:
+                    return
+                state["expired"] = True
+            try:
+                candidate.close()
+            except Exception:
+                pass
+
+        def settle():
+            timer.cancel()
+            with gate:
+                state["settled"] = True
+                return state["expired"]
+
+        timer = threading.Timer(HANDSHAKE_TIMEOUT_S, expire)
+        timer.daemon = True
+        timer.name = "codex-handshake-clock"
+        timer.start()
+        text = ("The Codex app-server (%s) did not answer within %.0fs of starting, so it was ended; "
+                "check the codex binary, then try again"
+                % (self.codex_bin or "managed runtime", HANDSHAKE_TIMEOUT_S))
+        try:
+            bring_up()
+            self._check_auth(candidate)
+        except Exception as e:
+            if settle():
+                raise _HandshakeTimeout(text) from e
+            raise
+        if settle():
+            raise _HandshakeTimeout(text)
+
     def _record_client_failure_locked(self, error, candidate=None):
         """Record one failed client generation. Caller owns _client_lock."""
         self._client_err = str(error) or error.__class__.__name__
         self._client_failures += 1
         delay = min(CLIENT_RETRY_MAX,
                     CLIENT_RETRY_MIN * (2 ** min(self._client_failures - 1, 8)))
+        if isinstance(error, _HandshakeTimeout):
+            delay = max(delay, HANDSHAKE_TIMEOUT_S)   # a re-probe costs the whole clock, lock held: not before then
         self._client_retry_at = time.monotonic() + delay
         if candidate is None:
             candidate = self._client
