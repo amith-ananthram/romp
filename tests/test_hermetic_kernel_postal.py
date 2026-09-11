@@ -9,15 +9,18 @@ FIXED port whenever nothing listens there. During a kernel restart the machine's
 lab bus took the port, the test's teardown killed the kernel and not the bus, and every session's mail then failed
 against the lab's token until someone found the process.
 
-The third leak of that day came by a shape no spawn scan can see: a test module that loads the kernel module
-IN-PROCESS (load_source of bin/romp-kernel, no subprocess at all) drove an attach whose bus call was refused, and the
-kernel's revive path ran `ensure` from inside the test process, with the test's environment and no trio. So the rule
+The later leaks of that day came by a shape no spawn scan can see: a test module that loads the kernel module
+IN-PROCESS (load_source of bin/romp-kernel, no subprocess at all) makes a bus call that is refused, and the kernel's
+revive path runs `ensure` from inside the test process, with the test's environment and no trio. Three sites, one
+afternoon: tests/test_federation_missing_served.py (a lab kernel started as a process, its environment built by hand),
+tests/test_kernel_tunnels.py (an in-process kernel, an attach whose bus call was refused) and tests/test_kernel.py's
+PostalPeerTunnels.test_notify_bus_peer_is_guarded (an in-process kernel, a peer notify forced to fail). So the rule
 here scans every process spawn whose argv names the kernel (Popen, run, check_output, check_call, call; the argument
 span read across lines, whatever spells the path, a path held in a name included), and the in-process shape is met in
 the bus itself: `romp-postal-service serve` and `ensure` refuse the fixed port under a test (PYTEST_CURRENT_TEST set, or the
 state root under a temporary directory) unless ROMP_POSTAL_PORT names the port, pinned by tests/test_postal_fixed_port_belt.py.
-A module that loads the kernel in-process and exercises the bus should still carry the trio before its load (the tunnel
-tests do), so its kernel never even asks.
+A module that loads the kernel in-process and exercises the bus still carries the trio, before its load (the tunnel
+tests) or around the call that provokes the revive (the peer-notify test), so its kernel never even asks.
 
 The fixture rule below is static, so it holds for tests that skip here (no browser, no extension deps) and fails at
 the spawn site, naming the file.
@@ -104,6 +107,14 @@ class HermeticKernelPostal(unittest.TestCase):
         load = src.index('load_source("romp_kernel"')
         for k in TRIO:
             self.assertIn(k, src[:load], "%s is set before the kernel module loads (it reads the port at import)" % k)
+
+    def test_the_peer_notify_guard_test_carries_the_trio_around_the_call_it_forces_to_fail(self):
+        src = open(os.path.join(HERE, "test_kernel.py"), encoding="utf-8", errors="replace").read()
+        body = src[src.index("def test_notify_bus_peer_is_guarded"):src.index("class CheckinMechanics")]
+        self.assertIn('os.environ.update(ROMP_POSTAL_CLIENT_ONLY="1", ROMP_POSTAL_PEERS="0", ROMP_POSTAL_PORT="1")', body,
+                      "client-only with peers off and a port nothing can bind, for the call the refusal revives the bus from")
+        self.assertLess(body.index("os.environ.update("), body.index("km._notify_bus_peer("), "…set before the call")
+        self.assertIn("os.environ.pop(k, None)", body, "…and restored after it")
 
 
 if __name__ == "__main__":
