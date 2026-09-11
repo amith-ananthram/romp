@@ -152,6 +152,10 @@ class DeathSweepTick(unittest.TestCase):
         self._saved_codex = km._codex
         km._prev_live_sids[0] = None
         jd.NAMES.mkdir(parents=True, exist_ok=True)
+        # the SDK registry directory EXISTS and is readable: a names-only sid is dead history only when the
+        # registry that would hold its reg can be read (a missing sdk/ with names on record is blindness, and
+        # the sweep stands down instead: tests/test_sdk_registry_blind.py)
+        jd.SDKDIR.mkdir(parents=True, exist_ok=True)
 
     def tearDown(self):
         km._codex = self._saved_codex

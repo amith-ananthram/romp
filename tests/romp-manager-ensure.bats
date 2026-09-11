@@ -70,6 +70,34 @@ teardown() {
     [[ "$output" == *'"id":"main"'* ]]
 }
 
+@test "a terminal multiplexer's variables leaked into the manager's environment never reach its kernels" {
+    command -v node >/dev/null 2>&1 || skip "node not available"
+
+    # A manager started by hand from inside a terminal multiplexer pane inherits that pane's TMUX and
+    # TMUX_PANE. Kernels are spawned with a copy of the manager's environment (specEnv), and each
+    # session's CLI inherits its kernel's, so the leak would tell every CLI it sits in a pane of that
+    # multiplexer. launchd and systemd start the manager clean; this pins the manual path: the manager
+    # scrubs both from its own env before any kernel spawns. The fake launcher dumps the env it is
+    # handed, which is exactly what a kernel would see.
+    local envdump="$TEST_DIR/kernel-env"
+    printf '#!/usr/bin/env bash\nenv > "%s"\nexec sleep 30\n' "$envdump" > "$FAKE"
+    chmod +x "$FAKE"
+    env TMUX="/tmp/tmux-000/default,99999,7" TMUX_PANE="%7" \
+        ROMP_MANAGER_PORT=$CPORT ROMP_SERVE_PORT=$MPORT ROMP_SERVE_BIN="$FAKE" \
+        node "$MGR" up >/dev/null 2>&1 &
+    MGR_PID=$!
+    local i
+    for i in $(seq 1 50); do [ -s "$envdump" ] && break; sleep 0.1; done
+    curl -fsS -X POST "http://127.0.0.1:$CPORT/stop" >/dev/null 2>&1 || true
+    [ -s "$envdump" ]
+    # `run` + status, NOT a bare `! grep`: `!` is exempt from set -e, so mid-test it asserts nothing.
+    run grep -q '^TMUX=' "$envdump"
+    [ "$status" -ne 0 ]
+    run grep -q '^TMUX_PANE=' "$envdump"
+    [ "$status" -ne 0 ]
+    grep -q '^ROMP_SERVE_BIN=' "$envdump"   # the dump is real: other env DID flow through
+}
+
 @test "quiet-mode refresh defers while turns are in flight, coalesces, applies on the quiet event" {
     command -v node >/dev/null 2>&1 || skip "node not available"
     command -v python3 >/dev/null 2>&1 || skip "python3 not available"

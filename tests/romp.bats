@@ -107,6 +107,7 @@ for a in "$@"; do [[ "$a" == http* ]] && url="$a"; done
 if [[ -n "${MOCK_CURL_FAIL_SEND:-}" && "$url" == */send ]]; then exit 22; fi
 if [[ -n "${MOCK_CURL_FAIL_NEW:-}" && "$url" == */new ]]; then exit 7; fi
 if [[ -n "${MOCK_CURL_SEND_QUEUED:-}" && "$url" == */send ]]; then echo '{"ok": true, "queued": true}'; exit 0; fi
+if [[ -n "${MOCK_CURL_SEND_REFUSED:-}" && "$url" == */send ]]; then echo '{"ok": false, "error": "no running backend owns web — the message was not delivered"}'; exit 0; fi
 if [[ -n "${MOCK_CURL_WATCH_PR_REFUSE:-}" && "$url" == */watch-pr ]]; then
   echo '{"ok": false, "retryable": true, "error": "the watch could not be saved ([Errno 28] No space left on device) - nothing is watching TESTORG/testrepo#7; retry once the state directory takes writes again"}'
   exit 0
@@ -884,6 +885,20 @@ MOCK
     [[ "$output" != *"starts in no tags"* ]]
     [[ "$output" != *"--in applied"* ]]
     [[ "$output" != *"WARNING"* ]]
+}
+
+@test "send: a refusal the kernel answers as ok:false is printed in the kernel's words and exits non-zero" {
+    # the kernel answers ok:false with an error for a message no running backend takes (a dead or names-only
+    # session); `romp send` must never print ok for it (review find, 2026-09-11)
+    _stub_curl
+    touch "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
+    export MOCK_CURL_SEND_REFUSED=1
+    run run_romp send web "hello there"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"refused"* ]]
+    [[ "$output" == *"no running backend owns web"* ]]
+    [[ "$output" != *"ok (web)"* ]]
 }
 
 @test "new -m: a failed send is loud and names the retry (the session IS up)" {

@@ -1576,7 +1576,10 @@ print(json.dumps(d))' "$_who" "$_when")"
         echo "romp $_verb: ok ($_who)"
         exit 0
     fi
-    echo "romp $_verb: kernel refused: $_resp" >&2
+    # the kernel's own words for a refusal (a session no running backend owns, a dead one: the message was
+    # not delivered), never a quiet ok — the raw body only when it carries no `error` field
+    _r_err="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("error") or sys.argv[1])' "$_resp" 2>/dev/null || printf '%s' "$_resp")"
+    echo "romp $_verb: refused — $_r_err" >&2
     exit 1
 fi
 

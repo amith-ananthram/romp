@@ -10531,7 +10531,8 @@ def _dead_wait_corroborated(sid, stats=None):
               2026-09-11: nothing launched by either backend, or a terminal session from before
               the removal, which no backend can revive).
       False — the owner's record says ALIVE: the map blinked, not the session.
-      None  — cannot confirm: an unreadable SDK reg, an unreadable Codex registry
+      None  — cannot confirm: an unreadable SDK reg, an unreadable SDK registry DIRECTORY
+              (_sdk_records_blind), an unreadable Codex registry
               (_codex_records_blind), or a reg-less sid with no names-registry entry — a session
               launched by NEITHER backend (both write names/<sid> at creation), whose existence is
               transcript-derived and which no owner here can answer for. The caller stands down
@@ -10567,6 +10568,12 @@ def _dead_wait_corroborated(sid, stats=None):
     # existence is transcript-derived — so no owner here can answer for it.
     if not (jd.NAMES / sid).is_file():
         return None                              # transcript-derived: no owner here — stand down
+    if _sdk_records_blind():
+        if stats is not None:
+            stats["sdk"] = stats.get("sdk", 0) + 1
+        else:
+            sys.stderr.write("dead-wait: the SDK registry directory cannot be read for %s — standing down this cycle\n" % sid)
+        return None                              # its reg may sit behind the unreadable directory
     cx = _codex()
     if _codex_records_blind(cx):
         if stats is not None:
@@ -10686,6 +10693,9 @@ def _dead_wait_sweep(alive_ids, nudged, now):
     # The pass's loud stand-downs, collapsed to one line per reason (_death_sweep_tick's idiom):
     # per-candidate lines multiply by the candidate count under exactly the wedge they report
     # (a 20-session listing collapse would log every candidate every tick), drowning the signal.
+    if stats.get("sdk"):
+        sys.stderr.write("dead-wait: the SDK registry directory cannot be read; %d candidate(s) stood down this pass\n"
+                         % stats["sdk"])
     if stats.get("codex"):
         sys.stderr.write("dead-wait: the Codex registry cannot be read; %d candidate(s) stood down this pass\n"
                          % stats["codex"])
@@ -15836,7 +15846,9 @@ def _drive(msg, client):
         if _route_meta_command(be, sid, str(msg["text"]), client):
             _push_soon()
         else:
-            _send_or_park(be, sid, str(msg["text"]), echo="human", qid=_client_qid(msg, sid, be)); _push_soon()  # idle → instant echo; SDK busy → queued bubble forwarded mid-turn + folded (but a SLASH COMMAND parks to fire alone at turn end — mid-turn it would land as text, not execute); a backend that cannot forward, busy → held + merged at turn end
+            if _send_or_park(be, sid, str(msg["text"]), echo="human", qid=_client_qid(msg, sid, be)) is None:
+                client["send"](json.dumps({"type": "warn", "text": "the message was not delivered: no running backend owns this session"}))
+            _push_soon()  # idle → instant echo; SDK busy → queued bubble forwarded mid-turn + folded (but a SLASH COMMAND parks to fire alone at turn end — mid-turn it would land as text, not execute); a backend that cannot forward, busy → held + merged at turn end
     elif t == "rewindSend" and msg.get("uuid") and msg.get("text"):
         # Edit a past message (SDK sessions): rewind the conversation to just before it and send the
         # edited text as the branch's next turn. NO optimistic kernel echo — the edit lands mid-chat
@@ -15900,7 +15912,8 @@ def _drive(msg, client):
                 if iid else text)
         # Mid-compaction the whole send is PARKED (queued bubble; delivered when compaction ends — _send_or_park);
         # the backend echoes the send for itself.
-        _send_or_park(be, sid, body, qid=_client_qid(msg, sid, be))
+        if _send_or_park(be, sid, body, qid=_client_qid(msg, sid, be)) is None:
+            client["send"](json.dumps({"type": "warn", "text": "the follow-up was not delivered: no running backend owns this session"}))
         if iid:                                           # optimistic: reopen the card NOW, before the judge pass
             _predict_working("followup", ids=[iid])       # instant cue to every feed view (chat-typed citation
             #                                               follow-ups included) — the reopen below is what the
@@ -16689,10 +16702,50 @@ _LIVE_READ_FAILS = {"count": 0, "last": {}}   # the liveness stand-down's tally:
 _LIVE_LAST_ROWS = {}                           # backend name -> the rows its last SUCCESSFUL read produced
 
 
+def _sdk_records_blind():
+    """True when the SDK backend's registry directory cannot be read right now while something says SDK
+    sessions exist. sdk_backend.list_regs answers [] for a MISSING sdk/ directory by design (a fresh state
+    root before the first write) and serves its cache on a listing fault, so a registry renamed aside,
+    unmounted, or a state root moved under a running kernel reads to the kernel as "no session", the
+    exact collapse decisions (b) and (d) of the tmux backend's removal promise to stand down on. The
+    kernel therefore checks the directory ITSELF (never the SDK module, which stays untouched): blind when
+    sdk/ is missing, not a directory, or cannot be listed, AND either the last successful SDK read had
+    rows (_LIVE_LAST_ROWS) or names/ holds an entry no Codex record explains. A fresh install with no
+    sdk/ and no such names is genuine emptiness, not blindness."""
+    d = jd.SDKDIR
+    try:
+        if d.is_dir():
+            os.listdir(d)
+            return False
+    except OSError:
+        pass                                         # unreadable: blind if anything below says sessions exist
+    if _LIVE_LAST_ROWS.get("sdk"):
+        return True
+    try:
+        names = [f.name for f in jd.NAMES.iterdir()]
+    except OSError:
+        return False
+    if not names:
+        return False
+    cx = _codex()
+    return any(cx is None or cx._session(sid) is None for sid in names)
+
+
+def _live_stand_down(name, why):
+    """Count and, once per episode, say a liveness stand-down for backend `name` (_backend_rows)."""
+    _LIVE_READ_FAILS["count"] += 1
+    if _LIVE_READ_FAILS["last"].get(name) != why:
+        _LIVE_READ_FAILS["last"][name] = why
+        sys.stderr.write("liveness: the %s backend's read failed (%s) — serving its previous rows; %d "
+                         "failure(s) since boot\n" % (name, why, _LIVE_READ_FAILS["count"]))
+    return _LIVE_LAST_ROWS.get(name) or {}
+
+
 def _backend_rows(name, be):
     """One backend's live_sessions() for Sessions.live(), with the stand-down (decision (b) of the tmux
     backend's removal, 2026-09-11). A read that returns {} is authoritative: no session of that backend is
-    running. A read that RAISES is not an empty world — the backend's registry is a local file, and an
+    running. A read that RAISES, or whose registry directory has gone unreadable under it
+    (_sdk_records_blind), is not an empty world — the backend's registry is a local file, and an
     unreadable one must neither blank every surface nor let the death sweep see every session depart at
     once — so the backend's LAST successful rows are served for this read, the failure is counted
     (_LIVE_READ_FAILS, on /version) and said once per episode on stderr. The other backend's rows stay
@@ -16700,13 +16753,11 @@ def _backend_rows(name, be):
     try:
         rows = be.live_sessions()
     except Exception:
-        _LIVE_READ_FAILS["count"] += 1
-        why = (traceback.format_exc().strip().splitlines() or ["?"])[-1]
-        if _LIVE_READ_FAILS["last"].get(name) != why:
-            _LIVE_READ_FAILS["last"][name] = why
-            sys.stderr.write("liveness: the %s backend's read failed (%s) — serving its previous rows; %d "
-                             "failure(s) since boot\n" % (name, why, _LIVE_READ_FAILS["count"]))
-        return _LIVE_LAST_ROWS.get(name) or {}
+        return _live_stand_down(name, (traceback.format_exc().strip().splitlines() or ["?"])[-1])
+    if name == "sdk" and not rows and _sdk_records_blind():
+        # the SDK module answers {} for a missing or unlistable registry directory (its own contract for a
+        # fresh root); with sessions on record that is a read that FAILED, not a world with no session
+        return _live_stand_down(name, "the registry directory %s is missing or cannot be read" % jd.SDKDIR)
     _LIVE_LAST_ROWS[name] = rows
     _LIVE_READ_FAILS["last"].pop(name, None)
     return rows
@@ -22485,11 +22536,15 @@ def _death_sweep_tick(now, live_map):
         return
     cx = _codex()
     blind = _codex_records_blind(cx)
-    stood = 0
+    sdk_blind = _sdk_records_blind()
+    stood = stood_sdk = 0
     for sid in prev - cur:
         if (jd.SDKDIR / (sid + ".json")).exists():
             continue                                 # an SDK death is the kill gesture's to stamp
         if not _death_stamp_due(sid):
+            continue
+        if sdk_blind:
+            stood_sdk += 1                           # its reg may sit behind the unreadable directory: stand down
             continue
         if blind:
             stood += 1                               # a Codex sid and dead history look alike until the registry reads
@@ -22497,6 +22552,8 @@ def _death_sweep_tick(now, live_map):
         if cx is not None and cx._session(sid) is not None and cx.owns(sid):
             continue                                 # the Codex registry says alive — our snapshot blinked, not the session
         _record_death(sid, now, "gone")
+    if stood_sdk:
+        sys.stderr.write("death-sweep: the SDK registry directory cannot be read — %d departed sid(s) not stamped this tick\n" % stood_sdk)
     if stood:
         sys.stderr.write("death-sweep: the Codex registry cannot be read — %d departed sid(s) not stamped this tick\n" % stood)
 
@@ -22508,14 +22565,19 @@ def _death_boot_pass(now=None):
     (an unreadable reg stands down); a Codex sid on its registry's dead mark; a names entry with NO
     registry row anywhere is dead history and stamps (decision (f) of the tmux backend's removal,
     2026-09-11: a terminal session from before the removal is exactly this, and no backend can revive
-    it). While the Codex registry cannot be read (_codex_records_blind) every reg-less sid is skipped,
-    loudly: a Codex session the kernel merely cannot see must not be stamped over."""
+    it). While the Codex registry cannot be read (_codex_records_blind), or the SDK registry directory
+    cannot (_sdk_records_blind: a reg-less sid may be an SDK session whose reg sits behind the unreadable
+    directory), every reg-less sid is skipped, loudly: a session the kernel merely cannot see must not be
+    stamped over."""
     now = int(now or time.time())
     if not jd.NAMES.is_dir():
         return
     cx = _codex()
     blind = _codex_records_blind(cx)
-    if blind:
+    if _sdk_records_blind():
+        sys.stderr.write("death-boot: the SDK registry directory cannot be read — reg-less sids skipped this boot\n")
+        blind = True
+    elif blind:
         sys.stderr.write("death-boot: the Codex registry cannot be read — reg-less sids skipped this boot\n")
     n = 0
     for f in sorted(jd.NAMES.iterdir()):
@@ -29610,6 +29672,9 @@ def _send_or_park(be, sid, text, echo=None, qid=None):
     indexes the first three slots are unchanged. Without it the copy was identified where it entered the
     backend's queue, so a send parked during compaction, a usage-limit hold or behind a queue carried no id
     until the drain and the chat read it by text."""
+    if be is _UNOWNED:
+        be.send(sid, text)                               # says why on stderr; nothing is parked for a session nobody runs
+        return None                                      # (a dead session's open turn would otherwise park it forever)
     cmd = _is_slash_command(text)
     op = ("command", text, echo) if cmd else ("send", text, echo)
     if qid:
@@ -52031,7 +52096,14 @@ class Handler(BaseHTTPRequestHandler):
                 if _route_meta_command(be, sid, body["text"], state=meta):
                     queued = bool(meta.get("queued"))              # a parked /model, /effort or /fast says so too
                 else:
-                    queued = bool(_send_or_park(be, sid, body["text"]))
+                    res = _send_or_park(be, sid, body["text"])
+                    if res is None:
+                        # the backend REFUSED the handover (a session no backend owns, a dead one): said, never
+                        # answered ok — `romp send` prints this and exits non-zero (review find, 2026-09-11)
+                        return self._send(200, json.dumps({"ok": False, "error":
+                            "no running backend owns %s — the message was not delivered" % (body.get("name") or sid)}),
+                                          "application/json")
+                    queued = bool(res)
                 # `queued` says which arm it took (the /compact route's shape): a sender that IS the
                 # target's open turn — an agent running `romp send <self> /clear` from its own Bash tool —
                 # read 'ok' otherwise and could not know the command waits for that turn to end (2026-09-03).

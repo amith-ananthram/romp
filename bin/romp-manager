@@ -56,6 +56,14 @@ function clearDownMarker(file = DOWN_MARKER) {
   try { fs.unlinkSync(file); return true; } catch (e) { return false; }   // absent = nothing to clear
 }
 
+// Environment scrub: a manager started by hand from inside a terminal multiplexer pane inherits that
+// pane's variables (TMUX, TMUX_PANE). Every kernel is spawned with a copy of this process's
+// environment (specEnv), and each session's CLI inherits its kernel's, so the leak would tell every
+// CLI it sits in a pane of that multiplexer. launchd and systemd start the manager clean; this makes
+// the manual path as clean, at the source. Mirrors kernel/judge.py's scrub for judge subprocesses.
+delete process.env.TMUX;
+delete process.env.TMUX_PANE;
+
 // log(msg, cb): cb runs once the line is written. A caller about to process.exit() passes its exit as
 // the callback, or the line can be lost: stderr on a pipe is asynchronous on macOS (the far-host
 // update script reads ensure's output through one), and exit() does not wait for pending writes.

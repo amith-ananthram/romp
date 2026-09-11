@@ -255,11 +255,11 @@ class SessionBackend(ABC):
     def mcp_status(self, sid: str):
         """(servers, error) — the live MCP server list for this session (the SDK's get_mcp_status).
         SDK-only: the default says so rather than pretending an empty list is the truth."""
-        return [], "MCP status is available on SDK sessions; this one runs in a terminal — use /mcp there"
+        return [], "MCP status is available on Claude Code sessions; no running backend owns this one"
 
     def mcp_action(self, sid: str, name: str, action: str, enabled: bool = True) -> str:
         """"" on success, else why not. Enable/disable or reconnect one MCP server (SDK control requests)."""
-        return "MCP controls are available on SDK sessions; this one runs in a terminal — use /mcp there"
+        return "MCP controls are available on Claude Code sessions; no running backend owns this one"
 
     def rewind_files(self, sid: str, uuid: str) -> bool:
         """Restore workspace files to their state before a user message (the SDK's rewind_files,
