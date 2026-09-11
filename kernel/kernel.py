@@ -1041,16 +1041,19 @@ _SHA = None                                  # lazily-resolved git short-sha of 
 
 _SHA_MISS_T = [0.0]         # when git last failed to answer _kernel_sha
 _SHA_REASK_S = 30           # and how long that failure stands before git is asked again (the round-two review's low)
+_CONVERGE_CRASH_T = [0.0]   # when the automatic converge's leg last crashed: one cool-down is held before the retry
 
 
-def _kernel_sha():
+def _kernel_sha(reask=False):
     """git short-sha of HEAD, plus '-dirty' if the working tree has uncommitted edits — the kernel
     loads bin/*.py straight from the worktree, so a dirty tree means it's running code that isn't at
     any commit. Resolved once (a restart re-reads it). None outside a git checkout."""
     global _SHA
     if _SHA is None:
-        if time.time() - _SHA_MISS_T[0] < _SHA_REASK_S:
+        if not reask and time.time() - _SHA_MISS_T[0] < _SHA_REASK_S:
             return None             # asked and unanswered within the bound: /version and /sw.js call this per request
+            #                         (`reask`: the converge leg asks once more, so one blip at the top of a pass does
+            #                         not turn an in-place converge into a restart; the round-three review's low b)
         try:
             r = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
                                capture_output=True, text=True, timeout=2)
@@ -7849,6 +7852,15 @@ def _main_drift_check():
         # answer comes from the drain's own predicate (SdkBackend.would_cut), and only a KNOWN empty list waives a
         # wait: unknown (no backend yet) keeps both, as before. Every held pass says so, each time.
         try:
+            since_crash = time.time() - _CONVERGE_CRASH_T[0]
+            if _CONVERGE_CRASH_T[0] and since_crash < _CONVERGE_COOLDOWN_S:
+                # the leg crashed within this cool-down: one full cool-down is held before the retry, whatever a
+                # restart would cut (the round-three review's low a: the spares branch below waived the cool-down the
+                # crash had just stamped, so a crashing leg retried every 300 s pass on a hosted box)
+                _converge_say("main is at %s: the converge leg crashed %d s ago; holding %d s more of one cool-down "
+                              "before the retry" % (target, int(since_crash), int(_CONVERGE_COOLDOWN_S - since_crash)))
+                _MAIN_DRIFT[slot] = ""
+                return
             cut = _deploy_would_cut()
             spares = cut is not None and not cut
             if not _sha_same(running, checkout) and _parked_quiet_deploy(checkout):
@@ -7889,6 +7901,7 @@ def _main_drift_check():
             # pass returned at the latch and that commit never converged, in silence) leaves no target latched:
             # the next pass judges afresh, and the crash itself reaches the check thread's log as before
             _MAIN_DRIFT[slot] = ""
+            _CONVERGE_CRASH_T[0] = time.time()
             raise
     else:
         if target in _dismissed_updates():
@@ -7998,7 +8011,7 @@ def _run_main_update(kind, immediate=True, manager_port=_PORT_FROM_ENV, target="
         pulled = _checkout_sha()   # ONE read: verdict input and converge target must be the same
         #                            sha — two reads raced a moving checkout and latched a target
         #                            the verdict never examined (T216 review)
-        if not _kernel_code_changed(_kernel_sha(), pulled) and _in_place_converge(pulled):
+        if not _kernel_code_changed(_kernel_sha(reask=True), pulled) and _in_place_converge(pulled):
             return
     # Pay the bundle rebuild BEFORE the old kernel dies (T216): the checkout is already at the
     # target here, so this builds the NEW code's bundles while the old kernel still serves — the
