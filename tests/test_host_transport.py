@@ -127,8 +127,10 @@ class LeaseClassification(unittest.TestCase):
 class FakeHost:
     """An asyncio Unix server speaking the host's frames from a scripted journal."""
 
-    def __init__(self, path, records, busy=False, exit_after=None):
+    def __init__(self, path, records, busy=False, exit_after=None, answer_init=None):
         self.path, self.records, self.busy, self.exit_after = path, records, busy, exit_after
+        self.answer_init = answer_init      # None: every control request answered; else answer_init(attach_no) -> bool
+        self.attaches = 0
         self.got = []
         self.server = None
 
@@ -147,6 +149,8 @@ class FakeHost:
                     if f["t"] == "attach":
                         if self.busy:
                             writer.write(sh.encode_frame({"t": "busy", "kernel": {"pid": 7}})); await writer.drain(); continue
+                        self.attaches += 1
+                        answering = self.answer_init is None or self.answer_init(self.attaches)
                         writer.write(sh.encode_frame({"t": "hello", "protocol": 1, "host": {"pid": 10, "start": "h", "version": "v"},
                                                       "cli": {"pid": 11, "start": "c", "fsid": SID}, "journal": {"next": len(self.records)}, "parked": []}))
                         for off, rec in enumerate(self.records):
@@ -156,9 +160,11 @@ class FakeHost:
                         if self.exit_after is not None:
                             writer.write(sh.encode_frame({"t": "exit", "code": self.exit_after, "cause": "died"}))
                         await writer.drain()
+                    elif f["t"] == "end":
+                        writer.write(sh.encode_frame({"t": "exit", "code": 0, "cause": "end"})); await writer.drain()
                     elif f["t"] == "in":
                         obj = json.loads(f["data"])
-                        if obj.get("type") == "control_request":
+                        if obj.get("type") == "control_request" and answering:
                             writer.write(sh.encode_frame({"t": "out", "offset": len(self.records), "data": {
                                 "type": "control_response", "response": {"subtype": "success", "request_id": obj["request_id"], "response": {}}}}))
                             await writer.drain()
@@ -546,7 +552,8 @@ class Pins(unittest.TestCase):
         self.assertIn('== "attach":', src, "boot attach-first")
         self.assertIn('append_session_event(self.state_dir, "host.attached"', src)
         self.assertIn("m.timeout = _ht().sh.HOOK_TIMEOUT_S", src, "hooks carry the bound under a host")
-        self.assertIn("self._host_stand_down(e)\n                    continue", src, "past the attach bound the session stands down, never the crash heal")
+        self.assertIn("self._host_stand_down(e)\n                    break", src, "past the attach bound the session stands down and LEAVES the loop, never the crash heal")
+        self.assertIn("s = self._ensure(sid, user_send=True)", src, "a send is the word that lifts a stand-down")
 
     def test_a_backend_with_hosts_off_touches_no_host_code_at_construction(self):
         d = tempfile.mkdtemp(); be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None)
@@ -679,6 +686,122 @@ class EndToEnd(unittest.TestCase):
     def _events(self):
         p = Path(self.d) / sb.SESSION_EVENTS_FILE
         return [json.loads(l) for l in p.read_text().splitlines()] if p.exists() else []
+
+
+@unittest.skipUnless(SDK, "the SDK is not importable here")
+class AttachStandDown(unittest.TestCase):
+    """The real connect loop against a fake host whose initialize never answers (the commit-10 review): exactly
+    four attaches, one host.attach-failed row, one waiting row, then NO further attach from the timer sweep, a
+    boot or a plain connect until a send arrives; and the retry counter counts CONSECUTIVE incomplete attaches
+    only (a completed connect resets it). The SDK's initialize timeout is forced to one second through the Query
+    seam; the host lease names this test process as both CLI and host and is beaten by a thread."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(self._sweep)
+        Path(self.d, "session-hosts").write_text("on")
+        for sub in ("sdk", "states", "names", "hosts"):
+            os.makedirs(os.path.join(self.d, sub), exist_ok=True)
+        self.sid = str(__import__("uuid").uuid4())
+        cwd = os.path.join(self.d, "proj"); os.makedirs(cwd)
+        sb.write_reg(Path(self.d), self.sid, {"sid": self.sid, "name": "web", "cwd": cwd, "alive": True, "mode": "bypassPermissions",
+                                              "effort": "high", "lastSid": self.sid})
+        me, start = os.getpid(), sb.proc_start(os.getpid())
+        self.holder = "%s:%s" % (me, start)
+        self._beating = True
+        def beat():
+            while self._beating:      # loop-ok: the lease heartbeat, ended by the test's cleanup
+                sb.write_lease(self.d, {"sid": self.sid, "fsid": self.sid, "pid": me, "start": start,
+                                        "holder": {"pid": me, "start": start, "kind": "host"}, "version": "t315", "t": time.time()})
+                time.sleep(1.0)
+        import threading
+        self.beater = threading.Thread(target=beat, daemon=True); self.beater.start()
+        self.logs = []
+        self.be = sb.SdkBackend(self.d, "/bin/true", lambda *a, **k: None, log=self.logs.append, code_version="t315")
+        import claude_agent_sdk._internal.query as q
+        orig = q.Query.__init__
+        def fast_init(self_, *a, **kw):
+            kw["initialize_timeout"] = 1.0
+            return orig(self_, *a, **kw)
+        patcher = mock.patch.object(q.Query, "__init__", fast_init); patcher.start(); self.addCleanup(patcher.stop)
+        self.loop = asyncio.new_event_loop()
+        self.host = None
+
+    def _serve(self, **kw):
+        sock = str(ht.host_sock(self.d, self.sid))
+        self.host = FakeHost(sock, [], **kw)
+        import threading
+        started = threading.Event()
+        def run_loop():
+            asyncio.set_event_loop(self.loop)
+            self.loop.run_until_complete(self.host.start()); started.set()
+            self.loop.run_forever()
+        threading.Thread(target=run_loop, daemon=True).start()
+        started.wait(5)
+
+    def _sweep(self):
+        self._beating = False
+        try:
+            self.be.drain(timeout=3)
+        except Exception:
+            pass
+        if self.host:
+            self.loop.call_soon_threadsafe(self.host.close)
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        sb.remove_lease(self.d, self.sid)
+
+    def _wait(self, pred, timeout=30, what=""):
+        deadline = time.time() + timeout
+        while time.time() < deadline:   # loop-ok: a bounded wait on an observable event
+            if pred():
+                return True
+            time.sleep(0.1)
+        self.fail("timed out waiting for %s\nlog tail: %s" % (what, "\n".join(self.logs[-15:])))
+
+    def _kinds(self):
+        p = Path(self.d) / sb.SESSION_EVENTS_FILE
+        return [json.loads(l)["kind"] for l in p.read_text().splitlines()] if p.exists() else []
+
+    def _states(self):
+        p = Path(self.d) / "states" / (self.sid + ".jsonl")
+        return [json.loads(l).get("state") for l in p.read_text().splitlines() if l.strip()] if p.exists() else []
+
+    def test_four_unanswered_attaches_stand_the_session_down_once_until_a_send(self):
+        self._serve(answer_init=lambda n: False)
+        self.assertTrue(self.be.send(self.sid, "hello"))
+        self._wait(lambda: "host.attach-failed" in self._kinds(), timeout=40, what="the stand-down row")
+        self._wait(lambda: not (self.be.sessions.get(self.sid) and self.be.sessions[self.sid].thread.is_alive()), what="the thread's exit")
+        time.sleep(3.0)                       # two more retry periods: nothing may attach again on its own
+        self.assertEqual(self.host.attaches, 4, "exactly four attaches, then the loop is left")
+        self.assertEqual(self._kinds().count("host.attach-failed"), 1)
+        self.assertEqual(self._states().count("waiting"), 1, "one waiting row from the stand-down; states: %r" % self._states())
+        self.assertNotIn("crash.heal", self._kinds()); self.assertNotIn("crash.loop", self._kinds())
+        reg = sb.read_reg(Path(self.d), self.sid) or {}
+        self.assertEqual((reg.get("hostAttachFailed") or {}).get("host"), self.holder, "the marker names the lease holder that would not answer")
+        self.assertNotIn(sb.CRASH_RESUME_NUDGE, reg.get("queue") or [], "no crash-resume nudge for a CLI that never died")
+        # the automatic doors stay shut while the marker names the current lease holder
+        self.assertIsNone(self.be._ensure(self.sid), "a plain ensure (the sweep, a heal) stands down")
+        self.assertFalse(self.be.connect(self.sid))
+        self.be._boot_reconcile([sb.read_reg(Path(self.d), self.sid)])
+        time.sleep(1.5)
+        self.assertEqual(self.host.attaches, 4, "no attach from the sweep, the connect or the boot")
+        # a send is new information: the marker clears and the attach is tried again
+        self.assertTrue(self.be.send(self.sid, "again"))
+        self._wait(lambda: self.host.attaches >= 5, what="the fifth attach, for the send")
+        self.assertNotIn("hostAttachFailed", sb.read_reg(Path(self.d), self.sid) or {})
+
+    def test_the_retry_counter_counts_consecutive_incomplete_attaches_only(self):
+        # attaches 1, 3, 5, 7 never complete; 2, 4, 6 do (and are reconnected on request): the fourth timeout in the
+        # session's life is the FIRST of a new run, a retry, never a stand-down
+        self._serve(answer_init=lambda n: n % 2 == 0)
+        self.assertTrue(self.be.connect(self.sid), "an eager connect, no turn: request_reconnect acts at once only on an idle session")
+        for target in (2, 4, 6):
+            self._wait(lambda t=target: self.host.attaches >= t and self.be.sessions.get(self.sid) is not None
+                       and self.be.sessions[self.sid].client is not None, what="a completed connect on attach %d" % target)
+            self.be.sessions[self.sid].request_reconnect()
+        self._wait(lambda: self.host.attaches >= 8, timeout=40, what="the eighth attach: the seventh's timeout was a retry")
+        self.assertNotIn("host.attach-failed", self._kinds(), "three recovered timeouts and one more never reach the bound")
+        self.assertNotIn("hostAttachFailed", sb.read_reg(Path(self.d), self.sid) or {})
 
 
 if __name__ == "__main__":

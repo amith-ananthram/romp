@@ -6288,6 +6288,8 @@ class SdkSession:
                         self._host_intent = False        # the setting is off: a kernel child after all
                 async with ClaudeSDKClient(options=opts, transport=transport) as client:
                     connected = True
+                    self._host_attach_retries = 0   # consecutive incomplete attaches, as the stand-down's docstring
+                    #   promises: a recovered timeout earlier in this object's life never counts toward a later bound
                     self.client = client
                     # The handshake IS the "this session is open" event (snapshot `connected`, the flip
                     # the kernel's opening chip stands down on) — push THIS session now. Left to the
@@ -6392,9 +6394,13 @@ class SdkSession:
                         self._reconnect = True
                         continue
                     # past the bound on a host that still lives: stand down, never the crash heal (whose resume
-                    # would put a second CLI beside the host's) and never a launch error for a CLI that is up
+                    # would put a second CLI beside the host's) and never a launch error for a CLI that is up.
+                    # `break`, not `continue`: a continue re-entered the loop's head and attached the same lease
+                    # again with the counter fresh, four more timeouts and another row every few minutes, forever
+                    # (the commit-10 review's second item); the thread ends here and nothing automatic restarts it
+                    # while the attach-failed marker names this host (see _ensure)
                     self._host_stand_down(e)
-                    continue
+                    break
                 if not connected:
                     # The CLI never came up. RECORD why, where the user can see it: this thread is about
                     # to die, and everything downstream of it (_on_session_gone settling 'waiting') is
@@ -6425,6 +6431,14 @@ class SdkSession:
         problem_row(st, "session %s: could not complete an attach to its live session host after %d tries (%s); the host keeps "
                     "the CLI; the next message tries again" % (self.name, self._host_attach_retries, type(exc).__name__),
                     "host.attach-failed", sid=self.sid, name=self.name, log=self.backend._log, tries=self._host_attach_retries)
+        try:
+            # the marker _ensure reads: no automatic revival (the timer sweep, a boot, a heal) attaches this host
+            # again; a user's send or a change of the lease's holder clears it (new information, not a timer).
+            # Keyed by the LEASE's holder identity, the same reading _ensure makes
+            self.backend._update_reg(self.sid, hostAttachFailed={"host": self.backend._holder_ident(read_lease(st, self.sid)),
+                                                                  "t": time.time(), "tries": self._host_attach_retries})
+        except Exception as e:
+            self.backend._log("host (%s): stand-down marker write failed: %s" % (self.name, e))
         self._host_attach_retries = 0
         self.inflight = 0
         self.detached = True
@@ -11369,10 +11383,14 @@ class SdkBackend:
         self._poke()
         return True
 
-    def _ensure(self, sid: str, on_boot_settled=None) -> SdkSession | None:
+    def _ensure(self, sid: str, on_boot_settled=None, user_send: bool = False) -> SdkSession | None:
         """Start (or return the already-running) SdkSession for `sid`. `on_boot_settled` (the boot
         stagger's slot release) is parked on a FRESH spawn and fired once its CLI proves up or dies;
-        the no-spawn paths fire it immediately — no CPU burst will ever happen, so no slot is held."""
+        the no-spawn paths fire it immediately — no CPU burst will ever happen, so no slot is held.
+        `user_send`: the caller is a user's message (T315): a session that stood down from a live host it
+        could not attach (the registry's hostAttachFailed marker names that host) is started again only for
+        a send or once the lease's holder has changed; the timer sweep, a boot and a heal leave it alone,
+        else a wedged host would be attached four times every few minutes for good."""
         def _settled_now():
             if on_boot_settled:
                 try:
@@ -11389,6 +11407,17 @@ class SdkBackend:
                 _settled_now()
                 return None
             reg["sid"] = sid
+            marker = reg.get("hostAttachFailed")
+            if isinstance(marker, dict):
+                cur = self._holder_ident(read_lease(self.state_dir, sid))
+                if user_send or cur != str(marker.get("host") or ""):
+                    self._update_reg_dropping(sid, drop=("hostAttachFailed",))   # _reg_lock, not self._lock
+                    reg.pop("hostAttachFailed", None)
+                else:
+                    self._log("host (%s): standing down from a host this kernel could not attach (marked %s); "
+                              "a message or a new lease holder starts it again" % (reg.get("name") or sid[:8], marker.get("host")))
+                    _settled_now()
+                    return None
             if reg.get("threadOf") and reg.get("spawnedAt") and self.thread_wake_model is not None:
                 # A DORMANT comment thread (spawnedAt: it has run before — a fresh fork's FIRST connect
                 # keeps the model the dialog explicitly chose) registered on a SUPERSEDED full model
@@ -11624,7 +11653,7 @@ class SdkBackend:
                         or (s._rewind_to and not getattr(s, "_rewind_armed", False)))
 
     def send(self, sid: str, text: str, qid: str | None = None) -> bool:
-        s = self._ensure(sid)
+        s = self._ensure(sid, user_send=True)
         if not s:
             return False
         if _is_compact_cmd(text):
