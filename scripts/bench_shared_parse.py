@@ -108,7 +108,7 @@ def draw(rows, out):
              ylabel="Resident size added by the judges' parse\nafter the display had parsed (MB), zero is the goal")
     ax.set_xlim(0, None); ax.set_ylim(0, top * 1.25); ax.set_yticks([0, round(top, 1) if top < 10 else round(top)])
     f.text(0.5, -0.04, "One measurement per point. A zero is the resident read's floor: a second tree that fits in pages\n"
-                       "the allocator already held adds nothing visible; the parse count in bench.json says whether one was built.",
+                       "the allocator already held adds nothing visible. The parse count in bench.json says whether one was built.",
            ha="center", va="top", fontsize=8, color="#555555", transform=f.transFigure)
     path = os.path.join(out, "trees_vs_size.png")
     f.savefig(path, dpi=150, bbox_inches="tight")
