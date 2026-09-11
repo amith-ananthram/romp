@@ -172,7 +172,7 @@ within a beat it reverts with a toast, never silently.
    stretch (`deltaSince`).
 7. Identity: identical prompts in different turns are different work
    (twins); same-second identical bursts plan once; any seg-id-derivation
-   change ships a placements migration (`placementsV`, currently v12);
+   change ships a placements migration (`placementsV`, currently v14);
    `tests/test_placements_canary.py` pins the derivation.
 8. The auto-nudge fires once per genuine stall, never re-arms off romp's
    own turns, is suppressed while interrupted, and its failure becomes a
