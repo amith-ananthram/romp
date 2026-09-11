@@ -132,6 +132,9 @@ test("the composer placeholder hints that / opens commands (the user 2026-06-30)
   // the resting placeholder now comes from composerRestingPlaceholder(); its DESKTOP form carries the
   // full hint row — send, newline, stage, and the bare "/ for commands" (the user 2026-08-15: "type"
   // was filler) — while mobile keeps just the core prompt (see the composer-send mobile test)
-  assert.match(RENDER, /composer\.placeholder = closed \? "Session closed — read-only" : composerRestingPlaceholder\(\);/);
+  // the live box's resting form is written by setComposerAskMode (one owner with the answering tint, 2026-09-10); a
+  // closed session's box says so instead
+  assert.match(RENDER, /if \(closed\) \{ composer\.placeholder = "Session closed — read-only"; composer\.classList\.remove\("answering"\); syncComposerPh\(\); \}/);
+  assert.match(RENDER, /function setComposerAskMode\(\) \{[\s\S]*?ta\.placeholder = composerRestingPlaceholder\(\);/);
   assert.match(RENDER, /"Message this session…  \(⏎ send · ⇧⏎ newline · ⌘⏎ stage · ↑ history · \/ for commands\)"/);
 });

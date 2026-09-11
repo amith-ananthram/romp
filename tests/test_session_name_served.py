@@ -107,6 +107,19 @@ out.bOn = await naming();
 await setBadge(false);
 await badgeIs(false, "the badge never went after the setting was switched off");
 out.bOff = await naming();
+// ---- the question flow (the user 2026-09-10): a box wearing the "answering" tint while its placeholder still reads the
+// resting form (a re-render used to leave it so) draws ONE text — the overlay, tinted; the native placeholder stays transparent ----
+const probe = (cls) => page.evaluate((cls) => {
+  const d = document.getElementById("f-chat").contentDocument; const ta = d.getElementById("composer-input"); const ph = d.getElementById("composer-ph");
+  ta.classList.toggle("answering", cls);
+  const tint = d.createElement("span"); tint.style.color = "color-mix(in srgb, var(--accent) 65%, var(--dim))"; d.body.appendChild(tint);
+  const dim = d.createElement("span"); dim.style.color = "var(--dim)"; d.body.appendChild(dim);
+  const r = { phShown: getComputedStyle(ph).display !== "none", native: getComputedStyle(ta, "::placeholder").color, overlay: getComputedStyle(ph).color,
+              tint: getComputedStyle(tint).color, dim: getComputedStyle(dim).color, resting: ta.placeholder.startsWith("Message ") };
+  tint.remove(); dim.remove(); return r;
+}, cls);
+out.answering = await probe(true);
+out.resting = await probe(false);
 out.ms = Date.now() - out.t0;
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
@@ -256,6 +269,17 @@ class ServedSessionName(unittest.TestCase):
         self.assertEqual(on["badgeFg"], "rgb(0, 0, 0)", "…with the name in black")
         self.assertIsNone(off["badgeText"], "the setting off again: the badge goes, no reload")
         self.assertEqual(off["phName"], "api", "…and the placeholder still names the session")
+
+    def test_3_an_answering_box_draws_one_placeholder_the_tinted_overlay_over_a_transparent_native_one(self):
+        # the user 2026-09-10: in the question flow the composer's placeholder appeared twice, a hair apart — the
+        # tinted native text showing through the name overlay. The "answering" tint rule sat at the overlay's
+        # transparent rule's specificity and came later in the sheet, so it won.
+        r = self._r(); a, b = r["answering"], r["resting"]
+        self.assertTrue(a["resting"] and a["phShown"], "the overlay shows: the placeholder still reads the resting form")
+        self.assertEqual(a["native"], "rgba(0, 0, 0, 0)", "the native placeholder is transparent beneath it, tint or no tint")
+        self.assertEqual(a["overlay"], a["tint"], "…and the overlay wears the answering tint in its place")
+        self.assertNotEqual(a["tint"], a["dim"], "the probe tells the two colours apart")
+        self.assertEqual(b["native"], "rgba(0, 0, 0, 0)"); self.assertEqual(b["overlay"], b["dim"], "resting again: dim, one text")
 
 
 if __name__ == "__main__":

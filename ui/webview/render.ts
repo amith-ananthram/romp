@@ -11563,7 +11563,7 @@ function showActive(keep?: { uuid: string; y: number } | null) {
       // with its own placeholder, and this branch never touched the composer, so the box takes input for the
       // picked session again; the first session frame's showActive sets its closed/live state
       const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
-      if (ta) { ta.disabled = false; ta.placeholder = composerRestingPlaceholder(); }
+      if (ta) { ta.disabled = false; setComposerAskMode(); }   // the resting form, or the picker's answer form with its tint: one owner (2026-09-10)
       const sendBtn = document.getElementById("composer-send") as HTMLButtonElement | null;
       if (sendBtn) sendBtn.disabled = false;
       // …and ask for it NOW. Every path that lands on a skeleton active comes through here — the click
@@ -11604,7 +11604,11 @@ function showActive(keep?: { uuid: string; y: number } | null) {
     const closed = s.status.state === "closed" && !failedProvisionals.has(activeId!);
     const viewer = !!s.sub;   // a SUBAGENT VIEWER is read-only by nature: there is no session behind it to message
     composer.disabled = closed || viewer;
-    composer.placeholder = closed ? "Session closed — read-only" : composerRestingPlaceholder();
+    // The placeholder and the "answering" tint have ONE owner (setComposerAskMode): this render used to write the
+    // resting form here and leave the tint, so the name overlay drew its named text over the tinted native text
+    // — two copies a hair apart, a blur (the user 2026-09-10). A closed session's box says so and answers nothing.
+    if (closed) { composer.placeholder = "Session closed — read-only"; composer.classList.remove("answering"); syncComposerPh(); }
+    else setComposerAskMode();
     const sendBtn = document.getElementById("composer-send") as HTMLButtonElement | null;
     if (sendBtn) sendBtn.disabled = closed || viewer;   // read-only session/viewer → the explicit send button is dead too
     // ONE read-only cue for the viewer: the statusline's dim line. The whole message box (input + send)

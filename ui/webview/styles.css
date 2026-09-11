@@ -1385,6 +1385,12 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
    also reads "add your own answer…"); the picker's controls stay visible above. */
 #composer-input.answering { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, var(--vscode-input-background, rgba(255, 255, 255, 0.05))); }
 #composer-input.answering::placeholder { color: color-mix(in srgb, var(--accent) 65%, var(--dim)); }
+/* The name overlay (#composer-ph, syncComposerPh) wears the answering tint, and the native placeholder stays
+   transparent beneath it whatever else the box wears: the transparent rule above and this tint sit at one
+   specificity, and the later one won, so an answering box whose placeholder a re-render had reset to the resting
+   form drew the text twice, a hair apart — a blur (the user 2026-09-10, in the question flow). */
+#composer-input.ph-on.answering::placeholder { color: transparent; }
+#composer-input.answering ~ #composer-ph { color: color-mix(in srgb, var(--accent) 65%, var(--dim)); }
 /* brief amber flash when Ctrl+C fires an interrupt — visible confirmation that the
    stop was sent (the restored prompt is the other half of the feedback) */
 #composer-input.interrupted-flash {
