@@ -79,8 +79,11 @@ test("the chip and the box gist take the kind word from ONE count (T225 rider)",
   assert.match(RENDER, /import \{ awaitWord, awaitBreakdown, groupRows, rowIds, waitsNote, GROUP_TITLE, workingFor, type AwaitRow \} from "\.\/spin-caption";/);   // + the nested-wait helpers (2026-09-10)
   assert.match(RENDER, /awaitingCount\?: number \| null;/, "the Status shape carries the kernel's count");
   assert.match(RENDER, /awaitingItems\?: AwaitRow\[\];/, "…and the rows (slice 2)");
-  assert.match(RENDER, /const chipWord = awaitWord\(s\.status\.awaitingKind, s\.status\.awaitingCount, chipItems\);/);
-  assert.match(RENDER, /chip\.textContent = CHIP_LABEL\.awaitingBg \+ \(chipWord \? " " \+ chipWord : ""\);/);
+  // the bar's chip is built by status-chip.ts since T322b: ONE awaitWord call words it for the bar and the tag overview's rows
+  assert.match(RENDER, /const chip = statusChip\(chipWords\(s\.status\), "button"\) as HTMLButtonElement;/);
+  const CHIP = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "status-chip.ts"), "utf8");
+  assert.match(CHIP, /const word = awaitWord\(st\.awaitingKind, st\.awaitingCount, items\);/);
+  assert.match(CHIP, /return \{ state, text: head \+ \(word \? " " \+ word : ""\), peer: null \};/);
   assert.match(RENDER, /const word = awaitWord\(s\.status\.awaitingKind, s\.status\.awaitingCount, items\);/);   // `s` is narrowed by the one renderer's gate since 2026-09-06 (no `s!`)
   assert.match(RENDER, /lab\.textContent = "Awaiting" \+ \(word \? " " \+ word : ""\) \+ " · " \+ why\.replace/);
   // the feed pill and the spin caption derive their word the same way

@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 const SRC = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
+const CHIP = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "status-chip.ts"), "utf8");
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
 
 test("the stop button acknowledges its click instantly: chip flips, button + timer vanish", () => {
@@ -28,8 +29,8 @@ test("the stop button acknowledges its click instantly: chip flips, button + tim
 });
 
 test("INTERRUPTING is a first-class chip state: labeled, styled, timerless, buttonless", () => {
-  assert.match(SRC, /"interrupting" \| "opening";/, "in the ChipState union (opening joined it 2026-08-05)");
-  assert.match(SRC, /interrupting: "Interrupting…",/);
+  assert.match(CHIP, /"interrupting" \| "opening";/, "in the ChipState union (opening joined it 2026-08-05; the union lives in status-chip.ts since T322b)");
+  assert.match(CHIP, /interrupting: "Interrupting…",/);   // CHIP_LABEL lives in status-chip.ts since T322b
   // the generic chip branch renders it; the stop button is drawn for working/compacting AND the stuck
   // retrying/blocked states — but NEVER for interrupting (the stop is already in flight)
   assert.match(SRC, /state === "working" \|\| s\.status\.state === "compacting"\s*\n\s*\|\| s\.status\.state === "retrying" \|\| s\.status\.state === "blocked"\) right\.appendChild\(stopButton\(s\.status\.state\)\)/);

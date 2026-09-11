@@ -4,8 +4,13 @@ of a hermetic kernel with four sessions under two tags. Asserted: with a session
 row's tag chip wears no underline; a click on the row shows the overview whose heading reads "Overview of", the tag's
 ordinary chip and the count; while it shows the message box (the whole footer) is gone, no tab renders as selected
 (the active tab's fill is transparent) and the row wears the selected tab's box (the tab's fill token, the identity
-ring); selecting a tab clears it and brings the footer and the tab's fill back. With SNAP_SHOTS=<dir> the driver writes
-screenshots (the grouped strip with one row expanded and a session active, dark and light; the overview shown, dark).
+ring); selecting a tab clears it and brings the footer and the tab's fill back. T322b: a row's state words are the SHARED
+status chip: the ui tag's session is idle awaiting three background agents (a tmux-backed session a fake tmux lists, its
+wait the states overlay row), and its overview row wears `chip chip-awaitingBg` reading "Awaiting 3 agents" in the same
+computed dress (fill, ink, weight,
+spacing, radius, padding, line height, rendered height, the 0.7em rule) the bar under the transcript wore for it a moment earlier; no pill of the row's
+own, the green pip beside it. With SNAP_SHOTS=<dir> the driver writes screenshots (the grouped strip with one row expanded
+and a session active, dark and light; the overview shown, dark; the overview with the awaiting row, dark).
 Skips LOUDLY without the extension deps or a Playwright browser. SYNTHETIC fixtures only (the notes-api demo world)."""
 import json
 import os
@@ -78,7 +83,15 @@ const measure = () => page.evaluate(() => {
   const activeFill = getComputedStyle(probe).backgroundColor; probe.remove();
   const footer = document.getElementById("footer"); const composer = document.getElementById("composer");
   const host = document.getElementById("tab-snapshot"); const head = host ? host.querySelector(".snap-head") : null;
-  return { body: document.body.className, rows, tabs, activeFill,
+  // a status chip's computed dress, and its parent's font size (the chip is 0.7em of whatever it sits in)
+  const dress = (c) => { const cs = getComputedStyle(c); const pcs = getComputedStyle(c.parentElement);
+    return { tag: c.tagName.toLowerCase(), cls: c.className, text: c.textContent.trim(), bg: cs.backgroundColor, color: cs.color, weight: cs.fontWeight,
+             spacing: cs.letterSpacing, radius: cs.borderRadius, padding: cs.padding, size: cs.fontSize, parentSize: pcs.fontSize,
+             lineHeight: cs.lineHeight, height: Math.round(c.getBoundingClientRect().height * 10) / 10 }; };
+  const barChip = document.querySelector("#statusline .chip");
+  const chips = host ? Array.from(host.querySelectorAll(".snap-row")).map((r) => { const c = r.querySelector(".chip"); const pip = r.querySelector(".snap-pip");
+    return { id: r.dataset.id, pip: pip ? pip.className : null, flag: !!r.querySelector(".snap-flag"), chip: c ? dress(c) : null }; }) : [];
+  return { body: document.body.className, rows, tabs, activeFill, bar: barChip ? dress(barChip) : null, chips,
            footer: footer ? getComputedStyle(footer).display : null, composer: composer ? getComputedStyle(composer).display : null,
            composerVisible: composer ? composer.getBoundingClientRect().height > 0 : null,
            snap: host ? { display: getComputedStyle(host).display, heading: head ? Array.from(head.children).map((c) => ({ cls: c.className, text: c.textContent.trim(), style: c.getAttribute("style") || (c.firstElementChild && c.firstElementChild.getAttribute("style")) || "" })) : null,
@@ -86,8 +99,15 @@ const measure = () => page.evaluate(() => {
            theme: document.body.classList.contains("theme-light") ? "light" : "dark" };
 });
 const out = {};
+// the awaiting session read first: the bar under the transcript wears its Awaiting chip (the dress the row's must match)
+await page.click('#tabs .tab[data-id="' + cfg.tests + '"]');
+await page.hover('#tabs .tab[data-id="' + cfg.docs + '"]');   // a tab pick rebuilds the strip under the pointer, and nothing hides the clicked tab's hover tip (render.ts renderTabs): hover-and-leave another tab dismisses it so the shots stay clean
+await page.mouse.move(700, 600);
+await page.waitForTimeout(700);
+out.barAwaiting = await measure();
 // a session inside the infra row is active (the strip's default pick is the first tab; make it explicit)
 await page.click('#tabs .tab[data-id="' + cfg.web + '"]');
+await page.hover('#tabs .tab[data-id="' + cfg.docs + '"]');
 await page.mouse.move(700, 600);   // off the strip: no tab tooltip in the shots
 await page.waitForTimeout(500);
 out.active = await measure();
@@ -103,6 +123,7 @@ await page.mouse.move(700, 600);
 await page.waitForTimeout(600);
 out.overview = await measure();
 if (cfg.shots) await page.screenshot({ path: cfg.shots + "/romp_chat-tab-overview-dark.png", fullPage: false });
+if (cfg.shots) await page.screenshot({ path: cfg.shots + "/romp_chat-tab-overview-awaiting-dark.png", clip: { x: 0, y: 0, width: 1100, height: 360 } });   // T322b: the awaiting row's chip
 // the cascade's two exceptions, probed in the mode: a hard-blocked active tab keeps its red fill (the class the tab
 // state paints, added here since a hermetic kernel has no blocked session), and under the Yatharth theme the active
 // tab wears that theme's resting wash with no selection border
@@ -171,20 +192,45 @@ class ServedTabOverviewMode(unittest.TestCase):
         for i, (name, sid) in enumerate(SIDS.items()):
             bg, fg = COLORS[name]
             Path(state, "names", sid).write_text("%s\t%s\t%s\t%s\n" % (name, cwd, bg, fg))
-            Path(state, "sdk", sid + ".json").write_text(json.dumps(
-                {"sid": sid, "name": name, "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": sid, "alive": True,
-                 "model": "claude-opus-5", "liveModel": "Opus 5"}))
+            if name != "tests":   # tests is the tmux-backed session below: the fake tmux lists it, the SDK backend never does
+                Path(state, "sdk", sid + ".json").write_text(json.dumps(
+                    {"sid": sid, "name": name, "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": sid, "alive": True,
+                     "model": "claude-opus-5", "liveModel": "Opus 5"}))
             recs = [{"type": "user", "timestamp": iso(t0 + i), "uuid": "u1", "parentUuid": None, "promptSource": "typed", "sessionId": sid,
                      "message": {"role": "user", "content": "what does the %s session do in notes-api?" % name}},
                     {"type": "assistant", "timestamp": iso(t0 + i + 5), "uuid": "a1", "parentUuid": "u1", "sessionId": sid,
                      "message": {"role": "assistant", "model": "claude-opus-5", "stop_reason": "end_turn",
                                  "content": [{"type": "text", "text": "It keeps the %s side of the notes-api tidy." % name}]}}]
             Path(proj, sid + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
+        # the tests session is idle awaiting background work it dispatched. Only a LIVE session can be awaiting (every
+        # source of _session_awaiting is live evidence, and the kernel's audit lifts a durable stamp no live source
+        # backs), and a lab has no running process, so tests is a tmux-backed session a FAKE tmux on the lab kernel's
+        # PATH lists (one idle romp pane, the lane format's fields; every other tmux command answers nothing), and its
+        # wait is the states overlay row the tmux Stop hook writes (source 1), carrying the kind and the count the chips
+        # word. (An SDK registration would not do: the SDK backend heals an awaiting:true row of a not-running session to
+        # false on its next look.) The state root and the fake live in the lab, so the real tmux server is never reached.
+        Path(state, "states", SIDS["tests"] + ".jsonl").write_text(json.dumps(
+            {"t": t0 + 20, "awaiting": True, "why": "waiting on 3 background agents", "kind": "agents", "count": 3}) + "\n")
+        fake_bin = os.path.join(cls.lab, "bin")
+        os.makedirs(fake_bin, exist_ok=True)
+        lane = "1|%s|waiting|%d|Opus 5|high|||%s|auto" % (SIDS["tests"], t0 + 10, COLORS["tests"][0])
+        Path(fake_bin, "tmux").write_text("#!/bin/sh\n"
+            "# the lab's tmux: one romp session (tests), idle; list-sessions answers the format it is asked for, all else is silent\n"
+            "fmt=''; while [ $# -gt 0 ]; do case \"$1\" in -F) fmt=\"$2\"; shift;; esac; shift; done\n"   # loop-ok: a finite argv walk
+            "case \"$fmt\" in\n"
+            "  '') exit 0;;\n"
+            "  *'#{@claude-state}'*) printf '%s\\n' '" + lane + "';;\n"
+            "  *'#{session_name}'*) printf '%s\\t%s\\n' '" + SIDS["tests"] + "' tests;;\n"
+            "  *'#{@romp-session-id}'*) printf '%s\\n' '" + SIDS["tests"] + "';;\n"
+            "esac\n")
+        os.chmod(os.path.join(fake_bin, "tmux"), 0o755)
+        cls.fake_path = fake_bin + os.pathsep + os.environ.get("PATH", "")
         # the tags: two, holding three of the four sessions; the fourth is the untagged trail
         Path(state, "timeline-views.json").write_text(json.dumps({"active": "all", "tags": TAGS}))
         Path(state, "usage.json").write_text(json.dumps({"five_hour": {"pct": 10}, "seven_day": {"pct": 10}}))
         cls.port, cls.token = _free_port(), "testtok-overview"
-        env = _lab.kernel_env(cls.lab, claude, dist, cls.port, cls.token, ROMP_HOST_NAME="TESTHOST")
+        env = _lab.kernel_env(cls.lab, claude, dist, cls.port, cls.token, ROMP_HOST_NAME="TESTHOST",
+                              PATH=cls.fake_path, ROMP_TMUX_AVAILABLE="1")   # the fake tmux above lists the tests session
         cls.klog = os.path.join(cls.lab, "kernel.log")
         cls.kernel = subprocess.Popen([os.path.join(BIN, "romp-kernel")], stdout=open(cls.klog, "w"), stderr=subprocess.STDOUT, env=env)
         for _ in range(120):
@@ -206,7 +252,7 @@ class ServedTabOverviewMode(unittest.TestCase):
     def test_the_overview_is_a_mode_and_the_rows_are_not_tabs(self):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
-            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "web": SIDS["web"], "docs": SIDS["docs"],
+            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "web": SIDS["web"], "docs": SIDS["docs"], "tests": SIDS["tests"],
                        "shots": os.environ.get("SNAP_SHOTS", "")}, f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
@@ -263,6 +309,23 @@ class ServedTabOverviewMode(unittest.TestCase):
         web = next(t for t in o["tabs"] if t["id"] == SIDS["web"])
         self.assertTrue(web["active"], "the active tab keeps its class (the way back), only its dress is neutralised: %r" % web)
         self.assertEqual(web["bg"], "rgba(0, 0, 0, 0)", "…transparent like a resting tab: %r" % web)
+        # T322b: the row's state words are the SHARED status chip: the same class, words and computed dress the bar under the
+        # transcript wore for the same session a moment earlier; no pill of the row's own; the green pip stays beside it
+        bar = r["barAwaiting"]["bar"]
+        self.assertIsNotNone(bar, "the bar wears a chip while the awaiting session is read: %r" % r["barAwaiting"])
+        self.assertEqual((bar["cls"].split()[:2], bar["text"]), (["chip", "chip-awaitingBg"], "Awaiting 3 agents"), "the bar's chip: %r" % bar)
+        trow = next(x for x in o["chips"] if x["id"] == SIDS["tests"])
+        self.assertFalse(trow["flag"], "no pill of the row's own: %r" % trow)
+        self.assertEqual(trow["pip"], "snap-pip waiting", "the green pip stays: %r" % trow)
+        chip = trow["chip"]
+        self.assertIsNotNone(chip, "the row wears the chip: %r" % trow)
+        self.assertEqual((chip["tag"], chip["cls"], chip["text"]), ("span", "chip chip-awaitingBg", "Awaiting 3 agents"),
+                         "the bar's class and words, as a span inside the row's button: %r" % chip)
+        for k in ("bg", "color", "weight", "spacing", "radius", "padding", "lineHeight", "height"):   # height: a span chip beside a button chip
+            self.assertEqual(chip[k], bar[k], "the chip's %s in the row equals the bar's: %r vs %r" % (k, chip, bar))
+        self.assertEqual(chip["bg"], "rgb(84, 178, 4)", "await-green, the status token: %r" % chip)
+        ratio = lambda d: round(float(d["size"].rstrip("px")) / float(d["parentSize"].rstrip("px")), 2)
+        self.assertEqual((ratio(chip), ratio(bar)), (0.7, 0.7), "the chip's em rule holds in both: %r %r" % (chip, bar))
         # the two exceptions: a blocked active tab keeps the red fill; Yatharth's active tab wears the resting wash, no border
         b = r["blocked"]
         self.assertTrue(b["active"])

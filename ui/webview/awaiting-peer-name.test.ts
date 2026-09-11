@@ -38,15 +38,17 @@ test("the chat pane names the peer: box in identity colour, pill with the colour
   assert.match(box, /el\("span", "bg-await-peer"\)/);
   assert.match(box, /\(pr\.host \? pr\.host \+ ":" : ""\) \+ pr\.name/, "host-prefixed when cross-host");
   assert.match(box, /nm\.style\.color = pr\.color\.bg/);
-  const chipAt = RENDER.indexOf("const chipPeers = s.status.awaitingPeers");
-  const chip = RENDER.slice(chipAt, RENDER.indexOf("chip.title =", chipAt));
+  // the bar's chip is the SHARED status chip since T322b (status-chip.ts): the peer name's treatment lives in its builder
+  const CHIP = ui("webview", "status-chip.ts");
+  const chip = CHIP.slice(CHIP.indexOf("export function statusChip("));
   assert.ok(!chip.includes("chip-peer-dot"), "the dot retired (the user 2026-08-26, round two) — the name wears the colour");
-  assert.match(chip, /el\("span", "chip-peer-name"\)/, "'Awaiting <name>' — the NAME itself in identity colour");
-  assert.match(chip, /nm\.replaceChildren\(\.\.\.hostPartsNodes\(chipPeers\[0\]\.host, chipPeers\[0\]\.name\)\)/,
+  assert.match(chip, /nm\.className = "chip-peer-name";/, "'Awaiting <name>' — the NAME itself in identity colour");
+  assert.match(chip, /nm\.replaceChildren\(\.\.\.hostPartsNodes\(w\.peer\.host, w\.peer\.name, doc\)\)/,
     "the HOUSE idiom via the SHARED renderer (the user 2026-08-26, round three) — host in .host-prefix italic gray, never a restyled copy");
-  assert.match(chip, /nm\.style\.color = chipPeers\[0\]\.color\.bg/);
+  assert.match(chip, /nm\.style\.color = w\.peer\.color\.bg/);
   assert.ok(!/nm\.textContent = .*host/.test(chip), "no one-string concatenation of host and name");
-  assert.match(chip, /chipPeers\.length \+ " peers"/, "several peers keep the one-line rule as a count");
+  assert.match(CHIP, /peers\.length \+ " peers"/, "several peers keep the one-line rule as a count");
+  assert.match(RENDER, /const chip = statusChip\(chipWords\(s\.status\), "button"\) as HTMLButtonElement;/, "the bar builds from it");
   // the backing is ONE rule shared with the transcript's mention chip since 2026-09-10 (the user, who wanted a
   // typed @name to wear this chip's look); the peer name keeps its own #fff default beside it
   assert.match(CSS, /^\.chip-peer-name, \.mention-chip \{ background: rgba\(0, 0, 0, 0\.85\); border-radius: 7px; padding: 0 5px; \}/m,
