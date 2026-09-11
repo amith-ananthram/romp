@@ -962,8 +962,8 @@ def _last_plain_user_turn_t(turns):
         trig = turn.get("trigger") or {}
         tuid = trig.get("uuid") if isinstance(trig, dict) else trig
         a = next((x for x in atoms if x.get("uuid") == tuid), None) or (atoms[0] if atoms else None)
-        if not a or a.get("author") != "human":
-            continue
+        if not a or a.get("author") != "human" or a.get("_echo_text") or turn.get("echoTurn"):
+            continue    # an echo (a send the transcript never took; since T344 placed by time) is never a prompt turn
         if "romp-goal-id" in (_atom_user_text(a) or ""):   # a nudge / typed card-reply → targeted, not a plain reply
             continue
         best = max(best, a.get("t") or turn.get("t") or 0)
@@ -31119,7 +31119,9 @@ def _merge_tx_sets(session, sid):
 def _merge_live_atoms(session, sid, shown_texts=()):
     """Merge in-memory LIVE-TAIL atoms into the parsed session, AHEAD of the transcript on disk, so messages
     appear instantly (the stream / a composer send leads the disk write). NON-MUTATING — `session` is the
-    _parse cache, so this returns a shallow copy with the last turn's atoms extended. The source is the
+    _parse cache, so this returns a shallow copy: the last turn's atoms extended by the fresh tail, and a
+    STALE echo placed by its send time into an earlier turn or a synthetic turn of its own (T344, the
+    placement comment below; the copy carries `_placed`, the fold's key for those). The source is the
     owning backend's live tail (the SDK backend's _live: stream + its own input echo; the Codex backend's
     list). Dedup: drop any live atom the transcript already has, by uuid (stream
     messages: SDK uuid == transcript uuid) or by text (an optimistic input echo carries a synthetic uuid).
@@ -31193,27 +31195,119 @@ def _merge_live_atoms(session, sid, shown_texts=()):
     if not turns:
         turns = [{"id": "live", "trigger": None, "t": fresh[0]["t"], "end": fresh[-1]["t"],
                   "ended": not live_work, "atoms": []}]
-    turns[-1] = dict(turns[-1])
-    # An in-flight input ECHO — the kernel's copy of a send the model has not read yet — sorts AFTER every atom the
-    # turn holds, whatever its send time (T252d for every other window, 2026-09-11). The model reads a mid-turn
-    # send only at its next tool boundary, so the steps that streamed after the send ran BEFORE it was read; sorted
-    # by time the echo drew the message above them in every window but the sender's own, whose tail bubble hides
-    # the echo (render.ts hiddenByPending) — one session in two split columns read as one column behind the other
-    # (the user 2026-09-10). The landing (the queued_command attachment, event_model._absorbed) takes the
-    # boundary's own time, the same tail region, so nothing moves when it lands. A never-delivered echo (dropped)
-    # is a record of a loss and keeps its time, as does a landed-but-unpruned one and the CLI's command feedback.
-    def _order(a):
-        tail = 1 if (a.get("_echo_text") and not a.get("command") and not a.get("dropped") and not a.get("_landed")) else 0
-        return (tail, a.get("t", 0), a.get("_seq", 0))
-    turns[-1]["atoms"] = sorted(list(turns[-1]["atoms"]) + fresh, key=_order)
-    # Extend the turn's window over the appended tail (the user 2026-07-02): segments() spans [turn.t,
-    # turn.end], so a live atom past the disk turn's end (a /model invocation minutes after the last work)
-    # otherwise falls OUTSIDE every segment — its timeline dot then appeared only retroactively, once the
-    # disk write moved the real end past it.
-    turns[-1]["end"] = max(turns[-1].get("end") or 0, max(a.get("t", 0) for a in fresh))
-    if live_work:
-        turns[-1]["ended"] = False
-    return {**session, "turns": turns}
+    # A STALE echo is placed by its send time, never among later rows (T344, the user 2026-09-11, who saw
+    # a 10:28 PM row between 7:05 AM rows): an echo stamped before the last turn's start is a send the
+    # transcript has moved past (a romp notice that never landed, reseeded at boot from the registry's
+    # echoes), and appended to the last turn it sat among today's rows wearing yesterday's clock, which
+    # the chat's day walk read as a day boundary. _place_stale_echoes puts each such echo into the turn
+    # whose window holds it, or into a closed turn of its own in the gap where it was sent, so the rows
+    # the chat reads are in time order and the day walk needs no special case. A pending send is always
+    # stamped after the last turn's start and takes the tail below, as before.
+    last_start = turns[-1].get("t") or 0
+    stale = [a for a in fresh if a.get("_echo_text") and a.get("t", 0) < last_start]
+    if stale:
+        # Only a send NOBODY still owes is stale: a held copy (T306) keeps its send stamp while the queue
+        # behind it feeds, so on release it is older than the last turn's start yet still a pending
+        # message, and it must ride the tail until it lands. Owed = queued behind a busy turn
+        # (`shown_texts`, the backend's pending_queued) or listed by the CLI's own queue ledger
+        # (_pending_ledger, the settle's "still owed" read); read only when a candidate exists.
+        p = _path_of(sid)
+        owed = {sb.echo_text_key(t) for t in shown_texts if t} | {sb.echo_text_key(t) for t in (_pending_ledger(p) if p else ())}
+        stale = [a for a in stale if not _echo_landed_in(a["_echo_text"], owed)]
+    placed = ()
+    if stale:
+        # `placed` is what the chat fold keys its sealed prefix on (build_session, the "echo" refold): a placed
+        # echo sits in a turn the fold seals, and its state moves without a parse change (dismissed, flagged
+        # dropped, landed), so the fold compares this tuple build to build instead of re-reading the turns.
+        turns, placed = _place_stale_echoes(turns, stale)
+        stale_ids = {id(a) for a in stale}
+        fresh = [a for a in fresh if id(a) not in stale_ids]
+    if fresh:
+        turns[-1] = dict(turns[-1])
+        # An in-flight input ECHO — the kernel's copy of a send the model has not read yet — sorts AFTER every atom the
+        # turn holds, whatever its send time (T252d for every other window, 2026-09-11). The model reads a mid-turn
+        # send only at its next tool boundary, so the steps that streamed after the send ran BEFORE it was read; sorted
+        # by time the echo drew the message above them in every window but the sender's own, whose tail bubble hides
+        # the echo (render.ts hiddenByPending) — one session in two split columns read as one column behind the other
+        # (the user 2026-09-10). The landing (the queued_command attachment, event_model._absorbed) takes the
+        # boundary's own time, the same tail region, so nothing moves when it lands. A never-delivered echo (dropped)
+        # is a record of a loss and keeps its time, as does a landed-but-unpruned one and the CLI's command feedback.
+        # (A stale echo nobody owes never reaches this sort: _place_stale_echoes put it by its send time above, T344.)
+        def _order(a):
+            tail = 1 if (a.get("_echo_text") and not a.get("command") and not a.get("dropped") and not a.get("_landed")) else 0
+            return (tail, a.get("t", 0), a.get("_seq", 0))
+        turns[-1]["atoms"] = sorted(list(turns[-1]["atoms"]) + fresh, key=_order)
+        # Extend the turn's window over the appended tail (the user 2026-07-02): segments() spans [turn.t,
+        # turn.end], so a live atom past the disk turn's end (a /model invocation minutes after the last work)
+        # otherwise falls OUTSIDE every segment — its timeline dot then appeared only retroactively, once the
+        # disk write moved the real end past it.
+        turns[-1]["end"] = max(turns[-1].get("end") or 0, max(a.get("t", 0) for a in fresh))
+        if live_work:
+            turns[-1]["ended"] = False
+    return {**session, "turns": turns, "_placed": placed}
+
+
+def _turn_activity_end(turn):
+    """When the turn's RECORDED activity ended: the latest non-idle atom's time. Never the turn's `end`: a
+    finished SDK turn carries a synthesized idle atom (event_model.synthesize_idle) whose end is the NEXT
+    state row, and _finalize_turn takes the max end, so a turn that ended at 22:01 reads as ending when the
+    next turn began. A window decided on that would swallow every notice sent while the session sat idle."""
+    return max((a.get("t") or 0 for a in turn.get("atoms") or [] if a.get("type") != "idle"),
+               default=turn.get("t") or 0)
+
+
+def _place_stale_echoes(turns, echoes):
+    """Place echo atoms stamped before the last turn's start where their send time belongs (T344). Each echo
+    joins the turn whose ACTIVITY window holds it, [turn.t, _turn_activity_end(turn)]; an echo that falls in
+    the gap between two turns' activity, or before the first, goes into a closed synthetic turn at that place
+    (trigger None, like the turn a transcript-less session gets), one turn per gap holding every echo sent in
+    it, sorted, so two notices sent together stay a run. The synthetic turn's id derives from its first echo's
+    uuid, so the same echo yields the same turn build after build. Returns (turns, placed): a new turns list
+    (the caller's turn dicts are copied before a write; the parse cache is never mutated) and the fold's key,
+    a tuple of (destination turn index, uuid, dropped) per echo, read off the destinations rather than by a
+    scan of every atom (three merges per push cycle while a dropped echo exists)."""
+    out = list(turns)
+    key = lambda a: (a.get("t", 0), a.get("_seq", 0))
+    gaps = {}                                   # insertion index in `turns` → the echoes sent in that gap
+    dest = []                                   # (the destination turn dict, echo) per echo, resolved to indexes below
+    for a in sorted(echoes, key=key):
+        t = a.get("t", 0)
+        i = None                                # the last turn starting at or before the echo
+        for k, turn in enumerate(out):
+            if (turn.get("t") or 0) <= t:
+                i = k
+            else:
+                break
+        if i is not None and t <= _turn_activity_end(out[i]):
+            out[i] = dict(out[i])
+            out[i]["atoms"] = sorted(list(out[i]["atoms"]) + [a], key=key)
+            out[i]["placedEchoes"] = list(out[i].get("placedEchoes") or []) + [a.get("uuid")]
+            dest.append((out[i], a))
+        else:
+            gaps.setdefault(0 if i is None else i + 1, []).append(a)
+    for idx in sorted(gaps, reverse=True):      # back to front, so earlier indices stay valid
+        atoms = sorted(gaps[idx], key=key)
+        turn = {"id": "live-" + str(atoms[0].get("uuid") or atoms[0].get("t", 0)), "trigger": None,
+                "t": atoms[0].get("t", 0), "end": atoms[-1].get("t", 0), "ended": True, "atoms": atoms,
+                "echoTurn": True, "placedEchoes": [a.get("uuid") for a in atoms]}
+        out.insert(idx, turn)
+        dest.extend((turn, a) for a in atoms)
+    index_of = {id(turn): k for k, turn in enumerate(out)}
+    placed = tuple(sorted((index_of[id(turn)], a.get("uuid"), bool(a.get("dropped"))) for turn, a in dest))
+    return out, placed
+
+
+def _turn_sans_placed_echoes(turn):
+    """The turn without the stale echoes _place_stale_echoes put into it (`placedEchoes`), for the
+    segmenters: a judged turn's segments and their ids must mirror the judge's own parse, which never
+    sees an echo, so a placed echo (a user atom, hence a segment input) must not split the turn's bar or
+    re-key its captions. A turn with nothing placed is returned as is; the tail's live echoes are not
+    placed and keep splitting the last turn as before."""
+    placed = turn.get("placedEchoes")
+    if not placed:
+        return turn
+    placed = set(placed)
+    return {**turn, "atoms": [a for a in turn.get("atoms") or [] if a.get("uuid") not in placed]}
 
 
 def _sdk_transcript_path(sid):
@@ -31638,6 +31732,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     # last turn is never cached (live atoms, overlays). Every gate names the exact input whose change
     # could render an earlier turn differently, and demotes to _fk = 0 when it moved.
     _turns = session["turns"]
+    _placed = tuple(session.get("_placed") or ())    # stale echoes placed into sealable turns (T344): the fold's "echo" key
     _n_pref = len(_turns) - 1                 # candidate prefix: every turn but the last
     _fk, _fe, _fold_ok, _fold_why = 0, None, False, None
     _pref_len = 0
@@ -31673,6 +31768,8 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                 _fold_why = "turnfp"                  # an earlier turn's atoms moved (a states-row atom, a heal)
             elif _fe["seams"] != _seams_sig:
                 _fold_why = "seam"                    # seg ids → tlId / deep-link anchors of old events
+            elif _fe.get("placed", ()) != _placed:
+                _fold_why = "echo"                    # a stale echo placed into the prefix was dismissed, flagged or landed (T344)
             elif _fe["floor"] != (_note_floor, len(_epi_rows_for_notes)):
                 _fold_why = "episode"                 # a /clear moved the durable-note floor
             elif _fe["notes"] != tuple(tuple(tuple(sorted(_x.items())) for _x in _lst
@@ -32288,7 +32385,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                     "fps": [_chat_turn_fp(_turns[_i]) for _i in range(_np)],
                     "events": events[:_b],
                     "seg": tuple(_seg_pref), "cursors": _cur, "last_t": _lt, "last_model": _lm,
-                    "disk_texts": _dt, "seams": _seams_sig,
+                    "disk_texts": _dt, "seams": _seams_sig, "placed": _placed,
                     "floor": (_note_floor, len(_epi_rows_for_notes)),
                     "notes": (tuple(tuple(sorted(_x.items())) for _x in recoveries[:_cur[0]]),
                               tuple(tuple(sorted(_x.items())) for _x in gaveups[:_cur[1]]),
@@ -32565,7 +32662,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     # ── the ledger memo (2026-09-09): the tree walk and the live roots below are a function of exactly these
     # inputs, each in the key or held by identity: the parse (seg_trig and seg_work come from it; by the parsed
     # object's identity, and only while no live atoms were merged, since the merge reshapes the last turn's
-    # segments); the store's seams (_seams_sig, from the store this build's seg maps were cut with: the
+    # segments and, since T344, places a stale echo into an earlier turn); the store's seams (_seams_sig, from the store this build's seg maps were cut with: the
     # build loads the store twice, once at the top for the seg ids and once here for the nodes, and a
     # publish landing between the two loads pairs the old seams' seg maps with the new store object, so
     # the seams stay a key component beside the store's identity or that build's tree would serve next
@@ -33000,7 +33097,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
             # every other pane, whose payloads dedup correctly, stayed instant.) The spawn time is
             # persisted and fixed; None when genuinely unknown, which the client tolerates — render.ts
             # keeps what it already had (`msg.firstSeen ?? prev.firstSeen`).
-            "firstSeen": session["turns"][0]["t"] if session["turns"] else _sdk_spawned_at(sid)}
+            "firstSeen": next((_t["t"] for _t in session["turns"] if not _t.get("echoTurn")), None) or _sdk_spawned_at(sid)}
 
 
 EPISODE_EVENT_CAP = 200   # events shipped per pre-clear episode expand — bounded, honest about the cut
@@ -37095,7 +37192,7 @@ def _segs_seam(turn, store):
     """Seam-aware segmentation — MUST mirror the judge's jd._segs (plans/segment-regrowth.md): seg ids
     the judges place/anchor against a settle-split have to be the same ids the kernel renders/resolves,
     or trails and deep-links written for a tail would silently stop matching."""
-    return jd.apply_seams(em.segments(turn), store or {})
+    return jd.apply_seams(em.segments(_turn_sans_placed_echoes(turn)), store or {})
 
 
 def _atom_prose_chars(a):
@@ -37864,6 +37961,8 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None):
     st_turns = session["turns"]
     bars, last_t, seg_ends, nsegs, complained = [], None, {}, 0, False   # seg_ends: seg-start t → work-END t (for completion marks)
     for ti, turn in enumerate(st_turns):
+        if turn.get("echoTurn"):
+            continue        # a stale echo's own turn (T344): a send the transcript never took draws no bar
         turn_open = (live and ti == len(st_turns) - 1 and not turn["ended"]
                      and not any(x["type"] == "idle" for x in turn["atoms"])
                      and not _suspended_after(turn["end"]))   # dead lane (live False) or pre-sleep freeze → not an open bar
@@ -37875,7 +37974,7 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None):
             _bars_complain(sid, "seams", e)
             complained = True
             try:
-                segs = em.segments(turn)
+                segs = em.segments(_turn_sans_placed_echoes(turn))
             except Exception:
                 segs = []
         for si, seg in enumerate(segs):
