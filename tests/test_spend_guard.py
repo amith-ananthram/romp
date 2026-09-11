@@ -247,9 +247,20 @@ class Memo(unittest.TestCase):
         self.assertEqual(sorted(km._SPEND_TREE_CACHE), sorted(leaves))
         km._spend_tree_memo_prune(set(leaves[1:]))
         self.assertEqual(sorted(km._SPEND_TREE_CACHE), sorted(leaves[1:]), "a session that left the live set loses its memo")
-        with mock.patch.object(km, "SPEND_GUARD_TREE_MEMO_BYTES", km._spend_tree_memo_size(km._SPEND_TREE_CACHE[leaves[2]]) + 1):
+        # over the byte bound the LARGEST memo goes first, down to three quarters of the bound (the follow-up review: with
+        # every survivor seen this tick, oldest-first was insertion order and one eviction a cycle re-walked trees in
+        # rotation). leaves[1] gets an extra file so it is the largest; the bound sits just under the pair's size
+        extra = os.path.join(os.path.dirname(leaves[1]), "%08d-2222-3333-4444-000000000350" % 1, "subagents", "agent-b.jsonl")
+        write_jsonl(extra, [user(NOW - 100, "u")], mtime=NOW - 100)
+        km._SPEND_TREE_CACHE[leaves[1]]["files"][extra] = NOW - 100
+        sizes = {k: km._spend_tree_memo_size(km._SPEND_TREE_CACHE[k]) for k in leaves[1:]}
+        with mock.patch.object(km, "SPEND_GUARD_TREE_MEMO_BYTES", sizes[leaves[1]] + sizes[leaves[2]] - 1):
             km._spend_tree_memo_prune(set(leaves[1:]))
-        self.assertEqual(sorted(km._SPEND_TREE_CACHE), [leaves[2]], "over the byte bound the least recently seen goes first")
+        self.assertEqual(sorted(km._SPEND_TREE_CACHE), [leaves[2]], "the largest memo went; the smaller one fits under three quarters of the bound")
+        self.assertGreaterEqual(km._spend_tree_memo_size({"files": {"x" * 10: 0}, "dirs": {}}), 2 * 10, "the estimate counts about twice the characters")
+        # a disabled ceiling drops every tree memo instead of stranding them
+        km._SPEND_TREE_CACHE["ghost"] = {"dirs": {}, "files": {}, "full": 0, "seen": 0}
+        self.assertIn("_SPEND_TREE_CACHE.clear()", inspect.getsource(km._spend_guard_tick).split("_spend_guard_seed()")[0], "cleared before the disabled-ceiling return")
         self.assertIn("_spend_tree_memo_prune(live_paths)", inspect.getsource(km._spend_guard_tick), "the tick prunes on every cycle")
 
 

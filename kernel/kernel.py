@@ -37124,6 +37124,8 @@ def _spend_guard_tick(now, live_map, sessions=None, be=None, clients=None, price
     ceiling = _spend_ceiling()
     if ceiling <= 0:
         _SPEND_GUARD.clear()                             # disabled: nothing latched survives the disable
+        _SPEND_TREE_CACHE.clear()                        # and no tree memo outlives it (the follow-up review: the return
+        #                                                  before the prune stranded them for the kernel's life)
         return
     _spend_guard_seed()                                  # once per kernel life: the ledger's verdicts
     rows = _alive_sessions(now, live_map) if sessions is None else sessions
@@ -37157,8 +37159,9 @@ def _spend_guard_tick(now, live_map, sessions=None, be=None, clients=None, price
 
 
 def _spend_tree_memo_size(m):
-    """A tree memo's weight, estimated from its path strings (the mtimes are a few dozen bytes beside each)."""
-    return sum(len(p) + 32 for p in m["files"]) + sum(len(d) + 32 for d in m["dirs"])
+    """A tree memo's weight: its path strings at about twice their character count (a str's header and the dict's
+    slot beside each; measured resident cost about 2x the characters), plus the mtime floats."""
+    return sum(2 * len(p) + 64 for p in m["files"]) + sum(2 * len(d) + 64 for d in m["dirs"])
 
 
 def _spend_tree_memo_prune(live_paths):
@@ -37171,8 +37174,12 @@ def _spend_tree_memo_prune(live_paths):
     total = sum(_spend_tree_memo_size(m) for m in _SPEND_TREE_CACHE.values())
     if total <= SPEND_GUARD_TREE_MEMO_BYTES:
         return
-    for k in sorted(_SPEND_TREE_CACHE, key=lambda k: _SPEND_TREE_CACHE[k]["seen"]):
-        if total <= SPEND_GUARD_TREE_MEMO_BYTES:
+    # over the bound every survivor is live and carries this tick's seen stamp, so an oldest-first order was insertion
+    # order and one eviction a cycle re-walked whole trees in rotation (the follow-up review): the LARGEST trees go
+    # first, down to three quarters of the bound, so the bound does not bind again next cycle
+    target = SPEND_GUARD_TREE_MEMO_BYTES * 3 // 4
+    for k in sorted(_SPEND_TREE_CACHE, key=lambda k: -_spend_tree_memo_size(_SPEND_TREE_CACHE[k])):
+        if total <= target:
             break
         total -= _spend_tree_memo_size(_SPEND_TREE_CACHE[k])
         _SPEND_TREE_CACHE.pop(k, None)
