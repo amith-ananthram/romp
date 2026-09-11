@@ -306,3 +306,13 @@ test("queuedCountText: all notices → 'notice'; all nudges → 'nudge'; anythin
   assert.equal(countText(2, 0, 0, 0), "2 queued messages");
   assert.equal(countText(1, 1, 0, 0), "1 queued command");
 });
+
+test("the kernel's echo of a send another window made wears the sender's pending dress at the tail (the user 2026-09-10)", () => {
+  // one session in two split columns: the sender's column drew its dashed tail bubble, the other a solid user bubble at
+  // the send time above later steps — the kernel now orders the echo last (_merge_live_atoms) and the pane dresses it
+  assert.match(RENDER, /isKernelEchoUuid, newPending, mintQid/, "the one reader of the backend's echo prefix (send-pending.ts)");
+  assert.match(RENDER, /if \(!ev\.undelivered && !injected && isKernelEchoUuid\(ev\.uuid\)\) \{[^\n]*\n\s*turn\.classList\.add\("echo"\);\s*bubble\.classList\.add\("echo-bubble"\);/);
+  assert.match(RENDER, /note\.textContent = "sending…";/);
+  assert.match(CSS, /\.turn\.echo \.echo-bubble \{ border-style: dashed; border-color: color-mix\(in srgb, var\(--you\) 65%, transparent\); opacity: 0\.85; \}/);
+  assert.match(CSS, /\.echo-note \{ font-size: 0\.82em; color: var\(--dim\); letter-spacing: 0\.02em; text-align: right; \}/);
+});

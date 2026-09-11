@@ -1,5 +1,5 @@
 """The timeline's idle FADE must match the chat tab's (the user 2026-07-22: idle threads dim in the chat
-but never on the timeline). The timeline derived `active` from the RAW tmux state and counted "waiting" as
+but never on the timeline). The timeline derived `active` from the RAW live-map state and counted "waiting" as
 active — but "waiting" IS the post-turn idle state, so every LIVE lane stayed unfaded forever and only DEAD
 lanes ever dimmed. Both surfaces now key the fade on the DERIVED chip: ready + idle > 1h.
 """
@@ -21,14 +21,14 @@ km = load_source("romp_kernel_tlfade", os.path.join(BIN, "romp-kernel"))
 
 
 class TimelineIdleFade(unittest.TestCase):
-    def test_timeline_fade_keys_on_the_derived_chip_not_the_raw_tmux_state(self):
+    def test_timeline_fade_keys_on_the_derived_chip_not_the_raw_live_state(self):
         src = inspect.getsource(km.build_timeline)
         # the fade rides the derived chip `state` (from _session_chip), mirroring the chat tab's rule,
         # and `not live` keeps dead lanes dimmed as before
         self.assertIn(
             'faded = (not live) or (state == "ready" and _idle_faded(state, tm and tm["since"], now))',
             src)
-        # the old raw-tmux set — which listed "waiting", the IDLE state, as ACTIVE — is gone
+        # the old raw-state set — which listed "waiting", the IDLE state, as ACTIVE — is gone
         self.assertNotIn('tm["state"] in ("working", "permission", "picker", "compacting", "waiting")', src)
 
     def test_both_surfaces_share_one_idle_rule(self):

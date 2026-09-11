@@ -240,7 +240,7 @@ class RefusalNeverAutoRetried(unittest.TestCase):
                        km._api_error, km._path_of, km._alive_sessions)
         km._retry_paused_on = lambda: False
         km._session_retry_suppressed = lambda sid: False
-        km._alive_sessions = lambda now, tmux: [{"sid": self.SID, "path": "/TESTDIR/x.jsonl"}]
+        km._alive_sessions = lambda now, live: [{"sid": self.SID, "path": "/TESTDIR/x.jsonl"}]
         km._path_of = lambda sid, now=None: "/TESTDIR/x.jsonl"
         self.aerr = {"text": REFUSAL_TEXT, "status": None, "category": "invalid_request",
                      "uuid": "11111111-2222-3333-4444-000000000101",

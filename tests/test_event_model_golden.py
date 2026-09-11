@@ -1993,7 +1993,8 @@ class SafeDefault(unittest.TestCase):
 
 
 class WaitingStopClosesTheTurn(unittest.TestCase):
-    """The tmux Stop hook writes state:"waiting" when the agent hands the floor back; it must terminate the
+    """The SDK backend writes state:"waiting" when the agent hands the floor back (the removed tmux backend's
+    Stop hook did the same); it must terminate the
     turn the SAME as the later idle-prompt's state:"idle". Keying only on "idle" left a finished session
     whose last assistant message wasn't a clean end_turn (e.g. it ended on a tool_use) stuck reading
     "working" from Stop until the idle-prompt eventually landed (the user 2026-06-25, who asked to revert working)."""

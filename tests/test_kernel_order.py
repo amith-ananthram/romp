@@ -78,19 +78,19 @@ class SessionOrder(unittest.TestCase):
 
     # ── _chat_tab_sessions / _timeline_sessions: stable through activity + death ───────────────────
     def test_chat_tabs_keep_order_when_a_session_dies(self):
-        km._alive_sessions = lambda now, tmux: [sess(A, 100), sess(B, 200), sess(C, 300)]
+        km._alive_sessions = lambda now, live: [sess(A, 100), sess(B, 200), sess(C, 300)]
         km._sessions = lambda now: [sess(A, 100), sess(B, 200), sess(C, 300)]
         self.assertEqual(self.sids(km._chat_tab_sessions(0, {})), [A, B, C])
         # B dies (leaves the alive set); not kept-open → its tab drops, A & C keep their relative order
-        km._alive_sessions = lambda now, tmux: [sess(A, 100), sess(C, 300)]
+        km._alive_sessions = lambda now, live: [sess(A, 100), sess(C, 300)]
         self.assertEqual(self.sids(km._chat_tab_sessions(0, {})), [A, C])
 
     def test_timeline_lanes_never_reshuffle_on_activity(self):
-        km._alive_sessions = lambda now, tmux: [sess(A, 100), sess(B, 200)]
+        km._alive_sessions = lambda now, live: [sess(A, 100), sess(B, 200)]
         km._sessions = lambda now: [sess(A, 100), sess(B, 200), sess(C, 50), sess(D, 60)]
         self.assertEqual(self.sids(km._timeline_sessions(0, {})), [A, B, C, D])
         # B works hard + dead lane C's transcript gets touched (both mtimes spike) — lanes must hold
-        km._alive_sessions = lambda now, tmux: [sess(A, 100), sess(B, 99999)]
+        km._alive_sessions = lambda now, live: [sess(A, 100), sess(B, 99999)]
         km._sessions = lambda now: [sess(A, 100), sess(B, 99999), sess(C, 88888), sess(D, 60)]
         self.assertEqual(self.sids(km._timeline_sessions(0, {})), [A, B, C, D])
 
@@ -124,14 +124,14 @@ class SessionOrder(unittest.TestCase):
 
     def test_chat_push_prunes_a_truly_gone_session_from_the_file(self):
         km._write_session_order([A, B, C])
-        km._alive_sessions = lambda now, tmux: [sess(A, 100), sess(C, 300)]    # B not alive
+        km._alive_sessions = lambda now, live: [sess(A, 100), sess(C, 300)]    # B not alive
         km._sessions = lambda now: [sess(A, 100), sess(C, 300)]               # B's transcript gone → GONE
         km._chat_tab_sessions(0, {})
         self.assertEqual(self.order_file(), [A, C])        # B pruned on a chat push (self-cleaning)
 
     def test_chat_push_keeps_a_dead_but_in_window_session(self):
         km._write_session_order([A, B, C])
-        km._alive_sessions = lambda now, tmux: [sess(A, 100), sess(C, 300)]    # B not alive...
+        km._alive_sessions = lambda now, live: [sess(A, 100), sess(C, 300)]    # B not alive...
         km._sessions = lambda now: [sess(A, 100), sess(B, 200), sess(C, 300)]  # ...but B is still in-window
         km._chat_tab_sessions(0, {})
         self.assertEqual(self.order_file(), [A, B, C])     # dead-but-in-window B keeps its slot
@@ -186,7 +186,7 @@ class SessionOrder(unittest.TestCase):
         km._name_of = lambda sid: reg.get(sid)
         self.addCleanup(lambda: setattr(km, "_name_of", saved_name_of))
         # A is no longer alive (relaunched) but its transcript is still in-window; OBS2 is the live fork
-        km._alive_sessions = lambda now, tmux: [f(OBS2, "obsidian"), f(B, "bee"), f(C, "see")]
+        km._alive_sessions = lambda now, live: [f(OBS2, "obsidian"), f(B, "bee"), f(C, "see")]
         km._sessions = lambda now: [f(A, "obsidian"), f(OBS2, "obsidian"), f(B, "bee"), f(C, "see")]
         out = self.sids(km._chat_tab_sessions(0, {}))
         # OBS2 inherited slot 1 (right after A); A is dead-but-in-window so it keeps its slot in the FILE
@@ -414,7 +414,7 @@ class OrderDisplayReaderServesUnproved(unittest.TestCase):
         self.assertIn("session-order.json could not be read", bad[0])
         # through the push path itself: _chat_tab_sessions orders, then runs the GC -- neither raises
         saved = (km._alive_sessions, km._sessions)
-        km._alive_sessions = lambda now, tmux: [sess(A, 1)]
+        km._alive_sessions = lambda now, live: [sess(A, 1)]
         km._sessions = lambda now: [sess(A, 1)]
         try:
             with _reads_fault(self._path()):

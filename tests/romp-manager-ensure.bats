@@ -5,15 +5,14 @@
 # It must be idempotent (no second manager) and non-blocking (spawns detached).
 
 load free-port
-load tmux-private
+load cli-scope-floor
 
 setup() {
     TEST_DIR="$(mktemp -d)"
     MGR="$(cd "$(dirname "$BATS_TEST_FILENAME")/../bin" && pwd)/romp-manager"
-    # Every test here starts a REAL manager. The manager has run no tmux since the tmux backend's removal
-    # (2026-09-11); tests/tmux-private.bash is still loaded for the floor it carries: ROMP_CLI_SCOPE=0, so
-    # no real scope lands on the user's manager (the floor moves to its own helper in a later stage).
-    tmux_private_socket_dir "$TEST_DIR"
+    # Every test here starts a REAL manager: the floor keeps it from leaving a transient scope on the
+    # developer's user manager (tests/cli-scope-floor.bash).
+    cli_scope_floor
     # The manager's state root is private too. With neither variable set STATE_ROOT is the live
     # ~/.local/state/romp, and `up` boots from that root's kernels.json: the fake launcher below runs
     # once per kernel registered there, each handed the registry entry's stateDir, and the drain
@@ -34,9 +33,7 @@ teardown() {
     # Graceful stop, then reap the detached manager (it is orphaned, not our child).
     curl -fsS -X POST "http://127.0.0.1:${CPORT:-0}/stop" >/dev/null 2>&1 || true
     [[ -n "${MGR_PID:-}" ]] && kill "$MGR_PID" 2>/dev/null || true
-    # The kill before the rm (a server the real tmux started must not outlive the test), and last, so
-    # its failure is teardown's status: bats swallows a failing command mid-teardown.
-    tmux_private_kill && rm -rf "$TEST_DIR"
+    rm -rf "$TEST_DIR"
 }
 
 @test "ensure: idempotent, non-blocking auto-start of the supervisor" {

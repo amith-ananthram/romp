@@ -16,6 +16,10 @@
 // to know, and the goal-node id is the real shared identity. Matching stays exact after the prefix — no
 // substring or startsWith matching, which would let one goal's id light a different card.
 
+// The focused-session section (T347) renders a second element per card under "f:a:<itemId>" / "f:g:<turnId>":
+// the board's key behind one more prefix, the same identity. The bridge strips it first, so a cross-pane
+// hover or a reveal names the copy too (kbHoverId in feed.ts strips it the same way for the keyboard cursor).
+const FOCUS = /^f:/;
 const NS = /^(?:a:|g:|s:)/;
 
 /** True when a card carrying `domKey` is one of the host-named `keys`. Accepts a host that already speaks
@@ -23,13 +27,19 @@ const NS = /^(?:a:|g:|s:)/;
 export function extHoverMatches(domKey: string | null | undefined, keys: Set<string>): boolean {
   if (!domKey || !keys || !keys.size) return false;
   if (keys.has(domKey)) return true;
-  const bare = domKey.replace(NS, "");
-  return bare !== domKey && keys.has(bare);
+  const board = domKey.replace(FOCUS, "");          // a focused-section copy answers to its board key…
+  if (board !== domKey && keys.has(board)) return true;
+  const bare = board.replace(NS, "");               // …and, like the board's element, to the bare domain id
+  return bare !== board && keys.has(bare);
 }
 
 /** The host-named keys a DOM key can satisfy — the same bridge, for callers that need to look up rather
  *  than test (e.g. finding the card to scroll to). Ordered most-specific first. */
 export function cardKeyAliases(domKey: string): string[] {
-  const bare = domKey.replace(NS, "");
-  return bare !== domKey ? [domKey, bare] : [domKey];
+  const out = [domKey];
+  const board = domKey.replace(FOCUS, "");
+  if (board !== domKey) out.push(board);
+  const bare = board.replace(NS, "");
+  if (bare !== board) out.push(bare);
+  return out;
 }

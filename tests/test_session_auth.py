@@ -169,7 +169,9 @@ class _OptionsHarness(_Keyed):
         self._fake_sdk = "claude_agent_sdk" not in sys.modules and not sb.sdk_importable()
         if self._fake_sdk:
             fake = types.ModuleType("claude_agent_sdk")
-            fake.HookMatcher = lambda **kw: kw
+            # an attribute-bearing stand-in, like the SDK's dataclass: with hosts on (the default since T348) the
+            # options loop sets each matcher's `timeout` to the host's hook bound, which a plain dict refused
+            fake.HookMatcher = lambda **kw: types.SimpleNamespace(**kw)
             sys.modules["claude_agent_sdk"] = fake
 
     def tearDown(self):
@@ -1100,7 +1102,7 @@ class DrivePlumbing(unittest.TestCase):
         self.assertEqual(src.count('auth=(a if a in ("login", "key") else "")'), 2,
                          "the WS op and POST /new both pass it")
 
-    def test_the_abc_names_the_control_and_tmux_refuses(self):
+    def test_the_abc_names_the_control_and_the_default_refuses(self):
         sbc = open(os.path.join(os.path.dirname(HERE), "kernel", "session_backend.py")).read()
         self.assertIn("def set_auth(self, sid: str, value: str) -> bool:", sbc)
         self.assertIn("return False", sbc.split("def set_auth", 1)[1][:900])

@@ -895,7 +895,8 @@ class PaneEnabledReader(unittest.TestCase):
         self.assertEqual(html.count(HELPER), 1)
         self.assertLess(html.index(HELPER), html.index("<iframe"), "defined in the head, before the first iframe")
         self.assertLess(html.index(HELPER), html.index("<body"))
-        self.assertEqual(html.count("<script>"), 20, "the head's existing script carries it: no new script element")
+        self.assertEqual(html.count("<script>"), 21, "the head's existing script carries it: no new script element "
+                         "(main's 20 + the chat split's own script, tests/test_chat_split.py — 2026-09-11)")
         for js in (km._LANDING_ERRS_JS, km._LANDING_MOBILE_JS, km._LANDING_REVEAL_JS, km._LANDING_SETTINGS_JS):
             self.assertIn("window.__rompPaneEnabled&&!window.__rompPaneEnabled('feed')", js, "absent helper = every pane shown")
 

@@ -30,7 +30,7 @@ setup() {
     export SIGNAL_JSON="$TEST_DIR/signal.json"
     cat > "$SIGNAL_JSON" <<'JSON'
 {"schema": 1, "asOf": 1756800000.4, "bootId": "4242.1756790000", "rate429Basis": "attempts",
- "coverage": {"sidechainExcluded": true, "sdkSessionsLive": 2, "inTurn": 1, "retrying": 1, "tmuxSessionsUncovered": 0},
+ "coverage": {"sidechainExcluded": true, "sdkSessionsLive": 2, "inTurn": 1, "retrying": 1},
  "overall": {"state": "thrashing", "worstBucket": "key:0123456789ab|fable"},
  "buckets": {"key:0123456789ab|fable": {"state": "thrashing",
    "windows": {"300": {"requests": 20, "rateLimited": 8, "rate429": 0.4}}}}}

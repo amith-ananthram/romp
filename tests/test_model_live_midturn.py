@@ -14,8 +14,13 @@ below pin the rule each way for the day one of them can flip. Every other park r
 Synthetic only — no real session data."""
 import os
 import tempfile
+import threading
+import time
 import unittest
 from romp_load import load_source
+from types import SimpleNamespace
+
+from tests.conftest import thread_census, wait_for_census
 
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()   # isolate: importing the kernel must not touch live state
 os.environ.pop("ROMP_STATE_DIR", None)
@@ -28,8 +33,11 @@ km = load_source("romp_kernel_model_live", os.path.join(BIN, "romp-kernel"))
 SID = "11111111-2222-3333-4444-555555555555"
 
 
-class _Tmux:
-    """A backend that cannot take input mid-turn (forwards_sends False) — set_model TYPES /model into a pane."""
+class _Typed:
+    """A backend of the ABC's base shape: it cannot take input mid-turn (forwards_sends False) and its set_model
+    lands as text typed at the CLI (the removed terminal backend typed "/model X" into its pane), so a pick
+    mid-turn races the running turn. No shipped backend has this shape since that backend's removal
+    (2026-09-11); the fake keeps the rule's parking arm pinned."""
     def __init__(self): self.calls = []
     def owns(self, sid): return True
     def forwards_sends(self): return False
@@ -37,7 +45,7 @@ class _Tmux:
     def send(self, sid, t): self.calls.append(("send", t))
 
 
-class _Sdk(_Tmux):
+class _Sdk(_Typed):
     """A backend that takes a send mid-turn (forwards_sends) AND can apply a model change mid-turn
     (model_switches_live) — the shape the open-turn exception is for. The real SdkBackend has the channel
     for it but declares False until the CLI persists a mid-turn switch correctly (see its docstring)."""
@@ -54,7 +62,7 @@ class _Codex(_Sdk):
 
 class ModelLiveMidTurn(unittest.TestCase):
     def setUp(self):
-        self.tmux, self.sdk = _Tmux(), _Sdk()
+        self.typed, self.sdk = _Typed(), _Sdk()
         km._pending_ops.pop(SID, None)
         self._saved = (km._compacting_now, km._working_now, km._limit_hold, km._mark_model_pending,
                        km._note_model_pick, km.Sessions.backend_for)
@@ -90,10 +98,10 @@ class ModelLiveMidTurn(unittest.TestCase):
         self.assertNotIn(SID, km._pending_ops)
 
     # ── every other park reason still stands ──
-    def test_tmux_still_parks_while_a_turn_is_open(self):
-        km.Sessions.backend_for = lambda sid: self.tmux
-        km._set_model_or_park(self.tmux, SID, "claude-fable-5-1")
-        self.assertEqual(self.tmux.calls, [], "typing /model into a busy pane is the race the FIFO exists for")
+    def test_a_typing_backend_still_parks_while_a_turn_is_open(self):
+        km.Sessions.backend_for = lambda sid: self.typed
+        km._set_model_or_park(self.typed, SID, "claude-fable-5-1")
+        self.assertEqual(self.typed.calls, [], "typing /model into a busy composer is the race the FIFO exists for")
         self.assertEqual(km._pending_ops.get(SID), [("model", "claude-fable-5-1")])
 
     def test_a_compaction_still_parks_it(self):
@@ -175,7 +183,7 @@ class ModelLiveMidTurn(unittest.TestCase):
         self.assertEqual(km._pending_ops.get(SID), [("model", "opus")])
 
     def test_no_shipped_backend_declares_the_capability_yet(self):
-        # Codex applies a pick at the next turn_start; the base class (tmux's shape) types it; and the SDK,
+        # Codex applies a pick at the next turn_start; the base shape types it at the CLI; and the SDK,
         # which HAS the control channel, says no for now: on CLI 2.1.257 a switch applied inside a turn
         # mis-parents its transcript breadcrumbs and the rest of that turn is read as a rewound branch by
         # romp and dropped by --resume (review of #923, 2026-09-04). Flipping the SDK is a one-line change
@@ -201,6 +209,68 @@ class ModelLiveMidTurn(unittest.TestCase):
         self.assertEqual(be.calls, [], "parked, and the send chained behind it")
         self.assertEqual(km._pending_ops.get(SID),
                          [("model", "claude-fable-5-1"), ("send", "after the pick", "human")])
+
+    def test_the_real_codex_backend_parked_on_a_rejected_model_lets_the_pick_that_fixes_it_through(self):
+        # The wedge this rule met on the REAL backend (review, 2026-09-11): a Codex send the worker parked on a
+        # permanent request rejection (the account refuses the model) kept busy() True with nothing in flight,
+        # the real _working_now took that as an open turn, and this setter parked the pick — the one change
+        # that re-arms the retry — behind a queue that would never move; the drain skipped the sid on the same
+        # word every cycle, and no unqueue, kill or resume led out. A parked queue reads not-working now, so
+        # the pick fires into set_model and the worker retries with the picked model.
+        root = os.path.dirname(HERE)
+        cb = load_source("romp_codex_backend_parked", os.path.join(root, "kernel", "codex_backend.py"))
+
+        class InvalidParamsError(RuntimeError):
+            def __init__(self, message):
+                super().__init__(message)
+                self.code = -32602
+
+        class RejectingClient:
+            """The slice of the app-server client that spawn and a rejected turn_start touch; nothing streams,
+            and the pump parks on next_notification until close."""
+            def __init__(self):
+                self.attempts = []
+                self._closed = threading.Event()
+            def account_read(self, *a, **k):
+                return SimpleNamespace(requires_openai_auth=False, account={"ok": True})
+            def thread_start(self, params=None):
+                return SimpleNamespace(thread=SimpleNamespace(id="T-1"), model="gpt-5-test")
+            def thread_set_name(self, tid, name):
+                pass
+            def turn_start(self, tid, input_items, params=None):
+                self.attempts.append(dict(params or {}))
+                raise InvalidParamsError("model is not available")
+            def next_notification(self):
+                self._closed.wait()
+                raise RuntimeError("client closed")
+            def close(self):
+                self._closed.set()
+
+        def settle(fn, timeout=5.0):
+            deadline = time.monotonic() + timeout
+            while not fn() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            return fn()
+
+        census0 = thread_census()
+        self.addCleanup(lambda: self.assertEqual(wait_for_census(census0, timeout=10), [],
+                                                 "the backend's worker and pump end with the test"))
+        fake = RejectingClient()
+        be = cb.CodexBackend(tempfile.mkdtemp(), client_factory=lambda: fake, log=lambda m: None)
+        sid = be.spawn("web", "/TESTDIR")
+        self.addCleanup(lambda: km._pending_ops.pop(sid, None))
+        self.addCleanup(fake.close)
+        self.addCleanup(be.kill, sid)
+        km._working_now = self._saved[1]                  # the REAL gate: this case is about its answer
+        km.Sessions.backend_for = lambda s: be
+        self.assertTrue(be.send(sid, "keep this durable"))
+        self.assertTrue(settle(lambda: be.launch_error(sid) is not None))   # written with the park, under the lock
+        self.assertEqual(len(fake.attempts), 1)
+        self.assertEqual(be.pending_queued(sid), ["keep this durable"])
+        self.assertFalse(km._set_model_or_park(be, sid, "gpt-5-fixed"), "nothing is in flight: the pick fires now")
+        self.assertIsNone(km._pending_ops.get(sid), "no chip parked behind the stuck queue")
+        self.assertTrue(settle(lambda: len(fake.attempts) == 2))
+        self.assertEqual(fake.attempts[1].get("model"), "gpt-5-fixed", "the worker retried with the picked model")
 
     # ── the neighbour that must NOT change ──
     def test_effort_still_parks_while_working_because_it_is_connect_time(self):

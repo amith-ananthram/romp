@@ -92,13 +92,13 @@ class _Base(unittest.TestCase):
             "rompUuid": SID, "seq": 1, "placements": {},
             "status": {self.gid: "working"}, "nodes": {self.gid: nd}}))
 
-    def _wake(self, tmux):
+    def _wake(self, live):
         km._SESSION_STAMP_CACHE.clear(); km._autonudge_cache.clear()
         store = km.jd.load_goals(SID)
         stamp = km._goal_awaiting_stamp_full(store.get("nodes", {}), self.gid)
         self.assertIsNotNone(stamp)
         return km._wake_goal(SID, self.gid, stamp, dict(km._auto_nudge_data().get("nudged", {})),
-                             self.turns, store, NOW, self.turns[-1], tmux)
+                             self.turns, store, NOW, self.turns[-1], live)
 
 
 class DeadmanKinds(_Base):

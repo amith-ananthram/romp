@@ -125,3 +125,14 @@ test("a pinned card still bolds to full when another pane hovers it", () => {
   assert.ok(FEEDCSS.indexOf(".fitem.ask.pinned") < FEEDCSS.indexOf(".fitem.ask.focused, .fitem.ask.dot-hl"),
     "the shared highlight must come after .pinned");
 });
+
+test("a focused-section copy (T347) answers to its board key and to the bare domain id, like the card below", () => {
+  // the section renders a second element per card under "f:a:<itemId>" / "f:g:<turnId>": one more prefix over
+  // the board's key, the same identity; a cross-pane hover or a reveal must reach the copy too
+  assert.equal(extHoverMatches("f:a:" + GOAL, new Set([GOAL])), true, "the host's bare goal id lights the copy");
+  assert.equal(extHoverMatches("f:a:" + GOAL, new Set(["a:" + GOAL])), true, "a host speaking DOM keys lights it too");
+  assert.equal(extHoverMatches("f:g:" + TURN, new Set([TURN])), true, "a group copy matches on its turn id");
+  assert.equal(extHoverMatches("f:a:" + GOAL, new Set([SID + ":g228"])), false, "exact after the prefixes, never a substring");
+  assert.deepEqual(cardKeyAliases("f:a:" + GOAL), ["f:a:" + GOAL, "a:" + GOAL, GOAL], "most-specific first: the copy, the board's key, the bare id");
+  assert.deepEqual(cardKeyAliases("a:" + GOAL), ["a:" + GOAL, GOAL], "a board key is unchanged by the bridge");
+});

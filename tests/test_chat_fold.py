@@ -923,5 +923,108 @@ class Wiring(unittest.TestCase):
         self.assertIn('fold=_chat_fold_last_info().get("fold", 0)', src)
 
 
+class PlacedEchoes(Gates):
+    """A STALE live echo placed into a sealed turn (T344: an echo stamped before the last turn's start sits
+    where its send time belongs) changes state without a parse change: dismissed (dismissEcho pops it from
+    the live tail), flagged dropped, or landed. The fold keys its sealed prefix on the merge's `_placed`
+    report and refolds ("echo") on a change, so the sealed events never hold a ghost of a dismissed echo
+    or a stale copy of its flag; the equivalence with a full build holds through every step."""
+
+    ECHO = "echo:" + "d" * 32
+    NOTICE = "[romp] The condition you asked romp to watch now HOLDS: the notes-api search suite has its verdict."
+
+    class _Backend(km._UnownedBackend):
+        """The owning backend as the chat build reads it: a live tail this test edits, a prune that retires nothing."""
+
+        def __init__(self):
+            self.live = []
+
+        def owns(self, sid):
+            return True
+
+        def live_atoms(self, sid):
+            return sorted(self.live, key=lambda a: a.get("t", 0))
+
+        def prune_live(self, sid, tx_uuids, tx_user_texts=(), human_floor=0):
+            return None
+
+    def setUp(self):
+        super().setUp()
+        self.be = self._Backend()
+        self._saved_bf = km.Sessions.backend_for
+        km.Sessions.backend_for = staticmethod(lambda sid: self.be)
+
+    def tearDown(self):
+        km.Sessions.backend_for = self._saved_bf
+        super().tearDown()
+
+    def _echo(self, t, **extra):
+        a = {"type": "user", "uuid": self.ECHO, "session_id": SID, "t": t, "parentUuid": None, "author": "romp",
+             "_echo_text": self.NOTICE, "message": {"role": "user", "content": [{"type": "text", "text": self.NOTICE}]}}
+        a.update(extra)
+        return a
+
+    def _sealed_uuids(self):
+        return [ev.get("uuid") for ev in km._chat_fold_get(SID)["events"]]
+
+    def test_a_placed_echo_is_sealed_and_its_dismissal_refolds(self):
+        self.grow(3)
+        t_first = self.s.now - 3 * 86400 + 6           # inside the FIRST turn's window: placed there, sealed with it
+        self.be.live.append(self._echo(t_first))
+        self.equiv("stale echo placed into a sealed turn")
+        e = km._chat_fold_get(SID)
+        self.assertIn(self.ECHO, self._sealed_uuids(), "the placed echo's event is part of the sealed prefix")
+        self.assertEqual(e["placed"], ((0, self.ECHO, False),), "…and the entry records its placement and state")
+        self.assert_folding()
+        self.be.live.clear()                            # dismissEcho: the live tail no longer holds it
+        inc = self._demotes("echo", "the placed echo dismissed")
+        self.assertNotIn(self.ECHO, self._sealed_uuids(), "the refold dropped the ghost from the sealed prefix")
+        self.assertNotIn(self.ECHO, [ev.get("uuid") for ev in inc["events"]], "…and from the payload")
+        self.assertEqual(km._chat_fold_get(SID)["placed"], ())
+
+    def test_a_placed_echo_flagged_dropped_refolds_and_the_sealed_copy_reads_dropped(self):
+        self.grow(3)
+        t_first = self.s.now - 3 * 86400 + 6
+        self.be.live.append(self._echo(t_first))
+        self.equiv("stale echo placed")
+        self.assert_folding()
+        self.be.live[0]["dropped"] = True                # _mark_dropped_echoes / settle_echoes flagged it
+        inc = self._demotes("echo", "the placed echo flagged dropped")
+        ev = next(x for x in inc["events"] if x.get("uuid") == self.ECHO)
+        self.assertTrue(ev.get("undelivered"), "the payload reads the flag (`undelivered`): %r" % {k: ev[k] for k in ev if k != "md"})
+        self.assertEqual(km._chat_fold_get(SID)["placed"], ((0, self.ECHO, True),))
+        self.assert_folding()                           # and folds again once the state is sealed anew
+
+    def test_a_placed_echo_that_lands_refolds_and_leaves_the_prefix(self):
+        # the third exit the fold's docstring names: the echo's TEXT lands in the transcript (a record carrying
+        # it), the display dedup drops the echo from the merge, `placed` empties, the sealed copy must go
+        self.grow(3)
+        t_first = self.s.now - 3 * 86400 + 6
+        self.be.live.append(self._echo(t_first))
+        self.equiv("stale echo placed")
+        self.assert_folding()
+        s = self.s
+        u = s.uid(); s.append([uline(s.tick(), self.NOTICE, u, s.last)])   # the notice lands as a user record
+        # The landing is a parse change too, and the sealed turn's fingerprint moves with the echo's departure
+        # (one atom fewer), so the gate chain demotes on "turnfp" before it reaches "echo"; either way the
+        # build refolds, and `placed` records the emptiness. What matters is that no ghost survives.
+        n_fp, n_echo = km._CHAT_FOLD_STATS.get("g:turnfp", 0), km._CHAT_FOLD_STATS.get("g:echo", 0)
+        inc = self.equiv("the placed echo landed")
+        self.assertTrue(km._CHAT_FOLD_STATS.get("g:turnfp", 0) > n_fp or km._CHAT_FOLD_STATS.get("g:echo", 0) > n_echo,
+                        "the landing refolds: the turn fingerprint moved with the echo's departure, or the echo gate fired")
+        self.assertNotIn(self.ECHO, self._sealed_uuids(), "the landed echo's sealed copy is gone")
+        self.assertNotIn(self.ECHO, [ev.get("uuid") for ev in inc["events"]], "…and the payload shows the record, not the echo")
+        self.assertEqual(km._chat_fold_get(SID)["placed"], ())
+
+    def test_a_fresh_echo_in_the_last_turn_never_touches_the_fold(self):
+        self.grow(3)
+        self.assert_folding()
+        self.be.live.append(self._echo(self.s.t + 1))    # after the last turn's start: the tail, as before
+        f0 = km._CHAT_FOLD_STATS["fold"]
+        inc = self.equiv("fresh echo in the tail")
+        self.assertIn(self.ECHO, [ev.get("uuid") for ev in inc["events"]])
+        self.assertGreater(km._CHAT_FOLD_STATS["fold"], f0, "a tail echo folds like any live tail")
+        self.assertEqual(km._chat_fold_get(SID)["placed"], ())
+
 if __name__ == "__main__":
     unittest.main()
