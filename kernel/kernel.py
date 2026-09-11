@@ -31115,7 +31115,9 @@ def _merge_tx_sets(session, sid):
 def _merge_live_atoms(session, sid, shown_texts=()):
     """Merge in-memory LIVE-TAIL atoms into the parsed session, AHEAD of the transcript on disk, so messages
     appear instantly (the stream / a composer send leads the disk write). NON-MUTATING — `session` is the
-    _parse cache, so this returns a shallow copy with the last turn's atoms extended. The source is the
+    _parse cache, so this returns a shallow copy: the last turn's atoms extended by the fresh tail, and a
+    STALE echo placed by its send time into an earlier turn or a synthetic turn of its own (T344, the
+    placement comment below; the copy carries `_placed`, the fold's key for those). The source is the
     owning backend's live tail (the SDK backend's _live: stream + its own input echo; the Codex backend's
     list). Dedup: drop any live atom the transcript already has, by uuid (stream
     messages: SDK uuid == transcript uuid) or by text (an optimistic input echo carries a synthetic uuid).
@@ -31199,10 +31201,16 @@ def _merge_live_atoms(session, sid, shown_texts=()):
     # stamped after the last turn's start and takes the tail below, as before.
     last_start = turns[-1].get("t") or 0
     stale = [a for a in fresh if a.get("_echo_text") and a.get("t", 0) < last_start]
+    placed = ()
     if stale:
         turns = _place_stale_echoes(turns, stale)
         stale_ids = {id(a) for a in stale}
         fresh = [a for a in fresh if id(a) not in stale_ids]
+        # What the chat fold keys its sealed prefix on (build_session, the "echo" refold): a placed echo
+        # sits in a turn the fold seals, and its state moves without a parse change (dismissed, flagged
+        # dropped, landed), so the fold compares this tuple build to build instead of re-reading the turns.
+        placed = tuple((i, a.get("uuid"), bool(a.get("dropped")))
+                       for i, turn in enumerate(turns) for a in turn["atoms"] if id(a) in stale_ids)
     if fresh:
         turns[-1] = dict(turns[-1])
         turns[-1]["atoms"] = sorted(list(turns[-1]["atoms"]) + fresh, key=lambda a: (a.get("t", 0), a.get("_seq", 0)))
@@ -31213,7 +31221,7 @@ def _merge_live_atoms(session, sid, shown_texts=()):
         turns[-1]["end"] = max(turns[-1].get("end") or 0, max(a.get("t", 0) for a in fresh))
         if live_work:
             turns[-1]["ended"] = False
-    return {**session, "turns": turns}
+    return {**session, "turns": turns, "_placed": placed}
 
 
 def _place_stale_echoes(turns, echoes):
@@ -31669,6 +31677,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     # last turn is never cached (live atoms, overlays). Every gate names the exact input whose change
     # could render an earlier turn differently, and demotes to _fk = 0 when it moved.
     _turns = session["turns"]
+    _placed = tuple(session.get("_placed") or ())    # stale echoes placed into sealable turns (T344): the fold's "echo" key
     _n_pref = len(_turns) - 1                 # candidate prefix: every turn but the last
     _fk, _fe, _fold_ok, _fold_why = 0, None, False, None
     _pref_len = 0
@@ -31704,6 +31713,8 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                 _fold_why = "turnfp"                  # an earlier turn's atoms moved (a states-row atom, a heal)
             elif _fe["seams"] != _seams_sig:
                 _fold_why = "seam"                    # seg ids → tlId / deep-link anchors of old events
+            elif _fe.get("placed", ()) != _placed:
+                _fold_why = "echo"                    # a stale echo placed into the prefix was dismissed, flagged or landed (T344)
             elif _fe["floor"] != (_note_floor, len(_epi_rows_for_notes)):
                 _fold_why = "episode"                 # a /clear moved the durable-note floor
             elif _fe["notes"] != tuple(tuple(tuple(sorted(_x.items())) for _x in _lst
@@ -32319,7 +32330,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                     "fps": [_chat_turn_fp(_turns[_i]) for _i in range(_np)],
                     "events": events[:_b],
                     "seg": tuple(_seg_pref), "cursors": _cur, "last_t": _lt, "last_model": _lm,
-                    "disk_texts": _dt, "seams": _seams_sig,
+                    "disk_texts": _dt, "seams": _seams_sig, "placed": _placed,
                     "floor": (_note_floor, len(_epi_rows_for_notes)),
                     "notes": (tuple(tuple(sorted(_x.items())) for _x in recoveries[:_cur[0]]),
                               tuple(tuple(sorted(_x.items())) for _x in gaveups[:_cur[1]]),

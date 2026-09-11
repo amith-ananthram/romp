@@ -171,11 +171,51 @@ class StaleEchoPlacement(unittest.TestCase):
         self.assertEqual(a["turns"][1]["id"], b["turns"][1]["id"], "the same echo yields the same turn id build after build")
         self.assertNotIn(a["turns"][1]["id"], ("t1", "t2", "live"))
 
+    def test_a_stale_echo_and_a_fresh_one_in_the_same_build_each_take_their_place(self):
+        stale = _echo(T_DAY1 + 22 * 3600 + 28 * 60, key="echo:" + "beef" * 8)
+        fresh = _echo(T_DAY2 + 7 * 3600 + 400, key="echo:" + "cafe" * 8, author="human", _echo_text="one more thing")
+        fresh["message"]["content"][0]["text"] = "one more thing"
+        merged, _ = self._merge(_two_days(), [stale, fresh])
+        self.assertEqual([t["id"] for t in merged["turns"]][::2], ["t1", "t2"])
+        self.assertEqual(merged["turns"][1]["atoms"][0]["uuid"], stale["uuid"], "the stale one in the gap")
+        self.assertEqual(merged["turns"][-1]["atoms"][-1]["uuid"], fresh["uuid"], "the fresh one in the tail")
+        self.assertEqual(merged["turns"][-1]["end"], fresh["t"], "the tail still extends the last turn's window")
+
+    def test_boundaries_an_echo_at_a_turns_end_joins_it_and_one_at_the_last_turns_start_takes_the_tail(self):
+        turns = _two_days()
+        at_end = _echo(turns[0]["end"], key="echo:" + "dead" * 8)                 # stamped exactly at t1's end
+        at_last_start = _echo(turns[1]["t"], key="echo:" + "face" * 8)          # stamped exactly at t2's start
+        merged, _ = self._merge(turns, [at_end, at_last_start])
+        self.assertEqual(len(merged["turns"]), 2, "neither needs a synthetic turn")
+        self.assertIn(at_end["uuid"], [a["uuid"] for a in merged["turns"][0]["atoms"]])
+        self.assertIn(at_last_start["uuid"], [a["uuid"] for a in merged["turns"][1]["atoms"]])
+
+    def test_a_dropped_echo_keeps_its_flag_and_the_placement_is_reported_for_the_fold(self):
+        stale = _echo(T_DAY1 + 22 * 3600 + 28 * 60, dropped=True)
+        merged, _ = self._merge(_two_days(), [stale])
+        a = next(x for t in merged["turns"] for x in t["atoms"] if x["uuid"] == stale["uuid"])
+        self.assertTrue(a.get("dropped"), "placement never touches the atom")
+        self.assertEqual(merged["_placed"], ((1, stale["uuid"], True),),
+                         "the chat fold keys its sealed prefix on (turn index, uuid, dropped) of every placed echo")
+        fresh_only, _ = self._merge(_two_days(), [_echo(T_DAY2 + 7 * 3600 + 400, key="echo:" + "a" * 32)])
+        self.assertEqual(fresh_only["_placed"], (), "a tail echo is not placed and not reported")
+
+    def test_an_older_stream_atom_is_still_the_last_turns_live_work(self):
+        # a reply in flight is never placed by time: only echoes are
+        turns = _two_days()
+        turns[-1]["ended"] = False
+        merged, _ = self._merge(turns, [_stream(T_DAY1 + 23 * 3600)])
+        self.assertEqual(len(merged["turns"]), 2)
+        self.assertIn("live-reply-1", [a["uuid"] for a in merged["turns"][-1]["atoms"]])
+        self.assertFalse(merged["turns"][-1]["ended"])
+
     def test_the_parse_object_is_not_mutated(self):
         turns = _two_days()
         before = [(t["id"], len(t["atoms"])) for t in turns]
-        self._merge(turns, [_echo(T_DAY1 + 22 * 3600 + 28 * 60)])
+        atom_lists = [t["atoms"] for t in turns]
+        self._merge(turns, [_echo(T_DAY1 + 22 * 3600 + 28 * 60), _echo(T_DAY1 + 22 * 3600 + 30, key="echo:" + "b" * 32)])
         self.assertEqual([(t["id"], len(t["atoms"])) for t in turns], before)
+        self.assertTrue(all(t["atoms"] is l for t, l in zip(turns, atom_lists)), "the parse's atom lists are the same objects")
 
 
 if __name__ == "__main__":
