@@ -327,6 +327,7 @@ class CodexBackend:
         self._sessions_lock = threading.RLock()
         self._reg_lock = threading.Lock()
         self._load_registry()
+        self._republish_missing_names()
         # A kernel restart must not strand a durable backend queue until the user happens to send
         # again. Re-arm every live queued session immediately; client retry backoff keeps failures cool.
         for _, s in self._session_items():
@@ -379,6 +380,33 @@ class CodexBackend:
                 s.note = r.get("note", "")
                 s.launch_error = r.get("launchError") if isinstance(r.get("launchError"), dict) else None
                 self._sessions[sid] = s
+
+    def _republish_missing_names(self):
+        """spawn writes the durable registry row, then names/<sid>. A kernel death between the two
+        left a LIVE row with no shared identity file, and nothing rewrote it: _load_registry rebuilt
+        the session from the row, the first turn took _prepare_thread's resume branch (no names
+        write), and only a rename would have healed it. Every surface that reads names/ alone
+        (sender name and colour, cwd, the duplicate-name claim, which sees live names through that
+        file only) was blind to the session, so a same-name create could mint a second live one
+        (2026-09-11). The registry IS the durable source for name, cwd and colour, so a live row
+        whose file is missing is republished from it here, once, at load. A row whose file exists
+        is left alone (the names consumers watch the mtime); a dead row claims no name slot. fg is
+        not in the registry and comes back empty, exactly as a rename's heal leaves it."""
+        d = self.state / "names"
+        for sid, s in self._session_items():
+            with s.lock:
+                dead = s.dead
+            if dead or (d / sid).is_file():
+                continue
+            try:
+                self._write_name(s)
+            except (OSError, UnicodeDecodeError) as e:
+                self.log("codex: names/%s could not be republished at load (%s) — the session runs "
+                         "UNNAMED on shared surfaces until a rename lands; a same-name create may "
+                         "collide meanwhile" % (sid, e))
+            else:
+                self.log("codex: republished names/%s, missing at load for a live registry row "
+                         "(a kernel death between spawn's registry write and its name publish)" % sid)
 
     def _session(self, sid):
         with self._sessions_lock:
@@ -1049,7 +1077,11 @@ class CodexBackend:
                 old = (d / s.sid).read_text().rstrip("\n").split("\t")
             except (OSError, UnicodeDecodeError):
                 old = []
-            bg = bg or (old[2] if len(old) > 2 else "")
+            bg = bg or (old[2] if len(old) > 2 else "") or s.color
+            #    the FILE first: a kernel-side recolour (_set_session_color) writes names/ only
+            #    and never updates s.color. The registry's colour is the fallback for a file with
+            #    none — a rename that healed a MISSING file wrote an empty colour although the
+            #    registry knew it (2026-09-11)
             fg = fg or (old[3] if len(old) > 3 else "")
             tmp = d / (s.sid + ".tmp")
             try:
