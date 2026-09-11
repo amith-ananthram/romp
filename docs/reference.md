@@ -399,8 +399,18 @@ Fable 5) are drawn once, aggregated across every connected host's login as the
 worst reading per window, and an `API` cell beside them carries the
 key-billed dollars (5-hour burn and month-to-date, numbers only). Hovering
 breaks both down per host, one column per host, side by side, and a host
-can show its login's windows and its key's spend together. The key-billed
-dollars come from the sessions whose CLI reported a key source at init, judged
+can show its login's windows and its key's spend together. A click on the
+readout opens the spend detail: a chart of spend over time stacked by session,
+and under it the list of sessions with their dollars, turns and tokens. The
+list follows the chart's range (one day by hour, seven days by hour, ninety
+days by day): its rows are summed from exactly the buckets the chart draws, so
+the list's total is the chart's total for every range, the header names the
+range, and a session with nothing in the range has no row and no stack. An
+attached machine on an older build sends its series without turns or
+key-billed dollars per bucket: its rows show a dash in those columns, never a
+zero that would read as a count, and a note under the list names the machine
+on the ranges where such a row shows. The
+key-billed dollars come from the sessions whose CLI reported a key source at init, judged
 against the declaration; a login turn's computed cost is dollars nobody pays
 and is left out.
 
