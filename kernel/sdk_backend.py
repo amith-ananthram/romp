@@ -11383,14 +11383,24 @@ class SdkBackend:
         self._poke()
         return True
 
-    def _ensure(self, sid: str, on_boot_settled=None, user_send: bool = False) -> SdkSession | None:
+    def _lift_attach_stand_down(self, sid: str) -> None:
+        """A user's message is the word that starts a stood-down session again (T315): drop the registry's
+        hostAttachFailed marker before the ensure, so the attach is tried once more. Called by send() only;
+        the timer sweep, a boot and a heal go through _ensure alone, which stands down while the marker names
+        the lease's current holder (else a wedged host would be attached four times every few minutes for
+        good). A separate step, not an argument to _ensure, whose one-positional shape many tests stub."""
+        reg = read_reg(self.state_dir, sid) or {}
+        if isinstance(reg.get("hostAttachFailed"), dict):
+            self._update_reg_dropping(sid, drop=("hostAttachFailed",))
+
+    def _ensure(self, sid: str, on_boot_settled=None) -> SdkSession | None:
         """Start (or return the already-running) SdkSession for `sid`. `on_boot_settled` (the boot
         stagger's slot release) is parked on a FRESH spawn and fired once its CLI proves up or dies;
         the no-spawn paths fire it immediately — no CPU burst will ever happen, so no slot is held.
-        `user_send`: the caller is a user's message (T315): a session that stood down from a live host it
-        could not attach (the registry's hostAttachFailed marker names that host) is started again only for
-        a send or once the lease's holder has changed; the timer sweep, a boot and a heal leave it alone,
-        else a wedged host would be attached four times every few minutes for good."""
+        A session that stood down from a live host it could not attach (the registry's hostAttachFailed
+        marker names that host, T315) is NOT started here while the marker names the lease's current
+        holder: a user's send lifts the marker first (_lift_attach_stand_down); a changed holder is new
+        information too and the marker is dropped on the way in."""
         def _settled_now():
             if on_boot_settled:
                 try:
@@ -11410,7 +11420,7 @@ class SdkBackend:
             marker = reg.get("hostAttachFailed")
             if isinstance(marker, dict):
                 cur = self._holder_ident(read_lease(self.state_dir, sid))
-                if user_send or cur != str(marker.get("host") or ""):
+                if cur != str(marker.get("host") or ""):
                     self._update_reg_dropping(sid, drop=("hostAttachFailed",))   # _reg_lock, not self._lock
                     reg.pop("hostAttachFailed", None)
                 else:
@@ -11653,7 +11663,8 @@ class SdkBackend:
                         or (s._rewind_to and not getattr(s, "_rewind_armed", False)))
 
     def send(self, sid: str, text: str, qid: str | None = None) -> bool:
-        s = self._ensure(sid, user_send=True)
+        self._lift_attach_stand_down(sid)     # a message is the word that retries a stood-down attach (T315)
+        s = self._ensure(sid)
         if not s:
             return False
         if _is_compact_cmd(text):

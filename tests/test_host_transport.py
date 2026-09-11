@@ -553,7 +553,7 @@ class Pins(unittest.TestCase):
         self.assertIn('append_session_event(self.state_dir, "host.attached"', src)
         self.assertIn("m.timeout = _ht().sh.HOOK_TIMEOUT_S", src, "hooks carry the bound under a host")
         self.assertIn("self._host_stand_down(e)\n                    break", src, "past the attach bound the session stands down and LEAVES the loop, never the crash heal")
-        self.assertIn("s = self._ensure(sid, user_send=True)", src, "a send is the word that lifts a stand-down")
+        self.assertIn("self._lift_attach_stand_down(sid)     # a message is the word", src, "a send is the word that lifts a stand-down")
 
     def test_a_backend_with_hosts_off_touches_no_host_code_at_construction(self):
         d = tempfile.mkdtemp(); be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None)
