@@ -260,12 +260,20 @@ def parse_events(rows: list[dict]) -> list[dict]:
 
 
 def parse_turns(rows: list[dict]) -> list[dict]:
-    """turns.jsonl rows with the derived seconds: feedToResultS, feedToFirstOutS (when both stamps exist)."""
+    """turns.jsonl rows with the derived seconds: feedToResultS, feedToFirstOutS (when both stamps exist and
+    the row says the turn was fed: a kernel before the 2026-09-10 writer fix stamped a turn the CLI opened
+    itself, fedTexts 0, with the previous fed turn's fedT and firstOutT, which read as hours of feed-to-result
+    and a duplicated first output; such a row is a turn and measures no feed latency). The gate is the count 0
+    alone: a row without a fedTexts key is read by its stamps, and a bool is not a count."""
     out = []
     for r in rows:
         if not isinstance(r.get("t"), (int, float)):
             continue
         rec = dict(r)
+        n = r.get("fedTexts")
+        if isinstance(n, int) and not isinstance(n, bool) and n == 0:
+            out.append(rec)          # nothing fed: the stamps, if any, are another turn's
+            continue
         fed, res, fo = r.get("fedT"), r.get("resultT"), r.get("firstOutT")
         if isinstance(fed, (int, float)) and fed > 0 and isinstance(res, (int, float)) and res >= fed:
             rec["feedToResultS"] = round(float(res) - float(fed), 3)

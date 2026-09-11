@@ -8,6 +8,7 @@ the backend's problem ring as its prose (the shape agreed with the lease work, w
 kinds through the same helper). turns.jsonl gets one row per settled turn with the event stamps the latency
 and redo-cost figures read. Synthetic fixtures only: placeholder uuids, fake pids above pid_max, scripted
 `run` / `kill` seams, no real CLI."""
+import asyncio
 import json
 import os
 import tempfile
@@ -356,21 +357,20 @@ class TurnLedgerRow(unittest.TestCase):
         s.since = 1700000000   # `since` stays whole seconds for its other readers and is not what the row reads
         self.assertEqual(s._turn_ledger_row(types.SimpleNamespace(), now=1700000012.5)["fedT"], 1700000000.125)
 
-    def test_feed_stamps_are_spent_at_the_settle(self):
-        """The ResultMessage branch resets _fed_t and _first_out_t right after the row, in the finally, ahead of
-        the settle; and the row is written from the finally, so a bookkeeping fault (a spend-fold exception)
-        still leaves it. Pinned on the source, which is where the ordering lives."""
+    def test_the_result_branch_stays_one_try(self):
+        """The ResultMessage branch is ONE try: its body is the bookkeeping, its finally the settle. Two things
+        about its shape stay pinned on the source, where they live: the one try itself (the branch's own
+        contract, and why the spend accounting hands its figures to the finally by attribute), and the feed
+        stamps spent ahead of the settle inside that finally (an order nothing outside it can observe: the two
+        are plain assignments with no await between them). What the finally DOES is driven in TurnLedgerDriven:
+        the row written with the accounting's figures whatever the bookkeeping did (so the figures were handed
+        over before the spend write), the stamps None afterwards, and the settle run."""
         import inspect
         src = inspect.getsource(sb.SdkSession._on_message)
-        i_fin = src.index("finally:\n                # T304: one durable row per settled turn")
-        i_row = src.index("append_turn_row(self.backend.state_dir, self._turn_ledger_row(msg, _sp[0], _sp[1]))")
-        i_reset = src.index("self._fed_t = None               # the turn's feed stamps are spent")
-        i_settle = src.index("everything that makes the turn over for the kernel")   # the finally's own comment
-        self.assertTrue(i_fin < i_row < i_reset < i_settle, "row, then the reset, then the settle, all inside the finally")
         self.assertIn("elif isinstance(msg, ResultMessage):\n            try:", src,
                       "the branch stays ONE try (the settle pins), so the fold hands its figures over by attribute")
-        self.assertIn("self._turn_spend = (delta, turn_u)", src[src.index("turn_u = self._turn_usage(msg)"):i_fin])
-        self.assertIn("self._turn_spend = None", src[i_row:i_settle], "spent with the row")
+        self.assertLess(src.index("self._fed_t = None"), src.index("self.inflight = 0"),
+                        "the feed stamps are spent ahead of the settle, both inside the finally")
 
     def test_row_fields_and_stamps(self):
         s = self._sess(["do the thing"], first_out=1700000004.25, fed_t=1700000000)
@@ -403,6 +403,108 @@ class TurnLedgerRow(unittest.TestCase):
         sb.append_turn_row(Path(d), {})            # nothing to write
         rows = [json.loads(ln) for ln in (Path(d) / sb.TURNS_FILE).read_text().splitlines()]
         self.assertEqual(rows, [{"t": 1, "sid": SID}])
+
+
+# ---- message doubles for the driven tests: the SDK's shapes by class name (msg_to_atom and _on_message key on it) ----
+class _TextBlock:
+    def __init__(self, text): self.text = text
+class _AssistantMessage:
+    def __init__(self, content, uuid="a1"):
+        self.content, self.model, self.uuid, self.stop_reason, self.error = content, "claude-x", uuid, "end_turn", None
+class _UserMessage:
+    def __init__(self, content, uuid="u1"):
+        self.content, self.uuid, self.parent_tool_use_id, self.tool_use_result = content, uuid, None, None
+class _ResultMessage:
+    uuid = "r1"
+    num_turns = 1
+def _result(**fields):
+    """A ResultMessage double carrying result fields (total_cost_usd, usage, ...): a subclass, so the
+    handler's isinstance and the failure report's class-name read both see a ResultMessage."""
+    return type("ResultMessage", (_ResultMessage,), dict(fields))()
+class _SystemMessage:
+    def __init__(self, subtype, data=None, uuid=None):
+        self.subtype, self.data, self.uuid = subtype, (data or {}), uuid
+_TextBlock.__name__ = "TextBlock"; _AssistantMessage.__name__ = "AssistantMessage"
+_UserMessage.__name__ = "UserMessage"; _ResultMessage.__name__ = "ResultMessage"; _SystemMessage.__name__ = "SystemMessage"
+
+
+async def _noop_coro(*a, **k):
+    return None
+
+
+class TurnLedgerDriven(unittest.TestCase):
+    """The stamps and the row, driven through the real code paths on a real SdkSession (never started: no
+    CLI, no thread) over a hermetic backend. TurnLedgerRow above reads the row off a preset double; these
+    reach the two writers of the stamps it presets, and the finally that writes the row and spends them."""
+
+    def _session(self, be, sid=SID, name="web"):
+        s = sb.SdkSession(be, {"sid": sid, "name": name, "cwd": "/tmp"})
+        s._do_refresh_context = _noop_coro    # the settle schedules both; there is no client to ask
+        s._do_refresh_usage = _noop_coro
+        return s
+
+    def test_forward_stamps_the_first_work_atom_once(self):
+        """firstOutT is the turn's FIRST streamed work atom while a fed turn is in flight: a second atom keeps
+        the first's stamp, nothing in flight stamps nothing, and a command line (a streamed /model
+        confirmation) is not work."""
+        be = _backend(tempfile.mkdtemp())
+        s = self._session(be)
+        s.inflight = 1
+        self.assertIsNone(s._first_out_t)
+        be._forward(s, _AssistantMessage([_TextBlock("working on it")], uuid="w1"))
+        first = s._first_out_t
+        self.assertIsInstance(first, float)
+        be._forward(s, _AssistantMessage([_TextBlock("still at it")], uuid="w2"))
+        self.assertEqual(s._first_out_t, first, "the first atom's stamp holds for the turn")
+        other = self._session(be, sid=SID2, name="api")
+        be._forward(other, _AssistantMessage([_TextBlock("idle chatter")], uuid="w3"))
+        self.assertIsNone(other._first_out_t, "nothing in flight: not a fed turn's first output")
+        other.inflight = 1
+        cmd = _UserMessage([_TextBlock("<command-name>/model</command-name>\n"
+                                       "<command-message>model</command-message>\n"
+                                       "<command-args>sonnet</command-args>")], uuid="c1")
+        be._forward(other, cmd)
+        self.assertIsNone(other._first_out_t, "a command line is not the turn's output")
+        be._forward(other, _AssistantMessage([_TextBlock("now working")], uuid="w4"))
+        self.assertIsInstance(other._first_out_t, float, "the next work atom is")
+
+    def test_the_settle_writes_the_row_and_spends_the_stamps_when_the_spend_write_raises(self):
+        """The ResultMessage branch's finally writes the turn's row and then spends the feed stamps, ahead of
+        the settle, whatever the bookkeeping did: here the spend write raises (the anomalous turn is exactly
+        the one the row must keep), the row still lands with the accounting's figures (the spend tuple is
+        set before the raising write), the stamps are None afterwards, and the settle ran. The fault itself is
+        contained by _handle_stream_message, which reports it and returns False."""
+        d = tempfile.mkdtemp()
+        be = _backend(d)
+        s = self._session(be)
+        s.inflight = 1
+        s._inflight_texts.append("do the thing")
+        s._fed_t = 1700000000.125
+        s._first_out_t = 1700000004.25
+
+        def boom(*a, **k):
+            raise RuntimeError("boom")
+        be._record_spend = boom
+        msg = _result(total_cost_usd=0.5, usage={"input_tokens": 1, "output_tokens": 2},
+                      duration_ms=10, duration_api_ms=8, num_turns=1, is_error=False)
+
+        async def run():
+            ok = s._handle_stream_message(msg, _AssistantMessage, _ResultMessage, _SystemMessage)
+            await asyncio.sleep(0)
+            return ok
+        ok = asyncio.run(run())
+        self.assertFalse(ok, "the spend write's fault is contained and reported, not swallowed")
+        rows = [json.loads(ln) for ln in (Path(be.state_dir) / sb.TURNS_FILE).read_text().splitlines()]
+        self.assertEqual(len(rows), 1, "one row for the settled turn, written from the finally")
+        row = rows[0]
+        self.assertEqual((row["fedT"], row["firstOutT"], row["fedTexts"]), (1700000000.125, 1700000004.25, 1))
+        self.assertEqual((row["usd"], row["durationMs"], row["apiMs"], row["tokIn"], row["tokOut"]), (0.5, 10, 8, 1, 2),
+                         "the accounting's figures reached the row although the spend write raised")
+        self.assertIsNone(s._fed_t, "the feed stamps are spent with the row")
+        self.assertIsNone(s._first_out_t)
+        self.assertIsNone(s._turn_spend)
+        self.assertEqual((s.inflight, list(s._inflight_texts)), (0, []), "the settle ran")
+        self.assertEqual(sb.last_state_value(Path(be.state_dir), SID), "waiting")
 
 
 if __name__ == "__main__":

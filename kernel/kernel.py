@@ -40069,6 +40069,29 @@ def _cards_for_segments(sid, seg_ids):
     return tops
 
 
+def _glow_groups(sid, uuids):
+    """The chat glow's group for one session (glowTurns): its atom uuids plus, for the pane's overview ruler, each
+    uuid's GLOBAL index in the chat payload (`idx`) and the payload's length (`total`) (T318b, 2026-09-10). The pane
+    holds only the newest WIRE_TAIL events, so a hovered card whose source turns are older has no row to light; with
+    the positions it marks them on the ruler's history strip instead of painting nothing. Read from the pusher's
+    built payload (_built_chat, the same events the pane was sent, in wire order: an event's index there IS the
+    global index the pane maps through headFrom); a session with no built payload gets a group without positions,
+    and no uuids means no group."""
+    if not uuids:
+        return []
+    g = {"sid": sid, "uuids": uuids}
+    hit = _built_chat.get(sid)
+    evs = (hit[1].get("events") if hit is not None and isinstance(hit[1], dict) else None) or []
+    if evs:
+        want, idx = set(uuids), {}
+        for i, e in enumerate(evs):
+            u = e.get("uuid") if isinstance(e, dict) else None
+            if u in want and u not in idx:
+                idx[u] = i                      # a multi-block atom's FIRST event is where its row sits
+        g["idx"], g["total"] = idx, len(evs)
+    return [g]
+
+
 def _segment_atom_uuids(sid, seg_ids, now):
     """The chat .turn[data-uuid]s inside the given segments — for the timeline->chat glow, so a bar hover
     lights EXACTLY that segment's chat rows BY ID instead of a +/-2s time window (the user 2026-06-19). Each
@@ -54746,7 +54769,7 @@ class Handler(BaseHTTPRequestHandler):
             _send_to_app("timeline", {"type": "hover", "ids": seg_ids, "nonce": _next_nonce()})
             gsid = item_id.rsplit(":", 1)[0] if (item_id and not msg.get("off")) else ""
             uuids = _segment_atom_uuids(gsid, seg_ids, time.time()) if gsid else []
-            groups = [{"sid": gsid, "uuids": uuids}] if uuids else []
+            groups = _glow_groups(gsid, uuids)   # with each uuid's global index, for turns outside the pane's tail (T318b)
             _send_to_app("chat", {"type": "glowTurns", "groups": groups, "mids": []})
         elif msg and msg.get("type") == "dotOpen":
             # chat rail CLICK → NAVIGATE the other two panes (the user 2026-07-23): the timeline pans to
@@ -54778,7 +54801,7 @@ class Handler(BaseHTTPRequestHandler):
                 _send_to_app("feed", {"type": "hoverCards",
                                       "keys": _cards_for_segments(hsid, [seg_id]) if seg_id else [],
                                       "eid": None})
-                groups = [{"sid": hsid, "uuids": seg_uuids}] if seg_uuids else []
+                groups = _glow_groups(hsid, seg_uuids)
                 _send_to_app("chat", {"type": "glowTurns", "groups": groups, "mids": []})
         elif msg and msg.get("type") == "timelineHover":
             # the REVERSE of the feed/chat→timeline hovers: a timeline bar hover lights the feed
@@ -54794,7 +54817,7 @@ class Handler(BaseHTTPRequestHandler):
                 _send_to_app("feed", {"type": "hoverCards",
                                       "keys": _cards_for_segments(hsid, seg_ids), "eid": None})
                 uuids = _segment_atom_uuids(hsid, seg_ids, time.time())
-                groups = [{"sid": hsid, "uuids": uuids}] if uuids else []
+                groups = _glow_groups(hsid, uuids)
                 _send_to_app("chat", {"type": "glowTurns", "groups": groups, "mids": []})
         # ---- pasted-image hydration + dropped-file handling (ported from the old TS kernel) ----
         elif msg and msg.get("type") == "imgRequest" and msg.get("path"):
