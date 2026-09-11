@@ -11410,6 +11410,28 @@ class SdkBackend:
         if isinstance(reg.get("hostAttachFailed"), dict):
             self._update_reg_dropping(sid, drop=("hostAttachFailed",))
 
+    def _queue_behind_stand_down(self, sid: str, text: str, qid: str | None = None) -> None:
+        """An automatic message for a session that stood down from its host: appended to the persisted queue
+        mirror (reg['queue'] + reg['queueMeta'], _persist_queue's shape) behind whatever is queued, so the
+        SdkSession the user's next message starts seeds it into _pending and delivers it in order. No thread,
+        no attach, no echo (a machine message has none). The chat's queued bubble reads the mirror for a
+        session that is not running (pending_queued_meta), so the message shows as queued."""
+        with self._reg_lock:
+            reg = read_reg(self.state_dir, sid)
+            if reg is None:
+                return
+            have = [t for t in (reg.get("queue") or []) if isinstance(t, str) and t]
+            if text in have:
+                return                                   # already queued (a record-gated sender asking twice)
+            reg["queue"] = have + [text]
+            metas = [m for m in (reg.get("queueMeta") or []) if isinstance(m, dict)]
+            metas.append({"text": text, "qid": qid, "qts": int(time.time() * 1000)} if qid else {"text": text})
+            reg["queueMeta"] = metas
+            write_reg(self.state_dir, sid, reg)
+        self._log("host (%s): an automatic message queued behind the stand-down (%d queued); it rides the attach the "
+                  "user's next message makes" % ((reg.get("name") or sid[:8]), len(reg["queue"])))
+        self._wake_push()
+
     def _attach_stand_down_holds(self, sid: str, reg: dict | None = None) -> bool:
         """True while the registry's hostAttachFailed marker still describes the world: the session's lease is
         a LIVE host lease ('attach': its CLI and host alive, the beat fresh) held by the very host the marker
@@ -11693,11 +11715,19 @@ class SdkBackend:
                         or (s._rewind_to and not getattr(s, "_rewind_armed", False)))
 
     def send(self, sid: str, text: str, qid: str | None = None, user: bool = False) -> bool:
-        """`user`: the text is a message the USER typed (the composer, the phone, a user's `romp send`, a comment
-        reply, a parked user send replayed), the one word that retries a stood-down attach (T315); romp's own
-        automatic messages (the default) are refused while the stand-down holds, like a peer's postal mail."""
+        """`user`: the text is a message the USER typed (the composer, the phone, an untagged `romp send`, a comment
+        reply or merge, a parked user send replayed, a compact click), the one word that retries a stood-down
+        attach (T315). Romp's own automatic messages (the default: the nudge, the awaiting backstop, the debt
+        reminder, the auto retry, a watch notice, a tagged `romp send`) are QUEUED while the stand-down holds:
+        the text lands in the persisted queue mirror (reg['queue'], the seed of the next start) without starting
+        the thread, so it rides the attach the user's next message makes, in order; True means accepted, as ever.
+        The stand-down refuses the ATTACH, never the message (the commit-13 review's first item: a refusal
+        dropped the nudge after its ledger row had said fired)."""
         if user:
             self._lift_attach_stand_down(sid)     # the user's message is the word that retries a stood-down attach (T315)
+        elif self._attach_stand_down_holds(sid):
+            self._queue_behind_stand_down(sid, text, qid)
+            return True
         s = self._ensure(sid)
         if not s:
             return False

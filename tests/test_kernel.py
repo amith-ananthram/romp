@@ -7451,8 +7451,8 @@ class CompactSessionRoute(unittest.TestCase):
         src = Path(BIN, "romp-kernel").read_text()
         self.assertIn('t in ("compact", "compactSession")', src,
                       "_drive handles both compact shapes (chat battery + timeline)")
-        self.assertIn('be.send(sid, "/compact")', src,
-                      "compact sends the same /compact through whichever backend owns the sid")
+        self.assertIn('_user_send(be, sid, "/compact") is False', src,
+                      "compact sends the same /compact through whichever backend owns the sid, as the user's gesture (T315), and a refusal shows no cue")
 
 
 class TmuxInject(unittest.TestCase):

@@ -242,9 +242,10 @@ class TheTmuxRouteTakesTheTextAlone(_TmuxFixture):
         client = {"send": lambda s: None}
         km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": A}, client)
         km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": B}, client)
-        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A), ("send", WORDS, "human", B)])
+        # the composer's send is the user's: the fifth slot says so (T315), behind the id in the fourth
+        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A, True), ("send", WORDS, "human", B, True)])
         self.assertIsNone(km._cancel_parked(SID, 0, WORDS, qid=B), "the ✕ by id is exact on a parked tmux send too")
-        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A)])
+        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A, True)])
         km._working_now = lambda sid: False
         km._apply_pending_ops()
         self.assertEqual(self.typed, [("web", WORDS)], "the drain hands the pane the text")
@@ -371,7 +372,8 @@ class TheWireCarriesTheId(unittest.TestCase):
     def test_a_send_parks_under_the_id_it_was_posted_with(self):
         self.assertTrue(km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": A}, self.client))
         self.assertTrue(km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": B}, self.client))
-        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A), ("send", WORDS, "human", B)])
+        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A, True), ("send", WORDS, "human", B, True)],
+                         "the id is the fourth slot; the fifth says the composer's send is the user's (T315)")
         self.assertEqual(self.sent, [], "nothing refused")
 
     def test_a_follow_up_parks_its_wrapped_body_under_the_id(self):
@@ -383,23 +385,24 @@ class TheWireCarriesTheId(unittest.TestCase):
     def test_an_id_in_another_form_or_one_the_session_holds_is_not_taken_and_the_kernel_mints_as_before(self):
         for bad in ("s-1", "echo:", "echo:zz", "echo:" + "A" * 32, "echo:" + "a" * 8, "echo:" + "a" * 70, 7, None):
             km._drive({"type": "sendMessage", "id": SID, "text": "words %r" % (bad,), "qid": bad}, self.client)
-        self.assertTrue(all(len(op) == 3 for op in km._pending_ops[SID]), "no slot for an id in another form: %r" % (km._pending_ops[SID],))
+        self.assertTrue(all(km._op_qid(op) is None and (len(op) == 3 or op[3] is None) for op in km._pending_ops[SID]),
+                        "no id for one in another form (the fourth slot None under the user's fifth): %r" % (km._pending_ops[SID],))
         km._pending_ops.pop(SID, None)
         # held by a parked op
         km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": A}, self.client)
         km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": A}, self.client)
-        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A), ("send", WORDS, "human")],
+        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A, True), ("send", WORDS, "human", None, True)],
                          "the second press of a held id parks without it")
         km._pending_ops.pop(SID, None)
         # held by the backend's queue
         self.be.q.append(("older copy", B))
         km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": B}, self.client)
-        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human")])
+        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", None, True)])
         km._pending_ops.pop(SID, None)
         # held by a live echo (a fed copy between the queue and its landing)
         self.be.live_atoms = lambda sid: [{"uuid": C, "_echo_text": "fed copy"}]
         km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": C}, self.client)
-        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human")])
+        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", None, True)])
 
     def test_a_cancel_that_names_the_id_removes_that_copy_whatever_index_the_click_carried(self):
         km._pending_ops[SID] = [("send", WORDS, "human", A), ("send", WORDS, "human", B)]

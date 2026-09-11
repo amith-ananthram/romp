@@ -69,6 +69,20 @@ class CompactOrPark(_Stubbed):
         self.assertEqual(self.be.calls, [("send", "/compact")])
         self.assertEqual(self.marked, [SID], "the idle path stamps the cue — the romp-send gap this verb fixes")
 
+    def test_a_refused_send_shows_no_compacting_cue_and_the_click_speaks_as_the_user(self):
+        # T315 (the commit-13 review's fourth item): the idle path ignored a False from send and stamped the cue
+        # anyway, so every surface showed 'compacting' for up to 180 s while nothing was sent
+        class Speaking(_FakeBackend):
+            def send(self, sid, text, user=False):
+                self.calls.append(("send", text, user)); return self.ok
+        be = Speaking(); be.ok = False
+        self.assertIsNone(km._compact_or_park(be, SID), "neither parked nor fired: refused")
+        self.assertEqual(self.marked, [], "no cue for a compaction that never started")
+        be.ok = True
+        self.assertFalse(km._compact_or_park(be, SID))
+        self.assertEqual(be.calls[-1], ("send", "/compact", True), "the compact click is the user's gesture")
+        self.assertEqual(self.marked, [SID])
+
     def test_open_turn_parks_the_compact_op(self):
         km._working_now = lambda sid: True
         queued = km._compact_or_park(self.be, SID)

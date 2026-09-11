@@ -140,7 +140,8 @@ class HeadlessRoutes(unittest.TestCase):
                  mock.patch.object(km, "_working_now", lambda sid: True):
                 code, resp = self._post("/send", {"id": "sid-q", "text": "/frobnicate now"})
             self.assertEqual((code, resp), (200, {"ok": True, "queued": True}))
-            self.assertEqual(list(km._pending_ops.values()), [[("command", "/frobnicate now", None)]])
+            self.assertEqual(list(km._pending_ops.values()), [[("command", "/frobnicate now", None, None, True)]],
+                             "an untagged POST /send is the user's words: the fifth slot says so (T315), no id in the fourth")
             fake.send.assert_not_called()
             km._pending_ops.clear()
             with mock.patch.object(km.Sessions, "backend_for", staticmethod(lambda sid: fake)), \
