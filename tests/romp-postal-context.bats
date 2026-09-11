@@ -9,12 +9,16 @@
 # Two gates. ROMP_SID in the environment (the kernel sets it on every CLI it spawns), and the
 # CLI's own id, from the payload's session_id, naming the session ROMP_SID names: the romp sid
 # itself (a fresh spawn or a born fork, whose CLI the kernel pins to the sid) or the SDK
-# registry's lastSid for it (the conversation a resume continued). Every process a session's
-# Bash tool runs inherits ROMP_SID, so a `claude -p` a session spawned used to pass the first
-# gate and take this pointer as its own; its id is in neither place, and the hook stays silent.
-# The start's source changes one thing only: an EMPTY lastSid (the reg as SdkBackend.spawn mints it,
-# before the CLI's init has flipped the field) passes a `startup` and nothing else, so a child that
-# auto-compacted mid-run and came back as a `compact` start with its own id gets nothing either.
+# registry's lastSid for it (the conversation a resume continued, or a compaction kept). Every
+# process a session's Bash tool runs inherits ROMP_SID, so a `claude -p` a session spawned used to
+# pass the first gate and take this pointer as its own; its id is in neither place, and the hook
+# stays silent. The start's source moves the check in two places, both for a start the hook sees
+# BEFORE the kernel's init-time lastSid write (SdkSession._on_message): an EMPTY lastSid (the reg
+# as SdkBackend.spawn mints it) passes a `startup` and nothing else, so a child that auto-compacted
+# mid-run and came back as a `compact` start with its own id gets nothing; and a `clear` passes on
+# the reg's EXISTENCE with no id match, because a /clear's new id reaches the reg only after its
+# SessionStart has run, so the match failed on every /clear (nothing a session's Bash tool runs
+# fires a `clear`: a child's start is a `startup`, its compaction a `compact` under the same id).
 
 setup() {
     TEST_DIR="$(mktemp -d)"
@@ -31,6 +35,7 @@ setup() {
     SID="11111111-2222-3333-4444-555555555555"     # the romp sid: ROMP_SID, and a fresh spawn's CLI id
     FSID="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"    # the conversation the reg's lastSid names (a resume)
     OTHER="99999999-8888-7777-6666-555555555555"   # an id in neither place: a child the session ran (its first start, or its compaction mid-run)
+    CLEARED="cccccccc-dddd-4eee-8fff-000000000000"  # the id a /clear rotated the CLI onto; the reg learns it only after the clear SessionStart
     HOOK="$(cd "$(dirname "$BATS_TEST_FILENAME")/../hooks" && pwd)/romp-postal-context.sh"
 }
 
@@ -99,14 +104,27 @@ run_hook() { run bash -c 'printf "%s" "$1" | "$2"' _ "$1" "$HOOK"; }
     [ -z "$output" ]
 }
 
-@test "a compaction or a /clear with an id the reg does not hold gets nothing: the source alone is no pass" {
+@test "a compaction with an id the reg does not hold gets nothing: the source alone is no pass" {
     # a `claude -p` the session's Bash tool ran auto-compacts mid-run and starts again as a `compact` with its
-    # own id; the previous cut let clear and compact through without reading the reg, and the child took the pointer
+    # own id; an earlier cut let compact through without reading the reg, and the child took the pointer
     write_reg "$FSID"
     ROMP_SID="$SID" run_hook "$(payload "$OTHER" compact)"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
-    ROMP_SID="$SID" run_hook "$(payload "$OTHER" clear)"
+}
+
+@test "a /clear start with a new id and an existing reg passes: the reg learns the id only after this hook" {
+    # a /clear rotates the CLI onto a fresh id; the kernel records it when the init lands (SdkSession._on_message),
+    # AFTER the clear SessionStart has run, so the reg still holds the previous conversation here. Requiring the
+    # match lost the pointer on every /clear; the source is enough, since nothing a session's Bash tool runs fires a clear
+    write_reg "$FSID"
+    ROMP_SID="$SID" run_hook "$(payload "$CLEARED" clear)"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"additionalContext"'* ]]
+}
+
+@test "a /clear start with no reg for the sid gets nothing, and the hook does not fail" {
+    ROMP_SID="$SID" run_hook "$(payload "$CLEARED" clear)"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
@@ -134,6 +152,10 @@ run_hook() { run bash -c 'printf "%s" "$1" | "$2"' _ "$1" "$HOOK"; }
 @test "an unreadable reg is the same silence, never a failed turn" {
     mkdir -p "$XDG_STATE_HOME/romp/sdk"; printf 'not json' > "$XDG_STATE_HOME/romp/sdk/$SID.json"
     ROMP_SID="$SID" run_hook "$(payload "$FSID" resume)"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    # a clear passes on the reg's existence, and an unreadable file is not one
+    ROMP_SID="$SID" run_hook "$(payload "$CLEARED" clear)"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }

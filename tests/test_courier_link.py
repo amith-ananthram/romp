@@ -165,10 +165,11 @@ class DormantHandoffConverts(unittest.TestCase):
         # this private root, so the corroboration answers true and the sweep files the block.
         jd.NAMES.mkdir(parents=True, exist_ok=True)
         (jd.NAMES / SENDER).write_text("web\t~/notes-api\t#3355aa\t#ffffff\n")
-        # …and the SDK registry directory EXISTS and is readable: dead history is a registry that can be
-        # read and lacks the sid; a missing sdk/ with names on record is blindness, on which the
-        # corroborator stands down instead (tests/test_sdk_registry_blind.py)
+        # …and the reg an ENDED SDK session keeps (alive False; the backend never unlinks a reg): with fresh
+        # states rows beside an EMPTY registry the sid would read as a registry moved aside, on which the
+        # corroborator stands down (tests/test_sdk_registry_blind.py); the dead sender's own reg says it ended
         jd.SDKDIR.mkdir(parents=True, exist_ok=True)
+        (jd.SDKDIR / (SENDER + ".json")).write_text(json.dumps({"sid": SENDER, "alive": False}))
         km._PREV_ALIVE = None
         self.nudged = {}
         self.addCleanup(self._assert_no_shared_sid_leftovers)   # runs AFTER tearDown: the run-wide root is as it was

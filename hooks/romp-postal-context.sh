@@ -14,30 +14,38 @@
 # a session spawned used to pass the first gate and take this pointer as its own context (a
 # review finding on the tmux backend's removal, 2026-09-11). The CLI names itself in the
 # SessionStart payload's session_id (CLAUDE_CODE_SESSION_ID stands in for a payload without
-# one); it is this session's CLI when that id is
-#   - the romp sid itself: the kernel pins a fresh spawn's CLI to the sid with --session-id,
-#     and a born-as-a-fork copy the same way (kernel/sdk_backend.py, SdkBackend._options: the
-#     session_id kwarg on both arms), or
-#   - the SDK registry's lastSid for the sid (sdk/<ROMP_SID>.json under the state root): the
-#     conversation the kernel resumed the CLI on, or the one a /clear rotated it onto.
-# The registry learns a CLI's id only when the CLI's init message reaches the kernel
-# (sdk_backend.py, SdkSession._on_message: on the init SystemMessage, `fsid =
-# d.get("session_id")`, then `self.backend._update_reg(self.sid, lastSid=fsid)` when it differs
-# from resume_sid), AFTER the CLI is up, and SdkBackend.spawn mints the reg with `"lastSid": ""`
-# before the launch, so a first `startup` can run this hook ahead of that write: an EMPTY lastSid
-# lets a `startup` through. It lets NOTHING ELSE through. The rule per source:
-#   startup   -> the id is the sid, or is lastSid, or lastSid is empty;
-#   any other -> the id is the sid, or is lastSid; an empty lastSid exits 0.
-# By any `resume`, `clear` or `compact` the reg holds an id: a resumed CLI resumes the lastSid
-# the kernel recorded, a /clear's new id lands on the same field through the same init flip
-# (that flip is what ends the kernel's clearing bracket, _on_message's `clearing` branch), and
-# a compaction keeps the CLI's id. So the check is the one a startup with a recorded id gets:
-# the payload's id must BE it. The previous cut let `clear` and `compact` pass on the source
-# alone, and a `claude -p` child that auto-compacted mid-run came back as a `compact` start
-# with its own id and took the pointer. A `clear` whose hook outruns the kernel's flip fails
-# closed for that start (the reg still holds the previous id), the side this gate errs on. No
-# id, no reg, or an unreadable reg: nothing to check against, so the hook does nothing (exit 0,
-# never loud). The gate is kept verbatim in romp-postal-ensure.sh.
+# one), and the check reads the SDK registry's row for the sid (sdk/<ROMP_SID>.json under the
+# state root), whose lastSid is the conversation the kernel last saw the CLI on. Three rules,
+# by the start's source:
+#   startup        -> the id is the sid, or is lastSid, or lastSid is empty;
+#   clear          -> the reg exists (a readable JSON file); the id is not checked;
+#   anything else  -> the id is the sid, or is lastSid (resume, compact).
+# The id IS the sid for a fresh spawn and for a born-as-a-fork copy: the kernel pins the CLI to
+# the sid with --session-id (kernel/sdk_backend.py, SdkBackend._options: the session_id kwarg
+# on both arms). The id is lastSid for the conversation a resume continued, and for a
+# compaction, which keeps the CLI's id. The registry learns a CLI's id only when the CLI's init
+# message reaches the kernel (sdk_backend.py, SdkSession._on_message: on the init SystemMessage,
+# `fsid = d.get("session_id")`, then `self.backend._update_reg(self.sid, lastSid=fsid)` when it
+# differs from resume_sid), AFTER the CLI is up, and both allowances are for a start this hook
+# sees BEFORE that write:
+#   - SdkBackend.spawn mints the reg with `"lastSid": ""` before the launch, so a first `startup`
+#     can find it empty; an empty lastSid lets a `startup` through and nothing else. A `claude -p`
+#     child's own first start is a `startup` too, but by then the reg holds the session's id and
+#     the child's fresh uuid fails the match.
+#   - A /clear rotates the CLI onto a NEW id, and the `clear` SessionStart runs before the init
+#     that carries that id reaches the kernel: the flip in _on_message (the one that ends the
+#     kernel's clearing bracket, its `clearing` branch) lands after this hook has run, so at hook
+#     time the reg still holds the PREVIOUS id, deterministically, on every /clear. The previous
+#     cut required the match here and lost the pointer on every /clear in a romp session (a
+#     review finding, 2026-09-11). The source is enough because nothing a session runs from its
+#     Bash tool ever fires a `clear`: a child's own start is a `startup` and its mid-run
+#     compaction comes back as a `compact` under the same id. So a `clear` in a process carrying
+#     ROMP_SID whose reg exists is this session's own CLI. The reg is still read (the same read
+#     the other sources make), and a missing or unreadable one exits 0.
+# `compact` keeps the match on purpose: a `claude -p` child that auto-compacted mid-run came back
+# as a `compact` start with its own id and took the pointer when the source alone passed. No id,
+# no reg, or an unreadable reg: nothing to check against, so the hook does nothing (exit 0, never
+# loud). The gate is kept verbatim in romp-postal-ensure.sh.
 input="$(cat)"
 if [[ "$input" =~ \"session_id\":[[:space:]]*\"([^\"]+)\" ]]; then cli_id="${BASH_REMATCH[1]}"
 else cli_id="${CLAUDE_CODE_SESSION_ID:-}"; fi
@@ -46,7 +54,8 @@ else cli_id="${CLAUDE_CODE_SESSION_ID:-}"; fi
 if [[ "$cli_id" != "$ROMP_SID" ]]; then
     reg="${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}/sdk/$ROMP_SID.json"
     last_sid="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("lastSid") or "")' "$reg" 2>/dev/null)" || exit 0
-    if [[ -z "$last_sid" ]]; then [[ "$start_kind" == "startup" ]] || exit 0   # a first start, ahead of the kernel's write
+    if [[ "$start_kind" == "clear" ]]; then :                                    # the reg exists; its lastSid is still the previous id
+    elif [[ -z "$last_sid" ]]; then [[ "$start_kind" == "startup" ]] || exit 0   # a first start, ahead of the kernel's write
     else [[ "$last_sid" == "$cli_id" ]] || exit 0; fi
 fi
 read -r -d '' CTX <<'TXT'

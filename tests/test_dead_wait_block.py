@@ -58,20 +58,33 @@ class _FakeCodex:
         return bool(self.rows.get(sid))
 
 
-def _register_name(sid):
-    """A names-registry entry — the launch record BOTH backends write at creation. It is what marks
-    a reg-less sid with no Codex row as dead HISTORY (a session some backend once launched that no
-    backend holds a record of); a sid with no reg and no names entry exists only as a transcript,
-    and no liveness owner here can answer for it."""
+OTHER_SID = "11111111-2222-3333-4444-777777777777"   # a bystander SDK session: the registry is never empty
+
+
+def _register_name(sid, ended=True):
+    """A names-registry entry — the launch record BOTH backends write at creation — plus the SDK reg an
+    ENDED session keeps (the backend never unlinks a reg; the kill flips alive to False): the shape of a
+    dead SDK sender. A names entry with NO reg is dead history only when nothing shows recent life while
+    the registry holds no regs at all; with fresh states rows beside an empty registry it reads as a
+    registry moved aside, on which the corroborator stands down (tests/test_sdk_registry_blind.py). A sid
+    with no reg and no names entry exists only as a transcript, and no liveness owner here can answer
+    for it. Tests that need another reg shape write it after this call. ended=False models a sid the SDK
+    registry never held (a Codex session, or plain history) on a machine that still runs OTHER SDK
+    sessions: no reg for the sid, a bystander's alive reg beside it, so the registry is not empty."""
     jd.NAMES.mkdir(parents=True, exist_ok=True)
     (jd.NAMES / sid).write_text("web\t~/notes-api\t#3355aa\t#ffffff\n")
+    jd.SDKDIR.mkdir(parents=True, exist_ok=True)
+    if ended:
+        (jd.SDKDIR / (sid + ".json")).write_text(json.dumps({"sid": sid, "alive": False}))
+    else:
+        (jd.SDKDIR / (OTHER_SID + ".json")).write_text(json.dumps({"sid": OTHER_SID, "alive": True}))
 
 
-def _seed_store(awaiting=True, named=True):
+def _seed_store(awaiting=True, named=True, ended=True):
     # named=True: the fixture models a romp-LAUNCHED session (the usual world), so the corroborator
     # is entitled to settle it; named=False models a transcript-derived one (no launch record).
     if named:
-        _register_name(SID)
+        _register_name(SID, ended=ended)
     store = jd.load_goals(SID)
     nd = {"id": GID, "text": "delegate the batch and report", "parentId": None,
           "nodeComplete": False, "blocked": False, "cleared": False, "t": STAMP_T - 100,
@@ -264,7 +277,7 @@ class DeadWaitCorroboration(_HermeticDeadWait):
         return bool(jd.load_goals(SID)["nodes"][GID].get("blocked"))
 
     def test_a_raw_listing_collapse_alone_never_files(self):
-        _seed_store()
+        _seed_store(ended=False)
         _write_state("idle", STAMP_T + 50)
         self.codex.rows[SID] = True               # the OWNER answers alive — the raw listing blinked
         km._PREV_ALIVE = {SID}
@@ -273,7 +286,7 @@ class DeadWaitCorroboration(_HermeticDeadWait):
         self.assertIn(SID, km._PREV_ALIVE, "the death transition stays armed for a genuine later death")
 
     def test_a_blind_codex_registry_stands_down_and_the_next_tick_retries(self):
-        _seed_store()
+        _seed_store(ended=False)
         _write_state("idle", STAMP_T + 50)
         self.codex._registry_unreadable = True    # the Codex records cannot be read — a Codex sid and dead history look alike
         km._PREV_ALIVE = {SID}
@@ -285,7 +298,7 @@ class DeadWaitCorroboration(_HermeticDeadWait):
         self.assertTrue(self._blocked(), "…and the retried tick converts")
 
     def test_the_codex_registrys_dead_mark_is_the_answer_for_a_codex_sid(self):
-        _seed_store()
+        _seed_store(ended=False)
         _write_state("idle", STAMP_T + 50)
         self.codex.rows[SID] = True               # a row the backend still owns
         self.assertIs(km._dead_wait_corroborated(SID), False, "owned: alive, never converts")
@@ -367,8 +380,8 @@ class DeadWaitStandDownLogging(_HermeticDeadWait):
 
     def test_a_blind_codex_registry_logs_one_line_per_pass_not_per_candidate(self):
         sid2 = _fresh_sid()
-        _register_name(SID)
-        _register_name(sid2)
+        _register_name(SID, ended=False)
+        _register_name(sid2, ended=False)
         self.codex._registry_unreadable = True    # the Codex records cannot be read, shared by the whole pass
         km._PREV_ALIVE = {SID, sid2}
         buf = io.StringIO()
@@ -380,7 +393,7 @@ class DeadWaitStandDownLogging(_HermeticDeadWait):
         self.assertEqual({SID, sid2} & km._PREV_ALIVE, {SID, sid2}, "both kept armed")
 
     def test_a_single_probe_codex_blind_stand_down_names_the_sid(self):
-        _register_name(SID)
+        _register_name(SID, ended=False)
         self.codex._registry_unreadable = True
         buf = io.StringIO()
         with redirect_stderr(buf):
@@ -466,19 +479,19 @@ class DeadWaitOneObserver(_HermeticDeadWait):
         # the single-flight guard: the pusher's pass holds _AUTO_NUDGE_TICK_LOCK (a plain Lock), so
         # the nested tick returns at its try-acquire before run_dead_wait is even read. The
         # run_dead_wait=False sweep skip is pinned by the sequential sibling above, not by this test.
-        _seed_store()
+        _seed_store(ended=False)
         _write_state("idle", STAMP_T + 50)
         km._PREV_ALIVE = {SID}
         real = km._dead_wait_corroborated
         seen = {}
 
-        def hooked(sid, stats=None):
+        def hooked(sid, stats=None, now=None):
             if "ran" not in seen:
                 seen["ran"] = True
                 before = set(km._PREV_ALIVE)
                 km._auto_nudge_tick(STAMP_T + 901, {}, run_dead_wait=False)   # WS fires mid-pass: returns at the lock
                 seen["moved"] = set(km._PREV_ALIVE) != before
-            return real(sid, stats=stats)
+            return real(sid, stats=stats, now=now)
 
         km._dead_wait_corroborated = hooked
         try:

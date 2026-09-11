@@ -10515,7 +10515,7 @@ def _codex_records_blind(cx):
     return bool(getattr(cx, "_registry_unreadable", False))
 
 
-def _dead_wait_corroborated(sid, stats=None):
+def _dead_wait_corroborated(sid, stats=None, now=None):
     """May the dead-wait writers (_dead_wait_sweep, _wake_goal's dormant branch) treat this sid as
     actually DEAD? Their trigger — absence from the live map — inherits every collapse that map can
     have (a backend's read that failed and is stood down on, _backend_rows), and the block they file
@@ -10590,6 +10590,12 @@ def _dead_wait_corroborated(sid, stats=None):
         return None                              # a Codex sid and a names-only one look alike until it reads
     if cx is not None and cx._session(sid) is not None:
         return not cx.owns(sid)                  # the Codex registry's dead mark is the answer
+    if not _sdk_registry_has_regs() and _recent_life(sid, int(now if now is not None else time.time())):
+        if stats is not None:
+            stats["sdk"] = stats.get("sdk", 0) + 1
+        else:
+            sys.stderr.write("dead-wait: the SDK registry holds no regs while %s shows recent life — standing down\n" % sid)
+        return None                              # a registry moved aside, not a session that ended
     return True                                  # a names entry with no registry row anywhere: dead history
 
 
@@ -10616,7 +10622,7 @@ def _dead_wait_sweep(alive_ids, nudged, now):
     stats = {}                                   # loud stand-down tallies → ONE line per reason per pass
     for sid in cands:
         try:
-            if _dead_wait_corroborated(sid, stats=stats) is not True:
+            if _dead_wait_corroborated(sid, stats=stats, now=now) is not True:
                 _PREV_ALIVE.add(sid)             # not corroborated dead: nothing files, and the death
                 continue                         # transition stays armed for the next tick's re-ask
             store = jd.load_goals(sid)
@@ -15765,7 +15771,7 @@ _FOREIGN_OP_VERB = {"sendMessage": "message", "askFollowUp": "reply", "askText":
                     "moveSession": "move"}
 
 
-def _refuse_drive(client, op, sid, msg):
+def _refuse_drive(client, op, sid, msg, why=None):
     """Refuse an op for a session this kernel doesn't have — and make the refusal impossible to miss. THREE
     places, because a silent drop here costs the user typed work they cannot get back (the user 2026-07-29):
       1. a MODAL in the pane that fired it — not the `warn` toast, which fades in 12s and can be missed
@@ -15786,10 +15792,12 @@ def _refuse_drive(client, op, sid, msg):
                                  "itemId": msg.get("itemId") or "", "text": text}) + "\n")
     except OSError:
         pass
-    sys.stderr.write("undeliverable %s: this kernel has no session %s — %r\n" % (op, sid, text[:200]))
-    detail = ("Nothing was sent. This romp kernel has no session with id %s, so it could not deliver your %s "
-              "— on a board showing more than one machine, that means the pane addressed the wrong kernel. "
-              "Your text is saved verbatim in undelivered.jsonl under romp's state directory." % (sid, what))
+    sys.stderr.write("undeliverable %s: %s %s — %r\n" % (op, why or "this kernel has no session", sid, text[:200]))
+    detail = ("Nothing was sent. %s, so it could not deliver your %s. "
+              "Your text is saved verbatim in undelivered.jsonl under romp's state directory."
+              % ((why + " (session %s)" % sid) if why else
+                 ("This romp kernel has no session with id %s — on a board showing more than one machine, that "
+                  "means the pane addressed the wrong kernel" % sid), what))
     try:
         # `sid` rides along so the shell's error-center entry carries the session it was meant for, the way
         # every card-badge entry does — the bell is a log you read later, and "which one?" is the first thing
@@ -15920,7 +15928,9 @@ def _drive(msg, client):
         # Mid-compaction the whole send is PARKED (queued bubble; delivered when compaction ends — _send_or_park);
         # the backend echoes the send for itself.
         if _send_or_park(be, sid, body, qid=_client_qid(msg, sid, be)) is None:
-            client["send"](json.dumps({"type": "warn", "text": "the follow-up was not delivered: no running backend owns this session"}))
+            # the feed predicted the move on the click; the err frame carrying op + itemId is what it reverts
+            # on (_refuse_drive's shape), so the card comes back at once with the reason, not on the backstop
+            _refuse_drive(client, t, sid, msg, why="No running backend owns this session")
             return True                                   # consumed, refused: no cue, no reopen, no note
         if iid:                                           # optimistic: reopen the card NOW, before the judge pass
             _predict_working("followup", ids=[iid])       # instant cue to every feed view (chat-typed citation
@@ -16708,6 +16718,8 @@ _LIVE_READ_FAILS = {"count": 0, "last": {}}   # the liveness stand-down's tally:
 #                                               text of the failure said last (one stderr line per episode); /version
 #                                               carries the count as liveReadFailures
 _LIVE_LAST_ROWS = {}                           # backend name -> the rows its last SUCCESSFUL read produced
+_LIVE_LAST_RAW = {}                            # backend name -> the rows its last read produced, stood down or not
+_VANISHED_SAID = set()                         # sids whose reg vanished by hand while other regs stood: said once each
 
 
 def _sdk_reg_exists(sid):
@@ -16744,17 +16756,50 @@ def _sdk_records_blind(rows=None):
     prev = _LIVE_LAST_ROWS.get("sdk") or {}
     if listable:
         # The directory is back but may be a NEW one: after sdk/ vanished under a running kernel the SDK
-        # backend's next routine reg write (a lastSid flip, a model note) re-creates it with one gutted reg,
-        # and the other sessions' regs went with the moved directory. A reg the SDK backend never unlinks
-        # (a real end leaves alive:False, or a gone marker) cannot be MISSING for a sid the previous read
-        # listed live while its names entry stands: that is the collapse, not a departure.
+        # backend's next routine reg write re-creates it with one gutted reg, and the other sessions' regs
+        # went with the moved directory. A reg the SDK backend never unlinks (a real end leaves alive:False,
+        # or a gone marker) cannot be MISSING for a sid the previous read listed live while its names entry
+        # stands. The COLLAPSE is that with an EMPTY fresh read: every previous row gone at once. A partial
+        # vanish while other regs stand is one reg deleted by hand (a dormant session's, which nothing
+        # rewrites): said once, by name, and treated as that session's end — never a verdict that freezes
+        # the whole map on the previous rows (review find, 2026-09-11).
+        if rows is not None:
+            fresh_empty = not rows
+        else:
+            # no read in hand (a death writer asking): the fresh read WOULD be empty when no reg in the
+            # directory is alive — a re-created directory holds only a gutted reg, a partial vanish leaves
+            # the other alive regs standing
+            fresh_empty = True
+            try:
+                for n in os.listdir(d):
+                    if n.endswith(".json"):
+                        try:
+                            if json.loads((d / n).read_text()).get("alive"):
+                                fresh_empty = False
+                                break
+                        except Exception:
+                            continue
+            except OSError:
+                return True
+        vanished = []
         for sid in prev:
             if rows is not None and sid in rows:
                 continue
             present = _sdk_reg_exists(sid)
-            if present is None or (present is False and (jd.NAMES / sid).is_file()):
-                return True
-        return False
+            if present is None:
+                return True                              # the check itself failed: the directory is not readable
+            if present is False and (jd.NAMES / sid).is_file():
+                vanished.append(sid)
+        if not vanished:
+            return False
+        if not fresh_empty:
+            for sid in vanished:
+                if sid not in _VANISHED_SAID:
+                    _VANISHED_SAID.add(sid)
+                    sys.stderr.write("liveness: the SDK reg of %s vanished while the other regs stand — treating the "
+                                     "session as ended\n" % sid)
+            return False
+        return True
     if prev:
         return True
     try:
@@ -16765,6 +16810,35 @@ def _sdk_records_blind(rows=None):
         return False
     cx = _codex()
     return any(cx is None or cx._session(sid) is None for sid in names)
+
+
+def _sdk_registry_has_regs():
+    """Whether sdk/ can be listed and holds at least one reg file. False for a missing, unlistable or empty
+    directory — the states in which a names entry alone cannot say whether its session ever had a reg."""
+    try:
+        return any(n.endswith(".json") for n in os.listdir(jd.SDKDIR))
+    except OSError:
+        return False
+
+
+def _recent_life(sid, now):
+    """Whether `sid` shows life within discover's 48-hour horizon (jd.WINDOW), read from what the kernel
+    itself holds: the newest states row, or the session's lease file (a live SDK session holds one; a crash
+    leaves it). Never the goal store: the dead-wait block writes it, and a writer's own mark must not hold
+    its stand-down. A names sid with recent life and no reg while the registry
+    holds NO regs is a registry moved aside (a backup rename, a partial restore), never dead history: the
+    death writers stand down on it, counted (review find, 2026-09-11). A sid with none — a terminal-era
+    entry, a session long over — is dead history and stamps."""
+    floor = now - jd.WINDOW
+    row = _last_states_row(sid)
+    if row is not None and int(row.get("t") or 0) >= floor:
+        return True
+    try:
+        if (jd.STATE / "leases" / (sid + ".json")).stat().st_mtime >= floor:
+            return True
+    except OSError:
+        pass
+    return False
 
 
 def _live_stand_down(name, why):
@@ -16790,6 +16864,7 @@ def _backend_rows(name, be):
         rows = be.live_sessions()
     except Exception:
         return _live_stand_down(name, (traceback.format_exc().strip().splitlines() or ["?"])[-1])
+    _LIVE_LAST_RAW[name] = rows
     if name == "sdk" and _sdk_records_blind(rows):
         # the SDK module answers {} for a missing or unlistable registry directory (its own contract for a
         # fresh root), and a directory re-created around a moved one lists without the other sessions' regs;
@@ -22622,6 +22697,8 @@ def _death_boot_pass(now=None):
     elif blind:
         sys.stderr.write("death-boot: the Codex registry cannot be read — reg-less sids skipped this boot\n")
     n = 0
+    no_regs = not _sdk_registry_has_regs()           # an empty registry beside standing names: moved aside, or history
+    stood = 0
     for f in sorted(jd.NAMES.iterdir()):
         sid = f.name
         reg = jd.SDKDIR / (sid + ".json")
@@ -22637,10 +22714,18 @@ def _death_boot_pass(now=None):
         else:
             if blind:
                 continue                             # a registry cannot be read: stand down
-            if cx is not None and cx._session(sid) is not None and cx.owns(sid):
-                continue                             # the Codex registry says alive
+            if cx is not None and cx._session(sid) is not None:
+                if cx.owns(sid):
+                    continue                         # the Codex registry says alive
+            elif no_regs and _recent_life(sid, now):
+                stood += 1                           # a live session whose registry went aside, not history
+                continue
         if _record_death(sid, now, "boot"):
             n += 1
+    if stood:
+        _LIVE_READ_FAILS["count"] += stood
+        sys.stderr.write("death-boot: the SDK registry holds no regs while %d session(s) show recent life — stood "
+                         "down, not stamped (a registry moved aside?)\n" % stood)
     if n:
         sys.stderr.write("death-boot: recorded %d session death(s) from before this kernel\n" % n)
 

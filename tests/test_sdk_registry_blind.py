@@ -88,7 +88,7 @@ class _Root(unittest.TestCase):
         self._saved = (km._sdk, km._codex, dict(km._LIVE_LAST_ROWS), dict(km._LIVE_READ_FAILS), km._prev_live_sids[0])
         km._sdk = lambda: self.fake
         km._codex = lambda: None
-        km._LIVE_LAST_ROWS.clear()
+        km._LIVE_LAST_ROWS.clear(); km._LIVE_LAST_RAW.clear(); km._VANISHED_SAID.clear()
         km._LIVE_READ_FAILS["count"] = 0
         km._LIVE_READ_FAILS["last"] = {}
         km._prev_live_sids[0] = None
@@ -199,6 +199,56 @@ class RegistryDirectoryGone(_Root):
             km._death_sweep_tick(NOW + 1, {})
         self.assertIsNone(_marker(SID)); self.assertIsNone(_marker(SID2))
         self.assertIsNone(km._dead_wait_corroborated(SID2))
+
+    def test_a_boot_with_the_registry_moved_aside_after_live_sessions_stamps_nothing(self):
+        # sdk/ renamed for a backup while names/ stands, and the kernel restarts: the new process has no previous
+        # rows, the boot creates an empty sdk/, and a names sid with no reg looks exactly like dead history —
+        # except that it shows RECENT LIFE (states rows minutes old, a lease, a goal store just written).
+        _name(SID); _name(SID2)
+        d = jd.STATE / "states"; d.mkdir(parents=True, exist_ok=True)
+        (d / (SID + ".jsonl")).write_text(json.dumps({"t": NOW - 120, "state": "working"}) + "\n")
+        (jd.STATE / "leases").mkdir(parents=True, exist_ok=True)
+        (jd.STATE / "leases" / (SID2 + ".json")).write_text(json.dumps({"sid": SID2}))
+        os.utime(jd.STATE / "leases" / (SID2 + ".json"), (NOW - 60, NOW - 60))
+        km._LIVE_LAST_ROWS.clear()
+        with contextlib.redirect_stderr(self.err):
+            km._death_boot_pass(NOW)
+            stats = {}
+            self.assertIsNone(km._dead_wait_corroborated(SID, stats=stats, now=NOW))
+        self.assertIsNone(_marker(SID)); self.assertIsNone(_marker(SID2))
+        self.assertEqual(stats, {"sdk": 1})
+        self.assertEqual(km._LIVE_READ_FAILS["count"], 2, "both stand-downs counted")
+        self.assertEqual(self.err.getvalue().count("death-boot: the SDK registry holds no regs while 2 session(s) show recent life"), 1)
+
+    def test_a_terminal_era_root_with_stale_states_still_stamps_at_boot(self):
+        _name(SID)
+        d = jd.STATE / "states"; d.mkdir(parents=True, exist_ok=True)
+        (d / (SID + ".jsonl")).write_text(json.dumps({"t": NOW - 30 * 86400, "state": "waiting"}) + "\n")
+        km._LIVE_LAST_ROWS.clear()
+        with contextlib.redirect_stderr(self.err):
+            km._death_boot_pass(NOW)
+        self.assertIsNotNone(_marker(SID), "no life within the horizon: dead history")
+        self.assertEqual(km._LIVE_READ_FAILS["count"], 0)
+
+    def test_dead_wait_reads_a_names_only_sid_with_stale_life_as_dead_history(self):
+        _name(SID)
+        d = jd.STATE / "states"; d.mkdir(parents=True, exist_ok=True)
+        (d / (SID + ".jsonl")).write_text(json.dumps({"t": NOW - 30 * 86400, "state": "waiting"}) + "\n")
+        jd.SDKDIR.mkdir(parents=True, exist_ok=True)   # the registry exists and is empty: nothing recent, so history
+        self.assertIs(km._dead_wait_corroborated(SID, now=NOW), True)
+
+    def test_a_reg_deleted_by_hand_while_others_stand_ends_that_session_and_freezes_nothing(self):
+        rows = self._seed()
+        os.unlink(jd.SDKDIR / (SID2 + ".json"))       # one dormant session's reg, removed out of band
+        with contextlib.redirect_stderr(self.err):
+            self.assertFalse(km._sdk_records_blind(), "a partial vanish is not the collapse")
+        fresh = self.live()
+        self.assertEqual(set(fresh), {SID}, "the fresh read is served, not the frozen previous rows")
+        self.assertEqual(km._LIVE_READ_FAILS["count"], 0)
+        self.assertEqual(self.err.getvalue().count("vanished while the other regs stand"), 1)
+        self.live()
+        self.assertEqual(self.err.getvalue().count("vanished"), 1, "said once per sid")
+        self.assertIn(SID2, self.err.getvalue())
 
     @unittest.skipIf(os.geteuid() == 0, "root reads an unreadable directory")
     def test_the_boot_pass_and_the_sweep_stand_down_on_an_unlistable_directory_without_raising(self):
@@ -323,8 +373,10 @@ class FollowUpRefused(_Root):
         finally:
             (km.Sessions.backend_for, km._push_soon, km._name_of, km._predict_working,
              jd.optimistic_followup, km._mark_views_dirty) = saved
-        warns = [m for m in sent if m.get("type") == "warn"]
-        self.assertTrue(warns and "not delivered" in warns[0]["text"], sent)
+        errs = [m for m in sent if m.get("type") == "err"]
+        self.assertTrue(errs, sent)
+        self.assertEqual((errs[0]["op"], errs[0]["itemId"]), ("askFollowUp", SID + ":g1"), "the shape the feed reverts on")
+        self.assertIn("No running backend owns this session", errs[0]["text"])
         self.assertEqual(predicted, [], "no card moves to Working on a refusal")
         self.assertEqual(reopened, [], "no reopen event is written on a refusal")
 

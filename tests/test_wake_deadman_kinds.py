@@ -136,7 +136,7 @@ class PeerDeathConversion(_Base):
         (km.jd.GOALDIR / (PEER + ".json")).write_text(json.dumps(
             {"rompUuid": PEER, "seq": 0, "placements": {}, "status": {}, "nodes": {}}))
         saved = (km._dead_wait_corroborated, km._name_of, getattr(km, "_PREV_ALIVE"))
-        km._dead_wait_corroborated = lambda sid, scan=None, stats=None: True
+        km._dead_wait_corroborated = lambda sid, stats=None, now=None: True   # the sweep passes its clock
         km._name_of = lambda sid: "worker_two"
         km._PREV_ALIVE = {SID, PEER}
         try:
