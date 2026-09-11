@@ -337,7 +337,19 @@ judges' origin rule); for stores written before that rule, `build_feed` heals
 read-side: a top rooted in a machine record (the judge's latched `askAnchor`
 verdict: a peer's line, the agent's own record, romp bookkeeping; never a top that
 merely lacks an anchor, and never a scheduled prompt's top, which the latch marks
-`scheduled` as the user's configured work) is rendered inside the session's human-asked top that was current
+`scheduled` as the user's configured work), or anchored on the harness's own skill-load
+record (the bare-named `<skill-format>` command wrapper with no arguments slot that the CLI
+writes when it loads a skill for the model, never typed; the event model emits no atom for it since 2026-09-11,
+and the judge's latch stamps the tops older stores minted from it `machine` off the record,
+re-stamping an older `human` latch once and resolving the top with romp's done verdict
+naming the skill, so nothing nudges or stalls it; a once-per-boot store-side pass reads the
+wrapper records raw across the project directory for stores the chain or the discover
+window no longer reaches, append-incrementally and under a byte budget, and an anchor once
+checked (an atom of a parse, or absent from a complete directory index) is never re-read. Such a top never hosts, a block romp filed itself (a failed
+nudge, an interrupt) does not except it, and with no host in the store it is hidden from
+the feed rather than shown as a root: the session's own view keeps the work, and only a
+live floor or the agent's own question to the user (a closer's or planner's block under
+it, which the stamp never resolves away) keeps its card) is rendered inside the session's human-asked top that was current
 when it was minted; word overlap with the transcript's recorded background
 launches only picks which launch supplies the why and, among several open tops,
 the parent. Hosts are the asks that trace to the user: human-anchored tops and

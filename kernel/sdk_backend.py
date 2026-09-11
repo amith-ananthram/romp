@@ -969,6 +969,19 @@ _COMMAND_NAME_ANY_RE = re.compile(r"<command-name>([^<]*)</command-name>")
 _COMMAND_ARGS_RE = re.compile(r"<command-args>([\s\S]*?)</command-args>")
 _LOCAL_STDOUT_RE = re.compile(r"^\s*<local-command-stdout>([\s\S]*?)</local-command-stdout>")
 _CMD_WRAP_RE = re.compile(r"^\s*<(?:command-(?:name|message|args|contents)|local-command-(?:stdout|caveat))>")
+# The harness's OWN skill load, twin of the event model's is_skill_load_wrapper (the user 2026-09-10): the
+# CLI loads a skill for the model by itself as a command wrapper with a BARE name, a <skill-format> tag and no
+# <command-args> slot (a typed skill in the new format carries the tag too, with its slot and its slash);
+# nobody typed it, so it is never the command-flagged human atom (which opened a segment of its own on the
+# live tail exactly as the file adapter did). It falls to the wrapper-noise skip below. ONE definition: the
+# event model's, read through the module binding _human_input_record already reads, so the two adapters cannot
+# drift on this shape (the other wrapper regexes above are twins because msg_to_atom predates the binding).
+
+
+def _is_skill_load_wrapper(text):
+    return _em.is_skill_load_wrapper(text)
+
+
 # The Skill tool's INSTRUCTIONS payload — twin of the event model's SKILL_CONTENT_RE/SKILL_MD_CAP (the
 # user 2026-07-08). On the STREAM it arrives as a plain UserMessage (the isMeta flag exists only on the
 # transcript record), so as a raw user atom it rendered as a fully-expanded note box for the whole live
@@ -993,6 +1006,8 @@ def _command_invocation(text):
     record that BEGINS with a command wrapper (_CMD_WRAP_RE), never from prose that quotes it. Read by
     msg_to_atom for the live atom and by _landed_texts for the landing scan, so the scan finds a slash
     send under exactly the text the kernel's prune retires its echo by."""
+    if _is_skill_load_wrapper(text):
+        return None                              # the harness loading a skill for the model: not an invocation
     mcmd = _COMMAND_NAME_RE.match(text) or (_COMMAND_NAME_ANY_RE.search(text)
                                             if _CMD_WRAP_RE.match(text) else None)
     if not mcmd:
@@ -8437,6 +8452,8 @@ def _human_input_record(rec: dict) -> bool:
         return False
     text = _em._text_of(blocks)
     if typ == "user":
+        if _em.is_skill_load_wrapper(text):
+            return False                                   # the harness loading a skill for the model (T333): nobody typed it
         if _em.COMMAND_NAME_RE.match(text) or (_em.CMD_WRAP_RE.match(text) and _em.COMMAND_NAME_ANY_RE.search(text)):
             return True                                    # the slash command the person typed, however marked
         if _em.CMD_WRAP_RE.match(text) or _em.SKILL_CONTENT_RE.match(text) or rec.get("sourceToolUseID"):

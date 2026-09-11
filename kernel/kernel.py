@@ -505,6 +505,11 @@ class _PerfStats:
             goals = jd.goal_io_stats()
         except Exception:
             goals = {}
+        try:                                               # T333: the boot pass's raw reads, its index and its negative memo
+            skill_idx = {"filesRead": int(jd._WRAP_READS["n"]), "bytesRead": int(jd._WRAP_READS["bytes"]),
+                         "filesIndexed": len(jd._WRAP_INDEX), "checked": len(jd._CHECKED)}
+        except Exception:
+            skill_idx = {}
         # The three identity memos' readers land here (review find, 2026-09-08: they had no consumer): the
         # judge pass's stat-keyed store memo, the pusher's shared read-only store cache and the write-moment
         # chain memo. `goals.loads` is the writer's loader alone; the pusher's loads show under memos.shared.
@@ -531,7 +536,7 @@ class _PerfStats:
         now = time.time()
         return {"now": now, "since": since, "uptime_s": now - _STARTED, "log": _PERF,
                 "process": _process_stats(), "pusher": pusher, "stages_ms": stages,
-                "builds": builds, "sends": sends, "goals": goals, "memos": memos, "judge": judge, "http": http,
+                "builds": builds, "sends": sends, "goals": goals, "memos": memos, "judge": judge, "skillLoadIndex": skill_idx, "http": http,
                 # T323: cold parses through the ONE parse store (stage 2): total = every miss (whoever asked), kernel =
                 # the display's asks among them, judge = the rest, hits = the display's asks served from the store,
                 # sharedHits = every hit. A boot with no client reads kernel 0.
@@ -2924,7 +2929,8 @@ def _debt_escalate(asker, debtor, ask_ts, now):
         cands = [nd for gid, nd in nodes.items()
                  if nd.get("parentId") is None and status.get(gid) == "working"
                  and gid not in _confirming            # one completion truth: the rollup exports (2026-08-13)
-                 and (nd.get("t") or 0) <= ask_ts]
+                 and not (isinstance(nd.get("askAnchorRecord"), dict) and nd["askAnchorRecord"].get("kind") == "skill-load")
+                 and (nd.get("t") or 0) <= ask_ts]      # never a top the harness's skill load minted: the feed hides it (T333)
         if not cands:
             return False
         nd = max(cands, key=lambda n: n.get("t") or 0)
@@ -11744,6 +11750,8 @@ def _auto_nudge_session(s, now, tmux, nudged, waitfor, alive_ids=None, wake_only
         nd = nodes[gid]
         if nd.get("parentId") is not None or nd.get("cleared") or gid in cleared:
             continue                                 # top-level, live goals only
+        if isinstance(nd.get("askAnchorRecord"), dict) and nd["askAnchorRecord"].get("kind") == "skill-load":
+            continue                                 # T333: a top the harness's skill load minted; romp resolves it, never asks
         if status.get(gid, "working") != "working":
             continue                                 # blocked/completed → the session resolved it; not orphaned
         _stamp = _goal_awaiting_stamp_full(nodes, gid, _kids, answered_at=_peer_answered(sid))
@@ -25967,7 +25975,16 @@ def _heal_session_tops(path, nodes, status=None, keep=()):
     was current when it was minted. The deciding fact is the judge's own latched anchor verdict (askAnchor
     "machine": the node's prompt anchor resolved to a peer mail, the agent's own record or romp bookkeeping,
     _latch_ask_anchors); never a word match, and never a top that merely lacks an anchor (older stores hold
-    plain tops without one). Excluded: cleared tops, handoff trackers, delegate-rooted tops (origin.peer: a
+    plain tops without one). A top anchored on the harness's own skill-load wrapper (T333, 2026-09-11: the
+    bare-named <skill-format> command wrapper the CLI writes when it loads a skill for the model) is one of
+    these: the judge's stamp (_latch_skill_load_anchors, off the parse's own report of the wrappers it skipped)
+    marks it "machine" with askAnchorRecord {kind: skill-load, skill},
+    re-stamping an older "human" latch once, so this reads the store alone, never a transcript (build_feed's
+    cold-start contract). Its why names the skill, and with no host in the store it is marked hidden
+    (born.hidden: the feed shows no card, the session's own view keeps the work) rather than left as a root,
+    and a block romp filed itself (a failed nudge, an interrupt) does not except it: the judge resolves such a top
+    with romp's done verdict, and only a live floor or the agent's own question to the user (a block from the
+    closer or planner anywhere under it, jd._asks_user) keeps its card. Excluded: cleared tops, handoff trackers, delegate-rooted tops (origin.peer: a
     chain the courier traced) and steps born of a session (never tops). A top a live floor RESOLVES to (a
     permission prompt, an API error or a judge-auth refusal keys the card on it) is un-nested by build_feed once
     the floors are known: it keeps its card and its face record, like a blocked one. HOSTS are the asks that trace to the user: human-anchored
@@ -25986,10 +26003,13 @@ def _heal_session_tops(path, nodes, status=None, keep=()):
     host). Deterministic: a pure function of the store and the task stream. Never writes the store."""
     out = {}
     status = status or {}
-    def toks(x):
-        return {w for w in re.findall(r"[a-z0-9]+", str(x or "").lower()) if len(w) > 3 and w not in _HEAL_STOP}
     def delegate(nd):
         return isinstance(nd.get("handoff"), dict) or (isinstance(nd.get("origin"), dict) and nd["origin"].get("peer"))
+    def skill_of(nd):                                 # the latch's record class (T333): the skill the harness loaded
+        rec = nd.get("askAnchorRecord")
+        return str(rec.get("skill") or "skill") if isinstance(rec, dict) and rec.get("kind") == "skill-load" else None
+    def toks(x):
+        return {w for w in re.findall(r"[a-z0-9]+", str(x or "").lower()) if len(w) > 3 and w not in _HEAL_STOP}
     cands = [(nid, nd) for nid, nd in nodes.items()
              if nd.get("parentId") is None and not nd.get("cleared") and not nd.get("born") and not delegate(nd)
              and nd.get("askAnchor") == "machine"]      # never "scheduled": a scheduled prompt's top is the user's
@@ -26018,10 +26038,16 @@ def _heal_session_tops(path, nodes, status=None, keep=()):
             if share > 0.5 and share > best:
                 best, hit = share, l
         via = ("workflow" if hit.get("type") == "local_workflow" else "agent") if hit else "work"
+        load = skill_of(nd) if not hit else None       # a matched run outranks the anchor's story
         why = ("matched a background %s the session started (%s)" % (via, " ".join(str(hit.get("launchDesc") or hit.get("summary")).split())[:120])
-               if hit else "rooted in the session's own record (a peer's line, a report, its own turn), not in a request")
+               if hit else "rooted in the %s skill the harness loaded for the session, not in a request" % load if load
+               else "rooted in the session's own record (a peer's line, a report, its own turn), not in a request")
         born = {"kind": "session", "via": via, "why": why, "healed": True}
-        nest = not (nd.get("blocked") or status.get(nid) == "blocked" or nd.get("clearWrap") or nid in set(keep or ()))
+        if skill_of(nd):                                  # a skill-load top: a nudge-failed or interrupt block is romp's own and no
+            nest = (not jd._asks_user(nodes, nid) and not nd.get("followupAt")   # door; the agent's question to the user (a
+                    and nid not in set(keep or ()))       #   closer's block under it) or the user's own reply on the card
+        else:                                             #   (the follow-up floor) keeps the card, as a floor does
+            nest = not (nd.get("blocked") or status.get(nid) == "blocked" or nd.get("clearWrap") or nid in set(keep or ()))
         host = None
         if nest:
             before = [h for h in hosts if (h[1].get("t") or 0) <= (nd.get("t") or 0) and h[0] != nid]
@@ -26033,6 +26059,9 @@ def _heal_session_tops(path, nodes, status=None, keep=()):
                     host = max(pool, key=lambda h: (len(toks(h[1].get("text")) & ht), h[1].get("t") or 0))
         if host:
             born["parentText"] = str(host[1].get("text") or "")[:120]
+        elif nest and skill_of(nd):
+            born["hidden"] = True     # a skill-load top with no request in the store to sit under: the feed hides it (the
+                                      # session's own view keeps the work); a blocked one is not here, it keeps its card
         out[nid] = (host[0] if host else None, born)
     return out
 
@@ -35527,6 +35556,7 @@ def build_feed(now, tmux=None):
     asks, working, awaiting = [], [], []
     serving_folds = []                                # T137: worker mirror cards awaiting the view-side fold
     heal_total = 0                                    # T319: session-started tops nested this build (logged once per rise)
+    hidden_total = 0                                  # T333: skill-load tops with no host, hidden from the feed this build
     bg_services = {}          # session name -> live SERVICE descs (judge-classified, _bg_split) → the neutral chip
     alive = _alive_sessions(now, tmux)               # hard filter: living sessions only
     wmap = _wait_for_graph(now, {s["sid"] for s in alive})   # per-session 'waiting on a live peer' (the user 2026-06-22)
@@ -35649,8 +35679,12 @@ def build_feed(now, tmux=None):
             pass
         healed = _heal_session_tops(s.get("path"), nodes, status)   # T319: machine-rooted tops nest (read-side)
         heal_total += sum(1 for v in healed.values() if v[0])
+        _hidden = {k for k, v in healed.items() if v[1].get("hidden")}   # T333: rooted in a skill the harness loaded, no
+        hidden_total += len(_hidden)                                     #   request in the store to sit under: no card
         children = {}
         for nid, nd in nodes.items():
+            if nid in _hidden:
+                continue                             # the session's own view keeps the work
             _hp = healed.get(nid)
             _pk = _hp[0] if (_hp and _hp[0]) else nd.get("parentId")
             if _pk is not None and _pk not in nodes and isinstance(nd.get("born"), dict):
@@ -35898,6 +35932,12 @@ def build_feed(now, tmux=None):
                 children.setdefault(None, []).append(_f)
                 healed[_f] = (None, _h[1])
                 heal_total -= 1
+                _unnested = True
+            elif _h and _h[1].get("hidden") and _f in _hidden:   # T333: a hidden top the floor keys on comes back as a card
+                children.setdefault(None, []).append(_f)
+                healed[_f] = (None, {k: v for k, v in _h[1].items() if k != "hidden"})
+                _hidden.discard(_f)
+                hidden_total -= 1
                 _unnested = True
         if _unnested:                                # the derivations below read the tree the card SHOWS (item 8 of the
             agent_open = _agent_open_set(nodes, children)   #   fourth review): recomputed over the un-nested layout
@@ -36507,10 +36547,15 @@ def build_feed(now, tmux=None):
     # globally unique, so the tracker id is the whole key). A candidate whose tracker row is not
     # on this build's board keeps its own card — suppression without a rendered home would
     # silently hide live work.
-    if heal_total > _HEAL_LOG["n"]:                   # T319: said once per boot, and again only when the count rises
-        _HEAL_LOG["n"] = heal_total
-        sys.stderr.write("feed: %d session-started top(s) nested under the goal they ran in "
-                         "(no request behind them; the planner nests new ones at mint time)\n" % heal_total)
+    _rose = []                                        # T319: said once per boot, and again only when a count RISES; each
+    if heal_total > _HEAL_LOG["n"]:                   #   count is named only when it is the one that rose, so a rise in
+        _rose.append("%d session-started top(s) nested under the goal they ran in" % heal_total)   # one never re-says
+    if hidden_total > _HEAL_LOG.get("h", 0):         #   the other's number (T333: the hidden count, a skill the harness
+        _rose.append("%d session-started top(s) hidden (rooted in a skill the harness loaded, no request in the "
+                     "store to sit under; the session's own view keeps the work)" % hidden_total)   # loaded, no host)
+    if _rose:
+        _HEAL_LOG["n"], _HEAL_LOG["h"] = max(heal_total, _HEAL_LOG["n"]), max(hidden_total, _HEAL_LOG.get("h", 0))
+        sys.stderr.write("feed: %s (no request behind them; the planner nests new ones at mint time)\n" % "; ".join(_rose))
     if serving_folds:
         _byrow = {}
         for _c in asks:
