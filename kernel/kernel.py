@@ -40630,7 +40630,19 @@ def _resolve_reconnect(c, chat_list):
     it (the pusher, the connect push a `ready` triggers included, _push_session_now, _confirm_close_now), so no
     strip can reach a reconnecting client before its set exists: a close confirmation landing in the gap before
     the pusher's first pass would otherwise paint the page's stale sessions as loaded tabs. No active hint (no
-    localStorage) → the kernel cannot know what the page shows → no set → today's full push (fail safe)."""
+    localStorage) → the kernel cannot know what the page shows → no set → today's full push (fail safe).
+    Returns whether the flag was popped HERE, so the caller knows the strip it is about to send is the redial's
+    first. That strip stands in for the `ready` a redial never posts: the bundle posted its one ready on an
+    earlier socket of this page, so no ready arm runs for this socket, and the pop stamps the client `ready` in
+    the arm's place (the target filter of _reveal_request reads the stamp); the caller then consumes a reveal
+    parked for the page's window right behind the strip (_consume_pending_reveal): strip, then focus, the order
+    the ready arm sends them in. The stamp itself lands earlier than the arm's (the arm stamps after its push;
+    this stamps before the caller's strip is enqueued), so a tap that reaches _reveal_request between this lock's
+    release and the strip's enqueue is sent ahead of the strip. Accepted: a redial is not a reload, so the page
+    still shows every tab it had, and a focus naming a session created during the outage arrives ahead of the
+    strip that lists it only the way a live tap outruns the pusher today (the bundle's focus handler acts by id
+    and treats the session's presence as optional). A client that declared no redial is left as it was, and the
+    caller does nothing more."""
     # ATOMIC under the client's slot lock, flag to set (review find 2026-09-07): with the pop and the stats outside
     # it, a second strip sender racing this one popped False, sent a keyless strip and a FULL for some sid, and
     # this sender then wrote a set still naming that sid — held whole by the client yet served only status frames
@@ -40638,14 +40650,19 @@ def _resolve_reconnect(c, chat_list):
     # holds whole (echat) is excluded outright, so a full that won the race can never be re-listed.
     with _client_lock(c):
         if not c.pop("reconnect", False):
-            return
+            return False
+        # The redial's stamp (2026-09-10): the page listens (the shim dials ?reconnect=1 only once the kernel's caps
+        # frame has answered its bundle's ready), and the bundle posts ready once, so nothing else would ever stamp
+        # this socket; without the stamp a tap for this window parked for the rest of the page's life.
+        c["ready"] = True
         act = c.get("active")
         if not act:
-            return
+            return True
         held = c.get("echat") or {}
         skel = [sid for sid in _skeleton_for(c, str(act), chat_list) if sid not in held]
         c["skeleton"] = set(skel)
         c["skeletonOrder"] = skel
+    return True
 
 
 def _send_tab_order(c, tab_order, tab_meta, live):
@@ -43103,8 +43120,10 @@ def _push(targets, connect=False, tmux=None):
                 _send_client(c, ("globalRetryPaused",), {"type": "globalRetryPaused", "value": _retry_paused_on(),
                                                          "resumeAt": _retry_resume_at(),   # limit reset epoch → the card counts down to the real retry
                                                          "reason": _retry_pause_reason()})   # "spend" → the card says 'raise your cap', no countdown
-                _resolve_reconnect(c, chat_list)         # a redialing page: fix its skeleton set BEFORE any strip
+                redialed = _resolve_reconnect(c, chat_list)   # a redialing page: fix its skeleton set BEFORE any strip
                 _send_tab_order(c, tab_order, tab_meta, tmux)
+                if redialed:                             # the redial's first strip stands in for the ready it never posts:
+                    _consume_pending_reveal(c, why="the pane's redial")   # a reveal parked for its window lands behind the strip
             active = {c.get("active") for c in chat_clients if c.get("active")}
             # Stable: active tabs first — and TRANSCRIPT-LESS sessions with them. A just-created session
             # has no transcript, so its build is near-free, and its creator is guaranteed to be staring
@@ -43608,8 +43627,10 @@ def _push_session_now(sid):
             return                                   # the periodic pusher owns the sid until content returns
         ms = None                                    # lazy: the first full send materializes it, the rest reuse
         for c in targets:
-            _resolve_reconnect(c, chat_list)         # a redialing page must never see a strip before its set exists
+            redialed = _resolve_reconnect(c, chat_list)   # a redialing page must never see a strip before its set exists
             _send_tab_order(c, tab_order, tab_meta, tmux)
+            if redialed:                             # this strip is the redial's first: a reveal parked for its window lands behind it
+                _consume_pending_reveal(c, why="the pane's redial")
             ms = _send_chat(c, m, ms, 0, True)       # change_from 0 → always the full-session form (…and releases a skeleton)
     except Exception:
         sys.stderr.write("push-session-now (%s): %s\n" % (sid, traceback.format_exc()))
@@ -43658,8 +43679,10 @@ def _confirm_close_now(sid):
             targets = [c for c in _clients if c["app"] == "chat"]
         for c in targets:
             try:
-                _resolve_reconnect(c, chat_list)     # a confirmation may be the FIRST strip a redialing page sees
+                redialed = _resolve_reconnect(c, chat_list)   # a confirmation may be the FIRST strip a redialing page sees
                 _send_tab_order(c, tab_order, tab_meta, tmux)
+                if redialed:                         # ...and then the sender that lands a reveal parked for its window
+                    _consume_pending_reveal(c, why="the pane's redial")
             except Exception:
                 c["alive"] = False
         return sid not in tab_order
@@ -45572,7 +45595,8 @@ def _sw_js():
 # mints and every same-window pane shares — so a second dashboard's reload cannot steal it). One
 # slot, latest wins: two taps before a boot completes should land on the newer notification.
 # `sent` (2026-09-06): the clients a LIVE tap was already handed to while unproven — see
-# _reveal_request; a pong from one of them retires the slot, a redial's ready consumes it.
+# _reveal_request; a pong from one of them retires the slot, a redial's first tab strip consumes it (a
+# redialed socket carries no ready, so _resolve_reconnect stamps it and its strip sender consumes).
 _PENDING_REVEAL = [None]                     # {"sid": ..., "wid": ...[, "sent": [clients]]} or None
 # The roads a shell may name in /reveal's `via`, the log line's first word (the ledger block above _push_ledger has
 # the design): the worker's message to a live window ('sw'), the deep link the page opened on or was navigated to
@@ -45622,8 +45646,12 @@ def _reveal_request(sid, wid, boot=False, via=""):
               the peer is unproven since the last heartbeat). Deliver as before AND keep a copy
               parked, tagged with who it went to: the pong that proves that socket alive retires it
               (_note_ws_inbound — the focus frame is ordered behind the ping it answers); a dead
-              socket never pongs, the pane redials, and its ready consumes the copy instead of
-              finding nothing. A socket with no ping outstanding is proven: nothing parked, so a
+              socket never pongs, the pane redials, and the redial's first tab strip consumes the
+              copy instead of finding nothing: a redialed socket carries no ready (the bundle posted
+              its one ready on the socket that died), so _resolve_reconnect stamps the client when
+              the first strip sender pops the flag, and that sender consumes behind its strip. A tap
+              in the gap between the redial's handshake and that strip parks like any other and is
+              landed by the same strip. A socket with no ping outstanding is proven: nothing parked, so a
               later ready never replays a landed tap — except on the boot road, where the copy is
               kept whatever the ping state (above) and the pane's own answer retires it.
 
@@ -45639,7 +45667,9 @@ def _reveal_request(sid, wid, boot=False, via=""):
         # same-wid chat socket exists from its handshake, but until its bundle posts ready it has no message
         # listener, so a focus sent to it vanishes — and its ready message, counted as an answer by
         # _note_ws_inbound, would retire the parked copy before the ready handler could consume it (the
-        # review find on T312). Such a socket is left alone: the park stands and its ready consumes.
+        # review find on T312). Such a socket is left alone: the park stands and its ready consumes. A
+        # redial (?reconnect=1) never posts a ready: _resolve_reconnect stamps it at its first tab strip,
+        # and that strip's sender consumes the park.
         targets = [c for c in _clients if c["app"] == "chat" and (c.get("wid") or "") == wid and c.get("ready")]
     delivered, sent = False, []
     for c in targets:
@@ -45678,18 +45708,23 @@ def _reveal_proven(client):
         print("[reveal] sid=%s: copy retired — its target answered" % str(p["sid"])[:8], file=sys.stderr)
 
 
-def _consume_pending_reveal(client):
+def _consume_pending_reveal(client, why="the pane's ready"):
     """Called from the WS 'ready' handler: if this is the chat pane the parked reveal was aimed
     at, deliver and clear. Runs AFTER the ready push, so the session tabs this focus names are
     already on the client (same socket, ordered delivery). An empty parked wid matches the first
-    chat pane to arrive — the no-sessionStorage fallback, better than dropping the tap."""
+    chat pane to arrive — the no-sessionStorage fallback, better than dropping the tap.
+    Also called by each tab-strip sender right after a redial's FIRST strip (_resolve_reconnect
+    popped the flag): a redialed socket never carries a ready, so that strip is the event that
+    consumes; the strip is sent first, for the same reason the ready push precedes the arm's
+    consume. `why` names the event on the journal line, so a park's end says which of the two
+    landed it."""
     p = _PENDING_REVEAL[0]
     if not p or client.get("app") != "chat":
         return
     if p["wid"] and (client.get("wid") or "") != p["wid"]:
         return
     _PENDING_REVEAL[0] = None
-    print("[reveal] sid=%s wid=%s: consumed — the pane's ready" % (str(p["sid"])[:8], str(p["wid"] or "")[:8]), file=sys.stderr)
+    print("[reveal] sid=%s wid=%s: consumed — %s" % (str(p["sid"])[:8], str(p["wid"] or "")[:8], why), file=sys.stderr)
     try:
         client["send"](json.dumps(_reveal_msg(p["sid"])))
     except Exception:
