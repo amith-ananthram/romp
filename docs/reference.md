@@ -1001,10 +1001,22 @@ sets as hashes, each file's witness and where its tail starts, and a hash over
 the pre-cut turn ids, segment ids and atom uuids. A fresh kernel verifies the
 document, rebuilds the pre-cut turns as atoms without bodies, reads the leaf
 from the cut's byte offset only and parses that tail, proves the prefix by the
-hash, and hands the judges and the display one tree. A body before the cut is
-read on demand from its record when a consumer asks for it, through a
-byte-capped memo; a consumer that reads one without asking fails loudly rather
-than seeing an empty message. A compaction after the document demotes to a
+hash, and hands the judges and the display one tree. Since the lazy index
+(2026-09-11, document version 4) the document also carries a `turns` section:
+each pre-cut turn as its identity, its atoms' row indexes, its segments' spans
+and the scalars the kernel's walkers read (the atoms' uuids, the last and
+latest times, the last model, the tool calls), so a restore builds the turns
+without building an atom. The pre-cut rows stay as bytes; a turn's atoms are
+a list whose slots are built one at a time when a consumer reaches for them,
+through a process-wide LRU of 20000 built atoms across every session (eviction
+drops the memo; a consumer's own reference stays whole), counted per consumer
+under `/perf` `asmIndex`. A body before the cut is read on demand from its
+record when a consumer asks for it, through a byte-capped memo; a consumer
+that reads one without asking fails loudly rather than seeing an empty
+message, and a serializer reaching a pre-cut turn's atoms is refused (a dump
+goes through `plain_tree`). A document written without the parsed tree (the
+exit path past its budget) carries no `turns` section and restores the atoms
+as before, until the next settle rewrites it with one. A compaction after the document demotes to a
 whole parse as before, and the next settle writes a new document; a rewrite
 under the cut's guard, a shrunk or moved file, another session, other inputs,
 a wrong version, a corrupt or unprovable document, or a document past 16 MB
@@ -1390,6 +1402,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `reconstruction`, `oversize`, `unencodable`, `offsets`, `stat`, `write`),
   `hydratedAtoms` and `hydratedBytes` (bodies read on demand for atoms before
   a cut) and `hydratedBy` (those bytes per calling function).
+- `asmIndex`: the lazy index (T323 stage 4c) a restored session's pre-cut turns
+  come from: `materialized` atoms built from the document's rows since boot,
+  `materializedBy` (per consumer), `resident` (the process-wide LRU, `cap`
+  20000 atoms across every session; eviction drops the memo, never a field in
+  place), `evictions`, and `restoredTurns`.
 - `skillLoadIndex`: the judge's skill-load boot pass (the tops older stores minted from
   the harness's own skill load): `filesRead` and `bytesRead` (transcripts read raw this
   boot, appended tails only once the persisted index holds a file), `filesIndexed`, and
