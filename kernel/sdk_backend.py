@@ -6431,14 +6431,21 @@ class SdkSession:
         problem_row(st, "session %s: could not complete an attach to its live session host after %d tries (%s); the host keeps "
                     "the CLI; the next message tries again" % (self.name, self._host_attach_retries, type(exc).__name__),
                     "host.attach-failed", sid=self.sid, name=self.name, log=self.backend._log, tries=self._host_attach_retries)
-        try:
-            # the marker _ensure reads: no automatic revival (the timer sweep, a boot, a heal) attaches this host
-            # again; a user's send or a change of the lease's holder clears it (new information, not a timer).
-            # Keyed by the LEASE's holder identity, the same reading _ensure makes
-            self.backend._update_reg(self.sid, hostAttachFailed={"host": self.backend._holder_ident(read_lease(st, self.sid)),
-                                                                  "t": time.time(), "tries": self._host_attach_retries})
-        except Exception as e:
-            self.backend._log("host (%s): stand-down marker write failed: %s" % (self.name, e))
+        lease = read_lease(st, self.sid)
+        if _ht().host_lease_state(lease, time.time()) == "attach":
+            try:
+                # the marker _ensure reads: no automatic revival (the timer sweep, a boot, a heal) attaches this host
+                # again; a user's send or a change of the lease clears it (new information, not a timer). Keyed by
+                # the LEASE's holder identity, the same reading _attach_stand_down_holds makes; written only while
+                # the lease is a live host's, so a host that left in the meantime is walked as the orphan it is
+                # (never a marker naming no host; the commit-12 review's fifth item)
+                self.backend._update_reg(self.sid, hostAttachFailed={"host": self.backend._holder_ident(lease),
+                                                                      "t": time.time(), "tries": self._host_attach_retries})
+            except Exception as e:
+                self.backend._log("host (%s): stand-down marker write failed: %s" % (self.name, e))
+        else:
+            self.backend._log("host (%s): the host's lease no longer holds at the stand-down; no marker, the next connect "
+                              "walks the orphan road" % self.name)
         self._host_attach_retries = 0
         self.inflight = 0
         self.detached = True
@@ -9701,6 +9708,13 @@ class SdkBackend:
                         self._update_reg(sid, effortPending=False, modelPending=False)
                     queued = [t for t in (r.get("queue") or []) if isinstance(t, str) and t]
                     if _ht().host_lease_state(read_lease(self.state_dir, sid), time.time()) == "attach":
+                        if self._attach_stand_down_holds(sid, r):
+                            # the last kernel stood down from this very host (four attaches never completed): a boot
+                            # is not new information; no attach, no count, no set entry (the commit-12 review's
+                            # fourth item). A message from the user or a change of the lease starts it again.
+                            self._log("boot reconcile: %s stays stood down from its live host (marked %s)"
+                                      % (r.get("name") or sid[:8], (r.get("hostAttachFailed") or {}).get("host")))
+                            continue
                         # T315: a live host holds this session's CLI and its turn (a comment thread's too); attach,
                         # whatever the setting says, no notice, no cut row
                         attached_boot += 1
@@ -11385,22 +11399,42 @@ class SdkBackend:
 
     def _lift_attach_stand_down(self, sid: str) -> None:
         """A user's message is the word that starts a stood-down session again (T315): drop the registry's
-        hostAttachFailed marker before the ensure, so the attach is tried once more. Called by send() only;
-        the timer sweep, a boot and a heal go through _ensure alone, which stands down while the marker names
-        the lease's current holder (else a wedged host would be attached four times every few minutes for
-        good). A separate step, not an argument to _ensure, whose one-positional shape many tests stub."""
+        hostAttachFailed marker before the ensure, so the attach is tried once more. Called by send() for a
+        message the USER typed only (send's `user` keyword; the composer, the phone, a user's `romp send`, a
+        comment reply, a parked user send replayed): romp's own automatic messages (the nudge, the awaiting
+        backstop, the debt reminder, the auto retry, a parked compaction) go through _ensure alone, like a
+        peer's postal mail, and are refused while the marker holds (the commit-12 review's second item). The
+        sweep, a boot and a heal stand down the same way. A separate step, not an argument to _ensure, whose
+        one-positional shape many tests stub."""
         reg = read_reg(self.state_dir, sid) or {}
         if isinstance(reg.get("hostAttachFailed"), dict):
             self._update_reg_dropping(sid, drop=("hostAttachFailed",))
+
+    def _attach_stand_down_holds(self, sid: str, reg: dict | None = None) -> bool:
+        """True while the registry's hostAttachFailed marker still describes the world: the session's lease is
+        a LIVE host lease ('attach': its CLI and host alive, the beat fresh) held by the very host the marker
+        names. Anything else is new information and the marker is dropped on the way: another holder, a lease
+        that no longer holds (the host died or was killed: the orphan road must run, not a stand-down; the
+        commit-12 review's first item), no lease at all (a fresh spawn would succeed; its fifth item)."""
+        reg = reg if isinstance(reg, dict) else (read_reg(self.state_dir, sid) or {})
+        marker = reg.get("hostAttachFailed")
+        if not isinstance(marker, dict):
+            return False
+        lease = read_lease(self.state_dir, sid)
+        if _ht().host_lease_state(lease, time.time()) == "attach" and self._holder_ident(lease) == str(marker.get("host") or ""):
+            return True
+        self._update_reg_dropping(sid, drop=("hostAttachFailed",))   # _reg_lock, not self._lock
+        reg.pop("hostAttachFailed", None)
+        return False
 
     def _ensure(self, sid: str, on_boot_settled=None) -> SdkSession | None:
         """Start (or return the already-running) SdkSession for `sid`. `on_boot_settled` (the boot
         stagger's slot release) is parked on a FRESH spawn and fired once its CLI proves up or dies;
         the no-spawn paths fire it immediately — no CPU burst will ever happen, so no slot is held.
         A session that stood down from a live host it could not attach (the registry's hostAttachFailed
-        marker names that host, T315) is NOT started here while the marker names the lease's current
-        holder: a user's send lifts the marker first (_lift_attach_stand_down); a changed holder is new
-        information too and the marker is dropped on the way in."""
+        marker names that host, T315) is NOT started here while the marker holds (_attach_stand_down_holds:
+        a live host lease by that very host): a user's send lifts the marker first (_lift_attach_stand_down);
+        another holder, a dead lease or none is new information and the marker is dropped on the way in."""
         def _settled_now():
             if on_boot_settled:
                 try:
@@ -11417,17 +11451,13 @@ class SdkBackend:
                 _settled_now()
                 return None
             reg["sid"] = sid
-            marker = reg.get("hostAttachFailed")
-            if isinstance(marker, dict):
-                cur = self._holder_ident(read_lease(self.state_dir, sid))
-                if cur != str(marker.get("host") or ""):
-                    self._update_reg_dropping(sid, drop=("hostAttachFailed",))   # _reg_lock, not self._lock
-                    reg.pop("hostAttachFailed", None)
-                else:
-                    self._log("host (%s): standing down from a host this kernel could not attach (marked %s); "
-                              "a message or a new lease holder starts it again" % (reg.get("name") or sid[:8], marker.get("host")))
-                    _settled_now()
-                    return None
+            if self._attach_stand_down_holds(sid, reg):
+                self._log("host (%s): standing down from a live host this kernel could not attach (marked %s); "
+                          "a message from the user or a change of the lease starts it again"
+                          % (reg.get("name") or sid[:8], (reg.get("hostAttachFailed") or {}).get("host")))
+                self._boot_attach_sids.discard(sid)   # never a boot=True host.attached row for an attach a later send makes
+                _settled_now()
+                return None
             if reg.get("threadOf") and reg.get("spawnedAt") and self.thread_wake_model is not None:
                 # A DORMANT comment thread (spawnedAt: it has run before — a fresh fork's FIRST connect
                 # keeps the model the dialog explicitly chose) registered on a SUPERSEDED full model
@@ -11662,8 +11692,12 @@ class SdkBackend:
                         or getattr(s, "_ping_feeding", False)   # getattr: test doubles skip __init__
                         or (s._rewind_to and not getattr(s, "_rewind_armed", False)))
 
-    def send(self, sid: str, text: str, qid: str | None = None) -> bool:
-        self._lift_attach_stand_down(sid)     # a message is the word that retries a stood-down attach (T315)
+    def send(self, sid: str, text: str, qid: str | None = None, user: bool = False) -> bool:
+        """`user`: the text is a message the USER typed (the composer, the phone, a user's `romp send`, a comment
+        reply, a parked user send replayed), the one word that retries a stood-down attach (T315); romp's own
+        automatic messages (the default) are refused while the stand-down holds, like a peer's postal mail."""
+        if user:
+            self._lift_attach_stand_down(sid)     # the user's message is the word that retries a stood-down attach (T315)
         s = self._ensure(sid)
         if not s:
             return False

@@ -14341,7 +14341,7 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
             be.fork(nm, parent_sid, cut, bg=col, fg=(pal.fg_for(col) if col else ""), sid=tsid, thread_of=parent_sid,
                     model=model, effort=effort, fast=fast)
             be.connect(tsid)
-            be.send(tsid, text if raw_opener else _comment_first_message(exact, text))
+            _user_send(be, tsid, text if raw_opener else _comment_first_message(exact, text))
         except Exception as e:
             with _comments_lock:                       # loud + lossless: no half-born thread row
                 data = _load_comments(parent_sid)
@@ -14381,7 +14381,7 @@ def _comment_reply(parent_sid, tid, text):
         # back for exactly this gesture, and a later relay sends only the new tail past relayedT
         reg = _thread_reg(tsid)
         be.resume(reg.get("name") or ("thread-" + tsid[:8]), tsid)   # alive again; names/ untouched
-    if not be.send(tsid, str(text)):
+    if not _user_send(be, tsid, str(text)):
         return "couldn't reach this thread's session; it may have been removed."
     _push_soon()
     return None
@@ -30647,14 +30647,37 @@ def _takes_qid(fn):
         return False
 
 
-def _send_with_id(be, sid, text, qid=None):
+def _takes_user(fn) -> bool:
+    """Whether a backend's send takes the `user` keyword (SdkBackend.send: the text is a message the USER typed,
+    the one word that retries an attach the session stood down from, T315). Read from the signature like
+    _takes_qid; a send without it (tmux, Codex, a stand-in) is called as before."""
+    if fn is None:
+        return False
+    try:
+        return "user" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _user_send(be, sid, text):
+    """be.send for a message the USER typed, with user=True when the backend's send takes it."""
+    if _takes_user(be.send):
+        return be.send(sid, text, user=True)
+    return be.send(sid, text)
+
+
+def _send_with_id(be, sid, text, qid=None, user=False):
     """be.send, with the copy's press-time id when one rode and the backend's send takes it (_takes_qid:
     SdkBackend, whose queued copy and echo then wear the id the chat's bubble already has). A send that takes
     no id (tmux, whose echo is the kernel's and whose queue is the CLI's; Codex; a stand-in) gets the text
-    alone, as before."""
+    alone, as before. `user`: a message the user typed (the composer, the phone, a user's `romp send`, a parked
+    user send replayed), passed on when the send takes it (T315: the word that retries a stood-down attach)."""
+    kw = {}
     if qid and _takes_qid(be.send):
-        return be.send(sid, text, qid=qid)
-    return be.send(sid, text)
+        kw["qid"] = qid
+    if user and _takes_user(be.send):
+        kw["user"] = True
+    return be.send(sid, text, **kw)
 
 
 def _send_or_park(be, sid, text, echo=None, qid=None):
@@ -30719,7 +30742,7 @@ def _send_or_park(be, sid, text, echo=None, qid=None):
         return True
     if _park_behind_queue(sid, op):
         return True
-    if _send_with_id(be, sid, text, qid) is False:
+    if _send_with_id(be, sid, text, qid, user=True) is False:
         return None                                      # refused by the backend: not parked, not delivered
     if echo:
         _optimistic_echo(sid, text, author=echo)
@@ -30935,12 +30958,12 @@ def _deliver_send_batch(be, sid, run):
         return
     if _forwards_sends(be):
         for op in run:
-            _send_with_id(be, sid, op[1], _op_qid(op))   # under the id the press minted, when one rode the park
+            _send_with_id(be, sid, op[1], _op_qid(op), user=True)   # under the id the press minted, when one rode the park
             if op[2]:
                 _optimistic_echo(sid, op[1], author=op[2])
         return
     merged = "\n\n".join(op[1] for op in run)          # tmux: one message, blank-line separated between turns
-    be.send(sid, merged)
+    _user_send(be, sid, merged)
     author = next((op[2] for op in run if op[2]), None)
     if author:
         _optimistic_echo(sid, merged, author=author)
@@ -31151,7 +31174,7 @@ def _apply_pending_ops(now=None):
                         # send batch (or forwarded mid-turn) it reaches the model as text instead of executing
                         # (the user 2026-08-13: /autocompact absorbed mid-turn got a polite reply and no
                         # setting change). Echo stamped at fire time, like a delivered send.
-                        _send_with_id(be, sid, op[1], _op_qid(op))
+                        _send_with_id(be, sid, op[1], _op_qid(op), user=True)
                     elif op[0] == "compact":
                         be.send(sid, "/compact")
                     elif op[0] == "model":

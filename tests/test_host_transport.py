@@ -331,7 +331,9 @@ class BackendHostRules(unittest.TestCase):
     the ack that a dead host must not get, and the kill switch after an orphan."""
 
     def _be(self):
-        d = tempfile.mkdtemp(); return d, sb.SdkBackend(d, "/bin/true", lambda *a, **k: None)
+        d = tempfile.mkdtemp(); logs = []
+        be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None, log=logs.append); be._test_logs = logs
+        return d, be
 
     def test_the_drain_latches_a_session_mid_attach_by_intent(self):
         d, be = self._be()
@@ -529,6 +531,108 @@ class BackendHostRules(unittest.TestCase):
         self.assertEqual(rows[-1]["state"], "waiting", "waiting on its host; the next send tries the attach again")
         self.assertEqual((sb.read_reg(Path(d), SID) or {}).get("queue"), ["kept"], "no crash-resume nudge")
 
+    def _marked(self, d, holder="999999996:2", **reg):
+        base = {"sid": SID, "name": "web", "alive": True, "lastSid": SID, "hostAttachFailed": {"host": holder, "t": 1.0, "tries": 4}}
+        base.update(reg)
+        sb.write_reg(Path(d), SID, base)
+
+    def _host_lease(self, d, cli=999999997, host=999999996, t=None):
+        sb.write_lease(d, {"sid": SID, "fsid": SID, "pid": cli, "start": "1", "holder": {"pid": host, "start": "2", "kind": "host"},
+                           "version": "", "t": time.time() if t is None else t})
+
+    def test_the_stand_down_marker_holds_only_for_a_live_lease_by_the_very_host(self):
+        # the commit-12 review's first item: the guard compared identities with no liveness check, so a killed host's
+        # stale lease kept every automatic ensure standing down and the orphan road never ran
+        alive = {999999997: "1", 999999996: "2"}
+        cases = [
+            ("attach by the marked host", dict(cli=999999997, host=999999996), alive, True),
+            ("attach by another host", dict(cli=999999997, host=999999995), {999999997: "1", 999999995: "2"}, False),
+            ("the host is gone (holder-gone)", dict(cli=999999997, host=999999996), {999999997: "1"}, False),
+            ("the CLI is gone (no-live-process)", dict(cli=999999997, host=999999996), {999999996: "2"}, False),
+            ("a stale beat", dict(cli=999999997, host=999999996, t=time.time() - 100), alive, False),
+            ("no lease at all", None, alive, False),
+        ]
+        for name, lease, starts, holds in cases:
+            with self.subTest(name):
+                d, be = self._be()
+                self._marked(d)
+                if lease:
+                    self._host_lease(d, **lease)
+                started = []
+                with mock.patch.object(sb, "proc_start", lambda p, run=None, st=starts: st.get(p)), \
+                     mock.patch.object(sb.SdkSession, "start", lambda self: started.append(self.sid)):
+                    self.assertEqual(be._attach_stand_down_holds(SID), holds)
+                    out = be._ensure(SID)
+                reg = sb.read_reg(Path(d), SID) or {}
+                if holds:
+                    self.assertIsNone(out, "stands down"); self.assertIn("hostAttachFailed", reg, "the marker stays")
+                    self.assertEqual(started, [])
+                else:
+                    self.assertIsNotNone(out, "new information: the session starts (the orphan road or a fresh spawn runs in its thread)")
+                    self.assertNotIn("hostAttachFailed", reg, "the marker is dropped on the way in")
+                    self.assertEqual(started, [SID])
+
+    def test_a_stand_down_with_no_live_attach_lease_writes_no_marker(self):
+        # the fifth item: a host that left in the window before the stand-down read its lease made a marker naming
+        # 'None:None', which every later lease-less ensure matched forever
+        for lease_state, lease, starts in (("none", None, {}), ("orphan", dict(cli=999999997, host=999999996), {})):
+            with self.subTest(lease_state):
+                d, be = self._be()
+                sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID})
+                if lease:
+                    self._host_lease(d, **lease)
+                s = types.SimpleNamespace(sid=SID, name="web", backend=be, inflight=1, detached=False, _reconnect=True,
+                                          _host_attach_retries=4, _host=types.SimpleNamespace(hello={"host": {"pid": 5, "start": "h"}}))
+                with mock.patch.object(sb, "proc_start", lambda p, run=None, st=starts: st.get(p)):
+                    sb.SdkSession._host_stand_down(s, TimeoutError("initialize"))
+                reg = sb.read_reg(Path(d), SID) or {}
+                self.assertNotIn("hostAttachFailed", reg, "no marker without a live host lease: the next connect walks the orphan road")
+                self.assertTrue(s.detached)
+        # and WITH a live attach lease the marker names the lease holder
+        d, be = self._be()
+        sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID})
+        self._host_lease(d)
+        s = types.SimpleNamespace(sid=SID, name="web", backend=be, inflight=1, detached=False, _reconnect=True,
+                                  _host_attach_retries=4, _host=types.SimpleNamespace(hello={"host": {"pid": 5, "start": "h"}}))
+        with mock.patch.object(sb, "proc_start", lambda p, run=None: {999999997: "1", 999999996: "2"}.get(p)):
+            sb.SdkSession._host_stand_down(s, TimeoutError("initialize"))
+        self.assertEqual(((sb.read_reg(Path(d), SID) or {}).get("hostAttachFailed") or {}).get("host"), "999999996:2")
+
+    def test_only_the_users_send_lifts_the_stand_down(self):
+        # the second item: send() lifted the marker for every caller, and romp's own automatic messages (the nudge,
+        # the backstop, the reminder, the retry, a parked compaction) each re-ran four attaches and filed a second row
+        d, be = self._be()
+        self._marked(d); self._host_lease(d)
+        ensured = []
+        stub = types.SimpleNamespace(enqueue=lambda t, qid=None, qts=None: None)
+        with mock.patch.object(sb, "proc_start", lambda p, run=None: {999999997: "1", 999999996: "2"}.get(p)):
+            self.assertFalse(be.send(SID, "<!-- romp-injected --> an automatic message"), "refused, like a peer's postal mail")
+            self.assertIn("hostAttachFailed", sb.read_reg(Path(d), SID) or {}, "the marker stands")
+            self.assertFalse(be.deliver(SID, "peer mail"), "postal mail is refused the same way (the bus keeps it)")
+            self.assertIn("hostAttachFailed", sb.read_reg(Path(d), SID) or {})
+            real = be._ensure
+            def ensure(sid, on_boot_settled=None):
+                ensured.append(sid); return stub
+            be._ensure = ensure
+            self.assertTrue(be.send(SID, "the user's words", user=True))
+        self.assertNotIn("hostAttachFailed", sb.read_reg(Path(d), SID) or {}, "the user's message lifts the marker before the ensure")
+        self.assertEqual(ensured, [SID])
+
+    def test_a_boot_leaves_a_stood_down_session_alone_and_counts_no_attach(self):
+        # the fourth item: the boot counted an attach, added the sid to the boot set and wrote the reconcile.boot row
+        # before the stagger's ensure refused; the attach a later send made then filed host.attached with boot=True
+        d, be = self._be()
+        self._marked(d, cwd=d, mode="default", effort="high")
+        self._host_lease(d)
+        started = []
+        with mock.patch.object(sb, "proc_start", lambda p, run=None: {999999997: "1", 999999996: "2"}.get(p)), \
+             mock.patch.object(sb.SdkSession, "start", lambda self: started.append(self.sid)):
+            be._boot_reconcile([sb.read_reg(Path(d), SID)])
+        self.assertNotIn(SID, be._boot_attach_sids, "no boot-attach entry for a session the boot stood down from")
+        self.assertEqual(started, [], "not started at boot")
+        self.assertIn("hostAttachFailed", sb.read_reg(Path(d), SID) or {}, "a boot is not new information; the marker stays")
+        self.assertTrue(any("stays stood down" in l for l in be._test_logs), "the boot says so")
+
 
 class Pins(unittest.TestCase):
     @unittest.skipUnless(SDK, "the SDK is not importable here")
@@ -553,7 +657,12 @@ class Pins(unittest.TestCase):
         self.assertIn('append_session_event(self.state_dir, "host.attached"', src)
         self.assertIn("m.timeout = _ht().sh.HOOK_TIMEOUT_S", src, "hooks carry the bound under a host")
         self.assertIn("self._host_stand_down(e)\n                    break", src, "past the attach bound the session stands down and LEAVES the loop, never the crash heal")
-        self.assertIn("self._lift_attach_stand_down(sid)     # a message is the word", src, "a send is the word that lifts a stand-down")
+        self.assertIn("        if user:\n            self._lift_attach_stand_down(sid)", src, "the USER's send is the word that lifts a stand-down; an automatic one is not")
+        self.assertIn("                    connected = True\n                    self._host_attach_retries = 0", src,
+                      "the retry counter resets inside the connected block: consecutive incomplete attaches only (the commit-10 review's first item)")
+        ksrc = open(os.path.join(ROOT, "kernel", "kernel.py")).read()
+        self.assertIn("if _send_with_id(be, sid, text, qid, user=True) is False:", ksrc, "the composer/phone/CLI route marks its send as the user's")
+        self.assertIn('return "user" in inspect.signature(fn).parameters', ksrc, "read from the signature, so a stand-in send without the keyword is called as before")
 
     def test_a_backend_with_hosts_off_touches_no_host_code_at_construction(self):
         d = tempfile.mkdtemp(); be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None)
@@ -785,9 +894,14 @@ class AttachStandDown(unittest.TestCase):
         self.be._boot_reconcile([sb.read_reg(Path(self.d), self.sid)])
         time.sleep(1.5)
         self.assertEqual(self.host.attaches, 4, "no attach from the sweep, the connect or the boot")
-        # a send is new information: the marker clears and the attach is tried again
-        self.assertTrue(self.be.send(self.sid, "again"))
-        self._wait(lambda: self.host.attaches >= 5, what="the fifth attach, for the send")
+        # romp's own automatic message (the default send) is refused like a peer's postal mail: no attach
+        self.assertFalse(self.be.send(self.sid, "<!-- romp-injected --><!-- romp-auto --> a nudge"))
+        time.sleep(1.5)
+        self.assertEqual(self.host.attaches, 4, "an automatic send never lifts the stand-down")
+        self.assertIn("hostAttachFailed", sb.read_reg(Path(self.d), self.sid) or {})
+        # the USER's message is new information: the marker clears and the attach is tried again
+        self.assertTrue(self.be.send(self.sid, "again", user=True))
+        self._wait(lambda: self.host.attaches >= 5, what="the fifth attach, for the user's send")
         self.assertNotIn("hostAttachFailed", sb.read_reg(Path(self.d), self.sid) or {})
 
     def test_the_retry_counter_counts_consecutive_incomplete_attaches_only(self):
