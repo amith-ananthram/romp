@@ -22,7 +22,9 @@ test("a spend cap suppresses the Retry button entirely", () => {
 test("a spend cap shows neither Retry nor a Dismiss button: the raise-the-cap line alone", () => {
   assert.doesNotMatch(apiErr, /Dismiss dialog|dismissDialog|backend === "tmux"/, "no terminal-only branch");
   assert.doesNotMatch(R, /dismissDialog/, "no delegate handler and no op posted for it");
-  assert.match(apiErr, /if \(!spendCap\) \{[\s\S]*?\n  \}\s*\n\s*\/\/ Global auto-retry pause/, "the spend-cap arm appends no button");
+  // anchored with no wildcard (review find): the Retry push, its closing brace and the next comment are adjacent
+  // lines, so a re-added `else if` arm under any label fails this pin
+  assert.match(apiErr, /if \(!spendCap\) \{\n    acts\.push\(noticeAct\("Retry now", "apiRetryNow"[^\n]*\n  \}\n  \/\/ Global auto-retry pause/, "the spend-cap arm appends no button");
 });
 
 test("the countdown reads the spend-cap message, never a fake retry countdown", () => {

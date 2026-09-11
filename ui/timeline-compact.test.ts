@@ -54,7 +54,7 @@ test("clicking the battery sends /compact on POINTERDOWN (not a click/down→up 
   assert.doesNotMatch(SRC, /hit\.addEventListener\('pointerup'/, "no pointerup pairing — a mid-press redraw would drop it");
   assert.match(SRC, /window\.__rompTimelineCompact === 'function'/);
   // bare Obsidian (no host hook): the kernel's /compact route over HTTP, the door `romp compact` uses (T331)
-  assert.match(SRC, /this\._kernelPost\('\/compact', \{ name \}\)/);
+  assert.match(SRC, /this\._kernelPost\('\/compact', \{ name \}\)\.then\(\(r\) => \{ if \(r && r\.ok === false\) this\._commandRefused\(name, '', r\); \}\);/, "a refusal drops the compacting cue and is said in the lane");
   assert.doesNotMatch(SRC, /send-keys/, "no tmux shell-out");
 });
 

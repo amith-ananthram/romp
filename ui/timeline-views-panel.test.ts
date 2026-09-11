@@ -673,7 +673,11 @@ test("the lane version submenu opens with a Latest row that clears the family's 
   assert.match(SRC, /_sendCommand\(name, cmd, confirm, extra\) \{/);
   assert.match(SRC, /window\.__rompTimelineSendCommand\(name, cmd, extra \|\| undefined\); return;/);
   // bare Obsidian (no host hook): the kernel's /send route over HTTP is the transport (T331); no tmux shell-out remains
-  assert.match(SRC, /this\._kernelPost\('\/send', \{ name, text: cmd \}\)/);
+  assert.match(SRC, /this\._kernelPost\('\/send', \{ name, text: cmd \}\)\.then\(\(r\) => \{ if \(r && r\.ok === false\) this\._commandRefused\(name, kind, r\); \}\);/,
+    "a refusal reaches the lane, never the console alone (review find)");
+  assert.match(SRC, /_commandRefused\(name, kind, r\) \{[\s\S]{0,400}this\.settingRefused\(\{ gesture: 'command', sid, flag: kind \|\| '', text \}\);/);
+  assert.match(SRC, /if \(m && m\.gesture === 'command' && sid\) \{\s*\n[^\n]*\n\s*if \(flag\) delete this\._metaPending\[sid \+ ':' \+ flag\]; else delete this\._compactClicked\[sid\];/, "the optimistic cue is dropped");
+  assert.doesNotMatch(SRC, /console\.warn\('romp timeline: \/(send|compact)/);
   assert.doesNotMatch(SRC, /_tmuxPath|send-keys|paste-buffer|set-buffer/, "the direct tmux path is gone");
   assert.doesNotMatch(SRC, /require\('child_process'\), tmux/);
   assert.match(BOOT, /__rompTimelineSendCommand: \(name: string, cmd: string, extra\?: Record<string, unknown>\) => post\(\{ type: "sendCommand", name, cmd, \.\.\.\(extra \|\| \{\}\) \}\)/);

@@ -3034,8 +3034,9 @@ class TimelinePanel {
         window.__rompTimelineCompact(name); return;
       }
       // bare Obsidian (no host hook): the kernel's compact route, which parks mid-turn like the click in the chat
-      // does; _kernelPost never rejects and names the refusal, and the lane's next poll shows the result
-      this._kernelPost('/compact', { name }).then((r) => { if (r && r.ok === false && r.error) console.warn('romp timeline: /compact ' + r.error); });
+      // does; _kernelPost never rejects and names the refusal, which the lane says (settingRefused) while the
+      // optimistic compacting cue is dropped (review find: a refusal to the console alone is a silent degrade)
+      this._kernelPost('/compact', { name }).then((r) => { if (r && r.ok === false) this._commandRefused(name, '', r); });
     } catch (e) { /* no host hook + no Electron → can't send */ }
   }
   // Send a slash command to a session (the model/effort pickers). VS Code surface: hand it to the host hook
@@ -3054,8 +3055,18 @@ class TimelinePanel {
       if (typeof window !== 'undefined' && typeof window.__rompTimelineSendCommand === 'function') {
         window.__rompTimelineSendCommand(name, cmd, extra || undefined); return;
       }
-      this._kernelPost('/send', { name, text: cmd }).then((r) => { if (r && r.ok === false && r.error) console.warn('romp timeline: /send ' + r.error); });
+      const kind = (/^\/(model|effort|fast)\b/.exec(cmd) || [])[1] || '';   // the pick's optimistic dim to drop on a refusal
+      this._kernelPost('/send', { name, text: cmd }).then((r) => { if (r && r.ok === false) this._commandRefused(name, kind, r); });
     } catch (e) { /* no host hook + no Electron → can't send */ }
+  }
+  // A refused /compact or slash send through the HTTP route: the kernel's words reach the lane (its gear, the same
+  // dismissible row a refused toggle gets; the shell's bell when a shell hosts the panel), and the optimistic cue
+  // (the compacting bar, the dimmed model/effort word) is dropped, never left to promise a change the kernel refused.
+  _commandRefused(name, kind, r) {
+    const s = ((this.data && this.data.sessions) || []).find((x) => x.name === name);
+    const sid = s ? s.id : '';
+    const text = r && r.refusal ? r.error : "couldn't send that — " + ((r && r.error) || 'no answer');
+    this.settingRefused({ gesture: 'command', sid, flag: kind || '', text });
   }
 
   _closeMetaMenu() { if (this._metaMenu) { if (this._metaMenu._sub) this._metaMenu._sub.remove(); this._metaMenu.remove(); this._metaMenu = null; } }
@@ -3391,6 +3402,10 @@ class TimelinePanel {
       this._laneRefusal = { sid, flag, text };
       if (this._laneMenu && this._laneMenu._sid === sid && this._laneMenuBuild) this._laneMenuBuild();
     }
+    if (m && m.gesture === 'command' && sid) {
+      // a refused /compact or slash send (the HTTP route): drop the optimistic cue the click stamped
+      if (flag) delete this._metaPending[sid + ':' + flag]; else delete this._compactClicked[sid];
+    }
     if (m && m.gesture === 'lane' && sid) {
       // the kernel could not record this Clear: release the sticky removal and put the row back in the slot
       // the click took it from, so the lane is visible again on THIS event (see _holdDismissed)
@@ -3406,6 +3421,11 @@ class TimelinePanel {
       shell = !!(typeof window !== 'undefined' && window.parent && window.parent !== window);
       if (shell) window.parent.postMessage({ romp: 'notify', kind: 'refused', text, sid }, '*');
     } catch (e) { /* no parent frame (Obsidian, headless) */ }
+    if (!shell && m && m.gesture === 'command' && sid) {
+      // no shell bell (the Obsidian panel): the lane's gear shows the kernel's words, the row a refused toggle gets
+      this._laneRefusal = { sid, flag: '', text };
+      if (this._laneMenu && this._laneMenu._sid === sid && this._laneMenuBuild) this._laneMenuBuild();
+    }
     if (!shell && m && m.gesture === 'order' && sid) {
       if (m.from === 'dialog') {
         // a row dragged INSIDE the tags dialog: the dialog's own row carries it, and only the dialog's —

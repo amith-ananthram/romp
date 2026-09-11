@@ -31,7 +31,7 @@ test("the tab tooltip is a custom DOM tooltip shown on hover, not a native title
 test("backend is a plain labelled FIELD ROW under the others — no coloured top badge (the user 2026-07-08)", () => {
   // it's just another "Backend: Claude Code | Codex" row alongside Branch/Mode/Model/Effort, not a
   // bold coloured badge; the names come from backend-names.ts (T288)
-  assert.match(RENDER, /rows\.push\(\["Backend", backendLabel\(be\)\]\)/);
+  assert.match(RENDER, /if \(be\) rows\.push\(\["Backend", backendLabel\(be\)\]\);/, "every backend the kernel names gets its row: a session still running on the retired terminal backend reads its id (T331 review)");
   assert.doesNotMatch(RENDER, /"tab-tip-be"/, "no dedicated backend-badge element");
   assert.doesNotMatch(RENDER, /be === "tmux" \? "#54B204" : "#1EA1EB"/, "no per-backend colour on the tooltip");
   assert.doesNotMatch(CSS, /\.tab-tip-be \b/, "the badge's CSS rule is gone");
