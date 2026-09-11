@@ -26,7 +26,7 @@ Auxiliary inputs the file adapter may read (same category as the transcript):
                                transcript lost to an API-errored try; judge parse only)
   timeline/messages.jsonl   -> peer rompUuid for a postal atom (join on the msg id)
 """
-import array, bisect, copy, json, os, re, sys, time, hashlib, threading
+import array, bisect, copy, gzip, json, os, re, sys, time, hashlib, threading
 from datetime import datetime
 from pathlib import Path
 
@@ -966,11 +966,13 @@ def checkpoint_sweep():
     if d is None or not Path(d).is_dir():
         return 0
     gone = 0
-    for cp in Path(d).glob("*.json"):
+    for cp in list(Path(d).glob("*.json")) + list(Path(d).glob("*.asm.json.gz")):
         keep = False
         try:
             text = cp.read_bytes()
             _count_read(str(cp), len(text))
+            if cp.name.endswith(".gz"):
+                text = gzip.decompress(text)
             doc = json.loads(text.decode("utf-8"))
             keep = isinstance(doc, dict) and isinstance(doc.get("path"), str) and os.path.exists(doc["path"])
         except (OSError, ValueError):
@@ -3735,7 +3737,7 @@ def _asm_ckpt_file(leaf_path):
     d = _ckpt_dir()
     if d is None:
         return None
-    return Path(d) / (hashlib.sha1(os.path.realpath(str(leaf_path)).encode("utf-8")).hexdigest()[:20] + ".asm.json")
+    return Path(d) / (hashlib.sha1(os.path.realpath(str(leaf_path)).encode("utf-8")).hexdigest()[:20] + ".asm.json.gz")
 
 
 def _asm_ckpt_note(path, reason, detail=""):
@@ -4000,12 +4002,13 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
             text = json.dumps(doc, separators=(",", ":"))
         except TypeError:
             return _asm_ckpt_skip("unencodable")
-        if len(text) > _ASM_CKPT_CAP:
+        data = gzip.compress(text.encode("utf-8"), compresslevel=6)   # identities and hashes compress about five to one; the
+        if len(data) > _ASM_CKPT_CAP:                                  #  bytes a boot reads are the compressed ones
             return _asm_ckpt_skip("oversize")
         try:
             cp.parent.mkdir(parents=True, exist_ok=True)
             tmp = cp.with_name("%s.%d.%x.tmp" % (cp.name, os.getpid(), threading.get_ident()))
-            tmp.write_text(text)
+            tmp.write_bytes(data)
             os.replace(tmp, cp)
         except OSError:
             return _asm_ckpt_skip("write")
@@ -4091,10 +4094,10 @@ def _asm_ckpt_load(leaf_path, rompuuid, sdk_human, candidate_files, links):
     if cp is None or not cp.exists():
         return None
     try:
-        text = cp.read_bytes()
-        _count_read(str(cp), len(text))
-        doc = json.loads(text.decode("utf-8"))
-    except (OSError, ValueError) as e:
+        data = cp.read_bytes()
+        _count_read(str(cp), len(data))
+        doc = json.loads(gzip.decompress(data).decode("utf-8"))
+    except (OSError, ValueError, EOFError) as e:
         _asm_ckpt_note(leaf_path, "corrupt", str(e)[:80]); return None
     if not isinstance(doc, dict) or doc.get("av") != _ASM_CKPT_V:
         _asm_ckpt_note(leaf_path, "version"); return None

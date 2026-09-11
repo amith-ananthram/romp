@@ -32,6 +32,17 @@ NOW = G.NOW
 COMPACTING = [n for n in G.SINGLE_FILE if any(r.get("subtype") == "compact_boundary" for r in G.SINGLE_FILE[n][0]())]
 
 
+def _doc(path):
+    """The leaf's assembly document, decoded (stored gzipped)."""
+    import gzip
+    return json.loads(gzip.decompress(em._asm_ckpt_file(path).read_bytes()))
+
+
+def _write_doc(path, d):
+    import gzip
+    em._asm_ckpt_file(path).write_bytes(gzip.compress(json.dumps(d).encode("utf-8")))
+
+
 def _strip(tree):
     """A tree as JSON compares it: lazy scalars dropped once hydrated (the whole parse never carries them)."""
     t = json.loads(json.dumps(tree, default=lambda o: "<unserializable>"))
@@ -116,7 +127,7 @@ class RestoredEqualsWhole(Harness):
                 self.fresh()
                 self.parse(path)                                        # the whole parse the writer works from
                 self.assertTrue(em.asm_checkpoint_write(path, SID), "a document is written: %s" % em.asm_checkpoint_stats())
-                doc = json.loads(em._asm_ckpt_file(path).read_text())
+                doc = _doc(path)
                 self.assertGreater(len(doc["atoms"]), 0, "the cut leaves atoms before it")
                 got, modes, n_lazy = self.restored(path)
                 self.assertEqual(modes, ["restore"], "the assembly came from the document: %s" % em.asm_checkpoint_stats())
@@ -172,9 +183,9 @@ class Fallbacks(Harness):
 
     def test_each_reason_falls_back_to_a_whole_parse_and_is_counted(self):
         for reason, spoil in (
-            ("version", lambda p: em._asm_ckpt_file(p).write_text(json.dumps(dict(json.loads(em._asm_ckpt_file(p).read_text()), av=99)))),
-            ("session", lambda p: em._asm_ckpt_file(p).write_text(json.dumps(dict(json.loads(em._asm_ckpt_file(p).read_text()), rompuuid="other")))),
-            ("corrupt", lambda p: em._asm_ckpt_file(p).write_text("{nope")),
+            ("version", lambda p: _write_doc(p, dict(_doc(p), av=99))),
+            ("session", lambda p: _write_doc(p, dict(_doc(p), rompuuid="other"))),
+            ("corrupt", lambda p: em._asm_ckpt_file(p).write_bytes(b"{nope")),
             ("guard", lambda p: self._rewrite_prefix(p)),
             ("identity", lambda p: self._spoil_identity(p)),
         ):
@@ -193,7 +204,7 @@ class Fallbacks(Harness):
         """A rewrite under the cut's guard: the last pre-cut line changed and the file grown past its recorded size, so
         the size check passes and the guard bytes are what catch it."""
         lines = open(path).read().splitlines(keepends=True)
-        doc = json.loads(em._asm_ckpt_file(path).read_text())
+        doc = _doc(path)
         pre_n = doc["files"][SID]["cut"][1]
         r = json.loads(lines[pre_n - 1]); r["message"] = {"role": r["message"].get("role", "user"), "content": "REWRITTEN under the guard " + "x" * 400}
         lines[pre_n - 1] = json.dumps(r) + "\n"                 # longer than before, so the size check passes and the guard decides
@@ -202,8 +213,7 @@ class Fallbacks(Harness):
             f.writelines(lines)
 
     def _spoil_identity(self, path):
-        cp = em._asm_ckpt_file(path)
-        d = json.loads(cp.read_text()); d["identity"] = "0" * 40; cp.write_text(json.dumps(d))
+        _write_doc(path, dict(_doc(path), identity="0" * 40))
 
 
 class KernelOverRestored(Harness):

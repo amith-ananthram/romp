@@ -149,9 +149,10 @@ class RestartOverACheckpointedSession(unittest.TestCase):
             self.assertEqual(perf1["fallbacks"], {}, "a first boot has nothing to fall back from")
         finally:
             self._stop(k1)
-        docs = [f for f in os.listdir(os.path.join(self.state, "checkpoints")) if f.endswith(".asm.json")]
+        docs = [f for f in os.listdir(os.path.join(self.state, "checkpoints")) if f.endswith(".asm.json.gz")]
         self.assertEqual(len(docs), 1, "the exit wrote web's assembly document; wrote: %s" % docs)
-        doc = json.loads(open(os.path.join(self.state, "checkpoints", docs[0])).read())
+        import gzip
+        doc = json.loads(gzip.decompress(open(os.path.join(self.state, "checkpoints", docs[0]), "rb").read()))
         self.assertEqual(doc["path"], os.path.realpath(self.leaf))
         size = os.path.getsize(self.leaf)
         k2, p2, log2 = self._boot()
