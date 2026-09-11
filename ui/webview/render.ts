@@ -5375,6 +5375,9 @@ function makeGroupHead(sec: TabSection, collapsed: boolean, holdsActive: boolean
   // (headWords) and its own way back are derived from
   const shown = snapView === name;
   if (shown) head.classList.add("snap-shown");
+  // the tag's colour as the row's --chip-bg (the tab sets the same variable from its identity colour): the shown
+  // row's box wears the selected tab's inset ring in it (styles.css .tab-group-head.snap-shown, T322)
+  if (sec.color) head.style.setProperty("--chip-bg", sec.color);
   // THE WAY BACK: the header whose section the pane shows, OPEN, holding the tab being read, is the click that
   // put the section in the pane; a second click puts the transcript back (show-transcript, leaveSnapshot)
   // instead of folding the section under its reader. Derived from the rendered state, as the fold is, and
@@ -5966,7 +5969,7 @@ function renderTabs() {
     // ...and the whole tab dims when that host is unreachable, so a disconnected session reads as one at
     // a glance rather than only on inspection (the user 2026-07-29). The marked "host:" carries the why.
     if (hostIsDown(id)) { tab.classList.add("host-off"); tab.title = hostDownNote(id); }
-    if (s.status.faded && id !== activeId && s.color) {
+    if (s.status.faded && (id !== activeId || snapView) && s.color) {   // in the overview mode the active tab fades like any other (no residual selection cue, T322)
       const full = s.color.bg;
       label.style.color = fadedColor(full);
       // The "host:" prefix declares its OWN color (quiet gray), so the parent's faded color can't inherit
@@ -11238,9 +11241,17 @@ function snapshotHost(): HTMLElement | null {
   host.addEventListener("pointerdown", () => { tabPointerHeld = true; });
   return host;
 }
+/** The overview MODE's one switch (T322): the body carries the class (the footer hides by it, the Classic strip's active
+ *  tab is neutralised by it) and so does the strip itself, because the Yatharth theme's neutraliser is a tint rule and
+ *  every tint rule starts with the theme's body class (tab-theme.test.ts), so that rule reads the mode off #tabs. */
+function setSnapMode(on: boolean): void {
+  document.body.classList.toggle("snap-mode", on);
+  document.getElementById("tabs")?.classList.toggle("snap-mode", on);
+}
 function hideSnapshot(): void {
   const host = document.getElementById("tab-snapshot");
   if (host) host.style.display = "none";
+  setSnapMode(false);
   snapModel = null;
   // the transcript comes back where the reader left it, not where the view's scrolls put the spot (snapKeep)
   if (snapKeep) { snapKeep.v.scrollTop = snapKeep.scrollTop; snapKeep.v.stick = snapKeep.stick; snapKeep = null; }
@@ -11324,16 +11335,18 @@ function renderSnapshot(): boolean {
   let list = host.querySelector<HTMLElement>(":scope > .snap-list");
   if (!list) {
     const h = document.createElement("h2"); h.className = "snap-head";
-    // the heading's own bar (snap-swatch) and the name: the strip's header wears the tag chip; this heading
-    // keeps a bar + name pair, whose parts the patch below rewrites in place (the rows' rule: nothing is remade)
-    const sw = el("span", "snap-swatch"); sw.setAttribute("aria-hidden", "true");
-    h.append(sw, el("span", "snap-name"), el("span", "snap-count"));
+    // the heading reads "Overview of <the tag's ordinary chip> <count>" (T322, the user 2026-09-10: a name beside a
+    // little colour bar was not it): the words, a slot the tag chip is placed in (tagChip, the same builder the
+    // strip's row and the tag menu use — never a chip rule of its own), and the count; the patch below rewrites
+    // the slot's chip and the count in place (the rows' rule: nothing else is remade)
+    const of = el("span", "snap-of"); of.textContent = "Overview of";
+    h.append(of, el("span", "snap-chip-slot"), el("span", "snap-count"));
     list = el("div", "snap-list"); list.setAttribute("role", "list");
     host.replaceChildren(h, list);
   }
   const part = (cls: string) => host.querySelector<HTMLElement>(".snap-head > ." + cls)!;
-  part("snap-swatch").style.background = next.color || "";
-  part("snap-name").textContent = next.name;
+  const chip = tagChip(next.name, next.color, { inheritSize: true }); chip.classList.add("snap-chip");
+  part("snap-chip-slot").replaceChildren(chip);
   part("snap-count").textContent = words.count;
   // a MOVED row: insertBefore detaches and re-attaches its node, which blurs it (the browser's focus fixup); the
   // same event puts focus back on it (the strip's refocus rule, by node instead of by id). A row GONE from under
@@ -11412,7 +11425,9 @@ function showActive(keep?: { uuid: string; y: number } | null) {
   // kernel's active hint, the MRU and the drafts still point at the session being read, and its header wears
   // the mark. renderSnapshot answers false when the section is gone from the strip (a tag deleted, its last
   // member hidden): then the transcript.
+  const wasSnap = document.body.classList.contains("snap-mode");   // read before renderSnapshot's gone-section path can clear it
   if (snapView && renderSnapshot()) {
+    setSnapMode(true);   // the overview is a mode: the message box goes, no tab is selected (styles.css, T322)
     for (const v of views.values()) v.el.style.display = "none";
     // the reader's place (snapKeep; once per visit): the hide above only queues the clamp's scroll event, so the
     // view's fields still hold what the reader's last scroll recorded
@@ -11434,6 +11449,11 @@ function showActive(keep?: { uuid: string; y: number } | null) {
     if (sendBtn) sendBtn.disabled = true;
     updateStatusline();
     return;
+  }
+  setSnapMode(false);   // a session's transcript: the message box and the selected tab are back
+  if (wasSnap) {   // the box was measured while the footer was display:none (a pick's draft swap): measure it now it has a layout box
+    const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
+    if (ta) growComposer(ta);
   }
   hideSnapshot();
   const s = activeId ? liveSession(activeId) : null;
@@ -12185,7 +12205,7 @@ if (typeof ResizeObserver === "function") {
       const h = entries[0]?.contentRect?.height ?? 0;
       const content = document.getElementById("content");
       const v = activeId ? views.get(activeId) : null;
-      if (content && lastH >= 0 && content.clientHeight > 0 && v && v.shown && followBoxBelow(v.stick, h - lastH)) {
+      if (content && !snapView && lastH >= 0 && content.clientHeight > 0 && v && v.shown && followBoxBelow(v.stick, h - lastH)) {   // a transcript rule: it stands down while the overview owns #content (the footer's hide is not a box below the reader, T322)
         writeScroll(content, content.scrollHeight, "box-below", true);
         v.scrollTop = content.scrollTop;                      // keep the per-view saved position in sync
       }

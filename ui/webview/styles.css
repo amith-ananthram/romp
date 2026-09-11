@@ -104,6 +104,7 @@ body.scheme-solarized-dark {
   /* THE faint accent wash — the one alpha behind every selected/hovered accent chrome (0.10 and 0.14
      variants drifted in before 2026-08-26). Mirrored in feed.css (own :root). */
   --accent-wash: rgba(156, 210, 255, 0.12);
+  --tab-active-bg: rgba(255, 255, 255, 0.14);   /* the selected tab's fill, and the tag row's while its overview shows (T322) */
   /* the menu vocabulary (CLAUDE.md "Menus and dropdowns wear ONE vocabulary") — every dropdown's
      radius and shadow resolve through these; two menus had drifted onto their own shadows before
      2026-08-26. Mirrored in feed.css (own :root). */
@@ -244,6 +245,7 @@ body.theme-light {
   --err: #B02A1C;
   --accent: #C2410C; --accent-fg: #FFF8F2;
   --accent-wash: rgba(194, 65, 12, 0.10);
+  --tab-active-bg: rgba(255, 255, 255, 0.14);   /* the same fill the dark tab wears: a whiter sheet over cream (T322) */
   --cmt-hl: #FFDF70;
   --cmt-hl-outline: #8f6a00;   /* amber ink: 4.2:1 on the cream page — the fill's yellow measures 1.1:1 there, invisible as a line (T310) */
   --fast: #D45500;
@@ -400,33 +402,30 @@ body.tabbar-resizing { cursor: ns-resize; user-select: none; }
    2026-09-06): a disclosure chevron that flips with the fold, the tag as THE CHIP it wears everywhere
    (T251), and the member count (the folded-away count while folded). No state class, no close, no pip
    of its own — none of a tab's dress; folded, one small MEMBER-derived mark follows the count (the
-   state pip below), and hover/focus brighten the label and color the chevron in the accent (a fold
-   cue), never a row wash (a "select me" cue). The chip is coloured by IDENTITY, so it brightens by a
+   state pip below), The chip is coloured by IDENTITY, so it brightens by a
    filter rather than to --fg (T251b: --fg would erase the tag; the chip's inline colour is what the
    header's colour rule cannot reach) — the same lift the plain name used to get, on the tag's own hue. The header is focusable (Enter or Space fold),
    drags to reorder the groups (tagOrder), and the header under a dragged group wears the accent
    insertion cue. 0.82em is the surface's sub-line size (the menus' sub-lines) — labels match labels,
    and nothing here nests an em inside it. Tokens only, so the header reads in every theme without a
    light override. */
-.tab-group-head { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; padding: 6px 7px 6px 6px;
+.tab-group-head { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; padding: 6px 7px;
   font-size: 0.82em; letter-spacing: 0.04em; color: var(--dim); cursor: pointer; white-space: nowrap;
   user-select: none; border-radius: 6px 6px 0 0; outline: none; }
-.tab-group-head:hover, .tab-group-head:focus-visible { color: var(--fg); }
-.tab-group-head:hover .tab-group-caret, .tab-group-head:focus-visible .tab-group-caret { color: var(--accent); }
-/* the chip's fold cue (T251b): a brightness lift keeps the tag's identity colour (a --fg swap would erase
-   it) and, unlike a background wash, is a property the chip's inline style never sets — so the rule wins
-   by construction; the uncoloured "(no tags)" chip lifts from --dim toward --fg, the old label's exact cue */
-.tab-group-head:hover .tab-group-chip, .tab-group-head:focus-visible .tab-group-chip { filter: brightness(1.3); }
+/* A tag row is NOT a tab (T322, the user 2026-09-10): it takes a tab's allotment of space (the same 6px 7px padding
+   as .tab around the chip, the caret and the count; no border of its own, so a row never sets the strip's height,
+   a tab does — dense-chrome-layout.test.ts measures that) but wears none of a tab's dress — no hover lift of the
+   words, the caret or the chip, no wash, no rest outline. The keyboard's focus ring stays: it is not a dress, it
+   is where the focus is. */
 .tab-group-head:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-/* the section holding the tab being read, open or folded: it folds like any other (its cursor promises the
-   click), and its header says whose it is by the tag's chip, accent-underlined (the chip is coloured by
-   identity inline, which a colour rule cannot reach; the underline is a property it never sets), so the
-   header that stands in for a folded-away tab is found by the same mark it wore while open. Distinct from
-   the hover lift (a fold cue) and from .snap-shown (the pane shows the section). */
-.tab-group-head.holds-active .tab-group-chip { text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: 2px; }
-/* the section whose sessions the pane is SHOWING at a glance (render.ts sets .snap-shown on its header): the
-   accent wash the picker's active row wears, on the header the chip's inline style never reaches */
-.tab-group-head.snap-shown { background: var(--accent-wash); }
+/* the section holding the tab being read wears NO mark of its own any more (T322, the user 2026-09-10: the
+   accent underline on the tag's chip read as a second selection): the highlight on the tab itself says which
+   session is active. The class stays (aria-current, the folded stand-in's focus and arrows key on it). */
+/* the section whose sessions the pane is SHOWING at a glance (render.ts sets .snap-shown on its header) wears
+   the SELECTED TAB's box (T322): the same fill token .tab.active wears and the same inset identity ring
+   .tab.active.colored wears (--chip-bg, set inline from the tag's colour by makeGroupHead), so the one selected
+   thing on the strip, tab or row, always looks the same; no tab is selected while it shows (body.snap-mode). */
+.tab-group-head.snap-shown { color: var(--fg); background: var(--tab-active-bg); box-shadow: inset 0 0 0 1.5px var(--chip-bg, transparent); }
 .tab-group-head.dragging { opacity: 0.45; }
 .tab-group-head.drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 /* the disclosure chevron: ▸ folded, turned down while open — the fold-caret idiom (a CSS transition on
@@ -614,7 +613,7 @@ body.tabbar-resizing { cursor: ns-resize; user-select: none; }
    background everywhere). No identity tint at any state, the
    thick 1.5px inset identity ring on the selected tab, the neutral line under the strip. The
    Yatharth theme below is the opt-in restoration of the contributor's merged strip aesthetic. */
-.tab.active { color: var(--fg); background: rgba(255, 255, 255, 0.14); }
+.tab.active { color: var(--fg); background: var(--tab-active-bg); }
 /* T123 (the user 2026-08-27, redirecting T118's resting-tab distinction — the merged 2% fill
    came out for this): resting tabs wear a SUPER-THIN outline at all times, no fill — the tab body
    stays the dark background, ringed by 1px in EXACTLY the gray the hover fill uses
@@ -1018,6 +1017,22 @@ body.chat-theme-yatharth .tab.active.colored:not(.tab-blocked) {
 .bg-deeper { flex: 0 0 auto; font-size: 0.82em; color: var(--dim); white-space: nowrap; }
 .sub-head-waits { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }   /* the viewer header's "· waiting on …" tail */
 
+/* THE OVERVIEW IS A MODE, NOT A SESSION (T322, the user 2026-09-10, twice): while a tag's overview shows
+   (body.snap-mode, set by showActive), the message box and the bottom bar go entirely — a message typed here
+   has no session to go to — and no tab renders as selected: the row's box (.tab-group-head.snap-shown) is the
+   one selection on the strip. The active tab's classes stay (activeId is the way back; focus and the arrows key
+   on them), only its dress is neutralised to a resting tab's. Selecting any tab clears the mode (setActive). */
+body.snap-mode #footer { display: none; }
+/* the neutralised active tab is a RESTING tab of its theme (review finds): a hard-blocked tab keeps its red fill (the
+   user's standing rule: the blocked fill survives on the active tab), hover still lifts it, and under the Yatharth theme
+   it wears that theme's resting wash with no border (Yatharth's selection mark IS the 55% identity border). The strip
+   (#tabs) carries the mode class beside the body (setSnapMode, one switch): a tint rule must start with the theme's
+   body class (tab-theme.test.ts: every identity wash lives under it), so the mode is read off the strip there. */
+body.snap-mode #tabs .tab.active:not(.tab-blocked) { color: var(--dim); background: transparent; box-shadow: none; }
+body.snap-mode #tabs .tab.active:not(.tab-blocked):hover { color: var(--fg); background: rgba(255, 255, 255, 0.06); }
+body.snap-mode:not(.chat-theme-yatharth) #tabs .tab.active:not(.tab-blocked):not(.tab-add) { border-color: rgba(255, 255, 255, 0.06); }
+body.chat-theme-yatharth #tabs.snap-mode .tab.active.colored:not(.tab-blocked) { background: color-mix(in srgb, var(--chip-bg) 9%, transparent); border-color: transparent; }
+body.chat-theme-yatharth #tabs.snap-mode .tab.active.colored:not(.tab-blocked):hover { background: color-mix(in srgb, var(--chip-bg) 15%, transparent); }
 #footer {
   position: relative;   /* anchors #composer-resize on the top-edge divider */
   flex: 0 0 auto;
@@ -1272,7 +1287,7 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
    identity color inline. Tokens only, so it reads in every theme without a light override. */
 #tab-snapshot { padding: 6px 14px 14px; }
 .snap-head { display: flex; align-items: center; gap: 6px; margin: 4px 0 8px; font-size: 0.82em; font-weight: 600; letter-spacing: 0.04em; color: var(--dim); }
-.snap-swatch { flex: 0 0 auto; width: 3px; height: 12px; border-radius: 1px; background: var(--dim); }
+/* (the heading's colour bar is gone, T322: the tag's ordinary chip carries the colour, between the words "Overview of" and the count) */
 .snap-count { font-weight: 400; opacity: 0.7; }
 .snap-list { display: flex; flex-direction: column; gap: 2px; }
 .snap-row { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; width: 100%; min-width: 0; padding: 5px 8px; border: 1px solid transparent; border-radius: 6px;
@@ -4108,7 +4123,7 @@ body.dense-chrome .tab-add { padding: 3px 8px; font-size: 1.1em; }              
    the 18px line + 2 x 3px dense padding + the 1px border; #tabs stretches every item on a row to the tallest, so
    without this the row holding the + and the tag control would stay 31px beside 25px rows */
 body.dense-chrome .tab-tagbox { min-height: 25px; }                                     /* 31px */
-body.dense-chrome .tab-group-head { gap: 4px; padding: 3px 5px 3px 4px; }               /* 5px; 6px 7px 6px 6px */
+body.dense-chrome .tab-group-head { gap: 4px; padding: 3px 5px; }                       /* 5px; 6px 7px — the dense tab's own padding, so the row keeps a tab's box here too (T322) */
 /* the untagged trail's divider (the inline layout, stripGroupRows off): its 1px line is the content area under fixed
    gutters, so the 8px gutters sized for the 32px row would leave a 9px line in the 25px row; 6px keeps the default's
    half-row proportion (about 13px). Scoped off the row break, which must keep no footprint; the width stays 13px,
