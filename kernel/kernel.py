@@ -31576,9 +31576,10 @@ def _human_turn_floor(session):
     message that landed and processed the echo. When a just-sent message hadn't hit disk yet, the
     interrupt's timestamp floored past the echo and retired it — so an interrupted send that got a partial
     reply then VANISHED on the next push. Mirrors _last_genuine_turn_t, which floors on genuine turns only."""
-    return max((a.get("t", 0) for turn in session["turns"] for a in turn["atoms"]
-                if a.get("type") == "user" and a.get("author") == "human"
-                and not em.is_interrupt_record(a)), default=0)
+    return max(((em.turn_scalar(turn, "hT") or 0) if turn.get("pre") else       # a restored pre-cut turn: its stored floor (T358)
+                max((a.get("t", 0) for a in turn["atoms"] if a.get("type") == "user" and a.get("author") == "human"
+                     and not em.is_interrupt_record(a)), default=0)
+                for turn in session["turns"]), default=0)
 
 
 def _echo_overtaken(atom, human_floor):
@@ -31626,7 +31627,7 @@ def _sendvis_diag(sid):
     return out
 
 
-_merge_sets_memo = {}                            # sid → (parsed session object, its sets): see _merge_tx_sets
+_merge_sets_memo = {}                            # sid → (parsed session object, its sets, the echo floor its texts cover): _merge_tx_sets
 _merge_sets_stats = {"hit": 0, "miss": 0}        # /perf memos.chatMergeSets
 _MERGE_SETS_MAX = 512                            # bounded by the sessions alive; the oldest entry goes first
 
@@ -31637,7 +31638,7 @@ def _merge_sets_report():
     return dict(_merge_sets_stats, entries=len(_merge_sets_memo))
 
 
-def _merge_tx_sets(session, sid):
+def _merge_tx_sets(session, sid, t_floor=None):
     """The transcript-side sets _merge_live_atoms derives from the parsed session, memoized per sid on the
     session OBJECT's identity: (tx_uuids, tx_text_uuids, tx_texts, tx_text_t, human_floor). Inputs: the
     atoms under session["turns"], and nothing else. The callers pass the parse cache's object
@@ -31649,29 +31650,41 @@ def _merge_tx_sets(session, sid):
     object. Every build used to derive the five from every atom of the parse. The three sets are frozen:
     the callers and the backends' prune_live only read them, and an in-place write would corrupt every
     later hit, so a write raises instead; tx_text_t stays a dict because sdk_backend.prune_live dispatches
-    on isinstance(dict) (2026-09-09)."""
+    on isinstance(dict) (2026-09-09).
+
+    A restored pre-cut turn contributes its stored scalars (uuids, pcs: T358) and no atom is built for it; its USER
+    texts (the echo landing keys) are read only when `t_floor`, the oldest live echo's send time, is at or before the
+    turn's newest atom: a text lands at or after its send, so no older turn can hold an echo's landing. The memo
+    entry records the floor its texts cover; a caller asking for an older floor misses and rebuilds."""
     ent = _merge_sets_memo.get(sid)
-    if ent is not None and ent[0] is session:
+    if ent is not None and ent[0] is session and (t_floor is None or ent[2] <= t_floor):
         _chat_memo_bump(_merge_sets_stats, "hit")
         return ent[1]
     _chat_memo_bump(_merge_sets_stats, "miss")
     turns = session["turns"]
-    tx_uuids = frozenset(a.get("uuid") for turn in turns for a in turn["atoms"] if a.get("uuid"))
-    tx_text_uuids = frozenset(a.get("uuid") for turn in turns for a in turn["atoms"]
-                              if a.get("uuid") and _atom_prose_chars(a) > 0)
-    # text → the NEWEST record time carrying it: prune_live retires an echo by text only through a record
+    # tx_text_t: text → the NEWEST record time carrying it: prune_live retires an echo by text only through a record
     # written at or after the echo's send (T237b A); the plain set keeps the display dedup in the caller
-    tx_texts, tx_text_t = set(), {}
+    tx_uuids, tx_text_uuids, tx_texts, tx_text_t = set(), set(), set(), {}
     for turn in turns:
+        pcs = em.turn_scalar(turn, "pcs")
+        if pcs is not None:                        # a restored pre-cut turn (T323 stage 4c / T358): its scalars, no atom built.
+            tx_uuids.update(u for u in turn["uuids"] if u)
+            tx_text_uuids.update(pcs)             # its USER texts are read only from the echo floor up (below)
+            if t_floor is None or (turn.get("maxT") or 0) < t_floor:
+                continue
         for a in turn["atoms"]:
+            if a.get("uuid"):
+                tx_uuids.add(a["uuid"])
+                if _atom_prose_chars(a) > 0:
+                    tx_text_uuids.add(a["uuid"])
             for t in _atom_user_texts(a):
                 tx_texts.add(t)
                 tx_text_t[t] = max(tx_text_t.get(t, 0), float(a.get("t") or 0))
-    sets = (tx_uuids, tx_text_uuids, frozenset(tx_texts), tx_text_t, _human_turn_floor(session))
+    sets = (frozenset(tx_uuids), frozenset(tx_text_uuids), frozenset(tx_texts), tx_text_t, _human_turn_floor(session))
     _merge_sets_memo.pop(sid, None)
     while len(_merge_sets_memo) >= _MERGE_SETS_MAX:
         _merge_sets_memo.pop(next(iter(_merge_sets_memo)))   # oldest-inserted first, one at a time, never clear-at-cap
-    _merge_sets_memo[sid] = (session, sets)
+    _merge_sets_memo[sid] = (session, sets, t_floor if t_floor is not None else float("inf"))   # the floor the texts cover
     return sets
 
 
@@ -31699,7 +31712,8 @@ def _merge_live_atoms(session, sid, shown_texts=()):
     # The transcript-side sets come from the per-sid memo (_merge_tx_sets): a function of the parsed
     # session alone, which the parse cache hands back as the same object until the transcript changes,
     # and which every build of a cycle (chat, feed, timeline) used to derive again from every atom.
-    tx_uuids, tx_text_uuids, tx_texts, tx_text_t, human_floor = _merge_tx_sets(session, sid)
+    echo_floor = min((float(a.get("t") or 0) for a in live if a.get("_echo_text")), default=None)   # the oldest echo's send:
+    tx_uuids, tx_text_uuids, tx_texts, tx_text_t, human_floor = _merge_tx_sets(session, sid, echo_floor)   # no text lands before it
     # A TEXTLESS disk twin must not land a texty live atom (the user 2026-07-28): on some model+tool
     # combinations (observed: fable-5 replying before an AskUserQuestion) the CLI persists the reply
     # text that streamed before the tool call as an EMPTY thinking record under the SAME uuid. The
@@ -35336,6 +35350,10 @@ def build_feed(now, live_map=None):
                     #                                  attachment record no chat event carries (2026-08-25)
                     _lu, _lsub = _seg_last_text(seg["atoms"])
                     seg_best[_seg_key(seg["id"])] = (_lu, _lsub, seg.get("t", 0))   # latest prose → summary deep-link fallback
+                    pcs_ = em.turn_scalar(turn, "pcs")
+                    if pcs_ is not None:                 # a restored pre-cut turn: its stored prose chars, no atom built (T358)
+                        cite_uuids.update(u_ for u_, n_ in pcs_.items() if n_ >= jd.CITE_MIN_CHARS)
+                        continue
                     for _a in seg["atoms"]:              # citable-uuid set: gates the distiller's CITED anchor.
                         # Resolvable in THIS parse AND substantive (the user 2026-07-14): a stored citation
                         # pointing at a connective stub (a lead-in that merely names the goal) is a wrong
@@ -38292,26 +38310,21 @@ def _seg_anchors(atoms):
     API-error atoms are SKIPPED: Claude Code records a failed turn as an assistant text block
     (isApiErrorMessage, tagged isApiError by em), so it carries text and would otherwise WIN the
     reply anchor — deep-linking a done/blocked goal to an 'API Error: …' line instead of its real
-    reply. An error is a failure, not a reply, and is never a jump target (the user 2026-06-18)."""
-    em.hydrate(atoms)   # bodies before the assembly cut: read on demand (T323 stage 4a)
+    reply. An error is a failure, not a reply, and is never a jump target (the user 2026-06-18).
+    Scalars only (em.atom_has_text, em.atom_is_settle: a lazy atom's marker holds its text flag, text hash
+    and model stamp), so no body is hydrated (T358)."""
     work = reply = settle = None
     for a in atoms:
         if a.get("type") != "assistant" or a.get("isApiError"):
             continue
         if work is None:
             work = a.get("uuid")
-        blocks = (a.get("message") or {}).get("content", [])
-        if isinstance(blocks, list) and any(
-                isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip()
-                for b in blocks):
+        if em.atom_has_text(a):
             # the machine-cut NULL SETTLE ("No response requested." / model "<synthetic>") is an
             # anchor of last resort, never the reply while a substantive atom exists (2026-08-25):
             # verdicts anchored at a cut turn's settle deep-linked to a filler the chat renders as
             # a seam marker — the alias belt covers residue, but the mint prefers the real reply
-            _txt = " ".join(b.get("text", "") for b in blocks
-                            if isinstance(b, dict) and b.get("type") == "text").strip()
-            if _txt == "No response requested." \
-                    or (a.get("message") or {}).get("model") == "<synthetic>":
+            if em.atom_is_settle(a):
                 settle = a.get("uuid")
             else:
                 reply = a.get("uuid")
@@ -38328,15 +38341,9 @@ def _segs_seam(turn, store):
 def _atom_prose_chars(a):
     """Chars of assistant prose on one atom — 0 for a non-assistant, API-error, or prose-less atom. The
     ONE measure behind both "substantive" reads: _seg_last_text's fallback floor and build_feed's
-    citation gate (both against jd.CITE_MIN_CHARS), so the two can never drift."""
-    if a.get("lazy") is not None: em.hydrate([a])   # a body before the assembly cut: read on demand (T323 stage 4a)
-    if a.get("type") != "assistant" or a.get("isApiError"):
-        return 0
-    blocks = (a.get("message") or {}).get("content", [])
-    if not isinstance(blocks, list):
-        return 0
-    return sum(len(b.get("text", "")) for b in blocks
-               if isinstance(b, dict) and b.get("type") == "text")
+    citation gate (both against jd.CITE_MIN_CHARS), so the two can never drift. A lazy atom answers from
+    its marker's `pc` (em.atom_prose_chars): no body is hydrated for it (T358)."""
+    return em.atom_prose_chars(a)
 
 
 def _seg_last_text(atoms):
@@ -38351,8 +38358,7 @@ def _seg_last_text(atoms):
     real wrap-ups ran 90-190. Recency is the signal; the floor only filters connective stubs ("Now the
     function rewrite:"), so it sits just above them. API-error atoms are skipped (like _seg_anchors: a
     failed turn carries text but is never a jump target). (None, False) when the segment has no
-    assistant prose."""
-    em.hydrate(atoms)   # bodies before the assembly cut: read on demand (T323 stage 4a)
+    assistant prose. Scalars only (_atom_prose_chars): no body is hydrated (T358)."""
     last_any, last_sub = None, None
     for a in atoms:
         n = _atom_prose_chars(a)
@@ -38372,19 +38378,15 @@ def _seg_jump(atoms):
     "couldn't locate this in the transcript" on a card whose newest segment was mid-flight, its only
     assistant output so far a thinking block (the user 2026-07-21, the romp_docs recording-suggestions
     card). None when the segment has nothing landable yet → the payload's ev_t time-nav, the same
-    graceful family as every other zone."""
-    em.hydrate(atoms)   # bodies before the assembly cut: read on demand (T323 stage 4a)
+    graceful family as every other zone.
+    Scalars only (em.atom_has_text, em.atom_tool_uses): no body is hydrated (T358)."""
     work, reply = _seg_anchors(atoms)
     if reply:
         return reply
     for a in atoms:
         if a.get("type") != "assistant" or a.get("isApiError") or not a.get("uuid"):
             continue
-        blocks = (a.get("message") or {}).get("content", [])
-        if isinstance(blocks, list) and any(
-                isinstance(b, dict) and (b.get("type") == "tool_use" or
-                                         (b.get("type") == "text" and b.get("text", "").strip()))
-                for b in blocks):
+        if em.atom_has_text(a) or em.atom_tool_uses(a):
             return a["uuid"]
     return None
 
@@ -38724,59 +38726,16 @@ def _seg_prompt(seg):
     return blocks if isinstance(blocks, str) else ""
 
 
-def _encoded_mids(content, ids=None):
-    """POSTAL_RE's matches over json.dumps(content) — the search a list-shaped tool_result gets — computed
-    without encoding the whole result, appended to `ids` in document order. Only the strings the encoding
-    would write (dict keys and string values; every other value encodes to digits, true/false/null or
-    brackets) can carry a marker, and a match cannot cross the encoder's `, ` and `: ` separators (the id
-    admits no space), so encoding just the strings that hold the marker's literal and matching each alone
-    yields the same ids in the same order. A value json.dumps would refuse (an unexpected type) contributes
-    nothing instead of raising. Encoding every list-shaped result was 2.3% of the pusher (cProfile of the
-    push thread on a loaded kernel, 2026-09-06): those lists are mostly image and tool_reference blocks that
-    never carry a marker, and a base64 image block is the expensive part."""
-    if ids is None:
-        ids = []
-    if isinstance(content, str):
-        if "romp-msg-id" in content:
-            ids += jd.em.POSTAL_RE.findall(json.dumps(content))
-    elif isinstance(content, dict):
-        for k, v in content.items():
-            if isinstance(k, str) and "romp-msg-id" in k:
-                ids += jd.em.POSTAL_RE.findall(json.dumps(k))
-            _encoded_mids(v, ids)
-    elif isinstance(content, (list, tuple)):
-        for v in content:
-            _encoded_mids(v, ids)
-    return ids
-
-
 def _seg_mids(seg):
     """Postal message ids referenced anywhere in a segment (its romp-msg-id markers, in text blocks or
     a check_inbox tool_result) — joins a recipient's WORK segment to the message that triggered it, so
     the timeline connector can bind to the true process-start. Called per segment on every timeline
-    build, so it reads the blocks in place (_encoded_mids) rather than encoding them."""
-    em.hydrate(seg.get("atoms") or [])   # bodies before the assembly cut: read on demand (T323 stage 4a)
-    ids = []
-    for a in seg.get("atoms", []):
-        msg = a.get("message") or {}
-        content = msg.get("content")
-        if isinstance(content, str):
-            ids += jd.em.POSTAL_RE.findall(content)
-        elif isinstance(content, list):
-            for b in content:
-                if not isinstance(b, dict):
-                    continue
-                if b.get("type") == "text":
-                    t = b.get("text")
-                    if isinstance(t, str):                # a null text field is skipped, not a TypeError
-                        ids += jd.em.POSTAL_RE.findall(t)
-                elif b.get("type") == "tool_result":
-                    c = b.get("content")                  # str | list[dict] | None from the SDK, as passed through
-                    if isinstance(c, str):
-                        ids += jd.em.POSTAL_RE.findall(c)
-                    elif c is not None:
-                        _encoded_mids(c, ids)
-    return ids
+    build. A restored pre-cut segment carries its ids (`mids`, written by the assembly checkpoint from
+    em.postal_mids over its atoms); otherwise each atom answers from its lazy marker or its body
+    (em.atom_mids), so no body is hydrated for it (T358)."""
+    if seg.get("mids") is not None:
+        return list(seg["mids"])
+    return [m for a in (seg.get("atoms") or []) for m in em.atom_mids(a)]
 
 
 def _bind_message_execs(messages, turns, prompts=None):

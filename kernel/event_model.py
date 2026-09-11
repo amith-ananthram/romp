@@ -3523,8 +3523,10 @@ def segments(turn):
     from one input to the next (or to the turn end). Each carries a stable `id` for the
     summarizer layer. Pure function over a turn."""
     atoms = turn["atoms"]
-    if turn.get("pre") and turn.get("segs") is not None:   # a restored pre-cut turn (T323 stage 4c): the spans as written
-        return [{"id": s[0], "trigger": s[1], "t": s[2], "end": s[3], "atoms": atoms[s[4]:s[4] + s[5]]} for s in turn["segs"]]
+    if turn.get("pre") and turn.get("segs") is not None:   # a restored pre-cut turn (T323 stage 4c): the spans as written; the
+        return [dict({"id": s[0], "trigger": s[1], "t": s[2], "end": s[3], "atoms": atoms[s[4]:s[4] + s[5]]},   # atoms a lazy view
+                     **({"w": bool(s[6]), "mids": list(s[7]), "hp": bool(s[8])} if len(s) >= 9 else {}))   # (T358: the stored verdicts)
+                for s in turn["segs"]]
     rompuuid = atoms[0]["session_id"] if atoms else ""
     starts = [i for i, a in enumerate(atoms) if _is_segment_input(a)]
     if not starts:
@@ -3588,6 +3590,8 @@ def split_segment(seg, t):
         return None
     rompuuid = atoms[0].get("session_id", "")
     head = dict(seg, atoms=head_a, end=tail_a[0]["t"])
+    for k_ in ("w", "mids", "hp"):
+        head.pop(k_, None)                            # the whole segment's stored verdicts (T358) do not describe a part
     tail = {"t": tail_a[0]["t"], "end": seg["end"], "trigger": None, "atoms": tail_a, "seam": True,
             "id": _segment_id(rompuuid, tail_a[0]["t"], tail_a, None)}
     return head, tail
@@ -4048,13 +4052,18 @@ def _asm_fold(entry, delta, leaf_recs, leaf_key, leaf_stem, rompuuid, postal_ind
 # ids and atom uuids. Bodies come back on demand (hydrate). Anything that does not verify is a counted fallback to a
 # whole parse; a compaction landing after the document demotes the tail fold to a whole parse exactly as before, and
 # the next settle writes a new document with the new cut.
-_ASM_CKPT_V = 4                       # 2: atom rows carry [offset, len], nt for every atom; 3: the carry holds skill_loads (T333);
+_ASM_CKPT_V = 5                       # 2: atom rows carry [offset, len], nt for every atom; 3: the carry holds skill_loads (T333);
 #                                       4: a `turns` section over the pre-cut rows (T323 stage 4c: the lazy index)
+#                                       5: lazy markers carry pc (assistant prose chars) and mid (postal message ids); a turn row
+#                                          carries pcs and hT, a segment row w, mids and hp (T358: the per-cycle walkers read scalars).
+#                                          The stored w and hp are atom_has_work's and seg_prompt_atom's verdicts at write time: a
+#                                          change to either rule, or to what pc, mid, pcs or hT mean, is a bump of this constant
+#                                          (tests/test_asm_index.py pins the rules' source beside it).
 _MAT_CAP = 20000                      # materialized pre-cut atoms resident across every session (the lazy index's LRU)
 _MAT_LRU = collections.OrderedDict()  # (id(LazyAtoms), row) → (LazyAtoms, row): eviction drops the memo, never a field in place
 _MAT_LOCK = threading.Lock()
 _ASM_INDEX_STATS = {"materialized": 0, "materializedBy": {}, "resident": 0, "evictions": 0, "restoredTurns": 0, "rowDecodes": 0}
-_PRE_TURN_KEYS = ("pre", "uuids", "lastT", "maxT", "lastModel", "tools", "segs")   # a pre-turn's fields beyond a plain turn's
+_PRE_TURN_KEYS = ("pre", "uuids", "lastT", "maxT", "lastModel", "tools", "segs", "pcs", "hT")   # a pre-turn's fields beyond a plain turn's
 
 
 class LazyIndexError(RuntimeError):
@@ -4191,9 +4200,14 @@ class LazyAtoms(list):
         return list(self._rows)
 
     # ── the list surface ──
+    def _unbuilt(self):
+        return any(a is _UNMAT for a in list.__iter__(self))
     def __getitem__(self, i):
         if isinstance(i, slice):
-            return [self._at(j) for j in range(*i.indices(len(self)))]
+            start, stop, step = i.indices(len(self))
+            if step == 1:                                 # a contiguous slice (a segment's atoms) stays lazy: a view over this list
+                return _LazyView(self, start, max(start, stop))
+            return [self._at(j) for j in range(start, stop, step)]
         n = len(self)
         if i < 0:
             i += n
@@ -4206,7 +4220,7 @@ class LazyAtoms(list):
         # and ship it: refused here, loudly, as the design asks (plain_tree is the dump's road)
         f = sys._getframe(1)
         if f is not None and f.f_code.co_name in ("iterencode", "encode", "_iterencode", "_iterencode_list", "_iterencode_dict") \
-                and any(a is _UNMAT for a in list.__iter__(self)):
+                and self._unbuilt():
             raise TypeError("a pre-cut turn's atoms are not JSON-serializable before they are built: dump em.plain_tree(session)")
         for j in range(len(self)):
             yield self._at(j)
@@ -4276,6 +4290,28 @@ class LazyAtoms(list):
         raise TypeError("a pre-cut turn's atoms are read-only")
 
 
+class _LazyView(LazyAtoms):
+    """A contiguous slice of a LazyAtoms (a segment's atoms, T358) that builds nothing until read: every read goes to the
+    parent's slot, so a build here is the parent's build under the parent's LRU key and an eviction there is seen here.
+    Its own storage holds placeholders only (json's encoder is refused the same way); slicing a view is a view of the
+    parent."""
+    def __init__(self, parent, start, stop):
+        list.__init__(self, [_UNMAT] * (stop - start))
+        self._parent, self._off = parent, start
+        self._index, self._rows = parent._index, parent._rows[start:stop]
+    def _at(self, i):
+        return self._parent._at(self._off + i)
+    def _unbuilt(self):
+        return any(list.__getitem__(self._parent, self._off + j) is _UNMAT for j in range(len(self)))
+    def __getitem__(self, i):
+        if isinstance(i, slice):
+            start, stop, step = i.indices(len(self))
+            if step == 1:
+                return _LazyView(self._parent, self._off + start, self._off + max(start, stop))
+            return [self._at(j) for j in range(start, stop, step)]
+        return LazyAtoms.__getitem__(self, i)
+
+
 class PreTurn(dict):
     """A restored pre-cut turn: a plain turn's fields (id, trigger, t, end, ended, atoms) with `atoms` a LazyAtoms, plus
     the turn-level scalars the kernel's walkers read instead of the atoms (_PRE_TURN_KEYS: uuids, lastT, maxT, lastModel,
@@ -4291,7 +4327,8 @@ def _pre_turns_of(doc, index):
         pt = PreTurn(id=td["id"], trigger=({"uuid": td["uuids"][at]} if at is not None else None), t=td["t"], end=td["end"],
                      ended=bool(td["ended"]), atoms=LazyAtoms(index, td["atoms"]),
                      pre=True, uuids=list(td["uuids"]), lastT=td.get("lastT"), maxT=td.get("maxT"), lastModel=td.get("lastModel"),
-                     tools=[tuple(x) for x in td.get("tools") or []], segs=[list(s) for s in td["segs"]])
+                     tools=[tuple(x) for x in td.get("tools") or []], segs=[list(s) for s in td["segs"]],
+                     pcs={u: n for u, n in td.get("pcs") or []}, hT=td.get("hT"))
         out.append(pt)
     return out
 
@@ -4406,7 +4443,10 @@ def _atom_scalars(a):
 
 
 def _lazy_of(a, kind, rec_index):
-    """The identity scalars a lazy atom carries in place of its body (what the ids, the segmentation and the gates read)."""
+    """The identity scalars a lazy atom carries in place of its body (what the ids, the segmentation and the gates read).
+    An atom that is lazy already keeps its marker (its body is on disk; the marker was made from it)."""
+    if a.get("lazy") is not None:
+        return {k: v for k, v in a["lazy"].items() if k not in ("i", "at")}
     text = _text_of(_content(a.get("message"))) if a.get("message") is not None else ""
     lz = {"k": kind, "h": hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:8], "nt": bool(text)}
     if _machine_written(a):                     # defaults left out: not machine-written, not an interrupt, no stop reason,
@@ -4430,6 +4470,13 @@ def _lazy_of(a, kind, rec_index):
         lz["tr"] = tr
     if kind == "c":
         lz["disp"] = text                       # the invocation's display text is short: inline, no read to rebuild it
+    if a.get("type") == "assistant" and not a.get("isApiError"):
+        pc = _prose_chars(a)
+        if pc:
+            lz["pc"] = pc                       # assistant prose chars: the substantive reads and the citation gate (T358)
+    mids = postal_mids(_content(msg) if msg is not None else None)
+    if mids:
+        lz["mid"] = mids                        # postal message ids: the timeline connector and the caption join (T358)
     return lz
 
 
@@ -4662,7 +4709,8 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None):
             turns_doc = []
             cut_ts = min((ad.ts_of.get(u, 0) for u in entry["kept"] if ad.seq_of.get(u, 0) >= cut_seq), default=None)
             for turn in tree.get("turns") or []:
-                seqs = [ad.seq_of[a["uuid"]] for a in turn["atoms"] if a.get("uuid") in ad.seq_of]
+                t_uuids = turn["uuids"] if turn.get("pre") else [a.get("uuid") for a in turn["atoms"]]   # a restored turn: no atom built
+                seqs = [ad.seq_of[u_] for u_ in t_uuids if u_ in ad.seq_of]
                 if seqs:
                     if max(seqs) >= cut_seq:
                         break                            # the first turn holding a post-cut record ends the pre-cut run
@@ -4670,8 +4718,8 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None):
                     break                                # a turn of synthesized atoms alone (an idle span opening the tree): pre-cut
                 #                                          by its time, else the tail's
                 idxs = []
-                for a in turn["atoms"]:
-                    u_ = a.get("uuid")
+                for ai_, u_ in enumerate(t_uuids):
+                    a = turn["atoms"][ai_] if not u_ or u_ not in row_of_atom else None   # built only for a uuid-less or unknown atom
                     k_ = row_of_atom.get(u_) if u_ else row_of_scalars.pop(json.dumps(_atom_scalars(a), sort_keys=True, default=str), None)
                     #  (two uuid-less attachments in one turn with the same enqueue stamp collide on the scalar key: the second
                     #   finds no row, the walk mints a synthesized one, and the coverage check refuses the section cleanly)
@@ -4685,22 +4733,42 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None):
                         pre_atoms.append(row_)
                     idxs.append(k_)
                 seg_rows, start = [], 0
+                pre_segs = {s_[0]: s_ for s_ in (turn.get("segs") or [])} if turn.get("pre") else {}
                 for sg in segments(turn):
-                    seg_rows.append([sg["id"], sg.get("trigger"), sg["t"], sg["end"], start, len(sg["atoms"])])
+                    ps_ = pre_segs.get(sg["id"])
+                    if ps_ is not None and len(ps_) >= 9:            # a restored turn: its stored verdicts carry over, no atom built
+                        w_, mids_, hp_ = ps_[6], ps_[7], ps_[8]
+                    else:                                             # w is atom_has_work's verdict at write time (see _ASM_CKPT_V)
+                        w_ = 1 if any(atom_has_work(a) for a in sg["atoms"]) else 0
+                        mids_ = [m_ for a in sg["atoms"] for m_ in atom_mids(a)]
+                        pa_ = seg_prompt_atom(sg)                     # hp: whether a MESSAGE caption is wanted (the planner's rule)
+                        hp_ = 1 if pa_ is not None and pa_.get("author") == "human" else 0
+                    seg_rows.append([sg["id"], sg.get("trigger"), sg["t"], sg["end"], start, len(sg["atoms"]), w_, mids_, hp_])
                     start += len(sg["atoms"])
+                if turn.get("pre") and turn.get("pcs") is not None:
+                    pcs_, hT_ = [[u_, n_] for u_, n_ in turn["pcs"].items()], turn.get("hT")
+                    ts_ = [turn.get("lastT")] if turn.get("lastT") else []
+                    ts_max, models, tools_ = turn.get("maxT"), ([turn["lastModel"]] if turn.get("lastModel") else []), [list(x) for x in turn.get("tools") or []]
+                    trig_at = t_uuids.index(turn["trigger"]["uuid"]) if turn.get("trigger") and turn["trigger"].get("uuid") in t_uuids else None
+                else:
+                    pcs_ = [[u_, n_] for u_, n_ in ((a.get("uuid"), atom_prose_chars(a)) for a in turn["atoms"]) if u_ and n_ > 0]
+                    hT_ = max((a.get("t", 0) for a in turn["atoms"] if a.get("type") == "user" and a.get("author") == "human"
+                               and not is_interrupt_record(a)), default=None)
+                    ts_ = [a.get("t") for a in turn["atoms"] if a.get("t")]
+                    ts_max = max(ts_) if ts_ else None
+                    models = [atom_model(a) for a in turn["atoms"] if a.get("type") == "assistant"]
+                    models = [m_ for m_ in models if m_]
+                    tools_ = [[i_, n_] for a in turn["atoms"] if a.get("type") == "assistant" for i_, n_ in atom_tool_uses(a)]
+                    trig_at = next((i_ for i_, a in enumerate(turn["atoms"]) if turn["trigger"] is not None and a is turn["trigger"]), None)
+                    if trig_at is None and turn["trigger"] is not None:
+                        trig_at = next((i_ for i_, a in enumerate(turn["atoms"]) if a.get("uuid") == turn["trigger"].get("uuid")), None)
                 if start != len(turn["atoms"]):
                     return skip("segs")                  # the segments are contiguous slices of the turn, in order
-                ts_ = [a.get("t") for a in turn["atoms"] if a.get("t")]
-                models = [atom_model(a) for a in turn["atoms"] if a.get("type") == "assistant"]
-                models = [m_ for m_ in models if m_]
-                trig_at = next((i_ for i_, a in enumerate(turn["atoms"]) if turn["trigger"] is not None and a is turn["trigger"]), None)
-                if trig_at is None and turn["trigger"] is not None:
-                    trig_at = next((i_ for i_, a in enumerate(turn["atoms"]) if a.get("uuid") == turn["trigger"].get("uuid")), None)
                 turns_doc.append({"id": turn["id"], "t": turn["t"], "end": turn["end"], "ended": bool(turn["ended"]), "atoms": idxs,
-                                  "segs": seg_rows, "uuids": [a.get("uuid") for a in turn["atoms"]], "triggerAt": trig_at,
-                                  "lastT": ts_[-1] if ts_ else None, "maxT": max(ts_) if ts_ else None,
-                                  "lastModel": models[-1] if models else None,
-                                  "tools": [[i_, n_] for a in turn["atoms"] if a.get("type") == "assistant" for i_, n_ in atom_tool_uses(a)]})
+                                  "segs": seg_rows, "uuids": list(t_uuids), "triggerAt": trig_at,
+                                  "lastT": ts_[-1] if ts_ else None, "maxT": ts_max,
+                                  "lastModel": models[-1] if models else None, "tools": tools_,
+                                  "pcs": pcs_, "hT": hT_})
             # the section must COVER the pre-cut rows: every row in exactly one turn (a permutation of the row indexes; the
             # turns sort by time, so a row's index need not be contiguous with its neighbours'), else the tree the store
             # holds is not this entry's whole (a bare rollback armed before the last compaction cuts it short) and the
@@ -4779,6 +4847,123 @@ def atom_tool_results(atom):
     if lz is not None:
         return list(lz.get("tr") or [])
     return [b.get("tool_use_id") for b in _content(atom.get("message")) if isinstance(b, dict) and b.get("type") == "tool_result"]
+
+
+def postal_mids(content, ids=None):
+    """POSTAL_RE's matches over a message's content, in document order, appended to `ids`: a bare string, the text blocks,
+    and a tool_result block's content (a string, or a list of blocks whose strings are searched one by one: only the strings
+    json.dumps would write can carry a marker, and a match cannot cross the encoder's separators, so encoding each string
+    alone yields the ids the encoded whole would, without encoding an image block). The one search the timeline's
+    connector, the message-caption join and the lazy marker share (T358; before it the kernel's _encoded_mids)."""
+    if ids is None:
+        ids = []
+    if isinstance(content, str):
+        if "romp-msg-id" in content:
+            ids += POSTAL_RE.findall(content)
+    elif isinstance(content, dict):
+        if content.get("type") == "text":
+            t = content.get("text")
+            if isinstance(t, str):                    # a null text field is skipped, not a TypeError
+                postal_mids(t, ids)
+        elif content.get("type") == "tool_result":
+            c = content.get("content")                # str | list[dict] | None from the SDK, as passed through
+            if isinstance(c, str):
+                postal_mids(c, ids)
+            elif c is not None:
+                _encoded_mids(c, ids)               # any other block (thinking, tool_use, image) carries no marker: skipped
+    elif isinstance(content, (list, tuple)):
+        for b in content:
+            postal_mids(b, ids)
+    return ids
+
+
+def _encoded_mids(content, ids=None):
+    """The strings-only search over an encoded value: dict keys and string values, every other value encodes to digits,
+    true/false/null or brackets and cannot hold a marker."""
+    if ids is None:
+        ids = []
+    if isinstance(content, str):
+        if "romp-msg-id" in content:
+            ids += POSTAL_RE.findall(json.dumps(content))
+    elif isinstance(content, dict):
+        for k, v in content.items():
+            if isinstance(k, str) and "romp-msg-id" in k:
+                ids += POSTAL_RE.findall(json.dumps(k))
+            _encoded_mids(v, ids)
+    elif isinstance(content, (list, tuple)):
+        for v in content:
+            _encoded_mids(v, ids)
+    return ids
+
+
+def atom_has_text(atom):
+    """Whether an atom's text (the text blocks joined, stripped) is non-empty: the lazy marker's nt, else the body."""
+    return _has_text(atom)
+
+
+def atom_mids(atom):
+    """The postal message ids an atom's message carries: the lazy marker's `mid`, else the body's (no hydration)."""
+    lz = atom.get("lazy")
+    if lz is not None:
+        return list(lz.get("mid") or [])
+    msg = atom.get("message")
+    return postal_mids((msg or {}).get("content") if isinstance(msg, dict) else None)
+
+
+def _prose_chars(atom):
+    """Chars of the text blocks of an atom's body (each block's length, unstripped): pc's definition."""
+    blocks = (atom.get("message") or {}).get("content", [])
+    if not isinstance(blocks, list):
+        return 0
+    return sum(len(b.get("text", "")) for b in blocks if isinstance(b, dict) and b.get("type") == "text")
+
+
+def atom_prose_chars(atom):
+    """Chars of ASSISTANT prose on one atom: 0 for a non-assistant, API-error or prose-less atom. The lazy marker's `pc`
+    for a lazy atom (no hydration), the body's text blocks for a resident one. The one measure behind every
+    "substantive" read (the summary deep-link floor, the feed's citation gate, both against the judge's CITE_MIN_CHARS)."""
+    if atom.get("type") != "assistant" or atom.get("isApiError"):
+        return 0
+    lz = atom.get("lazy")
+    if lz is not None:
+        return int(lz.get("pc") or 0)
+    return _prose_chars(atom)
+
+
+def atom_has_work(atom):
+    """Whether an atom is real ASSISTANT output: its own text or a tool_use, on an assistant record that is not an
+    API error (the captioner has nothing to gloss without one; an error record carries the error's text and is not
+    work). Read from the lazy scalars (nt, tu) for a lazy atom. A segment row's `w` in the assembly document is this
+    verdict at write time over the segment's atoms: changing this rule is a document version bump (_ASM_CKPT_V)."""
+    if atom.get("type") != "assistant" or atom.get("isApiError"):
+        return False
+    return _has_text(atom) or bool(atom_tool_uses(atom))
+
+
+_SETTLE_TEXT_H8 = hashlib.sha1(b"No response requested.").hexdigest()[:8]
+
+
+def atom_is_settle(atom):
+    """Whether an assistant atom's text is the CLI's settle reply ("No response requested.") or a synthetic model's: the
+    lazy marker's text hash and model stamp answer for a lazy atom, the body for a resident one."""
+    lz = atom.get("lazy")
+    if lz is not None:
+        return lz.get("mdl") == "<synthetic>" or (bool(lz.get("nt")) and lz.get("h") == _SETTLE_TEXT_H8)
+    msg = atom.get("message") or {}
+    return _text_of(_content(msg)) == "No response requested." or msg.get("model") == "<synthetic>"
+
+
+def seg_prompt_atom(seg):
+    """The atom a segment's MESSAGE caption glosses: its trigger, else its first atom (the caption planner's rule). One
+    build at most for a restored segment; the document stores whether it is human-authored (`hp`)."""
+    atoms = seg.get("atoms") or []
+    return next((a for a in atoms if a.get("uuid") == seg.get("trigger")), None) or (atoms[0] if atoms else None)
+
+
+def turn_scalar(turn, key):
+    """A restored pre-cut turn's stored scalar (`pcs`, `hT`, ...), None for a plain turn: the walkers ask this before
+    touching a turn's atoms."""
+    return turn.get(key) if turn.get("pre") else None
 
 
 def atom_model(atom):

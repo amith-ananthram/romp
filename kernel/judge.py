@@ -2655,19 +2655,15 @@ def _has_asst_work(atoms):
     usage-limit / auto-nudge storm the captioner (and the archiver behind it) then fired a call per errored
     retry turn, a flood of judge calls captioning nothing but error noise. Skipping isApiError atoms means a
     turn whose only assistant output is the error is work-less → no caption; a turn that did real work THEN
-    errored still captions the real work."""
-    em.hydrate(atoms)   # bodies before the assembly cut: read on demand (T323 stage 4a)
-    for a in atoms:
-        if a.get("type") == "assistant" and not a.get("isApiError"):
-            if _atom_text(a):
-                return True
-            for b in (a.get("message") or {}).get("content", []):
-                if isinstance(b, dict) and b.get("type") == "tool_use":
-                    return True
-    return False
+    errored still captions the real work.
+
+    Reads scalars only (em.atom_has_work: a lazy atom answers from its marker's nt and tu), so no body is hydrated
+    (T358). The assembly document stores this verdict per pre-cut segment (`w`): a change to the rule is a document
+    version bump (em._ASM_CKPT_V), pinned by tests/test_asm_index.py."""
+    return any(em.atom_has_work(a) for a in atoms)
 
 
-def _ready_tasks(session, store=None):
+def _ready_tasks(session, store=None, done=()):
     """Caption tasks. Two kinds (the user 2026-06-19):
       - kind 'prompt' = the MESSAGE caption, a gist of the user's ask. READY THE MOMENT THE MESSAGE LANDS
         (even the open final segment), so the timeline dot gets a gloss without waiting for the work. Keyed
@@ -2680,33 +2676,54 @@ def _ready_tasks(session, store=None):
         request. Only the open final TURN-grain caption is still withheld (no turn caption until it ends)."""
     turns = session["turns"]
     tasks = []
+    done = set(done or ())                             # units captioned already: skipped BEFORE any atom is built or read (T358)
     for ti, turn in enumerate(turns):
         is_last_turn = ti == len(turns) - 1
-        has_idle = any(a["type"] == "idle" for a in turn["atoms"])
+        has_idle = is_last_turn and any(a["type"] == "idle" for a in turn["atoms"])   # only the last turn can be open
         turn_open = is_last_turn and not turn["ended"] and not has_idle
         segs = _segs(turn, store) if store is not None else em.segments(turn)   # seam-aware: the tail gets its own caption
         single = len(segs) == 1
         for si, seg in enumerate(segs):
-            trig = next((a for a in seg["atoms"] if a.get("uuid") == seg.get("trigger")), None) or (seg["atoms"][0] if seg["atoms"] else None)
-            if trig and trig.get("author") == "human":   # MESSAGE caption — ready now, even mid-work
-                tasks.append({"kind": "prompt", "atoms": [trig],
-                              "writes": [{"id": seg["id"] + "#p", "grain": "prompt", "t": seg["t"]}]})
+            want_p = seg["id"] + "#p" not in done
+            want_w = seg["id"] not in done or (single and not turn_open and turn["id"] not in done)
+            if not want_p and not want_w:
+                continue                               # captioned at every grain: no atom of it is built or read
+            if want_p and seg.get("hp") is not False:      # a restored segment stores whether its message is human-authored (hp)
+                trig = em.seg_prompt_atom(seg)
+                if trig and trig.get("author") == "human":   # MESSAGE caption — ready now, even mid-work
+                    tasks.append({"kind": "prompt", "atoms": [trig],
+                                  "writes": [{"id": seg["id"] + "#p", "grain": "prompt", "t": seg["t"]}]})
             if turn_open and si == len(segs) - 1:      # the OPEN final segment → a LIVE in-progress work caption
                 if _has_asst_work(seg["atoms"]):       # ...only once it has real assistant work to gloss
                     tasks.append({"kind": "work", "live": True, "natoms": len(seg["atoms"]),
                                   "atoms": seg["atoms"],
                                   "writes": [{"id": seg["id"], "grain": "segment", "t": seg["t"]}]})
                 continue                               # no turn-grain while open; the final caption supersedes on close
-            if not _has_asst_work(seg["atoms"]):       # a work-less segment (bare prompt / aborted) → no WORK caption
+            if not want_w or not _seg_work(seg):       # a work-less segment (bare prompt / aborted) → no WORK caption
                 continue                               # (its #p message caption still glosses the ask)
             writes = [{"id": seg["id"], "grain": "segment", "t": seg["t"]}]
             if single and not turn_open:               # the turn IS this segment → mirror, no 2nd call
                 writes.append({"id": turn["id"], "grain": "turn", "t": turn["t"]})
+            writes = [w for w in writes if w["id"] not in done]
             tasks.append({"kind": "work", "atoms": seg["atoms"], "writes": writes})
-        if not turn_open and not single and _has_asst_work(turn["atoms"]):   # multi-segment turn → its own work caption
+        if not turn_open and not single and turn["id"] not in done and _turn_work(turn, segs):   # multi-segment turn → its own work caption
             tasks.append({"kind": "work", "atoms": turn["atoms"],
                           "writes": [{"id": turn["id"], "grain": "turn", "t": turn["t"]}]})
     return tasks
+
+
+def _seg_work(seg):
+    """_has_asst_work over a segment: the verdict a restored pre-cut segment stores (`w`, written by the assembly
+    checkpoint from the same rule), else the rule over its atoms (T358)."""
+    w = seg.get("w")
+    return _has_asst_work(seg["atoms"]) if w is None else bool(w)
+
+
+def _turn_work(turn, segs):
+    """_has_asst_work over a whole turn, from its segments' stored verdicts when every one carries one."""
+    if segs and all(sg.get("w") is not None for sg in segs):
+        return any(sg["w"] for sg in segs)
+    return _has_asst_work(turn["atoms"])
 
 
 # ───────────────────────── parse + units, (mtime,size) cached ─────────────────────────
@@ -3456,7 +3473,7 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None, states=None,
     return session
 
 
-def tasks_for(fsid, leaf, files, now):
+def tasks_for(fsid, leaf, files, now, done=None):
     """The transcript's ready caption tasks [{text, writes:[{id,grain,t}]}], memoized on disk
     by the pass's parse pair — repeated passes don't re-parse an unchanged transcript
     (ports the romp-events cache; the per-second-polling / 14MB-transcript guard). The memo key IS
@@ -3473,10 +3490,12 @@ def tasks_for(fsid, leaf, files, now):
     if pair is None:
         return []
     key = list(pair)                                   # as JSON reads it back: [[[mtime, size], ...], cut]
+    cap_key = _file_key(str(CAPDIR / (fsid + ".jsonl")))   # the captions file's stat beside it (T358): the memo holds the UNDONE
+    cap_key = list(cap_key) if cap_key else None      #  units' tasks only, so a caption filed since must miss it (a strike files none)
     cf = PCACHE / (fsid + ".json")
     try:
         o = json.loads(cf.read_text())
-        if o.get("key") == key and o.get("v") == 8:    # v8 = the harness skill-load wrapper no longer emits a command atom, so the prompt segment grows (T333, 2026-09-11; with PLACEMENTS_V 14);
+        if o.get("key") == key and o.get("capKey") == cap_key and o.get("v") == 9:    # v8 = the harness skill-load wrapper no longer emits a command atom, so the prompt segment grows (T333, 2026-09-11; with PLACEMENTS_V 14);
             #                                             v7 = machine-written triggers key their segment on the anchor uuid, so those seg ids moved (T318, 2026-09-10; with PLACEMENTS_V 13);
             #                                             v6 = absorbed atoms placed at their landing time, so their seg ids moved (T252d, 2026-09-08);
             #                                             v5 = absorbed SDK-injection atoms carry real text (2026-07-06); older caches regenerate
@@ -3488,7 +3507,9 @@ def tasks_for(fsid, leaf, files, now):
     if fault is not None:
         return []                                      # its row is filed; this session captions nothing this
     tasks = []                                         # pass and the other sessions' captions proceed
-    for t in _ready_tasks(session, store):
+    if done is None:
+        done = captioned_ids(fsid)
+    for t in _ready_tasks(session, store, done):       # captioned units are skipped before their bodies are read (T358)
         kind = t.get("kind", "work")
         text = _prompt_text(t["atoms"]) if kind == "prompt" else _unit_text(t["atoms"])
         task = {"kind": kind, "text": text, "writes": t["writes"]}
@@ -3498,7 +3519,7 @@ def tasks_for(fsid, leaf, files, now):
     try:
         PCACHE.mkdir(parents=True, exist_ok=True)
         tmp = cf.with_suffix(".tmp.%d" % os.getpid())
-        tmp.write_text(json.dumps({"key": key, "v": 8, "tasks": tasks}))
+        tmp.write_text(json.dumps({"key": key, "capKey": cap_key, "v": 9, "tasks": tasks}))
         tmp.rename(cf)
     except Exception:
         pass
@@ -8551,7 +8572,7 @@ def _run_index(now=None, budget=BUDGET, fairness=FAIRNESS, concurrency=None, ver
         yield_between_sessions()
         done = captioned_ids(fsid)
         live_n = _live_natoms(fsid)                       # the open segment's last live-caption sizes (cadence gate)
-        for task in tasks_for(fsid, str(path), [str(path)], now):
+        for task in tasks_for(fsid, str(path), [str(path)], now, done=done):
             undone = [w for w in task["writes"] if w["id"] not in done]
             if task.get("live"):                          # re-caption the OPEN segment only every CHUNK new atoms
                 undone = [w for w in undone
