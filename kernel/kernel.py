@@ -545,7 +545,10 @@ class _PerfStats:
                                sharedHits=int(getattr(jd, "parse_hits", lambda: 0)())),
                 # T323 stage 3: the folds' checkpoints: restored, written, swept at boot, folds skipped as unencodable,
                 # fallbacks per reason (version, path, shrunk, guard, rewrite, corrupt) and the bytes the reader read
-                "checkpoints": em.checkpoint_stats()}
+                "checkpoints": em.checkpoint_stats(),
+                # T323 stage 4a: the assembly documents: written, restored, fallbacks per reason, skips per reason (noEntry,
+                # restored, noBoundary, unsplittable, oversize, ...), hydrated bodies and bytes since boot
+                "asmCheckpoint": em.asm_checkpoint_stats()}
 
 
 _PERF_STATS = _PerfStats()
@@ -643,6 +646,7 @@ def _open_turn_progress(turns):
     (Analyzing…, Awaiting…, the stall chip, the Blocked floors) own every idle beat, so this covers
     exactly the case that used to be mute — an ordinary working card with its turn open. Derived from
     the same cached parse as the working dot; a tool use is an assistant record's tool_use block."""
+    em.hydrate(turns[-1].get("atoms") or []) if turns else None   # the last turn (T323 stage 4a)
     if not turns:
         return None
     lt = turns[-1]
@@ -719,6 +723,7 @@ def _interrupt_cause(nxt_atom):
     cuts romp itself caused and is already continuing (via the injected resume notice) — never a
     user-chosen stop, so they must not suppress the nudge nor paint the "you stopped this" badge (the
     user 2026-07-14). Pure per-atom classifier; _machine_cut_cause owns FINDING the notice."""
+    if nxt_atom is not None and nxt_atom.get("lazy") is not None: em.hydrate([nxt_atom])   # a body before the cut (T323 stage 4a)
     body = (_atom_user_text(nxt_atom) or "") if nxt_atom else ""
     if INTR_RESTART_SIG in body:
         return "restart"
@@ -9090,15 +9095,38 @@ def _session_fold_files(sid, leaf):
     return out
 
 
+def _prime_leaf_folds(leaf):
+    """Bring every checkpointed fold over a leaf transcript current before its checkpoints are written, so a fold this
+    process never happened to run for the file (a kernel stopped before a judges' pass reached it) still leaves its
+    cursor for the next process: without one, that fold's first run after the restart reads the file whole (measured
+    in the served test: the judges' background-task fold upgraded a restored tail entry to the whole leaf, 3.8 MB).
+    Over the resident whole entry a first fold costs its step over the records and no read; a current cursor costs a
+    stat. Over a WHOLE resident entry every leaf fold is primed; over a tail entry (a restored one, or a fold's own) only
+    the folds holding a cursor at that entry, whose step is an append over records in hand (a lagging judges' fold
+    would otherwise drop out of the settle write and read the leaf whole at the next boot), while a fold with no
+    cursor there, and a leaf this process never read, are left to their callers. The leaf's folds: the kernel's two background-task views, the judges' pairing,
+    the session meta and the agent launch state (the agent files' and the logs' folds are their own callers').
+    Best-effort per fold; True when the leaf was primed."""
+    whole = em.entry_whole_resident(leaf)
+    primed = False
+    for fn, cache in ((_bg_scan_cached, _bgtasks_cache), (_bg_scan_all_cached, _bgall_cache), (jd._bg_scan, jd._BG_SCAN_CACHE),
+                      (_session_meta, _session_meta_cache), (_agent_launch_state, _AGENT_LAUNCH_CACHE)):
+        if not whole and not em.fold_cursor_appendable(cache, leaf):
+            continue                          # over a tail entry only a fold with a cursor at this entry (an append, no read):
+        try:                                  #  one with none would read the file whole, and a leaf with no entry is left alone
+            fn(leaf); primed = True
+        except Exception:
+            pass
+    return primed
+
+
 def _persist_checkpoints(now):
     """Write the fold checkpoints whose files belong to a session with NEW settle evidence: its turn-end key (the
     Stop hook's lastStopAt, else a stopped states transition) or its states log's stat moved since the last write for
     it. A session whose turn runs for hours still writes at every states-log row (a working/awaiting transition is an
     event; a timer is not). Only dirty checkpoints are written; a session with no evidence change writes nothing.
+    Every leaf fold is brought current first (_prime_leaf_folds), so the write holds a cursor for each of them.
     Exit writes everything dirty (_drain_and_exit). Returns how many files were written."""
-    dirty = set(em.checkpoint_dirty())
-    if not dirty:
-        return 0
     written = 0
     for s in _sessions(now):
         sid, leaf = s.get("sid"), s.get("path")
@@ -9107,10 +9135,16 @@ def _persist_checkpoints(now):
         key = (_turn_end_key(sid), _stat_key(jd.STATE / "states" / (sid + ".jsonl")))
         if _CKPT_SETTLE_SEEN.get(sid) == key:
             continue
+        _prime_leaf_folds(leaf)
+        dirty = set(em.checkpoint_dirty())
         mine = _session_fold_files(sid, leaf) & dirty
         if mine:
             written += em.checkpoint_write_dirty(sorted(mine))
-            dirty -= mine
+        try:                                   # the assembly document for the leaf (T323 stage 4a): from a whole entry
+            if em.asm_checkpoint_write(leaf, sid, _display_sdk_human(sid)):   # with a compaction boundary, else a
+                written += 1                   #  counted skip; the tree it comes from is the store's live tree
+        except Exception:
+            sys.stderr.write("assembly checkpoint: %s\n" % traceback.format_exc())
         _CKPT_SETTLE_SEEN[sid] = key
     if len(_CKPT_SETTLE_SEEN) > 4096:
         _CKPT_SETTLE_SEEN.clear()
@@ -13876,6 +13910,7 @@ def _turn_landed(turn, cut_t=0.0):
     the backend's newest machineCut stamp (_last_machine_cut): an interrupt record at or before it is a
     cut ROMP made and is resuming (crash / restart), not the user's stop — the turn stays in progress
     (T237 review: otherwise the mark flapped yellow → green → yellow across every resume)."""
+    em.hydrate(turn.get("atoms") or [])   # bodies before the assembly cut: read on demand (T323 stage 4a)
     atoms = turn.get("atoms") or []
     # the CLI's null settle ("No response requested.", model "<synthetic>") follows every stop record it
     # writes — the same signals _interrupt_settle reads; it is part of the stop, never the reply, so the tail
@@ -25322,6 +25357,7 @@ def _seg_of_tool_uses(ps, store, tool_ids):
     every id is found; seam-aware (_segs_seam) so the ids match the judge's placement keys."""
     found, want = {}, set(tool_ids)
     for turn in reversed(ps.get("turns") or []):
+        em.hydrate(turn.get("atoms") or [])      # bodies before the assembly cut: read on demand, newest turns first (T323 stage 4a)
         if not want:
             break
         for seg in _segs_seam(turn, store):
@@ -25809,6 +25845,7 @@ def _retry_gaveups(sid):
 def _atom_md(a):
     """Joined text-block content of an assistant atom (thinking/tool_use skipped) — for the orphan-reply
     dedup, which compares a lost reply's text against what the transcript actually kept."""
+    if a.get("lazy") is not None: em.hydrate([a])   # a body before the assembly cut: read on demand (T323 stage 4a)
     msg = a.get("message") or {}
     c = msg.get("content")
     if isinstance(c, str):
@@ -27665,6 +27702,7 @@ def _fold_tasks_turn(atoms):
     the content of the turn's tool_result blocks (a TaskCreate's carries 'Task #N'); rejected: the
     tool_use_ids whose result came back is_error (the CLI refused the call: nothing created, nothing moved);
     ops: the turn's TaskCreate and TaskUpdate tool_use blocks in order, as (name, input, tool_use_id)."""
+    em.hydrate(atoms)   # bodies before the assembly cut: read on demand (T323 stage 4a)
     results, rejected, ops = {}, set(), []
     for a in atoms:
         if a.get("type") == "user":
@@ -31913,6 +31951,7 @@ def _atom_user_text(a):
     """The plain text of a user atom (for deduping the optimistic input echo against the transcript), keyed
     by sb.echo_text_key — the ONE rule the SDK backend's by-text prune and its landing scan share with the
     keys built here (2026-09-06: the scan matched a collapsed text the prune's raw comparison never could)."""
+    if a.get("lazy") is not None: em.hydrate([a])   # a body before the assembly cut: read on demand (T323 stage 4a)
     if a.get("type") != "user":
         return None
     c = (a.get("message") or {}).get("content")
@@ -31940,6 +31979,7 @@ def _atom_user_texts(a):
     the arguments; the typed echo meets that atom under the command key whatever whitespace it carried
     (2026-09-10). The backend's _landed_texts adds the same key to the raw records its landing scan reads,
     so the two agree."""
+    if a.get("lazy") is not None: em.hydrate([a])   # a body before the assembly cut: read on demand (T323 stage 4a)
     if a.get("type") != "user":
         return ()
     out = []
@@ -32509,6 +32549,7 @@ def _interrupt_settle(events, txt, atom=None):
       transcripts whose settle carries a real model id).
     A substantive reply after an interrupt ("stopped; the partial edit is reverted") stays a normal
     bubble either way."""
+    if atom is not None and atom.get("lazy") is not None: em.hydrate([atom])   # one body (T323 stage 4a)
     if txt.strip() != "No response requested.":
         return False
     if (((atom or {}).get("message") or {}).get("model")) == "<synthetic>":
@@ -32881,6 +32922,8 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
                             "why": _fold_why or ""}
     # per-turn seg maps for the turns this build reshapes (the prefix's came with the entry)
     _seg_by_turn = {}                         # turn index → its (uuid2seg, seg_anchors, seg_trig, seg_work) items
+    em.hydrate([a for _t in _turns[_fk:] for a in _t["atoms"]])   # the turns this build renders (T323 stage 4a): the
+    #                                                                fold's tail in the steady state, every turn on a demote
     for _ti in range(_fk, len(_turns)):
         turn = _turns[_ti]
         _u2s, _sa, _st, _sw = {}, {}, {}, {}
@@ -38155,6 +38198,7 @@ def _seg_anchors(atoms):
     (isApiErrorMessage, tagged isApiError by em), so it carries text and would otherwise WIN the
     reply anchor — deep-linking a done/blocked goal to an 'API Error: …' line instead of its real
     reply. An error is a failure, not a reply, and is never a jump target (the user 2026-06-18)."""
+    em.hydrate(atoms)   # bodies before the assembly cut: read on demand (T323 stage 4a)
     work = reply = settle = None
     for a in atoms:
         if a.get("type") != "assistant" or a.get("isApiError"):
@@ -38190,6 +38234,7 @@ def _atom_prose_chars(a):
     """Chars of assistant prose on one atom — 0 for a non-assistant, API-error, or prose-less atom. The
     ONE measure behind both "substantive" reads: _seg_last_text's fallback floor and build_feed's
     citation gate (both against jd.CITE_MIN_CHARS), so the two can never drift."""
+    if a.get("lazy") is not None: em.hydrate([a])   # a body before the assembly cut: read on demand (T323 stage 4a)
     if a.get("type") != "assistant" or a.get("isApiError"):
         return 0
     blocks = (a.get("message") or {}).get("content", [])
@@ -38212,6 +38257,7 @@ def _seg_last_text(atoms):
     function rewrite:"), so it sits just above them. API-error atoms are skipped (like _seg_anchors: a
     failed turn carries text but is never a jump target). (None, False) when the segment has no
     assistant prose."""
+    em.hydrate(atoms)   # bodies before the assembly cut: read on demand (T323 stage 4a)
     last_any, last_sub = None, None
     for a in atoms:
         n = _atom_prose_chars(a)
@@ -38232,6 +38278,7 @@ def _seg_jump(atoms):
     assistant output so far a thinking block (the user 2026-07-21, the romp_docs recording-suggestions
     card). None when the segment has nothing landable yet → the payload's ev_t time-nav, the same
     graceful family as every other zone."""
+    em.hydrate(atoms)   # bodies before the assembly cut: read on demand (T323 stage 4a)
     work, reply = _seg_anchors(atoms)
     if reply:
         return reply
@@ -38567,6 +38614,7 @@ def _expand_judging(wire):
 
 def _seg_prompt(seg):
     """The segment's request text (its trigger/opener atom) for the prompt-dot tooltip."""
+    em.hydrate(seg.get("atoms") or [])   # bodies before the assembly cut: read on demand (T323 stage 4a)
     trig = seg.get("trigger")
     atoms = seg["atoms"]
     a = next((x for x in atoms if x.get("uuid") == trig), None) if trig else None
@@ -38612,6 +38660,7 @@ def _seg_mids(seg):
     a check_inbox tool_result) — joins a recipient's WORK segment to the message that triggered it, so
     the timeline connector can bind to the true process-start. Called per segment on every timeline
     build, so it reads the blocks in place (_encoded_mids) rather than encoding them."""
+    em.hydrate(seg.get("atoms") or [])   # bodies before the assembly cut: read on demand (T323 stage 4a)
     ids = []
     for a in seg.get("atoms", []):
         msg = a.get("message") or {}
@@ -56203,7 +56252,23 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
     except Exception:
         pass
     try:
+        _drain_sessions = [_s for _s in _sessions(time.time()) if _s.get("sid") and _s.get("path")]
+    except Exception:
+        _drain_sessions = []
+    _prime_t0, _primed, _skipped = time.monotonic(), 0, 0
+    for _s in _drain_sessions:            # every RESIDENT leaf's folds current, so each leaves a cursor for the next kernel;
+        if time.monotonic() - _prime_t0 > 1.0:   # bounded: the SDK drain keeps its 2 s under the manager's 5 s grace
+            _skipped += 1; continue
+        _primed += 1 if _prime_leaf_folds(_s["path"]) else 0
+    if _skipped:
+        _exit_log("romp-kernel: drain primed %d leaves' folds, %d sessions left to their checkpoints (1 s budget)\n" % (_primed, _skipped))
+    try:
         em.checkpoint_write_dirty()       # every fold checkpoint that moved since its last write (T323 stage 3)
+    except Exception:
+        pass
+    try:                                  # the assembly documents of every session's leaf (T323 stage 4a): a whole entry
+        for _s in _drain_sessions:        # with a boundary writes, the rest are counted skips; bounded by the drain
+            em.asm_checkpoint_write(_s["path"], _s["sid"], _display_sdk_human(_s["sid"]))
     except Exception:
         pass
     try:

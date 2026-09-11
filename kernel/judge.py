@@ -2499,6 +2499,7 @@ def gist_llm(prompt_text, judge="gister"):
 
 # ───────────────────────── unit text (caption input) ─────────────────────────
 def _atom_text(atom):
+    if atom.get("lazy") is not None: em.hydrate([atom])   # a body before the assembly cut: read on demand (T323 stage 4a)
     msg = atom.get("message") or {}
     return " ".join(b.get("text", "") for b in msg.get("content", [])
                     if isinstance(b, dict) and b.get("type") == "text").strip()
@@ -2561,6 +2562,7 @@ def _unit_text(atoms, marker=None):
     ([m3]) so the model can CITE the one message its takeaway is grounded in (see _split_source).
     Sub-floor stubs (< CITE_MIN_CHARS) still ride along as context, just unlabeled — uncitable by
     construction."""
+    em.hydrate(atoms)   # bodies before the assembly cut: read on demand (T323 stage 4a)
     user_said, asst_said, tools, results, reported = [], [], [], [], []
     for a in atoms:
         if a["type"] == "user" and a.get("author") is not None:
@@ -2653,6 +2655,7 @@ def _has_asst_work(atoms):
     retry turn, a flood of judge calls captioning nothing but error noise. Skipping isApiError atoms means a
     turn whose only assistant output is the error is work-less → no caption; a turn that did real work THEN
     errored still captions the real work."""
+    em.hydrate(atoms)   # bodies before the assembly cut: read on demand (T323 stage 4a)
     for a in atoms:
         if a.get("type") == "assistant" and not a.get("isApiError"):
             if _atom_text(a):
@@ -3161,7 +3164,8 @@ def _chain_membership(fsid, path, cut):
                     _CHAIN_STATS["hit"] += 1
                     return dict(mem)
             _CHAIN_STATS["miss"] += 1
-    raw = em.chain_membership(path, candidate_files=cands, states=states_s, leaf_override=cut or None)
+    raw = em.chain_membership(path, candidate_files=cands, states=states_s, leaf_override=cut or None,
+                              rompuuid=fsid, sdk_human=_sdk_owned(fsid))   # the parse's own entry answers when it stands (T323 stage 4a)
     mem = {k: frozenset(v) for k, v in raw.items()}
     if base is not None:
         with _CHAIN_LOCK:
@@ -5955,15 +5959,13 @@ def _per_file_rewound(fsid, files):
         if not fp.exists():
             continue
         try:
-            ad = em.FileAdapter([str(fp)], str(fp))
-            if not ad.by_uuid and fp.stat().st_size > 0:
-                # the incremental reader swallows OSError into an empty record list with no row of
-                # its own (a permissions break, say) — a non-empty transcript that yields ZERO
-                # records is a failed read, not an empty file, and must count like one
-                raise OSError("transcript read yielded no records")
-            for u, v in ad.chain_verdicts().items():
-                if v == "rewind":
-                    out.add(u)
+            # em.file_rewound: the one-file walk; for the leaf with an assembly document it runs over the document's
+            # pre-cut verdicts and the tail read now instead of the whole file (T323 stage 4a). A non-empty
+            # transcript that yields ZERO records raises OSError there (the incremental reader swallows a
+            # permissions break into an empty list): a failed read, not an empty file, and it must count like one.
+            out |= em.file_rewound(fp, rompuuid=fsid if fp == leaf else None, sdk_human=_sdk_owned(fsid) if fp == leaf else None)
+            #     ^ the one-file walk asks for the leaf's document quietly: a lineage document (a /clear's anchor, a
+            #       resume fork) is not this walk's and stays the display's
         except Exception as e:
             fails += 1
             _log_judge_error("romp", fsid, "rewound-reconcile-file",
@@ -6621,6 +6623,7 @@ def _seg_launches(seg):
     review agent the turn waited on) is not a launch: counting it demoted a user's second ask under the first
     (a review finding on this change). A Workflow's words come from its script's meta (description, else name)
     or its scriptPath's file name; an agent's from its description, else the first line of its prompt."""
+    em.hydrate(seg.get("atoms") or [])   # bodies before the assembly cut: read on demand (T323 stage 4a)
     atoms = seg.get("atoms") or []
     acks = {}
     for a in atoms:
@@ -8820,6 +8823,12 @@ def _awaiting_bg_hold(fsid, path, session, store, now=None):
     launch_turn = {}                      # tool_use id -> the turn that dispatched it (launch or its ack)
     for turn in reversed(session.get("turns") or []):
         for a in turn["atoms"]:
+            if a.get("lazy") is not None:         # an atom before the assembly cut carries its tool ids as scalars (T323 stage 4a)
+                for tid, _name in em.atom_tool_uses(a):
+                    launch_turn.setdefault(tid, turn.get("id"))
+                for tid in em.atom_tool_results(a):
+                    launch_turn.setdefault(tid, turn.get("id"))
+                continue
             blocks = (a.get("message") or {}).get("content")
             if not isinstance(blocks, list):
                 continue
@@ -16858,6 +16867,7 @@ def _human_prompt_record(a, sender):
     an attachment record (a queued_command wrapping what the user dictated mid-turn) exactly when
     it carries no postal or romp-injected marker. Everything else — mail, romp's own lines, the
     agent's assistant atoms, machine input — is None."""
+    if a.get("lazy") is not None: em.hydrate([a])   # a body before the assembly cut: read on demand (T323 stage 4a)
     if a.get("author") == "human":
         if em.is_interrupt_record(a):
             return None

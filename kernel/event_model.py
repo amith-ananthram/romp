@@ -26,7 +26,7 @@ Auxiliary inputs the file adapter may read (same category as the transcript):
                                transcript lost to an API-errored try; judge parse only)
   timeline/messages.jsonl   -> peer rompUuid for a postal atom (join on the msg id)
 """
-import bisect, copy, json, os, re, sys, time, hashlib, threading
+import array, bisect, copy, gzip, json, os, re, sys, time, hashlib, threading
 from datetime import datetime
 from pathlib import Path
 
@@ -621,7 +621,8 @@ def _read_jsonl(path):
 # (FileAdapter builds fresh atom dicts; nothing writes into a record), matching the kernel's existing
 # whole-parse cache contract. The cached list itself is never extended in place — a grown file stores a
 # NEW list — so a concurrent reader holding the old list is never surprised mid-iteration.
-_JSONL_CACHE = {}                 # path -> (mtime, size, offset, tail_bytes, records, base, gen); dict order = LRU, hits reinsert
+_JSONL_CACHE = {}                 # path -> (mtime, size, offset, tail_bytes, records, base, gen, offsets); dict order = LRU, hits reinsert
+#                                   offsets: array of (byte offset, byte length) pairs, one per held record (T323 stage 4)
 #                                   base: how many records of the file precede records[0] (0 = the whole file is held; > 0 = a
 #                                   TAIL entry restored from a checkpoint, T323 stage 3); gen: a process-wide counter's value,
 #                                   fresh for every from-zero read and every restored entry (a mismatch, an eviction, a first
@@ -680,7 +681,24 @@ def read_bytes_report():
 _CKPT_V = 1
 _CKPT_DIR_FN = None               # () -> Path of the checkpoint directory; None = checkpoints off
 _CKPT_STATS = {"restored": 0, "writes": 0, "swept": 0, "skippedFolds": 0, "fallbacks": {}, "restoredFolds": {}, "droppedRestores": 0,
-               "oversizeFolds": {}}
+               "oversizeFolds": {}, "coldFolds": {}, "coldWrites": {}}
+_COLD = object()                  # a restored cursor with no state (its fold was oversize): fold_records inits it and steps the tail
+_COLD_FOLDS = set()               # (path, fold name) whose state in this process began cold at a cut: a TAIL-ONLY state, written as a
+                                  #  cursor without state until a whole refold, never as a complete one (review find, 2026-09-11)
+_SAID = set()
+
+
+def _say_once(line):
+    """One stderr line per distinct text for the process (a skip that recurs at every settle is said the first time)."""
+    if line in _SAID:
+        return
+    _SAID.add(line)
+    try:
+        sys.stderr.write(line + "\n")
+    except Exception:
+        pass
+
+
 _CKPT_FOLD_CAP = 64 * 1024        # bytes of encoded state a fold may put in a checkpoint. A state that grows with its file (the postal
 #                                   log fold's map of every sent row, the state intervals' list of every transition, the every-task
 #                                   background view on a long transcript) would make the document a second copy of the file: reading
@@ -704,6 +722,23 @@ def _next_gen():
         _GEN[0] += 1
         return _GEN[0]
 _FOLD_NAME_OF = {}                # id(cursor dict) -> checkpoint name, for callers that name their cache once (name_fold_cache)
+
+
+def entry_whole_resident(path):
+    """True when the reader holds `path`'s WHOLE file in memory (an entry read from byte zero): a fold over it costs
+    no read. False for a tail entry or none."""
+    with _JSONL_CACHE_LOCK:
+        ent = _JSONL_CACHE.get(str(path))
+    return ent is not None and ent[5] == 0
+
+
+def fold_cursor_appendable(cache, path):
+    """True when `cache` holds a cursor for `path` at the reader's current entry generation: a fold over it is a stat or
+    an append over the entry's records in hand, never a whole read. False with no cursor, no entry or another generation."""
+    with _JSONL_CACHE_LOCK:
+        ent = _JSONL_CACHE.get(str(path))
+    cur = cache.get(str(path))
+    return ent is not None and cur is not None and cur[1] == ent[6]
 
 
 def name_fold_cache(cache, name):
@@ -853,8 +888,10 @@ def _ckpt_pending(path, ent):
     key = str(path)
     with _CKPT_LOCK:
         pend = _CKPT_PENDING.get(key)
-    if pend is not None or ent is None or ent[5] != 0 or _CKPT_DIR_FN is None:
-        return pend
+    if pend is not None or ent is None or _CKPT_DIR_FN is None:
+        return pend                                       # a tail entry the assembly checkpoint's cut read created (T323
+    #                                                       stage 4a) is consulted like a whole one: the fold's recorded
+    #                                                       count must lie within the records the entry holds
     with _CKPT_LOCK:
         if key in _CKPT_SEQ:                          # already consulted (or written) in this process: nothing new
             return None
@@ -875,8 +912,12 @@ def _ckpt_pending(path, ent):
         _count_read(key, len(guard))
     except OSError:
         ok = False
-    if not ok or count > ent[5] + len(ent[4]):
+    if not ok:
         _ckpt_fallback(path, "guard", "whole reader first"); return None
+    if count < ent[5] or count > ent[5] + len(ent[4]):
+        with _CKPT_LOCK:
+            _CKPT_SEQ[key] = int(doc.get("seq") or 0)
+        return None                                       # the fold's count is outside the held records: a cold fold, no fallback
     pend = {"count": count, "gen": ent[6], "folds": dict(doc.get("folds") or {})}
     with _CKPT_LOCK:
         _CKPT_PENDING[key] = pend
@@ -907,6 +948,12 @@ def _restored_cursor(key, name, ent):
             return None
         if count != pend["count"] or count < base or count > base + len(ent[4]):
             return None
+        if "state" not in f:                              # an oversize fold's cursor: the fold starts cold at the cut
+            with _CKPT_LOCK:
+                _CKPT_STATS["coldFolds"][name] = _CKPT_STATS["coldFolds"].get(name, 0) + 1
+            _say_once("checkpoint: fold %s of %s restarts cold over the tail (its state was over the %d KB cap)"
+                      % (name, key, _CKPT_FOLD_CAP // 1024))
+            return (count, ent[6], _COLD)
         state = _ckpt_decode(f["state"])
         with _CKPT_LOCK:
             _CKPT_STATS["restoredFolds"][name] = _CKPT_STATS["restoredFolds"].get(name, 0) + 1
@@ -926,19 +973,27 @@ def checkpoint_write(path, force=False):
         ent = _JSONL_CACHE.get(key)
     if ent is None:
         return False
-    mtime, size, offset, tail, records, base, gen = ent
+    mtime, size, offset, tail, records, base, gen = ent[:7]
     count = base + len(records)
     folds = {}
     for name, cache in list(_FOLD_REG.items()):
         cur = cache.get(key)
         if cur is None or cur[0] != count or cur[1] != gen:
             continue
+        with _CKPT_LOCK:
+            cold = (key, name) in _COLD_FOLDS
+        if cold:                                          # a state that began cold at a cut covers the tail only: it must not
+            with _CKPT_LOCK:                              #  be written as a complete one (the next process would restore it
+                _CKPT_STATS["coldWrites"][name] = _CKPT_STATS["coldWrites"].get(name, 0) + 1   #  as whole and say nothing)
+            folds[name] = {"count": count}
+            continue
         try:
             enc = _ckpt_encode(cur[2])
             if len(json.dumps(enc, separators=(",", ":"))) > _CKPT_FOLD_CAP:
                 with _CKPT_LOCK:                          # a state the size of its file: the document must not become the file
                     _CKPT_STATS["oversizeFolds"][name] = _CKPT_STATS["oversizeFolds"].get(name, 0) + 1
-                continue
+                folds[name] = {"count": count}            # the cursor without its state: the next process starts this fold
+                continue                                  #  cold over the tail instead of reading the file whole (counted)
             folds[name] = {"count": count, "state": enc}
         except TypeError:
             with _CKPT_LOCK:
@@ -987,10 +1042,16 @@ def checkpoint_sweep():
     if d is None or not Path(d).is_dir():
         return 0
     gone = 0
-    for cp in Path(d).glob("*.json"):
+    for cp in list(Path(d).glob("*.json")) + list(Path(d).glob("*.asm.json.gz")):
         keep = False
         try:
-            text = cp.read_bytes()
+            meta = cp.with_name(cp.name + ".meta") if cp.name.endswith(".gz") else None
+            if meta is not None and meta.exists():
+                text = meta.read_bytes()                      # the sidecar: the sweep never inflates a document
+            else:
+                text = cp.read_bytes()
+                if cp.name.endswith(".gz"):
+                    text = gzip.decompress(text)
             _count_read(str(cp), len(text))
             doc = json.loads(text.decode("utf-8"))
             keep = isinstance(doc, dict) and isinstance(doc.get("path"), str) and os.path.exists(doc["path"])
@@ -999,6 +1060,8 @@ def checkpoint_sweep():
         if not keep:
             try:
                 cp.unlink(); gone += 1
+                if cp.name.endswith(".gz"):
+                    cp.with_name(cp.name + ".meta").unlink(missing_ok=True)
             except OSError:
                 pass
     with _CKPT_LOCK:
@@ -1009,7 +1072,8 @@ def checkpoint_sweep():
 def checkpoint_stats():
     with _CKPT_LOCK:
         out = dict(_CKPT_STATS); out["fallbacks"] = dict(_CKPT_STATS["fallbacks"]); out["restoredFolds"] = dict(_CKPT_STATS["restoredFolds"])
-        out["oversizeFolds"] = dict(_CKPT_STATS["oversizeFolds"])
+        out["oversizeFolds"] = dict(_CKPT_STATS["oversizeFolds"]); out["coldFolds"] = dict(_CKPT_STATS["coldFolds"])
+        out["coldWrites"] = dict(_CKPT_STATS["coldWrites"])
     d = _ckpt_dir()
     with _READ_BYTES_LOCK:
         out["documentBytes"] = sum(n for p_, n in _READ_BYTES.items() if d is not None and p_.startswith(str(d) + os.sep))
@@ -1020,22 +1084,41 @@ def checkpoint_stats():
     return out
 
 
-def _scan_jsonl_bytes(data, base_offset):
+def _scan_jsonl_bytes(data, base_offset, offsets=None):
     """(records, consumed) for a bytes blob of jsonl starting at base_offset: parsed objects of every
-    COMPLETE line, and the byte offset just past the last complete line (a trailing partial is left)."""
+    COMPLETE line, and the byte offset just past the last complete line (a trailing partial is left).
+    `offsets`, an array when given, receives each parsed record's (byte offset, byte length) as two
+    appended values: the assembly checkpoint names a record by where it sits (T323 stage 4)."""
     end = data.rfind(b"\n")
     if end < 0:
         return [], base_offset
     records = []
-    for line in data[:end + 1].splitlines():
-        line = line.strip()
-        if not line:
+    pos = 0
+    body = data[:end + 1]
+    for line in body.splitlines(keepends=True):
+        at, pos = pos, pos + len(line)
+        line_s = line.strip()
+        if not line_s:
             continue
         try:
-            records.append(json.loads(line.decode("utf-8", "replace")))
+            records.append(json.loads(line_s.decode("utf-8", "replace")))
         except Exception:
             continue
+        if offsets is not None:
+            offsets.append(base_offset + at); offsets.append(len(line))
     return records, base_offset + end + 1
+
+
+def record_offsets(path, base):
+    """[(byte offset, byte length)] of the reader entry's held records for `path`, record `base` first (the entry's
+    base): the assembly checkpoint's record locations. None when the reader holds no entry or its base is later."""
+    with _JSONL_CACHE_LOCK:
+        ent = _JSONL_CACHE.get(str(path))
+    if ent is None or len(ent) < 8 or ent[5] > base:
+        return None
+    offs = ent[7]
+    start = (base - ent[5]) * 2
+    return [(offs[i], offs[i + 1]) for i in range(start, len(offs), 2)]
 
 
 def _read_jsonl_incremental(path, on_fail=None):
@@ -1068,10 +1151,13 @@ def _read_stripe(path):
     return _READ_STRIPES[hash(path) % len(_READ_STRIPES)]
 
 
-def _read_jsonl_entry(path, on_fail=None, tail_ok=False):
+def _read_jsonl_entry(path, on_fail=None, tail_ok=False, tail_from=None):
     """The reader's cache entry for `path`, current as of this call (the contract at _read_jsonl_entry_unlocked). A hit
     is served under the cache lock alone; a read that would pull bytes runs under the path's stripe lock and re-checks
-    the cache first, so concurrent first reads of one file cost one read and one generation."""
+    the cache first, so concurrent first reads of one file cost one read and one generation. `tail_from`, a
+    (byte offset, record count before it, guard bytes) triple, asks for an entry that holds the records from that
+    offset on (the assembly checkpoint's cut, T323 stage 4): an entry whose base is at or before it serves as is; a
+    missing or later one is read from the offset after the guard verifies, and a guard mismatch reads whole."""
     path = str(path)
     try:
         st = os.stat(path)
@@ -1083,16 +1169,17 @@ def _read_jsonl_entry(path, on_fail=None, tail_ok=False):
         return None
     with _JSONL_CACHE_LOCK:
         hit = _JSONL_CACHE.get(path)
-        if hit is not None and hit[0] == st.st_mtime and hit[1] == st.st_size and (tail_ok or hit[5] == 0):
+        if hit is not None and hit[0] == st.st_mtime and hit[1] == st.st_size and (tail_ok or hit[5] == 0) \
+                and (tail_from is None or hit[5] <= tail_from[1]):
             _JSONL_CACHE.pop(path, None)  # reinsert at the LRU tail: a served entry is a USED entry
             _JSONL_CACHE[path] = hit
             return hit
     with _read_stripe(path):
-        return _read_jsonl_entry_unlocked(path, on_fail=on_fail, tail_ok=tail_ok)
+        return _read_jsonl_entry_unlocked(path, on_fail=on_fail, tail_ok=tail_ok, tail_from=tail_from)
 
 
-def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False):
-    """The reader's cache entry for `path`, (mtime, size, offset, tail, records, base, gen), current as of this call,
+def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None):
+    """The reader's cache entry for `path`, (mtime, size, offset, tail, records, base, gen, offsets), current as of this call,
     or None when the file is absent or unreadable (`on_fail` as in _read_jsonl_incremental). With `tail_ok` a caller
     accepts a TAIL entry (base > 0: records[0] is the file's record number base), and a first touch with no entry
     consults the file's checkpoint (T323 stage 3): the recorded offset's guard bytes are verified on disk and only
@@ -1110,68 +1197,83 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False):
         return None
     with _JSONL_CACHE_LOCK:
         hit = _JSONL_CACHE.get(path)
-        if hit is not None and hit[0] == st.st_mtime and hit[1] == st.st_size and (tail_ok or hit[5] == 0):
+        if hit is not None and hit[0] == st.st_mtime and hit[1] == st.st_size and (tail_ok or hit[5] == 0) \
+                and (tail_from is None or hit[5] <= tail_from[1]):
             _JSONL_CACHE.pop(path, None)  # reinsert at the LRU tail: a served entry is a USED entry
             _JSONL_CACHE[path] = hit
             return hit
     restored = None
-    if hit is None and tail_ok and _CKPT_DIR_FN is not None:
+    if tail_from is not None and (hit is None or hit[5] > tail_from[1]):
+        # the assembly checkpoint's cut: an entry from its offset, when the guard before it stands (else whole)
+        t_off, t_base, t_guard = tail_from
+        if st.st_size >= t_off:
+            keep_gen = hit[6] if hit is not None else _next_gen()   # an earlier start for an existing tail entry keeps its
+            hit = restored = (0.0, t_off, t_off, bytes(t_guard), [], int(t_base), keep_gen)   # generation: the folds' cursors stand
+    elif hit is None and tail_ok and _CKPT_DIR_FN is not None:
         hit = restored = _checkpoint_entry(path, st)
     try:
         with open(path, "rb") as fh:
             base, gen, done, kind = 0, None, False, "zero"
             grown = hit is not None and (st.st_size > hit[1] or (restored is not None and st.st_size == hit[1]
-                                                                    and st.st_mtime == hit[0]))
+                                                                    and (st.st_mtime == hit[0] or tail_from is not None)))
             unchanged_tail = (hit is not None and not tail_ok and hit[5] > 0 and st.st_size == hit[1]
                               and st.st_mtime == hit[0])            # a whole reader meets an unchanged tail entry
             if grown or unchanged_tail:
-                _, _, offset, tail, records, base0, gen0 = hit
+                _, _, offset, tail, records, base0, gen0 = hit[:7]
                 fh.seek(max(0, offset - len(tail)))
                 _count_read(path, len(tail))
                 if fh.read(len(tail)) == tail:            # the file really is our cached prefix + more
                     if tail_ok or base0 == 0:
                         data = fh.read()
                         _count_read(path, len(data))
-                        new, offset = _scan_jsonl_bytes(data, offset)
+                        offs = array.array("q", hit[7]) if len(hit) > 7 else array.array("q")
+                        new, offset = _scan_jsonl_bytes(data, offset, offs)
                         records = (records + new) if records else new   # a NEW list — never extend the served one in place
                         base, gen, done = base0, gen0, True
                         kind = "restore" if restored is not None else "grown"
-                        if restored is not None:
+                        if restored is not None and tail_from is None:
                             with _CKPT_LOCK:
                                 _CKPT_STATS["restored"] += 1
                     else:                                 # a whole reader over a tail entry: the whole file, same gen
                         fh.seek(0)
                         data = fh.read()
                         _count_read(path, len(data))
-                        records, offset = _scan_jsonl_bytes(data, 0)
+                        offs = array.array("q")
+                        records, offset = _scan_jsonl_bytes(data, 0, offs)
                         base, gen, done, kind = 0, gen0, True, "upgrade"
                 else:
                     kind = "guard"                        # prefix changed → a rewrite → full re-read, a fresh generation
-                    if restored is not None:
+                    if restored is not None and tail_from is None:
                         _ckpt_fallback(path, "guard")
             elif hit is not None:
                 kind = "shrunk" if st.st_size < hit[2] else "rewrite"   # shrank, or same size under a new mtime: a rewrite
-                if restored is not None:
+                if restored is not None and tail_from is None:
                     _ckpt_fallback(path, kind)
             if not done:
                 fh.seek(0)
                 data = fh.read()
                 _count_read(path, len(data))
-                records, offset = _scan_jsonl_bytes(data, 0)
+                offs = array.array("q")
+                records, offset = _scan_jsonl_bytes(data, 0, offs)
                 base, gen = 0, _next_gen()                # a from-zero read: a generation no cursor of this path can hold
             tail_from = max(0, offset - _JSONL_TAIL_GUARD)
             fh.seek(tail_from)
             tail = fh.read(offset - tail_from)
             _count_read(path, len(tail))                  # the guard capture is a read too (/perf's count is what was pulled)
             if _READER_TRACE:
-                sys.stderr.write("reader: %s %s base=%d gen=%d size=%d\n" % (kind, path, base, gen, st.st_size))
+                fr, inner = sys._getframe(1), []          # the caller outside this module, and the path through it
+                while fr is not None and fr.f_code.co_filename == __file__:
+                    inner.append(fr.f_code.co_name)
+                    fr = fr.f_back
+                who = ("%s:%d" % (fr.f_code.co_name, fr.f_lineno) if fr is not None else "?") + " via " + "<".join(inner[:6])
+                sys.stderr.write("reader: %s %s base=%d gen=%d size=%d by %s\n" % (kind, path, base, gen, st.st_size, who))
     except OSError as e:
         with _JSONL_CACHE_LOCK:
             _JSONL_CACHE.pop(path, None)
         if on_fail is not None and not isinstance(e, FileNotFoundError):
             on_fail(e)
         return None
-    ent = (st.st_mtime, st.st_size, offset, tail, records, base, gen)
+    ent = (st.st_mtime, st.st_size, offset, tail, records, base, gen, offs)
     with _JSONL_CACHE_LOCK:
         _JSONL_CACHE.pop(path, None)
         while len(_JSONL_CACHE) >= _JSONL_CACHE_MAX:
@@ -1243,6 +1345,10 @@ def fold_records(cache, path, init, step, on=None, ckpt=None):
         hit = _restored_cursor(key, ckpt, ent)
         if hit is not None:
             kind = "restore"
+            if hit[2] is _COLD:                           # the cursor without its state: the fold starts at the entry's
+                hit = (base, hit[1], init()); kind = "cold"   #  base and steps the tail it holds
+                with _CKPT_LOCK:
+                    _COLD_FOLDS.add((key, ckpt))          # and stays a tail-only state until a whole refold
     if hit is not None:
         n0, g0, state0 = hit
         if g0 == gen and n0 == total:
@@ -1269,6 +1375,9 @@ def fold_records(cache, path, init, step, on=None, ckpt=None):
             gen = ent[6] if ent is not None else 0
             total = len(recs)
         state, start, kind = init(), 0, "refold"
+        if ckpt is not None:
+            with _CKPT_LOCK:
+                _COLD_FOLDS.discard((key, ckpt))          # every record stepped: the state is complete again
     for r in recs[start:]:
         if isinstance(r, dict):
             state = step(state, r)
@@ -1668,6 +1777,12 @@ def injected_source(author, origin, reminders=(), preamble=""):
 
 
 # ═════════════════════════ FILE ADAPTER: graph recovery, quarantined ═════════════════════════
+def _th(text):
+    """The carry's text key: sha1 of the text. The dedup sets compare for equality only, so a hash serves them, and
+    the assembly checkpoint can carry the sets without carrying every prompt ever typed (T323 stage 4)."""
+    return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:16]
+
+
 def _emit_state():
     """The emit layer's cross-record carry — everything the per-record emit reads that EARLIER
     records established. A full parse starts one empty and folds every kept record through it;
@@ -1675,16 +1790,16 @@ def _emit_state():
     Field-for-field these are the old atoms() locals, hoisted so both paths share one
     implementation and cannot drift."""
     return {"replay": set(),           # uuids classified post-compaction replays (never atoms)
-            "seen_exact": set(),       # (second, text) of every kept user text — verbatim re-writes
-            "seen_text": set(),        # texts ever seen — the restore-burst dedup's memory
+            "seen_exact": set(),       # (second, text hash) of every kept user text — verbatim re-writes
+            "seen_text": set(),        # text hashes ever seen — the restore-burst dedup's memory
             "compacted": False, "restoring": False, "last_boundary": None,
             "summaries": {},           # boundary uuid -> its compaction summary text
             "skill_ids": set(),        # Skill tool_use ids among kept assistants
             "cmd_names": {},           # promptId -> {command names} (slash-invocation twins)
             "skill_loads": {},         # wrapper uuid -> skill name: the harness's own skill loads the emit skips (T333)
-            "absorbed_keys": set(),    # _absorbed's (ts, collapsed-text) dedup memory
+            "absorbed_keys": set(),    # _absorbed's (ts, hash of the collapsed text) dedup memory
             "postal_miss_rec": set(),  # kept records whose postal marker missed the index
-            "postal_miss_att": set(),  # absorbed (ts, collapsed-text) keys likewise
+            "postal_miss_att": set(),  # absorbed (ts, hash of the collapsed text) keys likewise
             "max_ppt": 0.0}            # chronological watermark of folded pre-pass-relevant records
 
 
@@ -1703,7 +1818,10 @@ class FileAdapter:
     ancestors and drop out for free; `/clear` leaves no parent link so the walk
     stops there and pre-clear history drops out naturally."""
 
-    def __init__(self, candidate_files, leaf_path, leaf_override=None, resume_links=None):
+    def __init__(self, candidate_files, leaf_path, leaf_override=None, resume_links=None, seed=None):
+        self.seed = seed         # the assembly checkpoint's pre-cut graph (T323 stage 4): uuids, verdicts, types, the kept
+        #                          chain, the gate facts and the read-counter floor of every record before the cut, so the
+        #                          walks and gates over the tail answer as the whole graph would; None for a whole read
         self.resume_links = dict(resume_links or {})   # {to_fsid: from_fsid} — recorded resume forks (states/ rows)
         self.by_uuid = {}        # uuid -> record
         self.fsid_of = {}        # uuid -> transcript file stem (provenance / click-to-open)
@@ -1743,10 +1861,32 @@ class FileAdapter:
         # read the leaf last so its trailing uuid wins as the walk anchor even if a
         # sibling file happens to sort after it
         files = [f for f in candidate_files if Path(f).stem != leaf_stem] + [Path(leaf_path)]
+        self._src_keys = {}      # path -> the reader's (gen, base, count) the records came from (the fold's identity gate)
+        if seed is not None:
+            self._seq = int(seed["seq_base"])
+            self.prompt_ids |= seed["prompt_ids"]; self.boundary_pids |= seed["boundary_pids"]
+            self.skill_use_ids |= seed["skill_use_ids"]; self.src_tool_links |= seed["src_tool_links"]
+            self.dangling |= seed["dangling"]
+            if seed.get("seq_ts") is not None:
+                self._seq_ts.append(tuple(seed["seq_ts"]))   # the last pre-cut witness: a splice right after the cut lands on it
+            self._last_ts = float(seed.get("last_ts") or 0)
         for fp in files:
             fsid = Path(fp).stem
-            recs = _read_jsonl_incremental(fp)
+            cut = (seed or {}).get("cuts", {}).get(fsid)      # (offset, base, guard) for a file read from its cut, "skip" for
+            if cut == "skip":                                   #  a file wholly before the cut (a fork's prior file, immutable)
+                self._src[str(fp)] = []
+                self._src_keys[str(fp)] = ("skip",)
+                continue
+            if cut is not None:
+                ent = _read_jsonl_entry(fp, tail_ok=True, tail_from=tuple(cut))
+            else:
+                ent = _read_jsonl_entry(fp, tail_ok=False)
+            recs = ent[4] if ent is not None else []
             self._src[str(fp)] = recs
+            self._src_keys[str(fp)] = (ent[6], ent[5], ent[5] + len(recs)) if ent is not None else (None, 0, 0)
+            if cut is not None and ent is not None and ent[5] < cut[1]:
+                recs = recs[cut[1] - ent[5]:]            # the entry holds records before the cut (a whole reader came
+            #                                              first): the seed stands for those, ingest from the cut on
             self._ingest(recs, fsid, fsid == leaf_stem)
         # PRISTINE graph state — parent links / leaf exactly as the records say, BEFORE the three
         # repair passes mutate them. The assembly fold re-derives the passes from this each time
@@ -1864,6 +2004,11 @@ class FileAdapter:
         if not self.resume_links:
             return
         first_of, last_of = {}, {}
+        for fs, ends in ((self.seed or {}).get("file_ends") or {}).items():   # files (or file heads) before the cut
+            if ends[0]:
+                first_of[fs] = ends[0]
+            if ends[1]:
+                last_of[fs] = ends[1]
         for u in self.by_uuid:               # insertion order = file read order
             fs = self.fsid_of.get(u)
             if fs not in first_of:
@@ -1882,16 +2027,17 @@ class FileAdapter:
         leaf is in compactMetadata.preservedSegment (tail/anchor/head), so when the stitch
         target is missing, re-point parent_of there — reconnecting the pre-compaction tree.
         (Verified: rescues 100% of the corpus's broken stitches.)"""
+        known = (self.seed or {}).get("verdicts") or {}   # records before an assembly checkpoint's cut (T323 stage 4)
         for u, r in self.by_uuid.items():
             if r.get("type") != "system" or r.get("subtype") != "compact_boundary":
                 continue
             target = self.parent_of.get(u)
-            if target is None or target in self.by_uuid:
+            if target is None or target in self.by_uuid or target in known:
                 continue                          # no stitch, or stitch is intact
             seg = (r.get("compactMetadata") or {}).get("preservedSegment") or {}
             for k in ("tailUuid", "anchorUuid", "headUuid"):   # tail = the pre-compaction leaf
                 cand = seg.get(k)
-                if cand and cand in self.by_uuid:
+                if cand and (cand in self.by_uuid or cand in known):
                     self.parent_of[u] = cand
                     break
 
@@ -2109,6 +2255,9 @@ class FileAdapter:
         `active` defaults to active_path(); pass it when already computed."""
         if active is None:
             active = self.active_path()
+        seed = self.seed
+        seed_types = seed["types"] if seed is not None else {}
+        seed_verdicts = seed["verdicts"] if seed is not None else {}
         # spine child map (parent -> its child ON the spine), for the fork-kind probe below
         spine_child, _u, _guard = {}, self.leaf_uuid, 0
         while _u is not None and _guard < 500000:
@@ -2117,7 +2266,17 @@ class FileAdapter:
                 break                              # root, or a cycle already crossed
             spine_child[_p] = _u
             _u = _p; _guard += 1
+        if seed is not None:                       # the pre-cut spine, root to cut, so a probe from a pre-cut fork walks on
+            sp = seed["spine"]
+            for i in range(len(sp) - 1):
+                spine_child.setdefault(sp[i], sp[i + 1])
         _fork_memo, _fork_terminal = {}, {}
+
+        def _type_of(u):
+            r = self.by_uuid.get(u)
+            if r is not None:
+                return r.get("type"), r.get("subtype")
+            return seed_types.get(u, (None, None))
         def fork_kind(f):
             """rewind vs eclipsed for a chain rejoining the spine at f. A genuine rollback
             re-parents the user's NEXT PROMPT directly at the cut (the spine leaves f with a
@@ -2135,8 +2294,7 @@ class FileAdapter:
             res, u, saw_err, _seen = "rewind", spine_child.get(f), False, set()
             while u is not None and u not in _seen:
                 _seen.add(u)
-                r = self.by_uuid.get(u) or {}
-                t = r.get("type")
+                t, sub = _type_of(u)
                 if t == "assistant":
                     break
                 if t == "user":
@@ -2144,7 +2302,7 @@ class FileAdapter:
                         res = "eclipsed"
                         _fork_terminal[f] = "user"
                     break
-                if t == "system" and r.get("subtype") == "api_error":
+                if t == "system" and sub == "api_error":
                     saw_err = True
                 u = spine_child.get(u)
             else:
@@ -2173,6 +2331,11 @@ class FileAdapter:
                 if u in verdict:
                     res = verdict[u]; break
                 if u not in self.by_uuid:
+                    sv = seed_verdicts.get(u)      # a record before the cut: the checkpoint recorded its verdict
+                    if sv == "active":
+                        res = fork_kind(u); break  # the chain rejoins the pre-cut spine
+                    if sv is not None:
+                        res = sv; break
                     res = "broken"; break           # dangling target uuid (corruption)
                 if u in path:
                     res = "broken"; break           # cycle -> unprovable, keep
@@ -2463,7 +2626,7 @@ class FileAdapter:
         for q in qatts:
             if q["ts"] is None:
                 continue   # unparseable timestamp — nowhere truthful to place it
-            key = (q["ts"], " ".join(q["text"].split()))
+            key = (q["ts"], _th(" ".join(q["text"].split())))
             if key in emitted:
                 continue   # identical (ts, text) copies are the SAME splice written more than
                            # once (compaction/resume replays the record verbatim — x2 is common
@@ -2553,12 +2716,13 @@ class FileAdapter:
                     # timestamp, so this chronological walk meets it right beside the original — before
                     # the boundary that produced it — and gating on _compacted would never fire. It is
                     # the same record either way. Only the restore-burst case is compaction-scoped.
-                    key = (int(self.ts_of.get(u) or 0), txt)
-                    if key in _seen_exact or (_compacted and _restoring and txt in _seen_text):
+                    th = _th(txt)
+                    key = (int(self.ts_of.get(u) or 0), th)
+                    if key in _seen_exact or (_compacted and _restoring and th in _seen_text):
                         replay_uuids.add(u)
                     else:
                         _seen_exact.add(key)
-                        _seen_text.add(txt)
+                        _seen_text.add(th)
         st["compacted"], st["restoring"], st["last_boundary"] = _compacted, _restoring, last_boundary
         # The chronological watermark the assembly fold's monotonic gate compares appended records
         # against: a delta that sorts at-or-after everything already folded is the invariant that
@@ -2841,7 +3005,7 @@ def synthesize_idle(states, atoms, now):
     return out
 
 
-def synthesize_orphans(states, atoms, landed_text_uuids=None):
+def synthesize_orphans(states, atoms, landed_text_uuids=None, rompuuid=None):
     """Salvaged assistant replies from orphanReply markers in states/<sid>.jsonl — text that STREAMED
     live but the transcript never kept (an API-errored try; the SDK backend persists it at settle,
     see its append_orphan_reply). The kernel's chat build has interleaved these since 2026-07-21, but
@@ -2869,10 +3033,20 @@ def synthesize_orphans(states, atoms, landed_text_uuids=None):
     # under the same uuid — the very loss the marker salvages — so counting that twin as "seen" ate the
     # salvage. A retry that DID re-reply carries its text and still dedups, as does a re-orphaned marker
     # (the add below); the prefix check against disk_texts guards every remaining double.
+    lazy = [a for a in atoms if a.get("lazy") is not None]           # atoms before an assembly checkpoint's cut: no body
     seen_uuids = {a.get("uuid") for a in atoms
-                  if a.get("uuid") and _text_of(_content(a.get("message"))).strip()}
-    disk_texts = [t for a in atoms if a.get("type") == "assistant"
+                  if a.get("uuid") and (a["lazy"].get("nt") if a.get("lazy") is not None else _text_of(_content(a.get("message"))).strip())}
+    disk_texts = [t for a in atoms if a.get("type") == "assistant" and a.get("lazy") is None
                   if (t := _text_of(_content(a.get("message"))).strip())]
+    older = [None]                                                    # the lazy assistants' texts, hydrated once, only if a marker needs them
+
+    def _older_texts():
+        if older[0] is None:
+            las = [a for a in lazy if a.get("type") == "assistant" and a["lazy"].get("nt")]
+            if las:
+                hydrate(las, rompuuid or atoms[0].get("session_id"))
+            older[0] = [t for a in las if (t := _text_of(_content(a.get("message"))).strip())]
+        return older[0]
     sid = atoms[0]["session_id"]
     out = []
     for r in states or []:
@@ -2897,6 +3071,8 @@ def synthesize_orphans(states, atoms, landed_text_uuids=None):
             continue
         if any(dt.startswith(txt) or txt.startswith(dt) for dt in disk_texts):
             continue
+        if lazy and any(dt.startswith(txt) or txt.startswith(dt) for dt in _older_texts()):
+            continue                                                   # a reply the disk kept before the cut
         out.append({"type": "assistant", "uuid": u or ("orphan:%d" % int(r["t"])), "session_id": sid,
                     "t": int(r["t"]), "fsid": None, "parentUuid": None, "orphaned": True,
                     "message": {"role": "assistant", "content": [{"type": "text", "text": txt}],
@@ -2909,6 +3085,74 @@ def synthesize_orphans(states, atoms, landed_text_uuids=None):
 
 
 # ═════════════════════════ SUBSTRATE-NEUTRAL: turns over atoms ═════════════════════════
+class LazyBodyRead(RuntimeError):
+    """A consumer read the message of an atom restored from the assembly checkpoint without hydrating it first
+    (em.hydrate). Raised on any read, in tests and in the kernel alike: a silent empty body would misclassify
+    the atom (no text, no tool blocks) where a loud failure names the consumer that bypassed hydration."""
+
+
+class _Unhydrated:
+    """The one value inside a _LazyBody's storage: not JSON serializable, so a lazy atom cannot leave the kernel as an
+    empty message by accident."""
+    __slots__ = ("uuid",)
+
+    def __init__(self, uuid):
+        self.uuid = uuid
+
+    def __repr__(self):
+        return "<unhydrated body of %s>" % self.uuid
+
+
+class _LazyBody(dict):
+    """The message of a lazy atom: a dict-shaped sentinel that refuses every read. `_content` sees a dict and asks
+    it for content; the ask raises LazyBodyRead with the atom's uuid, so the bypassing site is on the traceback."""
+    __slots__ = ("uuid",)
+
+    def __init__(self, uuid):
+        super().__init__()
+        self.uuid = uuid
+        super().__setitem__("lazy body", _Unhydrated(uuid))   # the C json encoder walks a dict subclass's storage
+        #                                                        directly, never through get/items: the value inside makes
+        #                                                        json.dumps raise (TypeError, not JSON serializable) instead
+        #                                                        of shipping an empty message
+
+    def _refuse(self, *a, **k):
+        raise LazyBodyRead("atom %s: message read before hydration (em.hydrate)" % self.uuid)
+
+    get = __getitem__ = __contains__ = items = keys = values = __iter__ = __len__ = _refuse
+
+    def __bool__(self):
+        return True
+
+    def __eq__(self, other):
+        return isinstance(other, _LazyBody) and other.uuid == self.uuid
+
+    def __hash__(self):
+        return hash(("lazy", self.uuid))
+
+    def __repr__(self):
+        return "<lazy body of %s>" % self.uuid
+
+
+def is_lazy(atom):
+    return isinstance(atom.get("message"), _LazyBody)
+
+
+def _text_hash8(atom):
+    """sha1(text)[:8] of an atom's text, the ids' content hash: read from the atom's lazy scalars when it has no body."""
+    lz = atom.get("lazy")
+    if lz is not None:
+        return lz["h"]
+    return hashlib.sha1(_text_of(_content(atom.get("message"))).encode("utf-8", "replace")).hexdigest()[:8]
+
+
+def _stop_reason(atom):
+    lz = atom.get("lazy")
+    if lz is not None:
+        return lz.get("sr")
+    return (atom.get("message") or {}).get("stop_reason")
+
+
 def is_interrupt_record(atom):
     """The CLI's own stop record — a user atom reading '[Request interrupted by user]' (Esc) or
     '[Request interrupted by user for tool use]' (a permission prompt dismissed). It is the interrupt
@@ -2919,6 +3163,9 @@ def is_interrupt_record(atom):
     on the same event."""
     if atom.get("type") != "user":
         return False
+    lz = atom.get("lazy")
+    if lz is not None:
+        return bool(lz.get("ir"))
     return _text_of(_content(atom.get("message"))).startswith("[Request interrupted by user")
 
 
@@ -2940,15 +3187,13 @@ def _turn_id(rompuuid, turn):
     """`${rompUuid}:${t}:${hash}` — anchor-keyed, fork-stable (the trigger's text, or the
     first atom's text for an autonomous turn)."""
     atoms = turn["atoms"]
-    text = ""
     trig = turn["trigger"]
+    a = None
     if trig:
         a = next((x for x in atoms if x.get("uuid") == trig["uuid"]), None)
-        if a:
-            text = _text_of(_content(a.get("message")))
     elif atoms:
-        text = _text_of(_content(atoms[0].get("message")))
-    h = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:8]
+        a = atoms[0]
+    h = _text_hash8(a) if a is not None else hashlib.sha1(b"").hexdigest()[:8]
     return "%s:%d:%s" % (rompuuid, turn["t"], h)
 
 
@@ -2991,7 +3236,7 @@ def segment_turns(atoms, rompuuid):
             else:
                 cur["atoms"].append(atom)
         if atom["type"] == "assistant":
-            sr = (atom.get("message") or {}).get("stop_reason")
+            sr = _stop_reason(atom)
             ended = sr in END_STOPS
         if atom["type"] == "user" and atom.get("command"):
             ended = True   # a slash-command invocation is self-contained → ends its turn so the NEXT prompt opens fresh
@@ -3012,7 +3257,7 @@ def _finalize_turn(turn, rompuuid):
     last_sr = None
     for a in atoms:
         if a["type"] == "assistant":
-            last_sr = (a.get("message") or {}).get("stop_reason")
+            last_sr = _stop_reason(a)
     turn["ended"] = last_sr in END_STOPS
     # a slash-COMMAND turn with no reply/output atom is SELF-CONTAINED → ended (the user 2026-06-29). Without
     # this, a command that produced no output (a hung /usage, a control command) leaves the turn open forever,
@@ -3083,25 +3328,45 @@ def _segment_id(rompuuid, seg_t, atoms, trigger_uuid):
     never coexist in anything recorded. A follow-up the USER typed into a card carries no romp-injected
     marker (only the Nudge button's does) and keeps its content hash, since its echo and its record must
     share a key while both are on screen."""
-    text = ""
-    anchor = None
+    anchor, texted = None, None           # texted: the atom whose text is the basis (the anchor with text)
     if trigger_uuid:
         a = next((x for x in atoms if x.get("uuid") == trigger_uuid), None)
         if a:
-            text = _text_of(_content(a.get("message")))
             anchor = a
-    if not text and atoms:
+            if _has_text(a):
+                texted = a
+    if texted is None and atoms:
         anchor = anchor or atoms[0]
-        text = _text_of(_content(atoms[0].get("message")))
-    origin = (anchor or {}).get("origin")
-    machine_written = bool(text) and bool(
-        ROMP_INJECT_RE.search(text) or SCHEDULED_PREAMBLE_RE.match(text)
-        or (isinstance(origin, dict) and origin.get("kind") == "task-notification" and origin.get("subkind") == "scheduled-trigger")
-        or (anchor is not None and is_interrupt_record(anchor)))
-    basis = (text if not machine_written else "") or (anchor or {}).get("uuid") \
-        or next((a.get("uuid") for a in atoms if a.get("uuid")), "")   # first uuid-bearing atom if the anchor has none
-    h = hashlib.sha1(basis.encode("utf-8", "replace")).hexdigest()[:8]
+        if _has_text(atoms[0]):
+            texted = atoms[0]
+    machine_written = texted is not None and (_machine_written(texted)
+                                              or (anchor is not None and is_interrupt_record(anchor)))
+    if texted is not None and not machine_written:
+        h = _text_hash8(texted)               # the content hash: sha1(text)[:8], the same on a lazy atom
+    else:
+        basis = (anchor or {}).get("uuid") or next((a.get("uuid") for a in atoms if a.get("uuid")), "")
+        h = hashlib.sha1(basis.encode("utf-8", "replace")).hexdigest()[:8]
     return "%s:%d:%s" % (rompuuid, seg_t, h)
+
+
+def _has_text(atom):
+    lz = atom.get("lazy")
+    if lz is not None:
+        return bool(lz.get("nt"))
+    return bool(_text_of(_content(atom.get("message"))))
+
+
+def _machine_written(atom):
+    """Whether the atom's text is romp's own or a scheduled task's fired prompt (the id keys on the anchor uuid then;
+    see _segment_id). Read from the lazy scalars when the atom has no body."""
+    lz = atom.get("lazy")
+    if lz is not None:
+        return bool(lz.get("mw"))
+    text = _text_of(_content(atom.get("message")))
+    origin = atom.get("origin")
+    return bool(text) and bool(
+        ROMP_INJECT_RE.search(text) or SCHEDULED_PREAMBLE_RE.match(text)
+        or (isinstance(origin, dict) and origin.get("kind") == "task-notification" and origin.get("subkind") == "scheduled-trigger"))
 
 
 def segments(turn):
@@ -3144,6 +3409,7 @@ def _seam_real_work(atoms):
     """True if `atoms` hold REAL work — any assistant tool_use, or assistant prose ≥ SEAM_PROSE_FLOOR
     chars (above connective stubs). The event condition that gates a seam split: post-settle wrap-up
     chatter never mints a noise segment."""
+    hydrate(atoms)                                            # bodies before the assembly cut: read on demand (T323 stage 4a)
     for a in atoms:
         if a.get("type") != "assistant":
             continue
@@ -3236,7 +3502,7 @@ def _lineage_closure(leaf_path, candidate_files, links):
     return candidate_files
 
 
-def chain_membership(leaf_path, candidate_files=None, states=None, leaf_override=None):
+def chain_membership(leaf_path, candidate_files=None, states=None, leaf_override=None, rompuuid=None, sdk_human=None):
     """THE exported chain-membership fact — {"kept", "rewind", "clear", "broken", "eclipsed"}
     uuid sets, built from the DISPLAY parse's exact inputs (resume links + lineage closure +
     leaf_override = the kernel's pending bare-rollback cut) so it can never disagree with what the
@@ -3261,9 +3527,74 @@ def chain_membership(leaf_path, candidate_files=None, states=None, leaf_override
         candidate_files = [str(leaf_path)]
     links = resume_fork_links(_load_states(states))
     candidate_files = _lineage_closure(leaf_path, candidate_files, links)
-    adapter = FileAdapter(candidate_files, leaf_path, leaf_override=leaf_override, resume_links=links)
+    # The display parse's own assembly entry answers when it stands for these inputs (T323 stage 4a): a fresh
+    # adapter here read the whole leaf and held its graph a second time, which on a session restored from its
+    # assembly document was the one whole read left at a boot. Read under the entry's key lock (folds mutate the
+    # adapter's links transiently); an entry restored from a document adds the pre-cut verdicts its seed carries.
+    adapter, how = None, "whole"
+    if not leaf_override and rompuuid is not None:
+        key = (os.path.realpath(str(leaf_path)), str(rompuuid), bool(sdk_human))
+        with _asm_key_lock(key):
+            with _ASM_LOCK:
+                entry = _ASM_CACHE.get(key)
+            if entry is not None and entry["cands"] == tuple(str(f) for f in candidate_files) \
+                    and entry["links"] == dict(links or {}) and _entry_current(entry, candidate_files):
+                if _READER_TRACE:
+                    sys.stderr.write("chain: entry %s\n" % leaf_path)
+                return _membership_of(entry["ad"])        # the display's own current graph, under its lock
+        if _CKPT_DIR_FN is not None:
+            doc = _asm_ckpt_load(leaf_path, rompuuid, sdk_human, candidate_files, links)
+            if doc is not None:                              # no current entry: the document's pre-cut facts plus the
+                try:                                         #  tail read now, the whole graph's verdicts without the
+                    seed, _landed = _seed_from_doc(doc)      #  whole read (the emit is the parse's, not needed here)
+                    adapter = FileAdapter(candidate_files, leaf_path, resume_links=links, seed=seed)
+                    how = "seeded"
+                except Exception as e:                       # noqa: BLE001
+                    _asm_ckpt_note(leaf_path, "restore", repr(e)[:120]); adapter = None
+            elif _READER_TRACE:
+                sys.stderr.write("chain: no document for %s (rompuuid %s sdk_human %r cands %r)\n" % (leaf_path, rompuuid, sdk_human, [str(f) for f in candidate_files]))
+    if adapter is None:
+        adapter = FileAdapter(candidate_files, leaf_path, leaf_override=leaf_override, resume_links=links)
+    if _READER_TRACE:
+        sys.stderr.write("chain: %s %s\n" % (how, leaf_path))
+    return _membership_of(adapter)
+
+
+def file_rewound(path, rompuuid=None, sdk_human=None):
+    """The uuids a ONE-FILE walk of `path` classifies "rewind" (the judges' per-file discriminator). When the file is a
+    leaf whose assembly document stands for a single-file lineage, the walk runs over a seeded adapter (the pre-cut
+    verdicts from the document, the tail read now) instead of reading the file whole; a multi-file lineage's document
+    records whole-graph verdicts, which are not this walk's, so that file reads whole as before. Raises OSError when a
+    non-empty file yields no records (a failed read, not an empty file)."""
+    path = Path(path)
+    ad = None
+    if rompuuid is not None and _CKPT_DIR_FN is not None:
+        doc = _asm_ckpt_load(path, rompuuid, sdk_human, [str(path)], {}, quiet_inputs=True)
+        if doc is not None:
+            try:
+                seed, _landed = _seed_from_doc(doc)
+                ad = FileAdapter([str(path)], str(path), seed=seed)
+            except Exception as e:                            # noqa: BLE001
+                _asm_ckpt_note(path, "restore", repr(e)[:120]); ad = None
+    if ad is None:
+        ad = FileAdapter([str(path)], str(path))
+    if not ad.by_uuid and (ad.seed is None or not ad.seed["verdicts"]) and path.stat().st_size > 0:
+        raise OSError("transcript read yielded no records")
+    verdicts = dict(ad.chain_verdicts())
+    if ad.seed is not None:
+        for u, v in ad.seed["verdicts"].items():
+            verdicts.setdefault(u, v)
+    return {u for u, v in verdicts.items() if v == "rewind"}
+
+
+def _membership_of(adapter):
+    """The five-way membership dict from an adapter's walk; a seeded adapter's pre-cut verdicts join its own."""
     active = adapter.active_path()
-    verdicts = adapter.chain_verdicts(active)
+    verdicts = dict(adapter.chain_verdicts(active))
+    if adapter.seed is not None:
+        for u, v in adapter.seed["verdicts"].items():
+            verdicts.setdefault(u, v)
+        active = set(active) | {u for u, v in adapter.seed["verdicts"].items() if v == "active"}
     # kept, derived from the verdicts already in hand — BY DEFINITION the same set kept_uuids
     # computes (active ∪ broken ∪ eclipsed; see its docstring: "derived from chain_verdicts — one
     # implementation"), without paying the graph walk a second time inside it. The hold view
@@ -3336,8 +3667,11 @@ def _asm_key_lock(key):
 def _asm_serve(entry):
     """A caller-owned copy of the entry's emit outputs: fresh top-level atom dicts (parse_session
     pops _seq and the turn builder sorts in place; the pristine list keeps both), a landed copy,
-    and no pending cut (cut parses never reach the cache)."""
-    return [dict(a) for a in entry["atoms"]], set(entry["landed"]), None, dict(entry["st"].get("skill_loads") or {})
+    and no pending cut (cut parses never reach the cache). A restored entry's prefix (the lazy atoms
+    before the checkpoint's cut, T323 stage 4) comes first, in emit order, like a whole parse's; its skill loads
+    (T333) are the carried pre-cut ones plus the tail's, in the seeded emit state."""
+    return ([dict(a) for a in entry.get("prefix") or []] + [dict(a) for a in entry["atoms"]], set(entry["landed"]), None,
+            dict(entry["st"].get("skill_loads") or {}))
 
 
 def _asm_full(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human):
@@ -3354,7 +3688,7 @@ def _asm_full(key, leaf_path, candidate_files, links, rompuuid, postal_index, sd
     entry = {"ad": ad, "st": st, "atoms": atoms, "kept": kept,
              "landed": ad.landed_text_uuids(),
              "cands": tuple(str(f) for f in candidate_files), "links": dict(links or {}),
-             "recs": dict(ad._src), "n_qatts": len(ad.qatts)}
+             "recs": dict(ad._src_keys), "n_qatts": len(ad.qatts), "prefix": []}
     with _ASM_LOCK:
         _ASM_CACHE.pop(key, None)
         while len(_ASM_CACHE) >= _ASM_CACHE_MAX:
@@ -3375,20 +3709,36 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
     files = [f for f in candidate_files if Path(f).stem != leaf_stem] + [Path(leaf_path)]
     delta = leaf_recs = None
     for fp in files:
-        recs = _read_jsonl_incremental(fp)
         old = entry["recs"].get(str(fp))
         if old is None:
             return _asm_demote("recs-gone")
+        if old == ("skip",):                                   # a file wholly before the checkpoint's cut: immutable by
+            fst = (entry.get("skipped") or {}).get(str(fp))    #  contract (a fork's prior file); its stat is the proof
+            try:
+                st_ = os.stat(fp)
+                if fst is None or (st_.st_size, st_.st_mtime) != tuple(fst):
+                    return _asm_demote("nonleaf")
+            except OSError:
+                return _asm_demote("nonleaf")
+            continue
+        ent = _read_jsonl_entry(fp, tail_ok=True)
+        if ent is None:
+            return _asm_demote("recs-gone")
+        gen, base, recs = ent[6], ent[5], ent[4]
+        ogen, obase, ocount = old
+        if gen != ogen or base > ocount:
+            return _asm_demote("rewrite" if Path(fp).stem == leaf_stem else "nonleaf")   # a from-zero read replaced the
+        #                                                                                  entry: a rewrite, a shrink, an eviction
+        count = base + len(recs)
         if Path(fp).stem != leaf_stem:
-            if recs is not old:
-                return _asm_demote("nonleaf")   # changed — or its reader slot was evicted and
-            continue             #  rebuilt; identity is the proof, its absence means full parse
+            if count != ocount:
+                return _asm_demote("nonleaf")   # a lineage file grew: the closure changed under the entry
+            continue
         leaf_recs = recs
-        if recs is old:
+        if count == ocount:
             delta = []
-        elif len(recs) > len(old) > 0 and recs[len(old) - 1] is old[-1]:
-            delta = recs[len(old):]   # the reader's contract: a grown file returns the SAME
-            #                           prefix objects + the parsed new bytes
+        elif count > ocount:
+            delta = recs[ocount - base:]        # the records past what the entry folded (the reader's generation proves the prefix)
         else:
             return _asm_demote("rewrite")
     if delta is None:
@@ -3479,12 +3829,12 @@ def _asm_heal(entry, rompuuid, postal_index):
         for i, a in enumerate(entry["atoms"]):
             if not a.get("absorbed"):
                 continue
-            key = (a.get("sentAt", a["t"]), " ".join(_text_of(_content(a.get("message"))).split()))   # the (send ts, text)
-            #                                                                                          key: `t` is the landing (T252d)
+            key = (a.get("sentAt", a["t"]), _th(" ".join(_text_of(_content(a.get("message"))).split())))   # the (send ts,
+            #                                                                            text hash) key: `t` is the landing (T252d)
             if key not in st["postal_miss_att"]:
                 continue
             q = next((q for q in ad.qatts if q["ts"] == key[0]
-                      and " ".join(q["text"].split()) == key[1]
+                      and _th(" ".join(q["text"].split())) == key[1]
                       and (q["uuid"] is None or q["uuid"] in kept)), None)
             if q is None:
                 st["postal_miss_att"].discard(key)
@@ -3527,10 +3877,649 @@ def _asm_fold(entry, delta, leaf_recs, leaf_key, leaf_stem, rompuuid, postal_ind
     entry["atoms"] = entry["atoms"] + new_atoms   # a NEW list — outstanding serves stay stable
     entry["kept"] = kept
     entry["n_qatts"] = len(ad.qatts)
-    entry["recs"][leaf_key] = leaf_recs           # commit LAST: a bail above re-slices the same
+    ogen, obase, ocount = entry["recs"][leaf_key]
+    entry["recs"][leaf_key] = (ogen, obase, ocount + len(delta))   # commit LAST: a bail above re-slices the same
     ad._src[leaf_key] = leaf_recs                 #  delta next visit and the uuid gate demotes it
+    ad._src_keys[leaf_key] = entry["recs"][leaf_key]
     _ASM_STATS["fold"] += 1
     return _asm_serve(entry)
+
+
+# ═══════════════════════ THE ASSEMBLY CHECKPOINT (T323 stage 4, 2026-09-11) ═══════════════════════
+# One document per leaf transcript beside the fold checkpoints (checkpoints/<sha1(realpath)[:20]>.asm.json), written
+# from a WHOLE assembly entry when the tree has a compaction boundary: everything before the CUT (the first kept record
+# of the turn that holds the last compact_boundary atom, or of the /compact command turn when that boundary is an
+# adopted manual one) is recorded as identities and locations, never bodies. A fresh process verifies the document
+# (version, path, session, every file's witness, the cut's guard bytes), rebuilds the pre-cut turns from the document
+# as LAZY atoms (every scalar the ids and the segmentation read, a _LazyBody where the message was), reads the leaf
+# from the cut's byte offset only, parses that tail through a FileAdapter seeded with the pre-cut graph facts and the
+# carried emit state, and proves the pre-cut part identical to the whole parse's by a sha1 over its turn ids, segment
+# ids and atom uuids. Bodies come back on demand (hydrate). Anything that does not verify is a counted fallback to a
+# whole parse; a compaction landing after the document demotes the tail fold to a whole parse exactly as before, and
+# the next settle writes a new document with the new cut.
+_ASM_CKPT_V = 3                       # 2: atom rows carry [offset, len], nt for every atom; 3: the carry holds skill_loads (T333)
+_ASM_CKPT_CAP = 16 * 1024 * 1024   # a document past this is not written (counted): that session parses whole as today
+_ASM_CKPT_STATS = {"written": 0, "restored": 0, "fallbacks": {}, "skipped": {}, "hydratedBytes": 0, "hydratedAtoms": 0,
+                   "hydratedBy": {}}     # bytes per calling function: a whole-tree hydration anywhere shows here
+_ASM_CKPT_LOCK = threading.Lock()
+_ASM_CKPT_SAID = set()             # (path, reason) said once per process
+_LAZY_FILES = {}                   # rompuuid -> {fsid: path}: where hydrate finds a lazy atom's record
+_HYDRATED = {}                     # uuid -> the body fields read; dict order = LRU
+_HYDRATED_BYTES = [0]
+_HYDRATED_CAP = 64 * 1024 * 1024   # the hydrated-body memo's byte cap (a judge pass re-reading one large body every cycle
+#                                    shows in hydratedBytes; the memo keeps the common case at one read)
+_LAZY_KINDS = ("a", "u", "c", "o", "k", "b")   # atom kinds whose message is lazy; boundary and refusal atoms carry no message
+
+
+def _asm_ckpt_file(leaf_path):
+    d = _ckpt_dir()
+    if d is None:
+        return None
+    return Path(d) / (hashlib.sha1(os.path.realpath(str(leaf_path)).encode("utf-8")).hexdigest()[:20] + ".asm.json.gz")
+
+
+def _asm_ckpt_note(path, reason, detail=""):
+    with _ASM_CKPT_LOCK:
+        _ASM_CKPT_STATS["fallbacks"][reason] = _ASM_CKPT_STATS["fallbacks"].get(reason, 0) + 1
+        first = (str(path), reason) not in _ASM_CKPT_SAID
+        _ASM_CKPT_SAID.add((str(path), reason))
+    if first:
+        try:
+            sys.stderr.write("assembly checkpoint fallback (%s) for %s%s\n" % (reason, path, (": " + detail) if detail else ""))
+        except Exception:
+            pass
+    cp = _asm_ckpt_file(path)
+    if cp is not None:
+        try:
+            cp.unlink()
+            cp.with_name(cp.name + ".meta").unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _asm_ckpt_skip(reason):
+    with _ASM_CKPT_LOCK:
+        _ASM_CKPT_STATS["skipped"][reason] = _ASM_CKPT_STATS["skipped"].get(reason, 0) + 1
+    return False
+
+
+def asm_checkpoint_stats():
+    with _ASM_CKPT_LOCK:
+        out = dict(_ASM_CKPT_STATS); out["fallbacks"] = dict(out["fallbacks"]); out["skipped"] = dict(out["skipped"])
+        out["hydratedBy"] = dict(out["hydratedBy"])
+    return out
+
+
+def _atom_kind(a):
+    """The lazy kind code of an emitted atom: which body fields hydrate rebuilds and how."""
+    t = a.get("type")
+    if t == "system":
+        return "x" if a.get("subtype") == "compact_boundary" else "r"
+    if a.get("absorbed"):
+        return "b"
+    if t == "user":
+        return "c" if a.get("command") else "u"
+    if a.get("skillMd") is not None:
+        return "k"
+    if a.get("command") is True:
+        return "o"
+    return "a"
+
+
+def _atom_scalars(a):
+    """Every field of an emitted atom but the bodies (message, toolUseResult, skillMd) and the read-order tiebreak."""
+    return {k: v for k, v in a.items() if k not in ("message", "toolUseResult", "skillMd", "_seq")}
+
+
+def _lazy_of(a, kind, rec_index):
+    """The identity scalars a lazy atom carries in place of its body (what the ids, the segmentation and the gates read)."""
+    text = _text_of(_content(a.get("message"))) if a.get("message") is not None else ""
+    lz = {"k": kind, "h": hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:8], "nt": bool(text)}
+    if _machine_written(a):                     # defaults left out: not machine-written, not an interrupt, no stop reason,
+        #                                          no structured tool result, no model
+        lz["mw"] = True
+    if is_interrupt_record(a):
+        lz["ir"] = True
+    msg = a.get("message") if isinstance(a.get("message"), dict) else None
+    if msg is not None and msg.get("stop_reason") is not None:
+        lz["sr"] = msg["stop_reason"]
+    if msg is not None and msg.get("model"):
+        lz["mdl"] = msg["model"]                # the model stamp a few readers test (synthetic replies, the settle)
+    if "toolUseResult" in a:
+        lz["tur"] = True
+    blocks = _content(msg) if msg is not None else []
+    tu = [[b.get("id"), b.get("name")] for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
+    tr = [b.get("tool_use_id") for b in blocks if isinstance(b, dict) and b.get("type") == "tool_result"]
+    if tu:
+        lz["tu"] = tu                           # tool calls and results by id: what the settle gates and the task
+    if tr:                                      #  pairings read, so they need no body
+        lz["tr"] = tr
+    if kind == "c":
+        lz["disp"] = text                       # the invocation's display text is short: inline, no read to rebuild it
+    return lz
+
+
+def _pre_tree_identity(atoms, rompuuid):
+    """sha1 over the turn ids, segment ids and atom uuids of `atoms` segmented as a session (no idle or orphan atoms):
+    the proof that a restored prefix is the whole parse's prefix."""
+    h = hashlib.sha1()
+    for turn in segment_turns([dict(a) for a in atoms], rompuuid):
+        h.update(turn["id"].encode()); h.update(b"|")
+        for seg in segments(turn):
+            h.update(seg["id"].encode()); h.update(b",")
+        for a in turn["atoms"]:
+            h.update((a.get("uuid") or "").encode()); h.update(b";")
+    return h.hexdigest()
+
+
+_ASM_SKIP_STRUCTURAL = ("unsplittable", "reconstruction", "unencodable", "oversize")   # true of a cut until it moves
+
+
+def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
+    """Write the leaf's assembly checkpoint from its WHOLE assembly entry. False when there is nothing to write: no
+    entry, an entry restored from a document (its cut stands until a compaction moves it), no compaction boundary in
+    the tree (the whole file would be the tail), a cut that would not split the chronological order the fold's gate
+    needs (garbled stamps), or a document past the cap; each counted under asmCheckpoint.skipped."""
+    cp = _asm_ckpt_file(leaf_path)
+    if cp is None:
+        return False
+    key = (os.path.realpath(str(leaf_path)), str(rompuuid), bool(sdk_human))
+    with _asm_key_lock(key):
+        with _ASM_LOCK:
+            entry = _ASM_CACHE.get(key)
+        if entry is None:
+            return _asm_ckpt_skip("noEntry")
+        if entry.get("prefix"):
+            return _asm_ckpt_skip("restored")            # the document it came from stands
+        if entry.get("docWritten") and cp.exists():
+            return _asm_ckpt_skip("written")             # this entry's pre-cut part has not moved (a fold appends after the cut)
+        ad = entry["ad"]
+        atoms = entry["atoms"]
+        bounds = [a for a in atoms if a.get("type") == "system" and a.get("subtype") == "compact_boundary"]
+        if not bounds:
+            return _asm_ckpt_skip("noBoundary")
+        active = ad.active_path()
+        verdicts = ad.chain_verdicts(active)
+        turns = segment_turns([dict(a) for a in atoms], rompuuid)
+        last_b = max(bounds, key=lambda a: (a["t"], a.get("_seq", 0)))
+        memo = entry.get("docSkip")
+        if memo is not None and memo[0] == last_b["uuid"]:
+            return _asm_ckpt_skip(memo[1])               # this cut already failed to write: nothing rebuilt until it moves
+
+        def skip(reason):
+            if reason in _ASM_SKIP_STRUCTURAL:            # a property of this cut: memoized like a success (docWritten),
+                entry["docSkip"] = (last_b["uuid"], reason)   #  re-armed when the cut moves
+                _say_once("assembly checkpoint: %s not written: %s (said once until its cut moves)" % (leaf_path, reason))
+            else:                                         # a blip (a stat or a write failing, a record landing between the
+                try:                                      #  parse and the offsets): said each time, tried again next settle
+                    sys.stderr.write("assembly checkpoint: %s not written this settle: %s\n" % (leaf_path, reason))
+                except Exception:
+                    pass
+            return _asm_ckpt_skip(reason)
+        bi = next(i for i, t in enumerate(turns) if any(a.get("uuid") == last_b["uuid"] for a in t["atoms"]))
+        if last_b["uuid"] in ad._adopted and bi > 0:
+            bi -= 1                                       # an adopted manual compact: its /compact episode is the turn before
+        def _rec_seq(a):
+            return ad.seq_of.get(a.get("uuid"), 0)
+        cut_seq = None
+        for ti in range(bi, -1, -1):                      # the cut turn, then earlier ones while the chronological split fails
+            seqs = [_rec_seq(a) for t in turns[ti:] for a in t["atoms"] if a.get("uuid") in ad.seq_of]
+            if not seqs:
+                continue
+            cand = min(seqs)
+            pre_ts = [ad.ts_of.get(u, 0) for u in entry["kept"] if ad.seq_of.get(u, 0) < cand and u in ad.by_uuid
+                      and (ad.by_uuid[u].get("type") in ("user", "assistant") or ad.by_uuid[u].get("subtype") == "compact_boundary")]
+            tail_ts = [ad.ts_of.get(u, 0) for u in entry["kept"] if ad.seq_of.get(u, 0) >= cand and u in ad.by_uuid
+                       and (ad.by_uuid[u].get("type") in ("user", "assistant") or ad.by_uuid[u].get("subtype") == "compact_boundary")]
+            if pre_ts and tail_ts and max(pre_ts) > min(tail_ts):
+                continue                                  # a stamp out of order across the cut: the carry would not hold
+            cut_seq = cand
+            break
+        if cut_seq is None or cut_seq <= 1:
+            return skip("unsplittable")
+        # the files: each one's records before the cut, its witness, and where the tail read starts
+        first_seq, n = {}, 0
+        for fp, recs in ad._src.items():
+            first_seq[fp] = n + 1
+            n += len(recs)
+        files, cuts, fsid_paths, file_offs = {}, {}, {}, {}
+        for fp, recs in ad._src.items():
+            fsid = Path(fp).stem
+            fsid_paths[fsid] = fp
+            try:
+                st_ = os.stat(fp)
+            except OSError:
+                return skip("stat")
+            pre_n = max(0, min(len(recs), cut_seq - first_seq[fp]))   # records of this file before the cut
+            offs = record_offsets(fp, 0)
+            if offs is None or len(offs) != len(recs):
+                return skip("offsets")
+            file_offs[fp] = offs
+            pre_uuids = [r.get("uuid") for r in recs[:pre_n] if r.get("uuid")]
+            f = {"path": fp, "size": st_.st_size, "mtime": st_.st_mtime, "pre": pre_n, "n": len(recs),
+                 "first": pre_uuids[0] if pre_uuids else None, "last": pre_uuids[-1] if pre_uuids else None}
+            if pre_n >= len(recs) and Path(fp).stem != Path(leaf_path).stem:
+                f["skip"] = True                          # wholly before the cut: never read at restore, stat is its proof
+            else:
+                cut_off = offs[pre_n][0] if pre_n < len(recs) else st_.st_size
+                try:
+                    with open(fp, "rb") as fh:
+                        fh.seek(max(0, cut_off - _JSONL_TAIL_GUARD))
+                        guard = fh.read(cut_off - max(0, cut_off - _JSONL_TAIL_GUARD))
+                except OSError:
+                    return skip("stat")
+                f["cut"] = [cut_off, pre_n, guard.hex()]
+            files[fsid] = f
+        # the pre-cut records: identity, verdict, type, order, time, file, landed
+        type_code = {"user": "u", "assistant": "a", "system": "s", "attachment": "t"}
+        rows, row_of, files_order = [], {}, {}
+        for u, r in ad.by_uuid.items():                   # insertion order = read order
+            sq = ad.seq_of.get(u, 0)
+            if sq >= cut_seq:
+                continue
+            fsid = ad.fsid_of.get(u)
+            fp = fsid_paths.get(fsid)
+            idx = sq - first_seq[fp] if fp is not None else -1
+            row_of[u] = len(rows)
+            fsids = files_order.setdefault("_", [])
+            if fsid not in fsids:
+                fsids.append(fsid)
+            rows.append([u, verdicts.get(u, "broken")[0], type_code.get(r.get("type"), "?"), r.get("subtype") if r.get("type") == "system" else None,
+                         sq, ad.ts_of.get(u, 0), fsids.index(fsid), idx, 1 if u in entry["landed"] else 0, r.get("parentUuid")])
+        # the pre-cut atoms in emit order
+        pre_atoms = []
+        for a in atoms:
+            u = a.get("uuid")
+            sq = ad.seq_of.get(u, 0) if u in ad.seq_of else None
+            if sq is None:
+                if a.get("absorbed"):
+                    q = next((q for q in ad.qatts if q["uuid"] == u), None)
+                    if q is None or q["seq"] >= cut_seq:
+                        continue
+                    sq = q["seq"]
+                else:
+                    continue
+            if sq >= cut_seq:
+                continue
+            kind = _atom_kind(a)
+            scal = _atom_scalars(a)
+            fsid = a.get("fsid")
+            fp = fsid_paths.get(fsid)
+            idx = (sq - first_seq[fp]) if fp is not None else -1
+            ri = row_of.get(u)
+            if ri is not None:                             # the record row carries uuid, type, t, fsid and parentUuid: derive them
+                rr = rows[ri]
+                for k_, v_ in (("uuid", u), ("fsid", fsid), ("session_id", rompuuid), ("t", rr[5]), ("parentUuid", rr[9])):
+                    if scal.get(k_) == v_:
+                        scal.pop(k_, None)
+                if scal.get("type") == {"u": "user", "a": "assistant", "s": "system"}.get(rr[2]):
+                    scal.pop("type", None)
+            row = {"i": idx}
+            f_offs = file_offs.get(fp)
+            if f_offs is not None and 0 <= idx < len(f_offs):
+                row["at"] = list(f_offs[idx])                  # (byte offset, byte length): hydrate seeks straight to it
+            if scal:
+                row["s"] = scal
+            if ri is not None:
+                row["r"] = ri
+            if a.get("_seq", sq) != sq:
+                row["seq"] = a.get("_seq", sq)             # an adopted boundary's emit order differs from its read order
+            if kind in _LAZY_KINDS:
+                row["lz"] = _lazy_of(a, kind, idx)
+            pre_atoms.append(row)
+        # the pre-cut spine, root to cut
+        chain, u, guard_n = [], ad.leaf_uuid, 0
+        while u is not None and guard_n < 500000:
+            if ad.seq_of.get(u, 0) < cut_seq and u in ad.by_uuid:
+                chain.append(u)
+            u = ad.parent_of.get(u); guard_n += 1
+        spine = [row_of[u] for u in reversed(chain) if u in row_of]   # record indexes, root to cut
+        seq_ts = None
+        i = bisect.bisect_left(ad._seq_ts, (cut_seq,)) - 1
+        if i >= 0:
+            seq_ts = list(ad._seq_ts[i])
+        last_ts = 0
+        for u, r in ad.by_uuid.items():
+            if ad.seq_of.get(u, 0) < cut_seq and parse_z(r.get("timestamp")) is not None:
+                last_ts = ad.ts_of.get(u, last_ts)
+        # the carry as the emit left it after the pre-cut records: re-run the pre-pass over them alone (the sets
+        # are the same as the whole parse's restricted to those records, since the walk is chronological)
+        st = _emit_state()
+        pre_order = [u for u in _chrono(ad, entry["kept"]) if ad.seq_of.get(u, 0) < cut_seq]
+        ad._prepass(pre_order, st)
+        for q in ad.qatts:
+            if q["seq"] < cut_seq and q["ts"] is not None and (q["uuid"] is None or q["uuid"] in entry["kept"]):
+                st["absorbed_keys"].add((q["ts"], _th(" ".join(q["text"].split()))))
+        fsids = files_order.get("_", [])
+        pre_whole = [dict(a) for a in atoms if (ad.seq_of.get(a.get("uuid")) if a.get("uuid") in ad.seq_of else
+                                                 next((q["seq"] for q in ad.qatts if q["uuid"] == a.get("uuid")), cut_seq)) < cut_seq]
+        identity = _pre_tree_identity(pre_whole, rompuuid)     # the WHOLE parse's ids over the pre-cut atoms (bodies in hand)
+        pre_lazy = _restore_prefix_atoms(pre_atoms, rompuuid, rows, fsids)
+        if _pre_tree_identity(pre_lazy, rompuuid) != identity:
+            return skip("reconstruction")            # the lazy reconstruction would not reproduce the whole parse's ids
+        doc = {"av": _ASM_CKPT_V, "path": os.path.realpath(str(leaf_path)), "rompuuid": str(rompuuid), "sdkHuman": bool(sdk_human),
+               "cands": list(entry["cands"]), "links": dict(entry["links"]), "files": files, "fsids": fsids, "cutSeq": cut_seq,
+               "records": rows, "atoms": pre_atoms, "spine": spine, "seqTs": seq_ts, "lastTs": last_ts,
+               "gates": {"prompt_ids": sorted(ad.prompt_ids), "boundary_pids": sorted(ad.boundary_pids),
+                         "skill_use_ids": sorted(ad.skill_use_ids), "src_tool_links": sorted(ad.src_tool_links),
+                         "dangling": sorted(ad.dangling)},
+               "carry": _carry_encode(st), "identity": identity, "t": time.time()}
+        try:
+            text = json.dumps(doc, separators=(",", ":"))
+        except TypeError:
+            return skip("unencodable")
+        data = gzip.compress(text.encode("utf-8"), compresslevel=6)   # identities and hashes compress about five to one; the
+        if len(data) > _ASM_CKPT_CAP:                                  #  bytes a boot reads are the compressed ones
+            return skip("oversize")
+        try:
+            cp.parent.mkdir(parents=True, exist_ok=True)
+            tmp = cp.with_name("%s.%d.%x.tmp" % (cp.name, os.getpid(), threading.get_ident()))
+            tmp.write_bytes(data)
+            os.replace(tmp, cp)
+            meta = cp.with_name(cp.name + ".meta")            # {"av", "path"}: what the boot sweep reads, never the document
+            mtmp = meta.with_name(meta.name + ".%d.tmp" % os.getpid())
+            mtmp.write_text(json.dumps({"av": _ASM_CKPT_V, "path": doc["path"]}))
+            os.replace(mtmp, meta)
+        except OSError:
+            return skip("write")
+        entry["docWritten"] = True
+        with _ASM_CKPT_LOCK:
+            _ASM_CKPT_STATS["written"] += 1
+        return True
+
+
+def _carry_encode(st):
+    """The emit carry as the document holds it: sets as lists, (second, hash) pairs as lists, the postal heal state
+    left out (a restored entry heals only the tail it emits itself)."""
+    return {"replay": sorted(st["replay"]), "seen_exact": sorted([list(k) for k in st["seen_exact"]]),
+            "seen_text": sorted(st["seen_text"]), "compacted": bool(st["compacted"]), "restoring": bool(st["restoring"]),
+            "last_boundary": st["last_boundary"], "summaries": dict(st["summaries"]), "skill_ids": sorted(st["skill_ids"]),
+            "cmd_names": {k: sorted(v) for k, v in st["cmd_names"].items()},
+            "absorbed_keys": sorted([list(k) for k in st["absorbed_keys"]]), "max_ppt": st["max_ppt"],
+            "skill_loads": dict(st.get("skill_loads") or {})}     # wrapper uuid -> skill name before the cut (T333)
+
+
+def _carry_decode(c):
+    return {"replay": set(c["replay"]), "seen_exact": {tuple(k) for k in c["seen_exact"]}, "seen_text": set(c["seen_text"]),
+            "compacted": bool(c["compacted"]), "restoring": bool(c["restoring"]), "last_boundary": c.get("last_boundary"),
+            "summaries": dict(c.get("summaries") or {}), "skill_ids": set(c.get("skill_ids") or []),
+            "cmd_names": {k: set(v) for k, v in (c.get("cmd_names") or {}).items()},
+            "absorbed_keys": {tuple(k) for k in c.get("absorbed_keys") or []}, "max_ppt": float(c.get("max_ppt") or 0),
+            "skill_loads": dict(c.get("skill_loads") or {}), "postal_miss_rec": set(), "postal_miss_att": set()}
+
+
+def atom_tool_uses(atom):
+    """[(tool_use id, name)] of an atom's tool calls, from the body or, for a lazy atom, its scalars: no hydration."""
+    lz = atom.get("lazy")
+    if lz is not None:
+        return [tuple(x) for x in lz.get("tu") or []]
+    return [(b.get("id"), b.get("name")) for b in _content(atom.get("message")) if isinstance(b, dict) and b.get("type") == "tool_use"]
+
+
+def atom_tool_results(atom):
+    """[tool_use id] of an atom's tool results, from the body or the lazy scalars."""
+    lz = atom.get("lazy")
+    if lz is not None:
+        return list(lz.get("tr") or [])
+    return [b.get("tool_use_id") for b in _content(atom.get("message")) if isinstance(b, dict) and b.get("type") == "tool_result"]
+
+
+def atom_model(atom):
+    """The model stamp of an atom's message (None when absent), from the body or the lazy scalars."""
+    lz = atom.get("lazy")
+    if lz is not None:
+        return lz.get("mdl")
+    msg = atom.get("message")
+    return msg.get("model") if isinstance(msg, dict) else None
+
+
+def _restore_prefix_atoms(pre_atoms, rompuuid, rows, fsids):
+    """The pre-cut atoms as the tree holds them: the identity fields from the record row (uuid, type, t, fsid, session,
+    parentUuid), the recorded scalars over them, a _LazyBody where a message was, the lazy scalars under `lazy`, and
+    the read-order tiebreak the segmentation sorts by."""
+    tname = {"u": "user", "a": "assistant", "s": "system"}
+    out = []
+    for row in pre_atoms:
+        a = {}
+        ri = row.get("r")
+        if ri is not None:
+            rr = rows[ri]
+            a.update({"type": tname.get(rr[2], "user"), "uuid": rr[0], "session_id": rompuuid, "t": rr[5],
+                      "fsid": fsids[rr[6]] if 0 <= rr[6] < len(fsids) else None, "parentUuid": rr[9]})
+            seq = rr[4]
+        else:
+            seq = row.get("seq", 0)
+        a.update(row.get("s") or {})
+        a["_seq"] = row.get("seq", seq)
+        lz = row.get("lz")
+        if lz is not None:
+            a["lazy"] = dict(lz, i=row["i"], at=tuple(row["at"]) if row.get("at") else None)
+            a["message"] = _LazyBody(a.get("uuid"))
+        out.append(a)
+    return out
+
+
+def _asm_ckpt_load(leaf_path, rompuuid, sdk_human, candidate_files, links, quiet_inputs=False):
+    """The verified document for `leaf_path`, or None after a counted fallback (a document that exists and does not
+    verify) or quietly when there is none."""
+    cp = _asm_ckpt_file(leaf_path)
+    if cp is None or not cp.exists():
+        return None
+    try:
+        data = cp.read_bytes()
+        _count_read(str(cp), len(data))
+        doc = json.loads(gzip.decompress(data).decode("utf-8"))
+    except (OSError, ValueError, EOFError) as e:
+        _asm_ckpt_note(leaf_path, "corrupt", str(e)[:80]); return None
+    if not isinstance(doc, dict) or doc.get("av") != _ASM_CKPT_V:
+        _asm_ckpt_note(leaf_path, "version"); return None
+    if doc.get("path") != os.path.realpath(str(leaf_path)) or doc.get("rompuuid") != str(rompuuid) \
+            or bool(doc.get("sdkHuman")) != bool(sdk_human):
+        _asm_ckpt_note(leaf_path, "session"); return None
+    if list(doc.get("cands") or []) != [str(f) for f in candidate_files] or dict(doc.get("links") or {}) != dict(links or {}):
+        if quiet_inputs:
+            return None                                       # a reader asking about other inputs (the one-file walk over a
+        _asm_ckpt_note(leaf_path, "inputs"); return None      #  lineage): not this document's failure, it stands
+    try:
+        for fsid, f in doc["files"].items():
+            st_ = os.stat(f["path"])
+            if f.get("skip"):
+                if (st_.st_size, st_.st_mtime) != (f["size"], f["mtime"]):
+                    _asm_ckpt_note(leaf_path, "lineage", fsid); return None
+                continue
+            cut_off, pre_n, guard_hex = f["cut"]
+            if st_.st_size < cut_off:
+                _asm_ckpt_note(leaf_path, "shrunk", fsid); return None
+            if st_.st_size < f["size"] or (st_.st_size == f["size"] and st_.st_mtime != f["mtime"]):
+                _asm_ckpt_note(leaf_path, "rewrite", fsid); return None
+            guard = bytes.fromhex(guard_hex)
+            with open(f["path"], "rb") as fh:
+                fh.seek(max(0, cut_off - len(guard)))
+                ok = fh.read(len(guard)) == guard
+            _count_read(f["path"], len(guard))
+            if not ok:
+                _asm_ckpt_note(leaf_path, "guard", fsid); return None
+    except (OSError, KeyError, TypeError, ValueError) as e:
+        _asm_ckpt_note(leaf_path, "corrupt", "files: %s" % e); return None
+    return doc
+
+
+def _seed_from_doc(doc):
+    """(seed, landed) from a verified document: the pre-cut graph facts a FileAdapter takes, and the pre-cut uuids
+    whose records carried assistant text."""
+    verdict_of = {"a": "active", "r": "rewind", "e": "eclipsed", "c": "clear", "b": "broken"}
+    type_of = {"u": "user", "a": "assistant", "s": "system", "t": "attachment"}
+    seed = {"seq_base": int(doc["cutSeq"]) - 1, "verdicts": {}, "types": {}, "spine": [doc["records"][i][0] for i in doc["spine"]],
+            "prompt_ids": set(doc["gates"]["prompt_ids"]), "boundary_pids": set(doc["gates"]["boundary_pids"]),
+            "skill_use_ids": set(doc["gates"]["skill_use_ids"]), "src_tool_links": set(doc["gates"]["src_tool_links"]),
+            "dangling": set(doc["gates"]["dangling"]), "seq_ts": doc.get("seqTs"), "last_ts": doc.get("lastTs"), "cuts": {},
+            "file_ends": {fsid: (f.get("first"), f.get("last")) for fsid, f in doc["files"].items()}}
+    landed = set()
+    for row in doc["records"]:
+        u, v, tc, sub = row[0], row[1], row[2], row[3]
+        seed["verdicts"][u] = verdict_of.get(v, "broken")
+        seed["types"][u] = (type_of.get(tc), sub)
+        if row[8]:
+            landed.add(u)
+    for fsid, f in doc["files"].items():
+        seed["cuts"][fsid] = "skip" if f.get("skip") else (int(f["cut"][0]), int(f["cut"][1]), bytes.fromhex(f["cut"][2]))
+    return seed, landed
+
+
+def _entry_current(entry, candidate_files):
+    """Whether an assembly entry folded everything its files hold now: each file's reader key (generation, base, count)
+    equals the entry's, and a skipped lineage file's stat stands. The chain predicate may only answer from an entry
+    that is current (its guard reads fresh inputs by contract)."""
+    for fp in candidate_files:
+        key = entry["recs"].get(str(fp))
+        if key is None:
+            return False
+        if key == ("skip",):
+            fst = (entry.get("skipped") or {}).get(str(fp))
+            try:
+                st_ = os.stat(fp)
+            except OSError:
+                return False
+            if fst is None or (st_.st_size, st_.st_mtime) != tuple(fst):
+                return False
+            continue
+        ent = _read_jsonl_entry(fp, tail_ok=True)
+        if ent is None or (ent[6], ent[5] + len(ent[4])) != (key[0], key[2]):
+            return False
+    return True
+
+
+def _asm_restore(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human):
+    """The entry restored from the leaf's assembly checkpoint, served; None when there is none or it does not verify.
+    The pre-cut turns come from the document as lazy atoms; the tail is read from the cut and parsed through an
+    adapter seeded with the pre-cut graph facts and the carried emit state; the prefix's identity is proven."""
+    doc = _asm_ckpt_load(leaf_path, rompuuid, sdk_human, candidate_files, links)
+    if doc is None:
+        return None
+    try:
+        seed, landed = _seed_from_doc(doc)
+        fsids = list(doc.get("fsids") or [])
+        prefix = _restore_prefix_atoms(doc["atoms"], rompuuid, doc["records"], fsids)
+        if _pre_tree_identity(prefix, rompuuid) != doc.get("identity"):
+            _asm_ckpt_note(leaf_path, "identity"); return None
+        ad = FileAdapter(candidate_files, leaf_path, resume_links=links, seed=seed)
+        ad.sdk_human = sdk_human
+        st = _emit_state()
+        st.update(_carry_decode(doc["carry"]))
+        kept = ad.kept_uuids(ad.active_path())
+        order = _chrono(ad, kept)
+        ad._prepass(order, st)
+        atoms = list(ad._emit_fold(order, st, rompuuid, postal_index))
+        atoms += ad._absorbed(ad.qatts, kept, st, rompuuid, postal_index)
+        entry = {"ad": ad, "st": st, "atoms": atoms, "kept": kept, "landed": landed | ad.landed_text_uuids(),
+                 "cands": tuple(str(f) for f in candidate_files), "links": dict(links or {}),
+                 "recs": dict(ad._src_keys), "n_qatts": len(ad.qatts), "prefix": prefix,
+                 "skipped": {f["path"]: (f["size"], f["mtime"]) for f in doc["files"].values() if f.get("skip")}}
+    except Exception as e:                                     # noqa: BLE001 — a document the code cannot use is a fallback
+        _asm_ckpt_note(leaf_path, "restore", repr(e)[:120]); return None
+    _LAZY_FILES[str(rompuuid)] = {fsid: f["path"] for fsid, f in doc["files"].items()}
+    with _ASM_LOCK:
+        _ASM_CACHE.pop(key, None)
+        while len(_ASM_CACHE) >= _ASM_CACHE_MAX:
+            _ASM_CACHE.pop(next(iter(_ASM_CACHE)))
+        _ASM_CACHE[key] = entry
+    with _ASM_CKPT_LOCK:
+        _ASM_CKPT_STATS["restored"] += 1
+    return _asm_serve(entry)
+
+
+def _hydrate_one(a, rec):
+    """Fill a lazy atom's body fields from its record, the way the emit built them."""
+    lz = a["lazy"]
+    k = lz["k"]
+    if k == "a":
+        a["message"] = _norm_message(rec.get("message"))
+    elif k == "u":
+        a["message"] = _norm_message(rec.get("message"))
+        if lz.get("tur") and isinstance(rec.get("toolUseResult"), dict):
+            a["toolUseResult"] = rec["toolUseResult"]
+    elif k == "c":
+        a["message"] = {"role": "user", "content": [{"type": "text", "text": lz.get("disp", "")}]}
+    elif k == "o":
+        btext = _text_of(_content(rec.get("message")))
+        m = LOCAL_STDOUT_RE.match(btext)
+        a["message"] = {"role": "assistant", "content": [{"type": "text", "text": strip_ansi(m.group(1)).strip() if m else ""}],
+                        "stop_reason": "end_turn"}
+    elif k == "k":
+        btext = _text_of(_content(rec.get("message")))
+        a["skillMd"] = btext[:SKILL_MD_CAP] + ("\n\n…(skill content truncated)" if len(btext) > SKILL_MD_CAP else "")
+        a["message"] = {"role": "assistant", "content": [], "stop_reason": None}
+    elif k == "b":
+        att = rec.get("attachment") or {}
+        full = att.get("prompt") if isinstance(att.get("prompt"), str) else _text_of(att.get("prompt") or [])
+        a["message"] = {"role": "user", "content": [{"type": "text", "text": full or ""}]}
+    a.pop("lazy", None)
+
+
+def hydrate(atoms, rompuuid=None, by=None):
+    """Fill the bodies of the lazy atoms among `atoms` (a list, a turn's atoms, a whole session's turns) from their
+    records on disk, one open per file and one seek-read per atom, through a byte-capped memo; returns how many
+    atoms were filled. Every consumer that reads a pre-cut atom's message, toolUseResult or skillMd calls this first
+    (a read without it raises LazyBodyRead). `rompuuid` names the session when the atoms carry none. The bytes read
+    are counted per caller (`by`, else the calling function's name) under asmCheckpoint.hydratedBy."""
+    if isinstance(atoms, dict):
+        atoms = [a for t in atoms.get("turns", []) for a in t["atoms"]]
+    lazy = [a for a in atoms if isinstance(a, dict) and a.get("lazy") is not None]
+    if not lazy:
+        return 0
+    if by is None:
+        try:
+            by = sys._getframe(1).f_code.co_name
+        except Exception:
+            by = "?"
+    filled, by_file = 0, {}
+    for a in lazy:
+        u = a.get("uuid")
+        with _ASM_CKPT_LOCK:
+            hit = _HYDRATED.get(u) if u else None
+            if hit is not None:
+                _HYDRATED.pop(u, None); _HYDRATED[u] = hit      # a served body is a used one: to the LRU tail
+        if hit is not None:
+            _hydrate_one(a, hit[0]); filled += 1
+            continue
+        sid = a.get("session_id") or rompuuid
+        path = (_LAZY_FILES.get(str(sid)) or {}).get(a.get("fsid"))
+        if path is None:
+            raise LazyBodyRead("atom %s: no file known for fsid %s" % (u, a.get("fsid")))
+        by_file.setdefault(path, []).append(a)
+    for path, group in by_file.items():
+        # the file's read stripe is held across the group: two threads hydrating the same atoms (the judges' unit text
+        # and the frame's markdown at a boot) would both miss the memo and both read; the second now waits and hits it
+        with _READ_STRIPES[hash(path) % len(_READ_STRIPES)], open(path, "rb") as fh:
+            for a in sorted(group, key=lambda x: x["lazy"].get("at") or (0, 0)):
+                u = a.get("uuid")
+                with _ASM_CKPT_LOCK:
+                    hit = _HYDRATED.get(u) if u else None
+                if hit is not None:
+                    _hydrate_one(a, hit[0]); filled += 1
+                    continue
+                at_ln = a["lazy"].get("at")
+                if not at_ln:
+                    raise LazyBodyRead("atom %s: the document carries no record location" % a.get("uuid"))
+                at, ln = at_ln
+                fh.seek(at)
+                raw = fh.read(ln)
+                _count_read(path, ln)
+                rec = json.loads(raw.decode("utf-8", "replace"))
+                if rec.get("uuid") != a.get("uuid"):
+                    raise LazyBodyRead("atom %s: the record at its offset is %s" % (a.get("uuid"), rec.get("uuid")))
+                with _ASM_CKPT_LOCK:
+                    _ASM_CKPT_STATS["hydratedBytes"] += ln; _ASM_CKPT_STATS["hydratedAtoms"] += 1
+                    _ASM_CKPT_STATS["hydratedBy"][by] = _ASM_CKPT_STATS["hydratedBy"].get(by, 0) + ln
+                    if a.get("uuid"):
+                        _HYDRATED[a["uuid"]] = (rec, ln); _HYDRATED_BYTES[0] += ln
+                        while _HYDRATED_BYTES[0] > _HYDRATED_CAP and _HYDRATED:
+                            _old = _HYDRATED.pop(next(iter(_HYDRATED)))    # the least recently used body goes first
+                            _HYDRATED_BYTES[0] -= _old[1]
+                _hydrate_one(a, rec); filled += 1
+    return filled
+
+
 
 
 def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human, leaf_override,
@@ -3580,6 +4569,11 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
                         return served
                 with _ASM_LOCK:                   # gate/invariance demotion: the entry is stale
                     _ASM_CACHE.pop(key, None)
+            elif _CKPT_DIR_FN is not None:
+                served = _asm_restore(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human)
+                if served is not None:
+                    _mode("restore")
+                    return served
             _mode("full")
             return _asm_full(key, leaf_path, candidate_files, links, rompuuid,
                              postal_index, sdk_human)
@@ -3642,7 +4636,7 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
     # come back caller-owned (fresh top-level dicts), so the mutations below never reach the cache.
     atoms, landed, cut_t, skill_loads = _assemble(leaf_path, candidate_files, links, rompuuid,
                                      postal_index, sdk_human, leaf_override, mode_out=asm_mode_out)
-    orphans = synthesize_orphans(_srows, atoms, landed_text_uuids=landed)
+    orphans = synthesize_orphans(_srows, atoms, landed_text_uuids=landed, rompuuid=rompuuid)
     #                                            # salvaged replies FIRST: they are real atoms the turn
     #                                              grouping must absorb (idle spans overlay afterwards)
     # A salvaged reply has NO position in the transcript graph — that absence is the very thing the
@@ -3743,6 +4737,42 @@ def task_store_plan(fsid):
     return items
 
 
+def plan_atoms(session):
+    """The atoms declared_plan reads bodies from: assistant atoms calling TaskCreate or TaskUpdate and the user atoms
+    carrying those calls' results. A lazy atom answers from its scalars (tu = [[id, name]], tr = [tool_use_id]), a
+    hydrated one from its blocks, so the list costs no read; hydrating it reads nothing for a session that declared
+    no plan (the planner asks every pass for every session with no task store: the whole prefix a pass would
+    otherwise seek-read, T323 stage 4a review)."""
+    out, ids = [], set()
+    for turn in session.get("turns", []):
+        for a in turn["atoms"]:
+            if a.get("type") != "assistant":
+                continue
+            lz = a.get("lazy")
+            if lz is not None:
+                calls = [(i, nm) for i, nm in (lz.get("tu") or [])]
+            else:
+                calls = [(b.get("id"), b.get("name")) for b in _content(a.get("message"))
+                         if isinstance(b, dict) and b.get("type") == "tool_use"]
+            mine = [i for i, nm in calls if nm in ("TaskCreate", "TaskUpdate")]
+            if mine:
+                out.append(a); ids.update(mine)
+    if not ids:
+        return out
+    for turn in session.get("turns", []):
+        for a in turn["atoms"]:
+            if a.get("type") != "user":
+                continue
+            lz = a.get("lazy")
+            if lz is not None:
+                got = lz.get("tr") or []
+            else:
+                got = [b.get("tool_use_id") for b in _content(a.get("message")) if isinstance(b, dict) and b.get("type") == "tool_result"]
+            if ids.intersection(got):
+                out.append(a)
+    return out
+
+
 def declared_plan(session):
     """The agent's OWN to-do list (Claude Code's Task tool) folded into ordered items
     [{key, text, activeForm, status}] — the FALLBACK behind task_store_plan for a session with no
@@ -3755,10 +4785,12 @@ def declared_plan(session):
     result text (a creation-order `cN` fallback if the result is unreadable); `status` rides each
     TaskUpdate. Only TaskCreate/TaskUpdate are folded — plain TodoWrite (no durable ids) is not
     used by romp. Empty list if the session declared no plan."""
+    sel = plan_atoms(session)                              # the task calls and their results, in turn order per type
+    hydrate(sel, by="declared_plan")                       # only those bodies: nothing read for a session with no plan
     results = {}                                           # tool_use_id → result content (a TaskCreate's carries 'Task #N')
     rejected = set()                                       # tool_use_ids whose result came back is_error
-    for turn in session["turns"]:
-        for a in turn["atoms"]:
+    for a in sel:
+        if True:
             if a.get("type") != "user":
                 continue
             for b in (a.get("message") or {}).get("content", []) or []:
@@ -3767,8 +4799,8 @@ def declared_plan(session):
                     if b.get("is_error"):
                         rejected.add(b["tool_use_id"])
     tasks, order = {}, 0
-    for turn in session["turns"]:
-        for a in turn["atoms"]:
+    for a in sel:
+        if True:
             if a.get("type") != "assistant":
                 continue
             for b in (a.get("message") or {}).get("content", []) or []:
