@@ -615,6 +615,21 @@ class CodexBackend:
                 pass
         self.log("client unavailable: %s (retry in %.2fs)" % (self._client_err, delay))
 
+    def _client_failure_text(self):
+        """The launch_error text for a session the client cannot serve right now: the recorded client
+        failure, framed as the app-server's when it is a raw one. SETUP_HINT and LOGIN_HINT are whole
+        sentences that name codex and carry their remedy, so they stand as written; anything else is
+        whatever building, starting or draining the client raised — str(error), or the bare class name
+        (_record_client_failure_locked): a missing binary's errno line, "TimeoutError" — and names no
+        process. The chat's red card shows a Codex session's text as the backend wrote it (kernel
+        build_session, 2026-09-11), so the frame is written here, at the two writers of this record.
+        _client_err itself stays raw: model_catalog and the kernel's creation refusals wrap it in
+        sentences of their own, and a frame there would double."""
+        err = self._client_err or SETUP_HINT
+        if err in (SETUP_HINT, LOGIN_HINT):
+            return err
+        return "The Codex app-server isn't available — %s" % err
+
     def _client_retry_remaining(self):
         with self._client_lock:
             return max(0.0, self._client_retry_at - time.monotonic())
@@ -1071,7 +1086,7 @@ class CodexBackend:
             # the entry still exists so the failure is VISIBLE on the lane (launch_error),
             # never a silently-missing session
             s = _Session(sid, "pending-%s" % sid[:8], name, cwd)
-            s.launch_error = {"text": self._client_err or SETUP_HINT, "at": time.time(),
+            s.launch_error = {"text": self._client_failure_text(), "at": time.time(),
                               "limit": False}
             with s.lock:
                 self._put_session(s)
@@ -1406,7 +1421,7 @@ class CodexBackend:
         if c is None:
             try:
                 with s.lock:
-                    s.launch_error = {"text": self._client_err or SETUP_HINT, "at": time.time(),
+                    s.launch_error = {"text": self._client_failure_text(), "at": time.time(),
                                       "limit": False}
                     self._save_registry(s, fields=("launchError",))
             except Exception:
