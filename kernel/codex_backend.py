@@ -264,6 +264,21 @@ def _tail_state(path):
     return last, set(tail)
 
 
+def _ends_mid_line(path):
+    """True when the file is non-empty and its last byte is not a newline: an earlier write was torn
+    (write(2) returned short under ENOSPC, the process was killed between pages, power was lost) and
+    left a partial line, a record with no line end. The next record must start its own line, or the
+    two join in ONE unparseable line every reader skips."""
+    try:
+        with open(path, "rb") as f:
+            if f.seek(0, os.SEEK_END) == 0:
+                return False
+            f.seek(-1, os.SEEK_END)
+            return f.read(1) != b"\n"
+    except FileNotFoundError:
+        return False
+
+
 class _Session:
     """One Codex session: registry row + runtime state. The worker thread owns the normalizer and
     the file; everything else only reads or enqueues."""
@@ -739,6 +754,15 @@ class CodexBackend:
         workers pushing concurrently AB-BA across their sessions' locks."""
         path = self.transcript_path(s.sid)
         with open(path, "a", encoding="utf-8") as f:
+            if _ends_mid_line(path):
+                # A torn earlier write left a partial line. Written straight after it, this batch's first
+                # record would join it in ONE unparseable line every reader skips (_tail_state, the event
+                # model's readers), so the record vanished while the retire below still took its echo: a
+                # prompt sent after the tear (the first record after a kill and restart) was nowhere in
+                # the UI. Close the fragment first: it stays its own skipped line and the record lands
+                # whole. Logged so the tear is seen, not silently papered over (review find, 2026-09-11).
+                self.log("transcript for %s ended mid-line (a torn write); closing that line" % s.name)
+                f.write("\n")
             for r in recs:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
         # A landed user record replaces its optimistic echoes (uuid-independent: match by text, under
