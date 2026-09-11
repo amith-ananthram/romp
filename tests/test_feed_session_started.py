@@ -236,14 +236,43 @@ class HealOlderStores(_Feed):
         self.assertIn(wf, asks, "no host: still a card")
         self.assertEqual(asks[wf]["sessionStarted"]["parent"], None)
 
-    def test_a_delegated_goal_the_courier_planted_is_a_host(self):
+    def test_a_delegated_goal_hosts_only_when_its_chain_is_proven_to_a_human(self):
         planted, wf = SID + ":g7", SID + ":g2"
-        self._store({planted: self._node(planted, "Review the retry diff for the manager", origin={"peer": "22222222-3333-4444-5555-666666666666", "msgId": "m2"}),
+        peer = "22222222-3333-4444-5555-666666666666"
+        self._store({planted: self._node(planted, "Review the retry diff for the manager", origin={"peer": peer, "msgId": "m2"},
+                                         userAsk={"text": "please review the retry diff", "sid": peer}),
                      wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine")})
         feed, err = self._feed()
         asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
-        self.assertEqual(set(asks), {planted}, "the worker's process top nests under the delegated goal")
+        self.assertEqual(set(asks), {planted}, "the worker's process top nests under the proven delegated goal")
         self.assertIn(wf, {r["id"] for r in asks[planted]["tree"]})
+        # a mid-chain coordination top with no proven ask never hosts: the machine top keeps its card and its face
+        self._store({planted: self._node(planted, "Review the retry diff for the manager", origin={"peer": peer, "msgId": "m2"}),
+                     wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine")})
+        feed, err = self._feed()
+        asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
+        self.assertIn(wf, asks)
+        self.assertIsNotNone(asks[wf]["sessionStarted"])
+
+    def test_a_permission_prompt_elsewhere_leaves_the_nesting_alone(self):
+        # the session is on a permission prompt, but the floor resolves to the HUMAN top (lastNode under it): the
+        # machine top stays nested, no root card pops out
+        ask, wf = SID + ":g1", SID + ":g2"
+        self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human"),
+                     wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine")}, last=ask)
+        km._tmux_sessions = lambda: {SID: {"state": "permission", "since": NOW - 10, "model": "", "effort": "",
+                                           "context": None, "compactPct": None, "color": None}}
+        feed, err = self._feed()
+        asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
+        self.assertEqual(set(asks), {ask})
+        self.assertEqual(asks[ask]["column"], "needs_input")
+        self.assertIn(wf, {r["id"] for r in asks[ask]["tree"]})
+
+    def test_a_long_title_holding_every_word_of_a_short_description_matches(self):
+        nodes = {SID + ":g1": self._node(SID + ":g1", "Add retries to the notes-api client", promptUuid="u1", askAnchor="human"),
+                 SID + ":g2": self._node(SID + ":g2", "Lens reviewers over the retry diff of the notes-api client, round two, with findings", t=T0 + 500, promptUuid="a2", askAnchor="machine")}
+        h = km._heal_session_tops(str(self.tpath), nodes, {})
+        self.assertEqual(h[SID + ":g2"][1]["via"], "workflow", "shared by the smaller set: the short description's words all appear")
 
     def test_the_top_a_live_floor_stands_on_keeps_its_card(self):
         # the session is stopped on a permission prompt whose focus is a machine top whose host is cleared: nesting

@@ -25635,17 +25635,18 @@ def _heal_session_tops(path, nodes, status=None, keep=()):
     "machine": the node's prompt anchor resolved to a peer mail, the agent's own record or romp bookkeeping,
     _latch_ask_anchors); never a word match, and never a top that merely lacks an anchor (older stores hold
     plain tops without one). Excluded: cleared tops, handoff trackers, delegate-rooted tops (origin.peer: a
-    chain the courier traced) and steps born of a session (never tops). A top in `keep` (the top a live floor
-    stands on: a permission prompt, an API error or a judge-auth refusal keys the card on it) is not nested: it
-    keeps its card and still gets the face record, like a blocked one. HOSTS are the asks that trace to the user: human-anchored
-    prompt tops and courier-planted delegated goals (origin.peer, a chain the courier proved), never a handoff
+    chain the courier traced) and steps born of a session (never tops). A top a live floor RESOLVES to (a
+    permission prompt, an API error or a judge-auth refusal keys the card on it) is un-nested by build_feed once
+    the floors are known: it keeps its card and its face record, like a blocked one. HOSTS are the asks that trace to the user: human-anchored
+    prompt tops and courier-planted delegated goals whose chain the courier proved to a human (origin.peer with
+    userAsk), never a handoff
     tracker (the delegation fold hides those) and never a session-born step; a completed host still holds its
     rows and a cleared host hides them with it (what a real step does; a cleared ask never resurfaces its rows
     as root cards). NEEDS-YOU BREAKS THROUGH: a candidate that is blocked (its own flag or its exported status)
     or a clear wrap-up's decision card is not nested, keeps its card, and still gets the face record so it
     never poses as an ask. The launch match reads the launch record's OWN description (`launchDesc`, kept from
     the dispatch and never overwritten by the completion's summary; never the brief or script) and shares by
-    the TITLE's word count, more than half and at least two, so one stray word never carries it; it only picks
+    the smaller word set, more than half and at least two, so one stray word never carries it; it only picks
     WHICH launch supplies the why and, when several hosts are open, which is the parent; with no matching
     launch the parent is the newest host minted before the node (else the oldest) and the why says the record
     it is rooted in. Returns {nid: (parent nid or None, born)}; None for a top not nested (blocked, or no
@@ -25666,8 +25667,9 @@ def _heal_session_tops(path, nodes, status=None, keep=()):
     except Exception:
         tasks = []
     launches = [t for t in tasks if isinstance(t, dict) and _bg_is_agent(t.get("type")) and (t.get("launchDesc") or t.get("summary"))]
-    def planted(hd):
-        return isinstance(hd.get("origin"), dict) and hd["origin"].get("peer")
+    def planted(hd):                                  # a courier-planted goal whose chain the courier PROVED reaches the
+        return (isinstance(hd.get("origin"), dict) and hd["origin"].get("peer")   # user (userAsk); a mid-chain coordination
+                and isinstance(hd.get("userAsk"), dict))                          # top the feed folds away never hosts
     hosts = sorted(((hid, hd) for hid, hd in nodes.items()
                     if hd.get("parentId") is None and not hd.get("born") and not isinstance(hd.get("handoff"), dict)
                     and hd.get("askAnchor") != "machine" and (hd.get("promptUuid") or planted(hd))),
@@ -25678,7 +25680,7 @@ def _heal_session_tops(path, nodes, status=None, keep=()):
         for l in launches:
             lt = toks(l.get("launchDesc") or l.get("summary"))    # the dispatch's own words, never the brief
             shared = len(tt & lt)
-            share = shared / float(len(tt)) if tt and lt and shared >= 2 else 0.0
+            share = shared / float(min(len(tt), len(lt))) if tt and lt and shared >= 2 else 0.0
             if share > 0.5 and share > best:
                 best, hit = share, l
         via = ("workflow" if hit.get("type") == "local_workflow" else "agent") if hit else "work"
@@ -34990,15 +34992,7 @@ def build_feed(now, tmux=None):
                             cite_uuids.add(_a["uuid"])
         except Exception:
             pass
-        _floor_keep = set()                          # T319: the top a live floor will stand on keeps its card (see the heal)
-        if (tm and str(tm.get("state")) in _NEEDS_INPUT_STATES) or _jauth_map.get(fsid) \
-                or (ps is not None and _api_error(s["path"])):
-            _f = store.get("lastNode")
-            while _f and nodes.get(_f, {}).get("parentId") is not None:
-                _f = nodes[_f]["parentId"]
-            if _f in nodes:
-                _floor_keep.add(_f)
-        healed = _heal_session_tops(s.get("path"), nodes, status, _floor_keep)   # T319: machine-rooted tops nest (read-side)
+        healed = _heal_session_tops(s.get("path"), nodes, status)   # T319: machine-rooted tops nest (read-side)
         heal_total += sum(1 for v in healed.values() if v[0])
         children = {}
         for nid, nd in nodes.items():
@@ -35241,10 +35235,13 @@ def build_feed(now, tmux=None):
                 f = nodes[f]["parentId"]
             if f in nodes and status.get(f) not in ("completed", "cleared"):
                 jauth_top = f
-        def _host_top(x):                            # T319: a floor landing on a healed top belongs to its host card (the
-            _h = healed.get(x) if x else None        #   healed top is no longer a card, and the placeholder keys on the floor)
-            return _h[0] if (_h and _h[0]) else x
-        perm_top, api_top, jauth_top = _host_top(perm_top), _host_top(api_top), _host_top(jauth_top)
+        for _f in (perm_top, api_top, jauth_top):    # T319: a floor that RESOLVES to a healed top un-nests exactly that top:
+            _h = healed.get(_f) if _f else None      #   it keeps its card (the floor keys the card on it) and its face; the
+            if _h and _h[0] and _f in children.get(_h[0], []):   #   host's other rows are untouched
+                children[_h[0]].remove(_f)
+                children.setdefault(None, []).append(_f)
+                healed[_f] = (None, _h[1])
+                heal_total -= 1
         plain_user_t = _last_plain_user_turn_t(ps["turns"]) if ps else 0   # re-check: a plain reply after a soft block de-urgents it
         had_working = False                          # does this session show ANY working card? → drives the provisional placeholder
         had_awaiting = False                         # …and does any of them read AWAITING? → the session's await-green dot (below)

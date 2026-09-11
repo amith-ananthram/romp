@@ -221,6 +221,7 @@ def _result_text(content):
 
 
 _WF_META_DESC_RE = re.compile(r"\b(description|name)\s*:\s*(['\"])(.*?)\2", re.S)
+_WF_META_LITERAL_RE = re.compile(r"export\s+const\s+meta\s*=\s*\{(.*?)\}", re.S)   # the meta object only, never a schema field
 
 
 def _launch_desc(name, inp):
@@ -231,8 +232,9 @@ def _launch_desc(name, inp):
     inp = inp if isinstance(inp, dict) else {}
     d = str(inp.get("description") or "").strip()
     if not d and name == "Workflow":
-        meta = {m.group(1): m.group(3) for m in _WF_META_DESC_RE.finditer(str(inp.get("script") or "")[:4000])}
-        d = str(meta.get("description") or meta.get("name") or "").strip()
+        lit = _WF_META_LITERAL_RE.search(str(inp.get("script") or "")[:6000])   # the FIRST meta literal: a later quoted
+        meta = {m.group(1): m.group(3) for m in _WF_META_DESC_RE.finditer(lit.group(1))} if lit else {}   # description is a
+        d = str(meta.get("description") or meta.get("name") or "").strip()                                 # schema field's
         if not d and inp.get("scriptPath"):
             d = os.path.splitext(os.path.basename(str(inp["scriptPath"])))[0]
     return " ".join(d.split())[:200]

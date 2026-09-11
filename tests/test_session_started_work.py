@@ -194,27 +194,40 @@ class WorkflowMidGoal(_Harness):
         step = self._by_text(store, "Wrote the retry loop")
         self.assertEqual(step["parentId"], tops[0]["id"], "the same-reply ref followed the ask's remapped position")
 
-    def test_the_planners_ask_mark_wins_over_words_a_paraphrased_title_keeps_the_card(self):
-        # the planner marks the ask's mint ("ask": true); a paraphrased title shares no word with the user's message,
-        # and the review-first order would once have crowned the review. The mark crowns the paraphrase.
+    def test_the_planners_ask_mark_alone_decides_against_a_better_worded_rival(self):
+        # the marked title shares NO word with the user's message; the rival mint repeats the user's words and would
+        # win on overlap; the review-first order would once have crowned the review. The mark alone decides.
         marked = ('{"ops":[{"why":"a distinct review deliverable","do":"mint","text":"Adversarial review of the retry diff"},'
-                  '{"why":"the user asked for resilience","do":"mint","ask":true,"text":"Make the client resilient to flaky networks"}]}')
+                  '{"why":"what was asked","do":"mint","text":"Add retries to the notes-api client"},'
+                  '{"why":"the shape the user wants","do":"mint","ask":true,"text":"Harden outbound calls against dropped packets"}]}')
         calls, store = self._run(self._records(), [("adversarial review workflow", marked), (ASK[:40], PLACE_ASK)])
-        tops = self._tops(store)
-        self.assertEqual([nd["text"] for nd in tops], ["Make the client resilient to flaky networks"])
+        tops = sorted(nd["text"] for nd in self._tops(store))
+        self.assertIn("Harden outbound calls against dropped packets", tops, "the mark crowns the paraphrase")
+        self.assertIn("Add retries to the notes-api client", tops, "the rival, nearer the user's words than any launch, stays a card too")
         rev = self._by_text(store, "Adversarial review")
-        self.assertEqual(rev["parentId"], tops[0]["id"])
-        self.assertEqual(rev["born"]["parentText"], "Make the client resilient to flaky networks")
+        self.assertEqual(rev["parentId"], self._by_text(store, "Harden outbound")["id"], "the review nests under the marked ask")
 
-    def test_a_launch_favoured_mint_is_never_crowned_even_when_marked_or_tied(self):
-        # every mint shares no word with the user's message (a tie); the review's words fit the launch, so it is
-        # never the ask, whatever its position or a stray mark; the other mint is crowned
-        tied = ('{"ops":[{"why":"a distinct review deliverable","do":"mint","ask":true,"text":"Adversarial review of the retry diff"},'
-                '{"why":"the user asked for resilience","do":"mint","text":"Make the client resilient to flaky networks"}]}')
-        calls, store = self._run(self._records(), [("adversarial review workflow", tied), (ASK[:40], PLACE_ASK)])
-        tops = self._tops(store)
-        self.assertEqual([nd["text"] for nd in tops], ["Make the client resilient to flaky networks"])
-        self.assertEqual(self._by_text(store, "Adversarial review")["parentId"], tops[0]["id"])
+    def test_a_short_approval_still_keeps_a_top_and_the_mark_beats_a_launch_word_in_its_why(self):
+        # "yes, go ahead": every mint shares no word with the message. The marked mint's why shares a word with the
+        # launch; before this fold the filter excluded it, no ask was crowned, every mint demoted, and with no open
+        # top the user's approved deliverable never reached the board
+        recs = [
+            uline(T0, "yes, go ahead", "u1"),
+            aline(T0 + 60, "Going ahead with the retry loop.", "a1", "u1", stop="tool_use", launch=("Workflow", {"script": WF_SCRIPT})),
+            tresult(T0 + 61, "u2", "a1", "toolu_a1"),
+            aline(T0 + 400, "Wrote the retry loop and launched an adversarial review workflow over the diff.", "a2", "u2"),
+        ]
+        marked = ('{"ops":[{"why":"a distinct review deliverable","do":"mint","text":"Adversarial review of the retry diff"},'
+                  '{"why":"the retry diff the user approved","do":"mint","ask":true,"text":"Harden outbound calls against dropped packets"}]}')
+        calls, store = self._run(recs, [("adversarial review workflow", marked)])
+        tops = [nd["text"] for nd in self._tops(store)]
+        self.assertEqual(tops, ["Harden outbound calls against dropped packets"], "the marked deliverable reaches the board")
+        self.assertEqual(self._by_text(store, "Adversarial review")["parentId"], self._tops(store)[0]["id"])
+        # ...and with no mark at all, a human segment still keeps one top (the first mint, when no words help)
+        unmarked = ('{"ops":[{"why":"a distinct review deliverable","do":"mint","text":"Adversarial review of the retry diff"},'
+                    '{"why":"the approved work","do":"mint","text":"Harden outbound calls against dropped packets"}]}')
+        calls, store = self._run(recs, [("adversarial review workflow", unmarked)])
+        self.assertEqual(len(self._tops(store)), 1, "never nothing for a human segment")
 
     def test_the_parser_carries_the_ask_mark_and_the_prompt_asks_for_it(self):
         ops = jd._parse_plan('{"ops":[{"why":"w","do":"mint","ask":true,"text":"Add retries"},{"why":"w","do":"mint","text":"Other"}]}', 0)
@@ -392,6 +405,13 @@ class TriggerlessSegments(unittest.TestCase):
 
 
 class LaunchReader(unittest.TestCase):
+    def test_a_workflow_description_comes_from_the_meta_literal_not_a_later_schema_field(self):
+        script = ("export const meta = { name: 'review-notes-api-retry', description: 'Lens reviewers over the retry diff' }\n"
+                  "const FINDINGS = { type: 'object', properties: { title: { type: 'string', description: 'a finding title' } } }\n")
+        seg = {"atoms": [{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Workflow", "input": {"script": script}}]}}]}
+        self.assertEqual(jd._seg_launches(seg)[0]["desc"], "Lens reviewers over the retry diff")
+        self.assertEqual(jd._wf_meta("const x = 1"), {}, "no meta literal: nothing")
+
     def test_reads_background_launches_only_with_the_event_models_criterion(self):
         seg = {"atoms": [
             {"type": "assistant", "message": {"content": [

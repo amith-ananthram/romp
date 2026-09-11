@@ -6327,6 +6327,16 @@ def _restrict_retitle(ops, allowed):
 
 _LAUNCH_TOOLS = {"Workflow": "workflow", "Agent": "agent", "Task": "agent"}
 _WF_META_RE = re.compile(r"\b(name|description)\s*:\s*(['\"])(.*?)\2", re.S)
+_WF_META_LITERAL_RE = re.compile(r"export\s+const\s+meta\s*=\s*\{(.*?)\}", re.S)   # the meta object only, never a schema field
+
+
+def _wf_meta(script):
+    """{name, description} read off a Workflow script's `export const meta = {...}` literal (the FIRST one), {} when
+    none: a later quoted description (a schema field's, an agent prompt's) is never the run's own words."""
+    m = _WF_META_LITERAL_RE.search(str(script or "")[:6000])
+    if not m:
+        return {}
+    return {mm.group(1): mm.group(3) for mm in _WF_META_RE.finditer(m.group(1))}
 
 
 def _seg_launches(seg):
@@ -6362,7 +6372,7 @@ def _seg_launches(seg):
                 continue                                   # a foreground subagent: the turn waited on it, no launch
             desc = ""
             if via == "workflow":
-                meta = {m.group(1): m.group(3) for m in _WF_META_RE.finditer(str(inp.get("script") or "")[:4000])}
+                meta = _wf_meta(inp.get("script"))
                 desc = meta.get("description") or meta.get("name") or ""
                 if not desc and inp.get("scriptPath"):
                     desc = os.path.splitext(os.path.basename(str(inp["scriptPath"])))[0]
@@ -6444,17 +6454,20 @@ def _demote_session_mints(ops, seg, store, menu, p_target, human):
         return max([_overlap(l["desc"], o.get("text")) for l in launches] + [_overlap(l["desc"], o.get("why")) for l in launches] + [0.0])
     prompt = _prompt_text(seg.get("atoms") or []) if human else ""
     def prompt_match(o):
-        return _overlap(prompt, o.get("text")) if prompt else 0.0
+        return max(_overlap(prompt, o.get("text")), _overlap(prompt, o.get("why"))) if prompt else 0.0
     mints = [o for o in ops if o.get("do") == "mint"]
     ask_op = None
     if human and parent is None:
-        # the ask's own placement: the mint the planner MARKED as the user's ask, else the mint nearest the user's
-        # words (a paraphrased title shares no words; a tie by position is no evidence), and never a mint a launch's
-        # words fit better than the user's (that one is the session's process, whatever its position)
-        pool = [o for o in mints if launch_match(o) <= prompt_match(o)]
-        marked = [o for o in pool if o.get("ask") is True]
-        pool = marked or pool
-        if pool:
+        # the ask's own placement, ALWAYS one for a human segment (the user's message never files nothing here):
+        # the mint the planner MARKED as the user's ask, before any word test (a short approval like "yes, go
+        # ahead" shares no word with any mint, and the mark is the planner's own knowledge); else the mint nearest
+        # the user's words among those no launch fits better (that one is the session's process, whatever its
+        # position); else the mint nearest the user's words at all; else the first mint.
+        marked = [o for o in mints if o.get("ask") is True]
+        if marked:
+            ask_op = marked[0]
+        else:
+            pool = [o for o in mints if launch_match(o) <= prompt_match(o)] or mints
             ask_op = max(pool, key=lambda o: (prompt_match(o), -mints.index(o)))
     # `ref` indexes the reply's CREATED nodes (mints and subs) in the reply's own order. The ask's mint is processed
     # FIRST so a demoted mint can nest under it wherever the planner listed it; every op keeps its original created
@@ -6513,6 +6526,8 @@ def _demote_session_mints(ops, seg, store, menu, p_target, human):
         created_new += 1; newpos[orig[id(o)]] = created_new
         born["parentText"] = str(nodes[p].get("text") or "")[:120]
         out.append({"do": "sub", "why": str(o.get("why") or why), "parentId": p, "text": text, "born": born})
+    if human and not out:
+        return ops                                     # a human segment never files nothing through this rule
     return out
 
 
