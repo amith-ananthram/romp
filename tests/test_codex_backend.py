@@ -31,6 +31,7 @@ os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
 cb = load_source("romp_codex_backend", os.path.join(ROOT, "kernel", "codex_backend.py"))
 sb = load_source("romp_session_backend", os.path.join(ROOT, "kernel", "session_backend.py"))
+em = load_source("romp_event_model", os.path.join(ROOT, "bin", "romp-event-model"))
 
 
 @contextlib.contextmanager
@@ -491,6 +492,105 @@ class Lifecycle(unittest.TestCase):
         self.assertTrue(until(lambda: not be.busy(sid)))
         recs = [json.loads(l) for l in Path(be.transcript_path(sid)).read_text().splitlines()]
         self.assertTrue(any("[Request interrupted" in json.dumps(r) for r in recs))
+
+    def test_turn_abandoned_by_a_dead_transport_settles_on_disk(self):
+        """A turn whose stream ends WITHOUT turn/completed (the app-server died mid-turn: the SDK puts the
+        transport failure into the turn's queue and next_turn_notification raises it) used to leave the
+        file turn open for good: nothing wrote the held final reply or ended the turn, so the session read
+        as working on every surface while nothing ran, and the next prompt was absorbed into the dead turn
+        as mid-turn input. The settle lands the held reply mid-turn-shaped, then an end_turn record
+        carrying the failure, and the next prompt opens its own turn. No interrupt goes out on the dead
+        transport: the SDK's request path waits on a reply with no timeout and its reader is gone, so a
+        worker that sent one would sit there for good (busy True, mode locked, kill's join timing out);
+        the pump's teardown of that client is what stops the turn."""
+        class DyingClient(FakeClient):
+            def next_turn_notification(self, turn_id):
+                n = super().next_turn_notification(turn_id)
+                if isinstance(n, BaseException):    # the SDK router's shape: fail_all → queue → raise
+                    raise n
+                return n
+
+            def turn_interrupt(self, tid, turn_id):
+                self._rec("turn_interrupt", tid, turn_id)
+                self.reply.wait()                   # the SDK's shape with its reader gone: no reply, ever
+
+        def item(turn, ms, it):
+            return ("item/completed", {"threadId": "T-1", "turnId": turn, "completedAtMs": ms, "item": it})
+
+        fake = DyingClient()
+        fake.reply = threading.Event()
+        self.addCleanup(fake.reply.set)             # a worker wedged on the interrupt is freed at the end
+        fake.hold_open = True
+        # wire stamps track the wall clock, as the app-server's do: the settle is clock-stamped, and a
+        # fixed-past fixture stamp would sort the SECOND turn's items ahead of it in the parse
+        ms = int(time.time() * 1000)
+        fake.scripts = [
+            [item("t-1", ms, {"type": "userMessage", "id": "u-1",
+                              "content": [{"type": "text", "text": "run the build"}]}),
+             item("t-1", ms + 1000, {"type": "agentMessage", "id": "a-1", "text": "partial reply"})],
+            [item("t-2", ms + 5000, {"type": "userMessage", "id": "u-2",
+                                     "content": [{"type": "text", "text": "try again"}]}),
+             item("t-2", ms + 6000, {"type": "agentMessage", "id": "a-2", "text": "ack: try again"}),
+             ("turn/completed", {"threadId": "T-1",
+                                 "turn": {"id": "t-2", "items": [], "status": "completed"}})]]
+        be, _, _ = build(factory=lambda: fake)
+        sid = be.spawn("web", "/TESTDIR")
+        path = Path(be.transcript_path(sid))
+
+        def recs():
+            return [json.loads(l) for l in path.read_text().splitlines()] if path.exists() else []
+        self.assertTrue(be.send(sid, "run the build"))
+        self.assertTrue(until(lambda: any(r["type"] == "user" for r in recs())))
+        fake.turn_queues["t-1"].put(RuntimeError("synthetic: app-server connection lost"))
+        self.assertTrue(until(lambda: not be.busy(sid) and be.launch_error(sid) is not None),
+                        "worker never settled; interrupt calls: %r" % fake.called("turn_interrupt"))
+        self.assertIn("connection lost", be.launch_error(sid)["text"])
+        rows = recs()
+        self.assertEqual([r["type"] for r in rows], ["user", "assistant", "assistant"])
+        held, settle = rows[1], rows[2]
+        self.assertEqual(held["message"]["content"][0]["text"], "partial reply")
+        self.assertIsNone(held["message"]["stop_reason"])       # the turn genuinely didn't settle
+        self.assertEqual(settle["message"]["stop_reason"], "end_turn")
+        self.assertTrue(settle.get("isApiErrorMessage"))
+        self.assertIn("connection lost", settle["message"]["content"][0]["text"])
+        self.assertEqual(settle["parentUuid"], held["uuid"])
+        self.assertEqual(fake.called("turn_interrupt"), [])
+        # the next prompt opens its OWN turn: the event model reads the abandoned one as ended
+        self.assertTrue(be.send(sid, "try again"))
+        self.assertTrue(until(lambda: not be.busy(sid) and len(recs()) == 5))
+        parsed = em.parse_session(str(path), rompuuid=sid, name="web", dir="/TESTDIR",
+                                  candidate_files=[str(path)], sdk_human=True)
+        self.assertEqual([t["ended"] for t in parsed["turns"]], [True, True])
+        be.kill(sid)
+
+    def test_turn_abandoned_by_a_failed_write_is_interrupted(self):
+        """The other way a turn is abandoned after its ACK: the transcript append raises (a full disk)
+        with the app-server alive and still running the instruction. The turn is told to stop (the
+        transport is up, so the reply comes), the settle's own failed write is logged, and launch_error
+        names the original fault, not the settle's."""
+        logs = []
+        fake = FakeClient()
+        be = cb.CodexBackend(tempfile.mkdtemp(), client_factory=lambda: fake, log=logs.append)
+        sid = be.spawn("web", "/TESTDIR")
+
+        writes = []
+        def failing_append(s, recs):
+            # the loop's write fails first; the settle's own write fails with a DIFFERENT error, so the
+            # test can tell which of the two launch_error and the log each carry
+            writes.append(recs)
+            raise (OSError(28, "No space left on device") if len(writes) == 1
+                   else OSError(5, "Input/output error"))
+        be._append = failing_append
+        self.assertTrue(be.send(sid, "write fails"))
+        self.assertTrue(until(lambda: not be.busy(sid) and be.launch_error(sid) is not None))
+        self.assertIn("No space left", be.launch_error(sid)["text"])
+        self.assertNotIn("Input/output", be.launch_error(sid)["text"])
+        self.assertEqual([c[2] for c in fake.called("turn_interrupt")], ["t-1"])
+        settle_logs = [m for m in logs if m.startswith("abandoned turn settle")]
+        self.assertEqual(len(settle_logs), 1, logs)
+        self.assertIn("Input/output error", settle_logs[0])
+        self.assertEqual(len(writes), 2)             # the loop's, then the settle's; nothing else wrote
+        be.kill(sid)
 
     def test_kill_resume_roundtrip(self):
         be, fake, _ = build()
