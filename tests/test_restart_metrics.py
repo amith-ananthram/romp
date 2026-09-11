@@ -69,6 +69,9 @@ def _fixture(state: Path):
         {"t": t1 + 3, "pid": 101, "kind": "reconcile.scope-stopped", "unit": "romp-session-11111111-7-1.scope", "sid8": "11111111"},
         {"t": t1 + 3, "pid": 101, "kind": "reconcile.boot", "sessions": 5, "resumed": 2, "restored": 0, "notified": 0,
          "reaped": 1, "scopesStopped": 1, "toStart": 2, "durationS": 0.2},
+        {"t": t1 + 4, "pid": 101, "kind": "host.attached", "sid": SID, "name": "web", "boot": True, "hostPid": 20, "cliPid": 21, "replayFrom": 3},
+        {"t": t1 + 4, "pid": 101, "kind": "host.attached", "sid": SID2, "name": "api", "boot": True, "hostPid": 22, "cliPid": 23},
+        {"t": t2 + 100, "pid": 102, "kind": "host.attached", "sid": SID, "name": "web", "boot": False, "hostPid": 20, "cliPid": 21},
         {"t": t2 + 5, "pid": 102, "kind": "reconcile.boot", "sessions": 5, "resumed": 1, "reaped": 0, "scopesStopped": 0},
         {"t": t2 + 900, "pid": 102, "kind": "crash.heal", "sid": SID2, "name": "api", "attempt": 1},
         {"t": t2 + 960, "pid": 102, "kind": "crash.loop", "sid": SID2, "name": "api", "attempt": 2},
@@ -134,7 +137,7 @@ class Parsers(unittest.TestCase):
     def test_events_turns_and_state_log(self):
         ev, _ = rm._read_jsonl(self.state / "session-events.jsonl")
         events = rm.parse_events(ev)
-        self.assertEqual(len(events), 10, "the stamp-less row is dropped")
+        self.assertEqual(len(events), 13, "the stamp-less row is dropped (the three host.attached rows count)")
         tu, _ = rm._read_jsonl(self.state / "turns.jsonl")
         turns = rm.parse_turns(tu)
         self.assertEqual(turns[0]["feedToResultS"], 37.0)
@@ -250,6 +253,9 @@ class Document(unittest.TestCase):
         self.assertEqual((b["orphansReaped"], b["scopesStopped"], b["duplicateClis"], b["crashHeals"], b["crashLoops"],
                           b["drainLeftClosing"], b["leaseProblems"]), (1, 1, 1, 1, 1, 1, 1))
         self.assertEqual((b["drainUnjoinedCount"], b["drainReapedCount"]), (1, 1))
+        self.assertEqual((b["attachedAtBoot"], b["attachedLater"]), (2, 1),
+                         "host.attached rows (T315): the sessions a restart kept running under their hosts, and the later attaches")
+        self.assertEqual(doc["events"]["byKind"]["host.attached"], 3)
         self.assertEqual(b["redo"], {"turns": 1, "usd": 0.5, "tokens": 3700})
         self.assertEqual(b["turns"], 4, "the self-opened turn counts as a turn; only its latency is unmeasured")
         self.assertEqual((b["latency"]["feedToResultS"]["n"], b["latency"]["feedToResultS"]["max"]), (2, 37.0))
@@ -288,6 +294,7 @@ class Document(unittest.TestCase):
         self.assertIn("dates in UTC time", text)
         self.assertIn("quiet windows 2 · wait n=2 p50 297 s p90 900 s max 900 s · backstop fired 1", text)
         self.assertIn("orphans reaped 1 · scopes stopped 1 · duplicate CLIs 1 · crash heals 1 · crash loops 1 · drain left closing 1", text)
+        self.assertIn("hosts attached: at boot 2 · later 1", text)
         self.assertIn("continuation notices 3 · redo turns 1 · redo cost $0.50 of $15.50 in the window · redo tokens 3,700", text)
         self.assertIn("feed to result n=2 p50 10.0 s p90 37.0 s", text)
         self.assertIn("machine cuts crash 1, restart 1", text)
