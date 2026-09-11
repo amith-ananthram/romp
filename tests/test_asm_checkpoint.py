@@ -351,6 +351,32 @@ class Fallbacks(Harness):
         _write_doc(path, dict(_doc(path), identity="0" * 40))
 
 
+class SkillLoadCarry(Harness):
+    def test_a_pre_cut_skill_load_is_reported_from_a_restored_tree(self):
+        """The harness's own skill load (T333: a bare-named <skill-format> wrapper the emit skips, reported as skillLoads for
+        the judges' anchor stamp) before the cut rides the document's carry: the restored tree reports it as the whole
+        parse does, with no body read."""
+        skill = "notes-review"
+        wrapper = ("<command-message>%s</command-message>\n<command-name>%s</command-name>\n"
+                   "<skill-format>true</skill-format>" % (skill, skill))
+        t0 = NOW - 7200
+        recs = [G.uline(t0, "Add retries to the notes-api client", "u1", None),
+                dict(G.uline(t0 + 1, wrapper, "u2", "u1"), isMeta=True),
+                dict(G.uline(t0 + 1, "# Notes review reference\n\nHow to review notes.", "u3", "u2"), isMeta=True),
+                G.aline(t0 + 60, "Adding the retry loop to the client.", "a1", "u3", stop="tool_use"),
+                G.aline(t0 + 400, "Wrote the retry loop with a test.", "a2", "a1", stop="end_turn")]
+        path = self.write("skill-load", compacting_variant(recs, "skl"))
+        whole = self.cold(path)
+        self.assertEqual(whole["skillLoads"], {"u2": skill}, "the whole parse reports the wrapper")
+        self.fresh(); self.parse(path); self.assertTrue(em.asm_checkpoint_write(path, SID), em.asm_checkpoint_stats())
+        self.fresh(); modes = []
+        tree = self.parse(path, modes)
+        self.assertEqual(modes, ["restore"])
+        self.assertEqual(tree["skillLoads"], {"u2": skill}, "restored from the carry, before any hydration")
+        em.hydrate(tree, SID)
+        self.assertEqual(_strip(tree), whole)
+
+
 class WriteValves(Harness):
     def _whole(self, name="valve"):
         records, sent = G.SINGLE_FILE["compaction_atom"]
