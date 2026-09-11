@@ -239,13 +239,21 @@ stays pending by its id up to the far host's delivered row or the peer's
 answer (the pending stamp survives every holder's save), and a refusal the
 bus cannot retry (no live recipient, a message that came back, with the far
 host's reason) reverts the node to your block with the refusal in its why,
-since nobody can be asked (filed at the bounce's own time, so a lift that
-landed after it outranks it); a pending relay whose wait ended another way is
-withdrawn from the far host's outbox; a dead worker's block is not relayed;
-each record lands before its entry is spent. A block filed again after the
+since nobody can be asked (the node is read again first, so a wait another
+holder ended meanwhile stands down instead, and the block is filed at the
+bounce's own time, so a follow-up of yours between the bounce and the tick
+outranks it; the refusal is noted beside the block, never in its words); a
+pending relay whose wait ended another way is withdrawn from the far host's
+outbox, and one the judge retired while it was parked is recalled the same
+way; a parked question completes only on the far host's delivered row, never
+on a later message; a dead worker's block is not relayed; each record lands
+before its entry is spent; a send the bus answered late is never repeated
+(the bus answers the send it holds, and the tick holds off after an unknown
+outcome and reads the bus's row). A block filed again after the
 peer's reply ended the wait relays again; a block re-asserted on a standing
-wait never does. Your own follow-up on a delegated card, newer than the
-delegation and the standing wait, keeps its block yours. A top is attributed to the
+wait never does. Your own follow-up on a delegated card, newer than every edge the block
+could wait on (the delegation, a standing wait up the card, the worker's own
+open question, a handoff), keeps its block yours. A top is attributed to the
 delegate mail its anchor names (the delegate-kind marker of the delivery that
 is a dispatch to this session, never one quoted from another session's, so a
 batched inbox whose first mail is a peer's heads-up still belongs to the

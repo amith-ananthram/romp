@@ -49,11 +49,9 @@ class _Peer(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
         td = Path(self.td.name)
-        self.saved = (jd.NAMES, jd.GOALDIR, jd.MESSAGES, jd.STATE, km.NAMES)
-        jd.NAMES = td / "names"; jd.NAMES.mkdir()
-        jd.GOALDIR = td / "goals"; jd.GOALDIR.mkdir()
-        jd.MESSAGES = td / "messages.jsonl"
-        jd.STATE = td
+        self.saved = (jd.STATE, km.NAMES)
+        jd._rebind_state(td)                             # STATE and every dir derived from it, the repo's rule for tests
+        jd.NAMES.mkdir(); jd.GOALDIR.mkdir(); jd.MESSAGES.parent.mkdir(parents=True)
         km.NAMES = jd.NAMES
         for sid, name in ((WORKER, "api"), (MANAGER, "web"), (OTHER, "tests")):
             (jd.NAMES / sid).write_text("%s\t/TESTDIR\t#abcdef\n" % name)
@@ -61,7 +59,7 @@ class _Peer(unittest.TestCase):
         self._write_mail()
 
     def tearDown(self):
-        (jd.NAMES, jd.GOALDIR, jd.MESSAGES, jd.STATE, km.NAMES) = self.saved
+        jd._rebind_state(self.saved[0]); km.NAMES = self.saved[1]
         jd._PEER_ASK_CACHE[0] = None
         jd._DELEG_CACHE[0] = None
         self.td.cleanup()
@@ -328,6 +326,22 @@ class UsersFollowUp(_Peer):
         nd = self._close(st, step, "cannot move further without you")
         self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER])
 
+    def test_the_workers_own_ask_after_the_follow_up_is_the_newer_edge(self):
+        st, top, step = self.store(delegated=True)
+        jd.record_verdict(st, st["nodes"][top], "user", "reopen", T0 + 300, msg=True)   # the user follows up...
+        self.ask(WORKER, MANAGER, T0 + 350)                                             # ...the worker asks the manager after it...
+        nd = self._close(st, step, "cannot move further without you")                  # ...and blocks at T0 + 400
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER], "the ask is the newer edge: a peer wait")
+        self.assertNotIn("relayWanted", nd, "the ask is the edge: nothing to relay")
+
+    def test_a_follow_up_after_the_workers_ask_is_the_users(self):
+        st, top, step = self.store(delegated=True)
+        self.ask(WORKER, MANAGER, T0 + 300)
+        jd.record_verdict(st, st["nodes"][top], "user", "reopen", T0 + 350, msg=True)
+        nd = self._close(st, step, "cannot move further without you")
+        self.assertTrue(nd["blocked"])
+        self.assertIsNone(nd.get("awaitingKind"))
+
     def test_a_follow_up_after_a_standing_wait_reclaims_it(self):
         st, top, step = self.store(delegated=True)
         nd = self._close(st, step, "cannot move further without you")
@@ -368,6 +382,7 @@ class _RelayFixture(_Peer):
     def setUp(self):
         super().setUp()
         self._orig_send = km._bus_send_relay
+        self._orig_recall = km._bus_recall_relay
         self.sent = []
         self.inbox = jd.STATE / "postal" / "mail" / MANAGER / "new"
         self.inbox.mkdir(parents=True)
@@ -385,6 +400,7 @@ class _RelayFixture(_Peer):
 
     def tearDown(self):
         km._bus_send_relay = self._orig_send
+        km._bus_recall_relay = self._orig_recall
         km._RELAY_SAID.clear()
         km._RELAY_QUIET.clear()
         km._RELAY_BAD["n"] = 0
@@ -460,7 +476,7 @@ class RelayEndToEnd(_RelayFixture):
         nd = jd.load_goals(WORKER)["nodes"][step]
         self.assertTrue(nd["blocked"], "the needs-you is back")
         self.assertIn("cannot move further without you", nd["blockWhy"])
-        self.assertIn("relay to web was refused", nd["blockWhy"])
+        self.assertIn("relay to web was refused", nd["relayRefusal"])
         self.assertNotIn("relayWanted", nd)
         self.assertEqual(nd["mt"], NOW, "bumped like every other block writer")
         self.assertEqual(nd["relayDone"]["outcome"], "refused", "the removal is a record the merge honours")
@@ -515,6 +531,21 @@ class RelayEdges(_RelayFixture):
         self.assertEqual(km._relay_tick(NOW), 1)
         self.assertEqual([p["body"] for p in self.sent], ["api cannot move further: second question"], "the NEW words")
         self.assertEqual(km._relay_tick(NOW + 1), 0, "once")
+
+    def test_two_nodes_blocked_in_one_pass_toward_one_peer_get_two_questions(self):
+        st, top, step = self.store(delegated=True)
+        other = WORKER + ":g3"
+        st["nodes"][other] = node(other, "Ask which port to use", parent=top, t=T0 + 70)
+        with contextlib.redirect_stderr(io.StringIO()):
+            jd.apply_close(st, [st["nodes"][step], st["nodes"][other]],
+                           {"done": {}, "block": {1: "which client?", 2: "which port?"}, "awaiting": {}}, t=T0 + 400)
+        ids = (st["nodes"][step]["relayWanted"]["id"], st["nodes"][other]["relayWanted"]["id"])
+        self.assertNotEqual(ids[0], ids[1], "one evidence time, one peer, two nodes: two markers")
+        self._save(st)
+        self.assertEqual(len(self._queue()), 2)
+        self.assertEqual(km._relay_tick(NOW), 2)
+        self.assertEqual(sorted(p["body"] for p in self.sent),
+                         ["api cannot move further: which client?", "api cannot move further: which port?"])
 
     def test_two_holders_filing_one_wait_mint_one_marker(self):
         st, top, step = self.store(delegated=True)
@@ -622,17 +653,19 @@ class RelayEdges(_RelayFixture):
         self.assertTrue(nd["blocked"], "the bounce is the definitive refusal: the user's block")
         self.assertEqual(self._queue(), [])
 
-    def test_a_parked_relay_the_peer_answers_completes(self):
+    def test_a_parked_relay_needs_delivery_proof_a_later_message_is_not_its_answer(self):
         st, top, step = self.store(delegated=True)
         self._close(st, step, "cannot move further without you", T0 + 400)
         self._save(st)
         km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "relay-far-2", "parked": "TESTHOST"})
         self.assertEqual(km._relay_tick(NOW), 0)
-        self.rows.append(mail(MANAGER, WORKER, NOW + 40, kind="coordinate"))
+        self.rows.append(mail(MANAGER, WORKER, NOW + 40, kind="coordinate"))   # the peer writes, but the parked question
+        self._write_mail()                                                     #   cannot have been read
+        self.assertEqual(km._relay_tick(NOW + 60), 0, "still pending: no delivery proof")
+        self.assertEqual(jd.load_goals(WORKER)["nodes"][step]["relayWanted"]["pendingMid"], "relay-far-2")
+        self.rows.append({"t": NOW + 70, "ev": "relayed", "id": "relay-far-2", "host": "TESTHOST"})
         self._write_mail()
-        self.assertEqual(km._relay_tick(NOW + 60), 1, "the peer answered: the relay stands as sent")
-        nd = jd.load_goals(WORKER)["nodes"][step]
-        self.assertEqual(nd["relayed"]["mid"], "relay-far-2")
+        self.assertEqual(km._relay_tick(NOW + 90), 1, "the far host's ack completes it")
         self.assertEqual(self._queue(), [])
 
     def test_a_relay_in_flight_to_a_host_that_is_up_is_pending_until_the_far_host_delivers(self):
@@ -687,7 +720,8 @@ class RelayEdges(_RelayFixture):
             self.assertEqual(km._relay_tick(NOW + 60), 0)
         nd = jd.load_goals(WORKER)["nodes"][step]
         self.assertTrue(nd["blocked"])
-        self.assertIn("was withdrawn by api", nd["log"][-1]["why"])
+        self.assertIn("was withdrawn by api", nd["relayRefusal"])
+        self.assertEqual(nd["log"][-1]["why"], "cannot move further without you", "the block keeps its own why")
 
     def test_a_bounce_carries_the_far_hosts_reason_into_the_users_block(self):
         st, top, step = self.store(delegated=True)
@@ -700,21 +734,39 @@ class RelayEdges(_RelayFixture):
         with contextlib.redirect_stderr(io.StringIO()):
             km._relay_tick(NOW + 60)
         nd = jd.load_goals(WORKER)["nodes"][step]
-        self.assertIn("came back from TESTHOST: no live session named web", nd["log"][-1]["why"])
-        self.assertEqual(nd["log"][-1]["ev_t"], NOW + 30, "filed at the bounce row's time: a later lift outranks it")
+        self.assertIn("came back from TESTHOST: no live session named web", nd["relayRefusal"])
+        self.assertEqual(nd["log"][-1]["why"], "cannot move further without you", "the mechanism's note stays out of the why")
+        self.assertEqual(nd["log"][-1]["ev_t"], NOW + 30, "filed at the bounce row's time: a user reopen after it outranks it")
 
-    def test_an_answer_in_the_sends_own_second_is_not_the_answer(self):
+    def test_a_bounce_on_a_wait_another_holder_ended_stands_down(self):
         st, top, step = self.store(delegated=True)
         self._close(st, step, "cannot move further without you", T0 + 400)
         self._save(st)
-        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-far-7", "note": "relaying"})
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-far-6b", "note": "relaying"})
         self.assertEqual(km._relay_tick(NOW), 0)
-        self.rows.append(mail(MANAGER, WORKER, NOW, kind="coordinate"))        # the same second as the send
+        self.rows.append({"t": NOW + 30, "ev": "bounced", "id": "px-far-6b", "host": "TESTHOST", "why": "no live session"})
         self._write_mail()
-        self.assertEqual(km._relay_tick(NOW + 1), 0, "still pending")
-        self.rows.append(mail(MANAGER, WORKER, NOW + 2, kind="coordinate"))
-        self._write_mail()
-        self.assertEqual(km._relay_tick(NOW + 3), 1, "a later message is the answer")
+        real = km._relay_ended_since
+        km._relay_ended_since = lambda sid, nid, t: True   # the fresh read finds the wait ended at or after the bounce
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(km._relay_tick(NOW + 60), 0)
+        finally:
+            km._relay_ended_since = real
+        nd = jd.load_goals(WORKER)["nodes"][step]
+        self.assertFalse(nd["blocked"], "nothing to revert to")
+        self.assertEqual((nd["relayDone"]["outcome"], nd["relayDone"]["pending"]), ("stood-down", "bounced"))
+
+    def test_ended_since_reads_the_node_on_disk(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        self.assertFalse(km._relay_ended_since(WORKER, step, NOW))
+        st = jd.load_goals(WORKER)
+        jd.record_verdict(st, st["nodes"][step], "romp", "awaiting", NOW + 5, why="", lift=True, end_ev=NOW + 5)
+        self._save(st)
+        self.assertTrue(km._relay_ended_since(WORKER, step, NOW), "a lift at or after the bounce's time")
+        self.assertFalse(km._relay_ended_since(WORKER, step, NOW + 10), "a lift before it is not an ending since")
 
     def test_the_pending_stamp_survives_a_holders_save_so_the_question_is_sent_once(self):
         st, top, step = self.store(delegated=True)
@@ -772,6 +824,41 @@ class RelayEdges(_RelayFixture):
         self.assertEqual(km._relay_tick(NOW + 1), 1, "the row names the marker: adopted")
         self.assertEqual(len(self.sent), 1)
         self.assertEqual(self._queue(), [])
+
+    def test_a_stalled_bus_is_not_asked_again_before_its_timeout_and_the_row_settles_it(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        real = km._bus_send_relay
+        calls = []
+        def stalled_bus(payload):                          # the request went in; no answer within the read timeout
+            calls.append(payload)
+            return False, "timed out", False, {"unknown": True}
+        km._bus_send_relay = stalled_bus
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(km._relay_tick(NOW), 0)
+            self.assertEqual(km._relay_tick(NOW + 1), 0)
+            self.assertEqual(km._relay_tick(NOW + 12), 0)
+        self.assertEqual(len(calls), 1, "held: nothing is sent again inside the bus's own timeout")
+        self.assertEqual(err.getvalue().count("outcome is unknown"), 1, "said once")
+        real(calls[0])                                     # the bus drains: its row lands, the manager holds one question
+        self.assertEqual(km._relay_tick(NOW + 13), 1, "the row names the marker: adopted")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_a_stalled_bus_that_never_wrote_is_asked_again_after_the_hold(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        calls = []
+        km._bus_send_relay = lambda payload: calls.append(payload) or (False, "timed out", False, {"unknown": True})
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(km._relay_tick(NOW), 0)
+            self.assertEqual(km._relay_tick(NOW + km.RELAY_UNKNOWN_HOLD - 1), 0)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(km._relay_tick(NOW + km.RELAY_UNKNOWN_HOLD), 0)
+        self.assertEqual(len(calls), 2, "the hold passed with no row: asked again")
+        self.assertEqual(jd.load_goals(WORKER)["nodes"][step]["relayWanted"]["attempts"], 2)
 
     def test_a_relay_leg_send_with_a_lost_answer_is_adopted_as_pending(self):
         st, top, step = self.store(delegated=True)
@@ -880,6 +967,72 @@ class RelayEdges(_RelayFixture):
         self._write_mail()                                 # the rowless rebuild appended an old row behind the ack
         self.assertEqual(km._relay_tick(NOW + 60), 1, "the ack is found past the recovered row")
 
+    def test_a_lost_relay_leg_send_whose_wait_ended_is_adopted_then_recalled(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        marker = st["nodes"][step]["relayWanted"]["id"]
+        def lossy_relay_leg(payload):
+            self.rows.append({"t": NOW, "ev": "sent", "id": "px-lost-2", "from_id": WORKER, "to_id": "peer:TESTHOST",
+                              "to_sid": MANAGER, "kind": "question", "relayed": True, "relayMarker": payload["relayMarker"]})
+            self._write_mail()
+            return False, "timed out", False, {"unknown": True}
+        km._bus_send_relay = lossy_relay_leg
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(km._relay_tick(NOW), 0)
+        st = jd.load_goals(WORKER)
+        jd.record_verdict(st, st["nodes"][step], "romp", "awaiting", NOW + 5, why="", lift=True, end_ev=NOW + 5)   # the wait ends
+        self._save(st)
+        recalls = []
+        km._bus_recall_relay = lambda sid, mid: recalls.append(mid) or "withdrawn"
+        km._bus_send_relay = lambda payload: self.fail("a second send")
+        self.assertEqual(km._relay_tick(NOW + 10), 0)
+        self.assertEqual(recalls, ["px-lost-2"], "adopted as pending, then recalled: the far host never delivers it")
+        nd = jd.load_goals(WORKER)["nodes"][step]
+        self.assertEqual((nd["relayDone"]["outcome"], nd["relayDone"]["recall"], nd["relayDone"]["marker"]), ("stood-down", "withdrawn", marker))
+
+    def test_a_row_the_bus_bounced_as_not_parked_was_never_sent(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        marker = st["nodes"][step]["relayWanted"]["id"]
+        self.rows.append({"t": NOW - 5, "ev": "sent", "id": "px-np", "from_id": WORKER, "to_id": "peer:TESTHOST",
+                          "to_sid": MANAGER, "kind": "question", "relayed": True, "relayMarker": marker})
+        self.rows.append({"t": NOW - 5, "ev": "bounced", "id": "px-np", "host": "TESTHOST",
+                          "why": "not parked: the outbox record could not be written", "notParked": True})
+        self._write_mail()
+        self.assertEqual(km._relay_tick(NOW), 1, "the not-parked row is no send: a fresh one goes out")
+        self.assertEqual(len(self.sent), 1)
+
+    def test_an_unknown_recall_keeps_the_entry_for_the_next_tick(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-ur", "parked": "TESTHOST"})
+        self.assertEqual(km._relay_tick(NOW), 0)
+        st = jd.load_goals(WORKER)
+        jd.record_verdict(st, st["nodes"][step], "romp", "awaiting", NOW + 5, why="", lift=True, end_ev=NOW + 5)
+        self._save(st)
+        answers = ["unknown", "carried"]
+        km._bus_recall_relay = lambda sid, mid: answers.pop(0)
+        self.assertEqual(km._relay_tick(NOW + 10), 0)
+        self.assertEqual(len(self._queue()), 1, "the bus could not be asked: kept")
+        self.assertIn("relayWanted", jd.load_goals(WORKER)["nodes"][step])
+        self.assertEqual(km._relay_tick(NOW + 11), 0)
+        self.assertEqual(self._queue(), [])
+        self.assertEqual(jd.load_goals(WORKER)["nodes"][step]["relayDone"]["recall"], "carried: could not be withdrawn")
+
+    def test_an_entry_is_spent_only_when_the_file_still_holds_what_was_read(self):
+        jd._relay_write_entry(WORKER, WORKER + ":g2", "mk-a", 3)
+        f = jd._relay_entry_path(WORKER, WORKER + ":g2")
+        e = json.loads(f.read_text())
+        jd._relay_write_entry(WORKER, WORKER + ":g2", "mk-b", 4)   # the judge's flush renamed a newer marker's entry over it
+        km._relay_spend(f, e)
+        self.assertTrue(f.exists(), "the newer entry stays")
+        self.assertEqual(json.loads(f.read_text())["marker"], "mk-b")
+        km._relay_spend(f, json.loads(f.read_text()))
+        self.assertFalse(f.exists(), "spent once it is the one read")
+
     def test_a_dead_workers_block_is_not_relayed(self):
         st, top, step = self.store(delegated=True)
         self._close(st, step, "cannot move further without you", T0 + 400)
@@ -899,6 +1052,15 @@ class RelayEdges(_RelayFixture):
                          "api cannot move further: the dashboard keyboard shortcut collides with discard; which key?",
                          "words, not substrings")
         self.assertEqual(km._relay_body("api", "the card is held open."), "api cannot move further on this and needs your call.")
+        self.assertEqual(km._relay_body("api", "the cards are nudged and the goals cleared; which port?"),
+                         "api cannot move further: which port?", "inflections are the same words")
+        self.assertEqual(km._relay_body("api", "the goal is blocked; which goal should ship first?"),
+                         "api cannot move further: which goal should ship first?", "a question is always kept")
+        self.assertEqual(km._relay_body("api", "No answer from the payments vendor yet; should I switch providers?"),
+                         "api cannot move further: No answer from the payments vendor yet; should I switch providers?",
+                         "a real question under the debt ladder's prefix is not procedural")
+        self.assertEqual(km._relay_body("api", jd.DEBT_BLOCK_WHY_PREFIX + "web after two reminders"),
+                         "api cannot move further on this and needs your call.")
 
     def test_a_malformed_entry_drops_alone(self):
         st, top, step = self.store(delegated=True)
@@ -1233,6 +1395,7 @@ class PostalRelayedFlag(unittest.TestCase):
         self.assertTrue(got and all(m.get("relayed") for m in got), "the inbox read carries the mark to the recipient")
         recs = ps.format_receipts(ps._sent_receipts(WORKER))
         self.assertIn("sent on your behalf", recs, "the worker's own receipts say romp sent it")
+        self.assertNotIn("romp-msg-relayed", ps.format_inbox(got, MANAGER) + ps.format_push(got), "no comment nobody reads")
         plain = ps.deliver(MANAGER, "api", WORKER, "a typed question", kind="question")
         self.assertNotIn("X-Relayed", (ps._mailbox(MANAGER) / "new" / plain).read_text())
         rows = [json.loads(l) for l in (ps.TLDIR / "messages.jsonl").read_text().splitlines()]
@@ -1344,6 +1507,48 @@ class SaverFlushesItsOwn(_RelayFixture):
         self.assertNotIn("relayWanted", jd.load_goals(WORKER)["nodes"][step])
         self.assertEqual(self._queue(), [], "nothing left to relay: no entry")
 
+    def test_a_retired_marker_handed_to_a_far_host_is_recalled_by_the_tick(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "first question", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-ret-1", "parked": "TESTHOST"})
+        self.assertEqual(km._relay_tick(NOW), 0)           # handed to the far host, pending
+        st = jd.load_goals(WORKER)
+        jd.record_verdict(st, st["nodes"][step], "romp", "awaiting", NOW + 5, why="", lift=True, end_ev=NOW + 5)
+        self._close(st, step, "second question", NOW + 60)   # the judge retires the pending marker for a new wait
+        nd = st["nodes"][step]
+        self.assertEqual([r["pendingMid"] for r in nd["relayRecall"]], ["px-ret-1"], "remembered for the recall")
+        self.assertEqual(nd["relayWanted"]["why"], "second question")
+        self._save(st)
+        recalls = []
+        km._bus_recall_relay = lambda sid, mid: recalls.append(mid) or "withdrawn"
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "to": payload["to"]})
+        self.assertEqual(km._relay_tick(NOW + 70), 1, "the new question goes out")
+        self.assertEqual(recalls, ["px-ret-1"], "and the stale one is withdrawn from the far host's outbox")
+        nd = jd.load_goals(WORKER)["nodes"][step]
+        self.assertNotIn("relayRecall", nd)
+        self.assertEqual(nd["relayRecalled"], ["px-ret-1"])
+
+    def test_a_retired_marker_on_the_users_block_is_recalled_too(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "first question", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-ret-2", "parked": "TESTHOST"})
+        self.assertEqual(km._relay_tick(NOW), 0)
+        st = jd.load_goals(WORKER)
+        jd.record_verdict(st, st["nodes"][top], "user", "reopen", NOW + 5, msg=True)   # the user follows up: the block is theirs
+        self._close(st, step, "still stuck", NOW + 60)
+        nd = st["nodes"][step]
+        self.assertTrue(nd["blocked"])
+        self.assertEqual([r["pendingMid"] for r in nd["relayRecall"]], ["px-ret-2"])
+        self._save(st)
+        self.assertEqual(len(self._queue()), 1, "an entry brings the tick to the node though no marker stands")
+        recalls = []
+        km._bus_recall_relay = lambda sid, mid: recalls.append(mid) or "carried"
+        self.assertEqual(km._relay_tick(NOW + 70), 0)
+        self.assertEqual(recalls, ["px-ret-2"])
+        self.assertEqual(self._queue(), [], "the recall entry is spent")
+
     def test_a_failed_publish_keeps_the_pending_list_for_the_retry(self):
         st, top, step = self.store(delegated=True)
         self._save(st)
@@ -1447,6 +1652,49 @@ class FarHostRelayMark(unittest.TestCase):
         rows = [json.loads(l) for l in (ps.TLDIR / "messages.jsonl").read_text().splitlines()]
         row = next(r for r in rows if r.get("id") == obj["id"])
         self.assertEqual((row.get("ev"), row.get("relayed"), row.get("kind")), ("sent", True, "question"), "the sender's ledger says relayed")
+
+    def test_the_marker_rides_the_row_the_header_and_the_rebuild_and_forges_nothing(self):
+        ps = self._postal()
+        live = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False); json.dump([{"id": MANAGER, "name": "web"}], live); live.close()
+        prior = os.environ.get("ROMP_SESSIONS_FILE"); os.environ["ROMP_SESSIONS_FILE"] = live.name
+        try:
+            def post(marker):
+                h = object.__new__(ps.Handler)
+                raw = json.dumps({"to": MANAGER, "from": "api", "from_id": WORKER, "kind": "question", "relayed": True,
+                                  "relayMarker": marker, "body": "api cannot move further: which client?"}).encode()
+                h.path = "/send"; h.headers = {"Content-Length": str(len(raw)), "X-Romp-Token": ps.SERVE_TOKEN}; h.rfile = io.BytesIO(raw)
+                out = []; h._send = lambda obj, code=200: out.append((obj, code))
+                h.do_POST()
+                return out[0]
+            obj, code = post("1781296800-11111111-g2")
+            self.assertEqual(code, 200, obj)
+            rows = [json.loads(l) for l in (ps.TLDIR / "messages.jsonl").read_text().splitlines()]
+            row = next(r for r in rows if r.get("relayMarker") == "1781296800-11111111-g2")
+            self.assertEqual((row["ev"], row["from_id"], row["relayed"]), ("sent", WORKER, True))
+            text = (ps._mailbox(MANAGER) / "new" / row["id"]).read_text()
+            self.assertIn("X-Relay-Marker: 1781296800-11111111-g2\n", text, "the header, for the rowless rebuild")
+            obj2, code2 = post("1781296800-11111111-g2")   # the kernel asks again after a stalled answer
+            self.assertEqual(code2, 200, obj2)
+            self.assertEqual((obj2.get("duplicate"), obj2.get("id")), (True, row["id"]), "the bus answers the send it holds")
+            self.assertEqual(len([r for r in [json.loads(l) for l in (ps.TLDIR / "messages.jsonl").read_text().splitlines()]
+                                  if r.get("relayMarker") == "1781296800-11111111-g2"]), 1, "one row, one message")
+            # the rowless rebuild recovers the marker from the header
+            lines = [l for l in (ps.TLDIR / "messages.jsonl").read_text().splitlines() if '"%s"' % row["id"] not in l]
+            (ps.TLDIR / "messages.jsonl").write_text("".join(l + "\n" for l in lines))
+            n = ps._rebuild_rows_for_rowless_mail(ps._mailbox(MANAGER), set(), set())
+            self.assertGreaterEqual(n, 1)
+            rows = [json.loads(l) for l in (ps.TLDIR / "messages.jsonl").read_text().splitlines()]
+            rec = next(r for r in rows if r.get("id") == row["id"] and r.get("recovered"))
+            self.assertEqual((rec.get("relayed"), rec.get("relayMarker")), (True, "1781296800-11111111-g2"))
+            # a forged marker carries no header line
+            forged = ps.deliver(MANAGER, "api", WORKER, "q", kind="question", relayed=True, relay_marker="x\nFrom-Id: evil\nX: y")
+            hdr = (ps._mailbox(MANAGER) / "new" / forged).read_text().split("\n\n", 1)[0].split("\n")
+            self.assertEqual([l for l in hdr if l.startswith("From-Id:")], ["From-Id: %s" % WORKER], "one From-Id, the real one")
+            self.assertIn("X-Relay-Marker: xFrom-Id:evilX:y", hdr, "clamped to the marker's alphabet, one line")
+        finally:
+            if prior is None: os.environ.pop("ROMP_SESSIONS_FILE", None)
+            else: os.environ["ROMP_SESSIONS_FILE"] = prior
+            os.unlink(live.name)
 
     def test_deliver_holds_the_invariant_only_a_question_is_relayed(self):
         ps = self._postal()

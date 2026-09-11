@@ -4565,6 +4565,16 @@ def _rebase_onto_disk(fsid, store):
             mnd["relaySettled"] = (ms + [x for x in dnd["relaySettled"]           #   remembers, so a holder stale
                                          if isinstance(x, str) and x not in ms])[-RELAY_SETTLED_CAP:]   # across two relays
         #                                                                                never re-mints the first)
+        if isinstance(dnd.get("relayRecalled"), list):   # the recalls done: the union
+            ms = [x for x in (mnd.get("relayRecalled") or []) if isinstance(x, str)]
+            mnd["relayRecalled"] = (ms + [x for x in dnd["relayRecalled"] if isinstance(x, str) and x not in ms])[-RELAY_SETTLED_CAP:]
+        if isinstance(dnd.get("relayRecall"), list):     # the recalls owed: the union, minus the ones done on either side
+            done = set(mnd.get("relayRecalled") or [])
+            mine = {str(r.get("pendingMid") or ""): r for r in (mnd.get("relayRecall") or []) if isinstance(r, dict)}
+            for r in dnd["relayRecall"]:
+                if isinstance(r, dict) and str(r.get("pendingMid") or "") not in mine:
+                    mine[str(r.get("pendingMid") or "")] = r
+            mnd["relayRecall"] = [r for r in mine.values() if str(r.get("pendingMid") or "") not in done][-RELAY_SETTLED_CAP:]
         if isinstance(mnd.get("relayWanted"), dict) and _relay_settled(mnd, mnd["relayWanted"]):
             mnd.pop("relayWanted", None)               # ours is settled: popped FIRST, so the disk's live marker is adopted
         d_rw, m_rw = dnd.get("relayWanted"), mnd.get("relayWanted")
@@ -12825,21 +12835,41 @@ def block_addressee_via(store, nd, why):
     or (None, None) when the block is the user's (T334, the rule above). Only a node
     under a DELEGATED goal (a courier-planted top) is ever redirected: a managed session's block is the case, and the
     user's own session, however many open questions it has out, keeps its blocks as its own decisions (an unrelated
-    open ask must never hide the user's own call behind "Awaiting <peer>"). An empty why is never redirected."""
+    open ask must never hide the user's own call behind "Awaiting <peer>"). An empty why is never redirected. The
+    USER's own follow-up on the delegated card (the reopen floor, _floor_of: the node's and its ancestors') newer than
+    every edge the block could wait on (the top's mint, a standing peer wait up the same chain, the open ask it would
+    name, the handoff) makes the block theirs: their decision, never relayed (the manager's fifth and sixth reviews)."""
     if not str(why or "").strip():
         return None, None
     if not _delegator_of(store, str(nd.get("id") or "")):
         return None, None
+    peer, via, edge_t = _block_peer_edge(store, nd, why)
+    if not peer:
+        return None, None
     nodes = store.get("nodes", {})
     tn = nodes.get(_top_of(nodes, str(nd.get("id") or "")) or "") or {}
-    since = max(int(tn.get("t") or 0), int(nd.get("awaitingAt") or 0) if nd.get("awaitingKind") == "peer" else 0)
+    since = max(int(tn.get("t") or 0), int(edge_t or 0))
+    seen, cur = set(), str(nd.get("id") or "")
+    while cur and cur in nodes and cur not in seen:             # loop-ok: the ancestor walk, cycle-guarded
+        seen.add(cur)
+        n_ = nodes[cur]
+        if n_.get("awaitingKind") == "peer":
+            since = max(since, int(n_.get("awaitingAt") or 0))
+        cur = n_.get("parentId")
     if int(_floor_of(store, nd) or 0) > since:
-        return None, None                              # the USER's own follow-up on the delegated card (the floor, newer than
-                                                       #   the delegation and the standing wait): their decision, never relayed
+        return None, None
+    return peer, via
+
+
+def _block_peer_edge(store, nd, why):
+    """The addressee of a block under a delegated goal, before the follow-up gate: (peer, via, edge_t), where edge_t is
+    the time of the edge the block would wait on (the open ask's send time, the handoff's time, 0 for the delegator's
+    relay), or (None, None, 0)."""
     ho = nd.get("handoff") if isinstance(nd.get("handoff"), dict) else None
     if ho and ho.get("peer") and ":" not in str(ho["peer"]):
-        return str(ho["peer"]), "ask"                 # a block on a "delegated to <peer>" tracker under a delegated goal waits
-                                                       #   on that peer: the delegate is a reply-expecting send its report ends
+        return str(ho["peer"]), "ask", int(ho.get("t") or 0)   # a block on a "delegated to <peer>" tracker under a delegated
+                                                       #   goal waits on that peer: the delegate is a reply-expecting send
+                                                       #   its report ends
     sid = str(store.get("rompUuid") or str(nd.get("id") or "").rsplit(":", 1)[0])
     nodes = store.get("nodes", {})
     delegator = _delegator_of(store, str(nd.get("id") or ""))
@@ -12850,17 +12880,18 @@ def block_addressee_via(store, nd, why):
     def named(p):
         return bool(_peer_name(p)) and bool(re.search(r"\b%s\b" % re.escape(_peer_name(p).lower()), text))
     if peers:
+        _la, last_ask, _al = _postal_ask_maps()
         if delegator in peers and not any(named(p) for p in peers if p != delegator):
-            return delegator, "ask"                    # the open ask to the delegator IS the edge
+            return delegator, "ask", int(last_ask.get((sid, delegator), 0))   # the open ask to the delegator IS the edge
         hits = [p for p in peers if named(p)]
         if len(hits) == 1:
-            return hits[0], "ask"                      # the words pick among the open asks
+            return hits[0], "ask", int(last_ask.get((sid, hits[0]), 0))   # the words pick among the open asks
         if delegator and not hits:
-            return delegator, "delegator"              # an open ask to a peer the block never names does not capture a
+            return delegator, "delegator", 0           # an open ask to a peer the block never names does not capture a
                                                        #   block in the delegator's work: the delegator, relayed
-        _la, last_ask, _al = _postal_ask_maps()
-        return max(peers, key=lambda p: last_ask.get((sid, p), 0)), "ask"   # else the latest ask, the wait graph's rule
-    return delegator, "delegator"
+        best = max(peers, key=lambda p: last_ask.get((sid, p), 0))
+        return best, "ask", int(last_ask.get((sid, best), 0))   # else the latest ask, the wait graph's rule
+    return delegator, "delegator", 0
 
 
 def file_block(store, nd, src, why, ev_t, t=None, seg=None):
@@ -12870,9 +12901,9 @@ def file_block(store, nd, src, why, ev_t, t=None, seg=None):
     kind "peer" or "block"; landed True when a verdict was written."""
     peer, via = block_addressee_via(store, nd, why)
     if not peer:
-        if isinstance(nd.get("relayWanted"), dict):        # the block is the user's: a peer wait's unsent marker on this
-            _relay_mark_settled(nd, nd.pop("relayWanted").get("id") or "")   #   node (the wait ended, or the user's
-        #                                                    follow-up reclaimed the card) is settled, never relayed
+        _relay_retire_marker(store, nd)                    # the block is the user's: a peer wait's marker on this node (the
+        #                                                    wait ended, or the user's follow-up reclaimed the card) is
+        #                                                    retired: settled, and recalled when it was handed to a far host
         return "block", bool(record_verdict(store, nd, src, "block", ev_t, why=why, seg=seg))
     if any(e.get("kind") in ("awaiting", "done") and (e.get("lift") or e.get("kind") == "done")
            and _wait_end_ev(e) > (ev_t or 0) for e in nd.get("log") or []):
@@ -12885,11 +12916,11 @@ def file_block(store, nd, src, why, ev_t, t=None, seg=None):
                                                        #   own once-ever record: a re-asserted judge block never lifts it
     prior_standing = nd.get("awaitingKind") == "peer" and peer in (nd.get("awaitingPeers") or ())   # read BEFORE any write:
     #                                                   record_verdict materializes awaitingKind at once (the manager's third review)
-    if not prior_standing and isinstance(nd.get("relayWanted"), dict):
-        old = nd.pop("relayWanted")                    # the ENDED wait's marker, still unsent: a new wait never reuses it (the
-        _relay_mark_settled(nd, old.get("id") or "")   #   tick would relay the old words for the new question, or its stand-down
-        #                                                of the old id would leave a wait with nothing to end it; the manager's
-        #                                                fifth review); its entry, if one exists, is spent as settled
+    if not prior_standing:
+        _relay_retire_marker(store, nd)                # the ENDED wait's marker: a new wait never reuses it (the tick would relay
+        #                                                the old words for the new question, or its stand-down of the old id
+        #                                                would leave a wait with nothing to end it; the manager's fifth review);
+        #                                                one handed to a far host is recalled (the sixth)
     landed = False
     if nd.get("blocked"):
         landed = bool(record_verdict(store, nd, "romp", "unblock", ev_t)) or landed
@@ -12900,19 +12931,37 @@ def file_block(store, nd, src, why, ev_t, t=None, seg=None):
     # its since-time, so the relay sent after it (and the peer's reply after that) end exactly this wait
     if via == "delegator" and not prior_standing:  # a fresh marker for every new wait (the ended wait's went above)
         nd["relayWanted"] = {"peer": peer, "why": str(why), "t": int(t if t is not None else ev_t),
-                             "id": _relay_marker_id(t if t is not None else ev_t, peer)}   # its identity: the records
+                             "id": _relay_marker_id(t if t is not None else ev_t, peer, nd.get("id"))}   # its identity:
         _relay_enqueue(store, nd)                  #   that settle it name it. The kernel's relay tick sends it as the
         landed = True                              #   worker's question, once per block: a re-asserted block on a
                                                    #   standing relayed wait never relays twice
     return "peer", landed
 
 
-def _relay_marker_id(ev_t, peer=""):
-    """A relay marker's identity: the block's evidence time and the peer. The records that settle a marker (relayed,
-    relayDone) name it and the queue entry carries it, so a re-block after a lift (later evidence) is a new marker
-    nothing older can settle (the manager's fourth review), while two holders filing ONE wait (the same evidence, the
-    same peer) mint the same id and each other's records settle it (the fifth review)."""
-    return "%d-%s" % (int(ev_t or 0), str(peer or "")[:8] or "peer")
+def _relay_marker_id(ev_t, peer="", nid=""):
+    """A relay marker's identity: the block's evidence time, the peer and the node. The records that settle a marker
+    (relayed, relayDone), the queue entry and the bus's sent row name it, so a re-block after a lift (later evidence)
+    is a new marker nothing older can settle (the manager's fourth review), two holders filing ONE wait (the same
+    evidence, peer and node) mint the same id and each other's records settle it (the fifth), and two nodes blocked
+    toward one peer in one pass (one evidence time) keep two markers and two questions (the sixth)."""
+    return "%d-%s-%s" % (int(ev_t or 0), str(peer or "")[:8] or "peer", str(nid or "").rsplit(":", 1)[-1] or "node")
+
+
+def _relay_retire_marker(store, nd):
+    """Retire the node's marker for a wait that ended (a new wait replaces it, or the block became the user's): it is
+    settled (relaySettled), and when it had already been handed to a far host (pendingMid: parked or unacked) it is
+    remembered on the node (relayRecall) for the kernel's tick to RECALL, so the far host never delivers a stale
+    question with no record; an entry brings the tick to the node (the manager's sixth review)."""
+    old = nd.pop("relayWanted", None)
+    if not isinstance(old, dict):
+        return
+    _relay_mark_settled(nd, old.get("id") or "")
+    if old.get("pendingMid"):
+        lst = [r for r in (nd.get("relayRecall") or []) if isinstance(r, dict)
+               and str(r.get("pendingMid") or "") != str(old.get("pendingMid"))]
+        lst.append({k: old.get(k) for k in ("id", "peer", "pendingMid", "pendingHost", "pendingAt") if old.get(k) is not None})
+        nd["relayRecall"] = lst[-RELAY_SETTLED_CAP:]
+        _relay_enqueue(store, nd)
 
 
 RELAY_SETTLED_CAP = 8        # settled marker ids a node remembers (relaySettled), newest last
@@ -12991,6 +13040,8 @@ def _relay_flush(fsid, store, pending):
         rw = nd.get("relayWanted") if isinstance(nd, dict) else None
         if isinstance(rw, dict):
             n += 1 if _relay_write_entry(str(fsid), str(nid), rw.get("id") or "", store.get("rev") or 0) else 0
+        elif isinstance(nd, dict) and nd.get("relayRecall"):
+            n += 1 if _relay_write_entry(str(fsid), str(nid), "recall", store.get("rev") or 0) else 0   # recalls owed
     return n
 
 

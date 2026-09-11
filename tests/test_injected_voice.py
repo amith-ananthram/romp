@@ -160,6 +160,10 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
             bodies["fork nudge variant %d" % i] = v
         return bodies
 
+    def test_the_relay_scrub_speaks_this_lists_words(self):
+        # the kernel scrubs a relayed question's why by the same vocabulary this file scans for (T334): one list
+        self.assertEqual(tuple(w for w, _why in ROMP_WORDS), km.ROMP_VOICE_WORDS)
+
     def test_no_romp_vocabulary_reaches_the_session(self):
         for name, body in self._bodies().items():
             # THE ONE ALLOWANCE, deliberate and ruling-backed (T212, the user 2026-09-01): a
