@@ -14911,10 +14911,13 @@ def _comments_frame(sid, live_map=None):
                         "lastUuid": last_uuid,                         # the newest record shown/held — the client's cap-proof "transcript moved" datum
                         "unreachable": unreachable or None,            # a broken thread (missing transcript / lost cut): owes nothing
                         "promotedName": th.get("promotedName") or "",
-                        # the thread's mail state (T356): off by default until broken out. The popover does not announce
-                        # it (the user 2026-09-11; the tab hover and the Sessions pane carry the state); it shows only how
-                        # many messages wait in the box (they land within the bus's retry interval of a break-out)
+                        # the thread's mail state (T356): off by default until broken out. An open thread's popover does
+                        # not announce it (the user 2026-09-11; the tab hover and the Sessions pane carry the state) and
+                        # shows only how many messages wait in the box (they land within the bus's retry interval of a
+                        # break-out); the PROMOTED view says whether its mail is on, and why not when it is not, so the
+                        # reason rides beside the boolean (an unreadable record is no mailbox toggle's to clear)
                         "mailOff": bool(_postal_isolated(tsid)),
+                        "mailOffWhy": _mail_off_why_k(tsid),
                         "heldMail": _held_mail_count(tsid),
                         "model": (reg.get("liveModel") or reg.get("model") or "") if reg else "",
                         "effort": (reg.get("effort") or "") if reg else "",
@@ -24157,11 +24160,14 @@ def _reg_unreadable(sid):
         return False
     p = jd.STATE / "sdk" / (str(sid) + ".json")
     try:
-        if not p.exists():
-            return False
-        return not isinstance(json.loads(p.read_text()), dict)
-    except (OSError, ValueError):
-        return True
+        p.stat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True                 # a directory the kernel cannot read: closed, as the bus reads it
+    # the memoized read (_thread_reg, keyed on the file's mtime, size and inode): {} for a record that exists but cannot
+    # be read, never a re-parse per call (the review's low: a sweep of 154 records re-read every one)
+    return not _thread_reg(str(sid))
 
 
 def _mail_off_why_k(sid):

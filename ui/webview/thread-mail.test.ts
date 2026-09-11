@@ -19,13 +19,16 @@ test("the popover says the thread's mail is off, and the promoted view says it i
   // the user's ruling (2026-09-11, 3:05 PM PT): the comment box says nothing about mail being off; a line only for held mail
   assert.doesNotMatch(RENDER, /Mail off: this thread neither sends nor receives peer mail/);
   assert.match(RENDER, /if \(th && th\.mailOff && \(th\.heldMail \|\| 0\) > 0\) \{[\s\S]{0,700}?mail\.textContent = held \+ \(held === 1 \? " message waits in its box and lands" : " messages wait in its box and land"\) \+ " at the break-out\.";/);
-  assert.match(RENDER, /note\.textContent = "The discussion continues there\.";\s*\n\s*pop\.appendChild\(note\);[\s\S]{0,600}mailOn\.textContent = th\.mailOff[\s\S]{0,200}: "Its mail is on now: peers can reach it and it can send\."/,
+  assert.match(RENDER, /note\.textContent = "The discussion continues there\.";\s*\n\s*pop\.appendChild\(note\);[\s\S]{0,600}mailOn\.textContent = !th\.mailOff[\s\S]{0,80}\? "Its mail is on now: peers can reach it and it can send\."/,
                "said once, in the promoted view, from the effective state");
   assert.match(CSS, /\.cmt-note\.cmt-mail \{ opacity: 0\.6; font-size: 0\.86em; \}/);
   // the follow-up: the promoted line reads the EFFECTIVE state (a mailbox toggled off since says so), and both lines
   // count the mail held in the box
   assert.match(COMMENTS, /heldMail\?: number;/);
-  assert.match(RENDER, /mailOn\.textContent = th\.mailOff\s*\n\s*\? "Its mailbox is off: the lane's mailbox toggle turns peer mail back on\."/);
+  assert.match(RENDER, /mailOn\.textContent = !th\.mailOff\s*\n\s*\? "Its mail is on now[^\n]*\n\s*: th\.mailOffWhy === "unreadable" \? "Its mail is held: this session's record cannot be read, and mail flows again once the record is repaired\."\s*\n\s*: "Its mailbox is off: the lane's mailbox toggle turns peer mail back on\."/,
+               "the promoted line reads the reason: an unreadable record is no mailbox toggle's to clear");
+  assert.match(COMMENTS, /mailOffWhy\?: string;/);
+  assert.match(KERNEL, /"mailOff": bool\(_postal_isolated\(tsid\)\),\s*\n\s*"mailOffWhy": _mail_off_why_k\(tsid\),/, "the comments frame carries the reason");
   assert.match(RENDER, /" in a moment\."/);
 });
 
