@@ -72,6 +72,25 @@ export function compactDisplay(kinds: readonly string[], names?: readonly (strin
   return out;
 }
 
+/** The member a display unit is PLACED and TIMED by (T339, the user 2026-09-11). A collapsed NOTICE run anchors on the
+ *  member with the LATEST epoch (ties: the later one), never the first: a run can hold a notice stamped earlier than the
+ *  rows around it (one that kept the moment it was queued and landed in the transcript at delivery), so timed by its first
+ *  member the run wore yesterday's clock among today's rows and the day walk read the step back as a day boundary. The
+ *  latest member is the one in sequence with its neighbours; the head's rail time, the day walk and the walk's exit all
+ *  read it (a run with no timed member falls to its first). Every other unit keeps its FIRST member, as before: a lone
+ *  event is its own anchor, and a tool run's members are in transcript order with its head timed by its first.
+ *  `epochAt(i)` is event i's epoch or null. */
+export function itemAnchor(it: DisplayItem, epochAt: (i: number) => number | null): number {
+  if (it.kind === "event") return it.index;
+  if (it.kind === "toolgroup") return it.indices[0];
+  let best = it.indices[0], bestEp: number | null = null;
+  for (const i of it.indices) {
+    const ep = epochAt(i);
+    if (ep != null && (bestEp == null || ep >= bestEp)) { best = i; bestEp = ep; }
+  }
+  return best;
+}
+
 // One pluralized count of a tool kind, e.g. { label: "Edits", count: 3 }. The label keeps the tool's
 // own Capitalized name (so it reads AS a tool — the user 2026-06-14, matching the bold .tool-name in
 // the non-compact view); only the Edit variants merge under "Edit".

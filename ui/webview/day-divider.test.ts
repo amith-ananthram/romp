@@ -19,10 +19,38 @@ import * as path from "node:path";
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
 
-test("dayDividerFor returns a divider only on the first turn of a past day", () => {
+test("dayDividerFor returns a divider only on the first turn of a past day, reached FORWARD (T339)", () => {
   const fn = RENDER.slice(RENDER.indexOf("function dayDividerFor"));
-  assert.match(fn.slice(0, 400), /if \(!day \|\| !date\) return null/, "every other turn gets nothing");
-  assert.match(fn.slice(0, 400), /markerLabel\(epoch, prevEpoch, Date\.now\(\)\)/, "same day-boundary rule as the marker");
+  assert.match(fn.slice(0, 400), /function dayDividerFor\(epoch: number, walk: DayWalk\)[^\n]*\n\s*const date = walk\.open\(epoch, Date\.now\(\)\);\s*\n\s*if \(!date\) return null/, "the marker's day rule plus the forward condition against the walk's high-water mark (time-marker.ts DayWalk, executed in time-marker.test.ts)");
+  // the date centered between two hairlines: a rule, the label, a rule
+  assert.match(fn.slice(0, 600), /d\.append\(el\("span", "day-divider-rule"\), lbl, el\("span", "day-divider-rule"\)\);/);
+});
+
+test("a collapsed run is placed and timed by its ANCHOR member, the latest, on both unit paths (T339)", () => {
+  // the chat's windowed path (appendItem) and the comment popover's parity loop both pick the anchor with the one pure
+  // rule (compact.ts itemAnchor, executed in compact.test.ts) and hand the day walk, the head and the walk's exit to it
+  const ai = RENDER.slice(RENDER.indexOf("function appendItem("), RENDER.indexOf("function renderWindowItems("));
+  assert.match(ai, /const anchor = itemAnchor\(it, \(i\) => eventEpoch\(s\.events\[i\]\)\);\s*\n\s*const dayOpen = eventEpoch\(s\.events\[anchor\]\);/, "the day walk reads the anchor");
+  assert.match(ai, /const dv = dayDividerFor\(dayOpen, walk\);/, "…against the walk's mark, never the raw previous row");
+  assert.match(ai, /renderNoticeGroup\(notes, s\.events\[anchor\], prevEpoch, key, open\)/, "the head is timed by the anchor");
+  assert.match(ai, /renderNoticeGroup\([^\n]*\n\s*adv\(anchor\);/, "the walk leaves a closed run on its anchor");
+  const ng = ai.slice(ai.indexOf('it.kind === "noticegroup"'), ai.lastIndexOf("} else {"));
+  assert.doesNotMatch(ng, /adv\(it\.indices\[0\]\)/, "never the first member of a notice run");
+  assert.match(ng, /\}\);\s*\n\s*adv\(anchor\);/, "…nor the last child of an open one: the anchor");
+  // a tool run is untouched: its members are in transcript order, its head is timed by its first, its walk exits as before
+  assert.match(ai, /renderToolGroup\(tools, prevEpoch, key, open\)\)\);\s*\n\s*adv\(it\.indices\[0\]\);/);
+  const pop = RENDER.slice(RENDER.indexOf("const dayOpen = eventEpoch(evs[anchor]);") - 200, RENDER.indexOf("if (!relayNoted) list.appendChild(cmtRelayedNote"));
+  assert.match(pop, /const anchor = itemAnchor\(it, \(i\) => eventEpoch\(evs\[i\]\)\);/);
+  assert.match(pop, /renderNoticeGroup\(run, evs\[anchor\], prev, key, open\)/);
+  assert.match(pop, /exit = it\.kind === "noticegroup" \? eventEpoch\(evs\[anchor\]\) : prev;[^\n]*\n\s*if \(it\.kind === "noticegroup" && exit != null\) prev = exit;/, "the popover's walk leaves an open notice run on its anchor too");
+  assert.match(pop, /exit = eventEpoch\(it\.kind === "noticegroup" \? evs\[anchor\] : run\[run\.length - 1\]\); if \(exit != null\) prev = exit;/, "…and a closed one; a closed tool run exits on its last member, as before");
+  assert.match(pop, /walk\.pass\(exit\);\s*\n\s*continue;/, "the day mark passes the run's exit");
+  assert.doesNotMatch(RENDER, /eventEpoch\(evs\[itemFirstEvent\(it\)\]\)|eventEpoch\(s\.events\[itemFirstEvent\(it\)\]\)/, "no day walk reads a run's first member");
+  // the head: rail time, data-t, uuid and hover from the anchor; the words from the first member
+  const rng = RENDER.slice(RENDER.indexOf("function renderNoticeGroup("), RENDER.indexOf("function toggleToolGroup("));
+  assert.match(rng, /function renderNoticeGroup\(evs: ChatEvent\[\], anchor: ChatEvent, prevEpoch: number \| null, key: string, open: boolean\)/);
+  assert.match(rng, /const epoch = eventEpoch\(anchor\);\s*\n\s*const anchorUuid = anchor\.uuid \?\? null;/);
+  assert.match(rng, /const b = noticeBrief\(evs\[0\]\);/);
 });
 
 test("the divider is a sibling of the turn, never a child (the dot anchors to the turn's top)", () => {
@@ -57,12 +85,25 @@ test("the incremental tail trim goes by data-unit, not by child count", () => {
   assert.match(RENDER, /n\.dataset\.unit != null \? Number\(n\.dataset\.unit\) : -1/);
 });
 
-test("the divider label is never constrained to a fixed width", () => {
+test("the divider label is never constrained to a fixed width; two hairlines share the leftover room so it centers (T339)", () => {
   const rule = CSS.slice(CSS.indexOf(".day-divider-label"));
   assert.doesNotMatch(rule.slice(0, 200), /\bwidth:|max-width:/, "a fixed width is the bug being closed");
-  // the hairline fills the leftover room, so the label takes exactly what it needs
-  assert.match(CSS, /\.day-divider::after \{[^}]*flex: 1 1 auto/);
+  // the hairlines fill the leftover room equally, so the label takes exactly what it needs and lands in the middle
+  assert.match(CSS, /^\.day-divider-rule \{ flex: 1 1 auto; height: 1px; background: var\(--box-border\); \}/m);
   assert.match(CSS, /\.day-divider-label \{[^}]*flex: 0 0 auto/);
+  assert.doesNotMatch(CSS, /\.day-divider::after/, "the one-sided rule is gone");
+});
+
+test("the rail runs through the divider: its own segment, the turn's line in the turn's colour, spanning its margins (T339)", () => {
+  const turnRail = CSS.match(/^\.turn::before \{ content: ""; position: absolute; left: ([\d.]+px); top: 0; bottom: 0; width: (\d+px); background: ([^;]+); opacity: ([\d.]+); \}/m);
+  assert.ok(turnRail, "the turn's rail rule, the one this segment mirrors");
+  const seg = CSS.match(/^\.day-divider::before \{ content: ""; position: absolute; left: ([\d.]+px); top: (-?\d+px); bottom: (-?\d+px); width: (\d+px); background: ([^;]+); opacity: ([\d.]+); \}/m);
+  assert.ok(seg, "the divider's rail segment");
+  assert.deepEqual([seg![1], seg![4], seg![5], seg![6]], [turnRail![1], turnRail![2], turnRail![3], turnRail![4]], "same left, width, colour and opacity as the turn's line");
+  const box = CSS.match(/^\.day-divider \{[^}]*margin: (\d+px) 0 (\d+px);[^}]*\}/m);
+  assert.ok(box, "the divider's margins");
+  assert.deepEqual([seg![2], seg![3]], ["-" + box![1], "-" + box![2]], "the segment spans the divider's own margins, so the line is continuous");
+  assert.match(CSS, /^\.day-divider \{[^}]*position: relative;/m, "…anchored to the divider");
 });
 
 test("the divider label matches the rail marker's type size", () => {
@@ -77,4 +118,43 @@ test("the divider label matches the rail marker's type size", () => {
   const size = (s: string): string | null => (s.match(/font-size: ([\d.]+em)/) ?? [])[1] ?? null;
   assert.equal(size(rule(".day-divider")), size(rule(".time-marker")));
   assert.equal(size(rule(".day-divider")), "0.72em");
+});
+
+// T339 review: the day walk's reference is a HIGH-WATER MARK (time-marker.ts DayWalk, executed in time-marker.test.ts),
+// separate from the rail's raw previous-row chain (prevEpoch / prevTimedEpoch, the same-minute rule). Every path that
+// emits a divider decides against the mark and passes its unit's exit; a window opening mid-transcript seeds the mark
+// as a walk from the top would have (unitExit, the one rule for both).
+test("every day walk decides against a DayWalk mark and never a raw epoch; windows and tails seed the mark from the top", () => {
+  const calls = RENDER.match(/(?<!function )dayDividerFor\([^)]*\)/g) || [];
+  assert.equal(calls.length, 4, "four call sites: " + calls.join(" | "));
+  for (const c of calls) assert.match(c, /^dayDividerFor\(\w+, walk\)$/, "each hands the walk, not a number: " + c);
+  const ai = RENDER.slice(RENDER.indexOf("function appendItem("), RENDER.indexOf("function renderWindowItems("));
+  assert.match(ai, /^function appendItem\(v: View, s: Session, items: DisplayItem\[\], u: number, prevEpoch: number \| null, walk: DayWalk, working: boolean\): number \| null \{/m);
+  assert.match(ai, /walk\.pass\(unitExit\(s, it\)\);\s*\n\s*return prevEpoch;\s*\n\}/, "the unit's exit passes the mark on the way out");
+  const rw = RENDER.slice(RENDER.indexOf("function renderWindowItems("), RENDER.indexOf("function sizeSpacers("));
+  assert.match(rw, /const walk = dayWalkBefore\(s, items, unitStart\);[^\n]*\n\s*for \(let u = unitStart; u < unitEnd; u\+\+\) prevEpoch = appendItem\(v, s, items, u, prevEpoch, walk, working\);/, "a window seeds the mark by walking the units before it");
+  assert.match(RENDER, /function dayWalkBefore\(s: Session, items: DisplayItem\[\], unitStart: number\): DayWalk \{\s*\n\s*const w = new DayWalk\(\);\s*\n\s*for \(let u = 0; u < unitStart && u < items\.length; u\+\+\) w\.pass\(unitExit\(s, items\[u\]\)\);/);
+  // unitExit: the one rule — a lone event its own epoch, a notice run its anchor, a tool run its first (collapsed) or last (expanded)
+  const ue = RENDER.slice(RENDER.indexOf("function unitExit("), RENDER.indexOf("function dayWalkBefore("));
+  assert.match(ue, /if \(it\.kind === "event"\) return eventEpoch\(s\.events\[it\.index\]\);/);
+  assert.match(ue, /if \(it\.kind === "noticegroup"\) return eventEpoch\(s\.events\[itemAnchor\(it, \(i\) => eventEpoch\(s\.events\[i\]\)\)\]\);/);
+  assert.match(ue, /const open = openFolds\.has\(toolGroupKey\(s\.events\[it\.indices\[0\]\]\)\);\s*\n\s*return eventEpoch\(s\.events\[open \? it\.indices\[it\.indices\.length - 1\] : it\.indices\[0\]\]\);/);
+  // the normal-mode tail: the mark seeded over the events before `from`, passed per row; the rail keeps its raw chain
+  assert.match(RENDER, /const walk = dayWalkBeforeEvent\(s\.events, from\);[^\n]*\n\s*for \(let i = from; i < len; i\+\+\) \{\s*\n\s*const prev = prevTimedEpoch\(s\.events, i\);/);
+  assert.match(RENDER, /v\.el\.appendChild\(node\);\s*\n\s*walk\.pass\(ep\);\s*\n\s*\}/, "…and passes each row");
+  // the cleared-episode fold and the comment popover carry their own walk
+  assert.match(RENDER, /const walk = new DayWalk\(\);   \/\/ the fold divides days/);
+  assert.match(RENDER, /prevEp = ep; walk\.pass\(ep\);/);
+  assert.match(RENDER, /let prev: number \| null = null;[^\n]*\n\s*const walk = new DayWalk\(\);/, "the popover");
+  assert.match(RENDER, /if \(ep != null\) prev = ep;\s*\n\s*walk\.pass\(ep\);\s*\n\s*\}/, "…passes each lone row");
+  assert.doesNotMatch(RENDER, /prevEpoch = prevEpoch == null \? ep : Math\.max/, "the rail's chain stays raw: the mark is the walk's, not the marker's");
+});
+
+test("a divider that leads the transcript draws no rail segment above the date, and its turn starts at its first dot (T339 review)", () => {
+  // leading = the thread's first child, or right after the system-context card, which sits off the rail (its line suppressed)
+  assert.match(CSS, /^\.turn-system::before \{ display: none; \}/m, "the card's own line is off, so a divider after it has nothing above");
+  assert.match(CSS, /^\.day-divider:first-child::before, \.turn-system \+ \.day-divider::before \{ display: none; \}/m);
+  const first = CSS.match(/^\.turn:first-child::before \{ top: (\d+px); \}/m);
+  assert.ok(first, "the first turn's own rule, the one this mirrors");
+  assert.match(CSS, new RegExp("^\\.day-divider:first-child \\+ \\.turn::before, \\.turn-system \\+ \\.day-divider \\+ \\.turn::before \\{ top: " + first![1] + "; \\}", "m"), "the turn after a leading divider starts its rail where a first turn does");
 });
