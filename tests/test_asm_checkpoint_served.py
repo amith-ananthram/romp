@@ -97,7 +97,8 @@ class RestartOverACheckpointedSession(unittest.TestCase):
 
     def _boot(self):
         port = _free_port()
-        env = _lab.kernel_env(self.lab, self.claude, self.dist, port, self.token, ROMP_HOST_NAME="TESTHOST")
+        env = _lab.kernel_env(self.lab, self.claude, self.dist, port, self.token, ROMP_HOST_NAME="TESTHOST",
+                              ROMP_READER_TRACE=os.environ.get("ROMP_READER_TRACE", ""))   # a diagnosis aid: one stderr line per read
         logp = os.path.join(self.lab, "kernel-%d.log" % port)
         k = subprocess.Popen([os.path.join(BIN, "romp-kernel")], stdout=open(logp, "w"), stderr=subprocess.STDOUT, env=env)
         for _ in range(200):
@@ -166,7 +167,10 @@ class RestartOverACheckpointedSession(unittest.TestCase):
             self.assertEqual(asm["fallbacks"], {}, "the document verified: %s" % asm)
             self.assertGreaterEqual(asm["restored"], 1, "the parse came from the document: %s" % asm)
             leaf_read = by.get(os.path.realpath(self.leaf), by.get(self.leaf, 0))
-            self.assertLess(leaf_read, 2 * size, "the leaf was not read whole twice (%d of %d bytes: the tail, the guards, and the frame's hydration)" % (leaf_read, size))
+            self.assertLessEqual(leaf_read, size + 8 * 64, "the leaf was never read whole: %d of %d bytes (the tail, the guards, and the "
+                                                            "frame's hydration of the atoms it renders)" % (leaf_read, size))
+            self.assertLess(leaf_read - asm["hydratedBytes"], size / 4, "without the frame's hydration the leaf cost its tail and guards only: "
+                                                                        "%d read, %d hydrated, %d whole" % (leaf_read, asm["hydratedBytes"], size))
             self.assertGreater(len(frame.get("events") or []), 0, "the frame carries events")
             log = open(log2).read()
             self.assertNotIn("LazyBodyRead", log, "no consumer read a body before hydrating")

@@ -1178,7 +1178,11 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
             tail = fh.read(offset - tail_from)
             _count_read(path, len(tail))                  # the guard capture is a read too (/perf's count is what was pulled)
             if _READER_TRACE:
-                sys.stderr.write("reader: %s %s base=%d gen=%d size=%d\n" % (kind, path, base, gen, st.st_size))
+                fr = sys._getframe(1)                     # the caller outside this module, for the diagnosis
+                while fr is not None and fr.f_code.co_filename == __file__:
+                    fr = fr.f_back
+                who = "%s:%d" % (fr.f_code.co_name, fr.f_lineno) if fr is not None else "?"
+                sys.stderr.write("reader: %s %s base=%d gen=%d size=%d by %s\n" % (kind, path, base, gen, st.st_size, who))
     except OSError as e:
         with _JSONL_CACHE_LOCK:
             _JSONL_CACHE.pop(path, None)
@@ -1788,6 +1792,9 @@ class FileAdapter:
             recs = ent[4] if ent is not None else []
             self._src[str(fp)] = recs
             self._src_keys[str(fp)] = (ent[6], ent[5], ent[5] + len(recs)) if ent is not None else (None, 0, 0)
+            if cut is not None and ent is not None and ent[5] < cut[1]:
+                recs = recs[cut[1] - ent[5]:]            # the entry holds records before the cut (a whole reader came
+            #                                              first): the seed stands for those, ingest from the cut on
             self._ingest(recs, fsid, fsid == leaf_stem)
         # PRISTINE graph state — parent links / leaf exactly as the records say, BEFORE the three
         # repair passes mutate them. The assembly fold re-derives the passes from this each time
@@ -3393,7 +3400,7 @@ def _lineage_closure(leaf_path, candidate_files, links):
     return candidate_files
 
 
-def chain_membership(leaf_path, candidate_files=None, states=None, leaf_override=None):
+def chain_membership(leaf_path, candidate_files=None, states=None, leaf_override=None, rompuuid=None, sdk_human=None):
     """THE exported chain-membership fact — {"kept", "rewind", "clear", "broken", "eclipsed"}
     uuid sets, built from the DISPLAY parse's exact inputs (resume links + lineage closure +
     leaf_override = the kernel's pending bare-rollback cut) so it can never disagree with what the
@@ -3418,9 +3425,74 @@ def chain_membership(leaf_path, candidate_files=None, states=None, leaf_override
         candidate_files = [str(leaf_path)]
     links = resume_fork_links(_load_states(states))
     candidate_files = _lineage_closure(leaf_path, candidate_files, links)
-    adapter = FileAdapter(candidate_files, leaf_path, leaf_override=leaf_override, resume_links=links)
+    # The display parse's own assembly entry answers when it stands for these inputs (T323 stage 4a): a fresh
+    # adapter here read the whole leaf and held its graph a second time, which on a session restored from its
+    # assembly document was the one whole read left at a boot. Read under the entry's key lock (folds mutate the
+    # adapter's links transiently); an entry restored from a document adds the pre-cut verdicts its seed carries.
+    adapter, how = None, "whole"
+    if not leaf_override and rompuuid is not None:
+        key = (os.path.realpath(str(leaf_path)), str(rompuuid), bool(sdk_human))
+        with _asm_key_lock(key):
+            with _ASM_LOCK:
+                entry = _ASM_CACHE.get(key)
+            if entry is not None and entry["cands"] == tuple(str(f) for f in candidate_files) \
+                    and entry["links"] == dict(links or {}) and _entry_current(entry, candidate_files):
+                if _READER_TRACE:
+                    sys.stderr.write("chain: entry %s\n" % leaf_path)
+                return _membership_of(entry["ad"])        # the display's own current graph, under its lock
+        if _CKPT_DIR_FN is not None:
+            doc = _asm_ckpt_load(leaf_path, rompuuid, sdk_human, candidate_files, links)
+            if doc is not None:                              # no current entry: the document's pre-cut facts plus the
+                try:                                         #  tail read now, the whole graph's verdicts without the
+                    seed, _landed = _seed_from_doc(doc)      #  whole read (the emit is the parse's, not needed here)
+                    adapter = FileAdapter(candidate_files, leaf_path, resume_links=links, seed=seed)
+                    how = "seeded"
+                except Exception as e:                       # noqa: BLE001
+                    _asm_ckpt_note(leaf_path, "restore", repr(e)[:120]); adapter = None
+            elif _READER_TRACE:
+                sys.stderr.write("chain: no document for %s (rompuuid %s sdk_human %r cands %r)\n" % (leaf_path, rompuuid, sdk_human, [str(f) for f in candidate_files]))
+    if adapter is None:
+        adapter = FileAdapter(candidate_files, leaf_path, leaf_override=leaf_override, resume_links=links)
+    if _READER_TRACE:
+        sys.stderr.write("chain: %s %s\n" % (how, leaf_path))
+    return _membership_of(adapter)
+
+
+def file_rewound(path, rompuuid=None, sdk_human=None):
+    """The uuids a ONE-FILE walk of `path` classifies "rewind" (the judges' per-file discriminator). When the file is a
+    leaf whose assembly document stands for a single-file lineage, the walk runs over a seeded adapter (the pre-cut
+    verdicts from the document, the tail read now) instead of reading the file whole; a multi-file lineage's document
+    records whole-graph verdicts, which are not this walk's, so that file reads whole as before. Raises OSError when a
+    non-empty file yields no records (a failed read, not an empty file)."""
+    path = Path(path)
+    ad = None
+    if rompuuid is not None and _CKPT_DIR_FN is not None:
+        doc = _asm_ckpt_load(path, rompuuid, sdk_human, [str(path)], {})
+        if doc is not None:
+            try:
+                seed, _landed = _seed_from_doc(doc)
+                ad = FileAdapter([str(path)], str(path), seed=seed)
+            except Exception as e:                            # noqa: BLE001
+                _asm_ckpt_note(path, "restore", repr(e)[:120]); ad = None
+    if ad is None:
+        ad = FileAdapter([str(path)], str(path))
+    if not ad.by_uuid and (ad.seed is None or not ad.seed["verdicts"]) and path.stat().st_size > 0:
+        raise OSError("transcript read yielded no records")
+    verdicts = dict(ad.chain_verdicts())
+    if ad.seed is not None:
+        for u, v in ad.seed["verdicts"].items():
+            verdicts.setdefault(u, v)
+    return {u for u, v in verdicts.items() if v == "rewind"}
+
+
+def _membership_of(adapter):
+    """The five-way membership dict from an adapter's walk; a seeded adapter's pre-cut verdicts join its own."""
     active = adapter.active_path()
-    verdicts = adapter.chain_verdicts(active)
+    verdicts = dict(adapter.chain_verdicts(active))
+    if adapter.seed is not None:
+        for u, v in adapter.seed["verdicts"].items():
+            verdicts.setdefault(u, v)
+        active = set(active) | {u for u, v in adapter.seed["verdicts"].items() if v == "active"}
     # kept, derived from the verdicts already in hand — BY DEFINITION the same set kept_uuids
     # computes (active ∪ broken ∪ eclipsed; see its docstring: "derived from chain_verdicts — one
     # implementation"), without paying the graph walk a second time inside it. The hold view
@@ -4130,6 +4202,51 @@ def _asm_ckpt_load(leaf_path, rompuuid, sdk_human, candidate_files, links):
     return doc
 
 
+def _seed_from_doc(doc):
+    """(seed, landed) from a verified document: the pre-cut graph facts a FileAdapter takes, and the pre-cut uuids
+    whose records carried assistant text."""
+    verdict_of = {"a": "active", "r": "rewind", "e": "eclipsed", "c": "clear", "b": "broken"}
+    type_of = {"u": "user", "a": "assistant", "s": "system", "t": "attachment"}
+    seed = {"seq_base": int(doc["cutSeq"]) - 1, "verdicts": {}, "types": {}, "spine": [doc["records"][i][0] for i in doc["spine"]],
+            "prompt_ids": set(doc["gates"]["prompt_ids"]), "boundary_pids": set(doc["gates"]["boundary_pids"]),
+            "skill_use_ids": set(doc["gates"]["skill_use_ids"]), "src_tool_links": set(doc["gates"]["src_tool_links"]),
+            "dangling": set(doc["gates"]["dangling"]), "seq_ts": doc.get("seqTs"), "last_ts": doc.get("lastTs"), "cuts": {},
+            "file_ends": {fsid: (f.get("first"), f.get("last")) for fsid, f in doc["files"].items()}}
+    landed = set()
+    for row in doc["records"]:
+        u, v, tc, sub = row[0], row[1], row[2], row[3]
+        seed["verdicts"][u] = verdict_of.get(v, "broken")
+        seed["types"][u] = (type_of.get(tc), sub)
+        if row[8]:
+            landed.add(u)
+    for fsid, f in doc["files"].items():
+        seed["cuts"][fsid] = "skip" if f.get("skip") else (int(f["cut"][0]), int(f["cut"][1]), bytes.fromhex(f["cut"][2]))
+    return seed, landed
+
+
+def _entry_current(entry, candidate_files):
+    """Whether an assembly entry folded everything its files hold now: each file's reader key (generation, base, count)
+    equals the entry's, and a skipped lineage file's stat stands. The chain predicate may only answer from an entry
+    that is current (its guard reads fresh inputs by contract)."""
+    for fp in candidate_files:
+        key = entry["recs"].get(str(fp))
+        if key is None:
+            return False
+        if key == ("skip",):
+            fst = (entry.get("skipped") or {}).get(str(fp))
+            try:
+                st_ = os.stat(fp)
+            except OSError:
+                return False
+            if fst is None or (st_.st_size, st_.st_mtime) != tuple(fst):
+                return False
+            continue
+        ent = _read_jsonl_entry(fp, tail_ok=True)
+        if ent is None or (ent[6], ent[5] + len(ent[4])) != (key[0], key[2]):
+            return False
+    return True
+
+
 def _asm_restore(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human):
     """The entry restored from the leaf's assembly checkpoint, served; None when there is none or it does not verify.
     The pre-cut turns come from the document as lazy atoms; the tail is read from the cut and parsed through an
@@ -4138,23 +4255,8 @@ def _asm_restore(key, leaf_path, candidate_files, links, rompuuid, postal_index,
     if doc is None:
         return None
     try:
-        verdict_of = {"a": "active", "r": "rewind", "e": "eclipsed", "c": "clear", "b": "broken"}
-        type_of = {"u": "user", "a": "assistant", "s": "system", "t": "attachment"}
-        seed = {"seq_base": int(doc["cutSeq"]) - 1, "verdicts": {}, "types": {}, "spine": [doc["records"][i][0] for i in doc["spine"]],
-                "prompt_ids": set(doc["gates"]["prompt_ids"]), "boundary_pids": set(doc["gates"]["boundary_pids"]),
-                "skill_use_ids": set(doc["gates"]["skill_use_ids"]), "src_tool_links": set(doc["gates"]["src_tool_links"]),
-                "dangling": set(doc["gates"]["dangling"]), "seq_ts": doc.get("seqTs"), "last_ts": doc.get("lastTs"), "cuts": {},
-                "file_ends": {fsid: (f.get("first"), f.get("last")) for fsid, f in doc["files"].items()}}
-        landed = set()
-        for row in doc["records"]:
-            u, v, tc, sub = row[0], row[1], row[2], row[3]
-            seed["verdicts"][u] = verdict_of.get(v, "broken")
-            seed["types"][u] = (type_of.get(tc), sub)
-            if row[8]:
-                landed.add(u)
+        seed, landed = _seed_from_doc(doc)
         fsids = list(doc.get("fsids") or [])
-        for fsid, f in doc["files"].items():
-            seed["cuts"][fsid] = "skip" if f.get("skip") else (int(f["cut"][0]), int(f["cut"][1]), bytes.fromhex(f["cut"][2]))
         prefix = _restore_prefix_atoms(doc["atoms"], rompuuid, doc["records"], fsids)
         if _pre_tree_identity(prefix, rompuuid) != doc.get("identity"):
             _asm_ckpt_note(leaf_path, "identity"); return None

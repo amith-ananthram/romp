@@ -3159,7 +3159,8 @@ def _chain_membership(fsid, path, cut):
                     _CHAIN_STATS["hit"] += 1
                     return dict(mem)
             _CHAIN_STATS["miss"] += 1
-    raw = em.chain_membership(path, candidate_files=cands, states=states_s, leaf_override=cut or None)
+    raw = em.chain_membership(path, candidate_files=cands, states=states_s, leaf_override=cut or None,
+                              rompuuid=fsid, sdk_human=_sdk_owned(fsid))   # the parse's own entry answers when it stands (T323 stage 4a)
     mem = {k: frozenset(v) for k, v in raw.items()}
     if base is not None:
         with _CHAIN_LOCK:
@@ -5952,15 +5953,11 @@ def _per_file_rewound(fsid, files):
         if not fp.exists():
             continue
         try:
-            ad = em.FileAdapter([str(fp)], str(fp))
-            if not ad.by_uuid and fp.stat().st_size > 0:
-                # the incremental reader swallows OSError into an empty record list with no row of
-                # its own (a permissions break, say) — a non-empty transcript that yields ZERO
-                # records is a failed read, not an empty file, and must count like one
-                raise OSError("transcript read yielded no records")
-            for u, v in ad.chain_verdicts().items():
-                if v == "rewind":
-                    out.add(u)
+            # em.file_rewound: the one-file walk; for the leaf with an assembly document it runs over the document's
+            # pre-cut verdicts and the tail read now instead of the whole file (T323 stage 4a). A non-empty
+            # transcript that yields ZERO records raises OSError there (the incremental reader swallows a
+            # permissions break into an empty list): a failed read, not an empty file, and it must count like one.
+            out |= em.file_rewound(fp, rompuuid=fsid if fp == leaf else None, sdk_human=_sdk_owned(fsid) if fp == leaf else None)
         except Exception as e:
             fails += 1
             _log_judge_error("romp", fsid, "rewound-reconcile-file",
