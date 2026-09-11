@@ -84,7 +84,7 @@ class ThreadMailOff(unittest.TestCase):
         # the comments frame says mailOff per thread; the /sessions thread rows and the Sessions pane rows carry the
         # effective postalServiceOff; the timeline lane and the chat rows read the effective reader too
         src = inspect.getsource(km._comments_frame)
-        self.assertIn('"mailOff": bool(_postal_isolated(tsid))', src)
+        self.assertIn('"mailOff": bool(mail_why)', src)
         rows = inspect.getsource(km._thread_rows)
         self.assertIn('"postalServiceOff": _postal_isolated(tsid)', rows); self.assertIn('"mailOffWhy": _mail_off_why_k(tsid)', rows)
         whole = Path(os.path.join(BIN, "romp-kernel")).read_text()
@@ -131,8 +131,31 @@ class UnreadableRecordOnTheKernelSide(unittest.TestCase):
         (Path(self.td) / "session-flags.json").write_text(json.dumps({PARENT: {"postalOff": True}}))
         self.assertEqual(km._mail_off_why_k(PARENT), "isolation", "the legacy key still isolates, under its reason")
         whole = Path(os.path.join(BIN, "romp-kernel")).read_text()
-        self.assertEqual(whole.count('"mailOffWhy": _mail_off_why_k('), 4, "chat rows, thread rows, Sessions pane rows and the comments frame carry the reason")
-        self.assertIn('"mailOffWhy": _mail_off_why_k(tsid)', inspect.getsource(km._comments_frame), "the promoted popover reads the reason")
+        self.assertEqual(whole.count('"mailOffWhy": _mail_off_why_k('), 3, "chat rows, thread rows and Sessions pane rows carry the reason inline")
+        self.assertIn('"mailOffWhy": mail_why', inspect.getsource(km._comments_frame), "…and the comments frame from its one derivation")
+
+    def test_the_record_state_is_by_type_and_by_the_buses_errno_set(self):
+        # the review's lows on the third follow-up: {} is a readable record (type, not truthiness); a symlink loop or a
+        # regular file where the sdk/ directory should be reads MISSING as Path.exists() does on the bus; a chmod repair
+        # is seen without a rewrite (ctime is in the memo's key)
+        d = Path(self.td) / "sdk"
+        (d / (PLAIN + ".json")).write_text("{}")
+        self.assertEqual(km._thread_reg_read(PLAIN), ("ok", {})); self.assertFalse(km._reg_unreadable(PLAIN)); self.assertEqual(km._mail_off_why_k(PLAIN), "")
+        loop = d / (THREAD + ".json"); os.symlink(loop, loop)
+        self.assertEqual(km._thread_reg_read(THREAD)[0], "missing", "ELOOP: no record, as the bus reads it"); self.assertFalse(km._reg_unreadable(THREAD))
+        loop.unlink()
+        (d / (PARENT + ".json")).write_text(json.dumps({"sid": PARENT}))
+        if os.geteuid() != 0:
+            os.chmod(d / (PARENT + ".json"), 0)
+            try:
+                self.assertEqual(km._thread_reg_read(PARENT)[0], "unreadable", "EACCES on the file: closed")
+                self.assertTrue(km._reg_unreadable(PARENT))
+            finally:
+                os.chmod(d / (PARENT + ".json"), 0o644)
+            self.assertEqual(km._thread_reg_read(PARENT)[0], "ok", "the repair (a chmod, no rewrite) is seen: ctime moved the key")
+        src = inspect.getsource(km._comments_frame)
+        self.assertIn("mail_why = _mail_off_why_k(tsid)", src); self.assertIn('"mailOff": bool(mail_why)', src); self.assertIn('"mailOffWhy": mail_why', src)
+        self.assertEqual(src.count("_mail_off_why_k(tsid)"), 1, "one derivation for both fields")
 
     def test_the_unreadable_check_reads_the_registration_memo_not_the_file(self):
         # the review's low: a sweep re-read and re-parsed every record; the memo (mtime, size, inode) answers now
@@ -141,7 +164,7 @@ class UnreadableRecordOnTheKernelSide(unittest.TestCase):
         self.assertFalse(km._reg_unreadable(PLAIN))
         self.assertIn(PLAIN, km._thread_reg_memo, "the read went through the memo")
         src = inspect.getsource(km._reg_unreadable)
-        self.assertIn("return not _thread_reg(str(sid))", src); self.assertNotIn("json.loads", src, "no parse of its own")
+        self.assertIn('return _thread_reg_read(str(sid))[0] == "unreadable"', src); self.assertNotIn("json.loads", src, "no parse of its own"); self.assertNotIn(".stat()", src, "one stat, the memo's")
         (Path(self.td) / "sdk" / (PLAIN + ".json")).write_text("{corrupt")
         self.assertTrue(km._reg_unreadable(PLAIN), "a rewrite is a new memo key: the corrupt record reads unreadable")
         if os.geteuid() != 0:

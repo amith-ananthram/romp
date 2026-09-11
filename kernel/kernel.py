@@ -14363,29 +14363,44 @@ def _comment_msg_text(rec):
 _thread_reg_memo = {}   # tsid -> ((mtime_ns, size), reg dict) — see _thread_reg
 
 
-def _thread_reg(tsid):
-    """The thread's SDK registry entry (authoritative for cwd/lastSid/threadOf), {} when unreadable.
-    Memoized on the file's (mtime, size, inode) — thirteen callers, two of them per chat build, each decoded
-    the file afresh (2026-09-03). Returns a shallow copy so a caller's edit never leaks into the memo."""
+# the stat errors Path.exists() reads as "no such file" (the bus's rule for a record): a record behind one of these is
+# MISSING, an ordinary session; any other stat error (EACCES on the directory, EIO) is a record that exists but cannot
+# be read, the closed door (the review on T356's follow-ups: the two sides must agree)
+_REG_MISSING_ERRNOS = (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP)
+
+
+def _thread_reg_read(tsid):
+    """(state, dict) for the session's durable SDK registry entry: ("ok", the record), ("missing", {}) when there is no
+    record, ("unreadable", {}) when one exists but cannot be read or is not a JSON object. Memoized on the file's
+    (mtime, size, inode, ctime) — thirteen callers, two of them per chat build, each decoded the file afresh
+    (2026-09-03); the OUTCOME is memoized too, so an unreadable record costs one stat per call, never a re-parse, and
+    ctime in the key means a permissions repair (no rewrite) is seen. The dict is the memo's own: callers copy."""
     p = jd.STATE / "sdk" / (tsid + ".json")
     try:
         st = p.stat()
-        key = (st.st_mtime_ns, st.st_size, st.st_ino)
-    except OSError:
+        key = (st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns)
+    except OSError as e:
         _thread_reg_memo.pop(tsid, None)
-        return {}
+        return ("missing" if e.errno in _REG_MISSING_ERRNOS else "unreadable"), {}
     hit = _thread_reg_memo.get(tsid)
     if hit is not None and hit[0] == key:
-        return dict(hit[1])
+        return hit[1], hit[2]
     try:
         d = json.loads(p.read_text())
-        d = d if isinstance(d, dict) else {}
+        state, d = ("ok", d) if isinstance(d, dict) else ("unreadable", {})
     except (OSError, ValueError):
-        return {}
+        state, d = "unreadable", {}
     if len(_thread_reg_memo) > 512:
         _thread_reg_memo.pop(next(iter(_thread_reg_memo)))
-    _thread_reg_memo[tsid] = (key, d)
-    return dict(d)
+    _thread_reg_memo[tsid] = (key, state, d)
+    return state, d
+
+
+def _thread_reg(tsid):
+    """The thread's SDK registry entry (authoritative for cwd/lastSid/threadOf), {} when missing or unreadable (the
+    callers that need the difference read _thread_reg_read). Returns a shallow copy so a caller's edit never leaks into
+    the memo."""
+    return dict(_thread_reg_read(tsid)[1])
 
 
 def _thread_transcript_path(reg, tsid):
@@ -14901,6 +14916,7 @@ def _comments_frame(sid, live_map=None):
                 meta = be.session_meta(tsid) or {}
             except Exception:
                 meta = {}
+        mail_why = _mail_off_why_k(tsid)
         threads.append({"tid": th.get("tid"), "anchorUuid": th.get("anchorUuid"),
                         "relayedT": th.get("relayedT") or 0,   # the persistent sent-back indicator's stamp (T145)
                         "name": th.get("name") or "", "color": th.get("color") or "",
@@ -14916,8 +14932,8 @@ def _comments_frame(sid, live_map=None):
                         # shows only how many messages wait in the box (they land within the bus's retry interval of a
                         # break-out); the PROMOTED view says whether its mail is on, and why not when it is not, so the
                         # reason rides beside the boolean (an unreadable record is no mailbox toggle's to clear)
-                        "mailOff": bool(_postal_isolated(tsid)),
-                        "mailOffWhy": _mail_off_why_k(tsid),
+                        "mailOff": bool(mail_why),        # ONE derivation for both fields: a flags write between two reads could
+                        "mailOffWhy": mail_why,           # ship "on" beside "unreadable" (the review's low)
                         "heldMail": _held_mail_count(tsid),
                         "model": (reg.get("liveModel") or reg.get("model") or "") if reg else "",
                         "effort": (reg.get("effort") or "") if reg else "",
@@ -24158,16 +24174,10 @@ def _reg_unreadable(sid):
     mail as on for it (the review's low: _thread_reg answers {} for missing and unreadable alike). No record → False."""
     if not sid:
         return False
-    p = jd.STATE / "sdk" / (str(sid) + ".json")
-    try:
-        p.stat()
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True                 # a directory the kernel cannot read: closed, as the bus reads it
-    # the memoized read (_thread_reg, keyed on the file's mtime, size and inode): {} for a record that exists but cannot
-    # be read, never a re-parse per call (the review's low: a sweep of 154 records re-read every one)
-    return not _thread_reg(str(sid))
+    # ONE memoized read (_thread_reg_read: one stat, the outcome remembered) answers by TYPE, not truthiness: an empty
+    # object {} is a readable record (mail on, as the bus reads it); a stat error outside Path.exists()'s ignored set
+    # is a record that exists but cannot be read (the review's lows on the third follow-up)
+    return _thread_reg_read(str(sid))[0] == "unreadable"
 
 
 def _mail_off_why_k(sid):
