@@ -50,7 +50,7 @@ test("Enter from the bare chat area (no focused control) drops into the message 
 });
 
 test("the message box shows a thin accent-blue border when focused (panel-focus blue, on the border)", () => {
-  assert.match(CSS, /#composer-input:focus \{ border-color: var\(--accent\); \}/);
+  assert.match(CSS, /#composer-input:focus \{ border-color: var\(--composer-identity, var\(--accent\)\); \}/);
 });
 
 test("the tab-menu feed/mail icons use the accent blue when on (matching the timeline lanes)", () => {

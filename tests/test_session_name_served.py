@@ -4,6 +4,8 @@ since T335 (the user 2026-09-10) the name is painted with the strip's own percep
 with the faded placeholder text, and since T341 (the user 2026-09-11: the full fade read too faint) at HALF strength; this test
 reads the same session's at-rest label colour once the tab is inactive and requires the placeholder's name colour to sit
 halfway between it and the identity colour, dark and light (PH_SHOTS=<dir> writes screenshots of the box under the strip; PH_BEFORE_DIST=<dist> serves another tree's bundle for the before shots and skips the fade checks);
+the FOCUSED box's border is that colour too, in the accent ring's own 1px geometry, the accent its fallback (T345, the user
+2026-09-11; PH_SHOTS adds romp_chat-composer-focus-ring-{web,api}-{dark,light}.png);
 the statusline badge (the name in black on that colour) is a SETTING, off by default (the maintainers via the user,
 2026-09-10), and a flip of the setting shows it and hides it again without a reload. Skips LOUDLY when the extension deps
 or a playwright browser are absent (CI installs none). Synthetic sessions and text only."""
@@ -147,6 +149,38 @@ const probe = (cls) => page.evaluate((cls) => {
 }, cls);
 out.answering = await probe(true);
 out.resting = await probe(false);
+// ---- the focus ring (T345, the user 2026-09-11): the FOCUSED box's border is the colour of the session you are messaging, in
+// the accent ring's own geometry (a fill of the existing 1px border, no glow); the accent stays the fallback ----
+const ring = () => page.evaluate(() => {
+  const d = document.getElementById("f-chat").contentDocument; const ta = d.getElementById("composer-input"); const box = d.getElementById("composer");
+  const cs = getComputedStyle(ta);
+  const acc = d.createElement("span"); acc.style.color = "var(--accent)"; d.body.appendChild(acc); const accent = getComputedStyle(acc).color; acc.remove();
+  return { focused: d.activeElement === ta, border: cs.borderTopColor, width: cs.borderTopWidth, style: cs.borderTopStyle, shadow: cs.boxShadow, outline: cs.outlineStyle,
+           identity: box.style.getPropertyValue("--composer-identity"), accent, active: (d.querySelector("#tabs .tab.active[data-id]") || { dataset: {} }).dataset.id || null,
+           theme: d.body.classList.contains("theme-light") ? "light" : "dark" };
+});
+const ringLeg = async (sid, shotName) => {
+  await fr.click('#tabs .tab[data-id="' + sid + '"]'); await waitActive(sid);
+  await page.waitForTimeout(150);
+  const rest = await ring();                                   // the unfocused border, for the geometry comparison
+  await fr.focus("#composer-input"); await page.mouse.move(700, 500); await page.waitForTimeout(150);   // off the strip: no tab tip in the shot
+  const foc = await ring();
+  await shot(shotName);
+  await page.evaluate(() => { document.getElementById("f-chat").contentDocument.getElementById("composer-input").blur(); });
+  return { rest, foc };
+};
+out.ringDark = { a: await ringLeg(cfg.sidA, "romp_chat-composer-focus-ring-web-dark"), b: await ringLeg(cfg.sidB, "romp_chat-composer-focus-ring-api-dark") };
+await page.evaluate(() => { document.getElementById("f-chat").contentDocument.body.classList.add("theme-light"); });
+out.ringLight = { a: await ringLeg(cfg.sidA, "romp_chat-composer-focus-ring-web-light"), b: await ringLeg(cfg.sidB, "romp_chat-composer-focus-ring-api-light") };
+// the fallback: nothing published (a session with no colour) → the accent ring, probed with the variable lifted off the box
+out.ringFallback = await page.evaluate(() => {
+  const d = document.getElementById("f-chat").contentDocument; const box = d.getElementById("composer"); const ta = d.getElementById("composer-input");
+  const had = box.style.getPropertyValue("--composer-identity"); box.style.removeProperty("--composer-identity");
+  ta.focus(); const c = getComputedStyle(ta).borderTopColor; ta.blur();
+  if (had) box.style.setProperty("--composer-identity", had);
+  return c;
+});
+await page.evaluate(() => { document.getElementById("f-chat").contentDocument.body.classList.remove("theme-light"); });
 out.ms = Date.now() - out.t0;
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
@@ -344,6 +378,25 @@ class ServedSessionName(unittest.TestCase):
         self.assertEqual(a["overlay"], a["tint"], "…and the overlay wears the answering tint in its place")
         self.assertNotEqual(a["tint"], a["dim"], "the probe tells the two colours apart")
         self.assertEqual(b["native"], "rgba(0, 0, 0, 0)"); self.assertEqual(b["overlay"], b["dim"], "resting again: dim, one text")
+
+    def test_4_the_focused_box_wears_the_sessions_colour_as_its_ring_in_the_accent_rings_geometry(self):
+        # T345 (the user 2026-09-11): the thin border around the focused message box is the colour of the session you are
+        # messaging, at the accent ring's own 1px geometry; two sessions, two rings; the unfocused border is unchanged; with
+        # nothing published (a session with no colour) the ring falls back to the accent. Both themes.
+        r = self._r()
+        colors = {"a": "#e57373", "b": "#64b5f6"}
+        for theme, legs in (("dark", r["ringDark"]), ("light", r["ringLight"])):
+            for k in ("a", "b"):
+                rest, foc = legs[k]["rest"], legs[k]["foc"]
+                self.assertEqual((foc["theme"], foc["focused"], rest["focused"]), (theme, True, False), "the leg's state in %s: %r / %r" % (theme, foc, rest))
+                self.assertEqual(self._rgb(foc["border"]), self._rgb(colors[k]), "the focused border is the session's identity colour in %s: %r" % (theme, foc))
+                self.assertEqual(foc["identity"], colors[k], "…published on the box from the placeholder's own source: %r" % foc)
+                self.assertNotEqual(self._rgb(foc["border"]), self._rgb(foc["accent"]), "not the accent")
+                self.assertEqual((foc["width"], foc["style"], foc["shadow"], foc["outline"]), (rest["width"], rest["style"], rest["shadow"], rest["outline"]),
+                                 "the accent ring's geometry, untouched: a fill of the existing border, no glow, no outline: %r vs %r" % (foc, rest))
+                self.assertNotEqual(self._rgb(rest["border"]), self._rgb(foc["border"]), "the unfocused border is unchanged, not the identity colour: %r" % rest)
+            self.assertNotEqual(self._rgb(legs["a"]["foc"]["border"]), self._rgb(legs["b"]["foc"]["border"]), "two sessions, two rings")
+        self.assertEqual(self._rgb(r["ringFallback"]), self._rgb(r["ringLight"]["a"]["foc"]["accent"]), "nothing published: the accent ring (probed in light, where the accent is the warm one)")
 
 
 if __name__ == "__main__":

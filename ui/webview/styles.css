@@ -1387,10 +1387,14 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
   #composer-send:disabled { background: rgba(255, 255, 255, 0.10); color: var(--dim); opacity: 1; }
   #composer-input { min-height: 40px; border-radius: 20px; padding: 10px 14px; }
 }
-/* Cursor in the message box → a thin romp-blue border, exactly on the box edge — the same accent blue that
-   marks the focused panel (the user 2026-06-26). It only fills in the existing 1px border (no glow, no layout
-   shift), so the chat's two focus spots read clearly: the tabs, or the message box. */
-#composer-input:focus { border-color: var(--accent); }
+/* Cursor in the message box → a thin border, exactly on the box edge, in the colour of the SESSION you are messaging
+   (T345, the user 2026-09-11): --composer-identity, published on #composer by the placeholder's sync (render.ts
+   syncComposerPh) from the same source the placeholder's name uses; the accent blue that marks the focused panel
+   (the user 2026-06-26) stays the fallback for a session with no colour or one too close to the page to read as a
+   ring. It only fills in the existing 1px border (no glow, no layout shift), so the chat's two focus spots read
+   clearly: the tabs, or the message box. The live picker's free-text tint below keeps winning while it applies: its
+   rule follows this one at the same specificity, so a focused answering box wears the accent. */
+#composer-input:focus { border-color: var(--composer-identity, var(--accent)); }
 /* A live picker with a free-text path is up → the message box IS that picker's "add your own answer" field
    now (the user 2026-07-09). Tint it so it's discoverable that typing here answers the prompt (the placeholder
    also reads "add your own answer…"); the picker's controls stay visible above. */
