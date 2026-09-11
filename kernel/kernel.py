@@ -54771,8 +54771,9 @@ class Handler(BaseHTTPRequestHandler):
             with _clients_lock:
                 if client in _clients:
                     _clients.remove(client)
-                _forget_active_chat_if_last(client)   # the window's focus record goes with its last pane (T347)
             _release_client_holds(client)          # its open editors' holds go with it: the disconnect is the event (T306)
+            with _clients_lock:
+                _forget_active_chat_if_last(client)   # the window's focus record goes with its last pane (T347)
 
     def _remote_ws(self, host, query):
         """GET /remote/<host>/ws — relay a federated-dashboard WebSocket to an attached host's
