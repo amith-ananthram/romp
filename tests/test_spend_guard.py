@@ -7,6 +7,7 @@ check (1000 with no file, 0 disables).
 
 SYNTHETIC fixtures only: placeholder ids, an invented session, transcripts written here with usage fields.
 """
+import inspect
 import json
 import os
 import tempfile
@@ -62,6 +63,7 @@ def write_jsonl(path, records, mtime=None):
 class FakeBackend:
     def __init__(self, stops=True, accepts=True):
         self.interrupts, self.sends, self.logs, self.stops, self.accepts = [], [], [], stops, accepts
+        self.sessions = {}                                # sid -> the session object (the SDK backend's map)
 
     def owns(self, sid):
         return True
@@ -151,7 +153,7 @@ class Memo(unittest.TestCase):
     def test_an_unchanged_file_serves_its_rows_from_the_memo_and_a_changed_one_is_scanned_again(self):
         write_jsonl(self.leaf, [assistant(NOW - 100, "msg_a", out_tokens=1000, in_tokens=0)], mtime=NOW - 100)
         self.assertAlmostEqual(km._spend_window_usd(self.leaf, NOW, 600, PRICES), 1000 * 25e-6, places=9)
-        stamp, floor, rows = km._SPEND_ROWS_CACHE[self.leaf]
+        stamp, floor, rows = km._SPEND_ROWS_CACHE[self.leaf][:3]
         self.assertEqual(floor, NOW - 600 - km.SPEND_GUARD_MEMO_SLACK_S)
         with mock.patch.object(km, "_msg_epoch", side_effect=AssertionError("a re-scan of an unchanged file")):
             self.assertAlmostEqual(km._spend_window_usd(self.leaf, NOW + 30, 600, PRICES), 1000 * 25e-6, places=9, msg="a later window, the same stamp: no scan")
@@ -159,6 +161,72 @@ class Memo(unittest.TestCase):
         write_jsonl(self.leaf, [assistant(NOW - 100, "msg_a", out_tokens=1000, in_tokens=0), assistant(NOW - 10, "msg_b", out_tokens=1000, in_tokens=0)], mtime=NOW - 10)
         self.assertAlmostEqual(km._spend_window_usd(self.leaf, NOW, 600, PRICES), 2 * 1000 * 25e-6, places=9, msg="a changed stamp: scanned again")
         self.assertNotEqual(km._SPEND_ROWS_CACHE[self.leaf][0], stamp)
+
+
+    def test_the_agent_tree_is_listed_once_then_watched_by_directory_mtimes_hot_files_every_cycle_cold_ones_rarely(self):
+        # the round-two review's MEDIUM: the recursive walk ran per live session per 2 Hz cycle
+        km._SPEND_TREE_CACHE.clear()
+        sub = os.path.join(os.path.dirname(self.leaf), SID, "subagents")
+        wf = os.path.join(sub, "workflows", "wf_1")
+        os.makedirs(wf)
+        write_jsonl(self.leaf, [user(NOW - 100, "u")], mtime=NOW - 100)
+        hot, cold = os.path.join(sub, "agent-hot.jsonl"), os.path.join(wf, "agent-cold.jsonl")
+        write_jsonl(hot, [user(NOW - 100, "u")], mtime=NOW - 100)          # inside the window
+        write_jsonl(cold, [user(NOW - 5000, "u")], mtime=NOW - 5000)       # idle since long before it
+        since = NOW - 600
+        real_scandir, real_stat = os.scandir, os.stat
+        listed, statted = [], []
+        def scandir(d):
+            listed.append(d); return real_scandir(d)
+        def stat(p, *a, **k):
+            statted.append(p); return real_stat(p, *a, **k)
+        with mock.patch.object(km.os, "scandir", side_effect=scandir), mock.patch.object(km.os, "stat", side_effect=stat):
+            self.assertEqual(sorted(km._spend_window_files(self.leaf, since, now=NOW)), sorted([self.leaf, hot]))
+            self.assertEqual(len(listed), 3, "the first call lists the tree whole: subagents, workflows, wf_1")
+            listed.clear(); statted.clear()
+            self.assertEqual(sorted(km._spend_window_files(self.leaf, since, now=NOW + 1)), sorted([self.leaf, hot]))
+            self.assertEqual(listed, [], "nothing changed: no directory listed again")
+            self.assertEqual(sorted(p for p in statted if p.endswith(".jsonl")), [hot], "the hot file statted, the cold one not")
+            self.assertEqual(sum(1 for p in statted if not p.endswith(".jsonl")), 3, "one stat per directory")
+            # a new workflow agent: its directory's mtime moves, that one directory is listed again, the file is seen
+            new = os.path.join(wf, "agent-new.jsonl")
+            time.sleep(0.02)
+            write_jsonl(new, [user(NOW - 10, "u")], mtime=NOW - 10)
+            os.utime(wf, (NOW + 2, NOW + 2))
+            listed.clear()
+            self.assertEqual(sorted(km._spend_window_files(self.leaf, since, now=NOW + 2)), sorted([self.leaf, hot, new]))
+            self.assertEqual(listed, [wf], "only the changed directory")
+            # the cold file wakes (a long tool call returned): seen at the next full pass, within SPEND_GUARD_TREE_RESCAN_S
+            os.utime(cold, (NOW + 3, NOW + 3))
+            self.assertEqual(sorted(km._spend_window_files(self.leaf, since, now=NOW + 3)), sorted([self.leaf, hot, new]), "not yet: cold files are not statted every cycle")
+            self.assertEqual(sorted(km._spend_window_files(self.leaf, since, now=NOW + km.SPEND_GUARD_TREE_RESCAN_S + 1)),
+                             sorted([self.leaf, hot, new, cold]), "the full pass sees it")
+        # a leaf with no subagents tree: the leaf alone, nothing memoized
+        km._SPEND_TREE_CACHE.clear()
+        lone = os.path.join(self.td.name, "proj", "22222222-2222-3333-4444-000000000350.jsonl")
+        write_jsonl(lone, [user(NOW, "u")])
+        self.assertEqual(km._spend_window_files(lone, since, now=NOW), [lone])
+        self.assertNotIn(lone, km._SPEND_TREE_CACHE)
+        self.assertNotIn("_subagent_transcripts(leaf)", inspect.getsource(km._spend_window_files), "the walk is the memo's first listing, not a per-call walk")
+        self.assertIn("os.scandir", inspect.getsource(km._spend_tree_list_dir))
+
+    def test_the_row_memos_stamp_carries_the_entrys_base_and_the_memo_is_capped(self):
+        km._SPEND_ROWS_CACHE.clear()
+        write_jsonl(self.leaf, [user(NOW - 100, "u"), assistant(NOW - 50, "m1", 1000)])
+        km._spend_file_rows(self.leaf, NOW - 600, PRICES, None)
+        ent = km.em._read_jsonl_entry(self.leaf, tail_ok=True)
+        self.assertEqual(km._SPEND_ROWS_CACHE[self.leaf][0], (ent[0], ent[1], ent[5]), "mtime, size, base (LOW a)")
+        self.assertEqual(len(km._SPEND_ROWS_CACHE[self.leaf]), 4, "and the last use, for the cap")
+        with mock.patch.object(km, "SPEND_GUARD_ROWS_CACHE_MAX", 2):
+            others = []
+            for i in range(3):
+                f = os.path.join(self.td.name, "proj", "agent-%d.jsonl" % i)
+                write_jsonl(f, [assistant(NOW - 40 + i, "m%d" % i, 100)])
+                time.sleep(0.005)
+                km._spend_file_rows(f, NOW - 600, PRICES, None)
+                others.append(f)
+            self.assertEqual(len(km._SPEND_ROWS_CACHE), 2, "capped (LOW b)")
+            self.assertEqual(sorted(km._SPEND_ROWS_CACHE), sorted(others[1:]), "the least recently used went first")
 
 
 class Ceiling(unittest.TestCase):
@@ -334,9 +402,23 @@ class Guard(unittest.TestCase):
         self.assertIn("; a stop was already in flight, and it has been told.", self.toasts[0]["text"])
         self.assertEqual((self._rows()[0]["stopped"], self._rows()[0]["stopping"], self._rows()[0]["told"]), (False, True, True))
 
+    def test_a_detached_hosted_session_is_not_pressed_and_the_sentence_says_its_host_keeps_the_turn(self):
+        # the round-two review's LOW c: the interrupt answers True for a detached session while the escalation is skipped
+        import types
+        self.be.sessions = {SID: types.SimpleNamespace(detached=True)}
+        self._spend(NOW, 200.0)
+        self._tick(NOW)
+        self.assertEqual(self.be.interrupts, [], "not pressed: the answer would say stopped while the host keeps the turn")
+        self.assertEqual(len(self.be.sends), 1, "told all the same")
+        row = self._rows()[-1]
+        self.assertIn("its host keeps the turn, so it was not stopped, but it has been told", row["text"])
+        self.assertEqual((row.get("detached"), row.get("stopped"), row.get("stopping"), row.get("told")), (True, False, False, True))
+        self.assertNotIn("refused: detached", inspect.getsource(km._spend_guard_fire), "the refusal prose names no branch it cannot reach")
+        self.assertNotIn(SID, km._interrupt_clicked, "no stop was pressed, so no stamp")
+
     def test_the_sentence_states_what_the_backend_actually_did(self):
         self._spend(NOW, 200.0)
-        self.be = FakeBackend(stops=False, accepts=False)   # detached, or no backend owns it: both refused
+        self.be = FakeBackend(stops=False, accepts=False)   # no backend owns it: both refused (a detached host is its own case)
         self._tick(NOW)
         self.assertIn("; it could not be stopped or told (no backend owns it).", self.toasts[0]["text"])
         self.assertEqual((self._rows()[0]["stopped"], self._rows()[0]["told"]), (False, False))
@@ -347,7 +429,7 @@ class Guard(unittest.TestCase):
             self.toasts.clear()
             km._spend_guard_tick(NOW + 1, {SID: {"state": "working"}}, sessions=self.sessions, be=None, clients=self.clients, prices=PRICES)
             bf.assert_called_with(SID)
-        self.assertIn("; it could not be stopped (the interrupt was refused: detached, or no backend owns it) but has been told.", self.toasts[0]["text"])
+        self.assertIn("; it could not be stopped (the interrupt was refused: no backend owns it) but has been told.", self.toasts[0]["text"])
 
     def test_the_fire_road_is_pinned_to_the_shared_doors(self):
         import inspect
@@ -363,7 +445,8 @@ class Guard(unittest.TestCase):
         handler = ui[i:ui.index("\n  }", i)]
         self.assertIn("warnToast(m.text);", handler)
         self.assertNotIn("failProvisional", handler, "never read as an in-flight create's verdict")
-        self.assertIn("_subagent_transcripts(leaf)", inspect.getsource(km._spend_window_files), "the canonical recursive walk")
+        self.assertIn("_spend_tree_list_dir(root, m, set(m[\"dirs\"]))", inspect.getsource(km._spend_window_files), "the tree memo's listing, the walk's rule kept")
+        self.assertIn("_spend_window_files(leaf, since, now)", inspect.getsource(km._spend_window_usd))
 
     def test_the_guard_never_starts_the_price_feed_fetch(self):
         """The cost view refreshes the remote price feed when its cache is stale; the guard runs on the pusher's path in

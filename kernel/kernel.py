@@ -36213,7 +36213,13 @@ SPEND_GUARD_MEMO_SLACK_S = 60       # a file's window rows are scanned this much
 SPEND_GUARD_LATCH_MAX = 1000        # latch entries kept for sessions no longer live (the oldest go first)
 _SPEND_GUARD = {}                   # sid -> {"over": bool, "t": the crossing (or clearing) epoch, "rate": $/h then}
 _SPEND_GUARD_SEEDED = [False]       # the latch was read back from the ledger once this kernel life
-_SPEND_ROWS_CACHE = {}              # file -> ((mtime, size), floor, [(t, usd), ...]): the window rows, memoized on the stamp
+_SPEND_ROWS_CACHE = {}              # file -> ((mtime, size, base), floor, [(t, usd), ...], last use): the window rows, memoized on the stamp
+SPEND_GUARD_ROWS_CACHE_MAX = 4000   # window-row memo entries kept; over it the least recently used go (a kernel life sees
+#                                     thousands of finished agent files, each a window row list nobody asks for again)
+SPEND_GUARD_TREE_RESCAN_S = 30      # a COLD agent file (idle since before the window's floor) is statted again this often,
+#                                     not every cycle; a hot one every cycle
+_SPEND_TREE_CACHE = {}              # leaf -> {"dirs": {dir: mtime}, "files": {path: mtime}, "full": epoch of the last full
+#                                     stat pass, "seen": epoch}: the session's subagents tree, watched by directory mtimes
 
 
 def _spend_ceiling():
@@ -36232,19 +36238,89 @@ def _spend_ceiling():
     return v
 
 
-def _spend_window_files(leaf, since):
-    """The leaf transcript and every agent transcript beside it that changed at or after `since`: the kernel's one
-    recursive walk of the session's subagents tree (_subagent_transcripts: Task agents at the top, Workflow agents one
-    level down under workflows/wf_<id>/, sibling agents after a /clear fork, no symlink followed), each file kept on a
-    stat of its own. A flat listing missed every workflow agent, the very fan-out the guard exists for (the review)."""
-    files = [str(leaf)]
-    for p in _subagent_transcripts(leaf):
+def _spend_tree_list_dir(d, m, known):
+    """One directory of a session's subagents tree listed (os.scandir): its .jsonl files into the memo with their mtimes,
+    its subdirectories with theirs, recursing only into a subdirectory not yet known (a new workflow directory), so
+    re-listing a known directory that changed costs one listing, not the tree's. _subagent_transcripts' rule holds: no
+    symlink is followed or kept (a directory or a file), the session's own tree only."""
+    try:
+        with os.scandir(d) as it:
+            entries = list(it)
+    except OSError:
+        return
+    for e in entries:
         try:
-            if os.stat(p).st_mtime >= since:
-                files.append(p)
+            if e.is_symlink():
+                continue
+            if e.is_dir(follow_symlinks=False):
+                new = e.path not in known
+                m["dirs"][e.path] = e.stat(follow_symlinks=False).st_mtime
+                if new:
+                    known.add(e.path)
+                    _spend_tree_list_dir(e.path, m, known)
+            elif e.name.endswith(".jsonl") and e.is_file(follow_symlinks=False):
+                m["files"][e.path] = e.stat(follow_symlinks=False).st_mtime
         except OSError:
-            pass
-    return files
+            continue
+
+
+def _spend_window_files(leaf, since, now=None):
+    """The leaf transcript and every agent transcript beside it that changed at or after `since` (Task agents at the top
+    of <sid>/subagents/, Workflow agents under workflows/wf_<id>/, the recursive tree the review asked for), from a memo
+    of the session's tree rather than a walk per call (the round-two review's MEDIUM: the walk ran per live session on
+    the pusher's 2 Hz loop, 26.6 ms of CPU a call on a 2,449-file tree against 0.4 ms for the flat glob before it, and
+    the three largest trees together would have held a sixth of a core for good while a handful of their files were in
+    the window). The memo keeps every directory's mtime and every file's. A cycle stats the directories (a new file or
+    subdirectory moves its parent's mtime; a changed directory is listed again, recursing only into directories not yet
+    known), stats the HOT files every cycle (mtime at or after the window's floor, SPEND_GUARD_MEMO_SLACK_S before
+    `since`: a file that may still be growing is never read stale), and the COLD ones once per SPEND_GUARD_TREE_RESCAN_S,
+    so an agent that wakes after a long tool call is seen within that bound, a twentieth of the window. The first call
+    lists the tree whole. Steady state per cycle: one stat per directory plus one per hot file."""
+    now = time.time() if now is None else now
+    key = str(leaf)
+    base, ext = os.path.splitext(key)
+    root = os.path.join(base, "subagents")
+    m = _SPEND_TREE_CACHE.get(key)
+    if m is None:
+        if ext != ".jsonl" or os.path.islink(root) or not os.path.isdir(root):
+            return [key]
+        m = {"dirs": {}, "files": {}, "full": now, "seen": now}
+        try:
+            m["dirs"][root] = os.stat(root).st_mtime
+        except OSError:
+            return [key]
+        _spend_tree_list_dir(root, m, set(m["dirs"]))
+        _SPEND_TREE_CACHE[key] = m
+        if len(_SPEND_TREE_CACHE) > SPEND_GUARD_LATCH_MAX:
+            for k in sorted(_SPEND_TREE_CACHE, key=lambda k: _SPEND_TREE_CACHE[k]["seen"])[:len(_SPEND_TREE_CACHE) - SPEND_GUARD_LATCH_MAX]:
+                _SPEND_TREE_CACHE.pop(k, None)
+    else:
+        m["seen"] = now
+        for d, mt in list(m["dirs"].items()):
+            try:
+                cur = os.stat(d).st_mtime
+            except OSError:
+                m["dirs"].pop(d, None)                       # a directory gone, its files with it
+                for p in [p for p in m["files"] if p.startswith(d + os.sep)]:
+                    m["files"].pop(p, None)
+                continue
+            if cur != mt:
+                m["dirs"][d] = cur
+                _spend_tree_list_dir(d, m, set(m["dirs"]))
+        if root not in m["dirs"]:
+            _SPEND_TREE_CACHE.pop(key, None)                 # the tree is gone: listed afresh if it returns
+            return [key]
+        full = now - m["full"] >= SPEND_GUARD_TREE_RESCAN_S
+        floor = since - SPEND_GUARD_MEMO_SLACK_S
+        for p, mt in list(m["files"].items()):
+            if full or mt >= floor:
+                try:
+                    m["files"][p] = os.stat(p).st_mtime
+                except OSError:
+                    m["files"].pop(p, None)
+        if full:
+            m["full"] = now
+    return [key] + [p for p, mt in m["files"].items() if mt >= since]
 
 
 def _spend_file_rows(f, since, prices, dearest):
@@ -36260,9 +36336,13 @@ def _spend_file_rows(f, since, prices, dearest):
     if ent is None:
         _SPEND_ROWS_CACHE.pop(f, None)
         return []
-    stamp = (ent[0], ent[1])
+    stamp = (ent[0], ent[1], ent[5])                     # mtime, size, and the entry's BASE (the round-two review's LOW a):
+    #   a tail entry accepted after a restart holds the records past the checkpoint's cut, and a later whole-file
+    #   upgrade of the same file (base 0) changes what the window can see without moving mtime or size; the base in
+    #   the stamp invalidates the memo the moment the entry's shape changes, not when the file next grows
     hit = _SPEND_ROWS_CACHE.get(f)
     if hit is not None and hit[0] == stamp and hit[1] <= since:
+        _SPEND_ROWS_CACHE[f] = (hit[0], hit[1], hit[2], time.time())
         return [r for r in hit[2] if r[0] >= since]
     floor = since - SPEND_GUARD_MEMO_SLACK_S
     best, rows = {}, []
@@ -36297,7 +36377,12 @@ def _spend_file_rows(f, since, prices, dearest):
                 rows[i] = (rows[i][0], c)
         else:
             rows.append((t, c))
-    _SPEND_ROWS_CACHE[f] = (stamp, floor, rows)
+    _SPEND_ROWS_CACHE[f] = (stamp, floor, rows, time.time())
+    if len(_SPEND_ROWS_CACHE) > SPEND_GUARD_ROWS_CACHE_MAX:
+        # the least recently used go (LOW b): a finished agent file's rows are asked for while it is in the window and
+        # never again; without a bound a kernel life would hold one list per agent it ever priced
+        for k in sorted(_SPEND_ROWS_CACHE, key=lambda k: _SPEND_ROWS_CACHE[k][3])[:len(_SPEND_ROWS_CACHE) - SPEND_GUARD_ROWS_CACHE_MAX]:
+            _SPEND_ROWS_CACHE.pop(k, None)
     return [r for r in rows if r[0] >= since]
 
 
@@ -36308,7 +36393,7 @@ def _spend_window_usd(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None):
         prices = _model_prices(int(now), refresh=False)   # never a network fetch from the pusher's path
     dearest = max(prices.values(), key=lambda p: float(p.get("out") or 0)) if prices else None
     since = now - window_s
-    return sum(c for f in _spend_window_files(leaf, since) for _t, c in _spend_file_rows(f, since, prices, dearest))
+    return sum(c for f in _spend_window_files(leaf, since, now) for _t, c in _spend_file_rows(f, since, prices, dearest))
 
 
 def _spend_guard_seed():
@@ -36391,10 +36476,18 @@ def _spend_guard_stop(sid, be, now):
     interrupt-clicked stamp the chip reads, the retry suppression that keeps the auto-retry and the idle-queue drive
     from re-driving the session while the latch holds, and the views marked dirty. Not pressed while an interrupt is
     already unsettled for the sid (the escalation ladder would climb to SIGINT and SIGKILL on a second press). Returns
-    "stopped", "stopping" (a stop already in flight), or "refused" (the backend would not, or owns no such session)."""
+    "stopped", "stopping" (a stop already in flight), "detached" (a hosted session whose host keeps the turn: not
+    pressed), or "refused" (the backend would not, or owns no such session)."""
     t0 = _interrupt_clicked.get(str(sid))
     if t0 is not None and now - t0 <= 120:
         return "stopping"
+    sessions = getattr(be, "sessions", None)
+    if getattr(sessions.get(sid) if isinstance(sessions, dict) else None, "detached", False):
+        # a DETACHED hosted session (the round-two review's LOW c): the backend's interrupt answers True while the CLI's
+        # escalation is skipped on purpose (its host keeps the turn), so nothing would stop and the sentence would say it
+        # had. Read before pressing, said as it is. No road to the host exists without pressing: the host's signal rung
+        # is the very escalation the detached state skips
+        return "detached"
     try:
         stopped = bool(be.interrupt(sid))
     except Exception:
@@ -36428,16 +36521,18 @@ def _spend_guard_fire(s, rate, ceiling, now, be, clients):
         told = False
     outcome = {("stopped", True): "it has been stopped and told",
                ("stopping", True): "a stop was already in flight, and it has been told",
-               ("refused", True): "it could not be stopped (the interrupt was refused: detached, or no backend owns it) but has been told",
+               ("detached", True): "its host keeps the turn, so it was not stopped, but it has been told",
+               ("refused", True): "it could not be stopped (the interrupt was refused: no backend owns it) but has been told",
                ("stopped", False): "it has been stopped, but the message was refused",
                ("stopping", False): "a stop was already in flight, and the message was refused",
+               ("detached", False): "its host keeps the turn, so it was not stopped, and the message was refused",
                ("refused", False): "it could not be stopped or told (no backend owns it)"}[(stop, told)]
     text = ("%s was spending about $%s an hour at %s, over the $%s an hour ceiling; %s."
             % (name, _usd_words(rate), when, _usd_words(ceiling), outcome))
     _spend_guard_toast(text, clients, sid=sid, name=name, phase="over", usdPerHour=round(float(rate), 2), t=int(now))
     _spend_guard_row("spend.ceiling", text, sid, name, be, t=int(now), usdPerHour=round(float(rate), 2),
                      ceilingUsdPerHour=float(ceiling), windowS=SPEND_GUARD_WINDOW_S,
-                     stopped=(stop == "stopped"), stopping=(stop == "stopping"), told=told)   # t: the crossing's moment
+                     stopped=(stop == "stopped"), stopping=(stop == "stopping"), detached=(stop == "detached"), told=told)   # t: the crossing's moment
 
 
 def _spend_guard_clear(s, rate, ceiling, now, be, clients):
