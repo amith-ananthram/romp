@@ -38,7 +38,7 @@ test("a collapsed run is placed and timed by its ANCHOR member, the latest, on b
   assert.doesNotMatch(ng, /adv\(it\.indices\[0\]\)/, "never the first member of a notice run");
   assert.match(ng, /\}\);\s*\n\s*adv\(anchor\);/, "…nor the last child of an open one: the anchor");
   // a tool run is untouched: its members are in transcript order, its head is timed by its first, its walk exits as before
-  assert.match(ai, /renderToolGroup\(tools, prevEpoch, key, open\)\)\);\s*\n\s*adv\(it\.indices\[0\]\);/);
+  assert.match(ai, /const head = tag\(renderToolGroup\(tools, prevEpoch, key, open\)\);\s*\n\s*v\.el\.appendChild\(head\);\s*\n\s*adv\(it\.indices\[0\]\);/);
   const pop = RENDER.slice(RENDER.indexOf("const dayOpen = eventEpoch(evs[anchor]);") - 200, RENDER.indexOf("if (!relayNoted) list.appendChild(cmtRelayedNote"));
   assert.match(pop, /const anchor = itemAnchor\(it, \(i\) => eventEpoch\(evs\[i\]\)\);/);
   assert.match(pop, /renderNoticeGroup\(run, evs\[anchor\], prev, key, open\)/);
@@ -130,7 +130,7 @@ test("every day walk decides against a DayWalk mark and never a raw epoch; windo
   for (const c of calls) assert.match(c, /^dayDividerFor\(\w+, walk\)$/, "each hands the walk, not a number: " + c);
   const ai = RENDER.slice(RENDER.indexOf("function appendItem("), RENDER.indexOf("function renderWindowItems("));
   assert.match(ai, /^function appendItem\(v: View, s: Session, items: DisplayItem\[\], u: number, prevEpoch: number \| null, walk: DayWalk, working: boolean\): number \| null \{/m);
-  assert.match(ai, /walk\.pass\(unitExit\(s, it\)\);\s*\n\s*for \(const n of nodes\) stampWalkDay\(n, walk\);\s*\n\s*return prevEpoch;\s*\n\}/, "the unit's exit passes the mark on the way out, and every node the unit appended is stamped with the walk's day (T342)");
+  assert.match(ai, /walk\.pass\(unitExit\(s, it\)\);[^\n]*\n\s*for \(const n of nodes\) if \(!stamped\.has\(n\)\) stampWalkDay\(n, walk\);\s*\n\s*return prevEpoch;\s*\n\}/, "the unit's exit passes the mark on the way out, and every node the unit appended is stamped with the walk's day unless a row was stamped in its own day mid-unit (T342)");
   const rw = RENDER.slice(RENDER.indexOf("function renderWindowItems("), RENDER.indexOf("function sizeSpacers("));
   assert.match(rw, /const walk = dayWalkBefore\(s, items, unitStart\);[^\n]*\n\s*for \(let u = unitStart; u < unitEnd; u\+\+\) prevEpoch = appendItem\(v, s, items, u, prevEpoch, walk, working\);/, "a window seeds the mark by walking the units before it");
   assert.match(RENDER, /function dayWalkBefore\(s: Session, items: DisplayItem\[\], unitStart: number\): DayWalk \{\s*\n\s*const w = new DayWalk\(\);\s*\n\s*for \(let u = 0; u < unitStart && u < items\.length; u\+\+\) w\.pass\(unitExit\(s, items\[u\]\)\);/);
@@ -138,7 +138,9 @@ test("every day walk decides against a DayWalk mark and never a raw epoch; windo
   const ue = RENDER.slice(RENDER.indexOf("function unitExit("), RENDER.indexOf("function dayWalkBefore("));
   assert.match(ue, /if \(it\.kind === "event"\) return eventEpoch\(s\.events\[it\.index\]\);/);
   assert.match(ue, /if \(it\.kind === "noticegroup"\) return eventEpoch\(s\.events\[itemAnchor\(it, \(i\) => eventEpoch\(s\.events\[i\]\)\)\]\);/);
-  assert.match(ue, /const open = openFolds\.has\(toolGroupKey\(s\.events\[it\.indices\[0\]\]\)\);\s*\n\s*return eventEpoch\(s\.events\[open \? it\.indices\[it\.indices\.length - 1\] : it\.indices\[0\]\]\);/);
+  assert.match(ue, /const open = openFolds\.has\(toolGroupKey\(s\.events\[it\.indices\[0\]\]\)\);\s*\n\s*if \(!open\) return eventEpoch\(s\.events\[it\.indices\[0\]\]\);/, "a collapsed tool run: its first member");
+  // an expanded run: its HIGH-WATER member (the walk passes every row and never rewinds), so the seed matches the walk for any row order
+  assert.match(ue, /for \(const i of it\.indices\) \{ const ep = eventEpoch\(s\.events\[i\]\); if \(ep != null && \(mx == null \|\| ep > mx\)\) mx = ep; \}\s*\n\s*return mx;/);
   // the normal-mode tail: the mark seeded over the events before `from`, passed per row; the rail keeps its raw chain
   assert.match(RENDER, /const walk = dayWalkBeforeEvent\(s\.events, from\);[^\n]*\n\s*for \(let i = from; i < len; i\+\+\) \{\s*\n\s*const prev = prevTimedEpoch\(s\.events, i\);/);
   assert.match(RENDER, /v\.el\.appendChild\(node\);\s*\n\s*walk\.pass\(ep\);\s*\n\s*stampWalkDay\(node, walk\);\s*\n\s*\}/, "…and passes each row, stamping it with the walk's day (T342)");
