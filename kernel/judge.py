@@ -2551,10 +2551,16 @@ def _unit_text(atoms, marker=None):
     ([m3]) so the model can CITE the one message its takeaway is grounded in (see _split_source).
     Sub-floor stubs (< CITE_MIN_CHARS) still ride along as context, just unlabeled — uncitable by
     construction."""
-    user_said, asst_said, tools, results = [], [], [], []
+    user_said, asst_said, tools, results, reported = [], [], [], [], []
     for a in atoms:
         if a["type"] == "user" and a.get("author") is not None:
             t = _FOLLOWUP_MARKER_RE.sub("", _atom_text(a)).strip()   # the follow-up marker is plumbing, not user text
+            if t and a.get("author") in ("system", "teammate"):
+                # T319: a harness report (a background task's completion, a system reminder) or a teammate's
+                # line folds into the unit, but it is NOT what the user asked: under USER ASKED it read as a
+                # request, and the planner minted the session's own review round as the user's deliverable
+                reported.append(t)
+                continue
             if t:
                 # a PEER's postal report is SUBSTANCE, not just context (T218, the study's postal class:
                 # the summary's evidence was the peer's ready-report, but only assistant prose could be
@@ -2594,6 +2600,8 @@ def _unit_text(atoms, marker=None):
     out = []
     if user_said:
         out.append("USER ASKED: " + _shape(" | ".join(user_said), 1200, 1800))
+    if reported:
+        out.append("BACKGROUND REPORTED (not the user): " + _shape(" | ".join(reported), 600, 900))
     if asst_said:
         out.append("ASSISTANT SAID: " + _shape(" ".join(asst_said), 2500, 5500))
     if tools:
@@ -3582,7 +3590,12 @@ PLAN_SYS = (
     "A card born **blocked** is the tell: when all a new goal would hold is a question about work that "
     "has not started, it is not a goal. Work the assistant merely **offers** (a fix it proposes after "
     "diagnosing, a follow-up it volunteers) is not an ask, so block the goal that surfaced the offer, "
-    "with the offer as the why, and mint nothing. It earns a card of its own once the user says go.\n"
+    "with the offer as the why, and mint nothing. It earns a card of its own once the user says go. "
+    "The session's own background workflows, review rounds and agents are its process, not deliverables: "
+    "file them as steps under the goal they serve, never as a new top-level goal. Every mint carries "
+    "\"kind\": \"ask\" (a deliverable the user's message asked for, e.g. \"Add retries to the client\") or "
+    "\"kind\": \"process\" (work the session started for itself: a review round, an audit, a workflow or agent it "
+    "launched, e.g. \"Adversarial review of the retry diff\").\n"
     '- {\"why\",\"do\":\"sub\",\"under\":<n>,\"text\":\"<step ≤10 words>\"}: a step or progress under '
     "card #n, where #n must be a **top-level card** (a flush-left line in <open-goals>; the indented "
     "sub-goals are context and done/block targets, not filing spots — where inside the card the step "
@@ -3804,7 +3817,13 @@ def _parse_plan(raw, menu_len, allow_extend=False):
             ops.append({"do": "skip", "why": why})
         elif do == "mint":
             if _has_alpha(text):
-                ops.append({"do": "mint", "why": why, "text": text})
+                op = {"do": "mint", "why": why, "text": text}
+                kind = str(o.get("kind") or "").strip().lower()
+                if kind in ("ask", "process"):
+                    op["kind"] = kind                  # the planner's label: the user's deliverable, or the session's own process (T319)
+                elif o.get("ask") is True:
+                    op["kind"] = "ask"                 # the earlier mark's spelling
+                ops.append(op)
         elif do == "sub":
             n, r = _int(o, "under"), _int(o, "ref")
             if not _has_alpha(text):
@@ -6320,6 +6339,250 @@ def _restrict_retitle(ops, allowed):
     return [o for o in ops if o["do"] != "retitle" or o.get("goal") == allowed]
 
 
+_LAUNCH_TOOLS = {"Workflow": "workflow", "Agent": "agent", "Task": "agent"}
+_WF_META_RE = re.compile(r"\b(name|description)\s*:\s*(['\"])(.*?)\2", re.S)
+_WF_META_LITERAL_RE = re.compile(r"export\s+const\s+meta\s*=\s*\{(.*?)\}", re.S)   # the meta object only, never a schema field
+
+
+def _meta_literal(script):
+    """The text inside a Workflow script's FIRST `export const meta = {...}` literal, matched by brace depth (a
+    nested object or array inside meta, phases: [{...}], never ends the scan early); '' when none."""
+    src = str(script or "")[:8000]
+    m = re.search(r"export\s+const\s+meta\s*=\s*\{", src)
+    if not m:
+        return ""
+    depth, i = 1, m.end()
+    while i < len(src) and depth:
+        c = src[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+        i += 1
+    return src[m.end():i - 1] if depth == 0 else src[m.end():]
+
+
+def _wf_meta(script):
+    """{name, description} read off a Workflow script's meta literal (the FIRST one, by brace depth), {} when none:
+    a quoted description elsewhere in the script (a schema field's, an agent prompt's) is never the run's own
+    words."""
+    lit = _meta_literal(script)
+    if not lit:
+        return {}
+    return {mm.group(1): mm.group(3) for mm in _WF_META_RE.finditer(lit)}
+
+
+def _seg_launches(seg):
+    """The BACKGROUND work this segment's assistant turns started, as [{"via": "workflow"|"agent", "desc": <the
+    dispatch's own words>}] in transcript order. The criterion is the event model's own (event_model._bg_step
+    registers a task on exactly these): a Workflow run (the tool only ever runs in the background), or an
+    Agent/Task tool_use whose input carries run_in_background or whose tool_result in this segment acked
+    asynchronously (toolUseResult.isAsync, or status "async_launched"). A FOREGROUND subagent (an Explore or a
+    review agent the turn waited on) is not a launch: counting it demoted a user's second ask under the first
+    (a review finding on this change). A Workflow's words come from its script's meta (description, else name)
+    or its scriptPath's file name; an agent's from its description, else the first line of its prompt."""
+    atoms = seg.get("atoms") or []
+    acks = {}
+    for a in atoms:
+        if a.get("type") != "user":
+            continue
+        tur = a.get("toolUseResult")
+        tur = tur if isinstance(tur, dict) else {}
+        is_async = bool(tur.get("isAsync")) or tur.get("status") == "async_launched"
+        for b in (a.get("message") or {}).get("content", []) or []:
+            if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id"):
+                acks[b["tool_use_id"]] = acks.get(b["tool_use_id"], False) or is_async
+    out = []
+    for a in atoms:
+        if a.get("type") != "assistant" or a.get("isApiError"):
+            continue
+        for b in (a.get("message") or {}).get("content", []) or []:
+            if not (isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in _LAUNCH_TOOLS):
+                continue
+            inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+            via = _LAUNCH_TOOLS[b["name"]]
+            if via != "workflow" and not inp.get("run_in_background") and acks.get(b.get("id")) is not True:
+                continue                                   # a foreground subagent: the turn waited on it, no launch
+            desc = ""
+            if via == "workflow":
+                meta = _wf_meta(inp.get("script"))
+                desc = meta.get("description") or meta.get("name") or ""
+                if not desc and inp.get("scriptPath"):
+                    desc = os.path.splitext(os.path.basename(str(inp["scriptPath"])))[0]
+            if not desc:
+                desc = str(inp.get("description") or "").strip()
+            if not desc:
+                first = str(inp.get("prompt") or "").strip().splitlines()
+                desc = first[0] if first else ""
+            out.append({"via": via, "desc": " ".join(str(desc).split())[:160]})
+    return out
+
+
+_TOKEN_STOP = {"the", "and", "for", "with", "over", "into", "from", "that", "this", "each", "then", "them", "they", "their", "your", "onto", "about"}   # function words: never a shared word
+
+
+def _tokens(text):
+    return {w for w in re.findall(r"[a-z0-9]+", str(text or "").lower()) if len(w) > 3 and w not in _TOKEN_STOP}
+
+
+def _overlap(a, b):
+    """Token overlap of two texts as a share of the smaller set (0..1); 0 when either is empty."""
+    ta, tb = _tokens(a), _tokens(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / float(min(len(ta), len(tb)))
+
+
+def _top_of(nodes, nid):
+    seen = set()
+    while nid in nodes and nodes[nid].get("parentId") and nid not in seen:
+        seen.add(nid)
+        nid = nodes[nid]["parentId"]
+    return nid if nid in nodes else None
+
+
+def _seg_trigger_author(seg):
+    atoms = seg.get("atoms") or []
+    trig = next((a for a in atoms if a.get("uuid") == seg.get("trigger")), None) or (atoms[0] if atoms else None)
+    return trig.get("author") if trig else None
+
+
+def _demote_session_mints(ops, seg, store, menu, p_target, human):
+    """The origin rule at minting time (T319, the user 2026-09-10: a card appears only for work that traces to
+    something they asked for; the sessions' own process, a Workflow run, a review round, an agent, never
+    stands as a top-level card). The PLANNER labels every mint `kind`: "ask" (a deliverable the user's message
+    asked for) or "process" (work the session started for itself), and this rule TRUSTS the labels (the fourth
+    review round: four rounds of word-overlap edge cases ended by asking the model, which knows):
+    - kind ask keeps its card, on both paths (an unplaced human segment and one whose prompt run already placed
+      the message);
+    - kind process nests as a step under the ask's top: the goal the turn ran in (the seam's own top, the
+      segment's placement), else this reply's ask, else the open top nearest in words to the launch or the step,
+      else nothing (files nothing; the chained ops go with it); born.via is the matching launch's kind when one
+      exists (workflow | agent, its words the why), else "work" with the planner's own why;
+    - a segment whose trigger is not a human ask (a seam tail, an autonomous stretch) treats every mint as process
+      whatever its label; a scheduled or programmatic prompt (trigger author "sdk") traces to the user's earlier
+      setup and is left untouched.
+    A MISSING label is filled by the words, and only then: in a human segment with no background launch a mint is
+    an ask; with a launch it is process, except exactly ONE unlabelled mint, the one nearest the user's own words
+    (its text against the message, never its why, never its position), which is an ask, and only among the mints
+    no launch's words fit better; when every unlabelled mint reads like a launch and a top exists to nest under,
+    all of them nest; when none exists (the message must place somewhere), the one least like a launch keeps the
+    card. Demoted steps carry born {kind: session, via, why, parentText}; a dropped mint takes the ops chained
+    onto it and surviving refs are remapped (a demoted mint still creates a node, so positions hold)."""
+    mints = [o for o in ops if o.get("do") == "mint"]
+    if not mints:
+        return ops
+    if _seg_trigger_author(seg) == "sdk":
+        return ops                                     # a scheduled firing is the user's, set up earlier
+    launches = _seg_launches(seg)
+    nodes = store.get("nodes", {})
+    parent = None
+    seam_top = (seg.get("seamOf") or {}).get("top") if isinstance(seg.get("seamOf"), dict) else None
+    for cand in (seam_top, p_target, (store.get("placements") or {}).get(seg.get("id") or "")):
+        if isinstance(cand, str) and cand in nodes:
+            parent = _top_of(nodes, cand)
+            break
+    open_tops = [m["id"] for m in menu if m.get("id") in nodes and nodes[m["id"]].get("parentId") is None
+                 and not nodes[m["id"]].get("nodeComplete") and not nodes[m["id"]].get("cleared")]
+    def launch_match(o):                               # the launch's words in the mint's TEXT only
+        return max([_overlap(l["desc"], o.get("text")) for l in launches] + [0.0])
+    prompt = _prompt_text(seg.get("atoms") or []) if human else ""
+    def prompt_match(o):                               # the user's words in the mint's TEXT only, never its why
+        return _overlap(prompt, o.get("text")) if prompt else 0.0
+    # the label of every mint: the planner's, else filled by the words
+    kind = {}
+    for o in mints:
+        k = str(o.get("kind") or "").strip().lower()
+        kind[id(o)] = k if k in ("ask", "process") else None
+    if not human:
+        for o in mints:
+            kind[id(o)] = "process"                    # the trigger is the event: no label can make this an ask
+    else:
+        unlabeled = [o for o in mints if kind[id(o)] is None]
+        if unlabeled and not launches:
+            for o in unlabeled:
+                kind[id(o)] = "ask"                    # no background work started: the words are the user's
+        elif unlabeled:
+            for o in unlabeled:
+                kind[id(o)] = "process"
+            if not any(kind[id(o)] == "ask" for o in mints):
+                fits_user = [o for o in unlabeled if launch_match(o) <= prompt_match(o)]
+                if fits_user:
+                    crown = max(fits_user, key=lambda o: prompt_match(o))
+                    kind[id(crown)] = "ask"
+                elif parent is None and not open_tops:  # nothing to nest under: the message must place somewhere
+                    crown = min(unlabeled, key=lambda o: launch_match(o))
+                    kind[id(crown)] = "ask"
+    if all(kind[id(o)] == "ask" for o in mints):
+        return ops
+    asks = [o for o in mints if kind[id(o)] == "ask"]
+    ask_op = None
+    if asks and parent is None:
+        # the reply's own ask hosts its process steps: the ask nearest the user's words, processed FIRST so a step
+        # can reference it wherever the planner listed it
+        ask_op = max(asks, key=lambda o: prompt_match(o))
+    # `ref` indexes the reply's CREATED nodes (mints and subs) in the reply's own order. Every op keeps its
+    # original created position for ref resolution (orig -> new); a dropped mint takes the ops chained onto it.
+    orig = {}
+    for o in ops:
+        if o.get("do") in ("mint", "sub"):
+            orig[id(o)] = len(orig) + 1
+    order = ([ask_op] if ask_op is not None else []) + [o for o in ops if o is not ask_op]
+    out, newpos, created_new = [], {}, 0
+    ask_ref, ask_text = None, ""
+    def dead(o):
+        r = o.get("ref")
+        return bool(r) and newpos.get(r) is None
+    def remap(o):
+        r = o.get("ref")
+        return dict(o, ref=newpos[r]) if r else o
+    for o in order:
+        do = o.get("do")
+        if do == "sub":
+            if dead(o):
+                newpos[orig[id(o)]] = None            # its parent died with a dropped mint: dropped with it
+                continue
+            created_new += 1; newpos[orig[id(o)]] = created_new; out.append(remap(o))
+            continue
+        if do != "mint":
+            if dead(o):
+                continue                               # a verdict aimed at a dropped node
+            out.append(remap(o))
+            continue
+        if kind[id(o)] == "ask":
+            created_new += 1; newpos[orig[id(o)]] = created_new
+            if o is ask_op:
+                ask_ref, ask_text = created_new, str(o.get("text") or "")
+            out.append(o)
+            continue
+        text = str(o.get("text") or "")
+        launch = max(launches, key=lambda l: _overlap(l["desc"], text)) if launches else None
+        if launch is not None and _overlap(launch["desc"], text) <= 0.0:
+            launch = launches[0] if len(launches) == 1 else None   # one launch in the segment: the step is its work
+        via = launch["via"] if launch else "work"
+        why = ("started a background %s (%s)" % (via, launch["desc"]) if launch and launch["desc"]
+               else str(o.get("why") or "the session started this on its own"))
+        born = {"kind": "session", "via": via, "why": " ".join(why.split())[:200]}
+        if ask_ref is not None:
+            created_new += 1; newpos[orig[id(o)]] = created_new
+            born["parentText"] = ask_text[:120]
+            out.append({"do": "sub", "why": str(o.get("why") or why), "ref": ask_ref, "text": text, "born": born})
+            continue
+        p = parent
+        if p is None and open_tops:
+            p = max(open_tops, key=lambda nid: (_overlap(nodes[nid].get("text"), (launch or {}).get("desc") or text),
+                                                nodes[nid].get("t") or 0))
+        if p is None:
+            newpos[orig[id(o)]] = None                 # nothing the user asked for to nest under: files nothing
+            continue
+        created_new += 1; newpos[orig[id(o)]] = created_new
+        born["parentText"] = str(nodes[p].get("text") or "")[:120]
+        out.append({"do": "sub", "why": str(o.get("why") or why), "parentId": p, "text": text, "born": born})
+    if human and not out:
+        return ops                                     # a human segment never files nothing through this rule
+    return out
+
+
 def _strip_top_mints(ops):
     """Drop every top-level `mint` op — and every op chained onto a dropped node — remapping the
     surviving same-reply refs. The deterministic half of the bookkeeping-root gate (the user
@@ -6475,7 +6738,7 @@ def apply_plan(store, seg_id, seg_t, ops, menu, place_key=None, prompt_uuid=None
     place_key = place_key if place_key is not None else seg_id
     created = []                                       # nodes minted/subbed in THIS reply, in order (for "ref")
 
-    def new_node(text, parent, why):
+    def new_node(text, parent, why, born=None):
         store["seq"] = store.get("seq", 0) + 1
         while "%s:g%d" % (store["rompUuid"], store["seq"]) in nodes:
             # a stale/absent seq must never mint OVER a live node: the overwrite is silent data
@@ -6489,6 +6752,9 @@ def apply_plan(store, seg_id, seg_t, ops, menu, place_key=None, prompt_uuid=None
                    "t": seg_t, "mt": seg_t, "why": why, "log": []}  # an empty diary at birth = diary-era node (2026-07-07)
         if clear_wrap:
             payload["clearWrap"] = True                # born from a clear wrap-up → clearing it is final (no second round)
+        if isinstance(born, dict) and born.get("kind"):
+            payload["born"] = dict(born)               # T319: work the SESSION started (a workflow, an agent, its own
+            #                                            thread), demoted under the goal it ran in; the card says so
         nodes[nid] = GuardedNode(payload)
         created.append(nid)
         return nid
@@ -6518,6 +6784,8 @@ def apply_plan(store, seg_id, seg_t, ops, menu, place_key=None, prompt_uuid=None
         return created[r - 1] if (r and 1 <= r <= len(created)) else None
 
     def _parent_of(o):                                # a sub parent: a menu node OR a same-reply mint ("ref")
+        if o.get("parentId") in nodes:                # ...or a node named outright (the T319 demotion's form:
+            return o["parentId"]                      #    the goal the turn ran in, menu member or not)
         if "under" in o:
             return menu[o["under"] - 1]["id"]
         r = o.get("ref")
@@ -6529,7 +6797,7 @@ def apply_plan(store, seg_id, seg_t, ops, menu, place_key=None, prompt_uuid=None
         if do == "skip":
             continue
         if do == "mint":
-            nid = new_node(o["text"] or "(untitled goal)", None, o["why"])
+            nid = new_node(o["text"] or "(untitled goal)", None, o["why"], born=o.get("born"))
             _unblock_branch(nid); focus = touched = nid
         elif do == "sub":
             parent = _parent_of(o)                     # menu goal, or a "ref" to an umbrella minted this reply
@@ -6545,9 +6813,10 @@ def apply_plan(store, seg_id, seg_t, ops, menu, place_key=None, prompt_uuid=None
                     nodes[dup]["mt"] = seg_t
                     if not o.get("coerced"):           # a coerced landing is bookkeeping, not re-engagement
                         _unblock_branch(dup)           #  (the user 2026-07-21) — blocks on the branch stand
-                    focus = touched = dup
+                    created.append(dup)                # the reply's created-node positions hold: a later `ref` to this
+                    focus = touched = dup              #   sub lands on the twin, never on a neighbour (T319 review)
                     continue
-                nid = new_node(o["text"] or "(step)", parent, o["why"])
+                nid = new_node(o["text"] or "(step)", parent, o["why"], born=o.get("born"))
             # A _coerce_place sub is the never-vanish floor, not the user re-engaging this branch: it must
             # not clear blocks above it (the user 2026-07-21: an unrelated aside quietly pulled the lone
             # blocked card back to working). A planner-chosen sub keeps the newest-wins unblock.
@@ -8334,8 +8603,8 @@ def _mint_anchor_uuid(seg):
     author = ta.get("author")
     files_nothing = (isinstance(author, dict)
                      and (author.get("kind") or "") in ("coordinate", "question"))
-    if not files_nothing and not (author == "romp" or em.is_interrupt_record(ta)):
-        return t
+    if not files_nothing and not (author in ("romp", "system", "teammate") or em.is_interrupt_record(ta)):
+        return t                                       # system/teammate (T319): a harness report is never a root either
     for a in atoms:
         if a.get("type") == "assistant" and a.get("uuid"):
             return a["uuid"]
@@ -9997,7 +10266,8 @@ def _latch_ask_anchors(fsid, session, store):
     shown→hidden on every restart/cache-cold beat: cache temperature, not new information (the
     cards-move-on-new-information rule). The verdict is a fact about a record that never changes
     once readable, so resolve it ONCE from the judge's own WARM parse and stamp `askAnchor` on the
-    node: 'human' (the dictated ask), 'machine' (a peer mail, the agent's own atom, romp
+    node: 'human' (the dictated ask), 'scheduled' (a scheduled or programmatic prompt, author
+    sdk: the user's configured work, which the feed's heal never nests), 'machine' (a peer mail, the agent's own atom, romp
     bookkeeping — _human_prompt_record, the one definition of 'dictated'), or 'absent' (the
     stitched chain no longer holds the uuid: rewound/compacted/pre-/clear — durable doubt, which
     keeps failing open exactly as the per-beat read did, just stably). The write rides the planner
@@ -10027,7 +10297,9 @@ def _latch_ask_anchors(fsid, session, store):
         if a is None:
             nd["askAnchor"] = "absent"
         else:
-            nd["askAnchor"] = "human" if _human_prompt_record(a, fsid) else "machine"
+            nd["askAnchor"] = ("human" if _human_prompt_record(a, fsid)
+                               else "scheduled" if a.get("author") == "sdk"   # a scheduled or programmatic prompt: the
+                               else "machine")                                #   user's configured work, never machine (T319)
         n += 1
     return n
 
@@ -10497,6 +10769,11 @@ def _plan_session(fsid, path, now):
                 store["placements"][seg_id] = None
                 save_goals(fsid, store)
                 continue
+        ops = _demote_session_mints(ops, seg_by_id.get(seg_id) or {}, store, menu, p_target, human)   # T319: the
+        if not ops:                                    # session's own process never stands as a top card; with
+            store["placements"][seg_id] = None         # nothing the user asked for to nest under, it files nothing
+            save_goals(fsid, store)
+            continue
         ops = _restrict_retitle(ops, pgi)              # only the segment's own prompt-run node is retitle-eligible
         ops = _card_route_subs(store, ops, menu)       # card-first: route subs to the card, then the placer
         if apply_plan_guarded(fsid, path, store, seg_id, seg_t, ops, menu, prompt_uuid=trig, quote=vq,
