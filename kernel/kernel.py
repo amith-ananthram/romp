@@ -15055,7 +15055,7 @@ def _sdk_locked():
             # as programmatic to the judges (no human segment) the moment the row was marked dead
             _owns = getattr(_sdk_backend, "owns", None)
             if _owns:
-                jd.set_sdk_owner_provider(lambda fsid: bool(_owns(fsid)) or bool((_cx := _codex()) and _cx._session(fsid) is not None))
+                jd.set_sdk_owner_provider(lambda fsid: bool(_owns(fsid)) or bool((_cx := _codex()) and _cx.has_record(fsid)))
             # The backend's flag-consumption events resolve held rewinds (two-phase goal cleanup:
             # archive at the branch-take, restore on failure — _on_rewind_resolved).
             _sdk_backend.rewind_resolved_cb = _on_rewind_resolved
@@ -28318,7 +28318,7 @@ def _display_sdk_human(sid):
     once a backend exists, so both sides share one slot; in a process without one (tests) the judges fall back to
     the registry file and a differing answer keeps its own slot."""
     _be = _sdk()
-    return bool((_be and _be.owns(sid)) or ((_cx := _codex()) and _cx._session(sid) is not None))
+    return bool((_be and _be.owns(sid)) or ((_cx := _codex()) and _cx.has_record(sid)))
 
 
 def _parse_cached(path):
