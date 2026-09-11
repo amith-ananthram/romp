@@ -2474,10 +2474,12 @@ so, and the watermark is written from there. The replay of a dead host's
 journal tail seeds the same way for the dead CLI before it drains. A result the
 attach's replay hands over again folds nothing, whatever its total, decided
 from the record's own journal position: the transport tags each result record
-with its offset as it reads it, the fold pops the tags in order (the SDK's
-buffered reader runs a record ahead, so the transport's current offset is
-never the handled record's), and a record before the offset the host's hello
-named as its next is a replay; its turn row says `redelivered` and carries
+with its offset as it reads it, the kernel pops one tag for every result record
+it receives, first thing and whatever the result holds (the SDK's buffered
+reader runs a record ahead, so the transport's current offset is never the
+handled record's), and a record before the offset the host's hello named as its
+next is a replay; a dead host's journal replays through the same road, the
+replay reader being the session's transport for the drain; its turn row says `redelivered` and carries
 `journalOffset`. A live total below the watermark is a counter reset the kernel
 did not see and folds whole, as before. An orphan journal's replay keeps the
 dead CLI's watermark as its line: at or below it was folded, above it was not. The attach flag lives

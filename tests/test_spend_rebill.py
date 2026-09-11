@@ -272,6 +272,91 @@ class Rebill(unittest.TestCase):
         self.assertAlmostEqual(self._day()["usd"], 2.0)
         self.assertEqual([r.get("redelivered", False) for r in self._turns()], [True, True, False])
 
+    def test_a_dead_hosts_journal_replays_through_the_real_orphan_road_and_bills_nothing_it_already_folded(self):
+        # round five of the review, the HIGH: the orphan road built the replay transport but never made it the session's,
+        # so the fold saw no tags and a dead host's tail across a /clear billed $8 for $0. Driven through the real
+        # _host_orphan_recover with a stub SDK client that reads the real replay transport and hands its records over
+        import sys
+        from unittest import mock
+        hostmod = load_source("romp_host_transport_orphan", os.path.join(ROOT, "kernel", "host_transport.py"))
+        sh = hostmod.sh
+        hdir = hostmod.host_dir(Path(self.d), SID) if hasattr(hostmod, "host_dir") else Path(self.d, "hosts", SID)
+        hdir.mkdir(parents=True, exist_ok=True)
+        (hdir / "identity.json").write_text(json.dumps({"pid": 9, "start": "h9"}))
+        recs = [{"type": "assistant", "n": 0},
+                {"type": "result", "subtype": "success", "total_cost_usd": 8.0, "n": 1},    # pre-clear, folded by the dead kernel
+                {"type": "system", "subtype": "init", "n": 2},                               # the /clear's init flip
+                {"type": "result", "subtype": "success", "total_cost_usd": 0.0, "n": 3},    # the /clear's own zero-cost result
+                {"type": "result", "subtype": "success", "total_cost_usd": 5.0, "n": 4}]    # post-clear, folded (costState 5.0), unacked
+        with open(hdir / "journal-0.jsonl", "w") as f:
+            for r in recs:
+                f.write(json.dumps(r) + chr(10))
+        sb.write_reg(Path(self.d), SID, {"sid": SID, "name": "web", "cwd": self.d, "alive": True,
+                                         "hostAck": {"host": "9:h9", "cli": "4242:s1", "offset": 1}})   # acked through the pre-clear result
+        self.be._update_reg(SID, costState={"total": 5.0, "tokens": {}, "cli": "4242:s1", "t": 1})
+        s = self._session()
+        classes = (_AssistantMessage, _ResultMessage, type("S", (), {}))
+        def to_msg(rec):
+            if rec.get("type") == "result":
+                r = _ResultMessage(); r.total_cost_usd = rec.get("total_cost_usd"); r.model_usage = {}; r.usage = {}; r.session_id = "e2"
+                return r
+            return object()
+        class Client:
+            """The SDK client's shape as the orphan road uses it: connects the transport (which makes the reader's queue),
+            then hands every record the reader yields to the drain; the initialize is marked answered so the reader
+            ends without its bounded wait for an answer this stub never asks for."""
+            def __init__(self, options=None, transport=None): self.transport = transport
+            async def __aenter__(self):
+                await self.transport.connect()
+                self.transport._init_answered = True
+                return self
+            async def __aexit__(self, *a): return False
+            async def receive_messages(self):
+                async for rec in self.transport.read_messages():
+                    yield to_msg(rec)
+        mod = types.ModuleType("claude_agent_sdk"); mod.ClaudeSDKClient = Client
+        async def go():
+            await self.be._host_orphan_recover(s, types.SimpleNamespace(), None, classes, died=False)
+        with mock.patch.dict(sys.modules, {"claude_agent_sdk": mod}):
+            asyncio.run(go())
+        self.assertEqual(self._day(), {}, "$0: the tail past the ack is a replay of what the dead kernel folded (the /clear's own result and the post-clear result)")
+        rows = self._turns()
+        self.assertEqual([(r.get("usd"), r.get("redelivered", False)) for r in rows], [(None, False), (0.0, True)],
+                         "the /clear's zero-cost result (no dollars folded, its tag consumed), then the post-clear result, replayed")
+        self.assertEqual(self._cost_state()["cli"], "4242:s1", "persisted under the dead CLI's identity")
+        self.assertIsNone(s._host, "the replay transport was the session's for the drain alone")
+        # the same road with hostAck naming ANOTHER host: the whole journal replays, and bills nothing
+        Path(self.d, "spend.json").unlink(missing_ok=True); Path(self.d, "turns.jsonl").unlink(missing_ok=True)
+        hdir.mkdir(parents=True, exist_ok=True)
+        (hdir / "identity.json").write_text(json.dumps({"pid": 9, "start": "h9"}))
+        with open(hdir / "journal-0.jsonl", "w") as f:
+            for r in recs:
+                f.write(json.dumps(r) + chr(10))
+        sb.write_reg(Path(self.d), SID, {"sid": SID, "name": "web", "cwd": self.d, "alive": True, "hostAck": {"host": "1:other", "cli": "4242:s1", "offset": 3}})
+        self.be._update_reg(SID, costState={"total": 5.0, "tokens": {}, "cli": "4242:s1", "t": 1})
+        s2 = self._session()
+        async def go2():
+            await self.be._host_orphan_recover(s2, types.SimpleNamespace(), None, classes, died=False)
+        with mock.patch.dict(sys.modules, {"claude_agent_sdk": mod}):
+            asyncio.run(go2())
+        self.assertEqual(self._day(), {}, "$0 for the whole-journal replay too (8.00 above the watermark is a replay all the same)")
+
+    def test_a_zero_cost_result_consumes_its_tag_so_later_results_read_their_own(self):
+        # round five's MEDIUM: popped only inside the total > 0 gate, a /clear's zero-cost result left its tag at the
+        # head and the first live result was read as the replay
+        self.be._update_reg(SID, costState={"total": 500.0, "tokens": {}, "cli": "4242:s1", "t": 1})
+        s = self._session(attach=True, journal_next=10, tags=[{"offset": 9, "replay": True}, {"offset": 10, "replay": False}, {"offset": 11, "replay": False}])
+        z = _result(0.0, 0)                                   # the /clear's own result: nothing to fold, but a record with a tag
+        self._run(s, z)
+        self.assertEqual(len(s._host.result_tags), 2, "its tag is gone")
+        self._run(s, _result(520.0, 10))                      # live (offset 10): folded as its own delta, not as the replay
+        self.assertAlmostEqual(self._day()["usd"], 20.0)
+        self._run(s, _result(526.0, 10))                      # live (offset 11)
+        self.assertAlmostEqual(self._day()["usd"], 26.0)
+        self.assertEqual([(r.get("usd"), r.get("redelivered", False)) for r in self._turns()], [(None, False), (20.0, False), (6.0, False)],
+                         "the zero-cost result's own row (no dollars), then the two live ones, none read as a replay")
+        self.assertEqual(self._cost_state()["session"], "", "the epoch is stamped from live results (these doubles carry none)")
+
     def test_the_transport_tags_each_result_record_with_its_offset_as_it_reads_it(self):
         # the transport unit of the rule: the hello's journal.next bounds the replay; records the reader hands over are
         # tagged in _take before the yield; the last replayed record tagged at next - 1 is a replay even though the

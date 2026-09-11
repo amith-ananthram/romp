@@ -7172,6 +7172,12 @@ class SdkSession:
             self._ping_feeding = False
             if self._input_wake is not None:
                 self._input_wake.set()   # same-loop thread — the settle path sets it the same way
+        if isinstance(msg, ResultMessage):
+            # the journal tag the transport queued for this RESULT record is popped here, first, for every result
+            # without exception (round five of 1450's review): popped only inside the spend fold's total > 0 gate, a
+            # zero-cost result (a /clear's own), a turn-less result the move settle consumes, or a handler failure
+            # left its tag at the head and every later result read the PREVIOUS record's tag for the transport's life
+            self._result_tag = self._spend_result_tag()
         if isinstance(msg, SystemMessage) and msg.subtype == "init":
             self._fire_boot_settled()   # the CLI is up and streaming — its transcript catch-up burst
             #                             is over, so the boot-stagger slot (if any) frees NOW
@@ -7510,9 +7516,10 @@ class SdkSession:
                     # is one the ledger already holds. A LIVE total below the watermark is a counter reset (a /clear
                     # the kernel did not see, a resumed cost-state seed against a print-mode CLI) and folds whole, as
                     # it always did; read from the total alone, a reset latched the session at $0 for the process's life
-                    self._spend_session_id = str(getattr(msg, "session_id", "") or "")   # the CLI's session epoch (a /clear moves it), kept beside the watermark
-                    tag = self._spend_result_tag()
+                    tag = getattr(self, "_result_tag", None)          # popped at the top of _on_message for every result
                     duplicate = self._spend_redelivered(tag, total)
+                    if not duplicate:                                  # a replayed record names the replayed epoch: not the watermark's
+                        self._spend_session_id = str(getattr(msg, "session_id", "") or "")   # the CLI's session epoch (a /clear moves it)
                     if unknown or duplicate:
                         delta = 0.0       # unknown: the lifetime's total, this turn's share unknowable; duplicate: already folded
                     else:
@@ -9662,11 +9669,17 @@ class SdkBackend:
                 cli = str(ack.get("cli") or "")
             sess._seed_for_dead_cli(cli)
             replay = ht.HostTransport.from_journal(hdir, ack=offset)
+            prev_host = getattr(sess, "_host", None)
+            sess._host = replay          # the session's transport for the drain (round five of 1450's review): the spend
+            #                              fold reads the replay's tags through sess._host, and with it None every replayed
+            #                              result read as live and a dead host's tail re-billed the dead CLI's spend
             try:
                 async with ClaudeSDKClient(options=opts, transport=replay) as client:
                     await self._replay_drain(sess, client, msg_classes)
             except Exception as e:
                 self._log("host (%s): orphan journal replay ended on %s" % (sess.name, type(e).__name__))
+            finally:
+                sess._host = prev_host
             self._log("host (%s): replayed the orphan journal from offset %d" % (sess.name, offset + 1))
         remove_lease(self.state_dir, sess.sid)
         shutil.rmtree(str(hdir), ignore_errors=True)
