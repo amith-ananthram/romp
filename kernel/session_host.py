@@ -34,6 +34,7 @@ import asyncio
 import json
 import os
 import signal
+import socket
 import sys
 import time
 import traceback
@@ -211,10 +212,23 @@ class Journal:
         self._seg_last[self._seg] = off
         self.gaps.add(off)
         self.next_offset = off + 1
-        try:                                            # the ORPHAN reader has no index: the gaps ride beside the segments
-            (self.dir / "gaps.json").write_text(json.dumps(sorted(self.gaps)))
+        self._persist_gaps()
+
+    def _persist_gaps(self) -> None:
+        """gaps.json for the ORPHAN reader (which has no index): written to a temp name and renamed over, never
+        in place. On the very full disk that made the gap an in-place rewrite truncates first and then fails,
+        erasing the record the reader needs (the commit-8 review's item 2); a rename either lands the new file
+        whole or leaves the old one standing."""
+        tmp = self.dir / "gaps.json.tmp"
+        try:
+            with open(tmp, "wb") as f:
+                f.write(json.dumps(sorted(self.gaps)).encode("utf-8"))
+            os.replace(tmp, self.dir / "gaps.json")
         except OSError:
-            pass
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
     def _turn_boundary(self) -> None:
         # rotate when the current segment is past its size; drop segments the kernel has fully acknowledged
@@ -859,6 +873,14 @@ class SessionHost:
         # each offset is resolved at ITS moment: from memory while unwritten, from the journal once landed, so
         # a record the writer lands during a drain yield is never between two snapshots (finding 4 of the
         # commit 6-7 review); a gap (a failed write) yields nothing and the parked table covers a request there
+        if self.spec.get("_test_socket_small_buffers"):
+            # a test seam: tiny send buffers, so the replay's drain below actually WAITS on a kernel that is not
+            # reading yet and the writer lands records during that wait (the shape that lost records to a replay
+            # built from two snapshots; the commit-8 review's item 9)
+            sock = writer.transport.get_extra_info("socket")
+            if sock is not None:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8192)
+            writer.transport.set_write_buffer_limits(high=4096)
         n = 0
         for off in range(max(ack + 1, 0), read_at_attach):
             rec = self._unwritten.get(off)

@@ -113,6 +113,61 @@ class JournalRules(unittest.TestCase):
         self.assertEqual([(o, r["n"]) for o, r in sh.read_journal_dir(d, 0)], [(0, 0), (2, 2), (4, 4)],
                          "the orphan reader, with no index, numbers past the unrecorded gap from gaps.json")
 
+    def test_a_write_that_will_not_truncate_leaves_the_segment_behind_for_a_fresh_one(self):
+        # the commit 6-7 review's item 11, untested until now: a partial write that ftruncate cannot undo makes the
+        # segment's byte positions unreliable; a fresh segment starts at the failed offset and the numbering holds
+        d = tempfile.mkdtemp(); j = sh.Journal(d)
+        j.append({"type": "assistant", "n": 0})
+        real = j._fh
+        class Raw:
+            def __init__(self): self.failed = False
+            def write(self, b):
+                if not self.failed:
+                    self.failed = True
+                    real.write(b[:5])                       # a partial line lands, then the disk is gone
+                    raise OSError(28, "no space left on device")
+                return real.write(b)
+            def fileno(self): return real.fileno()
+            def seek(self, *a): return real.seek(*a)
+            def tell(self): return real.tell()
+            def close(self): return real.close()
+        j._fh = Raw()
+        with mock.patch.object(sh.os, "ftruncate", side_effect=OSError(5, "input/output error")):
+            with self.assertRaises(OSError):
+                j.append({"type": "assistant", "n": 1})
+        self.assertEqual(j._seg, 1, "a fresh segment, named by the failed offset")
+        self.assertTrue(os.path.exists(j._path(1)))
+        self.assertEqual(j.next_offset, 1, "nothing advanced")
+        j.append({"type": sh.GAP_TYPE, "offset": 1})
+        j.append({"type": "result", "n": 2})
+        self.assertEqual([(o, r["n"]) for o, r in j.read_from(0)], [(0, 0), (2, 2)], "the old segment still serves record 0; the new one the rest")
+        self.assertEqual([(o, r["n"]) for o, r in sh.read_journal_dir(d, 0)], [(0, 0), (2, 2)], "the orphan reader numbers across both")
+
+    def test_the_gap_record_on_disk_survives_a_rewrite_that_fails(self):
+        # item 2 (medium): gaps.json was rewritten in place; on the full disk that made the gap the truncation
+        # succeeded and the write failed, erasing the record the orphan reader needs
+        d = tempfile.mkdtemp(); j = sh.Journal(d)
+        j.append({"type": "assistant", "n": 0})
+        j.note_gap(1)
+        self.assertEqual(json.loads(Path(d, "gaps.json").read_text()), [1])
+        real_open = open
+        class TruncatesThenFails:
+            """the full disk's shape: the open (and its truncation) succeeds, the write does not"""
+            def __init__(self, f): self.f = f
+            def write(self, b): raise OSError(28, "no space left on device")
+            def __enter__(self): return self
+            def __exit__(self, *a): self.f.close(); return False
+        def failing_open(p, *a, **kw):
+            f = real_open(p, *a, **kw)
+            return TruncatesThenFails(f) if (str(p).startswith(d) and "gaps" in str(p)) else f
+        j.append({"type": "assistant", "n": 2})
+        with mock.patch("builtins.open", failing_open):
+            j.note_gap(3)                                   # the rewrite fails after its truncation; the previous record must stand
+        self.assertEqual(json.loads(Path(d, "gaps.json").read_text()), [1], "the old record stands, not an empty file")
+        self.assertEqual(sorted(p.name for p in Path(d).glob("gaps*")), ["gaps.json"], "no temp file left behind")
+        j.append({"type": "result", "n": 4})
+        self.assertEqual([(o, r["n"]) for o, r in j.read_from(0)], [(0, 0), (2, 2), (4, 4)])
+
     def test_a_replay_read_is_bounded_by_its_end(self):
         # finding 2: the replay covers the records that existed when the attach began; later ones follow from the
         # live backlog, so a drain that yields during the replay cannot send a record twice
@@ -560,32 +615,46 @@ class HostProcess(unittest.TestCase):
         k2.close()
 
     def test_an_attach_while_the_writer_lags_sends_the_unwritten_records_from_memory(self):
-        # finding c: records read but not yet journaled were neither replayed nor backlogged
-        host, sock, spec = self._start(_test_journal_delay_s=0.5)
+        # finding c: records read but not yet journaled were neither replayed nor backlogged. The shape that lost
+        # them to a replay built from two snapshots (the journal as of the attach, then memory): more than two
+        # hundred records landed when the kernel attaches, so the replay reaches its drain, a kernel not reading
+        # yet and send buffers small enough (the seam) that the drain WAITS, and records the writer lands during
+        # that wait, gone from memory before a second pass could read them. Only a replay that resolves each
+        # offset at its own moment sends every record exactly once (the commit-8 review's item 9).
+        turns = 160                                                       # 1 init + 160 (assistant, result) pairs
+        total = 1 + 2 * turns
+        host, sock, spec = self._start(_test_journal_delay_s=0.01, _test_socket_small_buffers=True)
         k, _ = self._attach(sock)
-        for i in range(3):
-            k.send({"t": "in", "data": self._user("turn%d sleep=0.05" % i)})
-        first = k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result")
+        for i in range(turns):
+            k.send({"t": "in", "data": self._user("turn%d sleep=0" % i)})
+        k.recv_until(lambda f: sum(1 for g in k.outs() if g["data"].get("type") == "result") == turns, timeout=60)
         k.send({"t": "detach"}); k.close()
+        seg = Path(self.state) / "hosts" / SID / "journal-0.jsonl"
+        landed = lambda: sum(1 for _ in open(seg, "rb")) if seg.exists() else 0
+        deadline = time.time() + 30
+        while time.time() < deadline and landed() < 210:                  # loop-ok: the event is the writer's 210th record on disk
+            time.sleep(0.002)
+        self.assertLess(landed(), total, "records are still unwritten when the second kernel attaches (else the shape is not exercised)")
         k2, hello = self._attach(sock, ack=-1, pid=4343)
-        deadline = time.time() + 20
-        while time.time() < deadline and sum(1 for f in k2.outs() if f["data"].get("type") == "result") < 3:   # loop-ok
-            seen = {id(f) for f in k2.frames if f.get("t") == "pong"}
-            k2.send({"t": "ping"}); k2.recv_until(lambda f: f.get("t") == "pong" and id(f) not in seen)   # a NEW pong, so the read goes on
-            time.sleep(0.1)
+        self.assertEqual(hello["journal"]["next"], total, "the hello counted every record read, landed or not")
+        deadline = time.time() + 30
+        while time.time() < deadline and landed() < total:                # loop-ok: the writer landing the last record, while the replay waits on us
+            time.sleep(0.01)
+        self.assertEqual(landed(), total)
+        k2.recv_until(lambda f: sum(1 for g in k2.outs() if g["data"].get("type") == "result") == turns, timeout=60)
+        k2.send({"t": "ping"}); k2.recv_until(lambda f: f.get("t") == "pong")
         offs = [f["offset"] for f in k2.outs()]
-        self.assertEqual(offs, list(range(7)), "every record once, in order: the init and three (assistant, result) pairs, whether from disk, memory or the backlog; host log: %r"
-                         % [(r["kind"], r.get("at"), r.get("error")) for r in self._hostlog()][-12:])
-        self.assertGreaterEqual(hello["journal"]["next"], 4, "the hello counted records the writer had not landed yet")
+        self.assertEqual(offs, list(range(total)), "every record once, in order, whether from disk, memory or the backlog; host log: %r"
+                         % [(r["kind"], r.get("at"), r.get("error")) for r in self._hostlog()][-8:])
         k2.close()
 
     def test_an_end_right_after_a_line_lets_the_line_reach_the_cli_first(self):
         # finding d: `end` used to close stdin ahead of lines still queued on the pump
         host, sock, spec = self._start()
         k, _ = self._attach(sock)
-        k.send({"t": "in", "data": self._user("last words sleep=0.1")})
-        time.sleep(0.05)                                 # two socket reads on the host's side, not one
-        k.send({"t": "end", "grace": 20})
+        # one socket write carrying both frames: the host reads them together and queues the line, then the end
+        # sentinel, on the stdin pump; no sleep, no timing (the review's item 10)
+        k.s.sendall(sh.encode_frame({"t": "in", "data": self._user("last words sleep=0.1")}) + sh.encode_frame({"t": "end", "grace": 20}))
         ex = k.recv_until(lambda f: f.get("t") == "exit", timeout=15)
         self.assertEqual(ex["cause"], "end")
         self.assertIn("last words", open(self.fake_log).read(), "the queued line reached the CLI before its stdin closed")

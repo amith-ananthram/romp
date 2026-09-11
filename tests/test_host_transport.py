@@ -391,6 +391,138 @@ class BackendHostRules(unittest.TestCase):
         kinds = [json.loads(l)["kind"] for l in (Path(d) / sb.SESSION_EVENTS_FILE).read_text().splitlines()]
         self.assertIn("host.died", kinds)
 
+    # ── the fifth review fold (commit 10) ──
+    def _sdk_stub(self):
+        """claude_agent_sdk with a ClaudeSDKClient that is an async context manager and nothing else: the orphan
+        road imports it for the replay client; the replay itself is observed through from_journal and _replay_drain."""
+        mod = types.ModuleType("claude_agent_sdk")
+        class ClaudeSDKClient:
+            def __init__(self, options=None, transport=None): self.transport = transport
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+        mod.ClaudeSDKClient = ClaudeSDKClient
+        return mod
+
+    def _leftover(self, d, ident="5:h", records=3):
+        hd = ht.host_dir(d, SID); hd.mkdir(parents=True, exist_ok=True)
+        pid, start = ident.split(":")
+        (hd / "identity.json").write_text(json.dumps({"pid": int(pid), "start": start}))
+        with open(hd / "journal-0.jsonl", "w") as f:
+            for i in range(records):
+                f.write(json.dumps({"type": "assistant" if i % 2 == 0 else "result", "n": i}) + "\n")
+        return hd
+
+    def _kinds(self, d):
+        p = Path(d) / sb.SESSION_EVENTS_FILE
+        return [json.loads(l)["kind"] for l in p.read_text().splitlines()] if p.exists() else []
+
+    def test_with_the_setting_off_a_lease_less_leftover_is_replayed_and_cleared(self):
+        # item 1 (medium): the connect guard keyed on the lease alone, so a host that ended unattended (its lease
+        # removed) left its unconsumed tail and its directory behind for good with the setting off
+        d, be = self._be()
+        Path(d, "session-hosts").write_text("off")
+        sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID,
+                                     "hostAck": {"host": "5:h", "cli": "6:c", "offset": 0}, "hostLogPos": 3})
+        hd = self._leftover(d, "5:h", records=3)
+        s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False)
+        self.assertTrue(be._host_lease_applies(s), "a leftover directory is a host that held this session: the road runs whatever the setting")
+        acks, drained = [], []
+        async def drain(sess, client, msg_classes): drained.append(client.transport)
+        with mock.patch.dict(sys.modules, {"claude_agent_sdk": self._sdk_stub()}), \
+             mock.patch.object(ht.HostTransport, "from_journal", classmethod(lambda cls, hdir, ack=-1, **kw: acks.append(ack) or types.SimpleNamespace(hdir=hdir))), \
+             mock.patch.object(be, "_replay_drain", drain):
+            out = asyncio.run(be._host_transport_for(s, types.SimpleNamespace(), (None, None, None)))
+        self.assertIsNone(out, "the kill switch still holds: a plain SDK subprocess after the replay")
+        self.assertEqual(acks, [0], "the tail past the ack this host's identity vouches for was replayed")
+        self.assertEqual(len(drained), 1)
+        self.assertIn("host.tail-replayed", self._kinds(d))
+        self.assertFalse(hd.exists(), "the directory is cleared after the replay")
+        reg = sb.read_reg(Path(d), SID) or {}
+        self.assertNotIn("hostAck", reg); self.assertNotIn("hostLogPos", reg)
+        s2 = types.SimpleNamespace(sid=SID, name="web")
+        self.assertFalse(be._host_lease_applies(s2), "and nothing is left to apply")
+
+    def test_a_leftover_with_nothing_past_the_ack_files_no_tail_replayed_row(self):
+        # item 4: a failed spawn's leftovers (an empty journal, an identity, no lease) are cleared quietly
+        d, be = self._be()
+        sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID,
+                                     "hostAck": {"host": "5:h", "cli": "6:c", "offset": 2}})
+        hd = self._leftover(d, "5:h", records=3)          # offsets 0..2, all acknowledged
+        s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False)
+        with mock.patch.dict(sys.modules, {"claude_agent_sdk": self._sdk_stub()}), \
+             mock.patch.object(be, "_replay_drain", mock.AsyncMock()):
+            asyncio.run(be._host_orphan_recover(s, types.SimpleNamespace(), None, (None, None, None), died=False))
+        self.assertNotIn("host.tail-replayed", self._kinds(d), "nothing to replay, no row")
+        self.assertFalse(hd.exists())
+        (hd2 := self._leftover(d, "5:h", records=0))
+        with mock.patch.dict(sys.modules, {"claude_agent_sdk": self._sdk_stub()}), \
+             mock.patch.object(be, "_replay_drain", mock.AsyncMock()):
+            asyncio.run(be._host_orphan_recover(s, types.SimpleNamespace(), None, (None, None, None), died=False))
+        self.assertNotIn("host.tail-replayed", self._kinds(d), "an empty journal: no row either")
+        self.assertFalse(hd2.exists())
+
+    def test_the_orphan_road_trusts_hostack_only_for_the_host_that_wrote_the_identity(self):
+        # item 7: host A's acknowledged offset must not seed host B's replay
+        d, be = self._be()
+        sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID,
+                                     "hostAck": {"host": "1:a", "cli": "2:c", "offset": 1}})
+        self._leftover(d, "9:b", records=3)
+        s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False)
+        acks = []
+        capture = classmethod(lambda cls, hdir, ack=-1, **kw: acks.append(ack) or types.SimpleNamespace(hdir=hdir))
+        with mock.patch.dict(sys.modules, {"claude_agent_sdk": self._sdk_stub()}), \
+             mock.patch.object(ht.HostTransport, "from_journal", capture), mock.patch.object(be, "_replay_drain", mock.AsyncMock()):
+            asyncio.run(be._host_orphan_recover(s, types.SimpleNamespace(), None, (None, None, None), died=False))
+        self.assertEqual(acks, [-1], "another host's ack: the whole journal is replayed")
+        sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID,
+                                     "hostAck": {"host": "9:b", "cli": "2:c", "offset": 1}})
+        self._leftover(d, "9:b", records=3)
+        with mock.patch.dict(sys.modules, {"claude_agent_sdk": self._sdk_stub()}), \
+             mock.patch.object(ht.HostTransport, "from_journal", capture), mock.patch.object(be, "_replay_drain", mock.AsyncMock()):
+            asyncio.run(be._host_orphan_recover(s, types.SimpleNamespace(), None, (None, None, None), died=False))
+        self.assertEqual(acks, [-1, 1], "this host's ack: the replay starts past it")
+
+    def test_a_host_this_kernel_ended_gets_a_bounded_wait_for_its_lease_and_no_host_died_row(self):
+        # item 6: the behaviour, not the bookkeeping: an `end` this kernel asked for races the reconnect; the stale
+        # lease is waited out (bounded), never walked as a death
+        d, be = self._be()
+        Path(d, "session-hosts").write_text("off")
+        sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID})
+        sb.write_lease(d, {"sid": SID, "fsid": SID, "pid": 999999997, "start": "1", "holder": {"pid": 999999996, "start": "2", "kind": "host"}, "version": "", "t": time.time()})
+        be._host_recently_ended[SID] = "999999996:2"
+        s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False)
+        import threading
+        remover = threading.Timer(0.4, lambda: sb.remove_lease(d, SID)); remover.start()
+        try:
+            t0 = time.time()
+            with mock.patch.object(sb, "proc_start", lambda p, run=None: None), \
+                 mock.patch.object(be, "_host_orphan_recover", mock.AsyncMock()) as rec:
+                out = asyncio.run(be._host_transport_for(s, types.SimpleNamespace(), (None, None, None)))
+        finally:
+            remover.cancel()
+        self.assertIsNone(out)
+        self.assertGreaterEqual(time.time() - t0, 0.35, "the connect waited for the lease's removal")
+        self.assertIsNone(sb.read_lease(d, SID), "the host removed its lease; nothing of ours reaped it")
+        self.assertFalse(rec.called, "no orphan road: the host ended, it did not die")
+        self.assertNotIn("host.died", self._kinds(d))
+        self.assertNotIn(SID, be._host_recently_ended)
+
+    def test_an_attach_that_never_completes_stands_the_session_down_instead_of_the_crash_heal(self):
+        # item 3: past the retry bound on a wedged live host the failure used to run crash.heal then crash.loop and
+        # queue the crash-resume nudge for a CLI that never died
+        d, be = self._be()
+        sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID, "queue": ["kept"]})
+        s = types.SimpleNamespace(sid=SID, name="web", backend=be, inflight=1, detached=False, _reconnect=True,
+                                  _host_attach_retries=4, _host=types.SimpleNamespace(hello={"host": {"pid": 5, "start": "h"}}))
+        sb.SdkSession._host_stand_down(s, TimeoutError("initialize"))
+        self.assertTrue(s.detached, "detached: the session-gone path settles nothing and heals nothing")
+        self.assertFalse(s._reconnect); self.assertEqual((s.inflight, s._host_attach_retries), (0, 0))
+        kinds = self._kinds(d)
+        self.assertIn("host.attach-failed", kinds); self.assertNotIn("crash.heal", kinds)
+        rows = [json.loads(l) for l in (Path(d) / "states" / (SID + ".jsonl")).read_text().splitlines()]
+        self.assertEqual(rows[-1]["state"], "waiting", "waiting on its host; the next send tries the attach again")
+        self.assertEqual((sb.read_reg(Path(d), SID) or {}).get("queue"), ["kept"], "no crash-resume nudge")
+
 
 class Pins(unittest.TestCase):
     @unittest.skipUnless(SDK, "the SDK is not importable here")
@@ -414,6 +546,7 @@ class Pins(unittest.TestCase):
         self.assertIn('== "attach":', src, "boot attach-first")
         self.assertIn('append_session_event(self.state_dir, "host.attached"', src)
         self.assertIn("m.timeout = _ht().sh.HOOK_TIMEOUT_S", src, "hooks carry the bound under a host")
+        self.assertIn("self._host_stand_down(e)\n                    continue", src, "past the attach bound the session stands down, never the crash heal")
 
     def test_a_backend_with_hosts_off_touches_no_host_code_at_construction(self):
         d = tempfile.mkdtemp(); be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None)

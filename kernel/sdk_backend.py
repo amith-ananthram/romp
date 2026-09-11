@@ -6391,6 +6391,10 @@ class SdkSession:
                         self.inflight = 0
                         self._reconnect = True
                         continue
+                    # past the bound on a host that still lives: stand down, never the crash heal (whose resume
+                    # would put a second CLI beside the host's) and never a launch error for a CLI that is up
+                    self._host_stand_down(e)
+                    continue
                 if not connected:
                     # The CLI never came up. RECORD why, where the user can see it: this thread is about
                     # to die, and everything downstream of it (_on_session_gone settling 'waiting') is
@@ -6410,6 +6414,25 @@ class SdkSession:
                     self._host_intent = False
             if self.ended or not self._reconnect:
                 break        # drain ended on its own (process exit) or we're shutting down → done
+
+    def _host_stand_down(self, exc) -> None:
+        """Four attaches reached a live host and none completed (the initialize timed out each time: a wedged
+        host, or a CLI that never answers): the host keeps the CLI, and this session stands down from it: a
+        `host.attach-failed` problem row, the state settled `waiting` (on its host; the next send connects and
+        tries the attach again), the thread's exit marked a detach so the session-gone path neither heals nor
+        settles, and no crash-resume nudge: the CLI never died (the commit-8 review's item 3)."""
+        st = self.backend.state_dir
+        problem_row(st, "session %s: could not complete an attach to its live session host after %d tries (%s); the host keeps "
+                    "the CLI; the next message tries again" % (self.name, self._host_attach_retries, type(exc).__name__),
+                    "host.attach-failed", sid=self.sid, name=self.name, log=self.backend._log, tries=self._host_attach_retries)
+        self._host_attach_retries = 0
+        self.inflight = 0
+        self.detached = True
+        self._reconnect = False
+        try:
+            append_state(st, self.sid, "waiting")
+        except Exception as e:
+            self.backend._log("host (%s): stand-down state write failed: %s" % (self.name, e))
 
     def _rewind_failed(self, exc):
         """The CLI refused a rewind connect. Drop the one-shot flag (never re-offer a target the CLI just
@@ -9092,9 +9115,16 @@ class SdkBackend:
         return _ht().session_hosts_on(self.state_dir)
 
     def _host_lease_applies(self, sess) -> bool:
-        """A host holds (or held) this session: a live host lease must be attached and a dead host's journal
-        replayed, whatever the setting says now."""
-        return _ht().host_lease_state(read_lease(self.state_dir, sess.sid), time.time()) in ("attach", "orphan")
+        """A host holds (or held) this session: a live host lease must be attached, a dead host's journal
+        replayed, and a lease-less leftover (a host that ended unattended after its idle grace, removing its
+        lease, with records no kernel consumed) replayed and cleared, whatever the setting says now. Keyed on
+        the lease alone, the leftover was never entered with the setting off: its tail was lost and its
+        directory, hostAck and hostLogPos stood until the setting came back and the stale tail replayed into a
+        session that had run turns as a plain child since (the commit-8 review's item 1)."""
+        if _ht().host_lease_state(read_lease(self.state_dir, sess.sid), time.time()) in ("attach", "orphan"):
+            return True
+        hdir = _ht().host_dir(self.state_dir, sess.sid)
+        return (hdir / "identity.json").exists() or any(hdir.glob("journal-*.jsonl"))
 
     def _kernel_identity(self) -> dict:
         h = self._lease_holder()
@@ -9221,9 +9251,6 @@ class SdkBackend:
         if died:
             problem_row(self.state_dir, "the session host for %s died; its CLI finishes its turn, then the session resumes from "
                         "the transcript after the journal is replayed" % sess.name, "host.died", sid=sess.sid, name=sess.name, log=self._log)
-        else:
-            append_session_event(self.state_dir, "host.tail-replayed", sid=sess.sid, name=sess.name)
-            self._log("host (%s): the host ended unattended; replaying the journal's tail before resuming" % sess.name)
         if isinstance(lease, dict):
             try:
                 pid, start = int(lease.get("pid")), str(lease.get("start") or "")
@@ -9243,7 +9270,16 @@ class SdkBackend:
         except Exception:
             ident = None
         offset = int(ack.get("offset", -1)) if (ack and ident and str(ack.get("host") or "") == ident) else -1
-        if any(hdir.glob("journal-*.jsonl")):
+        has_tail = any(True for _ in ht.sh.read_journal_dir(hdir, offset + 1)) if any(hdir.glob("journal-*.jsonl")) else False
+        if not died:
+            if has_tail:
+                # a row only when there IS a tail: a failed spawn's leftovers (an empty journal, an identity, no
+                # lease) are cleared quietly (the commit-8 review's item 4)
+                append_session_event(self.state_dir, "host.tail-replayed", sid=sess.sid, name=sess.name)
+                self._log("host (%s): the host ended unattended; replaying the journal's tail before resuming" % sess.name)
+            else:
+                self._log("host (%s): clearing a host directory with nothing past the acknowledged offset" % sess.name)
+        if has_tail:
             from claude_agent_sdk import ClaudeSDKClient
             replay = ht.HostTransport.from_journal(hdir, ack=offset)
             try:
@@ -9254,7 +9290,7 @@ class SdkBackend:
             self._log("host (%s): replayed the orphan journal from offset %d" % (sess.name, offset + 1))
         remove_lease(self.state_dir, sess.sid)
         shutil.rmtree(str(hdir), ignore_errors=True)
-        self._update_reg_dropping(sess.sid, drop=("hostAck",))
+        self._update_reg_dropping(sess.sid, drop=("hostAck", "hostLogPos"))
 
     async def _replay_drain(self, sess, client, msg_classes):
         AssistantMessage, ResultMessage, SystemMessage = msg_classes
