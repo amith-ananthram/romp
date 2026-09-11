@@ -47433,8 +47433,9 @@ window.addEventListener('message',function(e){var m=e.data;if(m&&m.romp==='usage
 _TIMELINE_AXIS_PARTS = (r"^const NICE = \[[^\n]*\];", r"^function clock\(t\) \{[^\n]*\}", r"^function niceStep\(W\) \{[^\n]*\}")
 
 
-_TIMELINE_AXIS_MEMO = [None, None]   # (the view file's mtime_ns, the lifted script): re-read only when the file changes, so an edit
-#                                      still goes live while the landing's hot path pays one stat (review find)
+_TIMELINE_AXIS_MEMO = [None]   # [(the view file's key, the lifted script)] as ONE tuple: re-read only when the file changes, so an
+#                                edit still goes live while the landing's hot path pays one stat; one slot, so two GETs overlapping an
+#                                edit can never pair a new key with an old lift (review find)
 
 
 def _timeline_axis_js():
@@ -47447,22 +47448,29 @@ def _timeline_axis_js():
     landing GET never re-reads or re-reports); the histograms then draw their gridlines with no clocks rather than a
     second, drifting formatter."""
     p = UI / "romp-timeline-view.js"
+    stat_err = None
     try:
         key = p.stat().st_mtime_ns
-    except OSError:
-        key = "missing"
-    if _TIMELINE_AXIS_MEMO[0] == key and _TIMELINE_AXIS_MEMO[1]:
-        return _TIMELINE_AXIS_MEMO[1]
+    except OSError as e:
+        key, stat_err = "missing", e
+    held = _TIMELINE_AXIS_MEMO[0]
+    if held and held[0] == key:
+        return held[1]
     try:
-        if key == "missing":
-            raise FileNotFoundError(str(p))
+        if stat_err is not None:
+            raise OSError("%s: %s" % (p, stat_err.strerror or stat_err))
         src = p.read_text()
-        parts = [re.search(p_, src, re.M).group(0) for p_ in _TIMELINE_AXIS_PARTS]
+        parts = []
+        for p_ in _TIMELINE_AXIS_PARTS:
+            m = re.search(p_, src, re.M)
+            if m is None:
+                raise ValueError("%s: no line matches %s (the view's formatter moved or was reformatted)" % (p, p_))
+            parts.append(m.group(0))
         out = "window.__rompTimelineAxis=(function(){" + "\n".join(parts) + "\nreturn {NICE:NICE,clock:clock,niceStep:niceStep};})();"
     except Exception as e:
         sys.stderr.write("timeline axis lift: the API health histograms draw no clocks: %s\n" % e)
         out = "window.__rompTimelineAxis=null;"
-    _TIMELINE_AXIS_MEMO[0], _TIMELINE_AXIS_MEMO[1] = key, out
+    _TIMELINE_AXIS_MEMO[0] = (key, out)
     return out
 
 
@@ -47491,6 +47499,7 @@ var range='day';
 function SELF(){return (LAST&&LAST.host)||'this machine';}   // this kernel's own name, from its frame (T316)
 var STATE_WORD={thrashing:'rate-limit storm',degraded:'API failing',recovering:'recovering',healthy:'fine',unknown:'quiet'};
 var tip=document.createElement('div');tip.id='ah-tip';tip.style.display='none';
+if(window.ResizeObserver)new ResizeObserver(function(){fitAxisLabels(tip);}).observe(tip);   // the labels' fit follows the tip's width (the pinned detail is min(720px, 92vw))
 tip.setAttribute('role','tooltip');tip.setAttribute('aria-label','API health');tip.tabIndex=-1;document.body.appendChild(tip);
 // what the cell is described by while the hover shows (aria-describedby): a SHORT visually-hidden summary, refreshed
 // when the read lands, never the tip's whole text (the tip runs to hundreds of characters of rows, and at focus time,
@@ -50085,7 +50094,7 @@ def _landing():
             # apart before the first frame and jumped when the dot appeared)
             ".ah-slot{display:contents}"
             # the detail card's own rows, in the tip's font and palette (#ah-tip shares #ru-tip's skin below)
-            ".ah-head{gap:7px}.ah-word{font-weight:700;color:#e8eef5}.ah-since{opacity:.55;margin-left:auto}"
+            ".ah-head{gap:7px}.ah-word{font-weight:700;color:#e8eef5}.ah-since{color:#8b939c;margin-left:auto}"
             ".ah-line{margin-top:4px;max-width:340px}"
             ".ah-btn{margin-top:6px;font:inherit;padding:3px 9px;border-radius:5px;border:1px solid #3a3a3a;background:#2a2a2a;color:#cfd6dd;cursor:pointer}"
             ".ah-btn[disabled]{opacity:.55;cursor:default}#ah-tip .romp-acted{opacity:.6}"
@@ -50110,7 +50119,7 @@ def _landing():
             # failure line's precedent is #ef6b6f dark / #B02A1C light): 429 the error-text red, 5xx a lighter magenta in
             # the dark, a deeper one in the light; the swatches and the bars keep the chip colours
             ".ah-c-ok{color:var(--accent,#9cd2ff)}.ah-c-r429{color:#ef6b6f}.ah-c-r5xx{color:#e879f9}"
-            ".ah-c-none{color:#d9f99d}.ah-mline .ah-desc{opacity:1}.ah-mline .ah-c-plain{opacity:.85}"
+            ".ah-c-none{color:#d9f99d}.ah-mline .ah-desc{opacity:1}.ah-mline .ah-c-plain{color:#a9b1ba}"
             ".ah-win,.ah-ago{margin-left:auto}"
             # the legend carries no group opacity (T340 review: a descendant cannot exceed its group's, so a faded legend put every
             # coloured token under 4.5:1); only the explanation span is dimmed, the tokens stand at full strength
@@ -50137,7 +50146,7 @@ def _landing():
             # pinned card, which scrolls as before.
             ".ah-hword{opacity:.8}.ah-hsub{opacity:.55}.ah-boot .ah-hword{font-style:italic;opacity:.6}"
             # the graph (T301): the usage hover's own .ru-tip-graph grammar; the legend and the machine lines are sub-lines
-            ".ah-legend{margin-top:4px;max-width:340px}.ah-mline{gap:7px}.ah-mline .ah-desc{opacity:.9}"
+            ".ah-legend{margin-top:4px;max-width:340px}.ah-mline{gap:7px}"
             ".ah-hname{margin-top:6px}.ah-err{color:#ef6b6f}.ah-wait{margin:5px 0 2px}"
             ".ah-row.ah-ro{cursor:default}.ah-row.ah-ro:hover{background:transparent}"
             "#ah-tip:focus{outline:none}#ah-tip{overflow:hidden;box-sizing:border-box}"
@@ -50245,9 +50254,11 @@ def _landing():
             ".ru-tip-graph{position:relative;margin-top:4px}"
             ".ru-tip-graph svg{display:block;width:100%;height:56px;background:rgba(255,255,255,0.04);"
             "border-radius:3px}"
-            ".ru-tip-gy{position:absolute;left:3px;font-size:8px;opacity:.5;line-height:1;"
+            # the graph's small labels (the ceiling, the axis clocks) are muted by COLOUR at opacity 1 (T338 review: at 50% the
+            # clocks sat at 3.85:1 dark and 3.27:1 light); the inks clear 4.5:1 on each card at 8 px
+            ".ru-tip-gy{position:absolute;left:3px;font-size:8px;color:#8b939c;line-height:1;"
             "pointer-events:none;transform:translateY(1px)}"
-            ".ru-tip-gx{position:relative;height:9px;margin-top:1px;font-size:8px;opacity:.5}"
+            ".ru-tip-gx{position:relative;height:9px;margin-top:1px;font-size:8px;color:#8b939c}"
             ".ru-tip-gx span{position:absolute;transform:translateX(-50%);line-height:1}"
             ".ru-tip-track i{display:block;height:100%;border-radius:3px;transition:width .3s ease}"
             # margin-left:auto right-aligns every value to one edge, so the bar rows and the numbers-only
@@ -50567,7 +50578,8 @@ def _landing():
             "body.theme-light .ah-word{color:#1F1E1D}"
             "body.theme-light .ah-btn{background:#F1EAE2;border-color:rgba(0,0,0,0.12);color:#1F1E1D}"
             "body.theme-light .ah-row:hover{background:rgba(0,0,0,0.05)}"
-            "body.theme-light .ah-row .ah-desc{color:#5D574E}"
+            "body.theme-light .ah-row .ah-desc{color:#5D574E}body.theme-light .ah-mline .ah-c-plain{color:#5D574E}body.theme-light .ah-since{color:#6b6560}"
+            "body.theme-light .ru-tip-gy{color:#6b6560}body.theme-light .ru-tip-gx{color:#6b6560}"
             "body.theme-light .ah-row.ah-ro:hover{background:transparent}"
             "body.theme-light .ah-foot{border-top-color:rgba(0,0,0,0.10)}"
             "body.theme-light .ru-track{background:rgba(0,0,0,0.10)}"

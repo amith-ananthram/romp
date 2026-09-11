@@ -36,8 +36,8 @@ JS = km._LANDING_APIH_JS
 
 class TimelineAxisLift(unittest.TestCase):
     def setUp(self):
-        km._TIMELINE_AXIS_MEMO[:] = [None, None]
-        self.addCleanup(lambda: km._TIMELINE_AXIS_MEMO.__setitem__(slice(None), [None, None]))
+        km._TIMELINE_AXIS_MEMO[:] = [None]
+        self.addCleanup(lambda: km._TIMELINE_AXIS_MEMO.__setitem__(slice(None), [None]))
 
     def test_the_lift_is_the_views_own_three_lines_verbatim(self):
         js = km._timeline_axis_js()
@@ -51,7 +51,7 @@ class TimelineAxisLift(unittest.TestCase):
         self.assertIn("function niceStep(W) { for (const s of NICE) if (W / s <= 8) return s;", js, "the nice step: eight intervals")
         # memoized on the view's mtime: the second call returns the held string without a read
         mt = pathlib.Path(ROOT, "ui", "romp-timeline-view.js").stat().st_mtime_ns
-        self.assertEqual(km._TIMELINE_AXIS_MEMO[0], mt)
+        self.assertEqual(km._TIMELINE_AXIS_MEMO[0], (mt, js), "one tuple: the key and its lift can never be paired across two GETs")
         self.assertIs(km._timeline_axis_js(), js)
 
     def test_a_missing_view_publishes_null_and_says_so_once(self):
@@ -67,7 +67,8 @@ class TimelineAxisLift(unittest.TestCase):
         lines = [ln for ln in err.getvalue().splitlines() if ln]
         self.assertEqual(len(lines), 1, "said ONCE, not on every landing GET: %r" % lines)
         self.assertTrue(lines[0].startswith("timeline axis lift: the API health histograms draw no clocks:"), lines[0])
-        self.assertEqual(km._TIMELINE_AXIS_MEMO[0], "missing")
+        self.assertIn("romp-timeline-view.js", lines[0], "the file is named"); self.assertIn("No such file", lines[0], "and the stat's own reason")
+        self.assertEqual(km._TIMELINE_AXIS_MEMO[0][0], "missing")
         # a view whose lines moved: the null is memoized under that file version, said once
         view = pathlib.Path(tmp, "romp-timeline-view.js")
         view.write_text("// not the view\n")
@@ -75,8 +76,10 @@ class TimelineAxisLift(unittest.TestCase):
         with contextlib.redirect_stderr(err2):
             self.assertEqual(km._timeline_axis_js(), "window.__rompTimelineAxis=null;")
             self.assertEqual(km._timeline_axis_js(), "window.__rompTimelineAxis=null;")
-        self.assertEqual(len([ln for ln in err2.getvalue().splitlines() if ln]), 1)
-        self.assertEqual(km._TIMELINE_AXIS_MEMO[0], view.stat().st_mtime_ns)
+        moved = [ln for ln in err2.getvalue().splitlines() if ln]
+        self.assertEqual(len(moved), 1)
+        self.assertIn("no line matches", moved[0], "the part is named, not a NoneType's attribute"); self.assertIn("const NICE", moved[0])
+        self.assertEqual(km._TIMELINE_AXIS_MEMO[0][0], view.stat().st_mtime_ns)
         # the popup then draws gridlines at the quarters with no clocks rather than a second formatter's guesses
         self.assertIn("if(!TL){var q=[];for(var i=1;i<4;i++)q.push({x:i/4*W,label:'',date:false});return q;}", JS)
 
@@ -127,6 +130,11 @@ class LegendRowsAndBand(unittest.TestCase):
         # a waiting row's words are muted by colour at opacity 1, so the 429/529 tokens inside keep their inks whole
         self.assertIn(".ah-row .ah-desc{opacity:1;color:#a9b1ba}", html)
         self.assertIn("body.theme-light .ah-row .ah-desc{color:#5D574E}", html)
+        # the machine lines' plain words and the since stamp, and the graph's small labels: colour, never opacity
+        self.assertIn(".ah-mline .ah-c-plain{color:#a9b1ba}", html); self.assertNotIn(".ah-mline .ah-desc{opacity:.9}", html)
+        self.assertIn(".ah-since{color:#8b939c;margin-left:auto}", html); self.assertIn("body.theme-light .ah-since{color:#6b6560}", html)
+        self.assertIn(".ru-tip-gx{position:relative;height:9px;margin-top:1px;font-size:8px;color:#8b939c}", html)
+        self.assertIn("body.theme-light .ru-tip-gx{color:#6b6560}", html); self.assertNotIn("font-size:8px;opacity:.5", html)
 
     def test_the_other_bands_hue_per_theme_and_the_inks_that_follow_it(self):
         html = km._landing()

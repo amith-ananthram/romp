@@ -48,9 +48,10 @@ test("the kernel lifts the timeline's clock, NICE and niceStep by regexes that m
   assert.match(KERNEL, /def _timeline_axis_js\(\):/);
   assert.match(KERNEL, /out = "window\.__rompTimelineAxis=\(function\(\)\{" \+ "\\n"\.join\(parts\) \+ "\\nreturn \{NICE:NICE,clock:clock,niceStep:niceStep\};\}\)\(\);"/);
   assert.match(KERNEL, /out = "window\.__rompTimelineAxis=null;"/, "a missing file or a moved line publishes null, said on stderr");
-  assert.match(KERNEL, /key = "missing"/, "a missing file has its own memo key");
-  assert.match(KERNEL, /if _TIMELINE_AXIS_MEMO\[0\] == key and _TIMELINE_AXIS_MEMO\[1\]:\n\s*return _TIMELINE_AXIS_MEMO\[1\]/, "memoized on the view's mtime, the null too: one stat per landing, one stderr line per file version");
-  assert.match(KERNEL, /_TIMELINE_AXIS_MEMO\[0\], _TIMELINE_AXIS_MEMO\[1\] = key, out/);
+  assert.match(KERNEL, /key, stat_err = "missing", e/, "a missing file has its own memo key, and the stat's reason rides the line");
+  assert.match(KERNEL, /held = _TIMELINE_AXIS_MEMO\[0\]\n\s*if held and held\[0\] == key:\n\s*return held\[1\]/, "memoized on the view's mtime, the null too: one stat per landing, one stderr line per file version");
+  assert.match(KERNEL, /_TIMELINE_AXIS_MEMO\[0\] = \(key, out\)/, "one tuple: the key and its lift never pair across two GETs");
+  assert.match(KERNEL, /raise ValueError\("%s: no line matches %s \(the view's formatter moved or was reformatted\)" % \(p, p_\)\)/, "the failure names the part and the file");
   assert.ok(KERNEL.includes('"<script>" + _timeline_axis_js() + _LANDING_APIH_JS + "</script>"'), "ahead of the script that reads it, in the same element");
   assert.ok(APIH.includes("var TL=window.__rompTimelineAxis||null;"));
   assert.ok(APIH.includes("var step=TL.niceStep(span)"), "the timeline's tick rule");
@@ -119,7 +120,7 @@ test("across daylight saving: every day tick is a local midnight, the transition
 test("which labels stand is decided from measured boxes: overlaps yield left to right, a day's date takes its slot from the clock before it", () => {
   const { fitLabels } = world();
   const box = (x: number, date = false) => ({ x, w: 24, date });
-  // eight clocks 21 px apart (the hover's 24-hour axis at its real width): every other one yields
+  // eight clocks 21 units apart with 24-unit boxes (the hover's 24-hour axis measured in viewBox units): every other one yields
   assert.deepEqual(fitLabels([0, 21, 42, 63, 84, 105, 126, 147].map((x) => box(x)), 4), [true, false, true, false, true, false, true, false]);
   // the same, with the date on the tick that would have yielded: it stands and the clock before it yields
   assert.deepEqual(fitLabels([box(0), box(21), box(42), box(63, true), box(84), box(105)], 4), [true, false, false, true, false, true]);
@@ -173,27 +174,95 @@ function composite(ink: string, surface: string, alpha: number): string {
   return "#" + a.map((v, i) => Math.round(v * alpha + b[i] * (1 - alpha)).toString(16).padStart(2, "0")).join("");
 }
 const contrast = (ink: string, surface: string, alpha: number) => { const l1 = lum(composite(ink, surface, alpha)), l2 = lum(surface); return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05); };
-function opacityOf(selectorRule: RegExp): number { const m = KERNEL.match(selectorRule); assert.ok(m, selectorRule.source); const o = m![1].match(/opacity:([\d.]+)/); return o ? parseFloat(o[1]) : 1; }
 
-test("T340: the tokens stand at full strength: no group opacity over the legend or a waiting row's words, and every token ink clears 4.5:1 on its card", () => {
-  // the group rules carry no opacity (a descendant cannot exceed its group's); only the explanation span and the words are muted
-  assert.equal(opacityOf(/\.ah-legend\{([^}]*)\}"\n\s*"\.ah-lrow\{/), 1, "the legend's layout rule");
-  assert.equal(opacityOf(/"\.ah-legend\{([^}]*)\}\.ah-mline\{gap:7px\}/), 1, "the legend's later size rule (the stale .6 is gone)");
-  assert.equal((KERNEL.match(/\.ah-legend\{[^}]*opacity/g) || []).length, 0, "no .ah-legend rule fades");
-  assert.ok(KERNEL.includes(".ah-lrow > span:last-child{opacity:.75}"), "the explanation alone is dimmed");
-  assert.ok(KERNEL.includes(".ah-row .ah-desc{opacity:1;color:#a9b1ba}"), "a waiting row's words are muted by colour at opacity 1");
-  assert.ok(KERNEL.includes("body.theme-light .ah-row .ah-desc{color:#5D574E}"));
-  assert.equal(opacityOf(/"\.ah-lrow\{[^}]*\}\.ah-lt\{([^}]*)\}/), 1, "the token wears no opacity of its own");
-  // the inks over the cards, at the effective opacity 1: the dark tip is #1e1e1e, the light tip white
-  const inks: Array<[string, string, string]> = [["429", "#ef6b6f", "#B02A1C"], ["5xx", "#e879f9", "#86198F"], ["other", "#d9f99d", "#4f46e5"]];
-  for (const [name, dark, light] of inks) {
-    assert.ok(contrast(dark, "#1e1e1e", 1) >= 4.5, `${name} dark ${contrast(dark, "#1e1e1e", 1).toFixed(2)}:1`);
-    assert.ok(contrast(light, "#FFFFFF", 1) >= 4.5, `${name} light ${contrast(light, "#FFFFFF", 1).toFixed(2)}:1`);
+// The landing's CSS, read off the kernel's string literals: every `selector{declarations}` in source order. An element chain
+// (root first; each element its tag, id and classes, and whether it is the last child) is walked against every rule whose
+// compounds match it and its ancestors in order (descendant and child combinators alike; pseudo-classes other than
+// :last-child, and hover rules, are skipped), so the EFFECTIVE opacity of a token is the product of every matching rule's
+// last opacity on the way down: a fade re-introduced on any ancestor (#ah-tip, .ru-tip-win, .ah-legend, .ah-lrow, .ah-row,
+// .ah-desc) fails the floor below, not only the three rules this test happens to name.
+type El = { tag?: string; id?: string; classes: string[]; last?: boolean };
+const RULES: Array<{ sel: string; decl: string }> = [];
+for (const m of KERNEL.matchAll(/"((?:[^"\\]|\\.)*)"/g)) {
+  const text = m[1];
+  if (!/\{[^{}]*\}/.test(text) || /^\s*[<{]/.test(text)) continue;
+  for (const r of text.matchAll(/([^{}]+)\{([^{}]*)\}/g)) for (const sel of r[1].split(",")) RULES.push({ sel: sel.trim(), decl: r[2] });
+}
+assert.ok(RULES.length > 200, "the landing's rules were found: " + RULES.length);
+function compoundMatches(comp: string, el: El): boolean {
+  if (/:hover|:focus|\[hidden\]|::/.test(comp)) return false;
+  const last = /:last-child/.test(comp); comp = comp.replace(/:last-child/g, "");
+  if (last && !el.last) return false;
+  const parts = comp.match(/#[\w-]+|\.[\w-]+|^[a-z][\w-]*/g) || [];
+  if (!parts.length) return false;
+  return parts.every((p) => (p[0] === "#" ? el.id === p.slice(1) : p[0] === "." ? el.classes.includes(p.slice(1)) : el.tag === p));
+}
+function ruleMatches(sel: string, chain: El[]): boolean {
+  const comps = sel.replace(/\s*>\s*/g, " > ").trim().split(/\s+/).filter((c) => c !== ">");
+  // the last compound is the element itself; earlier ones match ancestors in order (any gap, as a descendant combinator)
+  if (!compoundMatches(comps[comps.length - 1], chain[chain.length - 1])) return false;
+  let ai = chain.length - 2;
+  for (let ci = comps.length - 2; ci >= 0; ci--) {
+    while (ai >= 0 && !compoundMatches(comps[ci], chain[ai])) ai--;
+    if (ai < 0) return false;
+    ai--;
   }
-  // and the muted words themselves still read
-  assert.ok(contrast("#a9b1ba", "#1e1e1e", 1) >= 4.5); assert.ok(contrast("#5D574E", "#FFFFFF", 1) >= 4.5);
-  // the failure the review found, for the record: the same inks under the old 60% fade sat under the floor
+  return true;
+}
+function effectiveOpacity(chain: El[]): number {
+  let alpha = 1;
+  for (let depth = 1; depth <= chain.length; depth++) {
+    const sub = chain.slice(0, depth);
+    let own: number | null = null;
+    for (const r of RULES) { if (!ruleMatches(r.sel, sub)) continue; const o = r.decl.match(/(?:^|;)\s*opacity:\s*([\d.]+)/); if (o) own = parseFloat(o[1]); }
+    if (own != null) alpha *= own;
+  }
+  return alpha;
+}
+const body = (light: boolean): El => ({ tag: "body", classes: light ? ["theme-light"] : [] });
+const TIP: El = { tag: "div", id: "ah-tip", classes: [] };
+const chains = (light: boolean) => ({
+  legendToken: [body(light), TIP, { tag: "div", classes: ["ru-tip-win", "ah-hist"] }, { tag: "div", classes: ["ah-legend"] }, { tag: "div", classes: ["ah-lrow"] }, { tag: "span", classes: ["ah-lt", "ah-c-r429"] }],
+  legendWords: [body(light), TIP, { tag: "div", classes: ["ru-tip-win", "ah-hist"] }, { tag: "div", classes: ["ah-legend"] }, { tag: "div", classes: ["ah-lrow"] }, { tag: "span", classes: [], last: true }],
+  rowToken: [body(light), TIP, { tag: "div", classes: ["ru-tip-win"] }, { tag: "div", classes: ["ru-tip-row", "ah-row"] }, { tag: "span", classes: ["ah-desc"], last: true }, { tag: "span", classes: ["ah-c-r5xx"] }],
+  lineToken: [body(light), TIP, { tag: "div", classes: ["ru-tip-win"] }, { tag: "div", classes: ["ru-tip-row", "ah-mline"] }, { tag: "span", classes: ["ah-desc"] }, { tag: "span", classes: ["ah-c-ok"] }],
+  axisLabel: [body(light), TIP, { tag: "div", classes: ["ru-tip-win", "ah-hist"] }, { tag: "div", classes: ["ru-tip-graph", "ah-bars"] }, { tag: "div", classes: ["ru-tip-gx"] }, { tag: "span", classes: [] }],
+  since: [body(light), TIP, { tag: "div", classes: ["ru-tip-win"] }, { tag: "div", classes: ["ru-tip-row", "ah-mline"] }, { tag: "span", classes: ["ah-since"] }],
+});
+
+test("T340: every token stands at full strength: the effective opacity of its whole ancestor chain is 1, and every ink clears 4.5:1 on its card", () => {
+  // the walk sees fades where they are: the legend's explanation span, and the historical .ah-desc rule off a machine line
+  assert.equal(effectiveOpacity(chains(false).legendWords), 0.75, "the explanation span alone is dimmed");
+  assert.equal(effectiveOpacity([body(false), TIP, { tag: "div", classes: ["ru-tip-win"] }, { tag: "div", classes: ["ru-tip-row"] }, { tag: "span", classes: ["ah-desc"] }]), 0.75, "a bare description keeps its fade (a row's and a line's are lifted)");
+  for (const light of [false, true]) {
+    const c = chains(light), surface = light ? "#FFFFFF" : "#1e1e1e";
+    for (const name of ["legendToken", "rowToken", "lineToken", "axisLabel", "since"] as const) {
+      assert.equal(effectiveOpacity(c[name]), 1, `${name} (${light ? "light" : "dark"}): no ancestor fades it`);
+    }
+    // the inks, each composited at the chain's effective opacity (1 here; a re-introduced fade would lower the ratio)
+    const ink: Record<string, string> = light
+      ? { legendToken: "#B02A1C", rowToken: "#86198F", lineToken: "#C2410C", axisLabel: "#6b6560", since: "#6b6560", other: "#4f46e5", words: "#5D574E" }
+      : { legendToken: "#ef6b6f", rowToken: "#e879f9", lineToken: "#9cd2ff", axisLabel: "#8b939c", since: "#8b939c", other: "#d9f99d", words: "#a9b1ba" };
+    for (const [name, hex] of Object.entries(ink)) {
+      const alpha = name in c ? effectiveOpacity((c as any)[name]) : 1;
+      const ratio = contrast(hex, surface, alpha);
+      assert.ok(ratio >= 4.5, `${name} ${light ? "light" : "dark"} ${hex} at ${alpha}: ${ratio.toFixed(2)}:1`);
+    }
+  }
+  // the CSS the walk reads, pinned in words too
+  assert.ok(KERNEL.includes(".ah-lrow > span:last-child{opacity:.75}"), "the explanation alone is dimmed");
+  assert.ok(KERNEL.includes(".ah-row .ah-desc{opacity:1;color:#a9b1ba}") && KERNEL.includes("body.theme-light .ah-row .ah-desc{color:#5D574E}"), "a waiting row's words: colour at opacity 1");
+  assert.ok(KERNEL.includes(".ah-mline .ah-c-plain{color:#a9b1ba}") && !KERNEL.includes(".ah-mline .ah-desc{opacity:.9}"), "a machine line's plain words: colour, the .9 gone");
+  assert.ok(KERNEL.includes(".ah-since{color:#8b939c;margin-left:auto}"), "the since stamp: colour");
+  assert.ok(KERNEL.includes(".ru-tip-gx{position:relative;height:9px;margin-top:1px;font-size:8px;color:#8b939c}") && KERNEL.includes("body.theme-light .ru-tip-gx{color:#6b6560}"), "the axis clocks: colour at opacity 1 (shared with the usage tip's graph)");
+  assert.ok(!KERNEL.includes("font-size:8px;opacity:.5"), "no half-strength small labels");
+  assert.equal((KERNEL.match(/\.ah-legend\{[^}]*opacity/g) || []).length, 0, "no .ah-legend rule fades");
+  // the failure the review found, for the record: the same inks under the old 60% and 50% fades sat under the floor
   assert.ok(contrast("#ef6b6f", "#1e1e1e", 0.6) < 4.5 && contrast("#B02A1C", "#FFFFFF", 0.6) < 4.5);
+  // the fit hides by the [hidden] attribute: the label rule sets no display an author rule could defeat it with
+  const gxSpan = RULES.find((r) => r.sel === ".ru-tip-gx span");
+  assert.ok(gxSpan && !/display\s*:/.test(gxSpan.decl), "no author display rule on .ru-tip-gx span");
+  assert.ok(APIH.includes("if(window.ResizeObserver)new ResizeObserver(function(){fitAxisLabels(tip);}).observe(tip);"), "the fit follows the tip's width");
 });
 
 test("T340: the other band's hue per theme, and the inks and fills that follow it", () => {
