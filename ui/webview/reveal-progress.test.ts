@@ -2,11 +2,13 @@
 // waited on a blank, and asked for at least a progress bar). On the index wire the reveal of a far-past anchor is a
 // fetch-until-resident loop (scrollToAnchor kicks loadOlder, chatHead prepends the chunk, the re-land kicks again).
 // While it runs, one quiet line says how far along it is: "Loading older messages…" with an HONEST fraction as a
-// thin bar when the anchor's moment makes one derivable (the resident span over the span back to the anchor), the
-// count of older messages loaded and the oldest loaded time otherwise. It hangs off the loop's start and end and
-// nothing else, and never begins for a session without the index wire's headFrom count (the one-round-trip window
-// of T323 stage 4b). The pure module is exercised directly; chatHead, fetchOlderForAnchor and the state machine are
-// lifted from render.ts and driven over a fake DOM with two chunk answers; source pins hold the seams.
+// thin bar when the anchor turn's own moment makes one derivable (the resident span over the span back to that
+// moment; the moment is the kernel's anchorEventT carried on the seek, never the card's time, which is the card's
+// newest activity), the count of older messages loaded and the oldest loaded time otherwise. It hangs off the loop's
+// start and end and nothing else, and never begins for a session without the index wire's headFrom count (the
+// one-round-trip window of T323 stage 4b). The pure module is exercised directly; chatHead, fetchOlderForAnchor,
+// showSeekNote and the state machine are lifted from render.ts and driven over a fake DOM with two chunk answers;
+// source pins hold the seams.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -18,6 +20,7 @@ import { markerLabel } from "./time-marker";
 const requireCjs = createRequire(__filename);
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
+const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
 
 // ── the pure module ──────────────────────────────────────────────────────────────────────────────────────────
 
@@ -33,6 +36,16 @@ test("the fraction is the resident span over the span back to the anchor, or abs
   assert.equal(MOD.revealFraction(10_000, 4_000, 5_000), null);
 });
 
+test("what the bar shows is floored and held below complete: rounding can never paint 100% before the event lands", () => {
+  assert.equal(MOD.revealShownFraction(0.9996), 0.999);
+  assert.equal(MOD.revealShownFraction(0.33749), 0.337);
+  assert.equal(MOD.revealShownFraction(0), 0);
+  assert.equal(MOD.revealPercentWords(0.9996), "99% of the way back");
+  assert.equal(MOD.revealPercentWords(0.996), "99% of the way back");
+  assert.equal(MOD.revealPercentWords(0.337), "33% of the way back", "floored, never rounded up");
+  assert.equal(MOD.revealPercentWords(0), "0% of the way back");
+});
+
 test("the resident span skips timeless events at both ends", () => {
   const epoch = (e: { t?: number }) => (typeof e.t === "number" ? e.t : null);
   assert.deepEqual(MOD.residentSpan([{}, { t: 5 }, { t: 6 }, {}, { t: 9 }, {}], epoch), { oldestT: 5, newestT: 9 });
@@ -40,9 +53,14 @@ test("the resident span skips timeless events at both ends", () => {
   assert.deepEqual(MOD.residentSpan([], epoch), { oldestT: null, newestT: null });
 });
 
+test("the count is of messages: turns and postal cards, not the tool atoms, thinking and notices between them", () => {
+  assert.equal(MOD.messageCount([{ kind: "user" }, { kind: "tool" }, { kind: "thinking" }, { kind: "assistant" }, { kind: "notice" }, { kind: "postal-service" }, {}]), 3);
+  assert.equal(MOD.messageCount([]), 0);
+});
+
 test("the count words: how many older messages landed and how far back the history now reaches, in the rail's clock words", () => {
-  const now = Date.UTC(2026, 8, 11, 20, 0, 0);
-  const today = Math.floor(now / 1000) - 3 * 3600;                 // three hours ago, the same day in every zone this test runs in
+  const now = Date.UTC(2026, 8, 11, 12, 0, 0);
+  const today = Math.floor(now / 1000) - 3 * 3600;                 // 12:00Z and 09:00Z share a local day at every offset from -12 to +14
   const hm = markerLabel(today, null, now).hm;
   assert.equal(MOD.revealCountWords(0, today, now), "back to " + hm, "before the first chunk lands only the reach is known");
   assert.equal(MOD.revealCountWords(1, today, now), "1 older message loaded · back to " + hm);
@@ -52,7 +70,6 @@ test("the count words: how many older messages landed and how far back the histo
   assert.ok(m.date, "a moment nine days back carries a date word");
   assert.equal(MOD.revealCountWords(500, lastWeek, now), `500 older messages loaded · back to ${m.date} ${m.hm}`);
   assert.equal(MOD.revealCountWords(0, null, now), "", "no resident event carries a time: nothing to say yet");
-  assert.equal(MOD.revealPercentWords(0.337), "34% of the way back");
   assert.equal(MOD.REVEAL_LABEL, "Loading older messages…");
 });
 
@@ -73,6 +90,7 @@ class FakeEl {
     return null;
   }
   querySelector(sel: string) { const cls = sel.slice(1); return this.find((e) => e.className.split(" ").includes(cls)); }
+  set tabIndex(_v: number) { /* the seek note sets it */ }
 }
 function fakeDocument() {
   const body = new FakeEl("body");
@@ -88,7 +106,8 @@ function liftBetween(startAnchor: string, endAnchor: string): string {
 type Hooks = { posts: any[]; pillShown: number; pillHidden: number; shows: number; cancels: number };
 type Api = {
   chatHead: (msg: any) => void;
-  tick: (scrolled: boolean, anchorT: number | null) => void;
+  tick: (scrolled: boolean) => void;
+  pass: (scrolled: boolean) => void;             // landActive's order after the attempt: the tick, then the seek block
   kick: (uuid: string) => void;                  // scrollToAnchor's older-tail branch, as the pinned source has it
   state: () => { sid: string; uuid: string; anchorT: number | null; loaded: number } | null;
   set: (p: Record<string, any>) => void;
@@ -96,6 +115,7 @@ type Api = {
 };
 
 function liftWorld(): (hooks: Hooks, mod: typeof MOD, doc: ReturnType<typeof fakeDocument>) => Api {
+  const note = liftBetween("function showSeekNote(): void {", "// ── reveal progress (T336)");
   const region = liftBetween("// ── reveal progress (T336)", "// ── end reveal progress");
   const head = liftBetween("function chatHead(msg: any) {", "// Fetch the next older history chunk re-anchored on `uuid`");
   const fetch = liftBetween("function fetchOlderForAnchor(sid: string, uuid: string): boolean {", "// Ask the kernel for the chunk of history just before the resident tail.");
@@ -113,14 +133,16 @@ function liftWorld(): (hooks: Hooks, mod: typeof MOD, doc: ReturnType<typeof fak
     const showActive = () => { H.shows++; };
     const cancelSeek = () => { H.cancels++; };
     const el = (tag, cls) => { const e = document.createElement(tag); if (cls) e.className = cls; return e; };
+    const metaDots = () => el("span", "meta-dots");
     const eventEpoch = (ev) => (typeof ev.t === "number" ? ev.t : null);
     const liveSession = (id) => (id ? sessions.get(id) : undefined);   // no skeleton tabs in this world
-    const { REVEAL_LABEL, revealFraction, residentSpan, revealCountWords, revealPercentWords } = MOD;
+    const { REVEAL_LABEL, revealFraction, revealShownFraction, residentSpan, revealCountWords, revealPercentWords, messageCount } = MOD;
   `;
   const epilogue = `
     return {
       chatHead,
       tick: revealProgressTick,
+      pass: (scrolled) => { revealProgressTick(scrolled); if (seek && pendingAnchor === seek.uuid) { if (scrolled) { seek = null; document.getElementById("seek-note")?.remove(); revealProgressEnd(); } else showSeekNote(); } },
       kick: (uuid) => {
         anchorPendingOlder = false;
         if (fetchOlderForAnchor(activeId, uuid) || loadingOlder.has(activeId)) {
@@ -137,82 +159,93 @@ function liftWorld(): (hooks: Hooks, mod: typeof MOD, doc: ReturnType<typeof fak
       get: (k) => ({ pendingAnchor, anchorPendingOlder, loadingOlder, pendingOlderAnchor })[k],
     };
   `;
-  return new Function("HOOKS", "MOD", "document", prelude + region + head + fetch + epilogue) as any;
+  return new Function("HOOKS", "MOD", "document", prelude + note + region + head + fetch + epilogue) as any;
 }
 
 const BASE = 1_760_000_000;                                   // an epoch in seconds; one event a minute
 const ev = (i: number) => ({ kind: i % 2 ? "assistant" : "user", uuid: "e" + i, t: BASE + i * 60 });
 const range = (a: number, b: number) => Array.from({ length: b - a }, (_, k) => ev(a + k));
+const anchorT = BASE + 10 * 60;                               // the anchor turn's own moment: the eleventh event, 490 events past the tail
 
-function world(opts: { anchorT: number | null; seek?: boolean }) {
+function world(opts: { seekT: number | null | "none" }) {
   const H: Hooks = { posts: [], pillShown: 0, pillHidden: 0, shows: 0, cancels: 0 };
   const doc = fakeDocument();
   const api = liftWorld()(H, MOD, doc);
   const s: any = { id: "A", name: "web", events: range(500, 750), headFrom: 500, headTotal: 750, status: { state: "ready" } };
-  api.set({ sessions: new Map([["A", s]]), activeId: "A", seek: opts.seek ? { sid: "A", uuid: "e10", kind: null } : null });
+  // the seek the navigation armed: its t is the kernel's anchorEventT (the turn's own moment), or null when the kernel resolved none
+  api.set({ sessions: new Map([["A", s]]), activeId: "A", seek: opts.seekT === "none" ? null : { sid: "A", uuid: "e10", kind: null, t: opts.seekT } });
   return { H, doc, api, s };
 }
 const line = (doc: ReturnType<typeof fakeDocument>) => doc.getElementById("reveal-progress");
-const anchorT = BASE + 10 * 60;                               // the anchor: the eleventh event, 490 events past the tail
 const frac = (oldest: number) => ((749 - oldest) / (749 - 10));
+const shown = (f: number) => Math.min(0.999, Math.floor(f * 1000) / 1000);
 
 test("two chunk answers: the line appears with the honest fraction, grows with each chunk, and leaves the moment the anchor lands", () => {
-  const { H, doc, api, s } = world({ anchorT, seek: true });
+  const { H, doc, api, s } = world({ seekT: anchorT });
   // the first landing pass: the anchor is past the tail, the loop kicks a loadOlder for the chunk before it
   api.kick("e10");
   assert.deepEqual(H.posts, [{ type: "loadOlder", id: "A", before: 500 }]);
   assert.equal(line(doc), null, "nothing until the pass reads its own start");
-  api.tick(false, anchorT);
+  api.pass(false);
   let n = line(doc)!;
   assert.ok(n, "the line begins on the pass that kicked the loop");
   assert.equal(n.attrs.get("role"), "status");
   assert.equal(n.querySelector(".rp-label")!.textContent, "Loading older messages…");
-  assert.equal(n.dataset.fraction, frac(500).toFixed(3), "the resident tail's span over the span back to the anchor");
-  assert.equal(n.dataset.fraction, "0.337");
-  assert.equal(n.querySelector(".rp-fill")!.style.width, "33.7%");
+  assert.equal(n.dataset.fraction, shown(frac(500)).toFixed(3), "the resident tail's span over the span back to the anchor turn's moment");
+  assert.equal(n.dataset.fraction, "0.336");
+  assert.equal(n.querySelector(".rp-fill")!.style.width, "33.6%");
   assert.equal(n.querySelector(".rp-bar")!.hidden, false);
-  assert.equal(n.querySelector(".rp-bar")!.title, "34% of the way back");
+  assert.equal(n.querySelector(".rp-bar")!.title, "33% of the way back");
   assert.equal(n.querySelector(".rp-detail")!.textContent, "", "the bar says it; no count beside an honest fraction");
   assert.equal(n.dataset.loaded, "0");
   assert.ok(n.querySelector(".rp-x"), "the seek's ✕ rides the line");
   assert.equal(H.pillHidden, 1, "the per-fetch pill yields: one message for the wait");
-  assert.equal(doc.getElementById("seek-note"), null);
+  assert.equal(doc.getElementById("seek-note"), null, "the seek note yields the slot");
   // chunk one lands: 250 older messages, the anchor still further back; the re-land pass kicks again
   api.chatHead({ type: "chatHead", id: "A", before: 500, from: 250, events: range(250, 500) });
   assert.equal(s.events.length, 500); assert.equal(s.headFrom, 250);
-  assert.equal(api.state()!.loaded, 250, "chatHead counts the chunk");
+  assert.equal(api.state()!.loaded, 250, "chatHead counts the chunk's messages");
   assert.equal(api.get("pendingAnchor"), "e10", "the deep link waiting to land wins the re-anchor");
   api.kick("e10");
   assert.equal(H.posts.length, 2); assert.equal(H.posts[1].before, 250);
-  api.tick(false, null);                                      // the re-land pass carries no anchor time: the stash from the first pass holds
+  api.pass(false);
   n = line(doc)!;
   assert.ok(n, "still the same line");
-  assert.equal(n.dataset.fraction, frac(250).toFixed(3));
+  assert.equal(n.dataset.fraction, shown(frac(250)).toFixed(3));
   assert.equal(n.dataset.fraction, "0.675");
   assert.equal(n.querySelector(".rp-fill")!.style.width, "67.5%");
   assert.equal(n.dataset.loaded, "250");
   assert.equal(doc.body.children.filter((c) => c.id === "reveal-progress").length, 1, "updated in place, never rebuilt");
+  assert.equal(doc.getElementById("seek-note"), null);
   // chunk two lands the anchor's event: the landing pass ends the line
   api.chatHead({ type: "chatHead", id: "A", before: 250, from: 0, events: range(0, 250) });
   assert.equal(s.headFrom, 0);
   assert.ok(s.events.some((e: any) => e.uuid === "e10"), "the anchor's event is resident");
   api.set({ anchorPendingOlder: false });
-  api.tick(true, null);
+  api.pass(true);
   assert.equal(line(doc), null, "gone the moment the anchor lands");
   assert.equal(api.state(), null);
   assert.equal(H.shows, 2, "each chunk repainted the active view");
 });
 
+test("the fraction reads the anchor turn's own moment from the seek, so a loop that begins on a later pass still gets its bar", () => {
+  // the first pass missed (a transient miss the seek exists to survive): pendingAnchorT was cleared with the pass, and the
+  // pass that finally kicks the loop still finds the moment on the seek record
+  const { doc, api } = world({ seekT: anchorT });
+  api.kick("e10"); api.tick(false);
+  assert.equal(line(doc)!.dataset.fraction, "0.336");
+});
+
 test("the ✕ on the line is the seek's cancel", () => {
-  const { H, doc, api } = world({ anchorT, seek: true });
-  api.kick("e10"); api.tick(false, anchorT);
+  const { H, doc, api } = world({ seekT: anchorT });
+  api.kick("e10"); api.pass(false);
   line(doc)!.querySelector(".rp-x")!.listeners.get("click")!({ stopPropagation() {} });
   assert.equal(H.cancels, 1);
 });
 
-test("no anchor time: the count and the oldest loaded time instead of a bar", () => {
-  const { doc, api } = world({ anchorT: null });
-  api.kick("e10"); api.tick(false, null);
+test("no anchor moment from the kernel: the count and the oldest loaded time instead of a bar (never the card's time)", () => {
+  const { doc, api } = world({ seekT: null });
+  api.kick("e10"); api.pass(false);
   const n = line(doc)!;
   assert.ok(n);
   assert.equal(n.dataset.fraction, undefined);
@@ -220,18 +253,27 @@ test("no anchor time: the count and the oldest loaded time instead of a bar", ()
   assert.equal(n.querySelector(".rp-fill")!.style.width, "0%");
   const hm0 = markerLabel(BASE + 500 * 60, null, Date.now());
   assert.equal(n.querySelector(".rp-detail")!.textContent, "back to " + (hm0.date ? hm0.date + " " + hm0.hm : hm0.hm));
-  assert.equal(n.querySelector(".rp-x"), null, "no seek, no ✕");
+  assert.ok(n.querySelector(".rp-x"), "the seek is live: its ✕ rides the line");
   api.chatHead({ type: "chatHead", id: "A", before: 500, from: 250, events: range(250, 500) });
-  api.kick("e10"); api.tick(false, null);
+  api.kick("e10"); api.pass(false);
   const hm1 = markerLabel(BASE + 250 * 60, null, Date.now());
   assert.equal(line(doc)!.querySelector(".rp-detail")!.textContent,
                "250 older messages loaded · back to " + (hm1.date ? hm1.date + " " + hm1.hm : hm1.hm));
   assert.equal(line(doc)!.dataset.fraction, undefined);
 });
 
+test("a navigation with no seek at all: count mode, no ✕", () => {
+  const { doc, api } = world({ seekT: "none" });
+  api.kick("e10"); api.tick(false);
+  const n = line(doc)!;
+  assert.ok(n);
+  assert.equal(n.dataset.fraction, undefined);
+  assert.equal(n.querySelector(".rp-x"), null, "no seek, no ✕");
+});
+
 test("an anchor moment the resident span already reaches falls back to the count: 100% while still loading would lie", () => {
-  const { doc, api } = world({ anchorT: BASE + 600 * 60 });   // inside the resident span, but not resident (a pruned or compacted event)
-  api.kick("e10"); api.tick(false, BASE + 600 * 60);
+  const { doc, api } = world({ seekT: BASE + 600 * 60 });   // inside the resident span, but not resident (a pruned or compacted event)
+  api.kick("e10"); api.pass(false);
   const n = line(doc)!;
   assert.ok(n);
   assert.equal(n.dataset.fraction, undefined);
@@ -239,59 +281,84 @@ test("an anchor moment the resident span already reaches falls back to the count
   assert.match(n.querySelector(".rp-detail")!.textContent, /^back to /);
 });
 
-test("the line ends when the loop stops asking, and when the tab changes", () => {
+test("the pass that ends the loop without landing gives the seek its note and ✕ back at once", () => {
+  const { doc, api } = world({ seekT: anchorT });
+  api.kick("e10"); api.pass(false);
+  assert.ok(line(doc)); assert.equal(doc.getElementById("seek-note"), null);
+  // headFrom reached 0 and the event was not there: the attempt neither kicked nor waits on a fetch for the anchor
+  api.set({ anchorPendingOlder: false, clearInFlight: true });
+  api.pass(false);
+  assert.equal(line(doc), null, "the line is gone"); assert.equal(api.state(), null);
+  assert.ok(doc.getElementById("seek-note"), "the seek note stands in the same pass: the seek keeps working toward its backstop, with its ✕");
+});
+
+test("the line ends when the loop stops asking with no seek, and when the tab changes", () => {
   {
-    const { doc, api } = world({ anchorT });
-    api.kick("e10"); api.tick(false, anchorT);
+    const { doc, api } = world({ seekT: "none" });
+    api.kick("e10"); api.tick(false);
     assert.ok(line(doc));
-    // a pass whose attempt neither kicked nor waits on a fetch for the anchor: the loop is over (headFrom reached 0, the
-    // event was not there; the seek note or the honest toast takes it from here)
     api.set({ anchorPendingOlder: false, clearInFlight: true });
-    api.tick(false, null);
+    api.tick(false);
     assert.equal(line(doc), null); assert.equal(api.state(), null);
   }
   {
-    const { doc, api } = world({ anchorT });
-    api.kick("e10"); api.tick(false, anchorT);
+    const { doc, api } = world({ seekT: anchorT });
+    api.kick("e10"); api.tick(false);
     api.set({ activeId: "B" });
-    api.tick(false, null);
+    api.tick(false);
     assert.equal(line(doc), null, "another tab's landing pass ends a loop whose chunks would be forgotten anyway");
     assert.equal(api.state(), null);
   }
 });
 
 test("a fetch already in flight for the anchor keeps the line alive across intermediate render passes", () => {
-  const { doc, api } = world({ anchorT });
-  api.kick("e10"); api.tick(false, anchorT);
+  const { doc, api } = world({ seekT: anchorT });
+  api.kick("e10"); api.tick(false);
   // a status push mid-fetch: the attempt short-circuits on the in-flight fetch (anchorPendingOlder true again), or with no
   // seek there is no attempt at all and the flag keeps its value; either way the fetch for the anchor is still on the wire
   api.set({ anchorPendingOlder: false });
-  api.tick(false, null);
+  api.tick(false);
   assert.ok(line(doc), "the in-flight fetch for the anchor holds the line");
 });
 
 test("a session without the index wire's headFrom count never begins a line: the one-round-trip window has its own landing", () => {
-  const { doc, api, s } = world({ anchorT });
+  const { doc, api, s } = world({ seekT: anchorT });
   s.headFrom = 0;                                             // a proto-2 session carries no count (T323 stage 4b: olderOnServer reads headKnown)
   api.set({ anchorPendingOlder: true, pendingAnchor: "e10" });
-  api.tick(false, anchorT);
+  api.tick(false);
   assert.equal(line(doc), null);
   assert.equal(api.state(), null);
 });
 
-// ── the seams in render.ts, pinned ────────────────────────────────────────────────────────────────────────────
+// ── the seams in render.ts and the kernel, pinned ───────────────────────────────────────────────────────────
 
-test("the seams: the tick sits on the landing pass after the seek block, chatHead counts, the seek note and the pill yield, clearSeek ends it", () => {
-  assert.match(RENDER, /else showSeekNote\(\);[^\n]*\n\s*\}\n\s*revealProgressTick\(scrolled, att\.t\);/, "once per landing pass, right after the seek block and before the pending fields clear");
-  assert.match(RENDER, /revealProgressTick\(scrolled, att\.t\);[^\n]*\n(?:[^\n]*\n){0,12}?\s*pendingAnchor = null; pendingAnchorIntent = null; pendingAnchorT = null;/);
-  assert.match(RENDER, /if \(older\.length\) s\.events = older\.concat\(s\.events\);\n\s*revealProgressChunk\(msg\.id, older\.length\);/);
+test("the seams: the tick sits on the landing pass BEFORE the seek block, chatHead counts messages, the seek note and the pill yield, clearSeek ends it", () => {
+  assert.match(RENDER, /revealProgressTick\(scrolled\);[^\n]*\n[^\n]*\n\s*if \(seek && att\.anchor === seek\.uuid\) \{\n\s*if \(scrolled\) clearSeek\(\);/, "once per landing pass, right before the seek block");
+  assert.match(RENDER, /else showSeekNote\(\);[^\n]*\n\s*\}\n(?:[^\n]*\n){0,12}?\s*pendingAnchor = null; pendingAnchorIntent = null; pendingAnchorT = null;/);
+  assert.match(RENDER, /if \(older\.length\) s\.events = older\.concat\(s\.events\);\n\s*revealProgressChunk\(msg\.id, messageCount\(older\)\);/);
   assert.match(RENDER, /if \(revealProgress && revealProgress\.uuid === seek\.uuid\) \{ existing\?\.remove\(\); return; \}/, "showSeekNote yields the slot");
   assert.match(RENDER, /document\.getElementById\("seek-note"\)\?\.remove\(\);\n\s*revealProgressEnd\(\);/, "every end of the seek ends the line");
   assert.match(RENDER, /function showLoadingPill\(\): void \{\n\s*if \(revealProgress\) return;/, "the per-fetch pill yields while the line shows");
   // the start guard reads the index wire's own count, never a version
   assert.match(RENDER, /if \(anchorPendingOlder && pendingAnchor && s && \(s\.headFrom \?\? 0\) > 0\) \{/);
+  // the moment the fraction reads is the seek's t (the kernel's anchorEventT), never att.t (the card's time)
+  assert.match(RENDER, /revealProgressBegin\(activeId!, pendingAnchor, seek && seek\.uuid === pendingAnchor \? seek\.t : null\);/);
+  assert.doesNotMatch(RENDER, /revealProgressTick\(scrolled, att\.t\)/);
+  assert.match(RENDER, /let seek: \{ sid: string; uuid: string; kind: string \| null; t: number \| null \} \| null = null;/);
+  assert.match(RENDER, /function armSeek\(sid: string, uuid: string, kind: string \| null, t: number \| null = null\): void \{/);
+  assert.match(RENDER, /seek = \{ sid, uuid, kind, t \};/);
+  assert.match(RENDER, /if \(anchor\) armSeek\(id, anchor, anchorKind \?\? null, anchorEventT \?\? null\);/);
+  assert.match(RENDER, /typeof m\.anchorEventT === "number" \? m\.anchorEventT : undefined\);/, "the frame handler hands the kernel's anchorEventT to setActive");
+  // the bar paints the floored fraction
+  assert.match(RENDER, /const shown = revealShownFraction\(fraction\);[^\n]*\n\s*n\.dataset\.fraction = shown\.toFixed\(3\);\n\s*bar\.hidden = false; bar\.title = revealPercentWords\(fraction\);\n\s*fill\.style\.width = \(shown \* 100\)\.toFixed\(1\) \+ "%";/);
   // the ✕ is the seek's cancel, carried over
   assert.match(RENDER, /x\.addEventListener\("click", \(e\) => \{ e\.stopPropagation\(\); cancelSeek\(\); \}\);\n\s*n\.appendChild\(x\);\n\s*\}\n\s*document\.body\.appendChild\(n\);\n\s*\}\n\s*const bar = n\.querySelector/);
+});
+
+test("the kernel resolves the anchor turn's own moment on every focus frame that names an anchor", () => {
+  assert.match(KERNEL, /def _anchor_event_t\(sid, uuid\):/);
+  assert.match(KERNEL, /"anchorEventT": _anchor_event_t\(msg\["sid"\], msg\.get\("anchorUuid"\)\)/, "a feed card's focus");
+  assert.match(KERNEL, /"anchorEventT": _anchor_event_t\(msg\["session"\], msg\.get\("anchor"\)\)/, "a deep link's focus");
 });
 
 test("the dress: the seek note's slot and surface, the composer placeholder's dim ink, a thin bar, nothing animated", () => {

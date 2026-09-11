@@ -46,7 +46,21 @@ export function revealCountWords(loaded: number, oldestT: number | null, nowMs: 
   return parts.join(" · ");
 }
 
-/** The bar's hover words: the fraction as a percentage. */
+/** The fraction the bar paints: floored to a tenth of a percent and held below 1, so rounding can never let the bar
+ *  read complete while the event is still not resident (revealFraction already yields null at 1 and above). */
+export function revealShownFraction(fraction: number): number {
+  return Math.min(0.999, Math.floor(fraction * 1000) / 1000);
+}
+
+/** The bar's hover words: the fraction as a whole percentage, floored and held below 100 for the same reason. */
 export function revealPercentWords(fraction: number): string {
-  return `${Math.round(fraction * 100)}% of the way back`;
+  return `${Math.min(99, Math.floor(fraction * 100))}% of the way back`;
+}
+
+/** How many of a chunk's events are messages: the turns and postal cards a reader counts as messages, not the tool
+ *  atoms, thinking blocks and notices between them. */
+export function messageCount<E extends { kind?: string }>(events: readonly E[]): number {
+  let n = 0;
+  for (const e of events) if (e.kind === "user" || e.kind === "assistant" || e.kind === "postal-service") n++;
+  return n;
 }

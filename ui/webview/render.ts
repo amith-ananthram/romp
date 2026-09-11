@@ -25,7 +25,7 @@ import { lensVisible, surfaceLens } from "./tag-lens";
 import { openTagMenu, tagMenuButton, syncTagFilter, tagChip } from "./tag-menu";
 import { syncSessionsFromTabMeta, applyMetaToSession, notePendingMeta, PendingTabMeta } from "./tab-meta";
 import { markerLabel, dayContext } from "./time-marker";
-import { REVEAL_LABEL, revealFraction, residentSpan, revealCountWords, revealPercentWords } from "./reveal-progress";
+import { REVEAL_LABEL, revealFraction, revealShownFraction, residentSpan, revealCountWords, revealPercentWords, messageCount } from "./reveal-progress";
 import { compactDisplay, toolCounts, type DisplayItem } from "./compact";
 import { senderKind, SenderKind } from "./sender-identity";
 import { loadSettings, onExternalSettingsChange, installSettingsSync, type RompSettings } from "./settings";
@@ -1041,14 +1041,14 @@ let anchorPendingOlder = false; // scrollToAnchor kicked off a loadOlder fetch f
 // or the standing can't-trap backstop expires into the honest failure. While it outlives the
 // immediate landing, a small pane-local notice says so ("finding the passage…") with the ✕ —
 // cancel leaves the reader exactly where they are, scroll fully theirs.
-let seek: { sid: string; uuid: string; kind: string | null } | null = null;
+let seek: { sid: string; uuid: string; kind: string | null; t: number | null } | null = null;   // t: the anchor turn's own moment when the kernel resolved it (anchorEventT), read by the reveal progress line (T336)
 let seekBackstop: number | undefined;
 const SEEK_BACKSTOP_MS = 30_000;
 
-function armSeek(sid: string, uuid: string, kind: string | null): void {
+function armSeek(sid: string, uuid: string, kind: string | null, t: number | null = null): void {
   if (seek && seek.sid === sid && seek.uuid === uuid) return;   // same target mid-seek: idempotent, never a restart
   clearSeek();                                                  // a different target supersedes cleanly
-  seek = { sid, uuid, kind };
+  seek = { sid, uuid, kind, t };
   seekBackstop = window.setTimeout(() => failSeek(), SEEK_BACKSTOP_MS);
 }
 
@@ -1119,7 +1119,8 @@ function showSeekNote(): void {
 // The interim progress line while the index wire's fetch-until-resident loop walks back to a far-past anchor
 // (the user 2026-09-10: a distilled summary far back in a long session took a long time to reveal, with nothing
 // saying how far along it was). It hangs off the loop's START (a landing pass that kicked, or is waiting on, an
-// older fetch for the anchor while the index wire's headFrom count is above 0) and its END (the anchor lands,
+// older fetch for the anchor while the index wire's headFrom count is above 0; the anchor turn's own moment rides the
+// seek, from the kernel's anchorEventT, never the card's time) and its END (the anchor lands,
 // the loop stops asking, the seek is cleared or cancelled, the tab changes), and off nothing else: the
 // one-round-trip window (T323 stage 4b, proto 2) carries no headFrom count, so under it the line never begins.
 // The fraction is the resident span over the span back to the anchor's moment (revealFraction), honest or
@@ -1174,9 +1175,10 @@ function revealProgressPaint(): void {
   const detail = n.querySelector(".rp-detail") as HTMLElement;
   n.dataset.loaded = String(p.loaded);
   if (fraction != null) {
-    n.dataset.fraction = fraction.toFixed(3);
+    const shown = revealShownFraction(fraction);          // floored below 1: the bar never reads complete before the event lands
+    n.dataset.fraction = shown.toFixed(3);
     bar.hidden = false; bar.title = revealPercentWords(fraction);
-    fill.style.width = (fraction * 100).toFixed(1) + "%";
+    fill.style.width = (shown * 100).toFixed(1) + "%";
     detail.textContent = "";
   } else {
     delete n.dataset.fraction;
@@ -1186,7 +1188,7 @@ function revealProgressPaint(): void {
   }
 }
 // Once per landing pass, after the attempt: the loop's start and end are read off the pass itself.
-function revealProgressTick(scrolled: boolean, anchorT: number | null): void {
+function revealProgressTick(scrolled: boolean): void {
   if (revealProgress) {
     const p = revealProgress;
     const inFlight = loadingOlder.has(p.sid) && pendingOlderAnchor.get(p.sid) === p.uuid;
@@ -1196,7 +1198,9 @@ function revealProgressTick(scrolled: boolean, anchorT: number | null): void {
   }
   const s = liveSession(activeId);
   if (anchorPendingOlder && pendingAnchor && s && (s.headFrom ?? 0) > 0) {   // the index wire's loop, by its own count
-    revealProgressBegin(activeId!, pendingAnchor, anchorT);
+    // the anchor turn's OWN moment, carried on the seek from the kernel's anchorEventT: the card's `t` is the card's newest
+    // activity, later than the turn it points at, and a fraction over it would read more progress than exists
+    revealProgressBegin(activeId!, pendingAnchor, seek && seek.uuid === pendingAnchor ? seek.t : null);
     revealProgressPaint();
   }
 }
@@ -11813,11 +11817,12 @@ function landActive(content: HTMLElement | null, v: View): void {
   // and never dead-ending. If the moment predates the loaded history, the oldest loaded message is
   // the nearest reachable point — the note names that too (fail loudly, land nearest).
   if (!scrolled && !att.anchor && att.t != null) scrolled = landNearestMoment(att.t);
+  revealProgressTick(scrolled);          // the reveal loop's progress line begins, repaints or ends on this pass, decided BEFORE the
+                                         // seek note: the pass that ends the loop without landing gets its note (and ✕) back at once (T336)
   if (seek && att.anchor === seek.uuid) {
     if (scrolled) clearSeek();             // the landing event — the indicator dies with the seek
     else showSeekNote();                   // outlived the immediate landing → say the search is on
   }
-  revealProgressTick(scrolled, att.t);   // the reveal loop's progress line begins, repaints or ends on this pass (T336)
   // BY-ID landing ONLY (the user 2026-06-20, who wanted to shrink the 29%, then remove the time fallback). TIER 1, by id:
   // a card TITLE / node text sends promptAnchorUuid, which lands the originating MESSAGE — a user turn OR a
   // peer's postal card (scrollToAnchor's kind guard now accepts both). That covers the ~71% of cards that
@@ -15572,7 +15577,7 @@ const navHist = new NavHistory({
   },
 });
 
-function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: string) {
+function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: string, anchorEventT?: number) {
   noteMru(id);
   // EPHEMERAL PEEK (see peekId): an out-of-view target opens as the peek; activating anything else
   // drops it. Before the already-active early-return, so a re-focus of a hidden session re-asserts
@@ -15629,7 +15634,7 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   pendingAnchor = anchor ?? null;
   if (anchor) flashedAnchor = null;        // a fresh navigation re-arms the one-per-navigation flash
   pendingAnchorIntent = anchor ? (anchorKind ?? null) : null;
-  if (anchor) armSeek(id, anchor, anchorKind ?? null);   // durable until land / ✕ / backstop (see armSeek)
+  if (anchor) armSeek(id, anchor, anchorKind ?? null, anchorEventT ?? null);   // durable until land / ✕ / backstop (see armSeek)
   activeId = id;
   try { vscodeApi?.setState?.({ ...(vscodeApi.getState?.() || {}), activeId: id }); } catch { /* ignore */ }
   renderTabs();
@@ -15984,7 +15989,7 @@ function chatHead(msg: any) {
   if (before !== (s.headFrom ?? 0)) { forget(msg.id); return; }   // stale / overlapping → ignore
   const older = (msg.events || []) as ChatEvent[];
   if (older.length) s.events = older.concat(s.events);
-  revealProgressChunk(msg.id, older.length);   // the reveal loop's count (T336); its paint rides the re-land pass
+  revealProgressChunk(msg.id, messageCount(older));   // the reveal loop's count of messages (T336); its paint rides the re-land pass
   s.headFrom = from;
   const v = views.get(msg.id);
   if (msg.id !== activeId) { forget(msg.id); if (v) v.stale = true; return; }
@@ -16423,7 +16428,8 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
       });
     } else {
       pendingAnchorQuote = typeof (m as { anchorQuote?: string }).anchorQuote === "string" ? (m as { anchorQuote?: string }).anchorQuote! : null;   // the supporting span (T218) — consumed by the landing
-      setActive(m.id, m.anchor, typeof m.anchorT === "number" ? m.anchorT : undefined, typeof m.anchorKind === "string" ? m.anchorKind : undefined);
+      setActive(m.id, m.anchor, typeof m.anchorT === "number" ? m.anchorT : undefined, typeof m.anchorKind === "string" ? m.anchorKind : undefined,
+                typeof m.anchorEventT === "number" ? m.anchorEventT : undefined);   // the anchor turn's own moment, when the kernel resolved it (T336)
     }
     // A feed card click that resolved to a live goal → seed the composer citation chip (the user 2026-07-01).
     if (m.cite && typeof m.cite.itemId === "string" && typeof m.cite.title === "string") setCitation(m.id, { itemId: m.cite.itemId, title: m.cite.title });

@@ -40521,6 +40521,30 @@ def _cite_for(item_id):
     return {"itemId": iid, "title": title}
 
 
+def _anchor_event_t(sid, uuid):
+    """The anchor turn's OWN moment (epoch seconds) from the session's built chat events, sent on a focus frame as
+    `anchorEventT` for the chat's reveal progress line (T336): a card's `t` is the card's newest activity, later than the
+    turn its anchorUuid names, and a fraction of the way back computed over it would read more progress than exists.
+    None when nothing resolves (no session, no such uuid, no time on the event): the chat then counts instead of
+    guessing. build_session is cache-backed; the dependency scope is reset as the history slices reset it."""
+    if not sid or not uuid:
+        return None
+    try:
+        try:
+            m = build_session(str(sid), int(time.time()))
+        finally:
+            _chat_dep_scope.deps = None
+        for e in (m or {}).get("events") or []:
+            if e.get("uuid") != uuid:
+                continue
+            ts = e.get("ts")
+            t = em.parse_z(ts) if isinstance(ts, str) else (ts if isinstance(ts, (int, float)) else e.get("t"))
+            return int(t) if t else None
+    except Exception:
+        return None
+    return None
+
+
 def _show_on_timeline_focus(msg):
     """A feed showOnTimeline tap → the chat `focus` message. anchorUuid (kernel 996ebd7) is the EXACT turn
     uuid the chat lands on (scrollToAnchor) — fully id-based deep-link, no nearest-time miss. There is no
@@ -40530,7 +40554,8 @@ def _show_on_timeline_focus(msg):
     `cite` (the user 2026-07-01): a click that resolves to a live goal node also seeds a dismissible citation
     chip in the composer (see _cite_for) → a follow-up without the explicit Follow-up button."""
     f = {"type": "focus", "id": msg["sid"], "anchor": msg.get("anchorUuid"),
-         "anchorT": msg.get("t"), "anchorKind": _focus_kind(msg.get("anchor"))}
+         "anchorT": msg.get("t"), "anchorKind": _focus_kind(msg.get("anchor")),
+         "anchorEventT": _anchor_event_t(msg["sid"], msg.get("anchorUuid"))}   # the turn's own moment (T336)
     if msg.get("quote"):
         f["anchorQuote"] = str(msg["quote"])[:300]   # the supporting span (T218) — the chat highlights it on landing
     cite = _cite_for(msg.get("itemId"))
@@ -55336,7 +55361,8 @@ class Handler(BaseHTTPRequestHandler):
             _reveal_chat_for(client, {"type": "focus", "id": msg["id"]})
         elif msg and msg.get("type") == "deepLink" and msg.get("session"):
             _reveal_or_confirm(msg["session"], {"type": "focus", "id": msg["session"], "anchor": msg.get("anchor"),
-                          "anchorT": msg.get("anchorT"), "anchorKind": msg.get("anchorKind")}, client)
+                          "anchorT": msg.get("anchorT"), "anchorKind": msg.get("anchorKind"),
+                          "anchorEventT": _anchor_event_t(msg["session"], msg.get("anchor"))}, client)   # the turn's own moment (T336)
         elif msg and msg.get("type") == "showOnTimeline" and msg.get("sid"):
             _reveal_or_confirm(msg["sid"], _show_on_timeline_focus(msg), client)
         elif msg and msg.get("type") == "expand" and msg.get("itemId"):

@@ -68,7 +68,7 @@ class Wiring(unittest.TestCase):
         self.assertGreaterEqual(src.count("_reveal_chat_for(client,"), 3)
         self.assertIn("_reveal_or_confirm(msg[\"sid\"], _show_on_timeline_focus(msg), client)", src,
                       "the distilled-summary jump is one viewer's navigation")
-        self.assertIn("\"anchorKind\": msg.get(\"anchorKind\")}, client)", src, "…and so is a deep link")
+        self.assertIn("\"anchorEventT\": _anchor_event_t(msg[\"session\"], msg.get(\"anchor\"))}, client)", src, "…and so is a deep link")   # T336: the frame also carries the anchor turn's moment
 
     def test_the_shell_mints_one_id_per_tab_and_the_panes_read_it(self):
         html = km._landing()
