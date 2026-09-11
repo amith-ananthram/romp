@@ -33094,9 +33094,15 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         _lerr = _launch_error(sid)
         if _lerr and not _lerr.get("limit"):
             # A missing dependency already reads as a whole sentence with its own remedy; only the raw
-            # failures need the "could not start" framing to make sense of a bare stderr line.
+            # failures need the "could not start" framing to make sense of a bare stderr line. A Codex
+            # session's texts are framed by the Codex backend itself (the login hint, "codex turn
+            # failed: …", a raw client failure as the app-server's: CodexBackend._client_failure_text),
+            # and several land mid-life (a turn the account refused, an app-server that died), so the
+            # claude "could not start" framing named the wrong process at the wrong moment for every
+            # one of them (2026-09-11): shown as the backend wrote them.
+            _codex_lane = _session_backend(sid, live_map.get(sid)) == "codex"
             events.append({"kind": "apiError",
-                           "text": _lerr["text"] if _lerr.get("dep") else
+                           "text": _lerr["text"] if _lerr.get("dep") or _codex_lane else
                            "This session's claude process could not start — %s" % _lerr["text"]})
     # TOC ledger: archiver headline (the tab tooltip's Summary; the bullets list retired 2026-07-07 —
     # its in-chat readers were deleted with the ledger box, and the tooltip reads recent/tree instead)
