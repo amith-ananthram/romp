@@ -2,8 +2,8 @@
 """The kernel's side of the per-session host (stage 4 of #1317, T315; kernel/session_host.py is the host,
 the T315 design note is the design): a Transport the SDK client drives over the host's Unix socket, the
 same class over an orphan journal file (one consumer path for live attach and for replay after a host
-death), the spawn specification the kernel writes for a host, the settings (the session-hosts toggle, on by default, and
-the host grace), and the host-lease classification the backend attaches by.
+death), the spawn specification the kernel writes for a host, the settings (the session-hosts toggle, on by
+default, and the host grace), and the host-lease classification the backend attaches by.
 
 The SDK's `Transport` is documented as unstable; `HostTransport` implements its six methods (connect,
 write, read_messages, close, is_ready, end_input) and a test pins the set against the abstract class.
