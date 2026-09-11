@@ -36791,20 +36791,28 @@ _SPEND_TREE_CACHE = {}              # leaf -> {"dirs": {dir: mtime}, "files": {p
 #                                     stat pass, "seen": epoch}: the session's subagents tree, watched by directory mtimes
 
 
-def _mem_total_bytes():
+def _mem_total_bytes(meminfo="/proc/meminfo"):
     """The machine's memory (MemTotal from /proc/meminfo; sysconf where there is no procfs), for the bounds that scale
-    with the box (the user's caches direction 2026-09-11: a memo's bound is a fraction of memory, never a small literal)."""
+    with the box (the user's caches direction 2026-09-11: a memo's bound is a fraction of memory, never a small literal).
+    A masked /proc or a hardened container answers sysconf with 0 or -1 (its documented indeterminate answer), and a
+    bound of zero would drop every live memo each tick, the opposite of a memo, so anything not positive falls to an
+    8 GB default (the follow-up review's second round)."""
+    total = 0
     try:
-        with open("/proc/meminfo") as f:
+        with open(meminfo) as f:
             for line in f:
                 if line.startswith("MemTotal:"):
-                    return int(line.split()[1]) * 1024
+                    total = int(line.split()[1]) * 1024
+                    break
     except (OSError, ValueError, IndexError):
-        pass
-    try:
-        return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
-    except (OSError, ValueError, AttributeError):
-        return 8 * 1024 ** 3
+        total = 0
+    if total <= 0:
+        try:
+            pages, page = os.sysconf("SC_PHYS_PAGES"), os.sysconf("SC_PAGE_SIZE")
+            total = pages * page if pages > 0 and page > 0 else 0   # each factor on its own: two -1s multiply to 1
+        except (OSError, ValueError, AttributeError, TypeError):
+            total = 0
+    return total if total > 0 else 8 * 1024 ** 3
 
 
 def _spend_tree_memo_bound():
@@ -37213,7 +37221,9 @@ def _spend_tree_memo_prune(live_paths):
     # order and one eviction a cycle re-walked whole trees in rotation (the follow-up review): the LARGEST trees go
     # first, and only the deficit is shed (the second round: shedding to three quarters re-listed the largest tree
     # every cycle once the bound bound across the live sessions). One tree alone over the bound is evicted and listed
-    # again next cycle, every cycle: the bound is the bound, and /perf's memos.spendTree shows it binding
+    # again next cycle, every cycle, and when the SUM of the live memos binds the largest is re-listed each cycle the
+    # same way (one first listing a cycle, the price of a bound that binds): the bound is the bound, and /perf's
+    # memos.spendTree shows it binding
     for k in sorted(_SPEND_TREE_CACHE, key=lambda k: -_spend_tree_memo_size(_SPEND_TREE_CACHE[k])):
         if total <= SPEND_GUARD_TREE_MEMO_BYTES:
             break

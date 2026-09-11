@@ -261,16 +261,24 @@ class Memo(unittest.TestCase):
         with mock.patch.object(km, "SPEND_GUARD_TREE_MEMO_BYTES", sizes[leaves[1]] + sizes[leaves[2]] - 1):
             km._spend_tree_memo_prune(set(leaves[1:]))
         self.assertEqual(sorted(km._SPEND_TREE_CACHE), [leaves[1]], "the largest memo went; the least recently seen survives")
-        # only the deficit is shed: three memos over the bound by one byte lose exactly the largest (three quarters of
-        # the bound would have taken a second)
+        # only the deficit is shed: FIVE memos over the bound by one byte lose exactly the largest (shedding to three
+        # quarters of the bound took a second: with three memos both policies evict one, so five tell them apart)
+        for i in (3, 4):
+            leaf = os.path.join(self.td.name, "proj", "%08d-2222-3333-4444-000000000350.jsonl" % i)
+            sub = os.path.join(os.path.dirname(leaf), "%08d-2222-3333-4444-000000000350" % i, "subagents")
+            os.makedirs(sub)
+            write_jsonl(leaf, [user(NOW - 100, "u")], mtime=NOW - 100)
+            write_jsonl(os.path.join(sub, "agent-a.jsonl"), [user(NOW - 100, "u")], mtime=NOW - 100)
+            leaves.append(leaf)
         km._SPEND_TREE_CACHE.clear()
-        for i in range(3):
+        for i in range(5):
             km._spend_window_files(leaves[i], NOW - 600, now=NOW + i)
         sizes = {k: km._spend_tree_memo_size(km._SPEND_TREE_CACHE[k]) for k in leaves}
         self.assertEqual(max(sizes, key=sizes.get), leaves[2])
         with mock.patch.object(km, "SPEND_GUARD_TREE_MEMO_BYTES", sum(sizes.values()) - 1):
             km._spend_tree_memo_prune(set(leaves))
-        self.assertEqual(sorted(km._SPEND_TREE_CACHE), sorted(leaves[:2]), "one eviction closed the deficit; the rest stand")
+        survivors = [k for k in leaves if k != leaves[2]]
+        self.assertEqual(sorted(km._SPEND_TREE_CACHE), sorted(survivors), "one eviction closed the deficit; the other four stand")
         self.assertEqual(km._spend_tree_memo_size({"files": {"x" * 10: 0}, "dirs": {}}), 2 * 10 + 64, "the estimate: twice the characters and a slot")
         # the bound is a sixty-fourth of the machine's memory unless the environment names one; /perf shows it beside the bytes
         self.assertEqual(km._spend_tree_memo_bound(), km._mem_total_bytes() // 64)
@@ -278,9 +286,16 @@ class Memo(unittest.TestCase):
             self.assertEqual(km._spend_tree_memo_bound(), 4096)
         with mock.patch.dict(os.environ, {"ROMP_SPEND_GUARD_TREE_MEMO_BYTES": "lots"}):
             self.assertEqual(km._spend_tree_memo_bound(), km._mem_total_bytes() // 64, "an unreadable override falls back to the fraction")
-        self.assertGreater(km.SPEND_GUARD_TREE_MEMO_BYTES, 16 * 1024 * 1024, "no small literal: above 16 MB on any box with a GB or more")
+        self.assertEqual(km.SPEND_GUARD_TREE_MEMO_BYTES, km._spend_tree_memo_bound(), "the module constant IS the fraction, no literal")
+        self.assertGreater(km.SPEND_GUARD_TREE_MEMO_BYTES, 16 * 1024 * 1024, "above 16 MB on any box with a GB or more")
+        # a masked /proc (a hardened container) answers sysconf with 0 or -1: the bound never reaches zero, which would
+        # drop every live memo each tick
+        self.assertEqual(km._mem_total_bytes(meminfo="/nonexistent/meminfo"), os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE"), "no procfs: sysconf")
+        for indeterminate in (0, -1):
+            with mock.patch.object(os, "sysconf", lambda name, _v=indeterminate: _v):
+                self.assertEqual(km._mem_total_bytes(meminfo="/nonexistent/meminfo"), 8 * 1024 ** 3, "sysconf %d: the 8 GB default" % indeterminate)
         rep = km._spend_tree_memo_report()
-        self.assertEqual((rep["entries"], rep["bytes"], rep["bound"]), (2, sizes[leaves[0]] + sizes[leaves[1]], km.SPEND_GUARD_TREE_MEMO_BYTES))
+        self.assertEqual((rep["entries"], rep["bytes"], rep["bound"]), (4, sum(sizes[k] for k in survivors), km.SPEND_GUARD_TREE_MEMO_BYTES))
         # a disabled ceiling drops every tree memo instead of stranding them: the tick itself, with the ceiling at zero
         km._SPEND_TREE_CACHE["ghost"] = {"dirs": {}, "files": {}, "full": 0, "seen": 0}
         with mock.patch.object(km, "_spend_ceiling", lambda: 0.0):
