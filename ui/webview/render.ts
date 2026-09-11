@@ -7412,10 +7412,11 @@ function backendTakesTags(be: string): boolean { return be === "sdk" || be === "
 // chip prefilled from a tagged active tab turns every terminal create into a refusal.
 // The Tags row's option paints as the tag chip itself (T321, the user 2026-09-10): the thin border in the tag's own
 // colour that the tab strip, the feed and the outline draw, and on versus off by the visual the tag toggles already
-// use, the faded chip (tagChip's `off`, TAG_CHIP_OFF_CLASS at 0.45), never a dot and never the Backend row's accent
+// use, the faded chip, here the STRUCK one (tagChip's `struck`, T321b: a diagonal in the chip's colour, since the fade
+// alone read too faint in this row), never a dot and never the Backend row's accent
 // fill. The `sel` class on the button stays the state the create reads; the chip is repainted from it on each click.
 function paintPickerTagChip(b: HTMLButtonElement, u: { name: string; color?: string | null }): void {
-  b.replaceChildren(tagChip(u.name, u.color, { inheritSize: true, off: !b.classList.contains("sel") }));
+  b.replaceChildren(tagChip(u.name, u.color, { inheritSize: true, struck: !b.classList.contains("sel") }));   // off = struck (T321b)
 }
 
 function syncPickerTags(): void {

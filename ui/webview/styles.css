@@ -700,6 +700,11 @@ body.chat-theme-yatharth .tab.active.colored:not(.tab-blocked) {
 /* a tag chip standing for an UNSELECTED toggle (the tag-lens menu, T283): faded, its colour kept —
    the state class; tag-menu.ts paints the same opacity inline for a sheet-less host (TAG_CHIP_OFF_OPACITY) */
 .tag-chip-off { opacity: 0.45; }
+/* an OFF tag drawn as STRUCK (T321b, the user 2026-09-10: in the picker's Tags row a faded chip alone did not read as
+   off): a 1px diagonal from the chip's bottom-left to its top-right in the chip's own colour (currentColor, so the same
+   tag colour on either theme), a gradient whose middle stop is the corner-to-corner line, over the lighter fade the
+   renderer sets inline with the class and the position (tagChip's `struck`); the same bytes on both sheets */
+.tag-chip-struck::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(to top right, transparent calc(50% - 0.5px), currentColor calc(50% - 0.5px), currentColor calc(50% + 0.5px), transparent calc(50% + 0.5px)); }
 .ctx-tag-x { flex: 0 0 auto; background: none; border: none; color: var(--dim); cursor: pointer; font: inherit; padding: 0 2px; }
 .ctx-tag-x:hover { color: var(--fg); }
 .ctx-item-newtag { cursor: default; }
@@ -2906,7 +2911,7 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 .picker-auth-fixed { flex: 0 0 auto; color: var(--fg); font-size: 0.82em; padding: 4px 0; }
 /* the picker's Tags row (tab groups, the user 2026-09-04): one option per tag; several may be selected, a session
    can hold several tags. Each option IS the tag chip every surface draws (T321, the user 2026-09-10): the thin
-   border in the tag's colour, the faded chip (.tag-chip-off) for unselected, so the button around it carries no
+   border in the tag's colour, the struck chip (.tag-chip-struck, T321b) for unselected, so the button around it carries no
    chrome: no border, no padding, the page's typeface (a bare button wears the browser's control face), and never
    the Backend row's accent fill or hover wash; the hover cue is the strip's own, the chip brightened */
 .picker-tags { flex-wrap: wrap; }

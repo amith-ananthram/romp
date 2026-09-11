@@ -46,7 +46,19 @@ test("the renderer pins the standard inline: thin border and text in the tag's c
     assert.equal(off.attrs["class"], "tag-chip-off");
     assert.match(off.attrs.style, /opacity:0\.45;/);
     assert.match(off.attrs.style, /border:1px solid #3355aa;color:#3355aa;/, "faded, never recoloured");
+    // the STRUCK off variant (T321b, the user 2026-09-10: a faded chip alone was not obvious enough in the picker): the
+    // state class the sheets draw the diagonal on, the chip positioned for it, a lighter fade, the colour kept
+    const struck = tagChip("qa", "#3355aa", { struck: true });
+    assert.equal(struck.attrs["class"], "tag-chip-struck", "one class: struck is its own off variant, never stacked on the fade");
+    assert.match(struck.attrs.style, /position:relative;opacity:0\.7;/, "positioned for the diagonal, faded lighter than the plain off");
+    assert.doesNotMatch(struck.attrs.style, /opacity:0\.45/);
+    assert.match(struck.attrs.style, /border:1px solid #3355aa;color:#3355aa;/, "the colour kept: the line is drawn in it");
   } finally { g.document = saved; g.window = savedWin; }
+  assert.match(MENU, /export const TAG_CHIP_STRUCK_CLASS = "tag-chip-struck";/);
+  assert.match(MENU, /export const TAG_CHIP_STRUCK_OPACITY = "0\.7";/);
+  const STRUCK_RULE = ".tag-chip-struck::after { content: \"\"; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(to top right, transparent calc(50% - 0.5px), currentColor calc(50% - 0.5px), currentColor calc(50% + 0.5px), transparent calc(50% + 0.5px)); }";
+  for (const [name, sheet] of [["styles.css", CSS], ["feed.css", FEED_CSS]] as const)
+    assert.ok(sheet.includes("\n" + STRUCK_RULE + "\n"), name + ": the diagonal, corner to corner in the chip's own colour (currentColor: theme parity by construction), the same bytes on both sheets");
 });
 
 test("every tag surface builds through tagChip", () => {
@@ -73,8 +85,10 @@ test("every tag surface builds through tagChip", () => {
   assert.match(dialog, /const c = tagChip\(g\.name, g\.color \|\| null\);/, "the feed's session dialog");
   assert.match(dialog, /c\.classList\.add\("fsm-chip-tag"\);/);
   assert.doesNotMatch(FEED, /c\.style\.borderColor = g\.color/, "no hand-painted tag border remains");
-  assert.match(RENDER, /function paintPickerTagChip\(b: HTMLButtonElement, u: \{ name: string; color\?: string \| null \}\): void \{\s*\n\s*b\.replaceChildren\(tagChip\(u\.name, u\.color, \{ inheritSize: true, off: !b\.classList\.contains\("sel"\) \}\)\);/,
-    "the new-session picker's Tags row");
+  assert.match(RENDER, /function paintPickerTagChip\(b: HTMLButtonElement, u: \{ name: string; color\?: string \| null \}\): void \{\s*\n\s*b\.replaceChildren\(tagChip\(u\.name, u\.color, \{ inheritSize: true, struck: !b\.classList\.contains\("sel"\) \}\)\);/,
+    "the new-session picker's Tags row: off = the struck chip (T321b)");
+  assert.match(filt, /const chip = tagChip\(c\.label, c\.color\);/, "the filter chips keep the plain chip (a selected filter is never off)");
+  assert.match(lensMenu, /\{ off: !on \}/, "the tag-lens menu keeps the fade for now (the user named the picker; the strike is one word away)");
   assert.doesNotMatch(RENDER + CSS, /picker-tag-dot/, "the picker's dot is gone");
 });
 
@@ -103,5 +117,5 @@ test("no sheet sets a weight on a tag chip class: the sheets add layout and stat
 
 test("the standard is written in ui/CLAUDE.md, one sentence", () => {
   assert.match(RULES, /\*\*Tags render as ONE chip everywhere\*\* \(the user 2026-09-10\): `tagChip` in\s*\n`ui\/webview\/tag-menu\.ts` builds every tag the UI shows/);
-  assert.match(RULES, /weight 400, the\s*\ncontext's size, faded when off; never bold, which is the session names' weight/);
+  assert.match(RULES, /weight 400, the\s*\ncontext's size, faded when off \(struck through with a diagonal in its colour where a fade alone\s*\nreads too faint: the picker's Tags row\); never bold, which is the session names' weight/);
 });
