@@ -916,17 +916,23 @@ class Proto2Wire(Harness):
         # a window that holds NO part of the run (a far anchor) still detaches the client, kernel and page agreeing
         far = km._chat_history_reply(SID, {"type": "loadAround", "id": SID, "uuid": whole[2]["uuid"]}, NOW, base=c["echat"][SID])
         self.assertFalse(far["connected"]); self.assertTrue(far["_base"]["detached"])
-        # a re-attach whose run's NEWEST key left the list (a fork rewrote the tail) while its first still stands before the
-        # frame: the client's merge shares the remaining keys, so the kernel keeps the older first too (round 4)
+        # a re-attach whose run's NEWEST key left the list (a fork rewrote the tail): the run held everything up to that key,
+        # so the keys just below the fork point survive; they are in the frame exactly when the fork left fewer than WIRE_TAIL
+        # new events, the client's merge then shares them and the kernel keeps the older first (round 4)
+        head_from = len(evs) - km.WIRE_TAIL
         c2, sent2 = _client()
-        c2["echat"][SID] = {"first": evs[0]["uuid"], "last": "gone-after-a-fork", "detached": False, "reattach": True}   # the first
-        km._send_chat_locked(c2, m, None, 0, False)                                                                   #  stands in the list
+        c2["echat"][SID] = {"first": evs[0]["uuid"], "last": "gone-after-a-fork", "detached": False, "reattach": True}
+        km._send_chat_locked(c2, m, None, head_from + 5, False)          # the fork point inside the frame: shared
         self.assertEqual(sent2[-1]["type"], "session"); self.assertEqual(c2["echat"][SID]["first"], evs[0]["uuid"])
         self.assertNotEqual(sent2[-1]["firstUuid"], evs[0]["uuid"], "…before the frame's first")
         c3, sent3 = _client()
-        c3["echat"][SID] = {"first": "gone-1", "last": "gone-2", "detached": False, "reattach": True}   # no key left: replaced
-        km._send_chat_locked(c3, m, None, 0, False)
-        self.assertEqual(c3["echat"][SID]["first"], sent3[-1]["firstUuid"])
+        c3["echat"][SID] = {"first": evs[0]["uuid"], "last": "gone-after-a-fork", "detached": False, "reattach": True}
+        km._send_chat_locked(c3, m, None, head_from - 5, False)          # a fork of WIRE_TAIL or more: no run key in the frame
+        self.assertEqual(c3["echat"][SID]["first"], sent3[-1]["firstUuid"], "the client replaces: the base takes the frame's first")
+        c4, sent4 = _client()
+        c4["echat"][SID] = {"first": "gone-1", "last": "gone-2", "detached": False, "reattach": True}   # no key left at all
+        km._send_chat_locked(c4, m, None, 0, False)
+        self.assertEqual(c4["echat"][SID]["first"], sent4[-1]["firstUuid"])
         src = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertIn('if base.pop("keepLast", False):', src, "the handler applies a loadOlder's first-edge advance")
 

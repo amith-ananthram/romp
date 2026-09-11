@@ -40784,15 +40784,15 @@ _PAGE_STATS = {"hits": 0, "misses": 0, "evictions": 0, "pages": 0, "bytes": 0, "
 _page_lock = threading.Lock()
 
 
-def _chat_history_page(sid, lo, hi, now, sess=None, tmux=None):
+def _chat_history_page(sid, lo, hi, now, sess=None, live_map=None):
     """The rendered events of turns [lo, hi) of `sid` (build_session's page mode), through a bounded LRU keyed on the
     session's whole chat-build signature: any input that would change the render misses. Counted (/perf chatPages)."""
-    if tmux is None:
-        tmux = _live_map()
+    if live_map is None:
+        live_map = _live_map()
     if sess is None:
         sess = next((x for x in _sessions(now) if x["sid"] == sid), None)
     try:                                          # the whole chat-build signature, as one digest (its components hold dicts)
-        raw = _chat_build_sig(sess, tmux.get(sid), now, live_map=tmux, deps=False) if sess else None
+        raw = _chat_build_sig(sess, live_map.get(sid), now, live_map=live_map, deps=False) if sess else None
         sig = hashlib.sha1(json.dumps(raw, sort_keys=True, default=str).encode("utf-8")).hexdigest() if raw is not None else None
     except Exception:
         sig = None
@@ -40806,7 +40806,7 @@ def _chat_history_page(sid, lo, hi, now, sess=None, tmux=None):
         _PAGE_STATS["misses"] += 1
     t0 = time.monotonic()
     try:
-        page = build_session(sid, now, tmux, page=(lo, hi))
+        page = build_session(sid, now, live_map, page=(lo, hi))
     finally:
         _chat_dep_scope.deps = None
     evs = (page or {}).get("events") or []
@@ -40858,12 +40858,12 @@ def _chat_history_reply(sid, msg, now, base=None):
     turn-aligned, so a client's oldest or newest resident event is a turn's first or last. The reply's `_base` is
     the client's new echat base, popped by the handler."""
     kind = msg.get("type")
-    tmux = _live_map()
+    live_map = _live_map()
     sess = next((x for x in _sessions(now) if x["sid"] == sid), None)
     if sess is None:
         return None
     try:
-        m = build_session(sid, now, tmux, floor=_RENDER_FLOOR.get(sid))
+        m = build_session(sid, now, live_map, floor=_RENDER_FLOOR.get(sid))
     finally:
         _chat_dep_scope.deps = None
     if not m:
@@ -40888,7 +40888,7 @@ def _chat_history_reply(sid, msg, now, base=None):
         a = lo
         while a < hi:
             b = min(hi, (a // PAGE_TURNS + 1) * PAGE_TURNS)
-            out.extend(_chat_history_page(sid, a, b, now, sess=sess, tmux=tmux))
+            out.extend(_chat_history_page(sid, a, b, now, sess=sess, live_map=live_map))
             a = b
         return out
 
@@ -41173,10 +41173,14 @@ def _send_chat_proto2(c, m, ms, change_from, led_changed, st, pc):
         # newest event left the list (a fork, a /clear) is replaced on the client, and the frame's first is the base's
         pos = _uuid_positions(evs, sid)
         pf, pl = pos.get(pc["first"]), pos.get(pc.get("last"))
-        # the run shares a key with the frame when its newest event is inside the frame, or its first is (the frame's
-        # first is then the older), or its newest left the list while its first still stands before the frame (a fork
-        # rewrote the newest events: the run's remaining keys reach the frame, as the client's merge finds; round 4)
-        shared = (pl is not None and pl >= head_from) or (pf is not None and (pf >= head_from or pl is None))
+        # the run shares a key with the frame (the client's merge overlaps on ANY resident key) when its newest event is
+        # inside the frame, or, its newest gone (a fork rewrote the tail), when the fork point lies inside the frame: the
+        # run held everything up to its newest, so the keys just below the fork point survive in the list and are in the
+        # frame exactly when the fork left fewer than WIRE_TAIL new events behind it (round 4: a fork of 250 or more
+        # leaves no run key in the frame, the client replaces, and the base takes the frame's first with it). The fork
+        # point is this push's change index (the shared diff against the last list sent).
+        fork_in_frame = pl is None and 0 < change_from < total and change_from > head_from
+        shared = (pl is not None and pl >= head_from) or fork_in_frame
         if shared and (pf is None or pf < head_from):
             first = pc["first"]
     st[sid] = {"first": first, "last": _last_anchor(evs), "detached": False}
