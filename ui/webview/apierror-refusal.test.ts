@@ -40,9 +40,10 @@ test("the chat error card drops Retry on a refusal and names the real fix in pla
   // remedy string, so this write and the tick's re-assert below cannot drift into different words
   assert.match(R, /const REFUSAL_REMEDY = "the model's safeguards refused this prompt — rewrite it or drop this thread";/);
   assert.match(apiErr, /if \(refusal\) countdown\.textContent = REFUSAL_REMEDY;/);
-  // no Dismiss-dialog dead button either: the Esc-sender is for the CLI's spend-limit menu, which a
-  // refusal never parks
-  assert.match(apiErr, /\} else if \(st\?\.backend === "tmux" && !refusal\) \{/);
+  // no dead button either: a refusal (like every no-Retry class) appends nothing after the Retry arm. Anchored with no
+  // wildcard (review find): the Retry push, its closing brace and the next comment are adjacent lines, so a re-added
+  // `else if` arm under any label fails this pin
+  assert.match(apiErr, /if \(!spendCap\) \{\n    acts\.push\(noticeAct\("Retry now", "apiRetryNow"[^\n]*\n  \}\n  \/\/ Global auto-retry pause/);
 });
 
 test("the 1s countdown tick RE-ASSERTS the refusal remedy — it must never write \"retrying soon…\" over it", () => {

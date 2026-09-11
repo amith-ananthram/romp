@@ -25,8 +25,18 @@ test("both judge-set toggles default OFF (the user 2026-06-29): the timeline's j
   assert.equal(DEFAULT_SETTINGS.showTriageJudges, false);
 });
 
-test("Default backend defaults to sdk (the user 2026-07-13, superseding the 06-22 tmux default); both backends coexist", () => {
+test("Default backend defaults to sdk (the user 2026-07-13); Claude Code and Codex coexist", () => {
   assert.equal(DEFAULT_SETTINGS.backend, "sdk");
+});
+
+test("a saved default of the retired terminal backend reads as sdk, never an undefined value (T331)", () => {
+  localStorage.setItem("romp:settings", JSON.stringify({ ...DEFAULT_SETTINGS, backend: "tmux" }));
+  assert.equal(loadSettings().backend, "sdk");
+  localStorage.setItem("romp:settings", JSON.stringify({ ...DEFAULT_SETTINGS, backend: "nonsense" }));
+  assert.equal(loadSettings().backend, "sdk", "any value no longer offered reads as the default");
+  localStorage.setItem("romp:settings", JSON.stringify({ ...DEFAULT_SETTINGS, backend: "codex" }));
+  assert.equal(loadSettings().backend, "codex", "an offered pick stands");
+  saveSettings({ backend: "sdk" });
 });
 
 test("Compact transcript defaults ON (the user 2026-07-14): fresh installs read the tidy transcript", () => {

@@ -22,8 +22,8 @@ test("the mode button renders FIRST (left of model) and the picker posts setMode
 
 test("Bypass is offered, and offered ONLY on an SDK session", () => {
   // The SDK sets the mode outright (set_permission_mode), so bypassPermissions is reachable there; a
-  // tmux session has nothing but the shift+tab cycle, which cannot express it. Listing it on tmux would
-  // be a menu entry that silently does nothing — the state this same change made the kernel refuse.
+  // Codex session has its own vocabulary and cannot express it. Listing it there would be a menu entry
+  // that silently does nothing.
   assert.match(RENDER, /value: "bypassPermissions", sdkOnly: true/);
   assert.match(RENDER, /\.filter\(\(c\) => !c\.sdkOnly \|\| s\.status\.backend === "sdk"\)/);
 });
@@ -49,7 +49,7 @@ test("every mode wears a tagline, and 'Accept edits' reads 'Accept' everywhere (
   // the rename holds everywhere the mode name renders: the chip/badge…
   assert.match(RENDER, /case "acceptedits": return "Accept";/);
   assert.ok(!RENDER.includes('"Accept edits"'), "no surface still says the two-word label");
-  // …and the kernel's tmux-cycle refusal names the same four modes with the same word
+  // …and the kernel's cycle refusal (its terminal leg, until the backend's removal lands) names the same four modes with the same word
   const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
   assert.match(KERNEL, /shift\+tab cycle — Normal, Accept, Auto, Plan\./);
 });

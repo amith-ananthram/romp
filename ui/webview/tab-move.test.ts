@@ -17,10 +17,9 @@ test("the tab menu carries a Move to folder… row beside Rename that opens the 
   assert.match(menu, /l\.textContent = "Rename"/);
   assert.match(menu, /l\.textContent = "Move to folder…"/);
   assert.match(menu, /dismissTabMenu\(\); showMovePrompt\(id\);/);
-  // a terminal session has no relocation primitive: the row says so and takes no click
-  assert.match(menu, /const isTmux = !!\(sTm && sTm\.status && sTm\.status\.backend === "tmux"\);/);
-  assert.match(menu, /if \(!isTmux\) mv\.addEventListener\("click"/);
-  assert.match(menu, /terminal sessions can't move/);
+  // every session moves (T331: the terminal backend, which had no relocation primitive, is no longer offered)
+  assert.match(menu, /mv\.addEventListener\("click", \(ev\) => \{ ev\.stopPropagation\(\); dismissTabMenu\(\); showMovePrompt\(id\); \}\);/);
+  assert.doesNotMatch(menu, /isTmux|terminal sessions can't move|ctx-item-off/, "no greyed state, no note");
 });
 
 test("the dialog posts moveSession with the typed folder and acknowledges before the round trip", () => {

@@ -48682,8 +48682,6 @@ var rows=m.sessions||[];
 if(rows.length){h+='<div class=ru-tip-win><div class=ru-tip-name><span>Sessions waiting</span></div>';
 rows.forEach(function(r){h+=rowHTML(r,full);});h+='</div>';}
 h+=histHTML();
-if(m.tmux>0)h+='<div class="ru-tip-win ah-line">'+(m.tmux===1?'1 tmux session is seen through its transcript only':m.tmux+' tmux sessions are seen through their transcripts only')
-+', so a retry in progress there shows only when it fails or recovers.</div>';
 if(full)h+='<div class="ru-tip-row ah-foot"><span class=ah-link role=button tabindex=0 data-act=usage>Usage and spend</span><span class=ah-link role=button tabindex=0 data-act=log>Log</span></div>';
 return h;}
 // The hover anchors above the rail, centered on the cursor, as the usage tip's showTip does; a re-render re-anchors

@@ -1,6 +1,6 @@
 // The romp VS Code extension — a THIN CLIENT of the romp web kernel.
 //
-// All host logic (transcript parsing, session mirroring, the feed fold, tmux
+// All host logic (transcript parsing, session mirroring, the feed fold,
 // driving, record-file IO) lives in the kernel (bin/romp-kernel, spawned via
 // bin/romp-serve). This extension only:
 //   1. ensures a kernel is running (spawn-or-attach on the default port,

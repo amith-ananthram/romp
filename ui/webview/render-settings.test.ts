@@ -43,6 +43,6 @@ test("the chat has NO gear of its own — it only consumes the shared setting (g
 
 test("the + New session button sends the picker's backend toggle, defaulting to the gear's (the user 2026-06-23)", () => {
   // the per-session toggle wins; it RESETS to the gear default (read fresh via loadSettings()) on each open
-  assert.match(RENDER, /const backend = beSel\?\.dataset\.be \|\| effectiveDefaultBackend\(loadSettings\(\)\.backend, kernelTmuxBackend\);\s*\n[\s\S]{0,400}startCreate\(\{ name, backend,/);
-  assert.match(RENDER, /const def = effectiveDefaultBackend\(loadSettings\(\)\.backend, kernelTmuxBackend\);/);   // toggle defaults to the gear setting, as offered (T288)
+  assert.match(RENDER, /const backend = beSel\?\.dataset\.be \|\| effectiveDefaultBackend\(loadSettings\(\)\.backend\);\s*\n[\s\S]{0,400}startCreate\(\{ name, backend,/);
+  assert.match(RENDER, /const def = effectiveDefaultBackend\(loadSettings\(\)\.backend\);/);   // toggle defaults to the gear setting, as offered (T288; a retired saved default reads as Claude Code, T331)
 });

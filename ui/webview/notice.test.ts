@@ -97,7 +97,7 @@ test("actions are data-act word buttons on the button vocabulary (noticeAct); th
   assert.match(RENDER, /function noticeAct\(label: string, act: string, tip\?: string\): HTMLButtonElement \{\s*\n\s*const b = el\("button", "notice-act"\) as HTMLButtonElement;/);
   assert.match(RENDER, /b\.dataset\.act = act;\s*\n\s*if \(tip\) setTip\(b, tip\);/);
   assert.match(CSS, /\.notice-act \{[^}]*font-size: var\(--btn-fs-sm\);[^}]*padding: var\(--btn-pad-sm\);/);
-  for (const act of ["apiRetryNow", "dismissDialog", "stopAllRetries", "stopRetrying", "echorestore", "echodismiss", "todofold", "futoggle", "composerNoteX"]) {
+  for (const act of ["apiRetryNow", "stopAllRetries", "stopRetrying", "echorestore", "echodismiss", "todofold", "futoggle", "composerNoteX"]) {   // dismissDialog went with the terminal backend (T331)
     assert.match(RENDER, new RegExp("\\n    " + act + ": \\("), act + " is handled on the body delegate");
   }
 });

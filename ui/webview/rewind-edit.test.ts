@@ -18,7 +18,7 @@ test("the edit affordance renders only on bubbles the backend can address", () =
   // SDK backend only, newer than the last compaction, not an optimistic echo)
   assert.match(RENDER, /if \(!romp && !injected && ev\.uuid && editSid\s*\n\s*&& \(sessions\.get\(editSid\) as any\)\?\._editable\?\.has\(ev\.uuid\)\)/);
   // the set is computed by rewind-reconcile.ts (executed there); render.ts hands it the backend and the echo prefix
-  assert.match(RENDER, /sdk: s\.status\?\.backend === "sdk", now: Date\.now\(\), ttlMs: REWIND_TTL_MS, optPrefix: OPT_PREFIX/);   // tmux sessions get no edit affordance; echoes are excluded
+  assert.match(RENDER, /sdk: s\.status\?\.backend === "sdk", now: Date\.now\(\), ttlMs: REWIND_TTL_MS, optPrefix: OPT_PREFIX/);   // a Codex session gets no edit affordance; echoes are excluded
   const PASS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "rewind-reconcile.ts"), "utf8");
   assert.match(PASS, /if \(events\[i\]\.kind === "compact"\) lastCompact = i;/);   // pre-compaction bubbles excluded
   assert.match(PASS, /!e\.uuid\.startsWith\(opts\.optPrefix\)/);              // optimistic echoes excluded

@@ -17,7 +17,7 @@ The served guard drives the real /chat page from a hermetic kernel with two tagg
 holds, opens the picker with the strip's +, and reads the Tags row: one option per tag, each holding one chip whose
 border wears the tag's colour; the tags the ACTIVE tab holds are selected (the full chip), the rest unselected (the
 faded chip); no dot anywhere. A click flips one option: the state class the create reads (`sel`) and the chip's off
-class move together, and a second click puts them back. The tmux pick greys the row and leaves both looks readable
+class move together, and a second click puts them back. No backend pick greys the row (T331)
 (the off chip's fade is not stacked with the row's).
 
 Skips LOUDLY without the extension deps or a Playwright browser (CI installs none); the CI-safe pins ride
@@ -141,15 +141,9 @@ await page.waitForTimeout(150);
 const light = await survey();
 await page.evaluate(() => document.body.classList.remove("chat-theme-yatharth", "theme-light"));
 await page.waitForTimeout(100);
-// the tmux pick: the row greys behind its note
-const hasTmux = await page.evaluate(() => { const b = document.querySelector('#picker .picker-be-opt[data-be="tmux"]'); return !!b && getComputedStyle(b).display !== "none"; });
-let tmux = null;
-if (hasTmux) {
-  await page.click('#picker .picker-be-opt[data-be="tmux"]');
-  await page.waitForTimeout(150);
-  tmux = await survey();
-}
-fs.writeSync(1, "RESULT:" + JSON.stringify({ strip, lensMenu, open, on, off, light, tmux, hasTmux }) + "\n");
+// T331: no backend pick disables the row any more (the terminal backend is no longer offered); the picker's toggles
+const backends = await page.evaluate(() => Array.from(document.querySelectorAll('#picker .picker-be-opt:not([data-tag])')).map((b) => b.getAttribute('data-be')).filter(Boolean));
+fs.writeSync(1, "RESULT:" + JSON.stringify({ strip, lensMenu, open, on, off, light, backends }) + "\n");
 await browser.close();
 process.exit(0);
 """
@@ -184,7 +178,6 @@ class ServedPickerTagChips(unittest.TestCase):
                      "message": {"role": "user", "content": "notes-api: check the %s service" % name}}]
             Path(proj, sid + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
         Path(cls.state, "usage.json").write_text(json.dumps({"five_hour": {"pct": 100}, "seven_day": {"pct": 10}}))
-        Path(cls.state, "tmux-backend").write_text("on")   # the gear's tmux switch: the picker offers Claude Code (tmux), so the greyed row can be driven
         tags = [{"id": tid, "name": tname, "color": color, "members": [sid for (_n, sid, t) in SESSIONS if tname in (t or "").split()]}
                 for (tid, tname, color) in TAGS]
         Path(cls.state, "timeline-views.json").write_text(json.dumps({"tags": tags, "tagOrder": [t[1] for t in TAGS],
@@ -297,16 +290,9 @@ class ServedPickerTagChips(unittest.TestCase):
         off = {x["tag"]: x for x in out["off"]["opts"]}
         self.assertFalse(off["infra"]["sel"])
         self.assertEqual((off["infra"]["chipClass"], off["infra"]["chipOpacity"]), ("tag-chip-off", "0.45"), "clicked again: the off chip")
-        # the tmux pick: the row greys (not a second fade), every option disabled, both looks still distinct
-        self.assertTrue(out["hasTmux"], "the lab turns the gear's tmux switch on, so the picker offers the tmux backend")
-        if out["hasTmux"]:
-            t = {x["tag"]: x for x in out["tmux"]["opts"]}
-            self.assertTrue(out["tmux"]["rowDisabled"])
-            for x in t.values():
-                self.assertTrue(x["disabled"])
-                self.assertIn("grayscale", x["btnFilter"], "greyed: %r" % x)
-                self.assertEqual(x["btnOpacity"], "1", "grey is the whole disabled cue: no second fade over the off chip's own: %r" % x)
-            self.assertEqual(t["web"]["chipOpacity"], "1"); self.assertEqual(t["infra"]["chipOpacity"], "0.45")
+        # T331: the picker offers Claude Code and Codex, both of whose creates take tags: no pick greys the row
+        self.assertEqual(out["backends"], ["sdk", "codex"], "the terminal backend is no longer offered")
+        self.assertFalse(out["on"]["rowDisabled"], "the row is never disabled")
 
 
 if __name__ == "__main__":

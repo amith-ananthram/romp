@@ -1,5 +1,5 @@
 // The status bar / needs-you notification decision core: derived from the
-// kernel's {type:"feed"} frames only (no polling, no tmux heuristics).
+// kernel's {type:"feed"} frames only (no polling).
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import { deriveStatus, freshNeedsYou, needsYouAsks, renderStatusBar, statusTooltipLines } from "./fleet-status";

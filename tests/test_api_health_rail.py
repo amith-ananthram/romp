@@ -491,10 +491,12 @@ class Detail(unittest.TestCase):
         self.assertIn("data-act=reveal data-sid=", self.JS)
         self.assertIn("else{hint=NOTSENT;dirty=true;}", row, "a dead socket is said here too")
 
-    def test_the_coverage_line_appears_only_under_a_tmux_guard(self):
-        self.assertIn("if(m.tmux>0)h+=", self.JS)
-        self.assertIn("seen through their transcripts only", self.JS)
-        self.assertIn(", so a retry in progress there shows only when it fails or recovers.", self.JS)
+    def test_no_terminal_coverage_line_is_drawn(self):
+        # T331 (the user 2026-09-10: the tmux backend is being removed): the popup no longer says how many terminal
+        # sessions are seen through their transcripts; the frame's `tmux` count stays on the wire until the kernel
+        # side goes (a federation field older peers keep sending)
+        self.assertNotIn("m.tmux", self.JS)
+        self.assertNotIn("seen through their transcripts only", self.JS)
 
     def test_the_detail_renders_from_the_last_frame_and_the_history_is_the_one_read(self):
         # the cell and the frame's reading render from the last frame only; the History section is the one fetch,

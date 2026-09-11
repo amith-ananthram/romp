@@ -24,7 +24,8 @@ test("the kernel reports OPENING while the transcript doesn't exist and the spaw
 // running): a fresh session of EITHER backend writes NO transcript until its first turn, so keying the
 // chip on the file alone held a fully-up idle session on the opening dots until the user typed.
 // SDK: the backend's live `spawning` report (session thread up, client not yet; the handshake closes
-// it). tmux: the CLI's statusline hook publishing its first @claude-state (2026-08-10). The SDK leg
+// it). The kernel's terminal leg (the statusline hook's first @claude-state) stays pinned until the backend's
+// removal lands (T331 is the UI stage). The SDK leg
 // must key on `spawning`, NOT on `connected` being falsy — a DORMANT created session (kernel restarts
 // kill idle CLIs; boot reconcile leaves them lazy) also reports no `connected`, and reading that as
 // "still opening" kept the dots up for hours on a session one message from answering (the user

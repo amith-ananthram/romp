@@ -528,18 +528,14 @@ through to `install.sh`:
 
 ### Session backends
 
-- **Enable Claude Code tmux backend** (the gear's Updates & debug section; off
-  by default) decides whether the new-session picker and the gear's Default
-  backend list offer **Claude Code (tmux)**, a Claude Code session in a
-  terminal pane that Romp follows by reading the terminal. The setting gates
-  the offer alone: sessions already running on that backend keep working and
-  keep their label, `romp new -t` still works, and a saved default of Claude
-  Code (tmux) is set aside while the setting is off (new sessions use Claude
-  Code) and returns when it comes back. Like the judge settings, a change
-  applies at once, without a restart, and follows to every connected machine.
-  The backends read as **Claude Code** (the default), **Claude Code (tmux)**
-  and **Codex** everywhere: the picker, the gear, the tab tooltip's Backend
-  row.
+- The new-session picker and the gear's Default backend list offer **Claude
+  Code** (the default) and **Codex**; the backends read by those names
+  everywhere (the picker, the gear, the tab tooltip's Backend row). The
+  terminal backend, **Claude Code (tmux)**, is being removed: the dashboard no
+  longer offers it or its gear switch, a saved default of it reads as Claude
+  Code (never an undefined value), and every session's tab menu offers Move to
+  folder. The kernel still carries the setting and the backend until their
+  removal lands; a session already running on it keeps working meanwhile.
 
 ### Ports
 

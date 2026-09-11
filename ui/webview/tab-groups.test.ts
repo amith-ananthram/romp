@@ -315,34 +315,19 @@ test("row hairlines count section headers as row members (T134's floating look m
   assert.doesNotMatch(painter, /tab-group-sep|tab-group-break/);
 });
 
-test("the picker's Tags row is for SDK and Codex sessions: disabled behind a note on the tmux pick, and no `tags` ride a tmux create", () => {
-  // the kernel refuses tags on a tmux create (a terminal session's id is unknown until it starts);
-  // the row, prefilled from a tagged active tab, used to turn every terminal create into a refusal.
-  // A Codex create takes them (the kernel applies parent/tags on one since the upstream fold's round
-  // 2), so the row and the payload follow ONE predicate — executed here on each backend name
-  const pred = RENDER.match(/function backendTakesTags\(be: string\): boolean \{ (return [^}]*); \}/);
-  assert.ok(pred, "one predicate decides which backend a chip is for");
-  const takes = new Function("be", pred![1]) as (be: string) => boolean;
-  assert.equal(takes("sdk"), true);
-  assert.equal(takes("codex"), true, "a Codex create takes tags");
-  assert.equal(takes("tmux"), false, "a terminal session's id is unknown until it starts");
-  assert.equal(takes(""), false);
+test("the picker's Tags row is live for every offered backend, and the create always carries the selected chips (T331)", () => {
+  // the terminal backend, whose create took no tags, is no longer offered: no disabled state, no note, one payload
+  assert.doesNotMatch(RENDER, /backendTakesTags|picker-tags-note/, "the predicate and the note went with the tmux pick");
+  const sync = RENDER.slice(RENDER.indexOf("function syncPickerTags("), RENDER.indexOf("function syncPickerAuth("));
+  assert.match(sync, /\.forEach\(\(b\) => \{ b\.disabled = false; \}\);/, "every chip stays live");
+  assert.doesNotMatch(sync, /classList\.toggle\("disabled"/);
+  assert.match(RENDER, /const tags = Array\.from\(tgWrap\.querySelectorAll<HTMLElement>\("\.picker-be-opt\.sel"\)\)\.map\(\(x\) => x\.dataset\.tag \|\| ""\)\.filter\(Boolean\);/,
+    "the create handler sends the selected chips for every backend");
   assert.match(KERNEL, /_create_codex_session\(nm, cwd, client=client,\s+parent=psid or "", tags=ctags\)/,
     "the premise: the kernel's createSession op applies tags on a Codex create");
-  const sync = RENDER.slice(RENDER.indexOf("function syncPickerTags("), RENDER.indexOf("function syncPickerAuth("));
-  assert.match(sync, /const takes = backendTakesTags\(pickerBackendChoice\(\)\);/);
-  assert.match(sync, /wrap\.classList\.toggle\("disabled", !takes\);/);
-  assert.match(sync, /\.forEach\(\(b\) => \{ b\.disabled = !takes; \}\);/);
-  assert.match(sync, /note\.style\.display = takes \? "none" : "";/);
-  assert.match(RENDER, /tgNote\.textContent = `Tags apply to \$\{backendLabel\("sdk"\)\} and \$\{backendLabel\("codex"\)\} sessions`;/, "the shared names (T288)");
-  assert.match(RENDER, /beWrap\.addEventListener\("click", \(\) => \{ syncPickerAuth\(\); syncPickerTags\(\); \}\);/, "re-decided on every backend toggle");
-  assert.match(RENDER, /syncPickerTags\(\);\s+\/\/ the backend toggle was just reset/, "…and on every open, after the backend reset");
-  assert.match(RENDER, /const tags = backendTakesTags\(backend\)\s*\n\s*\? Array\.from\(tgWrap\.querySelectorAll<HTMLElement>\("\.picker-be-opt\.sel"\)\)/,
-    "the create handler sends none for tmux, through the same predicate");
-  assert.doesNotMatch(RENDER, /const tags = backend === "sdk"/, "no second, SDK-only copy of the rule");
+  assert.match(RENDER, /beWrap\.addEventListener\("click", \(\) => \{ syncPickerAuth\(\); syncPickerTags\(\); \}\);/, "re-painted on every backend toggle");
   assert.match(RENDER, /:not\(\.picker-host\):not\(\.picker-auth\):not\(\.picker-tags\) \.picker-be-opt\.sel/, "a selected tag chip never reads as the backend pick");
-  assert.match(CSS, /\.picker-tags\.disabled \.picker-be-opt \{ filter: grayscale\(1\); cursor: default; pointer-events: none; \}/,
-    "greyed, not faded: the off chip keeps its own 0.45 as the only fade (T321)");
+  assert.doesNotMatch(CSS, /\.picker-tags\.disabled/, "the greyed-row rule is gone with the state");
 });
 
 test("headers are click-safe: data-act on the node, the action on the stable #tabs delegate, one render path via the event", () => {

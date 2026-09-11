@@ -1,5 +1,5 @@
 // Shared shape for a parsed live AskUserQuestion picker. The PARSER now lives in Python
-// (bin/romp-askparse, scraping the tmux pane kernel-side); the webview only needs these TYPES to render
+// (the kernel pushes askLive from the SDK's own control request); the webview only needs these TYPES to render
 // the picker the kernel pushes (askLive). The kernel emits exactly this shape (camelCase keys).
 
 export interface AskOption {
@@ -9,7 +9,7 @@ export interface AskOption {
   selected: boolean;    // the ❯ cursor is currently on this row
   checked?: boolean;    // multi-select checkbox state ([✔]/[ ]); undefined for non-checkbox rows
   preview?: string;     // THIS option's own preview box (SDK backend carries one per option, so the webview
-                        // can swap previews on ↑/↓ locally — no terminal round-trip). undefined on the tmux
+                        // can swap previews on ↑/↓ locally — no round-trip). undefined only from an older
                         // path, which only scrapes ONE preview (the focused option) into ParsedAsk.preview.
 }
 
@@ -29,6 +29,6 @@ export interface ParsedAsk {
                         // focused option draws to the RIGHT of the option list — undefined when none.
   previewKind?: "diff" | "plan"; // how to render `preview`: "diff" → colorize +/- lines (Edit/Write
                         // permission on the SDK backend), "plan" → plain (ExitPlanMode). undefined → verbatim
-                        // monospace (the tmux side-by-side scrape). (the user 2026-06-27.)
+                        // monospace (a verbatim box). (the user 2026-06-27.)
   sig: string;          // change-signature, so the host only re-posts when it actually changed
 }

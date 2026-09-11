@@ -50,7 +50,7 @@ test("landOn top-aligns the target (block:'start'), never centers", () => {
 
 // Ask preview — the live picker card reproduces the FOCUSED option's side-by-side TUI box (the user
 // 2026-06-13), now FOCUS-AWARE so ↑/↓ swaps it (the user 2026-06-22): the focused option's OWN preview
-// (SDK per-option) or ParsedAsk.preview (the single tmux scrape). Rendered as a monospace <pre> via
+// (per option; ParsedAsk.preview only from an older kernel). Rendered as a monospace <pre> via
 // textContent (NEVER innerHTML: the pane text is untrusted terminal output), and REPLACED not appended.
 test("the live ask card renders the focused option's preview as a monospace pre via textContent", () => {
   assert.match(RENDER, /renderAskPreview\(\);/);
