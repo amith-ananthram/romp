@@ -106,6 +106,23 @@ class SpendRate(unittest.TestCase):
         self.assertEqual(km._spend_window_usd(self.leaf, NOW + 5000, 600, PRICES), 0.0)
         self.assertEqual(km._spend_window_usd(os.path.join(self.td.name, "absent.jsonl"), NOW, 600, PRICES), 0.0)
 
+    def test_the_window_reads_the_cache_entry_with_a_tail_accepted_never_the_whole_file_road(self):
+        """After a restart the assembly checkpoint restores a transcript as a TAIL entry (the records past its cut); the
+        whole-file road would upgrade every live transcript to a full re-read on the guard's first cycle (the checkpoint's
+        served tests measure those bytes). The window reads the entry with tail_ok, and never calls the whole-file road."""
+        write_jsonl(self.leaf, [assistant(NOW - 100, "msg_t", out_tokens=1000, in_tokens=0)])
+        sub = Path(self.leaf).with_suffix("") / "subagents"
+        write_jsonl(sub / "agent-1.jsonl", [assistant(NOW - 50, "msg_s", out_tokens=1000, in_tokens=0)], mtime=NOW - 50)
+        calls = []
+        real = km.em._read_jsonl_entry
+        def entry(path, on_fail=None, tail_ok=False, tail_from=None):
+            calls.append((os.path.basename(str(path)), tail_ok)); return real(path, on_fail=on_fail, tail_ok=tail_ok, tail_from=tail_from)
+        with mock.patch.object(km.em, "_read_jsonl_entry", side_effect=entry), \
+             mock.patch.object(km.em, "_read_jsonl_incremental", side_effect=AssertionError("the whole-file road")):
+            usd = km._spend_window_usd(self.leaf, NOW, 600, PRICES)
+        self.assertAlmostEqual(usd, 2 * 1000 * 25e-6, places=9)
+        self.assertEqual(sorted(calls), sorted([(os.path.basename(self.leaf), True), ("agent-1.jsonl", True)]), "each file once, a tail accepted")
+
     def test_an_unpriced_model_counts_at_the_dearest_row_and_a_record_without_usage_counts_nothing(self):
         write_jsonl(self.leaf, [assistant(NOW - 100, "msg_x", out_tokens=1000, model="mystery-9", in_tokens=0),
                                 {"type": "assistant", "timestamp": iso(NOW - 90), "uuid": "n", "message": {"id": "msg_n", "model": "claude-opus-4-8", "content": []}}])

@@ -36252,7 +36252,12 @@ def _spend_window_usd(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None):
     usd = 0.0
     for f in _spend_window_files(leaf, since):
         best, anon = {}, 0.0
-        for o in reversed(em._read_jsonl_incremental(f)):
+        # the reader's entry with a TAIL accepted (T323 stage 4a): after a restart the assembly checkpoint restores a
+        # file as the records past its cut, and the whole-file road (_read_jsonl_incremental) would upgrade that entry
+        # to a full re-read of every live transcript on the guard's first cycle; the window wants the newest records,
+        # which a tail holds. A tail cut inside the window undercounts the minutes before the cut on that first cycle.
+        ent = em._read_jsonl_entry(f, tail_ok=True)
+        for o in reversed(ent[4] if ent is not None else []):
             if not isinstance(o, dict):
                 continue
             t = _msg_epoch(o)
