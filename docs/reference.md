@@ -2378,6 +2378,31 @@ message written but never placed, a store record never finished), closes each
 one's receipt as refused, and says so once. The sidecars are yours to inspect
 or delete.
 
+## The spend ledger across a host re-attach
+
+A session under a host keeps its CLI process across a kernel restart, and the
+CLI's `total_cost_usd` is cumulative per process. The kernel folds only each
+result's delta over a watermark, so every result persists that watermark on the
+session's registry row (`costState`: the cumulative total, the token
+watermarks, and the CLI's identity as pid and start time). A kernel that
+attaches to a surviving host reads it at the first result and, when it names
+that same CLI, seeds the watermarks from it, so the first result records only
+its own turn; a fresh process still starts at zero and records its whole first
+total. A surviving process with no matching watermark on record (a kernel
+before this rule wrote none) records nothing for that first result, since its
+total is the lifetime's and the turn's share is unknowable; the kernel log says
+so, and the watermark is written from there. Each `turns.jsonl` row carries
+`cumulativeUsd`, the CLI's own total at that result, and a first result's
+`spendBaseline` (`fresh`, `seeded` or `attach-unknown`). Before this rule every
+restart re-billed each hosted session's lifetime as one turn (2026-09-11: a
+staircase of rows from $436 to $953 on one session across 21 restarts).
+`romp spend-repair [--day D]` recomputes a day's `spend.json` hour and day
+buckets and `turns.jsonl` dollars from that staircase, treating a session's
+first result after a restart as cumulative (its true cost is the cumulative
+less the previous cumulative less the rows between; the day's first cumulative
+row counts as a typical turn), prints before and after per hour and per session,
+and changes nothing unless `--apply` is given.
+
 ## Restart metrics
 
 `romp restart-metrics` reads what kernel restarts do to the sessions, from the
