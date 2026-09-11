@@ -91,3 +91,13 @@ export function fullFrameMerges(pendingWhy: string | null | undefined): boolean 
 export function afterMore(more: boolean, headKnown: boolean, resident: number): { detached: boolean; headTotal: number | null } {
   return { detached: !!more, headTotal: !more && headKnown ? resident : null };
 }
+
+/** The newest resident keys a proto-2 client sends ahead of its re-attach ask (reattachKeys): the kernel's repair frame
+ *  keeps the run's older first edge when the highest of THESE that is still in the list lies inside the frame, the same
+ *  overlap mergeWindow finds; the broadcast diff's change index is no fork point for a connect push (T323 follow-up). */
+export const REATTACH_KEYS = 512;
+export function reattachKeys(events: readonly Ev[]): string[] {
+  const out: string[] = [];
+  for (const e of events.slice(-REATTACH_KEYS)) { const k = keyOf(e); if (k) out.push(k); }
+  return out;
+}

@@ -537,6 +537,7 @@ class _PerfStats:
                 # T323 stage 4a: the assembly documents: written, restored, fallbacks per reason, skips per reason (noEntry,
                 # restored, noBoundary, unsplittable, oversize, ...), hydrated bodies and bytes since boot
                 "asmCheckpoint": em.asm_checkpoint_stats(),
+                "asmIndex": em.asm_index_stats(),          # the lazy index (T323 stage 4c): atoms built, by caller, resident
                 "chatPages": dict(_PAGE_STATS)}   # the pre-floor history pages (T323 stage 4b): hits, misses, evictions, resident
 
 
@@ -1039,12 +1040,18 @@ _load_downtime()
 _SHA = None                                  # lazily-resolved git short-sha of the code this kernel runs
 
 
+_SHA_MISS_T = [0.0]         # when git last failed to answer _kernel_sha
+_SHA_REASK_S = 30           # and how long that failure stands before git is asked again (the round-two review's low)
+
+
 def _kernel_sha():
     """git short-sha of HEAD, plus '-dirty' if the working tree has uncommitted edits — the kernel
     loads bin/*.py straight from the worktree, so a dirty tree means it's running code that isn't at
     any commit. Resolved once (a restart re-reads it). None outside a git checkout."""
     global _SHA
     if _SHA is None:
+        if time.time() - _SHA_MISS_T[0] < _SHA_REASK_S:
+            return None             # asked and unanswered within the bound: /version and /sw.js call this per request
         try:
             r = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
                                capture_output=True, text=True, timeout=2)
@@ -1054,9 +1061,11 @@ def _kernel_sha():
                                    capture_output=True, text=True, timeout=2)
                 if d.returncode == 0 and d.stdout.strip():
                     sha += "-dirty"
-            _SHA = sha
-        except Exception:
-            _SHA = ""
+            _SHA = sha or None      # an EMPTY answer is not remembered for the process's life (T352 review): a 2 s git
+        except Exception:           # timeout at a busy boot used to pin '' and the drift check's restart leg then had
+            _SHA = None             # no running sha to compare until a restart; it is asked again after _SHA_REASK_S
+        if _SHA is None:
+            _SHA_MISS_T[0] = time.time()
     return _SHA or None
 
 
@@ -3518,7 +3527,7 @@ def _painted_flag_value(sid, flag):
     if flag == "notify":
         return bool(_notify_session_effective(sid))
     if flag == "postalServiceOff":
-        return bool(_session_flag(sid, "postalServiceOff") or _session_flag(sid, "postalOff"))
+        return bool(_postal_isolated(sid))      # a comment thread paints its mail-off default (T356)
     return bool(_session_flag(sid, flag))
 
 
@@ -7727,6 +7736,37 @@ def _parked_quiet_deploy(checkout, now=None):
     return int(rec["t"]) if isinstance(rec.get("t"), (int, float)) else 0
 
 
+def _deploy_would_cut():
+    """The turns a deploy restart NOW would cut, as the drain would record them (SdkBackend.would_cut), or None when
+    that is unknown (no backend built yet, or one without the method). The gates that spare in-flight turns apply to
+    an unknown answer exactly as to a non-empty one (T352): only a KNOWN empty list waives them."""
+    be = _sdk_backend or None
+    if be is None or not hasattr(be, "would_cut"):
+        return None
+    try:
+        return list(be.would_cut())
+    except Exception:
+        return None
+
+
+def _cut_words(cut):
+    """The tail of a converge line naming what a restart now would cut: the turns, or that it is unknown."""
+    if cut is None:
+        return "; what a restart would cut is unknown (no backend yet)"
+    if not cut:
+        return "; a restart now would cut no turn"
+    names = ", ".join(str(c.get("name") or str(c.get("sid") or "")[:8]) for c in cut[:6]) + (", …" if len(cut) > 6 else "")
+    return "; a restart now would cut %d turn%s: %s" % (len(cut), "" if len(cut) == 1 else "s", names)
+
+
+def _converge_say(text):
+    """One line on the kernel's log for EVERY pass in which main has moved and this box does not converge: a hold, a
+    stand-down, an unreadable read (T352: a merged fix waited 23 minutes behind a cool-down that said nothing, so
+    the journal could not tell a hold from a dead thread). Every pass, never once per sha: the reader of the journal
+    must see the wait still standing, and the cadence is one pass per five minutes."""
+    sys.stderr.write("romp-kernel: converge: %s\n" % text)
+
+
 def _main_drift_check():
     """One origin/checkout/running comparison pass; fires the SAME banner as the release check (the
     shell's offer() renders the main-drift wording off kind:"main"). Re-fires only when the target sha
@@ -7740,7 +7780,21 @@ def _main_drift_check():
         return
     checkout = _checkout_sha()      # ONE read each: the verdict's inputs and the parked-deploy
     running = _kernel_sha()         # match below read the same shas the verdict examined
-    kind, target = _main_drift_verdict(_origin_main_sha(), checkout, running)
+    origin = _origin_main_sha()
+    kind, target = _main_drift_verdict(origin, checkout, running)
+    if not origin or not checkout or not running:
+        # an unreadable input is a NOTE each pass, never a gate (T352, and its review): the verdict keeps its per-leg
+        # shape, so main unreadable (git ls-remote failing or timing out at the release remote: offline, an auth prompt,
+        # a box too busy to answer in 15 s) still lets a checkout ahead of the running kernel converge the restart leg,
+        # while a pull needs main and the checkout both. Silence here used to read, in the journal, like a check thread
+        # that had died.
+        gone = [n for n, v in (("main at %s (git ls-remote failed or timed out)" % _release_remote(), origin),
+                               ("the checkout's HEAD", checkout), ("the running kernel's sha", running)) if not v]
+        _converge_say("%s could not be read this pass (main %s, checkout %s, running %s): %s; again in %d s"
+                      % (" and ".join(gone), origin or "?", checkout or "?", running or "?",
+                         "no verdict" if not kind else "the %s leg still decides from what was read" % kind, _MAIN_CHECK_EVERY_S))
+        if not kind:
+            return
     if kind == "restart" and target == _REBUILT_FOR[0]:
         return                                        # already converged in place (UI-only rebuild)
     if kind == "restart" and not _kernel_code_changed(running, target):
@@ -7789,23 +7843,54 @@ def _main_drift_check():
         # for the rest of the window, and a pull must not wait on a park that already delivered
         # (review find). When a stand-down ends without that landing — the row expired, the park
         # died with its manager — say so once and let the converge proceed on its own terms.
-        if not _sha_same(running, checkout) and _parked_quiet_deploy(checkout):
-            if _QUIET_PARKED_LOGGED[0] != checkout:
-                _QUIET_PARKED_LOGGED[0] = checkout
-                sys.stderr.write("romp-kernel: converge: %s already parked as a quiet deploy — leaving it "
-                                 "to the quiet window\n" % checkout[:8])
+        # Both waits below exist to spare IN-FLIGHT TURNS from a restart's cut: the quiet window waits for them to
+        # end, the cool-down spaces the cuts. A restart that would cut none (every working session under a host,
+        # T315; the default since T348) has nothing to spare, so neither wait applies to it (T352, the manager's
+        # find: a merged fix waited 23 minutes behind the cool-down on a box where every session was hosted). The
+        # answer comes from the drain's own predicate (SdkBackend.would_cut), and only a KNOWN empty list waives a
+        # wait: unknown (no backend yet) keeps both, as before. Every held pass says so, each time.
+        try:
+            cut = _deploy_would_cut()
+            spares = cut is not None and not cut
+            if not _sha_same(running, checkout) and _parked_quiet_deploy(checkout):
+                if spares:
+                    _QUIET_PARKED_LOGGED[0] = ""             # pre-empted knowingly: no "no longer pending" line below
+                    _converge_say("%s is parked as a quiet deploy, but a restart now would cut no turn: converging "
+                                  "without waiting for the window" % (checkout or "?")[:8])
+                else:
+                    _QUIET_PARKED_LOGGED[0] = checkout
+                    _converge_say("%s is parked as a quiet deploy; leaving it to the quiet window%s"
+                                  % ((checkout or "?")[:8], _cut_words(cut)))
+                    _MAIN_DRIFT[slot] = ""
+                    return
+            if _QUIET_PARKED_LOGGED[0] == checkout:
+                _QUIET_PARKED_LOGGED[0] = ""
+                _converge_say("the quiet deploy parked for %s is no longer pending; the converge proceeds on its own "
+                              "terms" % (checkout or "?")[:8])
+            last = max(_LAST_AUTO_CONVERGE[0], _last_deploy_restart_t())
+            left = _CONVERGE_COOLDOWN_S - (time.time() - last)
+            if left > 0:
+                since = time.strftime("%H:%M:%SZ", time.gmtime(last))
+                if spares:
+                    _converge_say("main is at %s (this box runs %s): %d s of the %d min cool-down since the deploy "
+                                  "restart at %s remain, but a restart now would cut no turn: converging now"
+                                  % (target, (running or "?")[:8], int(left), int(_CONVERGE_COOLDOWN_S // 60), since))
+                else:
+                    _converge_say("main is at %s (the checkout %s, this box runs %s): holding %d s more of the %d min "
+                                  "cool-down since the deploy restart at %s%s"
+                                  % (target, (checkout or "?")[:8], (running or "?")[:8], int(left), int(_CONVERGE_COOLDOWN_S // 60), since,
+                                     _cut_words(cut)))
+                    _MAIN_DRIFT[slot] = ""
+                    return
+            _LAST_AUTO_CONVERGE[0] = time.time()
+            _run_main_update(kind, target=target)
+        except Exception:
+            # a crash in the hold branches (the T352 round-two review: a None running sha inside the cool-down raised
+            # at a [:8] AFTER the latch above took the target, and the hold's own reset never ran, so every later
+            # pass returned at the latch and that commit never converged, in silence) leaves no target latched:
+            # the next pass judges afresh, and the crash itself reaches the check thread's log as before
             _MAIN_DRIFT[slot] = ""
-            return
-        if _QUIET_PARKED_LOGGED[0] == checkout:
-            _QUIET_PARKED_LOGGED[0] = ""
-            sys.stderr.write("romp-kernel: converge: the quiet deploy parked for %s is no longer pending — "
-                             "the converge proceeds on its own terms\n" % checkout[:8])
-        last = max(_LAST_AUTO_CONVERGE[0], _last_deploy_restart_t())
-        if time.time() - last < _CONVERGE_COOLDOWN_S:
-            _MAIN_DRIFT[slot] = ""
-            return
-        _LAST_AUTO_CONVERGE[0] = time.time()
-        _run_main_update(kind, target=target)
+            raise
     else:
         if target in _dismissed_updates():
             return                    # Not-now'd THIS sha, durably — a NEW sha offers again
@@ -9098,6 +9183,18 @@ def _prime_leaf_folds(leaf):
     return primed
 
 
+def _stored_tree(path, sid):
+    """The parse store's tree for a session's leaf when it holds one (the kernel's display parse under its own human flag,
+    else the judges'), never a parse of its own: the assembly writer takes it for the document's turns section (T323
+    stage 4c), and a settle over a session no build has parsed writes the atoms-only form rather than read the leaf whole."""
+    try:
+        cut = jd._pending_cut(sid)
+        hit = jd._parse_slot(sid, cut, path, _display_sdk_human(sid)) or jd._parse_slot(sid, cut, path, None)
+    except Exception:
+        return None
+    return hit[1] if hit else None
+
+
 def _persist_checkpoints(now):
     """Write the fold checkpoints whose files belong to a session with NEW settle evidence: its turn-end key (the
     Stop hook's lastStopAt, else a stopped states transition) or its states log's stat moved since the last write for
@@ -9129,8 +9226,10 @@ def _persist_checkpoints(now):
         if mine:
             written += em.checkpoint_write_dirty(sorted(mine))
         try:                                   # the assembly document for the leaf (T323 stage 4a): from a whole entry
-            if em.asm_checkpoint_write(leaf, sid, _display_sdk_human(sid)):   # with a compaction boundary, else a
-                written += 1                   #  counted skip; the tree it comes from is the store's live tree
+            if em.asm_checkpoint_write(leaf, sid, _display_sdk_human(sid), tree=_stored_tree(leaf, sid)):   # with a compaction
+                written += 1                   #  boundary, else a counted skip; the store's tree, when it holds one, gives the
+        #                                          document its turns section (T323 stage 4c: a restore builds the turns without an
+        #                                          atom); never a parse of its own (the settle reads no leaf whole)
         except Exception:
             sys.stderr.write("assembly checkpoint: %s\n" % traceback.format_exc())
         _CKPT_SETTLE_SEEN[sid] = key
@@ -14158,6 +14257,8 @@ def _comments_frame(sid, live_map=None):
                         "lastUuid": last_uuid,                         # the newest record shown/held — the client's cap-proof "transcript moved" datum
                         "unreachable": unreachable or None,            # a broken thread (missing transcript / lost cut): owes nothing
                         "promotedName": th.get("promotedName") or "",
+                        # the thread's mail state (T356): off by default until broken out; the popover says so
+                        "mailOff": bool(_postal_isolated(tsid)),
                         "model": (reg.get("liveModel") or reg.get("model") or "") if reg else "",
                         "effort": (reg.get("effort") or "") if reg else "",
                         "sinceEpoch": since_ms,
@@ -22724,7 +22825,11 @@ def _thread_rows():
         out.append({"id": tsid, "name": nm or tsid[:8], "state": meta.get("state", ""),
                     "dir": _cwd_of(tsid), "thread": True, "parent": parent,
                     "lastSid": jd._sdk_last_sid(tsid) or tsid,
-                    "working": "", "backend": "sdk"})
+                    "working": "", "backend": "sdk",
+                    # a thread's mail is off until the user breaks it out (T356): the row says so, so a listing
+                    # consumer never has to derive it
+                    "postalServiceOff": _postal_isolated(tsid),
+                    "mailOffWhy": "thread" if _thread_mail_off(tsid) else ""})
     return out
 
 
@@ -23305,9 +23410,24 @@ def _postal_shaped(text):
     return "romp-msg-id" in t or t.startswith("####################") or "\U0001F4EC" in t
 
 
+def _thread_mail_off(sid):
+    """A comment thread's mail is OFF by default, both directions, until the user breaks it out (T356, the user
+    2026-09-11: a comment thread of a manager session received the manager's mail, mailed two of its workers and
+    merged a pull request as if it were the manager). The default derives from the thread-ness itself (the reg's
+    threadOf), so a thread already on disk with no flag reads OFF; the one way on short of a break-out is the fresh
+    key `threadMail` at the literal True (never an old key re-read: the flip-a-default rule). A break-out clears
+    threadOf, so the promoted session falls back to the ordinary rule below: mail on unless the user toggled its
+    mailbox off. The postal bus derives the same answer from the same two files (_mail_off_why)."""
+    if not sid or not _thread_reg(sid).get("threadOf"):
+        return False
+    f = _session_flags().get(sid)
+    return not (isinstance(f, dict) and f.get("threadMail") is True)
+
+
 def _postal_isolated(sid):
-    """The session's postal-isolation flag (the timeline lane's mailbox icon), legacy key included."""
-    return bool(_session_flag(sid, "postalServiceOff") or _session_flag(sid, "postalOff"))
+    """The session's EFFECTIVE postal isolation: a comment thread whose mail is off (_thread_mail_off), else the
+    mailbox flag the timeline lane's icon writes, legacy key included."""
+    return _thread_mail_off(sid) or bool(_session_flag(sid, "postalServiceOff") or _session_flag(sid, "postalOff"))
 
 
 _FOLLOWUP_GOAL_RE = re.compile(r"romp-goal-id:\s*([^\s>]+)")
@@ -26830,6 +26950,8 @@ def _fold_tasks(session, sid=None):
         if ent is not None and ent[0] is atoms and ent[1] == fp:
             _chat_memo_bump(_task_fold_stats, "hit")
             part = ent[2]
+        elif turn.get("pre") and not any(n in ("TaskCreate", "TaskUpdate") for _i, n in turn.get("tools") or ()):
+            part = ({}, set(), [])                       # a restored pre-cut turn with no task call: nothing built (stage 4c)
         else:
             _chat_memo_bump(_task_fold_stats, "miss")
             part = _fold_tasks_turn(atoms)
@@ -27323,6 +27445,13 @@ def _cursors_before(turns, k, note_lists, model0):
     turns' scalars alone (uuid, t, the lazy model stamp): no body is read."""
     last_t, tmax, last_model = None, None, model0
     for t in turns[:k]:
+        if t.get("pre"):                                  # a restored pre-cut turn (T323 stage 4c): its own scalars, no atom built
+            if t.get("lastT"):
+                last_t = t["lastT"]
+                tmax = t["maxT"] if tmax is None else max(tmax, t["maxT"])
+            if t.get("lastModel"):
+                last_model = t["lastModel"]
+            continue
         for a in t.get("atoms") or []:
             at = a.get("t")
             if at:
@@ -27390,6 +27519,9 @@ def _chat_turn_fp(turn):
     """A cheap per-turn fingerprint: the turn's identity plus its atom count and end. A fold (the
     parse's own append path) only ever ADDS atoms, so any change to an earlier turn's atoms shows
     up here as a count or an end that moved; a full parse is excluded upstream by _parse_mode."""
+    if turn.get("pre"):                                   # a restored pre-cut turn (T323 stage 4c): the same tuple from its scalars
+        us = turn.get("uuids") or []
+        return (turn.get("id"), len(us), us[0] if us else None, us[-1] if us else None, turn.get("lastT"), bool(turn.get("ended")))
     atoms = turn.get("atoms") or []
     return (turn.get("id"), len(atoms), atoms[0].get("uuid") if atoms else None,
             atoms[-1].get("uuid") if atoms else None, atoms[-1].get("t") if atoms else None,
@@ -27486,7 +27618,9 @@ def _ledger_memo_report():
 # only draws a window) and streams OLDER history in on scroll-back, WIRE_CHUNK events per `loadOlder` request.
 # The build itself is unchanged (every session still builds its full events + ledger — so the Fleet ledger
 # that rides the chat builds is intact); only what crosses the wire is trimmed.
-WIRE_TAIL = 250                                  # events shipped on a full chat send; older streams in on scroll-back
+WIRE_TAIL = 250                                 # events shipped on a full chat send; older streams in on scroll-back
+REATTACH_KEYS = 512                              # the newest resident keys a proto-2 client sends with its re-attach ask
+REATTACH_KEYS_CLIENTS = 16                       # sessions whose posted keys one client may hold at once (the oldest dropped)
 WIRE_CHUNK = 250                                 # events per loadOlder (chatHead) response
 
 
@@ -31497,6 +31631,10 @@ def _place_stale_echoes(turns, echoes):
     scan of every atom (three merges per push cycle while a dropped echo exists)."""
     out = list(turns)
     key = lambda a: (a.get("t", 0), a.get("_seq", 0))
+    # a restored pre-cut turn (T323 stage 4c) takes no echo: its atoms are the document's, its segment spans written, and
+    # a synthetic turn inserted among them would move the render floor's index; an echo whose time falls in the pre-cut
+    # history goes into the FIRST post-cut turn instead (review low 3)
+    first_tail = next((k for k, turn in enumerate(out) if not turn.get("pre")), None)
     gaps = {}                                   # insertion index in `turns` → the echoes sent in that gap
     dest = []                                   # (the destination turn dict, echo) per echo, resolved to indexes below
     copied = set()                              # turns copied for a write: ONCE each, so every echo destined for the
@@ -31511,7 +31649,9 @@ def _place_stale_echoes(turns, echoes):
                 i = k
             else:
                 break
-        if i is not None and t <= _turn_activity_end(out[i]):
+        if i is not None and out[i].get("pre"):
+            i = first_tail                      # into the first post-cut turn, whatever its window
+        if i is not None and (out[i].get("t", 0) > t or t <= _turn_activity_end(out[i])):
             if i not in copied:
                 out[i] = dict(out[i])
                 copied.add(i)
@@ -31522,6 +31662,15 @@ def _place_stale_echoes(turns, echoes):
             gaps.setdefault(0 if i is None else i + 1, []).append(a)
     for idx in sorted(gaps, reverse=True):      # back to front, so earlier indices stay valid
         atoms = sorted(gaps[idx], key=key)
+        if first_tail is not None and 0 < first_tail and idx <= first_tail:
+            k = first_tail                      # a gap at or before the first post-cut turn (idx 0 included: ahead of every
+            #                                     pre-cut turn): the echoes join that turn, no synthetic turn among the pre-cut ones
+            if k not in copied:
+                out[k] = dict(out[k]); copied.add(k)
+            out[k]["atoms"] = sorted(list(out[k]["atoms"]) + atoms, key=key)
+            out[k]["placedEchoes"] = list(out[k].get("placedEchoes") or []) + [a.get("uuid") for a in atoms]
+            dest.extend((out[k], a) for a in atoms)
+            continue
         turn = {"id": "live-" + str(atoms[0].get("uuid") or atoms[0].get("t", 0)), "trigger": None,
                 "t": atoms[0].get("t", 0), "end": atoms[-1].get("t", 0), "ended": True, "atoms": atoms,
                 "echoTurn": True, "placedEchoes": [a.get("uuid") for a in atoms]}
@@ -31942,6 +32091,8 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     gestures = _past_floor(_cmd_gestures(sid)); _cgi = 0
     _live_cmd_keys = set()
     for _t in session["turns"]:
+        if _t.get("pre"):
+            continue                              # a live chip rides the backend's live tail, never a pre-cut turn (stage 4c: no atom built)
         for _a in _t["atoms"]:
             if _a.get("command") and _a.get("_echo_text"):
                 _live_cmd_keys.add((int(_a.get("t") or 0), _a["_echo_text"]))
@@ -33393,7 +33544,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
             # per-session view flags (the user 2026-06-26): the tab right-click menu toggles these too, mirroring
             # the timeline lane's feed checkbox + postal mailbox. Same flags + legacy fallback as build_timeline.
             "hideFromFeed": _session_flag(sid, "hideFromFeed"),
-            "postalServiceOff": _session_flag(sid, "postalServiceOff") or _session_flag(sid, "postalOff"),
+            "postalServiceOff": _postal_isolated(sid),    # EFFECTIVE: a comment thread reads off until broken out (T356)
             "notify": _notify_session_effective(sid),   # session-level bell, EFFECTIVE (override, else the master default): OS notification when its work blocks on you / completes (the user 2026-07-28)
             # NEVER `now`. This rides the chat payload, and _send_client dedups by comparing the
             # SERIALIZED payload against what that client last received — so a firstSeen that ticked
@@ -36496,6 +36647,399 @@ def _series_index(hour_key, h0):
         return None
 
 
+# ── the SPEND GUARD (T350, the user 2026-09-11, after a team's review panels cost thousands of dollars in an hour) ──
+# A session-wide watch over each session's INSTANTANEOUS spend. Every pusher cycle reads each live session's rate over
+# the last SPEND_GUARD_WINDOW_S seconds, scaled to an hour, from data the kernel already holds: the record cache the
+# pusher serves the leaf transcript from (em._read_jsonl_incremental), plus the agent transcripts beside the leaf
+# (`<leaf stem>/subagents/*.jsonl`, the subagents and workflow agents the session fanned out; only the files that
+# changed inside the window are read), each assistant record priced by the same table the cost view uses (tokens by
+# _price_for; a response logged more than once, one per content block, counts once, at its largest usage row).
+# Over the ceiling, once per crossing: the session is INTERRUPTED (the Stop button's road, so the fan-out ends now,
+# not after the model reads a message), handed ONE message in the user's voice (no romp vocabulary; the voice test
+# renders it), every connected dashboard gets a warn toast naming the session, the rate and the moment, and one
+# session-events row (kind spend.ceiling) is filed through problem_row, so the kernel log and the error center carry it
+# and restart-metrics counts it. The crossing is the EVENT (CLAUDE.md: cards move on new information, never on a
+# per-build flap): the latch holds until the rate falls under SPEND_GUARD_REARM of the ceiling, then a cleared row
+# (spend.ceiling.cleared) and toast say so and the guard re-arms. The ceiling is a bare-value file under the state
+# directory (`spend-ceiling-usd-per-hour`, like session-hosts), read at each check: 1000 with no file, 0 disables.
+SPEND_CEILING_SETTING = "spend-ceiling-usd-per-hour"
+SPEND_CEILING_DEFAULT = 1000.0
+SPEND_GUARD_WINDOW_S = 600          # the sliding window the rate is read over
+SPEND_GUARD_REARM = 0.5             # the latch re-arms once the rate is under this share of the ceiling
+SPEND_GUARD_MEMO_SLACK_S = 60       # a file's window rows are scanned this much further back than the window, so the
+#                                     memo serves the next cycles' (later) windows without a re-scan
+SPEND_GUARD_LATCH_MAX = 1000        # latch entries kept for sessions no longer live (the oldest go first)
+_SPEND_GUARD = {}                   # sid -> {"over": bool, "t": the crossing (or clearing) epoch, "rate": $/h then}
+_SPEND_GUARD_SEEDED = [False]       # the latch was read back from the ledger once this kernel life
+_SPEND_ROWS_CACHE = {}              # file -> ((mtime, size, base), floor, [(t, usd), ...], last use): the window rows, memoized on the stamp
+SPEND_GUARD_ROWS_CACHE_MAX = 4000   # window-row memo entries kept; over it the least recently used go (a kernel life sees
+#                                     thousands of finished agent files, each a window row list nobody asks for again)
+SPEND_GUARD_TREE_RESCAN_S = 30      # a COLD agent file (idle since before the window's floor) is statted again this often,
+#                                     not every cycle; a hot one every cycle
+_SPEND_TREE_CACHE = {}              # leaf -> {"dirs": {dir: mtime}, "files": {path: mtime}, "full": epoch of the last full
+#                                     stat pass, "seen": epoch}: the session's subagents tree, watched by directory mtimes
+
+
+def _spend_ceiling():
+    """The ceiling in dollars an hour: the setting file's number; SPEND_CEILING_DEFAULT with no file, an empty one, a
+    value that is not a number, or one that is not a finite non-negative number (nan, inf, a negative); exactly 0
+    disables the guard."""
+    raw = jd._state_str(SPEND_CEILING_SETTING, "")
+    if not raw:
+        return SPEND_CEILING_DEFAULT
+    try:
+        v = float(raw)
+    except ValueError:
+        return SPEND_CEILING_DEFAULT
+    if not math.isfinite(v) or v < 0:
+        return SPEND_CEILING_DEFAULT
+    return v
+
+
+def _spend_tree_list_dir(d, m, known):
+    """One directory of a session's subagents tree listed (os.scandir): its .jsonl files into the memo with their mtimes,
+    its subdirectories with theirs, recursing only into a subdirectory not yet known (a new workflow directory), so
+    re-listing a known directory that changed costs one listing, not the tree's. _subagent_transcripts' rule holds: no
+    symlink is followed or kept (a directory or a file), the session's own tree only."""
+    try:
+        with os.scandir(d) as it:
+            entries = list(it)
+    except OSError:
+        return
+    for e in entries:
+        try:
+            if e.is_symlink():
+                continue
+            if e.is_dir(follow_symlinks=False):
+                new = e.path not in known
+                m["dirs"][e.path] = e.stat(follow_symlinks=False).st_mtime
+                if new:
+                    known.add(e.path)
+                    _spend_tree_list_dir(e.path, m, known)
+            elif e.name.endswith(".jsonl") and e.is_file(follow_symlinks=False):
+                m["files"][e.path] = e.stat(follow_symlinks=False).st_mtime
+        except OSError:
+            continue
+
+
+def _spend_window_files(leaf, since, now=None):
+    """The leaf transcript and every agent transcript beside it that changed at or after `since` (Task agents at the top
+    of <sid>/subagents/, Workflow agents under workflows/wf_<id>/, the recursive tree the review asked for), from a memo
+    of the session's tree rather than a walk per call (the round-two review's MEDIUM: the walk ran per live session on
+    the pusher's 2 Hz loop, 26.6 ms of CPU a call on a 2,449-file tree against 0.4 ms for the flat glob before it, and
+    the three largest trees together would have held a sixth of a core for good while a handful of their files were in
+    the window). The memo keeps every directory's mtime and every file's. A cycle stats the directories (a new file or
+    subdirectory moves its parent's mtime; a changed directory is listed again, recursing only into directories not yet
+    known), stats the HOT files every cycle (mtime at or after the window's floor, SPEND_GUARD_MEMO_SLACK_S before
+    `since`: a file that may still be growing is never read stale), and the COLD ones once per SPEND_GUARD_TREE_RESCAN_S,
+    so an agent that wakes after a long tool call is seen within that bound, a twentieth of the window. The first call
+    lists the tree whole. Steady state per cycle: one stat per directory plus one per hot file."""
+    now = time.time() if now is None else now
+    key = str(leaf)
+    base, ext = os.path.splitext(key)
+    root = os.path.join(base, "subagents")
+    m = _SPEND_TREE_CACHE.get(key)
+    if m is None:
+        if ext != ".jsonl" or os.path.islink(root) or not os.path.isdir(root):
+            return [key]
+        m = {"dirs": {}, "files": {}, "full": now, "seen": now}
+        try:
+            m["dirs"][root] = os.stat(root).st_mtime
+        except OSError:
+            return [key]
+        _spend_tree_list_dir(root, m, set(m["dirs"]))
+        _SPEND_TREE_CACHE[key] = m
+        if len(_SPEND_TREE_CACHE) > SPEND_GUARD_LATCH_MAX:
+            for k in sorted(_SPEND_TREE_CACHE, key=lambda k: _SPEND_TREE_CACHE[k]["seen"])[:len(_SPEND_TREE_CACHE) - SPEND_GUARD_LATCH_MAX]:
+                _SPEND_TREE_CACHE.pop(k, None)
+    else:
+        m["seen"] = now
+        for d, mt in list(m["dirs"].items()):
+            try:
+                cur = os.stat(d).st_mtime
+            except OSError:
+                m["dirs"].pop(d, None)                       # a directory gone, its files with it
+                for p in [p for p in m["files"] if p.startswith(d + os.sep)]:
+                    m["files"].pop(p, None)
+                continue
+            if cur != mt:
+                m["dirs"][d] = cur
+                _spend_tree_list_dir(d, m, set(m["dirs"]))
+        if root not in m["dirs"]:
+            _SPEND_TREE_CACHE.pop(key, None)                 # the tree is gone: listed afresh if it returns
+            return [key]
+        full = now - m["full"] >= SPEND_GUARD_TREE_RESCAN_S
+        floor = since - SPEND_GUARD_MEMO_SLACK_S
+        for p, mt in list(m["files"].items()):
+            if full or mt >= floor:
+                try:
+                    m["files"][p] = os.stat(p).st_mtime
+                except OSError:
+                    m["files"].pop(p, None)
+        if full:
+            m["full"] = now
+    return [key] + [p for p, mt in m["files"].items() if mt >= since]
+
+
+def _spend_file_rows(f, since, prices, dearest):
+    """One file's (t, usd) rows at or after `since`, from the record cache, memoized on the file's (mtime, size) stamp:
+    a file that did not change since its last scan serves its rows without a walk (LOW 2 of the review). The scan runs
+    from the tail back to SPEND_GUARD_MEMO_SLACK_S before `since`, so the memo also serves the next cycles, whose windows
+    start later; a response logged more than once (one record per content block, one message id) is one row at its
+    largest usage; a record whose model the table cannot place is priced at the table's dearest row (a guard errs high).
+    The reader's entry is taken with a TAIL accepted (T323 stage 4a): after a restart the assembly checkpoint restores
+    a file as the records past its cut, and the whole-file road would upgrade that entry to a full re-read of every live
+    transcript on the guard's first cycle; the window wants the newest records, which a tail holds."""
+    ent = em._read_jsonl_entry(f, tail_ok=True)
+    if ent is None:
+        _SPEND_ROWS_CACHE.pop(f, None)
+        return []
+    stamp = (ent[0], ent[1], ent[5])                     # mtime, size, and the entry's BASE (the round-two review's LOW a):
+    #   a tail entry accepted after a restart holds the records past the checkpoint's cut, and a later whole-file
+    #   upgrade of the same file (base 0) changes what the window can see without moving mtime or size; the base in
+    #   the stamp invalidates the memo the moment the entry's shape changes, not when the file next grows
+    hit = _SPEND_ROWS_CACHE.get(f)
+    if hit is not None and hit[0] == stamp and hit[1] <= since:
+        _SPEND_ROWS_CACHE[f] = (hit[0], hit[1], hit[2], time.time())
+        return [r for r in hit[2] if r[0] >= since]
+    floor = since - SPEND_GUARD_MEMO_SLACK_S
+    best, rows = {}, []
+    for o in reversed(ent[4]):
+        if not isinstance(o, dict):
+            continue
+        t = _msg_epoch(o)
+        if t is None:
+            continue
+        if t < floor:
+            break                                        # chronological: everything before is older
+        if o.get("type") != "assistant":
+            continue
+        m = o.get("message") if isinstance(o.get("message"), dict) else {}
+        u = m.get("usage") if isinstance(m.get("usage"), dict) else None
+        if not u:
+            continue
+        row = _price_for(str(m.get("model") or ""), prices) or dearest
+        if not row:
+            continue
+        c = (int(u.get("input_tokens") or 0) * float(row.get("in") or 0)
+             + int(u.get("output_tokens") or 0) * float(row.get("out") or 0)
+             + int(u.get("cache_creation_input_tokens") or 0) * float(row.get("cache_w") or 0)
+             + int(u.get("cache_read_input_tokens") or 0) * float(row.get("cache_r") or 0))
+        mid = m.get("id")
+        if mid:
+            i = best.get(mid)
+            if i is None:
+                best[mid] = len(rows)
+                rows.append((t, c))
+            elif c > rows[i][1]:
+                rows[i] = (rows[i][0], c)
+        else:
+            rows.append((t, c))
+    _SPEND_ROWS_CACHE[f] = (stamp, floor, rows, time.time())
+    if len(_SPEND_ROWS_CACHE) > SPEND_GUARD_ROWS_CACHE_MAX:
+        # the least recently used go (LOW b): a finished agent file's rows are asked for while it is in the window and
+        # never again; without a bound a kernel life would hold one list per agent it ever priced
+        for k in sorted(_SPEND_ROWS_CACHE, key=lambda k: _SPEND_ROWS_CACHE[k][3])[:len(_SPEND_ROWS_CACHE) - SPEND_GUARD_ROWS_CACHE_MAX]:
+            _SPEND_ROWS_CACHE.pop(k, None)
+    return [r for r in rows if r[0] >= since]
+
+
+def _spend_window_usd(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None):
+    """Dollars the session spent in the last `window_s` seconds: the leaf's and its agent files' rows in the window
+    (_spend_file_rows), priced by `prices` (the merged table by default, without the feed refresh)."""
+    if prices is None:
+        prices = _model_prices(int(now), refresh=False)   # never a network fetch from the pusher's path
+    dearest = max(prices.values(), key=lambda p: float(p.get("out") or 0)) if prices else None
+    since = now - window_s
+    return sum(c for f in _spend_window_files(leaf, since, now) for _t, c in _spend_file_rows(f, since, prices, dearest))
+
+
+def _spend_guard_seed():
+    """Read the latch back from the ledger once per kernel life (MEDIUM 1 of the review): the last spend.ceiling or
+    spend.ceiling.cleared row per session says whether that session stands over the ceiling, so a restarted kernel
+    does not fire the same crossing again on the same window (a second interrupt, a second message, a second row with
+    no clearing between). The rows are the durable record; nothing else is mirrored."""
+    if _SPEND_GUARD_SEEDED[0]:
+        return
+    _SPEND_GUARD_SEEDED[0] = True
+    try:
+        lines = (jd.STATE / "session-events.jsonl").read_text(encoding="utf-8").splitlines()[-SESSION_EVENTS_TAIL:]
+    except OSError:
+        return
+    for ln in lines:
+        try:
+            r = json.loads(ln)
+        except Exception:
+            continue
+        if not isinstance(r, dict) or r.get("kind") not in ("spend.ceiling", "spend.ceiling.cleared") or not r.get("sid"):
+            continue
+        cur = _SPEND_GUARD.get(str(r["sid"]))
+        if cur is not None and not cur.get("seeded"):
+            continue                                     # a verdict this life already made outranks the ledger's
+        try:
+            rate = float(r.get("usdPerHour") or 0)
+        except (TypeError, ValueError):
+            rate = 0.0
+        _SPEND_GUARD[str(r["sid"])] = {"over": r["kind"] == "spend.ceiling", "t": float(r.get("t") or 0), "rate": rate,
+                                       "seeded": True}
+
+
+def _spend_rate_usd_per_hour(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None):
+    """The session's spend over the window, scaled to an hour."""
+    return _spend_window_usd(leaf, now, window_s, prices) * 3600.0 / float(window_s)
+
+
+def _usd_words(x):
+    return "{:,.0f}".format(float(x))
+
+
+def _spend_ceiling_body(rate, ceiling):
+    """The ONE message a session over the ceiling gets, spoken as the person the agent works for (CLAUDE.md 'Messages
+    we inject': no romp vocabulary; tests/test_injected_voice.py renders this)."""
+    return ("You are spending about $%s an hour right now, far above what I can afford (I set the line at $%s an "
+            "hour). Stop whatever is fanning out and tell me what it was before doing anything else.\n\n"
+            "<!-- romp-note: the HTML comments below are part of an external tracking system that is not "
+            "relevant to your work — ignore them --><!-- romp-injected --><!-- romp-system -->"
+            % (_usd_words(rate), _usd_words(ceiling)))
+
+
+def _spend_guard_toast(text, clients=None, **fields):
+    """One `spendCeiling` message to every connected dashboard client: the chat bundle toasts it (render.ts). Its OWN
+    type, never `warn` (MEDIUM 3 of the review): a warn arriving while a create is in flight is read by the chat as that
+    create's verdict, and warn is the panes' soft-refusal channel. The durable record is the problem ring the shell's
+    bell mirrors on every pane (the row rides the backend's log); this message is the moment's toast."""
+    if clients is None:
+        with _clients_lock:
+            clients = list(_clients)
+    payload = json.dumps(dict(fields, type="spendCeiling", text=text))
+    for c in list(clients):
+        try:
+            c["send"](payload)
+        except Exception:
+            pass
+
+
+def _spend_guard_row(kind, text, sid, name, be, **fields):
+    """The session-events row for a crossing or a clearing, through problem_row: the ledger, the kernel log and (for a
+    backend with a log) the error center's ring."""
+    try:
+        m = sys.modules.get("romp_sdk_backend") or load_source("romp_sdk_backend", HERE / "sdk_backend.py")
+        m.problem_row(jd.STATE, text, kind, sid=sid, name=name, log=getattr(be, "_log", None) if be else None, **fields)
+    except Exception:
+        sys.stderr.write("spend-guard row: %s\n" % traceback.format_exc())
+
+
+def _spend_guard_stop(sid, be, now):
+    """The Stop button's WHOLE road for a session over the ceiling (MEDIUM 2 of the review): the interrupt, the
+    interrupt-clicked stamp the chip reads, the retry suppression that keeps the auto-retry and the idle-queue drive
+    from re-driving the session while the latch holds, and the views marked dirty. Not pressed while an interrupt is
+    already unsettled for the sid (the escalation ladder would climb to SIGINT and SIGKILL on a second press). Returns
+    "stopped", "stopping" (a stop already in flight), "detached" (a hosted session whose host keeps the turn: not
+    pressed), or "refused" (the backend would not, or owns no such session)."""
+    t0 = _interrupt_clicked.get(str(sid))
+    if t0 is not None and now - t0 <= 120:
+        return "stopping"
+    sessions = getattr(be, "sessions", None)
+    if getattr(sessions.get(sid) if isinstance(sessions, dict) else None, "detached", False):
+        # a DETACHED hosted session (the round-two review's LOW c): the backend's interrupt answers True while the CLI's
+        # escalation is skipped on purpose (its host keeps the turn), so nothing would stop and the sentence would say it
+        # had. Read before pressing, said as it is. No road to the host exists without pressing: the host's signal rung
+        # is the very escalation the detached state skips
+        return "detached"
+    try:
+        stopped = bool(be.interrupt(sid))
+    except Exception:
+        sys.stderr.write("spend-guard interrupt: %s\n" % traceback.format_exc())
+        stopped = False
+    if not stopped:
+        return "refused"
+    _interrupt_clicked[str(sid)] = now
+    err = _suppress_session_retry(sid)
+    if err:
+        sys.stderr.write("spend-guard: %s\n" % err)
+    _mark_views_dirty()
+    return "stopped"
+
+
+def _spend_guard_fire(s, rate, ceiling, now, be, clients):
+    """A crossing: stop the session (the Stop button's road), tell it once in the user's voice, tell every dashboard,
+    file the row. `be` None resolves the session's OWN backend (Sessions.backend_for: the SDK's, Codex's, or the unowned
+    stand-in that refuses by name), and the sentence says what actually happened (MEDIUM 4 of the review)."""
+    sid, name = s["sid"], s.get("name") or s["sid"][:8]
+    when = time.strftime("%H:%M", time.localtime(now))
+    if be is None:
+        be = Sessions.backend_for(sid)
+    stop = _spend_guard_stop(sid, be, now)
+    try:
+        # the user's message rides the same door as every machine send (LOW 3): parked while the session compacts,
+        # behind the user's own queued messages, and under a usage-limit hold; None is a refusal (no backend owns it)
+        told = _send_or_park(be, sid, _spend_ceiling_body(rate, ceiling)) is not None
+    except Exception:
+        sys.stderr.write("spend-guard send: %s\n" % traceback.format_exc())
+        told = False
+    outcome = {("stopped", True): "it has been stopped and told",
+               ("stopping", True): "a stop was already in flight, and it has been told",
+               ("detached", True): "its host keeps the turn, so it was not stopped, but it has been told",
+               ("refused", True): "it could not be stopped (the interrupt was refused: no backend owns it) but has been told",
+               ("stopped", False): "it has been stopped, but the message was refused",
+               ("stopping", False): "a stop was already in flight, and the message was refused",
+               ("detached", False): "its host keeps the turn, so it was not stopped, and the message was refused",
+               ("refused", False): "it could not be stopped or told (no backend owns it)"}[(stop, told)]
+    text = ("%s was spending about $%s an hour at %s, over the $%s an hour ceiling; %s."
+            % (name, _usd_words(rate), when, _usd_words(ceiling), outcome))
+    _spend_guard_toast(text, clients, sid=sid, name=name, phase="over", usdPerHour=round(float(rate), 2), t=int(now))
+    _spend_guard_row("spend.ceiling", text, sid, name, be, t=int(now), usdPerHour=round(float(rate), 2),
+                     ceilingUsdPerHour=float(ceiling), windowS=SPEND_GUARD_WINDOW_S,
+                     stopped=(stop == "stopped"), stopping=(stop == "stopping"), detached=(stop == "detached"), told=told)   # t: the crossing's moment
+
+
+def _spend_guard_clear(s, rate, ceiling, now, be, clients):
+    """The rate fell under the re-arm level: say so where the crossing was said, and file the clearing."""
+    sid, name = s["sid"], s.get("name") or s["sid"][:8]
+    if be is None:
+        be = Sessions.backend_for(sid)
+    text = "%s is back under the spend ceiling (about $%s an hour now)." % (name, _usd_words(rate))
+    _spend_guard_toast(text, clients, sid=sid, name=name, phase="under", usdPerHour=round(float(rate), 2), t=int(now))
+    _spend_guard_row("spend.ceiling.cleared", text, sid, name, be, t=int(now), usdPerHour=round(float(rate), 2),
+                     ceilingUsdPerHour=float(ceiling), windowS=SPEND_GUARD_WINDOW_S)
+
+
+def _spend_guard_tick(now, live_map, sessions=None, be=None, clients=None, prices=None):
+    """The pusher job: every live session's rate against the ceiling, the latch per session. `sessions`, `be`, `clients`
+    and `prices` are seams for the tests; the pusher passes none of them."""
+    ceiling = _spend_ceiling()
+    if ceiling <= 0:
+        _SPEND_GUARD.clear()                             # disabled: nothing latched survives the disable
+        return
+    _spend_guard_seed()                                  # once per kernel life: the ledger's verdicts
+    rows = _alive_sessions(now, live_map) if sessions is None else sessions
+    if prices is None:
+        prices = _model_prices(int(now), refresh=False)   # never a network fetch from the pusher's path
+    live = set()
+    for s in rows:
+        sid, path = s.get("sid"), s.get("path")
+        if not sid or not path:
+            continue
+        live.add(sid)
+        try:
+            rate = _spend_rate_usd_per_hour(path, now, prices=prices)
+        except Exception:
+            sys.stderr.write("spend-guard rate (%s): %s\n" % (sid[:8], traceback.format_exc()))
+            continue
+        st = _SPEND_GUARD.get(sid)
+        if rate >= ceiling and not (st and st.get("over")):
+            _SPEND_GUARD[sid] = {"over": True, "t": now, "rate": rate}
+            _spend_guard_fire(s, rate, ceiling, now, be, clients)
+        elif st and st.get("over") and rate < ceiling * SPEND_GUARD_REARM:
+            _SPEND_GUARD[sid] = {"over": False, "t": now, "rate": rate}
+            _spend_guard_clear(s, rate, ceiling, now, be, clients)
+    # a session that left the live map KEEPS its latch (MEDIUM 1 of the review): dropping it re-fired the whole
+    # crossing when the session rejoined on the same window; the dict is bounded instead, the oldest departed first
+    if len(_SPEND_GUARD) > SPEND_GUARD_LATCH_MAX:
+        for sid in sorted((k for k in _SPEND_GUARD if k not in live), key=lambda k: _SPEND_GUARD[k].get("t") or 0)[:len(_SPEND_GUARD) - SPEND_GUARD_LATCH_MAX]:
+            _SPEND_GUARD.pop(sid, None)
+
+
 def _spend_series(keyed_only=False, now=None):
     """The hover graph's money-rate series (the user 2026-08-13): $/hour over the last 192 hours, a
     DENSE array plus a base hour (h0, epoch-hours), so cross-host summing is an index-wise add after
@@ -36697,29 +37241,38 @@ def _spend_detail_local(now=None):
     def _series(buckets, keys):
         idx = {k: i for i, k in enumerate(keys)}
         n = len(keys)
-        per = {sid: ([0.0] * n, [0] * n) for sid in top}
-        other, una, others = ([0.0] * n, [0] * n), ([0.0] * n, [0] * n), set()
+        # per stack: usd[], tok[], turns[], keyUsd[] (T353: the list follows the chart's range, so every column the
+        # table shows is summed from the SAME buckets the chart draws; keyUsd is the key-billed sub-count's dollars,
+        # the table's key column, meaningful in the total scope alone)
+        per = {sid: ([0.0] * n, [0] * n, [0] * n, [0.0] * n) for sid in top}
+        other, una, others = ([0.0] * n, [0] * n, [0] * n, [0.0] * n), ([0.0] * n, [0] * n, [0] * n), set()
         for k, e in buckets.items():
             i = idx.get(k)
             if i is None or not isinstance(e, dict):
                 continue
-            tu, tt, _ = _tot(e)
+            tu, tt, tn = _tot(e)
             bs = _by(e)
             if bs is None:
-                una[0][i] += tu; una[1][i] += tt
+                una[0][i] += tu; una[1][i] += tt; una[2][i] += tn
                 continue
-            au = at = 0
+            au = at = an = 0
+            kb = e.get("bySid") if isinstance(e.get("bySid"), dict) else {}
             for sid, (u, t, _n) in bs.items():
-                au += u; at += t
+                au += u; at += t; an += _n
                 dst = per.get(sid)
                 if dst is None:
                     dst = other
                     if u > 0 or t > 0:
                         others.add(sid)   # "other (N sessions)" counts contributors only — the table's own fold
                         #                   (a login-only session in the keyed scope adds (0,0,0); T247b review)
-                dst[0][i] += u; dst[1][i] += t
+                dst[0][i] += u; dst[1][i] += t; dst[2][i] += _n
+                if not keyed:
+                    ks = kb.get(sid) if isinstance(kb.get(sid), dict) else None
+                    kk = ks.get("key") if ks and isinstance(ks.get("key"), dict) else None
+                    if kk:
+                        dst[3][i] += float(kk.get("usd") or 0)
             res = tu - au
-            una[0][i] += res if res >= _SPEND_GRAIN else 0.0; una[1][i] += max(0, tt - at)
+            una[0][i] += res if res >= _SPEND_GRAIN else 0.0; una[1][i] += max(0, tt - at); una[2][i] += max(0, tn - an)
         # presence is tested on the ROUNDED values the payload carries: a residue that rounds to nothing
         # must not hang a stack (a hatched "unattributed" chip with no bars, T247b review)
         stacks = []
@@ -36729,13 +37282,15 @@ def _spend_detail_local(now=None):
                 continue          # a top-N session with nothing in THIS range: no empty stack, no legend chip (review find)
             s = meta[sid]
             stacks.append({"kind": "sid", "sid": sid, "name": s["name"], "bg": s["bg"], "live": s["live"],
-                           "usd": usd, "tok": per[sid][1]})
+                           "usd": usd, "tok": per[sid][1], "turns": per[sid][2],
+                           "keyUsd": [round(v, 4) for v in per[sid][3]]})
         ousd = [round(v, 4) for v in other[0]]
         if any(ousd) or any(other[1]):
-            stacks.append({"kind": "other", "name": "other", "count": len(others), "usd": ousd, "tok": other[1]})
+            stacks.append({"kind": "other", "name": "other", "count": len(others), "usd": ousd, "tok": other[1],
+                           "turns": other[2]})
         uusd = [round(v, 4) for v in una[0]]
         if any(uusd) or any(una[1]):
-            stacks.append({"kind": "unattributed", "name": "unattributed", "usd": uusd, "tok": una[1]})
+            stacks.append({"kind": "unattributed", "name": "unattributed", "usd": uusd, "tok": una[1], "turns": una[2]})
         return {"keys": keys, "stacks": stacks}
 
     h0 = int(now // 3600) - (_SERIES_HOURS - 1)
@@ -36975,11 +37530,16 @@ def _merge_spend_details(payloads, hosts, local):
                 keys.append(a)
         n = len(keys)
         pos = {e: i for i, e in enumerate(epochs)} if name == "hours" else {k: i for i, k in enumerate(keys)}
-        per = {}           # (host, sid) -> [usd[], tok[]]
-        others = {}        # host -> ([usd], [tok], count): an OLDER peer's own "other" fold (its build still
-        #                    folds beyond a top-N); kept as that host's stack so its dollars are not lost, and
-        #                    named with the host — a current build folds nothing (T247e)
-        una = ([0.0] * n, [0] * n)
+        # per stack: usd[], tok[], turns[], keyUsd[] and a flags dict (T353: the list's columns per bucket). A peer of
+        # an OLDER build sends stacks with usd and tok alone: its turns and key dollars are UNKNOWN, so the flags drop
+        # those arrays from its stacks (the modal shows a dash and a note names the host), never a zero that would
+        # read as a count and undercount the total
+        per = {}           # (host, sid) -> ([usd], [tok], [turns], [keyUsd], {"turns": bool, "key": bool})
+        others = {}        # host -> ([usd], [tok], [count], [turns], {"turns": bool}): an OLDER peer's own "other" fold
+        #                    (its build still folds beyond a top-N); kept as that host's stack so its dollars are not
+        #                    lost, and named with the host — a current build folds nothing (T247e)
+        una = ([0.0] * n, [0] * n, [0] * n)
+        una_turns = [True]   # false once any peer's unattributed stack came without turns: the merged row shows a dash
         una_hosts = {}
         for host, p, rng, ax in peer_axes:
             idx = [pos.get(a) for a in ax]
@@ -36987,18 +37547,35 @@ def _merge_spend_details(payloads, hosts, local):
                 if not isinstance(s, dict) or not _own(host, p, s):
                     continue
                 usd, tok = s.get("usd") or [], s.get("tok") or []
+                turns = s.get("turns") if isinstance(s.get("turns"), list) else None
+                keyu = s.get("keyUsd") if isinstance(s.get("keyUsd"), list) else None
                 kind = s.get("kind")
+                tarr = karr = None
                 if kind == "sid":
                     key = (host, str(s.get("sid") or ""))
                     if key not in top_set:
                         continue          # a stack for a session the roster does not know: nothing to draw it as
-                    dst = per.setdefault(key, ([0.0] * n, [0] * n))
+                    dst = per.setdefault(key, ([0.0] * n, [0] * n, [0] * n, [0.0] * n, {"turns": True, "key": True}))
+                    if turns is None:
+                        dst[4]["turns"] = False
+                        no_turns.add(host)
+                    if keyu is None:
+                        dst[4]["key"] = False
+                    tarr, karr = dst[2], dst[3]
                 elif kind == "other":
-                    o = others.setdefault(host, ([0.0] * n, [0] * n, [0]))
+                    o = others.setdefault(host, ([0.0] * n, [0] * n, [0], [0] * n, {"turns": True}))
                     o[2][0] += int(s.get("count") or 0)
                     dst = o
+                    if turns is None:
+                        o[4]["turns"] = False
+                        no_turns.add(host)
+                    tarr = o[3]
                 elif kind == "unattributed":
                     dst = una
+                    if turns is None:
+                        una_turns[0] = False
+                        no_turns.add(host)
+                    tarr = una[2]
                     hu = una_hosts.setdefault(host, ([0.0] * n, [0] * n))
                     # a merged-shaped answer breaks its unattributed stack down by host: take the peer's own share
                     if isinstance(s.get("hosts"), dict) and isinstance(s["hosts"].get(p.get("host") or host), dict):
@@ -37011,6 +37588,10 @@ def _merge_spend_details(payloads, hosts, local):
                         continue
                     v = float(usd[j] or 0); t = int((tok[j] if j < len(tok) else 0) or 0)
                     dst[0][i] += v; dst[1][i] += t
+                    if tarr is not None and turns is not None:
+                        tarr[i] += int((turns[j] if j < len(turns) else 0) or 0)
+                    if karr is not None and keyu is not None and j < len(keyu):
+                        karr[i] += float(keyu[j] or 0)
                     if kind == "unattributed":
                         hu[0][i] += v; hu[1][i] += t
         stacks = []
@@ -37022,15 +37603,22 @@ def _merge_spend_details(payloads, hosts, local):
             if not (any(u) or any(arr[1])):
                 continue
             m = meta[key]
-            stacks.append({"kind": "sid", "host": key[0], "sid": key[1], "name": m.get("name") or "", "bg": m.get("bg") or "",
-                           "live": bool(m.get("live")), "usd": u, "tok": arr[1]})
+            row = {"kind": "sid", "host": key[0], "sid": key[1], "name": m.get("name") or "", "bg": m.get("bg") or "",
+                   "live": bool(m.get("live")), "usd": u, "tok": arr[1]}
+            if arr[4]["turns"]:
+                row["turns"] = arr[2]
+            if arr[4]["key"]:
+                row["keyUsd"] = [round(v, 4) for v in arr[3]]
+            stacks.append(row)
         for oh, o in others.items():
             ou = [round(v, 4) for v in o[0]]
             if any(ou) or any(o[1]):
-                stacks.append({"kind": "other", "host": oh, "name": "other", "count": o[2][0], "usd": ou, "tok": o[1]})
+                stacks.append({"kind": "other", "host": oh, "name": "other", "count": o[2][0], "usd": ou, "tok": o[1],
+                               **({"turns": o[3]} if o[4]["turns"] else {})})
         uu = [round(v, 4) for v in una[0]]
         if any(uu) or any(una[1]):
             stacks.append({"kind": "unattributed", "name": "unattributed", "usd": uu, "tok": una[1],
+                           **({"turns": una[2]} if una_turns[0] else {}),
                            "hosts": {h: {"usd": [round(v, 4) for v in a[0]], "tok": a[1]} for h, a in una_hosts.items()}})
         out = {"keys": keys, "stacks": stacks}
         if name == "hours":
@@ -37045,9 +37633,14 @@ def _merge_spend_details(payloads, hosts, local):
         for sid in (p.get("order") or []):
             if isinstance(sid, str):
                 order.append([host, sid])
+    no_turns = set()   # hosts whose stacks carry no turns or key dollars per bucket (an older build), for the modal's note
+    hrs, dys = _merge_range("hours"), _merge_range("days")
+    for h in hosts:
+        if h.get("host") in no_turns:
+            h["noTurns"] = True         # the modal: a dash in those columns for this host's rows, and a note naming it
     out = dict(local)
     out.update({"hosts": hosts, "sessions": sessions, "unattributed": un, "order": order, "tags": _spend_tags(),
-                "hours": _merge_range("hours"), "days": _merge_range("days")})
+                "hours": hrs, "days": dys})
     return out
 
 
@@ -38755,11 +39348,15 @@ def _refresh_remote_prices(now):
     threading.Thread(target=work, name="price-refresh", daemon=True).start()
 
 
-def _model_prices(now=None):
-    """The merged $/token price map: baked-in DEFAULT < best-effort remote feed < user config override."""
+def _model_prices(now=None, refresh=True):
+    """The merged $/token price map: baked-in DEFAULT < best-effort remote feed < user config override. `refresh`
+    (the default) lets a stale feed cache kick its background fetch; the spend guard passes False, since it runs on
+    the pusher's path in every kernel (a hermetic test kernel included) and must never start a network fetch: it
+    merges whatever the cost view's last refresh left in the cache (T350)."""
     if now is None:
         now = int(time.time())
-    _refresh_remote_prices(now)
+    if refresh:
+        _refresh_remote_prices(now)
     prices = {k: dict(v) for k, v in DEFAULT_MODEL_PRICES.items()}
     prices.update({k: dict(v) for k, v in _price_cache["remote"].items()})
     try:
@@ -39255,7 +39852,7 @@ def build_timeline(now, live_map=None, with_bars=True, live_only=False):
             "branch": branch_of.get(sid),
             "comments": _comment_markers(sid),
             "hideFromFeed": _session_flag(sid, "hideFromFeed"),    # lane checkbox → mute from feed (timeline-only)
-            "postalServiceOff": _session_flag(sid, "postalServiceOff") or _session_flag(sid, "postalOff"),  # lane mailbox → isolate from the Romp Postal Service (bin/romp-postal-service)
+            "postalServiceOff": _postal_isolated(sid),  # lane mailbox → isolate from the Romp Postal Service (bin/romp-postal-service); EFFECTIVE, a thread's default included (T356)
             "notify": _notify_session_effective(sid)})   # lane bell, EFFECTIVE (override, else the master default) → OS notification when this session's work blocks on you / completes (the user 2026-07-28)
     if with_bars and not live_only:
         # the live-lane memo releases the lanes that left the timeline here: a full build's lane set (live sessions
@@ -40213,9 +40810,10 @@ def _reattach_edge(client, sid, msg):
         return None
     with _client_lock(client):
         old = (client.get("echat") or {}).get(sid)
+        keys = (client.get("reattachKeys") or {}).pop(sid, None)   # the client's newest resident keys (reattachKeys, M1)
     if not isinstance(old, dict) or not old.get("first"):
         return None
-    return {"first": old["first"], "last": old.get("last"), "detached": False, "reattach": True}
+    return {"first": old["first"], "last": old.get("last"), "detached": False, "reattach": True, "keys": keys}
 
 
 def _client_reset_chat_base(client):
@@ -40939,7 +41537,8 @@ def _page_sig(sess, sid, now, floor=None, turns=None):
         floor = _RENDER_FLOOR.get(sid, _asm_cut_turn(parsed)) if floor is None else floor
     last = None
     if 0 < floor <= len(turns) and turns[floor - 1].get("atoms"):
-        last = turns[floor - 1]["atoms"][-1].get("uuid")
+        _lt = turns[floor - 1]
+        last = (_lt["uuids"][-1] if _lt.get("pre") and _lt.get("uuids") else _lt["atoms"][-1].get("uuid"))   # a pre-turn's uuids: no atom built (4c)
     _hold = _rewind_hold_get(sid)
     _be = _sdk()
     shared = getattr(_live_scope, "chat_shared", None) or _chat_sig_shared()
@@ -41140,8 +41739,9 @@ def _warm_history_pages(feed, now, live_map=None):
             if keys and len(keys | set(window)) > WARM_PAGES_MAX:
                 pending += 1                      # its pages would take the set past the bound: it waits (a shared page is free)
                 continue
+            new_keys = [k for k in window if k not in keys]     # a page two windows share is probed, rendered and counted once
             keys.update(window)
-            for key in window:
+            for key in new_keys:
                 with _page_lock:
                     hit = _PAGE_CACHE.get(key)
                 if hit is None:
@@ -41157,8 +41757,8 @@ def _warm_history_pages(feed, now, live_map=None):
         _PAGE_STATS["warmPending"] = pending
         _PAGE_STATS["warmMs"] += (time.monotonic() - t0) * 1000.0
         _PAGE_STATS["warmCycles"] += 1
-        resident_all = bool(keys) and unresolved == 0 and all(k in _PAGE_CACHE for k in keys)   # an empty or unresolved set is
-    if resident_all:                                                                              #  never "settled" (round 3, A)
+        resident_all = unresolved == 0 and all(k in _PAGE_CACHE for k in keys)   # an unresolved set is never "settled" (round 3, A); a
+    if resident_all:                                                                #  resolved board with every anchor in the tail settles EMPTY
         _WARM_MEMO.update(anchors=tuple(anchors), keys=frozenset(keys), sigs={sid_: e[4] for sid_, e in per_sid.items() if e is not None})
     else:
         _WARM_MEMO.update(anchors=(), keys=frozenset(), sigs={})
@@ -41175,6 +41775,10 @@ def _turn_of_uuid(turns, uuid):
     if base.startswith("branch:"):                     # a fork's departure chip sits after its cut event
         base = base[len("branch:"):]
     for i, t in enumerate(turns):
+        if t.get("pre"):                                  # a restored pre-cut turn (T323 stage 4c): its uuids, no atom built
+            if base in (t.get("uuids") or ()):
+                return i
+            continue
         for a in t.get("atoms") or []:
             if a.get("uuid") == base:
                 return i
@@ -41182,6 +41786,10 @@ def _turn_of_uuid(turns, uuid):
     if m:
         nt = int(m.group(2))
         for i, t in enumerate(turns):
+            if t.get("pre"):
+                if (t.get("maxT") or 0) >= nt:
+                    return i
+                continue
             if any((a.get("t") or 0) >= nt for a in t.get("atoms") or []):
                 return i
         return len(turns) - 1 if turns else None
@@ -41406,8 +42014,7 @@ def _turn_index_of_events(evs, turns):
     it, the head cards -1), so a slice of the list can be snapped to turn boundaries (review find J)."""
     u2t = {}
     for i, t in enumerate(turns):
-        for a in t.get("atoms") or []:
-            u = a.get("uuid")
+        for u in (t.get("uuids") if t.get("pre") else (a.get("uuid") for a in t.get("atoms") or [])):   # a pre-turn's uuids: no atom built
             if u and u not in u2t:
                 u2t[u] = i
     out, cur = [], -1
@@ -41503,14 +42110,18 @@ def _send_chat_proto2(c, m, ms, change_from, led_changed, st, pc):
         # newest event left the list (a fork, a /clear) is replaced on the client, and the frame's first is the base's
         pos = _uuid_positions(evs, sid)
         pf, pl = pos.get(pc["first"]), pos.get(pc.get("last"))
-        # the run shares a key with the frame (the client's merge overlaps on ANY resident key) when its newest event is
-        # inside the frame, or, its newest gone (a fork rewrote the tail), when the fork point lies inside the frame: the
-        # run held everything up to its newest, so the keys just below the fork point survive in the list and are in the
-        # frame exactly when the fork left fewer than WIRE_TAIL new events behind it (round 4: a fork of 250 or more
-        # leaves no run key in the frame, the client replaces, and the base takes the frame's first with it). The fork
-        # point is this push's change index (the shared diff against the last list sent).
-        fork_in_frame = pl is None and 0 < change_from < total and change_from > head_from
-        shared = (pl is not None and pl >= head_from) or fork_in_frame
+        # the run shares a key with the frame (the client's merge overlaps on ANY resident key) when the highest RESIDENT
+        # key of the run, as the client holds it, lies inside the frame: the client sends its newest REATTACH_KEYS keys with
+        # the ask (reattachKeys), and a fork that cut them all leaves no shared key (the client replaces, and the base takes
+        # the frame's first with it). The broadcast diff's change index is no fork point here: the repair frame is a
+        # connect push over an unchanged build (M1). An older bundle sends no keys: its newest edge decides. A resident key
+        # is required either way (M2): a run the fork cut entirely is replaced, never given a first that is in no list.
+        keys = pc.get("keys")
+        if keys is not None:
+            res = [pos[k] for k in keys if k in pos]
+            shared = bool(res) and max(res) >= head_from
+        else:
+            shared = pl is not None and pl >= head_from
         if shared and (pf is None or pf < head_from):
             first = pc["first"]
     st[sid] = {"first": first, "last": _last_anchor(evs), "detached": False}
@@ -43628,6 +44239,7 @@ def _push(targets, connect=False, live_map=None):
             if chat_sessions or want_fleet:
                 feed["ledgers"] = [{"sid": m["id"], "name": m["name"], "color": m.get("color"),
                                     "status": m.get("status"),
+                                    "postalServiceOff": _postal_isolated(m["id"]),   # the Sessions pane shows a mail-off session (T356)
                                     # attach the archived-completed TOP tasks so the Fleet's "Show completed"
                                     # can surface a finished+archived session (the user 2026-06-27); cached, so
                                     # ~free. The client renders them only when the toggle is on.
@@ -46368,6 +46980,10 @@ def _pusher_cycle_jobs(now, live_map, any_client):
         _auto_pause_on_spend_limit(now, live_map)
     except Exception:
         sys.stderr.write("auto-pause-on-spend-limit: %s\n" % traceback.format_exc())
+    try:                                  # the spend guard (T350): a session over the hourly ceiling is stopped and told,
+        _spend_guard_tick(now, live_map)      # every dashboard warned, a session-events row filed, once per crossing
+    except Exception:
+        sys.stderr.write("spend-guard: %s\n" % traceback.format_exc())
     try:                                  # a paused retry auto-clears once any session serves a request again
         _auto_resume_retry(now, live_map)
     except Exception:
@@ -48352,10 +48968,12 @@ var seed=(d.order||[]).map(function(p){return (p[0]&&p[0]!==d.host)?(p[0]+':'+p[
 var fin=spApplyViewOrder(seed,spViewOrder()),rank=Object.create(null);fin.forEach(function(id,i){rank[id]=i;});
 var known=[],rest=[];ss.forEach(function(s){if(rank[spKey(d,s)]!==undefined)known.push(s);else rest.push(s);});
 known.sort(function(a,b){return rank[spKey(d,a)]-rank[spKey(d,b)];});return known.concat(rest);}
-// the chart's stacks follow the list, bottom to top = top row to bottom row
-function spStackOrder(d,stacks){if(SP.order!=='yours')return stacks;var rank={};spOrdered(d).forEach(function(s,i){rank[String(s.host)+'\t'+s.sid]=i;});
-var sids=stacks.filter(function(s){return s.kind==='sid';}),rest=stacks.filter(function(s){return s.kind!=='sid';});
-sids.sort(function(a,b){return (rank[String(a.host)+'\t'+a.sid]||0)-(rank[String(b.host)+'\t'+b.sid]||0);});return sids.concat(rest);}
+// the chart's stacks follow the list, bottom to top = top row to bottom row: in every order since T353 (the list is
+// the range view's rows, by spend or the viewer's own), the unattributed and an older peer's fold last
+function spStackOrderRows(d,stacks,rows){var rank={};(rows||[]).forEach(function(r,i){if(r.kind==='sid')rank[String(r.host)+'|'+r.sid]=i;});
+var any=function(a){return (a||[]).some(function(v){return v>0;});};   // a session with nothing in THIS range is no stack (its row is gone too)
+var sids=stacks.filter(function(s){return s.kind==='sid'&&(any(s.usd)||any(s.tok)||any(s.turns));}),rest=stacks.filter(function(s){return s.kind!=='sid';});   // the row's own predicate
+sids.sort(function(a,b){var ra=rank[String(a.host)+'|'+a.sid],rb=rank[String(b.host)+'|'+b.sid];if(ra===undefined)ra=1e9;if(rb===undefined)rb=1e9;return ra-rb;});return sids.concat(rest);}
 var SP_OTHER='#4a5361',SP_NONE='#6b7a8c';   // "other" and a session with no identity color: neutrals, never a hue
 function spName(s){return s.name||('session '+String(s.sid||'').slice(0,8));}
 // T247c: when more than one machine contributes, a row or chip names its host the way a federated
@@ -48377,8 +48995,37 @@ function spTagChip(s){var c=spColor(s);return '<span class=rsp-tag-chip style="d
 var SP_RANGE_BUCKETS={day:24,hours:168};
 function spSeries(d){var ser=d[SP.range==='day'?'hours':SP.range];if(!ser)return null;var keep=SP_RANGE_BUCKETS[SP.range];return keep?spTail(ser,keep):ser;}
 function spTail(ser,keep){var n=(ser.keys||[]).length,cut=Math.max(0,n-keep);
-return {keys:(ser.keys||[]).slice(cut),epochs:(ser.epochs||[]).slice(cut),stacks:(ser.stacks||[]).map(function(s){var o={};for(var k in s)o[k]=s[k];o.usd=(s.usd||[]).slice(cut);o.tok=(s.tok||[]).slice(cut);
+return {keys:(ser.keys||[]).slice(cut),epochs:(ser.epochs||[]).slice(cut),stacks:(ser.stacks||[]).map(function(s){var o={};for(var k in s)o[k]=s[k];o.usd=(s.usd||[]).slice(cut);o.tok=(s.tok||[]).slice(cut);if(s.turns)o.turns=s.turns.slice(cut);if(s.keyUsd)o.keyUsd=s.keyUsd.slice(cut);
 if(s.hosts){o.hosts={};Object.keys(s.hosts).forEach(function(h){o.hosts[h]={usd:(s.hosts[h].usd||[]).slice(cut),tok:(s.hosts[h].tok||[]).slice(cut)};});}return o;})};}
+// the hosts whose rows in THIS range view show a dash for turns (an older build's stacks carry none): a session row's
+// host, or the fold's hosts when the fold's turns are unknown; the local machine's own rows always carry turns
+function spDashedHosts(d){var dashed={};(d.sessions||[]).forEach(function(s){if(s.turns==null)dashed[String(s.host||d.host||'')]=1;});
+if(d.other&&d.other.turns==null&&(d.other.usd>0||d.other.tok>0))(d.other.hosts||[]).forEach(function(hn){dashed[hn]=1;});return Object.keys(dashed).filter(function(x){return x;}).sort();}   // a fold with nothing in range draws no row, so no dash
+// The list FOLLOWS THE CHART (T353, the user 2026-09-11): the per-session rows are summed from the SAME buckets the
+// chart draws (spSeries: the range's tail of the ledger's series), so the list's total is the chart's total by
+// construction for every range, dollars, tokens and turns alike, and the key-billed column too (keyUsd). The
+// payload's own 90-day sessions stay the roster: names, colours, liveness, the viewer's order and the tag store's
+// members are read off them by key; a session with nothing in the range is no row and no stack. An older peer's
+// stacks carry no turns or keyUsd: those columns read 0 for it, never a guess.
+function spSumArr(a){var t=0;(a||[]).forEach(function(v){t+=v||0;});return t;}
+function spRound4(v){return Math.round(v*10000)/10000;}
+function spRangeView(d){var ser=spSeries(d);if(!ser||!ser.stacks)return d;var meta={};(d.sessions||[]).forEach(function(s){meta[spKey(d,s)]=s;});
+var sessions=[],un={usd:0,tok:0,turns:0},other=null;
+ser.stacks.forEach(function(st){var usd=spSumArr(st.usd),tok=spSumArr(st.tok),turns=st.turns?spSumArr(st.turns):null;   // null: an older peer's stack carries no turns (a dash, never a zero)
+if(st.kind==='sid'){if(!(usd>0||tok>0||(turns||0)>0))return;var m=meta[spKey(d,st)]||{};
+var row={sid:st.sid,host:st.host,name:st.name||m.name||'',bg:st.bg||m.bg||'',fg:m.fg||'',live:!!st.live,usd:spRound4(usd),tok:tok,turns:turns};
+if(m.bgDerived)row.bgDerived=true;
+// the key column follows the range too, but only where the ledger tracks a key split for the session (the roster's own
+// `key`, or key dollars inside the range): a stack whose keyUsd is all zeros on a login-only host grows no $0 column
+var ku=st.keyUsd?spSumArr(st.keyUsd):0;if(st.keyUsd&&(ku>0||(m.key&&typeof m.key.usd==='number')))row.key={usd:spRound4(ku)};sessions.push(row);}
+else if(st.kind==='other'){other=other||{usd:0,tok:0,turns:0,count:0,hosts:[]};other.usd+=usd;other.tok+=tok;if(turns==null)other.turns=null;else if(other.turns!=null)other.turns+=turns;other.count+=st.count||0;if(st.host&&other.hosts.indexOf(st.host)<0)other.hosts.push(st.host);}
+else if(st.kind==='unattributed'){un.usd+=usd;un.tok+=tok;if(turns==null)un.turns=null;else if(un.turns!=null)un.turns+=turns;}});
+sessions.sort(function(a,b){return (b.usd-a.usd)||(b.tok-a.tok)||String(a.name).localeCompare(String(b.name));});
+var out={};for(var k in d)out[k]=d[k];out.sessions=sessions;out.unattributed={usd:spRound4(un.usd),tok:un.tok,turns:un.turns};
+if(other){other.usd=spRound4(other.usd);out.other=other;}return out;}
+// the range in words, from the buckets the chart draws: '1 day \u00b7 by hour' reads 'last 24 hours', the week 'last 7 days',
+// the daily range 'last N days' (the payload's own key count, 90 today)
+function spRangeWords(ser){var n=ser&&ser.keys?ser.keys.length:0;if(SP.range==='days')return 'last '+n+' days';if(SP.range==='day')return 'last '+n+' hours';return 'last '+Math.round(n/24)+' days';}
 // the rows: the ordered sessions, or — merged by tag — one row per tag holding sessions here (named
 // by the tag, colored by the tag store's color, the strip's chip color) and the untagged sessions as
 // themselves. A session under several tags counts under EACH (the user's ruling: tags are equivalent,
@@ -48386,18 +49033,18 @@ if(s.hosts){o.hosts={};Object.keys(s.hosts).forEach(function(h){o.hosts[h]={usd:
 function spRows(d){var ss=spOrdered(d);if(!SP.merge||!(d.tags&&d.tags.length))return {rows:ss.map(function(s,i){return {kind:'sid',s:s,sid:s.sid,name:s.name,bg:s.bg,live:s.live,usd:s.usd,tok:s.tok,turns:s.turns,host:s.host,key:s.key,rank:i};}),multi:0};
 var byKey={},counts={},tagged={},rows=[];ss.forEach(function(s,i){byKey[spKey(d,s)]={s:s,i:i};});
 d.tags.forEach(function(t){var mem=[];(t.members||[]).forEach(function(m){var e=byKey[m];if(e){mem.push(e);counts[m]=(counts[m]||0)+1;}});if(!mem.length)return;
-var usd=0,tok=0,turns=0,live=false,hosts={},minI=1e9;mem.forEach(function(e){usd+=e.s.usd||0;tok+=e.s.tok||0;turns+=e.s.turns||0;live=live||!!e.s.live;hosts[String(e.s.host)]=1;if(e.i<minI)minI=e.i;tagged[spKey(d,e.s)]=1;});
+var usd=0,tok=0,turns=0,live=false,hosts={},minI=1e9;mem.forEach(function(e){usd+=e.s.usd||0;tok+=e.s.tok||0;if(e.s.turns==null)turns=null;else if(turns!=null)turns+=e.s.turns;live=live||!!e.s.live;hosts[String(e.s.host)]=1;if(e.i<minI)minI=e.i;tagged[spKey(d,e.s)]=1;});
 var hk=Object.keys(hosts);rows.push({kind:'tag',sid:'tag:'+t.name,name:t.name,bg:t.color||'',live:live,usd:usd,tok:tok,turns:turns,members:mem.map(function(e){return e.s;}),host:(hk.length===1?hk[0]:''),rank:minI});});
 ss.forEach(function(s,i){if(!tagged[spKey(d,s)])rows.push({kind:'sid',s:s,sid:s.sid,name:s.name,bg:s.bg,live:s.live,usd:s.usd,tok:s.tok,turns:s.turns,host:s.host,key:s.key,rank:i});});
 if(SP.order==='yours')rows.sort(function(a,b){return a.rank-b.rank;});else rows.sort(function(a,b){return ((b.usd||0)-(a.usd||0))||((b.tok||0)-(a.tok||0));});
 var multi=0;Object.keys(counts).forEach(function(k){if(counts[k]>1)multi++;});return {rows:rows,multi:multi};}
 // the stacks follow the rows: a tag row's stack is its members' stacks summed; untagged sessions keep
 // their own; unattributed (and an older peer's fold) stay last
-function spStacks(d,ser,model){var stacks=ser.stacks||[];if(!SP.merge||!(d.tags&&d.tags.length))return spStackOrder(d,stacks);
+function spStacks(d,ser,model){var stacks=spStackOrderRows(d,ser.stacks||[],model.rows);if(!SP.merge||!(d.tags&&d.tags.length))return stacks;
 var byKey={};stacks.forEach(function(s){if(s.kind==='sid')byKey[spKey(d,s)]=s;});var out=[];
-model.rows.forEach(function(r){if(r.kind==='tag'){var usd=null,tok=null;r.members.forEach(function(m){var st=byKey[spKey(d,m)];if(!st)return;
-if(!usd){usd=st.usd.slice();tok=st.tok.slice();}else{for(var i=0;i<usd.length;i++){usd[i]+=st.usd[i]||0;tok[i]+=st.tok[i]||0;}}});
-if(usd&&(usd.some(function(v){return v>0;})||tok.some(function(v){return v>0;})))out.push({kind:'tag',name:r.name,bg:r.bg,live:r.live,usd:usd,tok:tok});}
+model.rows.forEach(function(r){if(r.kind==='tag'){var usd=null,tok=null,turns=null,tk=true;r.members.forEach(function(m){var st=byKey[spKey(d,m)];if(!st)return;if(!st.turns)tk=false;
+if(!usd){usd=st.usd.slice();tok=st.tok.slice();turns=(st.turns||[]).slice();}else{for(var i=0;i<usd.length;i++){usd[i]+=st.usd[i]||0;tok[i]+=st.tok[i]||0;turns[i]=(turns[i]||0)+((st.turns||[])[i]||0);}}});
+if(usd&&(usd.some(function(v){return v>0;})||tok.some(function(v){return v>0;})))out.push({kind:'tag',name:r.name,bg:r.bg,live:r.live,usd:usd,tok:tok,turns:tk?turns:undefined});}
 else{var st=byKey[spKey(d,r)];if(st)out.push(st);}});
 stacks.forEach(function(s){if(s.kind!=='sid')out.push(s);});return out;}
 function spColor(s){return (s.bg&&/^#[0-9a-fA-F]{3,8}$/.test(s.bg))?s.bg:SP_NONE;}
@@ -48437,10 +49084,13 @@ if(!b)return;var a=b.getAttribute('data-act');
 if(a==='close'){closeSpend();return;}
 if(a==='retry'){openSpend();return;}
 if(a==='merge:toggle'){SP.merge=!SP.merge;spSavePrefs();if(SP.merge)b.classList.add('on');else b.classList.remove('on');
-var tb2=document.getElementById('rsp-table');if(tb2){tb2.innerHTML=sessionTable(SP.data);tb2.scrollTop=0;}renderChart();return;}
+var tb2=document.getElementById('rsp-table');if(tb2){tb2.innerHTML=sessionTable(spRangeView(SP.data));tb2.scrollTop=0;}renderChart();return;}
 var m=/^(range|measure|order):(\\w+)$/.exec(a);if(!m)return;
 SP[m[1]]=m[2];spSavePrefs();
-if(m[1]==='order'){var tb=document.getElementById('rsp-table');if(tb){tb.innerHTML=sessionTable(SP.data);tb.scrollTop=0;}}   // the new order's head rows, not a mid-list slice (review find)
+// the list follows the chart (T353): a new RANGE re-sums the rows over the buckets the chart now draws, and the head
+// names the range; a new order's head rows, not a mid-list slice (review find)
+if(m[1]==='order'||m[1]==='range'){var tb=document.getElementById('rsp-table');if(tb){tb.innerHTML=sessionTable(spRangeView(SP.data));tb.scrollTop=0;}
+var rn=document.getElementById('rsp-range-note');if(rn)rn.textContent=spRangeWords(spSeries(SP.data));}
 var sib=b.parentNode.querySelectorAll('[data-act^="'+m[1]+':"]');
 for(var i=0;i<sib.length;i++){if(sib[i]===b)sib[i].classList.add('on');else sib[i].classList.remove('on');}
 renderChart();});
@@ -48458,14 +49108,21 @@ var model=spRows(d);
 model.rows.forEach(function(s){h+='<tr data-sid="'+esc(s.sid||'')+'"'+(s.live?' class=rsp-live':' class=rsp-dead')+(s.kind==='tag'?' data-tag="'+esc(s.name)+'"':'')+'>'
 +'<td class=rsp-name>'+(s.kind==='tag'?(spTagChip(s)+'<span class=ru-tip-reset> \u00b7 '+s.members.length+' session'+(s.members.length===1?'':'s')+'</span>'):spTitle(s.s,many))+(s.live?'':'<span class=ru-tip-reset> \u00b7 not running</span>')+'</td>'
 +'<td class=n>'+fmtUsd(s.usd)+'</td>'+(keyCol?'<td class=n>'+(s.key?fmtUsd(s.key.usd):'\u2014')+'</td>':'')
-+'<td class=n>'+(s.turns||0)+'</td><td class=n>'+fmtTok(s.tok||0)+'</td></tr>';});
++'<td class=n>'+(s.turns==null?'\u2014':(s.turns||0))+'</td><td class=n>'+fmtTok(s.tok||0)+'</td></tr>';});   // a dash: the turns are unknown (an older peer)
 // spend recorded before per-session attribution existed (T100, 2026-08-24), or the part of a bucket no
 // session accounts for: shown as its own row, never dropped or folded into a session (fail loudly);
 // its hatch mark is the chart's hatched stack, not a session swatch
+var oth=d.other;   // an OLDER peer's own "other" fold (its build still folds beyond a top-N): a row of its own, its host named
+if(oth&&(oth.usd>0||oth.tok>0))h+='<tr class=rsp-dead><td class=rsp-name><i class=rsp-sw></i> other ('+(oth.count||0)+' session'+(oth.count===1?'':'s')+(oth.hosts&&oth.hosts.length?' on '+esc(oth.hosts.join(', ')):'')+')</td>'
++'<td class=n>'+fmtUsd(oth.usd)+'</td>'+(keyCol?'<td class=n>\u2014</td>':'')+'<td class=n>'+(oth.turns==null?'\u2014':(oth.turns||0))+'</td><td class=n>'+fmtTok(oth.tok||0)+'</td></tr>';
 if(un&&(un.usd>0||un.tok>0))h+='<tr class=rsp-dead>'
 +'<td class=rsp-name><i class="rsp-sw rsp-hatch"></i> unattributed<span class=ru-tip-reset> \u00b7 recorded before per-session tracking</span></td>'
-+'<td class=n>'+fmtUsd(un.usd)+'</td>'+(keyCol?'<td class=n>\u2014</td>':'')+'<td class=n>'+(un.turns||0)+'</td><td class=n>'+fmtTok(un.tok||0)+'</td></tr>';
++'<td class=n>'+fmtUsd(un.usd)+'</td>'+(keyCol?'<td class=n>\u2014</td>':'')+'<td class=n>'+(un.turns==null?'\u2014':(un.turns||0))+'</td><td class=n>'+fmtTok(un.tok||0)+'</td></tr>';
 h+='</tbody></table>';
+// the older-build note (T353 review): only where THIS range shows a dashed row, naming those hosts, and naming key
+// dollars only when the key column is drawn; it lives in the table's node so a range switch re-decides it
+var dh=spDashedHosts(d);
+if(dh.length)h+='<div class=rsp-note>'+dh.map(esc).join(', ')+': older build, '+(dh.length===1?'its':'their')+' sessions\u2019 turns'+(keyCol?' and key-billed dollars':'')+' in this range are unknown (a dash)</div>';
 if(model.multi)h+='<div class=rsp-note>'+model.multi+(model.multi===1?' session carries':' sessions carry')+' several tags and count'+(model.multi===1?'s':'')+' under each of them, so the rows add up past the totals.</div>';
 return h;}
 // 1. the SAME window numbers the hover shows — the sums across every machine, rows only (one renderer).
@@ -48504,11 +49161,11 @@ var ok=spHosts(d),many=ok.length>1;
 var scopes={};ok.forEach(function(x){scopes[x.scope||d.scope]=1;});var sk=Object.keys(scopes);
 var rule=sk.length===1?(sk[0]==='keyed'?'key-billed turns':sk[0]==='computed'?'computed cost, not billed':'all turns'):'each machine\u2019s own billing rule';
 h+='<div class=rsp-sec><div class=ru-tip-name><span>By session'+(many?' \u00b7 '+ok.length+' machines':'')+'</span>'
-+'<span class=ru-tip-reset>'+rule+' \u00b7 last '+((d.days&&d.days.keys)?d.days.keys.length:90)+' days</span></div>';
++'<span class=ru-tip-reset>'+rule+' \u00b7 <span id=rsp-range-note>'+spRangeWords(spSeries(d))+'</span></span></div>';
 // a machine that could not join is NAMED, never silently missing: down, timed out, refused, or too old
 ((d.hosts)||[]).forEach(function(x){if(x.status==='ok')return;
 h+='<div class=rsp-note>'+esc(x.host)+': '+(x.status==='older'?'older build, no per-session data':'not reachable')+(x.detail?' \u2014 '+esc(x.detail):'')+'</div>';});
-h+='<div id=rsp-table>'+sessionTable(d)+'</div></div>';
+h+='<div id=rsp-table>'+sessionTable(spRangeView(d))+'</div></div>';   // the list over the chart's own range (T353)
 spPanel.innerHTML=h;renderChart();spSizePane();}
 // the list pane takes exactly the room left under the chart (review find: a fixed 38vh cap left the card
 // itself scrolling at common viewport heights, a scroll region inside a scroll region); a floor keeps a
@@ -48564,7 +49221,7 @@ function spTipHide(){if(spTip)spTip.style.display='none';}
 function renderChart(){spTipHide();var box=document.getElementById('rsp-chart');if(!box||!SP.data)return;
 var d=SP.data,ser=spSeries(d),meas=SP.measure;
 if(!ser||!ser.keys||!ser.keys.length){box.innerHTML='<div class=rsp-note>No history yet.</div>';return;}
-var stacks=spStacks(d,ser,spRows(d)),n=ser.keys.length,W=Math.max(320,box.clientWidth||600),H=200;
+var stacks=spStacks(d,ser,spRows(spRangeView(d))),n=ser.keys.length,W=Math.max(320,box.clientWidth||600),H=200;
 var tots=[],mx=0;for(var i=0;i<n;i++){var t=0;for(var s=0;s<stacks.length;s++){t+=(stacks[s][meas]&&stacks[s][meas][i])||0;}tots.push(t);if(t>mx)mx=t;}
 if(!(mx>0)){box.innerHTML='<div class=rsp-note>Nothing recorded in this range.</div>';return;}
 var top=niceTop(mx),slot=W/n,gap=Math.min(2,slot*0.3),bw=Math.max(1,slot-gap),PADT=6;
@@ -54824,6 +55481,19 @@ class Handler(BaseHTTPRequestHandler):
             client.setdefault("resync", set()).add(str(msg["slot"]))
             _pusher_wake.set()
             return
+        if msg and msg.get("type") == "reattachKeys" and msg.get("id"):
+            # a proto-2 client's newest resident keys, sent right before its needFull("reattach") (T323 follow-up, M1): the
+            # repair frame's shared clause reads THESE, the run as the client holds it, not the broadcast diff's change index
+            keys = [str(k) for k in (msg.get("keys") or []) if k][-REATTACH_KEYS:]
+            sid = str(msg["id"])
+            with _client_lock(client):
+                if sid not in (client.get("echat") or {}):
+                    return                            # a session this client holds no base for: nothing to re-attach (1448 low b)
+                d = client.setdefault("reattachKeys", {})
+                d.pop(sid, None); d[sid] = keys
+                while len(d) > REATTACH_KEYS_CLIENTS:  # bounded: a posted list with no ask behind it never grows the map
+                    d.pop(next(iter(d)))
+            return
         if msg and msg.get("type") == "needFull" and msg.get("id"):
             # The client REJECTED a delta because it started past what it holds (render.ts chatTail's gap
             # branch) — it is missing events and cannot self-repair. Our own per-client bookkeeping can't
@@ -56547,8 +57217,8 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
         for _s in _drain_sessions:        # with a boundary writes, the rest are counted skips; BOUNDED (the periodic
             if time.monotonic() - _asm_t0 > EXIT_ASM_BUDGET_S:   # writer keeps them close; what is left waits for the next settle)
                 _asm_skipped += 1; continue
-            em.asm_checkpoint_write(_s["path"], _s["sid"], _display_sdk_human(_s["sid"]))
-    except Exception:
+            em.asm_checkpoint_write(_s["path"], _s["sid"], _display_sdk_human(_s["sid"]), tree=_stored_tree(_s["path"], _s["sid"]))   # the store's
+    except Exception:                     #  tree gives the turns section (stage 4c); a turnless document is rewritten with its turns at the next settle
         pass
     if _asm_skipped:
         _exit_log("romp-kernel: drain left %d assembly document(s) unwritten (%.1f s budget)\n" % (_asm_skipped, EXIT_ASM_BUDGET_S))

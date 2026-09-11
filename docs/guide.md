@@ -418,6 +418,13 @@ lands on the first visible tab. Focus moves to a different session only when
 you pick a tab, or when you close the active tab yourself (then the pane returns
 to the tab you used before it).
 
+A comment thread's mail is off, both directions, until you break it out: peers
+cannot see or mail the thread, and its own mail is refused with a line saying
+so. The popover says "mail off" while it lasts, and the moment you break the
+thread out it is a session like any other, mail on unless you toggle its
+mailbox off (the user 2026-09-11, after a thread received a manager's mail and
+acted as the manager).
+
 A session started from another one joins its tags. Forking a session, breaking
 a comment thread out into its own session, and running `romp new` inside a
 session's shell all put the new session in the parent's groups, so a session's
