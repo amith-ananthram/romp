@@ -1134,7 +1134,7 @@ A service restart (`systemctl --user restart romp-manager`, or the machine's
 own service management) kills everything in the service's cgroup, so on Linux
 under systemd Romp runs each session's CLI in a transient systemd scope of its
 own, outside that cgroup (`systemctl --user list-units 'romp-session-*'` lists
-them). A session's own tmux servers, `setsid` children and other detached work
+them). A session's own `setsid` children, detached servers and other detached work
 live in the session's scope, and a service restart leaves them alive as a kernel restart
 does; before 2026-09-05 they were in the service's cgroup and died with it. The
 CLI itself still ends: the kernel receives the service's SIGTERM and runs the
@@ -1252,7 +1252,7 @@ rejection means the machine changed under the running kernel.
 Whenever a memory limit is set, the wrapper also sets `OOMPolicy=continue` on
 the scope. A scope's default is `stop`: when Linux's OOM killer kills one
 process in it, systemd stops the whole scope, which ends the CLI and every
-`setsid` job and private tmux server in it. With `continue`, only the killed
+`setsid` job and detached server in it. With `continue`, only the killed
 process is gone. systemd logs each kill to the user journal as `<unit>: A process of this unit
 has been killed by the OOM killer` (`journalctl --user --since today | grep
 'romp-session-'`).
@@ -1289,12 +1289,12 @@ memory, so the machine-wide killers also choose a runaway session before the
 kernel.
 
 The limits cover what runs in the session's scope: the CLI, its tool shells,
-their `setsid` children, and a private tmux server started directly from a tool
-shell (`tmux -L <name>`). Outside it is anything a session starts as a transient
+their `setsid` children, and any server a tool shell starts directly (a process it
+forks and detaches). Outside it is anything a session starts as a transient
 unit of its own (`systemd-run --user --scope …`, or a `systemd-run --user`
 service): that is a sibling of the session's scope under the user manager,
-outside its memory limits, so a tmux server detached that way is outside them,
-whereas the same server started with a plain `tmux -L` is inside.
+outside its memory limits, so a server detached that way is outside them,
+whereas the same server started directly from the tool shell is inside.
 A `--scope` job started that way still inherits the session's raised
 `oom_score_adj` (`systemd-run` runs the command in place); a transient service
 does not (the user manager spawns it, not the session).
