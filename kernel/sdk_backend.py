@@ -6883,6 +6883,7 @@ class SdkSession:
         self._last_usage_totals = {}  # and its cumulative token counters
         self._spend_first_result = True
         self._spend_baseline = "fresh"
+        self._spend_seed_session = ""
         self._replay_cli = ""         # a dead CLI's replay is over once a connect seeds
         if getattr(self, "_host_is_attach", False) and getattr(self, "_host", None) is not None:
             # a host ATTACH (T315), and only with the host transport in hand (the flag alone is not trusted, M1 of
@@ -6927,6 +6928,7 @@ class SdkSession:
         self._last_usage_totals = {}
         self._spend_first_result = True
         self._spend_baseline = "attach-pending"
+        self._spend_seed_session = ""
         self._replay_cli = str(cli or "")
         self._seed_from_reg_cost_state(cli=cli, dead=True)
 
@@ -6947,6 +6949,7 @@ class SdkSession:
             self._last_usage_totals = {k: int(v) for k, v in toks.items() if isinstance(v, (int, float))}
             self._spend_baseline = "seeded"
             self._spend_unknown_open = False
+            self._spend_seed_session = str(cs.get("session") or "")   # the epoch the watermark's totals belong to
             self.backend._log("spend: %s %s (%s): watermarks seeded at the registry's "
                               "cumulative $%.2f so the first result records only this turn" % (self.name, how, cli, cs["total"]),
                               problem=False)
@@ -6975,7 +6978,7 @@ class SdkSession:
         except (IndexError, AttributeError):
             return None
 
-    def _spend_redelivered(self, tag, total) -> bool:
+    def _spend_redelivered(self, tag, total, session_id="") -> bool:
         """Is this result one an earlier kernel already folded? From the record's own journal position (round four of
         1450's review): a replayed record (its offset before the journal's next at the attach) folds nothing, moves no
         watermark and marks its row, WHATEVER its total, since the kernel that died folded what it saw and the ack it
@@ -6990,6 +6993,16 @@ class SdkSession:
         t = getattr(self, "_host", None)
         orphan = getattr(t, "journal_dir", None) is not None and getattr(t, "hello", None) is None
         if orphan:
+            # the dead CLI's watermark is the line, with two exceptions (the lows of the fix's round five): a seed that
+            # named no watermark (attach-unknown) knows no line, so every replayed record folds nothing rather than
+            # every ascending step after the first folding its delta; and a record from another session epoch (a
+            # /clear the dead kernel bracketed, its post-clear watermark on record) is not comparable to the
+            # watermark's totals at all, so it folds nothing
+            if getattr(self, "_spend_baseline", "") == "attach-unknown":
+                return True
+            seed_epoch = str(getattr(self, "_spend_seed_session", "") or "")
+            if seed_epoch and session_id and str(session_id) != seed_epoch:
+                return True
             return float(total) <= float(self._last_cost_total)
         return True
 
@@ -7520,7 +7533,7 @@ class SdkSession:
                     # the kernel did not see, a resumed cost-state seed against a print-mode CLI) and folds whole, as
                     # it always did; read from the total alone, a reset latched the session at $0 for the process's life
                     tag = getattr(self, "_result_tag", None)          # popped at the top of _on_message for every result
-                    duplicate = self._spend_redelivered(tag, total)
+                    duplicate = self._spend_redelivered(tag, total, str(getattr(msg, "session_id", "") or ""))
                     # the UNKNOWN window (the fix's second round): with no watermark on record, every replayed record is
                     # the lifetime so far and advances the watermarks to its total (a whole-journal replay, the attach
                     # whose hostAck names another host, hands over several); the first LIVE result closes the window and

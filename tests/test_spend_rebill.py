@@ -406,6 +406,47 @@ class Rebill(unittest.TestCase):
         self.assertEqual(self._day()["tokIn"], 100)
         self.assertEqual((self._cost_state()["total"], self._cost_state()["session"]), (301.5, "e1"))
         self.assertFalse(s._spend_unknown_open, "closed by the live result")
+    def test_an_orphan_replay_from_another_epoch_or_under_an_unnamed_seed_folds_nothing(self):
+        # the lows of the fix's round five: (a) an orphan tail reaching back before a /clear the dead kernel bracketed
+        # compared pre-clear totals to the post-clear watermark and re-billed the excess; the record's session_id
+        # against the watermark's epoch says the two are not comparable; (b) an unnamed seed (attach-unknown) protected
+        # the first replayed result alone, every ascending step after it folded its delta
+        self.be._update_reg(SID, costState={"total": 5.0, "tokens": {}, "cli": "4242:s1", "t": 1, "session": "e2"})
+        s = self._session()
+        s._seed_for_dead_cli("4242:s1")
+        self.assertEqual(s._spend_seed_session, "e2", "the watermark's epoch rides the seed")
+        s._host = types.SimpleNamespace(hello=None, journal_dir="/nonexistent/journal", ack_offset=8, exit_info=None, detach_mode=False,
+                                        result_tags=collections.deque([{"offset": 2, "replay": True}, {"offset": 4, "replay": True}]))
+        pre = _result(8.0, 10); pre.session_id = "e1"       # pre-clear, another epoch, above the post-clear watermark
+        self._run(s, pre)
+        self.assertEqual(self._day(), {}, "(a) not comparable to the watermark's epoch: folds nothing")
+        post = _result(5.0, 10); post.session_id = "e2"
+        self._run(s, post)
+        self.assertEqual(self._day(), {})
+        self.assertEqual(s._last_cost_total, 5.0)
+        # (b): no watermark on record for the dead CLI
+        Path(self.d, "spend.json").unlink(missing_ok=True); Path(self.d, "turns.jsonl").unlink(missing_ok=True)
+        sb.write_reg(Path(self.d), SID, {"sid": SID, "name": "web", "cwd": self.d, "alive": True})
+        s2 = self._session()
+        s2._seed_for_dead_cli("9:unknown")
+        self.assertEqual(s2._spend_baseline, "attach-unknown")
+        s2._host = types.SimpleNamespace(hello=None, journal_dir="/nonexistent/journal", ack_offset=3, exit_info=None, detach_mode=False,
+                                         result_tags=collections.deque([{"offset": 1, "replay": True}, {"offset": 2, "replay": True}, {"offset": 3, "replay": True}]))
+        for total in (8.0, 12.0, 20.0):
+            self._run(s2, _result(total, 10))
+        self.assertEqual(self._day(), {}, "every replayed record of an unnamed replay folds nothing, not the first alone")
+        self.assertEqual([r.get("redelivered", False) for r in self._turns()], [True, True, True])
+
+    def test_a_frame_with_no_offset_is_read_as_live_never_as_a_replay(self):
+        # low (c): a missing offset was tagged -1 and read as a replay (below any journal.next), folding nothing
+        ht = load_source("romp_host_transport_nooffset", os.path.join(ROOT, "kernel", "host_transport.py"))
+        t = ht.HostTransport.__new__(ht.HostTransport)
+        t.ack_offset, t.replay_end, t.result_tags, t.on_ack, t.hello = 5, 10, collections.deque(), None, None
+        t._advance = lambda out: None
+        t._take({"data": {"type": "result", "subtype": "success"}})            # no offset field
+        t._take({"offset": 3, "data": {"type": "result", "subtype": "success"}})
+        self.assertEqual(list(t.result_tags), [{"offset": -1, "replay": False}, {"offset": 3, "replay": True}],
+                         "unknown position: live; a positioned record before journal.next: a replay")
 
     def test_the_transport_tags_each_result_record_with_its_offset_as_it_reads_it(self):
         # the transport unit of the rule: the hello's journal.next bounds the replay; records the reader hands over are
