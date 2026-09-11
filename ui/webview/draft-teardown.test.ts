@@ -345,7 +345,7 @@ test("the note retires on the exact events: an explicit switch, the session's re
 });
 
 test("the `!activeId` adoption loads the adopted session's draft (once-per-page restore is not enough)", () => {
-  assert.match(RENDER, /const adopted = !activeId && !vanishedId && !wantActive && !wantActiveGone;[^\n]*\n\s*if \(adopted\) \{ activeId = msg\.id; loadComposerFor\(msg\.id, true\); persistActive\(msg\.id\); \}/, "…and never while the user's own tab is away, awaited after a reload, or shown as gone (T357); an adoption persists like a pick");
+  assert.match(RENDER, /const adopted = !activeId && !vanishedId && !wantActive && !wantActiveGone;[^\n]*\n\s*if \(adopted\) \{ activeId = msg\.id; assertPeekFor\(msg\.id\); loadComposerFor\(msg\.id, true\); persistActive\(msg\.id\); \}/, "…and never while the user's own tab is away, awaited after a reload, or shown as gone (T357); an adoption asserts the peek and persists like a pick");
   // …and the adoption is a first SHOW even for a payload the page already held (the append path never re-reveals a hidden view)
   assert.match(RENDER, /if \(existed && !forked && !firstBuild && !adopted\) \{\s*\n\s*appendActive\(\);/);
   // the loader: box ← drafts.get(id), chips, thumbnails, staged stack — the same set setActive paints

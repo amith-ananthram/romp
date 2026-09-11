@@ -9,7 +9,9 @@ and its transcript comes back. Screenshots of the unfocused state, dark and ligh
 The reload road (the review's HIGH, the user's actual trigger): the persisted state names a REMOTE tab this kernel never
 lists; after a reload the pane stays unfocused naming it, the local sessions adopt nothing, the remote strip entry
 restores focus to it, and a pick made before the relay wins.
-Synthetic fixtures only: placeholder UUIDs, a hermetic state root, an invented notes-api world."""
+The #only= filter (the review's probe): the persisted active tab hidden by the filter goes unfocused, its transcript off
+screen, named as hidden by the view. Synthetic fixtures only: placeholder UUIDs, a hermetic state root, an invented
+notes-api world."""
 import json
 import os
 import re
@@ -169,6 +171,21 @@ await page.reload();
 await page.waitForFunction((n) => document.querySelectorAll("#tabs .tab[data-id]").length >= n, 2, { timeout: 20000 });
 await page.waitForTimeout(500);
 out.gone = await state();
+// the #only= filter (the review's probe): web persisted active, the page served at #only=api, a reload: the strip shows
+// only api, and web's transcript must NOT be on screen; the pane is unfocused naming web as hidden by the view
+await page.evaluate((sid) => { const key = Object.keys(localStorage).find((k) => k.startsWith("romp-vscode-state-")); const st = JSON.parse(localStorage.getItem(key) || "{}"); st.activeId = sid; st.activeName = "web"; localStorage.setItem(key, JSON.stringify(st)); }, cfg.sidA);
+await page.goto(cfg.chat + "#only=api");   // a hash-only change is no navigation: the page keeps running, so…
+await page.reload();                        // …reload with the hash in place, the way a restart's reload would find it
+await page.waitForFunction((sid) => { const tabs = Array.from(document.querySelectorAll("#tabs .tab[data-id]")).map((t) => t.dataset.id); return tabs.length >= 1 && !tabs.includes(sid); }, cfg.sidA, { timeout: 20000 });
+await page.waitForTimeout(800);
+out.onlyFiltered = await page.evaluate(() => {
+  const act = document.querySelector("#tabs .tab.active[data-id]");
+  const empty = document.getElementById("empty-state");
+  const turns = Array.from(document.querySelectorAll("#content .turn")).filter((t) => { const r = t.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(t).display !== "none"; });
+  return { active: act ? act.dataset.id : null, tabs: Array.from(document.querySelectorAll("#tabs .tab[data-id]")).map((t) => t.dataset.id),
+           empty: empty && getComputedStyle(empty).display !== "none" ? { text: empty.textContent, vanished: empty.dataset.vanished || "" } : null,
+           visibleTurns: turns.length, composerDisabled: document.getElementById("composer-input").disabled };
+});
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 process.exit(0);
@@ -204,6 +221,7 @@ class ServedUnfocusedPane(unittest.TestCase):
         cwd = os.path.join(cls.lab, "proj")
         for d in ("names", "sdk", "states"):
             os.makedirs(os.path.join(state, d), exist_ok=True)
+        Path(state, "session-hosts").write_text("off\n")   # a lab root writes its own session-hosts off (the conftest rule), or a connect would spawn a real host
         os.makedirs(cwd, exist_ok=True)
         claude = os.path.join(cls.lab, "claude")
         proj = os.path.join(claude, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd)))
@@ -300,7 +318,14 @@ class ServedUnfocusedPane(unittest.TestCase):
         self.assertIn("No sessions yet.", em["empty"]["text"]); self.assertEqual(em["composer"]["placeholder"], "Click + to add a session", "the box's placeholder followed the strip: %r" % em["composer"])
         g = r["gone"]
         self.assertIsNone(g["active"], "a provisional id is never awaited or adopted: %r" % g)
-        self.assertIn("docs", g["empty"]["text"]); self.assertIn("is no longer available. Pick a tab.", g["empty"]["text"])
+        self.assertIn("docs", g["empty"]["text"]); self.assertIn("is no longer on the strip. Pick a tab.", g["empty"]["text"])
+        # the #only= filter: the hidden active tab's transcript leaves the screen; the pane is unfocused naming it
+        of = r["onlyFiltered"]
+        self.assertIsNone(of["active"], "no tab active under the filter: %r" % of); self.assertNotIn(SID_A, of["tabs"]); self.assertIn(SID_B, of["tabs"])
+        self.assertEqual(of["visibleTurns"], 0, "the filtered session's transcript is NOT on screen (the demo leak): %r" % of)
+        self.assertIsNotNone(of["empty"]); self.assertEqual(of["empty"]["vanished"], SID_A)
+        self.assertIn("web", of["empty"]["text"]); self.assertIn("is not shown by this tab view", of["empty"]["text"])
+        self.assertTrue(of["composerDisabled"])
 
 
 if __name__ == "__main__":

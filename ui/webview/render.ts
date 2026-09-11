@@ -1020,8 +1020,10 @@ let activeId: string | null = null;
 // read vanishedId). Only the user's own ✕ keeps the recency fallback, and only a pick by the user moves focus
 // (setActive clears these). pane-focus.ts holds the rule and the words.
 let vanishedId: string | null = null;
-let vanishedWhy: DismissWhy | null = null;
+let vanishedWhy: VanishWhy | null = null;
 let vanishedName = "";
+/** why the pane is unfocused: a dismissal's reason, or "hidden" (the strip's #only= filter stopped showing the active tab) */
+type VanishWhy = DismissWhy | "hidden";
 let renderingSid: string | null = null;   // the session id syncView is currently building (for per-session fold keys)
 // The SESSION whose transcript DOM is being built — the id preview/image URLs must bake in, host prefix
 // included. Distinct from renderingSid, which is a fold KEY the comment popover retargets to its thread id.
@@ -6266,13 +6268,21 @@ function renderTabs() {
   // ...and it must govern the CHAT BODY too, not just the bar (the user 2026-07-16). Hiding a
   // non-matching TAB while its transcript keeps rendering leaks precisely what the filter exists to
   // hide: a real session's chat sitting on screen under `#only=api,tests,web`, statusline and all —
-  // found while shooting the demo, with nimbus's transcript filling a "filtered" frame. Re-point the
-  // selection at the first visible session. Deferred so we never re-enter the render we're inside;
-  // setActive is a no-op once activeId is visible, so this settles in one pass.
-  // (No fallback re-points the selection when the view excludes the active tab: assertPeekFor runs before every
-  // renderTabs and makes the excluded active tab the PEEK, so tabInView holds for it and it stays on the strip; the
-  // pane never jumps to another session on its own (T357). The old first-visible-tab fallback was unreachable for
-  // the same reason and is gone with the route that replaced it.)
+  // found while shooting the demo, with nimbus's transcript filling a "filtered" frame.
+  // WHICH filter needs this: visibility is a pure function of the views blob, and captureViews asserts the active
+  // tab's peek before applyTabOrder on every tabOrder frame, so a VIEW that excludes the active tab never reaches
+  // here (the peek keeps it in tabInView). The `#only=` filter is not a peek input: it is applied on top of tabInView
+  // right above, so an only-filtered active tab does reach here. The pane then goes UNFOCUSED naming the hidden tab
+  // (T357: never re-pointed at another session); the check at fire time reads the same predicate visibleIds does
+  // (stripShows), and the tab comes back below when the filter shows it again.
+  if (activeId && ids.includes(activeId) && !visibleIds.includes(activeId)) {
+    const hid = activeId;
+    setTimeout(() => { if (activeId === hid && !stripShows(hid)) unfocusHiddenByView(hid); }, 0);
+  }
+  if (!activeId && vanishedId && vanishedWhy === "hidden" && visibleIds.includes(vanishedId)) {
+    const back = vanishedId;
+    setTimeout(() => { if (!activeId && vanishedId === back && stripShows(back)) setActive(back); }, 0);
+  }
   // TAB SECTIONS (the user 2026-09-04): groups are tags. With sectioning on (per browser — the
   // tag-lens menu's "Group tabs by tag") and some tag holding a visible tab, the strip renders one
   // header per tag in tagOrder holding a visible tab, each tab under EVERY tag it carries (T264b, the
@@ -11938,15 +11948,35 @@ function fillSnapshotRow(btn: HTMLElement, r: SnapRow, now: number): void {
 // no DOM left to capture from and the emptied box no longer overflows. undefined = capture here.
 // The empty body's line (pane-focus.ts emptyStateParts, T357): which session vanished and why, its name dressed the way
 // the strip dresses it (host prefix, identity colour), "reconnecting" when its host is dialing; or the plain invitation.
+/** Does the strip show `id` right now: in the tab view (a peek counts) AND matching the `#only=` filter — the one
+ *  predicate renderTabs's visibleIds is built from, read again at fire time so a deferred check judges the strip as
+ *  it is, not as it was scheduled. */
+function stripShows(id: string): boolean {
+  if (!tabInView(id)) return false;
+  const only = onlyTag();
+  return !only || matchesOnly(sessions.get(id)?.name ?? tabMeta.get(id)?.name ?? "", only);
+}
+// The strip's #only= filter stopped showing the active tab (T357, the review's probe: web persisted, `#only=api`, a
+// reload): the same rule as a dismissal — the pane goes UNFOCUSED naming the session the filter hides, its transcript
+// leaves the screen, and it never re-points itself at another session. renderTabs restores it when the filter shows
+// it again.
+function unfocusHiddenByView(id: string): void {
+  if (activeId !== id) return;
+  stashActiveDraft(id);
+  activeId = null; vanishedId = id; vanishedWhy = "hidden"; vanishedName = sessions.get(id)?.name || tabMeta.get(id)?.name || "";
+  loadComposerFor(null);
+  renderTabs();
+  showActive();
+}
 function paintEmptyState(empty: HTMLElement): void {
   const awaited = !vanishedId && wantActive ? wantActive : null;   // the persisted tab, not listed yet after a reload
   const gone = !vanishedId && !awaited && wantActiveGone ? wantActiveGone : null;   // a persisted id that can never be listed again
   const named = vanishedId || awaited || gone;
-  // a name over a raw sid: the persisted one, the strip's last known, else "a session" (a page whose persisted state
-  // predates the name has none; the review's low)
-  const nameOf = (id: string) => wantActiveName || tabMeta.get(id)?.name || "a session";
+  // a name over a raw sid on EVERY branch: the name carried, the persisted one, the strip's last known, else "a
+  // session" (the review's low: the dismissal branch fell to the id)
+  const nameOf = (id: string, carried = "") => carried || wantActiveName || tabMeta.get(id)?.name || sessions.get(id)?.name || "a session";
   const v = vanishedId && vanishedWhy && vanishedWhy !== "close"
-    ? { name: vanishedName || tabMeta.get(vanishedId)?.name || vanishedId, why: vanishedWhy, dialing: hostIsDialing(vanishedId) }
+    ? { name: nameOf(vanishedId, vanishedName), why: vanishedWhy, dialing: hostIsDialing(vanishedId) }
     : awaited ? { name: nameOf(awaited), why: "awaited" as const, dialing: hostIsDialing(awaited) }
     : gone ? { name: nameOf(gone), why: "gone" as const, dialing: false }
     : null;
@@ -16315,7 +16345,7 @@ function upsert(msg: any) {
   // and while it is away, an arrival of ANY OTHER session adopts nothing — the pane stays unfocused
   if (vanishedId === msg.id) setActive(msg.id);
   const adopted = !activeId && !vanishedId && !wantActive && !wantActiveGone;   // …nor while the persisted tab is awaited after a reload, nor while the body says it is gone: a pick, not an arrival, moves on (T357)
-  if (adopted) { activeId = msg.id; loadComposerFor(msg.id, true); persistActive(msg.id); }   // persisted like a pick: a restart lands here again (the review's low)   // adopted as the only tab → its draft too (T236: the once-per-page restore below never covers a session that LEFT and came back)
+  if (adopted) { activeId = msg.id; assertPeekFor(msg.id); loadComposerFor(msg.id, true); persistActive(msg.id); }   // persisted like a pick: a restart lands here again; the peek asserted like a pick's, so a view-hidden first arrival has a tab (the review's lows)   // adopted as the only tab → its draft too (T236: the once-per-page restore below never covers a session that LEFT and came back)
   if (wantActive && msg.id === wantActive) { wantActive = null; setActive(msg.id); }   // restore persisted tab on arrival
   renderTabs();                                   // a new id appended to `order` above → strip repaints in kernel order
   // Active tab: a content refresh appends + preserves scroll (appendActive); a new tab or a fork
@@ -16920,7 +16950,7 @@ function flashComposerNote(): void {
 function dismissSession(id: string, why: DismissWhy, doomed?: ReadonlySet<string>): void {
   if (peekId === id) peekId = null;   // its tab is going — the peek goes with it
   const wasActive = activeId === id;
-  const name = sessions.get(id)?.name || tabMeta.get(id)?.name || id;   // read before the maps forget it
+  const name = sessions.get(id)?.name || tabMeta.get(id)?.name || "a session";   // read before the maps forget it; never a raw sid in a line the user reads (T357)
   if (wasActive) stashActiveDraft(id);   // FIRST: what is on screen belongs to this id, whatever happens next
   sessions.delete(id);
   onDismiss(skeletonTabs, id);   // a tab that left the strip (✕, the kernel's omission, a host drop) has nothing left to load (2026-09-07)

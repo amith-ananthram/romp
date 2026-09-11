@@ -65,11 +65,13 @@ test("the tabOrder frame carries the blob and the strip filters on it, composing
     "echo-less frames still reach captureViews — an older kernel must age out a pending edit");
   assert.match(RENDER, /const inViewIds = ids\.filter\(tabInView\);/);
   assert.match(RENDER, /const visibleIds = only \? inViewIds\.filter\(\(id\) => matchesOnly\(nameOf\(id\), only\)\) : inViewIds;/);
-  // no active-tab re-point any more (T357 follow-up): assertPeekFor runs before every renderTabs and makes an active
-  // tab either filter excludes the PEEK, so it stays on the strip and the pane never re-points itself at another
-  // session; the old first-visible-tab fallback was unreachable for that reason and is gone
-  assert.doesNotMatch(RENDER, /if \(activeId && ids\.includes\(activeId\) && !visibleIds\.includes\(activeId\) && visibleIds\.length\)/);
+  // the active tab under BOTH filters (T357): a VIEW that excludes it is covered by the peek, asserted by
+  // captureViews before applyTabOrder on every tabOrder frame (visibility is a pure function of the views blob); the
+  // #only= filter is applied on top of tabInView and is no peek input, so an only-filtered active tab reaches the
+  // check below and the pane goes UNFOCUSED naming it, never re-pointed at another session
+  assert.match(RENDER, /if \(activeId && ids\.includes\(activeId\) && !visibleIds\.includes\(activeId\)\) \{/);
   assert.match(RENDER, /function tabInView\(id: string\): boolean \{ return id === peekId \|\| chatVisible\(id\); \}/);
+  assert.match(RENDER, /captureViews\(m\.views \|\| null\);\s*\n\s*applyTabOrder\(/, "the peek is asserted before the strip is applied, on every tabOrder frame");
 });
 
 test("every cycling path walks the VISIBLE order — keyboard can never land on a hidden session", () => {

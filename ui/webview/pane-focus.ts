@@ -25,9 +25,10 @@ export function focusAfterDismiss(why: Why, mru: readonly string[], order: reado
 
 /** The session that vanished from under the user, for the empty body's line: how it left (a dismissal's reason), or
  *  "awaited" (the tab this page showed before a reload, not listed yet: a kernel restart reloads the page, so no
- *  dismissal ran and the persisted choice is all the pane has), or "gone" (a persisted id that can never be listed
- *  again: a subagent viewer's tab, a provisional create). */
-export type Vanished = { name: string; why: Exclude<Why, "close"> | "awaited" | "gone"; dialing: boolean };
+ *  dismissal ran and the persisted choice is all the pane has), "gone" (a persisted id that can never be listed
+ *  again as a tab of its own: a subagent viewer's tab, a provisional create), or "hidden" (the strip's `#only=` filter
+ *  no longer shows the active tab; the peek covers a view's exclusion, not the filter's). */
+export type Vanished = { name: string; why: Exclude<Why, "close"> | "awaited" | "gone" | "hidden"; dialing: boolean };
 
 /** The empty body's text in three pieces, so the pane can dress the name the way the strip does (host prefix,
  *  identity colour): `head` + `name` + `tail`, `name` null when no session vanished. */
@@ -44,7 +45,8 @@ export function emptyStateParts(v: Vanished | null, hasTabs: boolean): EmptyStat
     : v.why === "omitted" ? " is no longer listed by romp. It comes back here if it returns."
     : v.why === "awaited" ? (v.dialing ? " is not listed yet; its host is reconnecting… It comes back here when the host does."
                                        : " is not listed yet. It comes back here when its host does.")
-    : v.why === "gone" ? " is no longer available. Pick a tab."
+    : v.why === "gone" ? " is no longer on the strip. Pick a tab."
+    : v.why === "hidden" ? " is not shown by this tab view. Pick a tab, or change the view."
     : " ended.";
   // an EMPTY strip invites no pick (the review's low): the session named is all there is to say
   return { head: hasTabs ? "No session selected. Pick a tab to start. " : "No sessions yet. ", name: v.name, tail };

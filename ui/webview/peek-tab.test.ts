@@ -60,7 +60,10 @@ test("a view change that excludes the ACTIVE session converts it into the peek �
   // the derivation is symmetric, so a view that now INCLUDES the active peek sheds the dress — the
   // same next-null branch the auto-close pin above holds; and the fallback's fire-time revalidation
   // (below) re-checks tabInView, so a converted peek can never be bounced by an in-flight timeout
-  assert.doesNotMatch(RENDER, /if \(activeId && ids\.includes\(activeId\) && !visibleIds\.includes\(activeId\) && visibleIds\.length\)/, "no first-visible-tab fallback at all (T357 follow-up): the peek holds the excluded active tab");
+  // (T357: a VIEW excluding the active tab never reaches renderTabs's check, since captureViews asserts the peek before
+  // applyTabOrder on every tabOrder frame and visibility is a pure function of the views blob; the #only= filter is
+  // no peek input, so an only-filtered active tab does reach it and goes UNFOCUSED, never re-pointed)
+  assert.match(RENDER, /setTimeout\(\(\) => \{ if \(activeId === hid && !stripShows\(hid\)\) unfocusHiddenByView\(hid\); \}, 0\);/);
 });
 
 test("peek is FIRST-CLASS in nav history by storing only the sid — apply lands in setActive, re-deriving peek", () => {
@@ -73,10 +76,13 @@ test("the first-tab fallback never fires on an active peek: tabInView counts the
   assert.match(RENDER, /function tabInView\(id: string\): boolean \{ return id === peekId \|\| chatVisible\(id\); \}/);
   // the #only=-era bounce reads visibleIds, which is built from tabInView — an active peek is in it
   assert.match(RENDER, /const inViewIds = ids\.filter\(tabInView\);/);
-  assert.doesNotMatch(RENDER, /if \(activeId && ids\.includes\(activeId\) && !visibleIds\.includes\(activeId\) && visibleIds\.length\)/);
+  assert.match(RENDER, /if \(activeId && ids\.includes\(activeId\) && !visibleIds\.includes\(activeId\)\) \{/, "the only-filter's check on the active tab (unfocus, not a re-point)");
   // …and the DEFERRED bounce re-validates at fire time: an activation between schedule and fire
   // (the feed click that just opened this peek) makes the active tab visible — no bounce then
-  assert.doesNotMatch(RENDER, /if \(activeId && ids\.includes\(activeId\) && !visibleIds\.includes\(activeId\) && visibleIds\.length\)/, "no first-visible-tab fallback at all (T357 follow-up): the peek holds the excluded active tab");
+  // (T357: a VIEW excluding the active tab never reaches renderTabs's check, since captureViews asserts the peek before
+  // applyTabOrder on every tabOrder frame and visibility is a pure function of the views blob; the #only= filter is
+  // no peek input, so an only-filtered active tab does reach it and goes UNFOCUSED, never re-pointed)
+  assert.match(RENDER, /setTimeout\(\(\) => \{ if \(activeId === hid && !stripShows\(hid\)\) unfocusHiddenByView\(hid\); \}, 0\);/);
 });
 
 test("the focus fast path (already-active live jump) still re-asserts the peek — setActive is skipped there", () => {
