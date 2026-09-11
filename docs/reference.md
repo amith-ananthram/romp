@@ -589,6 +589,8 @@ and their memory limits, the perf log), never a key. The service reads the file
 at manager startup, so a change needs a manager restart. `ROMP_SERVICE_ENV_FILE`
 overrides the file's path.
 
+The installed unit also sets `MALLOC_ARENA_MAX=2` for the manager and every kernel it spawns (2026-09-11): the kernel is a many-threaded Python process that rebuilds large record lists, and the allocator's per-thread arenas kept hundreds of megabytes of freed memory between restarts; two arenas return it. A line in `service.env` overrides it.
+
 Romp holds no API key (the user 2026-09-08, who wants romp to hold no key). A
 session's credential is Claude Code's own resolution: the `apiKeyHelper` in its
 settings (the helper) for a key, the login otherwise. Romp injects no credential
@@ -1402,7 +1404,26 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
 - `chatPages`: the rendered pages of chat history before a session's render
   floor (the chat wire's `loadOlder`, `loadAround` and `loadNewer` answers, below):
   `hits`, `misses`, `evictions`, `pages` and `bytes` resident (a bound of 32
-  pages or 16 MB per kernel), `renderMs` spent rendering.
+  pages or 16 MB per kernel), `renderMs` spent rendering; the warming, after
+  the pusher's send stage (`push.warm`), with a board client and a proto-2 chat
+  client connected: `warmed` pages rendered ahead of a click for the feed's
+  cards' anchors (the distilled summary's own targets first, a completed card's
+  too, then the active cards' heads and open rows; the feed's first 32 anchors,
+  so a late session's summaries can fall past the cap; the warm SET is bounded
+  to half the cache in pages and in bytes: anchors past it wait for the next
+  board change, and a set that fits settles, an unchanged board costing one
+  probe of its remembered keys; a set with an anchor whose session has no
+  render floor yet is never remembered as settled, so the floor's return
+  warms), `warmPending` (anchors waiting past the bound), `warmMs` (the
+  probes' time included),
+  `warmCycles`, and `warmSkipped` (cycles the warm stood down because the
+  pusher's last cycle ran over 1.5 s). A page's cache key reads what a
+  pre-floor render reads and none of the live tail (the reg's fork value, not
+  the reg file, which every send rewrites), so a warmed page survives the turns
+  that stream after it until the session's next judge publish (the goal store's
+  identity is a component: the segment anchors come from it); the postal
+  caption map is not a component, so a pre-floor page holding a card rendered
+  before its caption landed keeps the caption-less card until an eviction.
 - `parses`: the cold event-model parses through the one parse store the
   kernel and the judges share: `total` (every miss, whoever asked), `kernel`
   (the display's asks among them, with `bytes`, the parsed files' sizes, and

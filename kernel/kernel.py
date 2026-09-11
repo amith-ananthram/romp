@@ -533,6 +533,7 @@ class _PerfStats:
                 # T323 stage 3: the folds' checkpoints: restored, written, swept at boot, folds skipped as unencodable,
                 # fallbacks per reason (version, path, shrunk, guard, rewrite, corrupt) and the bytes the reader read
                 "checkpoints": em.checkpoint_stats(),
+                "recordCache": em.record_cache_stats(),   # the shared reader's byte budget and its evictions (2026-09-11)
                 # T323 stage 4a: the assembly documents: written, restored, fallbacks per reason, skips per reason (noEntry,
                 # restored, noBoundary, unsplittable, oversize, ...), hydrated bodies and bytes since boot
                 "asmCheckpoint": em.asm_checkpoint_stats(),
@@ -1534,6 +1535,10 @@ background:#9cd2ff;color:#0c1a2e;font-weight:600;cursor:pointer">Open</button>
 
 _clients = []                                # connected WS clients: {app, wid, send, alive}
 _clients_lock = threading.Lock()
+# wid -> the session id the chat pane of that dashboard window shows (None: no tab), from the chat's activeTab
+# (T347: the feed's focused-session section is a view of the chat pane's active tab; one window's panes share
+# a wid, so the chat's report is filed under it and read by that window's feed — _relay_active_chat below)
+_ACTIVE_CHAT_BY_WID = {}   # type: dict[str, str | None]
 _client_seen = [0.0]
 # SIDs seen ALIVE at any point during THIS kernel run. (Retained for diagnostics; it no longer drives
 # tabs — the user 2026-06-17 reversed the earlier keep-a-tab-when-it-dies rule: a dead session is now TIMELINE-ONLY,
@@ -9052,6 +9057,8 @@ except Exception:
 
 
 _CKPT_SETTLE_SEEN = {}          # sid -> (turn-end key, states-log stat) at the last checkpoint write of its files
+_CKPT_PERIODIC_SEEN = {}        # sid -> (leaf stat, monotonic time) at the last PERIODIC write (see _persist_checkpoints)
+CKPT_PERIOD_S = float(os.environ.get("ROMP_CKPT_PERIOD_S", "30"))   # a session mid-turn for hours writes at least this often
 
 
 def _session_fold_files(sid, leaf):
@@ -9110,15 +9117,25 @@ def _persist_checkpoints(now):
     it. A session whose turn runs for hours still writes at every states-log row (a working/awaiting transition is an
     event; a timer is not). Only dirty checkpoints are written; a session with no evidence change writes nothing.
     Every leaf fold is brought current first (_prime_leaf_folds), so the write holds a cursor for each of them.
-    Exit writes everything dirty (_drain_and_exit). Returns how many files were written."""
+    A second trigger (the restart-path work, 2026-09-11): a session whose LEAF moved since its last periodic
+    write, at most once per CKPT_PERIOD_S, so a turn that runs for an hour with no states-log row still keeps
+    its checkpoints and assembly document close to current, and the exit path finds little left to write (the
+    exit's own writes cost 4 to 6 s of a 20 s restart when they carried everything). Exit still writes everything
+    dirty (_drain_and_exit). Returns how many files were written."""
     written = 0
+    mono = time.monotonic()
     for s in _sessions(now):
         sid, leaf = s.get("sid"), s.get("path")
         if not sid or not leaf:
             continue
         key = (_turn_end_key(sid), _stat_key(jd.STATE / "states" / (sid + ".jsonl")))
-        if _CKPT_SETTLE_SEEN.get(sid) == key:
+        settle_due = _CKPT_SETTLE_SEEN.get(sid) != key
+        leaf_stat = _stat_key(leaf)
+        last = _CKPT_PERIODIC_SEEN.get(sid)
+        periodic_due = last is None or (last[0] != leaf_stat and mono - last[1] >= CKPT_PERIOD_S)
+        if not settle_due and not periodic_due:
             continue
+        _CKPT_PERIODIC_SEEN[sid] = (leaf_stat, mono)
         _prime_leaf_folds(leaf)
         dirty = set(em.checkpoint_dirty())
         mine = _session_fold_files(sid, leaf) & dirty
@@ -9134,6 +9151,8 @@ def _persist_checkpoints(now):
         _CKPT_SETTLE_SEEN[sid] = key
     if len(_CKPT_SETTLE_SEEN) > 4096:
         _CKPT_SETTLE_SEEN.clear()
+    if len(_CKPT_PERIODIC_SEEN) > 4096:
+        _CKPT_PERIODIC_SEEN.clear()
     return written
 
 
@@ -15011,6 +15030,7 @@ def _sdk_locked():
                 log=_backend_log,   # best-effort, through _exit_log: SdkBackend.drain logs its summary after
                 #                     its work is done, and a stderr that raises there must not carry the result away
                 reconcile=True,   # boot reconcile: reap orphaned CLIs, resume cut turns, deliver persisted queues
+                boot_phase=_mark_boot,   # censusDone / attachDone land on the boot row and release the judges' first pass
                 # the API-health aggregator's boot clock: this kernel's own _STARTED, which the aggregator
                 # truncates to the millisecond (the precision of every stamp in the payload) and serves as
                 # /api-health's bootAt, so a bucket the boot seeded is unknown since the kernel's own start
@@ -15952,8 +15972,25 @@ def _drive(msg, client):
         else:
             _push_soon()
     elif t == "interrupt":
-        be.interrupt(sid)                                 # Esc/stop AND settle idle (in the backend)
-        _interrupt_clicked[str(sid)] = time.time()        # chip → "interrupting" NOW (event-cleared on settle)
+        # The stamp lands only when the backend TOOK the stop (2026-09-11). A session with no turn in flight
+        # (Ctrl+C in an idle composer, a Stop click reaching the kernel just as the turn ends, a dead tab)
+        # has nothing to interrupt: the Codex backend answers False and sends nothing, and since the merged
+        # liveness row carries no `interrupting` flag, _interrupting could clear the stamp only on a stop
+        # record that never comes or at its 120 s cap — so the chip, the lane and the feed badge read
+        # Interrupting… for two minutes with nothing in flight, and a turn started inside that window read
+        # Interrupting… over Working. Only an explicit False is a refusal (the ABC's bool; the SDK's False
+        # is an unknown sid): a backend with no verdict keeps the optimistic chip.
+        if be.interrupt(sid) is not False:                # Esc/stop AND settle idle (in the backend)
+            _interrupt_clicked[str(sid)] = time.time()    # chip → "interrupting" NOW (event-cleared on settle)
+        elif be.busy(sid):
+            # A refusal WITH work in flight is a stop that did NOT land, not a stop with nothing to stop
+            # (review find, 2026-09-11): the Codex backend also answers False while a turn's start is still
+            # being acknowledged (queued, no turn id yet), when its app-server client is gone, and when the
+            # interrupt RPC raised (kernel log only). Read as an idle press those left the chip on Working
+            # and the click with no visible effect at all. busy() is the ABC's authoritative in-flight
+            # signal: True in exactly those cases, None or False when there was nothing to stop, so an idle
+            # Ctrl+C stays quiet. The sendMessage arm's warn idiom (fail loudly).
+            client["send"](json.dumps({"type": "warn", "text": "the stop was not delivered: the session is still working"}))
         err = _suppress_session_retry(sid)                # interrupting a thread STOPS romp's auto-retry into it until a
                                                           # successful turn re-arms (the user 2026-07-06) — the interrupt
                                                           # already aborted any in-flight CLI retry; this stops the relapse
@@ -21812,7 +21849,10 @@ def _audit_parent_gone(manager_pid, now=None):
 RESTART_CUTS_FILE = jd.STATE / "restart-cuts.jsonl"
 
 
-def _restart_cut_row(drain_res, watches_armed=0, audit_reason="", now=None):
+EXIT_ASM_BUDGET_S = float(os.environ.get("ROMP_EXIT_ASM_BUDGET_S", "1.5"))   # the exit's assembly-document writes, bounded
+
+
+def _restart_cut_row(drain_res, watches_armed=0, audit_reason="", now=None, phases=None):
     """One ledger row per restart — what THIS restart cut (T121: the drain's effect is measurable
     only if every restart writes its row, so a clean drain's row with an empty cutTurns list is the
     success metric, not noise). cutTurns names the sessions whose in-flight turns the drain
@@ -21835,6 +21875,8 @@ def _restart_cut_row(drain_res, watches_armed=0, audit_reason="", now=None):
            "reaped": int(d.get("reaped") or 0),
            "watchesArmed": int(watches_armed or 0),
            "reason": str(audit_reason or "")}
+    if isinstance(phases, dict):           # the exit's phases: ckptS (folds primed, checkpoints and assembly documents
+        row.update({k: v for k, v in phases.items() if k in ("ckptS", "drainS")})   # written), drainS (the sessions closed)
     row.update(_kernel_process_sample())   # T304: the kernel's own size and CPU at the end of its life
     return row
 
@@ -21863,10 +21905,22 @@ def _append_restart_cut(row):
         pass
 
 
-_BOOT_MARKS = {}                                   # {"firstServe": t, "reconcileDone": t} — see _mark_boot
-_BOOT_MARKS_LOCK = threading.Lock()                # the two marks land on DIFFERENT threads (main vs the
-#                                                    lazy backend builder) — without this, both could see
-#                                                    "both present" and double-append the boot row
+_BOOT_MARKS = {}                                   # {"firstServe": t, "reconcileDone": t, "censusDone": t, "attachDone": t} — see _mark_boot
+_BOOT_MARKS_LOCK = threading.Lock()                # the marks land on DIFFERENT threads (main, the lazy backend
+#                                                    builder, the boot reconcile) — without this, two could see
+#                                                    "all present" and double-append the boot row
+_BOOT_ATTACHED = threading.Event()                 # set at attachDone: every boot re-attach to a live session host has
+#                                                    its hello (or died), or there was none — the producer's first
+#                                                    judges' pass waits on this (bounded) so the census and the
+#                                                    attaches are not slowed by cold refolds in the same interpreter
+BOOT_JUDGE_HOLD_S = float(os.environ.get("ROMP_BOOT_JUDGE_HOLD_S", "8"))   # the bound on that wait
+BOOT_ROW_BACKSTOP_S = 30.0                         # the boot row is written without attachDone after this long (the pusher's tick)
+
+
+def _wait_boot_attached(timeout=None):
+    """The producer's first pass waits here: True when attachDone landed, False when the bound passed first
+    (a wedged attach must never hold the judges; the bound is loud in the boot row's attachTimedOut)."""
+    return _BOOT_ATTACHED.wait(BOOT_JUDGE_HOLD_S if timeout is None else timeout)
 
 
 def _append_boot_settled(first_serve, reconcile_done):
@@ -21890,6 +21944,13 @@ def _append_boot_settled(first_serve, reconcile_done):
         row = {"t": int(time.time()), "pid": os.getpid(), "bootSettled": True,
                "firstServe": round(first_serve, 2), "reconcileDone": round(reconcile_done, 2),
                "settleS": round(reconcile_done - first_serve, 2)}
+        with _BOOT_MARKS_LOCK:                 # the restart-path phases (2026-09-11): when the census ended and when
+            marks = dict(_BOOT_MARKS)          # the last boot re-attach settled, both relative to firstServe
+        for kind, field in (("censusDone", "censusS"), ("attachDone", "attachS")):
+            if isinstance(marks.get(kind), float):
+                row[field] = round(marks[kind] - first_serve, 2)
+        if "attachDone" not in marks:
+            row["attachTimedOut"] = True       # the backstop wrote the row: an attach never settled in time
         row.update(_kernel_process_sample())   # T304: the just-born kernel's size, the series' other bookend
         if prev_cut and isinstance(prev_cut.get("t"), int) and first_serve >= prev_cut["t"]:
             row["prevCutT"] = prev_cut["t"]
@@ -21900,23 +21961,52 @@ def _append_boot_settled(first_serve, reconcile_done):
 
 
 def _mark_boot(kind):
-    """One boot milestone (firstServe = the accept loop starts; reconcileDone = the SDK backend's
-    boot reconcile returned, or was found unavailable — the phase is over either way). The backend
-    builds LAZILY, so the two marks land in either order; whichever lands second appends the
-    boot-settled row. Idempotent per kind, never raises."""
+    """One boot milestone: firstServe (the accept loop starts), reconcileDone (the SDK backend was built, or found
+    unavailable), censusDone (the boot reconcile has read the process table, the leases and every registry row)
+    and attachDone (every boot re-attach to a live session host has its hello or died; immediate when there is
+    none). The marks land on different threads in any order. The boot-settled row is appended once, when
+    firstServe, reconcileDone and attachDone are all in, or BOOT_ROW_BACKSTOP_S after reconcileDone when an
+    attach never settles (the row then says attachTimedOut). attachDone also releases the producer's first
+    judges' pass (_wait_boot_attached). Idempotent per kind, never raises."""
     try:
         with _BOOT_MARKS_LOCK:
             if kind in _BOOT_MARKS:
                 return
             _BOOT_MARKS[kind] = time.time()
-            write = "firstServe" in _BOOT_MARKS and "reconcileDone" in _BOOT_MARKS \
-                and not _BOOT_MARKS.get("_row")
-            if write:
-                _BOOT_MARKS["_row"] = True         # exactly one row per boot, whichever thread wins
+            write = _boot_row_due_locked()
+        if kind == "attachDone":
+            _BOOT_ATTACHED.set()
         if write:
             _append_boot_settled(_BOOT_MARKS["firstServe"], _BOOT_MARKS["reconcileDone"])
     except Exception:
         pass
+
+
+def _boot_row_due_locked():
+    """Under _BOOT_MARKS_LOCK: claim the one boot row when its three marks are in."""
+    if _BOOT_MARKS.get("_row"):
+        return False
+    if all(k in _BOOT_MARKS for k in ("firstServe", "reconcileDone", "attachDone")):
+        _BOOT_MARKS["_row"] = True             # exactly one row per boot, whichever thread wins
+        return True
+    return False
+
+
+def _boot_row_backstop(now=None):
+    """The pusher's tick (no thread of its own): BOOT_ROW_BACKSTOP_S after reconcileDone with attachDone still missing,
+    write the row without it (the row then says attachTimedOut). Idempotent; a no-op once the row is written."""
+    try:
+        now = time.time() if now is None else now
+        with _BOOT_MARKS_LOCK:
+            if _BOOT_MARKS.get("_row") or "firstServe" not in _BOOT_MARKS or "reconcileDone" not in _BOOT_MARKS:
+                return False
+            if now - _BOOT_MARKS["reconcileDone"] < BOOT_ROW_BACKSTOP_S:
+                return False
+            _BOOT_MARKS["_row"] = True
+        _append_boot_settled(_BOOT_MARKS["firstServe"], _BOOT_MARKS["reconcileDone"])
+        return True
+    except Exception:
+        return False
 
 
 # ── going down (`romp down`) ─────────────────────────────────────────────────────
@@ -25316,7 +25406,7 @@ def _agent_launch_ids(agent_path):
     transcript half of _awaiting_nest's attribution: a background command whose tool_use id is in THIS
     file was launched by THIS agent. set() when unreadable."""
     try:
-        return em.fold_records(_AGENT_LAUNCH_IDS_CACHE, str(agent_path), _launch_ids_fresh, _launch_ids_step, ckpt="agentLaunchIds")
+        return em.fold_records(_AGENT_LAUNCH_IDS_CACHE, str(agent_path), _launch_ids_fresh, _launch_ids_step, ckpt="agentLaunchIds", drop_after="quiescent")
     except Exception:
         return set()
 
@@ -25330,7 +25420,7 @@ def _agent_steps(agent_path):
     either way); the running preview's clock (agentGist: calls/since/last) rides only while it runs."""
     _chat_dep_note_taskout(str(agent_path), _chat_stat_key(str(agent_path)))   # a growing agent file moves the key
     try:
-        st = em.fold_records(_AGENT_GIST_CACHE, str(agent_path), _gist_fresh, _gist_step, ckpt="agentGist")
+        st = em.fold_records(_AGENT_GIST_CACHE, str(agent_path), _gist_fresh, _gist_step, ckpt="agentGist", drop_after="quiescent")
     except Exception:
         return None
     if not st["since"]:
@@ -25372,7 +25462,7 @@ def _launch_step(state, o):
 
 
 def _agent_launch_state(path):
-    return em.fold_records(_AGENT_LAUNCH_CACHE, str(path), _launch_fresh, _launch_step, ckpt="agentLaunches")
+    return em.fold_records(_AGENT_LAUNCH_CACHE, str(path), _launch_fresh, _launch_step, ckpt="agentLaunches", drop_after="quiescent")
 
 
 def _agent_alive(row, agent_id, tm, spawned_at):
@@ -30246,7 +30336,20 @@ def _route_meta_command(be, sid, text, client=None, floating=False, state=None):
     # ours to swallow: it stays the CLI's, verbatim, and the user sees the CLI's own error.
     if not value or len(value.split()) != 1:
         return False
-    is_meta = ((head == "/model" and _vouched_model(value)) or (head == "/effort" and value in _EFFORT_VALUES)
+    # A Codex session's model vocabulary is its engine's (gpt-…), which the catalog behind _vouched_model
+    # never carries, so such a pick is vouched by the owning backend's own acceptance rule instead
+    # (CodexBackend.set_model refuses every other value). Before this the lane menu's "/model gpt-…" was no
+    # meta command at all and fell through to _send_or_park, so the Codex agent read the pick as a literal
+    # prompt (idle: sent; working: parked as a command chip that fired alone) while the chat statusline's
+    # setModel op landed the same pick — the two surfaces disagreed on one gesture (review find, 2026-09-11).
+    # The unowned route is vouched for the same shape: a DEAD Codex session still reports its backend (the
+    # lane reads the durable row, _session_backend), so its menu still offers gpt-… while backend_for says
+    # _UNOWNED (CodexBackend.owns is False once dead) — and the refusal arm below is the one place the client
+    # hears that the pick went nowhere; _UNOWNED.send refuses on stderr alone (review find, 2026-09-11).
+    model_pick = head == "/model" and (_vouched_model(value)
+                                        or (value.startswith("gpt") and be is not None
+                                            and (be is _UNOWNED or be is _codex())))
+    is_meta = (model_pick or (head == "/effort" and value in _EFFORT_VALUES)
                or (head == "/fast" and value in ("on", "off")))
     if is_meta and be is _UNOWNED:
         # a session no running backend owns takes no setting: refuse before any stamp (the switching dots
@@ -30259,7 +30362,7 @@ def _route_meta_command(be, sid, text, client=None, floating=False, state=None):
             client["send"](json.dumps({"type": "warn", "text": why}))
         sys.stderr.write("meta command %s for %s refused: no backend owns this session\n" % (head, sid))
         return True
-    if head == "/model" and _vouched_model(value):
+    if model_pick:
         # the model setter has its OWN rule (an open turn fires it live only on a backend that declares
         # model_switches_live — none shipped does yet, so the SDK still parks; #923), so its verdict is
         # read, not inferred from _ops_gate, which would say `queued` for a pick that had already applied
@@ -40171,7 +40274,12 @@ def _client_reset_chat_base(client):
         # is nothing it could lazily reload — every tab must arrive whole, and the status slots go with the set
         client.pop("skeleton", None); client.pop("skeletonOrder", None); client.pop("reconnect", None)
         snt = client.get("sent", {})
-        for k in [k for k in snt if isinstance(k, tuple) and k and k[0] in ("chat", "status", "taborder")]:
+        # …and the ("activeChat",) slot (T347): a feed page that reloads registers while its bundle still
+        # evaluates, and a tab switch in its window relays a frame to a document with no listener yet; the
+        # slot remembers that frame, so the ready arm's re-send would be deduped for _DEDUP_REPOST_S and the
+        # section would read "no session is focused" until the next tab click. A renderer that just
+        # evaluated holds nothing: the slot goes with the others.
+        for k in [k for k in snt if isinstance(k, tuple) and k and k[0] in ("chat", "status", "taborder", "activeChat")]:
             snt.pop(k, None)
 
 
@@ -40830,22 +40938,67 @@ PAGE_TURNS = 16                                  # turns per rendered page of pr
 WINDOW_TURNS = 8                                 # turns each side of a loadAround anchor
 _PAGE_CACHE = {}                                 # (sid, lo, hi, sig) → (events, bytes); LRU by insertion order
 _PAGE_CACHE_MAX, _PAGE_CACHE_BYTES = 32, 16 * 1024 * 1024
-_PAGE_STATS = {"hits": 0, "misses": 0, "evictions": 0, "pages": 0, "bytes": 0, "renderMs": 0.0}
+_PAGE_STATS = {"hits": 0, "misses": 0, "evictions": 0, "pages": 0, "bytes": 0, "renderMs": 0.0, "warmPending": 0,
+               "warmed": 0, "warmMs": 0.0, "warmCycles": 0, "warmSkipped": 0}   # the active cards' windows warmed ahead of a click
 _page_lock = threading.Lock()
 
 
-def _chat_history_page(sid, lo, hi, now, sess=None, live_map=None):
+def _page_sig(sess, sid, now, floor=None, turns=None):
+    """The pages cache's key for a session: a digest of every input a PRE-FLOOR page render reads that can change it,
+    and none of the live tail's (the transcript's stat, the liveness row, the backend's live revision, the queue, the
+    task store), which move at turn rate for exactly the working sessions the board shows and would evict a warmed
+    page before its click (the warming review, 2026-09-11). The pre-cut prefix a page renders from is fixed once
+    written: its identity here is the leaf path, the render floor and the uuid of the last atom below the floor (a
+    rewind or a /clear that reaches below the floor moves one of them). The rest are the inputs the page reshape
+    reads besides the atoms: the episodes file (the note floor, the boundary card), the goal store (the segment
+    anchors), the reg's forkedFrom (a fork's branch marker; the value, since the reg file itself is rewritten on every
+    send), the gone marker, the rewind hold and the pending cut, and the components every tab shares (the names
+    snapshot among them, _chat_sig_shared; the postal caption map is NOT among them: a pre-floor page holding a postal
+    card that was rendered before its caption landed keeps the caption-less card until an eviction re-renders it,
+    accepted, the card's text being the same). The goal store's identity is a component too, so a page survives the
+    turns that stream after it until the next judge publish for the session. None when the session has no transcript
+    path."""
+    path = sess.get("path") if sess else None
+    if not path:
+        return None
+    sid = str(sid)
+    if turns is None or floor is None:
+        try:
+            parsed = _parse(path, sid, now)
+        except Exception:
+            return None
+        turns = parsed["turns"] if turns is None else turns
+        floor = _RENDER_FLOOR.get(sid, _asm_cut_turn(parsed)) if floor is None else floor
+    last = None
+    if 0 < floor <= len(turns) and turns[floor - 1].get("atoms"):
+        _lt = turns[floor - 1]
+        last = (_lt["uuids"][-1] if _lt.get("pre") and _lt.get("uuids") else _lt["atoms"][-1].get("uuid"))   # a pre-turn's uuids: no atom built (4c)
+    _hold = _rewind_hold_get(sid)
+    _be = _sdk()
+    shared = getattr(_live_scope, "chat_shared", None) or _chat_sig_shared()
+    raw = [os.path.realpath(path), int(floor), last,
+           _chat_ident(jd.EPIDIR / (sid + ".jsonl")), jd._store_identity(sid)[1:],
+           (_thread_reg(sid) or {}).get("forkedFrom"),    # the one reg field a page reads (the branch marker): the FILE's identity
+           _chat_ident(jd.GONEDIR / (sid + ".json")),     #  moves on every send (the queue and echo mirrors rewrite it; warming review 2)
+           (_hold.get("cutT"), _hold.get("leaf"), _hold.get("at")) if _hold else None,
+           _be.pending_cut(sid) if _be else "", shared]
+    return hashlib.sha1(json.dumps(raw, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def _chat_history_page(sid, lo, hi, now, sess=None, live_map=None, sig=None, stats=None):
     """The rendered events of turns [lo, hi) of `sid` (build_session's page mode), through a bounded LRU keyed on the
-    session's whole chat-build signature: any input that would change the render misses. Counted (/perf chatPages)."""
+    session's page signature (_page_sig: what a pre-floor page reads, none of the live tail; `sig` when the caller
+    computed it once for several pages). Counted (/perf chatPages); `stats["rendered"]` is bumped when this call
+    rendered, so a caller counts its own renders and not a concurrent handler's."""
     if live_map is None:
         live_map = _live_map()
     if sess is None:
         sess = next((x for x in _sessions(now) if x["sid"] == sid), None)
-    try:                                          # the whole chat-build signature, as one digest (its components hold dicts)
-        raw = _chat_build_sig(sess, live_map.get(sid), now, live_map=live_map, deps=False) if sess else None
-        sig = hashlib.sha1(json.dumps(raw, sort_keys=True, default=str).encode("utf-8")).hexdigest() if raw is not None else None
-    except Exception:
-        sig = None
+    if sig is None:
+        try:
+            sig = _page_sig(sess, sid, now) if sess else None
+        except Exception:
+            sig = None
     key = (sid, lo, hi, sig)
     with _page_lock:
         hit = _PAGE_CACHE.get(key) if sig is not None else None
@@ -40854,6 +41007,8 @@ def _chat_history_page(sid, lo, hi, now, sess=None, live_map=None):
             _PAGE_STATS["hits"] += 1
             return hit[0]
         _PAGE_STATS["misses"] += 1
+    if stats is not None:
+        stats["rendered"] = stats.get("rendered", 0) + 1
     t0 = time.monotonic()
     try:
         page = build_session(sid, now, live_map, page=(lo, hi))
@@ -40877,6 +41032,170 @@ def _chat_history_page(sid, lo, hi, now, sess=None, live_map=None):
                 _PAGE_STATS["bytes"] -= _b; _PAGE_STATS["evictions"] += 1
             _PAGE_STATS["pages"] = len(_PAGE_CACHE)
     return evs
+
+
+def _window_turns(j, floor):
+    """The turns [lo, hi) a loadAround window covers for an anchor in turn j before the floor: the two PAGE-ALIGNED pages
+    around it (the page holding j and its nearer neighbour), so the window is at least WINDOW_TURNS each side where the
+    history allows, every page it renders is a whole cache entry, and the windows of anchors in the same pages share
+    entries (the warm and the click render the same keys)."""
+    p = (j // PAGE_TURNS) * PAGE_TURNS
+    if j - p < PAGE_TURNS // 2 and p > 0:
+        lo, hi = p - PAGE_TURNS, p + PAGE_TURNS
+    else:
+        lo, hi = p, p + 2 * PAGE_TURNS           # the second half, or the head's own page: the page after it
+    return lo, max(lo, min(floor, hi))
+
+
+def _history_pages(sid, lo, hi, now, sess=None, live_map=None, sig=None, stats=None):
+    """The rendered events of turns [lo, hi) as page-aligned pages (PAGE_TURNS each), through the pages cache."""
+    out, a = [], lo
+    while a < hi:
+        b = min(hi, (a // PAGE_TURNS + 1) * PAGE_TURNS)
+        out.extend(_chat_history_page(sid, a, b, now, sess=sess, live_map=live_map, sig=sig, stats=stats))
+        a = b
+    return out
+
+
+# ── warming the pages cache for the active cards' anchors (the user 2026-09-10: a click on a summary far in the past
+# took long to load; the cache behind the active cards) ──────────────────────────────────────────────────────────
+WARM_ANCHORS_MAX = 32                            # anchors probed per cycle, in the feed's order (a late session's summaries can
+#                                                  fall past the cap: accepted, the board's first cards are the ones read)
+WARM_PAGES_MAX = _PAGE_CACHE_MAX // 2            # the warm SET: half the cache in pages, so a warm never evicts the pages a
+#                                                  reader just scrolled into nor its own first half; anchors past it wait for
+#                                                  the next board change (a set that fits settles to a probe)
+WARM_SKIP_MS = 1500                              # a pusher cycle slower than this: the warm stands down (counted)
+_WARM_MEMO = {"anchors": (), "keys": frozenset(), "sigs": {}}   # the last anchor list whose set was fully resident, that set's
+#                                                                  page keys, and the page signature per session they were keyed on
+
+
+def _card_anchors(feed):
+    """(sid, uuid) for every deep-link anchor the feed's cards carry that a click would land in the chat: first the card's
+    distilled summary's own targets (summaryAnchorUuid, the summary line's click, and each paragraph's `u`; a
+    completed card's too: the takeaway far in the past is the click the user named, 2026-09-10), then, for the cards
+    in every column but completed, the head's work and prompt anchors and its open rows' (a done row's are not
+    warmed; a handoff row points at another session's card and is that card's to warm). Ordered as the feed lists
+    them, deduplicated."""
+    out, seen = [], set()
+
+    def add(sid, u):
+        if u and (sid, u) not in seen:
+            seen.add((sid, u)); out.append((sid, u))
+    for card in (feed or {}).get("asks") or []:
+        if not isinstance(card, dict) or not card.get("sid"):
+            continue
+        sid = str(card["sid"])
+        add(sid, card.get("summaryAnchorUuid"))
+        for p in card.get("summaryAnchorsPara") or []:
+            if isinstance(p, dict):
+                add(sid, p.get("u"))
+        if card.get("column") == "completed":
+            continue
+        for i, row in enumerate(card.get("tree") or []):
+            if not isinstance(row, dict) or row.get("kind") == "handoff":
+                continue
+            if i > 0 and row.get("status") == "done":
+                continue
+            for k in ("anchorUuid", "promptAnchorUuid"):
+                add(sid, row.get(k))
+    return out
+
+
+def _warm_history_pages(feed, now, live_map=None):
+    """Render, into the pages cache, the pages the feed's cards' anchors would ask for (the window loadAround serves,
+    _window_turns), so a click on one lands from the cache. The warm SET is bounded to WARM_PAGES_MAX pages (half the
+    cache, in pages AND in bytes, half of each bound): anchors are taken in the feed's order and the first whose window
+    would take the set past the bound, and every anchor after it, wait for the next board change (counted as
+    chatPages.warmPending), so the warm never evicts its own pages nor a reader's and a bounded set SETTLES (the warming
+    review, 2026-09-11: an unbounded set over the cache re-rendered itself every cycle for the kernel's life). A set is
+    remembered as settled only when it is non-empty and every anchor resolved (a session with no render floor yet, an
+    index client holding the tabs at 0, leaves the set unresolved, so the floor's return warms). Each admitted page is PROBED first: one resident under
+    the session's current page signature costs nothing, one that is not is rendered, so a page a reader's scrolling
+    evicted or a floor flip re-keyed is warmed again; an unchanged board whose set is fully resident costs one probe of
+    the remembered keys (_WARM_MEMO), nothing else. Skipped whole when the pusher's last cycle ran over WARM_SKIP_MS
+    (chatPages.warmSkipped). Only sessions whose chat has been built with a render floor and only anchors before it
+    (the tail is resident already). Returns the number of pages rendered by THIS call (its own count, not a shared
+    counter's difference: a handler's render meanwhile is not the warm's)."""
+    anchors = _card_anchors(feed)[:WARM_ANCHORS_MAX]
+    if not anchors:
+        return 0
+    last_ms = _PERF_STATS.pusher.get("cycle_ms_last", 0.0) if hasattr(_PERF_STATS, "pusher") else 0.0
+    if last_ms > WARM_SKIP_MS:                    # the stand-down first: an over-budget pusher pays not even the probe (round 3, C)
+        with _page_lock:
+            _PAGE_STATS["warmSkipped"] += 1
+        return 0
+    t0 = time.monotonic()
+    rows = {x["sid"]: x for x in _sessions(now)}
+    if tuple(anchors) == _WARM_MEMO["anchors"]:
+        # a settled board: its set still resident under the sessions' CURRENT page signatures costs this probe alone (a
+        # floor flip or a judge publish moves a signature: the remembered keys are then another key's pages); the probe's
+        # time is the warm's (warmMs)
+        try:
+            same = all(_page_sig(rows[sid_], sid_, now) == sg for sid_, sg in _WARM_MEMO["sigs"].items() if sid_ in rows)
+        except Exception:
+            same = False
+        with _page_lock:
+            settled = same and all(k in _PAGE_CACHE for k in _WARM_MEMO["keys"])
+            if settled:
+                _PAGE_STATS["warmCycles"] += 1
+                _PAGE_STATS["warmMs"] += (time.monotonic() - t0) * 1000.0
+        if settled:
+            return 0
+    if live_map is None:
+        live_map = _live_map()
+    st, pending, keys, unresolved, set_bytes = {"rendered": 0}, 0, set(), 0, 0
+    per_sid = {}                                  # sid → (floor, sess, turns, uuid → turn index below the floor, page signature)
+    for sid, uuid in anchors:
+        if len(keys) >= WARM_PAGES_MAX or (keys and set_bytes >= _PAGE_CACHE_BYTES // 2):
+            pending += 1                          # past the set's bound (pages, or bytes: round 3, B): waits for the next board change
+            continue
+        try:
+            if sid not in per_sid:
+                floor, sess = _RENDER_FLOOR.get(sid), rows.get(sid)
+                if not floor or sess is None:
+                    per_sid[sid] = None
+                else:
+                    turns = _parse(sess["path"], sid, now)["turns"]
+                    u2t = {a["uuid"]: i for i, t in enumerate(turns[:floor]) for a in t.get("atoms") or [] if a.get("uuid")}
+                    per_sid[sid] = (floor, sess, turns, u2t, _page_sig(sess, sid, now, floor=floor, turns=turns))
+            entry = per_sid[sid]
+            if entry is None:
+                unresolved += 1                   # no floor yet (an index client holds every tab at 0), or no row: this
+                continue                          #  anchor's pages are unknown, so the set cannot be called settled (round 3, A)
+            floor, sess, turns, u2t, sig = entry
+            j = u2t.get(str(uuid).split("#", 1)[0])
+            if j is None:
+                j = _turn_of_uuid(turns, uuid)    # a note's key, a fork's chip: by time
+            if j is None or j >= floor:
+                continue
+            lo, hi = _window_turns(j, floor)
+            window = [(sid, a, min(hi, a + PAGE_TURNS), sig) for a in range(lo, hi, PAGE_TURNS)]
+            if keys and len(keys | set(window)) > WARM_PAGES_MAX:
+                pending += 1                      # its pages would take the set past the bound: it waits (a shared page is free)
+                continue
+            keys.update(window)
+            for key in window:
+                with _page_lock:
+                    hit = _PAGE_CACHE.get(key)
+                if hit is None:
+                    _chat_history_page(sid, key[1], key[2], now, sess=sess, live_map=live_map, sig=sig, stats=st)
+                    with _page_lock:
+                        hit = _PAGE_CACHE.get(key)
+                set_bytes += hit[1] if hit is not None else 0   # the set's bytes: a page over the half-bound alone is admitted, and the set closes
+        except Exception:
+            unresolved += 1
+            sys.stderr.write("chat pages warm: %s\n" % traceback.format_exc().strip().splitlines()[-1])
+    with _page_lock:
+        _PAGE_STATS["warmed"] += st["rendered"]
+        _PAGE_STATS["warmPending"] = pending
+        _PAGE_STATS["warmMs"] += (time.monotonic() - t0) * 1000.0
+        _PAGE_STATS["warmCycles"] += 1
+        resident_all = bool(keys) and unresolved == 0 and all(k in _PAGE_CACHE for k in keys)   # an empty or unresolved set is
+    if resident_all:                                                                              #  never "settled" (round 3, A)
+        _WARM_MEMO.update(anchors=tuple(anchors), keys=frozenset(keys), sigs={sid_: e[4] for sid_, e in per_sid.items() if e is not None})
+    else:
+        _WARM_MEMO.update(anchors=(), keys=frozenset(), sigs={})
+    return st["rendered"]
 
 
 def _turn_of_uuid(turns, uuid):
@@ -40942,13 +41261,7 @@ def _chat_history_reply(sid, msg, now, base=None):
         return _turn_of_uuid(turns, k)
 
     def pages(lo, hi):
-        out = []
-        a = lo
-        while a < hi:
-            b = min(hi, (a // PAGE_TURNS + 1) * PAGE_TURNS)
-            out.extend(_chat_history_page(sid, a, b, now, sess=sess, live_map=live_map))
-            a = b
-        return out
+        return _history_pages(sid, lo, hi, now, sess=sess, live_map=live_map)
 
     def older_than_turn(j, want):
         """Whole turns before turn j, at least `want` events when there are that many: (events, first turn)."""
@@ -40987,7 +41300,7 @@ def _chat_history_reply(sid, msg, now, base=None):
             j = _turn_of_uuid(turns, anchor)
             if j is None or j >= floor:
                 return {"type": "chatWindow", "id": sid, "anchor": anchor, "events": [], "moreBefore": False, "moreAfter": False, "missing": True}
-            lo, hi = max(0, j - WINDOW_TURNS), min(floor, j + WINDOW_TURNS)
+            lo, hi = _window_turns(j, floor)
             out = pages(lo, hi)
             body_first = _event_key(out[0]) if out else None   # the first EVENT: a head card's key places in no turn (round 3, B)
             more_before = lo > 0
@@ -43535,6 +43848,20 @@ def _push(targets, connect=False, live_map=None):
                     bars_down = True
             sys.stderr.write("push send %s (%s): %s\n" % ("feed" if is_feed else "bars", c.get("app"), traceback.format_exc()))
     _PERF_STATS.stage("push.send", time.monotonic() - _t_stage)
+    # the cards' windows, ahead of a click (the warming, 2026-09-11): AFTER the send stage, so the feed frame of the cycle a
+    # card moves never waits for the renders; only with a board to click on (a feed or fleet client among the targets;
+    # want_feed counts the chat too, which cannot click a card) and a proto-2 chat client to serve pages to; its own stage key
+    _t_stage = time.monotonic()
+    try:
+        _fs = feed_src
+    except NameError:
+        _fs = None
+    if any(c["app"] in ("feed", "fleet") for c in targets) and _fs and not connect and any(c.get("proto") == 2 for c in chat_clients):
+        try:
+            _warm_history_pages(_fs, now, live_map)
+        except Exception:
+            sys.stderr.write("chat pages warm: %s\n" % traceback.format_exc().strip().splitlines()[-1])
+        _PERF_STATS.stage("push.warm", time.monotonic() - _t_stage)
     with _clients_lock:
         _clients[:] = [c for c in _clients if c.get("alive", True)]
 
@@ -44645,6 +44972,58 @@ def _apih_resend(client):
             client["send"](_APIH_LAST[0])
         except Exception:
             pass
+
+
+def _active_chat_wid(client):
+    """The window key a chat's active tab is filed under: the client's wid as a string, "" for a pane that reported
+    none (a page opened outside a dashboard), so the record and every read use one key shape."""
+    return str(client.get("wid") or "")
+
+
+def _send_active_chat(client):
+    """Tell ONE feed client which session the chat pane of its window shows — {type: "activeChat", id: sid|null},
+    the value recorded for its wid — on the ("activeChat",) dedup slot, so an unchanged value is not re-sent
+    (_send_client, within _DEDUP_REPOST_S). Nothing when no chat of that window has reported yet: the feed keeps
+    its own resting state rather than reading a null the kernel never learned. Returns whether a frame was
+    offered to the slot. A socket that fails is marked dead by _client_send; the relay's other feeds go on.
+
+    Called from two arms of Handler._dispatch_ws: the chat's activeTab (through _relay_active_chat, every feed of
+    the window) and a FEED client's `ready`, between that arm's reset and its connect push, so a reloaded feed's
+    first paint already knows its focused session. The ready arm and not the WS handshake: a frame sent before
+    the bundle's ready lands in a document with no message listener (the ready arm's own comment), and a
+    reloaded feed is exactly the client that has to learn the focus."""
+    wid = _active_chat_wid(client)
+    if wid not in _ACTIVE_CHAT_BY_WID:
+        return False
+    try:
+        _send_client(client, ("activeChat",), {"type": "activeChat", "id": _ACTIVE_CHAT_BY_WID[wid]})
+    except Exception:
+        return False
+    return True
+
+
+def _forget_active_chat_if_last(client):
+    """Drop the window's active-chat record when the client leaving was the last pane of that wid: the dict
+    is keyed by dashboard window id, and a window closed for good must not keep an entry for the kernel's
+    life (one per window ever opened). Called under _clients_lock, after the client left _clients; a window
+    with another pane still connected (its chat, a second feed) keeps the record for that pane's reload."""
+    wid = _active_chat_wid(client)
+    if wid in _ACTIVE_CHAT_BY_WID and not any(_active_chat_wid(c) == wid for c in _clients):
+        _ACTIVE_CHAT_BY_WID.pop(wid, None)
+
+
+def _relay_active_chat(client, sid):
+    """A chat client's activeTab: record the session under its window's wid (None for no tab) and send the window's
+    live feed clients the frame (T347: the feed's focused-session section is a view of the chat pane's active tab,
+    never a move of a card; one window's panes share a wid, and a pane outside a dashboard files under ""). The
+    two chat columns of a split window both report here and the later report stands. The client list is copied
+    under _clients_lock; the sends run outside it, as every other fan-out does."""
+    wid = _active_chat_wid(client)
+    _ACTIVE_CHAT_BY_WID[wid] = str(sid) if sid else None
+    with _clients_lock:
+        feeds = [c for c in _clients if c.get("alive") and c.get("app") == "feed" and _active_chat_wid(c) == wid]
+    for c in feeds:
+        _send_active_chat(c)
 
 
 # ── Web Push: the same bell events, delivered to the phone (plans/ios-app.md proposal 2; the user
@@ -45817,6 +46196,11 @@ def _run_tier(fn):
 
 def _producer():
     _prev_wall = _prev_mono = None
+    # the FIRST pass waits (bounded) for the boot's census and re-attaches: the producer's cold refolds and the
+    # boot reconcile share one interpreter, and a census that competes with them took 5.6 s where 1.4 s is the
+    # uncontended figure (the restart-path work, 2026-09-11); a wedged attach never holds the judges past the bound
+    if not _wait_boot_attached():
+        sys.stderr.write("producer: the boot's attaches did not settle within %.0f s; judging anyway\n" % BOOT_JUDGE_HOLD_S)
     while not _LOOPS_STOP.is_set():
         _nw, _nm = time.time(), time.monotonic()        # detect a host suspension (laptop slept) since the
         _iv = _detect_suspend(_prev_wall, _prev_mono, _nw, _nm)   # last tick: wall jumped past monotonic
@@ -46007,6 +46391,10 @@ def _pusher_cycle_jobs(now, live_map, any_client):
         _persist_checkpoints(now)         # move (T323 stage 3): the next kernel folds the tails, not the files
     except Exception:
         sys.stderr.write("checkpoints: %s\n" % traceback.format_exc())
+    try:                                  # the boot row's backstop: written without attachDone once the bound has passed
+        _boot_row_backstop(now)
+    except Exception:
+        pass
     try:                                  # hitting a usage limit auto-engages the retry-pause (before the resume check)
         _auto_pause_on_limit()
     except Exception:
@@ -53550,8 +53938,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, json.dumps(res), "application/json")
                 be = Sessions.backend_for(sid)
                 if u.path == "/interrupt":
-                    be.interrupt(sid)                           # Esc/stop AND settle idle (in the backend)
-                    _interrupt_clicked[str(sid)] = time.time()  # chip → "interrupting" NOW, same as the WS op
+                    # the WS op's gate: a stop the backend refused (nothing in flight) paints nothing
+                    if be.interrupt(sid) is not False:          # Esc/stop AND settle idle (in the backend)
+                        _interrupt_clicked[str(sid)] = time.time()  # chip → "interrupting" NOW, same as the WS op
+                    elif be.busy(sid):
+                        # …and a refusal WITH work in flight is a stop that did not land (the WS arm's toast):
+                        # said, never answered ok, so `romp interrupt` prints this and exits non-zero — the
+                        # /send route's refusal shape (review find, 2026-09-11)
+                        return self._send(200, json.dumps({"ok": False, "error":
+                            "the stop was not delivered: %s is still working" % who}), "application/json")
                 elif isinstance(b, dict) and b.get("when") == "idle":
                     # SELF-CLOSE deferral (the user 2026-08-15): record the wish; the pusher's sweep
                     # kills at the turn's settle, so a session ending itself finishes its goodbye first
@@ -54456,7 +54851,10 @@ class Handler(BaseHTTPRequestHandler):
             if msg.get("id"):
                 _release_skeleton(client, str(msg["id"]))   # a skeleton tab clicked: its full rides that push (2026-09-07)
             _pusher_wake.set()                 # …and that push starts when the in-flight cycle ends, not
-            return                             #    after the 0.5 s backstop (the tab switch IS the event)
+            #                                     after the 0.5 s backstop (the tab switch IS the event)
+            if client.get("app") == "chat":
+                _relay_active_chat(client, msg.get("id"))   # …and the window's feed learns which session is focused (T347)
+            return
         if msg and msg.get("type") == "needSlot" and msg.get("slot") in _DELTA_SLOTS:
             # The shim could not apply a view delta (its base revision did not match what it holds — a
             # frame it never saw, a reload mid-stream): forget what we believe it holds and re-send the
@@ -54588,6 +54986,8 @@ class Handler(BaseHTTPRequestHandler):
             # because cached bundles win the race). Same repair as needFull above, client-wide;
             # ready is posted once per renderer life, so this cannot loop.
             _client_reset_chat_base(client)
+            if client.get("app") == "feed":
+                _send_active_chat(client)      # T347: the window's focus, ahead of the first paint
             # Capture the seq of the views blob the pushes below serve — from the frames THIS thread
             # enqueues, so a pusher-thread frame landing meanwhile is not mistaken for the connect push's
             # (the caps frame's viewsSeq, see KERNEL_WS_CAPS)
@@ -55634,6 +56034,8 @@ class Handler(BaseHTTPRequestHandler):
                 if client in _clients:
                     _clients.remove(client)
             _release_client_holds(client)          # its open editors' holds go with it: the disconnect is the event (T306)
+            with _clients_lock:
+                _forget_active_chat_if_last(client)   # the window's focus record goes with its last pane (T347)
 
     def _remote_ws(self, host, query):
         """GET /remote/<host>/ws — relay a federated-dashboard WebSocket to an attached host's
@@ -56168,6 +56570,7 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
         _drain_sessions = [_s for _s in _sessions(time.time()) if _s.get("sid") and _s.get("path")]
     except Exception:
         _drain_sessions = []
+    _phases = {}                          # the exit's phase timings, for the cut row (the restart-path work, 2026-09-11)
     _prime_t0, _primed, _skipped = time.monotonic(), 0, 0
     for _s in _drain_sessions:            # every RESIDENT leaf's folds current, so each leaves a cursor for the next kernel;
         if time.monotonic() - _prime_t0 > 1.0:   # bounded: the SDK drain keeps its 2 s under the manager's 5 s grace
@@ -56179,13 +56582,18 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
         em.checkpoint_write_dirty()       # every fold checkpoint that moved since its last write (T323 stage 3)
     except Exception:
         pass
+    _asm_t0, _asm_skipped = time.monotonic(), 0
     try:                                  # the assembly documents of every session's leaf (T323 stage 4a): a whole entry
-        _asm_t0 = time.monotonic()        # with a boundary writes, the rest are counted skips; bounded by the drain. The
-        for _s in _drain_sessions:        # store's tree gives the turns section (stage 4c) while a 2 s budget holds; past it
-            _tree = _stored_tree(_s["path"], _s["sid"]) if time.monotonic() - _asm_t0 < 2.0 else None   # a turnless document is
-            em.asm_checkpoint_write(_s["path"], _s["sid"], _display_sdk_human(_s["sid"]), tree=_tree)   # rewritten with its turns
-    except Exception:                     #  at the next settle after the boot
+        for _s in _drain_sessions:        # with a boundary writes, the rest are counted skips; BOUNDED (the periodic
+            if time.monotonic() - _asm_t0 > EXIT_ASM_BUDGET_S:   # writer keeps them close; what is left waits for the next settle)
+                _asm_skipped += 1; continue
+            em.asm_checkpoint_write(_s["path"], _s["sid"], _display_sdk_human(_s["sid"]), tree=_stored_tree(_s["path"], _s["sid"]))   # the store's
+    except Exception:                     #  tree gives the turns section (stage 4c); a turnless document is rewritten with its turns at the next settle
         pass
+    if _asm_skipped:
+        _exit_log("romp-kernel: drain left %d assembly document(s) unwritten (%.1f s budget)\n" % (_asm_skipped, EXIT_ASM_BUDGET_S))
+    _phases["ckptS"] = round(time.monotonic() - _prime_t0, 2)
+    _drain_t0 = time.monotonic()
     try:
         if be is not None and hasattr(be, "drain"):
             res = be.drain(2.0)
@@ -56211,8 +56619,9 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
                     reason_err = traceback.format_exc().strip().splitlines()[-1][:200]
                     _exit_log("romp-kernel: the signal's reason helper failed, the cut row carries the "
                               "plain verdict and reasonError: %s\n" % reason_err)
+            _phases["drainS"] = round(time.monotonic() - _drain_t0, 2)
             row = _restart_cut_row(res, watches_armed=len(_pr_watches) + len(_watches),
-                                   audit_reason=reason)
+                                   audit_reason=reason, phases=_phases)
             if audit:
                 row["auditT"] = int(audit["t"])     # the audit row this cut CONSUMED (see _recent_restart_audit)
             if err:

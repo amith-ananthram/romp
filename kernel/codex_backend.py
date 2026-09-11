@@ -102,6 +102,7 @@ SEED_TAIL = 200   # records whose uuids seed the normalizer's dedup on re-attach
 CLIENT_RETRY_MIN = 0.25
 CLIENT_RETRY_MAX = 5.0
 WORKER_JOIN_TIMEOUT = 2.0
+HANDSHAKE_TIMEOUT_S = 30.0   # a new app-server answers its start-up requests within this, or the child is ended
 
 _PERMANENT_RPC_ERRORS = {"ParseError", "InvalidRequestError", "MethodNotFoundError",
                          "InvalidParamsError"}
@@ -140,6 +141,14 @@ class _PermanentRequestRejection(RuntimeError):
         self.operation = operation
         self.change_generation = change_generation
         self.client_generation = client_generation
+
+
+class _HandshakeTimeout(RuntimeError):
+    """The handshake clock ran out and the child was ended (_handshake). Its own class because its retry floor
+    differs: re-probing a child that never answers costs the whole clock again, under _client_lock, so the
+    record does not retry it before HANDSHAKE_TIMEOUT_S. The ordinary backoff (cap CLIENT_RETRY_MAX = 5s) would
+    have re-run the probe almost continuously while the fault lasted, holding the creation door and the
+    models list for the clock out of every clock-plus-cap."""
 
 
 def _execution_permissions(cwd, thread_start=False):
@@ -264,6 +273,21 @@ def _tail_state(path):
     return last, set(tail)
 
 
+def _ends_mid_line(path):
+    """True when the file is non-empty and its last byte is not a newline: an earlier write was torn
+    (write(2) returned short under ENOSPC, the process was killed between pages, power was lost) and
+    left a partial line, a record with no line end. The next record must start its own line, or the
+    two join in ONE unparseable line every reader skips."""
+    try:
+        with open(path, "rb") as f:
+            if f.seek(0, os.SEEK_END) == 0:
+                return False
+            f.seek(-1, os.SEEK_END)
+            return f.read(1) != b"\n"
+    except FileNotFoundError:
+        return False
+
+
 class _Session:
     """One Codex session: registry row + runtime state. The worker thread owns the normalizer and
     the file; everything else only reads or enqueues."""
@@ -327,6 +351,7 @@ class CodexBackend:
         self._sessions_lock = threading.RLock()
         self._reg_lock = threading.Lock()
         self._load_registry()
+        self._republish_missing_names()
         # A kernel restart must not strand a durable backend queue until the user happens to send
         # again. Re-arm every live queued session immediately; client retry backoff keeps failures cool.
         for _, s in self._session_items():
@@ -379,6 +404,33 @@ class CodexBackend:
                 s.note = r.get("note", "")
                 s.launch_error = r.get("launchError") if isinstance(r.get("launchError"), dict) else None
                 self._sessions[sid] = s
+
+    def _republish_missing_names(self):
+        """spawn writes the durable registry row, then names/<sid>. A kernel death between the two
+        left a LIVE row with no shared identity file, and nothing rewrote it: _load_registry rebuilt
+        the session from the row, the first turn took _prepare_thread's resume branch (no names
+        write), and only a rename would have healed it. Every surface that reads names/ alone
+        (sender name and colour, cwd, the duplicate-name claim, which sees live names through that
+        file only) was blind to the session, so a same-name create could mint a second live one
+        (2026-09-11). The registry IS the durable source for name, cwd and colour, so a live row
+        whose file is missing is republished from it here, once, at load. A row whose file exists
+        is left alone (the names consumers watch the mtime); a dead row claims no name slot. fg is
+        not in the registry and comes back empty, exactly as a rename's heal leaves it."""
+        d = self.state / "names"
+        for sid, s in self._session_items():
+            with s.lock:
+                dead = s.dead
+            if dead or (d / sid).is_file():
+                continue
+            try:
+                self._write_name(s)
+            except (OSError, UnicodeDecodeError) as e:
+                self.log("codex: names/%s could not be republished at load (%s) — the session runs "
+                         "UNNAMED on shared surfaces until a rename lands; a same-name create may "
+                         "collide meanwhile" % (sid, e))
+            else:
+                self.log("codex: republished names/%s, missing at load for a live registry row "
+                         "(a kernel death between spawn's registry write and its name publish)" % sid)
 
     def _session(self, sid):
         with self._sessions_lock:
@@ -567,16 +619,19 @@ class CodexBackend:
             try:
                 if self._client_factory:
                     candidate = self._client_factory()
+                    self._handshake(candidate, lambda: None)
                 else:
                     if not ensure_codex_sdk(self.state):
                         raise RuntimeError(SETUP_HINT)
                     from openai_codex.client import CodexClient, CodexConfig
                     cfg = _codex_config(CodexConfig, self.codex_bin, self.state)
                     candidate = CodexClient(config=cfg, approval_handler=self._handle_approval)
-                    candidate.start()
-                    candidate.initialize()
+
+                    def bring_up():
+                        candidate.start()
+                        candidate.initialize()
+                    self._handshake(candidate, bring_up)
                     self.log("app-server runtime: %s" % (self.codex_bin or "ROMP-managed %s" % getattr(_runtime, "VERSION", "")))
-                self._check_auth(candidate)
                 self._client = candidate
                 self._client_err = None
                 self._client_retry_at = 0.0
@@ -593,12 +648,70 @@ class CodexBackend:
                 self._record_client_failure_locked(e, candidate)
                 return None
 
+    def _handshake(self, candidate, bring_up):
+        """Run a new client's start-up requests (`bring_up`: start + initialize on a real client; nothing for
+        an injected one) and the login check under ONE clock, ending the child when it runs out.
+
+        The pinned SDK's request wait has no timeout: the one event that unblocks it is the reader thread
+        failing every waiter, which happens when the child's stdout ends. So a codex that starts, holds stdout
+        open and never writes its first frame (a start-up stalled on a hung ~/.codex or state mount, a stub
+        that sleeps) parked _get_client in that wait with _client_lock HELD, forever: every Codex creation,
+        resume, send and turn worker queued behind it, /models blocked under _catalog_lock, the tab whose
+        receive loop made the call read no more ops, and nothing was logged or recorded (2026-09-11). The
+        child offers no event of its own, so the clock stands in for one; its expiry is candidate.close(),
+        the SDK's own unblocking event (child terminated, reader sees EOF, the wait raises), and the failure
+        is recorded as the plain reason rather than the transport's text. The gate makes the two outcomes
+        exclusive: a clock that fires after the handshake settled must not close an installed client, and a
+        handshake that settled after the clock fired must not install a closed one (_check_auth swallows the
+        account_read error the close provokes, so the flag is read after it, not only on the raise path).
+        The expiry is its own class, _HandshakeTimeout, so _record_client_failure_locked floors the retry at
+        the clock: the next probe costs the whole clock again with the lock held, and the ordinary backoff (cap
+        5s) would have re-run it almost continuously while the fault lasted; inside the floor every caller gets
+        the recorded reason at once."""
+        gate = threading.Lock()
+        state = {"expired": False, "settled": False}
+
+        def expire():
+            with gate:
+                if state["settled"]:
+                    return
+                state["expired"] = True
+            try:
+                candidate.close()
+            except Exception:
+                pass
+
+        def settle():
+            timer.cancel()
+            with gate:
+                state["settled"] = True
+                return state["expired"]
+
+        timer = threading.Timer(HANDSHAKE_TIMEOUT_S, expire)
+        timer.daemon = True
+        timer.name = "codex-handshake-clock"
+        timer.start()
+        text = ("The Codex app-server (%s) did not answer within %.0fs of starting, so it was ended; "
+                "check the codex binary, then try again"
+                % (self.codex_bin or "managed runtime", HANDSHAKE_TIMEOUT_S))
+        try:
+            bring_up()
+            self._check_auth(candidate)
+        except Exception as e:
+            if settle():
+                raise _HandshakeTimeout(text) from e
+            raise
+        if settle():
+            raise _HandshakeTimeout(text)
+
     def _record_client_failure_locked(self, error, candidate=None):
         """Record one failed client generation. Caller owns _client_lock."""
         self._client_err = str(error) or error.__class__.__name__
         self._client_failures += 1
         delay = min(CLIENT_RETRY_MAX,
                     CLIENT_RETRY_MIN * (2 ** min(self._client_failures - 1, 8)))
+        if isinstance(error, _HandshakeTimeout):
+            delay = max(delay, HANDSHAKE_TIMEOUT_S)   # a re-probe costs the whole clock, lock held: not before then
         self._client_retry_at = time.monotonic() + delay
         if candidate is None:
             candidate = self._client
@@ -739,6 +852,15 @@ class CodexBackend:
         workers pushing concurrently AB-BA across their sessions' locks."""
         path = self.transcript_path(s.sid)
         with open(path, "a", encoding="utf-8") as f:
+            if _ends_mid_line(path):
+                # A torn earlier write left a partial line. Written straight after it, this batch's first
+                # record would join it in ONE unparseable line every reader skips (_tail_state, the event
+                # model's readers), so the record vanished while the retire below still took its echo: a
+                # prompt sent after the tear (the first record after a kill and restart) was nowhere in
+                # the UI. Close the fragment first: it stays its own skipped line and the record lands
+                # whole. Logged so the tear is seen, not silently papered over (review find, 2026-09-11).
+                self.log("transcript for %s ended mid-line (a torn write); closing that line" % s.name)
+                f.write("\n")
             for r in recs:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
         # A landed user record replaces its optimistic echoes (uuid-independent: match by text, under
@@ -822,11 +944,28 @@ class CodexBackend:
         return out
 
     def busy(self, sid):
+        """A turn is open, or a queued send is about to open one. A queue the worker has PARKED on a permanent
+        request rejection (a model the account refuses: _work breaks to kick.wait() with no timer) is neither:
+        nothing is in flight and nothing runs until an explicit change bumps change_generation. It must read
+        NOT busy, because the kernel takes busy() as its authoritative "turn open" word and parks a model or
+        effort pick behind it (Codex applies a pick at the next turn_start, model_switches_live False), and its
+        drain skips the session for as long as busy() holds — so a parked queue that read busy parked the very
+        pick that would have unparked it, with no way out: Codex has no unqueue, and kill + resume re-arm the
+        same queue with the same model (review, 2026-09-11). The rejection is stale the moment an explicit
+        change moves the generation (send, set_model, set_mode, set_effort, resume all bump it and kick), so
+        busy() flips back to True right then, before the worker wakes and clears the tuple, and a pick pressed
+        after that one parks behind the retry in press order. A new client generation is the worker's own
+        clear (it is kicked for it), a scheduling quantum later."""
         s = self._session(sid)
         if not s:
             return None
         with s.lock:
-            return None if s.dead else bool(s.turn_id or s.queue)
+            if s.dead:
+                return None
+            if s.turn_id:
+                return True
+            parked = s.turn_rejection is not None and s.turn_rejection[0] == s.change_generation
+            return bool(s.queue) and not parked
 
     # ── control ──────────────────────────────────────────────────────────────────────────────────
     def send(self, sid, text):
@@ -1049,7 +1188,11 @@ class CodexBackend:
                 old = (d / s.sid).read_text().rstrip("\n").split("\t")
             except (OSError, UnicodeDecodeError):
                 old = []
-            bg = bg or (old[2] if len(old) > 2 else "")
+            bg = bg or (old[2] if len(old) > 2 else "") or s.color
+            #    the FILE first: a kernel-side recolour (_set_session_color) writes names/ only
+            #    and never updates s.color. The registry's colour is the fallback for a file with
+            #    none — a rename that healed a MISSING file wrote an empty colour although the
+            #    registry knew it (2026-09-11)
             fg = fg or (old[3] if len(old) > 3 else "")
             tmp = d / (s.sid + ".tmp")
             try:
