@@ -3,21 +3,18 @@
 #
 # Usage (see `romp help`):
 #   romp                     # open the dashboard in your browser
-#   romp new api             # start a session named "api" (SDK; lives in the kernel)
+#   romp new api             # start a session named "api" (Claude Code; it lives in the kernel)
 #   romp new -m "fix X" api  # ...and deliver the first prompt in the same command
-#   romp new -t api          # ...as a terminal (tmux) session, attached
-#   romp resume              # resume a past conversation (full-screen picker)
+#   romp new --codex api     # ...as a Codex session
 #   romp send api "text"     # scripts/agents: message a session (also: interrupt, end)
 #   romp help                # the full command list
 # Commands are bare words, git-style; options are dashed and belong to their
 # command. A bare word that isn't a command fails loudly naming the fix
 # (`romp foo` → `romp new foo`) — nothing silently becomes a session.
 #
-# romp sessions are tagged with a tmux user option (@romp 1), so the dashboard
-# and the tmux-status hook find them by that flag — not by a naming convention.
-# There's no `romp rename` / `romp a`: rename from inside tmux (the hook resyncs)
-# and attach with plain `tmux a`. Claude is launched with `exec`, so quitting
-# Claude ends the tmux session (no lingering shell squatting the name).
+# Every session runs inside the kernel, which owns its backend (Claude Code through
+# the Agent SDK, or Codex): this script talks to the kernel's API and starts nothing
+# itself. A past conversation is resumed from the dashboard (Revive).
 
 set -euo pipefail
 
@@ -25,613 +22,6 @@ set -euo pipefail
 # make them resolvable regardless of the caller's PATH.
 PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd):$PATH"
 
-# The tmux server's socket lives under the user's runtime directory when there is one (T325, 2026-09-11): resolve
-# it the way the manager and the kernel do, BEFORE the first tmux call below, so `romp new -t`, the resume picker
-# and every other client here dial the server the manager started (a tmpfs mounted over /tmp took the default
-# socket away from every session that day). A TMUX_TMPDIR already set wins; inside a pane $TMUX's socket applies.
-# Found through the RESOLVED path, so a `~/.local/bin/romp` symlink finds its siblings too (the portable loop
-# bin/romp-serve and bin/romp-service carry: BSD readlink before macOS 12.3 has no -f). A copy of this script run away
-# from them (the help test does that) keeps working, and says so: tmux clients then dial tmux's default socket, which
-# on a systemd machine is a different server from the one the service started.
-_romp_src="${BASH_SOURCE[0]}"
-while [[ -L "$_romp_src" ]]; do
-    _romp_tgt="$(readlink "$_romp_src")"
-    case "$_romp_tgt" in
-        /*) _romp_src="$_romp_tgt" ;;
-        *)  _romp_src="$(cd "$(dirname "$_romp_src")" && pwd)/$_romp_tgt" ;;
-    esac
-done
-_romp_tmux_env="$(cd "$(dirname "$_romp_src")" && pwd)/romp-tmux-env"
-if [[ -r "$_romp_tmux_env" ]]; then
-    # shellcheck source=bin/romp-tmux-env
-    source "$_romp_tmux_env"
-    romp_tmux_tmpdir_export
-else
-    echo "[romp] romp-tmux-env is not beside this script: tmux clients here dial tmux's default socket, which may not be the server romp runs" >&2
-fi
-
-# --- Session name <-> Claude session-id map --------------------------------
-# romp launches Claude with a self-assigned --session-id, so it knows the
-# conversation's UUID (which is also the transcript filename under
-# ~/.claude/projects/<munged-cwd>/<uuid>.jsonl) the moment a session starts.
-# We persist <uuid> -> "<name>\t<dir>" so `romp resume` can offer YOUR session
-# names instead of Claude's auto-generated summaries. One file per id keeps
-# concurrent sessions from racing on a shared file.
-ROMP_NAMES_DIR="${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}/names"
-
-# The judges' per-session index the resume picker reads to show what a stopped
-# session was about: the archiver's headline (archive/<sid>.json — the session's
-# through-line) with the latest turn caption (captions/<sid>.jsonl) as the
-# fallback — see _romp_resume_rows.
-ROMP_ARCHIVE_DIR="${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}/archive"
-ROMP_CAPTIONS_DIR="${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}/captions"
-
-# --- Claude Code version floor ---------------------------------------------
-# Agent mail delivers through Claude Code's per-session inbox socket, which
-# appeared in 2.1.224; an older CLI still works, but delivery falls back to
-# the slower, more fragile pane injection. `claude --version` costs ~1s of
-# node startup, so the answer is cached keyed on the binary's mtime and
-# re-read only when the binary actually changes (an event, not a TTL).
-ROMP_CLAUDE_FLOOR="2.1.224"
-
-_romp_claude_version() {
-    local bin mtime cache line ver
-    bin="$(command -v claude 2>/dev/null || true)"
-    [[ -n "$bin" ]] || { echo ""; return 0; }
-    mtime="$(stat -c %Y "$bin" 2>/dev/null || stat -f %m "$bin" 2>/dev/null || echo 0)"
-    cache="${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}/claude-version"
-    if line="$(cat "$cache" 2>/dev/null)" && [[ "$line" == "$mtime "* ]]; then
-        echo "${line#* }"; return 0
-    fi
-    ver="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-    # cache only a real answer — a transient --version failure shouldn't stick until the next update
-    if [[ -n "$ver" ]]; then
-        { mkdir -p "$(dirname "$cache")" && printf '%s %s\n' "$mtime" "$ver" > "$cache"; } 2>/dev/null || true
-    fi
-    echo "$ver"
-}
-
-_romp_version_lt() {
-    # true when dotted version $1 < $2 (numeric per part; missing parts are 0)
-    local IFS=. i x y; local -a a b
-    read -r -a a <<<"$1"; read -r -a b <<<"$2"
-    for i in 0 1 2; do
-        x="${a[i]:-0}"; y="${b[i]:-0}"
-        if (( 10#$x < 10#$y )); then return 0; fi
-        if (( 10#$x > 10#$y )); then return 1; fi
-    done
-    return 1
-}
-
-_romp_claude_meets_floor() {
-    # unknown version (no claude on PATH, unparsable output) → below the floor:
-    # callers keep the safe old path rather than assuming a capability
-    local v; v="$(_romp_claude_version)"
-    [[ -n "$v" ]] || return 1
-    if _romp_version_lt "$v" "$ROMP_CLAUDE_FLOOR"; then return 1; fi
-    return 0
-}
-
-_romp_claude_floor_nudge() {
-    # An informative line, not a gate: romp still runs and mail still delivers
-    # (by pane injection); the nudge names what the upgrade buys and the command.
-    local v; v="$(_romp_claude_version)"
-    [[ -n "$v" ]] || return 0
-    if _romp_version_lt "$v" "$ROMP_CLAUDE_FLOOR"; then
-        echo "[romp] Claude Code $v found; romp wants $ROMP_CLAUDE_FLOOR or newer so agent mail arrives instantly (older versions fall back to slower typing into the pane). Upgrade with: claude update" >&2
-    fi
-    return 0
-}
-
-_romp_record() {   # <sid> <name> <dir> [bg] [fg] — write/replace the map entry
-    local sid="$1" nm="$2" dir="$3" bg="${4:-}" fg="${5:-}"
-    [[ -n "$sid" ]] || return 0
-    mkdir -p "$ROMP_NAMES_DIR"
-    # Keep the romp state root private — it holds session names, prompts,
-    # captions, and postal message bodies. 0700 on the root blocks other local
-    # users from reading anything beneath it (the traverse bit is enough).
-    # Idempotent; best-effort.
-    chmod 700 "${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}" 2>/dev/null || true
-    # Atomic: the line is written to a temp in the same directory and moved into place, one rename(2),
-    # so no reader ever sees the record empty or half-written. The kernel's names writers read the
-    # record while this hook rewrites it (its rename writer runs right after a live tmux rename; its
-    # color and palette writers touch any session's record) and publish their edit over what they
-    # read, so a truncate-then-write here cost the session its name and cwd. This is the one shell
-    # writer of a record (_romp_rename_record and _romp_free_title come through here). The temp is
-    # dot-prefixed, so _romp_free_title's glob and the resume picker's listing skip it; a failed write
-    # or move removes it.
-    local tmp="$ROMP_NAMES_DIR/.$sid.tmp.$$"
-    printf '%s\t%s\t%s\t%s\n' "$nm" "$dir" "$bg" "$fg" > "$tmp" && mv -f "$tmp" "$ROMP_NAMES_DIR/$sid" \
-        || { rm -f "$tmp"; return 1; }
-}
-
-_romp_rename_record() {   # <sid> <name> — update name, keep dir + identity color
-    local sid="$1" nm="$2" dir="" bg="" fg=""
-    [[ -n "$sid" && -f "$ROMP_NAMES_DIR/$sid" ]] || return 0
-    IFS=$'\t' read -r _ dir bg fg < "$ROMP_NAMES_DIR/$sid" || true
-    _romp_record "$sid" "$nm" "$dir" "$bg" "$fg"
-}
-
-# mtime of a file as YYYY-MM-DD (today if unknown). Portable across BSD/macOS
-# (`stat -f %m`, `date -r <epoch>`) and GNU/Linux (`stat -c %Y`, `date -d @<epoch>`).
-_romp_date_of() {   # <file> -> YYYY-MM-DD
-    local e
-    e="$(stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null || true)"
-    [[ -n "$e" ]] || { date +%Y-%m-%d; return; }
-    date -r "$e" +%Y-%m-%d 2>/dev/null || date -d "@$e" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d
-}
-
-# Reusing a title for a NEW session: free the title for it by suffixing every
-# STALE (dead) entry that still holds <name> with its last-use date, e.g.
-# `timeline_window` -> `timeline_window-2026-06-10`. So a typed title unambiguously
-# names the new session in the resume picker / name resolution, while the old
-# incarnations stay distinct and resumable (the user's ask, 2026-06-11). NEVER
-# touches a LIVE session's entry or the new session's own sid; last-use date comes
-# from the old transcript's mtime (fallback: the names-file's). Caller guards this
-# to NON-resume launches — reviving an old one deliberately keeps its title.
-_romp_free_title() {   # <new-sid> <name>
-    local keep="$1" nm="$2" f bsid ename edir ebg efg tp d live _c
-    [[ -n "$nm" && -d "$ROMP_NAMES_DIR" ]] || return 0
-    live="$(tmux list-sessions -F '#{@romp-session-id}' 2>/dev/null | grep -v '^$' || true)"
-    for f in "$ROMP_NAMES_DIR"/*; do
-        [[ -f "$f" ]] || continue
-        bsid="$(basename "$f")"
-        [[ "$bsid" == "$keep" ]] && continue
-        IFS=$'\t' read -r ename edir ebg efg < "$f" || continue
-        [[ "$ename" == "$nm" ]] || continue
-        if grep -qxF "$bsid" <<<"$live"; then continue; fi   # never rename a running session's entry
-        # last-use date from the (uniquely-named) transcript's mtime; the [[ -f ]]
-        # guard tolerates an unmatched glob under any shell glob setting.
-        tp=""
-        for _c in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"/*/"$bsid".jsonl; do [[ -f "$_c" ]] && { tp="$_c"; break; }; done
-        d="$(_romp_date_of "${tp:-$f}")"
-        _romp_record "$bsid" "${nm}-${d}" "$edir" "$ebg" "$efg"
-    done
-}
-
-# --- tmux self-provisioning (portable: no .tmux.conf required) ---------------
-# Everything romp needs from tmux beyond the session itself, installed by romp
-# rather than assumed from the user's dotfiles, so a packaged install works on
-# a stock tmux. Two scopes:
-#
-# SERVER glue (hooks) — functional, installed once per launch and ONLY when
-# absent, so a user's own config always wins. All hooked scripts no-op for
-# non-romp sessions.
-_romp_provision_server() {
-    local bin_dir
-    bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local hooks
-    hooks="$(tmux show-hooks -g 2>/dev/null || true)"
-    # Keep the name<->id map + Claude's pill synced on a rename made by ANY means.
-    grep -q '^after-rename-session' <<<"$hooks" || tmux set-hook -g after-rename-session \
-        "run-shell -b \"$bin_dir/romp _renamed #{q:session_name}; $bin_dir/romp-postal-service prune\""
-    # Drop dead sessions from postal peer rows the moment one closes.
-    grep -q '^session-closed' <<<"$hooks" || tmux set-hook -g session-closed \
-        "run-shell -b \"$bin_dir/romp-postal-service prune\""
-}
-
-# SESSION display decorations — the romp status line (live summary on the
-# right, postal peers row when romp-postal-service flips this session to `status 2`)
-# and the terminal-tab title dot. Session-scoped (`set -t`), so non-romp
-# sessions and the user's global status config are untouched. Mirrors what
-# previously lived only in the author's dotfiles tmux.conf.
-_romp_provision_session() {   # <session>
-    local s="$1"
-    tmux set -t "$s" set-titles on
-    tmux set -t "$s" set-titles-string '#{?@romp-emoji,#{@romp-emoji} #S,#S}'
-    tmux set -t "$s" status-interval 2
-    tmux set -t "$s" status-left-length 40
-    tmux set -t "$s" status-left ' #S '
-    tmux set -t "$s" status-right-length 150
-    # Postal flash (peer + direction, auto-expiring) when present; else the live
-    # <=8-word summary (an ellipsis while one is being generated).
-    tmux set -t "$s" status-right ' #{?@romp-msg-peer,#[bg=#{@romp-msg-bg}#,fg=#{@romp-msg-fg}#,bold] #{@romp-msg-dir} #{@romp-msg-peer} #[default] #{=80:@romp-msg-summary},#{?#{==:#{@claude-summary-kind},pending},…,#{=90:@claude-summary}}} '
-    # tmux array gotcha: defining ANY index of status-format at SESSION scope
-    # shadows the entire inherited array — with only [1] set below, [0] (the
-    # default status-left + windows + status-right composition) rendered EMPTY
-    # and the main row vanished (regressed when these settings moved from the
-    # dotfiles' global tmux.conf to session scope; the user's report 2026-06-12).
-    # Pin [0] to the live global composition before defining [1].
-    tmux set -t "$s" 'status-format[0]' "$(tmux show -gv 'status-format[0]')"
-    # Second status row: who this session is talking to (romp-postal-service maintains
-    # @romp-peerN and flips `status 2` when the list is non-empty).
-    tmux set -t "$s" 'status-format[1]' '#[align=right]#{?@romp-peer1, #[bg=#{@romp-peer1c}#,fg=#{@romp-peer1f}] #{@romp-peer1} #[default],}#{?@romp-peer2, #[bg=#{@romp-peer2c}#,fg=#{@romp-peer2f}] #{@romp-peer2} #[default],}#{?@romp-peer3, #[bg=#{@romp-peer3c}#,fg=#{@romp-peer3f}] #{@romp-peer3} #[default],}#{?@romp-peer4, #[bg=#{@romp-peer4c}#,fg=#{@romp-peer4f}] #{@romp-peer4} #[default],}#{?@romp-peer5, #[bg=#{@romp-peer5c}#,fg=#{@romp-peer5f}] #{@romp-peer5} #[default],}#{?@romp-peer6, #[bg=#{@romp-peer6c}#,fg=#{@romp-peer6f}] #{@romp-peer6} #[default],}#{?@romp-peer7, #[bg=#{@romp-peer7c}#,fg=#{@romp-peer7f}] #{@romp-peer7} #[default],}#{?@romp-peer8, #[bg=#{@romp-peer8c}#,fg=#{@romp-peer8f}] #{@romp-peer8} #[default],}#{?@romp-peer9, #[bg=#{@romp-peer9c}#,fg=#{@romp-peer9f}] #{@romp-peer9} #[default],}#{?@romp-peer10, #[bg=#{@romp-peer10c}#,fg=#{@romp-peer10f}] #{@romp-peer10} #[default],} '
-}
-
-# Map a romp palette hex to the nearest Claude `/color` name (empty if none).
-# Claude's prompt-box pill supports ONLY these 8 named colors — no custom hex —
-# so this is an approximate match to the exact romp identity color.
-_romp_named_for_hex() {   # <hex>
-    case "$1" in
-        '#1EA1EB') echo blue   ;;
-        '#54B204') echo green  ;;
-        '#9088F0') echo purple ;;
-        '#4EA8A9') echo cyan   ;;
-        '#DD42FF') echo pink   ;;
-        '#E87221') echo orange ;;
-        '#98998A') echo yellow ;;
-        '#F85B5A') echo red    ;;
-        '#F9D849') echo yellow ;;
-    esac
-}
-
-# Push Claude's /color to (approximately) match a session's identity color.
-# Typed into the pane, so the prompt box should be empty when this fires.
-_romp_send_color() {   # <session>
-    local sess="$1" bg named
-    bg="$(tmux show -t "$sess" -v @identity-bg 2>/dev/null || true)"
-    named="$(_romp_named_for_hex "$bg")"
-    [[ -n "$named" ]] && tmux send-keys -t "$sess" "/color $named" Enter
-}
-
-# Arrow-key menu over pre-rendered "<normal>\t<highlight>" rows (each row brings
-# its own colors for the unselected and selected states). Reads keystrokes from
-# and draws to the controlling terminal directly, so it works even while this
-# function's stdout is captured. Echoes the 1-based index of the chosen row, or
-# nothing if cancelled (Esc/q). Arrow keys move; Enter selects.
-# ROMP_MENU_IN / ROMP_MENU_OUT override the terminal (used by the tests).
-# Integer `read -t` on purpose: bash 3.2 rejects fractional timeouts.
-_romp_menu() {
-    local -a items=("$@")
-    local n=${#items[@]} sel=0 top=0 key rest i normal highlight
-    local in="${ROMP_MENU_IN:-/dev/tty}" out="${ROMP_MENU_OUT:-/dev/tty}"
-    local rows vis hdr above below frame
-    (( n > 0 )) || return 0
-    exec 4<"$in" 2>/dev/null || return 0
-    # Own full-screen UI on the alternate buffer. The trap guarantees we drop
-    # back to the ORIGINAL screen (and restore the cursor) on EVERY exit path —
-    # selection, Esc/q, or Ctrl-C — so cancelling never leaves the alt screen on
-    # or a half-drawn menu behind. We redraw in place each frame (home + clear-
-    # to-EOL per line + clear-to-end) instead of a full \033[2J wipe, so frames
-    # don't flash; and only the rows that fit are drawn (the viewport below), so
-    # a list taller than the terminal scrolls within the window instead of
-    # overflowing the screen.
-    # \033[?7l turns OFF autowrap so a row wider than the terminal is hard-cut at
-    # the right margin instead of wrapping onto the next line (escape sequences
-    # still execute, so colors never get stuck); the trap restores it (\033[?7h)
-    # alongside the cursor and the original screen on every exit path.
-    trap "printf '\\033[?25h\\033[?7h\\033[?1049l' >$out 2>/dev/null" EXIT INT TERM
-    printf '\033[?1049h\033[?7l\033[?25l' >"$out"
-    while true; do
-        # Terminal height, re-read each frame so a resize is picked up. Reserve 3
-        # lines (header + the "▲ more"/"▼ more" markers above and below); the rest
-        # is the scrolling viewport. When the size is unknown (output isn't a tty,
-        # e.g. under the tests) fall back to a height that shows everything.
-        rows="$(stty size <&4 2>/dev/null)"; rows="${rows%% *}"
-        [[ "$rows" =~ ^[0-9]+$ ]] || rows=$(( n + 3 ))
-        vis=$(( rows - 3 )); (( vis < 1 )) && vis=1; (( vis > n )) && vis=$n
-        # Scroll the window so the selection stays inside [top, top+vis).
-        (( sel < top ))        && top=$sel
-        (( sel >= top + vis )) && top=$(( sel - vis + 1 ))
-        (( top > n - vis ))    && top=$(( n - vis ))
-        (( top < 0 ))          && top=0
-        # Build the whole frame as one string, then write it in a single shot so
-        # there's no tearing. Structural escapes use $'' (real ESC bytes) so the
-        # pre-rendered row strings drop in verbatim with %s.
-        if (( n > vis )); then
-            hdr="Resume which session?   (Esc / q to cancel)   [$(( sel + 1 ))/$n]"
-        else
-            hdr="Resume which session?   (Esc / q to cancel)"
-        fi
-        if (( top > 0 ));       then above=$'  \033[38;2;120;120;120m\342\226\262 more\033[0m'; else above=''; fi
-        if (( top + vis < n )); then below=$'  \033[38;2;120;120;120m\342\226\274 more\033[0m'; else below=''; fi
-        frame=$'\033[H\033[2K'"$hdr"$'\n\033[2K'"$above"$'\n'
-        for (( i = top; i < top + vis; i++ )); do
-            IFS=$'\t' read -r normal highlight <<< "${items[$i]}"
-            if (( i == sel )); then frame+=$'\033[2K'"$highlight"$'\n'
-            else                    frame+=$'\033[2K'"$normal"$'\n'; fi
-        done
-        frame+=$'\033[2K'"$below"$'\033[J'
-        printf '%s' "$frame" > "$out"
-        IFS= read -rsn1 -u 4 key || { sel=-1; break; }
-        if [[ "$key" == $'\e' ]]; then
-            IFS= read -rsn2 -t 1 -u 4 rest || rest=""
-            case "$rest" in
-                '[A'|'OA') (( sel > 0 ))     && sel=$(( sel - 1 )) ;;
-                '[B'|'OB') (( sel < n - 1 )) && sel=$(( sel + 1 )) ;;
-                *)         sel=-1; break ;;
-            esac
-        else
-            case "$key" in
-                q)              sel=-1; break ;;
-                ''|$'\n'|$'\r') break ;;
-            esac
-        fi
-    done
-    exec 4<&-
-    if (( sel >= 0 )); then printf '%s\n' "$(( sel + 1 ))"; fi
-    return 0
-}
-
-# Render one picker row as "<normal>\t<highlight>". Columns, in order: NAME (in
-# its identity truecolor) · TIME (gray) · SUMMARY (the last cached Haiku phrase,
-# colored by kind: request=teal, reply=gray, error=red) · PATH (gray). The
-# highlight is a white bar with DARKENED foregrounds so everything stays readable
-# on white. Name and time are fixed-width so the summary and path align across
-# rows; the summary column is present only when requested (sum_w>0).
-# Args: <mtime> <name> <dir> <rgb-or-empty> <now-epoch> [sum_w] [sum_kind] [sum_text] [cols]
-# <cols> is the terminal width; when given (>0) the directory is clipped so the
-# row truncates instead of wrapping on a narrow terminal. 0/absent => no clip.
-_romp_render_row() {
-    local mt="$1" nm="$2" dir="$3" rgb="$4" now="$5"
-    local sum_w="${6:-0}" sum_kind="${7:-}" sum_txt="${8:-}" cols_avail="${9:-0}"
-    [[ "$cols_avail" =~ ^[0-9]+$ ]] || cols_avail=0
-    local d age np age_seg R G B dR dG dB norm high
-    local srgb seg sR sG sB dsR dsG dsB E=$'\033'
-    d=$(( now - mt ))
-    if   (( d < 60 ));    then age="${d}s"
-    elif (( d < 3600 ));  then age="$(( d / 60 ))m"
-    elif (( d < 86400 )); then age="$(( d / 3600 ))h"
-    else                       age="$(( d / 86400 ))d"
-    fi
-    dir="${dir/#$HOME/~}"
-    printf -v np '%-20.20s' "$nm"
-    printf -v age_seg '%-9s' "[${age} ago]"   # fixed width so summary/path align
-    # Clip the directory to the room left on the line so a narrow terminal
-    # truncates the row instead of wrapping it. Layout before the path is
-    # "  "+name + "  "+age + ["  "+summary], then "  "+dir; leave the last
-    # column blank so writing the row never nudges the cursor into a wrap.
-    if (( cols_avail > 0 )); then
-        local pre=$(( 2 + ${#np} + 2 + ${#age_seg} + 2 ))
-        (( sum_w > 0 )) && pre=$(( pre + 2 + sum_w ))
-        local dir_w=$(( cols_avail - pre - 1 ))
-        (( dir_w < 1 )) && dir_w=1
-        if (( ${#dir} > dir_w )); then
-            dir="${dir:0:$(( dir_w - 1 ))}"$'\342\200\246'
-        fi
-    fi
-    # Summary cell (optional). Clip with a trailing "…" when it overflows the
-    # column, else pad to it so the path column stays aligned across rows.
-    if (( sum_w > 0 )); then
-        case "$sum_kind" in
-            request) srgb="78;168;169"  ;;   # teal — mirrors the dashboard
-            error)   srgb="192;57;43"   ;;   # red
-            *)       srgb="160;160;160" ;;   # gray (reply / unknown)
-        esac
-        if (( ${#sum_txt} > sum_w )); then
-            seg="${sum_txt:0:$(( sum_w - 1 ))}"$'\342\200\246'
-        else
-            printf -v seg '%-*s' "$sum_w" "$sum_txt"
-        fi
-        sR="${srgb%%;*}"; sG="${srgb#*;}"; sG="${sG%%;*}"; sB="${srgb##*;}"
-        dsR=$(( sR * 45 / 100 )); dsG=$(( sG * 45 / 100 )); dsB=$(( sB * 45 / 100 ))
-    fi
-    # Assemble name · time · summary · path. The normal row resets (\033[0m) after
-    # each colored field; the highlight bar sets the white bg ONCE and only ever
-    # changes the FOREGROUND, so the bar persists until the closing \033[K\033[0m.
-    if [[ -n "$rgb" ]]; then
-        R="${rgb%%;*}"; G="${rgb#*;}"; G="${G%%;*}"; B="${rgb##*;}"
-        dR=$(( R * 45 / 100 )); dG=$(( G * 45 / 100 )); dB=$(( B * 45 / 100 ))
-        norm="  ${E}[38;2;${rgb}m${np}${E}[0m"
-        high="${E}[48;2;255;255;255m${E}[38;2;${dR};${dG};${dB}m"$'\342\235\257'" ${np}"
-    else
-        norm="  ${np}"
-        high="${E}[48;2;255;255;255m${E}[38;2;30;30;30m"$'\342\235\257'" ${np}"
-    fi
-    norm+="  ${E}[38;2;120;120;120m${age_seg}${E}[0m"
-    high+="${E}[38;2;90;90;90m  ${age_seg}"
-    if (( sum_w > 0 )); then
-        norm+="  ${E}[38;2;${srgb}m${seg}${E}[0m"
-        high+="${E}[38;2;${dsR};${dsG};${dsB}m  ${seg}"
-    fi
-    norm+="  ${E}[38;2;120;120;120m${dir}${E}[0m"
-    high+="${E}[38;2;90;90;90m  ${dir}${E}[K${E}[0m"
-    printf '%s\t%s\n' "$norm" "$high"
-}
-
-# Build the picker's rows in ONE python pass. Prints one FS-delimited
-# "<mtime><FS><sid><FS><name><FS><dir><FS><rgb><FS><sum_kind><FS><sum_text>" line
-# per RESUMABLE session, newest transcript first. <rgb> is "R;G;B" (or empty) from
-# the recorded identity hex; <sum_*> is the session's cached one-line gloss —
-# archive headline, else latest caption — pulled, never computed.
-# Args: <live-newline-list> (live session-ids to EXCLUDE) <fs> (field separator).
-#
-# A single python pass, NOT a shell loop, is deliberate: the old loop ran one
-# `find $HOME/.claude/projects` (a full re-walk of every transcript) AND one
-# python3 spawn PER session — O(sessions x files), ~13s for ~130 sessions. Here
-# the projects tree is walked ONCE into a sid->transcript index and summaries are
-# read in-process, so it's a single ~0.1s pass regardless of session count.
-# Also prunes name files whose transcript is gone. ROMP_PROJECTS_DIR overrides
-# the projects root (tests point it at a fixture).
-_romp_resume_rows() {   # <live-newline-list> <fs>
-    ROMP_NAMES_DIR="$ROMP_NAMES_DIR" ROMP_ARCHIVE_DIR="$ROMP_ARCHIVE_DIR" \
-    ROMP_CAPTIONS_DIR="$ROMP_CAPTIONS_DIR" \
-    ROMP_PROJECTS_DIR="${ROMP_PROJECTS_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects}" \
-    ROMP_LIVE="$1" ROMP_FS="$2" python3 - <<'PY' 2>/dev/null || true
-import os, sys, json, re
-
-names_dir = os.environ["ROMP_NAMES_DIR"]
-arch_dir  = os.environ["ROMP_ARCHIVE_DIR"]
-cap_dir   = os.environ["ROMP_CAPTIONS_DIR"]
-proj_dir  = os.environ["ROMP_PROJECTS_DIR"]
-FS        = os.environ["ROMP_FS"]
-live      = set(s for s in os.environ.get("ROMP_LIVE", "").split("\n") if s)
-
-# Walk ~/.claude/projects ONCE (depth <= 2, matching the old `find -maxdepth 2`)
-# into sid -> transcript path. This replaces the per-session re-walk.
-tpath = {}
-def consider(path, name):
-    if name.endswith(".jsonl"):
-        tpath[name[:-6]] = path
-try:
-    for e in os.scandir(proj_dir):
-        try:
-            if e.is_file():
-                consider(e.path, e.name)
-            elif e.is_dir():
-                for f in os.scandir(e.path):
-                    if f.is_file():
-                        consider(f.path, f.name)
-        except OSError:
-            pass
-except OSError:
-    pass
-
-# The session's one-line gloss: archiver headline (archive/<sid>.json), else the
-# latest non-empty caption (captions/<sid>.jsonl). Pure cache read — no model call.
-def summary(sid):
-    text = ""
-    try:
-        text = " ".join(str((json.load(open(os.path.join(arch_dir, sid + ".json"))) or {}).get("headline") or "").split())
-    except Exception:
-        pass
-    if not text:
-        try:
-            for ln in open(os.path.join(cap_dir, sid + ".jsonl"), errors="replace"):
-                try:
-                    o = json.loads(ln)
-                except Exception:
-                    continue
-                c = " ".join(str(o.get("caption") or "").split())
-                if c:
-                    text = c
-        except Exception:
-            pass
-    return text
-
-try:
-    sids = [s for s in os.listdir(names_dir) if not s.startswith(".")]
-except OSError:
-    sids = []
-
-# Only treat "transcript gone" as a reason to PRUNE the name file when we have a
-# populated index to check against. An empty index means the projects tree was
-# missing/unreadable, NOT that every session vanished — pruning then would wipe
-# the whole cache (this exact mismatch once nuked all 127 entries). Be safe: never
-# delete when we couldn't see any transcripts at all.
-prune = bool(tpath)
-
-rows = []
-for sid in sids:
-    if sid in live:                       # running -> skip (attach, don't resume)
-        continue
-    f = os.path.join(names_dir, sid)
-    try:
-        with open(f) as fh:
-            parts = fh.readline().rstrip("\n").split("\t")
-    except OSError:
-        continue
-    nm = parts[0] if len(parts) > 0 else ""
-    dr = parts[1] if len(parts) > 1 else ""
-    bg = parts[2] if len(parts) > 2 else ""
-    tp = tpath.get(sid)
-    if not tp:                            # transcript gone -> prune the stale name file
-        if prune:
-            try:
-                os.remove(f)
-            except OSError:
-                pass
-        continue
-    try:
-        mt = int(os.stat(tp).st_mtime)
-    except OSError:
-        mt = 0
-    rgb = ""
-    if re.match(r"^#[0-9A-Fa-f]{6}$", bg):
-        rgb = "%d;%d;%d" % (int(bg[1:3], 16), int(bg[3:5], 16), int(bg[5:7], 16))
-    st = summary(sid)
-    skind = "reply" if st else ""         # new model has no request/reply/error split
-    rows.append((mt, FS.join([str(mt), sid, nm, dr, rgb, skind, st])))
-
-rows.sort(key=lambda r: r[0], reverse=True)   # newest transcript first
-sys.stdout.write("\n".join(r[1] for r in rows))
-PY
-}
-
-# Interactive picker. Prints "<sid>\t<name>\t<dir>" for the chosen session on
-# stdout; _romp_menu draws the arrow-key UI straight to the terminal. Prints
-# nothing if cancelled. Sessions whose transcript no longer exists are pruned.
-_romp_pick() {
-    [[ -d "$ROMP_NAMES_DIR" ]] || return 0
-    local rows live now n choice line
-    local _mt _sid _nm _dir _rgb _skind _stext sum_w SUM_CAP cols
-    # Field separator for the assembled rows. Deliberately a NON-whitespace byte
-    # (Unit Separator) rather than a tab: `IFS=$'\t' read` collapses runs of tabs
-    # and drops EMPTY fields, which silently mis-shifts a row whose rgb is empty
-    # (a colorless session) now that summary fields follow it. \x1f never appears
-    # in names/dirs/phrases, so empty fields round-trip intact.
-    local FS=$'\x1f'
-
-    # session-ids of currently-LIVE romp sessions. A running session is
-    # attachable, not resumable (resuming it would fork a second Claude on the
-    # same conversation), so we exclude these from the picker.
-    live="$(tmux list-sessions -F '#{@romp-session-id}' 2>/dev/null | grep -v '^$' || true)"
-
-    # The resumable-session rows: one FS-delimited
-    # "<mtime><FS><sid><FS><name><FS><dir><FS><rgb><FS><sum_kind><FS><sum_text>"
-    # line per session, newest transcript first. Built by _romp_resume_rows in a
-    # single python pass (which also prunes name files whose transcript is gone).
-    rows="$(_romp_resume_rows "$live" "$FS")"
-    if [[ -z "$rows" ]]; then echo "[romp] no resumable sessions." >&2; return 0; fi
-    now="$(date +%s)"
-    n="$(printf '%s\n' "$rows" | grep -c . || true)"
-
-    # Summary-column width = longest cached phrase, capped (and trimmed to the
-    # terminal so rows don't wrap). sum_w=0 → no session has a cached summary, so
-    # the column is omitted entirely: it shows up only when there's something to
-    # show ("if available").
-    SUM_CAP=56
-    # Columns from the controlling terminal (our stdin is still the tty even
-    # though stdout is captured). Non-tty (tests) → stty fails → keep the default.
-    cols="$(stty size 2>/dev/null || true)"; cols="${cols##* }"
-    if [[ "$cols" =~ ^[0-9]+$ ]]; then
-        SUM_CAP=$(( cols - 52 ))
-        if (( SUM_CAP < 20 )); then SUM_CAP=20; fi
-        if (( SUM_CAP > 56 )); then SUM_CAP=56; fi
-    fi
-    sum_w=0
-    while IFS="$FS" read -r _mt _sid _nm _dir _rgb _skind _stext; do
-        if [[ -n "$_stext" ]] && (( ${#_stext} > sum_w )); then sum_w=${#_stext}; fi
-    done <<< "$rows"
-    if (( sum_w > SUM_CAP )); then sum_w=$SUM_CAP; fi
-
-    # Render each row to "<normal>\t<highlight>" (colored name; the selected row
-    # is a white bar with a darkened name) and feed them to the arrow-key menu.
-    local -a items=()
-    while IFS= read -r line; do items+=("$line"); done <<< "$(
-        printf '%s\n' "$rows" | while IFS="$FS" read -r _mt _sid _nm _dir _rgb _skind _stext; do
-            [[ -n "$_sid" ]] && _romp_render_row "$_mt" "$_nm" "$_dir" "$_rgb" "$now" "$sum_w" "$_skind" "$_stext" "$cols"
-        done )"
-    choice="$(_romp_menu "${items[@]}")"
-
-    [[ "$choice" =~ ^[0-9]+$ ]] || return 0
-    (( choice >= 1 && choice <= n )) || return 0
-
-    # Emit "<sid>\t<name>\t<dir>" for the chosen row (fields 2-4), converting the
-    # internal \x1f back to tabs — the caller splits the result on tab.
-    printf '%s\n' "$rows" | sed -n "${choice}p" | cut -d"$FS" -f2,3,4 | tr "$FS" '\t'
-}
-
-# --- Subcommand dispatch ---
-# Internal: invoked by the tmux after-rename-session hook when a session is
-# renamed by ANY means (romp rename, tmux prefix-$, choose-tree, :rename-session).
-# Resyncs the resume-picker name map AND pushes Claude's /rename so the prompt-box
-# pill follows too. No-op for non-romp sessions (no @romp-session-id).
-if [[ "${1:-}" == "_renamed" ]]; then
-    sess="${2:-}"
-    [[ -n "$sess" ]] || exit 0
-    sid="$(tmux show -t "$sess" -v @romp-session-id 2>/dev/null || true)"
-    [[ -n "$sid" ]] || exit 0
-    _romp_rename_record "$sid" "$sess"
-    # Push the new name to Claude's prompt-box pill. Run renames with the prompt
-    # box empty, or the keystrokes land in a half-typed message instead of firing
-    # the /rename command.
-    tmux send-keys -t "$sess" "/rename $sess" Enter
-    exit 0
-fi
-
-# Internal: invoked by the tmux-status hook on a FRESH session start to push
-# Claude's /color (the name is set silently via --name). We deliberately do NOT
-# do this on resume: Claude is still loading the transcript when SessionStart
-# fires there, so the keystrokes get dropped. A resumed session restores its own
-# /color, and the name is re-pointed via --name on the resume command itself.
-if [[ "${1:-}" == "_color" ]]; then
-    sess="${2:-}"
-    [[ -n "$sess" ]] || exit 0
-    [[ -n "$(tmux show -t "$sess" -v @romp-session-id 2>/dev/null || true)" ]] || exit 0
-    _romp_send_color "$sess"
-    exit 0
-fi
 
 # Help. The bare word plus the conventional flags.
 if [[ "${1:-}" == "help" || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -652,7 +42,6 @@ EOF
     _romp_cmd "romp"                       -            "Open the dashboard in your browser (prints the link too)"
     _romp_cmd "romp new <name>"            -            "Start a session (SDK by default; \`romp engine\` sets the machine default)"
     _romp_cmd "romp new --codex <name>"    -            "Start it as an OpenAI Codex session (docs/codex.md)"
-    _romp_cmd "romp new -t <name>"         -            "Start it as a terminal (tmux) session and attach (--detach: don't attach)"
     _romp_cmd "romp new -d <dir> <name>"   -            "Working directory for the new session (default: the current folder)"
     _romp_cmd "romp new -m <text> <name>"  -            "Start it AND deliver <text> as its first prompt (one command, idea to working)"
     _romp_cmd "romp new --model <id> <name>" -          "Model for the SDK session: a family alias (fable — follows the newest) or a full id (claude-fable-5 — a pin); re-asserted if <name> already runs"
@@ -661,7 +50,6 @@ EOF
     _romp_cmd "romp new --no-env <name>"   -            "Clear a running SDK session's per-session env (declares the empty set)"
     _romp_cmd "romp new --in <tag> <name>" -            "Put the new SDK or Codex session in a tag (repeatable; a new name creates the tag) — its tab lands in that group"
     _romp_cmd "romp new --no-inherit <name>" -          "Run from inside a session, a new session joins that session's tags by default; this starts it outside them"
-    _romp_cmd "romp resume [<id>]"         -            "Resume a past conversation (full-screen picker; or an exact UUID)"
     _romp_cmd "romp status"                romp-manager "Show manager + kernel status (a kernel stopped by romp down says so)"
     _romp_cmd "romp refresh"               romp-manager "Restart the postal bus + all romp kernels (picks up new code — run after an update)"
     _romp_cmd "romp update [host]"         romp-update  "Push this machine's committed romp to attached remotes and restart them"
@@ -675,10 +63,7 @@ EOF
     cat <<'EOF'
 
 Session names never collide with commands: the name is always an argument, so
-`romp new update` starts a session named "update". tmux sessions are tagged
-with the @romp flag, not a naming convention — rename from inside tmux
-(prefix-$ or :rename-session; it auto-syncs) and attach with `tmux a`.
-Quitting Claude ends a terminal session (it's exec'd; no shell lingers).
+`romp new update` starts a session named "update".
 
 For scripts / agents:
 EOF
@@ -852,8 +237,7 @@ if os.environ.get("RA_ACTION"):
     row["action"] = os.environ["RA_ACTION"]         # a request row (down, down-failed); the refresh row has none
 row.update({"ppid": int(os.environ.get("RA_PPID") or 0),
             "parent": os.environ.get("RA_PARENT") or "", "sid": os.environ.get("RA_SID") or "",
-            "name": os.environ.get("RA_NAME") or "", "tty": os.environ.get("RA_TTY") or "",
-            "tmux": os.environ.get("TMUX_PANE") or ""})
+            "name": os.environ.get("RA_NAME") or "", "tty": os.environ.get("RA_TTY") or ""})
 if os.environ.get("RA_REASON"):
     row["reason"] = os.environ["RA_REASON"]
 if os.environ.get("RA_WHEN") == "--quiet":
@@ -878,14 +262,13 @@ if [[ "${1:-}" == "url" || "${1:-}" == "--url" ]]; then
     exit 0
 fi
 
-# `romp sessions [--json]` — the fleet's live state for SCRIPTS, read from the kernel, which owns it.
-# Before this the only machine-readable source of per-session state and identity colour was the tmux
-# table (@claude-state, @identity-bg/@identity-fg), which an external tool could read directly. That
-# stopped working the moment sessions moved to the SDK backend: they never enter tmux, so
-# `tmux list-sessions` returns nothing and every such consumer silently degraded to empty output
+# `romp sessions [--json]` — the live state of your sessions for SCRIPTS, read from the kernel, which
+# owns it. Before this the only machine-readable source of per-session state and identity colour was
+# a side effect of the retired terminal backend (its session table), which an external tool could read
+# directly; it saw nothing of an SDK session, so every such consumer silently degraded to empty output
 # (found 2026-07-27 in a downstream editor extension whose status dots and colours just vanished).
 # Reading the authoritative store instead of a side effect of one backend is the repo's standing
-# rule, and it is the only source that covers both backends.
+# rule, and it is the only source that covers both backends (Claude Code and Codex).
 #
 # --json emits the kernel's rows verbatim (id, name, state, dir, bg, fg, backend, working, lastSid);
 # bare prints one aligned line per session. A dead kernel fails LOUDLY rather than printing an empty
@@ -901,9 +284,8 @@ fi
 #     chip vocabulary — needsInput, awaitingBg — never rides this command.)
 #   * `id` is the durable key, NOT `lastSid`. Every per-session store romp keeps (states/,
 #     captions/, goals/, episodes/) is filed under `id`. `lastSid` is the live Claude Code
-#     transcript's fsid, which FORKS on /clear — it is what the old tmux @romp-session-id
-#     tracked, being re-anchored per fork, so it is the natural guess and the wrong one. On a
-#     fleet of 11 here, all 11 had records under `id` and only 6 under `lastSid`. That key opens
+#     transcript's fsid, which FORKS on /clear, so it is the natural guess and the wrong one. Of
+#     11 sessions here, all 11 had records under `id` and only 6 under `lastSid`. That key opens
 #     the per-turn one-liners at captions/<id>.jsonl, text under `caption` (the record's OWN `id`
 #     is the turn's, not the session's). There is no summaries/ any more — the old path returns
 #     nothing rather than erroring, so a consumer on it shows blank text and mtime 0 forever.
@@ -1481,8 +863,7 @@ fi
 # Move a session's working directory (the user 2026-09-01: a subproject promoted to its own repo, and
 # the session should follow it): the kernel's POST /move, the sibling of `romp rename`. The session
 # keeps its conversation, name, mailbox and history; Claude's tools, CLAUDE.md and project settings
-# come from the new folder from the next turn on. SDK sessions only — a terminal (tmux) session has
-# no relocation primitive and the kernel says so. A relative dir is resolved against THIS shell's
+# come from the new folder from the next turn on. A relative dir is resolved against THIS shell's
 # cwd here (the kernel would otherwise resolve it against its own default directory, which is not
 # where the caller stands); `~` is the shell's to expand, and the kernel canonicalises the rest.
 if [[ "${1:-}" == "move" ]]; then
@@ -1962,10 +1343,6 @@ fi
 if [[ $# -eq 0 ]]; then
     _tok="$(_romp_token)"
     _kport="${ROMP_KERNEL_PORT:-29855}"
-    # The floor nudge comes BEFORE the token bail: a fresh install whose service
-    # hasn't minted a token yet is exactly the run that should hear about an old
-    # Claude Code, not be cut off by the earlier exit.
-    _romp_claude_floor_nudge
     if [[ -z "$_tok" ]]; then
         echo "romp: no serve token yet; the kernel mints it. Is romp running? (the login service starts it; \`romp up\` runs it by hand)" >&2
         exit 1
@@ -2126,7 +1503,7 @@ else:
 fi
 
 # `romp send|interrupt|end <session> [text]` — headless session control through the kernel HTTP
-# API (the kernel owns the transport and routes to whichever backend drives the session, tmux or SDK).
+# API (the kernel owns the transport and routes to whichever backend drives the session, Claude Code or Codex).
 # Before this, interrupt/end existed only as browser WS ops: a session could be FED headlessly but
 # never STOPPED (2026-07-05). The dashed spellings stay as SILENT aliases (agent-facing text
 # delivered before 2026-07-25 names them). Exit 0 only when the kernel acked ok — a dead kernel or
@@ -2620,11 +1997,6 @@ PYEOF
         exit 0 ;;
 esac
 
-# NB: there's no `romp rename` / `romp a` command. Rename from inside tmux
-# (prefix-$, choose-tree, :rename-session) — the after-rename-session hook fires
-# `romp _renamed` (above), which resyncs the picker map + Claude's pill. Attach
-# with plain `tmux a`.
-
 # --- Retired spellings (2026-07-25): commands are bare words now ---
 # Two grammar flips inside one day: PR #20 made every dashless word a session
 # name (commands moved behind dashes); the user then flipped the priority — the
@@ -2632,18 +2004,17 @@ esac
 # behind `romp new` where they can never collide with a command. The dashed
 # command spellings from that brief era (and the old short view flags) fail
 # loudly naming today's word. Exception, handled in the dispatches above:
-# agent-facing spellings (--mail/--url/--send/--interrupt/--end/--resume and
-# --version) keep working silently — reply footers in already-delivered postal
-# mail name them, and delivered text can't be re-issued. `_renamed`/`_color`
-# stay reserved: internal tmux-hook entrypoints (a live tmux server holds the
-# old hook string until it restarts).
+# agent-facing spellings (--mail/--url/--send/--interrupt/--end and --version)
+# keep working silently — reply footers in already-delivered postal mail name
+# them, and delivered text can't be re-issued. `--resume` answers with the same
+# one-line refusal as `romp resume` (the verb is gone; the `new` dispatch below).
 _romp_retired_flag_hint() {
     case "$1" in
         -l|--launch)   echo "the dashboard is now just: romp" ;;
         -d)            echo "the terminal monitor is gone; the browser dashboard is: romp (-d is romp new's directory option)" ;;
         -f)            echo "the terminal feed is gone; the feed lives in the dashboard: romp" ;;
         -j)            echo "the judge monitor is gone; judge warnings show on the cards themselves" ;;
-        -r)            echo "the resume picker is now: romp resume" ;;
+        -r)            echo "the resume picker is gone; a past conversation is resumed from the dashboard (Revive): romp" ;;
         --on)          echo "the foreground manager is now: romp up" ;;
         --refresh)     echo "the fleet restart is now: romp refresh" ;;
         --status)      echo "the status report is now: romp status" ;;
@@ -2660,14 +2031,11 @@ if _retired="$(_romp_retired_flag_hint "${1:-}")"; then
     exit 2
 fi
 
-# --- new / resume: the two commands that reach the launcher below ---
+# --- new: the one command that creates a session, over the kernel's API ---
 # Everything else either dispatched above or is an error here: an unknown bare
 # word is NEVER silently a session (nor a typo'd command doing nothing) — it
 # fails naming both readings.
 session_arg=""
-resume=false
-resume_id=""
-detach=false
 dir_arg=""
 model_arg=""
 effort_arg=""
@@ -2675,7 +2043,6 @@ env_args=()
 no_env=false
 in_args=()
 no_inherit=false
-use_tmux=false
 use_codex=false
 msg_arg=""
 tag_arg=""
@@ -2685,12 +2052,10 @@ case "${1:-}" in
         shift
         while [[ $# -gt 0 ]]; do
             case "$1" in
-                -t|--tmux) use_tmux=true; shift ;;
                 --codex)   use_codex=true; shift ;;   # an OpenAI Codex session (docs/codex.md)
-                --detach)  detach=true; shift ;;
                 -d)        shift
                            if [[ $# -eq 0 || "$1" == -* ]]; then
-                               echo "usage: romp new [-t|--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
+                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
                            fi
                            dir_arg="$1"; shift ;;
                 -m|--message) shift
@@ -2699,7 +2064,7 @@ case "${1:-}" in
                            # last two-step on the idea-to-working path). Empty text is a usage
                            # error, not a silent no-op.
                            if [[ $# -eq 0 || -z "$1" ]]; then
-                               echo "usage: romp new [-t|--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
+                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
                            fi
                            msg_arg="$1"; shift ;;
                 --tag)     shift
@@ -2709,7 +2074,7 @@ case "${1:-}" in
                            # as the user's typed words. Rides POST /send's "tag" field — the
                            # kernel validates and appends the render-hint marker itself.
                            if [[ $# -eq 0 || -z "$1" || "$1" == -* ]]; then
-                               echo "usage: romp new [-t|--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
+                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
                            fi
                            tag_arg="$1"; shift ;;
                 --model)   shift
@@ -2720,14 +2085,14 @@ case "${1:-}" in
                            # note here once said the CLI resolved "fable" to Opus 5 and so required
                            # full ids; that is not reproducible on any installed CLI.
                            if [[ $# -eq 0 || -z "$1" || "$1" == -* ]]; then
-                               echo "usage: romp new [-t|--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
+                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
                            fi
                            model_arg="$1"; shift ;;
                 --effort)  shift
                            # per-spawn effort (e.g. high, ultracode) — ultracode is per-session
                            # by design, never a machine default, so /new is its sanctioned door.
                            if [[ $# -eq 0 || -z "$1" || "$1" == -* ]]; then
-                               echo "usage: romp new [-t|--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
+                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
                            fi
                            effort_arg="$1"; shift ;;
                 --env)     shift
@@ -2742,7 +2107,7 @@ case "${1:-}" in
                            # behind Claude Code's apiKeyHelper (romp holds no key, and a credential name is
                            # refused here), since this payload is copied into per-sid files and the registry.
                            if [[ $# -eq 0 || -z "$1" || "$1" == -* ]]; then
-                               echo "usage: romp new [-t] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
+                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
                            fi
                            if [[ "$1" != *=* || ! "${1%%=*}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
                                echo "romp new: --env expects NAME=VALUE with NAME matching [A-Za-z_][A-Za-z0-9_]* (got: $1)" >&2; exit 2
@@ -2763,7 +2128,7 @@ case "${1:-}" in
                            # `romp tag <name> --add` would. `--tag` was already the -m message
                            # label, hence the different word.
                            if [[ $# -eq 0 || -z "$1" || "$1" == -* ]]; then
-                               echo "usage: romp new [-t|--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
+                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
                            fi
                            in_args+=("$1"); shift ;;
                 --no-inherit)
@@ -2773,16 +2138,13 @@ case "${1:-}" in
                            no_inherit=true; shift ;;
                 -*)        echo "romp new: unknown option: $1" >&2; exit 2 ;;
                 *)         if [[ -n "$session_arg" ]]; then
-                               echo "usage: romp new [-t|--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
+                               echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
                            fi
                            session_arg="$1"; shift ;;
             esac
         done
         if [[ -z "$session_arg" ]]; then
-            echo "usage: romp new [-t|--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
-        fi
-        if $use_tmux && $use_codex; then
-            echo "romp new: --codex and -t are different session kinds — pick one" >&2; exit 2
+            echo "usage: romp new [--codex] [-d <dir>] [-m <text>] [--tag <label>] [--model <id>] [--effort <level>] [--env NAME=VALUE] [--no-env] [--in <tag>] [--no-inherit] <name>" >&2; exit 2
         fi
         # The EFFECTIVE backend decides flag validity — the machine default (`romp engine`,
         # STATE/default-backend) counts exactly like an explicit --codex. Resolved HERE, before
@@ -2793,7 +2155,7 @@ case "${1:-}" in
         _be="$(cat "${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}/default-backend" 2>/dev/null | tr -d '[:space:]' || true)"
         case "$_be" in sdk|codex) ;; *) _be="sdk" ;; esac
         $use_codex && _be="codex"
-        if [[ -n "$model_arg$effort_arg" && "$_be" == "codex" ]] && ! $use_tmux; then
+        if [[ -n "$model_arg$effort_arg" && "$_be" == "codex" ]]; then
             # per-spawn model/effort ride /new for SDK sessions only; the codex spawn takes the
             # account default and the pickers change it after. Refuse loudly (no silent drop),
             # naming which door made this spawn Codex.
@@ -2807,97 +2169,39 @@ case "${1:-}" in
         if [[ -n "$tag_arg" ]] && ! [[ "$tag_arg" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,23}$ ]]; then
             echo "romp new: --tag must be one word (letters/digits/dashes, <=24 chars)" >&2; exit 2
         fi
-        if [[ -n "$msg_arg" ]] && $use_tmux; then
-            # the tmux variant attaches a terminal you type into yourself; delivering a first
-            # prompt is the SDK path's job. Refuse loudly rather than dropping the text.
-            echo "romp new: -m needs the default (SDK) session — with -t you type into the terminal yourself" >&2; exit 2
-        fi
-        if [[ -n "$model_arg$effort_arg" || ${#env_args[@]} -gt 0 ]] || $no_env && $use_tmux; then
-            # per-spawn model/effort/env ride the kernel's /new (SDK); a terminal session picks
-            # model/effort inside Claude itself and takes env from the tmux server's environment.
-            # Refuse loudly rather than dropping the flags (no silent divergence).
-            echo "romp new: --model/--effort/--env need the default (SDK) session — with -t, pick model/effort inside Claude itself (env comes from the tmux environment)" >&2; exit 2
-        fi
-        if [[ ${#in_args[@]} -gt 0 ]] && $use_tmux; then
-            # a terminal session's id is not known until it starts, so nothing could tag it at
-            # spawn; say so rather than drop the flag (tag it afterwards with `romp tag`)
-            echo "romp new: --in needs an SDK or Codex session; a terminal session cannot join a group — tag it after it starts: romp tag ${in_args[0]} --add $session_arg" >&2; exit 2
-        fi
         ;;
     resume|--resume)
-        # `romp resume` — our full-screen picker; `romp resume <id>` — an exact
-        # conversation UUID (scripts/agents; also the postal revive path).
-        # --name pins the session name (the kernel's reviver passes the recorded
-        # one; without it an explicit-id resume is named after the folder).
-        shift
-        resume=true
-        if [[ $# -gt 0 && "$1" != -* ]]; then
-            resume_id="$1"; shift
-        fi
-        while [[ $# -gt 0 ]]; do
-            case "$1" in
-                --detach) detach=true; shift ;;
-                --name)   shift
-                          if [[ $# -eq 0 || "$1" == -* ]]; then
-                              echo "usage: romp resume [<conversation-id>] [--name <name>] [--detach]" >&2; exit 2
-                          fi
-                          session_arg="$1"; shift ;;
-                *)        echo "usage: romp resume [<conversation-id>] [--name <name>] [--detach]" >&2; exit 2 ;;
-            esac
-        done
-        ;;
-    --detach)
-        # Old-kernel compat shim (SILENT): a kernel on pre-round-3 code spawns
-        # dashboard tmux sessions as `romp --detach <name>` (and its spawn path
-        # swallows stderr, so a loud error here would fail INVISIBLY). Keep the
-        # shape working until every kernel restarts onto new code.
-        if [[ -n "${2:-}" && "${2:-}" != -* && $# -eq 2 ]]; then
-            use_tmux=true; detach=true; session_arg="$2"; shift 2
-        else
-            echo "romp: \"--detach\" is an option of new/resume now: romp new -t --detach <name>" >&2
-            exit 2
-        fi
+        # `romp resume` is gone (the user 2026-09-10, with the terminal backend it drove): a past
+        # conversation is resumed from the dashboard, whose Revive brings it back as a Claude Code
+        # session with its history. One line, exit 2, nothing launched. `--resume` was the verb's
+        # agent-facing alias and answers the same, since delivered text that names it cannot be
+        # re-issued; the old reviver shapes (`romp <name> --resume <sid> --detach`, `romp --detach
+        # <name>`) fall to the unknown-command and unknown-option arms below.
+        echo "romp: \"$1\" is gone; a past conversation is resumed from the dashboard (Revive): romp" >&2
+        exit 2
         ;;
     -*)
         echo "romp: unknown option: $1" >&2
         exit 2
         ;;
     *)
-        # Old-kernel compat shim (SILENT), before the unknown-command error: the
-        # pre-round-3 reviver runs `romp <name> --resume <sid> --detach` — a bare
-        # positional name. Only that exact shape passes; anything else without
-        # `--resume` in its arguments is an unknown command.
-        if [[ " ${*:2} " == *" --resume "* ]]; then
-            session_arg="$1"; shift
-            resume=true
-            while [[ $# -gt 0 ]]; do
-                case "$1" in
-                    --resume) shift
-                              if [[ $# -gt 0 && "$1" != -* ]]; then resume_id="$1"; shift; fi ;;
-                    --detach) detach=true; shift ;;
-                    *)        echo "usage: romp resume [<conversation-id>] [--name <name>] [--detach]" >&2; exit 2 ;;
-                esac
-            done
-        else
-            echo "romp: unknown command \"$1\". To start a session named \"$1\": romp new $1   (commands: romp help)" >&2
-            exit 2
-        fi
+        echo "romp: unknown command \"$1\". To start a session named \"$1\": romp new $1   (commands: romp help)" >&2
+        exit 2
         ;;
 esac
 
-# --- `romp new` default: an SDK session, created in the kernel ---
-# The recommended backend (plans/sdk-backend.md): the session runs inside the
-# kernel and is driven from the dashboard / VS Code, so there is no terminal to
-# attach — create it over the kernel API and say where to look. `-t` is the
-# terminal variant: the tmux launcher below, attached, exactly the old flow.
-# No silent fallback in either direction: a dead kernel or an unavailable SDK
-# backend fails loudly naming both fixes (start romp, or -t).
-if [[ -n "$session_arg" ]] && ! $use_tmux && ! $resume; then
+# --- `romp new`: the session is created in the kernel, which runs it ---
+# Every session runs inside the kernel (plans/sdk-backend.md) and is driven from
+# the dashboard / VS Code, so nothing here needs a terminal: create it over the
+# kernel API and say where to look. No silent fallback: a dead kernel fails
+# loudly naming the fix (start romp). Every arm of the case above either set
+# session_arg or exited, so this is the `new` dispatch's tail.
+if [[ -n "$session_arg" ]]; then
     _tok="$(_romp_token)"
     _kport="${ROMP_KERNEL_PORT:-29855}"
     _dir="${dir_arg:-$PWD}"
     if [[ -z "$_tok" ]]; then
-        echo "romp new: the kernel isn't running (no serve token). Start romp (the login service, or \`romp up\`), or use \`romp new -t $session_arg\` for a terminal session." >&2
+        echo "romp new: the kernel isn't running (no serve token). Start romp (the login service, or \`romp up\`) first." >&2
         exit 1
     fi
     # $_be — the effective backend — was resolved at parse time (the `new` case), where the
@@ -2935,7 +2239,7 @@ print(json.dumps(d))' "$session_arg" "$_dir" "$_be" "$model_arg" "$effort_arg" "
     # kernel's 200 ok:false replies take.
     _resp="$(_romp_token_cfg | curl -s -m 15 --config - -X POST "http://127.0.0.1:$_kport/new" \
                   -H 'Content-Type: application/json' -d "$_payload")" \
-        || { echo "romp new: kernel not reachable on :$_kport (is romp running?). \`romp new -t $session_arg\` starts a terminal session without it." >&2; exit 1; }
+        || { echo "romp new: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
     if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
         if [[ "$_resp" == *'"thread": true'* || "$_resp" == *'"thread":true'* ]]; then
             # a comment THREAD owns this name (T223): nothing was created — the ask landed on the
@@ -3059,435 +2363,4 @@ print(json.dumps(d))' "$session_arg" "$msg_arg" "$tag_arg" "$_resp")"
     fi
     echo "romp new: kernel refused: $_resp" >&2
     exit 1
-fi
-
-# A lowercase v4 uuid for --session-id, from whichever source this host actually has.
-# uuidgen is NOT universal: on Debian/Ubuntu it ships in uuid-runtime, which a minimal
-# install omits — and there it failed to an EMPTY sid, so claude launched with a bare
-# `--session-id` and the session broke with nothing pointing at the cause (the user
-# 2026-07-27, first Linux install). python3 is already a hard romp dependency (install.sh
-# preflights it), so the fallback can never be the missing one; the kernel's random uuid
-# source is the last resort for a stripped container.
-_romp_uuid() {
-    if command -v uuidgen >/dev/null 2>&1; then
-        uuidgen | tr 'A-Z' 'a-z'
-    elif command -v python3 >/dev/null 2>&1; then
-        python3 -c 'import uuid; print(uuid.uuid4())'
-    elif [[ -r /proc/sys/kernel/random/uuid ]]; then
-        cat /proc/sys/kernel/random/uuid
-    else
-        echo "romp: no way to generate a session id (install uuid-runtime, or python3)" >&2
-        return 1
-    fi
-}
-
-# --- Everything below here IS the tmux launcher: require tmux, loudly ---------
-# Only `romp new -t` and `romp resume` reach this point (plain `romp new` returned
-# above, over the kernel API, needing no tmux). tmux is OPTIONAL for romp as a whole
-# — a host without it runs SDK sessions fine and the kernel keeps its tmux backend
-# disabled — but these two paths cannot work without it, so say the remedy instead
-# of letting a bare "tmux: command not found" fall out of the launcher (a fresh
-# Linux box with no tmux, the user 2026-07-27). Same no-silent-fallback rule as the
-# SDK branch above: name the fix, don't quietly do something else.
-# ROMP_TMUX_AVAILABLE overrides the probe, matching install.sh and TmuxBackend.available().
-_romp_tmux_available() {
-    case "${ROMP_TMUX_AVAILABLE-unset}" in
-        unset) command -v tmux >/dev/null 2>&1 ;;
-        ""|0)  return 1 ;;
-        *)     return 0 ;;
-    esac
-}
-if ! _romp_tmux_available; then
-    echo "romp: tmux isn't installed — terminal sessions need it." >&2
-    echo "  Linux: your distro's tmux package (e.g. sudo apt install tmux)    macOS: brew install tmux" >&2
-    if $resume; then
-        echo "  Without it, resume the session from the dashboard instead: romp" >&2
-    else
-        echo "  Or start it without a terminal (runs in the kernel, drive it from the dashboard):" >&2
-        echo "      romp new ${session_arg:-<name>}" >&2
-    fi
-    exit 1
-fi
-
-# --- Custom name-based resume picker ----------------------------------------
-# `romp resume` (without an explicit session id) shows OUR full-screen picker of
-# resumable named sessions instead of Claude's auto-summary picker. Picking one
-# sets the conversation id to resume, the session name to reuse, and the
-# directory to resume it in. Cancelling (Esc / q / Ctrl-C) or having nothing to
-# resume just returns to the shell — it launches nothing.
-picked_dir=""
-if $resume && [[ -z "$resume_id" ]]; then
-    pick="$(_romp_pick)" || true
-    [[ -n "$pick" ]] || exit 0
-    IFS=$'\t' read -r resume_id session_arg picked_dir <<<"$pick"
-fi
-
-# --- Resolve the launch directory (PHYSICAL path, never $HOME) ---
-# Canonicalize to the PHYSICAL path (resolve symlinks): Claude writes its
-# transcript under the realpath-munged ~/.claude/projects/<dir>, so recording a
-# symlinked launch dir (e.g. ~/Vault → ~/GitRepos/Vault) would make every
-# path-munging consumer (summary backfill, digest) look in a dir that doesn't
-# exist — no summaries for that session. `pwd -P` gives the real path.
-# Precedence: an explicit `-d` wins, then the picker's recorded dir, then here.
-work_dir="${dir_arg:-${picked_dir:-$PWD}}"
-work_dir="$(cd "$work_dir" 2>/dev/null && pwd -P || printf '%s' "$work_dir")"
-
-# Never launch a session in $HOME. A romp session indexes its working-directory
-# tree, and $HOME is the one cwd whose direct children include the macOS
-# TCC-protected Downloads/Desktop/Documents — so indexing them makes Claude
-# (node) trip a stream of spurious "wants to access your Downloads" OS prompts.
-# Redirect a $HOME launch (`romp new` run from home, OR resuming a session that
-# was recorded there) to ROMPHOME, which defaults to the romp install dir.
-# Compare physical-to-physical: on macOS $HOME can sit under a symlinked mount
-# (e.g. a test $HOME under /var → /private/var), so `pwd -P` both sides.
-romp_install_dir="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd -P || printf '%s' "$HOME")"
-: "${ROMPHOME:=$romp_install_dir}"
-home_real="$(cd "$HOME" 2>/dev/null && pwd -P || printf '%s' "$HOME")"
-if [[ "$work_dir" == "$home_real" ]]; then
-    work_dir="$(cd "$ROMPHOME" 2>/dev/null && pwd -P)" || work_dir="$romp_install_dir"
-    printf 'romp: not launching in $HOME (it triggers macOS file-access prompts); using %s\n' "$work_dir" >&2
-fi
-
-# --- Resolve session name ---
-# This names the tmux session — it shows in the ghostty tab, the romp
-# dashboard, AND Claude's prompt-box pill (set via --name below, and kept in
-# sync by `romp rename` via Claude's live /rename). Default to the launch
-# folder (the resolved work_dir, so a $HOME launch is named after ROMPHOME, not
-# your username); pass a (usually one-word) name to override, or `romp rename`
-# it later. No prefix — romp sessions are identified by @romp.
-if [[ -n "$session_arg" ]]; then
-    display="$session_arg"
-else
-    display="$(basename "$work_dir")"
-fi
-# Sanitize the session name to a shell- and tmux-safe charset. This name lands
-# in the launch shell command (`exec claude --name "<name>"`, run via respawn-pane
-# below) and is interpolated into tmux run-shell hooks, so any char outside [A-Za-z0-9_-]
-# (spaces, quotes, $, ;, backticks — and the tmux-illegal '.'/':') could inject
-# a command. Fold every such char to '-'. (Previously only '.'/':' were
-# replaced, which left command injection via the name wide open.)
-display="$(printf '%s' "$display" | LC_ALL=C tr -c 'A-Za-z0-9_-' '-')"
-name="$display"
-
-# --- Unset CLAUDECODE so this works when invoked from inside Claude Code ---
-unset CLAUDECODE 2>/dev/null || true
-
-# A resume wants its own fresh window — never hijack an existing session.
-# If the target name is taken, bump a numeric suffix until it's free.
-if $resume; then
-    _base="$name"
-    _n=2
-    while tmux has-session -t "=$name" 2>/dev/null; do
-        name="${_base}-${_n}"
-        (( _n++ ))
-    done
-    display="$name"
-fi
-
-# --- Build the claude launch command ---
-# Name the Claude session after the tmux session so the SAME name shows in the
-# prompt-box pill, the ghostty tab title, the romp dashboard, and the `romp
-# resume` picker. New sessions get a self-assigned --session-id so romp knows
-# the conversation UUID up front and can record name<->id for the picker (the
-# UUID is also the transcript filename under ~/.claude/projects). Resumes reuse
-# the name stored at creation, so we don't re-pass --name there. `romp rename`
-# keeps the pill current via Claude's live `/rename`. We `exec` (below) so
-# quitting Claude closes the pane — ending the session — not dropping to a shell.
-sid=""
-if $resume; then
-    # resume_id is always set here: an explicit `romp resume <id>`, or chosen in
-    # the picker above (which exits if cancelled). Pass --name so the pill matches
-    # the tmux session — otherwise Claude restores its (possibly stale) stored name.
-    sid="$resume_id"
-    # resume_id is a conversation UUID and lands in the launch shell command
-    # (`claude --resume <id>`), so reject anything that isn't hex+hyphens. This
-    # stops a crafted id (e.g. arriving via the postal `revive` path) from
-    # injecting a command at the `exec` respawn-pane below.
-    if [[ ! "$resume_id" =~ ^[0-9a-zA-Z][0-9a-zA-Z-]*$ ]]; then
-        echo "[romp] refusing to resume: invalid session id" >&2
-        exit 1
-    fi
-    claude_cmd="claude --resume $resume_id --name \"$display\""
-else
-    sid="$(_romp_uuid)"
-    claude_cmd="claude --name \"$display\" --session-id $sid"
-fi
-
-# The session's romp identity rides its ENVIRONMENT on both backends (the user 2026-08-16):
-# ROMP_SID (the stable id — what `romp end self` resolves through) and ROMP_SESSION_NAME (the
-# human name at spawn — env-first author attribution for external tools, which talk to romp only
-# through the API and this var, never tmux). Mirrors the SDK backend's spawn env (sdk_backend
-# _options); both values are already sanitized above (sid: hex+hyphens, name: [A-Za-z0-9_-]),
-# so the interpolation into the respawn-pane exec line is injection-safe.
-# Through `env`: the pane runs this as `exec <cmd>` (respawn-pane below), and an assignment-led exec is a command
-# named ROMP_SID=… to every shell (zsh, bash and sh all answer "command not found", status 127), so from
-# 2026-08-16 to 2026-09-11 a terminal session's pane died the instant it was spawned (found by the T325 lab).
-claude_cmd="env ROMP_SID=$sid ROMP_SESSION_NAME=\"$display\" $claude_cmd"
-
-# Load the Romp Postal Service MCP server (tool-native messaging) into romp
-# sessions only (scoped via --mcp-config), when installed.
-[[ -f "$HOME/.claude/romp-postal.mcp.json" ]] && \
-    claude_cmd="$claude_cmd --mcp-config $HOME/.claude/romp-postal.mcp.json"
-
-# Append a short, generic working-style prompt to every romp session, when
-# installed. It nudges the agent to state its deliverables / completion / blocks
-# in plain language — which makes transcripts easier for the judge to read,
-# without the agent knowing anything about romp. --append-system-prompt (not
-# --system-prompt) so it adds to the base prompt, and it survives compaction
-# (unlike SessionStart additionalContext). The deferred command-substitution
-# "$(cat ...)" keeps the multi-line content OUT of the launch command line — only
-# a fixed cat of a trusted, fixed path is handed to the pane (no user input), so
-# the launch shell expands it at exec time (see respawn-pane below).
-[[ -f "$HOME/.claude/romp-session-prompt.md" ]] && \
-    claude_cmd="$claude_cmd --append-system-prompt \"\$(cat $HOME/.claude/romp-session-prompt.md)\""
-
-# Claude Code ≥ 2.1.224 gives every session an inbox socket the kernel can
-# deliver agent mail through — instant, and it never touches a half-typed
-# draft. The CLI's inbound gate may HOLD mail from an unverifiable sender
-# (the kernel) when the session runs a bypass-class permission mode, and a
-# held message quietly expires — so accept it explicitly at launch, the
-# CLI's documented setting for unattended inboxes (the user approved this
-# 2026-08-08: same-user processes can already reach the pane itself via
-# send-keys with FULL user authority; socket mail arrives with LESS — the
-# CLI labels it another-session traffic and strips approval power).
-# @romp-inbound-accept (tagged at create, below) tells the kernel this
-# launch carries the setting; an older CLI gets neither flag nor tag, and
-# mail keeps arriving by pane injection exactly as before.
-claude_meets_floor=false
-if _romp_claude_meets_floor; then
-    claude_meets_floor=true
-    claude_cmd="$claude_cmd --settings '{\"crossSessionInbound\":\"accept\"}'"
-fi
-# An old Claude Code falls back to pane-injected agent mail — say so once here,
-# where a session is being launched (see the version-floor helpers up top).
-_romp_claude_floor_nudge
-
-# The server this shell's tmux calls reach must be the kernel's (T325 review find): a cron job, a `sudo -u` or a
-# `docker exec` shell has no XDG_RUNTIME_DIR and resolves tmux's default; a shell inside a pane on ANOTHER server (the
-# old /tmp server kept serving after the move, a personal `tmux`) dials the socket named in its own $TMUX ahead of
-# TMUX_TMPDIR; and a session started on either lands on a server romp cannot see: it never appears on the board, and
-# a later interactive launch starts a namesake. So when a kernel is reachable and reports where its socket lives
-# (/version, auth-exempt, new kernels only), the directory THIS shell's tmux calls would reach ($TMUX's socket, else
-# TMUX_TMPDIR, else tmux's default) is compared with the kernel's as canonical paths, and a difference is a refusal
-# worded by the kernel's rule: a manager from before the rule (its kernel on the default) needs `romp refresh`; a
-# shell without XDG_RUNTIME_DIR needs the kernel's directory exported, or a login shell; a pane on another server
-# needs a shell outside it. No kernel reachable, or a kernel too old to say, compares nothing.
-_romp_tmux_dir_check() {
-    local _kport="${ROMP_KERNEL_PORT:-29855}" _v _mine _how
-    _v="$(curl -sf -m 3 "http://127.0.0.1:$_kport/version" 2>/dev/null)" || return 0
-    if [[ -n "${TMUX:-}" ]]; then
-        _mine="$(dirname "$(dirname "${TMUX%%,*}")")"; _how="pane"     # the socket's directory: <dir>/tmux-<uid>/default
-    else
-        _mine="${TMUX_TMPDIR:-}"; _how="env"
-    fi
-    python3 - "$name" "$_mine" "$_how" "$_v" <<'PYEOF_CHECK' >&2
-import json, os, sys
-name, mine, how, raw = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-try:
-    o = json.loads(raw)
-except ValueError:
-    sys.exit(0)
-if "tmuxSocketRule" not in o:
-    sys.exit(0)                                   # a kernel from before the rule: nothing to compare
-kdir, krule, mrule = o.get("tmuxSocketDir") or "", o.get("tmuxSocketRule") or "", o.get("tmuxSocketManagerRule") or ""
-canon = lambda d: os.path.realpath(d if d else "/tmp")   # the default realpath'd too: /tmp is a symlink on macOS, and a pane's $TMUX names the real path
-if canon(kdir) == canon(mine):
-    sys.exit(0)
-mine_s, kdir_s = mine or "the tmux default", kdir or "the tmux default"
-where = "this shell is inside a tmux session on another server (%s)" % mine_s if how == "pane" else "this shell's tmux socket directory (%s)" % mine_s
-print("[romp] refusing to start '%s': %s is not the kernel's (%s), so the session would start on a server romp cannot see." % (name, where, kdir_s))
-if how == "pane":
-    print("  Fix: run this from a shell outside that tmux session (a pane's own $TMUX decides which server its tmux calls reach).")
-elif krule == "manager" and not kdir and not mrule:
-    print("  The kernel runs under a manager from before the socket moved to the runtime directory: restart the manager (`romp refresh`) and try again; `export TMUX_TMPDIR=/tmp` starts this session on that manager's server for now, and it drops out of sight at the next refresh.")
-elif krule == "manager" and not kdir:
-    print("  This manager has no runtime directory (its rule: %s), so its kernel is on tmux's default socket while this shell's TMUX_TMPDIR differs: `export TMUX_TMPDIR=/tmp` for this session, or start the manager from a login shell where XDG_RUNTIME_DIR is set." % mrule)
-elif not mine:
-    print("  Fix: export TMUX_TMPDIR=%s (the kernel's), or launch from a login shell where XDG_RUNTIME_DIR is set: a cron job, sudo -u or docker exec drops it." % (kdir or "/tmp"))
-else:
-    print("  Fix: export TMUX_TMPDIR=%s (the kernel's)." % (kdir or "/tmp"))
-sys.exit(1)
-PYEOF_CHECK
-}
-_romp_tmux_dir_check || exit 1
-
-# --- Launch or attach ---
-if tmux has-session -t "=$name" 2>/dev/null; then
-    # Session exists (Claude is running there) — attach/switch, or report.
-    if $detach; then
-        echo "[romp] session '$name' already running — attach with: tmux attach -t $name"
-    elif [[ -n "${TMUX:-}" ]]; then
-        tmux switch-client -t "$name"
-    else
-        tmux attach-session -t "$name"
-    fi
-else
-    # A pane inherits the tmux SERVER's globals, and romp holds no API key (2026-09-08): a leftover
-    # ANTHROPIC_API_KEY there would bill this terminal session to a key nobody chose and could be printed
-    # from inside it, while the kernel alone refused to boot on the same variable. Refuse, loudly, and say
-    # where the variable comes from; never scrub it quietly.
-    if tmux show-environment -g 2>/dev/null | grep -q '^ANTHROPIC_API_KEY='; then
-        echo "[romp] refusing to start '$name': the tmux server's environment carries ANTHROPIC_API_KEY. romp holds no API key; remove it from service.env (and any exported variable), restart the manager (romp on restart) so the server starts clean, and configure apiKeyHelper in Claude Code's settings instead (docs/reference.md)." >&2
-        exit 1
-    fi
-    # Create new detached session in working directory
-    tmux new-session -d -s "$name" -c "$work_dir"
-
-    # Tag it as a romp session so the dashboard / hook / attach find it.
-    tmux set -t "$name" @romp 1
-
-    # The kernel's inbox-socket delivery leg keys on this tag: it marks a launch
-    # that passed the inbound-accept setting (above), i.e. a session whose inbox
-    # socket can never hold-and-drop the kernel's mail. Written here, by the same
-    # code path that added the setting, so tag and setting can never disagree.
-    if $claude_meets_floor; then tmux set -t "$name" @romp-inbound-accept 1; fi
-
-    # Install the tmux glue romp needs (hooks/bindings server-wide if absent,
-    # status line + tab title on this session) — works on a stock tmux.
-    _romp_provision_server
-    _romp_provision_session "$name"
-
-    # Identity color for the status bar. On RESUME, reuse the color this
-    # conversation had before (recorded in the map) so a session keeps its
-    # identity across resumes. Otherwise pick the first unused color from the
-    # Session identity color. With the default "romp" palette these are the exact hex the
-    # Obsidian dashboard renders (see vault/styles.css --palette-N; other selectable palettes
-    # diverge from the vault's fixed semantic colors). The ghostty tab dot is separate — it
-    # tracks Claude's live status; see @romp-emoji below.
-    bg=""; fg=""
-    if [[ -n "$sid" && -f "$ROMP_NAMES_DIR/$sid" ]]; then
-        IFS=$'\t' read -r _ _ bg fg < "$ROMP_NAMES_DIR/$sid" || true
-    fi
-    if [[ -z "$bg" ]]; then
-        # Identity palette — SELECTABLE now (the user 2026-07-12): the ACTIVE set lives in
-        # bin/romp_palette.py (single source of truth), mirrored for shell by the kernel at
-        # STATE/palette-colors (bg<TAB>fg per line; rewritten at kernel boot + on every gear
-        # switch). Read the mirror when it exists; the hardcoded fallback below is the default
-        # "romp" set, for a machine whose kernel never booted.
-        _palette=(); _fg=()
-        _palfile="${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}/palette-colors"
-        if [[ -r "$_palfile" ]]; then
-            while IFS=$'\t' read -r _pb _pf; do
-                [[ "$_pb" == \#* ]] && { _palette+=("$_pb"); _fg+=("${_pf:-white}"); }
-            done < "$_palfile"
-        fi
-        # Assignment order is colorblind-tuned (the user 2026-06-12): blue, green first
-        # (favorites + reasonably distinct), then teal — the more colorblind-friendly of
-        # teal/purple against blue+green under deuteran/protan (Machado 2009; teal differs
-        # from blue on the PRESERVED blue-yellow axis, purple only on the lost red channel).
-        # Remaining slots are ordered most-distinct-first; purple lands last. Note this no
-        # longer matches the vault/styles.css --palette-N NUMBERING (which is the same hex
-        # SET, used as fixed semantic colors elsewhere) — only the set must agree, not order.
-        if (( ${#_palette[@]} == 0 )); then
-        _palette=(
-            "#1EA1EB"  "#54B204"  "#4EA8A9"  "#DD42FF"  "#E87221"
-            "#98998A"  "#F85B5A"  "#F9D849"  "#9088F0"  "#E0629C"
-            "#B585B6"  "#B69513"
-        )
-        _fg=(
-            "white"    "black"    "white"    "white"    "black"
-            "black"    "white"    "black"    "black"    "white"
-            "black"    "black"
-        )
-        fi
-        # Collect colors already in use by other romp sessions.
-        _used=()
-        while IFS= read -r _sess; do
-            _c=$(tmux show -t "$_sess" -v @identity-bg 2>/dev/null || true)
-            [[ -n "$_c" ]] && _used+=("$_c")
-        done < <(tmux list-sessions -F '#{@romp}|#{session_name}' 2>/dev/null \
-            | awk -F'|' '$1=="1"{print $2}')
-        # First unused color; fall back to a name hash if all are taken.
-        _idx=-1
-        for _i in "${!_palette[@]}"; do
-            _taken=false
-            for _u in "${_used[@]+"${_used[@]}"}"; do
-                [[ "${_palette[$_i]}" == "$_u" ]] && { _taken=true; break; }
-            done
-            $_taken || { _idx=$_i; break; }
-        done
-        if (( _idx < 0 )); then
-            _hash=$(printf '%s' "$name" | cksum | awk '{print $1}')
-            _idx=$(( _hash % ${#_palette[@]} ))
-        fi
-        bg="${_palette[$_idx]}"; fg="${_fg[$_idx]}"
-    fi
-
-    tmux set -t "$name" @identity-bg "$bg"
-    tmux set -t "$name" @identity-fg "$fg"
-    # Seed the ghostty tab dot blue = ready (updated on every event by tmux-status.sh).
-    tmux set -t "$name" @romp-emoji "🔵"
-    tmux set -t "$name" status-style "bg=$bg,fg=$fg"
-    # Copy-mode scroll indicator (top-right [N/M]) and drag-selection highlight in
-    # THIS session's identity color, so copy mode matches the status bar. These are
-    # window options drawn with a pane/window format tree that can't see the
-    # session-scoped @identity-* options, so set literal per-window values here
-    # (parallel to status-style) rather than a global format in tmux.conf.
-    # Cosmetic only, and copy-mode-position-style needs tmux >= 3.2 — on an older
-    # tmux (e.g. a remote host on 3.0) it errors "invalid option", which under
-    # `set -e` would abort session creation before the Claude launch below. Guard
-    # so a stock/older tmux silently skips the color and the session still starts.
-    tmux set -t "$name" -w copy-mode-position-style  "bg=$bg,fg=$fg" 2>/dev/null || true
-    tmux set -t "$name" -w copy-mode-selection-style "bg=$bg,fg=$fg" 2>/dev/null || true
-
-    # Record id <-> name/dir/color so `romp rename`, the resume picker, and
-    # future resumes (color reuse) can map this session to its transcript.
-    if [[ -n "$sid" ]]; then
-        tmux set -t "$name" @romp-session-id "$sid"
-        # Reused title on a fresh launch → the new session claims it; suffix any
-        # stale holder with its last-use date (resume keeps its own title).
-        $resume || _romp_free_title "$sid" "$display"
-        _romp_record "$sid" "$display" "$work_dir" "$bg" "$fg"
-    fi
-
-    # Launch claude via exec so quitting it ends the session. We hand the command
-    # to the pane with respawn-pane, NOT send-keys: a fresh shell flushes its tty
-    # input while starting up, so keys typed in that window are dropped — the bug
-    # was a launch that started `ec claude …` (the "ex" eaten). respawn-pane -k
-    # replaces the just-spawned shell with `$SHELL -c "exec $claude_cmd"`, an
-    # atomic handoff with no typing race. The shell is non-interactive, which is
-    # fine here: PATH comes from ~/.zshenv (claude resolves), and the `claude`
-    # shell-function wrapper is a no-op inside tmux anyway (it just runs `command
-    # claude "$@"`), so the raw binary is identical. The non-interactive shell
-    # also can't stall on an interactive startup prompt (e.g. oh-my-zsh update).
-    tmux respawn-pane -k -t "$name" "exec $claude_cmd"
-
-    # On a RESUME, a large/compacted session may sit on Claude's "resume as-is /
-    # from summary" PICKER before the session starts — no Claude hook fires while
-    # it's up, so an external watcher is the only way to surface it. Background a
-    # check that sets @claude-state=picker if the session stays stuck on the picker
-    # (the feed treats that as NEEDS INPUT). We do NOT auto-answer it — guessing the
-    # key / "from summary" loses context; the user clears it by hand. Through the
-    # ROMP_POSTAL_BIN seam like `mail` and `refresh`: this script puts its own directory
-    # first on PATH, so a test can stand in for the service no other way, and the real
-    # one, detached here, minted a serve-token under a test HOME after its teardown.
-    if $resume && [[ -n "$sid" ]]; then
-        ( "${ROMP_POSTAL_BIN:-romp-postal-service}" picker-check --name "$name" --id "$sid" >/dev/null 2>&1 & )
-    fi
-
-    # Attach — or, when detaching, just report how to get there.
-    if $detach; then
-        echo "[romp] started session '$name' (detached)."
-        if [[ -n "${TMUX:-}" ]]; then
-            echo "[romp] switch to it with: tmux switch-client -t $name"
-        else
-            echo "[romp] attach with: tmux attach -t $name"
-        fi
-    elif [[ -n "${TMUX:-}" ]]; then
-        tmux switch-client -t "$name"
-    else
-        tmux attach-session -t "$name"
-    fi
-fi
-
-# If we just foreground-attached in the tab's root shell (outside tmux, not
-# --detach) and the session has since vanished, Claude was quit — it's exec'd,
-# so quitting it ends the session. Signal the caller to close the terminal tab:
-# the romp zsh wrapper turns exit code 77 into a shell `exit`, so ghostty closes
-# the tab. Detaching (prefix-d) leaves the session alive, so this is skipped and
-# the tab stays open. Opt-in via ROMP_CLOSE_ON_END so a plain `romp new -t` (or
-# the test harness) without the wrapper is unaffected.
-if [[ -n "${ROMP_CLOSE_ON_END:-}" ]] && ! $detach && [[ -z "${TMUX:-}" ]] \
-   && ! tmux has-session -t "=$name" 2>/dev/null; then
-    exit 77
 fi

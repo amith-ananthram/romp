@@ -7,11 +7,10 @@
 set -uo pipefail
 
 [[ -n "${ROMP_SUMMARIZING:-}" ]] && exit 0
-[[ -z "${TMUX:-}" ]] && exit 0
-
-sess="$(tmux display-message -p '#S' 2>/dev/null || true)"
-[[ -n "$sess" ]] || exit 0
-[[ -n "$(tmux show -t "$sess" -v @romp 2>/dev/null || true)" ]] || exit 0
+# romp sessions only: a romp session is exactly one launched with ROMP_SID in its
+# environment (the kernel sets it on the CLI it spawns); a plain Claude Code session
+# has no peers and no bus to start.
+[[ -n "${ROMP_SID:-}" ]] || exit 0
 
 src="${BASH_SOURCE[0]}"
 while [[ -L "$src" ]]; do

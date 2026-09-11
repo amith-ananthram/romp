@@ -14,97 +14,33 @@ setup() {
 
     mkdir -p "$WORK_DIR" "$MOCK_DIR"
 
-    # Fixtures the tmux mock reads:
-    #   sessions file: one per line, "name" or "name|rompflag" (flag defaults to 1)
-    #   identity file: "name=colour" lines (for @identity-bg lookups)
-    export MOCK_TMUX_SESSIONS_FILE="$TEST_DIR/mock_sessions.txt"
-    export MOCK_TMUX_IDENTITY_FILE="$TEST_DIR/mock_identity.txt"
-    touch "$MOCK_TMUX_SESSIONS_FILE" "$MOCK_TMUX_IDENTITY_FILE"
-
+    # A fake tmux first on PATH as a TRIPWIRE, not a stand-in: the terminal backend left romp (the user
+    # 2026-09-10), so no path in bin/romp may shell tmux any more. The mock records every call to
+    # MOCK_LOG and answers nothing; the "no verb shells tmux" test below reads the log after a run of
+    # the surviving verbs, and a real tmux on the machine is never reached from here.
     cat > "$MOCK_DIR/tmux" << 'MOCK'
 #!/usr/bin/env bash
 echo "tmux $*" >> "$MOCK_LOG"
-# Opt-in: simulate an older tmux that rejects a given option (e.g. tmux 3.0 has no
-# copy-mode-position-style, added in 3.2). Off unless a test sets MOCK_TMUX_FAIL_OPT.
-if [[ -n "${MOCK_TMUX_FAIL_OPT:-}" && "$*" == *"$MOCK_TMUX_FAIL_OPT"* ]]; then
-  echo "invalid option: $MOCK_TMUX_FAIL_OPT" >&2
-  exit 1
-fi
-case "$1" in
-  has-session)
-    # $3 is "=<name>"; a session exists iff its name is in the file
-    target="${3#=}"
-    cut -d'|' -f1 "$MOCK_TMUX_SESSIONS_FILE" 2>/dev/null | grep -qx "$target" && exit 0
-    exit 1
-    ;;
-  display-message)
-    echo "${MOCK_TMUX_CURRENT:-mysession}"
-    exit 0
-    ;;
-  show-environment)
-    # the server's globals, one NAME=value per line, from the fixture (empty file = a clean server)
-    cat "${MOCK_TMUX_GLOBALS_FILE:-/dev/null}" 2>/dev/null
-    exit 0
-    ;;
-  list-sessions)
-    # Reformat each session line per the requested -F format ($3).
-    # @romp defaults to 1; a "name|0" line is a non-romp session.
-    fmt="$3"
-    while IFS='|' read -r s c; do
-      [[ -z "$s" ]] && continue
-      c="${c:-1}"
-      out="$fmt"
-      out="${out//'#{@romp}'/$c}"
-      out="${out//'#{session_name}'/$s}"
-      out="${out//'#S'/$s}"
-      echo "$out"
-    done < "$MOCK_TMUX_SESSIONS_FILE" 2>/dev/null
-    exit 0
-    ;;
-  show)
-    if [[ "$2" == "-t" && "$4" == "-v" && "$5" == "@identity-bg" ]]; then
-      result=$(grep "^${3}=" "$MOCK_TMUX_IDENTITY_FILE" 2>/dev/null | head -1 | cut -d= -f2)
-      [[ -n "$result" ]] && { echo "$result"; exit 0; }
-      exit 1
-    fi
-    # global status-format[0] — the default main-row composition the
-    # provisioning pins onto each session (sentinel for assertions)
-    if [[ "$2" == "-gv" && "$3" == "status-format[0]" ]]; then
-      echo "GLOBAL_ROW0"; exit 0
-    fi
-    exit 0
-    ;;
-esac
 exit 0
 MOCK
     chmod +x "$MOCK_DIR/tmux"
 
-    # Hermetic claude: the launch path probes `claude --version` for the 2.1.224
-    # floor (the inbound-accept setting + @romp-inbound-accept tag) — a dev
-    # machine's real claude would nondeterministically flip those on. Pin a
-    # modern version; per-test override via _stub_claude.
-    _stub_claude "2.1.226"
-
-    # Hermetic postal service (2026-09-06): on every resume bin/romp double-forks
-    # `romp-postal-service picker-check` and returns without waiting for it. The real
-    # service mints a serve-token under $HOME/.local/state/romp when none exists, and did
-    # so after teardown had removed TEST_DIR, so the tree came back with that one file in
-    # it: four to six per run of this file. bin/romp puts its own directory first on PATH,
-    # so a stand-in here cannot shadow the real one through PATH; it reaches bin/romp
-    # through the ROMP_POSTAL_BIN seam, which the picker-check honours like `mail` and
-    # `refresh`. A no-op: the tests that assert on the service's calls overwrite it with
-    # a recording mock.
+    # Hermetic postal service (2026-09-06): the real service mints a serve-token under
+    # $HOME/.local/state/romp when none exists, and once did so after teardown had removed
+    # TEST_DIR. bin/romp puts its own directory first on PATH, so a stand-in here cannot
+    # shadow the real one through PATH; it reaches bin/romp through the ROMP_POSTAL_BIN seam
+    # (`mail`, `refresh`). A no-op: the tests that assert on the service's calls overwrite
+    # it with a recording mock.
     printf '#!/usr/bin/env bash\nexit 0\n' > "$MOCK_DIR/romp-postal-service"
     chmod +x "$MOCK_DIR/romp-postal-service"
     export ROMP_POSTAL_BIN="$MOCK_DIR/romp-postal-service"
 
     export PATH="$MOCK_DIR:$PATH"
-    # The romp-manager tests below start a REAL bin/romp-manager, whose startup runs `tmux start-server`,
-    # and `romp new -t` runs `tmux new-session`: the mock above takes both, and the private socket
-    # directory keeps any call that reaches the real binary off the machine's tmux server
-    # (tests/tmux-private.bash has the 2026-09-06 incident).
+    # The romp-manager tests below start a REAL bin/romp-manager, whose startup still runs
+    # `tmux start-server`: the private socket directory keeps that off the machine's tmux server
+    # (tests/tmux-private.bash has the 2026-09-06 incident), and the same call floors
+    # ROMP_CLI_SCOPE=0 so a real manager or kernel leaves no transient scope behind.
     tmux_private_socket_dir "$TEST_DIR"
-    unset TMUX            # default: outside tmux → attach-session branch
     unset ROMP_SID        # default: outside a romp session — `romp new` names no parent (tests export it on purpose)
     # Hermetic HOME: bin/romp probes $HOME/.claude/romp-postal.mcp.json (would
     # nondeterministically append --mcp-config on a dev machine) and writes the
@@ -148,16 +84,6 @@ teardown() {
 # Helper — runs romp with merged stdout+stderr so BATS captures errors
 run_romp() {
     "$ROMP_SCRIPT" "$@" 2>&1
-}
-
-# Helper — a fake `claude` reporting the given version (the launch path only ever
-# runs `claude --version`; the exec line itself lands in the tmux mock's log)
-_stub_claude() {
-    cat > "$MOCK_DIR/claude" <<STUB
-#!/usr/bin/env bash
-echo "$1 (Claude Code)"
-STUB
-    chmod +x "$MOCK_DIR/claude"
 }
 
 # Helper — a fake `curl` for the kernel-API paths (`romp new` SDK spawn + `-m` send).
@@ -208,11 +134,41 @@ MOCK
 @test "bare romp is the dashboard front door: no kernel, loud error, never a session" {
     # Round 3 (2026-07-25): the shortest command does the most common thing. In this
     # hermetic env there is no serve token, so it must fail loudly and launch nothing.
-    touch "$MOCK_LOG"    # this path makes no tmux calls at all
     run run_romp
     [ "$status" -eq 1 ]
     [[ "$output" == *"no serve token"* ]]
-    [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
+}
+
+@test "no verb shells tmux: the fake tmux on PATH records nothing across a run of the surviving verbs" {
+    # the terminal backend left romp (the user 2026-09-10): bin/romp talks to the kernel's API and
+    # never to a terminal multiplexer. setup() puts a recording tmux first on PATH, so a
+    # representative run of what is left (a kernel-backed new with a first prompt, a Codex new, a
+    # send, help, a bad verb, the resume refusal, a dead-kernel new, the bare front door) must
+    # leave no `tmux` line in the log at all.
+    _stub_curl
+    : > "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
+    run run_romp new -m "first prompt" ideabox
+    [ "$status" -eq 0 ]
+    run run_romp new --codex -d "$WORK_DIR" codexbox
+    [ "$status" -eq 0 ]
+    run run_romp send ideabox "hello"
+    [ "$status" -eq 0 ]
+    run run_romp help
+    [ "$status" -eq 0 ]
+    run run_romp bogus-verb
+    [ "$status" -eq 2 ]
+    run run_romp resume
+    [ "$status" -eq 2 ]
+    unset ROMP_SERVE_TOKEN
+    run run_romp new nokernel
+    [ "$status" -eq 1 ]
+    run run_romp
+    [ "$status" -eq 1 ]
+    grep -q '/new' "$MOCK_LOG"               # the run did reach the kernel API: the log is not empty by accident
+    grep -q '/send' "$MOCK_LOG"
+    run grep -c '^tmux ' "$MOCK_LOG"          # `run`: grep -c exits 1 on a zero count
+    [ "$output" = "0" ]
 }
 
 @test "new -m: missing or empty text is a usage error, never a silent no-op" {
@@ -221,14 +177,6 @@ MOCK
     [[ "$output" == *"[-m <text>]"* ]]
     run run_romp new -m "" ideabox
     [ "$status" -eq 2 ]
-}
-
-@test "new -m with -t is refused loudly (the first prompt is the SDK path's job)" {
-    touch "$MOCK_LOG"
-    run run_romp new -t -m "do the thing" ideabox
-    [ "$status" -eq 2 ]
-    [[ "$output" == *"-m needs the default (SDK) session"* ]]
-    [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
 }
 
 @test "new -m: a first prompt the kernel PARKED is reported as queued, not delivered" {
@@ -792,16 +740,10 @@ MOCK
     [[ "$output" != *"did not acknowledge"* ]]
 }
 
-@test "new --in: needs a value, is refused with -t (tag a terminal session afterwards), and help lists it" {
+@test "new --in: needs a value, and help lists it" {
     run run_romp new --in
     [ "$status" -eq 2 ]
     [[ "$output" == *"[--in <tag>]"* ]]
-    touch "$MOCK_LOG"
-    run run_romp new -t --in pool ideabox
-    [ "$status" -eq 2 ]
-    [[ "$output" == *"--in needs an SDK or Codex session; a terminal session cannot join a group"* ]]
-    [[ "$output" == *"romp tag pool --add ideabox"* ]]
-    [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
     run run_romp help
     [[ "$output" == *"romp new --in <tag> <name>"* ]]
     [[ "$output" == *"romp new --no-inherit <name>"* ]]
@@ -976,6 +918,7 @@ MOCK
     run run_romp new web
     [ "$status" -eq 1 ]
     [[ "$output" == *"not reachable"* ]]
+    [[ "$output" != *"romp new -t"* ]]       # a dead kernel offers no terminal fallback any more
 }
 
 @test "help lists new -m" {
@@ -983,410 +926,52 @@ MOCK
     [[ "$output" == *"romp new -m <text> <name>"* ]]
 }
 
-@test "new -t: terminal session named by the argument, claude exec'd with --name + --session-id" {
-    run run_romp new -t myproject
-    [ "$status" -eq 0 ]
-    grep -q 'tmux new-session -d -s myproject' "$MOCK_LOG"
-    grep -q 'tmux set -t myproject @romp 1' "$MOCK_LOG"
-    # The pill carries the session name, and a self-assigned --session-id lets
-    # romp record name<->id up front (names map → resume picker). The command is
-    # handed to the pane with respawn-pane (atomic), not typed with send-keys.
-    # The romp identity rides the CLI's environment on this backend too (the user 2026-08-16):
-    # external tools attribute authors env-first (ROMP_SESSION_NAME) instead of asking tmux.
-    grep -qE 'tmux respawn-pane -k -t myproject exec env ROMP_SID=[0-9a-f-]{36} ROMP_SESSION_NAME="myproject" claude --name "myproject" --session-id [0-9a-f-]{36}' "$MOCK_LOG"
-    grep -q 'tmux attach-session -t myproject' "$MOCK_LOG"
-}
+# ─── romp resume is gone (the user 2026-09-10): a past conversation is revived from the dashboard ───
 
-# The tmux SERVER's globals are what a new pane inherits. romp holds no API key (2026-09-08), so a leftover
-# ANTHROPIC_API_KEY there is refused before the pane exists: the kernel alone refusing to boot on the same
-# variable left this path open (a review find), and a quiet scrub would hide the misconfiguration.
-_stale_server_globals() {
-    export MOCK_TMUX_GLOBALS_FILE="$TEST_DIR/mock_globals.txt"
-    printf '%s\n' "OP_SERVICE_ACCOUNT_TOKEN=synthetic-op-token" "OP_SESSION_acct=synthetic-session" \
-        "ANTHROPIC_API_KEY=synthetic-stale-key" "PATH=/usr/bin" "HOME=/nonexistent" > "$MOCK_TMUX_GLOBALS_FILE"
-}
-
-@test "new -t: a leftover ANTHROPIC_API_KEY in the tmux server's globals refuses the session, loudly, without scrubbing" {
-    _stale_server_globals
-    run run_romp new -t myproject
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"ANTHROPIC_API_KEY"* ]]
-    [[ "$output" == *"apiKeyHelper"* ]]
-    [[ "$output" != *"synthetic-stale-key"* ]]
-    run grep -q 'new-session' "$MOCK_LOG"     # `run` + status, not a bare `! grep`: `!` is exempt from set -e mid-test
-    [ "$status" -ne 0 ]
-    run grep -q 'set-environment' "$MOCK_LOG"
-    [ "$status" -ne 0 ]
-}
-
-@test "new -t: clean server globals (op's names, a login token) start the session and touch nothing" {
-    export MOCK_TMUX_GLOBALS_FILE="$TEST_DIR/mock_globals.txt"
-    printf '%s\n' "OP_SERVICE_ACCOUNT_TOKEN=synthetic-op-token" "ANTHROPIC_AUTH_TOKEN=synthetic-bearer" \
-        "PATH=/usr/bin" > "$MOCK_TMUX_GLOBALS_FILE"
-    run run_romp new -t myproject
-    [ "$status" -eq 0 ]
-    grep -q 'new-session' "$MOCK_LOG"
-    ! grep -q 'set-environment' "$MOCK_LOG"
-}
-
-@test "new -t on a 2.1.224+ claude: inbound-accept setting + @romp-inbound-accept tag" {
-    # The kernel's inbox-socket delivery leg fires only for launches that passed the
-    # CLI's inbound-accept setting (an unverifiable sender's mail can otherwise be
-    # held and silently expire); the tag records exactly those launches — one code
-    # path writes both, so they can never disagree. Setup pins claude at 2.1.226.
-    run run_romp new -t myproject
-    [ "$status" -eq 0 ]
-    grep -qF -- "--settings '{\"crossSessionInbound\":\"accept\"}'" "$MOCK_LOG"
-    grep -q 'tmux set -t myproject @romp-inbound-accept 1' "$MOCK_LOG"
-}
-
-@test "new -t on an old claude: no setting, no tag, one upgrade nudge" {
-    _stub_claude "2.1.220"
-    run run_romp new -t myproject
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"claude update"* ]]     # the informative floor line, not a failure
-    # (checked BEFORE the greps below: `run` clobbers $output, so the output assertion must come first)
-    run grep -q -- '--settings' "$MOCK_LOG"
-    [ "$status" -ne 0 ]
-    run grep -q -- '@romp-inbound-accept' "$MOCK_LOG"
-    [ "$status" -ne 0 ]
-}
-
-@test "the pane's exec line runs claude through env: an assignment-led exec is a command named ROMP_SID=… to every shell" {
-    # zsh, bash and sh all answer `exec FOO=1 cmd` with "command not found: FOO=1" (status 127): from 2026-08-16 to
-    # 2026-09-11 a terminal session's pane died the instant it was spawned (a hermetic kernel lab found it)
-    _stub_claude 9.9.9
-    run "$ROMP_SCRIPT" new -t --detach myproject
-    [ "$status" -eq 0 ]
-    grep -qE 'tmux respawn-pane -k -t myproject exec env ROMP_SID=\S+ ROMP_SESSION_NAME="myproject" claude ' "$MOCK_LOG"
-    # (`run` and a status check: a bare `!`-inverted command is exempt from errexit and the ERR trap, so it
-    # would assert nothing here)
-    run grep -qE 'respawn-pane .* exec ROMP_SID=' "$MOCK_LOG"
-    [ "$status" -ne 0 ]
-    # the rule itself, on the shells a tmux server may run the pane with (`run -127`: the expected exit code,
-    # so bats files no command-not-found warning for the very status under test)
-    for sh in sh bash zsh; do
-        command -v "$sh" >/dev/null || continue
-        run -127 "$sh" -c 'exec FOO=1 true'
-        run "$sh" -c 'exec env FOO=1 true'
-        [ "$status" -eq 0 ]
-    done
-}
-
-@test "a terminal launch is refused when the kernel's tmux socket directory is not this shell's, and proceeds when it is" {
-    # T325: a cron job, `sudo -u` or `docker exec` shell resolves tmux's default while the service's kernel dials the
-    # runtime-dir server; a session started there would never reach the board. /version says where the kernel's is.
-    _stub_claude 9.9.9; _stub_curl
-    MOCK_CURL_VERSION='{"tmuxSocketDir":"/elsewhere/romp","tmuxSocketRule":"runtime-dir"}' run "$ROMP_SCRIPT" new -t --detach myproject
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"refusing to start 'myproject'"* ]]
-    [[ "$output" == *"export TMUX_TMPDIR=/elsewhere/romp"* ]]
-    run grep -q 'new-session' "$MOCK_LOG"
-    [ "$status" -ne 0 ]
-    # the kernel on the same directory: the launch proceeds
-    MOCK_CURL_VERSION="{\"tmuxSocketDir\":\"$TMUX_TMPDIR\",\"tmuxSocketRule\":\"runtime-dir\"}" run "$ROMP_SCRIPT" new -t --detach myproject
-    [ "$status" -eq 0 ]
-    grep -q 'new-session -d -s myproject' "$MOCK_LOG"
-    # a kernel from before the rule (no tmuxSocketRule) compares nothing
+@test "resume: the verb is gone; one line pointing at the dashboard's Revive, exit 2, nothing launched" {
+    # `romp resume` and its picker drove the terminal backend; the dashboard's Revive brings a past
+    # conversation back as a Claude Code session. `--resume` was the agent-facing alias (delivered
+    # text names it) and answers the same one line; the pre-round-3 reviver shapes are plain
+    # unknown-command / unknown-option errors, never a launch; help no longer lists the verb.
+    _stub_curl
     : > "$MOCK_LOG"
-    MOCK_CURL_VERSION='{"kernel_ver":"0"}' run "$ROMP_SCRIPT" new -t --detach myproject2
-    [ "$status" -eq 0 ]
-    # canonical paths compare: the kernel reporting the same directory with a trailing slash is the same server
-    : > "$MOCK_LOG"
-    MOCK_CURL_VERSION="{\"tmuxSocketDir\":\"$TMUX_TMPDIR/\",\"tmuxSocketRule\":\"runtime-dir\"}" run "$ROMP_SCRIPT" new -t --detach myproject3
-    [ "$status" -eq 0 ]
-    grep -q 'new-session -d -s myproject3' "$MOCK_LOG"
-}
-
-@test "inside a pane on ANOTHER server the launch is refused (the pane's own \$TMUX wins over TMUX_TMPDIR); on the kernel's server it proceeds" {
-    _stub_claude 9.9.9; _stub_curl
-    local other="$TEST_DIR/other-server"; mkdir -p "$other/tmux-$(id -u)"
-    TMUX="$other/tmux-$(id -u)/default,4242,0" MOCK_CURL_VERSION="{\"tmuxSocketDir\":\"$TMUX_TMPDIR\",\"tmuxSocketRule\":\"runtime-dir\"}" \
-        run "$ROMP_SCRIPT" new -t --detach myproject
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"inside a tmux session on another server ($other)"* ]]
-    [[ "$output" == *"a shell outside that tmux session"* ]]
-    run grep -q 'new-session' "$MOCK_LOG"
-    [ "$status" -ne 0 ]
-    TMUX="$TMUX_TMPDIR/tmux-$(id -u)/default,4242,0" MOCK_CURL_VERSION="{\"tmuxSocketDir\":\"$TMUX_TMPDIR\",\"tmuxSocketRule\":\"runtime-dir\"}" \
-        run "$ROMP_SCRIPT" new -t --detach myproject
-    [ "$status" -eq 0 ]
-    grep -q 'new-session -d -s myproject' "$MOCK_LOG"
-}
-
-@test "a kernel under a manager from before the socket moved is refused with the refresh, not a cron diagnosis" {
-    _stub_claude 9.9.9; _stub_curl
-    MOCK_CURL_VERSION='{"tmuxSocketDir":"","tmuxSocketRule":"manager"}' run "$ROMP_SCRIPT" new -t --detach myproject
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"under a manager from before the socket moved"* ]]
-    [[ "$output" == *"romp refresh"* ]]
-    [[ "$output" != *"cron job"* ]]
-    # a CURRENT manager that simply has no runtime directory (launchd, `romp up` from a bare shell) says so: the
-    # manager's own rule rides on /version, and a refresh would restart it into the same state
-    MOCK_CURL_VERSION='{"tmuxSocketDir":"","tmuxSocketRule":"manager","tmuxSocketManagerRule":"no XDG_RUNTIME_DIR"}' run "$ROMP_SCRIPT" new -t --detach myproject
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"This manager has no runtime directory (its rule: no XDG_RUNTIME_DIR)"* ]]
-    [[ "$output" != *"before the socket moved"* ]]
-    # inside a pane the pane's word comes first, whatever the kernel's rule: an export cannot override a pane's own \$TMUX
-    TMUX="$TEST_DIR/other/tmux-$(id -u)/default,4242,0" MOCK_CURL_VERSION='{"tmuxSocketDir":"","tmuxSocketRule":"manager"}' run "$ROMP_SCRIPT" new -t --detach myproject
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"a shell outside that tmux session"* ]]
-    [[ "$output" != *"romp refresh"* ]]
-    [[ "$output" != *"export TMUX_TMPDIR"* ]]
-}
-
-@test "paths compare as real paths: a pane whose \$TMUX spells the kernel's directory through a symlink proceeds" {
-    # what macOS does to tmux's default (/tmp → /private/tmp): the kernel reports one spelling, the pane's socket the other
-    _stub_claude 9.9.9; _stub_curl
-    ln -s "$TMUX_TMPDIR" "$TEST_DIR/socklink"
-    TMUX="$TEST_DIR/socklink/tmux-$(id -u)/default,4242,0" MOCK_CURL_VERSION="{\"tmuxSocketDir\":\"$TMUX_TMPDIR\",\"tmuxSocketRule\":\"runtime-dir\"}" \
-        run "$ROMP_SCRIPT" new -t --detach myproject
-    [ "$status" -eq 0 ]
-    grep -q 'new-session -d -s myproject' "$MOCK_LOG"
-}
-
-@test "launch hands the exec line to respawn-pane, never typed via send-keys (dropped-char bug)" {
-    # Regression: a fresh shell flushes its tty input on startup, so send-keys'd
-    # keys are dropped — the launch once started `ec claude …` (the "ex" eaten).
-    # The exec command must reach the pane atomically (respawn-pane), so the exec
-    # line must NEVER appear on a send-keys call.
-    run run_romp new -t myproject
-    [ "$status" -eq 0 ]
-    grep -qE 'tmux respawn-pane -k -t myproject exec env ROMP_SID=\S+ ROMP_SESSION_NAME="myproject" claude' "$MOCK_LOG"
-    ! grep -qE 'send-keys.*exec (env ROMP_SID=\S+ ROMP_SESSION_NAME="[^"]*" )?claude' "$MOCK_LOG"
-}
-
-@test "old tmux without copy-mode-position-style still launches claude (no set -e abort)" {
-    # Regression: bin/romp sets the cosmetic copy-mode-position-style, added in tmux
-    # 3.2. On an older tmux (e.g. a remote host on 3.0) that errors "invalid option",
-    # which under `set -e` aborted session creation before the claude launch — the
-    # pane was left at a bare shell. The cosmetic set must be guarded so the session
-    # still starts. Simulate the old tmux by failing exactly that option.
-    export MOCK_TMUX_FAIL_OPT="copy-mode-position-style"
-    run run_romp new -t --detach myproject
-    [ "$status" -eq 0 ]
-    grep -qE 'tmux respawn-pane -k -t myproject exec env ROMP_SID=\S+ ROMP_SESSION_NAME="myproject" claude' "$MOCK_LOG"
-}
-
-@test "append-system-prompt: omitted when no working-style prompt is installed" {
-    # Default hermetic HOME has no romp-session-prompt.md, so the -f guard skips it.
-    run run_romp new -t myproject
-    [ "$status" -eq 0 ]
-    ! grep -q -- '--append-system-prompt' "$MOCK_LOG"
-}
-
-@test "append-system-prompt: appended (deferred \$(cat ...)) when the prompt is installed" {
-    mkdir -p "$HOME/.claude"
-    printf 'Working style: be explicit.\n' > "$HOME/.claude/romp-session-prompt.md"
-    run run_romp new -t myproject
-    [ "$status" -eq 0 ]
-    # The flag carries a deferred cat of the fixed path — the multi-line content
-    # stays OUT of the exec line, so the launch shell expands it at exec time.
-    grep -F -- "--append-system-prompt \"\$(cat $HOME/.claude/romp-session-prompt.md)\"" "$MOCK_LOG"
-    # Still the same single exec line, handed to the pane via respawn-pane.
-    grep -qE 'tmux respawn-pane -k -t myproject exec env ROMP_SID=\S+ ROMP_SESSION_NAME="myproject" claude --name "myproject" --session-id [0-9a-f-]{36} --append-system-prompt .*' "$MOCK_LOG"
-}
-
-@test "append-system-prompt: also appended on the resume path" {
-    mkdir -p "$HOME/.claude"
-    printf 'Working style: be explicit.\n' > "$HOME/.claude/romp-session-prompt.md"
-    run run_romp resume abc123-uuid
-    [ "$status" -eq 0 ]
-    grep -F -- "--append-system-prompt \"\$(cat $HOME/.claude/romp-session-prompt.md)\"" "$MOCK_LOG"
-}
-
-@test "provisioning pins status-format[0] alongside the session-scoped peers row" {
-    # tmux gotcha (2026-06-12): a session-scoped status-format[1] shadows the
-    # whole inherited array — without [0] pinned to the global composition the
-    # main status row (status-left + windows + status-right) renders EMPTY.
-    run run_romp new -t myproject
-    [ "$status" -eq 0 ]
-    grep -q 'tmux set -t myproject status-format\[0\] GLOBAL_ROW0' "$MOCK_LOG"
-    grep -q 'tmux set -t myproject status-format\[1\]' "$MOCK_LOG"
-}
-
-@test "named session: romp new -t my-task → my-task" {
-    run run_romp new -t my-task
-    [ "$status" -eq 0 ]
-    grep -q 'tmux new-session -d -s my-task' "$MOCK_LOG"
-    grep -q 'tmux attach-session -t my-task' "$MOCK_LOG"
-}
-
-@test "session name sanitization: dots and colons replaced with dashes" {
-    run run_romp new -t "my.task:v2"
-    [ "$status" -eq 0 ]
-    grep -q 'tmux new-session -d -s my-task-v2' "$MOCK_LOG"
-    grep -qE 'exec env ROMP_SID=\S+ ROMP_SESSION_NAME="my-task-v2" claude --name "my-task-v2"' "$MOCK_LOG"
-}
-
-@test "session name sanitization: shell metacharacters folded to dashes (no command injection)" {
-    # A name/dir carrying $(), ;, or quotes must NOT survive into the launch
-    # command the pane shell runs — every unsafe char becomes '-'. Regression for
-    # the command-injection-via-session-name hole.
-    run run_romp new -t 'pwn$(touch INJECTED);x"y'
-    [ "$status" -eq 0 ]
-    local line
-    line="$(grep -F 'respawn-pane' "$MOCK_LOG" | grep -F ' claude ')"
-    [ -n "$line" ]
-    # no shell metacharacters survive in the exec line
-    # `run` + status, NOT a bare `! grep`: `!` is exempt from set -e, so mid-test it asserts nothing.
-    run grep -qE '[$();]' <<<"$line"
-    [ "$status" -ne 0 ]
-    # exactly the four quotes that wrap ROMP_SESSION_NAME="<name>" and --name "<name>" (the same
-    # sanitized value twice), no injected extras. The fixed --settings tail romp itself appends
-    # carries its own JSON quotes — a trusted constant, not name-derived — so strip it first.
-    line="${line%%--settings*}"
-    [ "$(grep -o '"' <<<"$line" | wc -l | tr -d ' ')" -eq 4 ]
-}
-
-@test "provisioning installs no key bindings and no mail-badge hook (the tmux-only interrupt heal and badge went 2026-09-11)" {
-    run run_romp new -t myproject
-    [ "$status" -eq 0 ]
-    # the surviving server glue is installed (so the absences below are read off a provisioning that ran)
-    grep -q 'set-hook -g after-rename-session' "$MOCK_LOG"
-    grep -q 'set-hook -g session-closed' "$MOCK_LOG"
-    run grep -E 'bind -n (C-c|Escape)|romp-interrupt-reset|client-session-changed|romp-mail-clear' "$MOCK_LOG"
-    [ "$status" -ne 0 ]
-}
-
-@test "resume: a session id with shell metacharacters is refused before any launch" {
-    # resume_id is typed into `claude --resume <id>`; a non-alphanumeric id must
-    # be rejected before a session is created.
-    run run_romp resume 'abc;touch INJECTED' --name myproject --detach
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"invalid session id"* ]]
-    [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
-}
-
-@test "state dir is created private (0700)" {
-    run run_romp new -t myproject
-    [ "$status" -eq 0 ]
-    local perms
-    # GNU stat (-c) first, BSD/macOS stat (-f) as fallback. The reverse order
-    # breaks on Linux, where `stat -f` means --file-system and mangles output.
-    perms="$(stat -c '%a' "$XDG_STATE_HOME/romp" 2>/dev/null || stat -f '%Lp' "$XDG_STATE_HOME/romp")"
-    [ "$perms" = "700" ]
-}
-
-# ─── Resume tests ────────────────────────────────────────────────────
-
-@test "resume: bare -r with no resumable sessions is a no-op" {
-    # bare -r opens the by-name picker; with an empty names map there is
-    # nothing to offer — no session may be created as a side effect. The names
-    # dir exists-but-empty (steady state on any machine that ran romp before);
-    # a MISSING dir is the silent first-run path, exercised below.
-    # NOTE bats/macOS gotcha: a false [[ ]] mid-test is SWALLOWED (only the
-    # last command's status fails a test) — assert with simple commands
-    # (grep, [ ]) so failures actually fire.
-    mkdir -p "$XDG_STATE_HOME/romp/names"
+    export ROMP_SERVE_TOKEN=testtok
     run run_romp resume
-    [ "$status" -eq 0 ]
-    grep -q "no resumable sessions" <<<"$output"
-    [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
-}
-
-@test "resume: --resume is a silent alias of resume (agent-facing text names it)" {
-    mkdir -p "$XDG_STATE_HOME/romp/names"
-    run run_romp resume
-    [ "$status" -eq 0 ]
-    grep -q "no resumable sessions" <<<"$output"
-
+    [ "$status" -eq 2 ]
+    [ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]
+    [[ "$output" == *"is gone"* ]]
+    [[ "$output" == *"Revive"* ]]
+    run run_romp resume 11111111-2222-3333-4444-555555555555 --name web --detach
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"is gone"* ]]
     run run_romp --resume
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"is gone"* ]]
+    [[ "$output" == *"Revive"* ]]
+    run run_romp -r                          # the retired short flag says the same
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"Revive"* ]]
+    run run_romp web --resume 11111111-2222-3333-4444-555555555555 --detach
+    [ "$status" -eq 2 ]
+    [[ "$output" == *'unknown command "web"'* ]]
+    run run_romp --detach web
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"unknown option: --detach"* ]]
+    run grep -c 'curl\|^tmux ' "$MOCK_LOG"   # nothing reached the kernel and nothing shelled tmux
+    [ "$output" = "0" ]
+    run run_romp help
     [ "$status" -eq 0 ]
-    grep -q "no resumable sessions" <<<"$output"
-    [[ "$output" != *"retired"* ]]
-}
-
-@test "resume: first run ever (no names dir) exits silently, creating nothing" {
-    touch "$MOCK_LOG"    # this path may make no tmux calls at all
-    run run_romp resume
-    [ "$status" -eq 0 ]
-    [ -z "$output" ]
-    [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
+    [[ "$output" != *"romp resume"* ]]
+    [[ "$output" != *"romp new -t"* ]]
 }
 
 @test "an unknown bare word is a loud error naming both readings, never a session" {
     # Round 3: commands are bare words, so a word that is not one gets exit 2
     # with the `romp new` fix spelled out — nothing silently becomes a session.
-    touch "$MOCK_LOG"    # this path makes no tmux calls at all
     run run_romp foo
     [ "$status" -eq 2 ]
     [[ "$output" == *'unknown command "foo"'* ]]
     [[ "$output" == *"romp new foo"* ]]
-    [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
-}
-
-@test "resume: the old-kernel revive shape (name --resume id --detach) still works, silently" {
-    # A kernel on pre-round-3 code revives tmux sessions as `romp <name> --resume
-    # <sid> --detach`; that exact shape must keep working (SILENTLY) until every
-    # kernel restarts onto new code — its spawn path swallows stderr.
-    run run_romp web --resume abc123-uuid --detach
-    [ "$status" -eq 0 ]
-    [[ "$output" != *"retired"* ]]
-    grep -q 'tmux new-session -d -s web' "$MOCK_LOG"
-    grep -qE 'tmux respawn-pane -k -t web exec env ROMP_SID=abc123-uuid ROMP_SESSION_NAME="web" claude --resume abc123-uuid --name "web"' "$MOCK_LOG"
-    ! grep -q 'tmux attach-session' "$MOCK_LOG"
-}
-
-@test "resume: explicit session id resumes that conversation" {
-    run run_romp resume abc123-uuid
-    [ "$status" -eq 0 ]
-    grep -q 'tmux respawn-pane -k -t myproject exec env ROMP_SID=abc123-uuid ROMP_SESSION_NAME="myproject" claude --resume abc123-uuid --name "myproject"' "$MOCK_LOG"
-}
-
-@test "resume: name collision uniquifies instead of hijacking the session" {
-    echo "myproject" > "$MOCK_TMUX_SESSIONS_FILE"
-
-    run run_romp resume abc123-uuid
-    [ "$status" -eq 0 ]
-    run grep -qE 'tmux attach-session -t myproject$' "$MOCK_LOG"
-    [ "$status" -ne 0 ]
-    grep -q 'tmux new-session -d -s myproject-2' "$MOCK_LOG"
-    grep -qE 'tmux respawn-pane -k -t myproject-2 exec env ROMP_SID=abc123-uuid ROMP_SESSION_NAME="myproject-2" claude --resume abc123-uuid --name "myproject-2"' "$MOCK_LOG"
-}
-
-@test "resume: the background picker-check goes through ROMP_POSTAL_BIN, and the stand-in writes nothing" {
-    # bin/romp double-forks `romp-postal-service picker-check` on a resume and returns at once;
-    # the real service mints ~/.local/state/romp/serve-token when none exists, and did so after
-    # teardown had removed TEST_DIR, re-creating it. bin/romp's own directory leads PATH, so the
-    # seam is the only way a test can stand in for the service. The setup() stand-in leaves the
-    # state dir alone; a recording one for this test shows the resume path reaching the seam —
-    # the call is detached, so the check waits (bounded) for its record instead of racing it.
-    [ "$ROMP_POSTAL_BIN" = "$MOCK_DIR/romp-postal-service" ]
-    run "$ROMP_POSTAL_BIN" picker-check --name myproject --id abc123-uuid
-    [ "$status" -eq 0 ]
-    [ -z "$output" ]
-    [ ! -e "$HOME/.local/state/romp" ]
-
-    printf '#!/usr/bin/env bash\necho "postal $*" >> "%s"\n' "$TEST_DIR/postal.log" > "$MOCK_DIR/romp-postal-service"
-    run run_romp resume abc123-uuid
-    [ "$status" -eq 0 ]
-    local i; for i in $(seq 1 50); do [ -s "$TEST_DIR/postal.log" ] && break; sleep 0.1; done
-    grep -q '^postal picker-check --name myproject --id abc123-uuid$' "$TEST_DIR/postal.log"
-}
-
-# ─── Detach tests ────────────────────────────────────────────────────
-
-@test "detach: new -t --detach creates the session but does not attach" {
-    run run_romp new -t --detach myproject
-    [ "$status" -eq 0 ]
-    grep -q 'tmux new-session -d -s myproject' "$MOCK_LOG"
-    grep -qE 'tmux respawn-pane -k -t myproject exec env ROMP_SID=\S+ ROMP_SESSION_NAME="myproject" claude --name "myproject" --session-id [0-9a-f-]{36}' "$MOCK_LOG"
-    # $output is asserted BEFORE the `run grep` below overwrites it with grep's (empty) output.
-    [[ "$output" == *"attach with: tmux attach -t myproject"* ]]
-    run grep -q 'tmux attach-session' "$MOCK_LOG"
-    [ "$status" -ne 0 ]
-}
-
-@test "detach: --resume + id + detach (the skill conversion path) still works as an alias" {
-    run run_romp --resume sess-xyz --detach
-    [ "$status" -eq 0 ]
-    grep -q 'tmux new-session -d -s myproject' "$MOCK_LOG"
-    grep -qE 'tmux respawn-pane -k -t myproject exec env ROMP_SID=sess-xyz ROMP_SESSION_NAME="myproject" claude --resume sess-xyz --name "myproject"' "$MOCK_LOG"
-    # $output asserted before the `run grep` overwrites it.
-    [[ "$output" == *"(detached)"* ]]
-    run grep -q 'tmux attach-session' "$MOCK_LOG"
-    [ "$status" -ne 0 ]
 }
 
 # ─── Misc ────────────────────────────────────────────────────────────
@@ -1397,161 +982,50 @@ _stale_server_globals() {
     [[ "$output" == *"unknown option: -x"* ]]
 }
 
-@test "names map: the record writer publishes atomically, so a reader racing the rename hook never sees an empty record" {
-    # _romp_record (a launch, the after-rename hook, the title-freeing rewrite) fills a temp in the names
-    # directory and moves it into place. The kernel's names writers read the record while the hook
-    # rewrites it and publish their edit over what they read, so a writer that truncated before it wrote
-    # cost the session its name and cwd. A reader polling the record while the hook rewrites it forty
-    # times must never find it empty; the rename must land with the dir and colors intact, and every hook
-    # run must reach the writer (the mock tmux answers the sid and logs the send-keys that follows the
-    # write), so a hook that never writes cannot pass by leaving the seed alone. The temp is dot-prefixed:
-    # the `*` glob _romp_free_title walks the directory with must never see it, and none may be left behind.
-    cat > "$MOCK_DIR/tmux" << 'MOCK'
-#!/usr/bin/env bash
-echo "tmux $*" >> "$MOCK_LOG"
-if [[ "$1" == "show" && "$5" == "@romp-session-id" ]]; then echo aaaa1111-bbbb-2222-cccc-333333333333; fi
-exit 0
-MOCK
-    chmod +x "$MOCK_DIR/tmux"
-    ndir="$XDG_STATE_HOME/romp/names"
-    mkdir -p "$ndir"
-    f="$ndir/aaaa1111-bbbb-2222-cccc-333333333333"
-    printf 'stale\t%s\t#1EA1EB\twhite\n' "$WORK_DIR" > "$f"
-    # the writer: the rename hook, 40 times over; the reader: as many looks as fit meanwhile
-    ( for i in $(seq 1 40); do "$ROMP_SCRIPT" _renamed exp-web >/dev/null 2>&1; done ) &
-    wpid=$!
-    empty=0; reads=0; seen=0
-    while kill -0 "$wpid" 2>/dev/null; do
-        reads=$((reads + 1))
-        [ -s "$f" ] || empty=$((empty + 1))
-        for e in "$ndir"/*; do [ "$e" = "$f" ] || seen=$((seen + 1)); done   # the glob _romp_free_title walks
-    done
-    wait "$wpid"
-    [ "$reads" -gt 100 ]
-    [ "$empty" -eq 0 ]
-    [ "$seen" -eq 0 ]                                                      # the temp never shows to that glob
-    [ "$(grep -c '^tmux send-keys' "$MOCK_LOG")" -eq 40 ]                   # every hook run got past the writer
-    [ "$(cat "$f")" = "$(printf 'exp-web\t%s\t#1EA1EB\twhite' "$WORK_DIR")" ]   # the rename landed; dir and colors intact
-    [ "$(ls -A "$ndir" | grep -vc '^aaaa1111-bbbb-2222-cccc-333333333333$')" -eq 0 ]   # no temp left behind
-}
-
-@test "old-kernel spawn shape (--detach <name>) still works, silently" {
-    # A kernel on pre-round-3 code spawns dashboard tmux sessions as `romp
-    # --detach <name>` with stderr swallowed — the shape must keep working.
-    run run_romp --detach oldk
-    [ "$status" -eq 0 ]
-    [[ "$output" != *"retired"* ]]
-    grep -q 'tmux new-session -d -s oldk' "$MOCK_LOG"
-    ! grep -q 'tmux attach-session' "$MOCK_LOG"
-}
-
-@test "new: usage errors are loud — missing name, two names, dangling -d" {
-    touch "$MOCK_LOG"    # these paths make no tmux calls at all
+@test "new: usage errors are loud — missing name, two names, dangling -d, and the retired -t/--detach are unknown options" {
+    _stub_curl
+    : > "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
     run run_romp new
     [ "$status" -eq 2 ]
     [[ "$output" == *"usage: romp new"* ]]
-    run run_romp new -t alpha beta
+    [[ "$output" != *"[-t"* ]]               # the usage line offers no terminal variant
+    run run_romp new alpha beta
     [ "$status" -eq 2 ]
-    run run_romp new -t -d
+    run run_romp new -d
     [ "$status" -eq 2 ]
-    [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
-}
-
-@test "existing session reattaches instead of creating new" {
-    echo "myproject" > "$MOCK_TMUX_SESSIONS_FILE"
-
-    run run_romp new -t myproject
-    [ "$status" -eq 0 ]
-    run grep -q 'tmux new-session' "$MOCK_LOG"
-    [ "$status" -ne 0 ]
-    grep -q 'tmux attach-session -t myproject' "$MOCK_LOG"
-}
-
-# ─── Identity-color tests ────────────────────────────────────────────
-
-@test "color: first session gets the first palette color + a status dot" {
-    run run_romp new -t myproject
-    [ "$status" -eq 0 ]
-    grep -q 'tmux set -t myproject @identity-bg #1EA1EB' "$MOCK_LOG"
-    # The tab dot is seeded blue (ready) at launch; the status hook drives
-    # it thereafter.
-    grep -q 'tmux set -t myproject @romp-emoji 🔵' "$MOCK_LOG"
-}
-
-@test "color: second session gets a different color from the first" {
-    echo "other" > "$MOCK_TMUX_SESSIONS_FILE"
-    echo "other=#1EA1EB" > "$MOCK_TMUX_IDENTITY_FILE"
-
-    run run_romp new -t myproject
-    [ "$status" -eq 0 ]
-    grep -q 'tmux set -t myproject @identity-bg #54B204' "$MOCK_LOG"
-}
-
-@test "color: third session gets teal (colorblind-tuned order: blue, green, teal)" {
-    # The 3rd slot is teal #4EA8A9, the more colorblind-friendly of teal/purple against
-    # the blue+green pair (the user 2026-06-12) — pin both earlier colors as taken.
-    printf '%s\n' "s1" "s2" > "$MOCK_TMUX_SESSIONS_FILE"
-    printf '%s\n' "s1=#1EA1EB" "s2=#54B204" > "$MOCK_TMUX_IDENTITY_FILE"
-
-    run run_romp new -t myproject
-    [ "$status" -eq 0 ]
-    grep -q 'tmux set -t myproject @identity-bg #4EA8A9' "$MOCK_LOG"
-}
-
-@test "color: a kernel-written palette-colors mirror overrides the built-in set" {
-    # The identity palette is selectable (2026-07-12): the kernel mirrors the ACTIVE set to
-    # STATE/palette-colors (bg<TAB>fg per line) and the launcher assigns from it; the hardcoded
-    # arrays are only the fallback for a machine whose kernel never booted.
-    mkdir -p "$XDG_STATE_HOME/romp"
-    printf '#AA0000\twhite\n#00BB00\tblack\n' > "$XDG_STATE_HOME/romp/palette-colors"
-
-    run run_romp new -t myproject
-    [ "$status" -eq 0 ]
-    grep -q 'tmux set -t myproject @identity-bg #AA0000' "$MOCK_LOG"
-    grep -q 'tmux set -t myproject @identity-fg white' "$MOCK_LOG"
-}
-
-@test "color: all colors taken falls back to a hash pick" {
-    local palette=("#1EA1EB" "#54B204" "#4EA8A9" "#DD42FF" "#E87221" "#98998A" "#F85B5A" "#F9D849" "#9088F0")
-    > "$MOCK_TMUX_SESSIONS_FILE"
-    > "$MOCK_TMUX_IDENTITY_FILE"
-    for i in "${!palette[@]}"; do
-        echo "sess${i}" >> "$MOCK_TMUX_SESSIONS_FILE"
-        echo "sess${i}=${palette[$i]}" >> "$MOCK_TMUX_IDENTITY_FILE"
+    for flag in -t --tmux --detach; do
+        run run_romp new $flag alpha
+        [ "$status" -eq 2 ]
+        [[ "$output" == *"unknown option: $flag"* ]]
     done
-
-    run run_romp new -t myproject
-    [ "$status" -eq 0 ]
-    grep -q 'tmux set -t myproject @identity-bg #' "$MOCK_LOG"
+    run grep -c '/new' "$MOCK_LOG"           # none of these reached the kernel
+    [ "$output" = "0" ]
 }
 
-# ─── No attach/rename subcommands (use tmux a / tmux rename) ─────────
+# ─── Stray words never start anything ─────────
 
 @test "'a' and 'attach' are unknown commands, never sessions" {
-    # There is no attach command (plain tmux does that), and round 3 made every
-    # non-command bare word a loud error pointing at `romp new`. (`rename` left
-    # this list when it became a real verb — see the rename tests above.)
+    # Neither is a romp verb (a session is reached from the dashboard), and round 3 made every
+    # non-command bare word a loud error pointing at `romp new`. (`rename` left this list when
+    # it became a real verb — see the rename tests above.)
     for word in a attach; do
-        : > "$MOCK_LOG"
         run run_romp "$word"
         [ "$status" -eq 2 ]
         [[ "$output" == *"romp new ${word}"* ]]
-        [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
     done
 }
 
 @test "retired human spellings fail loudly naming today's word, and start nothing" {
     # Rounds 1-2 spellings (short view flags, dashed manager commands). The
-    # agent-facing aliases (--mail/--url/--send/--interrupt/--end/--resume,
-    # --version, first-arg --detach) are exercised elsewhere and stay SILENT.
+    # agent-facing aliases (--mail/--url/--send/--interrupt/--end, --version) are
+    # exercised elsewhere and stay SILENT; --resume answers the resume refusal.
     for flag in -l --launch -d -f -j -r --on --refresh --status --update --checkin --checkout --default-dir --debug; do
-        : > "$MOCK_LOG"
         run run_romp "$flag"
         [ "$status" -eq 2 ]
         [[ "$output" == *"retired"* ]]
-        # every hint names today's spelling, or says the command is gone (the terminal TUIs)
+        # every hint names today's spelling, or says the command is gone (the terminal TUIs, the resume picker)
         [[ "$output" == *"is now"* || "$output" == *"just: romp"* || "$output" == *"is gone"* ]]
-        [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
     done
     # spot-check: a RENAMED command names its new spelling, a DELETED one says so
     run run_romp -d
@@ -1678,11 +1152,9 @@ MOCK
     # dashboard is bare romp). Each must fail naming the fix. (`down` is a command: see the
     # romp down tests below.)
     for word in on serve launch open; do
-        : > "$MOCK_LOG"
         run run_romp "$word"
         [ "$status" -eq 2 ]
         [[ "$output" == *"romp new ${word}"* ]]
-        [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
     done
 }
 
@@ -2598,18 +2070,15 @@ STUB
     [ "$status" -eq 0 ]
     [[ "$output" == *"Usage:"* ]]
     [[ "$output" == *"romp new"* ]]
-    ! grep -q 'tmux new-session' "$MOCK_LOG"
 }
 
 @test "help, -h and --help all print usage" {
-    touch "$MOCK_LOG"    # help makes no tmux calls at all
     run run_romp --help
     [ "$status" -eq 0 ]
     [[ "$output" == *"Usage:"* ]]
     run run_romp help
     [ "$status" -eq 0 ]
     [[ "$output" == *"Usage:"* ]]
-    [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
 }
 
 @test "mail dispatches to romp-postal with its args (--mail is its silent alias)" {
@@ -2633,85 +2102,6 @@ MOCK
     grep -q 'romp-postal called: send beta hello' "$MOCK_LOG"
 }
 
-# _romp_resume_rows builds the resume-picker rows in ONE python pass: it walks the
-# projects tree once into a sid->transcript index, reads each session's name file
-# + cached gloss (archive headline, else latest caption), and emits FS-delimited
-# rows newest-first. These extract JUST the function (never source the whole
-# script — that would re-run its top-level dispatch + reset ROMP_*_DIR) and point
-# the dirs at fixtures. FS is \x1f; fields are mtime|sid|name|dir|rgb|kind|text.
-_resume_rows_fn() {   # writes the extracted function to $1
-    sed -n '/^_romp_resume_rows()/,/^}/p' "$ROMP_SCRIPT" > "$1"
-}
-
-@test "resume rows: archive headline, caption fallback, ordering, live-exclusion" {
-    local ndir="$TEST_DIR/names" adir="$TEST_DIR/archive" cdir="$TEST_DIR/captions"
-    local pdir="$TEST_DIR/projects" fn="$TEST_DIR/_rows.sh"
-    mkdir -p "$ndir" "$adir" "$cdir" "$pdir/proj-a"
-    _resume_rows_fn "$fn"
-
-    # three resumable sessions + one LIVE (must be excluded)
-    printf 'arch-sess\t/tmp/b\t#aabbcc\t#000000\n' > "$ndir/sid-arch"
-    printf 'cap-sess\t/tmp/c\t#ddeeff\t#000000\n'  > "$ndir/sid-cap"
-    printf 'live-sess\t/tmp/a\t#112233\t#ffffff\n' > "$ndir/sid-live"
-    : > "$pdir/proj-a/sid-arch.jsonl"
-    : > "$pdir/proj-a/sid-cap.jsonl"
-    : > "$pdir/proj-a/sid-live.jsonl"
-    # cap-sess transcript OLDER than arch-sess -> arch-sess sorts first
-    touch -t 202606160000 "$pdir/proj-a/sid-cap.jsonl"
-    touch -t 202606161200 "$pdir/proj-a/sid-arch.jsonl"
-    printf '{"headline":"Synthetic archive headline"}\n' > "$adir/sid-arch.json"
-    printf '{"caption":"older step"}\n{"caption":"newest caption step"}\n' > "$cdir/sid-cap.jsonl"
-
-    run env ROMP_NAMES_DIR="$ndir" ROMP_ARCHIVE_DIR="$adir" ROMP_CAPTIONS_DIR="$cdir" \
-        ROMP_PROJECTS_DIR="$pdir" \
-        bash -c 'source "$1"; _romp_resume_rows "$2" "$3"' _ "$fn" $'sid-live' $'\x1f'
-    [ "$status" -eq 0 ]
-    # live session excluded
-    [[ "$output" != *"live-sess"* ]]
-    # newest first: arch row before cap row
-    local first; first="$(printf '%s\n' "$output" | head -1)"
-    [[ "$first" == *"arch-sess"* ]]
-    # archive headline wins for arch-sess; caption fallback for cap-sess (last non-empty)
-    [[ "$output" == *"Synthetic archive headline"* ]]
-    [[ "$output" == *"newest caption step"* ]]
-    [[ "$output" != *"older step"* ]]
-    # rgb derived from the bg hex (#aabbcc -> 170;187;204)
-    [[ "$output" == *$'\x1f'"170;187;204"$'\x1f'* ]]
-}
-
-@test "resume rows: stale name file (transcript gone) is pruned" {
-    local ndir="$TEST_DIR/names" pdir="$TEST_DIR/projects" fn="$TEST_DIR/_rows.sh"
-    mkdir -p "$ndir" "$pdir/proj-a" "$TEST_DIR/archive" "$TEST_DIR/captions"
-    _resume_rows_fn "$fn"
-    printf 'has-tx\t/tmp/x\t\t\n'   > "$ndir/sid-has"
-    printf 'stale\t/tmp/y\t\t\n'    > "$ndir/sid-stale"
-    : > "$pdir/proj-a/sid-has.jsonl"          # only sid-has has a transcript
-    run env ROMP_NAMES_DIR="$ndir" ROMP_ARCHIVE_DIR="$TEST_DIR/archive" \
-        ROMP_CAPTIONS_DIR="$TEST_DIR/captions" ROMP_PROJECTS_DIR="$pdir" \
-        bash -c 'source "$1"; _romp_resume_rows "$2" "$3"' _ "$fn" '' $'\x1f'
-    [ "$status" -eq 0 ]
-    [ -f "$ndir/sid-has" ]            # kept
-    [ ! -f "$ndir/sid-stale" ]        # pruned
-}
-
-@test "resume rows: an EMPTY/unreadable projects index never prunes the cache" {
-    # Regression guard: if the projects tree is missing, "transcript gone" is
-    # unverifiable, so we must NOT delete any name files (an env mismatch once
-    # wiped the whole cache this way).
-    local ndir="$TEST_DIR/names" fn="$TEST_DIR/_rows.sh"
-    mkdir -p "$ndir" "$TEST_DIR/archive" "$TEST_DIR/captions"
-    _resume_rows_fn "$fn"
-    printf 'a\t/tmp/a\t\t\n' > "$ndir/sid-a"
-    printf 'b\t/tmp/b\t\t\n' > "$ndir/sid-b"
-    run env ROMP_NAMES_DIR="$ndir" ROMP_ARCHIVE_DIR="$TEST_DIR/archive" \
-        ROMP_CAPTIONS_DIR="$TEST_DIR/captions" ROMP_PROJECTS_DIR="$TEST_DIR/nonexistent" \
-        bash -c 'source "$1"; _romp_resume_rows "$2" "$3"' _ "$fn" '' $'\x1f'
-    [ "$status" -eq 0 ]
-    [ -f "$ndir/sid-a" ]             # both survive — nothing pruned without an index
-    [ -f "$ndir/sid-b" ]
-    [ -z "$output" ]                 # and no rows (no transcripts to show)
-}
-
 @test "help -h reflects which commands are PRESENT (presence-checked, no drift)" {
     # Run a copy of romp with only SOME backing romp-* binaries reachable: present commands show, absent
     # ones are hidden, built-ins always show — so the help can't drift from what's installed (the user 2026-06-16).
@@ -2722,7 +2112,7 @@ _resume_rows_fn() {   # writes the extracted function to $1
     [ "$status" -eq 0 ]
     # built-ins (no backing binary) always shown
     [[ "$output" == *"romp new"* ]]
-    [[ "$output" == *"romp resume"* ]]
+    [[ "$output" != *"romp resume"* ]]      # the verb is gone (2026-09-10): the dashboard's Revive
     # `romp serve` was removed (tailnet reach = tailscale serve to loopback) — must not resurface
     [[ "$output" != *"romp serve"* ]]
     # present backing → shown
@@ -2737,59 +2127,21 @@ _resume_rows_fn() {   # writes the extracted function to $1
     [[ "$output" != *"romp judges"* ]]
 }
 
-# ─── ROMPHOME — never launch a session in $HOME ──────────────────────
-# $HOME is the one cwd whose direct children include the macOS TCC-protected
-# Downloads/Desktop/Documents; indexing them trips spurious OS file-access
-# prompts. A $HOME launch is redirected to ROMPHOME instead.
-
-@test "ROMPHOME: a launch from \$HOME is redirected there, not created in \$HOME" {
-    export ROMPHOME="$TEST_DIR/romphome"
-    mkdir -p "$ROMPHOME"
-    local expect; expect="$(cd "$ROMPHOME" && pwd -P)"
-    local home_real; home_real="$(cd "$HOME" && pwd -P)"
-    cd "$HOME"
-    run run_romp new -t box
-    [ "$status" -eq 0 ]
-    grep -qF "tmux new-session -d -s box -c $expect" "$MOCK_LOG"
-    # the redirect is announced to the user — asserted BEFORE the `run grep` overwrites $output
-    [[ "$output" == *"not launching in \$HOME"* ]]
-    # the session must NOT be rooted at $HOME
-    run grep -qF "tmux new-session -d -s box -c $home_real" "$MOCK_LOG"
-    [ "$status" -ne 0 ]
-}
-
-@test "ROMPHOME: a name-less resume from \$HOME is named after ROMPHOME, not \$HOME" {
-    # Regression: basename(\$HOME) is the username — a privacy leak as a session
-    # name. `romp new` requires a name now, so the folder-name default only fires
-    # on an explicit-id resume without --name; the name must come from the
-    # resolved (redirected) dir.
-    export ROMPHOME="$TEST_DIR/scratchpad"
-    mkdir -p "$ROMPHOME"
-    cd "$HOME"
-    run run_romp resume abc123-uuid
-    [ "$status" -eq 0 ]
-    grep -q 'tmux new-session -d -s scratchpad' "$MOCK_LOG"
-    ! grep -qE 'tmux new-session -d -s home( |$| -)' "$MOCK_LOG"
-}
-
-@test "ROMPHOME: a launch from a normal project dir is unaffected" {
-    export ROMPHOME="$TEST_DIR/romphome"
-    mkdir -p "$ROMPHOME"
-    # setup() already cd'd into $WORK_DIR, a normal project dir
-    local expect; expect="$(cd "$WORK_DIR" && pwd -P)"
-    run run_romp new -t myproject
-    [ "$status" -eq 0 ]
-    grep -qF "tmux new-session -d -s myproject -c $expect" "$MOCK_LOG"
-    [[ "$output" != *"not launching in \$HOME"* ]]
-}
-
-@test "new: -d launches in the given directory, not the cwd" {
+@test "new: -d rides the /new payload as the session's dir, not the cwd" {
+    _stub_curl
+    : > "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
     local other="$TEST_DIR/elsewhere"
     mkdir -p "$other"
-    local expect; expect="$(cd "$other" && pwd -P)"
-    run run_romp new -t -d "$other" side
+    run run_romp new -d "$other" side
     [ "$status" -eq 0 ]
-    grep -qF "tmux new-session -d -s side -c $expect" "$MOCK_LOG"
+    [[ "$output" == *"working in $other"* ]]
+    grep '/new' "$MOCK_LOG" | grep -qF "\"dir\": \"$other\""
+    # without -d the payload names the caller's cwd (setup() cd'd into WORK_DIR)
+    : > "$MOCK_LOG"
+    run run_romp new side
+    [ "$status" -eq 0 ]
+    grep '/new' "$MOCK_LOG" | grep -qF "\"dir\": \"$WORK_DIR\""
 }
 
 @test "romp checkin/checkout: usage without a host, loud failure with no kernel" {
@@ -2806,18 +2158,20 @@ _resume_rows_fn() {   # writes the extracted function to $1
 
 # ─── romp new (SDK default) ──────────────────────────────────────────
 
-@test "new (no -t): no kernel token → loud error naming both fixes, nothing launched" {
-    touch "$MOCK_LOG"    # this path makes no tmux calls at all
+@test "new: no kernel token → loud error naming the one fix (start romp), nothing launched" {
+    _stub_curl
+    : > "$MOCK_LOG"
     run run_romp new api
     [ "$status" -eq 1 ]
     [[ "$output" == *"kernel isn't running"* ]]
-    [[ "$output" == *"romp new -t api"* ]]
-    [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
+    [[ "$output" == *"romp up"* ]]
+    [[ "$output" != *"romp new -t"* ]]       # a dead kernel offers no terminal fallback any more
+    run grep -c '/new' "$MOCK_LOG"
+    [ "$output" = "0" ]
 }
 
-@test "new (no -t): POSTs the kernel /new with backend sdk, and starts no tmux session" {
+@test "new: POSTs the kernel /new with backend sdk (the default)" {
     command -v python3 >/dev/null 2>&1 || skip "python3 not available"
-    touch "$MOCK_LOG"    # this path makes no tmux calls at all
     mkdir -p "$XDG_STATE_HOME/romp"
     printf 'tok-test' > "$XDG_STATE_HOME/romp/serve-token"
     # One-shot fake kernel: accept a single POST, log it, answer ok:true. Ephemeral
@@ -2857,7 +2211,6 @@ PY
     grep -q '"token": "tok-test"' "$TEST_DIR/req.log"
     grep -q '"name": "api"' "$TEST_DIR/req.log"
     grep -q '"backend": "sdk"' "$TEST_DIR/req.log"
-    [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
 }
 
 @test "new --model/--effort: ride /new VERBATIM (full ids, no alias munging) and report what was applied" {
@@ -2894,7 +2247,6 @@ PY
     grep -q '"model": "claude-fable-5"' "$TEST_DIR/req.log"
     grep -q '"effort": "ultracode"' "$TEST_DIR/req.log"
     [[ "$output" == *"applied model claude-fable-5, effort ultracode"* ]]
-    [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
 }
 
 @test "new --model/--effort: a kernel that does NOT ack them warns loudly (no silent divergence)" {
@@ -2964,14 +2316,6 @@ PY
     [[ "$output" == *"did not acknowledge --env (older kernel?)"* ]]
 }
 
-@test "new --model with -t refuses loudly (SDK-only flags), and starts nothing" {
-    touch "$MOCK_LOG"
-    run run_romp new -t --model claude-fable-5 x
-    [ "$status" -eq 2 ]
-    [[ "$output" == *"--model/--effort/--env need the default (SDK) session"* ]]
-    [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
-}
-
 @test "new: help names --model and --effort (the nightly optimizer's presence guard greps help)" {
     run run_romp -h
     [ "$status" -eq 0 ]
@@ -3020,7 +2364,6 @@ PY
     grep -q '"FEATURE_FLAG": "1"' "$TEST_DIR/req.log"
     grep -q '"UI_THEME": "dark"' "$TEST_DIR/req.log"
     [[ "$output" == *"applied env FEATURE_FLAG=1,UI_THEME=dark"* ]]
-    [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
 }
 
 @test "new --env: the value splits on the FIRST '=' and an empty value is meaningful" {
@@ -3057,7 +2400,6 @@ PY
     run run_romp new --env
     [ "$status" -eq 2 ]
     [[ "$output" == *"usage: romp new"* ]]
-    [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
 }
 
 @test "new --no-env sends the explicit empty declaration and reports the clear as applied" {
@@ -3070,17 +2412,6 @@ PY
     grep -q '"env": {}' "$TEST_DIR/req.log"
     [[ "$output" == *"applied env cleared"* ]]
     [[ "$output" != *"WARNING"* ]]
-}
-
-@test "new --env with -t refuses loudly (SDK-only flags), and starts nothing" {
-    touch "$MOCK_LOG"
-    run run_romp new -t --env FEATURE_FLAG=1 x
-    [ "$status" -eq 2 ]
-    [[ "$output" == *"need the default (SDK) session"* ]]
-    run run_romp new -t --no-env x
-    [ "$status" -eq 2 ]
-    [[ "$output" == *"need the default (SDK) session"* ]]
-    [ "$(grep -c 'tmux new-session' "$MOCK_LOG")" -eq 0 ]
 }
 
 @test "new: help names --env (the same presence guard as --model/--effort)" {
