@@ -215,13 +215,16 @@ reply the lift); an already-blocked node is unblocked by romp first. When the
 worker never mailed that peer, nothing could end the wait, so the kernel RELAYS
 it: the block's why goes to the delegating peer as the worker's own question
 (kind question, from the worker, "<worker> cannot move further: <why>", marked
-relayed in the row, the header and the inbox's bookkeeping comment, on a far
-host too), once per block off a marker the judge leaves on the node (each
-marker has an identity that its queue entry and the record settling it name,
-and the node remembers the markers it settled, so a block filed again with
-the same words after a lift is a new marker nothing older can settle, and a
-holder stale across two relays never re-mints the first; two holders that
-mint a marker for one wait converge on the published one) and an entry the
+relayed in the row and the header, on a far host too, the row naming the
+marker so a send whose record was lost is adopted and never repeated; a why
+that speaks romp is scrubbed to the question, and romp's own procedural whys
+ride as the plain lead-in alone), once per block off a marker the judge
+leaves on the node (each marker has an identity, the block's evidence time
+and the peer, that its queue entry and the record settling it name, and the
+node remembers the markers it settled, so a block filed again after a lift is
+a new marker nothing older can settle, an ended wait's unsent marker is never
+reused for a new wait, a holder stale across two relays never re-mints the
+first, and two holders filing one wait mint one marker) and an entry the
 saver holding the store writes to a queue directory once its own publish
 carried the marker (one file per entry, so the two writers never rewrite
 each other's list; another holder's save of the same session flushes nothing
@@ -236,9 +239,13 @@ stays pending by its id up to the far host's delivered row or the peer's
 answer (the pending stamp survives every holder's save), and a refusal the
 bus cannot retry (no live recipient, a message that came back, with the far
 host's reason) reverts the node to your block with the refusal in its why,
-since nobody can be asked; each record lands before its entry is spent. A
-block filed again after the peer's reply ended the wait relays again; a block
-re-asserted on a standing wait never does. A top is attributed to the
+since nobody can be asked (filed at the bounce's own time, so a lift that
+landed after it outranks it); a pending relay whose wait ended another way is
+withdrawn from the far host's outbox; a dead worker's block is not relayed;
+each record lands before its entry is spent. A block filed again after the
+peer's reply ended the wait relays again; a block re-asserted on a standing
+wait never does. Your own follow-up on a delegated card, newer than the
+delegation and the standing wait, keeps its block yours. A top is attributed to the
 delegate mail its anchor names (the delegate-kind marker of the delivery that
 is a dispatch to this session, never one quoted from another session's, so a
 batched inbox whose first mail is a peer's heads-up still belongs to the

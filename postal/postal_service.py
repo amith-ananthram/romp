@@ -552,7 +552,7 @@ def _walk_root_record(frm_id):
 
 
 def deliver(to_id, from_name, from_id, body, park=False, kind="", from_host="",
-            relay_mid="", relay_via="", tracked=False, user_ask=None, relayed=False):
+            relay_mid="", relay_via="", tracked=False, user_ask=None, relayed=False, relay_marker=""):
     # relayed=True (T334, 2026-09-11): romp sent this on the SENDER's behalf (the kernel relaying a worker's block
     # toward the peer that delegated its goal, as the worker's own question). The header and the row say so, so
     # the recipient and the courier can tell it from a typed ask; the message is otherwise ordinary mail.
@@ -570,7 +570,8 @@ def deliver(to_id, from_name, from_id, body, park=False, kind="", from_host="",
     # it (read_box/restore queue it into the readbox). The maildir file is the durable record: the
     # receipt route survives a bus restart exactly as long as the unread mail does.
     relayed = bool(relayed) and kind == "question"   # the invariant every path shares (the /send gate, the far side's
-    mb = _mailbox(to_id)                             #   deliver, a held message's approve): only a question is relayed
+    relay_marker = str(relay_marker or "")[:64] if relayed else ""   # deliver, a held message's approve): only a question
+    mb = _mailbox(to_id)                             #   is relayed; the marker (the kernel's relay identity) rides with it
     name = _unique()
     tmp = mb / "tmp" / name
     # THE header write point — every value that lands in a header line goes through _hdr_val
@@ -600,6 +601,8 @@ def deliver(to_id, from_name, from_id, body, park=False, kind="", from_host="",
         hdr += "X-Peer-Mid: %s\nX-Peer-Via: %s\n" % (h["relay_mid"], h["relay_via"])
     if relayed:
         hdr += "X-Relayed: romp\n"                  # sent by romp on the sender's behalf (T334)
+    if relay_marker:
+        hdr += "X-Relay-Marker: %s\n" % relay_marker   # the kernel's marker id: the row is its authoritative record
     tmp.write_text(hdr + "\n" + body + "\n")
     # Timeline log: a message was SENT (the matching exec event is logged when
     # the recipient consumes it in read_box). id = maildir filename joins the two.
@@ -611,6 +614,8 @@ def deliver(to_id, from_name, from_id, body, park=False, kind="", from_host="",
         ev["kind"] = kind                            # additive (consumer contract above)
     if relayed:
         ev["relayed"] = True                         # additive (consumer contract above): romp relayed it (T334)
+    if relay_marker:
+        ev["relayMarker"] = relay_marker             # additive: the kernel finds a send it lost the record of by this
     if tracked:
         ev["tracked"] = True                         # additive (consumer contract above): report-back
         #                                              delegation — the row is the flag's ONE record;
@@ -899,8 +904,6 @@ def format_inbox(msgs, me_id=""):
         mid = ("\n<!-- romp-msg-id: %s -->" % m["id"]) if m.get("id") else ""   # exact id for the timeline join
         if m.get("kind"):
             mid += "\n<!-- romp-msg-kind: %s -->" % m["kind"]   # sender-declared kind, read by the courier
-        if m.get("relayed"):
-            mid += "\n<!-- romp-msg-relayed -->"               # romp sent it on the sender's behalf (T334)
         out.append("\n— from %s%s%s:\n%s%s" % (_from_disp(m), d, pk, m.get("body", ""), mid))
     out.append("\n" + REPLY_HINT)
     return "\n".join(out)
@@ -988,7 +991,8 @@ def format_receipts(recs):
             st = "delivered %s (not read yet) · id %s" % (_hhmm_epoch(r["relayed"]), r.get("id", "?"))
         else:                                  # still unread -> recallable; show the id to target it
             st = "pending (not read yet) · id %s" % r.get("id", "?")
-        out.append("  → %-18s sent %s · %s" % (r.get("to", "?"), _hhmm_epoch(r["sent"]), st))
+        out.append("  → %-18s sent %s · %s%s" % (r.get("to", "?"), _hhmm_epoch(r["sent"]), st,
+                                                  " · sent on your behalf" if r.get("onBehalf") else ""))
     return "\n".join(out)
 
 # ───────────────────────── the bus (server) ─────────────────────────
@@ -1604,6 +1608,8 @@ def _sent_receipts(mid):
         r = {"to": e.get("toName") or _name(e.get("to_id", "")), "id": i, "sent": e["t"],
              "exec": execs.get(i), "recalled": recalls.get(i),
              "relayed": relays.get(i), "bounced": bounced.get(i), "parked": h}
+        if e.get("relayed"):
+            r["onBehalf"] = True                     # romp sent it on this session's behalf (T334): the receipt says so
         if r["bounced"]:
             r["bouncedWhy"] = bounced_why.get(i, "")   # additive: an older client ignores it
         if h:
@@ -1842,8 +1848,6 @@ def format_push(msgs):
             out.append("<!-- romp-msg-id: %s -->" % m["id"])   # exact id for the timeline join
         if m.get("kind"):
             out.append("<!-- romp-msg-kind: %s -->" % m["kind"])   # sender-declared kind, read by the courier
-        if m.get("relayed"):
-            out.append("<!-- romp-msg-relayed -->")               # romp sent it on the sender's behalf (T334)
         out.append(bar)
     out.append('(to reply, only if substantive: romp mail send --kind delegate|coordinate|question %s "...")'
                % msgs[0].get("from", ""))
@@ -2325,6 +2329,7 @@ class Handler(BaseHTTPRequestHandler):
             if rerr:
                 return self._send({"error": rerr}, 400)
             relayed = relayed and kind == "question"
+            relay_marker = str(data.get("relayMarker") or "")[:64] if relayed else ""   # the kernel's marker id (T334)
             #   (the user 2026-08-24): only a delegate can be tracked; wire metadata only — nothing
             #   about the flag ever appears in message prose (the injected-voice rule)
             if _postal_off(frm_id):                # the sender is in isolation → sending is disabled
@@ -2373,6 +2378,8 @@ class Handler(BaseHTTPRequestHandler):
                 if relayed:
                     relay_msg["relayed"] = True    # the far side's deliver marks it (T334): a relayed question
                     #                                reaches a far-host manager marked, exactly as a local one does
+                    if relay_marker:
+                        relay_msg["relayMarker"] = relay_marker
                 # `to_sid` (2026-09-08): the recipient's STABLE id, the same value the wire's toId
                 # carries. The row used to name the recipient only ("<host>:<name>"), so every
                 # reader of the wait (the kernel's wait maps, the judge's ask maps) had to join it
@@ -2392,7 +2399,8 @@ class Handler(BaseHTTPRequestHandler):
                                                      "toName": "%s:%s" % (phost, hit.get("name") or to),
                                                      "to_sid": str(hit.get("id") or ""),
                                                      "body": body, "kind": kind,
-                                                     **({"relayed": True} if relayed else {})}):   # as deliver's row (T334)
+                                                     **({"relayed": True} if relayed else {}),   # as deliver's row (T334)
+                                                     **({"relayMarker": relay_marker} if relay_marker else {})}):
                     return self._send({"ok": False, "error": NOT_RECORDED_TEXT}, 503)
                 if not outbox_put(phost, relay_msg):
                     _tl_append("messages.jsonl", {"t": int(time.time()), "ev": "bounced", "id": mid,
@@ -2411,7 +2419,8 @@ class Handler(BaseHTTPRequestHandler):
                                    "note": _parked_note(phost, frm_id) + tnote})
             a0 = res["agent"]
             try:
-                mid = deliver(a0["id"], frm, frm_id, body, kind=kind, tracked=tracked, relayed=relayed)
+                mid = deliver(a0["id"], frm, frm_id, body, kind=kind, tracked=tracked, relayed=relayed,
+                              relay_marker=relay_marker)
             except DeliveryNotRecorded as e:
                 # 503 + ok:false (see the relay leg): nothing was published; the sender retries.
                 return self._send({"ok": False, "error": str(e)}, 503)
@@ -2669,6 +2678,8 @@ def _rebuild_rows_for_rowless_mail(box, sent, ended):
             row["kind"] = meta["x-kind"]
         if meta.get("x-relayed"):
             row["relayed"] = True                    # romp sent it on the sender's behalf (T334)
+        if meta.get("x-relay-marker"):
+            row["relayMarker"] = str(meta.get("x-relay-marker"))[:64]
         row["from_host"] = meta.get("x-from-host", "")
         if meta.get("x-peer-mid"):
             row["originMid"] = meta["x-peer-mid"]
@@ -3786,6 +3797,8 @@ def _quarantine_put(origin, m, to_id, via="", wire_id=None):
         rec["userAsk"] = m["userAsk"]                # held with its provenance; approve replays it (T126)
     if m.get("relayed"):
         rec["relayed"] = True                        # held with its mark; approve replays it (T334)
+        if m.get("relayMarker"):
+            rec["relayMarker"] = str(m.get("relayMarker"))[:64]
     try:
         QUARANTINE.mkdir(parents=True, exist_ok=True)
         tmp = QUARANTINE / (mid + ".tmp")
@@ -3918,7 +3931,8 @@ def quarantine_decide(mid, action, text=None, feedback=None):
             deliver(to_id, rec.get("frm") or "?", rec.get("frmId") or "", body, kind=rec.get("kind") or "",
                     from_host=rec.get("origin") or "",
                     relay_mid=rec.get("mid") or "", relay_via=rec.get("via") or rec.get("origin") or "",
-                    user_ask=rec.get("userAsk"), relayed=bool(rec.get("relayed")))
+                    user_ask=rec.get("userAsk"), relayed=bool(rec.get("relayed")),
+                    relay_marker=str(rec.get("relayMarker") or ""))
         except DeliveryNotRecorded as e:
             return False, "%s — the held message is untouched" % e
         quarantine_del(mid)
@@ -3993,7 +4007,8 @@ def _relay_in(host, m, token_proven=False):
                         kind=m.get("kind") or "", from_host=origin,
                         relay_mid=mid, relay_via=host,       # read-receipt route: back through the direct peer
                         user_ask=m.get("userAsk"),           # origin-kernel walked record rides through (T126)
-                        relayed=bool(m.get("relayed")))      # romp sent it on the sender's behalf (T334)
+                        relayed=bool(m.get("relayed")),      # romp sent it on the sender's behalf (T334)
+                        relay_marker=str(m.get("relayMarker") or ""))
             except DeliveryNotRecorded as e:
                 # nothing landed → NOT acked and not marked seen: silence crosses the wire as
                 # 'retry', the sender's outbox keeps it parked and re-relays it next exchange

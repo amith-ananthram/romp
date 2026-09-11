@@ -12830,6 +12830,12 @@ def block_addressee_via(store, nd, why):
         return None, None
     if not _delegator_of(store, str(nd.get("id") or "")):
         return None, None
+    nodes = store.get("nodes", {})
+    tn = nodes.get(_top_of(nodes, str(nd.get("id") or "")) or "") or {}
+    since = max(int(tn.get("t") or 0), int(nd.get("awaitingAt") or 0) if nd.get("awaitingKind") == "peer" else 0)
+    if int(_floor_of(store, nd) or 0) > since:
+        return None, None                              # the USER's own follow-up on the delegated card (the floor, newer than
+                                                       #   the delegation and the standing wait): their decision, never relayed
     ho = nd.get("handoff") if isinstance(nd.get("handoff"), dict) else None
     if ho and ho.get("peer") and ":" not in str(ho["peer"]):
         return str(ho["peer"]), "ask"                 # a block on a "delegated to <peer>" tracker under a delegated goal waits
@@ -12864,6 +12870,9 @@ def file_block(store, nd, src, why, ev_t, t=None, seg=None):
     kind "peer" or "block"; landed True when a verdict was written."""
     peer, via = block_addressee_via(store, nd, why)
     if not peer:
+        if isinstance(nd.get("relayWanted"), dict):        # the block is the user's: a peer wait's unsent marker on this
+            _relay_mark_settled(nd, nd.pop("relayWanted").get("id") or "")   #   node (the wait ended, or the user's
+        #                                                    follow-up reclaimed the card) is settled, never relayed
         return "block", bool(record_verdict(store, nd, src, "block", ev_t, why=why, seg=seg))
     if any(e.get("kind") in ("awaiting", "done") and (e.get("lift") or e.get("kind") == "done")
            and _wait_end_ev(e) > (ev_t or 0) for e in nd.get("log") or []):
@@ -12875,8 +12884,12 @@ def file_block(store, nd, src, why, ev_t, t=None, seg=None):
         return "peer", False                           # the standing block is the ladder's escalation or an interrupt, romp's
                                                        #   own once-ever record: a re-asserted judge block never lifts it
     prior_standing = nd.get("awaitingKind") == "peer" and peer in (nd.get("awaitingPeers") or ())   # read BEFORE any write:
-    if not prior_standing:                            #   record_verdict materializes awaitingKind at once (the manager's
-        nd.pop("relayed", None)                       #   third review); a wait that ended takes its relay record with it
+    #                                                   record_verdict materializes awaitingKind at once (the manager's third review)
+    if not prior_standing and isinstance(nd.get("relayWanted"), dict):
+        old = nd.pop("relayWanted")                    # the ENDED wait's marker, still unsent: a new wait never reuses it (the
+        _relay_mark_settled(nd, old.get("id") or "")   #   tick would relay the old words for the new question, or its stand-down
+        #                                                of the old id would leave a wait with nothing to end it; the manager's
+        #                                                fifth review); its entry, if one exists, is spent as settled
     landed = False
     if nd.get("blocked"):
         landed = bool(record_verdict(store, nd, "romp", "unblock", ev_t)) or landed
@@ -12885,20 +12898,21 @@ def file_block(store, nd, src, why, ev_t, t=None, seg=None):
                                      await_kind="peer", await_peers=[peer], seg=seg)) or landed
     # a peer wait on the same peer already standing is not re-filed, whatever the re-asserted words: the stamp keeps
     # its since-time, so the relay sent after it (and the peer's reply after that) end exactly this wait
-    if via == "delegator" and not prior_standing and not isinstance(nd.get("relayWanted"), dict):
+    if via == "delegator" and not prior_standing:  # a fresh marker for every new wait (the ended wait's went above)
         nd["relayWanted"] = {"peer": peer, "why": str(why), "t": int(t if t is not None else ev_t),
-                             "id": _relay_marker_id(t if t is not None else ev_t)}   # its identity: the records that
-        _relay_enqueue(store, nd)                  #   settle it name it. The kernel's relay tick sends it as the worker's
-        landed = True                              #   question, once per block: a re-asserted block on a standing
-                                                   #   relayed wait never relays twice
+                             "id": _relay_marker_id(t if t is not None else ev_t, peer)}   # its identity: the records
+        _relay_enqueue(store, nd)                  #   that settle it name it. The kernel's relay tick sends it as the
+        landed = True                              #   worker's question, once per block: a re-asserted block on a
+                                                   #   standing relayed wait never relays twice
     return "peer", landed
 
 
-def _relay_marker_id(ev_t):
-    """A relay marker's identity: the block's evidence time and a nonce. The records that settle a marker (relayed,
-    relayDone) name it and the queue entry carries it, so a re-block with the same words after a lift is a new marker
-    nothing older can settle (the manager's fourth review)."""
-    return "%d-%s" % (int(ev_t or 0), secrets.token_hex(4))
+def _relay_marker_id(ev_t, peer=""):
+    """A relay marker's identity: the block's evidence time and the peer. The records that settle a marker (relayed,
+    relayDone) name it and the queue entry carries it, so a re-block after a lift (later evidence) is a new marker
+    nothing older can settle (the manager's fourth review), while two holders filing ONE wait (the same evidence, the
+    same peer) mint the same id and each other's records settle it (the fifth review)."""
+    return "%d-%s" % (int(ev_t or 0), str(peer or "")[:8] or "peer")
 
 
 RELAY_SETTLED_CAP = 8        # settled marker ids a node remembers (relaySettled), newest last
@@ -12956,7 +12970,8 @@ def _relay_write_entry(sid, nid, marker="", rev=0):
     try:
         d = _relay_queue_dir()
         d.mkdir(parents=True, exist_ok=True)
-        tmp = d / (".tmp-%s-%d" % (re.sub(r"[^A-Za-z0-9_.-]", "_", nid), os.getpid()))
+        tmp = d / (".tmp-%s-%d-%s" % (re.sub(r"[^A-Za-z0-9_.-]", "_", nid), os.getpid(), secrets.token_hex(3)))
+        #             the judge's flush and the tick's rewrite share one process: a private name each
         tmp.write_text(json.dumps({"sid": sid, "nid": nid, "t": int(time.time()), "marker": str(marker or ""),
                                    "rev": int(rev or 0)}))
         tmp.rename(_relay_entry_path(sid, nid))

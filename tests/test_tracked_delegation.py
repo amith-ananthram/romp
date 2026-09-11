@@ -92,7 +92,7 @@ class PostalTrackedWire(unittest.TestCase):
                       "a checked boolean: the string \"false\" used to arm tracking")
         self.assertIn('tracked = tracked and kind == "delegate"', PSRC)
         self.assertIn("`tracked` deliberately does NOT ride the relay", PSRC)
-        self.assertIn('mid = deliver(a0["id"], frm, frm_id, body, kind=kind, tracked=tracked, relayed=relayed)', PSRC)   # T334: relayed rides too
+        self.assertIn('mid = deliver(a0["id"], frm, frm_id, body, kind=kind, tracked=tracked, relayed=relayed,', PSRC)   # T334: relayed rides too
 
     def test_mcp_and_cli_expose_the_flag(self):
         self.assertIn('"tracked": {"type": "boolean"', PSRC, "the send_message schema offers it")

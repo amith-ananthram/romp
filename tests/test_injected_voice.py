@@ -135,6 +135,10 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
             # index, so it shipped saying "goal" twice and announcing "(Automated re-check…)" until
             # 2026-08-11 — exactly the drift this index exists to catch
             "awaiting backstop": km.AWAITING_BACKSTOP_TEXT,
+            # the relayed question (T334): a worker's block toward the peer that delegated its work, sent as the
+            # worker's own words; the why is the closer's prose, scrubbed of any clause that speaks romp
+            "relayed question": km._relay_body("api", "which client should the exporter target?"),
+            "relayed question (procedural why)": km._relay_body("api", jd.NUDGE_BLOCK_WHY),
             # a comment thread's opening message (the user 2026-08-13): the highlight + comment are
             # the user's own words; the quoting frame around them is romp-authored and scanned here
             "comment thread opener": km._comment_first_message(
@@ -269,8 +273,11 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
             if name in ("typed follow-up on a summary",
                         "debt reminder (question)", "debt reminder (handoff)",
                         "debt reminder (several)", "comment thread opener", "edit trace",
-                        "comment-thread merge", "compaction suggestion"):
-                #        ^ a housekeeping suggestion, not a progress ask — it elicits nothing
+                        "comment-thread merge", "compaction suggestion",
+                        "relayed question", "relayed question (procedural why)"):
+                #        ^ a housekeeping suggestion, not a progress ask: it elicits nothing; and the relayed
+                #          question is a WORKER's question to the peer that delegated its work, in the worker's
+                #          words, never a progress ask to the user (T334)
                 continue
             text = prose(body).lower()
             with self.subTest(message=name):
