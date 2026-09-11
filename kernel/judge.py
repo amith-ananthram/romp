@@ -11017,6 +11017,7 @@ def _plan_session(fsid, path, now):
         return 0
     _PLANNER_STATS["planned"] += 1
     store = load_goals(fsid)
+    _judge_ctx.relay_turns = (str(fsid), session.get("turns") or [])   # the block writer's excerpt source (T334 relay)
     if _heal_quote_titles(store) + _heal_floor_titles(fsid, store) \
             + _heal_ticket_titles(store):              # + ticket-led titles (T146, the live-failure heal)
         save_goals(fsid, store)                       # own words; raw-head → the landed prompt caption), both
@@ -12944,10 +12945,173 @@ def file_block(store, nd, src, why, ev_t, t=None, seg=None):
     if via == "delegator" and not prior_standing:  # a fresh marker for every new wait (the ended wait's went above)
         nd["relayWanted"] = {"peer": peer, "why": str(why), "t": int(t if t is not None else ev_t),
                              "id": _relay_marker_id(t if t is not None else ev_t, peer, nd.get("id"))}   # its identity:
+        ctx = _relay_context_for(store, t if t is not None else ev_t)   # the conversation the question ends, for the peer
+        if ctx:
+            nd["relayWanted"]["context"] = ctx
         _relay_enqueue(store, nd)                  #   that settle it name it. The kernel's relay tick sends it as the
         landed = True                              #   worker's question, once per block: a re-asserted block on a
                                                    #   standing relayed wait never relays twice
     return "peer", landed
+
+
+RELAY_CONTEXT_BYTES_DEFAULT = 24 * 1024     # the conversation excerpt a relayed question carries: 24 KiB of text
+RELAY_CONTEXT_KNOB = Path(os.path.expanduser("~/.config/romp/relay-context-bytes"))
+_RELAY_MARKER_RE = re.compile(r"<!--\s*romp-[^>]*-->")
+
+
+def relay_context_bytes():
+    """The bound on the conversation excerpt a relayed question carries, in bytes of text: $ROMP_RELAY_CONTEXT_BYTES,
+    else the first non-comment line of ~/.config/romp/relay-context-bytes, else RELAY_CONTEXT_BYTES_DEFAULT (24 KiB,
+    about six thousand tokens: a typical three-to-eight-turn exchange whole, well under a tenth of a peer's window, and
+    far under the bus's megabyte). Read at CALL time like the other ~/.config/romp knobs, so the user raises it
+    without a release; a value that is not a positive integer is ignored (said once per value)."""
+    for raw, src in ((os.environ.get("ROMP_RELAY_CONTEXT_BYTES"), "$ROMP_RELAY_CONTEXT_BYTES"), (_relay_knob_line(), str(RELAY_CONTEXT_KNOB))):
+        if raw is None:
+            continue
+        try:
+            n = int(str(raw).strip().replace("_", ""))
+            if n > 0:
+                return n
+        except ValueError:
+            pass
+        if raw not in _RELAY_KNOB_SAID:
+            _RELAY_KNOB_SAID.add(raw)
+            sys.stderr.write("relay context: %s holds %r, not a positive integer; the default stands\n" % (src, raw))
+    return RELAY_CONTEXT_BYTES_DEFAULT
+
+
+_RELAY_KNOB_SAID = set()
+
+
+def _relay_knob_line():
+    try:
+        for line in RELAY_CONTEXT_KNOB.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                return line
+    except OSError:
+        return None
+    return None
+
+
+def _relay_turn_text(turn, who):
+    """One turn of the conversation as the peer will read it: the user's prompt text and the assistant's reply text,
+    labelled, in order; tool calls collapsed to one line with their count (the code the assistant WROTE stays in its
+    text; the tool noise goes); romp's own markers stripped. Empty when the turn holds no text."""
+    lines, tools = [], 0
+    for a in turn.get("atoms") or []:
+        if a.get("lazy") is not None:
+            em.hydrate([a])                                # a body before the assembly cut: read on demand
+        msg = a.get("message") or {}
+        role = msg.get("role") or a.get("type")
+        blocks = msg.get("content") or []
+        if isinstance(blocks, str):
+            blocks = [{"type": "text", "text": blocks}]
+        tools += sum(1 for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use")
+        text = "\n".join(str(b.get("text") or "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
+        text = _RELAY_MARKER_RE.sub("", text).strip()
+        if not text:
+            continue
+        lines.append(("user: " if role == "user" else "%s: " % (who or "assistant")) + text)
+    if tools:
+        lines.append("(%d tool call%s)" % (tools, "" if tools == 1 else "s"))
+    return "\n".join(lines)
+
+
+def _relay_units(text):
+    """A turn's text as atomic units for shortening: a fenced code block is ONE unit (never cut), else a paragraph."""
+    units, cur, fence = [], [], None
+    for line in text.split("\n"):
+        m = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if fence is None and m:
+            if cur:
+                units.append(("text", "\n".join(cur))); cur = []
+            fence = m.group(1); cur = [line]
+            continue
+        if fence is not None:
+            cur.append(line)
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
+                units.append(("code", "\n".join(cur))); cur = []; fence = None
+            continue
+        if not line.strip():
+            if cur:
+                units.append(("text", "\n".join(cur))); cur = []
+            continue
+        cur.append(line)
+    if cur:
+        units.append(("code" if fence is not None else "text", "\n".join(cur)))
+    return units
+
+
+def _relay_shorten(text, budget):
+    """The question's own turn when it alone exceeds the bound: its LAST complete units that fit (paragraphs, and code
+    blocks kept whole or left out whole with a line saying so), under a line saying what was left out."""
+    units = _relay_units(text)
+    kept, size, dropped_code = [], 0, 0
+    for kind, u in reversed(units):
+        n = len(u.encode("utf-8")) + 2
+        if size + n > budget:
+            if kind == "code":
+                dropped_code += 1
+                note = "(a code block of %d lines left out)" % u.count("\n")
+                if size + len(note) + 2 <= budget:
+                    kept.append(note); size += len(note) + 2
+                continue
+            break
+        kept.append(u); size += n
+    kept.reverse()
+    out = "\n\n".join(kept)
+    left = max(0, len(text) - len(out))
+    return "(shortened: this turn's earlier %d characters left out)\n\n%s" % (left, out) if left else out
+
+
+def _relay_excerpt(turns, upto_t, budget, who=""):
+    """The conversation a relayed question sits in, for the peer: whole turns only, selected newest first from the
+    turn the question ends (always included, shortened only when it alone exceeds the bound) back while they fit
+    the bound, shown oldest first under a line that says how many turns are shown and how many earlier ones were left
+    out. Turns are the parse's (event_model): the user's prompt text and the assistant's reply text, tool calls
+    collapsed to a count. Empty when there is nothing to show."""
+    upto = int(upto_t or 0)
+    sel = [t for t in turns or [] if int(t.get("t") or 0) <= upto] or list(turns or [])[-1:]
+    rendered = [(i, _relay_turn_text(t, who)) for i, t in enumerate(sel)]
+    rendered = [(i, txt) for i, txt in rendered if txt]
+    if not rendered:
+        return ""
+    total = len(rendered)
+    kept, size = [], 0
+    for k in range(total - 1, -1, -1):
+        i, txt = rendered[k]
+        n = len(txt.encode("utf-8")) + 40
+        if not kept:
+            if n > budget:
+                txt = _relay_shorten(txt, max(256, budget - 40))
+                n = len(txt.encode("utf-8")) + 40
+            kept.append((i, txt)); size += n
+            continue
+        if size + n > budget:
+            break
+        kept.append((i, txt)); size += n
+    kept.reverse()
+    shown, left = len(kept), total - len(kept)
+    head = "The conversation this question ends, oldest first: %d of %d turn%s" % (shown, total, "" if total == 1 else "s")
+    head += (", the %d earlier one%s left out." % (left, "" if left == 1 else "s")) if left else "."
+    parts = [head] + ["--- turn %d of %d ---\n%s" % (i + 1, total, txt) for i, txt in kept]
+    return "\n\n".join(parts)
+
+
+def _relay_context_for(store, t):
+    """The excerpt for a marker filed on `store` at evidence time `t`, from the parsed turns the judging pass left on
+    the thread (_judge_ctx.relay_turns, set by _close_session and _plan_session for the session they hold); None when
+    the pass left none for this session (a boot conversion, a hand-run), so the marker rides without an excerpt."""
+    held = getattr(_judge_ctx, "relay_turns", None)
+    sid = str(store.get("rompUuid") or "")
+    if not held or str(held[0]) != sid:
+        return None
+    try:
+        return _relay_excerpt(held[1], t, relay_context_bytes(), who=_peer_name(sid) or "") or None
+    except Exception as e:
+        _log_judge_error("relay-context", sid, "the excerpt could not be built (%r); the question rides alone" % (e,))
+        return None
 
 
 def _relay_marker_id(ev_t, peer="", nid=""):
@@ -14099,6 +14263,7 @@ def _close_session(fsid, path, now, cap=CLOSE_FAIRNESS):
     swept = _closed_turns(store)
     sig = dict(store.get("closedSig") or {})
     turns = session["turns"]
+    _judge_ctx.relay_turns = (str(fsid), turns)      # the block writer's excerpt source (T334 relay)
     newly, did, cut = [], 0, False
     for ti, turn in enumerate(turns):
         if _turn_open(turn, turns):
