@@ -13018,7 +13018,11 @@ def _relay_turn_text(turn, who):
         text = _RELAY_MARKER_RE.sub("", text).strip()
         if not text:
             continue
-        lines.append(("user: " if role == "user" else "%s: " % (who or "assistant")) + text)
+        label = "user:" if role == "user" else "%s:" % (who or "assistant")
+        # a one-line text sits after its label; a text that opens with a code fence or spans lines goes UNDER the
+        # label on its own lines, so a fence opener stays at a line start (the review: a label on the fence's line
+        # hid the opener from the shortener, which then cut the block mid-fence)
+        lines.append(label + (" " + text if "\n" not in text and not re.match(r"^\s*(`{3,}|~{3,})", text) else "\n" + text))
     if tools:
         lines.append("(%d tool call%s)" % (tools, "" if tools == 1 else "s"))
     return "\n".join(lines)
@@ -13105,14 +13109,12 @@ def _relay_excerpt(turns, upto_t, budget, who=""):
     collapsed to a count. Empty when there is nothing to show."""
     upto = int(upto_t or 0)
     sel = [t for t in turns or [] if int(t.get("t") or 0) <= upto]   # nothing at or before the block's evidence: no excerpt
-    rendered = [(i, _relay_turn_text(t, who)) for i, t in enumerate(sel)]
-    rendered = [(i, txt) for i, txt in rendered if txt]
-    if not rendered:
-        return ""
-    total = len(rendered)
+    total = len(sel)
     kept, size = [], 0
-    for k in range(total - 1, -1, -1):
-        i, txt = rendered[k]
+    for i in range(total - 1, -1, -1):                     # newest first, rendered (and hydrated) one turn at a time: the
+        txt = _relay_turn_text(sel[i], who)                #   walk stops at the bound, so a long session's history is
+        if not txt:                                        #   never read for two turns' worth of excerpt (the review)
+            continue
         n = len(txt.encode("utf-8")) + 40
         if not kept:
             if n > budget:
@@ -13123,8 +13125,10 @@ def _relay_excerpt(turns, upto_t, budget, who=""):
         if size + n > budget:
             break
         kept.append((i, txt)); size += n
+    if not kept:
+        return ""
     kept.reverse()
-    shown, left = len(kept), total - len(kept)
+    shown, left = len(kept), kept[0][0]                    # every turn before the oldest shown was left out (or empty)
     head = "The conversation this question ends, oldest first: %d of %d turn%s" % (shown, total, "" if total == 1 else "s")
     head += (", the %d earlier one%s left out." % (left, "" if left == 1 else "s")) if left else "."
     parts = [head] + ["--- turn %d of %d ---\n%s" % (i + 1, total, txt) for i, txt in kept]

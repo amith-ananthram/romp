@@ -223,7 +223,8 @@ ends, quoted whole inside a fence: whole turns, the question's own always,
 earlier ones newest first while they fit the bound, shown oldest first with a
 line saying how many were left out, the user's prompts and the worker's
 replies with tool calls collapsed to a count and code blocks never cut, a turn
-with no paragraph break keeping its last lines; the bound is 24 KiB of text by
+with no paragraph break keeping its last lines, read newest first only as far
+as the bound reaches; the bound is 24 KiB of text by
 default, a knob at ~/.config/romp/relay-context-bytes or
 $ROMP_RELAY_CONTEXT_BYTES, read at call time and capped at 768 KiB, so you
 raise it without a release), once per block off a marker the judge

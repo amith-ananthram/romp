@@ -2996,9 +2996,10 @@ def _bus_send_relay(payload):
     response carries the bus's id and, for a far host, "parked"."""
     try:
         conn = http.client.HTTPConnection("127.0.0.1", BUS_PORT, timeout=12)
-        try:
-            conn.request("POST", "/send", json.dumps(payload), {"Content-Type": "application/json", "X-Romp-Token": TOKEN})
-        except Exception as e:
+        try:                                           # UTF-8 on the wire: an escaped non-ASCII body would be six times its
+            conn.request("POST", "/send", json.dumps(payload, ensure_ascii=False).encode("utf-8"),   # bytes, past the bus's
+                         {"Content-Type": "application/json; charset=utf-8", "X-Romp-Token": TOKEN})   # limit the excerpt's cap
+        except Exception as e:                         #   is set against (the review)
             return False, repr(e), False, {}           # never written: a plain retry
         try:
             resp = conn.getresponse()

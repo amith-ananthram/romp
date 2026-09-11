@@ -8,6 +8,7 @@ relayed question with only its last turn for context). Pinned on synthetic turns
 - the closer's block stores the excerpt on the marker, and the kernel's relay carries it inside a fence longer than
   any run of backticks it holds, the why alone scrubbed."""
 import contextlib
+import inspect
 import io
 import json
 import os
@@ -72,6 +73,33 @@ class Excerpt(unittest.TestCase):
         out = jd._relay_excerpt([t], T0, 4096, who="api")
         self.assertIn("user: run it\napi: done, three files changed\n(3 tool calls)", out)
         self.assertNotIn("romp-msg", out)
+
+    def test_a_reply_that_opens_with_a_fence_keeps_its_opener_at_a_line_start(self):
+        code = "```python\n" + "\n".join("v%d = %d" % (i, i) for i in range(40)) + "\n```"
+        big = turn(T0, "show me", code + "\n\nwhich variant?")
+        out = jd._relay_excerpt([big], T0, 4096, who="api")
+        self.assertIn("api:\n```python\n", out, "the label stands above a fenced text, so the opener starts its line")
+        short = jd._relay_excerpt([big], T0, 300, who="api")
+        self.assertIn("(a code block of 41 lines left out)", short, "the shortener sees the fence whole and leaves it out whole")
+        self.assertNotIn("v20 = 20", short)
+        self.assertIn("which variant?", short)
+        multi = jd._relay_excerpt([turn(T0, "two\nlines", "one line")], T0, 4096, who="api")
+        self.assertIn("user:\ntwo\nlines\napi: one line", multi, "a multi-line text goes under its label; a one-liner beside it")
+
+    def test_only_the_turns_the_excerpt_shows_are_rendered_and_hydrated(self):
+        turns = [turn(T0 + i, "prompt %d " % i + "x" * 200, "reply %d " % i + "y" * 200) for i in range(4000)]
+        for t in turns:                                    # every atom lazy: a hydrate is a body read
+            for a in t["atoms"]:
+                a["lazy"] = {"path": "synthetic", "off": 0}
+        hydrated = []
+        real = jd.em.hydrate
+        jd.em.hydrate = lambda atoms: hydrated.extend(atoms)
+        try:
+            out = jd._relay_excerpt(turns, T0 + 3999, 2000, who="api")
+        finally:
+            jd.em.hydrate = real
+        self.assertIn("4 of 4000 turns, the 3996 earlier ones left out", out)
+        self.assertLessEqual(len(hydrated), 5 * 2, "only the turns walked (the kept ones and the one that did not fit) are read: %d" % len(hydrated))
 
     def test_a_fenced_block_is_never_cut(self):
         code = "```python\n" + "\n".join("line %d = %d" % (i, i) for i in range(60)) + "\n```"
@@ -222,6 +250,11 @@ class OnTheMarkerAndInTheMail(unittest.TestCase):
         jd.save_goals(WORKER, st)
         self.assertEqual(km._relay_tick(NOW), 1)
         self.assertEqual(self.sent[0]["body"], "api cannot move further: which client?")
+
+    def test_the_wire_carries_utf8_so_the_cap_is_the_bus_s(self):
+        src = inspect.getsource(self._orig)                  # the real sender (the fixture stubs km._bus_send_relay)
+        self.assertIn('json.dumps(payload, ensure_ascii=False).encode("utf-8")', src, "no six-fold escape of non-ASCII on the wire")
+        self.assertIn("charset=utf-8", src)
 
     def test_the_body_fence_outgrows_any_run_inside(self):
         body = km._relay_body("api", "which port?", "text with ````` five backticks\nand ``` three")
