@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""The served restart test for the per-session host (T315, stage 4 of #1317): a hermetic kernel with the
+"""The kernel-restart test for the per-session host (T315, stage 4 of #1317), end to end through a real kernel
+process (no browser: this file is deliberately NOT named `_served.py`, the suffix CI's extension job collects for
+the browser-backed page tests and runs with ROMP_SERVED_TESTS_REQUIRE=1, which would turn the SDK-venv skip below
+into a failure on a runner that has no venv): a hermetic kernel with the
 session-hosts setting ON runs a session whose fake CLI takes twenty seconds over a turn; the kernel is sent
 SIGTERM five seconds in (the manager's restart: a drain that now DETACHES); a second kernel boots on the same
 state directory, attaches to the live host, and the turn finishes under it: the session settles waiting, the
