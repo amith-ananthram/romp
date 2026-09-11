@@ -75,7 +75,10 @@ const results = {};
 let page;
 for (const pass of cfg.passes) {
   page = await browser.newPage({ viewport: { width: pass.width, height: pass.height }, deviceScaleFactor: 2, hasTouch: !!pass.touch });
-  if (pass.storage) await page.addInitScript((st) => { for (const k in st) localStorage.setItem(k, st[k]); }, pass.storage);
+  // the seed stands for what an earlier visit left behind, so it is written ONCE, by the top document: an init script
+  // re-runs in every child frame as it attaches or navigates, and the shell's panes load lazily AFTER its boot, so an
+  // unguarded seed would replay the stale value over the boot's own save (the close of a hidden control's pane)
+  if (pass.storage) await page.addInitScript((st) => { if (self !== top) return; for (const k in st) localStorage.setItem(k, st[k]); }, pass.storage);
   await page.goto(cfg.shell);
   await page.waitForSelector("#f-chat", { timeout: 20000 });
   await page.waitForTimeout(1500);   // the panes' boots
