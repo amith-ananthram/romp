@@ -483,10 +483,11 @@ class FoldTailSafety(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertLessEqual(len(em._TRAILING_CACHE), em._TRAILING_CACHE_MAX)
 
-    def test_f_a_pin_lost_to_eviction_re_reads_and_keeps_the_tail(self):
+    def test_f_a_pin_lost_to_eviction_keeps_the_tail_without_a_re_read(self):
         # the reader's entry can be evicted (its own LRU) between the read and the pin: a None entry with records in
-        # hand is a lost pin, not "the reader holds nothing" — it re-reads once and answers with the tail, as for a pin
-        # lost to a peer's advance
+        # hand is a lost pin, not "the reader holds nothing". It used to re-read once; since the reader remembers the
+        # entry it served on this thread (T323 stage 3), the pin holds through the eviction and the tail rides on the
+        # one read
         cache = {}
         _append(self.p, {"n": 1})
         with open(self.p, "a") as f:
@@ -502,8 +503,8 @@ class FoldTailSafety(unittest.TestCase):
                     em._JSONL_CACHE.pop(str(path), None)                       # gone from under the fold
             return recs
         with mock.patch.object(em, "_read_jsonl_incremental", evicted_once):
-            self.assertEqual(em.fold_records(cache, self.p, list, self._step), [1, 2], "re-read once; the tail rides")
-        self.assertEqual(len(calls), 2)
+            self.assertEqual(em.fold_records(cache, self.p, list, self._step), [1, 2], "one read; the tail rides")
+        self.assertEqual(len(calls), 1, "the served entry is remembered: no re-read for a pin lost to eviction")
         self.assertEqual(cache[self.p][0], 1)
 
     def test_c_a_bg_cache_shaped_for_the_other_view_is_refused_loudly(self):

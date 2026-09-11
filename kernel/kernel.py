@@ -525,7 +525,10 @@ class _PerfStats:
                 # sharedHits = every hit. A boot with no client reads kernel 0.
                 "parses": dict(parses, total=int(getattr(jd, "parse_misses", lambda: 0)()),
                                judge=max(0, int(getattr(jd, "parse_misses", lambda: 0)()) - parses["kernel"]),
-                               sharedHits=int(getattr(jd, "parse_hits", lambda: 0)()))}
+                               sharedHits=int(getattr(jd, "parse_hits", lambda: 0)())),
+                # T323 stage 3: the folds' checkpoints: restored, written, swept at boot, folds skipped as unencodable,
+                # fallbacks per reason (version, path, shrunk, guard, rewrite, corrupt) and the bytes the reader read
+                "checkpoints": em.checkpoint_stats()}
 
 
 _PERF_STATS = _PerfStats()
@@ -729,7 +732,7 @@ def _last_machine_cut(sid):
         if o.get("machineCut"):
             return (float(o.get("t") or 0), str(o["machineCut"]))   # the NEWEST row decides
         return state
-    return _fold_records(_machine_cut_cache, p, lambda: (0.0, ""), step)
+    return _fold_records(_machine_cut_cache, p, lambda: (0.0, ""), step, ckpt="machineCut")
 
 
 def _machine_cut_cause(users, i, cut_t=0.0, cut_cause=""):
@@ -9043,6 +9046,53 @@ def _tick_job_skips(job, s):
 
 
 _load_tick_seen()               # the previous kernel's last evaluations, if it left them
+try:
+    em.checkpoint_sweep()       # checkpoints of files that are gone (cleared, removed sessions) leave with the boot (T323 stage 3)
+except Exception:
+    pass
+
+
+_CKPT_SETTLE_SEEN = {}          # sid -> (turn-end key, states-log stat) at the last checkpoint write of its files
+
+
+def _session_fold_files(sid, leaf):
+    """The files whose folds belong to session `sid` with leaf transcript `leaf`: the leaf, its states log, the agent
+    files under its subagents/ directory, and the shared postal log (written on any session's event)."""
+    out = {str(leaf), str(jd.STATE / "states" / (sid + ".jsonl")), str(jd.STATE / "timeline" / "messages.jsonl")}
+    try:
+        sd = Path(str(leaf)).with_suffix("") / "subagents"
+        if sd.is_dir():
+            out.update(str(p) for p in sd.glob("*.jsonl"))
+    except OSError:
+        pass
+    return out
+
+
+def _persist_checkpoints(now):
+    """Write the fold checkpoints whose files belong to a session with NEW settle evidence: its turn-end key (the
+    Stop hook's lastStopAt, else a stopped states transition) or its states log's stat moved since the last write for
+    it. A session whose turn runs for hours still writes at every states-log row (a working/awaiting transition is an
+    event; a timer is not). Only dirty checkpoints are written; a session with no evidence change writes nothing.
+    Exit writes everything dirty (_drain_and_exit). Returns how many files were written."""
+    dirty = set(em.checkpoint_dirty())
+    if not dirty:
+        return 0
+    written = 0
+    for s in _sessions(now):
+        sid, leaf = s.get("sid"), s.get("path")
+        if not sid or not leaf:
+            continue
+        key = (_turn_end_key(sid), _stat_key(jd.STATE / "states" / (sid + ".jsonl")))
+        if _CKPT_SETTLE_SEEN.get(sid) == key:
+            continue
+        mine = _session_fold_files(sid, leaf) & dirty
+        if mine:
+            written += em.checkpoint_write_dirty(sorted(mine))
+            dirty -= mine
+        _CKPT_SETTLE_SEEN[sid] = key
+    if len(_CKPT_SETTLE_SEEN) > 4096:
+        _CKPT_SETTLE_SEEN.clear()
+    return written
 
 
 def _interrupt_block_tick(now, tmux):
@@ -24120,7 +24170,7 @@ def _pending_ledger(path):
     2026-09-11): there a romp-authored echo (a nudge) waiting in the CLI's queue must count as waiting like
     any other, where the display fold drops it on purpose (it is not the user's queued input). Same cache
     as the display fold, so the read is free on a quiet transcript."""
-    return [c.strip() for c, _ts in _fold_records(_queued_parse_cache, path, list, _queue_ledger_step)
+    return [c.strip() for c, _ts in _fold_records(_queued_parse_cache, path, list, _queue_ledger_step, ckpt="queueLedger")
             if isinstance(c, str) and c.strip()]
 
 
@@ -24131,7 +24181,7 @@ def _pending_queued_meta(path):
     chain could share an id the ledger copy wore, and an id the chat latched from it would make it reject
     the echo and the landing as another send's (the review of the first cut). The chat reads this route
     by text; `qid` is None on every copy."""
-    pending = _fold_records(_queued_parse_cache, path, list, _queue_ledger_step)
+    pending = _fold_records(_queued_parse_cache, path, list, _queue_ledger_step, ckpt="queueLedger")
     out = []
     for text, ts in pending:
         if not _genuine_queued(text):
@@ -24275,7 +24325,7 @@ def _undelivered_wake_tail(path):
                     kept.append(e)
                 tail = kept
         return (tail, n)
-    tail, _n = _fold_records(_wake_tail_cache, path, lambda: ([], 0), step)
+    tail, _n = _fold_records(_wake_tail_cache, path, lambda: ([], 0), step, ckpt="wakeTail")
     tail = [dict(e) for e in tail]                           # callers get their own copies of the carried entries
     return (tail, (tail[-1]["pos"], tail[-1]["ts"]) if tail else None)
 
@@ -25514,7 +25564,7 @@ def _states_awaiting_overlay(sid):
     the fold's own cache clears whole above 256 entries, the shared idiom. Counters ride GET /perf under
     memos.statesOverlay."""
     p = jd.STATE / "states" / ("%s.jsonl" % sid)
-    last, working_after = _fold_records(_states_overlay_cache, p, _states_overlay_init, _states_overlay_step,
+    last, working_after = _fold_records(_states_overlay_cache, p, _states_overlay_init, _states_overlay_step, ckpt="statesOverlay",
                                         on=functools.partial(_states_overlay_on, str(p)))
     if last is not None and last.get("awaiting") and working_after:
         return {"awaiting": False, "why": None}            # stale true — superseded by a later work turn
@@ -25687,7 +25737,7 @@ def _states_notes(sid):
         if isinstance(v, str) and v:
             state["gestures"].append({"t": int(t), "cmd": v})
         return state
-    return _fold_records(_states_notes_cache, p, lambda: {k: [] for k in _NOTE_KEYS}, step)
+    return _fold_records(_states_notes_cache, p, lambda: {k: [] for k in _NOTE_KEYS}, step, ckpt="statesNotes")
 
 
 def _retry_recoveries(sid):
@@ -25839,7 +25889,7 @@ def _bg_scan_cached(path):
     Shared by the chat box (_bg_tasks) and the awaiting source (_session_awaiting source 0.75).
     Folds append-incrementally since 2026-09-03 (em.fold_records): a streaming session no longer re-
     pairs its whole transcript per record."""
-    return em.scan_bg_tasks_cached(path, _bgtasks_cache, want_all=False)
+    return em.scan_bg_tasks_cached(path, _bgtasks_cache, want_all=False, ckpt="bgRunning")
 
 
 _bgall_cache = {}             # path -> em.fold_records entry (every task, launch-ordered)
@@ -25851,7 +25901,7 @@ def _bg_scan_all_cached(path):
     push, this one only by the awaiting-stamp lift, and sharing one entry would make each invalidate the
     other's shape.
     Folds append-incrementally since 2026-09-03 (em.fold_records), like _bg_scan_cached."""
-    return em.scan_bg_tasks_cached(path, _bgall_cache, want_all=True)
+    return em.scan_bg_tasks_cached(path, _bgall_cache, want_all=True, ckpt="bgAll")
 
 
 def _session_started_face(nodes, nid, healed):
@@ -26159,7 +26209,7 @@ def _agent_launch_ids(agent_path):
     transcript half of _awaiting_nest's attribution: a background command whose tool_use id is in THIS
     file was launched by THIS agent. set() when unreadable."""
     try:
-        return em.fold_records(_AGENT_LAUNCH_IDS_CACHE, str(agent_path), _launch_ids_fresh, _launch_ids_step)
+        return em.fold_records(_AGENT_LAUNCH_IDS_CACHE, str(agent_path), _launch_ids_fresh, _launch_ids_step, ckpt="agentLaunchIds")
     except Exception:
         return set()
 
@@ -26173,7 +26223,7 @@ def _agent_steps(agent_path):
     either way); the running preview's clock (agentGist: calls/since/last) rides only while it runs."""
     _chat_dep_note_taskout(str(agent_path), _chat_stat_key(str(agent_path)))   # a growing agent file moves the key
     try:
-        st = em.fold_records(_AGENT_GIST_CACHE, str(agent_path), _gist_fresh, _gist_step)
+        st = em.fold_records(_AGENT_GIST_CACHE, str(agent_path), _gist_fresh, _gist_step, ckpt="agentGist")
     except Exception:
         return None
     if not st["since"]:
@@ -26215,7 +26265,7 @@ def _launch_step(state, o):
 
 
 def _agent_launch_state(path):
-    return em.fold_records(_AGENT_LAUNCH_CACHE, str(path), _launch_fresh, _launch_step)
+    return em.fold_records(_AGENT_LAUNCH_CACHE, str(path), _launch_fresh, _launch_step, ckpt="agentLaunches")
 
 
 def _agent_alive(row, agent_id, tm, spawned_at):
@@ -31257,7 +31307,7 @@ def _apply_pending_ops(now=None):
 # gitBranch / version on every user+assistant record and permissionMode on user records, and the model
 # rides each assistant message — it writes no system:init atom, so the event model never carries them.
 _GLOBAL_CLAUDE_MD = Path(os.path.expanduser("~/.claude/CLAUDE.md"))   # overridable in tests
-_session_meta_cache = {}   # path -> ((mtime,size), {...})
+_session_meta_cache = {}   # path -> fold_records cursor (count, gen, meta) (T323 stage 3)
 
 
 
@@ -31727,44 +31777,35 @@ def _session_meta(path):
     # contract — a grown file returns a NEW list whose prefix objects are the SAME — is the identity
     # gate here: newest-of-each-field wins, so folding only the appended records over the carried
     # meta is exact; a rewrite (prefix identity lost) re-folds from record 0.
-    recs = em._read_jsonl_incremental(path)
-    hit = _session_meta_cache.get(path)
-    start = 0
-    meta = {"cwd": "", "gitBranch": "", "version": "", "permissionMode": "", "lastEditPath": ""}
-    if hit is not None:
-        n0, last0, meta0 = hit
-        if n0 == len(recs) and (n0 == 0 or recs[-1] is last0):
-            return meta0
-        if 0 < n0 < len(recs) and recs[n0 - 1] is last0:
-            meta, start = dict(meta0), n0
+    return _fold_records(_session_meta_cache, str(path), _session_meta_fresh, _session_meta_step, ckpt="sessionMeta")
+
+
+def _session_meta_fresh():
+    return {"cwd": "", "gitBranch": "", "version": "", "permissionMode": "", "lastEditPath": ""}
+
+
+def _session_meta_step(meta, o):
+    """One record of _session_meta's fold (T323 stage 3: the hand-rolled cursor moved onto fold_records, so the meta
+    resumes from the checkpoint like every other fold): the newest of each field wins."""
     try:
-        for o in recs[start:]:
-                if not isinstance(o, dict):
-                    continue
-                if o.get("cwd"):
-                    meta["cwd"] = o["cwd"]
-                if o.get("gitBranch"):
-                    meta["gitBranch"] = o["gitBranch"]
-                if o.get("version"):
-                    meta["version"] = o["version"]
-                if o.get("type") == "user" and o.get("permissionMode"):
-                    meta["permissionMode"] = o["permissionMode"]
-                if o.get("type") == "assistant":
-                    try:
-                        for blk in (o.get("message") or {}).get("content") or []:
-                            if (isinstance(blk, dict) and blk.get("type") == "tool_use"
-                                    and blk.get("name") in _EDIT_TOOLS):
-                                fp = (blk.get("input") or {}).get("file_path") or \
-                                     (blk.get("input") or {}).get("notebook_path")
-                                if isinstance(fp, str) and fp.startswith("/"):
-                                    meta["lastEditPath"] = fp
-                    except Exception:
-                        pass
+        if o.get("cwd"):
+            meta["cwd"] = o["cwd"]
+        if o.get("gitBranch"):
+            meta["gitBranch"] = o["gitBranch"]
+        if o.get("version"):
+            meta["version"] = o["version"]
+        if o.get("type") == "user" and o.get("permissionMode"):
+            meta["permissionMode"] = o["permissionMode"]
+        if o.get("type") == "assistant":
+            for blk in (o.get("message") or {}).get("content") or []:
+                if (isinstance(blk, dict) and blk.get("type") == "tool_use"
+                        and blk.get("name") in _EDIT_TOOLS):
+                    fp = (blk.get("input") or {}).get("file_path") or \
+                         (blk.get("input") or {}).get("notebook_path")
+                    if isinstance(fp, str) and fp.startswith("/"):
+                        meta["lastEditPath"] = fp
     except Exception:
         pass
-    if len(_session_meta_cache) > 256:                       # bounded by fleet size; never unbounded
-        _session_meta_cache.clear()
-    _session_meta_cache[path] = (len(recs), recs[-1] if recs else None, meta)
     return meta
 
 
@@ -36567,7 +36608,7 @@ def _state_intervals(sid, want, now):
     rebuild used to re-read and re-parse the whole file, twice per session (once per `want`); the
     intervals themselves are cheap."""
     want = {want} if isinstance(want, str) else set(want)
-    ev = sorted(_fold_records(_state_ev_cache, jd.STATE / "states" / (sid + ".jsonl"), list, _state_ev_step))
+    ev = sorted(_fold_records(_state_ev_cache, jd.STATE / "states" / (sid + ".jsonl"), list, _state_ev_step, ckpt="stateIntervals"))
     cutoff, out = now - TL_HORIZON, []
     for i, (t, st) in enumerate(ev):
         if st not in want:
@@ -37869,7 +37910,7 @@ def _postal_messages(now, alive_sids, id2name, live_sids=None):
     host's lane by bare sid, and a connector whose far end matches nothing is dropped by the view's
     lane lookup, exactly like before. `live_sids` = the TRUE live set for the pending flag's
     recipient-liveness leg (alive_sids is the broader LANE set); None skips that leg."""
-    log = _fold_records(_postal_log_cache, jd.STATE / "timeline" / "messages.jsonl", _postal_log_fresh, _postal_log_step)
+    log = _fold_records(_postal_log_cache, jd.STATE / "timeline" / "messages.jsonl", _postal_log_fresh, _postal_log_step, ckpt="postalLog")
     sent, execd, ended = log["sent"], log["execd"], log["ended"]
     if not sent:
         return []
@@ -46147,6 +46188,10 @@ def _pusher_cycle_jobs(now, tmux, any_client):
         _persist_tick_seen()              # moved it (T323 stage 1): the next kernel's first look starts from here
     except Exception:
         sys.stderr.write("tick-seen: %s\n" % traceback.format_exc())
+    try:                                  # the folds' checkpoints, written for a session at its settle or a states-log
+        _persist_checkpoints(now)         # move (T323 stage 3): the next kernel folds the tails, not the files
+    except Exception:
+        sys.stderr.write("checkpoints: %s\n" % traceback.format_exc())
     try:                                  # hitting a usage limit auto-engages the retry-pause (before the resume check)
         _auto_pause_on_limit()
     except Exception:
@@ -56079,6 +56124,10 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
     _exit_log("romp-kernel: %s, draining SDK sessions\n" % what)
     try:
         _persist_tick_seen(force=True)    # the tick jobs' memo for the next kernel's first look (T323 stage 1)
+    except Exception:
+        pass
+    try:
+        em.checkpoint_write_dirty()       # every fold checkpoint that moved since its last write (T323 stage 3)
     except Exception:
         pass
     try:

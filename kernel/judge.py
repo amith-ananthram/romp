@@ -67,6 +67,8 @@ _ls_mod = importlib.util.module_from_spec(_ls_spec)
 _ls_spec.loader.exec_module(_ls_mod)
 load_source = _ls_mod.load_source   # file-path imports with load_module()'s sys.modules semantics (kernel/loadsource.py)
 em = load_source("romp_event_model", HERE / "event_model.py")
+em.set_checkpoint_dir(lambda: STATE / "checkpoints")   # T323 stage 3: the fold checkpoints live under the state root, read at
+#                                                        call time so _rebind_state moves them with everything else
 _cred = sys.modules.get("romp_credentials") or load_source("romp_credentials", HERE / "credentials.py")
 
 HOME     = Path.home()
@@ -8670,7 +8672,7 @@ def _bg_unresolved(path, now=None):
     planner key's expiry term and the gate's not-before, so none of them can disagree at the crossing);
     the wall clock otherwise."""
     # folds append-incrementally since 2026-09-03: a changed transcript steps only its appended records
-    tasks = em.scan_bg_tasks_cached(path, _BG_SCAN_CACHE)
+    tasks = em.scan_bg_tasks_cached(path, _BG_SCAN_CACHE, ckpt="bgJudge")
     # expiry is applied OUTSIDE the cache with a fresh now: a monitor whose CLI died mid-watch has no
     # terminal record, and an idle transcript never busts the mtime key — a cached verdict would say
     # "running" forever (see em._bg_expired)
@@ -8693,7 +8695,7 @@ def _bg_expiry_key(path, now):
     computed is planned every pass; the settle's own call then raises as it does today."""
     try:
         return tuple(sorted((str(t.get("id") or ""), bool(em._bg_expired(t, now)))
-                            for t in em.scan_bg_tasks_cached(path, _BG_SCAN_CACHE)))
+                            for t in em.scan_bg_tasks_cached(path, _BG_SCAN_CACHE, ckpt="bgJudge")))
     except Exception:
         return object()
 
@@ -8712,7 +8714,7 @@ def _settle_not_before(fsid, path, now):
     launch the judged world held (the transcript is append-only; a launch that landed after the pass's
     pin moves the parse pair anyway). Never recomputed on a skip: with an unchanged signature the task
     set is unchanged, so the stored instant is exact."""
-    tasks = em.scan_bg_tasks_cached(path, _BG_SCAN_CACHE)
+    tasks = em.scan_bg_tasks_cached(path, _BG_SCAN_CACHE, ckpt="bgJudge")
     sp = _cli_epoch(fsid)
     nb = None
     for t in tasks:
