@@ -718,7 +718,7 @@ def _interrupt_cause(nxt_atom):
     cuts romp itself caused and is already continuing (via the injected resume notice) — never a
     user-chosen stop, so they must not suppress the nudge nor paint the "you stopped this" badge (the
     user 2026-07-14). Pure per-atom classifier; _machine_cut_cause owns FINDING the notice."""
-    if nxt_atom.get("lazy") is not None: em.hydrate([nxt_atom])   # a body before the assembly cut: read on demand (T323 stage 4a)
+    if nxt_atom is not None and nxt_atom.get("lazy") is not None: em.hydrate([nxt_atom])   # a body before the cut (T323 stage 4a)
     body = (_atom_user_text(nxt_atom) or "") if nxt_atom else ""
     if INTR_RESTART_SIG in body:
         return "restart"
