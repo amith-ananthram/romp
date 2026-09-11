@@ -20,6 +20,7 @@ import { ctxFallbackColor, pickTone, readableRgb } from "./ctx-color";
 import { applyTheme } from "./theme";
 import { applyDenseChrome } from "./dense-chrome";
 import { SessionViews, viewVisible, viewsKey, revealIn, viewTagUnion, viewTags, type TagUnion, type SessionTag } from "./session-views";
+import { applyTailAfter, prependHead, appendMore, mergeWindow, historyLabel, indexOfUuid } from "./chat-window";   // the uuid-anchored wire (T323 stage 4b)
 import { mintWriteId, ackOutcome, adoptViews, seqOf, capsAdopts, announcedSeq, announcedAfter, createInFlight, rederivePending, lensBlob, applyLensFields, type InflightWrite, type LensFields, type TagEditOp, type ViewsAck } from "./views-writes";
 import { lensVisible, surfaceLens } from "./tag-lens";
 import { openTagMenu, tagMenuButton, syncTagFilter, tagChip } from "./tag-menu";
@@ -323,7 +324,7 @@ interface BgTasks { count: number; tasks: BgTask[]; }
 // kernel ships only the last WIRE_TAIL events (headFrom > 0) to keep startup light; older history streams in
 // on scroll-back (loadOlder → chatHead prepends, lowering headFrom). headFrom 0 = the whole transcript is
 // resident. chatTail's `from` is GLOBAL and mapped through headFrom.
-interface Session { id: string; name: string; color: Color | null; events: ChatEvent[]; status: Status; firstSeen?: number; cwd?: string; gitBranch?: string; workTree?: { dir: string; branch: string } | null; githubRepo?: string | null; headFrom?: number; headTotal?: number; bgTasks?: BgTasks; hideFromFeed?: boolean; postalServiceOff?: boolean; notify?: boolean; branch?: { fromSid: string; fromName: string; cut: string; t: number } | null; branches?: { sid: string; name: string; cut: string; t: number }[] | null; sub?: SubInfo; }
+interface Session { id: string; name: string; color: Color | null; events: ChatEvent[]; status: Status; firstSeen?: number; cwd?: string; gitBranch?: string; workTree?: { dir: string; branch: string } | null; githubRepo?: string | null; headFrom?: number; headTotal?: number | null; proto?: number; headKnown?: boolean; firstUuid?: string | null; lastUuid?: string | null; detached?: boolean; bgTasks?: BgTasks; hideFromFeed?: boolean; postalServiceOff?: boolean; notify?: boolean; branch?: { fromSid: string; fromName: string; cut: string; t: number } | null; branches?: { sid: string; name: string; cut: string; t: number }[] | null; sub?: SubInfo; }
 // A SUBAGENT VIEWER pseudo-session (plans/subagent-transcripts.md): a read-only tab whose events are one
 // agent's own transcript, fed by {type:"subagent"} frames. Client-only — the kernel never lists it in
 // tabOrder (reconcileTabOrder keeps a known, never-kernel-seen id), so it lives exactly as long as the
@@ -2625,6 +2626,13 @@ function paintGlowRuler(): void {
   ruler.style.height = rulerH + "px";
   ruler.style.left = (rect.right - RULER_W) + "px";
   ruler.replaceChildren();
+  // the strip's words (T323 stage 4b): a proto-2 session shows NO count of older history until the head has been
+  // reached (historyLabel says "older history" and nothing more); an index session's count is its headFrom
+  const sAct = activeId ? liveSession(activeId) : null;
+  const stripLabel = sAct && sAct.proto === 2
+    ? historyLabel(sAct.headKnown === true, sAct.events.length, sAct.headTotal ?? null)
+    : (sAct && (sAct.headFrom ?? 0) > 0 ? (sAct.headFrom ?? 0) + " older" : "");
+  ruler.title = stripLabel; ruler.setAttribute("aria-label", stripLabel);
   for (const b of bands) {
     const band = el("div", "glow-ruler-band");
     band.style.top = (capH + b.top / scrollH * mapH) + "px";
@@ -10234,6 +10242,13 @@ function scrollToAnchor(uuid: string): boolean {
                 || v.el.querySelector(`.turn[data-mid="${cssEscape(uuid)}"]`)
                 || v.el.querySelector(`.turn[data-mids~="${cssEscape(uuid)}"]`)
                 || v.el.querySelector(`.turn[data-uuids~="${cssEscape(uuid)}"]`)) as HTMLElement | null;
+    } else if (s && s.proto === 2 && (olderOnServer(s) || s.detached)) {
+      // proto 2 (T323 stage 4b): the anchor is outside the resident run — ONE window around it (chatWindow lands it)
+      if (requestAround(activeId, uuid) || loadingOlder.has(activeId)) {
+        pendingOlderAnchor.set(activeId, uuid);
+        pendingOlderKeepY.delete(activeId);
+        pendingAnchor = uuid; anchorPendingOlder = true; landTrail.push("pointer-fetch-window"); return false;
+      }
     } else if (s && (s.headFrom ?? 0) > 0) {
       // The anchor is OLDER than the resident tail — the chat ships only WIRE_TAIL events and streams older
       // history in on demand, so a deep-link to a message past the tail had nothing to match and honest-failed
@@ -10320,7 +10335,7 @@ function landNearestMoment(t: number): boolean {
   if (!target) { landTrail.push("time-nearest-miss"); return false; }
   landTrail.push("time-nearest");
   landOn(target as HTMLElement, uuid || undefined);
-  const beforeHead = headEp != null && t < headEp && (s.headFrom ?? 0) > 0;
+  const beforeHead = headEp != null && t < headEp && olderOnServer(s);
   landToast(beforeHead
     ? "that link points at a moment before the loaded history — landed at the oldest loaded message"
     : "that link points at a time, not a message — landed at the closest one");
@@ -12344,7 +12359,7 @@ function virtualizeToViewport(): void {
   const s = liveSession(activeId);
   if (!v || !content || !s) return;
   const total = v.unitTotal ?? 0;
-  const moreOnServer = (s.headFrom ?? 0) > 0;   // older history not yet resident (wire tail-windowing)
+  const moreOnServer = olderOnServer(s);   // older history not yet resident (wire tail-windowing; proto 2: the head not reached)
   if (total === 0 || ((v.winStart ?? 0) === 0 && (v.winEnd ?? total) >= total && !moreOnServer)) return; // everything rendered + resident
   // CHEAP pre-check first (this runs on EVERY scroll): is the viewport comfortably inside the rendered band?
   // Only when it nears a rendered edge do we pay the precise unit walk + re-render. Without this, every scroll
@@ -12360,6 +12375,8 @@ function virtualizeToViewport(): void {
   // At the top of the RESIDENT events with older history still on the server → fetch the previous chunk
   // (loadOlder → chatHead). winStart 0 ⇒ no top spacer left to expand into; topH is 0 so this is "near 0".
   if (moreOnServer && (v.winStart ?? 0) === 0 && st < topH + edgePx) { requestOlder(activeId, v, content); return; }
+  // At the bottom of a DETACHED proto-2 window (an older window with more after it) → the next page (loadNewer → chatMore)
+  if (s.detached && (v.winEnd ?? total) >= total && st + vh > renderedBottom - edgePx) { requestNewer(activeId); return; }
   const nearTopEdge = (v.winStart ?? 0) > 0 && st < topH + edgePx;
   const nearBotEdge = (v.winEnd ?? total) < total && st + vh > renderedBottom - edgePx;
   if (!nearTopEdge && !nearBotEdge) return;   // window comfortably covers the viewport
@@ -15618,7 +15635,13 @@ function upsert(msg: any) {
     githubRepo: ("githubRepo" in msg) ? (msg.githubRepo ?? null) : (prev ? prev.githubRepo : null),
     // A trimmed full send carries headFrom/headTotal; a whole-transcript send omits them (headFrom 0).
     headFrom: kept && prev ? prev.headFrom : (msg.headFrom ?? 0),
-    headTotal: kept && prev ? prev.headTotal : (msg.headTotal ?? events.length),
+    headTotal: kept && prev ? prev.headTotal : (msg.proto === 2 ? (msg.headTotal ?? null) : (msg.headTotal ?? events.length)),
+    // the uuid-anchored wire (T323 stage 4b): the frame says its shape (proto 2); a frame without it is an index frame
+    proto: kept && prev ? prev.proto : (msg.proto === 2 ? 2 : undefined),
+    headKnown: kept && prev ? prev.headKnown : (msg.proto === 2 ? !!msg.headKnown : undefined),
+    firstUuid: kept && prev ? prev.firstUuid : (msg.proto === 2 ? (msg.firstUuid ?? (events[0] as { uuid?: string } | undefined)?.uuid ?? null) : undefined),
+    lastUuid: kept && prev ? prev.lastUuid : (msg.proto === 2 ? (msg.lastUuid ?? null) : undefined),
+    detached: kept && prev ? prev.detached : false,
     bgTasks: ("bgTasks" in msg) ? msg.bgTasks : (prev ? prev.bgTasks : undefined),
     hideFromFeed: ("hideFromFeed" in msg) ? !!msg.hideFromFeed : (prev ? prev.hideFromFeed : undefined),
     postalServiceOff: ("postalServiceOff" in msg) ? !!msg.postalServiceOff : (prev ? prev.postalServiceOff : undefined),
@@ -15764,7 +15787,7 @@ const emptyFrameDiagSent = new Set<string>();   // sids whose empty session fram
 // delta for a session we hold nothing of; skeleton-click = the active tab is a skeleton; prefetch = the idle
 // chain; skeleton-delta = a delta for a tab held as skeleton (a contract violation). The return-to-tab harness
 // counts asks by it — a nobase on a reconnect row means the skeleton branch missed a frame type.
-type NeedFullWhy = "gap" | "nobase" | "skeleton-click" | "prefetch" | "skeleton-delta";
+type NeedFullWhy = "gap" | "nobase" | "skeleton-click" | "prefetch" | "skeleton-delta" | "reattach";   // reattach: a proto-2 window walked back to the tail (T323 stage 4b)
 function requestFullSession(id: string, why: NeedFullWhy): void {
   if (!id || awaitingFull.has(id)) return;
   awaitingFull.add(id);
@@ -15800,7 +15823,16 @@ function chatTail(msg: any) {
     return;
   }
   // msg.from is a GLOBAL transcript index; the resident events are the tail [headFrom, …) → map to local.
-  const from = (msg.from | 0) - (s.headFrom || 0);
+  // A proto-2 tail (T323 stage 4b) names the last unchanged event by uuid instead: the suffix starts after it.
+  let from = (msg.from | 0) - (s.headFrom || 0);
+  if (typeof msg.afterUuid === "string") {
+    const kernelEvents = s.events.filter((e) => !isOptimistic(e) && !isHeldGroup(e));
+    const at = indexOfUuid(kernelEvents as { uuid?: string }[], msg.afterUuid);
+    if (at < 0) { requestFullSession(msg.id, "gap"); return; }   // the anchor is not resident: a gap, whatever opened it
+    from = at + 1;
+    const inc = (msg.events || []) as ChatEvent[];
+    s.lastUuid = inc.length ? ((inc[inc.length - 1] as { uuid?: string }).uuid ?? s.lastUuid) : (kernelEvents[at] as { uuid?: string }).uuid ?? s.lastUuid;
+  }
   // The kernel's coordinate space ends at ITS OWN events — our injected optimistic bubbles are not in it.
   // Comparing `from` against the inflated length masked a genuine 1-event gap (the repair below never
   // fired, PR #107's desync class), and a delta starting exactly one past kernel truth landed BEYOND
@@ -15839,6 +15871,7 @@ function chatTail(msg: any) {
   // view stale so the window is rebuilt from the events that actually remain.
   const shrank = s.events.length < wasLen;
   if (typeof msg.total === "number") s.headTotal = msg.total;
+  if (s.proto === 2 && s.headKnown) s.headTotal = s.events.reduce((n, e) => n + (isOptimistic(e) || isHeldGroup(e) ? 0 : 1), 0);   // the whole is resident: its count
   const before = awaitKey(s.status);
   if (msg.status) s.status = msg.status;
   if ("ledger" in msg) ledgers.set(msg.id, msg.ledger ?? null);
@@ -15890,10 +15923,21 @@ function chatHead(msg: any) {
   const s = sessions.get(msg.id);
   if (!s) { forget(msg.id); return; }
   const before = msg.before | 0, from = msg.from | 0;
-  if (before !== (s.headFrom ?? 0)) { forget(msg.id); return; }   // stale / overlapping → ignore
   const older = (msg.events || []) as ChatEvent[];
-  if (older.length) s.events = older.concat(s.events);
-  s.headFrom = from;
+  if (typeof msg.beforeUuid === "string") {
+    // proto 2 (T323 stage 4b): the reply names the resident oldest; a stale one (the oldest moved on) is ignored,
+    // a missing anchor is the honest end of the search, and `more: false` is the head: the count exists from here
+    if (msg.missing) { forget(msg.id); return; }
+    const next = prependHead(s.events as { uuid?: string }[], msg.beforeUuid, older as { uuid?: string }[]);
+    if (!next) { forget(msg.id); return; }
+    s.events = next as ChatEvent[];
+    s.firstUuid = (s.events[0] as { uuid?: string } | undefined)?.uuid ?? null;
+    if (msg.more === false) { s.headKnown = true; s.headTotal = s.events.reduce((n, e) => n + (isOptimistic(e) || isHeldGroup(e) ? 0 : 1), 0); }
+  } else {
+    if (before !== (s.headFrom ?? 0)) { forget(msg.id); return; }   // stale / overlapping → ignore
+    if (older.length) s.events = older.concat(s.events);
+    s.headFrom = from;
+  }
   const v = views.get(msg.id);
   if (msg.id !== activeId) { forget(msg.id); if (v) v.stale = true; return; }
   // re-anchor: reset the active view so it re-windows around the saved row (now further down s.events), and
@@ -15919,12 +15963,12 @@ function chatHead(msg: any) {
 // when there's nothing older to fetch (headFrom 0) or a fetch is already in flight.
 function fetchOlderForAnchor(sid: string, uuid: string): boolean {
   const s = sessions.get(sid);
-  if (!s || (s.headFrom ?? 0) <= 0 || loadingOlder.has(sid)) return false;
+  if (!s || !olderOnServer(s) || loadingOlder.has(sid)) return false;
   pendingOlderAnchor.set(sid, uuid);
   pendingOlderKeepY.delete(sid);   // a DEEP-LINK: land it properly (top-align + flash), not offset-preserved
   loadingOlder.add(sid);
   showLoadingPill();
-  vscodeApi?.postMessage({ type: "loadOlder", id: sid, before: s.headFrom });
+  vscodeApi?.postMessage({ type: "loadOlder", id: sid, before: s.proto === 2 ? s.firstUuid : s.headFrom });
   return true;
 }
 
@@ -15943,7 +15987,7 @@ function fetchOlderForAnchor(sid: string, uuid: string): boolean {
 // its own offset, and the fetch becomes invisible again — which is all it was ever supposed to be.
 function requestOlder(sid: string, v: View, content: HTMLElement): void {
   const s = sessions.get(sid);
-  if (!s || (s.headFrom ?? 0) <= 0 || loadingOlder.has(sid)) return;
+  if (!s || !olderOnServer(s) || loadingOlder.has(sid)) return;
   const keep = captureScrollAnchor(content, v);
   const anchor = keep?.uuid
     || (v.el.querySelector(".turn[data-uuid]") as HTMLElement | null)?.dataset.uuid
@@ -15953,7 +15997,80 @@ function requestOlder(sid: string, v: View, content: HTMLElement): void {
   if (anchor) { pendingOlderAnchor.set(sid, anchor); pendingOlderKeepY.set(sid, keep?.y ?? 0); }
   loadingOlder.add(sid);
   showLoadingPill();
-  vscodeApi?.postMessage({ type: "loadOlder", id: sid, before: s.headFrom });
+  vscodeApi?.postMessage({ type: "loadOlder", id: sid, before: s.proto === 2 ? s.firstUuid : s.headFrom });
+}
+
+// ── the uuid-anchored wire's other two requests (T323 stage 4b, proto 2) ──────────────────────────────────
+// Older history exists on the server: for an index session while headFrom > 0; for a proto-2 session until the
+// head has been reached (headKnown). A proto-2 client never holds a count before that, so nothing shows one.
+function olderOnServer(s: Session): boolean {
+  return s.proto === 2 ? s.headKnown !== true : (s.headFrom ?? 0) > 0;
+}
+// A deep-link anchor past the resident run: ONE round trip for a window around it (chatWindow), instead of the
+// index wire's fetch-older-until-resident loop. False when nothing can be asked (an index session, a request in flight).
+function requestAround(sid: string, uuid: string): boolean {
+  const s = sessions.get(sid);
+  if (!s || s.proto !== 2 || loadingOlder.has(sid)) return false;
+  pendingOlderAnchor.set(sid, uuid);
+  pendingOlderKeepY.delete(sid);
+  loadingOlder.add(sid);
+  showLoadingPill();
+  vscodeApi?.postMessage({ type: "loadAround", id: sid, uuid });
+  return true;
+}
+// The page after a DETACHED window's newest event (the reader scrolled to its bottom): chatMore appends it, and
+// `more: false` means the live tail is resident again — the kernel's deltas resume from there.
+function requestNewer(sid: string): void {
+  const s = sessions.get(sid);
+  if (!s || s.proto !== 2 || !s.detached || !s.lastUuid || loadingOlder.has(sid)) return;
+  loadingOlder.add(sid);
+  showLoadingPill();
+  vscodeApi?.postMessage({ type: "loadNewer", id: sid, after: s.lastUuid });
+}
+function chatWindow(msg: any) {
+  loadingOlder.delete(msg.id);
+  hideLoadingPill();
+  const s = sessions.get(msg.id);
+  const anchorUuid = pendingOlderAnchor.get(msg.id);
+  pendingOlderAnchor.delete(msg.id); pendingOlderKeepY.delete(msg.id);
+  if (!s) return;
+  if (msg.missing || !(msg.events || []).length) {
+    // the honest end of a deep link: the anchor is in no page the kernel can render
+    if (msg.id === activeId && pendingAnchor === anchorUuid) { pendingAnchor = null; anchorPendingOlder = false; landTrail.push("window-missing"); landToast("couldn't locate this in the transcript"); }
+    return;
+  }
+  stripOptimistic(s);
+  const r = mergeWindow(s.events as { uuid?: string }[], msg.events as { uuid?: string }[]);
+  s.events = r.events as ChatEvent[];
+  s.firstUuid = (s.events[0] as { uuid?: string } | undefined)?.uuid ?? null;
+  s.lastUuid = (s.events[s.events.length - 1] as { uuid?: string } | undefined)?.uuid ?? null;
+  s.detached = !!msg.moreAfter;                  // an older window: no delta reaches it until it walks back to the tail
+  if (msg.moreBefore === false) s.headKnown = true;
+  s.headTotal = s.headKnown && !s.detached ? s.events.length : null;   // a count only when the whole is resident
+  reconcileOptimistic(s);
+  const v = views.get(msg.id);
+  if (v) { v.rendered = 0; v.winStart = 0; v.winEnd = 0; v.avgTurnH = undefined; v.spacerCount = undefined; v.spacerCountBot = undefined; v.unitTotal = undefined; v.stale = true; }
+  if (msg.id !== activeId) return;
+  const target = typeof msg.anchor === "string" ? msg.anchor : anchorUuid;
+  if (target) { pendingAnchor = target; pendingAnchorIntent = null; pendingAnchorT = null; pendingAnchorKind = null; flashedAnchor = null; pendingAnchorKeepY = null; anchorPendingOlder = false; }
+  showActive();
+}
+function chatMore(msg: any) {
+  loadingOlder.delete(msg.id);
+  hideLoadingPill();
+  const s = sessions.get(msg.id);
+  if (!s || msg.missing) return;
+  stripOptimistic(s);
+  const next = appendMore(s.events as { uuid?: string }[], msg.afterUuid, (msg.events || []) as { uuid?: string }[]);
+  if (!next) { reconcileOptimistic(s); return; }   // stale: the newest moved on
+  s.events = next as ChatEvent[];
+  s.lastUuid = (s.events[s.events.length - 1] as { uuid?: string } | undefined)?.uuid ?? s.lastUuid;
+  s.detached = !!msg.more;
+  if (!s.detached) { if (s.headKnown) s.headTotal = s.events.length; requestFullSession(msg.id, "reattach"); }   // back at the tail: a fresh base for the deltas
+  reconcileOptimistic(s);
+  const v = views.get(msg.id);
+  if (v) { v.stale = true; }
+  if (msg.id === activeId) showActive();
 }
 
 // The awaiting fields the #bg-tasks box renders from (renderBgTasks — the header words, the rows, the awaited-row outline) — one
@@ -16295,6 +16412,8 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   }
   else if (m.type === "chatTail") chatTail(m);
   else if (m.type === "chatHead") chatHead(m);
+  else if (m.type === "chatWindow") chatWindow(m);   // proto 2: a window around a deep-link anchor (T323 stage 4b)
+  else if (m.type === "chatMore") chatMore(m);       // proto 2: the page after a detached window
   else if (m.type === "chatEpisode") chatEpisode(m);
   else if (m.type === "subagent") applySubagentFrame(m);
   else if (m.type === "update") update(m);
@@ -16737,7 +16856,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   }
   else if (m.type === "closed") dismissSession(m.id, m.hostDrop === true ? "hostDrop" : "end");   // a session died on its own (or the kernel confirms our close) — or its HOST dropped (federation's stand-in, stamped: not an end)
   // any payload that rebuilt transcript DOM must get its highlights re-applied (marks live IN that DOM)
-  if (m && m.id && (m.type === "session" || m.type === "chatTail" || m.type === "chatHead" || m.type === "chatEpisode"))
+  if (m && m.id && (m.type === "session" || m.type === "chatTail" || m.type === "chatHead" || m.type === "chatWindow" || m.type === "chatMore" || m.type === "chatEpisode"))
     applyCommentMarks(String(m.id));
   // a refused create (warn) must hand the popover back — the draft is intact, the button un-sticks.
   // FULL rebuild: the in-place refresh path deliberately never touches the composer, so it would
@@ -18548,4 +18667,4 @@ setFileViewIdentity((id) => {
   const s = sessions.get(id) ?? tabMeta.get(id);
   return s && s.name ? { name: s.name, color: s.color ?? null } : hostStub(id);
 });
-if (vscodeApi) vscodeApi.postMessage({ type: "ready" });
+if (vscodeApi) vscodeApi.postMessage({ type: "ready", proto: 2 });   // proto 2: the uuid-anchored chat wire (T323 stage 4b); an older kernel ignores the field and sends index frames

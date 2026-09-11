@@ -4659,7 +4659,14 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
                      "end": turn["end"], "ended": turn["ended"], "atoms": turn["atoms"]}
         turn.clear()
         turn.update(turn_keys)
-    return {"rompUuid": rompuuid, "name": name or rompuuid, "dir": dir,
+    # the cut turn (T323 stage 4b): the first turn after the last one holding a lazy (pre-cut) atom, taken here before
+    # any consumer hydrates; 0 for a whole parse. The chat build renders from it (its render floor).
+    cut_turn = 0
+    for _i in range(len(turns) - 1, -1, -1):
+        if any(a.get("lazy") is not None for a in turns[_i]["atoms"]):
+            cut_turn = min(_i + 1, len(turns) - 1)
+            break
+    out = {"rompUuid": rompuuid, "name": name or rompuuid, "dir": dir,
             "color": color, "leafFsid": leaf_path.stem, "turns": turns,
             # for the kernel chat build's own marker interleave: its dedup reads the KEPT turns
             # only, so without this a marker whose reply landed on an abandoned branch would
@@ -4668,6 +4675,9 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
             # the harness's own skill-load wrappers the emit skipped, {uuid: skill name}, over every file the
             # walk crossed: the judge stamps the tops older stores minted from them off this (T333)
             "skillLoads": skill_loads}
+    if cut_turn:
+        out["cutTurn"] = cut_turn                   # a restored tree only (T323 stage 4b): where its lazy atoms ended
+    return out
 
 
 def task_store_dir(fsid):

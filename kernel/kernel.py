@@ -195,7 +195,7 @@ def _process_stats():
 _CHAT_SIG_LABELS = ("transcript", "states", "store", "hold", "archive", "episodes", "reg", "gone", "tasks", "cut",
                     "live", "row", "clock", "backend", "ops", "limit", "retry", "bg", "watch", "stamp", "anchors",
                     "downtime", "names", "flags", "ncards", "colormap", "acct", "cleared", "host",
-                    "cwd", "claudemd", "fork", "note", "needs",
+                    "cwd", "claudemd", "fork", "note", "needs", "floor",
                     "taskout", "pathlink", "postal")
 _CHAT_SIG_DEPS = ("taskout", "pathlink", "postal")
 
@@ -548,7 +548,8 @@ class _PerfStats:
                 "checkpoints": em.checkpoint_stats(),
                 # T323 stage 4a: the assembly documents: written, restored, fallbacks per reason, skips per reason (noEntry,
                 # restored, noBoundary, unsplittable, oversize, ...), hydrated bodies and bytes since boot
-                "asmCheckpoint": em.asm_checkpoint_stats()}
+                "asmCheckpoint": em.asm_checkpoint_stats(),
+                "chatPages": dict(_PAGE_STATS)}   # the pre-floor history pages (T323 stage 4b): hits, misses, evictions, resident
 
 
 _PERF_STATS = _PerfStats()
@@ -27702,9 +27703,19 @@ def _fold_tasks_turn(atoms):
     the content of the turn's tool_result blocks (a TaskCreate's carries 'Task #N'); rejected: the
     tool_use_ids whose result came back is_error (the CLI refused the call: nothing created, nothing moved);
     ops: the turn's TaskCreate and TaskUpdate tool_use blocks in order, as (name, input, tool_use_id)."""
-    em.hydrate(atoms)   # bodies before the assembly cut: read on demand (T323 stage 4a)
+    ids, sel = set(), []                       # the task calls and their results alone (T323 stage 4b): a turn with no
+    for a in atoms:                            #  TaskCreate/TaskUpdate reads no body, from the lazy scalars or the blocks
+        if a.get("type") == "assistant":
+            mine = [i for i, n in em.atom_tool_uses(a) if n in ("TaskCreate", "TaskUpdate")]
+            if mine:
+                sel.append(a); ids.update(mine)
+    if ids:
+        for a in atoms:
+            if a.get("type") == "user" and ids.intersection(em.atom_tool_results(a)):
+                sel.append(a)
+    em.hydrate(sel)   # bodies before the assembly cut: read on demand (T323 stage 4a), the selected atoms only
     results, rejected, ops = {}, set(), []
-    for a in atoms:
+    for a in sel:
         if a.get("type") == "user":
             for b in (a.get("message") or {}).get("content", []) or []:
                 if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id"):
@@ -28151,6 +28162,92 @@ _prev_chat_events = {}                           # sid → the events list from 
 # prefix. The prefix dicts are handed back by IDENTITY — _prev_chat_events, _built_chat and this
 # cache share them — so nothing may write into a prefix event in place; every such write (tool
 # output fill, skillMd, interrupt cause, tlId, askAnswer) either happens in the tail or demotes.
+_RENDER_FLOOR = {}                               # sid → the render floor the pusher's last build used (T323 stage 4b)
+_PAGE_FILL_TURNS = 4                             # turns stepped past a page's end so a late tool result or Skill payload fills its card
+
+
+def _branch_marker(sid, events):
+    """A session born as a fork: its reg's durable forkedFrom → the branch record, and a departure chip inserted after
+    the cut event when that event is in `events` (the whole list, or the page holding it). None otherwise."""
+    branch = None
+    _ff = (_thread_reg(sid) or {}).get("forkedFrom")   # _thread_reg is the generic sdk-reg reader
+    if isinstance(_ff, dict) and _ff.get("sid"):
+        branch = {"fromSid": str(_ff["sid"]),
+                  "fromName": _name_of(str(_ff["sid"])) or _ff.get("name") or "",
+                  "cut": str(_ff.get("cut") or ""), "t": _ff.get("t") or 0}
+        if branch["cut"]:
+            _at = next((i for i, e in enumerate(events) if e.get("uuid") == branch["cut"]), None)
+            if _at is not None:
+                events.insert(_at + 1, {"kind": "branch", "uuid": "branch:" + branch["cut"],
+                                        "fromSid": branch["fromSid"], "fromName": branch["fromName"],
+                                        "cut": branch["cut"],
+                                        "ts": iso(branch["t"]) if branch.get("t") else None})
+    return branch
+
+
+_OVERLAY_KINDS = frozenset(("todo", "compacting", "clearing", "reconnecting", "retrying", "queued", "apiError"))   # the live overlay cards
+
+
+def _uniq_event_uuids(tail, prefix=()):
+    """Every event of a built list carries a uuid unique WITHIN the list (the uuid-anchored wire's diff and the
+    page merge key on it): a tail event with no uuid is given one from its position in the tail; a tail event
+    whose uuid another event already holds (a record whose text and tool call are two events, an orphan note
+    falling back on a second) gets an ordinal suffix. The sealed prefix is read, never written: its own
+    suffixes were set when it was the tail, so the result is the same list a whole build produces."""
+    seen = {}
+    for ev in prefix:
+        u = ev.get("uuid")
+        if u:
+            seen[u] = seen.get(u, 0) + 1
+    for i, ev in enumerate(tail):
+        u = ev.get("uuid")
+        if not u:                                        # an event with none: an overlay card (one of its kind per list) is
+            if ev.get("kind") in _OVERLAY_KINDS:         #  named by its kind, stable across builds whose content moved;
+                u = str(ev["kind"])                      #  anything else by a digest of its content, the same whichever
+            else:                                        #  list (a floor'd one, the whole) it is built into
+                try:
+                    u = "ev:" + hashlib.sha1(json.dumps(ev, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:12]
+                except Exception:
+                    u = "ev:%d" % (len(prefix) + i)
+            ev["uuid"] = u
+        n = seen.get(u, 0)
+        if n:
+            ev["uuid"] = "%s#%d" % (u, n + 1)
+        seen[u] = n + 1
+
+
+def _asm_cut_turn(session):
+    """The turn the render floor sits at: the parse's cutTurn (the first turn after the last one holding a lazy
+    pre-cut atom, recorded at parse time before any hydration erased the markers; 0 for a whole parse). The scan
+    below is the same rule for a tree with no such field (a stub, a test's hand-built session)."""
+    if isinstance(session.get("cutTurn"), int):
+        return max(0, min(session["cutTurn"], len(session.get("turns") or []) - 1))
+    turns = session.get("turns") or []
+    for i in range(len(turns) - 1, -1, -1):
+        if any(a.get("lazy") is not None for a in turns[i].get("atoms") or []):
+            return min(i + 1, len(turns) - 1)
+    return 0
+
+
+def _cursors_before(turns, k, note_lists, model0):
+    """What the chat build holds on reaching turn `k` after stepping turns [0, k): the note cursors (every note
+    stamped at or before the latest atom time seen), the last atom time and the last assistant model. From the
+    turns' scalars alone (uuid, t, the lazy model stamp): no body is read."""
+    last_t, tmax, last_model = None, None, model0
+    for t in turns[:k]:
+        for a in t.get("atoms") or []:
+            at = a.get("t")
+            if at:
+                last_t = at
+                tmax = at if tmax is None else max(tmax, at)
+            if a.get("type") == "assistant":
+                m = em.atom_model(a)
+                if m:
+                    last_model = m
+    cursors = tuple(bisect.bisect_right([n["t"] for n in lst], tmax) if tmax is not None else 0 for lst in note_lists)
+    return cursors, last_t, last_model
+
+
 _chat_fold = {}                                  # sid → entry (see _chat_fold_commit); bounded, LRU-evicted
 _chat_fold_lock = threading.Lock()               # the dict ops only — builds run outside it
 _CHAT_FOLD_MAX = 256
@@ -28794,6 +28891,9 @@ def _chat_build_sig(sess, tm=None, now=None, tmux=None, deps=None):
         # every tab a None on the first push and a False on the next: one whole-strip rebuild for a value the
         # row reads the same (needsInput === true). Only True is a verdict.
         sig.append(_feed_needs_input_of(sid) is True)
+        # floor: the render floor decision (T323 stage 4b): True while a proto-1 client is connected (the pusher's
+        # per-push flag), so a payload built from turn 0 is never served from the cache once the floor climbs
+        sig.append(bool(getattr(_live_scope, "chat_floor0", False)))
         sig.extend(((), (), None) if deps is False else _chat_sig_deps(sid, deps))   # taskout, pathlink, postal
         return tuple(sig)
 
@@ -32614,7 +32714,7 @@ def _stamp_interrupt_causes(events):
     return events
 
 
-def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, sidechain=False, meta_path=None):
+def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, sidechain=False, meta_path=None, floor=None, page=None):
     """A {type:"session"} message the render.js bundle consumes: the event tree reshaped to
     ChatEvent[], plus the TOC ledger (archiver headline + turn captions) and a status chip.
 
@@ -32628,7 +32728,17 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
     Override mode is a READ-ONLY historical render: no live-atom merge, no queue/compacting/todo overlays,
     and it returns early with just {type:"session", id, events}. tail_cap_t bounds the final durable-note
     flush (orphan replies / retry notes are sid-keyed and span episodes — without the cap, notes from AFTER
-    the /clear would dump into the old episode's tail)."""
+    the /clear would dump into the old episode's tail).
+
+    floor / page (T323 stage 4b, the proto-2 chat wire): the RENDER FLOOR is the first turn the build reshapes
+    into its events; None means the turn holding the assembly cut (a restored parse's pre-cut turns are lazy
+    and stay unread), 0 means the whole transcript (what a proto-1 client needs; the pusher passes 0 while one
+    is connected). The fold entry records its floor and demotes when it moves (g:floor), so a floor that
+    climbs back releases the prefix it held. `page` = (lo, hi) renders the turns [lo, hi) ALONE (no fold, no
+    live overlays) and returns {type: "chatPage", id, events, lo, hi, n}: the older history a proto-2 client
+    asks for by uuid; a few turns past hi are stepped too, so a tool result or Skill payload that landed there
+    fills the page's own card, and their own events are dropped. Equal, page by page, to the whole build's
+    slice (tests/test_chat_pages.py)."""
     if tmux is None:
         tmux = _tmux_sessions()
     sess = next((s for s in _sessions(now) if s["sid"] == sid), None)
@@ -32769,8 +32879,27 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
     # last turn is never cached (live atoms, overlays). Every gate names the exact input whose change
     # could render an earlier turn differently, and demotes to _fk = 0 when it moved.
     _turns = session["turns"]
+    _cut = _asm_cut_turn(parsed)              # the turn after the last lazy (pre-cut) one: the render floor (stage 4a's cut), read
+    #                                           from the parse store's tree, whose cutTurn outlives every hydration of its atoms
+    _lo, _hi, _hi_ext = 0, len(_turns), len(_turns)
+    if page is not None:                      # a PAGE: turns [lo, hi) alone, plus a few fill turns whose events are dropped
+        _lo, _hi = max(0, int(page[0])), max(0, min(len(_turns), int(page[1])))
+        _hi_ext = min(len(_turns), _hi + _PAGE_FILL_TURNS)
+        _floor = _lo
+    elif path_override:
+        _floor = 0
+    else:
+        if floor is None:
+            _f0 = getattr(_live_scope, "chat_floor0", None)   # the pusher's decision for this cycle (True: a proto-1
+            if _f0 is not None:                                #  client is connected, build from turn 0); a handler
+                floor = 0 if _f0 else _cut                     #  thread renders from the floor the pusher last used
+            else:
+                floor = _RENDER_FLOOR.get(sid, _cut)
+        _floor = max(0, min(int(floor), _cut))
+        if getattr(_live_scope, "chat_floor0", None) is not None:
+            _RENDER_FLOOR[sid] = _floor       # the pusher's build is the authority the other builders follow
     _n_pref = len(_turns) - 1                 # candidate prefix: every turn but the last
-    _fk, _fe, _fold_ok, _fold_why = 0, None, False, None
+    _fk, _fe, _fold_ok, _fold_why = _floor, None, False, None
     _pref_len = 0
     _seams_sig = json.dumps((_bs_store or {}).get("seams") or [], sort_keys=True, default=str)
     _pk = _chat_postal_key()
@@ -32788,8 +32917,8 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
     # cycle snapshot (_live_scope.names): a handler-thread build reads the registry per card, so the values
     # it embeds and the values it would record are two reads, not one. Such a build records None.
     _scoped = getattr(_live_scope, "names", None) is not None
-    if path_override:
-        _chat_fold_count("bypass")
+    if path_override or page is not None:
+        _chat_fold_count("bypass" if path_override else "page")
     elif _n_pref > 0:
         try:
             _fe = _chat_fold_get(sid)
@@ -32797,10 +32926,13 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
                 _fold_why = "cold"
             elif _fe["path"] != sess["path"] or _fe["n"] > _n_pref:
                 _fold_why = "path" if _fe["path"] != sess["path"] else "shrink"
+            elif _fe.get("rf", 0) != _floor:
+                _fold_why = "floor"                   # the render floor moved (a proto-1 client came or went): the
+                #                                       prefix is rendered from the new floor, the old one released
             elif parsed is not _fe["parsed"] and _parse_mode.get(sess["path"], "full") not in ("serve", "fold"):
                 _fold_why = "parse"                   # a full/bypass/fallback parse may have re-emitted history
             elif parsed is not _fe["parsed"] and any(_chat_turn_fp(_turns[_i]) != _fe["fps"][_i]
-                                                     for _i in range(_fe["n"])):
+                                                     for _i in range(_fe.get("rf", 0), _fe["n"])):
                 _fold_why = "turnfp"                  # an earlier turn's atoms moved (a states-row atom, a heal)
             elif _fe["seams"] != _seams_sig:
                 _fold_why = "seam"                    # seg ids → tlId / deep-link anchors of old events
@@ -32916,15 +33048,29 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
         _chat_fold_count("full")
         if _fold_why not in (None, "cold", "fallback"):     # fallback is its own counter, never also a g:
             _chat_fold_demote(_fold_why)
-    for _i in range(_fk, len(_turns)):
+    if not _fold_ok and _fk > 0:
+        # a start above turn 0 (the render floor, a page): the note cursors, last_t and last_model the whole
+        # build holds when it reaches this turn, from the earlier turns' lazy scalars (no body read)
+        (_ri, _gi, _ei, _oi, _cgi), last_t, last_model = _cursors_before(_turns, _fk, (recoveries, gaveups, efforts, orphans, gestures), last_model)
+    for _i in range(_fk, _hi_ext):
         _disk_texts |= _texts_of_turn(_i)
+    _texts_all_done = [_fk == 0 and _hi_ext == len(_turns)]
+    def _texts_all():
+        """Every turn's disk texts, the whole build's orphan dedup set: read only when an orphan note is flushed
+        in a build that started above turn 0 or stops before the end (it hydrates the other turns)."""
+        nonlocal _disk_texts
+        if not _texts_all_done[0]:
+            _texts_all_done[0] = True
+            for _i in list(range(0, _fk)) + list(range(_hi_ext, len(_turns))):
+                _disk_texts |= _texts_of_turn(_i)
+        return _disk_texts
     _chat_fold_last.info = {"fold": int(_fold_ok), "k": _fk, "n": len(_turns), "prefix": _pref_len,
                             "why": _fold_why or ""}
     # per-turn seg maps for the turns this build reshapes (the prefix's came with the entry)
     _seg_by_turn = {}                         # turn index → its (uuid2seg, seg_anchors, seg_trig, seg_work) items
-    em.hydrate([a for _t in _turns[_fk:] for a in _t["atoms"]])   # the turns this build renders (T323 stage 4a): the
+    em.hydrate([a for _t in _turns[_fk:_hi_ext] for a in _t["atoms"]])   # the turns this build renders (T323 stage 4a): the
     #                                                                fold's tail in the steady state, every turn on a demote
-    for _ti in range(_fk, len(_turns)):
+    for _ti in range(_fk, _hi_ext):
         turn = _turns[_ti]
         _u2s, _sa, _st, _sw = {}, {}, {}, {}
         for seg in _segs_seam(turn, _bs_store):
@@ -32946,6 +33092,7 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
             if _o["uuid"] and _o["uuid"] in _landed_uuids:
                 continue                                   # landed on SOME branch — maybe an abandoned one
             _ot = _o["text"].strip()
+            _texts_all()                                   # every turn's texts (a build above turn 0 reads the rest now)
             if _ot in _disk_texts or any(dt.startswith(_ot) or _ot.startswith(dt) for dt in _disk_texts):
                 continue                                   # the transcript kept this reply → don't double it
             events.append({"kind": "assistant", "md": _o["text"], "orphaned": True,
@@ -32953,25 +33100,28 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
         while _ri < len(recoveries) and (upto is None or recoveries[_ri]["t"] <= upto):
             _r = recoveries[_ri]; _ri += 1
             events.append({"kind": "retried", "retries": _r["retries"], "ts": iso(_r["t"]),
-                           "uuid": "retried:%d" % _r["t"]})
+                           "uuid": "retried:%d:%d" % (_r["t"], _ri)})   # the ordinal: two notes in one second stay distinct
         while _gi < len(gaveups) and (upto is None or gaveups[_gi]["t"] <= upto):
             _g = gaveups[_gi]; _gi += 1                    # the storm that exhausted → a RED durable note, right
             events.append({"kind": "retryGaveUp", "retries": _g["retries"],   # above the error text it settled with
                            "errorKind": _g["errorKind"], "ts": iso(_g["t"]),
-                           "uuid": "gaveup:%d" % _g["t"]})
+                           "uuid": "gaveup:%d:%d" % (_g["t"], _gi)})
         while _cgi < len(gestures) and (upto is None or gestures[_cgi]["t"] <= upto):
             _cg = gestures[_cgi]; _cgi += 1
             if (_cg["t"], _cg["cmd"]) in _live_cmd_keys:
                 continue                                   # the synthesized live chip still shows this gesture
             events.append({"kind": "cmdGesture", "cmd": _cg["cmd"], "ts": iso(_cg["t"]),
-                           "uuid": "cmdg:%d" % _cg["t"]})
+                           "uuid": "cmdg:%d:%d" % (_cg["t"], _cgi)})
         while _ei < len(efforts) and (upto is None or efforts[_ei]["t"] <= upto):
             _e = efforts[_ei]; _ei += 1
             events.append({"kind": "effortApplied", "effort": _e["effort"], "ts": iso(_e["t"]),
-                           "uuid": "effort:%d" % _e["t"]})
+                           "uuid": "effort:%d:%d" % (_e["t"], _ei)})
     _tstart = {}                              # turn index → len(events) at its start (raw, pre-hydration)
-    for _ti in range(_fk, len(_turns)):
+    _n_page = None                            # a page: len(events) where its fill turns begin
+    for _ti in range(_fk, _hi_ext):
         turn = _turns[_ti]
+        if _ti == _hi:
+            _n_page = len(events)
         _tsnap[_ti] = ((_ri, _gi, _ei, _oi, _cgi), last_t, last_model)
         _tstart[_ti] = len(events)
         for a in turn["atoms"]:
@@ -33304,7 +33454,11 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
     # Tail events only in fold mode — the sealed prefix's cards are gated by _chat_agents_moved and held
     # open by _chat_agent_open_at below.
     _agent_states = _stamp_agents(by_tool, sess["path"], tm0, _sdk_spawned_at(sid), meta_path=meta_path)
-    _flush_recoveries(tail_cap_t)                       # a recovery on the still-open tail turn (t past the last atom) → bottom of the flow
+    if page is not None:
+        if _n_page is not None:
+            del events[_n_page:]                        # the fill turns' own events belong to the next page
+    else:
+        _flush_recoveries(tail_cap_t)                   # a recovery on the still-open tail turn (t past the last atom) → bottom of the flow
     #                                                     (tail_cap_t: an episode render stops at its /clear — later notes belong to the next episode)
     # The post-passes run over the TAIL only (issue 903): the prefix was hydrated, stamped and tlId'd
     # when it was sealed, and its inputs were gated above. `_raw_tail` keeps the pre-hydration events
@@ -33341,7 +33495,8 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
             # (askAnswerFilled) already handled every record that has one — never run both.
             _ask_fill_chosen(ev["askAnswer"], ev.get("output") or "")
     events = _prefix + events                           # the sealed prefix (same dicts) + this build's tail
-    if not path_override and _n_pref > 0:
+    _pref_ids = {id(_e) for _e in _prefix}              # the sealed dicts: read by the uuid pass below, never written
+    if not path_override and page is None and _n_pref > 0:
         # ── COMMIT the prefix: whole ENDED turns, sealed at a turn boundary the tail cannot reach back
         # across. Recorded from the events as built (a scan of the NEW part only), so the loop body above
         # stays exactly what it was.
@@ -33414,7 +33569,7 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
                 for _ti in range(_fk, _np):
                     _dt |= _texts_of_turn(_ti)
                 _chat_fold_put(sid, {
-                    "path": sess["path"], "parsed": parsed, "n": _np,
+                    "path": sess["path"], "parsed": parsed, "n": _np, "rf": _floor,
                     "fps": [_chat_turn_fp(_turns[_i]) for _i in range(_np)],
                     "events": events[:_b],
                     "seg": tuple(_seg_pref), "cursors": _cur, "last_t": _lt, "last_model": _lm,
@@ -33453,6 +33608,10 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
                 _chat_fold_warned[0] = True
                 sys.stderr.write("chat fold: commit failed (%s) — this session rebuilds in full until it succeeds (stats %r)\n"
                                  % (traceback.format_exc().strip().splitlines()[-1], dict(_CHAT_FOLD_STATS)))
+    if page is not None:
+        _branch_marker(sid, events)                     # a fork's departure chip sits after its cut event, in whichever page
+        _uniq_event_uuids(events)                       # every event addressable, once (the proto-2 wire keys on it)
+        return {"type": "chatPage", "id": sid, "events": events, "lo": _lo, "hi": _hi, "n": len(_turns)}
     if path_override:
         # Historical episode render: the transcript events only — none of the LIVE overlays below (todo,
         # queued, compacting, api-error, status chip) describe a closed episode, and the boundary/system
@@ -34041,7 +34200,7 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
     work_tree = ({"dir": _tilde(_wt_top), "branch": _wt_br}
                  if _wt_top and os.path.realpath(_wt_top) != os.path.realpath(_reg_top or "/nonexistent")
                  else None)
-    sysinfo = {"kind": "system", "model": last_model, "cwd": _tilde(scwd),
+    sysinfo = {"kind": "system", "uuid": "system:head", "model": last_model, "cwd": _tilde(scwd),
                # branch from the transcript if present (normalized: a detached stamp says 'HEAD', not a
                # branch), else derived straight from the folder so it shows on open (the user 2026-06-24) —
                # works for a never-run session of EITHER backend.
@@ -34056,41 +34215,36 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
     # exist. Ordered ABOVE the system card: the cleared history predates the current conversation's frame.
     _epi_rows = _epi_rows_for_notes   # loaded once above, with the note floor (T131)
     boundary = _epi_rows[-1] if len(_epi_rows) >= 2 else None
-    if events or boundary:
+    head_cards = []                   # the cards above the transcript's first event, head first (T323 stage 4b: a
+    if events or boundary:            #  top-level field too; in the events only when the list starts at turn 0)
         if docs or any(sysinfo[k] for k in ("model", "cwd", "gitBranch", "version", "mode")):
-            events.insert(0, sysinfo)
+            head_cards.insert(0, sysinfo)
         if boundary:
             # the open cards the boundary settle dropped (the settle annotation keyed to this head)
             # — the card names them so the drop is visible in the chat too, not only in the feed's
             # bell (the user 2026-07-27)
             _settle = jd.episode_settles(sid).get(boundary.get("head") or "") or {}
-            events.insert(0, {"kind": "clear", "uuid": "clear:%s" % (boundary.get("head") or boundary.get("t")),
-                              "ts": iso(boundary["t"]) if boundary.get("t") else None,
-                              "clearedAt": boundary.get("t"), "episodes": len(_epi_rows),
-                              "dropped": [d.get("text") or "" for d in (_settle.get("settled") or [])] or None})
+            head_cards.insert(0, {"kind": "clear", "uuid": "clear:%s" % (boundary.get("head") or boundary.get("t")),
+                                  "ts": iso(boundary["t"]) if boundary.get("t") else None,
+                                  "clearedAt": boundary.get("t"), "episodes": len(_epi_rows),
+                                  "dropped": [d.get("text") or "" for d in (_settle.get("settled") or [])] or None})
+    if _floor == 0:
+        events[0:0] = head_cards
     # BRANCH LINEAGE (the user 2026-08-13: branching must SHOW). A session born as a fork carries a
     # durable forkedFrom in its reg (the one-shot forkOf launch flags say nothing after the init
     # spends them): a branch DIVIDER event lands right after the branch-point record — everything
     # above it is history shared with the parent — and the top-level `branch` field survives
     # windowing. The other direction, `branches`, lists the forks that left FROM this session's own
     # turns, so the parent shows a chip where each branch departed. Both sides deep-link across.
-    branch = None
-    _ff = (_thread_reg(sid) or {}).get("forkedFrom")   # _thread_reg is the generic sdk-reg reader
-    if isinstance(_ff, dict) and _ff.get("sid"):
-        branch = {"fromSid": str(_ff["sid"]),
-                  "fromName": _name_of(str(_ff["sid"])) or _ff.get("name") or "",
-                  "cut": str(_ff.get("cut") or ""), "t": _ff.get("t") or 0}
-        if branch["cut"]:
-            _at = next((i for i, e in enumerate(events) if e.get("uuid") == branch["cut"]), None)
-            if _at is not None:
-                events.insert(_at + 1, {"kind": "branch", "uuid": "branch:" + branch["cut"],
-                                        "fromSid": branch["fromSid"], "fromName": branch["fromName"],
-                                        "cut": branch["cut"],
-                                        "ts": iso(branch["t"]) if branch.get("t") else None})
+    branch = _branch_marker(sid, events)
     _be_fk = _sdk()
     _kids = (_be_fk.fork_children().get(sid) if _be_fk and hasattr(_be_fk, "fork_children") else None) or None
+    _uniq_event_uuids([_e for _e in events if id(_e) not in _pref_ids], _prefix)   # every event addressable, once, the
+    #                                                                                 overlays included (the proto-2 wire keys on it)
     return {"type": "session", "id": sid, "name": sess["name"], "color": _name_color(sid),
             "branch": branch, "branches": _kids,
+            "floor": _floor,   # the turn the events start at (T323 stage 4b): 0 = the whole transcript; the send path reads it
+            "headCards": head_cards,   # the cards above the first event (the system card, a /clear notice): in `events` only at floor 0
             "cwd": _tilde(scwd),   # the CURRENT dir (a move rewrites it); lane tab shows it (the user 2026-06-22)
             # git branch as a TOP-LEVEL session field, NOT just inside the head system event: the status-bar
             # branch + tab tooltip must show for EVERY session, but the system event lives at events[0] and the
@@ -41400,7 +41554,7 @@ def _send_slot_delta(c, key, ftype, payload, pre, sig, parts=None):
 #   tagEdit — the targeted `tagEdit` op (create / rename / recolor / addMember / removeMember /
 #             delete / move, by tag id), the `tagEditAck` / `viewsAck` answers on the poster's socket,
 #             and the write sequence (`seq`) on every views blob.
-KERNEL_WS_CAPS = ("tagEdit",)
+KERNEL_WS_CAPS = ("tagEdit", "chatProto2")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b)
 # The caps frame: {type: "caps", caps: [...], viewsSeq: int|null}. `viewsSeq` (the 2026-09-05
 # review) is the write seq of the views blob the READY HANDLER'S OWN connect push served this client — the
 # tabOrder frame's for a chat page, the timeline skeleton's (`data.views`), the feed frame's — read from
@@ -41568,12 +41722,269 @@ def _send_chat(c, m, ms, change_from, led_changed):
         return _send_chat_locked(c, m, ms, change_from, led_changed)
 
 
+_UUID_POS = {}                                   # id(events list) → (the list, {uuid: index}); one map per built list per push
+PAGE_TURNS = 16                                  # turns per rendered page of pre-floor history (aligned to multiples)
+WINDOW_TURNS = 8                                 # turns each side of a loadAround anchor
+_PAGE_CACHE = {}                                 # (sid, lo, hi, sig) → (events, bytes); LRU by insertion order
+_PAGE_CACHE_MAX, _PAGE_CACHE_BYTES = 32, 16 * 1024 * 1024
+_PAGE_STATS = {"hits": 0, "misses": 0, "evictions": 0, "pages": 0, "bytes": 0, "renderMs": 0.0}
+_page_lock = threading.Lock()
+
+
+def _chat_history_page(sid, lo, hi, now, sess=None, tmux=None):
+    """The rendered events of turns [lo, hi) of `sid` (build_session's page mode), through a bounded LRU keyed on the
+    session's whole chat-build signature: any input that would change the render misses. Counted (/perf chatPages)."""
+    if tmux is None:
+        tmux = _tmux_sessions()
+    if sess is None:
+        sess = next((x for x in _sessions(now) if x["sid"] == sid), None)
+    try:                                          # the whole chat-build signature, as one digest (its components hold dicts)
+        raw = _chat_build_sig(sess, tmux.get(sid), now, tmux=tmux, deps=False) if sess else None
+        sig = hashlib.sha1(json.dumps(raw, sort_keys=True, default=str).encode("utf-8")).hexdigest() if raw is not None else None
+    except Exception:
+        sig = None
+    key = (sid, lo, hi, sig)
+    with _page_lock:
+        hit = _PAGE_CACHE.get(key) if sig is not None else None
+        if hit is not None:
+            _PAGE_CACHE.pop(key); _PAGE_CACHE[key] = hit
+            _PAGE_STATS["hits"] += 1
+            return hit[0]
+        _PAGE_STATS["misses"] += 1
+    t0 = time.monotonic()
+    try:
+        page = build_session(sid, now, tmux, page=(lo, hi))
+    finally:
+        _chat_dep_scope.deps = None
+    evs = (page or {}).get("events") or []
+    with _page_lock:
+        _PAGE_STATS["renderMs"] += (time.monotonic() - t0) * 1000
+        if sig is not None:
+            nbytes = len(json.dumps(evs))
+            _PAGE_CACHE[key] = (evs, nbytes)
+            _PAGE_STATS["pages"] = len(_PAGE_CACHE); _PAGE_STATS["bytes"] += nbytes
+            while _PAGE_CACHE and (len(_PAGE_CACHE) > _PAGE_CACHE_MAX or _PAGE_STATS["bytes"] > _PAGE_CACHE_BYTES):
+                _k = next(iter(_PAGE_CACHE))
+                if _k == key and len(_PAGE_CACHE) == 1:
+                    break                                 # one page over the byte bound still serves
+                _, _b = _PAGE_CACHE.pop(_k)
+                _PAGE_STATS["bytes"] -= _b; _PAGE_STATS["evictions"] += 1
+            _PAGE_STATS["pages"] = len(_PAGE_CACHE)
+    return evs
+
+
+def _turn_of_uuid(turns, uuid):
+    """The index of the turn holding an event's uuid: a record's uuid is an atom's; a note's synthetic uuid
+    ("retried:<t>:<n>", "orphan:<t>") names the second it was flushed at, so the turn holding the first atom
+    stamped at or after it. None when unknown. Reads no body (uuids, times and the lazy scalars only)."""
+    if not uuid:
+        return None
+    base = uuid.split("#", 1)[0]
+    for i, t in enumerate(turns):
+        for a in t.get("atoms") or []:
+            if a.get("uuid") == base:
+                return i
+    m = re.match(r"^(retried|gaveup|cmdg|effort|orphan):(\d+)(?::|$)", base)
+    if m:
+        nt = int(m.group(2))
+        for i, t in enumerate(turns):
+            if any((a.get("t") or 0) >= nt for a in t.get("atoms") or []):
+                return i
+        return len(turns) - 1 if turns else None
+    return None
+
+
+def _chat_history_reply(sid, msg, now):
+    """The reply to a proto-2 history request (loadOlder / loadAround / loadNewer), built from the session's floor'd
+    list (the pusher's build, cache-backed) and the page renderer for the turns before the floor. Every window is
+    turn-aligned, so a client's oldest or newest resident event is a turn's first or last. The reply's `_base` is
+    the client's new echat base, popped by the handler."""
+    kind = msg.get("type")
+    tmux = _tmux_sessions()
+    sess = next((x for x in _sessions(now) if x["sid"] == sid), None)
+    if sess is None:
+        return None
+    try:
+        m = build_session(sid, now, tmux, floor=_RENDER_FLOOR.get(sid))
+    finally:
+        _chat_dep_scope.deps = None
+    if not m:
+        return None
+    evs = m.get("events") or []
+    floor = int(m.get("floor") or 0)
+    pos = _uuid_positions(evs)
+    parsed = _parse(sess["path"], sid, now)
+    turns = parsed["turns"]
+
+    def pages(lo, hi):
+        out = []
+        a = lo
+        while a < hi:
+            b = min(hi, (a // PAGE_TURNS + 1) * PAGE_TURNS)
+            out.extend(_chat_history_page(sid, a, b, now, sess=sess, tmux=tmux))
+            a = b
+        return out
+
+    def older_than_turn(j, want):
+        """Whole turns before turn j, at least `want` events when there are that many: (events, first turn)."""
+        out, lo = [], j
+        while lo > 0 and len(out) < want:
+            lo2 = max(0, ((lo - 1) // PAGE_TURNS) * PAGE_TURNS)
+            out = pages(lo2, lo) + out
+            lo = lo2
+        return out, lo
+
+    if kind == "loadOlder":
+        before = str(msg.get("before") or "")
+        p = pos.get(before)
+        if p is not None and p > 0:
+            frm = max(0, p - WIRE_CHUNK)
+            return {"type": "chatHead", "id": sid, "beforeUuid": before, "events": evs[frm:p],
+                    "more": frm > 0 or floor > 0, "_base": None}
+        j = floor if p == 0 else _turn_of_uuid(turns, before)
+        if j is None:
+            return {"type": "chatHead", "id": sid, "beforeUuid": before, "events": [], "more": False, "missing": True}
+        out, lo = older_than_turn(j, WIRE_CHUNK)
+        return {"type": "chatHead", "id": sid, "beforeUuid": before, "events": out, "more": lo > 0}
+    if kind == "loadAround":
+        anchor = str(msg.get("uuid") or "")
+        p = pos.get(anchor)
+        if p is not None:
+            a, b = max(0, p - WIRE_CHUNK // 2), min(len(evs), p + WIRE_CHUNK // 2)
+            out = evs[a:b]
+            more_before, more_after = a > 0 or floor > 0, b < len(evs)
+        else:
+            j = _turn_of_uuid(turns, anchor)
+            if j is None or j >= floor:
+                return {"type": "chatWindow", "id": sid, "anchor": anchor, "events": [], "moreBefore": False, "moreAfter": False, "missing": True}
+            lo, hi = max(0, j - WINDOW_TURNS), min(floor, j + WINDOW_TURNS)
+            out = pages(lo, hi)
+            more_before = lo > 0
+            if hi >= floor:                               # the window reaches the floor'd list: continue into it
+                out = out + evs[:WIRE_CHUNK]
+                more_after = len(evs) > WIRE_CHUNK
+            else:
+                more_after = True
+        base = {"first": out[0].get("uuid"), "last": _last_anchor(out), "detached": bool(more_after)} if out else None
+        return {"type": "chatWindow", "id": sid, "anchor": anchor, "events": out, "moreBefore": more_before,
+                "moreAfter": more_after, "_base": base}
+    if kind == "loadNewer":
+        after = str(msg.get("after") or "")
+        p = pos.get(after)
+        if p is not None:
+            out = evs[p + 1:p + 1 + WIRE_CHUNK]
+            more = p + 1 + WIRE_CHUNK < len(evs)
+        else:
+            j = _turn_of_uuid(turns, after)
+            if j is None:
+                return {"type": "chatMore", "id": sid, "afterUuid": after, "events": [], "more": False, "missing": True}
+            out, hi = [], j + 1                           # whole turns after turn j, a chunk's worth, page-aligned
+            while hi < floor and len(out) < WIRE_CHUNK:
+                hi2 = min(floor, (hi // PAGE_TURNS + 1) * PAGE_TURNS)
+                out = out + pages(hi, hi2)
+                hi = hi2
+            if hi >= floor:                               # the pages reached the floor'd list: continue into it
+                out = out + evs[:WIRE_CHUNK]
+                more = len(evs) > WIRE_CHUNK
+            else:
+                more = True
+        first = None
+        cur = None
+        return {"type": "chatMore", "id": sid, "afterUuid": after, "events": out, "more": more,
+                "_base": {"first": None, "last": (_last_anchor(out) if out else after), "detached": bool(more), "keepFirst": True}}
+    return None
+
+
+def _uuid_positions(evs):
+    """{uuid: index} for a built events list, memoized on the list's identity (the pusher hands every client the same
+    list); bounded, the stale entries dropped when it grows."""
+    hit = _UUID_POS.get(id(evs))
+    if hit is not None and hit[0] is evs:
+        return hit[1]
+    if len(_UUID_POS) > 512:
+        _UUID_POS.clear()
+    pos = {}
+    for i, ev in enumerate(evs):
+        u = ev.get("uuid")
+        if u is not None and u not in pos:
+            pos[u] = i
+    _UUID_POS[id(evs)] = (evs, pos)
+    return pos
+
+
+def _last_anchor(evs):
+    """The uuid a proto-2 client's base ends on: the last TRANSCRIPT event, never a trailing overlay card (a todo, a
+    queued or api-error notice comes and goes between builds; anchoring on one left the next push unable to map the
+    base and sent a full frame). The overlay cards ride every delta's suffix instead."""
+    for e in reversed(evs):
+        if e.get("kind") not in _OVERLAY_KINDS:
+            return e.get("uuid")
+    return evs[-1].get("uuid") if evs else None
+
+
+def _send_chat_proto2(c, m, ms, change_from, led_changed, st, pc):
+    """The uuid-anchored wire (T323 stage 4b) for a client whose ready said proto 2. Its base is {first, last,
+    detached}: the uuids of the oldest and newest events it holds and whether it sits on an older window. A
+    change inside or right after what it holds is a chatTail {afterUuid, events}: it truncates after afterUuid
+    and appends; a change before its first event, a base the new list no longer holds (a fork, a rewind), or no
+    base is a full session frame carrying the list's tail with firstUuid/lastUuid, headKnown and headTotal. A
+    DETACHED client (its window's moreAfter was true) gets no delta at all: a delta would land past what it
+    holds; needFull, or its own loadNewer reaching the tail, re-attaches it."""
+    sid = m["id"]
+    evs = m.get("events") or []
+    total = len(evs)
+    if isinstance(pc, dict) and pc.get("detached"):
+        return ms
+    if isinstance(pc, dict) and total:
+        pos = _uuid_positions(evs)
+        pf, pl = pos.get(pc.get("first")), pos.get(pc.get("last"))
+        if pf is None and pl is not None:
+            pf = 0                                        # the client's run begins before the floor'd list (pages it scrolled
+        #                                                    into): the list's first event is inside what it holds
+        if pf is not None and pl is not None and pf <= pl:
+            if change_from >= total:
+                start = total                             # nothing changed: a status-only tail with an empty suffix
+            else:
+                start = min(change_from, pl + 1) if change_from > 0 else 0   # from the change, or from after the held
+            if start > pf:                                #  last record (the overlay cards after it ride the suffix)
+                tail = {"type": "chatTail", "id": sid, "afterUuid": evs[start - 1].get("uuid"),
+                        "events": evs[start:], "status": m.get("status")}
+                if led_changed:
+                    tail["ledger"] = m.get("ledger")
+                _send_client(c, ("chat", sid), tail, kind="delta")
+                st[sid] = {"first": pc["first"], "last": _last_anchor(evs), "detached": False}
+                return ms
+    if isinstance(pc, dict) and os.environ.get("ROMP_READER_TRACE"):
+        pos = _uuid_positions(evs)
+        sys.stderr.write("chat2: full frame for %s: first=%s at %s, last=%s at %s, change_from=%d, total=%d, last3=%s\n"
+                         % (sid[:8], pc.get("first"), pos.get(pc.get("first")), pc.get("last"), pos.get(pc.get("last")), change_from, total,
+                            [e.get("uuid") for e in evs[-3:]]))
+    head_from = max(0, total - WIRE_TAIL)
+    _release_skeleton_locked(c, sid)
+    m_send = dict(m)
+    m_send["events"] = evs[head_from:]
+    m_send["proto"] = 2
+    m_send.pop("headFrom", None)
+    head_known = head_from == 0 and not m.get("floor")
+    m_send["headKnown"] = head_known
+    m_send["headTotal"] = total if head_known else None
+    m_send["firstUuid"] = evs[head_from].get("uuid") if head_from < total else None
+    m_send["lastUuid"] = evs[-1].get("uuid") if total else None
+    _send_client(c, ("chat", sid), m_send)
+    st[sid] = {"first": m_send["firstUuid"], "last": _last_anchor(evs), "detached": False}
+    return ms
+
+
 def _send_chat_locked(c, m, ms, change_from, led_changed):
     sid = m["id"]
     evs = m.get("events") or []
     total = len(evs)
     st = c.setdefault("echat", {})
     pc = st.get(sid)                                  # (tail_head_uuid, headFrom) the client currently holds
+    if (c.get("proto") or 1) >= 2:
+        return _send_chat_proto2(c, m, ms, change_from, led_changed, st, pc)
+    if isinstance(pc, dict):
+        pc = None                                     # a proto-2 base cannot serve an index client (a reconnect resets anyway)
     if (pc is not None and change_from > 0 and pc[1] <= change_from <= total
             and pc[0] == (evs[pc[1]].get("uuid") if pc[1] < total else None)):
         tail = {"type": "chatTail", "id": sid, "from": change_from,
@@ -43486,6 +43897,9 @@ def _push(targets, connect=False, tmux=None):
             # push (_chat_push_scopes_open; a pusher cycle already holds the last two).
             _chat_push_scopes_open()
             _nd = len(_CHAT_SIG_DEPS)
+            # the render floor (T323 stage 4b): a proto-1 client needs today's index frames over the whole
+            # transcript, so while one is connected every tab builds from turn 0; with none, from the assembly cut
+            _live_scope.chat_floor0 = any(c.get("proto") == 1 for c in chat_clients)   # a socket before its ready has no protocol yet and moves no floor
             for s in build_order:
                 is_active = s["sid"] in active           # the watched tab(s): served like any tab while the key holds
                 _tm = tmux.get(s["sid"])
@@ -43655,6 +44069,7 @@ def _push(targets, connect=False, tmux=None):
             # OPEN SUBAGENT VIEWERS (plans/subagent-transcripts.md): each rides its own per-client dedup slot
             # like the comment frames, rebuilt only when the agent's file or liveness moved.
             _push_subagents(chat_clients, now, tmux)
+            _live_scope.chat_floor0 = None            # the decision is the chat loop's alone
             _chat_push_scopes_close()                    # after the threads' signatures, which read the shared components too
         _PERF_STATS.stage("push.chat", time.monotonic() - _t_stage)
         _t_stage = time.monotonic()
@@ -54580,6 +54995,25 @@ class Handler(BaseHTTPRequestHandler):
             _client_reset_chat_sid(client, sid)               # …and drop the dedup slot, so the full send lands
             self._push_one(client)                            # repair NOW, not on the next 0.5-3s tick
             return
+        if msg and msg.get("type") in ("loadOlder", "loadAround", "loadNewer") and msg.get("id") \
+                and (client.get("proto") or 1) >= 2 and not isinstance(msg.get("before"), int):
+            # The uuid-anchored history requests (T323 stage 4b): answered from the floor'd list and the page
+            # renderer, one round trip each; the client's base is updated so the pusher's next delta fits it.
+            try:
+                sid = str(msg["id"])
+                reply = _chat_history_reply(sid, msg, int(time.time()))
+                if reply is not None:
+                    with _client_lock(client):
+                        base = reply.pop("_base", None)
+                        if base is not None:
+                            if base.pop("keepFirst", False):
+                                old = client.get("echat", {}).get(sid)
+                                base["first"] = old.get("first") if isinstance(old, dict) else None
+                            client.setdefault("echat", {})[sid] = base
+                        client["send"](json.dumps(reply))
+            except Exception:
+                sys.stderr.write("%s: %s\n" % (msg.get("type"), traceback.format_exc()))
+            return
         if msg and msg.get("type") == "loadOlder" and msg.get("id"):
             # Browser scrolled back to the top of the loaded tail and there's older history on disk → ship the
             # previous WIRE_CHUNK events so it can prepend them (the wire tail-windowing scroll-back, the user
@@ -54648,6 +55082,7 @@ class Handler(BaseHTTPRequestHandler):
             _mark_views_dirty()
             return
         if msg and msg.get("type") == "ready":
+            client["proto"] = 2 if msg.get("proto") == 2 else 1   # the chat wire it speaks (T323 stage 4b): 2 = uuid frames; absent = index frames
             # `ready` = the render bundle JUST evaluated, so this renderer holds NOTHING — but this
             # socket may already have been served: the pusher fires from the moment the WS opens
             # (the inline shim dials during HTML parse), while the 1.4MB bundle can still be

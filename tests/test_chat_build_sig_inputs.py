@@ -81,6 +81,9 @@ CENSUS = {
     "_chat_seam_open_at": ("pure", "over the events"),
     "_chat_stat_key": ("sig", "taskout", "the fold's per-output identity; the same stat the taskout dep re-takes"),
     "_chat_turn_fp": ("pure", "over a turn"),
+    "_asm_cut_turn": ("pure", "over the turns' lazy markers: the first turn with a live atom (transcript)"),
+    "_cursors_before": ("pure", "over the earlier turns' scalars and the note lists (transcript, states, note)"),
+    "_uniq_event_uuids": ("pure", "over the built list: an ordinal suffix on a repeated uuid"),
     "_claude_account_label": ("sig", "acct"),
     "_claudemd_docs": ("sig", "claudemd", "the CLAUDE.md files on the chain from the cwd to its git root, plus the global one"),
     "_cleared_ids": ("sig", "cleared"),
@@ -160,7 +163,7 @@ CENSUS = {
     "_stat_key": ("sig", "cleared", "cleared.jsonl's identity, the ledger memo's key beside the set _cleared_ids reads"),
     "_strip_hook_notices": ("pure", "over a text"),
     "_task_outputs_for": ("sig", "taskout", "the launch record from the transcript's scan; each output file's tail is a taskout dep"),
-    "_thread_reg": ("sig", "reg"),
+    "_branch_marker": ("sig", "reg"),   # the fork lineage chip: _thread_reg (the reg) and _name_of, one helper for the whole build and a page
     "_tilde": ("const", "the home directory"),
     "_tmux_sessions": ("sig", "row", "the liveness map when the caller passed none"),
     "_tree_of": ("sig", "cwd"),
@@ -170,6 +173,7 @@ CENSUS = {
 
 # Attribute calls whose base is a module-level object or one of the backend locals build_session binds.
 DOTTED = {
+    "_RENDER_FLOOR.get": ("sig", "floor", "the floor the pusher last used, read by a build outside its cycle (the pusher's decision is the component)"),
     "Sessions.backend_for": ("sig", "reg", "ownership: the SDK backend owns a sid whose reg exists"),
     "Sessions.working_note": ("sig", "note", "the working-note file (working/<sid>) by identity"),
     "jd.episode_rows": ("sig", "episodes"),
@@ -217,6 +221,8 @@ GLOBALS = {
     "_PATH_LINK_CACHE": ("sig", "pathlink"),
     "_SEND_TOOL_RE": ("const", "a module regex"),
     "_chat_fold": ("memo", "see _chat_fold_get"),
+    "_RENDER_FLOOR": ("sig", "floor", "the render floor the pusher's last build used; the pusher's own decision is the floor component"),
+    "_PAGE_FILL_TURNS": ("const", "the turns stepped past a page for late fills"),
     "_chat_fold_last": ("out", "the perf line's per-thread record"),
     "_chat_fold_lock": ("const", "a lock"),
     "_chat_fold_warned": ("out", "a once-flag"),
