@@ -173,7 +173,7 @@ def _rebind_state(path):
     CODEXDIR = STATE / "codex"
     EPIDIR = STATE / "episodes"
     _lastsid_memo.clear()   # sdk-registry reads are mtime-memoized per sid — a rebind must not serve the old root's values
-    _LEAF_SEEN.clear()      # the leaves discover handed out belong to the old root
+    _LEAF_SEEN.clear(); _LEAF_RETIRED.clear()   # the leaves discover handed out belong to the old root
     _STORE_FAULTS.clear()   # unreadable-store episodes belong to the old root's files
     _CHAIN_MEMO.clear()     # the write-moment chain memo keys on paths under STATESDIR; a new root is a new world
     parse_cache_clear()      # the parses belong to the old root too
@@ -2816,7 +2816,13 @@ def _parse_store(fsid, cut, key, session, leaf, human, mode="full"):
     while the live leaf is parsed by the lanes, the feed and the judges) keeps a slot of its own instead of evicting
     the live leaf's tree and being evicted by it in turn, twice per cycle (review find, 2026-09-11). A leaf a /clear
     or a resume fork rotated away is released at the event that rotates it: discover, on first handing out the
-    session's new leaf, drops the previous leaf's slots (_note_leaf), so one tree per session holds across clears."""
+    session's new leaf, drops the previous leaf's slots (_note_leaf), so one tree per session holds across clears;
+    a parse stored under that retired leaf afterwards (a pass working from rows it snapshotted before the flip, an
+    episode render of the pre-clear transcript) is handed back to its caller and not stored, since the release is
+    a one-shot and nothing would drop it again. A leaf discover never handed out (a subagent's agent file) is
+    never retired and stores as an override slot."""
+    if _leaf_retired(fsid, leaf):
+        return
     slot = (fsid, cut, str(leaf))
     with _PARSE_CACHE_LOCK:
         for k in [k for k in _PARSE_CACHE if k[0] == fsid and k[1] != cut]:
@@ -2874,11 +2880,14 @@ def parse_cache_drop(fsid):
     return len(gone)
 
 
-def parse_cache_drop_leaf(leaf):
-    """Drop every slot holding a parse of `leaf` (the kernel's view pops by path; a leaf's stem is not the sid)."""
+def parse_cache_drop_leaf(leaf, fsid=None):
+    """Drop every slot holding a parse of `leaf` (the kernel's view pops by path; a leaf's stem is not the sid), or
+    with `fsid` only that session's slots of it: a fork child's registry is born naming the PARENT's transcript until
+    its own init flips it, so the child's flip must not take the parent's live slot with it (review find)."""
     leaf = str(leaf)
     with _PARSE_CACHE_LOCK:
-        gone = [k for k, trees in _PARSE_CACHE.items() if any(ent[2] == leaf for ent in trees.values())]
+        gone = [k for k, trees in _PARSE_CACHE.items()
+                if (fsid is None or k[0] == fsid) and any(ent[2] == leaf for ent in trees.values())]
         for k in gone:
             del _PARSE_CACHE[k]
     return len(gone)
@@ -7714,19 +7723,36 @@ def _custom_title(p):
 
 
 _LEAF_SEEN = {}      # sid -> the leaf path discover last handed out for it: the parse store releases the previous
+_LEAF_RETIRED = {}   # sid -> the leaves discover handed out for it before the current one: never stored again
+_LEAF_LOCK = threading.Lock()
 
 
 def _note_leaf(sid, path_str):
     """discover hands out `path_str` as sid's CURRENT leaf. When that differs from the leaf it handed out last (a
     /clear minted a new fsid under the same romp sid, or a resume fork moved the head to a fresh file), the previous
-    leaf's parse slots are dropped: nothing reads them again (the anchor is a non-leaf candidate of the new parse,
-    read through the record cache, never through the parse store), and without this every clear left one more full
-    tree resident until restart (review find, 2026-09-11). The event is the flip itself, observed at the one read
-    that gives every caller the new leaf; a candidate-based drop would release only the first anchor."""
-    prev = _LEAF_SEEN.get(sid)
+    leaf's parse slots OF THIS SID are dropped: nothing reads them again (the anchor is a non-leaf candidate of the
+    new parse, read through the record cache, never through the parse store), and without this every clear left one
+    more full tree resident until restart (review find, 2026-09-11). The event is the flip itself, observed at the
+    one read that gives every caller the new leaf; a candidate-based drop would release only the first anchor. Only
+    this sid's slots go: a fork child's registry names the parent's transcript until its own init flips it, and the
+    parent's live slot is not the child's to drop. The retired leaf is remembered so a parse stored under it AFTER
+    the flip (a pass that snapshotted its rows before a mid-pass /clear) is refused by _parse_store rather than
+    kept as a live slot; a leaf handed out again (the anchor, while a fresh lastSid names a file not yet on disk)
+    is current again and stores as before."""
+    with _LEAF_LOCK:
+        prev = _LEAF_SEEN.get(sid)
+        _LEAF_SEEN[sid] = path_str
+        retired = _LEAF_RETIRED.setdefault(sid, set())
+        retired.discard(path_str)
+        if prev is not None and prev != path_str:
+            retired.add(prev)
     if prev is not None and prev != path_str:
-        parse_cache_drop_leaf(prev)
-    _LEAF_SEEN[sid] = path_str
+        parse_cache_drop_leaf(prev, sid)
+
+
+def _leaf_retired(sid, leaf):
+    with _LEAF_LOCK:
+        return str(leaf) in _LEAF_RETIRED.get(sid, ())
 
 
 _lastsid_memo = {}   # sid -> (sdk-registry mtime, diverged lastSid or None) — the registry is rewritten

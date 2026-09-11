@@ -259,9 +259,10 @@ class OneParseForBoth(unittest.TestCase):
             jd.parsed_session(C, [anchor_path], now)
             self.assertEqual(len(slots()), 1)
             for i, L in enumerate((L1, L2), start=1):
-                time.sleep(0.02)                                   # the registry rewrite must move its mtime
                 leaf = _transcript(str(proj_dir), L, n=1)         # /clear: a fresh-headed transcript under a new fsid
                 reg.write_text(json.dumps({"sid": C, "name": "worker", "cwd": str(cdir), "lastSid": L}))
+                os.utime(reg, (now + i, now + i))                  # the registry read memoizes on mtime: move it
+                #                                                    explicitly, never by a sleep (coarse timestamps)
                 self.assertEqual(current_leaf(), leaf, "clear %d: discover hands out the new leaf" % i)
                 t = km._parse(leaf, C, now)
                 self.assertIsNot(t, t0)
@@ -270,6 +271,15 @@ class OneParseForBoth(unittest.TestCase):
                                  "clear %d: exactly one slot remains for the session, the new leaf's" % i)
                 self.assertIsNone(km._parse_cached(anchor_path if i == 1 else prev_leaf), "the previous leaf's tree is gone")
                 prev_leaf, t0 = leaf, t
+            # a pass that snapshotted its rows before the clear parses the retired leaf AFTER the flip: it gets its
+            # tree and the store keeps nothing, since the release was a one-shot and nothing would drop it again
+            m0 = self._misses()
+            late = jd.parsed_session(C, [anchor_path], now)
+            self.assertEqual(self._misses() - m0, 1)
+            self.assertTrue(late["turns"], "the late caller still gets a parse")
+            self.assertEqual(slots(), [(C, jd._pending_cut(C), prev_leaf)], "a store under a retired leaf is refused")
+            self.assertIsNone(km._parse_cached(anchor_path))
+            self.assertTrue(jd._leaf_retired(C, anchor_path)); self.assertFalse(jd._leaf_retired(C, prev_leaf))
         finally:
             jd.NAMES, jd.PROJECTS = saved[1], saved[2]
             if saved[3] is None:
@@ -277,6 +287,26 @@ class OneParseForBoth(unittest.TestCase):
             else:
                 os.environ["CLAUDE_CONFIG_DIR"] = saved[3]
             jd._rebind_state(saved[0])
+
+    def test_a_fork_childs_flip_leaves_the_parents_slot(self):
+        """Review find (2026-09-11): a fork child's SDK registry is born with lastSid = the PARENT's fsid until its
+        own init flips it, so discover hands the child the parent's transcript first; the child's flip to its own
+        file must drop the child's slots of that leaf only, never the parent's live tree."""
+        P, CH = A, "66666666-2222-4333-8444-000000000666"
+        parent_leaf = _transcript(self.d, P, n=2)
+        child_leaf = _transcript(self.d, CH, n=1)
+        jd._note_leaf(P, parent_leaf)
+        jd._note_leaf(CH, parent_leaf)                     # the child's registry still names the parent's file
+        parent_tree = km._parse(parent_leaf, P, self.now)
+        jd.parsed_session(CH, [parent_leaf], self.now)     # a pass parsed the child's row over the parent's file
+        m0 = self._misses()
+        jd._note_leaf(CH, child_leaf)                      # the child's init flipped its lastSid
+        self.assertIs(km._parse(parent_leaf, P, self.now), parent_tree, "the parent's live slot stands")
+        self.assertEqual(self._misses() - m0, 0, "the parent is not re-parsed cold by the child's flip")
+        self.assertEqual([k for k in jd._PARSE_CACHE if k[0] == CH], [], "the child's slot of the parent's file went")
+        self.assertTrue(jd._leaf_retired(CH, parent_leaf)); self.assertFalse(jd._leaf_retired(P, parent_leaf))
+        jd.parsed_session(CH, [child_leaf], self.now)
+        self.assertEqual(len([k for k in jd._PARSE_CACHE if k[0] == CH]), 1, "the child's own leaf stores")
 
     def test_the_kernel_view_reads_the_store(self):
         p = _transcript(self.d, A)
