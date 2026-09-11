@@ -7896,6 +7896,7 @@ def _main_drift_check():
                     return
             _LAST_AUTO_CONVERGE[0] = time.time()
             _run_main_update(kind, target=target)
+            _CONVERGE_CRASH_T[0] = 0.0                    # a converge that ran clears the crash hold (the follow-up review)
         except Exception:
             # a crash in the hold branches (the T352 round-two review: a None running sha inside the cool-down raised
             # at a [:8] AFTER the latch above took the target, and the hold's own reset never ran, so every later
@@ -8013,6 +8014,9 @@ def _run_main_update(kind, immediate=True, manager_port=_PORT_FROM_ENV, target="
         #                            sha — two reads raced a moving checkout and latched a target
         #                            the verdict never examined (T216 review)
         if not _kernel_code_changed(_kernel_sha(reask=True), pulled) and _in_place_converge(pulled):
+            _CONVERGE_CRASH_T[0] = 0.0                    # an in-place converge is a success too: the crash hold clears
+            #                                               (the follow-up review: a stale stamp held a later converge
+            #                                               for up to a cool-down after a success that bypassed the gate)
             return
     # Pay the bundle rebuild BEFORE the old kernel dies (T216): the checkout is already at the
     # target here, so this builds the NEW code's bundles while the old kernel still serves — the

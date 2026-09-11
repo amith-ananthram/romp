@@ -534,7 +534,8 @@ class ConvergeWaitsSpareOnlyCuts(unittest.TestCase):
         import io
         self.saved = (km._update_mode, km._origin_main_sha, km._checkout_sha, km._kernel_sha, km._run_main_update,
                       km._deploy_would_cut, km._parked_quiet_deploy, km._kernel_code_changed,
-                      km._LAST_AUTO_CONVERGE[0], km._MAIN_DRIFT[0], km._MAIN_DRIFT[1], km._QUIET_PARKED_LOGGED[0])
+                      km._LAST_AUTO_CONVERGE[0], km._MAIN_DRIFT[0], km._MAIN_DRIFT[1], km._QUIET_PARKED_LOGGED[0],
+                      km._CONVERGE_CRASH_T[0])
         self.ran = []
         km._update_mode = lambda: "auto"
         km._checkout_sha = lambda: "aaa"
@@ -552,7 +553,8 @@ class ConvergeWaitsSpareOnlyCuts(unittest.TestCase):
     def tearDown(self):
         (km._update_mode, km._origin_main_sha, km._checkout_sha, km._kernel_sha, km._run_main_update,
          km._deploy_would_cut, km._parked_quiet_deploy, km._kernel_code_changed) = self.saved[:8]
-        km._LAST_AUTO_CONVERGE[0], km._MAIN_DRIFT[0], km._MAIN_DRIFT[1], km._QUIET_PARKED_LOGGED[0] = self.saved[8:]
+        (km._LAST_AUTO_CONVERGE[0], km._MAIN_DRIFT[0], km._MAIN_DRIFT[1], km._QUIET_PARKED_LOGGED[0],
+         km._CONVERGE_CRASH_T[0]) = self.saved[8:]     # the crash stamp restored too (the follow-up review)
         if km.RESTART_CUTS_FILE.exists():
             km.RESTART_CUTS_FILE.unlink()
 
@@ -698,6 +700,16 @@ class ConvergeWaitsSpareOnlyCuts(unittest.TestCase):
         km._CONVERGE_CRASH_T[0] = time.time() - km._CONVERGE_COOLDOWN_S - 1
         self._pass()
         self.assertEqual(self.ran, ["pull"], "the cool-down over, the retry converges")
+        self.assertEqual(km._CONVERGE_CRASH_T[0], 0.0, "a converge that ran clears the crash hold (the follow-up review)")
+
+    def test_an_in_place_converge_clears_the_crash_hold_too(self):
+        # the follow-up review: a success that bypassed the gate (an in-place converge from the restart leg or /update)
+        # left the stamp, and a later converge waited out a cool-down it had no reason to
+        import inspect
+        src = inspect.getsource(self.saved[4])           # the REAL _run_main_update (setUp stubs km's)
+        i = src.index("_in_place_converge(pulled):")
+        self.assertIn("_CONVERGE_CRASH_T[0] = 0.0", src[i:i + 400], "cleared on the in-place road before its return")
+        self.assertLess(src.index("_CONVERGE_CRASH_T[0] = 0.0", i), src.index("return", i + 30))
 
     def test_the_converge_leg_asks_git_again_for_the_running_sha_within_the_miss_bound(self):
         # the round-three review's low b: the 30 s miss memo made the leg's own read (in _run_main_update) return None
