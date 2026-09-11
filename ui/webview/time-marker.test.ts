@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { markerLabel, dayContext } from "./time-marker";
+import { markerLabel, dayContext, dayOpens, DayWalk } from "./time-marker";
 
 // All epochs below are built from local-time components so the test is timezone-agnostic
 // (markerLabel reads getHours()/getMinutes()/getDate() in local time, matching the browser).
@@ -103,4 +103,48 @@ test("dayContext speaks the relative-day vocabulary, midnight-relative", () => {
   assert.equal(dayContext(at(2026, 6, 22), now), "3 weeks ago", "26 days");
   assert.equal(dayContext(at(2026, 6, 15), now), "Jul 15", "past a month → the divider's own date form");
   assert.equal(dayContext(at(2025, 11, 30), now), "Dec 30 2025", "a different year says so");
+});
+
+// T339 (the user 2026-09-11): a day divider opens only on a FORWARD crossing into a past day. A row stamped earlier than the
+// row before it (a notice that kept the moment it was queued and landed at delivery) drew "Yesterday" inside today.
+test("dayOpens: the first row of a past day opens it, forward; today never opens; the same day never opens", () => {
+  assert.strictEqual(dayOpens(at(2026, 5, 11, 10, 0), at(2026, 5, 10, 10, 0), NOW), "Yesterday", "two days ago → yesterday: a forward crossing");
+  assert.strictEqual(dayOpens(at(2026, 5, 11, 10, 0), null, NOW), "Yesterday", "the first timed row of a past day, nothing before it");
+  assert.strictEqual(dayOpens(at(2026, 5, 12, 7, 5), at(2026, 5, 11, 22, 28), NOW), "", "yesterday → today: today wears no divider");
+  assert.strictEqual(dayOpens(at(2026, 5, 11, 10, 28), at(2026, 5, 11, 10, 0), NOW), "", "the same day: no boundary");
+  assert.strictEqual(dayOpens(at(2026, 5, 9, 10, 0), at(2026, 5, 8, 10, 0), NOW), "Tue", "a weekday within the week");
+});
+
+test("dayOpens: a step BACK in time is not a day opening, whatever markerLabel would have said", () => {
+  // the reported shape: a row of today, then a row stamped yesterday (a notice run's first member), then today again
+  assert.strictEqual(dayOpens(at(2026, 5, 11, 9, 47), at(2026, 5, 12, 8, 15), NOW), "", "yesterday after today: no divider");
+  assert.strictEqual(markerLabel(at(2026, 5, 11, 9, 47), at(2026, 5, 12, 8, 15), NOW).day, true, "…though the marker rule alone reads it as a day change (the bug)");
+  assert.strictEqual(dayOpens(at(2026, 5, 12, 8, 15), at(2026, 5, 11, 9, 47), NOW), "", "and the return to today opens nothing either");
+  assert.strictEqual(dayOpens(at(2026, 5, 10, 9, 0), at(2026, 5, 11, 9, 0), NOW), "", "two days ago after yesterday: a step back, no divider");
+  assert.strictEqual(dayOpens(at(2026, 5, 11, 9, 0), at(2026, 5, 11, 9, 0), NOW), "", "the same instant: no divider");
+});
+
+// T339 review: the walk's reference is a HIGH-WATER MARK. Against the previous row alone, a step back followed by a return
+// into a PAST day re-opened it: the stale row drew no divider but became the reference, and the next in-sequence row then
+// crossed "forward" into a day already open. Today never opens, so only a same-day-as-today return was ever safe.
+test("DayWalk: a step back never rewinds the mark, so the return into a past day opens nothing a second time", () => {
+  const TOMORROW = new Date(2026, 5, 13, 12, 0, 0).getTime();   // the transcript read the next day: its rows are yesterday's
+  const w = new DayWalk();
+  const seen: string[] = [];
+  for (const ep of [at(2026, 5, 12, 9, 5), at(2026, 5, 10, 9, 40), at(2026, 5, 10, 9, 41), at(2026, 5, 12, 9, 10)]) {
+    seen.push(w.open(ep, TOMORROW)); w.pass(ep);
+  }
+  assert.deepStrictEqual(seen, ["Yesterday", "", "", ""], "one divider for yesterday, none for the two stale rows, none on the return");
+  assert.strictEqual(w.mark, at(2026, 5, 12, 9, 10), "the mark is the latest epoch passed");
+});
+
+test("DayWalk: passing an earlier epoch or null leaves the mark; a forward crossing into a past day opens once", () => {
+  const w = new DayWalk();
+  assert.strictEqual(w.open(at(2026, 5, 10, 10, 0), NOW), "Wed", "the first row of a past day opens it");
+  w.pass(at(2026, 5, 10, 10, 0)); w.pass(null); w.pass(at(2026, 5, 9, 23, 0));
+  assert.strictEqual(w.mark, at(2026, 5, 10, 10, 0), "null and an earlier epoch never move the mark");
+  assert.strictEqual(w.open(at(2026, 5, 10, 10, 5), NOW), "", "the same day again: nothing");
+  assert.strictEqual(w.open(at(2026, 5, 11, 8, 0), NOW), "Yesterday", "the next day opens");
+  w.pass(at(2026, 5, 11, 8, 0));
+  assert.strictEqual(w.open(at(2026, 5, 12, 8, 0), NOW), "", "today never opens");
 });

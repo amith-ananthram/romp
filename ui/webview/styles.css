@@ -1776,14 +1776,27 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    gutter is 59px wide and "Yesterday" measures 52.6px bold, so its "Y" fell off the left edge
    of the pane; anything sized to FIT that gutter re-clips the moment --vscode-chat-font-size
    grows. Out here the label has the whole column, so no date string can ever be cut off.
-   Left-aligned with the prose (turns pad 24px); the rule fills the rest of the line. */
+   The date is CENTERED over the column (T339, the user 2026-09-11: it sat at the prose edge with the
+   rule to its right alone), a hairline either side: the two rules share the leftover room equally, so
+   the label lands in the middle. padding-left keeps the row in the prose column (turns pad 24px). */
 .day-divider {
-  display: flex; align-items: center; gap: 9px;
+  display: flex; align-items: center; gap: 9px; position: relative;
   margin: 16px 0 6px; padding-left: 24px;
   font-size: 0.72em; letter-spacing: 0.02em;   /* same size as .time-marker — same kind of label */
 }
 .day-divider-label { flex: 0 0 auto; color: var(--fg); font-weight: 700; white-space: nowrap; }
-.day-divider::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--box-border); }
+.day-divider-rule { flex: 1 1 auto; height: 1px; background: var(--box-border); }
+/* the rail runs THROUGH the divider (T339): the line is drawn per turn (.turn::before below), so a divider between
+   two turns left a gap the height of itself and its margins. This segment is the same 2px at the same left in the
+   same colour and opacity, and spans the divider's own margins, so the line is continuous. */
+.day-divider::before { content: ""; position: absolute; left: 10.5px; top: -16px; bottom: -6px; width: 2px; background: var(--active-accent, var(--rail)); opacity: 0.7; }
+/* a divider that LEADS the transcript (a session whose first row is a past day, read from its top) has no line above
+   it: the thread's first child, or the one right after the pinned system-context card, which sits OFF the rail with its
+   own line suppressed (.turn-system::before below). No segment there, and the turn it opens starts its rail at its first
+   dot, as a first turn does (.turn:first-child::before). A windowed head (.tx-spacer-top first) keeps the segment: the
+   rail continues from the turns the spacer stands in for. */
+.day-divider:first-child::before, .turn-system + .day-divider::before { display: none; }
+.day-divider:first-child + .turn::before, .turn-system + .day-divider + .turn::before { top: 16px; }
 /* "worked …" footer — how long the session ran on a finished prompt. Sits IN-FLOW
    below that prompt's last reply, left-justified under the response text (turns pad
    30px on the left, so a normal block lands at the text's left edge). It used to ride
@@ -3580,6 +3593,10 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
    (pending bubbles, dots, notes) come after the turns, so the + combinator never misses a pair;
    keep the -6px paired with .cmt-msgs' gap above. */
 .cmt-msgs .turn + .turn::before { top: -6px; }
+/* the day divider between two turns (fillCommentMsgs, T339): its segment spans only its own margins (16px above, 6px
+   below), and this flex column adds its 6px gap on both sides of it, which the rule above does not bridge (the turn after
+   a divider is not `.turn + .turn`); stretch the segment over margin plus gap each side, so the rail runs through here too */
+.cmt-msgs .day-divider::before { top: -22px; bottom: -12px; }
 /* the quoted passage as CONTEXT on the thread's opening message (the user 2026-08-24) — the
    .cmt-quote dress, sitting inside the turn above its bubble, the chat's citation-as-context shape */
 .cmt-quote-ctx { margin: 0 0 4px; }

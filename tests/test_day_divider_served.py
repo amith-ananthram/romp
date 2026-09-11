@@ -1,0 +1,341 @@
+#!/usr/bin/env python3
+"""T339 (the user 2026-09-11, screenshot): the chat's day divider. Three faults on the real /chat page of a hermetic kernel:
+(1) the rail's vertical line broke above and below the divider; (2) the date sat at the prose edge with the hairline to its
+right alone; (3) a collapsed run of notices whose FIRST member carried yesterday's time among today's rows drew a
+"Yesterday" divider inside today and wore yesterday's clock. The producer, from the kernel's code: a session's LIVE echo
+atoms (the kernel's own copies of sent messages, kept until the transcript lands their text; persisted in the registry's
+`echoes` mirror and reseeded at boot) are merged into the chat's LAST turn sorted by their own SEND time (kernel.py, the
+live-atom merge), so a romp notice sent yesterday whose text never landed sits right after the previous turn's rows, among
+today's, stamped yesterday; two such echoes fold into one notice run timed by its first.
+
+Two synthetic sessions on one kernel. `web`: rows two days ago, yesterday and today (two turns), the registry mirroring two
+echoes of romp notices, the first sent yesterday, the second today between the two turns. `api`: the same shape read a day
+later, rows all yesterday and both echoes two days ago (a run whose latest member is itself stale): against the previous
+row alone the stale run drew no divider but became the reference, and the next in-sequence row crossed "forward" into a
+day already open, a second "Yesterday" mid-day (the review's finding; time-marker.ts DayWalk is the high-water mark that
+closes it). Asserted, dark and light: `web` shows two dividers only (the weekday over two days ago, "Yesterday" over
+yesterday's first row) and none above the notice run, whose head wears its latest member's time; `api` shows exactly one
+"Yesterday"; each divider's label is centered in the column between two hairlines of equal width; the divider's rail
+segment is painted on the turns' own line (the same page x) and reaches the neighbouring turns' boxes above and below
+(painted geometry, not the rule text); a divider that leads the transcript (nothing on the rail above it: the first child,
+or the one after the pinned system-context card, which sits off the rail) draws no segment and the turn after it starts
+its rail where a first turn does. The browser's clock is pinned to the epoch the fixture was stamped from, so a run that
+crosses local midnight between the boot and the drive still agrees with itself.
+
+With DD_SHOTS=<dir> the driver writes screenshots (dark and light, the `web` session); DD_BEFORE_DIST=<dist> serves another
+tree's bundle for the before shots and skips the assertions, unless DD_BEFORE_ASSERT=1 keeps them (how the test is proven
+red against the bundle before the change: a third divider inside today above `web`'s notice run; and, against the branch
+before the high-water mark, a second "Yesterday" in `api`). Skips LOUDLY without the extension deps or a Playwright
+browser; the extension CI job installs Chromium and runs served files with ROMP_SERVED_TESTS_REQUIRE=1, which turns any
+skip into a failure there. SYNTHETIC fixtures only (sessions web and api, invented notice texts, the notes-api demo world)."""
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+from tests.dist_copy import copy_dist
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+ROOT = os.path.dirname(HERE)
+BIN = os.path.join(ROOT, "bin")
+EXT = os.path.join(ROOT, "vscode-extension")
+sys.path.insert(0, HERE)
+import test_ship_reship as _lab   # noqa: E402  the lab kernel's environment (the module, not its classes)
+
+SID_A = "aaaaaaaa-1111-2222-3333-444444444444"   # web: today's rows, one stale echo among them
+SID_B = "bbbbbbbb-1111-2222-3333-444444444444"   # api: the same read a day later, both echoes stale
+
+
+def _free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+def iso(t):
+    return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _local_day(days_ago, hour, minute, now):
+    """An epoch on the LOCAL day `days_ago` days before `now` at hour:minute (the chat's day keys are the browser's local
+    time, the same machine's as this runner's; the browser's clock is pinned to `now` too)."""
+    lt = time.localtime(now)
+    base = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hour, minute, 0, 0, 0, -1))
+    return int(base) - days_ago * 86400
+
+
+NOTICE_MARKERS = "\n\n<!-- romp-injected --><!-- romp-system --><!-- romp-tag: watch -->"
+NOTICE_1 = "[romp] The condition you asked romp to watch now HOLDS: the search suite's log has its verdict.<!-- romp-gist: the condition it was watching now holds -->" + NOTICE_MARKERS
+NOTICE_2 = "[romp] The condition you asked romp to watch now HOLDS: the second log has its verdict.<!-- romp-gist: the condition it was watching now holds -->" + NOTICE_MARKERS
+
+
+def _echoes(now, shift):
+    """The registry's echo mirror: two romp notices the kernel sent and whose text never landed. Reseeded at boot as live
+    atoms, they merge into the last turn by their own send time: after the first turn's rows, before the second turn's.
+    `shift` 0 (web): the first sent YESTERDAY 09:47, the second today 00:12. `shift` 1 (api): both two days ago."""
+    if shift == 0:
+        return [{"uuid": "echo:" + "a" * 32, "t": _local_day(1, 9, 47, now), "text": NOTICE_1, "author": "romp"},
+                {"uuid": "echo:" + "b" * 32, "t": _local_day(0, 0, 12, now), "text": NOTICE_2, "author": "romp"}]
+    return [{"uuid": "echo:" + "c" * 32, "t": _local_day(2, 9, 40, now), "text": NOTICE_1, "author": "romp"},
+            {"uuid": "echo:" + "d" * 32, "t": _local_day(2, 9, 41, now), "text": NOTICE_2, "author": "romp"}]
+
+
+def _records(sid, now, shift):
+    """The transcript. `shift` 0 (web): a pair two days ago, a pair yesterday (a real day boundary), then today: two turns,
+    the echoes merging between them. `shift` 1 (api): two turns, all yesterday (the transcript read a day later)."""
+    def user(uuid, parent, t, text):
+        return {"type": "user", "timestamp": iso(t), "uuid": uuid, "parentUuid": parent, "promptSource": "typed", "sessionId": sid,
+                "message": {"role": "user", "content": text}}
+    def asst(uuid, parent, t, text):
+        return {"type": "assistant", "timestamp": iso(t), "uuid": uuid, "parentUuid": parent, "sessionId": sid,
+                "message": {"role": "assistant", "model": "claude-opus-5", "stop_reason": "end_turn", "content": [{"type": "text", "text": text}]}}
+    if shift == 0:
+        d2, d1 = _local_day(2, 10, 0, now), _local_day(1, 10, 0, now)
+        # today's rows early in the local day, so the fixture's "today" holds from 00:00 on
+        t0 = _local_day(0, 0, 10, now)
+        return [
+            user("u1", None, d2, "how should the notes-api retry loop back off?"),
+            asst("a1", "u1", d2 + 60, "Use exponential backoff with a jitter of ten percent."),
+            user("u2", "a1", d1, "and the cap on retries?"),
+            asst("a2", "u2", d1 + 60, "Five attempts, then surface the failure."),
+            user("u3", "a2", t0, "please run the notes-api search suite"),
+            asst("a3", "u3", t0 + 60, "Running the search suite now."),
+            # the second turn of today; the two echoes (00:12 today and 09:47 yesterday) sort before its trigger
+            user("u4", "a3", t0 + 180, "and the docs suite after it"),
+            asst("a4", "u4", t0 + 240, "Both suites are green; the search module is done."),
+        ]
+    y0 = _local_day(1, 9, 5, now)
+    return [
+        user("u1", None, y0, "please run the notes-api search suite"),
+        asst("a1", "u1", y0 + 60, "Running the search suite now."),
+        # the second turn of yesterday; both echoes (two days ago) sort before its trigger
+        user("u2", "a1", y0 + 300, "and the docs suite after it"),
+        asst("a2", "u2", y0 + 360, "Both suites are green; the search module is done."),
+    ]
+
+
+DRIVER = r"""
+import { createRequire } from "node:module";
+import fs from "node:fs";
+const require = createRequire(process.env.EXT_PKG);
+const { chromium } = require("playwright");
+const cfg = JSON.parse(fs.readFileSync(process.env.CFG, "utf8"));
+let browser;
+try { browser = await chromium.launch(); }
+catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
+const page = await browser.newPage({ viewport: { width: 1100, height: 760 }, deviceScaleFactor: 2 });
+await page.clock.setFixedTime(cfg.nowMs);   // the page's Date.now() is the epoch the fixture was stamped from; timers keep running
+await page.goto(cfg.chat);
+await page.waitForSelector("#tabs .tab[data-id]", { timeout: 20000 });
+const show = async (sid, turns) => {
+  await page.click('#tabs .tab[data-id="' + sid + '"]');
+  await page.waitForFunction((n) => Array.from(document.querySelectorAll("#content .turn")).filter((t) => t.offsetParent !== null).length >= n, turns, { timeout: 30000 });
+  await page.mouse.move(700, 600); await page.waitForTimeout(500);
+};
+const measure = () => page.evaluate(() => {
+  const turn0 = Array.from(document.querySelectorAll("#content .turn")).find((t) => t.offsetParent !== null);
+  const thread = turn0.parentElement;
+  const kids = Array.from(thread.children);
+  const rows = kids.map((n) => {
+    const cs = getComputedStyle(n);
+    const isDiv = n.classList.contains("day-divider");
+    const marker = n.querySelector(":scope > .time-marker");
+    const r = n.getBoundingClientRect();
+    return { cls: n.className, unit: n.dataset.unit ?? null, t: n.dataset.t ?? null, marker: marker ? marker.textContent : null,
+             markerEpoch: marker ? marker.dataset.epoch : null, label: isDiv ? n.querySelector(".day-divider-label").textContent : null,
+             top: r.top, bottom: r.bottom, height: r.height, marginTop: cs.marginTop, marginBottom: cs.marginBottom };
+  });
+  const railX = (n) => { const b = getComputedStyle(n, "::before"); return n.getBoundingClientRect().left + parseFloat(b.left); };
+  const divs = kids.filter((n) => n.classList.contains("day-divider")).map((n) => {
+    const r = n.getBoundingClientRect(); const cs = getComputedStyle(n);
+    const lbl = n.querySelector(".day-divider-label").getBoundingClientRect();
+    const rules = Array.from(n.querySelectorAll(".day-divider-rule")).map((x) => { const b = x.getBoundingClientRect(); return { left: b.left, width: b.width, height: b.height }; });
+    const before = getComputedStyle(n, "::before");
+    const contentLeft = r.left + parseFloat(cs.paddingLeft);
+    const prev = n.previousElementSibling, next = n.nextElementSibling;
+    const box = (m) => m ? { cls: m.className, top: m.getBoundingClientRect().top, bottom: m.getBoundingClientRect().bottom, railX: m.classList.contains("turn") ? railX(m) : null,
+                             railTop: m.classList.contains("turn") ? getComputedStyle(m, "::before").top : null,
+                             t: m.dataset.t ?? null, markerEpoch: (m.querySelector(":scope > .time-marker") || {}).dataset?.epoch ?? null } : null;
+    // leads: nothing rail-bearing above it (the system-context card sits off the rail with its line suppressed)
+    return { label: n.querySelector(".day-divider-label").textContent, leads: kids.slice(0, kids.indexOf(n)).every((m) => m.classList.contains("turn-system")),
+             labelCenter: (lbl.left + lbl.right) / 2, columnCenter: (contentLeft + r.right) / 2, top: r.top, bottom: r.bottom, rules,
+             rail: { display: before.display, width: before.width, left: before.left, top: before.top, bottom: before.bottom, bg: before.backgroundColor, opacity: before.opacity, position: before.position,
+                     x: railX(n), segTop: r.top + parseFloat(before.top), segBottom: r.bottom - parseFloat(before.bottom) },
+             prev: box(prev), next: box(next) };
+  });
+  const tb = getComputedStyle(turn0, "::before");
+  const head = Array.from(document.querySelectorAll("#content .turn-noticegroup")).find((t) => t.offsetParent !== null);
+  return { rows, divs, turnRail: { width: tb.width, left: tb.left, bg: tb.backgroundColor, opacity: tb.opacity },
+           head: head ? { marker: (head.querySelector(":scope > .time-marker") || {}).textContent ?? null, t: head.dataset.t ?? null,
+                          prevIsDivider: !!(head.previousElementSibling && head.previousElementSibling.classList.contains("day-divider")),
+                          gist: head.textContent.trim().slice(0, 80) } : null,
+           theme: document.body.classList.contains("theme-light") ? "light" : "dark" };
+});
+const out = { web: {}, api: {} };
+await show(cfg.web, 8);
+out.web.dark = await measure();
+if (cfg.shots) { fs.mkdirSync(cfg.shots, { recursive: true }); await page.screenshot({ path: cfg.shots + "/romp_chat-day-divider-dark" + (cfg.shotSuffix || "") + ".png", fullPage: false }); }
+await page.evaluate(() => document.body.classList.add("theme-light")); await page.waitForTimeout(300);
+out.web.light = await measure();
+if (cfg.shots) await page.screenshot({ path: cfg.shots + "/romp_chat-day-divider-light" + (cfg.shotSuffix || "") + ".png", fullPage: false });
+await show(cfg.api, 4);
+out.api.light = await measure();
+await page.evaluate(() => document.body.classList.remove("theme-light")); await page.waitForTimeout(300);
+out.api.dark = await measure();
+fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
+await browser.close();
+process.exit(0);
+"""
+
+
+class ServedDayDivider(unittest.TestCase):
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            cls._boot()
+        except BaseException:          # a skip OR a failure: never leave a kernel or a lab behind
+            cls.tearDownClass()
+            raise
+
+    @classmethod
+    def _boot(cls):
+        if not os.path.isdir(os.path.join(EXT, "node_modules", "playwright")):
+            raise unittest.SkipTest("extension deps absent (npm ci not run here) — the served guard needs them; CI's extension job has them and requires this file to run")
+        probe = subprocess.run(["node", "-e", "const p=require(process.argv[1]);process.stdout.write(p.chromium.executablePath())",
+                                os.path.join(EXT, "node_modules", "playwright")], capture_output=True, text=True)
+        if probe.returncode != 0 or not os.path.exists(probe.stdout.strip()):
+            raise unittest.SkipTest("no playwright browser on this box — the served guard needs one; CI's extension job installs Chromium and requires this file to run")
+        cls.lab = tempfile.mkdtemp(prefix="day-divider-")
+        cls.before = os.environ.get("DD_BEFORE_DIST", "")
+        if not cls.before:
+            b = subprocess.run(["node", "esbuild.js"], cwd=EXT, capture_output=True, text=True)
+            if b.returncode != 0:
+                raise unittest.SkipTest("esbuild failed here: " + (b.stderr or b.stdout)[-200:])
+        dist = os.path.join(cls.lab, "dist")
+        copy_dist(cls.before or os.path.join(EXT, "dist"), dist)
+        state = os.path.join(cls.lab, "xdg", "romp")
+        claude = os.path.join(cls.lab, "claude")
+        for d in ("names", "sdk", "states"):
+            os.makedirs(os.path.join(state, d), exist_ok=True)
+        cls.now = time.time()   # ONE epoch for the fixture and the browser's clock: the run cannot straddle midnight against itself
+        for sid, name, shift, colour in ((SID_A, "web", 0, ("#9cd2ff", "#0c1a2e")), (SID_B, "api", 1, ("#ffd29c", "#2e1a0c"))):
+            cwd = os.path.join(cls.lab, "proj-" + name)
+            os.makedirs(cwd, exist_ok=True)
+            Path(state, "names", sid).write_text("%s\t%s\t%s\t%s\n" % (name, cwd, colour[0], colour[1]))
+            Path(state, "sdk", sid + ".json").write_text(json.dumps(
+                {"sid": sid, "name": name, "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": sid, "alive": True,
+                 "model": "claude-opus-5", "liveModel": "Opus 5", "echoes": _echoes(cls.now, shift)}))
+            proj = os.path.join(claude, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd)))
+            os.makedirs(proj, exist_ok=True)
+            Path(proj, sid + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in _records(sid, cls.now, shift)))
+        Path(state, "usage.json").write_text(json.dumps({"five_hour": {"pct": 10}, "seven_day": {"pct": 10}}))
+        cls.port, cls.token = _free_port(), "testtok-daydivider"
+        env = _lab.kernel_env(cls.lab, claude, dist, cls.port, cls.token, ROMP_HOST_NAME="TESTHOST")
+        cls.klog = os.path.join(cls.lab, "kernel.log")
+        cls.kernel = subprocess.Popen([os.path.join(BIN, "romp-kernel")], stdout=open(cls.klog, "w"), stderr=subprocess.STDOUT, env=env)
+        for _ in range(120):
+            try:
+                urllib.request.urlopen("http://127.0.0.1:%d/healthz" % cls.port, timeout=1)
+                break
+            except Exception:
+                time.sleep(0.5)
+        else:
+            raise unittest.SkipTest("hermetic kernel never served /healthz here")
+
+    @classmethod
+    def tearDownClass(cls):
+        k = getattr(cls, "kernel", None)
+        if k:
+            k.kill(); k.wait()
+        shutil.rmtree(getattr(cls, "lab", ""), ignore_errors=True)
+
+    def _divider_shape(self, d, m, theme):
+        """(2) the date centered over the column, a hairline either side; (1) the rail runs through: the segment is the
+        turn's own line at the same page x, and reaches the neighbouring turns' boxes (painted geometry, not the rule)."""
+        self.assertEqual(len(d["rules"]), 2, "two hairlines: %r" % d)
+        self.assertTrue(all(x["width"] > 40 and abs(x["height"] - 1) < 0.6 for x in d["rules"]), "both rules have room and are hairlines: %r" % d["rules"])
+        self.assertLess(abs(d["rules"][0]["width"] - d["rules"][1]["width"]), 2, "the two rules share the room equally: %r" % d["rules"])
+        self.assertLess(abs(d["labelCenter"] - d["columnCenter"]), 2, "the label sits in the middle of the column: %r" % d)
+        nxt = d["next"]
+        self.assertIsNotNone(nxt, "a divider precedes the turn it opens: %r" % d)
+        self.assertTrue(nxt["cls"].startswith("turn"), "…a turn: %r" % nxt)
+        if d["leads"]:
+            # a LEADING divider: no segment above the date; the turn it opens starts its rail at its first dot, as a first turn does
+            self.assertEqual(d["rail"]["display"], "none", "a leading divider draws no segment in %s: %r" % (theme, d["rail"]))
+            self.assertEqual(nxt["railTop"], "16px", "…and its turn starts its rail where a first turn does: %r" % nxt)
+            return
+        self.assertEqual((d["rail"]["position"], d["rail"]["width"]), ("absolute", m["turnRail"]["width"]), "a 2px segment: %r" % d["rail"])
+        self.assertEqual((d["rail"]["bg"], d["rail"]["opacity"]), (m["turnRail"]["bg"], m["turnRail"]["opacity"]), "the turn's colour and opacity: %r vs %r" % (d["rail"], m["turnRail"]))
+        self.assertLess(abs(d["rail"]["x"] - nxt["railX"]), 0.5, "painted on the turns' own line (the same page x): %r vs %r" % (d["rail"], nxt))
+        prv = d["prev"]
+        self.assertIsNotNone(prv, "a turn above: %r" % d)
+        self.assertLessEqual(d["rail"]["segTop"], prv["bottom"] + 0.5, "the segment reaches the turn above: %r / %r" % (d["rail"], prv))
+        self.assertGreaterEqual(d["rail"]["segBottom"], nxt["top"] - 0.5, "…and the turn below: %r / %r" % (d["rail"], nxt))
+
+    def test_the_divider_opens_each_past_day_once_centered_with_the_rail_through_it_and_never_on_a_stale_row(self):
+        cfg = os.path.join(self.lab, "cfg.json")
+        with open(cfg, "w") as f:
+            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "web": SID_A, "api": SID_B,
+                       "nowMs": int(self.now * 1000),
+                       "shots": os.environ.get("DD_SHOTS", ""), "shotSuffix": "-before" if self.before else ""}, f)
+        driver = os.path.join(self.lab, "driver.mjs")
+        with open(driver, "w") as f:
+            f.write(DRIVER)
+        p = subprocess.run(["node", driver], capture_output=True, text=True, timeout=300,
+                           env=dict(os.environ, EXT_PKG=os.path.join(EXT, "package.json"), CFG=cfg))
+        if p.returncode == 3:
+            raise unittest.SkipTest("no playwright browser on this box — the served guard needs one; CI's extension job installs Chromium and requires this file to run")
+        self.assertEqual(p.returncode, 0, "driver failed:\n" + p.stdout[-3000:] + p.stderr[-3000:] + "\nkernel:\n" + open(self.klog).read()[-1500:])
+        line = next((ln for ln in p.stdout.splitlines() if ln.startswith("RESULT:")), None)
+        self.assertIsNotNone(line, "driver printed no result:\n" + p.stdout[-3000:])
+        r = json.loads(line[len("RESULT:"):])
+        if self.before and not os.environ.get("DD_BEFORE_ASSERT"):
+            self.skipTest("a before-the-change dist: screenshots only, the assertions describe the change")
+        now = self.now
+        yesterday_first = _local_day(1, 10, 0, now)
+        two_days_ago = time.strftime("%a", time.localtime(_local_day(2, 10, 0, now)))   # the marker's weekday label for a day within the week
+        later_t = _echoes(now, 0)[1]["t"]
+        # web: today's rows with one stale echo among them
+        for theme in ("dark", "light"):
+            m = r["web"][theme]
+            self.assertEqual(m["theme"], theme)
+            # (3) two dividers only: the first row (two days ago) opens its day, yesterday's first row opens "Yesterday";
+            # none inside today, where the notice run sits with its first member stamped yesterday
+            self.assertEqual([d["label"] for d in m["divs"]], [two_days_ago, "Yesterday"], "two dividers, the transcript's two past days, in %s: %r" % (theme, [d["label"] for d in m["divs"]]))
+            d = m["divs"][1]
+            self.assertEqual(d["next"]["markerEpoch"], str(yesterday_first), "…yesterday's first row: %r" % d["next"])
+            self.assertIsNotNone(m["head"], "the two echoed notices collapsed into one run: %r" % [row["cls"] for row in m["rows"]])
+            self.assertFalse(m["head"]["prevIsDivider"], "no divider above the notice run (its first member is stamped yesterday, its place is today): %r" % m["head"])
+            self.assertEqual(m["head"]["marker"], time.strftime("%H:%M", time.localtime(later_t)), "the run's head wears its LATEST member's time, today's, not yesterday's: %r" % m["head"])
+            self.assertEqual(m["head"]["t"], str(later_t), "…and anchors on it")
+            self.assertTrue(m["divs"][0]["leads"], "the transcript leads with its first day's divider (after the system-context card): %r" % m["divs"][0])
+            for d in m["divs"]:
+                self._divider_shape(d, m, theme)
+        # api: the same read a day later, both echoes stale: exactly ONE "Yesterday" (the review's duplicate closed)
+        b_later_t = _echoes(now, 1)[1]["t"]
+        for theme in ("dark", "light"):
+            m = r["api"][theme]
+            self.assertEqual(m["theme"], theme)
+            self.assertEqual([d["label"] for d in m["divs"]], ["Yesterday"], "one divider: the stale run opens nothing and never becomes the reference, so the return to yesterday's rows opens nothing either, in %s: %r" % (theme, [d["label"] for d in m["divs"]]))
+            self.assertIsNotNone(m["head"], "the two stale echoes collapsed into one run: %r" % [row["cls"] for row in m["rows"]])
+            self.assertFalse(m["head"]["prevIsDivider"], "no divider above the stale run: %r" % m["head"])
+            self.assertEqual(m["head"]["t"], str(b_later_t), "the run's head anchors on its latest member, stale as it is")
+            self.assertTrue(m["divs"][0]["leads"])
+            self._divider_shape(m["divs"][0], m, theme)
+
+
+if __name__ == "__main__":
+    unittest.main()

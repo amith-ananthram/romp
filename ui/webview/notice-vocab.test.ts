@@ -113,7 +113,8 @@ test("(g) the gallery fixture is checked in and mirrors the builder class-for-cl
   assert.match(fx, /SYNTHETIC/, "the fixture declares itself synthetic (privacy rule)");
   for (const cls of ["notice-sev-info", "notice-sev-romp", "notice-sev-err", "notice-sev-compact", "notice-sev-retry", "notice-sev-warn",
                      "notice-slim", "notice-boxed", "notice-nested", "notice-head", "notice-glyph", "notice-src", "notice-gist", "notice-meta",
-                     "notice-acts", "notice-act", "notice-body", "notice-src-chip", "romp-bubble", "queued-bubble", "undelivered-note"]) {
+                     "notice-acts", "notice-act", "notice-body", "notice-src-chip", "romp-bubble", "queued-bubble", "undelivered-note",
+                     "day-divider-rule"]) {   // the divider's two hairlines around its date (T339)
     assert.ok(fx.includes(cls), "fixture shows ." + cls);
   }
   assert.match(fx, /data-act="noticetoggle"/);

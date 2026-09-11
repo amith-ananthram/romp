@@ -49,6 +49,31 @@ export function markerLabel(epoch: number, prevEpoch: number | null, nowMs: numb
   return { text: time, day: false, hm: time, date: "" };
 }
 
+/** The date a day divider shows above a row, or "" for none: the boundary rule markerLabel applies (the first row of a
+ *  PAST day), with one more condition (T339, the user 2026-09-11): the crossing must be FORWARD. A row stamped earlier
+ *  than the row before it (a notice that kept the moment it was queued and landed at delivery, a clock skew) is not a
+ *  day opening: reading the step back as a boundary drew "Yesterday" inside today, above a row whose neighbours were all
+ *  today's. Such a row keeps its own time and draws no divider. */
+export function dayOpens(epoch: number, prevEpoch: number | null, nowMs: number): string {
+  if (prevEpoch != null && epoch < prevEpoch) return "";
+  const { day, date } = markerLabel(epoch, prevEpoch, nowMs);
+  return day && date ? date : "";
+}
+
+/** The day walk's state (T339 review): the reference a divider is decided against is a HIGH-WATER MARK, the latest
+ *  epoch the walk has passed, never the row just before. A row stamped earlier than the rows around it (a live echo the
+ *  kernel merges into the last turn at its send time) opens no day (dayOpens) and must not become the reference either:
+ *  the next in-sequence row would cross "forward" out of the stale day and open a SECOND divider for a day already open,
+ *  whenever that day is not today (today never opens, which is the one case a previous-row rule got right). `open` asks
+ *  whether a row opens a day against the mark; `pass` moves the mark over a row (or a unit's exit epoch) and never
+ *  rewinds. The rail's own HH:MM chain is separate (it reads the raw previous row), so a row after a stale one still
+ *  shows its time. */
+export class DayWalk {
+  mark: number | null = null;
+  open(epoch: number, nowMs: number): string { return dayOpens(epoch, this.mark, nowMs); }
+  pass(epoch: number | null): void { if (epoch != null && (this.mark == null || epoch > this.mark)) this.mark = epoch; }
+}
+
 // (A chooseStamps() spacing pass used to live here: it re-revealed a suppressed same-minute stamp every
 // ~6 rows so the gutter never went long without a time. The sticky rail stamp now guarantees a time at the
 // top of the view at all times, which made those repeats pure noise — so the pass is gone and a stamp means
