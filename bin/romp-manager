@@ -785,12 +785,19 @@ const TMUX_DIR_RULES = { operator: 'operator', runtime: 'runtime-dir', noRuntime
                          subdirUnusable: 'XDG_RUNTIME_DIR/romp could not be made, or is not a writable directory' };
 function resolveTmuxTmpdir({ env = process.env, fsi = fs } = {}) {
   const op = env.TMUX_TMPDIR || '';                 // as it stands: no trimming, the twins agree byte for byte
-  if (op) return { dir: op, rule: TMUX_DIR_RULES.operator };
-  const run = env.XDG_RUNTIME_DIR || '';
-  if (!run) return { dir: null, rule: TMUX_DIR_RULES.noRuntime };
+  if (op) {
+    // the shell twin's word for what IT resolved (bin/romp-tmux-env exports the mark beside the value before `romp
+    // up` starts a manager), so the log names that rule and not the operator
+    const mark = env.ROMP_TMUX_TMPDIR_RULE || '';
+    return { dir: op, rule: Object.values(TMUX_DIR_RULES).includes(mark) ? mark : TMUX_DIR_RULES.operator };
+  }
+  const run0 = env.XDG_RUNTIME_DIR || '';
+  if (!run0) return { dir: null, rule: TMUX_DIR_RULES.noRuntime };
   const usable = (p) => {
     try { if (!fsi.statSync(p).isDirectory()) return false; fsi.accessSync(p, fs.constants.W_OK | fs.constants.X_OK); return true; } catch { return false; }
   };
+  let run = run0;                                   // the CANONICAL runtime path: a trailing slash or a symlink must not read as another directory
+  try { run = fsi.realpathSync(run0); } catch { run = run0.replace(/\/+$/, '') || run0; }
   if (!usable(run)) return { dir: null, rule: TMUX_DIR_RULES.runtimeUnusable };
   const d = path.join(run, 'romp');
   if (!usable(d)) {
@@ -1125,7 +1132,7 @@ function ensureUp() {
 // file is executed directly, so require()-ing it from a test has no side effects.
 module.exports = { restartGate, quietGate, quietTick, loadSpecs, specEnv, fileStamp,
                    kernelToken, fetchBusy, resetDrainNotices, queueQuietRestart, clearPendingQuiet,
-                   tmuxStartArgv, scopedStartFailure, commandOnPath, TMUX_START_ARGV, tmuxTmpdir, resolveTmuxTmpdir, describeTmuxTmpdir, TMUX_DIR_RULES, staleManagerYields,
+                   tmuxStartArgv, scopedStartFailure, commandOnPath, TMUX_START_ARGV, tmuxTmpdir, resolveTmuxTmpdir, describeTmuxTmpdir, TMUX_DIR_RULES, staleManagerYields, startManager,
                    placementFromCgroup, tmuxServerPlacement, bareEnsuredLine, TMUX_SERVER_PID_ARGV,
                    withoutOpCredentials, retiredCredentialNames, retiredCredentialMessage, exitLine, auditSigterm,
                    ensureDecision, downMarkerHeld, clearDownMarker, DOWN_MARKER,

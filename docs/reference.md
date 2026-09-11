@@ -1121,11 +1121,19 @@ under launchd, a shell with the variable unset) tmux's own default applies, as
 before. On a systemd machine that default is a DIFFERENT server from the one
 the service started: a shell without `XDG_RUNTIME_DIR` (a cron job, `sudo -u`,
 `docker exec`) would start its own, and a session made there would never
-appear on the board. So `romp new -t` compares its own answer with the kernel's
-(`/version` reports `tmuxSocketDir` and the rule that chose it) and refuses
-when they differ, naming the fix (`export TMUX_TMPDIR=<the kernel's>`, or a
-login shell); with no kernel reachable, or a kernel too old to say, it
-compares nothing and proceeds as before.
+appear on the board; nor would one started from a pane on another server (the
+old `/tmp` server kept serving after the move, a personal `tmux`), since a
+pane's tmux calls dial the socket named in its own `$TMUX`. So `romp new -t`
+compares the directory its tmux calls would reach (`$TMUX`'s socket, else
+`TMUX_TMPDIR`, else the default) with the kernel's (`/version` reports
+`tmuxSocketDir` and the rule that chose it), as canonical paths, and refuses
+when they differ, worded by the kernel's rule: a kernel under a manager from
+before the change needs `romp refresh`; a shell without `XDG_RUNTIME_DIR` needs
+`export TMUX_TMPDIR=<the kernel's>` or a login shell; a pane on another server
+needs a shell outside it. With no kernel reachable, or a kernel too old to say,
+it compares nothing and proceeds as before. A kernel's own terminal spawn that
+is refused this way says so: one line in the kernel log and one row in the
+dashboard's error center, instead of a tab that never appears.
 
 One rule, resolved the same way in three places: the manager, before it starts
 the server, into the environment every kernel inherits; `bin/romp`, before its

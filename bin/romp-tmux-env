@@ -1,23 +1,29 @@
 #!/usr/bin/env bash
 # romp-tmux-env: where romp's tmux server keeps its socket (T325, 2026-09-11), the shell twin of
-# kernel/tmux_socket.py and of bin/romp-manager's tmuxTmpdir. Sourced by bin/romp before its first tmux call so a
+# kernel/tmux_socket.py and of bin/romp-manager's resolveTmuxTmpdir. Sourced by bin/romp before its first tmux call so a
 # plain shell's `romp new -t`, the resume picker and every other client here dial the server the manager started;
 # run directly it prints the resolved directory (an empty line means tmux's own default), for tests and operators.
 #
-# The rule, the same in all three: a TMUX_TMPDIR the operator set wins as it stands; else XDG_RUNTIME_DIR naming an
-# existing, writable directory gives <XDG_RUNTIME_DIR>/romp, created 0700 when missing (tmux 3.4 falls back to /tmp
-# silently when TMUX_TMPDIR names a missing directory, so the directory is made, never assumed); else nothing,
-# tmux's default. /run/user/<uid> is a per-user tmpfs no /tmp housekeeping, tmpfiles age sweep or /tmp mount-over
-# can touch: on 2026-09-11 a tmpfs mounted over a populated /tmp took /tmp/tmux-<uid> and every tmux-backed
-# session's terminal with it. A client already inside a pane uses its own $TMUX socket and needs none of this.
+# The rule, the same in all three: under the manager (ROMP_MANAGER_PID set: the kernel's own `romp new -t`, the
+# reviver's `romp resume`) TMUX_TMPDIR is taken as it stands, empty meaning tmux's default, because the manager alone
+# starts the server; else a TMUX_TMPDIR the operator set wins as it stands; else XDG_RUNTIME_DIR naming an existing,
+# writable directory gives <XDG_RUNTIME_DIR>/romp on the CANONICAL runtime path (a trailing slash in a shell rc must
+# not read as another directory), created 0700 when missing (tmux 3.4 falls back to /tmp silently when TMUX_TMPDIR
+# names a missing directory, so the directory is made, never assumed); else nothing, tmux's default. When this helper
+# resolved the runtime directory itself it also exports ROMP_TMUX_TMPDIR_RULE=runtime-dir, so a manager started from
+# bin/romp (`romp up` without a service) logs the rule that fired and not "set by the operator". /run/user/<uid> is
+# a per-user tmpfs no /tmp housekeeping, tmpfiles age sweep or /tmp mount-over can touch: on 2026-09-11 a tmpfs
+# mounted over a populated /tmp took /tmp/tmux-<uid> and every tmux-backed session's terminal with it. A client
+# already inside a pane uses its own $TMUX socket for every tmux call and needs none of this.
 
 romp_tmux_tmpdir() {
-    if [[ -n "${TMUX_TMPDIR:-}" ]]; then
-        printf '%s\n' "$TMUX_TMPDIR"
+    if [[ -n "${ROMP_MANAGER_PID:-}" || -n "${TMUX_TMPDIR:-}" ]]; then
+        printf '%s\n' "${TMUX_TMPDIR:-}"
         return 0
     fi
     local run="${XDG_RUNTIME_DIR:-}"
     [[ -n "$run" && -d "$run" && -w "$run" && -x "$run" ]] || return 0
+    run="$(cd "$run" 2>/dev/null && pwd -P)" || return 0
     local d="$run/romp"
     if [[ ! -d "$d" ]]; then
         mkdir -m 0700 "$d" 2>/dev/null || [[ -d "$d" ]] || return 0
@@ -29,8 +35,8 @@ romp_tmux_tmpdir() {
 romp_tmux_tmpdir_export() {
     local d
     d="$(romp_tmux_tmpdir)"
-    if [[ -n "$d" ]]; then
-        export TMUX_TMPDIR="$d"
+    if [[ -n "$d" && -z "${TMUX_TMPDIR:-}" ]]; then
+        export TMUX_TMPDIR="$d" ROMP_TMUX_TMPDIR_RULE=runtime-dir   # resolved here, and marked as such
     fi
     return 0
 }

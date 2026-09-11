@@ -12894,8 +12894,16 @@ def _spawn_session(name, cwd=None):
     _commands_for_cwd(cwd)   # pre-warm the slash-command list — a new session predicts a composer (the user 2026-08-13)
     env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
     try:
-        subprocess.run([str(BIN / "romp"), "new", "-t", "--detach", name], cwd=cwd, env=env, timeout=25,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        r = subprocess.run([str(BIN / "romp"), "new", "-t", "--detach", name], cwd=cwd, env=env, timeout=25,
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            # said, never swallowed (T325 review): the launcher's refusal (its socket directory not this kernel's,
+            # tmux missing, the CLI below its floor) used to vanish into DEVNULL after /new had already answered
+            # ok, so no tab appeared and nothing said why. One stderr line and one error-center row.
+            detail = (r.stderr or r.stdout or "").strip().splitlines()
+            detail = " / ".join(l.strip() for l in detail if l.strip())[:400] or "romp new exited %d" % r.returncode
+            sys.stderr.write("spawn '%s': romp new -t exited %d: %s\n" % (name, r.returncode, detail))
+            _sdk_problem("terminal session '%s' did not start: %s" % (name, detail))
     except Exception:
         sys.stderr.write("spawn '%s': %s\n" % (name, traceback.format_exc()))
     _reap_if_cancelled(name)   # the ✕ may have fired while this spawn was in flight

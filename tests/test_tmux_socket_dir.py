@@ -111,6 +111,28 @@ class Resolver(unittest.TestCase):
             self.assertEqual(ts.resolve({"XDG_RUNTIME_DIR": self.run}), (d, ts.RULE_RUNTIME))
         self.assertEqual(stat.S_IMODE(os.stat(d).st_mode), 0o700)
 
+    def test_the_runtime_dir_is_canonical_and_a_launcher_s_mark_names_its_rule(self):
+        # a trailing slash in a shell rc or service.env, or a symlinked runtime dir, must not read as another directory:
+        # bin/romp compares its answer with the kernel's byte for byte
+        d = os.path.join(self.run, "romp")
+        self.assertEqual(ts.tmux_tmpdir({"XDG_RUNTIME_DIR": self.run + "/"}), d)
+        link = os.path.join(self.td.name, "runlink"); os.symlink(self.run, link)
+        self.assertEqual(ts.tmux_tmpdir({"XDG_RUNTIME_DIR": link}), d)
+        self.assertEqual(ts.canonical(d + "/"), d); self.assertEqual(ts.canonical(""), "/tmp"); self.assertEqual(ts.canonical(None), "/tmp")
+        # the shell twin exported the value and marked what it resolved: the answer carries that rule, not "operator"
+        self.assertEqual(ts.resolve({"TMUX_TMPDIR": d, ts.LAUNCHER_MARK: ts.RULE_RUNTIME}), (d, ts.RULE_RUNTIME))
+        self.assertEqual(ts.resolve({"TMUX_TMPDIR": d, ts.LAUNCHER_MARK: "made-up"}), (d, ts.RULE_OPERATOR), "an unknown mark is ignored")
+
+    def test_the_kernel_s_own_terminal_spawn_says_when_the_launcher_refused(self):
+        # the launcher's refusal used to vanish into DEVNULL after /new had answered ok: no tab, nothing said why
+        src = open(os.path.join(os.path.dirname(HERE), "kernel", "kernel.py"), encoding="utf-8").read()
+        i = src.index("def _spawn_session(")
+        body = src[i:src.index("\ndef ", i + 10)]
+        self.assertIn("capture_output=True", body)
+        self.assertNotIn("stdout=subprocess.DEVNULL", body)
+        self.assertNotIn("stderr=subprocess.DEVNULL", body)
+        self.assertIn("_sdk_problem(\"terminal session '%s' did not start: %s\"", body)
+
     def test_a_managed_kernel_takes_the_manager_s_value_as_it_stands_and_resolves_nothing(self):
         # under the manager (ROMP_MANAGER_PID) the kernel never resolves: the manager started the server, and a
         # new-code kernel respawned under an old manager must dial that manager's /tmp server, not a runtime-dir
@@ -154,13 +176,19 @@ class ThreeTwinsAgree(unittest.TestCase):
         cases = [({"TMUX_TMPDIR": "/op/dir", "XDG_RUNTIME_DIR": self.run}, "/op/dir"),
                  ({"TMUX_TMPDIR": " /op/dir ", "XDG_RUNTIME_DIR": self.run}, " /op/dir "),   # as it stands: untrimmed in all three
                  ({"XDG_RUNTIME_DIR": self.run}, os.path.join(self.run, "romp")),
+                 ({"XDG_RUNTIME_DIR": self.run + "/"}, os.path.join(self.run, "romp")),        # canonical: a trailing slash is the same directory
                  ({}, None),
-                 ({"XDG_RUNTIME_DIR": os.path.join(self.td.name, "missing")}, None)]
+                 ({"XDG_RUNTIME_DIR": os.path.join(self.td.name, "missing")}, None),
+                 # under the manager (ROMP_MANAGER_PID) each twin takes TMUX_TMPDIR as it stands, empty meaning the default
+                 ({"ROMP_MANAGER_PID": "1", "XDG_RUNTIME_DIR": self.run}, None),
+                 ({"ROMP_MANAGER_PID": "1", "TMUX_TMPDIR": "/the/managers", "XDG_RUNTIME_DIR": self.run}, "/the/managers")]
         for extra, want in cases:
             with self.subTest(extra=extra):
-                self.assertEqual(ts.tmux_tmpdir(dict(extra)), want, "python")
+                managed = bool(extra.get("ROMP_MANAGER_PID"))
+                self.assertEqual(ts.tmux_tmpdir(dict(extra), managed=managed), want, "python")
                 self.assertEqual(self._shell(extra), want, "bash twin")
-                self.assertEqual(self._node(extra), want, "node twin")
+                if not managed:      # the manager itself is never under a manager; its twin has no such branch
+                    self.assertEqual(self._node(extra), want, "node twin")
         self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.run, "romp")).st_mode), 0o700)
 
 

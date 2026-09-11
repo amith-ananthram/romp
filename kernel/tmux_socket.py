@@ -12,10 +12,13 @@ ONE rule, resolved the same way by the manager (before it starts the server, so 
 manager started) and an UNMANAGED kernel (``romp-serve`` bare, a lab, a test), each naming which branch fired:
 
 * ``operator``: a ``TMUX_TMPDIR`` already set wins, AS IT STANDS (no trimming: the three twins agree byte for byte);
-* ``runtime-dir``: else ``XDG_RUNTIME_DIR`` naming an existing, writable directory gives ``<XDG_RUNTIME_DIR>/romp``,
-  created 0700 when missing (tmux 3.4 falls back to ``/tmp`` SILENTLY when ``TMUX_TMPDIR`` names a missing directory,
-  so the directory is made, never assumed; a mkdir lost to a sibling making it at the same moment is re-judged, not
-  reported as a failure);
+  when the shell twin resolved it itself and marked it (``ROMP_TMUX_TMPDIR_RULE``, the launcher's export before it
+  starts a manager), the answer carries that rule, so a log does not call the launcher's value the operator's;
+* ``runtime-dir``: else ``XDG_RUNTIME_DIR`` naming an existing, writable directory gives ``<XDG_RUNTIME_DIR>/romp`` on
+  the CANONICAL runtime path (realpath: a trailing slash in a shell rc or service.env must not read as another
+  directory, since bin/romp compares its answer with the kernel's byte for byte), created 0700 when missing (tmux 3.4
+  falls back to ``/tmp`` SILENTLY when ``TMUX_TMPDIR`` names a missing directory, so the directory is made, never
+  assumed; a mkdir lost to a sibling making it at the same moment is re-judged, not reported as a failure);
 * else None, tmux's own default, as before, with the reason (``no XDG_RUNTIME_DIR``; the runtime dir not a writable
   directory; its ``romp`` subdirectory not makeable or not a writable directory).
 
@@ -37,6 +40,8 @@ RULE_RUNTIME = "runtime-dir"
 RULE_NO_RUNTIME = "no XDG_RUNTIME_DIR"
 RULE_RUNTIME_UNUSABLE = "XDG_RUNTIME_DIR is not a writable directory"
 RULE_SUBDIR_UNUSABLE = "XDG_RUNTIME_DIR/romp could not be made, or is not a writable directory"
+RULES = (RULE_OPERATOR, RULE_MANAGER, RULE_RUNTIME, RULE_NO_RUNTIME, RULE_RUNTIME_UNUSABLE, RULE_SUBDIR_UNUSABLE)
+LAUNCHER_MARK = "ROMP_TMUX_TMPDIR_RULE"   # the shell twin's word for what it resolved, beside the value it exported
 
 
 def _usable_dir(p):
@@ -52,13 +57,14 @@ def resolve(env=None, mkdir=True, managed=False):
     if managed:
         return (op or None), RULE_MANAGER
     if op:
-        return op, RULE_OPERATOR
+        mark = env.get(LAUNCHER_MARK) or ""
+        return op, (mark if mark in RULES else RULE_OPERATOR)
     run = env.get("XDG_RUNTIME_DIR") or ""
     if not run:
         return None, RULE_NO_RUNTIME
     if not _usable_dir(run):
         return None, RULE_RUNTIME_UNUSABLE
-    d = os.path.join(run, ROMP_SUBDIR)
+    d = os.path.join(os.path.realpath(run), ROMP_SUBDIR)
     if mkdir and not os.path.isdir(d):
         try:
             os.mkdir(d, 0o700)
@@ -81,6 +87,12 @@ def export_tmux_tmpdir(env=None, managed=False):
     if rule == RULE_RUNTIME and env.get("TMUX_TMPDIR") != d:
         env["TMUX_TMPDIR"] = d
     return d, rule
+
+
+def canonical(d):
+    """The directory as a comparison key: tmux's default for None or empty, else its realpath, so `/x/` and `/x` and a
+    symlinked runtime dir read as one directory (bin/romp compares its own answer with the kernel's this way)."""
+    return os.path.realpath(d) if d else "/tmp"
 
 
 def describe(d, rule):

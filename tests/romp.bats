@@ -1091,6 +1091,36 @@ _stale_server_globals() {
     : > "$MOCK_LOG"
     MOCK_CURL_VERSION='{"kernel_ver":"0"}' run "$ROMP_SCRIPT" new -t --detach myproject2
     [ "$status" -eq 0 ]
+    # canonical paths compare: the kernel reporting the same directory with a trailing slash is the same server
+    : > "$MOCK_LOG"
+    MOCK_CURL_VERSION="{\"tmuxSocketDir\":\"$TMUX_TMPDIR/\",\"tmuxSocketRule\":\"runtime-dir\"}" run "$ROMP_SCRIPT" new -t --detach myproject3
+    [ "$status" -eq 0 ]
+    grep -q 'new-session -d -s myproject3' "$MOCK_LOG"
+}
+
+@test "inside a pane on ANOTHER server the launch is refused (the pane's own \$TMUX wins over TMUX_TMPDIR); on the kernel's server it proceeds" {
+    _stub_claude 9.9.9; _stub_curl
+    local other="$TEST_DIR/other-server"; mkdir -p "$other/tmux-$(id -u)"
+    TMUX="$other/tmux-$(id -u)/default,4242,0" MOCK_CURL_VERSION="{\"tmuxSocketDir\":\"$TMUX_TMPDIR\",\"tmuxSocketRule\":\"runtime-dir\"}" \
+        run "$ROMP_SCRIPT" new -t --detach myproject
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"inside a tmux session on another server ($other)"* ]]
+    [[ "$output" == *"a shell outside that tmux session"* ]]
+    run grep -q 'new-session' "$MOCK_LOG"
+    [ "$status" -ne 0 ]
+    TMUX="$TMUX_TMPDIR/tmux-$(id -u)/default,4242,0" MOCK_CURL_VERSION="{\"tmuxSocketDir\":\"$TMUX_TMPDIR\",\"tmuxSocketRule\":\"runtime-dir\"}" \
+        run "$ROMP_SCRIPT" new -t --detach myproject
+    [ "$status" -eq 0 ]
+    grep -q 'new-session -d -s myproject' "$MOCK_LOG"
+}
+
+@test "a kernel under a manager from before the socket moved is refused with the refresh, not a cron diagnosis" {
+    _stub_claude 9.9.9; _stub_curl
+    MOCK_CURL_VERSION='{"tmuxSocketDir":"","tmuxSocketRule":"manager"}' run "$ROMP_SCRIPT" new -t --detach myproject
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"under a manager from before the socket moved"* ]]
+    [[ "$output" == *"romp refresh"* ]]
+    [[ "$output" != *"cron job"* ]]
 }
 
 @test "launch hands the exec line to respawn-pane, never typed via send-keys (dropped-char bug)" {
