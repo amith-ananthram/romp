@@ -81,15 +81,15 @@ test("render.ts wires the three rules, tracks the pending needFull reason, hides
   assert.ok(upsert.includes("pendingFullWhy.delete(msg.id)"), "…consumed by the frame that answers it");
   assert.ok(upsert.includes("if (msg.id === activeId) updateLivePaused();"), "the strip re-evaluates when the active tab's frame lands");
   assert.ok(upsert.includes("mergedRun && prev?.headKnown ? events.length"), "a merged run with a known head carries its own count");
-  assert.match(RENDER, /pendingFullWhy\.set\(id, why\);\n  vscodeApi\?\.postMessage\(\{ type: "needFull", id, why \}\)/, "requestFullSession records the reason before it asks");
-  assert.match(RENDER, /awaitingFull\.clear\(\); pendingFullWhy\.clear\(\);/, "…and a new socket forgets both");
+  assert.match(RENDER, /vscodeApi\?\.postMessage\(\{ type: "needFull", id, why \}\);\n  pendingFullWhy\.set\(id, why\);/, "requestFullSession records the reason with the ask");
+  assert.match(RENDER, /window\.addEventListener\("romp:wsup", \(\) => pendingFullWhy\.clear\(\)\);/, "…and a new socket forgets the reasons with the asks");
   const win = RENDER.slice(RENDER.indexOf("function chatWindow(msg: any) {"), RENDER.indexOf("function chatMore(msg: any) {"));
   assert.ok(win.includes("s.detached = windowDetached(!!msg.moreAfter, !!msg.connected, wasDetached, r.mode, heldLast, s.lastUuid);"), "chatWindow decides through the rule, with the state before the merge");
   assert.ok(win.includes("if (cur && cur.detached && c && c.scrollHeight <= c.clientHeight + 1) { requestNewer(msg.id); return; }"), "a detached window that does not overflow asks for its next page directly");
   const more = RENDER.slice(RENDER.indexOf("function chatMore(msg: any) {"), RENDER.indexOf("let livePausedEl"));
   assert.ok(more.includes("const am = afterMore(!!msg.more, !!s.headKnown, s.events.length);"), "chatMore decides through the rule");
   const active = RENDER.slice(RENDER.indexOf("function setActive(id: string"), RENDER.indexOf("\n}\n", RENDER.indexOf("function setActive(id: string")));
-  assert.ok(active.includes("showActive();\n  updateLivePaused();"), "a tab switch re-evaluates the strip for the entering tab");
+  assert.ok(active.includes("activeId = id;\n  updateLivePaused();"), "a tab switch re-evaluates the strip for the entering tab");
   assert.ok(RENDER.includes('turn.dataset.orphanOf = String((ev as { orphanOf?: string }).orphanOf)'), "an orphan note's turn carries its record uuid");
   assert.equal((RENDER.match(/\.turn\[data-orphan-of="\$\{cssEscape\(uuid\)\}"\]/g) || []).length, 2, "…and both anchor lookups read it");
   assert.ok(RENDER.includes("(e as { orphanOf?: string }).orphanOf === uuid"), "…as does the events-list search behind them");

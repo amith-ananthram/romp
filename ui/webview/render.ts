@@ -15564,10 +15564,10 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   pendingAnchorIntent = anchor ? (anchorKind ?? null) : null;
   if (anchor) armSeek(id, anchor, anchorKind ?? null);   // durable until land / ✕ / backstop (see armSeek)
   activeId = id;
+  updateLivePaused();   // the entering tab's own detached state shows or hides the strip (round 2, item 7)
   try { vscodeApi?.setState?.({ ...(vscodeApi.getState?.() || {}), activeId: id }); } catch { /* ignore */ }
   renderTabs();
   showActive();
-  updateLivePaused();   // the entering tab's own detached state shows or hides the strip (round 2, item 7)
   schedulePrebuild(); // warm the OTHER tabs in idle (MRU-first) so the next switch is instant
 }
 
@@ -15813,13 +15813,14 @@ type NeedFullWhy = "gap" | "nobase" | "skeleton-click" | "prefetch" | "skeleton-
 function requestFullSession(id: string, why: NeedFullWhy): void {
   if (!id || awaitingFull.has(id)) return;
   awaitingFull.add(id);
-  pendingFullWhy.set(id, why);
   vscodeApi?.postMessage({ type: "needFull", id, why });
+  pendingFullWhy.set(id, why);   // the reason, for upsert's merge-or-replace decision when the answer lands (round 2, item 3)
 }
 // A reconnect mints a FRESH kernel-side client (its echat starts empty, so full frames are already
 // guaranteed) — but an ask parked against the dead socket would gag the new socket's repair path
 // forever (awaitingFull only clears when the reply lands, and the dead socket's never will).
-window.addEventListener("romp:wsup", () => { awaitingFull.clear(); pendingFullWhy.clear(); });
+window.addEventListener("romp:wsup", () => awaitingFull.clear());
+window.addEventListener("romp:wsup", () => pendingFullWhy.clear());   // …and the reasons parked with them
 // …and the same socket-open resets what this page learned on the dead one: the fulls it received there (so the
 // new socket's skeleton list may re-list them — they are stale after the outage; skeleton-tabs.ts) and the
 // one-per-reconnect diagnostic row noteSkeletonTabOrder posts.
