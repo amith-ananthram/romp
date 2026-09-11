@@ -387,7 +387,7 @@ class LiveHelpers(unittest.TestCase):
                  "  102   101   250  0.0 sleep 3",
                  "  200     1  2000  2.0 /x/claude --output-format stream-json --resume=%s --input-format stream-json" % SID,
                  "  300     1   900  0.0 /x/claude --output-format stream-json --resume %s --input-format stream-json" % SID2,
-                 "  400     1   100  0.0 claude --resume %s" % SID,
+                 "  400     1   100  0.0 claude --resume %s" % SID,   # a terminal CLI: no stream-json mark, never romp's
                  "garbage"]
         procs = rm.parse_ps(lines)
         self.assertEqual(len(procs), 6)
@@ -395,7 +395,7 @@ class LiveHelpers(unittest.TestCase):
         trees = sorted(rm.ps_session_trees(procs, regs), key=lambda t: t["cliPid"])
         self.assertEqual([(t["name"], t["cliPid"], t["procs"], t["memBytes"], t["cpuPct"]) for t in trees],
                          [("web", 100, 3, 1750 * 1024, 1.5), ("web", 200, 1, 2000 * 1024, 2.0), ("api", 300, 1, 900 * 1024, 0.0)])
-        self.assertEqual(rm.duplicate_clis(procs, [SID, SID2]), {SID: [100, 200]}, "the tmux CLI (no mark) never counts")
+        self.assertEqual(rm.duplicate_clis(procs, [SID, SID2]), {SID: [100, 200]}, "a terminal CLI (no stream-json mark: someone's own claude, never romp's) never counts")
 
     def test_kernel_live_unreachable_is_said(self):
         state = Path(tempfile.mkdtemp())
