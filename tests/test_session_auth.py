@@ -169,7 +169,9 @@ class _OptionsHarness(_Keyed):
         self._fake_sdk = "claude_agent_sdk" not in sys.modules and not sb.sdk_importable()
         if self._fake_sdk:
             fake = types.ModuleType("claude_agent_sdk")
-            fake.HookMatcher = lambda **kw: kw
+            # an attribute-bearing stand-in, like the SDK's dataclass: with hosts on (the default since T348) the
+            # options loop sets each matcher's `timeout` to the host's hook bound, which a plain dict refused
+            fake.HookMatcher = lambda **kw: types.SimpleNamespace(**kw)
             sys.modules["claude_agent_sdk"] = fake
 
     def tearDown(self):
