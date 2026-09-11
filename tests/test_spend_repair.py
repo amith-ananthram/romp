@@ -286,10 +286,33 @@ class Plan(unittest.TestCase):
         self.assertEqual(after["hours"]["%sT11" % DAY]["usd"], 15.0, "524 less the 509 correction: the $9 result kept")
         self.assertEqual(after["days"][DAY]["usd"], 31.0)
 
-    def test_the_restart_instants_come_from_both_ledgers(self):
-        cuts = [{"t": 100, "cutTurns": [], "reason": "main-converge"}, {"t": 150, "firstServe": 1}]      # a bootSettled row is not a restart
-        audit = [{"t": 200, "action": "manager-sigterm"}, {"t": 250, "action": "quiet-window"}, {"t": 100, "action": "p2p-update"}]
-        self.assertEqual(rp.restart_instants(cuts, audit), [100, 200])
+    def test_the_restart_instants_are_the_boots_and_the_cuts_and_a_request_only_when_no_boot_answers_it(self):
+        cuts = [{"t": 100, "cutTurns": [], "reason": "main-converge"},                       # the old kernel's drain
+                {"t": 107, "firstServe": 107.2, "settleS": 0.1, "pid": 1, "bootSettled": True}]   # the new kernel's first serve
+        audit = [{"t": 100, "action": "p2p-update"},                # the request the boot at 107 answers: not an instant of its own
+                 {"t": 200, "action": "manager-sigterm"},           # no boot within five minutes: kept (a crash's row-less restart)
+                 {"t": 250, "action": "quiet-window"}, {"t": 260, "action": "bootSettled"}]     # neither a restart action
+        self.assertEqual(rp.restart_instants(cuts, audit), [100, 107, 200])
+
+    def test_a_result_the_old_kernel_recorded_during_its_drain_is_an_ordinary_turn_not_a_fresh_process(self):
+        # web: 300 (its lifetime after the 9:30 boot), then at 9:59:53 the restart is REQUESTED and the old kernel records
+        # a $5 result at 9:59:55 while draining, the new kernel serves at 10:00:00 and web's first result under it is
+        # 320. With the request as the instant the $5 row read as a fresh process and 320 - 5 = 315 was the turn
+        turns = [row(A, "web", at(9, 0), 2.0), row(A, "web", at(9, 40), 300.0), row(A, "web", at(10, 0) - 5, 5.0), row(A, "web", at(10, 5), 320.0)]
+        cuts = [{"t": at(9, 30), "firstServe": at(9, 30), "settleS": 0.1, "pid": 1}, {"t": at(10, 0), "firstServe": at(10, 0), "settleS": 0.1, "pid": 2}]
+        audit = [{"t": at(9, 30) - 7, "action": "manager-sigterm"}, {"t": at(10, 0) - 7, "action": "manager-sigterm"}]
+        restarts = rp.restart_instants(cuts, audit)
+        self.assertEqual(restarts, [at(9, 30), at(10, 0)])
+        p = rp.plan(turns, restarts, DAY)
+        got = {c["t"]: c["corrected"] for c in p["rows"]}
+        self.assertEqual(got[at(10, 5)], 15.0, "320 less 300 less the $5 drain-time turn between")
+        self.assertNotIn(at(10, 0) - 5, got)
+        # the ledger as an earlier run with the request as its instant left it: the $5 row stands (it was 'fresh'), the
+        # 320 row corrected to 315, the first cumulative to 2.0 (then the only row following no restart); judged again,
+        # 315 becomes 15 and the typical turn is the median of 2 and the $5 turn now counted ordinary
+        repaired = [turns[0], turns[1] | {"usd": 2.0, "usdRecorded": 300.0}, turns[2], turns[3] | {"usd": 315.0, "usdRecorded": 320.0}]
+        again = {c["t"]: (c["current"], c["corrected"]) for c in rp.plan(repaired, restarts, DAY)["rows"]}
+        self.assertEqual(again, {at(9, 40): (2.0, 3.5), at(10, 5): (315.0, 15.0)})
 
 
 if __name__ == "__main__":

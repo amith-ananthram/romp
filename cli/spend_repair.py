@@ -65,16 +65,31 @@ def local_hour(t) -> str:
     return datetime.fromtimestamp(float(t)).strftime("%Y-%m-%dT%H")
 
 
+BOOT_ANSWER_S = 300                 # an audit row (a restart REQUEST) that a boot row answers within this is the request, not the restart
+
+
 def restart_instants(cuts: list, audit: list) -> list:
-    """The moments a kernel restarted: every restart-cuts row with a cutTurns list (a kernel's exit) and every audit
-    row whose action asks for a restart, sorted, deduplicated to the second."""
-    out = set()
+    """The moments a new kernel took over, sorted, deduplicated to the second: every restart-cuts BOOT row (the new
+    kernel's first serve: pid, settleS, firstServe) and every cut row (the old kernel's drain, cutTurns), plus an audit
+    row whose action asks for a restart only when no boot row answers it within BOOT_ANSWER_S. The audit row is the
+    REQUEST: the old kernel drains for seconds after it and records the results that land meanwhile as its own
+    (ordinary deltas), so a request taken for the instant read an ordinary row as a fresh process's first result and
+    the next real re-bill was corrected against that small figure (2026-09-11: 33 rows in those gaps, one session's
+    $1,030 lifetime read as a $1,025 turn). The boot row is written by the new kernel; every row before it is the old
+    kernel's."""
+    boots, out = [], set()
     for r in cuts:
-        if isinstance(r.get("t"), (int, float)) and "cutTurns" in r:
+        if not isinstance(r.get("t"), (int, float)):
+            continue
+        if "firstServe" in r or "settleS" in r or "bootSettled" in r:
+            boots.append(int(r["t"])); out.add(int(r["t"]))
+        elif "cutTurns" in r:
             out.add(int(r["t"]))
     for r in audit:
         if isinstance(r.get("t"), (int, float)) and str(r.get("action") or "") in RESTART_ACTIONS:
-            out.add(int(r["t"]))
+            t = int(r["t"])
+            if not any(t <= b <= t + BOOT_ANSWER_S for b in boots):
+                out.add(t)
     return sorted(out)
 
 
@@ -222,8 +237,12 @@ def plan(turns: list, restarts: list, day: str, since=None, owners=None, keyed=N
                 # chain continues from it; a repaired row that is no step is restored to the kernel's figure
                 if repaired and abs(rec - usd) > 1e-9:
                     restores.append((r, rec, usd, prev_cum, list(between)))
-                prev_cum = rec
-                between = []
+                if restarted:
+                    prev_cum = rec
+                    between = []
+                else:
+                    between.append(rec)        # a repaired row that follows no restart (an earlier run's instants were
+                    #                            wrong): an ordinary turn, restored above, counted between
             else:
                 between.append(usd)
             prev_t = t
