@@ -31270,6 +31270,10 @@ def _place_stale_echoes(turns, echoes):
     key = lambda a: (a.get("t", 0), a.get("_seq", 0))
     gaps = {}                                   # insertion index in `turns` → the echoes sent in that gap
     dest = []                                   # (the destination turn dict, echo) per echo, resolved to indexes below
+    copied = set()                              # turns copied for a write: ONCE each, so every echo destined for the
+    #                                             same turn lands in the same dict (a second copy left `dest` holding
+    #                                             an object no longer in `out`, and the index lookup below missed:
+    #                                             every feed build failed on a session with two such echoes, 2026-09-11)
     for a in sorted(echoes, key=key):
         t = a.get("t", 0)
         i = None                                # the last turn starting at or before the echo
@@ -31279,7 +31283,9 @@ def _place_stale_echoes(turns, echoes):
             else:
                 break
         if i is not None and t <= _turn_activity_end(out[i]):
-            out[i] = dict(out[i])
+            if i not in copied:
+                out[i] = dict(out[i])
+                copied.add(i)
             out[i]["atoms"] = sorted(list(out[i]["atoms"]) + [a], key=key)
             out[i]["placedEchoes"] = list(out[i].get("placedEchoes") or []) + [a.get("uuid")]
             dest.append((out[i], a))
