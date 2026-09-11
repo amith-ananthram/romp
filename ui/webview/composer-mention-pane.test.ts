@@ -628,6 +628,42 @@ test("in Chromium: copying a selection that holds a chip copies the @name as typ
   await h.page.close();
 });
 
+test("in Chromium: a chip for a session whose host is down copies with no title on its host prefix either", async (t) => {
+  const h = await open(t); if (!h) return;
+  const r = await h.page.evaluate((webId: string) => {
+    const w = window as any;
+    // the federation manager's published state, as host-prefix.ts reads it (globalThis.__rompFed): TESTHOST
+    // unreachable, no dial in flight, never reached. Every other case in this file leaves it unset, so no chip
+    // there wears the down mark; the page is this test's own
+    w.__rompFed = { down: () => ["TESTHOST"], dialing: () => false, lastSeen: () => 0 };
+    const sessions = new Map<string, any>([["TESTHOST:" + webId, { id: "TESTHOST:" + webId, name: "TESTHOST:web", color: { bg: "#8899aa", fg: "#000000" }, status: { state: "working" } }]]);
+    const root = document.getElementById("content")!;
+    const thread = document.createElement("div"); root.appendChild(thread);
+    const chips = w.__mention.chips({ sessions, views: new Map([["v1", { el: thread }]]), refreshMentionCard: null });
+    const bubble = document.createElement("div"); bubble.className = "user-bubble md";
+    bubble.innerHTML = "<p>ping @TESTHOST:web</p>"; thread.appendChild(bubble); chips.markMentions(bubble);
+    w.__ta.blur();                                    // __setup focused the composer; the selection goes to the transcript
+    const prefix = bubble.querySelector<HTMLElement>(".mention-chip .host-prefix")!;
+    const before = [prefix.className, prefix.title];
+    const sel = document.getSelection()!;
+    sel.selectAllChildren(bubble);
+    const dt = new DataTransfer();
+    const ev = new ClipboardEvent("copy", { clipboardData: dt, bubbles: true, cancelable: true });
+    bubble.dispatchEvent(ev);
+    return { before, prevented: ev.defaultPrevented, text: dt.getData("text/plain"), html: dt.getData("text/html"),
+             after: [prefix.className, prefix.title], textAfter: bubble.textContent };
+  }, SID(4));
+  assert.equal(r.before[0], "host-prefix off", "the stub took: the chip's host prefix wears the down mark");
+  assert.match(r.before[1], /^TESTHOST is disconnected\./, "and the live reconnect note as its own title");
+  assert.deepEqual([r.prevented, r.text], [true, "ping @TESTHOST:web"], "the copy is the listener's, the token host and all");
+  assert.match(r.html, /class="host-prefix off">@TESTHOST:<\/span>web<\/span>/, "the mark's class travels, as the chip's does");
+  assert.doesNotMatch(r.html, /title=|data-/, "the prefix's note is dropped with the chip's own title: a paste carries nothing about the host's link");
+  assert.deepEqual(r.after, r.before, "the live chip still wears its mark and its note");
+  assert.equal(r.textAfter, "ping TESTHOST:web");
+  assert.deepEqual(h.errors, []);
+  await h.page.close();
+});
+
 // ── the chips' host prefix, on the real sheet ───────────────────────────────────────────────────────────
 
 /** A computed colour as [r, g, b, a]; a hex token the same way. */
