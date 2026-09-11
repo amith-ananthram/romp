@@ -119,6 +119,35 @@ class HeadlessRoutes(unittest.TestCase):
         self.assertIn(str(sid), km._interrupt_clicked,
                       "the chat chip flips to 'interrupting' exactly like the WS op")
 
+    def test_interrupt_route_paints_nothing_when_the_backend_refuses(self):
+        # the WS op's gate, mirrored (2026-09-11): a stop the backend refused — a Codex session with no
+        # turn in flight, a dead tab — interrupted nothing, so the chip must not read Interrupting… for
+        # the 120 s cap, the only thing that could clear a stamp whose stop record never comes
+        fake = mock.Mock()
+        fake.interrupt.return_value = False
+        fake.busy.return_value = None                     # a dead tab: no backend, no in-flight signal (a bare Mock is truthy)
+        with mock.patch.object(km.Sessions, "backend_for", staticmethod(lambda sid: fake)):
+            code, resp = self._post("/interrupt", {"name": "web"})
+        self.assertEqual(code, 200)
+        fake.interrupt.assert_called_once()
+        sid = fake.interrupt.call_args[0][0]
+        self.assertNotIn(str(sid), km._interrupt_clicked, "a refused stop leaves no optimistic stamp")
+
+    def test_interrupt_route_says_when_the_stop_did_not_land(self):
+        # a refusal WITH work in flight (the Codex backend's False while a turn's start is still being
+        # acknowledged, with its client gone, or after a failed interrupt RPC) is a stop that did not land:
+        # the /send route's refusal shape, so `romp interrupt` exits non-zero instead of printing ok
+        fake = mock.Mock()
+        fake.interrupt.return_value = False
+        fake.busy.return_value = True
+        with mock.patch.object(km.Sessions, "backend_for", staticmethod(lambda sid: fake)):
+            code, resp = self._post("/interrupt", {"name": "web"})
+        self.assertEqual(code, 200)
+        self.assertIs(resp.get("ok"), False, "a dropped stop is never answered ok")
+        self.assertEqual(resp.get("error"), "the stop was not delivered: web is still working")
+        sid = fake.interrupt.call_args[0][0]
+        self.assertNotIn(str(sid), km._interrupt_clicked, "no stop landed, so nothing reads Interrupting…")
+
     def test_end_route_kills_and_announces_close(self):
         fake = mock.Mock()
         sent = []

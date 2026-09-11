@@ -148,6 +148,7 @@ function liftWorld(): (hooks: Hooks, mod: typeof MOD, doc: ReturnType<typeof fak
     let loadingPillEl = null;
     const hideLoadingPill = () => { H.pillHidden++; };
     const showLoadingPill = () => { H.pillShown++; };
+    const olderOnServer = (s) => s.proto === 2 ? !s.headKnown : (s.headFrom ?? 0) > 0;   // the guard's helper (T323 stage 4b), outside the lift
     const showActive = () => { H.shows++; };
     const cancelSeek = () => { H.cancels++; };
     const el = (tag, cls) => { const e = document.createElement(tag); if (cls) e.className = cls; return e; };

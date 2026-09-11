@@ -1,7 +1,7 @@
 // T302 (the user 2026-09-10, after seeing old and new postal cards side by side): the kind is coloured TEXT in the
 // old chip colours, the delivery state is an icon at the head's right edge (sent / delivered / read / parked /
 // bounced / recalled, from what the kernel files), both ENDS wear their sessions' colours (the peer's chip, then
-// this session's own), no card wears a background wash, and a sent card whose message has not landed wears the
+// this session's own), the incoming card wears the peer's hue as a tint on its own ground (back since 2026-09-11), and a sent card whose message has not landed wears the
 // pending send's own provisional dress (the queued bubble's class and rule). Source pins (render.ts has
 // import-time DOM side effects); the pure module is executed in postal-state.test.ts.
 import { test } from "node:test";
@@ -50,6 +50,18 @@ test("the kind is coloured text in the meta slot, never a chip, at prose weight,
   // never truncated: the postal meta stays rigid
   assert.match(CSS, /\.turn-postal-service \.notice-meta \{ flex: 1 0 auto; display: inline-flex; align-items: baseline; gap: 7px; min-width: 0; \}/,
     "the postal meta never shrinks (the kind word stays whole) and grows to the head's edge to carry the icon (T313)");
+});
+
+test("the incoming card wears the peer's hue at its ground's own lightness, in both themes; the sent card does not", () => {
+  // the user 2026-09-11, who missed the tint T302 had removed the day before on their own side-by-side ruling. A hue at
+  // the ground's lightness, not a mix: a mix lifts the ground and the dimmest kind word fell under the ramp's 4.5:1 floor
+  assert.match(CSS, /\.turn-postal-service\.postal-service-in \.notice:not\(\.notice-slim\) \{\n  background: oklch\(from var\(--notice-rail, var\(--box-bg\)\) var\(--postal-wash-l, 0\.263\) var\(--postal-wash-c, 0\.03\) h\); \}/,
+               "one declaration: the rail's hue (the peer's colour) at the ground's lightness and a gentle chroma, each token with a fallback");
+  assert.match(CSS, /\n  --postal-wash-l: 0\.263;  --postal-wash-c: 0\.03;/, "the dark ground's lightness and the chroma, beside the kind tokens");
+  assert.match(CSS, /\n  --postal-wash-l: 0\.919;  --postal-wash-c: 0\.045;/, "the light ground's lightness and a stronger chroma for the cream's warm hue, in the light block");
+  assert.doesNotMatch(CSS, /theme-light[^{}]*postal-service-in[^{}]*\{[^}]*background/, "no theme takes it back");
+  assert.doesNotMatch(CSS, /postal-service-out[^{}]*\{[^}]*oklch\(from var\(--notice-rail/, "the sent card is untinted");
+  assert.match(fn("renderPostalService"), /rail: ev\.color \? ev\.color\.bg : undefined/, "the rail is the peer's colour, so the hue is the peer's");
 });
 
 const STATE = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "postal-state.ts"), "utf8");
@@ -110,9 +122,9 @@ test("both ends wear their sessions' colours: the peer's chip, then this session
   assert.match(CSS, /\.turn-postal-service \.notice-src-self \.notice-src-name \{ display: none; \}/);
 });
 
-test("no card wears a background wash in a session's colour; incoming keeps border + rail, sent stays slim", () => {
-  assert.doesNotMatch(CSS, /\.notice-peer > \.notice:not\(\.notice-slim\)/, "the 6% peer wash is gone");
-  assert.doesNotMatch(CSS, /color-mix\(in srgb, var\(--notice-rail, transparent\) 6%/);
+test("the old 6% mix and its hook stay gone; incoming keeps border + rail, sent stays slim", () => {
+  assert.doesNotMatch(CSS, /\.notice-peer > \.notice:not\(\.notice-slim\)/, "the retired hook's rule stays gone");
+  assert.doesNotMatch(CSS, /color-mix\(in srgb, var\(--notice-rail, transparent\) 6%/, "the mix that lifted the ground stays gone: the tint is a hue at the ground's lightness (below)");
   assert.match(CARD, /rail: ev\.color \? ev\.color\.bg : undefined,/, "the rail still names the peer");
   // the shared notice rule (a body → a card, head-only → slim) stands, and the postal card overrides it for ONE
   // direction: incoming keeps its box even with nothing to fold; sent stays slim

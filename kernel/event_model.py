@@ -641,6 +641,63 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
                                   # states/postal logs became tenants too (2026-09-01): one states file per session
                                   # plus messages.jsonl now share the slots, and an evicted LEAF slot also demotes
                                   # the assembly cache's identity gate to a full parse.
+# A BYTE budget beside the count (the kernel memory work, 2026-09-11): the count bounded slots, never memory, and the
+# working set is files of every size (a 177 MB leaf and a 2 KB states log take one slot each), so the kernel climbed to
+# 5 to 8 GB between restarts holding every live and subagent transcript's records (about 1.7 bytes resident per file
+# byte). Each entry weighs the bytes it holds (the file size less a tail entry's offset); past the budget the least
+# recently used entries go first, one at a time, under the same LRU order the count uses, so a hot leaf survives a
+# cold flood of subagent files exactly as before. A single entry larger than the whole budget still inserts: a leaf is
+# never refused, the budget then holds that one entry. Counters under /perf recordCache.
+_JSONL_CACHE_BUDGET_BYTES = int(float(os.environ.get("ROMP_RECORD_CACHE_BUDGET_MB", "1024")) * 1024 * 1024)
+_JSONL_CACHE_BYTES = [0]          # the sum of every held entry's weight, kept in step with _JSONL_CACHE under its lock
+_RECORD_CACHE_STATS = {"inserts": 0, "evictions": 0, "evictedBytes": 0, "budgetEvictions": 0, "dropped": 0, "droppedBytes": 0}
+_DROP_AFTER_QUIESCENT_S = float(os.environ.get("ROMP_RECORD_CACHE_DROP_QUIESCENT_S", "120"))   # a file this long unchanged
+#                                   is one whose writer has finished (a subagent that returned): its records are not kept
+
+
+def _entry_weight(ent) -> int:
+    """The bytes an entry holds: the file's size less the offset a tail entry started at (a checkpoint's cut)."""
+    try:
+        size, base = int(ent[1]), int(ent[5])
+        return max(0, size - int(ent[2])) if base > 0 else size
+    except Exception:
+        return 0
+
+
+def _cache_pop_locked(path):
+    """Under _JSONL_CACHE_LOCK: drop `path`'s entry and its weight; returns the weight (0 when absent)."""
+    ent = _JSONL_CACHE.pop(path, None)
+    if ent is None:
+        return 0
+    w = _entry_weight(ent)
+    _JSONL_CACHE_BYTES[0] = max(0, _JSONL_CACHE_BYTES[0] - w)
+    return w
+
+
+def _cache_insert_locked(path, ent):
+    """Under _JSONL_CACHE_LOCK: insert `ent` at the LRU tail, evicting the least recently used entries past the count cap
+    and past the byte budget (the new entry's own weight counted; an entry larger than the budget alone still inserts)."""
+    _cache_pop_locked(path)
+    w = _entry_weight(ent)
+    while len(_JSONL_CACHE) >= _JSONL_CACHE_MAX:
+        _RECORD_CACHE_STATS["evictions"] += 1
+        _RECORD_CACHE_STATS["evictedBytes"] += _cache_pop_locked(next(iter(_JSONL_CACHE)))   # oldest-used first; hot entries survive any cold flood
+    while _JSONL_CACHE and _JSONL_CACHE_BYTES[0] + w > _JSONL_CACHE_BUDGET_BYTES:
+        _RECORD_CACHE_STATS["evictions"] += 1; _RECORD_CACHE_STATS["budgetEvictions"] += 1
+        _RECORD_CACHE_STATS["evictedBytes"] += _cache_pop_locked(next(iter(_JSONL_CACHE)))
+    _JSONL_CACHE[path] = ent
+    _JSONL_CACHE_BYTES[0] += w
+    _RECORD_CACHE_STATS["inserts"] += 1
+
+
+def record_cache_stats() -> dict:
+    """The record cache for /perf: entries, held bytes, the budget, and the counters (inserts, evictions by count and by
+    budget, evicted bytes, drop-after-fold drops)."""
+    with _JSONL_CACHE_LOCK:
+        return {"entries": len(_JSONL_CACHE), "bytes": _JSONL_CACHE_BYTES[0], "budgetBytes": _JSONL_CACHE_BUDGET_BYTES,
+                "countCap": _JSONL_CACHE_MAX, **_RECORD_CACHE_STATS}
+
+
 _JSONL_TAIL_GUARD = 64            # bytes of pre-offset content re-verified before an incremental read
 _JSONL_CACHE_LOCK = threading.Lock()   # the cache has cross-thread callers (the judge tiers' worker pools,
                                        # the pusher, the warm threads) and HITS mutate (LRU reinsert): the
@@ -1163,7 +1220,7 @@ def _read_jsonl_entry(path, on_fail=None, tail_ok=False, tail_from=None):
         st = os.stat(path)
     except OSError as e:
         with _JSONL_CACHE_LOCK:
-            _JSONL_CACHE.pop(path, None)
+            _cache_pop_locked(path)
         if on_fail is not None and not isinstance(e, FileNotFoundError):
             on_fail(e)
         return None
@@ -1191,7 +1248,7 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
         st = os.stat(path)
     except OSError as e:
         with _JSONL_CACHE_LOCK:
-            _JSONL_CACHE.pop(path, None)
+            _cache_pop_locked(path)
         if on_fail is not None and not isinstance(e, FileNotFoundError):
             on_fail(e)
         return None
@@ -1269,20 +1326,17 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
                 sys.stderr.write("reader: %s %s base=%d gen=%d size=%d by %s\n" % (kind, path, base, gen, st.st_size, who))
     except OSError as e:
         with _JSONL_CACHE_LOCK:
-            _JSONL_CACHE.pop(path, None)
+            _cache_pop_locked(path)
         if on_fail is not None and not isinstance(e, FileNotFoundError):
             on_fail(e)
         return None
     ent = (st.st_mtime, st.st_size, offset, tail, records, base, gen, offs)
     with _JSONL_CACHE_LOCK:
-        _JSONL_CACHE.pop(path, None)
-        while len(_JSONL_CACHE) >= _JSONL_CACHE_MAX:
-            _JSONL_CACHE.pop(next(iter(_JSONL_CACHE)))   # oldest-used first; hot entries survive any cold flood
-        _JSONL_CACHE[path] = ent
+        _cache_insert_locked(path, ent)      # the count cap and the byte budget, LRU order (hot entries survive any cold flood)
     return ent
 
 
-def fold_records(cache, path, init, step, on=None, ckpt=None):
+def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
     """Fold a JSONL file's records into a carried state, APPEND-INCREMENTALLY (issue 903, 2026-09-03):
     the states/transcript readers re-read their whole file behind an (mtime,size) key that every append
     invalidates — O(file) per push for every working session. The reader serves the parsed records of a
@@ -1312,6 +1366,10 @@ def fold_records(cache, path, init, step, on=None, ckpt=None):
     the next call reads again; an ABSENT file is not a failure and folds to init() through the normal path).
     A caller's counters ride it (the kernel's `_states_awaiting_overlay`); the fold itself keeps no counters,
     since one cache dict serves many readers and a caller's counters are locked per reader.
+    `drop_after` (the kernel memory work, 2026-09-11): "quiescent" drops the file's records from the shared reader's
+    cache once this fold has stepped them, when the file has not changed for _DROP_AFTER_QUIESCENT_S (a subagent
+    that returned; the user's rule: nothing stays resident that nobody looks at). The cursor and its checkpoint stand;
+    a later fold of an unchanged file re-reads it once, a growing file keeps its records (see _drop_quiescent_entry).
 
     Lives here (moved from the kernel, 2026-09-03) so the judge's readers can fold too — the
     background-task pairing below is shared by both."""
@@ -1389,7 +1447,28 @@ def fold_records(cache, path, init, step, on=None, ckpt=None):
             _FOLD_DIRTY.add(key)
     if on is not None:
         on(kind)
-    return _fold_eof_fragment(key, ent, state, step)
+    out = _fold_eof_fragment(key, ent, state, step)
+    if drop_after == "quiescent" and ent is not None:
+        _drop_quiescent_entry(key, ent)
+    return out
+
+
+def _drop_quiescent_entry(key, ent):
+    """drop_after="quiescent" (the kernel memory work, 2026-09-11): a file unchanged for _DROP_AFTER_QUIESCENT_S is one
+    whose writer has finished (a subagent that returned), and its records are not kept in the shared reader's cache
+    once a fold has stepped them: the fold's cursor (and its checkpoint) stands, the file's bytes leave memory. Only the
+    very entry this fold read is dropped (another thread's newer entry is left alone); a file still changing keeps its
+    records, since its next append would otherwise re-read it whole."""
+    try:
+        if time.time() - float(ent[0]) < _DROP_AFTER_QUIESCENT_S:
+            return
+    except Exception:
+        return
+    with _JSONL_CACHE_LOCK:
+        if _JSONL_CACHE.get(key) is ent:
+            w = _cache_pop_locked(key)
+            _RECORD_CACHE_STATS["dropped"] += 1
+            _RECORD_CACHE_STATS["droppedBytes"] += w
 
 
 _UNPINNED = object()
@@ -4431,8 +4510,11 @@ def _asm_restore(key, leaf_path, candidate_files, links, rompuuid, postal_index,
 
 
 def _hydrate_one(a, rec):
-    """Fill a lazy atom's body fields from its record, the way the emit built them."""
-    lz = a["lazy"]
+    """Fill a lazy atom's body fields from its record, the way the emit built them. An atom another thread finished
+    meanwhile (its marker gone) is left as it is (review find C)."""
+    lz = a.get("lazy")
+    if lz is None:
+        return
     k = lz["k"]
     if k == "a":
         a["message"] = _norm_message(rec.get("message"))
@@ -4482,7 +4564,9 @@ def hydrate(atoms, rompuuid=None, by=None):
             if hit is not None:
                 _HYDRATED.pop(u, None); _HYDRATED[u] = hit      # a served body is a used one: to the LRU tail
         if hit is not None:
-            _hydrate_one(a, hit[0]); filled += 1
+            if a.get("lazy") is not None:                       # another thread may have finished it since the filter (C)
+                _hydrate_one(a, hit[0])
+            filled += 1
             continue
         sid = a.get("session_id") or rompuuid
         path = (_LAZY_FILES.get(str(sid)) or {}).get(a.get("fsid"))
@@ -4493,14 +4577,17 @@ def hydrate(atoms, rompuuid=None, by=None):
         # the file's read stripe is held across the group: two threads hydrating the same atoms (the judges' unit text
         # and the frame's markdown at a boot) would both miss the memo and both read; the second now waits and hits it
         with _READ_STRIPES[hash(path) % len(_READ_STRIPES)], open(path, "rb") as fh:
-            for a in sorted(group, key=lambda x: x["lazy"].get("at") or (0, 0)):
-                u = a.get("uuid")
+            for a in sorted(group, key=lambda x: (x.get("lazy") or {}).get("at") or (0, 0)):
+                lz = a.get("lazy")
+                if lz is None:
+                    filled += 1; continue                 # another thread hydrated it between the filter and here (the feed's
+                u = a.get("uuid")                         #  build and the judges both ask): its body is in place
                 with _ASM_CKPT_LOCK:
                     hit = _HYDRATED.get(u) if u else None
                 if hit is not None:
                     _hydrate_one(a, hit[0]); filled += 1
                     continue
-                at_ln = a["lazy"].get("at")
+                at_ln = lz.get("at")
                 if not at_ln:
                     raise LazyBodyRead("atom %s: the document carries no record location" % a.get("uuid"))
                 at, ln = at_ln
@@ -4661,7 +4748,14 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
                      "end": turn["end"], "ended": turn["ended"], "atoms": turn["atoms"]}
         turn.clear()
         turn.update(turn_keys)
-    return {"rompUuid": rompuuid, "name": name or rompuuid, "dir": dir,
+    # the cut turn (T323 stage 4b): the first turn after the last one holding a lazy (pre-cut) atom, taken here before
+    # any consumer hydrates; 0 for a whole parse. The chat build renders from it (its render floor).
+    cut_turn = 0
+    for _i in range(len(turns) - 1, -1, -1):
+        if any(a.get("lazy") is not None for a in turns[_i]["atoms"]):
+            cut_turn = min(_i + 1, len(turns) - 1)
+            break
+    out = {"rompUuid": rompuuid, "name": name or rompuuid, "dir": dir,
             "color": color, "leafFsid": leaf_path.stem, "turns": turns,
             # for the kernel chat build's own marker interleave: its dedup reads the KEPT turns
             # only, so without this a marker whose reply landed on an abandoned branch would
@@ -4670,6 +4764,9 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
             # the harness's own skill-load wrappers the emit skipped, {uuid: skill name}, over every file the
             # walk crossed: the judge stamps the tops older stores minted from them off this (T333)
             "skillLoads": skill_loads}
+    if cut_turn:
+        out["cutTurn"] = cut_turn                   # a restored tree only (T323 stage 4b): where its lazy atoms ended
+    return out
 
 
 def task_store_dir(fsid):

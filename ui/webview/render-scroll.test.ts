@@ -162,7 +162,7 @@ test("a deep-link to an anchor OLDER than the resident tail fetches older histor
   // the helper stashes the TARGET uuid (not the current top row) so chatHead lands on it
   assert.match(RENDER, /function fetchOlderForAnchor\(sid: string, uuid: string\): boolean/);
   assert.match(RENDER, /pendingOlderAnchor\.set\(sid, uuid\)/);
-  assert.match(RENDER, /vscodeApi\?\.postMessage\(\{ type: "loadOlder", id: sid, before: s\.headFrom \}\)/);
+  assert.match(RENDER, /vscodeApi\?\.postMessage\(\{ type: "loadOlder", id: sid, before: s\.proto === 2 \? s\.firstUuid : s\.headFrom \}\)/);   // proto 2 anchors by uuid (T323 stage 4b)
   // the flag is reset at the start of each attempt so it can't leak a stale "fetching" state
   assert.match(RENDER, /anchorPendingOlder = false;\s+\/\/ fresh attempt/);
 });
