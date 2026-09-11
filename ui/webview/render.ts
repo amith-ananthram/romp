@@ -5115,8 +5115,14 @@ function renderTeammate(ev: Extract<ChatEvent, { kind: "teammate" }>): HTMLEleme
 
 function bgRgb(): [number, number, number] {
   try {
-    const m = /(\d+)\D+(\d+)\D+(\d+)/.exec(getComputedStyle(document.body).backgroundColor || "");
-    if (m) return [+m[1], +m[2], +m[3]];
+    const parse = (c: string): [number, number, number] | null => { const m = /(\d+)\D+(\d+)\D+(\d+)/.exec(c || ""); return m ? [+m[1], +m[2], +m[3]] : null; };
+    const own = getComputedStyle(document.body).backgroundColor || "";
+    // the picker's lift paints the body TRANSPARENT (styles.css body.picker-lifted) and backs the page with its ::before at
+    // var(--bg): a transparent body is that backing's colour, not black (T345 review: read as black, a light page's
+    // yellow session passed the ring's readability test under the lift and wore an invisible ring after it)
+    const transparent = own === "transparent" || /^rgba\([^)]*,\s*0\)$/.test(own);
+    const c = parse(transparent ? getComputedStyle(document.body, "::before").backgroundColor : own);
+    if (c) return c;
   } catch { /* ignore */ }
   return [30, 30, 30];
 }
@@ -5131,17 +5137,33 @@ const CLASSIC_FADE_SCALE = 0.9;   // T118 (the user 2026-08-27): +10% brighter f
 // covers half the perceptual distance the strip's at-rest label covers. Its host prefix sits at the matching midpoint
 // (styles.css --host-fade on #composer-ph).
 const PH_NAME_FADE = 0.5;
+const LUM_MARGIN = 38;   // the luminance step a colour must stand off the page by to read as its own (the fade's target, the ring's test)
+const lum = (x: number, y: number, z: number) => 0.2126 * x + 0.7152 * y + 0.0722 * z;
+function hexRgb(hex: string): [number, number, number] | null {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex.trim());
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+// Does an identity colour stand off the page enough to read as a RING around the message box (T345)? The strip's fade
+// asks a one-sided version of this (is the colour brighter than the page by the margin, so a fade has room), which on a
+// light page is true of no colour at all; a ring reads on either side of the page's luminance, so the same margin is
+// applied both ways. A colour within the margin falls back to the accent.
+function identityReadable(hex: string): boolean {
+  const c = hexRgb(hex);
+  if (!c) return false;
+  const [br, bgc, bb] = bgRgb();
+  return Math.abs(lum(c[0], c[1], c[2]) - lum(br, bgc, bb)) > LUM_MARGIN;
+}
 // `amount` is the fade's strength: 1 (the default) is the strip's at-rest fade, unchanged for tabs; 0.5 is half the way
 // from the identity colour toward the page background. It scales the one blend, so the dim-hue early return holds at every
 // strength and a light page (already past the luminance target) stays a no-op.
 function fadedColor(hex: string, amount = 1): string {
-  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex.trim());
-  if (!m) return hex;
-  const n = parseInt(m[1], 16);
-  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  const c = hexRgb(hex);
+  if (!c) return hex;
+  const [r, g, b] = c;
   const [br, bgc, bb] = bgRgb();
-  const lum = (x: number, y: number, z: number) => 0.2126 * x + 0.7152 * y + 0.0722 * z;
-  const Lc = lum(r, g, b), Lb = lum(br, bgc, bb), Lt = Lb + 38;
+  const Lc = lum(r, g, b), Lb = lum(br, bgc, bb), Lt = Lb + LUM_MARGIN;
   if (Lc <= Lt) return hex; // already dim — leave it
   // Classic fades 10% less far toward the background (T118); Yatharth keeps his full fade.
   const scale = settings.chatTabTheme === "yatharth" ? 1 : CLASSIC_FADE_SCALE;
@@ -10049,6 +10071,7 @@ function closePicker() {
   const o = document.getElementById("picker");
   if (o) o.style.display = "none";
   signalPickerOverlay(false);   // release the full-window lift — the chat iframe returns to its pane
+  syncComposerPh();             // …and the box re-reads its ring against the page it is back on (T345)
   if (pickMode) {
     if (vscodeApi) vscodeApi.postMessage({ type: "pickResult", id: null });
     pickMode = false;
@@ -13293,6 +13316,14 @@ function syncComposerPh(): void {
   const live = liveSession(activeId);
   const meta = activeId ? tabMeta.get(activeId) : undefined;
   const colorBg = (live?.color?.bg || meta?.color?.bg) || null;
+  // the box's FOCUS ring wears the session's identity colour (T345, the user 2026-09-11: the thin border around the focused
+  // box should be the colour of the session you are messaging): published here, the one place that knows the active
+  // session's colour, as a variable on the box for the focus rule (styles.css #composer-input:focus) to read; the accent
+  // stays the fallback for a session with no colour, or one too close to the page's luminance to read as a ring
+  const ring = colorBg && identityReadable(colorBg) ? colorBg : "";
+  if (box.style.getPropertyValue("--composer-identity") !== ring) {
+    if (ring) box.style.setProperty("--composer-identity", ring); else box.style.removeProperty("--composer-identity");
+  }
   const parts = phParts(ta.placeholder, live?.name || meta?.name || "", activeId);   // the sid tells a remote host's prefix from a name (host-prefix.ts)
   const show = parts.kind === "named" && !ta.value && !ta.disabled && ta.offsetParent !== null;
   ph.style.display = show ? "" : "none";

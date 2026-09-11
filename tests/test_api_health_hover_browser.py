@@ -280,6 +280,8 @@ const head = () => ev(() => { const h = document.querySelector("#ah-tip .ah-hist
   return { word: mq(".ah-desc"), dot: me && me.querySelector(".ah-dot") ? me.querySelector(".ah-dot").getAttribute("data-dot") : null, name: mq(".ah-nm"),
            since: mq(".ah-since"), title: qt(".ru-tip-name span"), win: qt(".ah-win"), ago: q(".ah-ago"),
            legend: h ? Array.from(h.querySelectorAll(".ah-legend .ah-lrow")).map((n) => n.textContent) : null, graphs: bars.length,
+           gxHidden: Array.from(document.querySelectorAll("#ah-tip .ru-tip-gx span[hidden]")).every((s) => getComputedStyle(s).display === "none"),
+           gxShown: document.querySelectorAll("#ah-tip .ru-tip-gx span:not([hidden])").length,
            bars: bars.length ? +bars[0].getAttribute("data-bars") : 0, big: bars.some((b) => b.classList.contains("ah-big")),
            err: q(".ah-err"), wait: !!(h && h.querySelector(".ah-wait")),
            mlines: Array.from(document.querySelectorAll("#ah-tip .ah-mline")).map((n) => ((n.querySelector(".ah-nm") || {}).textContent || "") + ": " + ((n.querySelector(".ah-desc") || {}).textContent || "")),
@@ -791,8 +793,10 @@ class ServedHistory(unittest.TestCase):
         self.assertIsNone(h["since"], "the frame is ok: no since on the line")
         self.assertRegex(h["ago"], r"^read (now|\d+ minutes? ago)$", "the read's age in words on one clock, never a clock stamp")
         self.assertEqual(h["names"], ["History", "State changes"])
-        self.assertEqual(h["legend"], ["429 = the API told us to slow down (rate limit)", "5xx = the API itself failed (server error)"],
-                         "vertical: one line each, 429 then 5xx; no gray line when the range holds no such failure")
+        self.assertTrue(h["gxHidden"], "a clock the fit hid beside a date is display:none: no author display rule defeats [hidden]")
+        self.assertGreaterEqual(h["gxShown"], 3, "the axis carries clocks that stand (T338)")
+        self.assertEqual(h["legend"], ["429 rate limit: the API told us to slow down", "5xx server error: the API itself failed"],
+                         "vertical: one line each, 429 then 5xx; no other line when the range holds no such failure")
         self.assertEqual((h["graphs"], h["bars"], h["big"]), (1, 96, False), "the day as 96 quarter-hour bars, small in the hover")
         self.assertFalse(h["unknown"], "the word never reaches the user")
         self.assertEqual([(r["k"], r["w"], r["v"], r["boot"]) for r in rows],
@@ -901,7 +905,7 @@ class ServedHistory(unittest.TestCase):
         h, rows = self.R["offline"]["head"], self.R["offline"]["rows"]
         self.assertEqual((h["word"], h["dot"]), ("6 successful requests · 2 429s · 7 no connection", "errors"),
                          "attempts without a status are counted as no connection; the machine's word (unknown) is never said")
-        self.assertEqual(h["legend"][-1], "gray = no connection, or another error", "the gray line joins the legend when the range holds such failures")
+        self.assertEqual(h["legend"][-1], "other no connection, or another error", "the other line joins the legend when the range holds such failures")
         self.assertEqual(len(h["legend"]), 3)
         self.assertFalse(h["unknown"])
 
