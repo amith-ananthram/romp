@@ -14316,8 +14316,10 @@ def _comments_frame(sid, live_map=None):
                         "lastUuid": last_uuid,                         # the newest record shown/held — the client's cap-proof "transcript moved" datum
                         "unreachable": unreachable or None,            # a broken thread (missing transcript / lost cut): owes nothing
                         "promotedName": th.get("promotedName") or "",
-                        # the thread's mail state (T356): off by default until broken out; the popover says so
+                        # the thread's mail state (T356): off by default until broken out; the popover says so, and how
+                        # many messages wait in its box (they land within the bus's retry interval of a break-out)
                         "mailOff": bool(_postal_isolated(tsid)),
+                        "heldMail": _held_mail_count(tsid),
                         "model": (reg.get("liveModel") or reg.get("model") or "") if reg else "",
                         "effort": (reg.get("effort") or "") if reg else "",
                         "sinceEpoch": since_ms,
@@ -23525,6 +23527,16 @@ def _postal_shaped(text):
     isolated session."""
     t = (text or "").strip()
     return "romp-msg-id" in t or t.startswith("####################") or "\U0001F4EC" in t
+
+
+def _held_mail_count(sid):
+    """How many messages wait unread in `sid`'s postal box (the bus's Maildir new/ under the shared state): what a
+    thread whose mail is off will receive the moment it is broken out (T356 follow-up). 0 when the box is absent or
+    unreadable; a directory listing, bounded by the box itself."""
+    try:
+        return sum(1 for _ in (jd.STATE / "postal" / "mail" / str(sid) / "new").iterdir())
+    except OSError:
+        return 0
 
 
 def _thread_mail_off(sid):

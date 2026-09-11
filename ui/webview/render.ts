@@ -10009,12 +10009,13 @@ function renderCommentPopover(): void {
     crow.append(attach, box, send);
     pop.appendChild(crow);
     if (metaRowPending) pop.appendChild(metaRowPending);   // model/effort under the box, like the chat
-    if (th && th.mailOff) {
-      // T356 (the user 2026-09-11): a thread's mail is off, both directions, until it is broken out; the popover
-      // is the thread's whole surface, so it says so here
+    if (th && th.mailOff && (th.heldMail || 0) > 0) {
+      // T356: a thread's mail is off until it is broken out, but the comment box does not SAY so (the user
+      // 2026-09-11, 3:05 PM PT: not here; the tab hover's Mail row and the Sessions pane tag carry the state quietly).
+      // Only a message actually held in its box is worth a line: the count, and that it lands at the break-out.
+      const held = th.heldMail || 0;
       const mail = el("div", "cmt-note cmt-mail");
-      mail.textContent = "Mail off: this thread neither sends nor receives peer mail until you break it out.";
-      mail.title = "Peers cannot see or mail this thread, and its own mail is refused. Break out turns mail on.";
+      mail.textContent = held + (held === 1 ? " message waits in its box and lands" : " messages wait in its box and land") + " at the break-out.";
       pop.appendChild(mail);
     }
     if (th && th.status === "open") {
@@ -10084,9 +10085,13 @@ function renderCommentPopover(): void {
     const note = el("div", "cmt-note");
     note.textContent = "The discussion continues there.";
     pop.appendChild(note);
-    // the break-out flipped its mail on (T356): said once, here, where the user looks after breaking it out
+    // the break-out flipped its mail on (T356): said once, here, where the user looks after breaking it out — from the
+    // EFFECTIVE state the frame carries, so a mailbox the user toggled off since reads as off (the review's low)
     const mailOn = el("div", "cmt-note cmt-mail");
-    mailOn.textContent = "Its mail is on now: peers can reach it and it can send.";
+    const held = th.heldMail || 0;
+    mailOn.textContent = th.mailOff
+      ? "Its mailbox is off: the lane's mailbox toggle turns peer mail back on."
+      : "Its mail is on now: peers can reach it and it can send." + (held ? " " + held + (held === 1 ? " held message lands" : " held messages land") + " in a moment." : "");
     pop.appendChild(mailOn);
     const row = el("div", "cmt-actions");
     const open = el("button", "cmt-act") as HTMLButtonElement;
