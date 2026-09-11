@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""The SessionBackend contract (the user 2026-06-26): tmux + SDK behind ONE clean session API, and NOTHING
-above the backend shells tmux. These tests pin (a) both backends honor the ABC and (b) the no-raw-tmux
-guard — so a future tmux leak into the higher layers fails CI instead of silently rotting the abstraction.
+"""The SessionBackend contract (the user 2026-06-26): every backend behind ONE clean session API, and NOTHING
+above the backend shells a terminal. Written when the backends were tmux and the SDK; since the tmux
+backend's removal (2026-09-11) they are Claude Code (the SDK) and Codex. These tests pin (a) the shipped
+backends honor the ABC and (b) the no-raw-tmux guard — so a tmux call written anywhere fails CI instead of
+re-coupling romp to a backend it no longer has.
 """
 import os
 import re
@@ -36,12 +38,12 @@ class AbcContract(unittest.TestCase):
 
     def test_forwards_sends_capability(self):
         # forwards_sends is a CONCRETE default (False) on the ABC — the kernel holds + merges a backend's
-        # sends when it can't forward them itself (tmux inherits this). The SDK overrides it True so the
+        # sends when it can't forward them itself (the removed tmux backend inherited it). The SDK overrides it True so the
         # kernel hands it composer sends mid-turn (the user 2026-07-17). SDK checked at the source level.
         self.assertNotIn("forwards_sends", ABSTRACT,
                          "forwards_sends is a concrete default, not part of the abstract contract")
         self.assertFalse(sb.SessionBackend.forwards_sends(object()),
-                         "the ABC default is False (hold + merge, like tmux)")
+                         "the ABC default is False (hold + merge, as the removed tmux backend did)")
         src = open(os.path.join(BIN, "romp_sdk_backend.py"), encoding="utf-8").read()
         m = re.search(r"def forwards_sends\(self\)[\s\S]*?\n        return (\w+)", src)
         self.assertTrue(m and m.group(1) == "True", "SdkBackend.forwards_sends returns True")

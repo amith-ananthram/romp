@@ -4,7 +4,7 @@
 ROMP_SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../bin" && pwd)/romp"
 
 load free-port
-load tmux-private
+load cli-scope-floor
 
 setup() {
     TEST_DIR="$(mktemp -d)"
@@ -36,11 +36,9 @@ MOCK
     export ROMP_POSTAL_BIN="$MOCK_DIR/romp-postal-service"
 
     export PATH="$MOCK_DIR:$PATH"
-    # The romp-manager tests below start a REAL bin/romp-manager, whose startup still runs
-    # `tmux start-server`: the private socket directory keeps that off the machine's tmux server
-    # (tests/tmux-private.bash has the 2026-09-06 incident), and the same call floors
-    # ROMP_CLI_SCOPE=0 so a real manager or kernel leaves no transient scope behind.
-    tmux_private_socket_dir "$TEST_DIR"
+    # The romp-manager tests below start a REAL bin/romp-manager: the floor keeps it, and any kernel,
+    # from leaving a transient scope on the developer's user manager (tests/cli-scope-floor.bash).
+    cli_scope_floor
     unset ROMP_SID        # default: outside a romp session — `romp new` names no parent (tests export it on purpose)
     # Hermetic HOME: bin/romp probes $HOME/.claude/romp-postal.mcp.json (would
     # nondeterministically append --mcp-config on a dev machine) and writes the
@@ -76,9 +74,7 @@ teardown() {
     [[ -n "${OTHER_PID:-}" ]] && kill -9 "$OTHER_PID" 2>/dev/null
     # the stub kernel the `romp tag` tests start (_stub_tag_kernel) serves until reaped here
     [[ -n "${TAG_KERNEL_PID:-}" ]] && kill "$TAG_KERNEL_PID" 2>/dev/null
-    # The kill before the rm (a server the real tmux started must not outlive the test), and last, so
-    # its failure is teardown's status: bats swallows a failing command mid-teardown.
-    tmux_private_kill && rm -rf "$TEST_DIR"
+    rm -rf "$TEST_DIR"
 }
 
 # Helper — runs romp with merged stdout+stderr so BATS captures errors

@@ -60,6 +60,7 @@ test("the gear is the chain's last step: the shell asks the settings page's own 
   // gear.js: the hook closes the modal and says so, unless one of its own dialogs is up (they close one level at a time)
   assert.ok(GEAR.includes("window.__rompSettingsClose = function () { if (p.hidden || (lgM && !lgM.hidden) || openHousePick) return false; closeSettings(); return true; };"));
   assert.ok(GEAR.includes("if (e.key === 'Escape' && lgM && !lgM.hidden) lgModal(false);"), "the login card's own Escape stays");
-  // closing hides the iframe that held the keyboard: the shell's settings bridge puts focus back in the chat
-  assert.ok(KERNEL.includes("if(!m.on){var fc=document.getElementById('f-chat');try{fc&&fc.contentWindow&&fc.contentWindow.focus();}catch(e){}}}"));
+  // closing hides the iframe that held the keyboard: the shell's settings bridge puts focus back in the chat — the
+  // split's column last worked in, else the first (chat split, 2026-09-11)
+  assert.ok(KERNEL.includes("if(!m.on){var fid=(window.__rompFocusedChatId&&window.__rompFocusedChatId())||'f-chat';var fc=document.getElementById(fid)||document.getElementById('f-chat');try{fc&&fc.contentWindow&&fc.contentWindow.focus();}catch(e){}}}"));
 });

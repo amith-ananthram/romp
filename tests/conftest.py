@@ -134,6 +134,25 @@ os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel exports this to its sess
 # bus refuses its fixed port under a test unless the port is the run's own, which the marker beside a port says
 os.environ.pop("ROMP_POSTAL_PORT", None)
 os.environ["ROMP_POSTAL_HERMETIC"] = "1"
+# No test spawns a per-session HOST by omission (2026-09-11, T348): hosts are on by default now, so a backend built over
+# a state dir with no `session-hosts` file starts a real bin/romp-session-host for any session it connects. The root the
+# runner floors carries the toggle set to off from the start, re-asserted per test below (a test that deletes or rewrites
+# it gets it back); the deliberate hosts-on tests write `on` into their OWN state roots and are unaffected. A test that
+# builds its own bare state dir pins the setting itself (kernel/host_transport.py session_hosts_read).
+_SESSION_HOSTS_OFF = os.path.join(os.environ["XDG_STATE_HOME"], "romp", "session-hosts")
+
+
+def _floor_session_hosts_off():
+    try:
+        os.makedirs(os.path.dirname(_SESSION_HOSTS_OFF), exist_ok=True)
+        if not os.path.exists(_SESSION_HOSTS_OFF) or open(_SESSION_HOSTS_OFF).read().strip().lower() != "off":
+            with open(_SESSION_HOSTS_OFF, "w") as f:
+                f.write("off\n")
+    except OSError:
+        pass
+
+
+_floor_session_hosts_off()
 
 # No test may resolve the REAL ~/.claude (2026-09-08): the judge module and the event model compute
 # their projects root at IMPORT from CLAUDE_CONFIG_DIR (default ~/.claude), the kernel and the SDK
@@ -257,6 +276,14 @@ def _no_real_claude_config():
 
 
 @pytest.fixture(autouse=True)
+def _hosts_off_in_the_floored_root():
+    """The floored state root reads hosts OFF before every test (T348): the file is re-written when a test removed or
+    changed it, so no later test spawns a real host by omission."""
+    _floor_session_hosts_off()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _dead_manager_port():
     """The import-time poison above covers collection, but a module-level env write in a test file
     ALSO executes during collection — so one module's write (or pop) would otherwise hold for the
@@ -334,26 +361,6 @@ def _no_cli_scope():
     for v in _CLI_SCOPE_LIMIT_VARS:
         os.environ.pop(v, None)
     yield
-
-
-# No test may reach the machine's REAL tmux server (2026-09-06; the reason changed on 2026-09-08): the
-# retired key-source module used to scrub the live server's globals from inside a test, and any tmux-backed
-# test still runs its commands somewhere. The same private socket directory the bats suites use
-# (tests/tmux-private.bash): tmux puts every socket, `-L` ones included, under $TMUX_TMPDIR/tmux-<uid>/,
-# and the directory must exist or tmux 3.4 silently falls back to the default. No server ever exists
-# there, so a tmux command from a test exits with "no server running" instead of touching the live one.
-os.environ["TMUX_TMPDIR"] = tempfile.mkdtemp(prefix="romp-tests-tmux-")
-os.environ.pop("TMUX", None)
-os.environ.pop("ROMP_TMUX_SOCKET", None)
-
-
-@pytest.fixture(autouse=True)
-def _no_live_tmux_server():
-    os.environ["TMUX_TMPDIR"] = _TMUX_PRIVATE
-    yield
-
-
-_TMUX_PRIVATE = os.environ["TMUX_TMPDIR"]
 
 
 @pytest.fixture(autouse=True)
@@ -503,7 +510,7 @@ ENV_VALUE_REDACTED = "[REDACTED-ENV-VALUE]"
 _ENV_VALUE_PATH_NAMES = frozenset((
     "PWD", "OLDPWD", "HOME", "PATH", "TMPDIR", "SHELL", "VIRTUAL_ENV", "PYTHONPATH", "LS_COLORS",
     "ROMP_SERVICE_ENV_FILE", "ROMP_SERVICE_ENV", "ROMP_DIR", "ROMP_STATE_DIR", "ROMP_CLAUDE_BIN",
-    "ROMP_SYSTEMD_DIR", "ROMP_LAUNCHD_DIR", "CLAUDE_CONFIG_DIR", "TMUX_TMPDIR", "ROMP_TESTS_SYSTEM_TMPDIR",
+    "ROMP_SYSTEMD_DIR", "ROMP_LAUNCHD_DIR", "CLAUDE_CONFIG_DIR", "ROMP_TESTS_SYSTEM_TMPDIR",
     # the Claude settings dir conftest saved ahead of its CLAUDE_CONFIG_DIR floor (above), for the live
     # move test: a path a failure report may quote, like CLAUDE_CONFIG_DIR beside it
     "ROMP_TESTS_REAL_CLAUDE_CONFIG_DIR",

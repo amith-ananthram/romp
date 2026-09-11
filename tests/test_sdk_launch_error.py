@@ -684,7 +684,9 @@ class TheClisStderrIsCaptured(unittest.TestCase):
 
         sess = _sess_for_options()
         fake_sdk = types.ModuleType("claude_agent_sdk")
-        fake_sdk.HookMatcher = lambda **kw: kw
+        # an attribute-bearing stand-in, like the SDK's dataclass: with hosts on (the default since T348) the
+        # options loop sets each matcher's `timeout` to the host's hook bound, which a plain dict refused
+        fake_sdk.HookMatcher = lambda **kw: types.SimpleNamespace(**kw)
         saved = sys.modules.get("claude_agent_sdk")
         sys.modules["claude_agent_sdk"] = fake_sdk
         try:

@@ -903,7 +903,8 @@ class RenameFaultsThroughTheDoors(_Routes):
 
     def test_a_dead_codex_tab_fault_reaches_the_asker_as_the_errno_too(self):
         # on origin/main: the Codex branch's catch mapped the raise to None → "is that session known to
-        # this kernel?", a false cause — the same class this commit fixes for the tmux and SDK paths.
+        # this kernel?", a false cause — the same class this commit fixed for the SDK path and the terminal
+        # backend's (removed 2026-09-11).
         # A REAL CodexBackend over its own state dir: a dead Codex tab is not owned (owns() is alive-only),
         # so the doors route it to the unowned route, whose dead-tab rename renames the Codex registry's
         # durable name first; the fault is beneath its real names writer (the atomic publish)

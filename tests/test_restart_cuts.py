@@ -39,7 +39,7 @@ SID = "11111111-2222-3333-4444-00000000c001"
 STATE_ROOT = km.RESTART_CUTS_FILE.parent
 
 # bin/romp's `romp refresh` row: caller attribution with no action field, as the CLI writes it.
-REFRESH_CLI_ROW = {"ppid": 4242, "parent": "bash", "sid": "", "name": "", "tty": "/dev/pts/0", "tmux": ""}
+REFRESH_CLI_ROW = {"ppid": 4242, "parent": "bash", "sid": "", "name": "", "tty": "/dev/pts/0"}
 
 
 class DeadTty:

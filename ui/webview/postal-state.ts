@@ -64,6 +64,42 @@ export function deliveryOf(ev: { direction: "in" | "out"; status?: string | null
   return null;
 }
 
+/** The delivery mark's DRAWINGS, one per state: the inner SVG of a 16-unit box the renderer wraps (render.ts
+ *  deliveryIcon: 14 px, a 1.5 stroke in currentColor, round caps and joins, no fill unless a drawing says so).
+ *
+ *  sent / delivered / read is the ladder messaging apps draw (T337, the user 2026-09-10, who liked the marks but found a
+ *  bare check read as a line when zoomed in): a hollow circle = sent (handed to the relay), the circle with a check =
+ *  delivered (in the recipient's inbox, or the far host's ack), the filled circle with the check knocked out = read (the
+ *  recipient consumed it: the ledger's own exec event, never inferred). One circle, one three-point check: the three
+ *  rungs are one mark changing state, and the read rung's check wears MARK_CHECK_CLASS so the sheet can cut it out in
+ *  the page colour (a presentation attribute cannot carry a var()). The other three states keep their own glyphs: a
+ *  clock = parked, a cross = bounced, a return arrow = recalled. Each mark carries a worded title (deliveryTitle).
+ *
+ *  An adaptation of Signal's ladder, not its rungs one for one: Signal draws sending as the hollow circle, sent as a
+ *  circled check, delivered as a circled double check and read as the filled circle; the kernel files three states, so
+ *  ours maps sent, delivered and read onto hollow, check and filled check.
+ *
+ *  Drawn at 14 px with a 1.5 stroke, heavier than the envelope glyph at the head's other end (12 px, 1.4): a ring with
+ *  a check inside needs the two extra pixels for the check's arms to stay clear of the ring at device scale 1, and the
+ *  1.5 stroke is the mark's own specification (the user's reference).
+ *
+ *  The marks keep the STATE colour (the sheet: dim for sent and delivered, the accent for read), never the kind's.
+ *
+ *  Licence: the ladder is drawn here from two primitives of our own, a circle and a three-point polyline, in this
+ *  file's own coordinates. This repository is Apache-2.0 (LICENSE); Signal's own icon assets ship AGPL-3.0 with its
+ *  apps and are therefore not copied into it. */
+export const MARK_CHECK_CLASS = "postal-mark-check";
+const CHECK = '<path class="' + MARK_CHECK_CLASS + '" d="M4.9 8.3 L7.1 10.5 L10.9 6.1"/>';   // one three-point check, its
+                                                                                              // far tip clear of the ring
+export const DELIVERY_GLYPHS: Record<PostalDeliveryState, string> = {
+  sent: '<circle cx="8" cy="8" r="6.25"/>',
+  delivered: '<circle cx="8" cy="8" r="6.25"/>' + CHECK,
+  read: '<circle cx="8" cy="8" r="6.25" fill="currentColor"/>' + CHECK,
+  parked: '<circle cx="8" cy="8" r="5.6"/><path d="M8 4.8 V8.2 L10.4 9.6"/>',
+  bounced: '<path d="M4.5 4.5 L11.5 11.5"/><path d="M11.5 4.5 L4.5 11.5"/>',
+  recalled: '<path d="M6.6 4.6 L3.2 8 L6.6 11.4"/><path d="M3.2 8 H10 A2.8 2.8 0 0 0 12.8 5.2"/>',
+};
+
 /** The icon's title: the word, the clock when known, the reason for a bounce. `clock` formats an epoch. */
 export function deliveryTitle(d: PostalDelivery, clock: (epochS: number) => string): string {
   let s = d.word;

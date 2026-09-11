@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { compactDisplay, summarizeTools, toolCounts, STANDALONE_TOOLS } from "./compact";
+import { compactDisplay, summarizeTools, toolCounts, itemAnchor, STANDALONE_TOOLS, type DisplayItem } from "./compact";
 
 test("compactDisplay: thinking is dropped entirely", () => {
   const d = compactDisplay(["user", "thinking", "assistant"]);
@@ -144,4 +144,18 @@ test("retry runs and tool runs break each other — two folds, never one mixed g
 test("thinking hides without breaking a retry run, same as a tool run", () => {
   const kinds = ["retried", "thinking", "retried"];
   assert.deepEqual(compactDisplay(kinds), [{ kind: "noticegroup", indices: [0, 2] }]);   // noticegroup since 2026-09-08
+});
+
+// T339 (the user 2026-09-11): a collapsed run is placed and timed by its LATEST member, never its first. The user's
+// transcript held a notice run whose first member carried yesterday's clock among today's rows.
+test("itemAnchor: a lone event is its own anchor; a run anchors on its latest member, ties on the later one", () => {
+  const epochs = [1000, 2000, 500, 2000, null, 3000];
+  const at = (i: number) => epochs[i] ?? null;
+  assert.equal(itemAnchor({ kind: "event", index: 2 }, at), 2);
+  assert.equal(itemAnchor({ kind: "noticegroup", indices: [2, 5] }, at), 5, "yesterday then today: today");
+  assert.equal(itemAnchor({ kind: "noticegroup", indices: [5, 2] }, at), 5, "the latest, wherever it sits in the run");
+  assert.equal(itemAnchor({ kind: "noticegroup", indices: [1, 3] }, at), 3, "a tie: the later member");
+  assert.equal(itemAnchor({ kind: "noticegroup", indices: [0, 4, 1] }, at), 1, "a member with no epoch never anchors");
+  assert.equal(itemAnchor({ kind: "toolgroup", indices: [2, 5] }, at), 2, "a tool run keeps its first member, as before");
+  assert.equal(itemAnchor({ kind: "noticegroup", indices: [4, 4] } as DisplayItem, at), 4, "no timed member: the first");
 });

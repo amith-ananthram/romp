@@ -56,11 +56,16 @@ def _pid_max() -> int:
     except (OSError, ValueError):
         return 4194304
 P = _pid_max()
-CLI, TOOL, LOOP, BYSTANDER, MANAGER, KERNEL, TMUX, LIVE = (P + 42, P + 50, P + 60, P + 300, P + 901, P + 90210, P + 556, P + 557)
+CLI, TOOL, LOOP, BYSTANDER, MANAGER, KERNEL, TERMINAL, LIVE = (P + 42, P + 50, P + 60, P + 300, P + 901, P + 90210, P + 556, P + 557)
+# TERMINAL is someone's own claude in a terminal (no stream-json mark), never romp's: the reap must leave it alone
 
 
 def _backend(d=None):
-    return sb.SdkBackend(d or tempfile.mkdtemp(), "/bin/true", lambda *a, **k: None)
+    d = d or tempfile.mkdtemp()
+    # hosts OFF in this bare state dir (T348: on by default): the real _boot_reconcile below starts the sessions it
+    # classes as cut, and with no file it would spawn a real bin/romp-session-host for each on a box with the SDK
+    Path(d, "session-hosts").write_text("off")
+    return sb.SdkBackend(d, "/bin/true", lambda *a, **k: None)
 
 
 class _Sess:
@@ -228,10 +233,10 @@ class BootReconcileEndsTheTree(unittest.TestCase):
         ps = ("  %d 1 /x/claude --output-format stream-json --resume %s --input-format stream-json\n"
               "  %d %d bash -c tool\n"
               "  %d %d sleep 300\n"
-              "  %d 1 claude --resume %s --name termsess\n"
+              "  %d 1 claude --resume %s --name termsess\n"   # a terminal CLI: no stream-json mark, never romp's
               "  %d 1 /usr/bin/python3 /x/romp/bin/romp-kernel\n"
               "  %d %d /x/claude --output-format stream-json --resume %s --input-format stream-json\n"
-              ) % (CLI, SID, TOOL, CLI, LOOP, TOOL, TMUX, SID, KERNEL, LIVE, KERNEL, SID)
+              ) % (CLI, SID, TOOL, CLI, LOOP, TOOL, TERMINAL, SID, KERNEL, LIVE, KERNEL, SID)
         listing = "romp-session-11111111-%d-1757374800.scope loaded active running claude\n" % CLI
         killed, runs = [], []
         def run(argv, **kw):
@@ -240,7 +245,7 @@ class BootReconcileEndsTheTree(unittest.TestCase):
              mock.patch.object(sb.os, "kill", side_effect=lambda p, s: killed.append((p, s))), \
              mock.patch.object(sb.SdkBackend, "_pid_alive", lambda self, p: False):   # fake pids read as gone on every platform (no /proc on macOS → os.kill(pid, 0) would be this mock)
             be._boot_reconcile([sb.read_reg(Path(d), SID)])
-        self.assertEqual([p for p, _ in killed], [TOOL, LOOP, CLI], "the orphan's tree, children first, then the CLI; the tmux CLI and the live CLI untouched")
+        self.assertEqual([p for p, _ in killed], [TOOL, LOOP, CLI], "the orphan's tree, children first, then the CLI; the terminal CLI (no stream-json mark) and the live CLI untouched")
         self.assertEqual(runs[0], sb.PS_ARGV, "the listing is read first, with PS_ARGV")
         self.assertIn(sb.SCOPE_LIST_ARGV, runs, "…then our sessions' scopes are listed")
         self.assertIn(["systemctl", "--user", "stop", "romp-session-11111111-%d-1757374800.scope" % CLI], runs,

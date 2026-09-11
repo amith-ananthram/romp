@@ -119,10 +119,16 @@ class PaneRailTest(unittest.TestCase):
         self.assertIn("#chat-pane{flex:var(--g-chat,60) 1 0}#fleet-pane{flex:var(--g-fleet,34) 1 0}#feed-pane{flex:var(--g-feed,40) 1 0}#files-pane{flex:var(--g-files,40) 1 0}", self.html)
         self.assertNotIn("--g-timeline", self.html)              # timeline is the fixed-height band, not a row grow
         self.assertIn("var GK='romp-pane-grow'", self.html)
-        self.assertIn("setGrow(key(id),document.getElementById(id).offsetWidth)", self.html)
+        # two passes (2026-09-08): every shown width is READ before any grow is written — a write re-flows the row,
+        # and a read after it came back at a mixed scale, ballooning the first column on a fresh browser's first drag
+        self.assertIn("var px={};PANES.forEach(function(id){if(shown(id))px[id]=document.getElementById(id).offsetWidth;});", self.html)
+        self.assertIn("Object.keys(px).forEach(function(id){setGrow(key(id),px[id]);});", self.html)
         self.assertIn("localStorage.setItem(GK,JSON.stringify(grow))", self.html)
-        # gv-b picks its left neighbour live: fleet when shown, else chat (so it's the chat|feed gutter too)
-        self.assertIn("document.body.classList.contains('po-fleet')?'fleet-pane':'chat-pane'", self.html)
+        # gv-b picks its left neighbour live: the outline (fleet) when shown, else the RIGHTMOST chat column (so it's the
+        # chat|feed gutter too; lastChat() is the last split column, or #chat-pane when there is no split —
+        # split screen, the user 2026-09-08)
+        self.assertIn("document.body.classList.contains('po-fleet')?'fleet-pane':lastChat()", self.html)
+        self.assertIn("gutter('gv-a',function(){return lastChat();},'fleet-pane')", self.html)
 
     def test_the_shell_serves_the_landing_line_of_a_divider_drag(self):
         # a divider drag moves a line over the row and the panes take their widths once, at release (the drag
