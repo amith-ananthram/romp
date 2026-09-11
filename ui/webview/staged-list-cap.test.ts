@@ -98,6 +98,7 @@ function lift(): (hooks: Hooks) => Api {
     const hostIsDown = (id) => H.down.has(id); const isProvisionalId = (id) => H.provisional.has(id);
     const warnToast = (msg) => { H.toasts.push(msg); };
     const ephemeralWarnToast = (msg) => { H.toasts.push(msg); };   // the slice's unreachable-session word is the ephemeral one
+    const syncComposerPh = () => {};   // the composer's name overlay re-sync the strip renderer calls on every exit (composer-placeholder.ts): no overlay here
   `;
   const epilogue = `return { routeUserMessage, flushStaged, renderStagedStrip, stagedMsgs, stagedOpen, stagedCollapsed, stagedScroll };`;
   return new Function("HOOKS", prelude + js + epilogue) as (hooks: Hooks) => Api;

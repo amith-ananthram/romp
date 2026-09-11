@@ -16,6 +16,7 @@ setup() {
     # per run; three misdiagnosed CI runs on 2026-08-31). Same lesson the kernel's own port
     # comment records. postal_spawn_bus below retries past a genuine collision anyway.
     export ROMP_POSTAL_PORT=$((27200 + ${BATS_TEST_NUMBER:-0}))
+    export ROMP_POSTAL_HERMETIC=1   # the port above is this run's own: the bus honours it under a temporary state root (2026-09-11)
     export ROMP_POSTAL_POLL=1
     export ROMP_POSTAL_IDLE_GRACE=2
     export ROMP_POSTAL_HEARTBEAT_TTL=2
