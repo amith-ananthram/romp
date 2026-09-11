@@ -23,6 +23,7 @@ class WarmTheCards(P.Harness):
     def setUp(self):
         super().setUp()
         km._PAGE_STATS.update(warmed=0, warmMs=0.0, warmCycles=0, warmSkipped=0, warmPending=0)   # the warm counters, per test
+        km._WARM_MEMO.update(anchors=(), keys=frozenset(), sigs={})
         km._PERF_STATS.pusher["cycle_ms_last"] = 20.0
 
     def _restored(self, turns=200, compact_every=25):
@@ -71,16 +72,23 @@ class WarmTheCards(P.Harness):
         feed = self._feed(self._card([whole[5]["uuid"], whole[60]["uuid"]]))
         n = km._warm_history_pages(feed, NOW, {})
         self.assertGreater(n, 0)
+        self.assertEqual(km._WARM_MEMO["anchors"], tuple(km._card_anchors(feed)), "the set is fully resident: remembered")
+        self.assertEqual(len(km._WARM_MEMO["keys"]), n)
         self.assertEqual(km._warm_history_pages(feed, NOW, {}), 0, "every page resident: the probe renders nothing")
         self.assertEqual(km._PAGE_STATS["warmCycles"], 2, "…and the cycle is counted")
         with km._page_lock:                                           # a reader's scrolling evicted the pages (or a floor flip re-keyed them)
             km._PAGE_CACHE.clear(); km._PAGE_STATS["pages"] = 0; km._PAGE_STATS["bytes"] = 0
         self.assertEqual(km._warm_history_pages(feed, NOW, {}), n, "the same pages are rendered again")
         self.assertEqual(km._PAGE_STATS["warmed"], 2 * n)
+        with km._page_lock:
+            k0 = next(iter(km._WARM_MEMO["keys"])); km._PAGE_CACHE.pop(k0); km._PAGE_STATS["pages"] -= 1
+        self.assertEqual(km._warm_history_pages(feed, NOW, {}), 1, "one page evicted: the remembered set is probed and that page alone rendered")
         km._RENDER_FLOOR[SID] = m["floor"] - 16                       # a floor move re-keys the pages: warmed again
         self.assertGreater(km._warm_history_pages(feed, NOW, {}), 0)
 
-    def test_the_render_budget_is_half_the_cache_and_the_rest_waits_a_cycle(self):
+    def test_the_warm_set_is_bounded_to_half_the_cache_and_settles_and_a_board_change_admits_the_rest(self):
+        """The warming review (item 3): an unbounded set over the cache re-rendered itself every cycle for the kernel's life
+        (23 windows: 14 to 16 renders on each of eight cycles, 92 evictions). The SET is bounded: anchors past it wait."""
         whole, m = self._restored(turns=600, compact_every=150)
         floor = m["floor"]
         turns = km._parse(self.leaf, SID, NOW)["turns"]
@@ -88,19 +96,24 @@ class WarmTheCards(P.Harness):
         for p in range(0, floor - 2 * km.PAGE_TURNS, 2 * km.PAGE_TURNS):
             j = p + km.PAGE_TURNS // 2                                # a turn in the page's second half: its window is [p, p+32)
             anchors.append(next(a["uuid"] for a in turns[j]["atoms"] if a.get("uuid")))
-        self.assertGreater(2 * len(anchors), km.WARM_PAGES_MAX, "more pages than one cycle's budget")
-        self.assertLessEqual(2 * len(anchors), km._PAGE_CACHE_MAX, "…but they all fit the cache")
+        self.assertGreater(2 * len(anchors), km.WARM_PAGES_MAX, "more pages than the set's bound")
         feed = self._feed(self._card(anchors))
         n1 = km._warm_history_pages(feed, NOW, {})
-        self.assertEqual(n1, km.WARM_PAGES_MAX, "one cycle renders the budget")
-        self.assertEqual(km._PAGE_STATS["warmPending"], 2 * len(anchors) - km.WARM_PAGES_MAX, "the rest is counted as pending")
-        first, last = anchors[0], anchors[-1]
-        self.assertTrue(self._hit(first), "the FIRST anchor's window is resident: the warm did not evict its own first half")
-        self.assertFalse(self._hit(last), "the last anchor's window waits for the next cycle")
-        n2 = km._warm_history_pages(feed, NOW, {})
-        self.assertEqual(n2, 2 * len(anchors) - km.WARM_PAGES_MAX - 2, "the next cycle renders the rest (the click above rendered one window)")
-        self.assertEqual(km._PAGE_STATS["warmPending"], 0)
-        self.assertTrue(self._hit(first)); self.assertTrue(self._hit(last))
+        admitted = km.WARM_PAGES_MAX // 2                             # windows of two pages each
+        self.assertEqual(n1, km.WARM_PAGES_MAX, "one cycle renders the set's bound")
+        self.assertEqual(km._PAGE_STATS["warmPending"], len(anchors) - admitted, "the anchors past the bound wait")
+        ev0 = km._PAGE_STATS["evictions"]
+        for _ in range(4):                                            # the cycles after: the set settles, nothing re-rendered
+            self.assertEqual(km._warm_history_pages(feed, NOW, {}), 0, "a bounded set settles: no render")
+        self.assertEqual(km._PAGE_STATS["evictions"], ev0, "…and evicts nothing")
+        self.assertEqual(km._PAGE_STATS["warmCycles"], 5)
+        self.assertTrue(self._hit(anchors[0]), "the first anchor's window stays resident")
+        self.assertFalse(self._hit(anchors[-1]), "the last anchor's waits for a board change")
+        # a board change: the first four cards left; their windows' place admits the next four
+        feed2 = self._feed(self._card(anchors[4:]))
+        n2 = km._warm_history_pages(feed2, NOW, {})
+        self.assertEqual(n2, 2 * 4, "the next four windows admitted and rendered (the click above rendered the LAST anchor's, still waiting)")
+        self.assertEqual(km._PAGE_STATS["warmPending"], len(anchors) - 4 - admitted)
         self.assertEqual(km.WARM_PAGES_MAX, km._PAGE_CACHE_MAX // 2)
 
     def test_done_rows_handoffs_completed_rows_and_tail_anchors_are_not_warmed(self):
@@ -151,6 +164,18 @@ class WarmTheCards(P.Harness):
         self.assertEqual(P._strip(km._chat_history_page(SID, 0, km.PAGE_TURNS, NOW + 100, stats=st)), P._strip(page))
         self.assertEqual((km._PAGE_STATS["misses"], st["rendered"]), (misses, 1), "the page's key survived the turn: a hit")
 
+    def test_a_pages_key_reads_the_regs_fork_value_not_the_file(self):
+        """The warming review (item 2): the queue and echo mirrors rewrite STATE/sdk/<sid>.json on every send, so a key on
+        the file's identity re-keyed every page of the session the user was prompting."""
+        whole, m = self._restored()
+        reg = jd.STATE / "sdk" / (SID + ".json")
+        reg.write_text(json.dumps({"forkedFrom": None, "queue": []}))
+        k1 = km._page_sig(self.rows[0], SID, NOW)
+        reg.write_text(json.dumps({"forkedFrom": None, "queue": [{"text": "a send"}], "echoes": [1]}))   # a send: the mirror rewrote
+        self.assertEqual(km._page_sig(self.rows[0], SID, NOW), k1, "the same fork value: the same key")
+        reg.write_text(json.dumps({"forkedFrom": {"sid": "22222222-3333-4444-5555-666666666666", "uuid": whole[3]["uuid"]}}))
+        self.assertNotEqual(km._page_sig(self.rows[0], SID, NOW), k1, "a fork lineage: another key (the branch marker moves)")
+
     def test_the_window_is_two_aligned_pages_around_the_anchor(self):
         w = km._window_turns
         self.assertEqual(w(3, 400), (0, 32), "the head's page and the next")
@@ -163,15 +188,15 @@ class WarmTheCards(P.Harness):
         src = open(os.path.join(P.BIN, "romp-kernel")).read()
         send = src.index('_PERF_STATS.stage("push.send", time.monotonic() - _t_stage)')
         block = src[send:src.index("def _broadcast_restarting", send)]
-        self.assertIn("_warm_history_pages(_fs, now, tmux)", block, "the pusher warms AFTER its send stage")
-        self.assertIn('if want_feed and _fs and not connect and any(c.get("proto") == 2 for c in chat_clients):', block,
-                      "only with a board client among the targets and a proto-2 chat client connected")
+        self.assertIn("_warm_history_pages(_fs, now, live_map)", block, "the pusher warms AFTER its send stage")
+        self.assertIn('if any(c["app"] in ("feed", "fleet") for c in targets) and _fs and not connect and any(c.get("proto") == 2 for c in chat_clients):', block,
+                      "only with a board client (feed or fleet, never the chat alone) among the targets and a proto-2 chat client connected")
         self.assertIn('_PERF_STATS.stage("push.warm", time.monotonic() - _t_stage)', block, "its own stage key")
         self.assertNotIn("_warm_history_pages(feed_src", src, "the hook before the ledgers and the timeline is gone")
         self.assertIn("lo, hi = _window_turns(j, floor)", src, "loadAround's window is the warm's")
         self.assertEqual(sorted(k for k in km._PAGE_STATS if k.startswith("warm")), ["warmCycles", "warmMs", "warmPending", "warmSkipped", "warmed"])
         self.assertEqual(km.WARM_ANCHORS_MAX, 32)
-        self.assertFalse(hasattr(km, "_WARM_MEMO"), "the anchor-set memo is gone: the probe is the memo")
+        self.assertEqual(sorted(km._WARM_MEMO), ["anchors", "keys", "sigs"], "the remembered resident set: the anchor list, its page keys, the signatures")
 
 
 if __name__ == "__main__":

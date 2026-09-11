@@ -1389,14 +1389,19 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   the pusher's send stage (`push.warm`), with a board client and a proto-2 chat
   client connected: `warmed` pages rendered ahead of a click for the feed's
   cards' anchors (the distilled summary's own targets first, a completed card's
-  too, then the active cards' heads and open rows; at most 32 anchors probed
-  and 16 pages rendered per cycle, a resident page costing a dictionary read,
-  so an unchanged board settles to a probe and an evicted page is warmed
-  again), `warmPending` (pages over the cycle's render budget, rendered on the
-  cycles after), `warmMs`, `warmCycles`, and `warmSkipped` (cycles the warm
-  stood down because the pusher's last cycle ran over 1.5 s). A page's cache
-  key reads what a pre-floor render reads and none of the live tail, so a
-  warmed page survives the turns that stream after it.
+  too, then the active cards' heads and open rows; the feed's first 32 anchors,
+  so a late session's summaries can fall past the cap; the warm SET is bounded
+  to 16 pages, half the cache: anchors past it wait for the next board change,
+  and a set that fits settles, an unchanged board costing one probe of its
+  remembered keys), `warmPending` (anchors waiting past the bound), `warmMs`,
+  `warmCycles`, and `warmSkipped` (cycles the warm stood down because the
+  pusher's last cycle ran over 1.5 s). A page's cache key reads what a
+  pre-floor render reads and none of the live tail (the reg's fork value, not
+  the reg file, which every send rewrites), so a warmed page survives the turns
+  that stream after it until the session's next judge publish (the goal store's
+  identity is a component: the segment anchors come from it); the postal
+  caption map is not a component, so a pre-floor page holding a card rendered
+  before its caption landed keeps the caption-less card until an eviction.
 - `parses`: the cold event-model parses through the one parse store the
   kernel and the judges share: `total` (every miss, whoever asked), `kernel`
   (the display's asks among them, with `bytes`, the parsed files' sizes, and
