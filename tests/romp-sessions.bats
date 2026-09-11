@@ -3,8 +3,8 @@
 # `romp sessions [--json]`: the sessions' live state for scripts, read from the kernel.
 #
 # It exists because the only machine-readable source of per-session state and identity colour
-# used to be the tmux session table of the terminal backend removed on 2026-09-11 (@claude-state,
-# @identity-bg/@identity-fg). SDK sessions never entered tmux, so once they became the default
+# used to be the tmux session table (@claude-state, @identity-bg/@identity-fg) of the terminal
+# backend removed on 2026-09-11. SDK sessions never entered tmux, so once they became the default
 # `tmux list-sessions` returned nothing and every external consumer silently degraded to empty
 # output. The kernel owns this state for BOTH backends (Claude Code and Codex), so that is what
 # this reads, and a dead kernel must fail loudly rather than print an empty list, which would read

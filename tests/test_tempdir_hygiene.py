@@ -341,14 +341,14 @@ class LiteralPinChecker(unittest.TestCase):
         'd=$(mktemp -p "$TMPDIR")',
         'd=$(mktemp --tmpdir="$TEST_DIR")',
         'd=$(TMPDIR="$TEST_DIR" mktemp -d)',
-        'export FAKE_HOME="$TEST_DIR/home"',
+        'export FAKE_TMPDIR="$TEST_DIR/fake"',                   # a name ENDING in TMPDIR is not the variable
         'export TMPDIR=/nonexistent',
         'TEST_DIR="$(mktemp -d -u)"',
         '# mktemp -d /tmp/x.XXXX',                               # a comment line
         '    # d=$(TMPDIR=/tmp mktemp -d)',
         'TEST_DIR="$(mktemp -d)"   # not /tmp',                  # a trailing comment
         '[ -d /tmp ]',
-        'grep -qxF "FAKE_HOME=$TEST_DIR/home" "$FAKE_ENV"',
+        'grep -qxF "FAKE_TMPDIR=$TEST_DIR/fake" "$FAKE_ENV"',
     ]
 
     def test_shell_shapes_that_pin_are_hits(self):

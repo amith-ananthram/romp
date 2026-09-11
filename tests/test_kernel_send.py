@@ -2,8 +2,9 @@
 """POST /send body parsing — the human->agent input channel the Obsidian track-changes
 plugin posts to. The kernel then hands the text to whichever backend drives the session
 (Claude Code via the SDK, or Codex; Sessions.backend_for), the same delivery the chat
-composer's WS sendMessage uses, so the plugin never touches a backend itself. Until the
-terminal backend's removal (2026-09-11) that delivery was _tmux_send.
+composer's WS sendMessage uses, so the plugin never touches a backend itself. Before the
+SessionBackend contract (2026-06-26) the route called the terminal backend's _tmux_send
+directly; that backend itself left on 2026-09-11.
 """
 import os
 import unittest
@@ -79,7 +80,7 @@ class SessionList(unittest.TestCase):
         self._stub(
             live={"sid-c": {"state": "working", "backend": "codex"},
                   "sid-s": {"state": "waiting", "backend": "sdk"}},
-            notes={"sid-c": "owns feed.ts"},           # SDK has no working-note yet (P3) → ''
+            notes={"sid-c": "owns feed.ts"},           # no note published for sid-s → ''
             names={"sid-c": ("alpha", "/work/a", "#112233", "#ffffff"),
                    "sid-s": ("beta", "/work/b", "blue", "white")})
         rows = {r["id"]: r for r in km._session_rows()}
@@ -160,8 +161,8 @@ class WorkingNoteStore(unittest.TestCase):
     """The backend-agnostic working-note store (working/<sid> files): the postal bus's set_working goes
     through the kernel (Sessions.set_working_note, served at POST /working), works for ANY sid whichever
     backend drives it (Claude Code via the SDK, or Codex), and the note surfaces in _working_notes (→ GET
-    /sessions). It replaced the terminal backend's @romp-working tmux variable, gone with that backend
-    (2026-09-11)."""
+    /sessions). It replaced the terminal backend's @romp-working tmux variable on 2026-06-26; the backend
+    itself left on 2026-09-11."""
 
     def setUp(self):
         import tempfile

@@ -106,8 +106,8 @@ jobs:
       # bats comes from the pinned release tarball, NOT apt: an Azure apt-mirror outage hung
       # `apt-get update` to the job timeout three runs in a row (2026-08-19, ~35 wasted minutes
       # each). GitHub itself is already on the critical path (checkout), so this adds no new
-      # dependency — and no bats test needs anything else installed (every suite mocks its subjects
-      # on PATH), so nothing else is installed at all. The step timeout kills any residual network hang in
+      # dependency — and no bats test needs a runtime beyond bash (every suite mocks its subjects on
+      # PATH); gitleaks, two steps below, is the one extra tool, for tests/gitleaks-config.bats. The step timeout kills any residual network hang in
       # minutes instead of letting it eat the job's budget.
       - name: Install bats (Linux)
         if: runner.os == 'Linux'

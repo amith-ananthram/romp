@@ -154,7 +154,7 @@ def _free_port():
 # at a free port with ROMP_POSTAL_PEERS=0 and ROMP_POSTAL_CLIENT_ONLY=1, so the kernel's boot-time ensure starts
 # nothing there (client-only applies in the legacy singleton scheme alone, postal_service.is_client_only).
 # The environment the driver hands the kernel it relaunches rides the lab's cfg.json, a file, so it is narrowed once
-# more (relaunch_env) to the ROMP_* and XDG_* names, CLAUDE_CONFIG_DIR, PATH and HOME and the four conftest names:
+# more (relaunch_env) to the ROMP_* and XDG_* names, CLAUDE_CONFIG_DIR, PATH and HOME and the three conftest names:
 # never anything else a lab put in its kernel's environment, such as the probe the served legs plant, and never a
 # ROMP_TESTS_* name, the prefix tests/conftest.py exports the run's own names under (ROMP_TESTS_SYSTEM_TMPDIR): no
 # kernel reads one, so a lab kernel's environment carries one only if the lab put it there, and the file never does.

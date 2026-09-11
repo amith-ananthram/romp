@@ -30,8 +30,9 @@ SID = "11111111-2222-3333-4444-555555555555"
 
 class _Typed:
     """A backend of the ABC's base shape: it cannot take input mid-turn (forwards_sends False) and its set_model
-    TYPES /model into the composer, so a pick mid-turn is a race. No shipped backend has this shape since the
-    terminal backend's removal (2026-09-11); the fake keeps the rule's parking arm pinned."""
+    lands as text typed at the CLI (the removed terminal backend typed "/model X" into its pane), so a pick
+    mid-turn races the running turn. No shipped backend has this shape since that backend's removal
+    (2026-09-11); the fake keeps the rule's parking arm pinned."""
     def __init__(self): self.calls = []
     def owns(self, sid): return True
     def forwards_sends(self): return False
@@ -177,7 +178,7 @@ class ModelLiveMidTurn(unittest.TestCase):
         self.assertEqual(km._pending_ops.get(SID), [("model", "opus")])
 
     def test_no_shipped_backend_declares_the_capability_yet(self):
-        # Codex applies a pick at the next turn_start; the base class types it into the composer; and the SDK,
+        # Codex applies a pick at the next turn_start; the base shape types it at the CLI; and the SDK,
         # which HAS the control channel, says no for now: on CLI 2.1.257 a switch applied inside a turn
         # mis-parents its transcript breadcrumbs and the rest of that turn is read as a rewound branch by
         # romp and dropped by --resume (review of #923, 2026-09-04). Flipping the SDK is a one-line change

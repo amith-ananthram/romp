@@ -2,7 +2,7 @@
 
 # tests/free-port.bash picks loopback ports nothing is bound to, for the suites that start a real
 # bin/romp-manager. These cases pin its contract: the band, distinct picks, and a loud failure where a
-# silent one would send the subject to the manager's default port. Nothing below starts a process or node.
+# silent one would send the subject to the manager's default port. Nothing below starts a manager or a node process.
 
 load free-port
 
