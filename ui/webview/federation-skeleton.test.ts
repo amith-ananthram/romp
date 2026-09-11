@@ -222,7 +222,7 @@ test("routeOutbound: a re-attach's resident keys go to the owning kernel by the 
   assert.deepEqual(routeOutbound({ type: "reattachKeys", id: "B", keys }, new Set(["gpu1"])), [{ host: "", msg: { type: "reattachKeys", id: "B", keys } }]);
   assert.deepEqual(routeOutbound({ type: "reattachKeys", id: "gpu1:" + V, keys }, new Set(["gpu1"])), [{ host: "gpu1", msg: { type: "reattachKeys", id: V, keys } }]);
   assert.ok(BOOKKEEPING.has("reattachKeys"), "held for the socket's open like the other proto-2 asks, never toasted");
-  assert.equal(BOOKKEEPING.get("reattachKeys")!({ id: "B" }), BOOKKEEPING.get("loadNewer")!({ id: "B" }).replace("loadNewer", "reattachKeys"));
+  assert.equal(BOOKKEEPING.get("reattachKeys")!({ id: "B" }), String(BOOKKEEPING.get("loadNewer")!({ id: "B" })).replace("loadNewer", "reattachKeys"));
 });
 
 test("the manager's outbound puts needFull(+why) on the owning kernel's wire — local send or remote socket", () => {

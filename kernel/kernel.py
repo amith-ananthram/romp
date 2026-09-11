@@ -27384,8 +27384,9 @@ def _ledger_memo_report():
 # only draws a window) and streams OLDER history in on scroll-back, WIRE_CHUNK events per `loadOlder` request.
 # The build itself is unchanged (every session still builds its full events + ledger — so the Fleet ledger
 # that rides the chat builds is intact); only what crosses the wire is trimmed.
-WIRE_TAIL = 250
-REATTACH_KEYS = 512                              # the newest resident keys a proto-2 client sends with its re-attach ask                                  # events shipped on a full chat send; older streams in on scroll-back
+WIRE_TAIL = 250                                 # events shipped on a full chat send; older streams in on scroll-back
+REATTACH_KEYS = 512                              # the newest resident keys a proto-2 client sends with its re-attach ask
+REATTACH_KEYS_CLIENTS = 16                       # sessions whose posted keys one client may hold at once (the oldest dropped)
 WIRE_CHUNK = 250                                 # events per loadOlder (chatHead) response
 
 
@@ -54644,8 +54645,14 @@ class Handler(BaseHTTPRequestHandler):
             # a proto-2 client's newest resident keys, sent right before its needFull("reattach") (T323 follow-up, M1): the
             # repair frame's shared clause reads THESE, the run as the client holds it, not the broadcast diff's change index
             keys = [str(k) for k in (msg.get("keys") or []) if k][-REATTACH_KEYS:]
+            sid = str(msg["id"])
             with _client_lock(client):
-                client.setdefault("reattachKeys", {})[str(msg["id"])] = keys
+                if sid not in (client.get("echat") or {}):
+                    return                            # a session this client holds no base for: nothing to re-attach (1448 low b)
+                d = client.setdefault("reattachKeys", {})
+                d.pop(sid, None); d[sid] = keys
+                while len(d) > REATTACH_KEYS_CLIENTS:  # bounded: a posted list with no ask behind it never grows the map
+                    d.pop(next(iter(d)))
             return
         if msg and msg.get("type") == "needFull" and msg.get("id"):
             # The client REJECTED a delta because it started past what it holds (render.ts chatTail's gap

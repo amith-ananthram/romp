@@ -494,6 +494,26 @@ class RealArm(Harness):
         self.assertTrue(w2["connected"])
 
 
+class ReattachKeysArm(Harness):
+    """1448's lows: a posted key list is held only for a session the client has a base for, and the map is bounded."""
+
+    def test_unknown_sessions_are_ignored_and_the_map_is_bounded(self):
+        c, sent = _client()
+        c["echat"]["s-known"] = {"first": "a", "last": "b", "detached": False}
+        arm = lambda msg: km.Handler._dispatch_ws(object.__new__(km.Handler), msg, c)
+        arm({"type": "reattachKeys", "id": "s-unknown", "keys": ["k1"]})
+        self.assertNotIn("reattachKeys", c, "a session this client holds no base for: dropped")
+        arm({"type": "reattachKeys", "id": "s-known", "keys": ["k%d" % i for i in range(700)]})
+        self.assertEqual(len(c["reattachKeys"]["s-known"]), km.REATTACH_KEYS, "the newest keys, bounded")
+        for i in range(km.REATTACH_KEYS_CLIENTS + 3):
+            sid = "s-%d" % i
+            c["echat"][sid] = {"first": "a", "last": "b", "detached": False}
+            arm({"type": "reattachKeys", "id": sid, "keys": ["k"]})
+        self.assertEqual(len(c["reattachKeys"]), km.REATTACH_KEYS_CLIENTS, "the map is capped")
+        self.assertNotIn("s-known", c["reattachKeys"], "…the oldest dropped first")
+        self.assertIn("s-%d" % (km.REATTACH_KEYS_CLIENTS + 2), c["reattachKeys"])
+
+
 class OrphanGate(Harness):
     """Round 2 item 11, executed: the fold's orphan demotion gate reads the note's own window."""
 
