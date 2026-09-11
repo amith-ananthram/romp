@@ -304,8 +304,9 @@ class ExitThenBoot(unittest.TestCase):
                 got = by.get(os.path.realpath(sp), by.get(sp)) or 0
                 now_size = os.path.getsize(sp)                      # the second kernel appends states rows of its own
                 self.assertGreaterEqual(got, sizes[sid], "%s's states log: whole, the parse's read (bytes by class: %s)" % (sid, report))
-                self.assertLessEqual(got, now_size + 4 * 64, "%s's states log: at most whole plus a few guard reads (the restore's "
-                                     "check, the upgrade's, an append's)" % sid)
+                self.assertLessEqual(got, 2 * now_size + 4 * 64,
+                                     "%s's states log: whole once for the parse, at most once more when the kernel rewrites "
+                                     "the log in place (a healed overlay row moves the guard), plus a few guard reads" % sid)
             for sid, lp in self.leaf_files.items():
                 got = by.get(os.path.realpath(lp), by.get(lp)) or 0
                 self.assertGreaterEqual(got, os.path.getsize(lp), "%s's leaf transcript: whole, the parse's read (stage 4)" % sid)
