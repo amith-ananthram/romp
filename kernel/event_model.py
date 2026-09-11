@@ -3007,7 +3007,7 @@ def synthesize_idle(states, atoms, now):
     return out
 
 
-def synthesize_orphans(states, atoms, landed_text_uuids=None, rompuuid=None, pre=None):
+def synthesize_orphans(states, atoms, landed_text_uuids=None, rompuuid=None, pre=None, t_floor=None):
     """Salvaged assistant replies from orphanReply markers in states/<sid>.jsonl — text that STREAMED
     live but the transcript never kept (an API-errored try; the SDK backend persists it at settle,
     see its append_orphan_reply). The kernel's chat build has interleaved these since 2026-07-21, but
@@ -3029,6 +3029,8 @@ def synthesize_orphans(states, atoms, landed_text_uuids=None, rompuuid=None, pre
     consumed, since the atoms-only dedup below can no longer see the abandoned record)."""
     if not atoms:
         return []
+    if t_floor is not None:                                           # a restored parse: only a marker the tail can hold counts (the
+        states = [r for r in states or [] if isinstance(r, dict) and (r.get("t") or 0) >= t_floor]   #  caller discards the rest)
     if not any(isinstance(r, dict) and r.get("t") and isinstance(r.get("orphanReply"), dict) for r in states or []):
         return []                                                     # no marker: nothing to salvage, and no pre-cut row decoded
     # TEXT-BEARING uuids only (the user 2026-07-28): a marker whose uuid the disk knows solely as a
@@ -3056,13 +3058,24 @@ def synthesize_orphans(states, atoms, landed_text_uuids=None, rompuuid=None, pre
                   if (t := _text_of(_content(a.get("message"))).strip())]
     older = [None]                                                    # the lazy assistants' texts, hydrated once, only if a marker needs them
 
+    pre_hashes = None                                                 # the pre-cut assistants' text hashes (lz.h): an exact match
+
+    def _pre_exact(txt):
+        """Whether a pre-cut assistant kept exactly `txt`, from the rows' text hashes: no atom built, no body read (the
+        restored parse's bound, review round 2 M2; a marker whose text is a strict PREFIX of a pre-cut reply is not
+        matched here, where a whole parse would have dropped it: the chat's near-window dedup of the note stands)."""
+        nonlocal pre_hashes
+        if pre_hashes is None:
+            pre_hashes = set()
+            for la, k, r in pre_rows:
+                hh = la._index.text_hash(r)
+                if hh:
+                    pre_hashes.add(hh)
+        return hashlib.sha1(txt.encode("utf-8", "replace")).hexdigest()[:8] in pre_hashes
+
     def _older_texts():
         if older[0] is None:
             las = [a for a in lazy if a.get("type") == "assistant" and a["lazy"].get("nt")]
-            for la, k, r in pre_rows:                                 # the index's assistants with text: built and hydrated only now
-                typ, nt = la._index.text_flags(r)
-                if typ == "assistant" and nt:
-                    las.append(la[k])
             if las:
                 hydrate(las, rompuuid or (atoms[0].get("session_id") if atoms else None))
             older[0] = [t for a in las if (t := _text_of(_content(a.get("message"))).strip())]
@@ -3091,8 +3104,10 @@ def synthesize_orphans(states, atoms, landed_text_uuids=None, rompuuid=None, pre
             continue
         if any(dt.startswith(txt) or txt.startswith(dt) for dt in disk_texts):
             continue
-        if (lazy or pre_rows) and any(dt.startswith(txt) or txt.startswith(dt) for dt in _older_texts()):
+        if lazy and any(dt.startswith(txt) or txt.startswith(dt) for dt in _older_texts()):
             continue                                                   # a reply the disk kept before the cut
+        if pre_rows and _pre_exact(txt):
+            continue                                                   # …or the index kept, exactly (by hash: no atom built)
         out.append({"type": "assistant", "uuid": u or ("orphan:%d" % int(r["t"])), "session_id": sid,
                     "t": int(r["t"]), "fsid": None, "parentUuid": None, "orphaned": True,
                     "message": {"role": "assistant", "content": [{"type": "text", "text": txt}],
@@ -3996,6 +4011,20 @@ class LazyIndex:
             return self.records[ri][0]
         return (row.get("s") or {}).get("uuid")
 
+    def text_hash(self, k):
+        """A row's text hash (lz.h: the first eight hex of sha1 over the text) without building its atom; None for a row
+        with no lazy marker (a synthesized atom: its message is inline and hashed here)."""
+        with _MAT_LOCK:
+            _ASM_INDEX_STATS["rowDecodes"] += 1
+        row = json.loads(self.rowb[k])
+        lz = row.get("lz")
+        if lz is not None:
+            return lz.get("h") if lz.get("nt") else None
+        if row.get("syn") and "m" in row:
+            txt = _text_of(_content(row["m"])).strip()
+            return hashlib.sha1(txt.encode("utf-8", "replace")).hexdigest()[:8] if txt else None
+        return None
+
     def text_flags(self, k):
         """(type, has text) for a row without building its atom: what an orphan marker's dedup reads."""
         with _MAT_LOCK:
@@ -4175,6 +4204,7 @@ def _tree_identity_of_doc(turns_doc, identity):
             h.update(sg[0].encode()); h.update(b",")
         for u in td["uuids"]:
             h.update((u or "").encode()); h.update(b";")
+        h.update(",".join(str(k) for k in td["atoms"]).encode()); h.update(b"/")   # the rows each turn holds (a permuted section differs)
     return h.hexdigest()
 
 
@@ -4513,12 +4543,15 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None):
         # with its message inline. The section stops at the first turn holding a post-cut record (the cut is a turn
         # boundary: the chronological split above put every pre-cut record before every post-cut one).
         turns_doc = None
+        n0 = len(pre_atoms)                               # the rows the walk appends leave with a refusal (review round 2, M1)
         if tree is not None:
-            row_of_atom = {}
+            row_of_atom, row_of_scalars = {}, {}
             for k_, row_ in enumerate(pre_atoms):
                 u_ = rows[row_["r"]][0] if "r" in row_ else (row_.get("s") or {}).get("uuid")
                 if u_ and u_ not in row_of_atom:
                     row_of_atom[u_] = k_
+                elif not u_ and "r" not in row_:            # a uuid-less absorbed atom (a queued_command attachment): its row is
+                    row_of_scalars.setdefault(json.dumps(row_.get("s") or {}, sort_keys=True, default=str), k_)   #  found by its scalars
             turns_doc = []
             cut_ts = min((ad.ts_of.get(u, 0) for u in entry["kept"] if ad.seq_of.get(u, 0) >= cut_seq), default=None)
             for turn in tree.get("turns") or []:
@@ -4532,7 +4565,7 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None):
                 idxs = []
                 for a in turn["atoms"]:
                     u_ = a.get("uuid")
-                    k_ = row_of_atom.get(u_) if u_ else None
+                    k_ = row_of_atom.get(u_) if u_ else row_of_scalars.pop(json.dumps(_atom_scalars(a), sort_keys=True, default=str), None)
                     if k_ is None:
                         if u_ in ad.seq_of:
                             return skip("turnRows")      # a record atom with no row of its own: the tree and the entry disagree
@@ -4568,6 +4601,7 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None):
                 turns_doc = None
             if not turns_doc:
                 turns_doc = None                          # nothing before the cut in this tree: the atoms-only form
+                del pre_atoms[n0:]                        # …whose rows are the emit's alone, the identity's count (M1)
         doc = {"av": _ASM_CKPT_V, "path": os.path.realpath(str(leaf_path)), "rompuuid": str(rompuuid), "sdkHuman": bool(sdk_human),
                "cands": list(entry["cands"]), "links": dict(entry["links"]), "files": files, "fsids": fsids, "cutSeq": cut_seq,
                "records": rows, "atoms": pre_atoms, "spine": spine, "seqTs": seq_ts, "lastTs": last_ts,
@@ -5037,7 +5071,7 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
     # document's (or nothing: the whole parse put it in a pre-cut turn)
     t_tail0 = min((a["t"] for a in atoms if a.get("t")), default=None) if pre_turns else None
     orphans = synthesize_orphans(_srows, atoms, landed_text_uuids=landed, rompuuid=rompuuid,
-                                 pre=(pre_turns if pre_turns else None))
+                                 pre=(pre_turns if pre_turns else None), t_floor=t_tail0 if pre_turns else None)
     if pre_turns:
         orphans = [a for a in orphans if t_tail0 is not None and a["t"] >= t_tail0]
     #                                            # salvaged replies FIRST: they are real atoms the turn

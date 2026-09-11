@@ -31440,9 +31440,9 @@ def _place_stale_echoes(turns, echoes):
             gaps.setdefault(0 if i is None else i + 1, []).append(a)
     for idx in sorted(gaps, reverse=True):      # back to front, so earlier indices stay valid
         atoms = sorted(gaps[idx], key=key)
-        if first_tail is not None and idx <= first_tail and first_tail < len(out) and out[first_tail].get("echoTurn") is None \
-                and any(turn.get("pre") for turn in out[:idx]):
-            k = first_tail                      # a gap among the pre-cut turns: the echoes join the first post-cut turn
+        if first_tail is not None and 0 < first_tail and idx <= first_tail:
+            k = first_tail                      # a gap at or before the first post-cut turn (idx 0 included: ahead of every
+            #                                     pre-cut turn): the echoes join that turn, no synthetic turn among the pre-cut ones
             if k not in copied:
                 out[k] = dict(out[k]); copied.add(k)
             out[k]["atoms"] = sorted(list(out[k]["atoms"]) + atoms, key=key)

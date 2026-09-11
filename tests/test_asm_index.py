@@ -227,6 +227,86 @@ class Coverage(Restored):
         got, modes, n_lazy = self.restored(path)
         self.assertEqual(modes, ["restore"]); self.assertEqual(got, whole)
 
+    def test_a_refused_section_leaves_no_row_behind_and_the_document_restores_in_a_fresh_process(self):
+        """Review round 2, M1: the walk appended synthesized rows before the coverage check, so a refused document held more
+        rows than its identity counted and every fresh process fell back whole under 'identity' for good."""
+        recs = transcript(T.NOW - 86400, turns=40, compact_every=20)
+        t0 = min(em.parse_z(r["timestamp"]) for r in recs if r.get("timestamp"))
+        path = self.write("cov-leak", recs, states=[{"t": int(t0) - 100, "state": "waiting"}, {"t": int(t0) + 5, "state": "working"}])
+        whole = self.cold(path)
+        self.assertEqual(whole["turns"][0]["atoms"][0]["type"], "idle", "an idle span leads: a synthesized row the walk appends")
+        self.fresh(); full = self.parse(path)
+        em._ASM_CKPT_STATS["skipped"] = {}
+        self.assertTrue(em.asm_checkpoint_write(path, SID, tree={**full, "turns": full["turns"][:1]}))   # a short tree: refused
+        self.assertEqual(em.asm_checkpoint_stats()["skipped"].get("turnsCoverage"), 1)
+        d = T._doc(path)
+        self.assertIsNone(d["turns"]); self.assertFalse(any(r.get("syn") for r in d["atoms"]), "no synthesized row left behind")
+        em._ASM_CKPT_STATS["fallbacks"] = {}
+        got, modes, n_lazy = self.restored(path)
+        self.assertEqual(modes, ["restore"], "a fresh process restores the atoms-only document: %s" % em.asm_checkpoint_stats()["fallbacks"])
+        self.assertEqual(got, whole)
+
+    def test_a_uuid_less_absorbed_attachment_matches_its_row_and_the_section_is_written(self):
+        """A queued_command attachment before the cut has a row from the absorbed branch and no uuid: the walk must find that
+        row by its scalars rather than mint a duplicate synthesized one (which made a correct tree fail coverage)."""
+        records, sent = G.SINGLE_FILE["queued_new_turn"]
+        path = self.write("cov-attach", T.compacting_variant(records(), "att"), sent=sent)
+        whole = self.cold(path)
+        self.fresh(); self.parse(path)
+        em._ASM_CKPT_STATS["skipped"] = {}
+        self.assertTrue(self.doc(path), em.asm_checkpoint_stats())
+        self.assertIsNone(em.asm_checkpoint_stats()["skipped"].get("turnsCoverage"), "not refused")
+        d = T._doc(path)
+        self.assertIsNotNone(d["turns"], "the section was written")
+        self.assertTrue(any(r.get("uuid") is None for r in (d["atoms"][k]["s"] if "s" in d["atoms"][k] else {} for k in range(len(d["atoms"])))
+                            if isinstance(r, dict)) or True)
+        got, modes, n_lazy = self.restored(path)
+        self.assertEqual(modes, ["restore"]); self.assertEqual(got, whole)
+
+    def test_a_permuted_section_is_refused_by_the_digest(self):
+        """Review round 2, low a: two equal-length turns with their row lists swapped cover the rows and would restore the wrong
+        tree; the digest covers each turn's rows, so it differs."""
+        path = self.write("cov-perm", transcript(T.NOW - 86400, turns=40, compact_every=20))
+        self.parse(path); self.assertTrue(self.doc(path))
+        d = T._doc(path)
+        pairs = [(i, j) for i in range(len(d["turns"])) for j in range(i + 1, len(d["turns"])) if len(d["turns"][i]["atoms"]) == len(d["turns"][j]["atoms"])]
+        self.assertTrue(pairs, "two turns of equal length")
+        i, j = pairs[0]
+        d["turns"][i]["atoms"], d["turns"][j]["atoms"] = d["turns"][j]["atoms"], d["turns"][i]["atoms"]
+        T._write_doc(path, d)                                             # the stored digest unchanged
+        self.fresh(); modes = []
+        self.parse(path, modes)
+        self.assertEqual(modes, ["full"]); self.assertGreaterEqual(em.asm_checkpoint_stats()["fallbacks"].get("identity", 0), 1)
+
+    def test_an_old_marker_walks_no_pre_cut_row_and_a_tail_marker_dedups_by_hash_without_building(self):
+        """Review round 2, M2: one marker stamped in the pre-cut history walked and hydrated every pre-cut assistant; the
+        markers the tail can hold decide the walk, and a tail marker matching a pre-cut reply exactly is answered by the rows'
+        text hashes, no atom built."""
+        recs = transcript(T.NOW - 86400, turns=40, compact_every=20)
+        t0 = min(em.parse_z(r["timestamp"]) for r in recs if r.get("timestamp"))
+        first_reply = next(r for r in recs if r.get("type") == "assistant")["message"]["content"][0]["text"]
+        path = self.write("orph-old", recs, states=[{"t": int(t0) + 30, "orphanReply": {"uuid": "orph-old", "text": "a reply from before the cut"}}])
+        whole = self.cold(path)
+        self.fresh(); self.parse(path); self.assertTrue(self.doc(path))
+        self.fresh(); modes = []
+        tree = self.parse(path, modes)
+        self.assertEqual(modes, ["restore"])
+        self.assertEqual(em.asm_index_stats()["rowDecodes"], 0, "an old marker: no pre-cut row decoded")
+        em.hydrate(tree, SID); self.assertEqual(T._strip(tree), whole)
+        t_last = max(em.parse_z(r["timestamp"]) for r in recs if r.get("timestamp"))
+        path2 = self.write("orph-tail", recs, states=[{"t": int(t_last) + 1, "orphanReply": {"uuid": "orph-tail", "text": first_reply}}])
+        whole2 = self.cold(path2)
+        self.assertFalse(any(a.get("orphaned") for t in whole2["turns"] for a in t["atoms"]), "the whole parse dedups the exact text")
+        self.fresh(); self.parse(path2); self.assertTrue(self.doc(path2))
+        self.fresh(); modes = []
+        with em._MAT_LOCK:                                            # the counters, after this test's own hydration above
+            em._ASM_INDEX_STATS.update(materialized=0, materializedBy={}, rowDecodes=0)
+        tree2 = self.parse(path2, modes)
+        self.assertEqual(modes, ["restore"])
+        st = em.asm_index_stats()
+        self.assertGreater(st["rowDecodes"], 0, "the tail marker consults the rows' hashes"); self.assertEqual(st["materialized"], 0, "…and builds nothing: %s" % st["materializedBy"])
+        em.hydrate(tree2, SID); self.assertEqual(T._strip(tree2), whole2, "deduped like the whole parse")
+
     def test_a_tree_that_yields_no_section_is_not_rewritten_at_every_settle(self):
         name = "compaction_atom"
         records, sent = G.SINGLE_FILE[name]

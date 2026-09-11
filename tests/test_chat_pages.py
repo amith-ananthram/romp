@@ -603,13 +603,14 @@ class EchoPlacement(Harness):
         early = turns[3]["t"] + 1                                          # inside a pre-cut turn's window
         gap = turns[cut - 1]["end"] + 1 if turns[cut]["t"] - turns[cut - 1]["end"] > 2 else turns[2]["end"] + 1   # a gap among pre-turns
         echoes = [{"type": "user", "uuid": "echo-1", "session_id": SID, "t": early, "_echo_text": "a note sent yesterday", "message": {"role": "user", "content": "a note sent yesterday"}},
-                  {"type": "user", "uuid": "echo-2", "session_id": SID, "t": gap, "_echo_text": "another", "message": {"role": "user", "content": "another"}}]
+                  {"type": "user", "uuid": "echo-2", "session_id": SID, "t": gap, "_echo_text": "another", "message": {"role": "user", "content": "another"}},
+                  {"type": "user", "uuid": "echo-0", "session_id": SID, "t": turns[0]["t"] - 60, "_echo_text": "before everything", "message": {"role": "user", "content": "before everything"}}]
         out, placed = km._place_stale_echoes(turns, echoes)
         self.assertEqual(len(out), len(turns), "no synthetic turn among the pre-cut turns")
         for i in range(cut):
             self.assertIs(out[i], turns[i], "a pre-cut turn is untouched")
         self.assertEqual({p[0] for p in placed}, {cut}, "both echoes joined the first post-cut turn")
-        self.assertEqual(sorted(a["uuid"] for a in out[cut]["atoms"] if a.get("_echo_text")), ["echo-1", "echo-2"])
+        self.assertEqual(sorted(a["uuid"] for a in out[cut]["atoms"] if a.get("_echo_text")), ["echo-0", "echo-1", "echo-2"], "the one ahead of every turn too")
         self.assertEqual(em.asm_index_stats()["materialized"], 0, "…and no pre-cut atom was built for it")
 
 
