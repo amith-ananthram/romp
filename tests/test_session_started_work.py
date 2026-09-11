@@ -417,6 +417,18 @@ class TriggerlessSegments(unittest.TestCase):
         ops = jd._demote_session_mints([dict(self.MINT, kind="ask")], seg, store, self._menu(store), None, False)
         self.assertEqual(ops[0]["do"], "sub", "no human asked: the label does not stand")
 
+    def test_the_latch_marks_a_scheduled_prompts_top_scheduled_not_machine(self):
+        g1, g2 = SID + ":g1", SID + ":g2"
+        store = {"rompUuid": SID, "nodes": {
+            g1: {"id": g1, "text": "Nightly guard review", "parentId": None, "promptUuid": "c1"},
+            g2: {"id": g2, "text": "Lens review of the diff", "parentId": None, "promptUuid": "s1"}}}
+        txt = lambda t: {"content": [{"type": "text", "text": t}]}
+        atoms = [{"uuid": "c1", "type": "user", "author": "sdk", "message": txt("nightly review")},
+                 {"uuid": "s1", "type": "user", "author": "system", "message": txt("<task-notification>done</task-notification>")}]
+        self.assertEqual(jd._latch_ask_anchors(SID, {"turns": [{"atoms": atoms}]}, store), 2)
+        self.assertEqual(store["nodes"][g1]["askAnchor"], "scheduled", "the user's configured work, never machine")
+        self.assertEqual(store["nodes"][g2]["askAnchor"], "machine")
+
     def test_a_scheduled_prompt_is_the_users_and_its_mints_are_never_demoted(self):
         store = self._store()
         seg = {"id": "s1", "trigger": "c1", "atoms": [

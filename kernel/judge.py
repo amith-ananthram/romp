@@ -10230,7 +10230,8 @@ def _latch_ask_anchors(fsid, session, store):
     shown→hidden on every restart/cache-cold beat: cache temperature, not new information (the
     cards-move-on-new-information rule). The verdict is a fact about a record that never changes
     once readable, so resolve it ONCE from the judge's own WARM parse and stamp `askAnchor` on the
-    node: 'human' (the dictated ask), 'machine' (a peer mail, the agent's own atom, romp
+    node: 'human' (the dictated ask), 'scheduled' (a scheduled or programmatic prompt, author
+    sdk: the user's configured work, which the feed's heal never nests), 'machine' (a peer mail, the agent's own atom, romp
     bookkeeping — _human_prompt_record, the one definition of 'dictated'), or 'absent' (the
     stitched chain no longer holds the uuid: rewound/compacted/pre-/clear — durable doubt, which
     keeps failing open exactly as the per-beat read did, just stably). The write rides the planner
@@ -10260,7 +10261,9 @@ def _latch_ask_anchors(fsid, session, store):
         if a is None:
             nd["askAnchor"] = "absent"
         else:
-            nd["askAnchor"] = "human" if _human_prompt_record(a, fsid) else "machine"
+            nd["askAnchor"] = ("human" if _human_prompt_record(a, fsid)
+                               else "scheduled" if a.get("author") == "sdk"   # a scheduled or programmatic prompt: the
+                               else "machine")                                #   user's configured work, never machine (T319)
         n += 1
     return n
 

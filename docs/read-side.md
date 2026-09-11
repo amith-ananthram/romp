@@ -327,7 +327,8 @@ Work a session started on its own is never a card of its own (the user
 judges' origin rule); for stores written before that rule, `build_feed` heals
 read-side: a top rooted in a machine record (the judge's latched `askAnchor`
 verdict: a peer's line, the agent's own record, romp bookkeeping; never a top that
-merely lacks an anchor) is rendered inside the session's human-asked top that was current
+merely lacks an anchor, and never a scheduled prompt's top, which the latch marks
+`scheduled` as the user's configured work) is rendered inside the session's human-asked top that was current
 when it was minted; word overlap with the transcript's recorded background
 launches only picks which launch supplies the why and, among several open tops,
 the parent. Hosts are the asks that trace to the user: human-anchored tops and

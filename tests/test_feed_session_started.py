@@ -318,6 +318,38 @@ class HealOlderStores(_Feed):
         self.assertEqual(set(asks), {ask})
         self.assertIn(wf, {r["id"] for r in asks[ask]["tree"]})
 
+    def test_a_scheduled_prompts_top_keeps_its_card_with_no_face(self):
+        # the latch marks a scheduled (sdk) prompt's top "scheduled": the user's configured work, never nested, no face
+        ask, night = SID + ":g1", SID + ":g6"
+        self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human"),
+                     night: self._node(night, "Nightly guard review of the tree", t=T0 + 500, promptUuid="c1", askAnchor="scheduled")})
+        feed, err = self._feed()
+        asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
+        self.assertEqual(set(asks), {ask, night})
+        self.assertIsNone(asks[night]["sessionStarted"])
+        self.assertEqual(err, "")
+
+    def test_an_unnest_recomputes_the_hosts_row_state_and_the_parked_cue(self):
+        # W (machine top) nests under the completed ask A; W holds an open agent step and a handoff edge. A permission
+        # floor on W un-nests it: A must then render done and its leaf R must lose the parked cue (both derived rows)
+        A, R, W, H, G = SID + ":g1", SID + ":g3", SID + ":g2", SID + ":g4", SID + ":g5"
+        self._store({A: self._node(A, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human", nodeComplete=True),
+                     R: self._node(R, "Write the changelog entry", parent=A, t=T0 + 100),
+                     W: self._node(W, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine"),
+                     H: self._node(H, "delegated: check the diff", parent=W, t=T0 + 600, handoff={"peer": "22222222-3333-4444-5555-666666666666", "msgId": "m1"}),
+                     G: self._node(G, "Lens pass two", parent=W, t=T0 + 650, agentTask={"status": "open"})},
+                    status={A: "completed"}, last=W)
+        km._tmux_sessions = lambda: {SID: {"state": "permission", "since": NOW - 10, "model": "", "effort": "",
+                                           "context": None, "compactPct": None, "color": None}}
+        feed, err = self._feed()
+        asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
+        self.assertEqual(set(asks), {A, W}, "the floor resolves to W: it un-nests and keeps its card")
+        rows = {r["id"]: r for r in asks[A]["tree"]}
+        self.assertNotIn(W, rows, "W left the tree the card shows")
+        self.assertEqual(rows[A]["status"], "done", "no open agent step under A any more: the row reads done (agent_open recomputed)")
+        self.assertIsNone(rows[R]["parked"], "no younger sibling with a handoff edge under A any more (parked_rows recomputed)")
+        self.assertEqual(asks[W]["column"], "needs_input")
+
     def test_the_launch_match_reads_the_dispatch_not_the_completion_summary(self):
         # the run completes and its notification's summary overwrites the task's summary; the heal still matches on
         # the words the dispatch carried at launch (launchDesc), so the why and the parent do not change when a run ends

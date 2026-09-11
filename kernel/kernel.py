@@ -9182,8 +9182,8 @@ def _pure_delegation_top(nodes, top_id, sid=None, path=None):
         pu = root.get("promptUuid")
         if pu and not isinstance(root.get("origin"), dict):
             latch = root.get("askAnchor")
-            if latch in ("human", "absent"):
-                return False                          # the dictated ask (or durable doubt) — stable
+            if latch in ("human", "absent", "scheduled"):
+                return False                          # the dictated ask, a scheduled prompt's, or durable doubt: stable
             if latch != "machine" and _dictated_prompt_uuid(sid, path, pu) is not False:
                 return False                          # unlatched → the cached-parse read, fail-open
     children = {}
@@ -25659,7 +25659,8 @@ def _heal_session_tops(path, nodes, status=None, keep=()):
         return isinstance(nd.get("handoff"), dict) or (isinstance(nd.get("origin"), dict) and nd["origin"].get("peer"))
     cands = [(nid, nd) for nid, nd in nodes.items()
              if nd.get("parentId") is None and not nd.get("cleared") and not nd.get("born") and not delegate(nd)
-             and nd.get("askAnchor") == "machine"]
+             and nd.get("askAnchor") == "machine"]      # never "scheduled": a scheduled prompt's top is the user's
+             #                                           configured work (the mint-time rule's sdk carve-out)
     if not cands:
         return out
     try:
