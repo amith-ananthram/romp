@@ -185,6 +185,7 @@ if [[ -n "${MOCK_CURL_WATCH_PR_REFUSE:-}" && "$url" == */watch-pr ]]; then
   echo '{"ok": false, "retryable": true, "error": "the watch could not be saved ([Errno 28] No space left on device) - nothing is watching TESTORG/testrepo#7; retry once the state directory takes writes again"}'
   exit 0
 fi
+if [[ -n "${MOCK_CURL_VERSION:-}" && "$url" == */version ]]; then echo "$MOCK_CURL_VERSION"; exit 0; fi
 if [[ -n "${MOCK_CURL_NEW_400:-}" && "$url" == */new ]]; then
   for a in "$@"; do
     if [[ "$a" == "-f" || "$a" == -[!-]*f* ]]; then exit 22; fi
@@ -1070,6 +1071,78 @@ _stale_server_globals() {
         run "$sh" -c 'exec env FOO=1 true'
         [ "$status" -eq 0 ]
     done
+}
+
+@test "a terminal launch is refused when the kernel's tmux socket directory is not this shell's, and proceeds when it is" {
+    # T325: a cron job, `sudo -u` or `docker exec` shell resolves tmux's default while the service's kernel dials the
+    # runtime-dir server; a session started there would never reach the board. /version says where the kernel's is.
+    _stub_claude 9.9.9; _stub_curl
+    MOCK_CURL_VERSION='{"tmuxSocketDir":"/elsewhere/romp","tmuxSocketRule":"runtime-dir"}' run "$ROMP_SCRIPT" new -t --detach myproject
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"refusing to start 'myproject'"* ]]
+    [[ "$output" == *"export TMUX_TMPDIR=/elsewhere/romp"* ]]
+    run grep -q 'new-session' "$MOCK_LOG"
+    [ "$status" -ne 0 ]
+    # the kernel on the same directory: the launch proceeds
+    MOCK_CURL_VERSION="{\"tmuxSocketDir\":\"$TMUX_TMPDIR\",\"tmuxSocketRule\":\"runtime-dir\"}" run "$ROMP_SCRIPT" new -t --detach myproject
+    [ "$status" -eq 0 ]
+    grep -q 'new-session -d -s myproject' "$MOCK_LOG"
+    # a kernel from before the rule (no tmuxSocketRule) compares nothing
+    : > "$MOCK_LOG"
+    MOCK_CURL_VERSION='{"kernel_ver":"0"}' run "$ROMP_SCRIPT" new -t --detach myproject2
+    [ "$status" -eq 0 ]
+    # canonical paths compare: the kernel reporting the same directory with a trailing slash is the same server
+    : > "$MOCK_LOG"
+    MOCK_CURL_VERSION="{\"tmuxSocketDir\":\"$TMUX_TMPDIR/\",\"tmuxSocketRule\":\"runtime-dir\"}" run "$ROMP_SCRIPT" new -t --detach myproject3
+    [ "$status" -eq 0 ]
+    grep -q 'new-session -d -s myproject3' "$MOCK_LOG"
+}
+
+@test "inside a pane on ANOTHER server the launch is refused (the pane's own \$TMUX wins over TMUX_TMPDIR); on the kernel's server it proceeds" {
+    _stub_claude 9.9.9; _stub_curl
+    local other="$TEST_DIR/other-server"; mkdir -p "$other/tmux-$(id -u)"
+    TMUX="$other/tmux-$(id -u)/default,4242,0" MOCK_CURL_VERSION="{\"tmuxSocketDir\":\"$TMUX_TMPDIR\",\"tmuxSocketRule\":\"runtime-dir\"}" \
+        run "$ROMP_SCRIPT" new -t --detach myproject
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"inside a tmux session on another server ($other)"* ]]
+    [[ "$output" == *"a shell outside that tmux session"* ]]
+    run grep -q 'new-session' "$MOCK_LOG"
+    [ "$status" -ne 0 ]
+    TMUX="$TMUX_TMPDIR/tmux-$(id -u)/default,4242,0" MOCK_CURL_VERSION="{\"tmuxSocketDir\":\"$TMUX_TMPDIR\",\"tmuxSocketRule\":\"runtime-dir\"}" \
+        run "$ROMP_SCRIPT" new -t --detach myproject
+    [ "$status" -eq 0 ]
+    grep -q 'new-session -d -s myproject' "$MOCK_LOG"
+}
+
+@test "a kernel under a manager from before the socket moved is refused with the refresh, not a cron diagnosis" {
+    _stub_claude 9.9.9; _stub_curl
+    MOCK_CURL_VERSION='{"tmuxSocketDir":"","tmuxSocketRule":"manager"}' run "$ROMP_SCRIPT" new -t --detach myproject
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"under a manager from before the socket moved"* ]]
+    [[ "$output" == *"romp refresh"* ]]
+    [[ "$output" != *"cron job"* ]]
+    # a CURRENT manager that simply has no runtime directory (launchd, `romp up` from a bare shell) says so: the
+    # manager's own rule rides on /version, and a refresh would restart it into the same state
+    MOCK_CURL_VERSION='{"tmuxSocketDir":"","tmuxSocketRule":"manager","tmuxSocketManagerRule":"no XDG_RUNTIME_DIR"}' run "$ROMP_SCRIPT" new -t --detach myproject
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"This manager has no runtime directory (its rule: no XDG_RUNTIME_DIR)"* ]]
+    [[ "$output" != *"before the socket moved"* ]]
+    # inside a pane the pane's word comes first, whatever the kernel's rule: an export cannot override a pane's own \$TMUX
+    TMUX="$TEST_DIR/other/tmux-$(id -u)/default,4242,0" MOCK_CURL_VERSION='{"tmuxSocketDir":"","tmuxSocketRule":"manager"}' run "$ROMP_SCRIPT" new -t --detach myproject
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"a shell outside that tmux session"* ]]
+    [[ "$output" != *"romp refresh"* ]]
+    [[ "$output" != *"export TMUX_TMPDIR"* ]]
+}
+
+@test "paths compare as real paths: a pane whose \$TMUX spells the kernel's directory through a symlink proceeds" {
+    # what macOS does to tmux's default (/tmp → /private/tmp): the kernel reports one spelling, the pane's socket the other
+    _stub_claude 9.9.9; _stub_curl
+    ln -s "$TMUX_TMPDIR" "$TEST_DIR/socklink"
+    TMUX="$TEST_DIR/socklink/tmux-$(id -u)/default,4242,0" MOCK_CURL_VERSION="{\"tmuxSocketDir\":\"$TMUX_TMPDIR\",\"tmuxSocketRule\":\"runtime-dir\"}" \
+        run "$ROMP_SCRIPT" new -t --detach myproject
+    [ "$status" -eq 0 ]
+    grep -q 'new-session -d -s myproject' "$MOCK_LOG"
 }
 
 @test "launch hands the exec line to respawn-pane, never typed via send-keys (dropped-char bug)" {

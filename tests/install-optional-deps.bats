@@ -9,6 +9,8 @@
 
 ROMP_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 
+load tmux-private
+
 setup() {
     TEST_DIR="$(mktemp -d)"
     export HOME="$TEST_DIR/home"
@@ -22,10 +24,15 @@ setup() {
     unset ROMP_PYTHON
     # The state root is this test's own (the setup scripts read ROMP_STATE_DIR first, and a kernel
     # exports it to its sessions), and no port here may reach a live kernel or manager: the manager
-    # port is poisoned to a dead value and the kernel port's two spellings are unset.
+    # port and the kernel port's two spellings are poisoned to a dead value (`romp new -t` asks the
+    # kernel where its tmux socket lives before it launches, and nothing may answer from a live one).
     export ROMP_STATE_DIR="$TEST_DIR/state"
-    export ROMP_MANAGER_PORT=1
-    unset ROMP_KERNEL_PORT ROMP_SERVE_PORT
+    export ROMP_MANAGER_PORT=1 ROMP_KERNEL_PORT=1 ROMP_SERVE_PORT=1
+    # tmux's socket directory is this test's own too (the shell twin would otherwise make
+    # $XDG_RUNTIME_DIR/romp in the REAL runtime dir), and a shell inside a running romp carries the
+    # session's manager pid and mark, which the twin reads: neither may reach the launches here
+    tmux_private_socket_dir "$TEST_DIR"
+    unset ROMP_MANAGER_PID ROMP_TMUX_TMPDIR_RULE
     export ROMP_GITHOOK_DIR="$TEST_DIR/githooks"
     # Keep vscode-extension/install.sh's app-bundle probe inside the sandbox: on a
     # dev mac, /Applications really contains editors, and finding one would send
@@ -49,7 +56,7 @@ setup() {
     done
 }
 
-teardown() { rm -rf "$TEST_DIR"; }
+teardown() { tmux_private_kill && rm -rf "$TEST_DIR"; }
 
 # Stubs first, then the allowlist — nothing from the host machine leaks in (CI's
 # apt tmux and Debian's node live in /usr/bin, so a PATH keeping /usr/bin is never

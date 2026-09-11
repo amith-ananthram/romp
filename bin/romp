@@ -25,6 +25,31 @@ set -euo pipefail
 # make them resolvable regardless of the caller's PATH.
 PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd):$PATH"
 
+# The tmux server's socket lives under the user's runtime directory when there is one (T325, 2026-09-11): resolve
+# it the way the manager and the kernel do, BEFORE the first tmux call below, so `romp new -t`, the resume picker
+# and every other client here dial the server the manager started (a tmpfs mounted over /tmp took the default
+# socket away from every session that day). A TMUX_TMPDIR already set wins; inside a pane $TMUX's socket applies.
+# Found through the RESOLVED path, so a `~/.local/bin/romp` symlink finds its siblings too (the portable loop
+# bin/romp-serve and bin/romp-service carry: BSD readlink before macOS 12.3 has no -f). A copy of this script run away
+# from them (the help test does that) keeps working, and says so: tmux clients then dial tmux's default socket, which
+# on a systemd machine is a different server from the one the service started.
+_romp_src="${BASH_SOURCE[0]}"
+while [[ -L "$_romp_src" ]]; do
+    _romp_tgt="$(readlink "$_romp_src")"
+    case "$_romp_tgt" in
+        /*) _romp_src="$_romp_tgt" ;;
+        *)  _romp_src="$(cd "$(dirname "$_romp_src")" && pwd)/$_romp_tgt" ;;
+    esac
+done
+_romp_tmux_env="$(cd "$(dirname "$_romp_src")" && pwd)/romp-tmux-env"
+if [[ -r "$_romp_tmux_env" ]]; then
+    # shellcheck source=bin/romp-tmux-env
+    source "$_romp_tmux_env"
+    romp_tmux_tmpdir_export
+else
+    echo "[romp] romp-tmux-env is not beside this script: tmux clients here dial tmux's default socket, which may not be the server romp runs" >&2
+fi
+
 # --- Session name <-> Claude session-id map --------------------------------
 # romp launches Claude with a self-assigned --session-id, so it knows the
 # conversation's UUID (which is also the transcript filename under
@@ -3250,6 +3275,55 @@ fi
 # An old Claude Code falls back to pane-injected agent mail — say so once here,
 # where a session is being launched (see the version-floor helpers up top).
 _romp_claude_floor_nudge
+
+# The server this shell's tmux calls reach must be the kernel's (T325 review find): a cron job, a `sudo -u` or a
+# `docker exec` shell has no XDG_RUNTIME_DIR and resolves tmux's default; a shell inside a pane on ANOTHER server (the
+# old /tmp server kept serving after the move, a personal `tmux`) dials the socket named in its own $TMUX ahead of
+# TMUX_TMPDIR; and a session started on either lands on a server romp cannot see: it never appears on the board, and
+# a later interactive launch starts a namesake. So when a kernel is reachable and reports where its socket lives
+# (/version, auth-exempt, new kernels only), the directory THIS shell's tmux calls would reach ($TMUX's socket, else
+# TMUX_TMPDIR, else tmux's default) is compared with the kernel's as canonical paths, and a difference is a refusal
+# worded by the kernel's rule: a manager from before the rule (its kernel on the default) needs `romp refresh`; a
+# shell without XDG_RUNTIME_DIR needs the kernel's directory exported, or a login shell; a pane on another server
+# needs a shell outside it. No kernel reachable, or a kernel too old to say, compares nothing.
+_romp_tmux_dir_check() {
+    local _kport="${ROMP_KERNEL_PORT:-29855}" _v _mine _how
+    _v="$(curl -sf -m 3 "http://127.0.0.1:$_kport/version" 2>/dev/null)" || return 0
+    if [[ -n "${TMUX:-}" ]]; then
+        _mine="$(dirname "$(dirname "${TMUX%%,*}")")"; _how="pane"     # the socket's directory: <dir>/tmux-<uid>/default
+    else
+        _mine="${TMUX_TMPDIR:-}"; _how="env"
+    fi
+    python3 - "$name" "$_mine" "$_how" "$_v" <<'PYEOF_CHECK' >&2
+import json, os, sys
+name, mine, how, raw = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+try:
+    o = json.loads(raw)
+except ValueError:
+    sys.exit(0)
+if "tmuxSocketRule" not in o:
+    sys.exit(0)                                   # a kernel from before the rule: nothing to compare
+kdir, krule, mrule = o.get("tmuxSocketDir") or "", o.get("tmuxSocketRule") or "", o.get("tmuxSocketManagerRule") or ""
+canon = lambda d: os.path.realpath(d if d else "/tmp")   # the default realpath'd too: /tmp is a symlink on macOS, and a pane's $TMUX names the real path
+if canon(kdir) == canon(mine):
+    sys.exit(0)
+mine_s, kdir_s = mine or "the tmux default", kdir or "the tmux default"
+where = "this shell is inside a tmux session on another server (%s)" % mine_s if how == "pane" else "this shell's tmux socket directory (%s)" % mine_s
+print("[romp] refusing to start '%s': %s is not the kernel's (%s), so the session would start on a server romp cannot see." % (name, where, kdir_s))
+if how == "pane":
+    print("  Fix: run this from a shell outside that tmux session (a pane's own $TMUX decides which server its tmux calls reach).")
+elif krule == "manager" and not kdir and not mrule:
+    print("  The kernel runs under a manager from before the socket moved to the runtime directory: restart the manager (`romp refresh`) and try again; `export TMUX_TMPDIR=/tmp` starts this session on that manager's server for now, and it drops out of sight at the next refresh.")
+elif krule == "manager" and not kdir:
+    print("  This manager has no runtime directory (its rule: %s), so its kernel is on tmux's default socket while this shell's TMUX_TMPDIR differs: `export TMUX_TMPDIR=/tmp` for this session, or start the manager from a login shell where XDG_RUNTIME_DIR is set." % mrule)
+elif not mine:
+    print("  Fix: export TMUX_TMPDIR=%s (the kernel's), or launch from a login shell where XDG_RUNTIME_DIR is set: a cron job, sudo -u or docker exec drops it." % (kdir or "/tmp"))
+else:
+    print("  Fix: export TMUX_TMPDIR=%s (the kernel's)." % (kdir or "/tmp"))
+sys.exit(1)
+PYEOF_CHECK
+}
+_romp_tmux_dir_check || exit 1
 
 # --- Launch or attach ---
 if tmux has-session -t "=$name" 2>/dev/null; then
