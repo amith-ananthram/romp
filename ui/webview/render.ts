@@ -7480,11 +7480,10 @@ function backendTakesTags(be: string): boolean { return be === "sdk" || be === "
 // chip prefilled from a tagged active tab turns every terminal create into a refusal.
 // The Tags row's option paints as the tag chip itself (T321, the user 2026-09-10): the thin border in the tag's own
 // colour that the tab strip, the feed and the outline draw, and on versus off by the visual the tag toggles already
-// use, the faded chip, here the STRUCK one (tagChip's `struck`, T321b: a diagonal in the chip's colour, since the fade
-// alone read too faint in this row), never a dot and never the Backend row's accent
+// use, the faded chip (tagChip's `off`, TAG_CHIP_OFF_CLASS at 0.45), never a dot and never the Backend row's accent
 // fill. The `sel` class on the button stays the state the create reads; the chip is repainted from it on each click.
 function paintPickerTagChip(b: HTMLButtonElement, u: { name: string; color?: string | null }): void {
-  b.replaceChildren(tagChip(u.name, u.color, { inheritSize: true, struck: !b.classList.contains("sel") }));   // off = struck (T321b)
+  b.replaceChildren(tagChip(u.name, u.color, { inheritSize: true, off: !b.classList.contains("sel") }));
 }
 
 function syncPickerTags(): void {
@@ -7989,7 +7988,7 @@ function openPicker(pick = false, prompt?: string, allowNew = false) {
     for (const u of unions) {
       const b = el("button", "picker-be-opt" + (preset.has(u.name) ? " sel" : "")) as HTMLButtonElement;
       b.type = "button"; b.dataset.tag = u.name;
-      paintPickerTagChip(b, u);   // the tag chip every surface draws, full when selected, struck when not (T321, T321b)
+      paintPickerTagChip(b, u);   // the tag chip every surface draws, full when selected, faded when not (T321)
       b.title = preset.has(u.name)
         ? `the session you are looking at is in ${u.name} — the new one joins it too unless you unpick this`
         : `put the new session in ${u.name}`;
