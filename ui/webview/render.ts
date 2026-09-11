@@ -18,9 +18,10 @@ import { CMT_POP_SIZE_KEY, CMT_POP_THREAD_DEFAULT, parseCmtPopSize, clampCmtPopP
          centerCmtPop, cmtPopCapPx } from "./comment-pop-size";
 import { ctxFallbackColor, pickTone, readableRgb } from "./ctx-color";
 import { applyTheme } from "./theme";
+import { installPostalWash } from "./postal-wash";   // the incoming postal card's tint lightness, measured from the page (T337c)
 import { applyDenseChrome } from "./dense-chrome";
 import { SessionViews, viewVisible, viewsKey, revealIn, viewTagUnion, viewTags, type TagUnion, type SessionTag } from "./session-views";
-import { prependHead, appendMore, mergeWindow, historyLabel, indexOfUuid, keyOf, windowDetached, fullFrameMerges, afterMore } from "./chat-window";   // the uuid-anchored wire (T323 stage 4b)
+import { prependHead, appendMore, mergeWindow, historyLabel, indexOfUuid, keyOf, windowDetached, fullFrameMerges, afterMore, reattachKeys } from "./chat-window";   // the uuid-anchored wire (T323 stage 4b)
 import { mintWriteId, ackOutcome, adoptViews, seqOf, capsAdopts, announcedSeq, announcedAfter, createInFlight, rederivePending, lensBlob, applyLensFields, type InflightWrite, type LensFields, type TagEditOp, type ViewsAck } from "./views-writes";
 import { lensVisible, surfaceLens } from "./tag-lens";
 import { openTagMenu, tagMenuButton, syncTagFilter, tagChip } from "./tag-menu";
@@ -16430,6 +16431,7 @@ function updateLivePaused(): void {
 function reattachLive(sid: string): void {
   const s = sessions.get(sid);
   if (!s || s.proto !== 2 || !s.detached) return;
+  vscodeApi?.postMessage({ type: "reattachKeys", id: sid, keys: reattachKeys(s.events as { uuid?: string; key?: string }[]) });   // the run as held, for the kernel's shared clause
   requestFullSession(sid, "reattach");   // the kernel's full tail frame re-bases this client; upsert merges it into the held run
 }
 
@@ -16848,6 +16850,13 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     // an unreadable parent, the SDK setup hint). It gets a dialog naming the reason and takes the
     // provisional tab down with it; a toast would slide past the one moment it needed to be read.
     if (provisionalId) failProvisional(m.text); else warnToast(m.text);
+  }
+  else if (m.type === "spendCeiling" && typeof m.text === "string" && m.text) {
+    // the spend guard's word (T350): a session crossed the hourly spend ceiling, or fell back under it. Its OWN type,
+    // never `warn`: a warn arriving while a create is in flight is read above as that create's verdict, and this
+    // sentence is about another session entirely. The durable record is the shell's bell (the row rides the problem
+    // ring); this is the moment's toast.
+    warnToast(m.text);
   }
   // `err` is the LOUD channel, deliberately distinct from `warn` (the user 2026-07-29): a warn toast fades
   // after 12s, which is right for "that name has a bad character" and wrong for "the message you just typed
@@ -18419,6 +18428,7 @@ function applyChatScheme(s: RompSettings): void {
   // the overall theme (T113 promoted 2026-08-28): the shared applier toggles the strip-aesthetic
   // and light-theme classes from s.theme. Applies live — onExternalSettingsChange re-runs this.
   applyTheme(document, s);
+  installPostalWash(document);   // once: the observers; every later call re-measures the ground (a theme just applied)
   // compact tabs and agents (the user 2026-09-08): a body class the strip's and the #bg-tasks panel's dense
   // rules key on (styles.css body.dense-chrome). The same two moments as the scheme and the theme, so the
   // gear's flip repaints both surfaces at once through the cascade; neither is rebuilt.

@@ -12,7 +12,7 @@ const FEED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", 
 
 test("the ask card's Clear flushes the hover highlight, right before the header conjunction + pendingCleared", () => {
   // the one-motion header exit (2026-08-24) rides between the flush and the suppression — same click
-  assert.match(FEED, /card\.dispatchEvent\(new MouseEvent\("mouseleave"\)\);\s*\n\s*dressHeaderIfLast\(card, it\.sid\);[^\n]*\n\s*pendingCleared\.add\(it\.itemId\);/);
+  assert.match(FEED, /card\.dispatchEvent\(new MouseEvent\("mouseleave"\)\);\s*\n\s*dressHeaderIfLast\(askEls\.get\(it\.itemId\) \?\? card, it\.sid\);[^\n]*\n\s*pendingCleared\.add\(it\.itemId\);/);
 });
 
 test("the group card's Clear flushes the hover highlight too", () => {

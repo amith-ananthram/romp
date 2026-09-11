@@ -35,8 +35,9 @@ test("the exit un-keys FIRST, removes on the END EVENT, backstops, and honors re
 });
 
 test("the CONJUNCTION: the run's last card takes its header with it, at the same click", () => {
-  assert.match(FEED, /dressHeaderIfLast\(card, it\.sid\);/, "ask-card clears join the motion");
-  assert.match(FEED, /dressHeaderIfLast\(card, cur\.sid\);/, "group-card clears too — a group is one session's turn");
+  // the BOARD's element, when Clear came from the focused section's copy (T347): the section holds no run headers
+  assert.match(FEED, /dressHeaderIfLast\(askEls\.get\(it\.itemId\) \?\? card, it\.sid\);/, "ask-card clears join the motion, from either copy");
+  assert.match(FEED, /dressHeaderIfLast\(groupEls\.get\(cur\.turnId\) \?\? card, cur\.sid\);/, "group-card clears too — a group is one session's turn");
   const dh = FEED.slice(FEED.indexOf("function dressHeaderIfLast"), FEED.indexOf("function reconcileCol"));
   assert.ok(dh.includes("if (!feedPrefs().grouped) return;"), "grouped mode only — flat mode has no headers");
   assert.ok(dh.includes('if (!head || head.getAttribute("data-fsid") !== sid || head.classList.contains("sess-exit")) return;'),
