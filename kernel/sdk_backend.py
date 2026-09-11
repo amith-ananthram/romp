@@ -6460,6 +6460,11 @@ class SdkSession:
                         self.backend._write_host_ack(self, force=True)   # still attached to a live CLI: the last ack
                     self._host = None
                     self._host_intent = False
+                # the attach flag lives ONE connect (M1 of 1450's review): a reconnect in this thread that never enters
+                # _host_transport_for (hosts off with no lease and no host directory: an effort or auth switch after a
+                # rollback) must seed fresh, not wait for a watermark the kernel child never has; left True, the first
+                # turn recorded nothing and the watermark was then written under an empty CLI identity, once per connect
+                self._host_is_attach = False
             if self.ended or not self._reconnect:
                 break        # drain ended on its own (process exit) or we're shutting down → done
 
@@ -6867,8 +6872,9 @@ class SdkSession:
         self._last_usage_totals = {}  # and its cumulative token counters
         self._spend_first_result = True
         self._spend_baseline = "fresh"
-        if getattr(self, "_host_is_attach", False):
-            # a host ATTACH (T315): the CLI process SURVIVED the kernel, so its counters continued and its first
+        if getattr(self, "_host_is_attach", False) and getattr(self, "_host", None) is not None:
+            # a host ATTACH (T315), and only with the host transport in hand (the flag alone is not trusted, M1 of
+            # 1450's review): the CLI process SURVIVED the kernel, so its counters continued and its first
             # result's total_cost_usd is the process lifetime's, not this turn's. Zero here recorded that lifetime as
             # one turn at every restart (T354: 21 restarts, a staircase of $436 to $953 rows on one session). The
             # watermark the previous kernel persisted on the registry is read at the first result, when the host's
@@ -7186,7 +7192,10 @@ class SdkSession:
                 self.backend._log("sdk %s: adopting CLI cwd %r (registry had %r)" % (self.sid[:8], cli_cwd, self.cwd))
                 self.cwd = cli_cwd
                 self.backend._update_reg(self.sid, cwd=cli_cwd)
-                if loaded_sid and getattr(self, "_spend_first_result", False):   # getattr: __new__-built test doubles
+                if loaded_sid and getattr(self, "_spend_first_result", False) \
+                        and getattr(self, "_spend_baseline", "fresh") == "fresh":   # getattr: __new__-built test doubles
+                    # (a seed from the registry, or the dead-CLI seed a replayed tail carries, is not clobbered by an
+                    # init record inside that tail whose cwd differs from the registry's: low a of 1450's review)
                     # The connect-time seed read the transcript under the REGISTRY's cwd; the CLI loaded the
                     # one under ITS cwd (the same keying). No result has settled since the connect, so re-seed
                     # from the file the CLI opened: a registry variant that holds no transcript left the seed
@@ -7439,21 +7448,38 @@ class SdkSession:
                         self._seed_from_reg_cost_state()
                         baseline = self._spend_baseline
                     unknown = first and baseline == "attach-unknown"
-                    if unknown:
-                        delta = 0.0       # the lifetime's total: this turn's own share is unknowable, so nothing is folded
+                    # a REDELIVERED result (M2 of 1450's review): hostAck is written at most once a second while the
+                    # watermark moves per result, so a kernel death leaves processed results past the acknowledged
+                    # offset and the attach's replay hands them over again (the whole journal, when the ack names
+                    # another host). One CLI process's total is monotone apart from a /clear the kernel zeroes by
+                    # event, so under a host a total BELOW the watermark is a result the ledger already holds: folded
+                    # whole (the "counter reset" road below, meant for a process we never watched) it was the
+                    # process's lifetime as one turn
+                    hosted = getattr(self, "_host", None) is not None or baseline == "seeded"
+                    duplicate = hosted and total < self._last_cost_total
+                    if unknown or duplicate:
+                        delta = 0.0       # unknown: the lifetime's total, this turn's share unknowable; duplicate: already folded
                     else:
                         delta = total - self._last_cost_total if total >= self._last_cost_total else total
-                    self._last_cost_total = float(total)
-                    self._spend_first_result = False   # the watermark moved: the process's first result is in
+                    if not duplicate:
+                        self._last_cost_total = float(total)
+                    self._spend_first_result = False   # the watermark moved (or a duplicate was seen): the process's first result is in
                     # the tokens: THIS turn's counts, from whichever result counter is a running total —
                     # the two are not the same kind (see _turn_usage; the flat `usage` is per-turn now)
-                    turn_u = self._turn_usage(msg)
+                    if duplicate:
+                        keep = dict(self._last_usage_totals)
+                        turn_u = self._turn_usage(msg)
+                        turn_u = {k: 0 for k in (turn_u or {})} if isinstance(turn_u, dict) else turn_u
+                        self._last_usage_totals = keep       # the token watermarks are not moved down either
+                    else:
+                        turn_u = self._turn_usage(msg)
                     if unknown:       # the token watermarks moved with the map; the lifetime's counts are not this turn's
                         turn_u = {k: 0 for k in (turn_u or {})} if isinstance(turn_u, dict) else turn_u
                     self._turn_cumulative = float(total)          # the turn row carries the CLI's own cumulative (T354)
                     self._turn_baseline = baseline if first else None
+                    self._turn_duplicate = duplicate
                     self._turn_spend = (delta, turn_u)   # for the turn ledger row the finally writes (T304)
-                    self._persist_cost_state(total)      # the watermark the next kernel's attach seeds from (T354)
+                    self._persist_cost_state(self._last_cost_total)   # the watermark the next kernel's attach seeds from (T354)
                     self.backend._record_spend(delta, turn_u, keyed=self.api_key_auth,
                                                sid=self.thread_of or self.sid)   # the rail's spend —
                     #   a comment THREAD bills its owning session (T144: whole-session truth for the

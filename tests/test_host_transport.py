@@ -565,8 +565,9 @@ class BackendHostRules(unittest.TestCase):
         sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID,
                                      "hostAck": {"host": "1:a", "cli": "2:c", "offset": 1}})
         self._leftover(d, "9:b", records=3)
+        seeds = []
         s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False,
-                                _seed_for_dead_cli=lambda cli: None)   # the replay's watermark seed (T354): a no-op on this stand-in
+                                _seed_for_dead_cli=seeds.append)   # the replay's watermark seed (T354): recorded here
         acks = []
         capture = classmethod(lambda cls, hdir, ack=-1, **kw: acks.append(ack) or types.SimpleNamespace(hdir=hdir))
         with mock.patch.dict(sys.modules, {"claude_agent_sdk": self._sdk_stub()}), \
@@ -580,6 +581,7 @@ class BackendHostRules(unittest.TestCase):
              mock.patch.object(ht.HostTransport, "from_journal", capture), mock.patch.object(be, "_replay_drain", mock.AsyncMock()):
             asyncio.run(be._host_orphan_recover(s, types.SimpleNamespace(), None, (None, None, None), died=False))
         self.assertEqual(acks, [-1, 1], "this host's ack: the replay starts past it")
+        self.assertEqual(seeds, ["", "2:c"], "the watermark seed runs before each replay (T354 M7), the CLI named by hostAck only when the ack is this host's")
 
     def test_a_host_this_kernel_ended_gets_a_bounded_wait_for_its_lease_and_no_host_died_row(self):
         # item 6: the behaviour, not the bookkeeping: an `end` this kernel asked for races the reconnect; the stale

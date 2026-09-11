@@ -199,6 +199,68 @@ class Rebill(unittest.TestCase):
         self.assertIn('cli = "%s:%s" % (lease.get("pid"), lease.get("start"))', src, "the lease names the dead CLI")
         self.assertIn('cli = str(ack.get("cli") or "")', src, "else hostAck, when it names this host")
 
+    def test_a_reconnect_that_skips_the_host_connect_seeds_fresh_the_flag_gone_with_the_transport(self):
+        # M1 of the review of this pull request: the connect calls _host_transport_for only with hosts on or a lease that
+        # applies, so a reconnect in the same thread after a rollback to hosts off (an effort or auth switch) never
+        # reached the clear there; the stale True made the seed wait for a watermark the kernel child never has, and
+        # the fresh child's first turn recorded nothing, then the watermark was written under an empty CLI identity.
+        # The connect's finally now drops the flag with the transport, and the seed trusts the flag only with the
+        # transport in hand: this is the state that finally leaves (host None, flag stale) fed to the seed
+        s = self._session()
+        s._host_is_attach = True
+        s._host = None
+        s._seed_spend_watermarks()
+        self.assertEqual((s._last_cost_total, s._spend_baseline), (0.0, "fresh"), "no transport: a fresh kernel child")
+        self._run(s, _result(3.5, 100))
+        self.assertAlmostEqual(self._day()["usd"], 3.5, msg="the child's first turn is recorded in full")
+        self.assertEqual(self._cost_state()["cli"], "", "a kernel child's watermark names no CLI")
+        import inspect
+        src = inspect.getsource(sb)
+        i = src.index("self._host = None" + chr(10) + "                    self._host_intent = False" + chr(10))
+        self.assertIn("self._host_is_attach = False", src[i:i + 900], "the connect's finally drops the flag with the transport")
+        self.assertLess(src.index("self._host_is_attach = False", i), src.index("if self.ended or not self._reconnect:", i))
+        self.assertIn('if getattr(self, "_host_is_attach", False) and getattr(self, "_host", None) is not None:',
+                      inspect.getsource(sb.SdkSession._seed_spend_watermarks))
+
+    def test_a_redelivered_result_below_the_watermark_folds_nothing_and_the_watermarks_stay(self):
+        # M2: hostAck is written at most once a second while the watermark moves per result, so a kernel death leaves
+        # processed results past the acknowledged offset and the attach's replay hands them over again (the whole
+        # journal when the ack names another host); folded whole as a "counter reset" they were the lifetime as one turn
+        self.be._update_reg(SID, costState={"total": 500.0, "tokens": {"input_tokens": 90000}, "cli": "4242:s1", "t": 1})
+        s = self._session(attach=True, hello_cli=("4242", "s1"))
+        self._run(s, _result(480.0, 89000))                 # redelivered: below the seeded 500
+        self.assertEqual(self._day(), {}, "a result the ledger already holds folds nothing")
+        self.assertEqual((s._last_cost_total, s._last_usage_totals["input_tokens"]), (500.0, 90000), "the watermarks did not move down")
+        self._run(s, _result(500.0, 90000))                 # redelivered: the very result the watermark came from
+        self.assertEqual(self._day(), {})
+        self._run(s, _result(512.5, 90400))                 # the first NEW result
+        self.assertAlmostEqual(self._day()["usd"], 12.5, msg="only the new spend: the true 12.5, not the lifetime's 512.5")
+        self.assertEqual(self._day()["tokIn"], 400)
+        self.assertEqual(self._cost_state()["total"], 512.5)
+        rows = self._turns()
+        self.assertEqual([r["usd"] for r in rows], [0.0, 0.0, 12.5])
+        self.assertEqual([r["cumulativeUsd"] for r in rows], [480.0, 500.0, 512.5], "each row still names the CLI's total it carried")
+        # a fresh process is NOT hosted: a total below the watermark there is still the counter reset it always was
+        s2 = self._session()
+        self._run(s2, _result(10.0, 10)); self._run(s2, _result(4.0, 10))
+        self.assertAlmostEqual(self._day()["usd"], 12.5 + 10.0 + 4.0)
+
+    def test_a_replayed_tail_with_no_result_leaves_the_spawn_to_seed_fresh_and_an_init_in_the_tail_never_clobbers_the_dead_seed(self):
+        # low b: a dead host's tail with no result record folds nothing and the connect's seed for the spawn that follows
+        # starts at zero; low a: the init record's cwd re-seed is for a resumed FRESH process only
+        self.be._update_reg(SID, costState={"total": 500.0, "tokens": {}, "cli": "4242:s1", "t": 1})
+        s = self._session()
+        s._seed_for_dead_cli("4242:s1")
+        self.assertEqual(s._spend_baseline, "seeded")
+        s._seed_spend_watermarks()                          # nothing replayed; the spawn's seed
+        self.assertEqual((s._last_cost_total, s._spend_baseline), (0.0, "fresh"))
+        self.assertEqual(self._day(), {})
+        import inspect
+        src = inspect.getsource(sb)
+        want = ("if loaded_sid and getattr(self, \"_spend_first_result\", False) " + chr(92) + chr(10)
+                + "                        and getattr(self, \"_spend_baseline\", \"fresh\") == \"fresh\":")
+        self.assertIn(want, src, "the init's cwd re-seed runs for a fresh baseline only, never over a registry or dead-CLI seed")
+
     def test_the_seed_and_the_result_are_pinned_to_the_registry_road(self):
         import inspect
         seed = inspect.getsource(sb.SdkSession._seed_spend_watermarks)
@@ -206,7 +268,7 @@ class Rebill(unittest.TestCase):
         self.assertIn("self._last_cost_total = 0.0   # a fresh CLI process starts its cumulative cost at zero", seed, "the fresh seed is unchanged")
         on = inspect.getsource(sb.SdkSession._on_message)
         self.assertIn("self._seed_from_reg_cost_state()", on)
-        self.assertIn("self._persist_cost_state(total)", on, "the watermark is written at every result")
+        self.assertIn("self._persist_cost_state(self._last_cost_total)", on, "the watermark is written at every result (the kept watermark, not a duplicate's lower total)")
         self.assertIn('costState={"total": float(total), "tokens": dict(self._last_usage_totals),', inspect.getsource(sb.SdkSession._persist_cost_state))
 
 
