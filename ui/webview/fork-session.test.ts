@@ -77,7 +77,7 @@ test("the modal defaults to <session>-fork and posts forkSession {id, uuid, name
 
 test("the palette forks the ACTIVE session from the tip, via the chat pane", () => {
   assert.match(PALETTE, /id: "session\.fork", title: "Fork this session…"/);
-  assert.match(PALETTE, /pane\("f-chat"\)!\.contentWindow!\.postMessage\(\{ romp: "forkSession" \}, "\*"\)/);
+  assert.match(PALETTE, /chatPane\(\)!\.contentWindow!\.postMessage\(\{ romp: "forkSession" \}, "\*"\)/);   // the chat column last worked in (split screen 2026-09-08)
   assert.match(RENDER, /if \(m\.romp === "forkSession"\) \{/);
   assert.match(RENDER, /if \(activeId && !isProvisionalId\(activeId\) && sessions\.get\(activeId\)\) showForkPrompt\(activeId, ""\);/);
 });

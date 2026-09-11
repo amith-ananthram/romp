@@ -231,6 +231,18 @@ scrolling for the rest; the cap lifts while a row's details are open. Where the 
 it also shrinks the tabs and group headers; on a phone the session picker stands in for the strip, so
 there the setting tightens the panel alone. Like the other chat settings, it is per browser.
 
+**Several sessions at once.** The chat can be split into columns, so two or three sessions
+sit side by side instead of behind each other's tabs. Right-click a tab and pick **Open in
+new split**, and a new chat column opens to the right on that session; **⌘** / **Ctrl**
+with the backslash key, or **Split the chat** in the command palette, opens an empty one. Each column is a full chat, with its own tab strip,
+its own composer and its own place in each transcript; drag the gutter between two columns
+to resize them. A column remembers which session it was on, and its width, across reloads,
+and the set of open columns is remembered per browser. The **×** in a column's top-right
+corner closes it; **Close this chat split** in the palette closes the column you are in, or
+the last one when you are in the first. When a card in the feed or a notification jumps to
+a session, the jump lands in the column already showing it, else in the column you last
+worked in. Four columns at most; the phone shows one pane at a time and never splits.
+
 ### The feed
 
 The feed is Romp's task-management layer: a card for each task. Romp's

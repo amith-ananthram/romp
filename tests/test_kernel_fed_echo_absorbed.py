@@ -137,6 +137,67 @@ class _World:
         return key
 
 
+def streamed_after_the_send():
+    """Tool steps the session ran after a send at T0+55 and before its splice: what the model did BEFORE reading it."""
+    return [
+        aline(T0 + 120, "", "a3", "tr1", tools=("Bash",), stop="tool_use"),
+        trline(T0 + 121, "tu_a3_0", "tr2", "a3"),
+        aline(T0 + 122, "", "a4", "tr2", tools=("Bash",), stop="tool_use"),
+    ]
+
+
+class TheEchoSitsAtTheTailForEveryViewer(unittest.TestCase):
+    """The kernel's echo of a fed, unlanded send is the message's only record until the splice, and every window but
+    the sender's draws it (the sender hides it behind its own tail bubble, T262h). The merge sorted the turn's atoms
+    by time alone, so the echo sat at its SEND time — above the tool steps that streamed after the send, which the
+    model ran before reading it — while the sender's bubble sat at the tail (T252d): one session in two split columns
+    read as one column behind the other (the user 2026-09-10). An in-flight echo now sorts after every atom the turn
+    holds; a never-delivered echo (a record of a loss) and the CLI's command feedback keep their time."""
+
+    def setUp(self):
+        self.w = _World()
+
+    def tearDown(self):
+        self.w.close()
+
+    def _atoms(self, merged):
+        return merged["turns"][-1]["atoms"]
+
+    def test_an_in_flight_echo_follows_the_steps_that_streamed_after_the_send(self):
+        self.w.write(running_turn() + streamed_after_the_send())
+        self.w.echo(FED, T0 + 55)                    # sent after tr1 (T0+50), before the steps
+        self.w.s.inflight = 1
+        self.w.s._inflight_texts.append(FED)
+        atoms = self._atoms(km._merge_live_atoms(self.w.parse(), SID))
+        self.assertEqual(atoms[-1].get("_echo_text"), FED, "the echo is the turn's last atom")
+        self.assertEqual([a["uuid"] for a in atoms[-4:-1]], ["a3", "tr2", "a4"], "…below the steps that ran while it waited")
+        by_time = sorted(atoms, key=lambda a: (a.get("t", 0), a.get("_seq", 0)))
+        self.assertEqual([a["uuid"] for a in by_time[-4:]], ["echo:fed", "a3", "tr2", "a4"],
+                         "time order alone drew the send above those steps: the old order, the other column's view")
+
+    def test_a_never_delivered_echo_and_command_feedback_keep_their_time(self):
+        self.w.write(running_turn() + streamed_after_the_send())
+        key = self.w.echo(FED, T0 + 55)
+        self.w.be._live[SID][key]["dropped"] = True   # never delivered: a record of a loss, at the time it was lost
+        self.w.be._live[SID]["cmd"] = {"type": "user", "uuid": "cmd", "session_id": SID, "t": T0 + 56, "parentUuid": None,
+                                       "author": "human", "command": "/model", "_echo_text": "/model opus",
+                                       "message": {"role": "user", "content": [{"type": "text", "text": "/model opus"}]}}
+        atoms = self._atoms(km._merge_live_atoms(self.w.parse(), SID))
+        self.assertEqual([a["uuid"] for a in atoms[-5:]], ["echo:fed", "cmd", "a3", "tr2", "a4"],
+                         "both keep their place in time, before the later steps")
+
+    def test_the_landing_replaces_the_tail_echo_in_place(self):
+        # the splice lands the text below the steps (T252d): the echo retires and the absorbed atom holds the tail
+        self.w.write(running_turn() + streamed_after_the_send() + [attline(T0 + 55, FED, "att1", "a4")])
+        self.w.echo(FED, T0 + 55)
+        self.w.s.inflight = 1
+        self.w.s._inflight_texts.append(FED)
+        atoms = self._atoms(km._merge_live_atoms(self.w.parse(), SID))
+        self.assertNotIn(SID, self.w.be._live, "the landing retires the echo")
+        self.assertEqual(atoms[-1]["uuid"], "att1", "the absorbed atom is the tail, where the echo was")
+        self.assertTrue(atoms[-1].get("absorbed"))
+
+
 class FedEchoSurvivesUntilTheSpliceLands(unittest.TestCase):
     def setUp(self):
         self.w = _World()

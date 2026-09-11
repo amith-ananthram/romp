@@ -2049,6 +2049,11 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   background: color-mix(in srgb, var(--you) 8.5%, transparent); border: 1px dashed color-mix(in srgb, var(--you) 55%, transparent);
   border-radius: 14px; padding: 7px 12px; color: var(--prov-ink);
 }
+/* the kernel's echo of a send ANOTHER window made, not yet read by the model: the sender's tail-bubble dress on the
+   user bubble it is drawn as — the same dashed border (its own 1px, so nothing shifts) and dim caption — so two views
+   of one session agree on what is pending (2026-09-10) */
+.turn.echo .echo-bubble { border-style: dashed; border-color: color-mix(in srgb, var(--you) 65%, transparent); opacity: 0.85; }
+.echo-note { font-size: 0.82em; color: var(--dim); letter-spacing: 0.02em; text-align: right; }
 .notice.queued-bubble, .notice.notice-slim.queued-bubble { max-width: none; display: block; }   /* the notice keeps its row
    width and flex head at either density; only the dress is the bubble's (the shared rule's specificities, later in the
    file). The boxed card too: it fills the column while provisional, so nothing snaps when the receipt lands. */

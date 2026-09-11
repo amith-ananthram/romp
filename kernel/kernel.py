@@ -31194,7 +31194,18 @@ def _merge_live_atoms(session, sid, shown_texts=()):
         turns = [{"id": "live", "trigger": None, "t": fresh[0]["t"], "end": fresh[-1]["t"],
                   "ended": not live_work, "atoms": []}]
     turns[-1] = dict(turns[-1])
-    turns[-1]["atoms"] = sorted(list(turns[-1]["atoms"]) + fresh, key=lambda a: (a.get("t", 0), a.get("_seq", 0)))
+    # An in-flight input ECHO — the kernel's copy of a send the model has not read yet — sorts AFTER every atom the
+    # turn holds, whatever its send time (T252d for every other window, 2026-09-11). The model reads a mid-turn
+    # send only at its next tool boundary, so the steps that streamed after the send ran BEFORE it was read; sorted
+    # by time the echo drew the message above them in every window but the sender's own, whose tail bubble hides
+    # the echo (render.ts hiddenByPending) — one session in two split columns read as one column behind the other
+    # (the user 2026-09-10). The landing (the queued_command attachment, event_model._absorbed) takes the
+    # boundary's own time, the same tail region, so nothing moves when it lands. A never-delivered echo (dropped)
+    # is a record of a loss and keeps its time, as does a landed-but-unpruned one and the CLI's command feedback.
+    def _order(a):
+        tail = 1 if (a.get("_echo_text") and not a.get("command") and not a.get("dropped") and not a.get("_landed")) else 0
+        return (tail, a.get("t", 0), a.get("_seq", 0))
+    turns[-1]["atoms"] = sorted(list(turns[-1]["atoms"]) + fresh, key=_order)
     # Extend the turn's window over the appended tail (the user 2026-07-02): segments() spans [turn.t,
     # turn.end], so a live atom past the disk turn's end (a /model invocation minutes after the last work)
     # otherwise falls OUTSIDE every segment — its timeline dot then appeared only retroactively, once the
@@ -39732,8 +39743,8 @@ def _note_ws_drop(c, why, frame_len, key=None):
     if key is None:
         key = c.get("curSlot")
     try:
-        sys.stderr.write("ws: dropping %s client — %s (wid=%s slot=%s queued=%dB frame=%dB)\n"
-                         % (c.get("app"), why, c.get("wid") or "-", _perf_slot(key) if key else "-",
+        sys.stderr.write("ws: dropping %s client — %s (wid=%s col=%s slot=%s queued=%dB frame=%dB)\n"
+                         % (c.get("app"), why, c.get("wid") or "-", c.get("col") or "-", _perf_slot(key) if key else "-",
                             int(c.get("qbytes") or 0), int(frame_len)))
         if "bytes behind" in str(why):
             _WS_DROP_SEQ[0] += 1
@@ -44952,7 +44963,16 @@ def _consume_pending_reveal(client, why="the pane's ready"):
     _PENDING_REVEAL[0] = None
     print("[reveal] sid=%s wid=%s: consumed — %s" % (str(p["sid"])[:8], str(p["wid"] or "")[:8], why), file=sys.stderr)
     try:
-        client["send"](json.dumps(_reveal_msg(p["sid"])))
+        m = _reveal_msg(p["sid"])
+        m["own"] = True   # addressed to THIS column (split screen, 2026-09-08): one chat client consumes the parked
+        #                   tap, so the pane's column arbitration (render.ts focusIsOurs) must not hand it elsewhere —
+        #                   a consumed park has ONE recipient, and a consumer that deferred to arbitration would lose
+        #                   the tap (a booting split whose second column's ready came first). Known residual
+        #                   (review find, 2026-09-11): a copy already delivered to unproven same-wid panes (`sent`,
+        #                   T312) can land in one column by arbitration and then, before its proof retires the park,
+        #                   in a redialing column too (its socket dead at the tap) — two columns on one session, a
+        #                   state the split allows on purpose, so the rare duplicate is accepted over a lost tap.
+        client["send"](json.dumps(m))
     except Exception:
         pass
 
@@ -45421,6 +45441,12 @@ var failedConnects=0,firstFailT=0;   // handshakes that never OPENED since the l
 // (a focus, a jump) at the dashboard that asked instead of at every one that is open (the user 2026-07-29).
 var wid=new URLSearchParams(location.search).get("wid")||"";
 try{if(!wid)wid=window.sessionStorage.getItem("romp:wid")||"";}catch(e){}
+// This pane's chat COLUMN (split screen, the user 2026-09-08): the shell serves every chat column past the
+// first as /chat?col=N. The column rides the persisted-state key (SK, below) so each column keeps its OWN
+// active tab, drafts and scroll — one blob per column, the first column on the unsuffixed key it always had —
+// and the WS connect, so the kernel can tell one dashboard's columns apart in its logs. "" for the first
+// column, a standalone page and every non-chat pane; the shim is shared, so absent means exactly today.
+var COL=new URLSearchParams(location.search).get("col")||"";if(COL==="1")COL="";
 // This PAGE's instance id — minted once per load, never stored: every connect of this page carries it, so the
 // kernel retires this page's previous socket on a reconnect, and never another page's (a duplicated tab copies
 // sessionStorage, and with it wid; it must not copy this).
@@ -45566,7 +45592,7 @@ function connect(){if(ws&&(ws.readyState===0||ws.readyState===1))return;   // on
 if(returnAt)returnRedialed=true;   // a dial inside a return window (whatever path led here) → the return-fresh row says so
 connT=Date.now();var proto=location.protocol==="https:"?"wss://":"ws://";
 var active="";try{var st0=JSON.parse(localStorage.getItem(SK)||"null");active=(st0&&st0.activeId)||"";}catch(e){}
-ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1":""));   // reconnect=1: this page has held a socket before AND its bundle has said ready AND the kernel's caps frame has answered that ready AND the ready is not still waiting in the queue for this open, so it holds the sessions the kernel served it; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own); a ready that left on an open socket the kernel never answered (the socket died before its caps frame came back) served the page nothing either: all three redials dial as a fresh page, the last for the page's life, since the bundle posts ready once and no later socket carries one for a caps frame to answer (2026-09-10)
+ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1":"")+(COL?"&col="+encodeURIComponent(COL):""));   // reconnect=1: this page has held a socket before AND its bundle has said ready AND the kernel's caps frame has answered that ready AND the ready is not still waiting in the queue for this open, so it holds the sessions the kernel served it; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own); a ready that left on an open socket the kernel never answered (the socket died before its caps frame came back) served the page nothing either: all three redials dial as a fresh page, the last for the page's life, since the bundle posts ready once and no later socket carries one for a caps frame to answer (2026-09-10)
 // onopen: flush the queue; a RECONNECT (after a drop) also PROMPTS a reload — the fresh socket resyncs live via
 // the kernel's next push, and the banner offers a full reload for anything a live push doesn't cover. This
 // replaced the old silent location.reload() (the user 2026-07-05: don't foist a reload; let me click). Narrowed by
@@ -45711,7 +45737,7 @@ var touched=kind.indexOf("dictlist:")===0?touchedLanes(c,map.order,order):null;
 last.maps[name]={order:order,items:items};m[name]=assemble(kind,last.maps[name],last.msg[name],touched);}
 last.rev=d.rev;last.msg=m;return m;}
 window.__rompLocalSend=send;window.__rompApp=APP;   // federation.ts (the multi-kernel manager) routes local sends + knows the app through these
-var SK="romp-vscode-state-%s";   // persist webview state to localStorage so UI prefs survive a refresh
+var SK="romp-vscode-state-%s"+(COL?":"+COL:"");   // persist webview state to localStorage so UI prefs survive a refresh — per chat column (split screen 2026-09-08)
 window.acquireVsCodeApi=function(){return{postMessage:function(m){if(window.__rompFed){window.__rompFed.outbound(m);}else{send(m);}},
 getState:function(){try{return JSON.parse(localStorage.getItem(SK)||"null");}catch(e){return null;}},
 setState:function(s){try{localStorage.setItem(SK,JSON.stringify(s));}catch(e){}}};};connect();
@@ -46349,14 +46375,24 @@ var GK='romp-pane-grow',grow={chat:60,fleet:34,feed:40,files:40};
 try{var g=JSON.parse(localStorage.getItem(GK)||'null');if(g)grow=Object.assign(grow,g);}catch(e){}
 function setGrow(k,v){grow[k]=v;row.style.setProperty('--g-'+k,v);}
 for(var k in grow)setGrow(k,grow[k]);
-function key(id){return id==='chat-pane'?'chat':id==='fleet-pane'?'fleet':id==='feed-pane'?'feed':'files';}
+// split chat columns (the user 2026-09-08) are made AFTER this runs: they register here so the grab's
+// normalisation and the fair-grow average see them, and gv-a/gv-b's left neighbour is the RIGHTMOST one.
+var KEYS={};
+window.__rompRegisterPane=function(id,k){KEYS[id]=k;if(PANES.indexOf(id)<0)PANES.splice(PANES.indexOf('fleet-pane'),0,id);};
+window.__rompUnregisterPane=function(id){var k=KEYS[id];delete KEYS[id];var i=PANES.indexOf(id);if(i>=0)PANES.splice(i,1);
+if(k){delete grow[k];row.style.removeProperty('--g-'+k);try{localStorage.setItem(GK,JSON.stringify(grow));}catch(e){}}};
+function lastChat(){return (window.__rompLastChatPane&&window.__rompLastChatPane())||'chat-pane';}
+function key(id){return KEYS[id]||(id==='chat-pane'?'chat':id==='fleet-pane'?'fleet':id==='feed-pane'?'feed':'files');}
 function shown(id){var p=document.getElementById(id);return p&&getComputedStyle(p).display!=='none';}
 // a pane re-shown from the rail gets a grow comparable to the panes already visible, so it never slots back
 // in as a sliver after the others were dragged to extreme widths (grows are stored as px). Timeline is the
 // bottom BAND now (fixed-height var, not a row grow), so it's excluded.
-window.__rompGrowFair=function(k){if(k==='timeline')return;var v=PANES.filter(shown).map(function(id){return grow[key(id)];});
+window.__rompGrowFair=function(k){if(k==='timeline')return;var v=PANES.filter(shown).map(function(id){return grow[key(id)];})
+.filter(function(g){return typeof g==='number'&&isFinite(g);});   // a pane with no grow yet (a split column being made) must not average in as NaN (review find 2026-09-08: the first split opened 0px wide)
 var avg=v.length?v.reduce(function(a,b){return a+b;},0)/v.length:50;setGrow(k,avg);
 try{localStorage.setItem(GK,JSON.stringify(grow));}catch(e){}};
+// a split column keeps the width it was dragged to across reloads: fair only when the store holds nothing for it
+window.__rompGrowFairIfNew=function(k){if(typeof grow[k]==='number'&&isFinite(grow[k])){setGrow(k,grow[k]);return;}window.__rompGrowFair(k);};
 // A drag moves a LANDING LINE and the panes take their widths ONCE, at release. A grow write re-lays out the row
 // and with it every same-origin pane document in that frame, so writing the pair on every mousemove cost one
 // relayout of every pane per pointer step, a cost that grows with what the panes hold (seconds a step once a pane
@@ -46368,7 +46404,11 @@ function gutter(gid,leftPick,rightId){var h=document.getElementById(gid);if(!h)r
 h.addEventListener('mousedown',function(e){e.preventDefault();
 var L=document.getElementById(leftPick()),R=document.getElementById(rightId);if(!L||!R)return;
 document.body.classList.add('drag','dragv');
-PANES.forEach(function(id){if(shown(id))setGrow(key(id),document.getElementById(id).offsetWidth);});
+// read EVERY shown pane's width first, then write: a setGrow re-flows the row, so a width read after it came back
+// at a mixed scale (the first pane in px, the rest still on their small default numbers) and the first drag in a
+// fresh browser ballooned the first column (served-test find, 2026-09-08; the split's fresh columns hit it every time)
+var px={};PANES.forEach(function(id){if(shown(id))px[id]=document.getElementById(id).offsetWidth;});
+Object.keys(px).forEach(function(id){setGrow(key(id),px[id]);});
 var wL=L.offsetWidth,wR=R.offsetWidth,sum=wL+wR,sx=e.clientX,mn=Math.min(120,sum*0.25),nL=wL,lx=L.getBoundingClientRect().left,rr=row.getBoundingClientRect();
 function show(){if(!ghost)return;ghost.style.top=rr.top+'px';ghost.style.height=rr.height+'px';ghost.style.left=(lx+nL)+'px';ghost.style.display='block';}
 function mv(ev){nL=Math.max(mn,Math.min(sum-mn,wL+(ev.clientX-sx)));show();}
@@ -46376,9 +46416,10 @@ function up(){document.body.classList.remove('drag','dragv');if(ghost)ghost.styl
 setGrow(key(L.id),nL);setGrow(key(R.id),sum-nL);try{localStorage.setItem(GK,JSON.stringify(grow));}catch(e){}
 window.removeEventListener('mousemove',mv);window.removeEventListener('mouseup',up);}
 show();window.addEventListener('mousemove',mv);window.addEventListener('mouseup',up);});}
-gutter('gv-a',function(){return 'chat-pane';},'fleet-pane');
-gutter('gv-b',function(){return document.body.classList.contains('po-fleet')?'fleet-pane':'chat-pane';},'feed-pane');
-gutter('gv-c',function(){var c=document.body.classList;return c.contains('po-feed')?'feed-pane':c.contains('po-fleet')?'fleet-pane':'chat-pane';},'files-pane');
+window.__rompGutter=gutter;   // the split's chat|chat gutters are wired through the same code
+gutter('gv-a',function(){return lastChat();},'fleet-pane');
+gutter('gv-b',function(){return document.body.classList.contains('po-fleet')?'fleet-pane':lastChat();},'feed-pane');
+gutter('gv-c',function(){var c=document.body.classList;return c.contains('po-feed')?'feed-pane':c.contains('po-fleet')?'fleet-pane':lastChat();},'files-pane');
 tf&&tf.addEventListener('load',function(){autosize();
 try{new ResizeObserver(autosize).observe(tf.contentDocument.body);}catch(e){}});
 window.addEventListener('resize',autosize);
@@ -46399,17 +46440,21 @@ var TL='f-timeline';                       // the timeline is a bottom BAND unde
 var curFocus='f-chat', lastCol='f-chat';   // for Shift-Up out of the timeline: return to the last column used
 // The active pane gets a focus RING (.pane-focused). Same-origin iframes, so the shell sets it directly on
 // pointerdown / focusin / window-focus — event-based, no polling. Exactly one pane is ringed at a time.
-function setFocus(id){var pid=PANE[id];if(!pid)return;curFocus=id;if(COLS.indexOf(id)>=0)lastCol=id;
-for(var k in PANE){var el=document.getElementById(PANE[k]);if(el)el.classList.toggle('pane-focused',PANE[k]===pid);}}
+var lastChat='f-chat';   // the chat column the user last worked in (split screen 2026-09-08): where shell relays land
+function paneOf(id){return PANE[id]||(window.__rompChatPaneOf?window.__rompChatPaneOf(id):null);}   // split columns are made after this map
+function allCols(){var c=window.__rompChatFrameIds?window.__rompChatFrameIds():['f-chat'];return c.concat(COLS.slice(1));}   // every chat column, then Outline, Feed
+function setFocus(id){var pid=paneOf(id);if(!pid)return;curFocus=id;if(allCols().indexOf(id)>=0)lastCol=id;if(pid.indexOf('chat-pane')===0)lastChat=id;
+Array.prototype.forEach.call(document.querySelectorAll('.pane'),function(el){el.classList.toggle('pane-focused',el.id===pid);});}
+window.__rompFocusedChatId=function(){return document.getElementById(lastChat)?lastChat:'f-chat';};
 // SPATIAL cross-pane keyboard nav (the user 2026-07-01): Alt(Option)+Arrow jumps focus between VISIBLE panes —
 // Alt-Left/Right along the columns (Chat <-> Outline <-> Feed, skipping hidden ones), Alt-Down into the
 // timeline band, Alt-Up back out. Alt (not Shift, which selects text; not Ctrl/Cmd, which macOS uses for
 // Spaces / browser back-forward) — the one modifier free outside a text field. Iframes can't focus each other,
 // but the shell (their parent) can; it then posts {romp:'paneFocus'} so the target pane can arm its own
 // intra-pane arrow nav (feed/outline cards). Configurable later; hardcoded for now (the user 2026-07-01).
-function paneVisible(id){var el=document.getElementById(PANE[id]);if(!el)return false;
+function paneVisible(id){var el=document.getElementById(paneOf(id));if(!el)return false;
 try{return getComputedStyle(el).display!=='none';}catch(e){return true;}}
-function visCols(){return COLS.filter(paneVisible);}
+function visCols(){return allCols().filter(paneVisible);}
 function focusPane(id,dir){var f=document.getElementById(id);if(!f)return;
 try{f.contentWindow.focus();}catch(e){}setFocus(id);
 try{f.contentWindow.postMessage({romp:'paneFocus',dir:dir||'',from:'shell'},'*');}catch(e){}}
@@ -46439,6 +46484,7 @@ f.contentWindow.addEventListener('focus',emit);
 d.addEventListener('keydown',onKey,true);}catch(e){}}   // capture Alt+Arrow before the pane's own handlers
 Object.keys(PANE).forEach(function(id){var f=document.getElementById(id);if(!f)return;
 f.addEventListener('load',function(){wire(f);});wire(f);});   // wire now (already-loaded) + on every (re)load
+window.__rompWireFocus=function(f){f.addEventListener('load',function(){wire(f);});wire(f);};   // a split column made later gets the same
 // ALSO claim Alt+Arrow at the TOP-LEVEL shell document (the user 2026-07-01): a keydown fires in whichever
 // document has focus and does NOT cross the iframe boundary, so the per-iframe handlers miss the case where
 // focus sits on the shell itself (right after load, or after clicking shell chrome) — there Alt+Left fell
@@ -46627,11 +46673,15 @@ window.__rompNotify(m.kind||'error',m.text,
 // loaded), so a blip on a pane you can't even see shouldn't cry wolf while the chat pane you interact
 // through is up. Gate on the pane-enabled body class the toggle sets (po-chat/po-feed/po-timeline/po-fleet).
 // Only the up->down TRANSITION logs an entry; the live red cue rides the state itself.
-var st={};
+var st={},stc={};   // stc: split chat columns (2026-09-08) by column, apart from the first column's `chat` key — one column's 'up' must never mask another's drop
 function shown(k){return document.body.classList.contains('po-'+k);}
-function liveDown(){for(var k in st){if(st[k]==='down'&&shown(k))return true;}return false;}
+function liveDown(){for(var k in st){if(st[k]==='down'&&shown(k))return true;}for(var c in stc){if(stc[c]==='down'&&shown('chat'))return true;}return false;}
+window.__rompColGone=function(c){delete stc[String(c)];paint();};   // a closed column takes its state with it
 var PN=""" + json.dumps(dict(_PANE_ORDER)) + """;   // key → rail label, from _PANE_ORDER (one list with the rail, the tabs and the drop row); timeline key stays internal — the pane outgrew the name (filter, tags, lane controls — the user 2026-08-24)
 window.addEventListener('message',function(e){var m=e&&e.data;if(!m||m.romp!=='wsState')return;
+var col=(m.app==='chat'&&window.__rompColOf)?window.__rompColOf(e.source):'';   // a split column reports under its own key (the sender frame says which)
+if(col){var sc=(m.state==='up')?'up':'down',pc=stc[col];stc[col]=sc;
+if(sc==='down'&&pc!=='down'&&shown('chat'))window.__rompNotify('conn','Kernel connection lost \\u2014 chat split '+col+' (reconnecting)');else paint();return;}
 var s=(m.state==='up')?'up':'down',prev=st[m.app];st[m.app]=s;
 if(s==='down'&&prev!=='down'&&shown(m.app))
 window.__rompNotify('conn','Kernel connection lost \\u2014 '+(PN[m.app]||m.app)+' pane (reconnecting)');
@@ -46690,6 +46740,8 @@ document.addEventListener('keydown',onEsc,true);
 ['f-chat','f-fleet','f-feed','f-files','f-timeline','f-settings'].forEach(function(id){var f=document.getElementById(id);if(!f)return;
 var wire=function(){try{if(f.contentDocument)f.contentDocument.addEventListener('keydown',onEsc,true);}catch(e){}};
 f.addEventListener('load',wire);wire();});
+window.__rompWireEsc=function(f){var wire=function(){try{if(f.contentDocument)f.contentDocument.addEventListener('keydown',onEsc,true);}catch(e){}};
+f.addEventListener('load',wire);wire();};   // a split chat column (2026-09-08) is wired as it is made
 })();
 """
 
@@ -47879,14 +47931,22 @@ open();};
 window.addEventListener('message',function(e){var m=e.data;if(!m)return;
 if(m.romp==='settings'){document.body.classList.toggle('settings-open',!!m.on);
 // closing hides the iframe that held the keyboard, which drops focus onto the shell body; put it back in the
-// chat (the dashboard's default focus, _LANDING_FOCUS_JS rings it) so the next keystroke lands in a pane
-if(!m.on){var fc=document.getElementById('f-chat');try{fc&&fc.contentWindow&&fc.contentWindow.focus();}catch(e){}}}
+// chat (the dashboard's default focus, _LANDING_FOCUS_JS rings it) so the next keystroke lands in a pane — the
+// split's column last worked in, else the first (2026-09-11: the close handed the keyboard to column 1 whatever
+// column the user was in, and that focus re-aimed every later shell relay at column 1 too)
+if(!m.on){var fid=(window.__rompFocusedChatId&&window.__rompFocusedChatId())||'f-chat';var fc=document.getElementById(fid)||document.getElementById('f-chat');try{fc&&fc.contentWindow&&fc.contentWindow.focus();}catch(e){}}}
 // a pane asking for the gear (the feed's login card, ui/webview/gear-host.ts openGear: the feed page hosts no gear)
 if(m.romp==='openSettings')window.__rompOpenSettings();
 // the gear's "Open log" (T290): the settings modal closes itself first, then asks the shell for the Log panel
 if(m.romp==='openLog'&&window.__rompOpenErrs)window.__rompOpenErrs();
 // the /chat iframe's new-session picker asks the shell to lift it full-window (see body.picker-open CSS)
-if(m.romp==='picker')document.body.classList.toggle('picker-open',!!m.on);
+if(m.romp==='picker'){
+  // the column that asked is the one lifted (split screen 2026-09-08): the sender frame wears .lifted (and its
+  // pane), the CSS lifts by that class; the first column when the sender cannot be told (no split script)
+  var lf=(window.__rompFrameOfWin&&window.__rompFrameOfWin(e.source))||document.getElementById('f-chat');
+  Array.prototype.forEach.call(document.querySelectorAll('.lifted'),function(el){el.classList.remove('lifted');});
+  if(m.on&&lf){lf.classList.add('lifted');if(lf.parentElement)lf.parentElement.classList.add('lifted');}
+  document.body.classList.toggle('picker-open',!!m.on);}
 // A file link clicked in the chat and routed to the FILES pane (ui/webview/file-route.ts fileLinkRoute,
 // decided at the click in render.ts openPath: the pane is on screen, or the gear's "File links open in"
 // names it) posts viewFile up with pane:'pane'. The shell brings that pane forward, the click being the
@@ -47949,6 +48009,7 @@ else if(m.romp==='browseFiles'){var bf=document.getElementById('f-feed');
 // opened for (m.sid beats the active tab there). The chat-hosted viewer posts to its own window and
 // never gets here.
 if(m.type==='editorSelection'&&typeof m.text==='string'){var fc=document.getElementById('f-chat');
+  fc=(window.__rompChatTarget&&window.__rompChatTarget(m.sid))||fc;   // the split column showing that session, else the one last used (2026-09-08)
   // the chat pane may be toggled OFF (hidden by CSS, iframe still loaded): the chip would seed a composer
   // nobody can see, a silent gesture (review find on #970, 2026-09-07). Bring the pane forward first, the
   // way the browseFiles arm does for the feed — desktop only; the phone's one-pane tab swap is untouched.
@@ -48919,7 +48980,8 @@ return (s?s.unsubscribe():Promise.resolve()).then(function(){return ep?post('/pu
 // files it as a client-diag row and the result line says no session was attached, never a silent probe.
 function diag(what,data){try{window.__rompShellDiag&&window.__rompShellDiag(what,data);}catch(e){}}
 function activeSession(){var t=null,why='',n=0;
-try{var f=document.getElementById('f-chat'),d=f&&f.contentDocument,tb=d&&d.querySelector('#tabs');
+try{var f=document.getElementById('f-chat');var fid=window.__rompFocusedChatId&&window.__rompFocusedChatId();   // the split column last worked in (2026-09-08)
+if(fid&&document.getElementById(fid))f=document.getElementById(fid);var d=f&&f.contentDocument,tb=d&&d.querySelector('#tabs');
 if(!f)why='no-frame';else if(!d)why='no-doc';else if(!tb)why='no-tabs';
 else{n=tb.querySelectorAll('.tab[data-id]').length;t=tb.querySelector('.tab.active[data-id]');if(!t)why='none-active';}}catch(e){why='threw';}
 var id=t?String(t.getAttribute('data-id')||''):'';var i=id.indexOf(':');
@@ -49349,6 +49411,85 @@ _LANDING_COLLAPSE_JS = """
 """
 
 
+# SPLIT SCREEN for the chat (the user 2026-09-08, who wanted several sessions open at once instead of tabbing
+# through them). Every chat column past the first is a client-made twin of #chat-pane — <div class="pane
+# chat-col"> around an iframe at /chat?col=N, inserted before gv-a with a .gv.gv-chat gutter ahead of it — so
+# the row reads chat | chat … | outline | feed. Each column is a FULL chat pane: its own tab strip, its own
+# persisted active tab, drafts and scroll (the shim keys its state blob by ?col=), its own socket (the kernel
+# already serves N chat clients per dashboard and builds every watched tab first), its own grow weight
+# (--g-chatN, in the gutters' store). The set of open columns persists per browser (romp-chat-cols); a
+# reopened column number finds its state where it left it. Desktop only: the phone shows one pane at a time.
+# A dashboard-aimed focus (a feed click, a kernel focus, a revive prompt) reaches EVERY column's socket, so the
+# columns ask the shell which of them it belongs to (__rompChatTarget: the column already showing the session,
+# else the one the user last worked in, else the first) and the others stand down — render.ts focusIsOurs.
+_LANDING_SPLIT_JS = """
+(function(){
+var CK='romp-chat-cols',MAX=4,cols=[];   // cols: the open column numbers in ROW order (2, 3, …); MAX counts the first column too
+var row=document.querySelector('.row'),gva=document.getElementById('gv-a');
+if(!row||!gva)return;
+function mobile(){var b=document.getElementById('mtabs');try{return !!b&&getComputedStyle(b).display!=='none';}catch(e){return false;}}
+function save(){try{localStorage.setItem(CK,JSON.stringify(cols));}catch(e){}}
+function paneId(n){return 'chat-pane-'+n;}function frameId(n){return 'f-chat-'+n;}
+function frames(){var out=[document.getElementById('f-chat')];cols.forEach(function(n){out.push(document.getElementById(frameId(n)));});return out.filter(Boolean);}
+function frameOfWin(win){if(!win)return null;var fs=frames();for(var i=0;i<fs.length;i++){try{if(fs[i].contentWindow===win)return fs[i];}catch(e){}}return null;}
+function colOf(win){var f=frameOfWin(win);return f?String(f.getAttribute('data-col')||''):'';}
+function lastPane(){return cols.length?paneId(cols[cols.length-1]):'chat-pane';}
+function activeIn(f){try{var t=f.contentDocument&&f.contentDocument.querySelector('#tabs .tab.active[data-id]');return t?String(t.getAttribute('data-id')||''):'';}catch(e){return '';}}
+function focused(){var id=(window.__rompFocusedChatId&&window.__rompFocusedChatId())||'f-chat';return document.getElementById(id)||document.getElementById('f-chat');}
+// Which column a session-focus belongs to: the column already showing that session, else the column the
+// user last worked in, else the first. The panes ask this before acting on a dashboard-aimed focus.
+function target(sid){var fs=frames();if(sid){for(var i=0;i<fs.length;i++){if(activeIn(fs[i])===sid)return fs[i];}}return focused()||fs[0]||null;}
+function make(n,sid){var have=document.getElementById(frameId(n));if(have)return have;
+var g=document.createElement('div');g.className='gv gv-chat';g.id='gv-chat-'+n;
+var p=document.createElement('div');p.className='pane chat-col';p.id=paneId(n);p.setAttribute('data-col',String(n));
+p.style.flex='var(--g-chat'+n+',60) 1 0';
+var f=document.createElement('iframe');f.id=frameId(n);f.className='chat-col';f.setAttribute('data-col',String(n));f.src='/chat?col='+n;
+var x=document.createElement('div');x.className='col-x';x.title='Close this split';x.setAttribute('role','button');x.textContent='×';
+x.addEventListener('click',function(ev){ev.stopPropagation();close(n);});
+p.appendChild(f);p.appendChild(x);
+row.insertBefore(g,gva);row.insertBefore(p,gva);
+if(window.__rompRegisterPane)window.__rompRegisterPane(p.id,'chat'+n);
+if(window.__rompGrowFairIfNew)window.__rompGrowFairIfNew('chat'+n);else if(window.__rompGrowFair)window.__rompGrowFair('chat'+n);   // a fair width, never a sliver — and a dragged width survives a reload
+if(window.__rompGutter)window.__rompGutter(g.id,function(){var i=cols.indexOf(n);return i>0?paneId(cols[i-1]):'chat-pane';},p.id);
+if(window.__rompWireFocus)window.__rompWireFocus(f);if(window.__rompWireEsc)window.__rompWireEsc(f);
+try{window.dispatchEvent(new CustomEvent('romp-chat-cols',{detail:{frame:f,col:n,open:true}}));}catch(e){}   // palette-main wires its keys
+// opened ON a session: the pane takes a focus before its frames land (render.ts latches it), so the new
+// column shows that session and not whatever its state blob last held. `own` says this focus is addressed
+// to THIS column — the pane's arbitration (focusIsOurs) would otherwise hand it to a column already
+// showing the session, which is exactly the case when a tab is opened in a new split.
+if(sid)f.addEventListener('load',function(){try{f.contentWindow.postMessage({type:'focus',id:sid,own:true},'*');}catch(e){}},{once:true});   // the opening only: a later reload of the frame keeps the tab its own state names
+return f;}
+function canSplit(){return !mobile()&&cols.length+1<MAX;}
+// a refused split says why (the click-acknowledgement rule): the cap, or the phone's one-pane layout
+function refuse(){var why=mobile()?'The phone shows one pane at a time — no split here.':'Four chat columns at most — close one to open another.';
+try{if(window.__rompNotify)window.__rompNotify('warn',why);}catch(e){}return null;}
+function open(sid){if(!canSplit())return refuse();
+try{if(!document.body.classList.contains('po-chat')&&window.__rompPaneToggle)window.__rompPaneToggle('chat',true);}catch(e){}   // a split of a hidden chat group brings the group forward first
+var n=2;while(cols.indexOf(n)>=0)n++;cols.push(n);save();
+var f=make(n,sid||'');try{f.contentWindow.focus();}catch(e){}return f;}
+function close(n){var i=cols.indexOf(n);if(i<0)return;cols.splice(i,1);save();
+var p=document.getElementById(paneId(n)),g=document.getElementById('gv-chat-'+n);
+if(window.__rompUnregisterPane)window.__rompUnregisterPane(paneId(n));
+if(p)p.remove();if(g)g.remove();
+if(window.__rompColGone)window.__rompColGone(String(n));
+try{window.dispatchEvent(new CustomEvent('romp-chat-cols',{detail:{col:n,open:false}}));}catch(e){}
+var pf=document.getElementById(i>0?frameId(cols[i-1]):'f-chat');   // the ring moves to the column before it
+try{pf&&pf.contentWindow.focus();}catch(e){}}
+function closeFocused(){var f=focused(),c=f?colOf(f.contentWindow):'';if(!c&&cols.length)c=String(cols[cols.length-1]);if(c)close(Number(c));}
+window.__rompSplitChat=function(sid){return open(typeof sid==='string'?sid:'');};window.__rompCanSplit=canSplit;
+window.__rompCloseSplit=function(n){if(n===undefined)closeFocused();else close(Number(n));};
+window.__rompChatFrames=frames;window.__rompChatFrameIds=function(){return frames().map(function(f){return f.id;});};
+window.__rompChatPaneOf=function(fid){return fid==='f-chat'?'chat-pane':(String(fid).indexOf('f-chat-')===0?paneId(String(fid).slice(7)):null);};
+window.__rompLastChatPane=lastPane;window.__rompColOf=colOf;window.__rompFrameOfWin=frameOfWin;window.__rompChatTarget=target;
+// a chat pane's tab menu asks for a split holding that session (render.ts "Open in new split")
+window.addEventListener('message',function(e){var m=e&&e.data;if(!m||m.romp!=='openSplit')return;open(typeof m.sid==='string'?m.sid:'');});
+// the columns this browser had open come back, each on its own state
+try{var saved=JSON.parse(localStorage.getItem(CK)||'null');
+if(Array.isArray(saved)&&!mobile())saved.forEach(function(n){n=Number(n);if(n>=2&&n<100&&cols.indexOf(n)<0&&cols.length+1<MAX){cols.push(n);make(n,'');}});}catch(e){}
+})();
+"""
+
+
 def _stale_block(v):
     # the reload core first: the banner script below registers as its refused fallback and announces a reload
     return ("<style>" + _STALE_CSS + "</style>" + _STALE_HTML
@@ -49738,13 +49879,15 @@ def _landing():
             # list. Same bridge as settings: render.ts posts {romp:'picker',on} and the shell lifts the chat
             # iframe over the whole window (body.picker-open) so the overlay fills the screen and the list gets
             # the full height to scroll. Restored on close.
-            "body.picker-open #chat-pane{display:block!important}"
+            # …by CLASS since the split (2026-09-08): the column whose picker is up wears .lifted (the shell marks
+            # the sender frame and its pane), so a picker opened in a later column lifts THAT column, never the first.
+            "body.picker-open .pane.lifted{display:block!important}"
             # Height = --app-h (the shell's live VISIBLE height, fed by the top-level visualViewport),
             # not inset:0: the layout viewport ignores the phone keyboard, so a bottom-anchored lift sat
             # half behind it — and, sized this way, the keyboard opening/closing reaches the iframe as
             # its own resize event, which is what render.ts keys the picker's short-window fold on
             # (the user 2026-08-10, Chrome on a phone).
-            "body.picker-open #f-chat{display:block;position:fixed;left:0;right:0;top:0;height:var(--app-h,100dvh);z-index:200;background:transparent}"   # same transparency as the settings lift above
+            "body.picker-open iframe.lifted{display:block;position:fixed;left:0;right:0;top:0;height:var(--app-h,100dvh);z-index:200;background:transparent}"   # same transparency as the settings lift above
             # ── pane rail (the user 2026-06-24; rotated to a BOTTOM BAR the user 2026-07-05): a thin toolbar with
             # Chat / Timeline / Outline / Feed toggles. It used to be a vertical strip on the far LEFT; it now runs
             # HORIZONTALLY across the bottom of .col, BELOW the timeline band (last child of .col). Each toggle is
@@ -50221,6 +50364,17 @@ def _landing():
             # off hides it AND the now-orphaned gutters. Fixed order: chat, outline, feed, files. Timeline is the band.
             "#chat-pane{flex:var(--g-chat,60) 1 0}#fleet-pane{flex:var(--g-fleet,34) 1 0}#feed-pane{flex:var(--g-feed,40) 1 0}#files-pane{flex:var(--g-files,40) 1 0}"
             "body:not(.po-chat) #chat-pane{display:none}body:not(.po-fleet) #fleet-pane{display:none}body:not(.po-feed) #feed-pane{display:none}body:not(.po-files) #files-pane{display:none}"
+            # split chat columns (the user 2026-09-08): every column past the first is a client-made .pane.chat-col
+            # (_LANDING_SPLIT_JS) with its own /chat?col=N iframe and its own grow var, set inline. They ride the
+            # chat group's toggle: off hides every column and the chat|chat gutters with it.
+            "body:not(.po-chat) .chat-col,body:not(.po-chat) .gv-chat{display:none}"
+            # a split column's close: a small × in its top-right corner, shown on hover and while the column is
+            # focused, above the iframe and the focus ring (z 6) — the pane rail's action dress, not a new one
+            ".chat-col>.col-x{position:absolute;top:4px;right:6px;z-index:7;width:20px;height:20px;border-radius:5px;"
+            "background:rgba(30,30,30,0.85);color:#8a8a8a;font:600 13px/20px 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;"
+            "text-align:center;cursor:pointer;user-select:none;opacity:0;transition:opacity .12s,color .1s,background .1s}"
+            ".chat-col:hover>.col-x,.chat-col.pane-focused>.col-x{opacity:1}"
+            ".chat-col>.col-x:hover{color:#fff;background:rgba(255,255,255,0.12)}"
             ".row>.gv{flex:0 0 7px}"
             # gv-a sits chat|outline (only when both shown); gv-b sits (outline|chat)|feed, so it is the chat|feed gutter when
             # the outline is off; gv-c sits (feed|outline|chat)|files, hidden when files is off or no column is shown to its left.
@@ -50293,6 +50447,7 @@ def _landing():
             # the Outline (fleet) rides the tab bar like every other pane (the user 2026-07-11, who couldn't
             # access the outline view in the mobile UI — it was desktop-only before)
             "#chat-pane,#fleet-pane,#feed-pane,#files-pane,#tl-pane{display:contents!important}"
+            ".chat-col,.gv-chat{display:none!important}"   # one pane at a time here: split columns never show (nor are made, see _LANDING_SPLIT_JS)
             # reset the desktop iframe absolute-fill (the bare `iframe` reset below re-flows them as tab panes)
             ".pane>iframe{position:static;inset:auto;width:100%;height:100%}"
             "iframe{position:static;display:none;width:100%;height:100%;border:0}"
@@ -50443,6 +50598,8 @@ def _landing():
             # which silenced the bell's and the network glyph's on-state entirely in the light theme
             # (the user 2026-09-02) — restate `.on` at the winning specificity
             "body.theme-light .rail-act.on{color:var(--accent)}"
+            "body.theme-light .chat-col>.col-x{background:rgba(255,255,255,0.85);color:#5D574E}"
+            "body.theme-light .chat-col>.col-x:hover{color:#1F1E1D;background:rgba(0,0,0,0.06)}"
             "body.theme-light .gv{background:linear-gradient(90deg,transparent 3px,rgba(0,0,0,0.14) 3px,rgba(0,0,0,0.14) 4px,transparent 4px)}"
             "body.theme-light .gh{background:linear-gradient(180deg,transparent 3px,rgba(0,0,0,0.14) 3px,rgba(0,0,0,0.14) 4px,transparent 4px)}"
             "body.theme-light .gv::after,body.theme-light .gh::after{background:rgba(0,0,0,0.22)}"
@@ -50806,6 +50963,7 @@ def _landing():
             "<script>" + _LANDING_PUSH_JS + "</script>"
             "<script>" + _LANDING_REVEAL_JS + "</script>"
             "<script>" + _LANDING_COLLAPSE_JS + "</script>"
+            "<script>" + _LANDING_SPLIT_JS + "</script>"   # chat split columns (2026-09-08), after the controller it leans on
             # the command palette (Cmd/Ctrl+P) and the session quick-switcher hotkey (Cmd/Ctrl+O):
             # a dist bundle (ui/webview/palette-main.ts) like age-color-global above. Loaded last —
             # it reads the __romp* globals lazily, at command run time, so order is cosmetic.
@@ -54472,6 +54630,8 @@ class Handler(BaseHTTPRequestHandler):
         iid = (q.get("iid") or [""])[0]         # which page INSTANCE: a reconnect carrying it retires its old socket
         active = (q.get("active") or [""])[0]   # the tab this client is looking at → _push builds it FIRST
         reconnect = (q.get("reconnect") or [""])[0] == "1"   # the shim's own statement: this page opened a socket before and its bundle has said ready, with no ready waiting in its queue
+        col = (q.get("col") or [""])[0]         # which chat COLUMN of that dashboard (split screen, 2026-09-08) — for the logs;
+        #                                         the columns arbitrate a dashboard-aimed focus among themselves (render.ts focusIsOurs)
         self.send_response(101)
         self.send_header("Upgrade", "websocket")
         self.send_header("Connection", "Upgrade")
@@ -54507,6 +54667,8 @@ class Handler(BaseHTTPRequestHandler):
             # frame follows. Every redial of such a page is served whole, the cost before 2026-09-07, never a
             # false skeleton.
             client["reconnect"] = True
+        if col:
+            client["col"] = col
         _register_ws_client(client)
         if client.get("reconnect"):
             _pusher_wake.set()   # the reconnect is the event; without this it waited out the 0.5-3 s backstop
