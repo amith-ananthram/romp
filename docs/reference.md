@@ -2529,11 +2529,11 @@ session's whole CLI lifetime as one turn, a staircase of rows on each session).
 It reads the turn rows and the restart instants (each boot row of
 `restart-cuts.jsonl` gives its `firstServe`, the epoch the new kernel began
 serving; the row's own `t` is the settle, which can lag the first serve by
-minutes; an audit row's restart request counts only when no boot's first serve
-answers it within five minutes, since the dying kernel records results for
-seconds after both the request and its own cut row) and judges each session's
-first result after a restart, a result at the first-serve second being the old
-kernel's:
+minutes; nothing else is an instant: a restart request in the audit ledger is
+most often a parked one that no restart followed, and the dying kernel records
+results for seconds after both a request and its own cut row) and judges each
+session's first result strictly after a restart, a result at the first-serve
+second being the old kernel's:
 it is that process's cumulative when it stands at or above the previous
 cumulative plus the rows recorded between (a process's total grows by at least
 what its own rows recorded; a figure below that is a fresh process's first turn
@@ -2555,9 +2555,13 @@ bills (a comment thread's owner, the registry's `threadOf`), and the buckets'
 `key` split moves only for sessions the registry marks as API-key billed; the
 report says how many rows' split was left as recorded. The kernel may be
 running: `--apply` copies both files beside themselves first
-(`spend.json.bak-<stamp>`, `turns.jsonl.bak-<stamp>`), reads `spend.json`
-again right before the write and recomputes the fold on what is there, and
-rewrites `turns.jsonl` carrying every row appended since its read.
+(`spend.json.bak-<stamp>`, `turns.jsonl.bak-<stamp>`), rewrites `turns.jsonl`
+first carrying every row appended since its read, journals the rows' deltas
+(`spend-repair.jsonl`), then reads `spend.json` again and folds the deltas on
+what is there; a run that fails between the two writes leaves its deltas
+journaled and the next run folds them first. A standing correction of a day's
+first cumulative row is kept as it was made, so the day's later rows never
+rewrite it.
 
 ## Switches
 

@@ -70,37 +70,28 @@ def local_hour(t) -> str:
     return datetime.fromtimestamp(float(t)).strftime("%Y-%m-%dT%H")
 
 
-BOOT_ANSWER_S = 300                 # an audit row (a restart REQUEST) that a boot row answers within this is the request, not the restart
+REPAIR_JOURNAL = "spend-repair.jsonl"   # beside the ledger: each --apply's row deltas, then the mark that their buckets were folded
 
 
-def restart_instants(cuts: list, audit: list) -> list:
+def restart_instants(cuts: list, audit: list = None) -> list:
     """The moments a new kernel took over, sorted, deduplicated to the second: every restart-cuts BOOT row's
-    `firstServe` (the epoch the new kernel began serving; the row's `t` when it has none), plus an audit row whose
-    action asks for a restart only when no boot's first serve answers it within BOOT_ANSWER_S. Neither the audit row,
-    the cut row nor the boot row's own `t` is the instant: the audit row is the REQUEST, the cut row is written by the
-    DYING kernel after its drain while sessions are still unjoined (results land for seconds after both and are the old
-    kernel's, ordinary deltas), and the boot row's `t` is the SETTLE, written once the reconcile is done, which lagged
-    the first serve by three minutes on 2026-09-11 at 20:19Z while the re-billed first results landed from 20:19:44Z
-    (firstServe 20:19:39.99Z; the two earlier boots that day settled within 9 s, which hid it). A request taken for
-    the instant read a drain-time row as a fresh process's first result and the next real re-bill was corrected against
-    that small figure (33 rows in those gaps that day, one session's $1,030 lifetime read as a $1,025 turn). Every row
-    before the first-serve second is the old kernel's, a row at that very second too."""
-    boots, out = [], set()
+    `firstServe` (the epoch the new kernel began serving; the row's `t` when it has none). Nothing else is an
+    instant. The audit row is the REQUEST, and on the live ledgers most unanswered requests are PARKED ones (a quiet
+    deploy, no restart followed): taken for instants they made a session's next ordinary turn a first result, reset
+    the chain's baseline to that small figure and the next real re-bill was corrected to almost the whole lifetime
+    (the round-three review's HIGH); a request a boot answers adds nothing the boot does not; a restart with no boot
+    row wrote no first serve and re-billed nothing. The cut row is written by the DYING kernel after its drain while
+    sessions are still unjoined, so results land for seconds after it and are the old kernel's. The boot row's own
+    `t` is the SETTLE, which lagged the first serve by three minutes on 2026-09-11 at 20:19Z while the re-billed
+    first results landed from 20:19:44Z. Every row at or before the first-serve second is the old kernel's."""
+    out = set()
     for r in cuts:
         if not isinstance(r.get("t"), (int, float)):
             continue
         if "firstServe" in r or "settleS" in r or "bootSettled" in r:
             fs = r.get("firstServe")
-            t = int(fs) if isinstance(fs, (int, float)) and fs > 0 else int(r["t"])
-            boots.append(t); out.add(t)
-    for r in audit:
-        if isinstance(r.get("t"), (int, float)) and str(r.get("action") or "") in RESTART_ACTIONS:
-            t = int(r["t"])
-            if not any(t <= b <= t + BOOT_ANSWER_S for b in boots):
-                out.add(t)
+            out.add(int(fs) if isinstance(fs, (int, float)) and fs > 0 else int(r["t"]))
     return sorted(out)
-
-
 def _typical(usds: list) -> float:
     return float(statistics.median(usds)) if usds else 0.0
 
@@ -109,6 +100,30 @@ def _kernel_usd(r: dict) -> float:
     """The figure the kernel wrote for a row: usdRecorded where a run corrected it, else usd."""
     v = r.get("usdRecorded")
     return float(v) if isinstance(v, (int, float)) else float(r["usd"])
+
+
+def journal_pending(state: Path) -> list:
+    """Row deltas an earlier --apply wrote to turns.jsonl whose bucket write never completed: every `rows` entry of
+    the repair journal with no `buckets` entry naming it (low D of the round-three review: rows corrected and buckets
+    unfolded, with printed advice that did nothing). Returns the entries, oldest first."""
+    rows, folded = [], set()
+    for o in read_jsonl(state / REPAIR_JOURNAL):
+        if o.get("phase") == "rows" and isinstance(o.get("deltas"), list):
+            rows.append(o)
+        elif o.get("phase") == "buckets":
+            folded.add(o.get("ref"))
+    return [o for o in rows if o.get("t") not in folded]
+
+
+def journal_append(state: Path, entry: dict) -> None:
+    with open(state / REPAIR_JOURNAL, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + chr(10))
+
+
+def fold_deltas(spend: dict, deltas: list, day: str) -> dict:
+    """The journal's deltas folded into the buckets, the same fold as a plan's rows."""
+    p = {"day": day, "rows": [dict(d, current=0.0, corrected=float(d["delta"]), name=d.get("name") or "") for d in deltas]}
+    return apply_to_spend(spend, p)
 
 
 def read_text(path: Path) -> str:
@@ -193,14 +208,15 @@ def plan(turns: list, restarts: list, day: str, since=None, owners=None, keyed=N
     # keeps the figure the kernel wrote) is judged AGAIN on that figure, so a run over repaired rows finds nothing new
     # when the judgement stands and restores the row when it does not (a rule tightened after the first run brings a
     # zeroed turn back); a row written by a kernel that carries the CLI's cumulative (T354's fix) is never a step.
-    marked = {}
+    marked, rs_by_sid, step_ids_by_sid = {}, {}, {}
     for sid, rs in by_sid.items():
         # the session's typical turn: the median of its rows that are NOT a first result after a restart (those are a
         # cumulative or a fresh process's first turn, both atypical); the same figure decides the threshold and the
         # correction, and it does not move when a first row is corrected or restored, so a second run agrees with the first
         firsts, pt = set(), day_start
         for r in rs:
-            if any(pt < x < float(r["t"]) for x in restarts):    # exclusive: a row AT the boot's second is the old kernel's
+            if any(pt <= x < float(r["t"]) for x in restarts):   # a row AT the first-serve second is the old kernel's; the
+                #                                                       first row strictly after the instant is the first
                 firsts.add(id(r))
             pt = float(r["t"])
         # the provisional typical turn for the first-cumulative threshold: rows following no restart, on the KERNEL's
@@ -277,6 +293,7 @@ def plan(turns: list, restarts: list, day: str, since=None, owners=None, keyed=N
         step_ids = {id(x[0]) for x in steps}
         ordinary = [_kernel_usd(r) for r in rs if id(r) not in step_ids]   # every row that is not a step, the kernel's figure
         marked[sid] = (steps, restores, _typical(ordinary) or 0.0)
+        rs_by_sid[sid], step_ids_by_sid[sid] = rs, step_ids
         all_ordinary.extend(ordinary)
     day_typical = _typical(all_ordinary)
 
@@ -289,7 +306,11 @@ def plan(turns: list, restarts: list, day: str, since=None, owners=None, keyed=N
         typical = typical or day_typical
         for r, rec, cur, prev_cum, between, no_instant in steps:
             if prev_cum is None:
-                corrected, reason = typical, "the day's first cumulative row: a typical turn (median %.4f)" % typical
+                if isinstance(r.get("usdRecorded"), (int, float)):
+                    continue                   # a standing correction is kept: the day's later rows do not rewrite it (low C)
+                before = [_kernel_usd(x) for x in rs_by_sid[sid] if id(x) not in step_ids_by_sid[sid] and float(x["t"]) < float(r["t"])]
+                typical_before = _typical(before) or typical
+                corrected, reason = typical_before, "the day's first cumulative row: a typical turn (median %.4f of the session's earlier rows)" % typical_before
             else:
                 corrected = rec - prev_cum - sum(between)      # >= 0 by the bound that made this a step, to float noise
                 if corrected < 0:
@@ -488,7 +509,7 @@ def main(argv=None) -> int:
         return 2
     bad = []
     turns = read_jsonl(state / "turns.jsonl", bad)
-    restarts = restart_instants(read_jsonl(state / "restart-cuts.jsonl"), read_jsonl(state / "restart-audit.jsonl"))
+    restarts = restart_instants(read_jsonl(state / "restart-cuts.jsonl"))
     owners, keyed = registry_maps(state)
     spend_text = read_text(state / "spend.json")
     try:
@@ -506,10 +527,14 @@ def main(argv=None) -> int:
         sys.stdout.write(json.dumps(p, indent=1, sort_keys=True) + "\n")
     else:
         sys.stdout.write(report(p) + "\n")
+    pending = journal_pending(state)
+    if pending:
+        sys.stdout.write("%d delta(s) from %d earlier run(s) are journaled with their bucket write incomplete: --apply folds them first\n"
+                         % (sum(len(o["deltas"]) for o in pending), len(pending)))
     if not a.apply:
         sys.stdout.write("\ndry run: nothing written (pass --apply to write spend.json and turns.jsonl)\n")
         return 0
-    if not p["rows"]:
+    if not p["rows"] and not pending:
         sys.stdout.write("\nnothing to apply\n")
         return 0
     sp = state / "spend.json"
@@ -527,22 +552,37 @@ def main(argv=None) -> int:
     # turns.jsonl FIRST, then the buckets for the rows actually rewritten (low c of the review): a planned row the
     # file no longer holds as planned (the ledger moved) is left alone in both places, said below, and the next run
     # judges it afresh; before this the buckets moved for every planned row and a row the rewrite missed had its
-    # delta folded again on the next run
+    # delta folded again on the next run. The deltas are journaled between the two writes (low D): a failure there
+    # leaves rows corrected and buckets unfolded, and the next run folds the journaled deltas first
     done = apply_to_turns(state / "turns.jsonl", p)
     missed = len(p["rows"]) - len(done)
+    stamp_t = time.time()
+    deltas = [{"sid": c["sid"], "t": c["t"], "hour": c["hour"], "owner": c["owner"], "keyed": c["keyed"], "name": c["name"],
+               "delta": round(c["corrected"] - c["current"], 6)} for c in done]
+    if deltas:
+        journal_append(state, {"t": stamp_t, "phase": "rows", "day": day, "deltas": deltas})
     fresh_text = read_text(sp)
     try:
         base = parse_spend(fresh_text)
     except ValueError as e:
         sys.stderr.write("romp spend-repair: spend.json stopped parsing between the plan and the write (%s); the rows were "
-                         "rewritten, the buckets were not: run again once it parses\n" % e)
+                         "rewritten, the buckets were not: their deltas are journaled and fold on the next run once it parses\n" % e)
         return 2
     if fresh_text != spend_text:
         sys.stdout.write("spend.json moved since the plan's read (a result folded meanwhile): the fold was recomputed on the file as it stands\n")
+    if pending:
+        for o in pending:
+            base = fold_deltas(base, o["deltas"], str(o.get("day") or day))
+        sys.stdout.write("%d delta(s) from %d earlier run(s) whose bucket write did not complete were folded now\n"
+                         % (sum(len(o["deltas"]) for o in pending), len(pending)))
     new_spend = apply_to_spend(base, dict(p, rows=done))
     tmp = sp.with_name("spend.json.repair.tmp")
     tmp.write_text(json.dumps(new_spend), encoding="utf-8")
     os.replace(tmp, sp)
+    for o in pending:
+        journal_append(state, {"t": time.time(), "phase": "buckets", "ref": o["t"]})
+    if deltas:
+        journal_append(state, {"t": time.time(), "phase": "buckets", "ref": stamp_t})
     n_restore = sum(1 for c in done if c.get("restore"))
     sys.stdout.write("\napplied: %d turn row(s) corrected (usdRecorded keeps the old figure)%s, then spend.json rewritten for those\n"
                      % (len(done) - n_restore, ", %d restored to the kernel's figure" % n_restore if n_restore else ""))

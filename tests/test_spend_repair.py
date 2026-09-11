@@ -49,13 +49,13 @@ class Plan(unittest.TestCase):
         fixed = {(c["name"], c["t"]): c for c in p["rows"]}
         self.assertEqual(sorted(fixed), [("web", at(10, 40)), ("web", at(11, 10))], "the two lifetimes; api's modest row stands")
         first = fixed[("web", at(10, 40))]
-        self.assertEqual((first["recorded"], first["corrected"]), (507.0, 3.0), "the day's first cumulative row: the median of web's ordinary turns (3, 4, 2)")
+        self.assertEqual((first["recorded"], first["corrected"]), (507.0, 3.5), "the day's first cumulative row: the median of web's earlier ordinary turns (3, 4)")
         second = fixed[("web", at(11, 10))]
         self.assertEqual((second["recorded"], second["corrected"]), (515.0, 6.0), "515 less 507 less the $2 row between")
-        self.assertEqual(p["hours"]["%sT10" % DAY], {"before": 520.0, "after": 16.0})
+        self.assertEqual(p["hours"]["%sT10" % DAY], {"before": 520.0, "after": 16.5})
         self.assertEqual(p["hours"]["%sT11" % DAY], {"before": 515.0, "after": 6.0})
-        self.assertEqual(p["days"][DAY], {"before": 1035.0, "after": 22.0})
-        self.assertEqual(p["bySid"][A]["after"], 18.0)
+        self.assertEqual(p["days"][DAY], {"before": 1035.0, "after": 22.5})
+        self.assertEqual(p["bySid"][A]["after"], 18.5)
         self.assertEqual(p["bySid"][B], {"name": "api", "before": 4.0, "after": 4.0})
         self.assertEqual(p["restarts"], 2)
 
@@ -95,7 +95,7 @@ class Plan(unittest.TestCase):
         # and one that DOES descend from it takes it
         turns3 = [row(A, "web", at(9, 0), 2.0), row(A, "web", at(9, 40), 45.0), row(A, "web", at(10, 0), 3.0), row(A, "web", at(10, 40), 50.0)]
         got3 = {c["t"]: c["corrected"] for c in rp.plan(turns3, [at(9, 30), at(10, 30)], DAY)["rows"]}
-        self.assertEqual(got3, {at(9, 40): 2.5, at(10, 40): 2.0}, "45 is the first cumulative (the typical 2.5, the median of 2 and 3), 50 the next: 50 - 45 - 3")
+        self.assertEqual(got3, {at(9, 40): 2.0, at(10, 40): 2.0}, "45 is the first cumulative (the typical 2.0: the one row before it), 50 the next: 50 - 45 - 3")
         repaired = [turns[0], turns[1] | {"usd": 2.0, "usdRecorded": 300.0, "repairedT": 1}, turns[2]]
         p = rp.plan(repaired, [at(9, 30)], DAY)
         self.assertEqual([(c["current"], c["corrected"], c.get("restore")) for c in p["rows"]], [(2.0, 300.0, True)])
@@ -155,7 +155,7 @@ class Plan(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(rp.main(["--day", DAY, "--state", d]), 0)
         self.assertIn("dry run: nothing written", out.getvalue())
-        self.assertIn("web", out.getvalue()); self.assertIn("507.00 ->     3.00", out.getvalue())
+        self.assertIn("web", out.getvalue()); self.assertIn("507.00 ->     3.50", out.getvalue())
         self.assertEqual(json.loads((state / "spend.json").read_text()), spend, "a dry run leaves spend.json as it was")
         self.assertEqual(len((state / "turns.jsonl").read_text().splitlines()), 7)
         out = io.StringIO()
@@ -167,18 +167,18 @@ class Plan(unittest.TestCase):
         self.assertEqual(json.loads(baks[0].read_text()), spend, "the copy is the ledger before the write")
         self.assertEqual(len(baks[1].read_text().splitlines()), 7)
         after = json.loads((state / "spend.json").read_text())
-        self.assertEqual(after["hours"]["%sT10" % DAY]["usd"], 16.0)
-        self.assertEqual(after["hours"]["%sT10" % DAY]["bySid"][A]["usd"], 12.0)
+        self.assertEqual(after["hours"]["%sT10" % DAY]["usd"], 16.5)
+        self.assertEqual(after["hours"]["%sT10" % DAY]["bySid"][A]["usd"], 12.5)
         self.assertEqual(after["hours"]["%sT10" % DAY]["bySid"][B]["usd"], 4.0, "api untouched")
         self.assertEqual(after["hours"]["%sT10" % DAY]["turns"], 6, "turns and tokens stay")
         self.assertEqual(after["hours"]["%sT11" % DAY]["usd"], 6.0)
         self.assertEqual(after["hours"]["%sT11" % DAY]["key"]["usd"], 6.0, "the keyed split follows")
         self.assertEqual(after["hours"]["%sT11" % DAY]["bySid"][A]["key"]["usd"], 6.0)
-        self.assertEqual(after["days"][DAY]["usd"], 22.0)
-        self.assertEqual(after["days"][DAY]["bySid"][A]["usd"], 18.0)
+        self.assertEqual(after["days"][DAY]["usd"], 22.5)
+        self.assertEqual(after["days"][DAY]["bySid"][A]["usd"], 18.5)
         rows = [json.loads(l) for l in (state / "turns.jsonl").read_text().splitlines()]
         fixed = [r for r in rows if "usdRecorded" in r]
-        self.assertEqual([(r["usdRecorded"], r["usd"]) for r in fixed], [(507.0, 3.0), (515.0, 6.0)])
+        self.assertEqual([(r["usdRecorded"], r["usd"]) for r in fixed], [(507.0, 3.5), (515.0, 6.0)])
         self.assertEqual(len(rows), 7, "no row lost")
 
     def test_a_second_run_over_repaired_rows_finds_nothing_and_a_fixed_kernels_rows_are_never_steps(self):
@@ -242,10 +242,10 @@ class Plan(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(rp.main(["--day", DAY, "--state", d, "--apply", "--no-backup"]), 0)
         after = json.loads((state / "spend.json").read_text())
-        self.assertEqual(after["hours"]["%sT10" % DAY]["usd"], 7.5, "507 -> the typical 2.5 (the median of 3 and 2): 3 + 2.5 + 2")
-        self.assertEqual(after["hours"]["%sT10" % DAY]["bySid"][A]["usd"], 7.5, "the thread's correction reached its owner's row")
+        self.assertEqual(after["hours"]["%sT10" % DAY]["usd"], 8.0, "507 -> the typical 3.0 (the one row before it): 3 + 3 + 2")
+        self.assertEqual(after["hours"]["%sT10" % DAY]["bySid"][A]["usd"], 8.0, "the thread's correction reached its owner's row")
         self.assertEqual(after["hours"]["%sT11" % DAY]["bySid"][A]["usd"], 6.0)
-        self.assertEqual(after["days"][DAY]["bySid"][A]["usd"], 13.5)
+        self.assertEqual(after["days"][DAY]["bySid"][A]["usd"], 14.0)
         self.assertEqual(after["hours"]["%sT10" % DAY]["key"]["usd"], 512.0, "no apiKeyAuth on record: the key split stands as recorded")
         self.assertEqual(after["days"][DAY]["bySid"][A]["key"]["usd"], 1027.0)
         self.assertIn("2 corrected row(s) belong to sessions the registry does not mark as API-key billed: their buckets' key split is left as recorded", out.getvalue())
@@ -299,7 +299,7 @@ class Plan(unittest.TestCase):
         self.assertIn("spend.json moved since the plan's read", out.getvalue())
         after = json.loads((state / "spend.json").read_text())
         self.assertEqual(after["hours"]["%sT11" % DAY]["usd"], 15.0, "524 less the 509 correction: the $9 result kept")
-        self.assertEqual(after["days"][DAY]["usd"], 31.0)
+        self.assertEqual(after["days"][DAY]["usd"], 31.5)
 
     def test_an_unparseable_ledger_is_refused_and_a_torn_turn_line_is_counted(self):
         d = tempfile.mkdtemp()
@@ -329,12 +329,67 @@ class Plan(unittest.TestCase):
         restarts = [at(9, 30), at(11, 0)]
         p = rp.plan(turns, restarts, DAY)
         got = {c["t"]: c["corrected"] for c in p["rows"]}
-        self.assertEqual(got, {at(9, 40): 3.0, at(10, 30): 6.0, at(11, 10): 20.0}, "the typical 3.0: the median of 2, 3 and 4")
+        self.assertEqual(got, {at(9, 40): 2.5, at(10, 30): 6.0, at(11, 10): 20.0}, "the typical 2.5: the median of the rows before it, 2 and 3")
         repaired = [dict(r) for r in turns]
         for r in repaired:
             if r["t"] in got:
                 r["usdRecorded"], r["usd"] = r["usd"], got[r["t"]]
         self.assertEqual(rp.plan(repaired, restarts, DAY)["rows"], [], "a second run moves nothing")
+
+    def test_a_standing_first_cumulative_correction_is_kept_as_the_day_grows(self):
+        # low C of round three: the correction median grew with the day, and a later atypical row rewrote a standing
+        # correction on a re-run; a new correction takes the median of the session's rows before it, a standing one is kept
+        turns = [row(A, "web", at(9, 0), 2.0), row(A, "web", at(9, 10), 3.0), row(A, "web", at(9, 40), 300.0),
+                 row(A, "web", at(10, 0), 4.0), row(A, "web", at(10, 40), 320.0)]
+        restarts = [at(9, 30), at(10, 30)]
+        p = rp.plan(turns, restarts, DAY)
+        got = {c["t"]: c["corrected"] for c in p["rows"]}
+        self.assertEqual(got, {at(9, 40): 2.5, at(10, 40): 16.0}, "the median of the rows before it, 2 and 3")
+        repaired = [dict(r) for r in turns]
+        for r in repaired:
+            if r["t"] in got:
+                r["usdRecorded"], r["usd"] = r["usd"], got[r["t"]]
+        later = repaired + [row(A, "web", at(11, 0), 40.0)]          # an atypical ordinary turn later in the day
+        self.assertEqual(rp.plan(later, restarts, DAY)["rows"], [], "a re-run moves nothing: the standing 2.5 is kept")
+
+    def test_a_failure_between_the_two_writes_is_recovered_from_the_journal(self):
+        # low D of round three: rows corrected and buckets unfolded, and the printed advice did nothing
+        d = tempfile.mkdtemp()
+        state = Path(d)
+        (state / "turns.jsonl").write_text("".join(json.dumps(r) + chr(10) for r in self.turns))
+        (state / "restart-cuts.jsonl").write_text("".join(json.dumps({"t": t, "firstServe": t, "settleS": 0.1, "pid": 1}) + chr(10) for t in self.restarts))
+        spend = {"hours": {"%sT10" % DAY: {"usd": 520.0, "turns": 6, "bySid": {A: {"usd": 516.0}}},
+                           "%sT11" % DAY: {"usd": 515.0, "turns": 1, "bySid": {A: {"usd": 515.0}}}},
+                 "days": {DAY: {"usd": 1035.0, "turns": 7, "bySid": {A: {"usd": 1031.0}}}}}
+        (state / "spend.json").write_text(json.dumps(spend))
+        import io, contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(rp.main(["--day", DAY, "--state", d, "--apply", "--no-backup"]), 0)
+        journal = [json.loads(l) for l in (state / rp.REPAIR_JOURNAL).read_text().splitlines()]
+        self.assertEqual([j["phase"] for j in journal], ["rows", "buckets"], "the deltas, then the mark that their buckets were folded")
+        self.assertEqual(journal[1]["ref"], journal[0]["t"])
+        # the failure: the buckets never folded (the ledger as before the fold, the journal without its mark)
+        (state / "spend.json").write_text(json.dumps(spend))
+        (state / rp.REPAIR_JOURNAL).write_text(json.dumps(journal[0]) + chr(10))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(rp.main(["--day", DAY, "--state", d]), 0)
+        self.assertIn("2 delta(s) from 1 earlier run(s) are journaled with their bucket write incomplete: --apply folds them first", out.getvalue())
+        self.assertEqual(json.loads((state / "spend.json").read_text()), spend, "a dry run still writes nothing")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(rp.main(["--day", DAY, "--state", d, "--apply", "--no-backup"]), 0)
+        self.assertIn("2 delta(s) from 1 earlier run(s) whose bucket write did not complete were folded now", out.getvalue())
+        after = json.loads((state / "spend.json").read_text())
+        self.assertEqual((after["hours"]["%sT10" % DAY]["usd"], after["hours"]["%sT11" % DAY]["usd"], after["days"][DAY]["usd"]), (16.5, 6.0, 22.5))
+        journal = [json.loads(l) for l in (state / rp.REPAIR_JOURNAL).read_text().splitlines()]
+        self.assertEqual([j["phase"] for j in journal], ["rows", "buckets"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(rp.main(["--day", DAY, "--state", d, "--apply", "--no-backup"]), 0)
+        self.assertIn("nothing to apply", out.getvalue())
+        self.assertEqual(json.loads((state / "spend.json").read_text()), after, "and a third run folds nothing again")
 
     def test_the_rows_are_written_first_and_the_buckets_follow_only_the_rows_found(self):
         # low c: a planned row the file no longer holds as planned (the ledger moved) is left alone in both places
@@ -363,7 +418,7 @@ class Plan(unittest.TestCase):
         self.assertIn("1 turn row(s) corrected (usdRecorded keeps the old figure), then spend.json rewritten for those", out.getvalue())
         self.assertIn("1 planned row(s) were not in turns.jsonl as planned (the ledger moved): left as they are in both files", out.getvalue())
         after = json.loads((state / "spend.json").read_text())
-        self.assertEqual(after["hours"]["%sT10" % DAY]["usd"], 16.0, "the found row's bucket moved")
+        self.assertEqual(after["hours"]["%sT10" % DAY]["usd"], 16.5, "the found row's bucket moved")
         self.assertEqual(after["hours"]["%sT11" % DAY]["usd"], 515.0, "the missed row's bucket did not")
         rows = {r["t"]: r for r in (json.loads(l) for l in (state / "turns.jsonl").read_text().splitlines())}
         self.assertEqual(rows[at(11, 10)]["usd"], 515.0); self.assertNotIn("usdRecorded", rows[at(11, 10)])
@@ -372,12 +427,11 @@ class Plan(unittest.TestCase):
         cuts = [{"t": 100, "cutTurns": [], "reason": "main-converge"},                       # the dying kernel's cut row: not an instant
                 {"t": 290, "firstServe": 107.2, "settleS": 0.1, "pid": 1, "bootSettled": True},   # the new kernel: its FIRST SERVE is the instant, not its settle (t), which lagged three minutes here
                 {"t": 400, "settleS": 0.1, "pid": 2}]                                          # a boot row with no firstServe: its t
-        audit = [{"t": 100, "action": "p2p-update"},                # the request the first serve at 107 answers: not an instant of its own
-                 {"t": 200, "action": "manager-sigterm"},           # no first serve within five minutes... the boot at 400 is 200 s later: answered
-                 {"t": 900, "action": "manager-sigterm"},           # nothing answers this one: kept (a crash's row-less restart)
-                 {"t": 250, "action": "quiet-window"}, {"t": 260, "action": "bootSettled"}]     # neither a restart action
-        self.assertEqual(rp.restart_instants(cuts, audit), [107, 400, 900])
-        self.assertEqual(rp.plan([], rp.restart_instants(cuts, audit), "1970-01-01")["restarts"], 3, "the report counts instants, one per restart")
+        audit = [{"t": 100, "action": "p2p-update"}, {"t": 200, "action": "manager-sigterm"},
+                 {"t": 900, "action": "manager-sigterm"}]           # requests, answered or not: never instants (a parked request is no restart)
+        self.assertEqual(rp.restart_instants(cuts, audit), [107, 400], "boot rows alone (M1, round three): the request at 900 that nothing answers is a parked one")
+        self.assertEqual(rp.restart_instants(cuts), [107, 400])
+        self.assertEqual(rp.plan([], rp.restart_instants(cuts), "1970-01-01")["restarts"], 2, "the report counts instants, one per restart")
 
     def test_a_result_the_old_kernel_recorded_during_its_drain_is_an_ordinary_turn_not_a_fresh_process(self):
         # web: 300 (its lifetime after the 9:30 boot), then at 9:59:53 the restart is REQUESTED and the old kernel records
@@ -387,21 +441,26 @@ class Plan(unittest.TestCase):
         cuts = [{"t": at(9, 30), "firstServe": at(9, 30), "settleS": 0.1, "pid": 1}, {"t": at(10, 0) - 1, "cutTurns": [], "reason": "p2p-update"},
                 {"t": at(10, 0), "firstServe": at(10, 0), "settleS": 0.1, "pid": 2}]
         audit = [{"t": at(9, 30) - 7, "action": "manager-sigterm"}, {"t": at(10, 0) - 7, "action": "manager-sigterm"}]
-        restarts = rp.restart_instants(cuts, audit)
+        restarts = rp.restart_instants(cuts)
         self.assertEqual(restarts, [at(9, 30), at(10, 0)], "boot rows alone: the cut row a second before the boot is the dying kernel's")
         p = rp.plan(turns, restarts, DAY)
         got = {c["t"]: c["corrected"] for c in p["rows"]}
         self.assertEqual(got[at(10, 5)], 15.0, "320 less 300 less the $5 drain-time turn between")
         self.assertNotIn(at(10, 0) - 5, got)
-        # a result recorded AT the boot's second is the old kernel's too (M1: exclusive on the instant's second)
+        # a result recorded AT the first-serve second is the old kernel's, and the row after it is the first (the round-three
+        # MEDIUM: open at both ends, the interval let a row on the boot's second swallow the instant, the plan came out empty)
         at_boot = [turns[0], turns[1], row(A, "web", at(10, 0), 5.0), turns[3]]
-        self.assertEqual({c["t"]: c["corrected"] for c in rp.plan(at_boot, restarts, DAY)["rows"]}[at(10, 5)], 15.0)
+        p2 = rp.plan(at_boot, restarts, DAY)
+        got2 = {c["t"]: c for c in p2["rows"]}
+        self.assertEqual({t: c["corrected"] for t, c in got2.items()}, {at(9, 40): 2.0, at(10, 5): 15.0},
+                         "the $5 at the boot second is between; 320 is the first and a step descending from 300, which is the day's first cumulative (the one row before it, 2.0)")
+        self.assertNotIn("no restart instant", got2[at(10, 5)]["reason"], "through the instant, not the no-instant branch")
         # the ledger as an earlier run with the request as its instant left it: the $5 row stands (it was 'fresh'), the
         # 320 row corrected to 315, the first cumulative to 2.0 (then the only row following no restart); judged again,
         # 315 becomes 15 and the typical turn is the median of 2 and the $5 turn now counted ordinary
         repaired = [turns[0], turns[1] | {"usd": 2.0, "usdRecorded": 300.0}, turns[2], turns[3] | {"usd": 315.0, "usdRecorded": 320.0}]
         again = {c["t"]: (c["current"], c["corrected"]) for c in rp.plan(repaired, restarts, DAY)["rows"]}
-        self.assertEqual(again, {at(9, 40): (2.0, 3.5), at(10, 5): (315.0, 15.0)})
+        self.assertEqual(again, {at(10, 5): (315.0, 15.0)}, "315 becomes 15; the standing 2.0 on the first cumulative is kept as it was made (low C)")
 
 
 if __name__ == "__main__":
