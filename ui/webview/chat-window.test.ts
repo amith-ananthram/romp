@@ -60,4 +60,12 @@ test("render.ts speaks proto 2 at ready and routes the four proto-2 frames throu
   for (const fn of ["indexOfUuid", "prependHead", "appendMore", "mergeWindow", "historyLabel", "keyOf"]) assert.ok(RENDER.includes(fn + "("), fn);   // chatTail truncates by indexOfUuid in place
   assert.ok(RENDER.includes('m.type === "chatWindow"') && RENDER.includes('m.type === "chatMore"'), "the two new frames are dispatched");
   assert.ok(RENDER.includes('type: "loadAround"') && RENDER.includes('type: "loadNewer"'), "and the two new requests are posted");
+  for (const s of ['updateLivePaused(', 'reattachLive(', '"live-paused"', 'requestFullSession(sid, "reattach")']) assert.ok(RENDER.includes(s), s);   // the detached client's way back
+  assert.ok(RENDER.includes("r.mode === \"merge\"") && RENDER.includes("mergedRun"), "a full frame overlapping the held run merges into it");
+  assert.ok(RENDER.includes('requestFullSession(msg.id, "gap"); return; }   // the anchor is gone'), "a missing chatHead is a gap");
+});
+
+test("federation tells every remote kernel the chat protocol on its socket's open", () => {
+  const FED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "federation.ts"), "utf8");
+  assert.ok(FED.includes('ws.send(JSON.stringify({ type: "ready", proto: 2 }))'), "the remote socket's open sends the ready with the protocol");
 });

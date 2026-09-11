@@ -1652,15 +1652,25 @@ announces `chatProto2` in its `caps`:
   moreBefore, moreAfter}` in one round trip (`missing: true` when the anchor is
   in no page); a window with `moreAfter` leaves the client DETACHED: it gets no
   delta until `loadNewer {id, after: <newest resident uuid>}`, answered by
-  `chatMore {id, afterUuid, events, more}`, reaches the tail (`more: false`), or
-  a `needFull` re-attaches it; a reconnect's `ready` starts a fresh base.
+  `chatMore {id, afterUuid, events, more}`, reaches the tail (`more: false`,
+  the reply then carries the frame's status and ledger), or a `needFull`
+  re-attaches it (the page's "Return to live" strip and its jump chip ask for
+  one; a full frame overlapping the held run merges into it, so the pages the
+  reader walked stay); a reconnect's `ready` starts a fresh base. A window that
+  reaches the run the client already holds keeps it attached (`connected`). A
+  detached run whose edges left the transcript (a `/clear`, a fork, a rewind)
+  gets a full frame; a `missing` reply on a held key is a gap the page answers
+  with `needFull`. A reply that reaches the head carries the head cards first.
+  Every slice of the list is turn-aligned. A remote kernel learns the protocol
+  from a `ready` the page sends on each host socket's open.
 
 The pages before the render floor are rendered on demand from the parse's
 lazy atoms (a page hydrates its own turns), memoized in a bounded cache
 (`/perf` `chatPages`), and equal the whole build's slice byte for byte
-(`tests/test_chat_pages.py`). Every event carries a uuid unique within its
-list; the notes romp adds (a retry recovered, an effort change) carry
-synthetic ones.
+(`tests/test_chat_pages.py`). Every event carries a uuid, and a
+`key` unique within its list (the uuid, or `uuid#n` for a second event built
+from one record); the notes romp adds (a retry recovered, an effort change, an
+orphan reply) carry synthetic uuids keyed by their second and ordinal.
 
 ## Browser-side performance telemetry
 

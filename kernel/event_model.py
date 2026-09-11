@@ -4429,8 +4429,11 @@ def _asm_restore(key, leaf_path, candidate_files, links, rompuuid, postal_index,
 
 
 def _hydrate_one(a, rec):
-    """Fill a lazy atom's body fields from its record, the way the emit built them."""
-    lz = a["lazy"]
+    """Fill a lazy atom's body fields from its record, the way the emit built them. An atom another thread finished
+    meanwhile (its marker gone) is left as it is (review find C)."""
+    lz = a.get("lazy")
+    if lz is None:
+        return
     k = lz["k"]
     if k == "a":
         a["message"] = _norm_message(rec.get("message"))
@@ -4480,7 +4483,9 @@ def hydrate(atoms, rompuuid=None, by=None):
             if hit is not None:
                 _HYDRATED.pop(u, None); _HYDRATED[u] = hit      # a served body is a used one: to the LRU tail
         if hit is not None:
-            _hydrate_one(a, hit[0]); filled += 1
+            if a.get("lazy") is not None:                       # another thread may have finished it since the filter (C)
+                _hydrate_one(a, hit[0])
+            filled += 1
             continue
         sid = a.get("session_id") or rompuuid
         path = (_LAZY_FILES.get(str(sid)) or {}).get(a.get("fsid"))

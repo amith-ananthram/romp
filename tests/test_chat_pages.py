@@ -32,6 +32,24 @@ SID = "aaaaaaaa-4444-4222-8333-444444444444"
 NOW = 1781200000
 
 
+def _last_uuid(recs):
+    return next((r["uuid"] for r in reversed(recs) if r.get("uuid")), None)
+
+
+def compacting_variant(recs, tag):
+    """A golden scenario's records followed by a compaction and two more turns (the stage 4a harness's shape, copied here:
+    importing that module re-executes the event model into this process and resets its registries)."""
+    t1 = max((em.parse_z(r.get("timestamp")) or 0) for r in recs if r.get("timestamp")) + 600
+    b, sm = "b_%s" % tag, "s_%s" % tag
+    more = [G.compact_line(t1, b, _last_uuid(recs)),
+            G.compact_summary_line(t1 + 1, sm, b),
+            G.uline(t1 + 10, "after the compaction, what remains?", "u_%s_1" % tag, sm),
+            G.aline(t1 + 20, "the cap and the retry budget remain", "a_%s_1" % tag, "u_%s_1" % tag, stop="end_turn"),
+            G.uline(t1 + 30, "then close them out", "u_%s_2" % tag, "a_%s_1" % tag),
+            G.aline(t1 + 40, "closing both", "a_%s_2" % tag, "u_%s_2" % tag, stop="end_turn")]
+    return list(recs) + more
+
+
 def _strip(events):
     return json.loads(json.dumps(events, default=lambda o: "<unserializable>"))
 
@@ -137,6 +155,76 @@ class PagesEqualTheWhole(Harness):
                 self.assertEqual(self.pages(floor, size) + tail, whole, "pages of %d turns plus the tail equal the whole" % size)
         self.assertGreater(km._PAGE_STATS["misses"], 0)
 
+    def _with_notes(self, turns=120, compact_every=25):
+        """The fixture with a model stamp on every reply and a states log of romp's notes between the turns: a retry
+        recovered, a give-up, an effort change, a command gesture and two orphan replies (one the transcript kept: deduped;
+        one it did not: rendered), several stamped one second before a page boundary's first atom."""
+        recs = transcript(NOW - 86400, turns=turns, compact_every=compact_every)
+        for r in recs:
+            if r.get("type") == "assistant":
+                r["message"]["model"] = "claude-test-1"
+        self.write(recs)
+        t_of = {}                                                          # turn index (typed prompts in order) -> its t
+        k = 0
+        for r in recs:
+            if r.get("type") == "user" and not r.get("isCompactSummary") and r.get("promptSource") == "typed":
+                t_of[k] = em.parse_z(r["timestamp"]); k += 1
+        kept_text = next(r for r in recs if r.get("type") == "assistant")["message"]["content"][0]["text"]
+        rows = [{"t": int(t_of[3]) + 30, "retriesRecovered": 2},
+                {"t": int(t_of[16]) - 1, "retriesGaveUp": 5, "errorKind": "overloaded"},     # a page boundary (16-turn pages)
+                {"t": int(t_of[32]) - 1, "effortApplied": "high"},
+                {"t": int(t_of[48]) - 1, "cmdGesture": "/compact"},
+                {"t": int(t_of[64]) - 1, "orphanReply": {"uuid": "orph-1", "text": "a reply the transcript never kept"}},
+                {"t": int(t_of[7]) + 5, "orphanReply": {"uuid": "orph-2", "text": kept_text}},
+                {"t": int(t_of[80]) - 1, "effortApplied": "low"}]
+        (jd.STATE / "states" / (SID + ".jsonl")).write_text("".join(json.dumps(r) + "\n" for r in rows))
+        return recs
+
+    def test_pages_with_notes_between_the_turns_equal_the_whole_and_the_walks_cross_them(self):
+        """Review find N: the fixtures carried no notes, so the cursors, the note ordinals and the orphan dedup ran on empty
+        inputs. Notes at page boundaries are a page's first event; the uuid walks resolve them (review find B)."""
+        self._with_notes()
+        whole = self.whole()
+        kinds = [e.get("kind") for e in whole]
+        for k in ("retried", "retryGaveUp", "effortApplied", "cmdGesture"):
+            self.assertIn(k, kinds, k)
+        # the parse synthesizes an orphan reply's atom from the same row when the transcript lacks the text
+        # (event_model.synthesize_orphans), so orph-1's note is deduped against that atom, which sits at the note's time;
+        # orph-2's text is turn 0's reply, far from the note's time, so under the near-window rule the note renders
+        orphaned = [e for e in whole if e.get("orphaned")]
+        self.assertEqual([e.get("orphanOf") for e in orphaned], ["orph-2"], "near texts dedup; a copy far in time does not")
+        self.assertTrue(any(e.get("kind") == "assistant" and not e.get("orphaned") and (e.get("md") or "").startswith("a reply the transcript never kept") for e in whole))
+        self.document()
+        m = self.restored()
+        floor = m["floor"]; tail = _strip(m["events"])
+        for size in (1, 3, 7, 16, 64):
+            with self.subTest(page_turns=size):
+                self.assertEqual(self.pages(floor, size) + tail, whole, "notes interleaved the same way in pages of %d turns" % size)
+        # the uuid walks cross the notes: older to the head from the tail, then around a note and forward to the tail
+        c, sent = _client()
+        km._send_chat_locked(c, m, None, 0, False)
+        resident = list(sent[-1]["events"]); oldest = resident[0]["uuid"]
+        for _ in range(100):
+            r = km._chat_history_reply(SID, {"type": "loadOlder", "id": SID, "before": oldest}, NOW)
+            self.assertNotIn("missing", r, "a page's first event is a note here: it resolves by its second")
+            resident = r["events"] + resident
+            if not r["more"]:
+                break
+            oldest = resident[0].get("key") or resident[0]["uuid"]
+        self.assertEqual(_strip(resident), self.head_cards + whole)
+        note = next(e for e in whole if e.get("kind") == "retryGaveUp")
+        w = km._chat_history_reply(SID, {"type": "loadAround", "id": SID, "uuid": note["uuid"]}, NOW)
+        self.assertNotIn("missing", w); self.assertIn(note["uuid"], [e["uuid"] for e in w["events"]])
+        held = list(w["events"])
+        for _ in range(100):
+            n = km._chat_history_reply(SID, {"type": "loadNewer", "id": SID, "after": held[-1].get("key") or held[-1]["uuid"]}, NOW)
+            self.assertNotIn("missing", n)
+            held = held + n["events"]
+            if not n["more"]:
+                break
+        full = [e["uuid"] for e in self.head_cards + whole]
+        self.assertEqual([e["uuid"] for e in held], full[full.index(held[0]["uuid"]):])
+
     def test_a_page_hydrates_its_own_turns_and_the_floored_build_the_tails(self):
         recs = transcript(NOW - 86400, turns=120, compact_every=25)
         self.write(recs)
@@ -155,10 +243,10 @@ class PagesEqualTheWhole(Harness):
         self.assertLess(floor, len(em.parse_session(self.leaf, rompuuid=SID, candidate_files=[self.leaf], states=None, postal_log=[], now=NOW)["turns"]))
 
     def test_every_golden_compaction_scenario_pages_equal_its_whole(self):
-        for name in ("compaction_atom", "compaction_broken_stitch", "manual_compact_detached"):
+        for name in sorted(G.SINGLE_FILE):                                 # every single-file scenario made to compact (stage 4a)
             with self.subTest(scenario=name):
                 records, _ = G.SINGLE_FILE[name]
-                self.write(records())
+                self.write(compacting_variant(records(), name[:6]) if name not in ("compaction_atom", "compaction_broken_stitch", "manual_compact_detached") else records())
                 whole = self.whole()
                 self.document()
                 m = self.restored()
@@ -203,9 +291,9 @@ class RenderFloor(Harness):
         self.document()
         m = self.restored()
         cut = m["floor"]; self.assertGreater(cut, 0)
-        tree = em.parse_session(self.leaf, rompuuid=SID, candidate_files=[self.leaf], states=None, postal_log=[], now=NOW)
+        tree = km._parse(self.leaf, SID, NOW)                            # the STORE's tree, the one build_session reads
         self.assertEqual(tree.get("cutTurn"), cut)
-        em.hydrate(tree, SID)                                             # what the judges' first pass does
+        em.hydrate(tree, SID)                                             # what the judges' first pass does, to that tree
         self.assertEqual(sum(1 for t in tree["turns"] for a in t["atoms"] if a.get("lazy") is not None), 0, "no marker left")
         km._live_scope.chat_floor0 = False
         try:
@@ -214,6 +302,13 @@ class RenderFloor(Harness):
             km._live_scope.chat_floor0 = None
         self.assertEqual(m2["floor"], cut, "the floor stands after the hydration")
         self.assertEqual([e["uuid"] for e in m2["events"]], [e["uuid"] for e in m["events"]])
+        saved = tree.pop("cutTurn")                                       # cutTurn is load-bearing: without it the markers, now gone,
+        try:                                                              #  would put the floor at turn 0
+            km._live_scope.chat_floor0 = False
+            m3 = km.build_session(SID, NOW + 2, {})
+        finally:
+            km._live_scope.chat_floor0 = None; tree["cutTurn"] = saved
+        self.assertEqual(m3["floor"], 0, "the parse's cutTurn is what holds the floor")
 
 
     def test_the_floor_drops_while_a_proto1_client_is_connected_and_climbs_back_when_it_leaves(self):
@@ -315,6 +410,101 @@ class Proto2Wire(Harness):
         d = sent[-1]
         self.assertEqual((d["type"], d["afterUuid"], [e["uuid"] for e in d["events"]]), ("chatTail", m["events"][-1]["uuid"], ["u_next"]))
 
+    def test_the_base_rule_over_a_list_longer_than_the_wire_tail_and_a_floor_move(self):
+        """Review find N: the earlier fixture's floor'd list fit the wire tail whole (pf 0). Here the tail is longer: a change
+        just before the held first is a full frame, just after it a delta from the change; a floor move (an index client
+        connecting) rebuilds the list from turn 0 and is a full frame."""
+        recs = transcript(NOW - 86400, turns=600, compact_every=150)      # the cut near turn 450: ~300 events after it
+        self.write(recs); self.document(); m = self.restored()
+        evs = m["events"]; self.assertGreater(len(evs), km.WIRE_TAIL)
+        c, sent = _client()
+        km._send_chat_locked(c, m, None, 0, False)
+        f = sent[-1]; pf = len(evs) - km.WIRE_TAIL
+        self.assertEqual(f["firstUuid"], evs[pf].get("key") or evs[pf]["uuid"])
+        m2 = dict(m); e2 = list(evs); e2[pf - 1] = dict(e2[pf - 1], md="edited before the held first"); m2["events"] = e2
+        km._send_chat_locked(c, m2, None, pf - 1, False)
+        self.assertEqual(sent[-1]["type"], "session", "a change before the held first: a full tail frame")
+        m3 = dict(m); e3 = list(evs); e3[pf + 1] = dict(e3[pf + 1], md="edited inside"); m3["events"] = e3
+        km._send_chat_locked(c, m3, None, pf + 1, False)
+        d = sent[-1]
+        self.assertEqual((d["type"], d["afterUuid"]), ("chatTail", evs[pf].get("key") or evs[pf]["uuid"]), "a change inside: a delta from it")
+        self.assertEqual(len(d["events"]), len(evs) - pf - 1)
+        km._live_scope.chat_floor0 = True                                  # an index client connected: the floor drops to 0
+        try:
+            m0 = km.build_session(SID, NOW + 1, {})
+        finally:
+            km._live_scope.chat_floor0 = None
+        km._send_chat_locked(c, m0, None, 0, False)
+        self.assertEqual((sent[-1]["type"], sent[-1]["floor"]), ("session", 0), "a floor move is a full frame")
+
+    def test_a_detached_base_whose_edges_left_the_transcript_gets_a_full_frame(self):
+        """Review find A: a detached client whose run is gone (a /clear, a fork, a rewind) was never sent anything again."""
+        whole, m = self._restored_tail()
+        c, sent = _client()
+        c["echat"][SID] = {"first": "gone-1", "last": "gone-2", "detached": True}
+        km._send_chat_locked(c, m, None, len(m["events"]) - 1, False)
+        self.assertEqual(sent[-1]["type"], "session", "both edges gone from the transcript: a full frame re-bases the client")
+        self.assertFalse(c["echat"][SID]["detached"])
+        c["echat"][SID] = {"first": whole[3]["uuid"], "last": whole[30]["uuid"], "detached": True}   # a live pre-floor run
+        n = len(sent)
+        km._send_chat_locked(c, m, None, len(m["events"]) - 1, False)
+        self.assertEqual(len(sent), n, "a detached run the transcript still holds gets no delta")
+
+    def test_a_window_that_reaches_the_held_run_keeps_the_client_attached(self):
+        """Review find G: a window overlapping the resident tail merges into one run through the live tail."""
+        whole, m = self._restored_tail()
+        c, sent = _client()
+        km._send_chat_locked(c, m, None, 0, False)
+        base = c["echat"][SID]
+        anchor = whole[-len(m["events"]) - 3]["uuid"]                        # just before the floor'd list: the window reaches it
+        r = km._chat_history_reply(SID, {"type": "loadAround", "id": SID, "uuid": anchor}, NOW, base=base)
+        self.assertTrue(r["connected"], "the window holds the client's first: one run through the tail")
+        self.assertEqual((r["_base"]["detached"], r["_base"]["last"]), (False, base["last"]))
+
+    def test_in_list_windows_are_turn_aligned_at_floor_zero_and_the_walks_meet_the_whole(self):
+        """Review find J: slices of the floor'd list snap to turn boundaries, at floor 0 too (a whole parse, no document)."""
+        recs = transcript(NOW - 86400, turns=300, compact_every=1000)     # no compaction: floor 0, ~600 events in the list
+        self.write(recs)
+        self.fresh(); km._live_scope.chat_floor0 = False
+        try:
+            m = km.build_session(SID, NOW, {})
+        finally:
+            km._live_scope.chat_floor0 = None
+        self.assertEqual(m["floor"], 0)
+        evs = m["events"]
+        turns = km._parse(self.leaf, SID, NOW)["turns"]
+        tix = km._turn_index_of_events(evs, turns)
+        anchor = evs[len(evs) // 2]["uuid"]
+        r = km._chat_history_reply(SID, {"type": "loadAround", "id": SID, "uuid": anchor}, NOW)
+        first, last = r["events"][0]["uuid"], r["events"][-1]["uuid"]
+        pos = {e["uuid"]: i for i, e in enumerate(evs)}
+        a, b = pos[first], pos[last]
+        self.assertTrue(a == 0 or tix[a - 1] != tix[a], "the window starts at a turn's first event")
+        self.assertTrue(b == len(evs) - 1 or tix[b + 1] != tix[b], "and ends at a turn's last event")
+        held = list(r["events"])
+        for _ in range(50):
+            o = km._chat_history_reply(SID, {"type": "loadOlder", "id": SID, "before": held[0].get("key") or held[0]["uuid"]}, NOW)
+            held = o["events"] + held
+            if not o["more"]:
+                break
+        for _ in range(50):
+            n = km._chat_history_reply(SID, {"type": "loadNewer", "id": SID, "after": held[-1].get("key") or held[-1]["uuid"]}, NOW)
+            held = held + n["events"]
+            if not n["more"]:
+                break
+        self.assertEqual(_strip(held), _strip(evs), "both walks from the window meet the whole list")
+
+    def test_the_fold_entry_carries_the_prefixs_key_counts(self):
+        whole, m = self._restored_tail()
+        km._live_scope.chat_floor0 = False
+        try:
+            km.build_session(SID, NOW + 1, {})                             # a second build seals a prefix
+        finally:
+            km._live_scope.chat_floor0 = None
+        fe = km._chat_fold_get(SID)
+        self.assertIsNotNone(fe); self.assertIn("keyCounts", fe)
+        self.assertEqual(fe["keyCounts"], km._key_counts(fe["events"]))
+
     def test_a_detached_client_gets_no_delta_and_a_fresh_base_reattaches(self):
         whole, m = self._restored_tail()
         c, sent = _client()
@@ -358,7 +548,7 @@ class Proto2Wire(Harness):
                 break
             oldest = resident[0]["uuid"]
             self.assertLess(steps, 50)
-        self.assertEqual(_strip(resident), whole, "the pages walked back to the head concatenate to the whole build")
+        self.assertEqual(_strip(resident), self.head_cards + whole, "the pages walked back to the head, the head cards first, concatenate to the whole build")
         self.assertGreaterEqual(steps, 2)
 
     def test_load_around_lands_a_deep_anchor_in_one_reply_and_load_newer_walks_back_to_the_tail(self):
@@ -388,7 +578,8 @@ class Proto2Wire(Harness):
                 break
             newest = held[-1]["uuid"]
             self.assertLess(steps, 50)
-        self.assertEqual(_strip(held), whole, "the window walked forward to the tail equals the whole")
+        self.assertEqual(_strip(held), self.head_cards + whole, "the window walked forward to the tail equals the whole, the head cards first (the window reached the head)")
+        self.assertIn("status", n, "back at the tail the reply carries the frame's status (no full frame needed)")
         self.assertFalse(n["_base"]["detached"], "re-attached at the tail")
         # a missing anchor answers honestly
         r = km._chat_history_reply(SID, {"type": "loadAround", "id": SID, "uuid": "no-such-uuid"}, NOW)
@@ -411,6 +602,28 @@ class Proto2Wire(Harness):
             self.assertGreaterEqual(km._PAGE_STATS["evictions"], 1)
         finally:
             km._PAGE_CACHE_MAX = saved
+
+
+class HydrationRace(Harness):
+    def test_an_atom_another_thread_finished_between_the_filter_and_the_read_is_skipped(self):
+        """Review find C: the disk loop was guarded, the memo-hit path and _hydrate_one were not."""
+        class Flaky(dict):                                                # answers the marker once (the filter), then none
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k); self.n = 0
+            def get(self, k, d=None):
+                if k == "lazy":
+                    self.n += 1
+                    return super().get(k, d) if self.n <= 1 else None
+                return super().get(k, d)
+        a = Flaky({"uuid": "x1", "type": "user", "lazy": {"k": "u", "at": (0, 10)}, "session_id": SID})
+        with em._ASM_CKPT_LOCK:
+            em._HYDRATED["x1"] = ({"uuid": "x1", "message": {"role": "user", "content": "hi"}}, 10)   # a warm memo
+        try:
+            self.assertEqual(em.hydrate([a], SID), 1, "counted as filled, nothing raised")
+        finally:
+            with em._ASM_CKPT_LOCK:
+                em._HYDRATED.pop("x1", None)
+        em._hydrate_one({"uuid": "x2"}, {"uuid": "x2"})                   # a finished atom: a no-op, not a KeyError
 
 
 if __name__ == "__main__":

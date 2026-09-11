@@ -119,7 +119,7 @@ class OrphanInterleaveAndDedup(unittest.TestCase):
         self.assertIn("orphans = _past_floor(_orphan_replies(sid))", src)   # floored at the episode boundary since T131
         # interleaved by timestamp in the same flush as the recovery note, as a normal assistant bubble
         self.assertIn('events.append({"kind": "assistant", "md": _o["text"], "orphaned": True,', src)
-        self.assertIn('"uuid": "orphan:%s" % (_o["uuid"] or _o["t"]), "ts": iso(_o["t"])})', src)
+        self.assertIn('"uuid": "orphan:%d:%d" % (_o["t"], _oi), "ts": iso(_o["t"])})', src)   # keyed like every note (T323 stage 4b); the record uuid rides orphanOf
 
     def test_the_orphan_is_deduped_against_what_the_disk_kept(self):
         src = inspect.getsource(km.build_session)
@@ -127,7 +127,7 @@ class OrphanInterleaveAndDedup(unittest.TestCase):
         self.assertIn('if _a.get("type") == "assistant" and not _a.get("isApiError"):', src)
         self.assertIn("_disk_texts.add(_tx)", src)
         # exact OR either-way prefix match → a retry that re-replied (full text, or the partial's completion) skips
-        self.assertIn("if _ot in _disk_texts or any(dt.startswith(_ot) or _ot.startswith(dt) for dt in _disk_texts):", src)
+        self.assertIn("if _ot in _near or any(dt.startswith(_ot) or _ot.startswith(dt) for dt in _near):", src)   # the texts within a turn of the note's time (T323 stage 4b)
 
 
 if __name__ == "__main__":

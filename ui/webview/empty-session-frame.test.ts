@@ -28,7 +28,7 @@ test("render.ts upsert keeps the held events, head window and all, and files the
   assert.ok(m, "upsert");
   const body = m![1];
   assert.match(body, /const kept = keepResidentEvents\(prev \? prev\.events : null, msg\.events\);/);
-  assert.match(body, /const events = kept && prev \? prev\.events : \(msg\.events \|\| \(prev \? prev\.events : \[\]\)\);/);
+  assert.match(body, /let events: ChatEvent\[\] = kept && prev \? prev\.events : \(msg\.events \|\| \(prev \? prev\.events : \[\]\)\);/);   // `let`: a proto-2 frame overlapping the held run merges into it (T323 stage 4b)
   assert.match(body, /headFrom: kept && prev \? prev\.headFrom : \(msg\.headFrom \?\? 0\),/);
   assert.match(body, /headTotal: kept && prev \? prev\.headTotal : \(msg\.proto === 2 \? \(msg\.headTotal \?\? null\) : \(msg\.headTotal \?\? events\.length\)\),/);   // proto 2: null until the head is known (T323 stage 4b)
   // the decision is made BEFORE forked/firstBuild read msg.events: an empty array is neither a fork nor a first build

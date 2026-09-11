@@ -2453,7 +2453,9 @@ function applyGlow(groups: Array<{ sid: string; uuids: string[]; idx?: Record<st
     // ruler mirrors; other views are display:none)
     if (g.sid === activeId) {
       const s = liveSession(g.sid);
-      glowHistory = historyMarks(g.uuids || [], g.idx, lit, s?.headFrom ?? 0);
+      // proto 2 has no index into the unloaded prefix: the strip shows no marks for it (its hits outside the resident
+      // run have no position to draw at until the head is known, and then everything is resident) (review find R)
+      glowHistory = historyMarks(g.uuids || [], g.idx, lit, s?.proto === 2 ? 0 : (s?.headFrom ?? 0));
       glowUnits = s ? residentUnits(s, (g.uuids || []).filter((u) => !lit.has(u))) : [];
     }
   }
@@ -12007,6 +12009,7 @@ function updateJumpBtn(): void {
 jumpBtn.onclick = () => {
   const c = document.getElementById("content");
   if (!c) return;
+  if (activeId) { const sd = liveSession(activeId); if (sd && sd.proto === 2 && sd.detached) reattachLive(activeId); }   // a detached window: the bottom is the live tail (review find M)
   writeScroll(c, c.scrollHeight, "jump-button", true);   // the snap IS the acknowledgment
   const v = activeId ? views.get(activeId) : undefined;
   if (v) { v.stick = true; v.scrollTop = c.scrollTop; }   // the explicit re-entry into follow mode
@@ -15614,7 +15617,16 @@ function upsert(msg: any) {
     emptyFrameDiagSent.add(msg.id);
     vscodeApi?.postMessage({ type: "clientDiag", surface: "chat", what: "empty-session-frame", data: { id: msg.id, held: prev.events.length } });
   }
-  const events = kept && prev ? prev.events : (msg.events || (prev ? prev.events : []));
+  let events: ChatEvent[] = kept && prev ? prev.events : (msg.events || (prev ? prev.events : []));
+  let mergedRun = false;
+  if (!kept && prev && prev.proto === 2 && msg.proto === 2 && Array.isArray(msg.events) && msg.events.length) {
+    // a full frame meeting a resident run it overlaps (a re-attach, a re-base after a floor move) MERGES into the run:
+    // the pages the reader walked stay resident and the reader's place holds (review find L); a frame with no
+    // overlap (a fork, a /clear) replaces as before
+    stripOptimistic(prev);
+    const r = mergeWindow(prev.events as { uuid?: string; key?: string }[], msg.events as { uuid?: string; key?: string }[]);
+    if (r.mode === "merge") { events = r.events as ChatEvent[]; mergedRun = true; }
+  }
   const s: Session = {
     id: msg.id,
     name: msg.name,
@@ -15638,8 +15650,8 @@ function upsert(msg: any) {
     headTotal: kept && prev ? prev.headTotal : (msg.proto === 2 ? (msg.headTotal ?? null) : (msg.headTotal ?? events.length)),
     // the uuid-anchored wire (T323 stage 4b): the frame says its shape (proto 2); a frame without it is an index frame
     proto: kept && prev ? prev.proto : (msg.proto === 2 ? 2 : undefined),
-    headKnown: kept && prev ? prev.headKnown : (msg.proto === 2 ? !!msg.headKnown : undefined),
-    firstUuid: kept && prev ? prev.firstUuid : (msg.proto === 2 ? (msg.firstUuid ?? keyOf(events[0] as { uuid?: string; key?: string } | undefined) ?? null) : undefined),
+    headKnown: kept && prev ? prev.headKnown : (msg.proto === 2 ? (!!msg.headKnown || (mergedRun && !!prev?.headKnown)) : undefined),
+    firstUuid: kept && prev ? prev.firstUuid : (msg.proto === 2 ? (mergedRun ? keyOf(events[0] as { uuid?: string; key?: string } | undefined) ?? null : (msg.firstUuid ?? keyOf(events[0] as { uuid?: string; key?: string } | undefined) ?? null)) : undefined),
     lastUuid: kept && prev ? prev.lastUuid : (msg.proto === 2 ? (msg.lastUuid ?? null) : undefined),
     detached: kept && prev ? prev.detached : false,
     bgTasks: ("bgTasks" in msg) ? msg.bgTasks : (prev ? prev.bgTasks : undefined),
@@ -15927,7 +15939,7 @@ function chatHead(msg: any) {
   if (typeof msg.beforeUuid === "string") {
     // proto 2 (T323 stage 4b): the reply names the resident oldest; a stale one (the oldest moved on) is ignored,
     // a missing anchor is the honest end of the search, and `more: false` is the head: the count exists from here
-    if (msg.missing) { forget(msg.id); return; }
+    if (msg.missing) { forget(msg.id); requestFullSession(msg.id, "gap"); return; }   // the anchor is gone from the transcript (a /clear, a fork): re-base
     const next = prependHead(s.events as { uuid?: string }[], msg.beforeUuid, older as { uuid?: string }[]);
     if (!next) { forget(msg.id); return; }
     s.events = next as ChatEvent[];
@@ -16040,11 +16052,15 @@ function chatWindow(msg: any) {
     return;
   }
   stripOptimistic(s);
+  const heldLast = s.lastUuid;
   const r = mergeWindow(s.events as { uuid?: string }[], msg.events as { uuid?: string }[]);
   s.events = r.events as ChatEvent[];
   s.firstUuid = keyOf(s.events[0] as { uuid?: string; key?: string } | undefined) ?? null;
   s.lastUuid = keyOf(s.events[s.events.length - 1] as { uuid?: string; key?: string } | undefined) ?? null;
-  s.detached = !!msg.moreAfter;                  // an older window: no delta reaches it until it walks back to the tail
+  // detached only when the merged run's newest event is not the live tail the page held: a window that overlaps the
+  // resident tail merges into one contiguous run through it and stays attached (review find G; the kernel says so
+  // too, `connected`)
+  s.detached = !!msg.moreAfter && !msg.connected && !(r.mode === "merge" && heldLast != null && s.lastUuid === heldLast);
   if (msg.moreBefore === false) s.headKnown = true;
   s.headTotal = s.headKnown && !s.detached ? s.events.length : null;   // a count only when the whole is resident
   reconcileOptimistic(s);
@@ -16054,23 +16070,62 @@ function chatWindow(msg: any) {
   const target = typeof msg.anchor === "string" ? msg.anchor : anchorUuid;
   if (target) { pendingAnchor = target; pendingAnchorIntent = null; pendingAnchorT = null; pendingAnchorKind = null; flashedAnchor = null; pendingAnchorKeepY = null; anchorPendingOlder = false; }
   showActive();
+  updateLivePaused();
+  window.requestAnimationFrame(() => virtualizeToViewport());   // a window that does not overflow never scrolls: the edge check runs once now (review find M)
 }
 function chatMore(msg: any) {
   loadingOlder.delete(msg.id);
   hideLoadingPill();
   const s = sessions.get(msg.id);
-  if (!s || msg.missing) return;
+  if (!s) return;
+  if (msg.missing) { requestFullSession(msg.id, "gap"); return; }   // the run's newest event is gone from the transcript: re-base
   stripOptimistic(s);
   const next = appendMore(s.events as { uuid?: string }[], msg.afterUuid, (msg.events || []) as { uuid?: string }[]);
   if (!next) { reconcileOptimistic(s); return; }   // stale: the newest moved on
   s.events = next as ChatEvent[];
   s.lastUuid = keyOf(s.events[s.events.length - 1] as { uuid?: string; key?: string } | undefined) ?? s.lastUuid;
   s.detached = !!msg.more;
-  if (!s.detached) { if (s.headKnown) s.headTotal = s.events.length; requestFullSession(msg.id, "reattach"); }   // back at the tail: a fresh base for the deltas
+  if (!s.detached) {
+    // back at the live tail: the kernel re-based this client on the reply and carries the frame's status and ledger
+    // here, so no full frame is asked (a full frame is the last 250 events: the walked pages would be dropped and the
+    // reader's place lost, review find L)
+    if (s.headKnown) s.headTotal = s.events.length;
+    if (msg.status) s.status = msg.status;
+    if ("ledger" in msg) ledgers.set(msg.id, msg.ledger ?? null);
+  }
   reconcileOptimistic(s);
   const v = views.get(msg.id);
   if (v) { v.stale = true; }
   if (msg.id === activeId) showActive();
+  updateLivePaused();
+}
+
+// ── the detached client's way back (review find M) ──────────────────────────────────────────────────────────
+// A proto-2 client reading an older window gets no live delta: a strip says so and offers the return; the jump chip
+// returns too. The return is a full frame (needFull "reattach"): upsert merges it into the held run when they
+// overlap, so the pages the reader walked stay resident.
+let livePausedEl: HTMLElement | null = null;
+function updateLivePaused(): void {
+  const s = activeId ? liveSession(activeId) : null;
+  const on = !!(s && s.proto === 2 && s.detached);
+  if (!on) { if (livePausedEl) livePausedEl.hidden = true; return; }
+  if (!livePausedEl) {
+    livePausedEl = el("div", "live-paused");
+    livePausedEl.id = "live-paused";
+    const txt = el("span", "live-paused-text"); txt.textContent = "Live updates are paused while you read older history.";
+    const btn = document.createElement("button"); btn.className = "live-paused-btn"; btn.type = "button"; btn.textContent = "Return to live";
+    btn.onclick = () => { if (activeId) reattachLive(activeId); };
+    livePausedEl.appendChild(txt); livePausedEl.appendChild(btn);
+    document.body.appendChild(livePausedEl);
+  }
+  livePausedEl.hidden = false;
+  const c = document.getElementById("content");
+  if (c) livePausedEl.style.bottom = (Math.max(0, window.innerHeight - c.getBoundingClientRect().bottom) + 40) + "px";
+}
+function reattachLive(sid: string): void {
+  const s = sessions.get(sid);
+  if (!s || s.proto !== 2 || !s.detached) return;
+  requestFullSession(sid, "reattach");   // the kernel's full tail frame re-bases this client; upsert merges it into the held run
 }
 
 // The awaiting fields the #bg-tasks box renders from (renderBgTasks — the header words, the rows, the awaited-row outline) — one

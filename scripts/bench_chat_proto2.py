@@ -10,7 +10,7 @@ first frame per session, and the assembly counters (hydrated atoms and bytes by 
 hydrates and renders every pre-cut turn; on this branch it renders from the render floor (the assembly cut), so
 the open reads nothing before the cut. One measurement per point; a cleanplots figure with the floors named.
 
-    uvx --with cleanplots --with matplotlib --with pandas python scripts/bench_chat_proto2.py \\
+    capped uvx --with cleanplots --with matplotlib --with pandas python scripts/bench_chat_proto2.py \\
         --tree main=/path/to/main-tree --tree stage4b=. --sizes 1,4,16 --sessions 6 --out DIR
 """
 import argparse
