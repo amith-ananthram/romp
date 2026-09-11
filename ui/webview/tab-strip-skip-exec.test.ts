@@ -100,6 +100,8 @@ function lift(): (hooks: Hooks) => Api {
       createTextNode: (t) => { const n = new H.FakeEl("#text"); n.textContent = t; return n; } };
     const auditTabOrder = () => {}; const onlyTag = () => H.only; const matchesOnly = (name, only) => name.includes(only);
     const tabInView = (id) => id === peekId || !H.hidden.has(id);
+    // the chat split's partition (2026-09-11), inert: no shell here, so the sets are null and every id is held
+    let colSets = null; const readColSets = () => null; const heldHere = () => true; const noteColumnEmptiness = () => {}; const staleActiveFallback = () => {};
     const setActive = () => {}; const setTimeout = () => 0;
     // the section-at-a-glance view's readers on the strip, inert: the plan the view reads (lastStripItems), the
     // section the pane shows (snapView, null: no view open, so stripAftermath's follow does nothing), and the

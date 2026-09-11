@@ -219,7 +219,7 @@ test("Browse files sits at the BOTTOM of the tab menu, behind a divider, wearing
   // section, so the switches section ends on Billing and nothing else is appended before Browse's divider)
   const between = menuBody.slice(billingAt, browseAt);
   assert.ok(between.includes('menu.appendChild(el("div", "ctx-sep"));'), "the divider sits between Billing and Browse");
-  assert.doesNotMatch(between, /l\.textContent = "(Tags|Move to folder…|Open in new split|Rename)"/, "no other item between them");
+  assert.doesNotMatch(between, /l\.textContent = "(Tags|Move to folder…|Move to a new column|Rename)"/, "no other item between them");
 });
 
 // ── the viewer's veto, run FOR REAL: a browse click while the discard confirm keeps the viewer ──────────

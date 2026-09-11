@@ -164,6 +164,15 @@ window.__rompUnregisterPane('chat-pane-3');
 //    unregistered fallback keys (key('chat-pane') → chat, key('feed-pane') → feed)
 delete window.__rompLastChatPane;
 out.dragGvB = drag('gv-b', 500, 480);
+// 8) a NEW chat column takes HALF the rightmost column (the chat split, 2026-09-11): __rompSplitGrow normalises every
+//    SHOWN pane to its pixels first (the hidden outline and files panes are not written), then the left pane's key and
+//    the new key each take half the left pane's width, persisted; a hidden or missing left pane writes nothing
+resetDom();
+STORE['romp-pane-grow'] = JSON.stringify({ chat: 60, fleet: 34, feed: 40, chat2: 25 });
+BOOT();
+window.__rompRegisterPane('chat-pane-2', 'chat2');
+out.splitGrow = { wrote: window.__rompSplitGrow('chat-pane-2', 'chat3'), grows: grows(), store: store(),
+                  hidden: window.__rompSplitGrow('fleet-pane', 'chat9'), missing: window.__rompSplitGrow('chat-pane-77', 'chat9'), after: grows() };
 console.log(JSON.stringify(out));
 """
 
@@ -259,6 +268,18 @@ class PaneGuttersExecute(unittest.TestCase):
         self.assertEqual(a["afterUp"]["--g-feed"], 420)
         self.assertEqual(a["afterUp"]["--g-fleet"], 240)
         self.assertEqual(a["store"], {"chat": 580, "fleet": 240, "feed": 420, "files": 40})
+
+    def test_8_a_new_column_takes_half_the_rightmost_column_after_every_shown_pane_is_normalised(self):
+        # the chat split's honest half-width (2026-09-11): the stub panes report chat 600, chat2 500, feed 400 (the outline
+        # and files panes hidden), so the grab-style normalisation writes those three first — never a mixed scale — and
+        # then chat2 and the new chat3 each take 250; the hidden panes keep their stored grows
+        a = self.out["splitGrow"]
+        self.assertTrue(a["wrote"])
+        self.assertEqual(a["grows"], {"--g-chat": 600, "--g-chat2": 250, "--g-chat3": 250, "--g-feed": 400, "--g-fleet": 34, "--g-files": 40})
+        self.assertEqual(a["store"], {"chat": 600, "fleet": 34, "feed": 400, "files": 40, "chat2": 250, "chat3": 250}, "persisted, so __rompGrowFairIfNew keeps it when the column is made")
+        self.assertFalse(a["hidden"], "a hidden left pane is never written")
+        self.assertFalse(a["missing"], "nor a missing one")
+        self.assertEqual(a["after"], a["grows"], "…and the refusals changed nothing")
 
 
 if __name__ == "__main__":

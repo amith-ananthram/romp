@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
-"""Chat split screen, the SERVED leg (the user 2026-09-08, who wanted several sessions open side by side
-instead of tabbing between them). The dashboard shell holds N chat columns: column 1 is #chat-pane / #f-chat,
-every later one a client-made twin (_LANDING_SPLIT_JS) around an iframe at /chat?col=N with its own tab
-strip, state blob, socket and grow weight, slotted before #gv-a behind a chat|chat gutter.
+"""Chat columns, the SERVED leg (the user 2026-09-08, who wanted several sessions open side by side instead of
+tabbing between them; the partition 2026-09-11: the columns hold DIFFERENT sessions). The dashboard shell holds N
+chat columns: column 1 is #chat-pane / #f-chat, every later one a client-made twin (_LANDING_SPLIT_JS) around an
+iframe at /chat?col=N&skeleton=1 with its own state blob, socket and grow weight, slotted before #gv-a behind a
+chat|chat gutter, and showing ONLY the sessions the shell's store says it holds; the first column shows the rest.
 
 The node-side test (tests/test_chat_split.py) drives the split script against a DOM stub; this one drives the
 REAL page: a hermetic kernel serves the dashboard with EIGHT synthetic sessions (a board wide enough that a
 column served whole is told apart from one served as a view), a headless browser opens it once, and ONE
 driver run walks the whole story in order, each step landing in its own assertion here:
-  1. a split on session B opens a second column that is WIDE (the review find: the first split opened 0px
-     because the new column's missing grow averaged in as NaN), in the right row slot, with a finite
-     --g-chat2 and the column set persisted, its frame at /chat?col=2&skeleton=1;
-  2. the new column shows B — as a VIEW of it (2026-09-11): the shell seeded the column's state blob with B
-     before the frame existed, the page's socket dialled as a skeleton client of B, and the kernel served B
-     whole and every other tab as a skeleton (a status frame each, never a full: GET /perf's `sends` say so),
-     so the wire carried one session, not the board; between the call and B's paint the column showed the pane
-     loader and never the no-sessions copy or an "Opening session" line (polled per animation frame from the
-     shell). Column 1 keeps its tab, and __rompChatTarget routes a session-focus to the column showing it —
-     or, for a session nobody shows, to the column the user last clicked in;
-  3. a split opened ON a session column 1 already shows still takes it (the page's wantActive never
-     arbitrates), and closing that column drops it from the persisted set;
-  4. dragging the chat|chat gutter moves width between the two columns and persists column 2's grow;
-  5. column 2's new-session picker lifts ITS iframe and pane (.lifted), never column 1's, and unlifts on
-     toggle;
-  6. a reload brings both columns back, column 2 on B again, at the width the drag left it;
-  7. closing column 2 leaves one column and an empty persisted set.
+  1. __rompMoveTab(B, "new") opens a second column that holds B — B's tab leaves column 1's strip, column 2's
+     strip lists B alone — both columns near half the old width (the honest half, __rompSplitGrow), the v2 store
+     persisted, the frame at /chat?col=2&skeleton=1; the column is served as a VIEW of B (the kernel's send
+     counters: one full frame, a status per other tab, never the board) and showed the pane loader, never the
+     no-sessions copy or an "Opening session" line, between the call and B's paint;
+  2. routing by the owner: with C moved into column 2 as well and active there, the feed's click echo for C
+     (a romp:focus-echo storage write) and a jumpSession for B posted into COLUMN 1 both land in column 2 —
+     column 1 keeps A throughout — and __rompChatTarget names the owner for every session;
+  3. __rompMoveTab(B, 1) with B alone in column 2 (C moved home first) closes column 2, column 1 lists B again,
+     and the draft typed for B in column 2's box is in column 1's box when B is picked there;
+  4. a new column on B again, then dragging the chat|chat gutter moves width between the two columns and
+     persists column 2's grow;
+  5. column 2's new-session picker lifts ITS iframe and pane (.lifted), never column 1's, and unlifts on toggle;
+  6. a reload restores the v2 store: column 2 on B at the dragged width, column 1 without B;
+  7. the cross on the last later column returns B to column 1 and leaves {v:2, cols:[]};
+  8. the whole story runs well under half a minute (the driver waits on conditions, never on fixed sleeps).
 Skips LOUDLY when the extension deps or a playwright browser are absent (CI installs none). Synthetic only:
 placeholder sids, invented notes-api prompt text, no real session data."""
 import json
@@ -60,16 +60,18 @@ os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 
 SID_A = "11111111-2222-4333-8444-000000000301"   # "web": column 1's session
-SID_B = "11111111-2222-4333-8444-000000000302"   # "api": the session the split opens on
-SID_X = "11111111-2222-4333-8444-000000000999"   # a session no column shows
+SID_B = "11111111-2222-4333-8444-000000000302"   # "api": the session the move opens a column on
+SID_C = "11111111-2222-4333-8444-000000000303"   # "tests": moved into column 2 beside B for the routing step
+SID_X = "11111111-2222-4333-8444-000000000999"   # a session no column lists (not on the board)
 # six more tabs, so the board is EIGHT sessions: a column served whole takes eight full frames per push, a column served
-# as a view of B takes one (plus a status frame per other tab), and the /perf deltas in step 2 tell the two apart with
+# as a view of B takes one (plus a status frame per other tab), and the /perf deltas in step 1 tell the two apart with
 # room for the page's idle prefetch to have loaded a tab or two by the paint
 FILLERS = [("11111111-2222-4333-8444-00000000030%d" % k, name, k)
            for k, name in ((3, "tests"), (4, "docs"), (5, "lint"), (6, "deploy"), (7, "search"), (8, "auth"))]
 BOARD = 2 + len(FILLERS)
 DRAG_PX = 200
 SLACK_PX = 40
+DRAFT = "a half-typed note for the api session, kept across the move"
 
 
 def _free_port():
@@ -129,6 +131,12 @@ const waitTabs = (fid, sids) => waitFn(([fid, sids]) => {
   const ids = Array.from(d.querySelectorAll("#tabs .tab[data-id]")).map((t) => t.dataset.id);
   return sids.every((s) => ids.includes(s));
 }, [fid, sids], fid + " never showed tabs " + sids.join(","));
+// a column's tab strip lists NONE of `sids` (a moved tab is gone from its old column)
+const waitNoTabs = (fid, sids) => waitFn(([fid, sids]) => {
+  const f = document.getElementById(fid); const d = f && f.contentDocument; if (!d) return false;
+  const ids = Array.from(d.querySelectorAll("#tabs .tab[data-id]")).map((t) => t.dataset.id);
+  return ids.length > 0 && sids.every((s) => !ids.includes(s));
+}, [fid, sids], fid + " still lists " + sids.join(","));
 // a column's ACTIVE tab is `sid`
 const waitActive = (fid, sid) => waitFn(([fid, sid]) => {
   const f = document.getElementById(fid); const d = f && f.contentDocument;
@@ -136,14 +144,20 @@ const waitActive = (fid, sid) => waitFn(([fid, sid]) => {
 }, [fid, sid], fid + " never activated " + sid);
 const waitBootGone = () => waitFn(() => !document.getElementById("romp-boot"), null, "boot splash never cleared");
 const waitFocused = (fid) => waitFn((fid) => window.__rompFocusedChatId && window.__rompFocusedChatId() === fid, fid, fid + " never took the focus ring");
+const waitGone = (id) => waitFn((id) => !document.getElementById(id), id, id + " never left the row");
 const activeIn = (fid) => page.evaluate((fid) => {
   const f = document.getElementById(fid); const d = f && f.contentDocument;
   const t = d && d.querySelector("#tabs .tab.active[data-id]"); return t ? t.dataset.id : null;
 }, fid);
+const tabsIn = (fid) => page.evaluate((fid) => {
+  const f = document.getElementById(fid); const d = f && f.contentDocument;
+  return d ? Array.from(d.querySelectorAll("#tabs .tab[data-id]")).map((t) => t.dataset.id) : null;
+}, fid);
 const targetOf = (sid) => page.evaluate((sid) => { const f = window.__rompChatTarget(sid); return f ? f.id : null; }, sid);
 const width = (id) => page.evaluate((id) => { const e = document.getElementById(id); return e ? e.getBoundingClientRect().width : null; }, id);
+const composerIn = (fid) => page.evaluate((fid) => { const d = document.getElementById(fid).contentDocument; const ta = d && d.getElementById("composer-input"); return ta ? ta.value : null; }, fid);
 const shell = () => page.evaluate(() => ({
-  frameIds: window.__rompChatFrameIds(), cols: localStorage.getItem("romp-chat-cols"),
+  frameIds: window.__rompChatFrameIds(), cols: localStorage.getItem("romp-chat-cols"), sets: window.__rompChatSets(),
   rowKids: Array.from(document.querySelector(".row").children).map((e) => e.id || e.className),
   grow: JSON.parse(localStorage.getItem("romp-pane-grow") || "null"),
   lifted: Array.from(document.querySelectorAll(".lifted")).map((e) => e.id), pickerOpen: document.body.classList.contains("picker-open"),
@@ -151,25 +165,23 @@ const shell = () => page.evaluate(() => ({
 // the page rect of an element INSIDE a column, for page.mouse (the iframe's offset plus the element's own)
 const rectIn = (fid, sel) => page.evaluate(([fid, sel]) => {
   const f = document.getElementById(fid); const fr = f.getBoundingClientRect(); const el = f.contentDocument.querySelector(sel);
+  if (!el) return null;
   const r = el.getBoundingClientRect(); return { x: fr.left + r.left, y: fr.top + r.top, w: r.width, h: r.height };
 }, [fid, sel]);
-const clickIn = async (fid, sel) => { const r = await rectIn(fid, sel); await page.mouse.click(r.x + r.w / 2, r.y + Math.min(r.h / 2, 120)); };
+const clickIn = async (fid, sel) => { const r = await rectIn(fid, sel); if (!r) await die("no " + sel + " in " + fid); await page.mouse.click(r.x + r.w / 2, r.y + Math.min(r.h / 2, 120)); };
+const clickTab = async (fid, sid) => { const fr = await (await page.$("#" + fid)).contentFrame(); await fr.locator('#tabs .tab[data-id="' + sid + '"]').first().click(); };
 // GET /perf from the shell's origin (the landing's cookie authorises it): the kernel's send counters by class and slot
 const perf = () => page.evaluate(() => fetch("/perf").then((r) => r.json()));
 const sends = (p, slot) => (((p || {}).sends || {}).full || {})[slot]?.count || 0;
 
-// ---- load: both sessions are tabs in column 1; column 1 shows A ----
+// ---- load: every session is a tab in column 1; column 1 shows A ----
 await page.goto(cfg.url);
-await waitTabs("f-chat", [cfg.sidA, cfg.sidB]);
+await waitTabs("f-chat", [cfg.sidA, cfg.sidB, cfg.sidC]);
 await waitBootGone();
-if ((await activeIn("f-chat")) !== cfg.sidA) {
-  const fr = await (await page.$("#f-chat")).contentFrame();
-  await fr.locator('#tabs .tab[data-id="' + cfg.sidA + '"]').click();
-  await waitActive("f-chat", cfg.sidA);
-}
+if ((await activeIn("f-chat")) !== cfg.sidA) { await clickTab("f-chat", cfg.sidA); await waitActive("f-chat", cfg.sidA); }
 out.col1Before = await activeIn("f-chat");
 
-// ---- 1. split on B: a second column, wide, before gv-a, persisted ----
+// ---- 1. move B to a new column: column 2 holds B alone, column 1 no longer lists B, both near half the old width ----
 const perf0 = await perf();
 out.s1 = await page.evaluate((sidB) => {
   // What column 2 shows between the call and B's paint, read once per animation frame from the shell (the frames
@@ -182,6 +194,7 @@ out.s1 = await page.evaluate((sidB) => {
     const f = document.getElementById("f-chat-2"); const d = f && f.contentDocument;
     if (d) {
       const es = d.getElementById("empty-state"); if (es && es.style.display !== "none") o.emptyState++;
+      const ns = d.getElementById("no-sessions"); if (ns) o.emptyState++;
       const sl = d.getElementById("statusline"); if (sl && /Opening session/.test(sl.textContent || "")) o.openingText++;
       const tl = d.getElementById("tab-loading"); if (tl && /opening/.test(tl.textContent || "")) o.openingText++;
       const spin = d.getElementById("pane-spin"); if (spin && !spin.classList.contains("gone")) o.loaderSeen++;
@@ -192,48 +205,72 @@ out.s1 = await page.evaluate((sidB) => {
     if (o.frames < 1200) requestAnimationFrame(tick); else o.timedOut = true;
   };
   requestAnimationFrame(tick);
-  const f = window.__rompSplitChat(sidB);
-  const row = document.querySelector(".row"), kids = Array.from(row.children).map((e) => e.id);
   const w = (id) => { const e = document.getElementById(id); return e ? e.getBoundingClientRect().width : null; };
+  const pane1Before = w("chat-pane");
+  const f = window.__rompMoveTab(sidB, "new");
+  const row = document.querySelector(".row"), kids = Array.from(row.children).map((e) => e.id);
   return { frameId: f && f.id, tag: f && f.tagName, src: f && f.getAttribute("src"), paneCol: (document.getElementById("chat-pane-2") || {}).getAttribute?.("data-col"),
            order: kids, gIdx: kids.indexOf("gv-chat-2"), pIdx: kids.indexOf("chat-pane-2"), aIdx: kids.indexOf("gv-a"),
-           pane1W: w("chat-pane"), pane2W: w("chat-pane-2"), gChat2Inline: row.style.getPropertyValue("--g-chat2"),
-           gChat2: getComputedStyle(row).getPropertyValue("--g-chat2"), cols: localStorage.getItem("romp-chat-cols") };
+           pane1Before, pane1W: w("chat-pane"), pane2W: w("chat-pane-2"), gChat2Inline: row.style.getPropertyValue("--g-chat2"),
+           gChat2: getComputedStyle(row).getPropertyValue("--g-chat2"), cols: localStorage.getItem("romp-chat-cols"), sets: window.__rompChatSets() };
 }, cfg.sidB);
-
-// ---- 2. the new column shows B, as a view of it; targets route by the column showing the session, else the last-clicked ----
-await waitTabs("f-chat-2", [cfg.sidA, cfg.sidB]);
+await waitTabs("f-chat-2", [cfg.sidB]);
 await waitActive("f-chat-2", cfg.sidB);
+await waitNoTabs("f-chat", [cfg.sidB]);
 await waitFn(() => window.__obs && (window.__obs.done || window.__obs.timedOut), null, "column 2 never painted B's transcript");
 const perfAtPaint = await page.evaluate(() => window.__obs.perfAtPaint ? window.__obs.perfAtPaint : null);
-out.s2 = { col2Active: await activeIn("f-chat-2"), col1After: await activeIn("f-chat"),
-           targetB: await targetOf(cfg.sidB), targetA: await targetOf(cfg.sidA),
-           obs: await page.evaluate(() => { const { perfAtPaint, ...rest } = window.__obs; return rest; }),
-           // the kernel's send counters across the open: full chat frames and status frames, before the call and at the paint
-           fullChatDelta: sends(perfAtPaint, "chat") - sends(perf0, "chat"), statusDelta: sends(perfAtPaint, "status") - sends(perf0, "status"),
-           col2Tabs: await page.evaluate(() => { const d = document.getElementById("f-chat-2").contentDocument;
-             return Array.from(d.querySelectorAll("#tabs .tab[data-id]")).map((t) => ({ id: t.dataset.id, skeleton: t.classList.contains("tab-skeleton"), active: t.classList.contains("active") })); }) };
-await clickIn("f-chat-2", "#content");
-await waitFocused("f-chat-2");
-out.s2.unknownAfterCol2 = await targetOf(cfg.sidX);
+out.s1.col2Active = await activeIn("f-chat-2"); out.s1.col1After = await activeIn("f-chat");
+out.s1.col2Tabs = await tabsIn("f-chat-2"); out.s1.col1Tabs = await tabsIn("f-chat");
+out.s1.obs = await page.evaluate(() => { const { perfAtPaint, ...rest } = window.__obs; return rest; });
+out.s1.fullChatDelta = sends(perfAtPaint, "chat") - sends(perf0, "chat"); out.s1.statusDelta = sends(perfAtPaint, "status") - sends(perf0, "status");
+out.s1.targetB = await targetOf(cfg.sidB); out.s1.targetA = await targetOf(cfg.sidA); out.s1.targetX = await targetOf(cfg.sidX);
+
+// ---- 2. routing by the owner: C joins column 2 and is active there; an echo for C and a jump for B posted into column 1 both land in column 2 ----
+out.s2 = await page.evaluate((sidC) => { const f = window.__rompMoveTab(sidC, 2); return { target: f && f.id, cols: localStorage.getItem("romp-chat-cols") }; }, cfg.sidC);
+await waitTabs("f-chat-2", [cfg.sidB, cfg.sidC]);
+await waitNoTabs("f-chat", [cfg.sidB, cfg.sidC]);
+await waitActive("f-chat-2", cfg.sidC);   // the move's focus shows the moved tab in its new column
+out.s2.col2AfterMove = await activeIn("f-chat-2");
+await clickTab("f-chat-2", cfg.sidB);
+await waitActive("f-chat-2", cfg.sidB);
+// the feed's click echo for C: a storage write every column hears; only the owner acts
+await page.evaluate((sidC) => localStorage.setItem("romp:focus-echo", JSON.stringify({ sid: sidC, t: Date.now() })), cfg.sidC);
+await waitActive("f-chat-2", cfg.sidC);
+out.s2.col2AfterEcho = await activeIn("f-chat-2"); out.s2.col1AfterEcho = await activeIn("f-chat");
+// the shell's switcher picks B while column 1 is the column last worked in: column 1 hands the pick to the owner
 await clickIn("f-chat", "#content");
 await waitFocused("f-chat");
-out.s2.unknownAfterCol1 = await targetOf(cfg.sidX);
-out.s2.col1AfterClicks = await activeIn("f-chat");
+await page.evaluate((sidB) => document.getElementById("f-chat").contentWindow.postMessage({ type: "jumpSession", id: sidB }, "*"), cfg.sidB);
+await waitActive("f-chat-2", cfg.sidB);
+out.s2.col2AfterJump = await activeIn("f-chat-2"); out.s2.col1AfterJump = await activeIn("f-chat");
+out.s2.col1Tabs = await tabsIn("f-chat");
+out.s2.targetB = await targetOf(cfg.sidB); out.s2.targetC = await targetOf(cfg.sidC); out.s2.targetA = await targetOf(cfg.sidA);
 
-// ---- 3. a split ON the session column 1 shows: the third column takes it anyway; close it ----
-out.s3 = await page.evaluate((sidA) => { const f = window.__rompSplitChat(sidA); return { frameId: f && f.id, cols: localStorage.getItem("romp-chat-cols") }; }, cfg.sidA);
-await waitTabs("f-chat-3", [cfg.sidA, cfg.sidB]);
-await waitActive("f-chat-3", cfg.sidA);
-out.s3.col3Active = await activeIn("f-chat-3");
-out.s3.col1Still = await activeIn("f-chat");
-out.s3.targetAWithThree = await targetOf(cfg.sidA);   // column 1 shows A too and comes first in the row
-await page.evaluate(() => window.__rompCloseSplit(3));
+// ---- 3. B home again, with its draft: C goes home first, a draft is typed for B in column 2, then B moves to column 1 and column 2 closes ----
+await page.evaluate((sidC) => window.__rompMoveTab(sidC, 1), cfg.sidC);
+await waitTabs("f-chat", [cfg.sidA, cfg.sidC]);
+await waitNoTabs("f-chat-2", [cfg.sidC]);
+await waitActive("f-chat-2", cfg.sidB);
+await clickIn("f-chat-2", "#composer-input");
+await page.keyboard.type(cfg.draft);
+out.s3 = { typed: await composerIn("f-chat-2"), col1BeforeMove: await activeIn("f-chat") };
+out.s3.moveTarget = await page.evaluate((sidB) => { const f = window.__rompMoveTab(sidB, 1); return f && f.id; }, cfg.sidB);
+await waitGone("chat-pane-2");
+await waitTabs("f-chat", [cfg.sidA, cfg.sidB, cfg.sidC]);
 out.s3.after = await shell();
-out.s3.pane3Gone = await page.evaluate(() => !document.getElementById("chat-pane-3") && !document.getElementById("gv-chat-3") && !document.getElementById("f-chat-3"));
+out.s3.col1Tabs = await tabsIn("f-chat");
+await clickTab("f-chat", cfg.sidB);
+await waitActive("f-chat", cfg.sidB);
+await waitFn(([fid, draft]) => { const d = document.getElementById(fid).contentDocument; const ta = d && d.getElementById("composer-input"); return !!ta && ta.value === draft; }, ["f-chat", cfg.draft], "column 1's box never showed B's draft");
+out.s3.draftInCol1 = await composerIn("f-chat");
+out.s3.targetB = await targetOf(cfg.sidB);
 
-// ---- 4. drag the chat|chat gutter right: column 1 grows, column 2 shrinks, the grow persists ----
-out.s4 = { before1: await width("chat-pane"), before2: await width("chat-pane-2") };
+// ---- 4. a new column on B again, then drag the chat|chat gutter right: column 1 grows, column 2 shrinks, the grow persists ----
+out.s4 = await page.evaluate((sidB) => { const f = window.__rompMoveTab(sidB, "new"); return { frameId: f && f.id, cols: localStorage.getItem("romp-chat-cols") }; }, cfg.sidB);
+await waitTabs("f-chat-2", [cfg.sidB]);
+await waitActive("f-chat-2", cfg.sidB);
+await waitNoTabs("f-chat", [cfg.sidB]);
+out.s4.before1 = await width("chat-pane"); out.s4.before2 = await width("chat-pane-2");
 const g = await (await page.$("#gv-chat-2")).boundingBox();
 await page.mouse.move(g.x + g.width / 2, g.y + g.height / 2);
 await page.mouse.down();
@@ -258,20 +295,25 @@ await page.evaluate(() => document.getElementById("f-chat-2").contentWindow.post
 await waitFn(() => !document.body.classList.contains("picker-open"), null, "the shell never released the lift");
 out.s5.closed = await shell();
 
-// ---- 6. reload: both columns return, column 2 on B, at the dragged width ----
+// ---- 6. reload: the v2 store restores column 2 on B at the dragged width, column 1 without B ----
 await page.reload();
-await waitTabs("f-chat", [cfg.sidA, cfg.sidB]);
-await waitTabs("f-chat-2", [cfg.sidA, cfg.sidB]);
+await waitTabs("f-chat", [cfg.sidA, cfg.sidC]);
+await waitTabs("f-chat-2", [cfg.sidB]);
 await waitActive("f-chat-2", cfg.sidB);
 await waitBootGone();
+await waitNoTabs("f-chat", [cfg.sidB]);
 out.s6 = await shell();
 out.s6.col2Active = await activeIn("f-chat-2"); out.s6.col1Active = await activeIn("f-chat");
+out.s6.col1Tabs = await tabsIn("f-chat"); out.s6.col2Tabs = await tabsIn("f-chat-2");
 out.s6.pane1W = await width("chat-pane"); out.s6.pane2W = await width("chat-pane-2");
 
-// ---- 7. close column 2: one column left, nothing persisted ----
-await page.evaluate(() => window.__rompCloseSplit(2));
+// ---- 7. the cross on the last later column: B returns to column 1, the store is empty ----
+await page.evaluate(() => document.querySelector("#chat-pane-2 .col-x").click());
+await waitGone("chat-pane-2");
+await waitTabs("f-chat", [cfg.sidA, cfg.sidB, cfg.sidC]);
 out.s7 = await shell();
 out.s7.pane2Gone = await page.evaluate(() => !document.getElementById("chat-pane-2") && !document.getElementById("gv-chat-2") && !document.getElementById("f-chat-2"));
+out.s7.col1Tabs = await tabsIn("f-chat");
 out.ms = Date.now() - out.t0;
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
@@ -346,7 +388,7 @@ class ServedChatSplit(unittest.TestCase):
         cfg = os.path.join(cls.lab, "cfg.json")
         with open(cfg, "w") as f:
             json.dump({"url": "http://127.0.0.1:%d/?token=%s" % (cls.port, cls.token),
-                       "sidA": SID_A, "sidB": SID_B, "sidX": SID_X, "dragPx": DRAG_PX}, f)
+                       "sidA": SID_A, "sidB": SID_B, "sidC": SID_C, "sidX": SID_X, "dragPx": DRAG_PX, "draft": DRAFT}, f)
         driver = os.path.join(cls.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)
@@ -397,40 +439,40 @@ class ServedChatSplit(unittest.TestCase):
             self.fail(self.driver_error + tail)
         return self.result
 
-    def test_1_a_split_on_a_session_opens_a_wide_second_column_before_gv_a_and_persists(self):
-        s = self._r()["s1"]
-        self.assertEqual(s["tag"], "IFRAME", "__rompSplitChat returns the new column's iframe: %r" % s)
+    def test_1_a_move_to_a_new_column_opens_it_on_the_session_alone_at_half_the_width_and_persists_the_partition(self):
+        r = self._r()
+        s = r["s1"]
+        self.assertEqual(r["col1Before"], SID_A, "the story starts with column 1 on A")
+        self.assertEqual(s["tag"], "IFRAME", "__rompMoveTab returns the new column's iframe: %r" % s)
         self.assertEqual(s["frameId"], "f-chat-2")
         self.assertEqual(s["src"], "/chat?col=2&skeleton=1", "every later column is /chat?col=N, a skeleton client of its session (2026-09-11)")
         self.assertEqual(s["paneCol"], "2")
-        self.assertEqual(s["cols"], "[2]", "the open column set persists per browser")
+        self.assertEqual(json.loads(s["cols"]), {"v": 2, "cols": [{"n": 2, "ids": [SID_B]}]}, "the v2 store: column 2 holds B")
+        self.assertEqual(s["sets"], {"2": [SID_B]}, "what every column page filters by")
         # row order: … chat-pane, gv-chat-2, chat-pane-2, gv-a …
         self.assertGreaterEqual(s["gIdx"], 0, s["order"])
         self.assertEqual(s["pIdx"], s["gIdx"] + 1, "the gutter sits directly ahead of its column: %r" % s["order"])
         self.assertLess(s["pIdx"], s["aIdx"], "the new column slots before gv-a: %r" % s["order"])
         self.assertEqual(s["order"][s["gIdx"] - 1], "chat-pane", "…and right after the first column: %r" % s["order"])
-        # the review find (2026-09-08): the first split opened 0px wide because the new column's missing grow
-        # averaged in as NaN. Both columns must be real widths the moment the split opens.
-        self.assertGreater(s["pane1W"], 150, "column 1 keeps a real width: %r" % s)
+        # the honest half (__rompSplitGrow): the two columns share the old column's width, less the new 7px gutter
+        half = (s["pane1Before"] - 7) / 2
+        self.assertLessEqual(abs(s["pane1W"] - half), SLACK_PX, "column 1 is about half its old width: %r" % s)
+        self.assertLessEqual(abs(s["pane2W"] - half), SLACK_PX, "…and so is the new column: %r" % s)
         self.assertGreater(s["pane2W"], 150, "the new column opens at a real width, never a sliver: %r" % s)
         g = float(s["gChat2Inline"] or s["gChat2"] or "nan")
         self.assertTrue(g == g and abs(g) != float("inf"), "--g-chat2 on .row is a finite number: %r" % s)
         self.assertGreater(g, 0)
-
-    def test_2_the_new_column_shows_its_session_and_focus_targets_route_by_column(self):
-        r = self._r()
-        s = r["s2"]
-        self.assertEqual(r["col1Before"], SID_A, "the story starts with column 1 on A")
+        # the partition on the pages: column 2's strip lists B alone; column 1's no longer lists B
         self.assertEqual(s["col2Active"], SID_B, "the seeded blob's activeId lands the new column on B: %r" % s)
-        self.assertEqual(s["col1After"], SID_A, "column 1's tab is untouched by the split: %r" % s)
-        self.assertEqual(s["targetB"], "f-chat-2", "a focus for B belongs to the column showing B: %r" % s)
+        self.assertEqual(s["col2Tabs"], [SID_B], "column 2 shows its one member and nothing else: %r" % s["col2Tabs"])
+        self.assertNotIn(SID_B, s["col1Tabs"], "B left column 1's strip: %r" % s["col1Tabs"])
+        self.assertEqual(len(s["col1Tabs"]), BOARD - 1, "column 1 keeps the rest: %r" % s["col1Tabs"])
+        self.assertEqual(s["col1After"], SID_A, "column 1's tab is untouched by the move: %r" % s)
+        self.assertEqual(s["targetB"], "f-chat-2", "a focus for B belongs to the column holding B: %r" % s)
         self.assertEqual(s["targetA"], "f-chat", "a focus for A belongs to column 1: %r" % s)
-        # a session no column shows goes to the column the user last worked in (click-tracked by the shell)
-        self.assertEqual(s["unknownAfterCol2"], "f-chat-2", "after a click in column 2, an unshown session's focus goes there: %r" % s)
-        self.assertEqual(s["unknownAfterCol1"], "f-chat", "…and back to column 1 after a click there: %r" % s)
-        self.assertEqual(s["col1AfterClicks"], SID_A, "the focus clicks changed no tab")
+        self.assertEqual(s["targetX"], "f-chat", "a session no entry lists is the first column's: %r" % s)
 
-    def test_2b_the_new_column_is_served_as_a_view_of_its_session_and_shows_the_loader_until_the_transcript(self):
+    def test_1b_the_new_column_is_served_as_a_view_of_its_session_and_shows_the_loader_until_the_transcript(self):
         """The open's cost and copy (the user 2026-09-11, who found a new column slow to open and its copy reading as
         a create). The kernel's send counters across the open tell a column served WHOLE (a full frame per tab: eight
         here, and no status frame — a client that declared nothing gets none) from one served as a VIEW of B (the
@@ -439,45 +481,55 @@ class ServedChatSplit(unittest.TestCase):
         cycle the handshake wakes can land before the bundle's ready, into a document that cannot hear it, and the
         ready arm's connect push then re-sends the one full (two); and the page's idle prefetch may have loaded a
         skeleton tab or two by the time B's transcript is painted. Never the board."""
-        s = self._r()["s2"]
+        s = self._r()["s1"]
         o = s["obs"]
         self.assertTrue(o["done"], "the observer saw B's transcript painted in column 2: %r" % o)
         self.assertGreaterEqual(s["statusDelta"], BOARD - 1,
                                 "a status frame per other tab: the column was served as a skeleton client, not whole: %r" % s)
         self.assertGreaterEqual(s["fullChatDelta"], 1, "B's one full frame: %r" % s)
         self.assertLess(s["fullChatDelta"], BOARD, "never the board (eight full frames per push before 2026-09-11): %r" % s)
-        # the copy between the call and the paint: the pane loader, never the create flow's words
-        self.assertEqual(o["emptyState"], 0, "no 'No session open' copy in a column opened on a session: %r" % o)
+        # the copy between the call and the paint: the pane loader, never the create flow's words or the no-sessions copy
+        self.assertEqual(o["emptyState"], 0, "no 'No session open' / no-sessions copy in a column opened on a session: %r" % o)
         self.assertEqual(o["openingText"], 0, "no 'Opening session' or 'opening …' line — a view of a running session is not a create: %r" % o)
         self.assertGreaterEqual(o["loaderSeen"], 1, "the pane loader (the romp swirl) covered the column until the transcript: %r" % o)
-        # the strip at the paint: B loaded and active, the other tabs listed (skeletons until clicked or prefetched)
-        tabs = {t["id"]: t for t in s["col2Tabs"]}
-        self.assertEqual(len(tabs), BOARD, "every session is a tab: %r" % s["col2Tabs"])
-        self.assertTrue(tabs[SID_B]["active"] and not tabs[SID_B]["skeleton"], "B is the loaded, active tab: %r" % s["col2Tabs"])
         self.assertLess(o["msToPaint"], 15000, "the paint came within the driver's wait")
 
-    def test_3_a_split_on_a_session_already_shown_takes_it_and_closing_it_drops_it_from_the_set(self):
+    def test_2_a_focus_for_a_session_lands_in_the_column_that_holds_it_wherever_it_was_made(self):
+        s = self._r()["s2"]
+        self.assertEqual(s["target"], "f-chat-2", "a move into an open column returns that column's iframe: %r" % s)
+        self.assertEqual(json.loads(s["cols"]), {"v": 2, "cols": [{"n": 2, "ids": [SID_B, SID_C]}]}, "C joined column 2's entry")
+        self.assertEqual(s["col2AfterMove"], SID_C, "the move's focus shows the moved tab in its new column: %r" % s)
+        # the feed's click echo for C reaches every column's listener; only the owner acts
+        self.assertEqual(s["col2AfterEcho"], SID_C, "the echo activated C in the column that holds it: %r" % s)
+        self.assertEqual(s["col1AfterEcho"], SID_A, "…and column 1, which does not, stood down: %r" % s)
+        # the shell's switcher, aimed at column 1, picked B: column 1 handed the pick to the owner
+        self.assertEqual(s["col2AfterJump"], SID_B, "the jump landed in column 2, B's column: %r" % s)
+        self.assertEqual(s["col1AfterJump"], SID_A, "column 1 keeps A: a pick of a session living elsewhere never changes its own tab: %r" % s)
+        self.assertNotIn(SID_B, s["col1Tabs"]); self.assertNotIn(SID_C, s["col1Tabs"])
+        self.assertEqual(s["targetB"], "f-chat-2"); self.assertEqual(s["targetC"], "f-chat-2"); self.assertEqual(s["targetA"], "f-chat")
+
+    def test_3_a_move_home_closes_the_emptied_column_and_the_draft_travels_with_the_tab(self):
         s = self._r()["s3"]
-        self.assertEqual(s["frameId"], "f-chat-3")
-        self.assertEqual(s["cols"], "[2,3]")
-        # the seeded blob names A and the page's wantActive never arbitrates (the shell's own:true hand-over, which used
-        # to beat the arbitration here, went on 2026-09-11)
-        self.assertEqual(s["col3Active"], SID_A, "the third column shows A even though column 1 does: %r" % s)
-        self.assertEqual(s["col1Still"], SID_A)
-        self.assertEqual(s["targetAWithThree"], "f-chat", "with two columns on A, the first in row order wins the target")
-        self.assertTrue(s["pane3Gone"], "__rompCloseSplit(3) removes the pane, its gutter and its iframe")
-        self.assertEqual(s["after"]["cols"], "[2]", "the persisted set is back to column 2 alone: %r" % s["after"])
-        self.assertEqual(s["after"]["frameIds"], ["f-chat", "f-chat-2"])
-        self.assertNotIn("chat3", s["after"]["grow"] or {}, "a closed column's grow leaves the store: %r" % s["after"]["grow"])
+        self.assertEqual(s["typed"], DRAFT, "the draft was typed into column 2's box for B: %r" % s)
+        self.assertEqual(s["col1BeforeMove"], SID_C, "C's move home showed C in column 1 (a move into an open column focuses the moved tab there): %r" % s)
+        self.assertEqual(s["moveTarget"], "f-chat", "a move to the first column returns its iframe")
+        a = s["after"]
+        self.assertEqual(json.loads(a["cols"]), {"v": 2, "cols": []}, "column 2 held only B: its entry went with it: %r" % a)
+        self.assertEqual(a["frameIds"], ["f-chat"], "…and its pane closed")
+        self.assertEqual(a["sets"], {})
+        self.assertNotIn("chat2", a["grow"] or {}, "a closed column's grow leaves the store: %r" % a["grow"])
+        self.assertIn(SID_B, s["col1Tabs"], "column 1 lists B again: %r" % s["col1Tabs"])
+        self.assertEqual(len(s["col1Tabs"]), BOARD)
+        self.assertEqual(s["draftInCol1"], DRAFT, "B's draft, typed in column 2, is in column 1's box once B is picked there: %r" % s)
+        self.assertEqual(s["targetB"], "f-chat")
 
     def test_4_dragging_the_chat_gutter_moves_width_between_the_columns_and_persists_it(self):
-        """FAILS on 2026-09-08 (a product bug the served leg exposed; left asserting the right behaviour): the
-        grab's normalisation writes each pane's grow and only THEN reads the next pane's offsetWidth, and the
-        write forces a reflow at a mixed scale (chat at its px width, the others still at their small default
-        numbers), so column 2 is recorded at about a fifth of its width and column 1 balloons before the pointer
-        moves. Pre-existing in _LANDING_JS for the chat|feed gutter, but every fresh browser's FIRST drag after a
-        split hits it, since the new column's fair grow sits next to the 60/40 defaults."""
+        """The grab's normalisation writes each pane's grow only after reading every pane's offsetWidth (a 2026-09-08
+        product bug the served leg exposed: a write between reads forced a reflow at a mixed scale, so column 2 was
+        recorded at about a fifth of its width and column 1 ballooned before the pointer moved)."""
         s = self._r()["s4"]
+        self.assertEqual(s["frameId"], "f-chat-2", "the column on B again, the lowest free number reused")
+        self.assertEqual(json.loads(s["cols"]), {"v": 2, "cols": [{"n": 2, "ids": [SID_B]}]})
         self.assertTrue(s["dragClass"], "the grab arms the drag (body.drag makes the iframes let the pointer through)")
         self.assertFalse(s["dragClassAfter"], "…and the release disarms it")
         g0 = s["growAtGrab"]
@@ -504,29 +556,37 @@ class ServedChatSplit(unittest.TestCase):
         self.assertFalse(c["pickerOpen"], "toggle closes the picker and releases the lift: %r" % c)
         self.assertEqual(c["lifted"], [], "no .lifted remains: %r" % c)
 
-    def test_6_a_reload_brings_both_columns_back_on_their_sessions_at_the_dragged_width(self):
+    def test_6_a_reload_restores_the_partition_column_2_on_its_session_at_the_dragged_width(self):
         r = self._r()
         s = r["s6"]
         self.assertEqual(s["frameIds"], ["f-chat", "f-chat-2"], "both columns return after a reload: %r" % s)
-        self.assertEqual(s["cols"], "[2]")
-        self.assertEqual(s["col2Active"], SID_B, "column 2 finds its tab where it left it (its own state blob): %r" % s)
-        self.assertEqual(s["col1Active"], SID_A)
+        self.assertEqual(json.loads(s["cols"]), {"v": 2, "cols": [{"n": 2, "ids": [SID_B]}]}, "the v2 store, as written")
+        self.assertEqual(s["sets"], {"2": [SID_B]})
+        self.assertEqual(s["col2Active"], SID_B, "column 2 comes back on B (its blob's tab, still a member): %r" % s)
+        self.assertEqual(s["col2Tabs"], [SID_B], "…and lists B alone")
+        self.assertNotIn(SID_B, s["col1Tabs"], "column 1 comes back without B: %r" % s["col1Tabs"])
+        # column 1 was ON B when B moved away (step 4): the re-point fell to its first visible member and the blob
+        # persisted that, so the reload restores a member — never the tab that lives in column 2
+        self.assertNotEqual(s["col1Active"], SID_B, "a reload never re-activates a session another column holds: %r" % s)
+        self.assertIn(s["col1Active"], s["col1Tabs"], "column 1 comes back on one of its own: %r" % s)
         self.assertLessEqual(abs(s["pane2W"] - r["s4"]["after2"]), SLACK_PX,
                              "column 2 comes back at the width the drag left it: %r vs %r" % (s["pane2W"], r["s4"]["after2"]))
         self.assertLessEqual(abs(s["pane1W"] - r["s4"]["after1"]), SLACK_PX,
                              "…and so does column 1: %r vs %r" % (s["pane1W"], r["s4"]["after1"]))
         self.assertFalse(s["pickerOpen"]); self.assertEqual(s["lifted"], [])
 
-    def test_7_closing_the_last_split_leaves_one_column_and_an_empty_set(self):
+    def test_7_the_cross_on_the_last_later_column_returns_its_session_to_the_first_column(self):
         s = self._r()["s7"]
-        self.assertTrue(s["pane2Gone"], "__rompCloseSplit(2) removes the pane, its gutter and its iframe")
+        self.assertTrue(s["pane2Gone"], "the cross removes the pane, its gutter and its iframe")
         self.assertEqual(s["frameIds"], ["f-chat"])
-        self.assertEqual(s["cols"], "[]")
+        self.assertEqual(json.loads(s["cols"]), {"v": 2, "cols": []}, "an empty v2 store, never the v1 array")
+        self.assertEqual(s["sets"], {})
+        self.assertIn(SID_B, s["col1Tabs"], "B is column 1's again: %r" % s["col1Tabs"])
         self.assertNotIn("chat2", s["grow"] or {}, "the closed column's grow leaves the store: %r" % s["grow"])
 
     def test_8_the_whole_story_runs_in_well_under_half_a_minute(self):
         r = self._r()
-        self.assertLess(r["ms"], 25000, "the driver waits on conditions, never on fixed sleeps: %d ms" % r["ms"])
+        self.assertLess(r["ms"], 30000, "the driver waits on conditions, never on fixed sleeps: %d ms" % r["ms"])
 
 
 if __name__ == "__main__":

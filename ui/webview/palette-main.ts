@@ -166,11 +166,35 @@ installMenuEcho();
         : undefined,
     });
   }
-  // Split screen (the user 2026-09-08): another chat column beside the last one, and closing the one the
-  // user is in (the last one when the first column has the focus). The shell owns the columns
-  // (_LANDING_SPLIT_JS); the rail's split action runs the same code.
-  registerCommand({ id: "chat.split", title: "Split the chat", run: () => { if (w.__rompSplitChat) w.__rompSplitChat(); } });
-  registerCommand({ id: "chat.closeSplit", title: "Close this chat split", run: () => { if (w.__rompCloseSplit) w.__rompCloseSplit(); } });
+  // Chat columns (the user 2026-09-08, who wanted several sessions open at once; the partition 2026-09-11): the
+  // shell owns which sessions each later column holds (_LANDING_SPLIT_JS) and __rompMoveTab is its one mutation.
+  // Every command here goes through chatPane(), the column last worked in, never the first column by name.
+  // chat.split (Mod+\) moves that column's active session to a new column at the right; chat.closeSplit closes
+  // that column (the last one when the first column has the focus), its sessions returning to the first column.
+  registerCommand({ id: "chat.split", title: "Move this session to a new column", run: () => { if (w.__rompSplitChat) w.__rompSplitChat(); } });
+  registerCommand({ id: "chat.closeSplit", title: "Close this column", run: () => { if (w.__rompCloseSplit) w.__rompCloseSplit(); } });
+  // The keyboard path across columns, palette-only and unbound (Alt+Arrow is pane focus and Ctrl+Alt+Arrow an OS
+  // binding on some desktops; the palette's rebinding covers anyone who wants a chord): the focused column's
+  // active session to the column on its right (past the last: a new one, the shell checks the cap) or on its
+  // left. A keystroke that can do nothing says so through the bell, never nothing silently.
+  const columnNotice = (why: string): void => { try { if (w.__rompNotify) w.__rompNotify("warn", why); } catch (e) { /* no bell yet */ } };
+  function moveActiveSession(dir: 1 | -1): void {
+    if (!w.__rompMoveTab) return;
+    const f = chatPane();
+    const t = f?.contentDocument?.querySelector("#tabs .tab.active[data-id]") as HTMLElement | null;
+    const sid = t?.dataset.id || "";
+    if (!sid) { columnNotice("No session is open in this column to move."); return; }
+    const frames = ((w.__rompChatFrameIds ? w.__rompChatFrameIds() : ["f-chat"]) as string[]).map(pane).filter((x): x is HTMLIFrameElement => !!x);
+    const i = f ? frames.indexOf(f) : -1;
+    if (i < 0) return;
+    const colOf = (fr: HTMLIFrameElement): number | "new" => (fr.id === "f-chat" ? 1 : Number(fr.getAttribute("data-col")));
+    if (dir < 0) {
+      if (i === 0) { columnNotice("This session is in the first column already."); return; }
+      w.__rompMoveTab(sid, colOf(frames[i - 1]));
+    } else w.__rompMoveTab(sid, i === frames.length - 1 ? "new" : colOf(frames[i + 1]));
+  }
+  registerCommand({ id: "chat.moveToNextColumn", title: "Move this session to the next column", run: () => moveActiveSession(1) });
+  registerCommand({ id: "chat.moveToPrevColumn", title: "Move this session to the previous column", run: () => moveActiveSession(-1) });
 
   // Esc (or running an item) hands focus back to the chat pane, so "palette, Esc, type"
   // never strands the keyboard on the shell document. The palette's hotkey chips show each

@@ -1775,7 +1775,7 @@ class LandingRevealPins(unittest.TestCase):
         # just made); since then it seeds the column's state blob instead and posts none either.
         taps = km._LANDING_REVEAL_JS + km._LANDING_PUSH_JS + km._LANDING_MOBILE_JS
         self.assertNotIn("type:'focus',id:sid", taps, "no focus posted straight into the chat iframe any more")
-        self.assertNotIn("type:'focus'", km._LANDING_SPLIT_JS, "the split's hand-over went with the seeded blob (2026-09-11)")
+        self.assertNotIn("own:true", km._LANDING_SPLIT_JS, "the split's hand-over went with the seeded blob (2026-09-11); the plain focus a move into an open column posts wears no `own`")
         self.assertNotIn("type:'focus'", km._LANDING_REVEAL_JS)
         self.assertNotIn("setTimeout", km._LANDING_REVEAL_JS, "event-based: the feed's ready, never a timer")
 

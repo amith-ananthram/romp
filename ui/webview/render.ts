@@ -48,12 +48,13 @@ import { tabStateClass, tabDotClass, tabDotTitle, sectionPip, sectionPipMembers,
 import { titleWithKey, chordOf, effectiveChord, loadOverrides } from "./keybindings";
 import { DEFAULT_CHORDS } from "./commands";
 import { NavHistory } from "./nav-history";
-import { StagedStack, quoteReplyBody, stagedPosts } from "./staged-messages";
+import { StagedStack, quoteReplyBody, stagedPosts, type StagedMsg } from "./staged-messages";
 import { type PendingSend, type TailEvent, OPT_PREFIX, isOptimisticUuid, isKernelEchoUuid, newPending, mintQid, reconcilePending, queuedCopyToHide, dropPending, bareGroupLabel, sentAtLabel, pendingBody } from "./send-pending";
 import { reconcileHeld, heldAsQueued, type HeldCopy, type HeldQueued, type HeldMemory } from "./queued-held";
 import { reloadHoldReason } from "./reload-hold";
 import { liveNotices, keepReloadNotices, takeReloadNotices } from "./reload-notices";
 import { mintProvisionalId, isProvisionalId, provisionalName, adoptsProvisional, focusResolvesProvisional } from "./provisional";
+import { colFromSearch, columnHolds, type ColSets } from "./chat-columns";   // the chat split's partition (2026-09-11): which column this page is, which sessions it holds
 import { onlyTag, matchesOnly } from "./only-filter";
 import { numberDiff, type DiffRow } from "./diff-lines";
 import { parseAgentNotif, notifHead, type AgentNotif } from "./agent-notif";
@@ -958,7 +959,26 @@ function assertPeekFor(id: string): void {
   const next = chatVisible(id) ? null : id;
   if (next !== peekId) { peekId = next; renderTabs(); }
 }
-function tabInView(id: string): boolean { return id === peekId || chatVisible(id); }
+// THE COLUMN this page is (the chat split, the user 2026-09-11, who asked for columns that hold different sessions
+// instead of each showing the whole board): "" for the first column, a standalone page and the VS Code webview; a
+// number for a later column (chat-columns.ts, the shim's rule). The shell owns which sessions each later column
+// holds (__rompChatSets, read ONCE per renderTabs into colSets — a cross-window call, the focusIsOurs precedent) and
+// the first column holds the rest. A sub-agent viewer and a provisional (create) tab are this page's own, whatever
+// the sets say. null sets: no partition (no shell, an older shell, the phone), everything is held. The filter is the
+// whole partition on the page: tabInView feeds visibleIds, the keyboard walk, the hidden-active re-point, the strip
+// plan and the signature, so a tab moved away is simply gone from this strip.
+const COL = colFromSearch(location.search);
+let colSets: ColSets | null = null;
+let tabOrderSeen = false;   // the kernel's first strip has landed on this socket (applyTabOrder): the emptiness post and the stale-active fallback wait for it
+function readColSets(): ColSets | null {
+  try {
+    if (!window.parent || window.parent === window) return null;
+    const f = (window.parent as any).__rompChatSets;
+    return typeof f === "function" ? (f() ?? null) : null;
+  } catch { return null; }   // cross-origin parent (VS Code): no shell
+}
+function heldHere(id: string): boolean { return isSubId(id) || isProvisionalId(id) || columnHolds(colSets, COL, id); }
+function tabInView(id: string): boolean { return (id === peekId || chatVisible(id)) && heldHere(id); }
 // TAB SECTIONS (tab-groups.ts): the ids the last render folded away under a collapsed section
 // header. Keyboard cycling walks the VISIBLE order, and a folded tab is not visible. The active tab's
 // section folds like any other, so the active id can be folded away too: its header is then its
@@ -5255,6 +5275,7 @@ function applyTabOrder(o: any, tabs?: any, report?: OrderReport, live?: any) {
   order.length = 0;
   for (const id of next) order.push(id);
   for (const id of kernelOrder) kernelListed.add(id);
+  tabOrderSeen = true;   // the board has been heard once on this socket (the chat split's emptiness post and stale-active fallback wait for it)
   renderTabs();
 }
 // The tabOrder frame's `skeleton` list (2026-09-07): the tabs the kernel is withholding from this page after a
@@ -5892,7 +5913,7 @@ function makePlaceholderTab(id: string): HTMLElement {
 // The empty transcript case was already handled with a "No messages yet." placeholder; this is its
 // missing sibling, one level up: no sessions rather than no messages. Saying so also beats a spinner —
 // it tells a new user the pane is working and what to do next.
-function syncNoSessionsPlaceholder(visibleCount: number, totalCount = 0) {
+function syncNoSessionsPlaceholder(visibleCount: number, totalCount = 0, heldCount = totalCount) {
   const content = document.getElementById("content");
   if (!content) return;
   const existing = document.getElementById("no-sessions");
@@ -5900,10 +5921,13 @@ function syncNoSessionsPlaceholder(visibleCount: number, totalCount = 0) {
     existing?.remove();               // a session arrived → the real view takes over
     return;
   }
-  // sessions exist but the active view hides them all — say THAT, not "no sessions yet"
-  const txt = totalCount > 0
-    ? "Every session is hidden from this view. Reveal one from the + picker, or switch views on the timeline's Show menu."
-    : "No sessions yet. Start one with  romp new <name>  or the + above.";
+  // sessions exist but every one is in another column (the chat split: this column holds none of them), or the
+  // active view hides them all — say THAT, not "no sessions yet"
+  const txt = totalCount > 0 && heldCount === 0
+    ? "Every session is in another column. Drag a tab here, or start one with the + above."
+    : totalCount > 0
+      ? "Every session is hidden from this view. Reveal one from the + picker, or switch views on the timeline's Show menu."
+      : "No sessions yet. Start one with  romp new <name>  or the + above.";
   if (existing) { existing.textContent = txt; return; }   // idempotent: renderTabs runs on every push
   const ph = el("div", "tx-empty");
   ph.id = "no-sessions";
@@ -5993,6 +6017,7 @@ function renderTabs() {
   if (tabPointerHeld) { renderPendingWhilePressed = true; return; }   // don't destroy a tab mid-click (see tabPointerHeld)
   const bar = document.getElementById("tabs");
   if (!bar) return;
+  colSets = readColSets();   // the partition (the chat split): which sessions each column holds, read ONCE per render — tabInView, the plan and the signature all read this snapshot
   // TABS-FIRST (the user 2026-06-26): render the WHOLE strip up front, in `order` — the kernel's order
   // verbatim (applyTabOrder), plus any just-arrived tab not yet pushed. An id whose session hasn't landed yet
   // draws as a placeholder (name+color, non-interactive) that fills in when build_session arrives — so tabs
@@ -6005,6 +6030,7 @@ function renderTabs() {
   for (const id of order) { if (!seen.has(id) && !closingTabs.has(id)) { seen.add(id); ids.push(id); } }
   for (const id of tabMeta.keys()) { if (!seen.has(id) && !closingTabs.has(id)) { seen.add(id); ids.push(id); } }   // any pushed tab not yet in `order` (placeholder)
   auditTabOrder(ids);
+  noteColumnEmptiness(ids);   // a later column none of whose members the kernel lists any more tells the shell (the chat split)
   // demo/recording view filter (the user 2026-07-14): `#only=<tag>` shows only matching-name tabs; the
   // real sessions keep running, just hidden from this view. No tag → visibleIds === ids (unchanged).
   const only = onlyTag();
@@ -6026,6 +6052,7 @@ function renderTabs() {
     // then would kick the user off the very tab they just opened (the no-flap rule)
     setTimeout(() => { if (activeId !== next && activeId && !tabInView(activeId)) setActive(next); }, 0);
   }
+  staleActiveFallback(ids, visibleIds);   // no active tab and none on its way (the chat split): the first visible member, deferred like the re-point
   // TAB SECTIONS (the user 2026-09-04): groups are tags. With sectioning on (per browser — the
   // tag-lens menu's "Group tabs by tag") and some tag holding a visible tab, the strip renders one
   // header per tag in tagOrder holding a visible tab, each tab under EVERY tag it carries (T264b, the
@@ -6300,7 +6327,7 @@ function renderTabs() {
  *  rebuild must not leave behind: the active view is built lazily, so it can appear between two renders
  *  whose strips are equal. */
 function stripAftermath(visibleIds: readonly string[], ids: readonly string[]): void {
-  syncNoSessionsPlaceholder(visibleIds.length, ids.length);
+  syncNoSessionsPlaceholder(visibleIds.length, ids.length, ids.filter(heldHere).length);   // …and how many this column holds (the chat split's copy)
   // the section view follows the push (renderTabs runs on every one): a no-op when nothing a row shows has
   // changed (snapshotModel's same-object return). The section GONE from the plan (its tag deleted or
   // renamed, its last member hidden or moved out, sectioning turned off) is the event that ends the view:
@@ -6478,10 +6505,10 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
     menu.appendChild(row);
   }
   menu.appendChild(el("div", "ctx-sep"));
-  // ── 2. WHERE IT BELONGS: Tags (flyout); Move to folder…; Open in new split. Membership and location
+  // ── 2. WHERE IT BELONGS: Tags (flyout); Move to folder…; Move to a new column. Membership and location
   // are functional: they change what the kernel and the file system know about the session, and the
-  // user placed Move beside Tags. Open in new split sits third here until the drag lands (then it
-  // becomes Move to a new column, once the partition makes a column a place a session belongs).
+  // user placed Move beside Tags. The column item sits third here until the drag lands (the partition
+  // made a column a place a session belongs, 2026-09-11; the drag makes the item redundant).
   // TAGS (the user 2026-08-24, overruling the earlier skip: tag editing belongs everywhere a
   // session is in front of you — you might not have the timeline open and still want to organize
   // or dispatch). A compact one-line row — the current tag names as the sub-line — with the
@@ -6785,10 +6812,10 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
     mv.addEventListener("click", (ev) => { ev.stopPropagation(); dismissTabMenu(); showMovePrompt(id); });
     menu.appendChild(mv);
   }
-  // Open in new split (the user 2026-09-08, who wanted several sessions open at once instead of tabbing):
-  // another chat column beside the last one, opened on this session. The shell makes the column
-  // (_LANDING_SPLIT_JS) and hands it a focus; this pane only asks. Shell-hosted only — standalone and
-  // VS Code have no row to split — and only a shell that carries the split script.
+  // Move to a new column (the user 2026-09-08, who wanted several sessions open at once instead of tabbing; the
+  // partition 2026-09-11): this session leaves this column for a new one at the right, alone. The shell moves it
+  // (_LANDING_SPLIT_JS __rompMoveTab, which also carries the draft); this pane only asks. Shell-hosted only —
+  // standalone and VS Code have no row to split — and only a shell that carries the split script.
   const shellCanSplit = (() => {   // a shell with the split script, and one that can take another column right now (the cap, the phone)
     try { const p = window.parent as any; return inRompShell() && typeof p.__rompSplitChat === "function" && (typeof p.__rompCanSplit !== "function" || !!p.__rompCanSplit()); }
     catch (e) { return false; }
@@ -6797,8 +6824,8 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
     const split = el("div", "ctx-item ctx-item-toggle");
     split.appendChild(ctxIcon("split", false));
     const bodyEl = el("span", "ctx-item-body");
-    const l = el("span", "ctx-item-label"); l.textContent = "Open in new split"; bodyEl.appendChild(l);
-    const sb = el("span", "ctx-item-sub"); sb.textContent = "another chat column beside this one, on this session"; bodyEl.appendChild(sb);
+    const l = el("span", "ctx-item-label"); l.textContent = "Move to a new column"; bodyEl.appendChild(l);
+    const sb = el("span", "ctx-item-sub"); sb.textContent = "a new chat column at the right, holding just this session"; bodyEl.appendChild(sb);
     split.appendChild(bodyEl);
     split.addEventListener("click", (ev) => {
       ev.stopPropagation(); dismissTabMenu();
@@ -7365,6 +7392,7 @@ function dropProvisional(): { queued: string[]; draft: string } {
 // queued messages send FOR REAL here — they were never sent before, because there was no session to send
 // them to; the dashed bubbles you saw were this client saying "received", not the kernel.
 function adoptProvisional(realId: string): void {
+  claimSession(realId);                    // a session created from a later column belongs to that column (the chat split): claimed BEFORE the switch, so setActive shows it here
   const { queued, draft } = dropProvisional();
   if (draft) drafts.set(realId, draft);    // set BEFORE the switch — setActive fills the box from drafts
   setActive(realId);
@@ -7455,9 +7483,9 @@ function revealSelfPane(): void {
 }
 // Split screen (the user 2026-09-08): the kernel aims a focus at the DASHBOARD, so every chat column's socket
 // receives it, and the feed's click echo reaches every column's storage listener. The shell says which column
-// a session-focus belongs to (__rompChatTarget: the column already showing that session, else the one the
-// user last worked in, else the first) and the others stand down. Standalone and VS Code have no shell and
-// always act, exactly as before.
+// a session-focus belongs to (__rompChatTarget: the column that HOLDS the session under the partition, 2026-09-11,
+// else the first; with no session named, the one the user last worked in) and the others stand down — one
+// lookup, exactly one taker. Standalone and VS Code have no shell and always act, exactly as before.
 function focusIsOurs(sid: string): boolean {
   try {
     if (!window.parent || window.parent === window) return true;
@@ -7466,6 +7494,58 @@ function focusIsOurs(sid: string): boolean {
     const f = t(sid);
     return !f || f === window.frameElement;
   } catch (e) { return true; }   // cross-origin parent (VS Code) — not the romp shell
+}
+// …and the HOP the partition adds: a message about a session another column holds is posted into that column's
+// frame (the same shell lookup) and the keyboard follows it. Two callers: setActive, for a pick made here of a
+// session living elsewhere (shown where it lives, the focus moves there: a jump, not a move); and the focus /
+// confirmRevive gates, for a consumed parked reveal the kernel sent to THIS one client (`own`) — the copy they hand
+// over carries no `own`, so it cannot hop again. False when the owner is this frame or there is no shell: the
+// caller then acts locally, exactly as before.
+function forwardToOwner(m: Record<string, unknown>): boolean {
+  try {
+    if (!window.parent || window.parent === window) return false;
+    const t = (window.parent as any).__rompChatTarget;
+    if (typeof t !== "function") return false;
+    const f = t(String(m.id));
+    if (!f || f === window.frameElement || !f.contentWindow) return false;
+    f.contentWindow.postMessage(m, "*");
+    try { f.contentWindow.focus(); } catch (e) { /* the message alone still lands the session */ }
+    return true;
+  } catch (e) { return false; }   // cross-origin parent (VS Code) — not the romp shell
+}
+// A session CREATED from this column's plus button belongs to this column (the chat split): claimed on the shell
+// the moment its provisional resolves to the real id, and the sets re-read so the switch that follows finds it
+// held here. The first column derives (a session no entry lists is already its own), so it claims nothing.
+function claimSession(id: string): void {
+  if (!COL) return;
+  try { const c = (window.parent as any)?.__rompClaimSession; if (typeof c === "function") c(id, COL); } catch (e) { /* no shell */ }
+  colSets = readColSets();
+}
+// EMPTINESS (the chat split): a later column none of whose members the kernel's strip lists any more — ended, or
+// closed from a tab's cross (`ids` excludes closingTabs, so the user's own cross empties the column at once: the
+// acknowledgement) — tells the shell, which prunes the gone ids and closes a column left with none. Once per
+// emptiness: the flag resets when a member is listed again. Waits for the kernel's first strip (tabOrderSeen), so
+// a page that has not heard the board yet says nothing; `ids` keeps host-down remote tabs and live-omitted ids
+// (T258), so neither a tunnel blip nor a transient read failure closes a column.
+let colEmptyPosted = false;
+function noteColumnEmptiness(ids: readonly string[]): void {
+  if (!COL || !colSets || !tabOrderSeen) return;
+  const mine = colSets[COL] || [];
+  const empty = mine.length > 0 && !mine.some((id) => ids.includes(id));
+  if (!empty) { colEmptyPosted = false; return; }
+  if (colEmptyPosted) return;
+  colEmptyPosted = true;
+  try { window.parent.postMessage({ romp: "colEmpty", gone: mine.slice() }, "*"); } catch (e) { /* no shell */ }
+}
+// STALE ACTIVE (the chat split): a skeleton client whose hinted session has ended gets no full frame to adopt, and
+// a column whose wanted tab another column now holds must not sit on nothing. With the kernel's first strip
+// landed, no active tab, no create in flight, the wanted id null, unlisted or held elsewhere, and a visible member,
+// the first visible member is activated — deferred and re-checked at fire time, like the hidden-active re-point.
+function staleActiveFallback(ids: readonly string[], visibleIds: readonly string[]): void {
+  if (activeId || !tabOrderSeen || provisionalId || !visibleIds.length) return;
+  if (wantActive && ids.includes(wantActive) && heldHere(wantActive)) return;   // its frame is on the way: the restore takes it
+  const first = visibleIds[0];
+  setTimeout(() => { if (!activeId && !provisionalId && tabInView(first)) { wantActive = null; setActive(first); } }, 0);
 }
 
 // Full-screen bridge (the user 2026-07-05): the picker is rendered inside the /chat iframe, so its
@@ -15693,6 +15773,38 @@ const sessionMru: string[] = [];
     const m = tabMeta.get(id);
     return { id, name: m?.name || id, bg: m?.color?.bg || "", fg: m?.color?.fg || "" };
   });
+// DRAFTS TRAVEL with a moved tab (the chat split, the user 2026-09-11): the shell calls this on the SOURCE page,
+// synchronously (same origin, so the transfer is race-free), for the session leaving this column. The composer's
+// text is stashed first when the tab is active; then everything persistDrafts writes for the session — the draft,
+// its citations, attachments and staged messages — leaves this page's maps and blob in the same call and is returned,
+// so the target's adopt is the only copy. null when nothing was held. An active tab's box is emptied here: the
+// re-point that follows the move must not re-stash the moved text under a session this column no longer shows.
+(window as any).__rompTakeSessionState = (sid: string): { draft: string; citations: Citation[]; files: string[]; staged: StagedMsg[] } | null => {
+  if (typeof sid !== "string" || !sid) return null;
+  const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
+  if (sid === activeId && ta) { if (ta.value) drafts.set(sid, ta.value); else drafts.delete(sid); }
+  const draft = drafts.get(sid) ?? "", citations = composerCitations.get(sid) ?? [], files = composerFiles.get(sid) ?? [], staged = stagedMsgs.takeAll(sid);
+  drafts.delete(sid); composerCitations.delete(sid); composerFiles.delete(sid);
+  if (sid === activeId) { if (ta) { ta.value = ""; growComposer(ta); } renderComposerChips(sid); renderComposerFiles(sid); renderStagedStrip(sid); }
+  persistDrafts();
+  if (!draft && !citations.length && !files.length && !staged.length) return null;
+  return { draft, citations, files, staged };
+};
+// …and the TARGET page's half: what the source held, into the maps (joined onto anything already here, never over
+// it), persisted, and into the box when the tab is active. The shell posts it on a new column's load or at once.
+function adoptSessionState(sid: unknown, state: unknown): void {
+  if (typeof sid !== "string" || !sid || !state || typeof state !== "object") return;
+  const st = state as { draft?: unknown; citations?: unknown; files?: unknown; staged?: unknown };
+  if (typeof st.draft === "string" && st.draft) drafts.set(sid, [drafts.get(sid) ?? "", st.draft].filter(Boolean).join("\n\n"));
+  if (Array.isArray(st.citations) && st.citations.length) composerCitations.set(sid, [...(composerCitations.get(sid) ?? []), ...(st.citations as Citation[])]);
+  if (Array.isArray(st.files) && st.files.length) {
+    const paths = (st.files as unknown[]).filter((p): p is string => typeof p === "string" && !!p);
+    if (paths.length) composerFiles.set(sid, [...(composerFiles.get(sid) ?? []), ...paths]);
+  }
+  if (Array.isArray(st.staged) && st.staged.length) stagedMsgs.restore({ [sid]: [...stagedMsgs.list(sid), ...st.staged] });
+  persistDrafts();
+  if (activeId === sid) loadComposerFor(sid);
+}
 function noteMru(id: string): void {
   const i = sessionMru.indexOf(id);
   if (i >= 0) sessionMru.splice(i, 1);
@@ -15727,6 +15839,12 @@ const navHist = new NavHistory({
 
 function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: string, anchorEventT?: number) {
   noteMru(id);
+  // A PICK OF A SESSION ANOTHER COLUMN HOLDS (the chat split): the picker, an at-mention, a transcript link, the
+  // trail and the shell's switcher all land here; the session is shown where it lives and the focus moves there —
+  // a jump, not a move (only a move command, the tab menu's item, the drag or a create changes which column holds
+  // a session). The same fields ride the hop and the owner's own focus gate takes it. Ahead of the peek and the
+  // drafts swap below, so this page's box and strip never change hands for a session it does not show.
+  if (colSets && !heldHere(id) && forwardToOwner({ type: "focus", id, anchor, anchorT, anchorKind, anchorEventT })) return;
   // EPHEMERAL PEEK (see peekId): an out-of-view target opens as the peek; activating anything else
   // drops it. Before the already-active early-return, so a re-focus of a hidden session re-asserts
   // its peek even when nothing else changes.
@@ -15933,9 +16051,10 @@ function upsert(msg: any) {
   // fallback tab active with the box unheld, and the next blind keystroke landed there after all (the
   // T236 harness, omission path: the tab is re-listed within seconds). setActive clears the note.
   if (composerNoteSid === msg.id) setActive(msg.id);
-  const adopted = !activeId;
+  colSets = readColSets();   // membership for the two adoptions below (the chat split): fresh, not the last render's — a later column's socket carries every session's frames, and only a member may take the box
+  const adopted = !activeId && heldHere(msg.id);
   if (adopted) { activeId = msg.id; loadComposerFor(msg.id, true); }   // adopted as the only tab → its draft too (T236: the once-per-page restore below never covers a session that LEFT and came back)
-  if (wantActive && msg.id === wantActive) { wantActive = null; setActive(msg.id); }   // restore persisted tab on arrival
+  if (wantActive && msg.id === wantActive && heldHere(msg.id)) { wantActive = null; setActive(msg.id); }   // restore persisted tab on arrival — while this column holds it (a want for a tab moved away is retired by staleActiveFallback)
   renderTabs();                                   // a new id appended to `order` above → strip repaints in kernel order
   // Active tab: a content refresh appends + preserves scroll (appendActive); a new tab or a fork
   // lands at the bottom/anchor (showActive). This is what keeps new pushes from snapping to bottom.
@@ -16409,7 +16528,7 @@ function dismissSession(id: string, why: DismissWhy, doomed?: ReadonlySet<string
     // dead id left `mru` above; an id `order` no longer carries would bind the box to a tab nobody can see,
     // and the next keystroke would file under it) and not one this same teardown takes next.
     const home = hostOf(id);   // "" for a local id, and then no sibling rule: every local tab would "share" it
-    const goingToo = (x: string) => (doomed?.has(x) ?? false) || (why === "hostDrop" && !!home && hostOf(x) === home);
+    const goingToo = (x: string) => (doomed?.has(x) ?? false) || (why === "hostDrop" && !!home && hostOf(x) === home) || !heldHere(x);   // …nor a tab another column holds (the chat split): it is nobody's fallback here
     // …and with no recency left (the user only ever looked at this one tab), the first tab still on the
     // strip: leaving activeId null with tabs showing read "No session open" under a visible strip, and
     // handed the box to whichever session frame happened to arrive next (the harness caught both, T236).
@@ -16501,6 +16620,9 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   }
   // the shell's palette / shell-focus chords: the chat owns the nav trail, the shell just asks
   if (m.romp === "chatNav") { navHist.go(m.dir === 1 ? 1 : -1); return; }
+  // a moved tab's drafts (the chat split): the shell took them from the source page (__rompTakeSessionState) and
+  // hands them to this page, the session's column now — into the maps, persisted, and into the box when it is active
+  if (m.romp === "adopt") { adoptSessionState(m.sid, m.state); return; }
   // the shell's pane set, which panes are on screen by key: the cache openPath routes file links by (panesOn
   // above; the shell posts it on every toggle, on this iframe's load and on a phone's tab switch). Whole-set
   // replace: a key the shell stopped naming must not linger as on.
@@ -16549,7 +16671,15 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   else if (m.type === "update") update(m);
   else if (m.type === "wsup") { onSocketUp(skeletonTabs); skeletonDiagArmed = true; reholdQueuedEditors(); }   // the shim's socket-flip marker, in FRAME order: the dead socket's frames may still be draining from the FIFO when onopen fires (review find 2026-09-07)
   else if (m.type === "status") statusOnly(m);
-  else if (m.type === "focus" && !m.own && !focusIsOurs(m.id)) { /* another chat column's (split screen): the shell named the column it belongs to; `own` is the shell's hand-over to THIS new column */ }
+  else if (m.type === "focus" && !focusIsOurs(m.id)) {
+    // another chat column's (split screen): the shell named the column that holds the session. A consumed parked
+    // push-tap reveal rides `own` (the kernel sent it to THIS one client, _consume_pending_reveal): it is handed to
+    // the owner once — the copy carries no `own`, so it cannot hop again; anything else the owner received on its own
+    // socket. A create this focus answers (a running session under the requested name) retires here too, so the
+    // provisional tab goes in the creating column while the owner shows the session.
+    if (m.own) { const copy = { ...m }; delete copy.own; forwardToOwner(copy); }
+    if (focusResolvesProvisional(m.id, sessions.get(m.id)?.name, pendingNewSession, provisionalId)) resolveProvisionalToExisting(m.id);
+  }
   else if (m.type === "focus") {
     revealSelfPane();   // every focus is someone jumping HERE — on mobile, come forward (incl. from a remote kernel)
     closingTabs.delete(m.id);   // an explicit reveal outranks a pending close-suppression: closing a tab and
@@ -16800,7 +16930,11 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
         closeTabLocally(m.id);   // same optimistic drop as the in-page ✕ — this path used to sit and wait
       });
   }
-  else if (m.type === "confirmRevive" && m.id && !m.own && !focusIsOurs(m.id)) { /* another chat column's prompt (split screen) — one dialog, not one per column; `own` is addressed to this column */ }
+  else if (m.type === "confirmRevive" && m.id && !focusIsOurs(m.id)) {
+    // another chat column's prompt (split screen): one dialog, in the column that holds the session; a consumed
+    // reveal's prompt (`own`, sent to this one client) is handed there once, the copy without `own`
+    if (m.own) { const copy = { ...m }; delete copy.own; forwardToOwner(copy); }
+  }
   else if (m.type === "confirmRevive" && m.id) {
     revealSelfPane();   // the dead-session prompt is drawn in THIS pane — useless if the pane isn't showing
     const nm = String(m.name || "");
@@ -18221,6 +18355,10 @@ window.addEventListener("storage", (e) => {
 // TAB SECTIONS state (tab-groups.ts): a fold/open or the "Group tabs by tag" switch — from this
 // window (the CustomEvent) or a sibling pane (the storage event) — re-renders the strip
 window.addEventListener("storage", (e) => { if (e.key === TABGROUPS_KEY) renderTabs(); });
+// …and so does the shell's write of which sessions each column holds (the chat split): the tab of a session moved
+// away is simply gone from this strip and a session moved here appears; an equal signature skips the rebuild (the
+// source's own dragend render already read the new sets in the same task)
+window.addEventListener("storage", (e) => { if (e.key === "romp-chat-cols") renderTabs(); });
 window.addEventListener(TABGROUPS_EVENT, () => renderTabs());
 // …and so does crossing the phone/desktop boundary (an iPad rotation): renderTabs samples
 // phoneLayout() per render, and the kernel's CSS swaps the strip for its scraped session list the

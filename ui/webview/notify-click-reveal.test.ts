@@ -54,7 +54,7 @@ test("a reveal outranks the persisted-tab restore: the focus handler retires wan
   assert.ok(focusBlock.length > 100, "found the focus handler");
   assert.match(focusBlock, /\n    wantActive = null;/);
   // …and the restore itself is still the one-shot it was: consumed on arrival, or retired here
-  assert.match(RENDER, /if \(wantActive && msg\.id === wantActive\) \{ wantActive = null; setActive\(msg\.id\); \}/);
+  assert.match(RENDER, /if \(wantActive && msg\.id === wantActive && heldHere\(msg\.id\)\) \{ wantActive = null; setActive\(msg\.id\); \}/);   // …while this column holds it (the chat split, 2026-09-11)
 });
 
 test("a focus on a federated session its host has not relayed yet shows the loader, not 'No session open'", () => {

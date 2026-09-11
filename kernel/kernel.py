@@ -44974,14 +44974,15 @@ def _consume_pending_reveal(client, why="the pane's ready"):
     print("[reveal] sid=%s wid=%s: consumed — %s" % (str(p["sid"])[:8], str(p["wid"] or "")[:8], why), file=sys.stderr)
     try:
         m = _reveal_msg(p["sid"])
-        m["own"] = True   # addressed to THIS column (split screen, 2026-09-08): one chat client consumes the parked
-        #                   tap, so the pane's column arbitration (render.ts focusIsOurs) must not hand it elsewhere —
-        #                   a consumed park has ONE recipient, and a consumer that deferred to arbitration would lose
-        #                   the tap (a booting split whose second column's ready came first). Known residual
-        #                   (review find, 2026-09-11): a copy already delivered to unproven same-wid panes (`sent`,
-        #                   T312) can land in one column by arbitration and then, before its proof retires the park,
-        #                   in a redialing column too (its socket dead at the tap) — two columns on one session, a
-        #                   state the split allows on purpose, so the rare duplicate is accepted over a lost tap.
+        m["own"] = True   # addressed to THIS client (split screen, 2026-09-08): one chat client consumes the parked
+        #                   tap, and a consumer that deferred to the columns' arbitration (render.ts focusIsOurs) would
+        #                   lose it (a booting split whose second column's ready came first). Under the partition
+        #                   (2026-09-11: a session lives in ONE column) the consuming page hands a tap for a session
+        #                   another column holds to that column itself — it posts the same message WITHOUT `own` into
+        #                   the owner's frame (render.ts, the focus gate), one hop by construction since the copy
+        #                   carries no `own`. The residual a review named on 2026-09-11 (a copy already delivered to
+        #                   unproven same-wid panes landing in two columns on one session) went with the arrangement
+        #                   that allowed two columns on one session.
         client["send"](json.dumps(m))
     except Exception:
         pass
@@ -46409,6 +46410,17 @@ var avg=v.length?v.reduce(function(a,b){return a+b;},0)/v.length:50;setGrow(k,av
 try{localStorage.setItem(GK,JSON.stringify(grow));}catch(e){}};
 // a split column keeps the width it was dragged to across reloads: fair only when the store holds nothing for it
 window.__rompGrowFairIfNew=function(k){if(typeof grow[k]==='number'&&isFinite(grow[k])){setGrow(k,grow[k]);return;}window.__rompGrowFair(k);};
+// A NEW CHAT COLUMN takes HALF the rightmost column (the chat split, 2026-09-11: the width the drop's rectangle
+// promises). Every shown pane is normalised to its pixels first — the grab's read-all-then-write rule below, so no
+// pane is read at a mixed scale — then the left pane's key and the new key each take half of its width, persisted,
+// so __rompGrowFairIfNew finds the value when the column is made and keeps it (the fair average stays the rule for a
+// column with no stored width: a boot restore). The new pane is not in the row yet, so it is never read; a hidden
+// pane is never written. Returns whether it wrote (a hidden or missing left pane: nothing).
+window.__rompSplitGrow=function(leftId,newKey){var L=document.getElementById(leftId);if(!L||!shown(leftId)||!newKey)return false;
+var px={};PANES.forEach(function(id){if(shown(id))px[id]=document.getElementById(id).offsetWidth;});
+Object.keys(px).forEach(function(id){setGrow(key(id),px[id]);});
+var w=px[leftId];setGrow(key(leftId),w/2);setGrow(newKey,w/2);
+try{localStorage.setItem(GK,JSON.stringify(grow));}catch(e){}return true;};
 // A drag moves a LANDING LINE and the panes take their widths ONCE, at release. A grow write re-lays out the row
 // and with it every same-origin pane document in that frame, so writing the pair on every mousemove cost one
 // relayout of every pane per pointer step, a cost that grows with what the panes hold (seconds a step once a pane
@@ -49516,87 +49528,167 @@ _LANDING_COLLAPSE_JS = """
 """
 
 
-# SPLIT SCREEN for the chat (the user 2026-09-08, who wanted several sessions open at once instead of tabbing
-# through them). Every chat column past the first is a client-made twin of #chat-pane — <div class="pane
-# chat-col"> around an iframe at /chat?col=N, inserted before gv-a with a .gv.gv-chat gutter ahead of it — so
-# the row reads chat | chat … | outline | feed. Each column is a FULL chat pane: its own tab strip, its own
-# persisted active tab, drafts and scroll (the shim keys its state blob by ?col=), its own socket — dialled as a
-# SKELETON client of the one session it opened on (the shell seeds the blob's activeId, the frame's src carries
-# skeleton=1, the kernel serves that tab whole and the rest as skeleton tabs; 2026-09-11) — and its own grow weight
-# (--g-chatN, in the gutters' store). The set of open columns persists per browser (romp-chat-cols); a
-# reopened column number finds its state where it left it. Desktop only: the phone shows one pane at a time.
-# A dashboard-aimed focus (a feed click, a kernel focus, a revive prompt) reaches EVERY column's socket, so the
-# columns ask the shell which of them it belongs to (__rompChatTarget: the column already showing the session,
-# else the one the user last worked in, else the first) and the others stand down — render.ts focusIsOurs.
+# CHAT COLUMNS (the user 2026-09-08, who wanted several sessions open at once instead of tabbing through them;
+# reworked 2026-09-11 into columns that PARTITION the sessions). Every chat column past the first is a client-made
+# twin of #chat-pane — <div class="pane chat-col"> around an iframe at /chat?col=N&skeleton=1, inserted before gv-a
+# with a .gv.gv-chat gutter ahead of it — so the row reads chat | chat … | outline | feed. Each column is a full chat
+# page (its own socket, state blob, drafts and scroll; the shim keys the blob by ?col=) FILTERED by one shell-owned
+# fact: which sessions each later column holds, persisted per browser under romp-chat-cols as {v:2, cols:[{n, ids}]}
+# in row order (a v1 array of column numbers is migrated once, each number to the session its blob named). The first
+# column has no entry and holds the rest: every session that arrives with no gesture (a peer's spawn, a remote host's
+# tabs, a revived session whose column has closed) lands there. Every column page reads the sets through
+# __rompChatSets and filters its strip (render.ts tabInView, through chat-columns.ts); ONE mutation, __rompMoveTab(sid,
+# to), changes them — the palette's commands, the tab menu's item and the drop zones all go through it — and it
+# carries the session's draft, citations, attachments and staged messages with the tab (__rompTakeSessionState on the
+# source page, {romp:'adopt'} into the target). A new column opens as a skeleton client of its one session (the blob's
+# activeId seeded before the frame exists; the kernel serves that tab whole and the rest as skeleton tabs). A column
+# whose last member leaves closes; its cross and the palette's close return its sessions to the first column. Desktop
+# only: the phone shows one pane at a time and filters nothing. A dashboard-aimed focus (a feed click, a kernel focus,
+# a revive prompt) reaches EVERY column's socket, so the columns ask the shell which of them holds the session
+# (__rompChatTarget: the owner column, else the first; with no session named, the column the user last worked in) and
+# the others stand down — render.ts focusIsOurs.
 _LANDING_SPLIT_JS = """
 (function(){
-var CK='romp-chat-cols',MAX=4,cols=[];   // cols: the open column numbers in ROW order (2, 3, …); MAX counts the first column too
+var CK='romp-chat-cols',MAX=4,cols=[];   // cols: the later columns in ROW order, each {n: the column number, ids: the sessions it holds}; MAX counts the first column too
 var BK='romp-vscode-state-chat:';   // a column's state blob (the shim's SK for /chat?col=N): its activeId is the shim's ?active= connect hint and render.ts's wantActive
 var row=document.querySelector('.row'),gva=document.getElementById('gv-a');
 if(!row||!gva)return;
 function mobile(){var b=document.getElementById('mtabs');try{return !!b&&getComputedStyle(b).display!=='none';}catch(e){return false;}}
-function save(){try{localStorage.setItem(CK,JSON.stringify(cols));}catch(e){}}
+function save(){try{localStorage.setItem(CK,JSON.stringify({v:2,cols:cols.map(function(c){return {n:c.n,ids:c.ids.slice()};})}));}catch(e){}}
 function paneId(n){return 'chat-pane-'+n;}function frameId(n){return 'f-chat-'+n;}
-function frames(){var out=[document.getElementById('f-chat')];cols.forEach(function(n){out.push(document.getElementById(frameId(n)));});return out.filter(Boolean);}
+function idx(n){for(var i=0;i<cols.length;i++){if(cols[i].n===n)return i;}return -1;}
+function entry(n){var i=idx(n);return i<0?null:cols[i];}
+function frames(){var out=[document.getElementById('f-chat')];cols.forEach(function(c){out.push(document.getElementById(frameId(c.n)));});return out.filter(Boolean);}
 function frameOfWin(win){if(!win)return null;var fs=frames();for(var i=0;i<fs.length;i++){try{if(fs[i].contentWindow===win)return fs[i];}catch(e){}}return null;}
 function colOf(win){var f=frameOfWin(win);return f?String(f.getAttribute('data-col')||''):'';}
-function lastPane(){return cols.length?paneId(cols[cols.length-1]):'chat-pane';}
-function activeIn(f){try{var t=f.contentDocument&&f.contentDocument.querySelector('#tabs .tab.active[data-id]');return t?String(t.getAttribute('data-id')||''):'';}catch(e){return '';}}
+function frameOfCol(n){return document.getElementById(n===1?'f-chat':frameId(n));}
+function lastPane(){return cols.length?paneId(cols[cols.length-1].n):'chat-pane';}
+// THE PARTITION, three pure readers of cols: the column holding a session (1, the first, when no entry lists it);
+// the sets every column page filters by (an id listed twice — a store another dashboard wrote — belongs to the
+// first entry in row order, so no two columns show it); the lowest free number (a reused number's blob and grow
+// key find their state where they left it).
+function ownerOf(sid){for(var i=0;i<cols.length;i++){if(cols[i].ids.indexOf(sid)>=0)return cols[i].n;}return 1;}
+function sets(){var out={},seen={};cols.forEach(function(c){out[String(c.n)]=c.ids.filter(function(id){if(seen[id])return false;seen[id]=true;return true;});});return out;}
+function nextNumber(){var n=2;while(entry(n))n++;return n;}
+function activeIn(f){try{var t=f.contentDocument&&f.contentDocument.querySelector('#tabs .tab.active[data-id]');return t?String(t.getAttribute('data-id')||''):'';}catch(e){return '';}}   // the palette's "move this session": the focused column's own tab
 function focused(){var id=(window.__rompFocusedChatId&&window.__rompFocusedChatId())||'f-chat';return document.getElementById(id)||document.getElementById('f-chat');}
-// Which column a session-focus belongs to: the column already showing that session, else the column the
-// user last worked in, else the first. The panes ask this before acting on a dashboard-aimed focus.
-function target(sid){var fs=frames();if(sid){for(var i=0;i<fs.length;i++){if(activeIn(fs[i])===sid)return fs[i];}}return focused()||fs[0]||null;}
+// Which column a session-focus belongs to: the column that HOLDS the session (one lookup, never a read of the
+// panes' DOM), the first when no entry lists it; with no session named, the column the user last worked in,
+// else the first. The panes ask this before acting on a dashboard-aimed focus, and before showing a pick of a
+// session that lives elsewhere.
+function target(sid){if(sid)return frameOfCol(ownerOf(sid))||document.getElementById('f-chat')||null;return focused()||document.getElementById('f-chat')||null;}
 // Opened ON a session (the user 2026-09-11, who found a new column slow to open and its copy reading as a create):
 // the column's state blob names the session BEFORE the frame exists. The shim's connect reads activeId from that
 // blob and dials ?active=<sid>&skeleton=1, so the kernel serves ONE full frame (the session) and skeletons the rest
 // (Handler._ws), and render.ts's wantActive activates it when its frame lands — the first frame on the socket, by
-// construction; no focus is handed over. Merged, never replaced: a reused number's drafts survive. No sid (a
-// restore) leaves the blob as it is: the column comes back on the tab its own state names.
+// construction; no focus is handed over. Merged, never replaced: a reused number's drafts survive.
 function seed(n,sid){if(!sid)return;var st=null;try{st=JSON.parse(localStorage.getItem(BK+n)||'null');}catch(e){}
 if(!st||typeof st!=='object'||Array.isArray(st))st={};st.activeId=sid;try{localStorage.setItem(BK+n,JSON.stringify(st));}catch(e){}}
-function make(n,sid){var have=document.getElementById(frameId(n));if(have)return have;
+// At a restore a column comes back on the tab its own blob names when that session is still a member, else on its
+// first member (the blob's tab was moved away while this browser was closed)
+function seedFor(c){var st=null;try{st=JSON.parse(localStorage.getItem(BK+c.n)||'null');}catch(e){}var a=st&&typeof st.activeId==='string'?st.activeId:'';return c.ids.indexOf(a)>=0?a:c.ids[0];}
+// DRAFTS TRAVEL with a moved tab (the user's work): the SOURCE page hands over what it holds for the session — the
+// composer's text (stashed first when the tab is active), citations, attachments, staged messages — synchronously
+// (same origin, so the transfer is race-free) and drops them; the TARGET page adopts them on its load (a new
+// column) or at once (an open one). null when the source held nothing or has no such function (an older page).
+function take(f,sid){try{var t=f&&f.contentWindow&&f.contentWindow.__rompTakeSessionState;return typeof t==='function'?(t(sid)||null):null;}catch(e){return null;}}
+function adopt(f,sid,state){if(!f||!state)return;try{f.contentWindow.postMessage({romp:'adopt',sid:sid,state:state},'*');}catch(e){}}
+function make(n,sid,state){var have=document.getElementById(frameId(n));if(have)return have;
 var g=document.createElement('div');g.className='gv gv-chat';g.id='gv-chat-'+n;
 var p=document.createElement('div');p.className='pane chat-col';p.id=paneId(n);p.setAttribute('data-col',String(n));
 p.style.flex='var(--g-chat'+n+',60) 1 0';
 var f=document.createElement('iframe');f.id=frameId(n);f.className='chat-col';f.setAttribute('data-col',String(n));
 seed(n,sid);f.src='/chat?col='+n+'&skeleton=1';   // the blob first, then the src: the shim reads the hint at its connect. skeleton=1: a later column is a VIEW of its one session (the kernel serves that tab whole and the rest as skeleton tabs that load on a click)
-var x=document.createElement('div');x.className='col-x';x.title='Close this split';x.setAttribute('role','button');x.textContent='×';
+if(state)f.addEventListener('load',function(){adopt(f,sid,state);state=null;});   // the moved tab's drafts, once the page can hear them; once — a later reload of the frame has them in its own blob
+var x=document.createElement('div');x.className='col-x';x.title='Close this column';x.setAttribute('role','button');x.textContent='×';
 x.addEventListener('click',function(ev){ev.stopPropagation();close(n);});
 p.appendChild(f);p.appendChild(x);
 row.insertBefore(g,gva);row.insertBefore(p,gva);
 if(window.__rompRegisterPane)window.__rompRegisterPane(p.id,'chat'+n);
-if(window.__rompGrowFairIfNew)window.__rompGrowFairIfNew('chat'+n);else if(window.__rompGrowFair)window.__rompGrowFair('chat'+n);   // a fair width, never a sliver — and a dragged width survives a reload
-if(window.__rompGutter)window.__rompGutter(g.id,function(){var i=cols.indexOf(n);return i>0?paneId(cols[i-1]):'chat-pane';},p.id);
+if(window.__rompGrowFairIfNew)window.__rompGrowFairIfNew('chat'+n);else if(window.__rompGrowFair)window.__rompGrowFair('chat'+n);   // the half __rompSplitGrow wrote, or a fair width at a restore — never a sliver — and a dragged width survives a reload
+if(window.__rompGutter)window.__rompGutter(g.id,function(){var i=idx(n);return i>0?paneId(cols[i-1].n):'chat-pane';},p.id);
 if(window.__rompWireFocus)window.__rompWireFocus(f);if(window.__rompWireEsc)window.__rompWireEsc(f);
 try{window.dispatchEvent(new CustomEvent('romp-chat-cols',{detail:{frame:f,col:n,open:true}}));}catch(e){}   // palette-main wires its keys
 return f;}
 function canSplit(){return !mobile()&&cols.length+1<MAX;}
-// a refused split says why (the click-acknowledgement rule): the cap, or the phone's one-pane layout
-function refuse(){var why=mobile()?'The phone shows one pane at a time — no split here.':'Four chat columns at most — close one to open another.';
-try{if(window.__rompNotify)window.__rompNotify('warn',why);}catch(e){}return null;}
-function open(sid){if(!canSplit())return refuse();
-try{if(!document.body.classList.contains('po-chat')&&window.__rompPaneToggle)window.__rompPaneToggle('chat',true);}catch(e){}   // a split of a hidden chat group brings the group forward first
-var n=2;while(cols.indexOf(n)>=0)n++;cols.push(n);save();
-var f=make(n,sid||'');try{f.contentWindow.focus();}catch(e){}return f;}
-function close(n){var i=cols.indexOf(n);if(i<0)return;cols.splice(i,1);save();
+// a refused move says why (the click-acknowledgement rule): the cap, the phone's one-pane layout, or nothing to do
+function notify(why){try{if(window.__rompNotify)window.__rompNotify('warn',why);}catch(e){}return null;}
+function refuse(){return notify(mobile()?'The phone shows one pane at a time — no split here.':'Four chat columns at most — close one to open another.');}
+function unlist(sid){for(var i=0;i<cols.length;i++){var c=cols[i],j=c.ids.indexOf(sid);if(j>=0){c.ids.splice(j,1);return c.ids.length?0:c.n;}}return 0;}   // the number of an entry the removal emptied, else 0
+// THE ONE MUTATION of the sets. `to` is a column number (1 = the first, which derives and takes no entry) or "new":
+// a column of its own to the right of the rightmost, half that column's width. Steps: the source page hands over
+// the session's drafts; the store changes (the id leaves its entry, an entry left empty is removed and its column
+// closed); the target adopts the drafts and shows the session; the ring moves there. Returns the target's iframe,
+// null when refused. A session already alone in a later column has nowhere new to go: a new column would be a twin
+// of the origin and the origin would close, so that is refused with a line rather than done for nothing.
+function moveTab(sid,to){if(typeof sid!=='string'||!sid)return null;
+var from=ownerOf(sid),src=frameOfCol(from);
+if(to==='new'){var se=entry(from);if(se&&se.ids.length===1)return notify('This session is already alone in its column.');
+if(!canSplit())return refuse();
+try{if(!document.body.classList.contains('po-chat')&&window.__rompPaneToggle)window.__rompPaneToggle('chat',true);}catch(e){}   // a hidden chat group comes forward first
+var state=take(src,sid),n=nextNumber();
+if(window.__rompSplitGrow)window.__rompSplitGrow(lastPane(),'chat'+n);   // the rightmost column and the new one each take half its width
+unlist(sid);cols.push({n:n,ids:[sid]});save();
+var nf=make(n,sid,state);try{nf.contentWindow.focus();}catch(e){}return nf;}
+var tn=Number(to);if(tn!==1&&!entry(tn))return null;
+var tf=frameOfCol(tn);if(!tf)return null;
+if(tn===from)return tf;   // already there: nothing moves
+var st=take(src,sid),emptied=unlist(sid);if(tn!==1)entry(tn).ids.push(sid);save();
+adopt(tf,sid,st);try{tf.contentWindow.postMessage({type:'focus',id:sid},'*');}catch(e){}   // a plain focus: the target is the owner now, so its own gate takes it
+if(emptied)close(emptied);   // the origin's last member left: it closes (the ring lands on the target below, not on the origin's neighbour)
+try{tf.contentWindow.focus();}catch(e){}return tf;}
+// CLOSE a column: its sessions return to the first column — the entry goes whole, so the first column derives them —
+// drafts and all (what the closing page holds for each is handed to the first column's page); the pane, its gutter
+// and its grow go; the Log drops its connection state; the ring moves to the column on its left. `keep` skips the
+// store write (a reconcile of another dashboard tab's write, which is already the truth).
+function close(n,keep){var i=idx(n);if(i<0)return;
+var f=document.getElementById(frameId(n)),home=document.getElementById('f-chat');
+if(f&&home)cols[i].ids.forEach(function(sid){adopt(home,sid,take(f,sid));});
+cols.splice(i,1);if(!keep)save();
 var p=document.getElementById(paneId(n)),g=document.getElementById('gv-chat-'+n);
 if(window.__rompUnregisterPane)window.__rompUnregisterPane(paneId(n));
 if(p)p.remove();if(g)g.remove();
 if(window.__rompColGone)window.__rompColGone(String(n));
 try{window.dispatchEvent(new CustomEvent('romp-chat-cols',{detail:{col:n,open:false}}));}catch(e){}
-var pf=document.getElementById(i>0?frameId(cols[i-1]):'f-chat');   // the ring moves to the column before it
+var pf=document.getElementById(i>0?frameId(cols[i-1].n):'f-chat');   // the ring moves to the column before it
 try{pf&&pf.contentWindow.focus();}catch(e){}}
-function closeFocused(){var f=focused(),c=f?colOf(f.contentWindow):'';if(!c&&cols.length)c=String(cols[cols.length-1]);if(c)close(Number(c));}
-window.__rompSplitChat=function(sid){return open(typeof sid==='string'?sid:'');};window.__rompCanSplit=canSplit;
+function closeFocused(){var f=focused(),c=f?colOf(f.contentWindow):'';if(!c&&cols.length)c=String(cols[cols.length-1].n);if(c)close(Number(c));}
+// the palette's Move this session to a new column: the focused column's active tab (the one DOM read kept, for this)
+window.__rompSplitChat=function(sid){var id=typeof sid==='string'&&sid?sid:activeIn(focused());if(!id)return notify('No session is open in this column to move.');return moveTab(id,'new');};
+window.__rompCanSplit=canSplit;window.__rompMoveTab=moveTab;
 window.__rompCloseSplit=function(n){if(n===undefined)closeFocused();else close(Number(n));};
+window.__rompChatSets=function(){return mobile()?null:sets();};   // null on the phone: the one chat shows everything
+// a session CREATED from a later column's plus button belongs to that column: the page claims the real id when its
+// provisional resolves; a session an entry already lists is never stolen
+window.__rompClaimSession=function(sid,col){var n=Number(col),e=entry(n);if(typeof sid!=='string'||!sid||!e||ownerOf(sid)!==1)return false;e.ids.push(sid);save();return true;};
 window.__rompChatFrames=frames;window.__rompChatFrameIds=function(){return frames().map(function(f){return f.id;});};
 window.__rompChatPaneOf=function(fid){return fid==='f-chat'?'chat-pane':(String(fid).indexOf('f-chat-')===0?paneId(String(fid).slice(7)):null);};
 window.__rompLastChatPane=lastPane;window.__rompColOf=colOf;window.__rompFrameOfWin=frameOfWin;window.__rompChatTarget=target;
-// a chat pane's tab menu asks for a split holding that session (render.ts "Open in new split")
-window.addEventListener('message',function(e){var m=e&&e.data;if(!m||m.romp!=='openSplit')return;open(typeof m.sid==='string'?m.sid:'');});
-// the columns this browser had open come back, each on its own state
-try{var saved=JSON.parse(localStorage.getItem(CK)||'null');
-if(Array.isArray(saved)&&!mobile())saved.forEach(function(n){n=Number(n);if(n>=2&&n<100&&cols.indexOf(n)<0&&cols.length+1<MAX){cols.push(n);make(n,'');}});}catch(e){}
+window.addEventListener('message',function(e){var m=e&&e.data;if(!m)return;
+if(m.romp==='openSplit'){if(typeof m.sid==='string'&&m.sid)moveTab(m.sid,'new');return;}   // the tab menu's Move to a new column (render.ts), until the drag lands
+// a column whose members the kernel's strip no longer lists (ended, or closed from a tab's cross) says so: the gone
+// ids leave its entry, and an entry left empty closes its column — a member added meanwhile keeps it open
+if(m.romp==='colEmpty'&&Array.isArray(m.gone)){var c=Number(colOf(e.source)),en=c>=2?entry(c):null;if(!en)return;
+en.ids=en.ids.filter(function(id){return m.gone.indexOf(id)<0;});if(en.ids.length)save();else close(en.n);}});
+// THE STORE, read: the v2 object, or a v1 array of numbers migrated once (each number to the session its blob names;
+// a number with no session is dropped). Sanitised on the way in: integer numbers from 2, each once; string ids, each
+// in one entry; no empty entry; at most MAX-1 entries.
+function read(){var raw=null;try{raw=JSON.parse(localStorage.getItem(CK)||'null');}catch(e){}
+var out=[],seen={},migrated=false;
+function add(n,ids){n=Number(n);if(!(n>=2&&n<100&&n===Math.floor(n))||out.length>=MAX-1)return;for(var i=0;i<out.length;i++){if(out[i].n===n)return;}
+var keep=[];(ids||[]).forEach(function(id){if(typeof id==='string'&&id&&!seen[id]){seen[id]=true;keep.push(id);}});if(keep.length)out.push({n:n,ids:keep});}
+if(Array.isArray(raw)){migrated=true;raw.forEach(function(n){var st=null;try{st=JSON.parse(localStorage.getItem(BK+Number(n))||'null');}catch(e){}add(n,[st&&typeof st.activeId==='string'?st.activeId:'']);});}
+else if(raw&&typeof raw==='object'&&raw.v===2&&Array.isArray(raw.cols))raw.cols.forEach(function(c){if(c&&typeof c==='object')add(c.n,Array.isArray(c.ids)?c.ids:[]);});
+return {cols:out,migrated:migrated};}
+// another dashboard tab's write (this window never hears its own): its arrangement is the truth — close what it
+// dropped, make what it added (seeded like a restore), take its sets — and nothing is written back
+function reconcile(next){cols.filter(function(c){return !next.some(function(d){return d.n===c.n;});}).forEach(function(c){close(c.n,true);});
+cols=next.map(function(c){return {n:c.n,ids:c.ids.slice()};});
+cols.forEach(function(c){if(!document.getElementById(frameId(c.n)))make(c.n,seedFor(c),null);});}
+window.addEventListener('storage',function(e){if(!e||e.key!==CK||mobile())return;var r=read();if(!r.migrated)reconcile(r.cols);});
+// the columns this browser had open come back, each on a member of its own (the phone restores nothing: the
+// arrangement stays in the store for the desktop); a v1 store is written back in the new shape, once
+try{if(!mobile()){var r0=read();cols=r0.cols;cols.forEach(function(c){make(c.n,seedFor(c),null);});if(r0.migrated)save();}}catch(e){}
 })();
 """
 
