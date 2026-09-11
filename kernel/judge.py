@@ -8460,6 +8460,16 @@ def _discover_impl(now, window=None, forks=True):
         # ever-growing work bar (the user 2026-07-10).
         last = _sdk_last_sid(sid)
         fork = next(((p, m) for st, p, m in listing if st == last), None) if last else None
+        if fork is None and last:
+            # The /clear race window: the registry's lastSid already names the new transcript but the CLI has not
+            # written its first record, so the file is not on disk yet. Handing out the ANCHOR here (the shape until
+            # 2026-09-11) made every build landing in the window parse the pre-clear anchor cold from the second clear
+            # on (its tree was released at the first clear) and flipped the noted leaf twice. The session's current
+            # transcript is the leaf discover handed out last, so that is what it hands out, when it still exists;
+            # only a fresh process, which noted nothing yet, falls to the anchor (review find carried from stage 2).
+            with _LEAF_LOCK:
+                prev = _LEAF_SEEN.get(sid)
+            fork = next(((p, m) for st, p, m in listing if p == prev), None) if prev else None
         if fork is not None:
             path_str, mt = fork
             _note_leaf(sid, path_str)                    # the leaf flipped here: the previous leaf's trees go
