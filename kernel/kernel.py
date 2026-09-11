@@ -36613,6 +36613,7 @@ SPEND_GUARD_TREE_RESCAN_S = 30      # a COLD agent file (idle since before the w
 #                                     not every cycle; a hot one every cycle
 _SPEND_TREE_CACHE = {}              # leaf -> {"dirs": {dir: mtime}, "files": {path: mtime}, "full": epoch of the last full
 #                                     stat pass, "seen": epoch}: the session's subagents tree, watched by directory mtimes
+SPEND_GUARD_TREE_MEMO_BYTES = 32 * 1024 * 1024   # the tree memos together (their path strings, estimated), least recently seen first
 
 
 def _spend_ceiling():
@@ -36773,8 +36774,11 @@ def _spend_file_rows(f, since, prices, dearest):
     _SPEND_ROWS_CACHE[f] = (stamp, floor, rows, time.time())
     if len(_SPEND_ROWS_CACHE) > SPEND_GUARD_ROWS_CACHE_MAX:
         # the least recently used go (LOW b): a finished agent file's rows are asked for while it is in the window and
-        # never again; without a bound a kernel life would hold one list per agent it ever priced
-        for k in sorted(_SPEND_ROWS_CACHE, key=lambda k: _SPEND_ROWS_CACHE[k][3])[:len(_SPEND_ROWS_CACHE) - SPEND_GUARD_ROWS_CACHE_MAX]:
+        # never again; without a bound a kernel life would hold one list per agent it ever priced. Down to three
+        # quarters of the cap in one sort, not one entry per miss (the round-three review's low b: a saturated memo
+        # sorted itself whole on every miss)
+        keep = SPEND_GUARD_ROWS_CACHE_MAX * 3 // 4
+        for k in sorted(_SPEND_ROWS_CACHE, key=lambda k: _SPEND_ROWS_CACHE[k][3])[:len(_SPEND_ROWS_CACHE) - keep]:
             _SPEND_ROWS_CACHE.pop(k, None)
     return [r for r in rows if r[0] >= since]
 
@@ -36875,7 +36879,7 @@ def _spend_guard_stop(sid, be, now):
     if t0 is not None and now - t0 <= 120:
         return "stopping"
     sessions = getattr(be, "sessions", None)
-    if getattr(sessions.get(sid) if isinstance(sessions, dict) else None, "detached", False):
+    if getattr(sessions.get(str(sid)) if isinstance(sessions, dict) else None, "detached", False):   # str(sid), as every other read of the map
         # a DETACHED hosted session (the round-two review's LOW c): the backend's interrupt answers True while the CLI's
         # escalation is skipped on purpose (its host keeps the turn), so nothing would stop and the sentence would say it
         # had. Read before pressing, said as it is. No road to the host exists without pressing: the host's signal rung
@@ -36950,12 +36954,13 @@ def _spend_guard_tick(now, live_map, sessions=None, be=None, clients=None, price
     rows = _alive_sessions(now, live_map) if sessions is None else sessions
     if prices is None:
         prices = _model_prices(int(now), refresh=False)   # never a network fetch from the pusher's path
-    live = set()
+    live, live_paths = set(), set()
     for s in rows:
         sid, path = s.get("sid"), s.get("path")
         if not sid or not path:
             continue
         live.add(sid)
+        live_paths.add(str(path))
         try:
             rate = _spend_rate_usd_per_hour(path, now, prices=prices)
         except Exception:
@@ -36973,6 +36978,29 @@ def _spend_guard_tick(now, live_map, sessions=None, be=None, clients=None, price
     if len(_SPEND_GUARD) > SPEND_GUARD_LATCH_MAX:
         for sid in sorted((k for k in _SPEND_GUARD if k not in live), key=lambda k: _SPEND_GUARD[k].get("t") or 0)[:len(_SPEND_GUARD) - SPEND_GUARD_LATCH_MAX]:
             _SPEND_GUARD.pop(sid, None)
+    _spend_tree_memo_prune(live_paths)
+
+
+def _spend_tree_memo_size(m):
+    """A tree memo's weight, estimated from its path strings (the mtimes are a few dozen bytes beside each)."""
+    return sum(len(p) + 32 for p in m["files"]) + sum(len(d) + 32 for d in m["dirs"])
+
+
+def _spend_tree_memo_prune(live_paths):
+    """The tree memos of sessions not in this tick's live set are dropped (a departed session's tree is nobody's
+    window; bounded by entry count alone the memos of a day's two hundred sessions held tens of MB: the round-three
+    review's low a), and the rest are bounded by bytes, the least recently seen going first (a live session whose memo
+    goes is listed again on its next tick, one first listing)."""
+    for k in [k for k in _SPEND_TREE_CACHE if k not in live_paths]:
+        _SPEND_TREE_CACHE.pop(k, None)
+    total = sum(_spend_tree_memo_size(m) for m in _SPEND_TREE_CACHE.values())
+    if total <= SPEND_GUARD_TREE_MEMO_BYTES:
+        return
+    for k in sorted(_SPEND_TREE_CACHE, key=lambda k: _SPEND_TREE_CACHE[k]["seen"]):
+        if total <= SPEND_GUARD_TREE_MEMO_BYTES:
+            break
+        total -= _spend_tree_memo_size(_SPEND_TREE_CACHE[k])
+        _SPEND_TREE_CACHE.pop(k, None)
 
 
 def _spend_series(keyed_only=False, now=None):
