@@ -2397,11 +2397,17 @@ so, and the watermark is written from there. Each `turns.jsonl` row carries
 restart re-billed each hosted session's lifetime as one turn (2026-09-11: a
 staircase of rows from $436 to $953 on one session across 21 restarts).
 `romp spend-repair [--day D]` recomputes a day's `spend.json` hour and day
-buckets and `turns.jsonl` dollars from that staircase, treating a session's
-first result after a restart as cumulative (its true cost is the cumulative
-less the previous cumulative less the rows between; the day's first cumulative
-row counts as a typical turn), prints before and after per hour and per session,
-and changes nothing unless `--apply` is given.
+buckets and `turns.jsonl` dollars from that staircase. A session's first
+result after a restart is cumulative when it stands at or above the previous
+cumulative plus the rows recorded between (a process's total grows by at least
+what its own rows recorded; a figure below that is a fresh process's first turn
+and stands), and its true cost is the cumulative less the previous cumulative
+less the rows between; the day's first cumulative row counts as a typical turn
+(the median of the session's rows that follow no restart) and only when a
+staircase follows it. It prints before and after per hour and per session and
+changes nothing unless `--apply` is given; a corrected row keeps the kernel's
+figure as `usdRecorded`, so a later run judges it again on that figure and
+restores it when the judgement no longer holds.
 
 ## Restart metrics
 

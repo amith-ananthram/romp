@@ -59,9 +59,66 @@ class Plan(unittest.TestCase):
                  row(A, "web", at(11, 10), 60.0)]                                   # after the 11:00 restart: its new lifetime
         p = rp.plan(turns, [at(9, 30), at(10, 30), at(11, 0)], DAY)
         got = {c["t"]: (c["recorded"], c["corrected"]) for c in p["rows"]}
-        self.assertEqual(got[at(9, 40)], (300.0, 3.5), "first cumulative: the typical turn (the median of the ordinary rows 2 and 5)")
+        self.assertEqual(got[at(9, 40)], (300.0, 2.0), "first cumulative: the typical turn, the median of the rows that are not a first result after a restart (2 alone; 5 and 60 follow restarts)")
         self.assertNotIn(at(10, 40), got, "a modest first turn after a restart is a turn")
         self.assertEqual(got[at(11, 10)], (60.0, 55.0), "the new chain's cumulative less the fresh process's first row")
+
+    def test_a_first_result_below_the_previous_cumulative_plus_the_rows_between_is_a_turn(self):
+        # the first run's rule (at or above the previous cumulative alone) took 303 for the lifetime and zeroed it:
+        # 303 is below 300 plus the $5 turn recorded between, which no cumulative of that process can be
+        turns = [row(A, "web", at(9, 0), 2.0), row(A, "web", at(9, 40), 300.0),      # a lifetime after the 9:30 restart
+                 row(A, "web", at(10, 0), 5.0),                                     # an ordinary turn
+                 row(A, "web", at(10, 40), 303.0),                                  # after the 10:30 restart: below 305, a fresh process
+                 row(A, "web", at(11, 10), 320.0)]                                  # after the 11:00 restart: that process's lifetime
+        p = rp.plan(turns, [at(9, 30), at(10, 30), at(11, 0)], DAY)
+        got = {c["t"]: (c["recorded"], c["corrected"]) for c in p["rows"]}
+        self.assertNotIn(at(10, 40), got, "a figure below the previous cumulative plus the rows between is a turn")
+        self.assertEqual(got[at(11, 10)], (320.0, 17.0), "the new chain's cumulative less the fresh process's first row")
+        self.assertEqual(got[at(9, 40)], (300.0, 3.5), "the typical turn: the median of 2 and 5, the rows that follow no restart")
+
+    def test_a_lone_first_result_with_no_staircase_after_it_stands(self):
+        turns = [row(A, "web", at(9, 0), 2.0), row(A, "web", at(9, 40), 300.0), row(A, "web", at(10, 0), 5.0)]
+        self.assertEqual(rp.plan(turns, [at(9, 30)], DAY)["rows"], [], "one big first result and no chain: a fresh process's long turn")
+        repaired = [turns[0], turns[1] | {"usd": 2.0, "usdRecorded": 300.0, "repairedT": 1}, turns[2]]
+        p = rp.plan(repaired, [at(9, 30)], DAY)
+        self.assertEqual([(c["current"], c["corrected"], c.get("restore")) for c in p["rows"]], [(2.0, 300.0, True)])
+        self.assertIn("lone first result after a restart with no staircase following it", p["rows"][0]["reason"])
+
+    def test_a_second_run_restores_a_turn_the_first_run_zeroed_and_the_row_loses_its_repair_marks(self):
+        d = tempfile.mkdtemp()
+        state = Path(d)
+        # the ledger as the first run left it: the 303 row zeroed (usdRecorded 303), the 320 row corrected to 17
+        turns = [row(A, "web", at(9, 0), 2.0), row(A, "web", at(9, 40), 3.5) | {"usdRecorded": 300.0, "repairedT": 1},
+                 row(A, "web", at(10, 0), 5.0), row(A, "web", at(10, 40), 0.0) | {"usdRecorded": 303.0, "repairedT": 1},
+                 row(A, "web", at(11, 10), 17.0) | {"usdRecorded": 320.0, "repairedT": 1}]
+        restarts = [at(9, 30), at(10, 30), at(11, 0)]
+        (state / "turns.jsonl").write_text("".join(json.dumps(r) + "\n" for r in turns))
+        (state / "restart-cuts.jsonl").write_text("".join(json.dumps({"t": t, "cutTurns": [], "reason": "main-converge"}) + "\n" for t in restarts))
+        spend = {"hours": {"%sT10" % DAY: {"usd": 5.0, "turns": 2, "bySid": {A: {"usd": 5.0, "turns": 2}}}},
+                 "days": {DAY: {"usd": 27.5, "turns": 5, "bySid": {A: {"usd": 27.5}}}}}
+        (state / "spend.json").write_text(json.dumps(spend))
+        p = rp.plan(turns, restarts, DAY)
+        self.assertEqual([(c["t"], c["current"], c["corrected"], c.get("restore")) for c in p["rows"]], [(at(10, 40), 0.0, 303.0, True)],
+                         "the zeroed turn comes back; the two real steps stand as corrected")
+        self.assertIn("restored: 303.0000 is below the previous cumulative 300.0000 plus 1 row(s) between (5.0000), a turn of a fresh process", p["rows"][0]["reason"])
+        self.assertEqual(p["hours"]["%sT10" % DAY], {"before": 5.0, "after": 308.0})
+        self.assertEqual(p["days"][DAY], {"before": 27.5, "after": 330.5})
+        import io, contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(rp.main(["--day", DAY, "--state", d, "--apply"]), 0)
+        self.assertIn("0 cumulative row(s) found, 1 earlier correction(s) to restore", out.getvalue())
+        self.assertIn("0 turn row(s) corrected (usdRecorded keeps the old figure), 1 restored to the kernel's figure", out.getvalue())
+        after = json.loads((state / "spend.json").read_text())
+        self.assertEqual(after["hours"]["%sT10" % DAY]["usd"], 308.0)
+        self.assertEqual(after["days"][DAY]["bySid"][A]["usd"], 330.5)
+        rows = {r["t"]: r for r in (json.loads(l) for l in (state / "turns.jsonl").read_text().splitlines())}
+        self.assertEqual(rows[at(10, 40)]["usd"], 303.0)
+        self.assertNotIn("usdRecorded", rows[at(10, 40)], "a restored row is the kernel's row again")
+        self.assertNotIn("repairedT", rows[at(10, 40)])
+        self.assertEqual((rows[at(11, 10)]["usd"], rows[at(11, 10)]["usdRecorded"]), (17.0, 320.0), "a standing correction keeps its marks")
+        again = rp.plan([json.loads(l) for l in (state / "turns.jsonl").read_text().splitlines()], restarts, DAY)
+        self.assertEqual(again["rows"], [], "and a third run finds nothing")
 
     def test_apply_folds_the_deltas_into_the_buckets_and_the_rows_and_a_dry_run_writes_nothing(self):
         d = tempfile.mkdtemp()

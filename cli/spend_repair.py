@@ -95,63 +95,93 @@ def plan(turns: list, restarts: list, day: str) -> dict:
         by_sid.setdefault(str(r.get("sid") or ""), []).append(r)
     day_start = datetime.strptime(day, "%Y-%m-%d").timestamp()
     corrections, all_ordinary = [], []
-    # first pass per session: which rows are staircase steps, which are ordinary
+    # first pass per session: which rows are staircase steps, which are ordinary. A row already repaired (usdRecorded
+    # keeps the figure the kernel wrote) is judged AGAIN on that figure, so a run over repaired rows finds nothing new
+    # when the judgement stands and restores the row when it does not (a rule tightened after the first run brings a
+    # zeroed turn back); a row written by a kernel that carries the CLI's cumulative (T354's fix) is never a step.
     marked = {}
     for sid, rs in by_sid.items():
-        prev_t, prev_cum, ordinary, steps = day_start, None, [], []
+        # the session's typical turn: the median of its rows that are NOT a first result after a restart (those are a
+        # cumulative or a fresh process's first turn, both atypical); the same figure decides the threshold and the
+        # correction, and it does not move when a first row is corrected or restored, so a second run agrees with the first
+        firsts, pt = set(), day_start
+        for r in rs:
+            if any(pt < x <= float(r["t"]) for x in restarts):
+                firsts.add(id(r))
+            pt = float(r["t"])
+        ordinary = [float(r["usd"]) for r in rs if id(r) not in firsts]
+        typical = _typical(ordinary) or 0.0
+        prev_t, prev_cum, steps, restores = day_start, None, [], []
         between = []
         for r in rs:
             t, usd = float(r["t"]), float(r["usd"])
-            restarted = any(prev_t < x <= t for x in restarts)
+            restarted = id(r) in firsts
             step = False
-            if "usdRecorded" in r or "cumulativeUsd" in r:
-                # already repaired (usdRecorded keeps the staircase figure), or written by a kernel that carries the
-                # CLI's cumulative on the row (T354's fix): never a step again, so a second run finds nothing; the
-                # chain's baseline is the row's own cumulative where it names one
-                ordinary.append(r)
-                if isinstance(r.get("cumulativeUsd"), (int, float)):
-                    prev_cum = float(r["cumulativeUsd"]); between = []
-                elif isinstance(r.get("usdRecorded"), (int, float)):
-                    prev_cum = float(r["usdRecorded"]); between = []
-                else:
-                    between.append(usd)
+            if isinstance(r.get("cumulativeUsd"), (int, float)):
+                prev_cum = float(r["cumulativeUsd"]); between = []
                 prev_t = t
                 continue
+            repaired = isinstance(r.get("usdRecorded"), (int, float))
+            rec = float(r["usdRecorded"]) if repaired else usd
             if restarted:
-                if prev_cum is not None and usd >= prev_cum:
-                    step = True                # the surviving process's lifetime again
-                elif prev_cum is None:
-                    typical = _typical([float(x["usd"]) for x in rs if x is not r]) or 0.0
-                    step = usd >= max(MIN_STAIRCASE_USD, TYPICAL_MULTIPLE * typical) if typical else usd >= MIN_STAIRCASE_USD
+                if prev_cum is not None:
+                    # the surviving process's lifetime again: at or above the previous cumulative PLUS every turn recorded
+                    # between, since a process's total grows by at least what its own rows recorded. A figure below that
+                    # cannot be this process's cumulative: it is a fresh process's first turn. (The first run's rule was
+                    # `>= prev_cum` alone and zeroed 49 small genuine turns on 2026-09-11; they carry usdRecorded and
+                    # come back through here to be restored.)
+                    step = rec >= prev_cum + sum(between) - 1e-6
+                else:
+                    step = rec >= max(MIN_STAIRCASE_USD, TYPICAL_MULTIPLE * typical) if typical else rec >= MIN_STAIRCASE_USD
             if step:
-                steps.append((r, prev_cum, list(between)))
-                prev_cum = usd
+                steps.append((r, rec, usd, prev_cum, list(between)))
+                prev_cum = rec
                 between = []
-            elif restarted:
-                # a FRESH process's first result (below the previous cumulative, or a modest first turn): the turn stands
-                # as recorded, and its total IS the new process's cumulative, so the chain continues from it
-                ordinary.append(r)
-                prev_cum = usd
+            elif restarted or repaired:
+                # a FRESH process's first result (below the previous cumulative plus the rows between, or a modest first
+                # turn): the turn stands as the kernel recorded it, and its total IS the new process's cumulative, so the
+                # chain continues from it; a repaired row that is no step is restored to the kernel's figure
+                if repaired and abs(rec - usd) > 1e-9:
+                    restores.append((r, rec, usd, prev_cum, list(between)))
+                prev_cum = rec
                 between = []
             else:
-                ordinary.append(r)
                 between.append(usd)
             prev_t = t
-        marked[sid] = (steps, ordinary)
-        all_ordinary.extend(float(x["usd"]) for x in ordinary)
+        if len(steps) == 1 and steps[0][3] is None:
+            # the day's first cumulative row is believed only when a staircase FOLLOWS it (a later row at or above it
+            # plus the turns between); alone, a big first result after a restart is as likely a fresh process's long
+            # first turn, and it stands (restored, when an earlier run took it)
+            r, rec, usd, _, _ = steps.pop()
+            if isinstance(r.get("usdRecorded"), (int, float)) and abs(rec - usd) > 1e-9:
+                restores.append((r, rec, usd, None, []))
+        marked[sid] = (steps, restores, typical)
+        all_ordinary.extend(ordinary)
     day_typical = _typical(all_ordinary)
-    for sid, (steps, ordinary) in marked.items():
-        typical = _typical([float(x["usd"]) for x in ordinary]) or day_typical
-        for r, prev_cum, between in steps:
-            usd = float(r["usd"])
+
+    def entry(r, sid, rec, cur, corrected, reason, **extra):
+        return {"sid": sid, "name": str(r.get("name") or sid[:8]), "t": int(r["t"]), "hour": local_hour(r["t"]),
+                "recorded": round(rec, 6), "current": round(cur, 6), "corrected": round(corrected, 6), "reason": reason, **extra}
+
+    for sid, (steps, restores, typical) in marked.items():
+        typical = typical or day_typical
+        for r, rec, cur, prev_cum, between in steps:
             if prev_cum is None:
                 corrected, reason = typical, "the day's first cumulative row: a typical turn (median %.4f)" % typical
             else:
-                corrected = max(0.0, usd - prev_cum - sum(between))
+                corrected = max(0.0, rec - prev_cum - sum(between))
                 reason = "cumulative %.4f less the previous cumulative %.4f less %d row(s) between (%.4f)" % (
-                    usd, prev_cum, len(between), sum(between))
-            corrections.append({"sid": sid, "name": str(r.get("name") or sid[:8]), "t": int(r["t"]), "hour": local_hour(r["t"]),
-                                "recorded": round(usd, 6), "corrected": round(corrected, 6), "reason": reason})
+                    rec, prev_cum, len(between), sum(between))
+            if abs(corrected - cur) < 1e-6:
+                continue                       # already right: a run over repaired rows
+            corrections.append(entry(r, sid, rec, cur, corrected, reason))
+        for r, rec, cur, prev_cum, between in restores:
+            if prev_cum is None:
+                reason = "restored: %.4f is a lone first result after a restart with no staircase following it, a turn" % rec
+            else:
+                reason = "restored: %.4f is below the previous cumulative %.4f plus %d row(s) between (%.4f), a turn of a fresh process" % (
+                    rec, prev_cum, len(between), sum(between))
+            corrections.append(entry(r, sid, rec, cur, rec, reason, restore=True))
     hours, sids = {}, {}
     for r in rows:
         h, sid = local_hour(r["t"]), str(r.get("sid") or "")
@@ -160,7 +190,7 @@ def plan(turns: list, restarts: list, day: str) -> dict:
         hours[h]["before"] += float(r["usd"]); hours[h]["after"] += float(r["usd"])
         sids[sid]["before"] += float(r["usd"]); sids[sid]["after"] += float(r["usd"])
     for c in corrections:
-        d = c["corrected"] - c["recorded"]
+        d = c["corrected"] - c["current"]
         hours[c["hour"]]["after"] += d
         sids[c["sid"]]["after"] += d
     for m in list(hours.values()) + list(sids.values()):
@@ -195,7 +225,7 @@ def apply_to_spend(spend: dict, p: dict) -> dict:
 
     notes = []
     for c in p["rows"]:
-        delta = c["corrected"] - c["recorded"]
+        delta = c["corrected"] - c["current"]      # against the row as it stands now (a repaired row's current figure)
         if not fold(hours.get(c["hour"]), c["sid"], delta):
             notes.append("no hour bucket %s for %s" % (c["hour"], c["name"]))
         if not fold(days.get(p["day"]), c["sid"], delta):
@@ -205,9 +235,10 @@ def apply_to_spend(spend: dict, p: dict) -> dict:
 
 
 def apply_to_turns(path: Path, p: dict) -> int:
-    """turns.jsonl (and its predecessor) rewritten with each corrected row's usd, the recorded figure kept as
-    usdRecorded; returns the rows changed. Atomic per file."""
-    want = {(c["sid"], c["t"], c["recorded"]): c["corrected"] for c in p["rows"]}
+    """turns.jsonl (and its predecessor) rewritten with each corrected row's usd, the kernel's figure kept as
+    usdRecorded (a row corrected twice keeps the original); a restored row gets the kernel's figure back and loses its
+    repair marks. Returns the rows changed. Atomic per file."""
+    want = {(c["sid"], c["t"], c["current"]): c for c in p["rows"]}
     changed = 0
     for f in (path.with_name(path.name + ".1"), path):
         try:
@@ -224,9 +255,14 @@ def apply_to_turns(path: Path, p: dict) -> int:
             key = (str(o.get("sid") or ""), int(o["t"]) if isinstance(o.get("t"), (int, float)) else None,
                    round(float(o["usd"]), 6) if isinstance(o.get("usd"), (int, float)) else None)
             if key in want:
-                o["usdRecorded"] = o["usd"]
-                o["usd"] = want[key]
-                o["repairedT"] = int(time.time())
+                c = want[key]
+                if c.get("restore"):
+                    o["usd"] = c["corrected"]
+                    o.pop("usdRecorded", None); o.pop("repairedT", None)
+                else:
+                    o.setdefault("usdRecorded", o["usd"])
+                    o["usd"] = c["corrected"]
+                    o["repairedT"] = int(time.time())
                 changed += 1
             out.append(json.dumps(o))
         # a result the kernel appended between the read and this write rides along: the file is read again just
@@ -244,7 +280,9 @@ def apply_to_turns(path: Path, p: dict) -> int:
 
 
 def report(p: dict) -> str:
-    lines = ["spend repair for %s: %d restart(s) that day, %d cumulative row(s) found" % (p["day"], p["restarts"], len(p["rows"]))]
+    n_restore = sum(1 for c in p["rows"] if c.get("restore"))
+    lines = ["spend repair for %s: %d restart(s) that day, %d cumulative row(s) found%s" % (
+        p["day"], p["restarts"], len(p["rows"]) - n_restore, ", %d earlier correction(s) to restore" % n_restore if n_restore else "")]
     lines.append("")
     lines.append("per session (dollars before -> after):")
     for sid, m in sorted(p["bySid"].items(), key=lambda kv: -kv[1]["before"]):
@@ -259,10 +297,10 @@ def report(p: dict) -> str:
     lines.append("")
     lines.append("the day: %.2f -> %.2f" % (d["before"], d["after"]))
     lines.append("")
-    lines.append("rows (session, time, recorded -> corrected, why):")
+    lines.append("rows (session, time, now -> corrected, why):")
     for c in p["rows"]:
         lines.append("  %-16s %s %10.2f -> %8.2f  %s" % (c["name"][:16], datetime.fromtimestamp(c["t"]).strftime("%H:%M:%S"),
-                                                        c["recorded"], c["corrected"], c["reason"]))
+                                                        c["current"], c["corrected"], c["reason"]))
     if p.get("notes"):
         lines.append("")
         lines.extend("note: " + n for n in p["notes"])
@@ -307,7 +345,9 @@ def main(argv=None) -> int:
     tmp.write_text(json.dumps(new_spend), encoding="utf-8")
     os.replace(tmp, sp)
     n = apply_to_turns(state / "turns.jsonl", p)
-    sys.stdout.write("\napplied: spend.json rewritten, %d turn row(s) corrected (usdRecorded keeps the old figure)\n" % n)
+    n_restore = sum(1 for c in p["rows"] if c.get("restore"))
+    sys.stdout.write("\napplied: spend.json rewritten, %d turn row(s) corrected (usdRecorded keeps the old figure)%s\n"
+                     % (n - n_restore, ", %d restored to the kernel's figure" % n_restore if n_restore else ""))
     return 0
 
 
