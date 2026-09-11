@@ -10988,14 +10988,19 @@ function prevTimedEpoch(events: ChatEvent[], i: number): number | null {
 }
 
 // The epoch a display unit leaves the day walk on (T339): a lone event its own; a notice run its ANCHOR member (the
-// latest, compact.ts itemAnchor); a tool run its first member when collapsed and its last when expanded, exactly what
-// appendItem's rail chain (adv) leaves behind. One rule for the walk and for a window's seed, so a window opening
-// mid-transcript decides its first divider as a walk from the top would have.
+// latest, compact.ts itemAnchor); a tool run its first member when collapsed and, when expanded, its HIGH-WATER member
+// (appendItem passes every row of an expanded run, and the walk never rewinds, so the run leaves it on its latest
+// member whatever order the rows came in; the last member only when the run is in order, the review's find). One rule
+// for the walk and for a window's seed, so a window opening mid-transcript decides its first divider as a walk from the
+// top would have.
 function unitExit(s: Session, it: DisplayItem): number | null {
   if (it.kind === "event") return eventEpoch(s.events[it.index]);
   if (it.kind === "noticegroup") return eventEpoch(s.events[itemAnchor(it, (i) => eventEpoch(s.events[i]))]);
   const open = openFolds.has(toolGroupKey(s.events[it.indices[0]]));
-  return eventEpoch(s.events[open ? it.indices[it.indices.length - 1] : it.indices[0]]);
+  if (!open) return eventEpoch(s.events[it.indices[0]]);
+  let mx: number | null = null;
+  for (const i of it.indices) { const ep = eventEpoch(s.events[i]); if (ep != null && (mx == null || ep > mx)) mx = ep; }
+  return mx;
 }
 // The day the WALK is in at a row (T342, the manager's review of T339): the top-of-view day-context label
 // (paintRailSticky) read the top row's own epoch, so a stale echo at the top line said "2 days ago" between rows the
@@ -11058,6 +11063,7 @@ function lastCompactUnit(s: Session, items: DisplayItem[]): number {
 function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEpoch: number | null, walk: DayWalk, working: boolean): number | null {
   const it = items[u];
   const nodes: HTMLElement[] = [];   // every node this unit appends: stamped with the walk's day on the way out (T342)
+  const stamped = new Set<HTMLElement>();   // …unless stamped mid-unit: an expanded tool run's rows, each in its own day
   const tag = (node: HTMLElement): HTMLElement => { node.dataset.unit = String(u); nodes.push(node); return node; };
   const adv = (i: number) => { const ep = eventEpoch(s.events[i]); if (ep != null) prevEpoch = ep; };
   // A new day opens with its divider, above whatever unit starts that day (tagged with the same
@@ -11075,16 +11081,22 @@ function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEp
     const key = toolGroupKey(first);
     const tools = it.indices.map((i) => s.events[i]) as Extract<ChatEvent, { kind: "tool" }>[];
     const open = openFolds.has(key);
-    v.el.appendChild(tag(renderToolGroup(tools, prevEpoch, key, open)));
+    const head = tag(renderToolGroup(tools, prevEpoch, key, open));
+    v.el.appendChild(head);
     adv(it.indices[0]);
     if (open) {   // expanded → the GROUPED TOOLS, each as its normal turn. Compact mode hides thinking
       // everywhere, so the expansion must too: iterate it.indices (the tools only), NOT the contiguous
       // start..end span, which would surface the thinking that sat between the tools (the user 2026-06-29).
       // it.indices already excludes thinking — compactDisplay skipped it while building the run.
+      // The head is timed by the FIRST member and each row by its own, so the walk passes them one by one and stamps
+      // each with the day it is in THERE (T342 review): a run spanning midnight otherwise put today's mark on
+      // yesterday's rows, and the day label over its 23:58 head went blank.
+      walk.pass(eventEpoch(first)); stampWalkDay(head, walk); stamped.add(head);
       it.indices.forEach((i, j) => {
         const child = renderEvent(s.events[i], prevEpoch, turnWorkedSecs(s.events, i, working));
         child.classList.add("tg-child"); if (j === it.indices.length - 1) child.classList.add("tg-last");
         v.el.appendChild(tag(child)); adv(i);
+        walk.pass(eventEpoch(s.events[i])); stampWalkDay(child, walk); stamped.add(child);
       });
     }
   } else if (it.kind === "noticegroup") {
@@ -11105,8 +11117,8 @@ function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEp
     v.el.appendChild(tag(renderEvent(s.events[it.index], prevEpoch, turnWorkedSecs(s.events, it.index, working))));
     adv(it.index);
   }
-  walk.pass(unitExit(s, it));
-  for (const n of nodes) stampWalkDay(n, walk);
+  walk.pass(unitExit(s, it));   // a no-op for an expanded tool run (every row already passed): one rule with dayWalkBefore
+  for (const n of nodes) if (!stamped.has(n)) stampWalkDay(n, walk);
   return prevEpoch;
 }
 

@@ -197,10 +197,11 @@ out.api.light = await measure();
 await page.evaluate(() => document.body.classList.remove("theme-light")); await page.waitForTimeout(300);
 out.api.dark = await measure();
 // the stale run's head at the TOP LINE of a short viewport: the sticky day label names the walk's day there (T342)
-await page.setViewportSize({ width: 1100, height: 330 });   // short enough that the rows after the run out-measure the pane, so the head can reach the top
+await page.setViewportSize({ width: 1100, height: 330 });   // a short pane: the head must be able to reach the top line
 await page.evaluate(() => {
   const h = Array.from(document.querySelectorAll("#content .turn-noticegroup")).find((t) => t.offsetParent !== null);
   const c = document.getElementById("content");
+  c.style.paddingBottom = c.clientHeight + "px";   // room below the last row, so the scroll cannot clamp before the head reaches the top whatever sits under the run (the sticky reads tops only)
   h.scrollIntoView({ block: "start" });
   c.scrollTop += h.getBoundingClientRect().top - c.getBoundingClientRect().top;   // the head's top exactly at the pane's top, past the pane's own padding
 });
@@ -212,7 +213,8 @@ out.api.sticky = await page.evaluate(() => {
   const m = h.querySelector(":scope > .time-marker");
   const vis = (n) => !!n && getComputedStyle(n).display !== "none";
   const c = document.getElementById("content");
-  return { headTop: h.getBoundingClientRect().top - content.top, pane: [c.scrollTop, c.scrollHeight, c.clientHeight], headMarker: m ? m.textContent : null, headMarkerVisible: !!m && getComputedStyle(m).visibility !== "hidden",
+  return { headTop: h.getBoundingClientRect().top - content.top, headTracked: h.getBoundingClientRect().top <= content.top + 6, pane: [c.scrollTop, c.scrollHeight, c.clientHeight],
+           headMarker: m ? m.textContent : null, headMarkerVisible: !!m && getComputedStyle(m).visibility !== "hidden",
            headDay: m ? m.dataset.day : null, headEpoch: m ? m.dataset.epoch : null,
            dayLabel: vis(day) ? day.textContent : null, stickyHm: vis(sticky) ? sticky.textContent : null };
 });
@@ -361,7 +363,8 @@ class ServedDayDivider(unittest.TestCase):
         # T342: the stale run's head scrolled to the top line: the day-context label names the WALK's day there, "Yesterday",
         # never the run's own "2 days ago"; the rail's HH:MM over it stays the run's own (its stale anchor's clock)
         st = r["api"]["sticky"]
-        self.assertLessEqual(st["headTop"], 6.5, "the head sits at the top line: %r" % st)
+        self.assertLessEqual(st["headTop"], 0.5, "the head sits exactly at the pane's top once the scroll cannot clamp: %r" % st)
+        self.assertTrue(st["headTracked"], "…within the sticky's own tracking threshold (its 6px buffer), so the head is the tracked turn: %r" % st)
         self.assertEqual(st["dayLabel"], "Yesterday", "the day label over the stale run is the walk's day, not the run's own 2 days ago: %r" % st)
         stale_hm = time.strftime("%H:%M", time.localtime(b_later_t))
         self.assertIn(stale_hm, (st["headMarker"] if st["headMarkerVisible"] else None, st["stickyHm"]), "the HH:MM at the top is the run's own, stale as it is: %r" % st)
