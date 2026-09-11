@@ -636,6 +636,19 @@ def main(argv=None) -> int:
             before = float(((spend.get("hours") or {}).get(h) or {}).get("usd") or 0)
             after_ = float(((preview.get("hours") or {}).get(h) or {}).get("usd") or 0)
             sys.stdout.write("  recovery fold would move hour %s: %.2f -> %.2f\n" % (h, before, after_))
+        # and the plan's own fold on that recovered copy (round seven of the review): the report's hour table comes from
+        # the turn rows and the plan's fold above ran on the ledger as read, so a clamp that arises only on the recovered
+        # figures showed nowhere before an --apply landed it
+        p_on = dict(p, rows=list(p["rows"]))
+        planned_on = apply_to_spend(preview, p_on)
+        for n in p_on.get("notes") or []:
+            if "below zero" in n:
+                sys.stdout.write("  plan fold on the recovered ledger would say: %s\n" % n)
+        for h in sorted({c["hour"] for c in p["rows"]}):
+            b_ = float(((preview.get("hours") or {}).get(h) or {}).get("usd") or 0)
+            a_ = float(((planned_on.get("hours") or {}).get(h) or {}).get("usd") or 0)
+            if abs(a_ - b_) > 1e-9:
+                sys.stdout.write("  plan fold on the recovered ledger would move hour %s: %.2f -> %.2f\n" % (h, b_, a_))
     if not a.apply:
         sys.stdout.write("\ndry run: nothing written (pass --apply to write spend.json and turns.jsonl)\n")
         return 0

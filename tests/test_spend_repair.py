@@ -561,6 +561,39 @@ class Plan(unittest.TestCase):
         new, _c, _k = rb.rebuild({"days": {}, "hours": {}, "repairJournal": {"folded": [1.5]}}, {}, {})
         self.assertEqual(new.get("repairJournal"), {"folded": [1.5]}, "a rebuild keeps every top-level key it does not recount")
 
+    def test_a_plan_clamp_that_arises_only_on_the_recovered_ledger_is_previewed_and_said(self):
+        # round six's MEDIUM, with a scenario that produces the clamp: hour 11 holds the 515 row (corrected to 6.0 by an
+        # earlier run whose bucket write never completed: pending, -509) and a fresh re-bill of 530 the plan corrects
+        # to 15 (-515). On the ledger as read (535) the plan's fold has no clamp, so the report says none; on the
+        # recovered base (26) it clamps 489 below zero. The dry run previews it; --apply says it
+        d = tempfile.mkdtemp()
+        state = Path(d)
+        turns = [self.turns[0], self.turns[1], self.turns[2] | {"usd": 3.5, "usdRecorded": 507.0, "repairedT": 1, "repairRule": rp.REPAIR_RULE},
+                 self.turns[3], row(A, "web", at(11, 10), 6.0) | {"usdRecorded": 515.0, "repairedT": 1, "repairRule": rp.REPAIR_RULE},
+                 row(A, "web", at(11, 20), 530.0)]          # hour 10 already corrected (3 + 4 + 3.5 + 2 = 12.5); hour 11 holds 6 and the fresh 530
+        (state / "turns.jsonl").write_text("".join(json.dumps(r) + chr(10) for r in turns))
+        (state / "restart-cuts.jsonl").write_text("".join(json.dumps({"t": t, "firstServe": t, "settleS": 0.1, "pid": 1}) + chr(10) for t in self.restarts + [at(11, 15)]))
+        spend = {"hours": {"%sT10" % DAY: {"usd": 12.5, "turns": 4, "bySid": {A: {"usd": 12.5}}},
+                           "%sT11" % DAY: {"usd": 535.0, "turns": 2, "bySid": {A: {"usd": 535.0}}}},
+                 "days": {DAY: {"usd": 547.5, "turns": 6, "bySid": {A: {"usd": 547.5}}}}}
+        (state / "spend.json").write_text(json.dumps(spend))
+        (state / rp.REPAIR_JOURNAL).write_text(json.dumps({"t": 77.0, "phase": "rows", "day": DAY, "deltas": [
+            {"sid": A, "t": at(11, 10), "hour": "%sT11" % DAY, "owner": A, "keyed": False, "name": "web", "delta": -509.0, "corrected": 6.0}]}) + chr(10))
+        import io, contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(rp.main(["--day", DAY, "--state", d]), 0)
+        self.assertIn("recovery fold would move hour %sT11: 535.00 -> 26.00" % DAY, out.getvalue())
+        self.assertIn("plan fold on the recovered ledger would say: hour %sT11 would go 489.0000 below zero; held at zero" % DAY, out.getvalue(), "previewed")
+        self.assertIn("plan fold on the recovered ledger would move hour %sT11: 26.00 -> 0.00" % DAY, out.getvalue())
+        self.assertNotIn("note: hour", out.getvalue(), "the report's own fold, on 535, has no clamp")
+        self.assertEqual(json.loads((state / "spend.json").read_text()), spend, "the dry run writes nothing")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(rp.main(["--day", DAY, "--state", d, "--apply", "--no-backup"]), 0)
+        self.assertIn("note: hour %sT11 would go 489.0000 below zero; held at zero" % DAY, out.getvalue(), "said on --apply as a new line")
+        self.assertEqual(json.loads((state / "spend.json").read_text())["hours"]["%sT11" % DAY]["usd"], 0.0)
+
     def test_a_fold_that_would_take_a_bucket_below_zero_is_said_not_hidden(self):
         spend = {"hours": {"%sT10" % DAY: {"usd": 1.0, "turns": 1, "bySid": {A: {"usd": 1.0}}}}, "days": {DAY: {"usd": 1.0, "turns": 1, "bySid": {A: {"usd": 1.0}}}}}
         p = {"day": DAY, "rows": [{"sid": A, "owner": A, "keyed": False, "name": "web", "t": at(10, 0), "hour": "%sT10" % DAY, "current": 5.0, "corrected": 0.0, "recorded": 5.0}]}
