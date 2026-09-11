@@ -47,7 +47,8 @@ SID = "11111111-2222-3333-4444-555555555555"
 # and node ids collide across test modules under the shared placeholder (CLAUDE.md, goal-store fixtures).
 GOAL_SID = "77777777-8888-9999-aaaa-bbbbbbbbbbbb"
 TOP_KEYS = {"now", "since", "uptime_s", "log", "process", "pusher", "stages_ms", "builds", "sends",
-            "goals", "memos", "judge", "http", "parses"}   # parses: cold event-model parses (T323 stage 1)
+            "goals", "memos", "judge", "http", "parses",   # parses: cold event-model parses (T323 stage 1)
+            "checkpoints"}                                 # checkpoints: the folds' checkpoints (T323 stage 3)
 
 
 def _burn_cpu(seconds):

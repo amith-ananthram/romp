@@ -656,6 +656,15 @@ _CKPT_PENDING = {}                # path -> {"count": N, "gen": g, "folds": {nam
 _CKPT_SEQ = {}                    # path -> the seq of the last checkpoint read or written for it
 _FOLD_DIRTY = set()               # paths whose fold cursors moved since their checkpoint was last written
 _FOLD_REG = {}                    # checkpoint name -> the fold's cursor dict (fold_records registers at first call)
+_FOLD_NAME_OF = {}                # id(cursor dict) -> checkpoint name, for callers that name their cache once (name_fold_cache)
+
+
+def name_fold_cache(cache, name):
+    """Give a fold's cursor dict its checkpoint name once, so every fold_records call over it is resumable without
+    a `ckpt` argument at the call (a caller whose call shape other code stubs, such as the judge's background-task
+    scan, keeps its signature)."""
+    _FOLD_NAME_OF[id(cache)] = name
+    _FOLD_REG[name] = cache
 
 
 def set_checkpoint_dir(fn):
@@ -1074,6 +1083,8 @@ def fold_records(cache, path, init, step, on=None, ckpt=None):
     Lives here (moved from the kernel, 2026-09-03) so the judge's readers can fold too — the
     background-task pairing below is shared by both."""
     key = str(path)
+    if ckpt is None:
+        ckpt = _FOLD_NAME_OF.get(id(cache))               # a cache named once (name_fold_cache)
     if ckpt is not None:
         _FOLD_REG[ckpt] = cache                           # the newest caller's cursor dict (a test process loads the kernel
         #                                                   several times over one event model; production loads it once)
