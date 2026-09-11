@@ -296,12 +296,12 @@ class HealOlderStores(unittest.TestCase):
         self.tpath.write_text("\n".join(json.dumps(r) for r in skill_turn()) + "\n")
         names = td / "names"; names.mkdir()
         (names / SID).write_text("web\t%s\t#abcdef\n" % str(cdir))
-        self.saved = (jd.NAMES, jd.PROJECTS, jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR, jd.STATE, km.NAMES, km._tmux_sessions)
+        self.saved = (jd.NAMES, jd.PROJECTS, jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR, jd.STATE, km.NAMES, km._live_map)
         jd.NAMES, jd.PROJECTS = names, proj
         jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR = td / "captions", td / "archive", td / "goals"
         jd.STATE = td
         km.NAMES = names
-        km._tmux_sessions = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
+        km._live_map = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
                                            "context": None, "compactPct": None, "color": None}}
         jd.GOALDIR.mkdir(parents=True)
         km._bgall_cache.clear()
@@ -310,7 +310,7 @@ class HealOlderStores(unittest.TestCase):
         jd._WRAP_READS.update({"n": 0, "bytes": 0})
 
     def tearDown(self):
-        (jd.NAMES, jd.PROJECTS, jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR, jd.STATE, km.NAMES, km._tmux_sessions) = self.saved
+        (jd.NAMES, jd.PROJECTS, jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR, jd.STATE, km.NAMES, km._live_map) = self.saved
         jd._WRAP_INDEX.clear(); jd._CHECKED.clear(); jd._SKILL_INDEX_FAILED.clear()
         jd._WRAP_LOADED["v"] = False; jd._WRAP_DIRTY["v"] = False
         jd._WRAP_READS.update({"n": 0, "bytes": 0})
@@ -386,7 +386,7 @@ class HealOlderStores(unittest.TestCase):
         skill, step = SID + ":g1", SID + ":g2"
         self._store({skill: self._node(skill, "Review notes via /%s" % SKILL, t=T0 + 2, promptUuid="u2", **STAMP),
                      step: self._node(step, "Read the retry notes", parent=skill, t=T0 + 90)}, last=step)
-        km._tmux_sessions = lambda: {SID: {"state": "permission", "since": NOW - 10, "model": "", "effort": "",
+        km._live_map = lambda: {SID: {"state": "permission", "since": NOW - 10, "model": "", "effort": "",
                                            "context": None, "compactPct": None, "color": None}}
         asks, err = self._feed()
         self.assertEqual(set(asks), {skill})
