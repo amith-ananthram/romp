@@ -21,7 +21,9 @@ import { applyTheme } from "./theme";
 import { installPostalWash } from "./postal-wash";   // the incoming postal card's tint lightness, measured from the page (T337c)
 import { applyDenseChrome } from "./dense-chrome";
 import { SessionViews, viewVisible, viewsKey, revealIn, viewTagUnion, viewTags, type TagUnion, type SessionTag } from "./session-views";
-import { prependHead, appendMore, mergeWindow, historyLabel, indexOfUuid, keyOf, windowDetached, fullFrameMerges, afterMore } from "./chat-window";   // the uuid-anchored wire (T323 stage 4b)
+import { prependHead, appendMore, mergeWindow, historyLabel, indexOfUuid, keyOf, windowDetached, fullFrameMerges, afterMore, reattachKeys } from "./chat-window";   // the uuid-anchored wire (T323 stage 4b)
+import { SUBAGENT_OPEN_WAIT_MS, subagentStallText, subagentStalled } from "./subagent-wait";   // the viewer's wait bound and its stall (T355)
+import { placeholderKind, placeholderStands, fillPlaceholder } from "./pane-placeholder";   // the empty pane's placeholder, by kind (T355)
 import { mintWriteId, ackOutcome, adoptViews, seqOf, capsAdopts, announcedSeq, announcedAfter, createInFlight, rederivePending, lensBlob, applyLensFields, type InflightWrite, type LensFields, type TagEditOp, type ViewsAck } from "./views-writes";
 import { lensVisible, surfaceLens } from "./tag-lens";
 import { openTagMenu, tagMenuButton, syncTagFilter, tagChip } from "./tag-menu";
@@ -331,7 +333,8 @@ interface Session { id: string; name: string; color: Color | null; events: ChatE
 // agent's own transcript, fed by {type:"subagent"} frames. Client-only — the kernel never lists it in
 // tabOrder (reconcileTabOrder keeps a known, never-kernel-seen id), so it lives exactly as long as the
 // viewer. anchorUuid = the parent's Agent tool head, for the header's link back.
-interface SubInfo { parentId: string; agentId: string; meta: SubMeta | null; running: boolean; truncated: boolean; error: string | null; loaded: boolean; anchorUuid: string | null; }
+interface SubInfo { parentId: string; agentId: string; meta: SubMeta | null; running: boolean; truncated: boolean; error: string | null; loaded: boolean; anchorUuid: string | null;
+                    stalled?: boolean; askedAt?: number; }   // stalled: the ask went unanswered past SUBAGENT_OPEN_WAIT_MS (T355)
 
 const vscodeApi =
   typeof (window as any).acquireVsCodeApi === "function" ? (window as any).acquireVsCodeApi() : undefined;
@@ -5438,7 +5441,9 @@ function showTabTip(tab: HTMLElement, s: Session): void {
   if (s.status.effort) rows.push(["Effort", s.status.effort]);
   // Backend is a plain labelled FIELD now, under the others (the user 2026-07-08 — no longer a coloured
   // "SDK backend" badge at the top of the tooltip; it reads as one of the session's config fields).
-  if (be) rows.push(["Backend", backendLabel(be)]);   // the shared names (T288); a session still running on the retired terminal backend (until stage 3) reads its id, never blank (review find)
+  if (be) rows.push(["Backend", backendLabel(be)]);
+  // the session's mail state (T356): off means peers cannot see or mail it and its own sends are refused
+  rows.push(["Mail", s.postalServiceOff ? "off: this session neither sends nor receives peer mail" : "on"]);   // the shared names (T288); a session still running on the retired terminal backend (until stage 3) reads its id, never blank (review find)
   // Billing: whether this tab bills the API key or the Claude login — and WHICH login account (the
   // user 2026-08-09: shown whenever the backend reports it, one-auth machines included). No key material, ever.
   // When the CLI's own init landed on the OTHER side (authLive — say, a key found via apiKeyHelper
@@ -9796,6 +9801,14 @@ function renderCommentPopover(): void {
     crow.append(attach, box, send);
     pop.appendChild(crow);
     if (metaRowPending) pop.appendChild(metaRowPending);   // model/effort under the box, like the chat
+    if (th && th.mailOff) {
+      // T356 (the user 2026-09-11): a thread's mail is off, both directions, until it is broken out; the popover
+      // is the thread's whole surface, so it says so here
+      const mail = el("div", "cmt-note cmt-mail");
+      mail.textContent = "Mail off: this thread neither sends nor receives peer mail until you break it out.";
+      mail.title = "Peers cannot see or mail this thread, and its own mail is refused. Break out turns mail on.";
+      pop.appendChild(mail);
+    }
     if (th && th.status === "open") {
       // the thread is a real session under the hood — its model/effort switch LIVE through the
       // chat's own ops (setModel/setEffort route by sid; be.owns makes the thread reachable).
@@ -9863,6 +9876,10 @@ function renderCommentPopover(): void {
     const note = el("div", "cmt-note");
     note.textContent = "The discussion continues there.";
     pop.appendChild(note);
+    // the break-out flipped its mail on (T356): said once, here, where the user looks after breaking it out
+    const mailOn = el("div", "cmt-note cmt-mail");
+    mailOn.textContent = "Its mail is on now: peers can reach it and it can send.";
+    pop.appendChild(mailOn);
     const row = el("div", "cmt-actions");
     const open = el("button", "cmt-act") as HTMLButtonElement;
     open.type = "button";
@@ -10872,40 +10889,20 @@ function syncViewInner(id: string, atBottom?: boolean): View {
   // (the user 2026-06-19). Idempotent: leaves an existing placeholder in place; the first real event clears it.
   if (s.events.length === 0) {
     const only = v.el.childNodes.length === 1 ? (v.el.firstChild as HTMLElement) : null;
-    // …and rebuild a placeholder whose STARTING loader outlived its create (the failure flips it to
-    // the couldn't-start notice below — the spinning loader would be a lie on a failed tab)
-    const staleStart = !!only && only.classList?.contains("tx-starting") && failedProvisionals.has(id);
-    if (!only || !only.classList?.contains("tx-empty") || staleStart) {
+    // The placeholder is rebuilt when its KIND changes (pane-placeholder.ts): a viewer's loader gives way to the kernel's
+    // error sentence, the stall past the wait, or "written nothing yet"; a starting tab's loader to the couldn't-start
+    // notice (its create failed); the same kind twice is left alone (no churn on repeated pushes that stay empty).
+    const kind = placeholderKind({ sub: s.sub, failedRevive: failedRevives.get(id) || null,
+                                   provisional: isProvisionalId(id), provisionalFailed: failedProvisionals.has(id) });
+    if (!only || !only.classList?.contains("tx-empty") || !placeholderStands(only, kind)) {
       while (v.el.firstChild) v.el.removeChild(v.el.firstChild);
       const ph = el("div", "tx-empty"); v.el.appendChild(ph);
-      // A PROVISIONAL tab is not empty, it is STARTING — so it wears the romp loader (the repo's rule for
-      // any wait), not the placeholder that tells you to send something. The composer below it is live
-      // either way: anything typed here is held and flushed when the session lands. A FAILED create's
-      // tab says what happened instead (the user 2026-08-08) — the loader would be a lie.
-      if (failedRevives.has(id)) {
-        ph.textContent = failedRevives.get(id) || "";
-        ph.classList.add("tx-revive-failed");
-      } else if (s.sub && s.sub.error) {
-        // the kernel could not open the agent's file: its sentence, loud, in the pane (never a blank)
-        ph.textContent = s.sub.error;
-        ph.classList.add("tx-revive-failed");
-      } else if (s.sub && !s.sub.loaded) {
-        // the viewer's first frame is in flight → the romp loader holds the pane (the wait-state rule)
-        ph.classList.add("tx-starting");
-        ph.appendChild(rompLoaderInner("opening the agent's transcript…"));
-      } else if (s.sub) {
-        ph.textContent = "This agent has written nothing yet.";
-      } else if (isProvisionalId(id) && failedProvisionals.has(id)) {
-        ph.textContent = "This session couldn't start. What you typed is kept in the box below; "
-          + "✕ on the tab discards both.";
-      } else if (isProvisionalId(id)) {
-        ph.classList.add("tx-starting");
-        const sw = el("img", "tx-starting-swirl") as HTMLImageElement;
-        sw.src = mediaSrc("romp-swirl-glyph.svg"); sw.alt = ""; sw.onerror = () => sw.remove();
-        const wm = el("div", "tx-starting-msg");
-        wm.textContent = "Starting " + s.name + "… you can type now; romp sends it when it's up.";
-        ph.append(sw, wm);
-      } else ph.textContent = "No messages yet.";
+      fillPlaceholder(ph, kind, {
+        el, loader: rompLoaderInner, button: () => document.createElement("button"), br: () => document.createElement("br"),
+        swirl: () => { const sw = el("img", "tx-starting-swirl") as HTMLImageElement; sw.src = mediaSrc("romp-swirl-glyph.svg"); sw.alt = ""; sw.onerror = () => sw.remove(); return sw; },
+        text: { error: s.sub?.error, failedRevive: failedRevives.get(id), stall: subagentStallText(), sessionName: s.name },
+        onRetry: () => askSubagent(id),
+      });
     }
     v.rendered = 0; v.stale = false; v.winStart = 0; v.winEnd = 0;
     return v;
@@ -12904,9 +12901,46 @@ function openSubagentView(parentId: string, agentId: string, anchorUuid: string 
     });
     if (!order.includes(id)) order.push(id);
     vscodeApi?.postMessage({ type: "openSubagent", id: parentId, agentId });
+    armSubagentWait(id);   // the frame is expected within SUBAGENT_OPEN_WAIT_MS (T355)
   } else if (anchorUuid && cur.sub) cur.sub.anchorUuid = anchorUuid;
   setActive(id);
 }
+
+// The viewer's ask, with its wait (T355): the frame is expected on this socket within SUBAGENT_OPEN_WAIT_MS; past that the
+// pane shows the stall and a retry in place of the loader (a frame that never arrives left "opening…" up for good).
+function askSubagent(id: string): void {
+  const s = sessions.get(id);
+  if (!s || !s.sub) return;
+  vscodeApi?.postMessage({ type: "openSubagent", id: s.sub.parentId, agentId: s.sub.agentId });
+  armSubagentWait(id);
+}
+function armSubagentWait(id: string): void {
+  const s = sessions.get(id);
+  if (!s || !s.sub) return;
+  const p = s.sub;
+  p.loaded = false; p.stalled = false; p.askedAt = Date.now();
+  const asked = p.askedAt;
+  window.setTimeout(() => {
+    const cur = sessions.get(id);
+    if (!cur || !cur.sub || cur.sub.askedAt !== asked) return;   // answered, retried or closed meanwhile
+    if (!subagentStalled(cur.sub.loaded, Date.now() - asked)) return;
+    cur.sub.stalled = true;
+    const v = views.get(id);
+    if (v) { v.rendered = 0; v.stale = true; }
+    if (activeId === id) showActive();
+  }, SUBAGENT_OPEN_WAIT_MS);
+}
+// A connection coming back: the reconnected kernel holds no viewer registry for this client, so every viewer STILL WAITING
+// (no frame yet, or stalled) asks again; a viewer that has its answer keeps it (a re-ask would put the loader back over
+// "written nothing yet"). The reconnect-class events this pane can see: the local socket's romp:wsup, a remote host's relay
+// socket reopening (romp:hostRelayUp: a remote kernel's restart fires that and not wsup, the 2026-09-01 finding the upload
+// re-ship records), and the extension's pipeState up (the VS Code webview never sees wsup).
+function reaskWaitingSubagents(host?: string): void {
+  for (const [id, s] of sessions)
+    if (s.sub && (!s.sub.loaded || s.sub.stalled) && (host === undefined || hostOf(s.sub.parentId) === host)) askSubagent(id);
+}
+window.addEventListener("romp:wsup", () => reaskWaitingSubagents(""));   // the local kernel's own viewers (a host's relay
+//                                                                            reopening re-asks in the romp:hostRelayUp listener below)
 
 function closeSubagentView(id: string): void {
   const p = subParts(id);
@@ -12932,7 +12966,7 @@ function applySubagentFrame(m: any): void {
   const id = subTabId(parentId, agentId);
   const s = sessions.get(id);
   if (!s || !s.sub) { vscodeApi?.postMessage({ type: "closeSubagent", id: parentId, agentId }); return; }
-  s.sub.loaded = true;
+  s.sub.loaded = true; s.sub.stalled = false;   // answered, late or not: no re-ask puts the loader back over it (T355)
   s.sub.error = m.error ? String(m.error) : null;
   s.sub.running = !!m.running;
   s.sub.truncated = !!m.truncated;
@@ -14753,6 +14787,7 @@ window.addEventListener("romp:hostRelayUp", (e) => {
   // event a remote kernel's restart produces (it fires neither romp:wsup nor hostUp), so settled previews
   // make their one attempt here as well
   refreshSettledPreviews();
+  reaskWaitingSubagents(h);   // …and that host's subagent viewers still waiting ask again (T355: a remote kernel's restart; an empty host is the local one)
   // …and the tab this pane is LOOKING AT, when that host owns it (T246, the user 2026-09-07): the relay's
   // open is the moment the remote kernel holds a FRESH client for this pane — after that kernel restarted,
   // one with no active tab at all. Its pusher builds and flushes a client's active tab first; every tab is
@@ -16431,6 +16466,7 @@ function updateLivePaused(): void {
 function reattachLive(sid: string): void {
   const s = sessions.get(sid);
   if (!s || s.proto !== 2 || !s.detached) return;
+  vscodeApi?.postMessage({ type: "reattachKeys", id: sid, keys: reattachKeys(s.events as { uuid?: string; key?: string }[]) });   // the run as held, for the kernel's shared clause
   requestFullSession(sid, "reattach");   // the kernel's full tail frame re-bases this client; upsert merges it into the held run
 }
 
@@ -16746,6 +16782,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     return;
   }
   // the pipe's down edge is the VS Code twin of the shim's romp:wsdown: unconfirmed sends say so (markPendingLost)
+  if (m.type === "pipeState" && m.up) reaskWaitingSubagents();   // the extension's reconnect-class event (it never sees romp:wsup), T355
   if (m.type === "pipeState") { if (!m.up) markPendingLost("connection"); pipeBanner(!!m.up, Number(m.queued) || 0); return; }
   // any kernel message proves the kernel is reachable again — heal previews whose fetch died in a
   // restart window (preview.ts retryFailedPreviews; a no-op when nothing failed). federation's
@@ -16849,6 +16886,13 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     // an unreadable parent, the SDK setup hint). It gets a dialog naming the reason and takes the
     // provisional tab down with it; a toast would slide past the one moment it needed to be read.
     if (provisionalId) failProvisional(m.text); else warnToast(m.text);
+  }
+  else if (m.type === "spendCeiling" && typeof m.text === "string" && m.text) {
+    // the spend guard's word (T350): a session crossed the hourly spend ceiling, or fell back under it. Its OWN type,
+    // never `warn`: a warn arriving while a create is in flight is read above as that create's verdict, and this
+    // sentence is about another session entirely. The durable record is the shell's bell (the row rides the problem
+    // ring); this is the moment's toast.
+    warnToast(m.text);
   }
   // `err` is the LOUD channel, deliberately distinct from `warn` (the user 2026-07-29): a warn toast fades
   // after 12s, which is right for "that name has a bad character" and wrong for "the message you just typed

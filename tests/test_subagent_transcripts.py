@@ -158,7 +158,7 @@ class World(unittest.TestCase):
         self.live = {"state": "waiting", "since": T0, "model": "", "effort": "", "context": None,
                      "compactPct": None, "color": None, "backend": "sdk"}
         km._live_map = lambda: self.tm
-        for cache in (km._chat_fold, km._parse_cache, km._SUBAGENT_META_CACHE, km._AGENT_GIST_CACHE,
+        for cache in (km._chat_fold, km._parse_cache, km._SUBAGENT_META_CACHE, km._SUBAGENT_FILE_CACHE, km._AGENT_GIST_CACHE,
                       km._AGENT_LAUNCH_CACHE, km._SUBAGENT_FRAMES, km._bgtasks_cache, km._bgall_cache):
             cache.clear()
 
@@ -460,6 +460,110 @@ class Viewer(World):
         km._SUBAGENT_META_CACHE.clear()
         self.assertEqual(km._subagent_file(str(self.tpath), AID_BG), moved / "subagents" / ("agent-%s.jsonl" % AID_BG))
         self.assertIsNone(km._subagent_file(str(self.tpath), "a9999999999999999"))
+
+
+AID_WF = "a0000000000000c0de"[:17]                 # a WORKFLOW agent (Claude Code 2.1.261): its file one level down
+TU_WF = "toolu_wf_0001"
+
+
+class NestedWorkflowAgent(World):
+    """T355 (the user, 2026-09-11): opening a WORKFLOW subagent's transcript from the dashboard hung. The CLI writes a
+    workflow agent's file and sidecar under subagents/workflows/wf_<id>/, and the viewer's lookup read only the flat
+    subagents/agent-<id>.jsonl (plus the sibling-fsid glob at the same depth), so the frame carried the 'missing beside
+    this session's transcript' sentence, and the Agent card's sidecar join never learned the agent's id."""
+
+    def setUp(self):
+        super().setUp()
+        self.wfdir = self.subdir / "workflows" / "wf_0123456789abcdef"
+        self.wfdir.mkdir(parents=True)
+        (self.wfdir / ("agent-%s.meta.json" % AID_WF)).write_text(json.dumps(
+            {"agentType": "workflow", "description": "review the api changes", "spawnDepth": 1, "toolUseId": TU_WF}))
+        self.wf_file = self.wfdir / ("agent-%s.jsonl" % AID_WF)
+        write_jsonl(self.wf_file, self._agent_records(AID_WF, T0 + 120, [
+            ("Read", {"file_path": "/tmp/notes-api/api/notes.py"}, "def list_notes(): ..."),
+            ("Bash", {"command": "uv run pytest -q tests/", "description": "run the api tests"}, "4 passed"),
+        ], closing="The api changes hold: four tests pass."))
+        ack = {"isAsync": True, "status": "async_launched", "agentId": AID_WF, "description": "review the api changes",
+               "outputFile": "/tmp/claude-1000/-tmp-notes-api/%s/tasks/%s.output" % (SID, AID_WF), "taskType": "local_agent"}
+        append_jsonl(self.tpath, [
+            urec(T0 + 100, "u5", "run the review workflow on the api changes", self.last),
+            arec(T0 + 102, "a5", [tool_use(TU_WF, "Agent", {"description": "review the api changes", "prompt": "Review the api changes.",
+                                                            "subagent_type": "workflow", "run_in_background": True})], "u5", stop="tool_use"),
+            urec(T0 + 103, "r5", [tool_result(TU_WF, "Async agent launched. Agent ID: %s. Output file: %s" % (AID_WF, ack["outputFile"]))], "a5",
+                 toolUseResult=ack),
+            arec(T0 + 104, "a6", [{"type": "text", "text": "The workflow is running."}], "r5")])
+        self.last = "a6"
+        km._SUBAGENT_META_CACHE.clear()
+
+    def test_the_nested_file_and_sidecar_resolve_and_the_viewer_renders_them(self):
+        self.assertEqual(km._subagent_file(str(self.tpath), AID_WF), self.wf_file, "one level down: found")
+        self.assertEqual(km._subagent_meta(str(self.tpath), AID_WF).get("agentType"), "workflow", "the sidecar beside the file")
+        mp = km._subagent_meta_map(str(self.tpath))
+        self.assertEqual(mp.get(TU_WF, {}).get("agentId"), AID_WF, "the Agent card's join sees the nested sidecar")
+        self.assertEqual(mp.get(TU_BG, {}).get("agentId"), AID_BG, "…beside the flat ones")
+        fr = km.build_subagent(SID, AID_WF, NOW, self.tm)
+        self.assertNotIn("error", fr, fr.get("error"))
+        self.assertEqual(fr["meta"]["agentType"], "workflow"); self.assertEqual(fr["meta"]["toolUseId"], TU_WF)
+        kinds = [e.get("kind") for e in fr["events"]]
+        self.assertIn("tool", kinds); self.assertTrue(any("four tests pass" in (e.get("md") or "") for e in fr["events"]))
+        ev = self._agent_events().get(TU_WF)
+        self.assertIsNotNone(ev, "the parent's Agent card"); self.assertEqual(ev.get("agentId"), AID_WF)
+
+    def test_the_socket_arm_answers_a_nested_agents_open_with_its_events(self):
+        c = _Client()
+        km.Handler._dispatch_ws(object.__new__(km.Handler), {"type": "openSubagent", "id": SID, "agentId": AID_WF}, c)
+        fr = next(f for f in c.out if f.get("type") == "subagent")
+        self.assertEqual((fr["id"], fr["agentId"]), (SID, AID_WF))
+        self.assertNotIn("error", fr, "the frame the pane shows: events, not the 'missing' sentence")
+        self.assertGreater(len(fr["events"]), 0)
+
+    def test_the_nested_file_is_found_under_a_forked_fsid_dir_too(self):
+        moved = self.proj / "66666666-7777-8888-9999-000000000000"
+        shutil.move(str(self.proj / SID), str(moved))
+        km._SUBAGENT_META_CACHE.clear()
+        self.assertEqual(km._subagent_file(str(self.tpath), AID_WF), moved / "subagents" / "workflows" / "wf_0123456789abcdef" / ("agent-%s.jsonl" % AID_WF))
+        self.assertEqual(km._subagent_meta(str(self.tpath), AID_WF).get("toolUseId"), TU_WF)
+        self.assertIsNone(km._subagent_file(str(self.tpath), "a9999999999999999"))
+
+    def test_a_miss_memoized_before_the_file_lands_under_a_sibling_tree_resolves_when_it_lands(self):
+        """Round 3's medium: the memo latched a miss when the file landed under a sibling fsid's tree (a /clear fork's agents
+        land under the old fsid), since only the own tree and the project directory were stamped; every directory the walk
+        read is stamped now, siblings included, and a hit re-stats those alone."""
+        aid = "a5555555555555555"
+        self.assertIsNone(km._subagent_file(str(self.tpath), aid), "absent everywhere: a miss, memoized")
+        sib = self.proj / "66666666-7777-8888-9999-000000000000" / "subagents"
+        sib.mkdir(parents=True)                                      # a sibling fsid's tree appears (the project directory moves)
+        self.assertIsNone(km._subagent_file(str(self.tpath), aid), "still absent")
+        wf = sib / "workflows" / "wf_00000000000000ff"; wf.mkdir(parents=True)
+        write_jsonl(wf / ("agent-%s.jsonl" % aid), self._agent_records(aid, T0 + 200, []))   # …and the file lands in it, nested
+        self.assertEqual(km._subagent_file(str(self.tpath), aid), wf / ("agent-%s.jsonl" % aid), "found without a restart")
+        # a hit re-stats the directories the walk read and lists nothing
+        real_listdir, real_walk, count = os.listdir, os.walk, [0]
+        os.listdir = lambda *a, **k: (count.__setitem__(0, count[0] + 1), real_listdir(*a, **k))[1]
+        os.walk = lambda *a, **k: (count.__setitem__(0, count[0] + 1), real_walk(*a, **k))[1]
+        try:
+            self.assertEqual(km._subagent_file(str(self.tpath), aid), wf / ("agent-%s.jsonl" % aid))
+            self.assertEqual(count[0], 0, "a memo hit: stats only")
+        finally:
+            os.listdir, os.walk = real_listdir, real_walk
+
+    def test_a_symlinked_subagents_directory_yields_no_file_and_no_sidecar_map(self):
+        """Round 3's low d: a file reached THROUGH a symlinked subagents/ is not this session's."""
+        outside = Path(self._td) / "elsewhere" / "subagents"; outside.mkdir(parents=True)
+        write_jsonl(outside / ("agent-%s.jsonl" % AID_BG), self._agent_records(AID_BG, T0, []))
+        (outside / ("agent-%s.meta.json" % AID_BG)).write_text(json.dumps({"agentType": "x", "toolUseId": TU_BG}))
+        shutil.rmtree(self.subdir); os.symlink(str(outside), str(self.subdir))
+        km._SUBAGENT_FILE_CACHE.clear(); km._SUBAGENT_META_CACHE.clear()
+        self.assertIsNone(km._subagent_file(str(self.tpath), AID_BG), "the own tree is a symlink: not taken")
+        self.assertEqual(km._subagent_meta_map(str(self.tpath)), {}, "…and its sidecars are not listed")
+
+    def test_a_symlink_into_the_tree_is_neither_followed_nor_taken(self):
+        outside = Path(self._td) / "outside"; outside.mkdir()
+        write_jsonl(outside / "agent-a3333333333333333.jsonl", self._agent_records("a3333333333333333", T0, []))
+        os.symlink(str(outside), str(self.subdir / "workflows" / "wf_link"))
+        os.symlink(str(outside / "agent-a3333333333333333.jsonl"), str(self.wfdir / "agent-a4444444444444444.jsonl"))
+        self.assertIsNone(km._subagent_file(str(self.tpath), "a3333333333333333"), "a symlinked directory is not followed")
+        self.assertIsNone(km._subagent_file(str(self.tpath), "a4444444444444444"), "a symlinked file is not taken")
 
 
 class _Client(dict):

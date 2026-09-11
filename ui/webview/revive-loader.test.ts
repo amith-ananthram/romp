@@ -12,6 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
+const PLACEHOLDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "pane-placeholder.ts"), "utf8");   // the empty pane's placeholder, by kind (T355)
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
 
 test("the Revive click acknowledges at once: post reviveSession AND show the loader", () => {
@@ -59,7 +60,9 @@ test("failure is loud AND pane-local: named error in the session's placeholder +
   assert.match(RENDER, /failedRevives\.set\(id, msg\);/);
   assert.match(RENDER, /warnToast\(msg\);/, "the warn-toast family — dismissible (✕ / Esc), never window-blocking");
   // the session's own pane says it: the empty-transcript placeholder wears the named failure
-  assert.match(RENDER, /if \(failedRevives\.has\(id\)\) \{\s*\n\s*ph\.textContent = failedRevives\.get\(id\) \|\| "";\s*\n\s*ph\.classList\.add\("tx-revive-failed"\);/);
+  assert.match(RENDER, /failedRevive: failedRevives\.get\(id\) \|\| null,/, "the failed revive decides the placeholder's kind first (pane-placeholder.ts, T355)");
+  assert.match(PLACEHOLDER, /if \(st\.failedRevive\) return "revive-failed";/);
+  assert.match(PLACEHOLDER, /case "revive-failed":\s*\n\s*ph\.textContent = ctx\.text\.failedRevive \|\| "";\s*\n\s*ph\.classList\.add\("tx-revive-failed"\);/);
   assert.match(CSS, /\.tx-empty\.tx-revive-failed \{ color: var\(--vscode-errorForeground, #f48771\); \}/);
   // a fresh revive attempt clears the parked failure — the gesture beats the stale verdict
   assert.match(RENDER, /failedRevives\.delete\(id\);/);

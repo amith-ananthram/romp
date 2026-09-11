@@ -102,6 +102,19 @@ def _bucket_keys(ts):
     return t.strftime("%Y-%m-%dT%H"), t.strftime("%Y-%m-%d")
 
 
+def _lane_files(subdir):
+    """Every .jsonl under a session's subagents directory, at any depth (Claude Code 2.1.261 writes a Workflow agent's
+    transcript at workflows/wf_<id>/agent-<id>.jsonl; a flat glob missed every one, T355), no symlink followed or taken:
+    the kernel's _subagent_transcripts rule."""
+    if os.path.islink(subdir) or not os.path.isdir(subdir):
+        return []
+    out = []
+    for root, dirs, files in os.walk(subdir):        # followlinks=False
+        dirs.sort()
+        out.extend(p for p in (os.path.join(root, n) for n in files if n.endswith(".jsonl")) if not os.path.islink(p))
+    return sorted(out)
+
+
 def _scan(paths, seen):
     """Per-call usage from transcript files: [(hour, day, {kind: n})]. Streaming writes one message as several
     records that share `message.id` — counted once. Subagent (sidechain) calls count: the recorder's source,
@@ -148,7 +161,8 @@ def recount(state, claude, ledger):
         paths = []
         for fid in sorted(info["ids"]):
             paths += glob.glob(str(claude / "projects" / "*" / (fid + ".jsonl")))
-            paths += glob.glob(str(claude / "projects" / "*" / fid / "subagents" / "*.jsonl"))   # the Agent tool's lanes
+            for sd in glob.glob(str(claude / "projects" / "*" / fid / "subagents")):   # the Agent tool's lanes, one level or deeper
+                paths += _lane_files(sd)                                                #  (workflow agents sit under workflows/wf_<id>/)
         for hk, dk, u in _scan(sorted(set(paths)), seen):
             for kind, key in (("hours", hk), ("days", dk)):
                 slot = per.setdefault((kind, key), {}).setdefault(owner, {k: 0 for k, _ in KINDS})

@@ -26,7 +26,7 @@ Auxiliary inputs the file adapter may read (same category as the transcript):
                                transcript lost to an API-errored try; judge parse only)
   timeline/messages.jsonl   -> peer rompUuid for a postal atom (join on the msg id)
 """
-import array, bisect, copy, gzip, json, os, re, sys, time, hashlib, threading
+import array, bisect, collections, copy, gzip, json, os, re, sys, time, hashlib, threading
 from datetime import datetime
 from pathlib import Path
 
@@ -648,7 +648,33 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
 # recently used entries go first, one at a time, under the same LRU order the count uses, so a hot leaf survives a
 # cold flood of subagent files exactly as before. A single entry larger than the whole budget still inserts: a leaf is
 # never refused, the budget then holds that one entry. Counters under /perf recordCache.
-_JSONL_CACHE_BUDGET_BYTES = int(float(os.environ.get("ROMP_RECORD_CACHE_BUDGET_MB", "1024")) * 1024 * 1024)
+# The default is a QUARTER of the machine's memory, never under 4 GiB (2026-09-11, the day the budget shipped at 1 GiB):
+# the working set of a devbox running 50 sessions is their live leaves, read by every build in every pusher cycle, and
+# a budget below it does not save memory, it thrashes: 18 entries filled the 1 GiB, every build re-read whole
+# transcripts (14.9 GB read in the first 3.5 minutes, 724 evictions, one pusher cycle of 132 s, chat builds of 3 s
+# each), and glibc's arenas kept the churn, 14 GB resident over a 1 GiB cache. What is not needed until looked at
+# (subagent transcripts) leaves through drop_after="quiescent" folds instead; the budget is the backstop, not the
+# mechanism. ROMP_RECORD_CACHE_BUDGET_MB still sets it outright.
+RECORD_CACHE_BUDGET_FLOOR_BYTES = 4 * 1024 ** 3
+RECORD_CACHE_BUDGET_FRACTION = 0.25
+
+
+def _record_cache_default_budget_bytes(meminfo_text=None):
+    """A quarter of MemTotal (from /proc/meminfo, or the text given), floored at 4 GiB; the floor alone when the file
+    is unreadable (macOS, a container without procfs)."""
+    try:
+        text = meminfo_text if meminfo_text is not None else open("/proc/meminfo", encoding="utf-8").read()
+        for line in text.splitlines():
+            if line.startswith("MemTotal:"):
+                kb = int(line.split()[1])
+                return max(RECORD_CACHE_BUDGET_FLOOR_BYTES, int(kb * 1024 * RECORD_CACHE_BUDGET_FRACTION))
+    except Exception:
+        pass
+    return RECORD_CACHE_BUDGET_FLOOR_BYTES
+
+
+_JSONL_CACHE_BUDGET_BYTES = (int(float(os.environ["ROMP_RECORD_CACHE_BUDGET_MB"]) * 1024 * 1024)
+                             if os.environ.get("ROMP_RECORD_CACHE_BUDGET_MB") else _record_cache_default_budget_bytes())
 _JSONL_CACHE_BYTES = [0]          # the sum of every held entry's weight, kept in step with _JSONL_CACHE under its lock
 _RECORD_CACHE_STATS = {"inserts": 0, "evictions": 0, "evictedBytes": 0, "budgetEvictions": 0, "dropped": 0, "droppedBytes": 0}
 _DROP_AFTER_QUIESCENT_S = float(os.environ.get("ROMP_RECORD_CACHE_DROP_QUIESCENT_S", "120"))   # a file this long unchanged
@@ -1083,10 +1109,16 @@ def checkpoint_dirty():
         return sorted(_FOLD_DIRTY)
 
 
-def checkpoint_write_dirty(paths=None):
-    """Write the checkpoints of `paths` (default: every dirty path); returns how many were written."""
+def checkpoint_write_dirty(paths=None, budget_s=None):
+    """Write the checkpoints of `paths` (default: every dirty path); returns how many were written. `budget_s`
+    bounds the pass (the exit path, 2026-09-11: an unbounded write over a kernel life's dirty files outran the
+    manager's 5 s grace and the SIGKILL lost the cut row): the first file always writes, the pass stops once the
+    budget has passed, and what is left stays dirty for the next writer."""
     n = 0
+    t0 = time.monotonic()
     for p in (checkpoint_dirty() if paths is None else [str(p) for p in paths]):
+        if budget_s is not None and n and time.monotonic() - t0 > budget_s:
+            break
         if checkpoint_write(p):
             n += 1
     return n
@@ -3086,7 +3118,7 @@ def synthesize_idle(states, atoms, now):
     return out
 
 
-def synthesize_orphans(states, atoms, landed_text_uuids=None, rompuuid=None):
+def synthesize_orphans(states, atoms, landed_text_uuids=None, rompuuid=None, pre=None, t_floor=None):
     """Salvaged assistant replies from orphanReply markers in states/<sid>.jsonl — text that STREAMED
     live but the transcript never kept (an API-errored try; the SDK backend persists it at settle,
     see its append_orphan_reply). The kernel's chat build has interleaved these since 2026-07-21, but
@@ -3108,6 +3140,10 @@ def synthesize_orphans(states, atoms, landed_text_uuids=None, rompuuid=None):
     consumed, since the atoms-only dedup below can no longer see the abandoned record)."""
     if not atoms:
         return []
+    if t_floor is not None:                                           # a restored parse: only a marker the tail can hold counts (the
+        states = [r for r in states or [] if isinstance(r, dict) and (r.get("t") or 0) >= t_floor]   #  caller discards the rest)
+    if not any(isinstance(r, dict) and r.get("t") and isinstance(r.get("orphanReply"), dict) for r in states or []):
+        return []                                                     # no marker: nothing to salvage, and no pre-cut row decoded
     # TEXT-BEARING uuids only (the user 2026-07-28): a marker whose uuid the disk knows solely as a
     # TEXTLESS record must still interleave. On some model+tool combinations (observed: fable-5 replying
     # before an AskUserQuestion) the CLI persists the streamed reply text as an EMPTY thinking record
@@ -3117,15 +3153,45 @@ def synthesize_orphans(states, atoms, landed_text_uuids=None, rompuuid=None):
     lazy = [a for a in atoms if a.get("lazy") is not None]           # atoms before an assembly checkpoint's cut: no body
     seen_uuids = {a.get("uuid") for a in atoms
                   if a.get("uuid") and (a["lazy"].get("nt") if a.get("lazy") is not None else _text_of(_content(a.get("message"))).strip())}
+    pre_rows = []                                                     # (turn, slot, row, type, has text, hash) of the restored pre-cut
+    if pre:                                                           #  atoms (stage 4c), one decode per row
+        for pt in pre:
+            la = pt["atoms"]
+            for k, r in enumerate(la.rows()):
+                typ, nt, hh = la._index.text_flags(r)
+                pre_rows.append((la, k, r, typ, nt, hh))
+                if nt:
+                    u = la._index.uuid_of(r)                           # text-bearing uuids from the rows: no atom built
+                    if u:
+                        seen_uuids.add(u)
     disk_texts = [t for a in atoms if a.get("type") == "assistant" and a.get("lazy") is None
                   if (t := _text_of(_content(a.get("message"))).strip())]
     older = [None]                                                    # the lazy assistants' texts, hydrated once, only if a marker needs them
+
+    pre_hashes = {hh for la, k, r, typ, nt, hh in pre_rows if typ == "assistant" and hh}   # the pre-cut ASSISTANTS' text hashes
+    pre_texts = [None]                                                # …and their texts, built and hydrated only if a marker needs them
+
+    def _pre_exact(txt):
+        """Whether a pre-cut assistant kept exactly `txt`, from the rows' hashes: no atom built (a user prompt or a command
+        with the same text is not a kept reply, so only assistants count: round 3 M2a)."""
+        return hashlib.sha1(txt.encode("utf-8", "replace")).hexdigest()[:8] in pre_hashes
+
+    def _pre_texts():
+        """The pre-cut assistants' texts for the either-way prefix rule the whole parse applies (round 3 M2b): built and
+        hydrated once, only when a tail marker survived the cheaper checks (the t_floor filter above keeps this off every
+        parse with no marker the tail can hold)."""
+        if pre_texts[0] is None:
+            las = [la[k] for la, k, r, typ, nt, hh in pre_rows if typ == "assistant" and nt]
+            if las:
+                hydrate(las, rompuuid or (atoms[0].get("session_id") if atoms else None), by="synthesize_orphans")
+            pre_texts[0] = [t for a in las if (t := _text_of(_content(a.get("message"))).strip())]
+        return pre_texts[0]
 
     def _older_texts():
         if older[0] is None:
             las = [a for a in lazy if a.get("type") == "assistant" and a["lazy"].get("nt")]
             if las:
-                hydrate(las, rompuuid or atoms[0].get("session_id"))
+                hydrate(las, rompuuid or (atoms[0].get("session_id") if atoms else None))
             older[0] = [t for a in las if (t := _text_of(_content(a.get("message"))).strip())]
         return older[0]
     sid = atoms[0]["session_id"]
@@ -3154,6 +3220,8 @@ def synthesize_orphans(states, atoms, landed_text_uuids=None, rompuuid=None):
             continue
         if lazy and any(dt.startswith(txt) or txt.startswith(dt) for dt in _older_texts()):
             continue                                                   # a reply the disk kept before the cut
+        if pre_rows and (_pre_exact(txt) or any(dt.startswith(txt) or txt.startswith(dt) for dt in _pre_texts())):
+            continue                                                   # …or the index kept, exactly (by hash) or as a prefix either way
         out.append({"type": "assistant", "uuid": u or ("orphan:%d" % int(r["t"])), "session_id": sid,
                     "t": int(r["t"]), "fsid": None, "parentUuid": None, "orphaned": True,
                     "message": {"role": "assistant", "content": [{"type": "text", "text": txt}],
@@ -3455,6 +3523,8 @@ def segments(turn):
     from one input to the next (or to the turn end). Each carries a stable `id` for the
     summarizer layer. Pure function over a turn."""
     atoms = turn["atoms"]
+    if turn.get("pre") and turn.get("segs") is not None:   # a restored pre-cut turn (T323 stage 4c): the spans as written
+        return [{"id": s[0], "trigger": s[1], "t": s[2], "end": s[3], "atoms": atoms[s[4]:s[4] + s[5]]} for s in turn["segs"]]
     rompuuid = atoms[0]["session_id"] if atoms else ""
     starts = [i for i, a in enumerate(atoms) if _is_segment_input(a)]
     if not starts:
@@ -3752,7 +3822,7 @@ def _asm_serve(entry):
     before the checkpoint's cut, T323 stage 4) comes first, in emit order, like a whole parse's; its skill loads
     (T333) are the carried pre-cut ones plus the tail's, in the seeded emit state."""
     return ([dict(a) for a in entry.get("prefix") or []] + [dict(a) for a in entry["atoms"]], set(entry["landed"]), None,
-            dict(entry["st"].get("skill_loads") or {}))
+            dict(entry["st"].get("skill_loads") or {}), list(entry.get("preTurns") or []))
 
 
 def _asm_full(key, leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human):
@@ -3978,7 +4048,290 @@ def _asm_fold(entry, delta, leaf_recs, leaf_key, leaf_stem, rompuuid, postal_ind
 # ids and atom uuids. Bodies come back on demand (hydrate). Anything that does not verify is a counted fallback to a
 # whole parse; a compaction landing after the document demotes the tail fold to a whole parse exactly as before, and
 # the next settle writes a new document with the new cut.
-_ASM_CKPT_V = 3                       # 2: atom rows carry [offset, len], nt for every atom; 3: the carry holds skill_loads (T333)
+_ASM_CKPT_V = 4                       # 2: atom rows carry [offset, len], nt for every atom; 3: the carry holds skill_loads (T333);
+#                                       4: a `turns` section over the pre-cut rows (T323 stage 4c: the lazy index)
+_MAT_CAP = 20000                      # materialized pre-cut atoms resident across every session (the lazy index's LRU)
+_MAT_LRU = collections.OrderedDict()  # (id(LazyAtoms), row) → (LazyAtoms, row): eviction drops the memo, never a field in place
+_MAT_LOCK = threading.Lock()
+_ASM_INDEX_STATS = {"materialized": 0, "materializedBy": {}, "resident": 0, "evictions": 0, "restoredTurns": 0, "rowDecodes": 0}
+_PRE_TURN_KEYS = ("pre", "uuids", "lastT", "maxT", "lastModel", "tools", "segs")   # a pre-turn's fields beyond a plain turn's
+
+
+class LazyIndexError(RuntimeError):
+    """A pre-cut row the index cannot decode: names the session and the row, so the fallback is a loud one."""
+
+
+class _Unmaterialized:
+    """The placeholder a LazyAtoms slot holds before its atom is built. Not JSON-serializable and not a dict: a serializer
+    or a copier reaching a pre-cut turn's atoms through the list's storage raises instead of shipping placeholders."""
+    __slots__ = ()
+
+    def __repr__(self):
+        return "<unmaterialized atom>"
+
+
+_UNMAT = _Unmaterialized()
+
+
+def _materialize_caller():
+    """The consumer that reached for a pre-cut atom: the first frame above the index's own methods."""
+    f = sys._getframe(2)
+    for _ in range(8):
+        if f is None:
+            break
+        name = f.f_code.co_name
+        if name not in ("__getitem__", "__iter__", "__reversed__", "__contains__", "__eq__", "index", "count", "copy", "__add__",
+                        "__radd__", "__reduce_ex__", "_at", "materialize", "_materialize_caller", "<genexpr>", "<listcomp>", "get"):
+            return name
+        f = f.f_back
+    return "?"
+
+
+class LazyIndex:
+    """One restored session's pre-cut rows (T323 stage 4c): the document's atom rows kept as BYTES, decoded one at a time
+    when a consumer reaches for an atom, through a process-wide LRU (_MAT_CAP). The record rows (identity, time, file,
+    parent) stay decoded: they are small and every materialization reads one."""
+
+    def __init__(self, doc, rompuuid, leaf_path):
+        self.rompuuid = str(rompuuid)
+        self.leaf = str(leaf_path)
+        self.rowb = [json.dumps(r, separators=(",", ":")).encode("utf-8") for r in doc["atoms"]]
+        self.records = doc["records"]
+        self.fsids = list(doc.get("fsids") or [])
+
+    def build(self, k):
+        with _MAT_LOCK:
+            _ASM_INDEX_STATS["rowDecodes"] += 1
+        try:
+            row = json.loads(self.rowb[k])
+        except (IndexError, ValueError) as e:
+            raise LazyIndexError("session %s row %d: %s" % (self.rompuuid[:8], k, e)) from e
+        if row.get("syn"):                                # a synthesized atom (idle, a salvaged reply): its message inline, if any
+            a = dict(row.get("s") or {})
+            if "m" in row:
+                a.update(message=row["m"])                # a WRITE of the synthesized atom's message (no body read: the audit's regex)
+            return a
+        a = _restore_prefix_atoms([row], self.rompuuid, self.records, self.fsids)[0]
+        a.pop("_seq", None)                               # the read-order tiebreak: the section fixed the order (parse_session pops it too)
+        return a
+
+    def uuid_of(self, k):
+        """A row's uuid without building its atom (the record row's, else the synthesized scalars')."""
+        with _MAT_LOCK:
+            _ASM_INDEX_STATS["rowDecodes"] += 1
+        row = json.loads(self.rowb[k])
+        ri = row.get("r")
+        if ri is not None:
+            return self.records[ri][0]
+        return (row.get("s") or {}).get("uuid")
+
+    def text_flags(self, k):
+        """(type, has text, text hash) for a row without building its atom, one decode: what an orphan marker's dedup reads.
+        The hash is lz.h (the first eight hex of sha1 over the text) for a lazy row, the same digest over an inline message
+        for a synthesized or inline row; None without text."""
+        with _MAT_LOCK:
+            _ASM_INDEX_STATS["rowDecodes"] += 1
+        row = json.loads(self.rowb[k])
+        ri = row.get("r")
+        lz = row.get("lz")
+        tname = {"u": "user", "a": "assistant", "s": "system"}
+        typ = (row.get("s") or {}).get("type") or (tname.get(self.records[ri][2], "user") if ri is not None else None)
+        if lz is not None:
+            return typ, bool(lz.get("nt")), (lz.get("h") if lz.get("nt") else None)
+        if "m" in row:
+            txt = _text_of(_content(row["m"])).strip()
+            return typ, bool(txt), (hashlib.sha1(txt.encode("utf-8", "replace")).hexdigest()[:8] if txt else None)
+        return typ, False, None
+
+
+class LazyAtoms(list):
+    """A pre-cut turn's atoms (T323 stage 4c): a list whose slots hold placeholders until a consumer reaches for an
+    atom, which the index then builds (a lazy atom, its body still on disk, hydrate() as before). Every read path a
+    list offers goes through the build (indexing, slicing, iteration, membership, equality, copies, concatenation,
+    pickling), so a consumer sees plain atom dicts; the placeholders reach only a serializer or copier that reads the
+    list's storage directly (json's encoder, refused at __iter__ while a slot is unbuilt), and those raise. Materialized atoms live in a process-wide LRU
+    (_MAT_CAP): eviction puts the placeholder back in the slot, the consumer's own reference stays whole."""
+
+    def __init__(self, index, rows):
+        list.__init__(self, [_UNMAT] * len(rows))
+        self._index = index
+        self._rows = list(rows)
+
+    # ── the build ──
+    def _at(self, i):
+        a = list.__getitem__(self, i)
+        if a is not _UNMAT:
+            with _MAT_LOCK:
+                key = (id(self), i)
+                if key in _MAT_LRU:
+                    _MAT_LRU.move_to_end(key)
+            return a
+        a = self._index.build(self._rows[i])
+        by = _materialize_caller()
+        with _MAT_LOCK:
+            cur = list.__getitem__(self, i)
+            if cur is not _UNMAT:                         # another thread built it first
+                return cur
+            list.__setitem__(self, i, a)
+            _MAT_LRU[(id(self), i)] = (self, i)
+            _ASM_INDEX_STATS["materialized"] += 1
+            _ASM_INDEX_STATS["materializedBy"][by] = _ASM_INDEX_STATS["materializedBy"].get(by, 0) + 1
+            while len(_MAT_LRU) > _MAT_CAP:
+                _, (lz, j) = _MAT_LRU.popitem(last=False)
+                list.__setitem__(lz, j, _UNMAT)
+                _ASM_INDEX_STATS["evictions"] += 1
+            _ASM_INDEX_STATS["resident"] = len(_MAT_LRU)
+        return a
+
+    def uuids(self):
+        """The atoms' uuids without building them."""
+        return [self._index.uuid_of(r) for r in self._rows]
+
+    def rows(self):
+        return list(self._rows)
+
+    # ── the list surface ──
+    def __getitem__(self, i):
+        if isinstance(i, slice):
+            return [self._at(j) for j in range(*i.indices(len(self)))]
+        n = len(self)
+        if i < 0:
+            i += n
+        if not 0 <= i < n:
+            raise IndexError("LazyAtoms index out of range")
+        return self._at(i)
+
+    def __iter__(self):
+        # json's encoder (C or Python) reaches a list SUBCLASS through iteration, so a dump of a tree would build every atom
+        # and ship it: refused here, loudly, as the design asks (plain_tree is the dump's road)
+        f = sys._getframe(1)
+        if f is not None and f.f_code.co_name in ("iterencode", "encode", "_iterencode", "_iterencode_list", "_iterencode_dict") \
+                and any(a is _UNMAT for a in list.__iter__(self)):
+            raise TypeError("a pre-cut turn's atoms are not JSON-serializable before they are built: dump em.plain_tree(session)")
+        for j in range(len(self)):
+            yield self._at(j)
+
+    def __reversed__(self):
+        for j in range(len(self) - 1, -1, -1):
+            yield self._at(j)
+
+    def __contains__(self, x):
+        return any(a is x or a == x for a in self)
+
+    def __eq__(self, other):
+        return list(self) == list(other) if isinstance(other, list) else NotImplemented
+
+    def __ne__(self, other):
+        eq = self.__eq__(other)
+        return eq if eq is NotImplemented else not eq
+
+    __hash__ = None
+
+    def index(self, x, *args):
+        return list(self).index(x, *args)
+
+    def count(self, x):
+        return list(self).count(x)
+
+    def copy(self):
+        return list(self)
+
+    def __add__(self, other):
+        return list(self) + list(other)
+
+    def __radd__(self, other):
+        return list(other) + list(self)
+
+    def __mul__(self, n):
+        return list(self) * n
+
+    def __reduce_ex__(self, proto):
+        return (list, (list(self),))                     # a copy or a pickle is a plain list of built atoms
+
+    def __repr__(self):
+        return "LazyAtoms(%d rows, %d built)" % (len(self), sum(1 for a in list.__iter__(self) if a is not _UNMAT))
+
+    def sort(self, *a, **k):
+        raise TypeError("a pre-cut turn's atoms are read-only")
+
+    def append(self, *a):
+        raise TypeError("a pre-cut turn's atoms are read-only")
+
+    def extend(self, *a):
+        raise TypeError("a pre-cut turn's atoms are read-only")
+
+    def insert(self, *a):
+        raise TypeError("a pre-cut turn's atoms are read-only")
+
+    def pop(self, *a):
+        raise TypeError("a pre-cut turn's atoms are read-only")
+
+    def remove(self, *a):
+        raise TypeError("a pre-cut turn's atoms are read-only")
+
+    def __setitem__(self, *a):
+        raise TypeError("a pre-cut turn's atoms are read-only")
+
+    def __delitem__(self, *a):
+        raise TypeError("a pre-cut turn's atoms are read-only")
+
+
+class PreTurn(dict):
+    """A restored pre-cut turn: a plain turn's fields (id, trigger, t, end, ended, atoms) with `atoms` a LazyAtoms, plus
+    the turn-level scalars the kernel's walkers read instead of the atoms (_PRE_TURN_KEYS: uuids, lastT, maxT, lastModel,
+    tools, segs). A dict subclass only so a walker can tell one apart; `trigger` is {"uuid": the opener's}, as the
+    segmentation shapes it, from the uuids alone."""
+
+
+def _pre_turns_of(doc, index):
+    """The pre-cut turns of a version-4 document as PreTurns over the index (no atom built)."""
+    out = []
+    for td in doc["turns"]:
+        at = td.get("triggerAt")
+        pt = PreTurn(id=td["id"], trigger=({"uuid": td["uuids"][at]} if at is not None else None), t=td["t"], end=td["end"],
+                     ended=bool(td["ended"]), atoms=LazyAtoms(index, td["atoms"]),
+                     pre=True, uuids=list(td["uuids"]), lastT=td.get("lastT"), maxT=td.get("maxT"), lastModel=td.get("lastModel"),
+                     tools=[tuple(x) for x in td.get("tools") or []], segs=[list(s) for s in td["segs"]])
+        out.append(pt)
+    return out
+
+
+def _tree_identity_of_doc(turns_doc, identity):
+    """sha1 over a `turns` section's turn ids, segment ids and atom uuids, and the atoms' own identity digest (the whole
+    parse's, verified at write time): the proof a restore reads from the section alone, no atom built."""
+    h = hashlib.sha1()
+    h.update((identity or "").encode()); h.update(b"#")
+    for td in turns_doc:
+        h.update(td["id"].encode()); h.update(b"|")
+        for sg in td["segs"]:
+            h.update(sg[0].encode()); h.update(b",")
+        for u in td["uuids"]:
+            h.update((u or "").encode()); h.update(b";")
+        h.update(",".join(str(k) for k in td["atoms"]).encode()); h.update(b"/")   # the rows each turn holds (a permuted section differs)
+    return h.hexdigest()
+
+
+def plain_tree(session):
+    """A plain copy of a parsed session for a comparison or a dump: every turn a plain dict with the six turn fields, its
+    atoms built into plain dicts (bodies as they are: hydrate first for the text). The pre-turn fields are left out, so a
+    restored tree and the whole parse's compare equal when they are."""
+    turns = []
+    for t in session.get("turns") or []:
+        pt = {k: v for k, v in t.items() if k != "atoms" and k not in _PRE_TURN_KEYS}
+        if isinstance(pt.get("trigger"), dict):
+            pt["trigger"] = dict(pt["trigger"])
+        pt["atoms"] = [dict(a) for a in t["atoms"]]
+        turns.append(pt)
+    out = {k: v for k, v in session.items() if k != "turns"}
+    out["turns"] = turns
+    return out
+
+
+def asm_index_stats():
+    with _MAT_LOCK:
+        return {"materialized": _ASM_INDEX_STATS["materialized"], "materializedBy": dict(_ASM_INDEX_STATS["materializedBy"]),
+                "resident": len(_MAT_LRU), "evictions": _ASM_INDEX_STATS["evictions"], "cap": _MAT_CAP,
+                "restoredTurns": _ASM_INDEX_STATS["restoredTurns"], "rowDecodes": _ASM_INDEX_STATS["rowDecodes"]}
 _ASM_CKPT_CAP = 16 * 1024 * 1024   # a document past this is not written (counted): that session parses whole as today
 _ASM_CKPT_STATS = {"written": 0, "restored": 0, "fallbacks": {}, "skipped": {}, "hydratedBytes": 0, "hydratedAtoms": 0,
                    "hydratedBy": {}}     # bytes per calling function: a whole-tree hydration anywhere shows here
@@ -4096,7 +4449,14 @@ def _pre_tree_identity(atoms, rompuuid):
 _ASM_SKIP_STRUCTURAL = ("unsplittable", "reconstruction", "unencodable", "oversize")   # true of a cut until it moves
 
 
-def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
+def _tree_key(tree):
+    """A parsed tree's identity for the writer's memo: its object, its turn count and its last turn's id (a new parse mints
+    new dicts; the same tree yields the same section, or none, every time)."""
+    turns = (tree or {}).get("turns") or []
+    return (id(tree), len(turns), turns[-1].get("id") if turns else None)
+
+
+def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None):
     """Write the leaf's assembly checkpoint from its WHOLE assembly entry. False when there is nothing to write: no
     entry, an entry restored from a document (its cut stands until a compaction moves it), no compaction boundary in
     the tree (the whole file would be the tail), a cut that would not split the chronological order the fold's gate
@@ -4110,10 +4470,13 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
             entry = _ASM_CACHE.get(key)
         if entry is None:
             return _asm_ckpt_skip("noEntry")
-        if entry.get("prefix"):
+        if entry.get("prefix") or entry.get("preTurns"):
             return _asm_ckpt_skip("restored")            # the document it came from stands
-        if entry.get("docWritten") and cp.exists():
-            return _asm_ckpt_skip("written")             # this entry's pre-cut part has not moved (a fold appends after the cut)
+        if entry.get("docWritten") and cp.exists() and (tree is None or entry.get("docTurns")
+                                                          or entry.get("docNoTurns") == _tree_key(tree)):
+            return _asm_ckpt_skip("written")             # this entry's pre-cut part has not moved (a fold appends after the cut);
+        #                                                  a document written without a tree is written again once one is given,
+        #                                                  one whose tree yielded no section is not, for that tree (review low 4)
         ad = entry["ad"]
         atoms = entry["atoms"]
         bounds = [a for a in atoms if a.get("type") == "system" and a.get("subtype") == "compact_boundary"]
@@ -4245,8 +4608,12 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
                 row["r"] = ri
             if a.get("_seq", sq) != sq:
                 row["seq"] = a.get("_seq", sq)             # an adopted boundary's emit order differs from its read order
-            if kind in _LAZY_KINDS:
+            if kind in _LAZY_KINDS and idx >= 0 and fp is not None:
                 row["lz"] = _lazy_of(a, kind, idx)
+            elif kind in _LAZY_KINDS:                          # no record to read back (an absorbed attachment with no uuid, round 3):
+                row["m"] = a.get("message")                    #  the body rides inline, never a lazy marker hydrate cannot fill
+                if "toolUseResult" in a:
+                    row["tur"] = a["toolUseResult"]
             pre_atoms.append(row)
         # the pre-cut spine, root to cut
         chain, u, guard_n = [], ad.leaf_uuid, 0
@@ -4278,9 +4645,76 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
         pre_lazy = _restore_prefix_atoms(pre_atoms, rompuuid, rows, fsids)
         if _pre_tree_identity(pre_lazy, rompuuid) != identity:
             return skip("reconstruction")            # the lazy reconstruction would not reproduce the whole parse's ids
+        # the `turns` section (T323 stage 4c): the parsed TREE's pre-cut turns as rows, so a restore builds the turns
+        # without an atom; a synthesized atom (an idle span, a salvaged reply) has no record and rides as a row of its own
+        # with its message inline. The section stops at the first turn holding a post-cut record (the cut is a turn
+        # boundary: the chronological split above put every pre-cut record before every post-cut one).
+        turns_doc = None
+        n0 = len(pre_atoms)                               # the rows the walk appends leave with a refusal (review round 2, M1)
+        if tree is not None:
+            row_of_atom, row_of_scalars = {}, {}
+            for k_, row_ in enumerate(pre_atoms):
+                u_ = rows[row_["r"]][0] if "r" in row_ else (row_.get("s") or {}).get("uuid")
+                if u_ and u_ not in row_of_atom:
+                    row_of_atom[u_] = k_
+                elif not u_ and "r" not in row_:            # a uuid-less absorbed atom (a queued_command attachment): its row is
+                    row_of_scalars.setdefault(json.dumps(row_.get("s") or {}, sort_keys=True, default=str), k_)   #  found by its scalars
+            turns_doc = []
+            cut_ts = min((ad.ts_of.get(u, 0) for u in entry["kept"] if ad.seq_of.get(u, 0) >= cut_seq), default=None)
+            for turn in tree.get("turns") or []:
+                seqs = [ad.seq_of[a["uuid"]] for a in turn["atoms"] if a.get("uuid") in ad.seq_of]
+                if seqs:
+                    if max(seqs) >= cut_seq:
+                        break                            # the first turn holding a post-cut record ends the pre-cut run
+                elif cut_ts is None or (turn.get("t") or 0) >= cut_ts:
+                    break                                # a turn of synthesized atoms alone (an idle span opening the tree): pre-cut
+                #                                          by its time, else the tail's
+                idxs = []
+                for a in turn["atoms"]:
+                    u_ = a.get("uuid")
+                    k_ = row_of_atom.get(u_) if u_ else row_of_scalars.pop(json.dumps(_atom_scalars(a), sort_keys=True, default=str), None)
+                    #  (two uuid-less attachments in one turn with the same enqueue stamp collide on the scalar key: the second
+                    #   finds no row, the walk mints a synthesized one, and the coverage check refuses the section cleanly)
+                    if k_ is None:
+                        if u_ in ad.seq_of:
+                            return skip("turnRows")      # a record atom with no row of its own: the tree and the entry disagree
+                        k_ = len(pre_atoms)
+                        row_ = {"i": -1, "syn": 1, "s": _atom_scalars(a)}   # a synthesized atom's row: its scalars, its message inline
+                        if "message" in a:                                #  when it has one (an idle span has none)
+                            row_["m"] = a["message"]
+                        pre_atoms.append(row_)
+                    idxs.append(k_)
+                seg_rows, start = [], 0
+                for sg in segments(turn):
+                    seg_rows.append([sg["id"], sg.get("trigger"), sg["t"], sg["end"], start, len(sg["atoms"])])
+                    start += len(sg["atoms"])
+                if start != len(turn["atoms"]):
+                    return skip("segs")                  # the segments are contiguous slices of the turn, in order
+                ts_ = [a.get("t") for a in turn["atoms"] if a.get("t")]
+                models = [atom_model(a) for a in turn["atoms"] if a.get("type") == "assistant"]
+                models = [m_ for m_ in models if m_]
+                trig_at = next((i_ for i_, a in enumerate(turn["atoms"]) if turn["trigger"] is not None and a is turn["trigger"]), None)
+                if trig_at is None and turn["trigger"] is not None:
+                    trig_at = next((i_ for i_, a in enumerate(turn["atoms"]) if a.get("uuid") == turn["trigger"].get("uuid")), None)
+                turns_doc.append({"id": turn["id"], "t": turn["t"], "end": turn["end"], "ended": bool(turn["ended"]), "atoms": idxs,
+                                  "segs": seg_rows, "uuids": [a.get("uuid") for a in turn["atoms"]], "triggerAt": trig_at,
+                                  "lastT": ts_[-1] if ts_ else None, "maxT": max(ts_) if ts_ else None,
+                                  "lastModel": models[-1] if models else None,
+                                  "tools": [[i_, n_] for a in turn["atoms"] if a.get("type") == "assistant" for i_, n_ in atom_tool_uses(a)]})
+            # the section must COVER the pre-cut rows: every row in exactly one turn (a permutation of the row indexes; the
+            # turns sort by time, so a row's index need not be contiguous with its neighbours'), else the tree the store
+            # holds is not this entry's whole (a bare rollback armed before the last compaction cuts it short) and the
+            # document is written without a section rather than restore a session missing history (review medium 1)
+            if turns_doc and sorted(k_ for td in turns_doc for k_ in td["atoms"]) != list(range(len(pre_atoms))):
+                _asm_ckpt_skip("turnsCoverage")
+                turns_doc = None
+            if not turns_doc:
+                turns_doc = None                          # nothing before the cut in this tree: the atoms-only form
+                del pre_atoms[n0:]                        # …whose rows are the emit's alone, the identity's count (M1)
         doc = {"av": _ASM_CKPT_V, "path": os.path.realpath(str(leaf_path)), "rompuuid": str(rompuuid), "sdkHuman": bool(sdk_human),
                "cands": list(entry["cands"]), "links": dict(entry["links"]), "files": files, "fsids": fsids, "cutSeq": cut_seq,
                "records": rows, "atoms": pre_atoms, "spine": spine, "seqTs": seq_ts, "lastTs": last_ts,
+               "turns": turns_doc, "treeIdentity": _tree_identity_of_doc(turns_doc, identity) if turns_doc else None,
                "gates": {"prompt_ids": sorted(ad.prompt_ids), "boundary_pids": sorted(ad.boundary_pids),
                          "skill_use_ids": sorted(ad.skill_use_ids), "src_tool_links": sorted(ad.src_tool_links),
                          "dangling": sorted(ad.dangling)},
@@ -4304,6 +4738,8 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
         except OSError:
             return skip("write")
         entry["docWritten"] = True
+        entry["docTurns"] = bool(turns_doc)              # the turns section was written (T323 stage 4c)
+        entry["docNoTurns"] = _tree_key(tree) if (tree is not None and not turns_doc) else None   # …or this tree yields none
         with _ASM_CKPT_LOCK:
             _ASM_CKPT_STATS["written"] += 1
         return True
@@ -4376,6 +4812,10 @@ def _restore_prefix_atoms(pre_atoms, rompuuid, rows, fsids):
         if lz is not None:
             a["lazy"] = dict(lz, i=row["i"], at=tuple(row["at"]) if row.get("at") else None)
             a["message"] = _LazyBody(a.get("uuid"))
+        elif "m" in row:                                  # an inline body: an emitted atom with no record behind it (round 3)
+            a["message"] = row["m"]
+            if "tur" in row:
+                a["toolUseResult"] = row["tur"]
         out.append(a)
     return out
 
@@ -4480,9 +4920,23 @@ def _asm_restore(key, leaf_path, candidate_files, links, rompuuid, postal_index,
     try:
         seed, landed = _seed_from_doc(doc)
         fsids = list(doc.get("fsids") or [])
-        prefix = _restore_prefix_atoms(doc["atoms"], rompuuid, doc["records"], fsids)
-        if _pre_tree_identity(prefix, rompuuid) != doc.get("identity"):
-            _asm_ckpt_note(leaf_path, "identity"); return None
+        pre_turns, prefix = [], []
+        if doc.get("turns"):
+            # the lazy index (T323 stage 4c): the turns from the section, their atoms built on demand; the section's own
+            # digest proves it is the one the writer verified against the whole parse (no atom built here)
+            if _tree_identity_of_doc(doc["turns"], doc.get("identity")) != doc.get("treeIdentity"):
+                _asm_ckpt_note(leaf_path, "identity"); return None
+            if sorted(k_ for td in doc["turns"] for k_ in td["atoms"]) != list(range(len(doc["atoms"]))):
+                _asm_ckpt_note(leaf_path, "coverage"); return None   # the section does not cover the rows: never a short history
+            index = LazyIndex(doc, rompuuid, leaf_path)
+            pre_turns = _pre_turns_of(doc, index)
+            doc["atoms"] = None                                # the rows live in the index as bytes from here
+            with _MAT_LOCK:
+                _ASM_INDEX_STATS["restoredTurns"] += len(pre_turns)
+        else:
+            prefix = _restore_prefix_atoms(doc["atoms"], rompuuid, doc["records"], fsids)
+            if _pre_tree_identity(prefix, rompuuid) != doc.get("identity"):
+                _asm_ckpt_note(leaf_path, "identity"); return None
         ad = FileAdapter(candidate_files, leaf_path, resume_links=links, seed=seed)
         ad.sdk_human = sdk_human
         st = _emit_state()
@@ -4494,7 +4948,7 @@ def _asm_restore(key, leaf_path, candidate_files, links, rompuuid, postal_index,
         atoms += ad._absorbed(ad.qatts, kept, st, rompuuid, postal_index)
         entry = {"ad": ad, "st": st, "atoms": atoms, "kept": kept, "landed": landed | ad.landed_text_uuids(),
                  "cands": tuple(str(f) for f in candidate_files), "links": dict(links or {}),
-                 "recs": dict(ad._src_keys), "n_qatts": len(ad.qatts), "prefix": prefix,
+                 "recs": dict(ad._src_keys), "n_qatts": len(ad.qatts), "prefix": prefix, "preTurns": pre_turns,
                  "skipped": {f["path"]: (f["size"], f["mtime"]) for f in doc["files"].values() if f.get("skip")}}
     except Exception as e:                                     # noqa: BLE001 — a document the code cannot use is a fallback
         _asm_ckpt_note(leaf_path, "restore", repr(e)[:120]); return None
@@ -4633,7 +5087,7 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
         cut_t = None
         if leaf_override in ad.by_uuid:
             cut_t = ad.ts_of.get(leaf_override)
-        return ad.atoms(rompuuid, postal_index), ad.landed_text_uuids(), cut_t, dict(getattr(ad, "skill_loads", None) or {})
+        return ad.atoms(rompuuid, postal_index), ad.landed_text_uuids(), cut_t, dict(getattr(ad, "skill_loads", None) or {}), []
     key = (os.path.realpath(str(leaf_path)), str(rompuuid), bool(sdk_human))
     try:
         with _asm_key_lock(key):
@@ -4679,7 +5133,7 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
             _ASM_CACHE.pop(key, None)
         ad = FileAdapter(candidate_files, leaf_path, resume_links=links)
         ad.sdk_human = sdk_human
-        return ad.atoms(rompuuid, postal_index), ad.landed_text_uuids(), None, dict(getattr(ad, "skill_loads", None) or {})
+        return ad.atoms(rompuuid, postal_index), ad.landed_text_uuids(), None, dict(getattr(ad, "skill_loads", None) or {}), []
 
 
 def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None,
@@ -4723,9 +5177,16 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
     # The assembly cache serves/folds/rebuilds as the gates decide — a streamed append folds only
     # the new records through the shared emit code; everything else is a full parse. atoms/landed
     # come back caller-owned (fresh top-level dicts), so the mutations below never reach the cache.
-    atoms, landed, cut_t, skill_loads = _assemble(leaf_path, candidate_files, links, rompuuid,
-                                     postal_index, sdk_human, leaf_override, mode_out=asm_mode_out)
-    orphans = synthesize_orphans(_srows, atoms, landed_text_uuids=landed, rompuuid=rompuuid)
+    atoms, landed, cut_t, skill_loads, pre_turns = _assemble(leaf_path, candidate_files, links, rompuuid,
+                                                postal_index, sdk_human, leaf_override, mode_out=asm_mode_out)
+    # a restored tree's pre-cut turns (T323 stage 4c) come whole from the document, their synthesized atoms included; the
+    # tail alone is segmented and synthesized over below, and a span or a marker from before the tail's first atom is the
+    # document's (or nothing: the whole parse put it in a pre-cut turn)
+    t_tail0 = min((a["t"] for a in atoms if a.get("t")), default=None) if pre_turns else None
+    orphans = synthesize_orphans(_srows, atoms, landed_text_uuids=landed, rompuuid=rompuuid,
+                                 pre=(pre_turns if pre_turns else None), t_floor=t_tail0 if pre_turns else None)
+    if pre_turns:
+        orphans = [a for a in orphans if t_tail0 is not None and a["t"] >= t_tail0]
     #                                            # salvaged replies FIRST: they are real atoms the turn
     #                                              grouping must absorb (idle spans overlay afterwards)
     # A salvaged reply has NO position in the transcript graph — that absence is the very thing the
@@ -4739,9 +5200,13 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
     if cut_t:
         orphans = [a for a in orphans if a["t"] <= cut_t]
     atoms += orphans
-    atoms += synthesize_idle(_srows, atoms, now)
-    turns = segment_turns(atoms, rompuuid)
-    for turn in turns:
+    idle = synthesize_idle(_srows, atoms, now)
+    if pre_turns:
+        idle = [a for a in idle if t_tail0 is not None and a["t"] >= t_tail0]
+    atoms += idle
+    tail_turns = segment_turns(atoms, rompuuid) if atoms else []
+    turns = list(pre_turns) + tail_turns
+    for turn in tail_turns:
         for a in turn["atoms"]:
             a.pop("_seq", None)
         turn_keys = {"id": turn["id"], "trigger": turn["trigger"], "t": turn["t"],
@@ -4751,10 +5216,13 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
     # the cut turn (T323 stage 4b): the first turn after the last one holding a lazy (pre-cut) atom, taken here before
     # any consumer hydrates; 0 for a whole parse. The chat build renders from it (its render floor).
     cut_turn = 0
-    for _i in range(len(turns) - 1, -1, -1):
-        if any(a.get("lazy") is not None for a in turns[_i]["atoms"]):
-            cut_turn = min(_i + 1, len(turns) - 1)
-            break
+    if pre_turns:
+        cut_turn = min(len(pre_turns), len(turns) - 1)   # the first tail turn (stage 4c: the pre-cut turns are the index's)
+    else:
+        for _i in range(len(turns) - 1, -1, -1):
+            if any(a.get("lazy") is not None for a in turns[_i]["atoms"]):
+                cut_turn = min(_i + 1, len(turns) - 1)
+                break
     out = {"rompUuid": rompuuid, "name": name or rompuuid, "dir": dir,
             "color": color, "leafFsid": leaf_path.stem, "turns": turns,
             # for the kernel chat build's own marker interleave: its dedup reads the KEPT turns
@@ -4999,7 +5467,7 @@ def main():
     session = parse_session(path, rompuuid=opts.get("rompuuid"), name=opts.get("name"),
                             states=states, now=int(time.time()))
     if mode == "--emit":
-        sys.stdout.write(json.dumps(session, indent=1, sort_keys=True))
+        sys.stdout.write(json.dumps(plain_tree(session), indent=1, sort_keys=True, default=lambda o: "<unserializable>"))   # a restored tree's pre-cut turns built plain (stage 4c)
         sys.stdout.write("\n")
     else:
         _dump(session)

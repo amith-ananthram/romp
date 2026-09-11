@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
+const PLACEHOLDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "pane-placeholder.ts"), "utf8");   // the empty pane's placeholder, by kind (T355)
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
 
 test("syncView shows a 'No messages yet.' placeholder for a zero-event transcript", () => {
@@ -18,7 +19,8 @@ test("syncView shows a 'No messages yet.' placeholder for a zero-event transcrip
   // (2026-07-30: a PROVISIONAL tab takes the romp loader instead — it is not empty, it is starting —
   // so the placeholder text moved to the else branch. A real empty transcript reads exactly as before.)
   assert.match(RENDER, /el\("div", "tx-empty"\); v\.el\.appendChild\(ph\);/);
-  assert.match(RENDER, /\} else ph\.textContent = "No messages yet\.";/);
+  assert.match(PLACEHOLDER, /default:\s*\n\s*ph\.textContent = "No messages yet\.";/);   // the placeholder by kind (pane-placeholder.ts, T355)
+  assert.match(PLACEHOLDER, /return "empty";/);
   // idempotent: an already-present placeholder is left alone (no churn on repeated pushes that stay empty)
   assert.match(RENDER, /only\.classList\?\.contains\("tx-empty"\)/);
 });

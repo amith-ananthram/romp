@@ -728,6 +728,21 @@ class CodexBackend:
                 pass
         self.log("client unavailable: %s (retry in %.2fs)" % (self._client_err, delay))
 
+    def _client_failure_text(self):
+        """The launch_error text for a session the client cannot serve right now: the recorded client
+        failure, framed as the app-server's when it is a raw one. SETUP_HINT and LOGIN_HINT are whole
+        sentences that name codex and carry their remedy, so they stand as written; anything else is
+        whatever building, starting or draining the client raised — str(error), or the bare class name
+        (_record_client_failure_locked): a missing binary's errno line, "TimeoutError" — and names no
+        process. The chat's red card shows a Codex session's text as the backend wrote it (kernel
+        build_session, 2026-09-11), so the frame is written here, at the two writers of this record.
+        _client_err itself stays raw: model_catalog and the kernel's creation refusals wrap it in
+        sentences of their own, and a frame there would double."""
+        err = self._client_err or SETUP_HINT
+        if err in (SETUP_HINT, LOGIN_HINT):
+            return err
+        return "The Codex app-server isn't available — %s" % err
+
     def _client_retry_remaining(self):
         with self._client_lock:
             return max(0.0, self._client_retry_at - time.monotonic())
@@ -1004,10 +1019,23 @@ class CodexBackend:
             entry_id = "q-%s" % uuidlib.uuid4().hex
             s.queue.append(text)
             s.queue_ids.append(entry_id)
-            s.change_generation += 1
             # Keep append order identical in memory and on disk. _save_registry snapshots this RLock
             # reentrantly before taking either registry lock; it never takes a session lock afterward.
-            self._save_registry(s, queue_append={"id": entry_id, "text": text})
+            try:
+                self._save_registry(s, queue_append={"id": entry_id, "text": text})
+            except BaseException:
+                # A raising durable write publishes NOTHING, as every sibling mutator keeps it: the entry
+                # never reached disk, so it leaves memory too, and this send's echo with it — by its id
+                # and uuid, never by position or text, so no other send's copy goes. Kept, they showed a
+                # queued bubble on a busy session for a send the caller was told failed, with no worker
+                # kicked to drain it, and the copy rode the next kick into that turn beside the retype.
+                if entry_id in s.queue_ids:
+                    at = s.queue_ids.index(entry_id)
+                    del s.queue[at]
+                    del s.queue_ids[at]
+                s.echoes = [e for e in s.echoes if e["uuid"] != echo_uuid]
+                raise
+            s.change_generation += 1
         self._ensure_worker(s)
         s.kick.set()
         return True
@@ -1214,7 +1242,7 @@ class CodexBackend:
             # the entry still exists so the failure is VISIBLE on the lane (launch_error),
             # never a silently-missing session
             s = _Session(sid, "pending-%s" % sid[:8], name, cwd)
-            s.launch_error = {"text": self._client_err or SETUP_HINT, "at": time.time(),
+            s.launch_error = {"text": self._client_failure_text(), "at": time.time(),
                               "limit": False}
             with s.lock:
                 self._put_session(s)
@@ -1549,7 +1577,7 @@ class CodexBackend:
         if c is None:
             try:
                 with s.lock:
-                    s.launch_error = {"text": self._client_err or SETUP_HINT, "at": time.time(),
+                    s.launch_error = {"text": self._client_failure_text(), "at": time.time(),
                                       "limit": False}
                     self._save_registry(s, fields=("launchError",))
             except Exception:
@@ -1601,6 +1629,7 @@ class CodexBackend:
             raise
         turn_id = started.turn.id
         ack_persisted = False
+        stream_failed = False
         try:
             with s.lock:
                 if s.queue[:len(batch)] != batch or s.queue_ids[:len(batch_ids)] != batch_ids:
@@ -1632,7 +1661,11 @@ class CodexBackend:
                 except Exception as e:
                     self.log("kill interrupt %s: %s" % (s.name, e))
             while True:
-                n = c.next_turn_notification(turn_id)
+                try:
+                    n = c.next_turn_notification(turn_id)
+                except Exception:
+                    stream_failed = True       # the transport is down: see the except below
+                    raise
                 method = getattr(n, "method", "")
                 wrote = False
                 with s.norm_lock:
@@ -1645,14 +1678,45 @@ class CodexBackend:
                     self.push_session(s.sid)
                 if method == "turn/completed":
                     break
-        except Exception:
-            if not ack_persisted:
-                # The request is still durable, so prevent an untracked acknowledged turn from
-                # continuing alongside its retry. unregister in finally always releases routing.
+        except Exception as exc:
+            # Whatever ended the loop, the app-server's turn is now UNTRACKED: unregister in finally
+            # releases its routing, so its later notifications are dropped, and with turn_id cleared
+            # neither interrupt() nor kill() can reach it. Before the ACK the request is still durable,
+            # so this keeps the acknowledged turn from continuing alongside its retry; after it, the
+            # turn would keep executing in the sandbox with busy() False and no way to stop it.
+            # ONLY when the failure was on our side (a transcript write, a normalizer raise) with the
+            # transport up, though. A raise from the READ means the SDK's reader thread is gone: the one
+            # writer of an exception into a turn queue is the router's fail_all, run once from that
+            # thread's own except (pinned wheel, client.py _reader_loop). An RPC now would wedge this
+            # worker for good: _request_raw waits on its reply with no timeout, fail_all has already
+            # failed every waiter it will ever fail, and close() fails none, so the request is written to
+            # a process nothing reads answers from. busy() would read True forever, mode_lock stay held,
+            # kill() time out on the join and skip the drain. The global pump reads the same failure and
+            # closes that client, terminating the app-server, so the turn dies with it and there is
+            # nothing left to interrupt.
+            if not stream_failed:
                 try:
                     c.turn_interrupt(tid, turn_id)
                 except Exception as e:
-                    self.log("unpersisted turn interrupt %s: %s" % (s.name, e))
+                    if ack_persisted:
+                        self.log("abandoned turn interrupt %s: %s" % (s.name, e))
+                    else:
+                        self.log("unpersisted turn interrupt %s: %s" % (s.name, e))
+            if ack_persisted:
+                # The ACK consumed the prompt from the queue, so this turn has no retry and the file is
+                # the only place its end can be recorded: settle it there (the held final reply lands,
+                # then an end_turn record carrying the failure, codex_events.abandoned). No notification
+                # will do it — a dead transport sends none, and a turn the SDK no longer routes drops its
+                # own turn/completed — and an open file turn reads as working on every surface and
+                # absorbs the next prompt. The finally's poke/push announce the records. The append may
+                # be exactly what raised: its failure is logged, never allowed to mask the original.
+                try:
+                    with s.norm_lock:
+                        recs = norm.abandoned(turn_id, "codex turn failed: %s" % exc)
+                        if recs:
+                            self._append(s, recs)
+                except Exception:
+                    self.log("abandoned turn settle %s: %s" % (s.name, traceback.format_exc()))
             raise
         finally:
             try:

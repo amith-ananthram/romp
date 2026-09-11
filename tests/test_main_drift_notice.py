@@ -8,6 +8,8 @@ import inspect
 import os
 import tempfile
 import unittest
+from unittest import mock
+import time
 from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -323,9 +325,10 @@ class DriftWiring(unittest.TestCase):
                                          "reason": "from TESTHOST to f3dc387a", "when": "quiet"}) + "\n")
             out = check()
             self.assertEqual(ran, [], "a quiet deploy for this very code is parked: the converge stands down")
-            self.assertIn("already parked as a quiet deploy", out, "one line says why nothing happened")
+            self.assertIn("f3dc387a is parked as a quiet deploy; leaving it to the quiet window", out, "one line says why nothing happened")
             self.assertEqual(km._MAIN_DRIFT[1], "", "the sha is not marked acted on — the next pass re-evaluates")
-            self.assertNotIn("already parked", check(), "…but says it once per sha, not once per pass")
+            self.assertIn("is parked as a quiet deploy; leaving it to the quiet window", check(),
+                          "…and says it on EVERY pass (T352: a silent hold read as a dead thread), no longer once per sha")
             self.assertEqual(ran, [])
             # the 08:42Z shape: origin reads ahead of the checkout too (a stale fetch, or a merge
             # that landed meanwhile) — the parked restart still delivers the code on disk first;
@@ -520,6 +523,242 @@ class DriftWiring(unittest.TestCase):
         self.assertIn('"target": d0 or d1', src, "the click converges onto the commit the banner named")
 
 
+
+class ConvergeWaitsSpareOnlyCuts(unittest.TestCase):
+    """T352 (the manager's find, 2026-09-11): a merged fix waited 23 minutes behind the auto-converge cool-down on a box
+    where every session was hosted, and the hold wrote nothing to the journal. The two waits (the cool-down, the parked
+    quiet deploy) exist to spare in-flight turns, so a restart that would cut none skips them; every pass that holds,
+    stands down, or cannot read main says so on the kernel's log, each time."""
+
+    def setUp(self):
+        import io
+        self.saved = (km._update_mode, km._origin_main_sha, km._checkout_sha, km._kernel_sha, km._run_main_update,
+                      km._deploy_would_cut, km._parked_quiet_deploy, km._kernel_code_changed,
+                      km._LAST_AUTO_CONVERGE[0], km._MAIN_DRIFT[0], km._MAIN_DRIFT[1], km._QUIET_PARKED_LOGGED[0])
+        self.ran = []
+        km._update_mode = lambda: "auto"
+        km._checkout_sha = lambda: "aaa"
+        km._kernel_sha = lambda: "aaa"
+        km._origin_main_sha = lambda: "bbb"
+        km._run_main_update = lambda kind, immediate=False, target="": self.ran.append(kind)
+        km._parked_quiet_deploy = lambda checkout, now=None: 0
+        km._kernel_code_changed = lambda running, target: True
+        km._MAIN_DRIFT[0] = km._MAIN_DRIFT[1] = ""
+        km._QUIET_PARKED_LOGGED[0] = ""
+        km._LAST_AUTO_CONVERGE[0] = 0.0
+        km._CONVERGE_CRASH_T[0] = 0.0
+        self.err = io.StringIO()
+
+    def tearDown(self):
+        (km._update_mode, km._origin_main_sha, km._checkout_sha, km._kernel_sha, km._run_main_update,
+         km._deploy_would_cut, km._parked_quiet_deploy, km._kernel_code_changed) = self.saved[:8]
+        km._LAST_AUTO_CONVERGE[0], km._MAIN_DRIFT[0], km._MAIN_DRIFT[1], km._QUIET_PARKED_LOGGED[0] = self.saved[8:]
+        if km.RESTART_CUTS_FILE.exists():
+            km.RESTART_CUTS_FILE.unlink()
+
+    def _pass(self):
+        import contextlib
+        with contextlib.redirect_stderr(self.err):
+            km._main_drift_check()
+
+    def _lines(self):
+        return [l for l in self.err.getvalue().splitlines() if l.startswith("romp-kernel: converge: ")]
+
+    def _deploy_landed(self, ago):
+        import json, time
+        km.RESTART_CUTS_FILE.write_text(json.dumps({"t": int(time.time() - ago), "reason": "p2p-update: from X to Y",
+                                                    "cutTurns": []}) + "\n")
+
+    def test_a_held_converge_says_so_every_pass_and_names_the_turns_it_spares(self):
+        self._deploy_landed(300)
+        km._deploy_would_cut = lambda: [{"sid": "1" * 36, "name": "web"}, {"sid": "2" * 36, "name": "api"}]
+        self._pass(); self._pass()
+        self.assertEqual(self.ran, [], "inside the cool-down with turns to spare: no restart")
+        lines = self._lines()
+        self.assertEqual(len(lines), 2, "one line per held pass, never once per sha: %r" % lines)
+        for l in lines:
+            self.assertIn("main is at bbb (the checkout aaa, this box runs aaa): holding ", l)
+            self.assertRegex(l, r"holding \d+ s more of the 25 min cool-down since the deploy restart at \d\d:\d\d:\d\dZ")
+            self.assertIn("; a restart now would cut 2 turns: web, api", l)
+        self.assertEqual(km._MAIN_DRIFT[0], "", "the deferred sha stays unoffered: the first pass past the window takes the latest")
+
+    def test_a_converge_that_would_cut_nothing_skips_the_cool_down_and_says_why(self):
+        self._deploy_landed(300)
+        km._deploy_would_cut = lambda: []                 # every working session hosted: a restart cuts nothing
+        self._pass()
+        self.assertEqual(self.ran, ["pull"], "nothing to spare: the converge proceeds inside the cool-down")
+        lines = self._lines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertRegex(lines[0], r"^romp-kernel: converge: main is at bbb \(this box runs aaa\): \d+ s of the 25 min cool-down since the deploy restart at \d\d:\d\d:\d\dZ remain, but a restart now would cut no turn: converging now$")
+
+    def test_an_unknown_cut_set_keeps_the_hold(self):
+        self._deploy_landed(300)
+        km._deploy_would_cut = lambda: None               # no backend yet: unknown is not "none"
+        self._pass()
+        self.assertEqual(self.ran, [], "unknown keeps both waits, as before")
+        self.assertIn("; what a restart would cut is unknown (no backend yet)", self._lines()[0])
+
+    def test_an_unreadable_main_says_so_every_pass_and_the_restart_leg_still_converges(self):
+        km._origin_main_sha = lambda: ""                  # git ls-remote failed or timed out
+        km._deploy_would_cut = lambda: []
+        self._pass(); self._pass()
+        self.assertEqual(self.ran, [], "the checkout and the kernel agree: nothing to do, said each pass")
+        lines = self._lines()
+        self.assertEqual(len(lines), 2, lines)
+        for l in lines:
+            self.assertIn("main at ", l)
+            self.assertIn("(git ls-remote failed or timed out) could not be read this pass (main ?, checkout aaa, running aaa): no verdict; again in 300 s", l)
+        # the per-leg shape (the review's M1): the checkout ahead of the running kernel converges the restart leg with
+        # main unreadable, as it always did; only a pull needs main and the checkout both
+        km._checkout_sha = lambda: "bbb"
+        self._pass()
+        self.assertEqual(self.ran, ["restart"], "offline, the restart leg still converges")
+        self.assertIn("the restart leg still decides from what was read; again in 300 s", self._lines()[-1])
+
+    def test_an_empty_kernel_sha_is_asked_again_never_remembered(self):
+        import subprocess as _sp
+        saved = km._SHA
+        real = self.saved[3]                              # the REAL reader: setUp stubbed km._kernel_sha for the gate tests
+        calls = []
+        def run(argv, **kw):
+            calls.append(argv[-1])
+            if len(calls) == 1:
+                raise _sp.TimeoutExpired(argv, 2)     # a busy boot: git did not answer in time
+            return mock.Mock(returncode=0, stdout="" if argv[-1] == "--porcelain" else "abc1234\n")   # a clean tree
+        saved_miss = km._SHA_MISS_T[0]
+        try:
+            km._SHA = None
+            km._SHA_MISS_T[0] = 0.0
+            with mock.patch.object(km.subprocess, "run", side_effect=run):
+                self.assertIsNone(real(), "the blip answers nothing…")
+                self.assertIsNone(real(), "…and within the re-ask bound the miss stands without a git call (the round-two low: "
+                                          "/version and /sw.js call this per request)")
+                self.assertEqual(calls, ["HEAD"], "one git call so far")
+                km._SHA_MISS_T[0] = time.time() - km._SHA_REASK_S - 1     # the bound passed
+                self.assertEqual(real(), "abc1234", "…and is not remembered for the process's life: asked again after the bound")
+                self.assertEqual(real(), "abc1234", "a real answer is memoized")
+            self.assertEqual(calls, ["HEAD", "HEAD", "--porcelain"])
+        finally:
+            km._SHA = saved
+            km._SHA_MISS_T[0] = saved_miss
+
+    def test_a_missing_running_sha_inside_the_cool_down_holds_says_so_and_the_next_pass_converges(self):
+        # the round-two review's MEDIUM: with the pass no longer returning early on an unreadable input, a None running
+        # sha (a 2 s rev-parse timeout on a busy box) inside the cool-down raised at running[:8] AFTER the latch took
+        # the target, and the hold's own reset never ran: every later pass returned at the latch, the commit never
+        # converged, in silence
+        self._deploy_landed(300)
+        km._kernel_sha = lambda: None
+        km._deploy_would_cut = lambda: [{"sid": "1" * 36, "name": "web"}]
+        self._pass()
+        self.assertEqual(self.ran, [], "inside the cool-down with a turn to spare: held")
+        self.assertIn("main is at bbb (the checkout aaa, this box runs ?): holding ", self._lines()[-1])
+        self.assertEqual(km._MAIN_DRIFT[0], "", "the hold's reset ran: no target latched")
+        km._kernel_sha = lambda: "aaa"
+        km.RESTART_CUTS_FILE.unlink()                    # the cool-down is over
+        self._pass()
+        self.assertEqual(self.ran, ["pull"], "the next pass converges")
+        # the spares branch with a None running sha says so too
+        self.ran.clear(); km._MAIN_DRIFT[0] = ""
+        self._deploy_landed(300)
+        km._kernel_sha = lambda: None
+        km._deploy_would_cut = lambda: []
+        self._pass()
+        self.assertEqual(self.ran, ["pull"], "a restart now would cut no turn: converging")
+        self.assertIn("main is at bbb (this box runs ?): ", self._lines()[-1])
+
+    def test_a_crash_in_the_hold_branches_never_leaves_a_target_latched(self):
+        def boom():
+            raise RuntimeError("boom")
+        km._deploy_would_cut = boom
+        with self.assertRaises(RuntimeError):
+            self._pass()
+        self.assertEqual(km._MAIN_DRIFT[0], "", "the latch is reset on the way out, so the next pass judges afresh")
+        km._deploy_would_cut = lambda: []
+        km._CONVERGE_CRASH_T[0] = 0.0                    # the crash hold is its own test below
+        self._pass()
+        self.assertEqual(self.ran, ["pull"])
+
+    def test_a_crash_in_the_converge_leg_holds_one_cool_down_before_the_retry(self):
+        # the round-three review's low a: the spares branch waived the cool-down the crash had just stamped, so a
+        # crashing leg retried every pass on a hosted box
+        def boom():
+            raise RuntimeError("boom")
+        km._deploy_would_cut = boom
+        with self.assertRaises(RuntimeError):
+            self._pass()
+        self.assertGreater(km._CONVERGE_CRASH_T[0], 0.0, "the crash is stamped")
+        km._deploy_would_cut = lambda: []                # a restart would cut nothing: the spares branch would converge
+        self._pass(); self._pass()
+        self.assertEqual(self.ran, [], "held: one cool-down after a crash, whatever a restart would cut")
+        held = [l for l in self._lines() if "the converge leg crashed" in l]
+        self.assertEqual(len(held), 2, "said on every held pass: %r" % self._lines())
+        self.assertIn("holding ", held[0]); self.assertIn(" s more of one cool-down before the retry", held[0])
+        self.assertEqual(km._MAIN_DRIFT[0], "", "no target latched while held")
+        km._CONVERGE_CRASH_T[0] = time.time() - km._CONVERGE_COOLDOWN_S - 1
+        self._pass()
+        self.assertEqual(self.ran, ["pull"], "the cool-down over, the retry converges")
+
+    def test_the_converge_leg_asks_git_again_for_the_running_sha_within_the_miss_bound(self):
+        # the round-three review's low b: the 30 s miss memo made the leg's own read (in _run_main_update) return None
+        # for a blip at the top of the same pass, so a main commit touching no kernel code took a full restart
+        import subprocess as _sp
+        real = self.saved[3]
+        saved, saved_miss = km._SHA, km._SHA_MISS_T[0]
+        calls = []
+        def run(argv, **kw):
+            calls.append(argv[-1])
+            return mock.Mock(returncode=0, stdout="" if argv[-1] == "--porcelain" else "abc1234\n")
+        try:
+            km._SHA = None
+            km._SHA_MISS_T[0] = time.time()              # git blipped a moment ago
+            with mock.patch.object(km.subprocess, "run", side_effect=run):
+                self.assertIsNone(real(), "within the bound the miss stands…")
+                self.assertEqual(calls, [])
+                self.assertEqual(real(reask=True), "abc1234", "…but the converge leg's read asks once more")
+            self.assertEqual(calls, ["HEAD", "--porcelain"])
+            self.assertIn("_kernel_code_changed(_kernel_sha(reask=True), pulled)", inspect.getsource(self.saved[4]),
+                          "the REAL _run_main_update (setUp stubs km's) asks once more")
+        finally:
+            km._SHA, km._SHA_MISS_T[0] = saved, saved_miss
+
+    def test_a_parked_quiet_deploy_stands_down_every_pass_unless_nothing_would_be_cut(self):
+        km._checkout_sha = lambda: "bbb"                  # the checkout is ahead of the kernel: a restart is owed…
+        km._origin_main_sha = lambda: "bbb"
+        km._parked_quiet_deploy = lambda checkout, now=None: 1   # …and a quiet deploy is parked for it
+        km._deploy_would_cut = lambda: [{"sid": "1" * 36, "name": "web"}]
+        self._pass(); self._pass()
+        self.assertEqual(self.ran, [], "with a turn to spare the parked quiet deploy stands the check down")
+        lines = self._lines()
+        self.assertEqual(len(lines), 2, "said on every pass, not once per sha: %r" % lines)
+        for l in lines:
+            self.assertEqual(l, "romp-kernel: converge: bbb is parked as a quiet deploy; leaving it to the quiet window; a restart now would cut 1 turn: web")
+        km._deploy_would_cut = lambda: []
+        self._pass()
+        self.assertEqual(self.ran, ["restart"], "nothing to spare: the converge does not wait for the window")
+        self.assertEqual(self._lines()[-1], "romp-kernel: converge: bbb is parked as a quiet deploy, but a restart now would cut no turn: converging without waiting for the window")
+
+    def test_the_backend_answers_would_cut_with_the_drains_own_predicate(self):
+        import sys, tempfile, types
+        sbm = sys.modules.get("romp_sdk_backend") or load_source("romp_sdk_backend", os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py"))
+        d = tempfile.mkdtemp()
+        open(os.path.join(d, "session-hosts"), "w").write("off")   # a bare state root pins hosts off (the suite's rule, T348)
+        be = sbm.SdkBackend(d, "/bin/true", lambda *a, **k: None)
+        mk = lambda sid, name, inflight, host=None, intent=False: types.SimpleNamespace(sid=sid, name=name, inflight=inflight, _host=host, _host_intent=intent)
+        be.sessions = {"a": mk("a" * 36, "plain-busy", True), "b": mk("b" * 36, "plain-idle", False),
+                       "c": mk("c" * 36, "hosted-busy", True, host=object()), "d": mk("d" * 36, "attaching-busy", True, intent=True)}
+        self.assertEqual(be.would_cut(), [{"sid": "a" * 36, "name": "plain-busy"}], "only a plain child with a turn in flight is a cut")
+        be.sessions = {"c": mk("c" * 36, "hosted-busy", True, host=object())}
+        self.assertEqual(be.would_cut(), [], "every working session hosted: a restart cuts nothing")
+        self.assertEqual(km._deploy_would_cut(), None, "no backend in this process: unknown")
+        saved = km._sdk_backend
+        km._sdk_backend = be
+        try:
+            self.assertEqual(km._deploy_would_cut(), [])
+        finally:
+            km._sdk_backend = saved
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -533,7 +772,9 @@ class UiOnlyConverge(unittest.TestCase):
         self._saved = {n: getattr(km, n) for n in
                        ("_main_drift_verdict", "_kernel_code_changed", "_rebuild_dist",
                         "_sync_notice", "_update_mode", "_send_to_app", "_kernel_sha",
-                        "_main_tracking", "_converge_classes")}
+                        "_main_tracking", "_converge_classes", "_origin_main_sha", "_checkout_sha")}
+        km._origin_main_sha = lambda: "tgt"     # stubbed: the real one runs `git ls-remote`, a NETWORK call per test
+        km._checkout_sha = lambda: "tgt"        # (the classifier test's precedent; the stubbed verdict decides below)
         km._MAIN_DRIFT[0] = km._MAIN_DRIFT[1] = ""
         km._REBUILT_FOR[0] = ""
         km._INPLACE_TRIED[0] = ""
@@ -609,7 +850,7 @@ class UiOnlyConverge(unittest.TestCase):
     def test_the_pull_path_carries_the_same_in_place_converge(self):
         src = inspect.getsource(km._run_main_update)
         self.assertIn("pulled = _checkout_sha()", src)
-        self.assertIn("not _kernel_code_changed(_kernel_sha(), pulled) and _in_place_converge(pulled)",
+        self.assertIn("not _kernel_code_changed(_kernel_sha(reask=True), pulled) and _in_place_converge(pulled)",
                       src, "verdict input and converge target are the SAME read — never raced")
         conv = inspect.getsource(km._in_place_converge)
         self.assertIn("_rebuild_dist()", conv)
@@ -678,12 +919,14 @@ class PersistentDismissal(unittest.TestCase):
     def test_a_dismissed_drift_sha_never_banners_but_a_new_one_does(self):
         saved = {n: getattr(km, n) for n in
                  ("_main_tracking", "_main_drift_verdict", "_send_to_app", "_update_mode",
-                  "_kernel_sha", "_kernel_code_changed")}
+                  "_kernel_sha", "_kernel_code_changed", "_origin_main_sha", "_checkout_sha")}
         banners = []
         try:
             km._update_mode = lambda: "ask"
             km._main_tracking = lambda: True
             km._kernel_sha = lambda: "cur"
+            km._origin_main_sha = lambda: "tgt"     # stubbed: the real one is a network call (the classifier test's precedent)
+            km._checkout_sha = lambda: "tgt"
             km._kernel_code_changed = lambda a, b: True
             km._send_to_app = lambda app, payload: banners.append(payload)
             km._MAIN_DRIFT[0] = km._MAIN_DRIFT[1] = ""

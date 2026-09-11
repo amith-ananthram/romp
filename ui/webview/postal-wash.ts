@@ -36,9 +36,12 @@ export function resolveColour(doc: Document, css: string): RGBA | null {
     const ctx = cv.getContext("2d");
     if (!ctx) return null;
     ctx.clearRect(0, 0, 1, 1);
-    ctx.fillStyle = "#000000";                     // a value the canvas refuses leaves the previous fill: make it detectable
-    ctx.fillStyle = v;
-    if (ctx.fillStyle === "#000000" && !/^(#000000|#000|black|rgb\(0,\s*0,\s*0\)|rgba\(0,\s*0,\s*0,\s*1\))$/i.test(v)) return null;
+    // a value the canvas refuses leaves the previous fill in place: set TWO different sentinels in turn and read the
+    // fill back after each; a value the canvas took gives the same colour both times, one it refused gives the two
+    // sentinels (the review of 2026-09-11: an enumeration of black's spellings missed rgb(0 0 0), #000000ff, hsl(...))
+    ctx.fillStyle = "#010203"; ctx.fillStyle = v; const first = ctx.fillStyle;
+    ctx.fillStyle = "#040506"; ctx.fillStyle = v; const second = ctx.fillStyle;
+    if (first !== second) return null;
     ctx.fillRect(0, 0, 1, 1);
     const d = ctx.getImageData(0, 0, 1, 1).data;
     return [d[0], d[1], d[2], d[3] / 255];
