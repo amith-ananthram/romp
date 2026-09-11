@@ -133,3 +133,16 @@ test("an array never adopts an id the strip does not list: a session that ended 
   assert.deepEqual(st.order, ["B"], "Z is not on the strip → not a skeleton either (the prefetch must never ask for it)");
   assert.equal(st.ids.has("Z"), false);
 });
+
+test("a dismissed tab leaves the loaded set, so its re-listing is a skeleton again and the pane asks for its frame (T357)", () => {
+  const st = newSkeletonState();
+  applyTabOrderSkeleton(st, ["A"], ["A", "B"]);
+  onFull(st, "A");                                    // its frame landed on this socket
+  assert.ok(st.loaded.has("A")); assert.ok(!st.ids.has("A"));
+  applyTabOrderSkeleton(st, ["A"], ["A", "B"]);       // re-listed as a skeleton while loaded: refused, the page has it
+  assert.ok(!st.ids.has("A"), "a loaded id is never re-skeletoned on the same socket");
+  onDismiss(st, "A");                                 // its tab left the strip (a host drop, an omission): the view went with it
+  assert.ok(!st.loaded.has("A"), "no longer loaded here");
+  applyTabOrderSkeleton(st, ["A"], ["A", "B"]);       // the host re-attached: the strip names it a skeleton again
+  assert.ok(st.ids.has("A"), "…and now it is one, so the pane asks for its frame");
+});
