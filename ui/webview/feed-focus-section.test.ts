@@ -124,6 +124,28 @@ test("the two quiet states, only while the switch is on: no tab focused; a focus
   assert.match(FEED, /removeFocusSection\(\);   \/\/ an empty board is the wordmark alone/, "an empty board shows the wordmark, not the section");
 });
 
+test("Clear, its 180 ms finish and Undo resolve by ITEM across both copies, never by one element (the review of T347)", () => {
+  // Clear on the section's copy used to run the board builder's handler, whose finish guarded on the BOARD's
+  // element (askEls.get(id) === card): the copy stayed, dropDismissed never ran, and Undo stripped .dismissing
+  // from the board's element alone. Every element carrying the item dismisses and finalizes together.
+  assert.match(FEED, /function cardTwins\(itemId: string\): HTMLElement\[\] \{[\s\S]*?askEls\.get\(itemId\)[\s\S]*?fsAskEls\.get\(itemId\)/, "the board's element and the section's copy");
+  assert.match(FEED, /function groupTwins\(turnId: string\): HTMLElement\[\] \{[\s\S]*?groupEls\.get\(turnId\)[\s\S]*?fsGroupEls\.get\(turnId\)/);
+  assert.match(FEED, /for \(const c of cardTwins\(it\.itemId\)\) c\.classList\.add\("dismissing"\);\s*\n\s*vscodeApi\?\.postMessage\(\{ type: "askClear"/, "the ask card's Clear marks both copies");
+  assert.match(FEED, /const twins = cardTwins\(it\.itemId\)\.filter\(\(c\) => c\.classList\.contains\("dismissing"\)\);[\s\S]*?if \(fsAskEls\.get\(it\.itemId\) === c\) fsAskEls\.delete\(it\.itemId\); \}\s*\n\s*dropDismissed\(\[it\.itemId\]\);/, "the finish removes every copy still dismissing and forgets both caches");
+  assert.doesNotMatch(FEED, /if \(askEls\.get\(it\.itemId\) === card && card\.classList\.contains\("dismissing"\)\)/, "the element-identity guard is gone from the ask card's finish");
+  assert.match(FEED, /for \(const c of groupTwins\(cur\.turnId\)\) c\.classList\.add\("dismissing"\);/, "…and the group card's");
+  assert.match(FEED, /for \(const c of cardTwins\(it\.itemId\)\) c\.classList\.remove\("dismissing"\);/, "Undo restores both copies");
+  assert.match(FEED, /const f = fsAskEls\.get\(m\.itemId\);[\s\S]*?leaving\.push\(\[f, \(\) => fsAskEls\.get\(m\.itemId\) === f, \(\) => fsAskEls\.delete\(m\.itemId\)\]\);/, "the session-wide Clear takes the copies along");
+  assert.match(FEED, /for \(const \[tid, g\] of Array\.from\(fsGroupEls\)\) \{/, "…group copies too");
+});
+
+test("cross-pane hover and reveal reach the copies: card-key strips the section's prefix, the keyboard cursor likewise", () => {
+  const CK = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "card-key.ts"), "utf8");
+  assert.match(CK, /const FOCUS = \/\^f:\/;/);
+  assert.match(CK, /const board = domKey\.replace\(FOCUS, ""\);/);
+  assert.match(FEED, /if \(key\.startsWith\("f:"\)\) key = key\.slice\(2\);/, "kbHoverId strips it the same way");
+});
+
 // ── feed.css: the section's rules, through the variables ─────────────────────────────────────────────
 test("feed.css: #feed-focus, the head, the caption, the rule and the empty line exist, var() only", () => {
   assert.match(CSS, /#feed-focus \{ display: flex; flex-direction: column; gap: 8px; \}/);

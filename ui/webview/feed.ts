@@ -200,6 +200,21 @@ const askEls = new Map<string, HTMLElement>();
 // card's bare key see only the copy below, so nothing below moves because the section did.
 const fsAskEls = new Map<string, HTMLElement>();
 const fsGroupEls = new Map<string, HTMLElement>();
+/** Every element on the page that renders this card: the board's, and the focused section's copy when the
+ *  section shows it. Clear, its 180 ms finish and Undo resolve by ITEM through these, never by one element,
+ *  so a gesture on either copy reaches both (the review of T347: Clear on a copy left the card below). */
+function cardTwins(itemId: string): HTMLElement[] {
+  const out: HTMLElement[] = [];
+  const a = askEls.get(itemId); if (a) out.push(a);
+  const f = fsAskEls.get(itemId); if (f) out.push(f);
+  return out;
+}
+function groupTwins(turnId: string): HTMLElement[] {
+  const out: HTMLElement[] = [];
+  const g = groupEls.get(turnId); if (g) out.push(g);
+  const f = fsGroupEls.get(turnId); if (f) out.push(f);
+  return out;
+}
 // Optimistically-cleared item ids: Clear animates a card out + posts askClear, but a feed push that
 // arrives BEFORE the kernel processes the clear still lists the card — re-rendering it strips the
 // `.dismissing` class (updateAskCard resets className) so it pops back, then a later push drops it. We
@@ -1396,9 +1411,18 @@ function makeAskCard(it: AskItem): HTMLElement {
     dressHeaderIfLast(card, it.sid);   // the run's last card takes its header with it — one motion (2026-08-24)
     pendingCleared.add(it.itemId);   // suppress from incoming pushes until the kernel confirms the clear
     clearedStack.push([(card as any)._it ?? it]);   // cache the FRESHEST payload copy for an instant optimistic Undo (the closure's `it` is the card's creation-time object)
-    card.classList.add("dismissing");
+    // BY ITEM, not by this element (T347): the focused-session section holds a second element for the same
+    // card, and Clear on either copy clears the card, so both wear .dismissing now and both leave together.
+    // The stale-timeout guard is per element: a render inside the window that revived the card (its update
+    // resets the class) or replaced its element leaves that copy alone.
+    for (const c of cardTwins(it.itemId)) c.classList.add("dismissing");
     vscodeApi?.postMessage({ type: "askClear", itemId: it.itemId, sid: it.sid });
-    setTimeout(() => { if (askEls.get(it.itemId) === card && card.classList.contains("dismissing")) { card.remove(); askEls.delete(it.itemId); dropDismissed([it.itemId]); } }, 180);
+    setTimeout(() => {
+      const twins = cardTwins(it.itemId).filter((c) => c.classList.contains("dismissing"));
+      if (!twins.length) return;
+      for (const c of twins) { c.remove(); if (askEls.get(it.itemId) === c) askEls.delete(it.itemId); if (fsAskEls.get(it.itemId) === c) fsAskEls.delete(it.itemId); }
+      dropDismissed([it.itemId]);
+    }, 180);
   };
   cont.onclick = (ev) => {
     ev.stopPropagation();
@@ -2672,7 +2696,7 @@ function makeGroupCard(g: AskGroup): HTMLElement {
     card.dispatchEvent(new MouseEvent("mouseleave"));   // flush the group's stuck hover highlight (see the ask card's clear)
     const cur = (card as any)._g as AskGroup;
     dressHeaderIfLast(card, cur.sid);   // a group is one session's turn — same one-motion rule (2026-08-24)
-    card.classList.add("dismissing");
+    for (const c of groupTwins(cur.turnId)) c.classList.add("dismissing");   // both copies of the group (T347), see the ask card's Clear
     clearedStack.push(cur.members.slice());   // cache the whole batch for an instant optimistic Undo
     for (const m of cur.members) pendingCleared.add(m.itemId);
     // ONE kernel batch for every member (askClearMany): the kernel's Undo restores a batch by its one
@@ -2680,7 +2704,12 @@ function makeGroupCard(g: AskGroup): HTMLElement {
     vscodeApi?.postMessage({ type: "askClearMany", itemIds: cur.members.map((m) => m.itemId), sid: cur.sid });
     // only finalize if a render in the 180ms window didn't revive (re-render clears
     // .dismissing) or replace this card — else a stale timeout yanks the wrong one
-    setTimeout(() => { if (groupEls.get(cur.turnId) === card && card.classList.contains("dismissing")) { card.remove(); groupEls.delete(cur.turnId); dropDismissed(cur.members.map((m) => m.itemId)); } }, 180);
+    setTimeout(() => {
+      const twins = groupTwins(cur.turnId).filter((c) => c.classList.contains("dismissing"));
+      if (!twins.length) return;
+      for (const c of twins) { c.remove(); if (groupEls.get(cur.turnId) === c) groupEls.delete(cur.turnId); if (fsGroupEls.get(cur.turnId) === c) fsGroupEls.delete(cur.turnId); }
+      dropDismissed(cur.members.map((m) => m.itemId));
+    }, 180);
   };
   // hover (120ms intent) → white border + preview the group's timeline journey
   // (first member). leave → restore the pin (ask OR group) or clear.
@@ -3736,7 +3765,7 @@ function makeUndoClearBtn(): HTMLElement {
         // a card still inside its 180 ms collapse keeps its element AND its object, so the per-card update
         // gate would leave `.dismissing` on it and the collapse timer would then remove the restored card:
         // the Undo gesture is the event that takes the class off
-        askEls.get(it.itemId)?.classList.remove("dismissing");
+        for (const c of cardTwins(it.itemId)) c.classList.remove("dismissing");   // the board's element and the focused section's copy (T347)
         if (!asks.some((a) => a.itemId === it.itemId)) asks.push(it);        // show it NOW
       }
       render();
@@ -4468,9 +4497,14 @@ function clearSessionCards(sid: string): void {
   for (const m of members) {
     const c = askEls.get(m.itemId);
     if (c) leaving.push([c, () => askEls.get(m.itemId) === c, () => askEls.delete(m.itemId)]);
+    const f = fsAskEls.get(m.itemId);   // the focused section's copy leaves with its card (T347)
+    if (f) leaving.push([f, () => fsAskEls.get(m.itemId) === f, () => fsAskEls.delete(m.itemId)]);
   }
   for (const [tid, g] of Array.from(groupEls)) {
     if (turns.has(tid) && ((g as any)._g as AskGroup | undefined)?.sid === sid) leaving.push([g, () => groupEls.get(tid) === g, () => groupEls.delete(tid)]);
+  }
+  for (const [tid, g] of Array.from(fsGroupEls)) {
+    if (turns.has(tid) && ((g as any)._g as AskGroup | undefined)?.sid === sid) leaving.push([g, () => fsGroupEls.get(tid) === g, () => fsGroupEls.delete(tid)]);
   }
   for (const [c] of leaving) { c.dispatchEvent(new MouseEvent("mouseleave")); c.classList.add("dismissing"); }
   // The header row holds the hover-freeze gate too, and its Clear all sits on the row: the pointer that clicked it

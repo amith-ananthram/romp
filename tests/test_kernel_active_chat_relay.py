@@ -125,7 +125,8 @@ class ActiveChatRelay(unittest.TestCase):
         self.assertLess(types.index("activeChat"), types.index("caps"),
                         "ahead of the connect push, never after the caps frame the shim's redial gate reads")
         km.Handler._dispatch_ws(_Self(), {"type": "ready"}, feed)
-        self.assertEqual(len(self._relayed(feed)), 1, "a second ready re-sends nothing: the slot dedups it")
+        self.assertEqual(len(self._relayed(feed)), 2, "a second ready re-sends: a renderer that just evaluated holds nothing, "
+                         "so the reset forgets the slot (a dedup here left a reloaded feed without its focus)")
         # a window whose chat has never reported gets no frame at all — not even a null
         other = self._client("feed", "W3")
         km.Handler._dispatch_ws(_Self(), {"type": "ready"}, other)
@@ -136,6 +137,29 @@ class ActiveChatRelay(unittest.TestCase):
             c = self._client(app, "W1")
             km.Handler._dispatch_ws(_Self(), {"type": "ready"}, c)
             self.assertEqual(self._relayed(c), [], app)
+
+    def test_04b_a_relay_before_ready_never_starves_the_ready_arms_send(self):
+        # the review's case: the feed page reloads and registers while its bundle still evaluates; a tab switch
+        # in the window relays a frame into that listener-less document (it vanishes) and writes the slot; the
+        # ready arm's send was then deduped for _DEDUP_REPOST_S and the section read "no session is focused"
+        chat = self._client("chat", "W1")
+        feed = self._client("feed", "W1")                             # registered, bundle not yet evaluated
+        _dispatch({"type": "activeTab", "id": WEB}, chat)             # relayed into the void, slot written
+        self.assertEqual(self._relayed(feed), [{"type": "activeChat", "id": WEB}])
+        self.assertIn(("activeChat",), feed["sent"])
+        km.Handler._dispatch_ws(_Self(), {"type": "ready"}, feed)     # the bundle evaluated: the reset forgets the slot
+        self.assertEqual(self._relayed(feed), [{"type": "activeChat", "id": WEB}] * 2, "ready re-sends the focus")
+
+    def test_08_the_record_leaves_with_the_windows_last_pane(self):
+        chat = self._client("chat", "W1")
+        feed = self._client("feed", "W1")
+        _dispatch({"type": "activeTab", "id": WEB}, chat)
+        self.assertEqual(km._ACTIVE_CHAT_BY_WID.get("W1"), WEB)
+        km._clients.remove(chat); km._forget_active_chat_if_last(chat)
+        self.assertEqual(km._ACTIVE_CHAT_BY_WID.get("W1"), WEB, "the window's feed is still connected: the record stays for its reload")
+        km._clients.remove(feed); km._forget_active_chat_if_last(feed)
+        self.assertNotIn("W1", km._ACTIVE_CHAT_BY_WID, "the last pane of the window left: the record goes")
+        other = self._client("feed", "W2"); km._clients.remove(other); km._forget_active_chat_if_last(other)   # a wid with no record: a no-op
 
     def test_05_the_record_is_keyed_by_the_wid_string_and_a_missing_wid_is_the_empty_key(self):
         chat = self._client("chat")                 # no wid at all: a page opened outside a dashboard

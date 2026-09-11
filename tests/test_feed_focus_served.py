@@ -206,8 +206,24 @@ await park();
 const reloaded = await survey();
 await deliver({ type: "activeChat", id: cfg.web });
 const restored = await survey();
+// (h) Clear on the SECTION's copy clears the card: both elements dismiss and leave together; Undo brings both back
+// (the review of T347: the copy ran the board builder's finish, which guarded on the board's element, so the copy
+// stayed and the card below never left)
+const keyState = () => page.evaluate((k) => {
+  const f = document.querySelector(`#feed-focus [data-key="f:a:${k}"]`), a = document.querySelector(`#feed-cols [data-key="a:${k}"]`);
+  return { copy: !!f, board: !!a, copyDismissing: !!(f && f.classList.contains("dismissing")), boardDismissing: !!(a && a.classList.contains("dismissing")) };
+}, cfg.webDone);
+await page.locator(`#feed-focus [data-key="f:a:${cfg.webDone}"] .fdismiss`, { hasText: /^Clear$/ }).click();   // the card's Clear (its Continue wears the same chrome)
+const clearing = await keyState();                    // right after the click: both copies wear .dismissing
+await page.waitForTimeout(300);                       // the 180 ms finish, with room
+const cleared = await keyState();
+await page.waitForSelector("#feed-undoclear", { state: "visible", timeout: 10000 });
+await page.click("#feed-undoclear");
+await page.waitForSelector(`#feed-cols [data-key="a:${cfg.webDone}"]`, { timeout: 10000 });
+await frame();
+const undone = await keyState();
 fs.writeSync(1, "RESULT:" + JSON.stringify({ off, offFocused, rowsBefore, on, rowsAfter, dark, light: lit, api, none, bare,
-                                              storedBefore, reloaded, restored, errors }) + "\n");
+                                              storedBefore, reloaded, restored, clearing, cleared, undone, errors }) + "\n");
 await browser.close();
 process.exit(0);
 """
@@ -361,6 +377,14 @@ class ServedFocusedSessionSection(unittest.TestCase):
         self.assertEqual(sorted(c["key"] for c in rs["secCards"]), sorted(WEB_KEYS), "…and web's three copies: %r" % rs["secCards"])
         self.assertEqual(self._by_col(rs["secCards"], WEB_KEYS), self._by_col(rs["boardCards"], web_board_keys), "per column the same titles as the board's")
         self.assertEqual(sorted(c["key"] for c in rs["boardCards"]), board_keys, "the board below is whole after the reload too")
+
+        # (h) Clear on the section's copy: both elements dismiss, both leave, Undo restores both (review of T347)
+        cg, cd, un = r["clearing"], r["cleared"], r["undone"]
+        self.assertEqual((cg["copy"], cg["board"], cg["copyDismissing"], cg["boardDismissing"]), (True, True, True, True),
+                         "right after the click both copies wear .dismissing: %r" % cg)
+        self.assertEqual((cd["copy"], cd["board"]), (False, False), "after the finish neither element remains: %r" % cd)
+        self.assertEqual((un["copy"], un["board"], un["copyDismissing"], un["boardDismissing"]), (True, True, False, False),
+                         "Undo restores the card below and its copy above, neither still dismissing: %r" % un)
 
 
 if __name__ == "__main__":

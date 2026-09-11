@@ -39825,7 +39825,12 @@ def _client_reset_chat_base(client):
         # is nothing it could lazily reload — every tab must arrive whole, and the status slots go with the set
         client.pop("skeleton", None); client.pop("skeletonOrder", None); client.pop("reconnect", None)
         snt = client.get("sent", {})
-        for k in [k for k in snt if isinstance(k, tuple) and k and k[0] in ("chat", "status", "taborder")]:
+        # …and the ("activeChat",) slot (T347): a feed page that reloads registers while its bundle still
+        # evaluates, and a tab switch in its window relays a frame to a document with no listener yet; the
+        # slot remembers that frame, so the ready arm's re-send would be deduped for _DEDUP_REPOST_S and the
+        # section would read "no session is focused" until the next tab click. A renderer that just
+        # evaluated holds nothing: the slot goes with the others.
+        for k in [k for k in snt if isinstance(k, tuple) and k and k[0] in ("chat", "status", "taborder", "activeChat")]:
             snt.pop(k, None)
 
 
@@ -43891,6 +43896,16 @@ def _send_active_chat(client):
     except Exception:
         return False
     return True
+
+
+def _forget_active_chat_if_last(client):
+    """Drop the window's active-chat record when the client leaving was the last pane of that wid: the dict
+    is keyed by dashboard window id, and a window closed for good must not keep an entry for the kernel's
+    life (one per window ever opened). Called under _clients_lock, after the client left _clients; a window
+    with another pane still connected (its chat, a second feed) keeps the record for that pane's reload."""
+    wid = _active_chat_wid(client)
+    if wid in _ACTIVE_CHAT_BY_WID and not any(_active_chat_wid(c) == wid for c in _clients):
+        _ACTIVE_CHAT_BY_WID.pop(wid, None)
 
 
 def _relay_active_chat(client, sid):
@@ -54756,6 +54771,7 @@ class Handler(BaseHTTPRequestHandler):
             with _clients_lock:
                 if client in _clients:
                     _clients.remove(client)
+                _forget_active_chat_if_last(client)   # the window's focus record goes with its last pane (T347)
             _release_client_holds(client)          # its open editors' holds go with it: the disconnect is the event (T306)
 
     def _remote_ws(self, host, query):
