@@ -37,6 +37,7 @@ import { canPreview } from "./preview";
 import { initFileView, setFileViewIdentity, hostStub } from "./file-view";
 import { initFileBrowse, openFileBrowse } from "./file-browse";
 import { VIEW_STATE_KEY, parseViewState, serializeViewState, pruneViewState, capViewState, type FeedViewState, threadKey, threadKeys } from "./feed-view-state";
+import { focusedEntries, focusedCardCount } from "./feed-focus";   // the focused-session section's pure pick (T347)
 import { wireTip, setTip, pruneTip } from "./tip";
 import { perfFrameHandler } from "./perf-telemetry";
 import { listenForFrames } from "./frame-listener";
@@ -188,8 +189,17 @@ function applyFocus() {
   const eff = hoverAskId ?? pinnedAskId;
   for (const [id, card] of askEls) card.classList.toggle("focused", id === eff);
   for (const [tid, card] of groupEls) card.classList.toggle("focused", "g:" + tid === eff);
+  // the focused-session section's copies (T347) light with the card below — one card, two elements
+  for (const [id, card] of fsAskEls) card.classList.toggle("focused", id === eff);
+  for (const [tid, card] of fsGroupEls) card.classList.toggle("focused", "g:" + tid === eff);
 }
 const askEls = new Map<string, HTMLElement>();
+// The FOCUSED SESSION section's own element caches (T347): the section duplicates the focused session's
+// cards above the board, so each card there is a SECOND element, keyed "f:a:<itemId>" / "f:g:<turnId>" and
+// cached here, never in askEls/groupEls — the board's reconcile, its FLIP capture and every lookup by a
+// card's bare key see only the copy below, so nothing below moves because the section did.
+const fsAskEls = new Map<string, HTMLElement>();
+const fsGroupEls = new Map<string, HTMLElement>();
 // Optimistically-cleared item ids: Clear animates a card out + posts askClear, but a feed push that
 // arrives BEFORE the kernel processes the clear still lists the card — re-rendering it strips the
 // `.dismissing` class (updateAskCard resets className) so it pops back, then a later push drops it. We
@@ -1033,7 +1043,7 @@ function rearmLatches(reply: LatchReply): number {
   const arm = (b: HTMLButtonElement | undefined, label: string) => {
     if (b && b.disabled) { b.disabled = false; b.textContent = label; n++; }
   };
-  for (const card of askEls.values()) {
+  for (const card of [...askEls.values(), ...fsAskEls.values()]) {   // the focused section's copies hold the same latches (T347)
     const a = card as any;
     const it = a._it as AskItem | undefined;
     if (!it) continue;
@@ -1525,6 +1535,13 @@ const cardTreeExpanded = new Set<string>();
 // arrangement dragged before the merge survives it).
 const collapsedCols = new Set<string>();
 let colOrder: string[] = [];                         // [] = each layout's own CSS default
+// THE FOCUSED SESSION section (T347, the user 2026-09-11, who wanted the focused session's cards on top): the
+// chat pane's active tab, relayed by the kernel as {type:"activeChat", id} to the feed clients of the same
+// window (on every tab switch, and once when this client registers), and the View menu's switch that puts
+// that session's cards above a divider. The switch is view state (persisted with the rest, prune-exempt,
+// OFF by default); the sid is not persisted — a reloaded feed registers and is told again.
+let focusedSid: string | null = null;
+let showFocused = false;
 
 (function hydrateViewState() {
   let st;
@@ -1537,6 +1554,7 @@ let colOrder: string[] = [];                         // [] = each layout's own C
   for (const k of st.threads) for (const key of threadKeys(k)) collapsedThreads.add(key);   // a pre-T263c bare sid = every column
   for (const k of st.cols) collapsedCols.add(k);
   colOrder = st.order.slice();
+  showFocused = st.focused;   // the focused-session section's switch (T347); a blob saved before it reads OFF
 })();
 
 function currentViewState(): FeedViewState {
@@ -1544,7 +1562,7 @@ function currentViewState(): FeedViewState {
   secChoice.forEach((v, k) => { sec[k] = v; });
   return { v: 1, sec, tree: [...cardTreeExpanded], nodes: [...collapsedNodes], logs: [...nodeLogOpen],
            asks: [...expandedAsks], threads: [...collapsedThreads], cols: [...collapsedCols],
-           order: colOrder.slice() };
+           order: colOrder.slice(), focused: showFocused };
 }
 
 // Written at the END of every render rather than from each toggle handler: the feed re-renders on every
@@ -3576,6 +3594,10 @@ type Entry =
 function entryCards(e: Entry): number {
   return e.kind === "sess" ? e.folded : e.kind === "group" ? e.group.members.length : 1;
 }
+/** The session an entry belongs to: a card's or a turn-group's owner, a run header's own sid. */
+function entrySid(e: Entry): string {
+  return e.kind === "ask" ? e.ask.sid : e.kind === "group" ? e.group.sid : e.sid;
+}
 
 // Grouped-mode session headers, one reused element per (column, sid) — same keyed-incremental treatment as
 // cards so re-renders never rebuild a header mid-press. Pruned when a reconcile drops them from the DOM.
@@ -3891,12 +3913,17 @@ function buildViewMenu(menu: HTMLElement): void {
   mk(false, () => setViewPref("newestFirst", !feedPrefs().newestFirst));
   mk(true, () => setViewPref("stacked", !feedPrefs().stacked, applyStacked));
   mk(true, () => setViewPref("grouped", !feedPrefs().grouped));
+  // "Show focused session" (T347, the user 2026-09-11): the chat's focused session's cards on top of the
+  // feed, above a divider. View state of the feed itself, not a shared pref: it rides the feed's persisted
+  // view state (FeedViewState.focused, OFF by default), never romp:settings, so the gear and the other panes
+  // have nothing to read — and the click re-renders directly, the way the fold carets do.
+  mk(true, () => { showFocused = !showFocused; persistViewState(); render(); });
 }
-// Sync the three rows to the CURRENT prefs — labels, ✓s, the forced state — without rebuilding them.
+// Sync the four rows to the CURRENT prefs — labels, ✓s, the forced state — without rebuilding them.
 function paintViewMenu(menu: HTMLElement): void {
   const p = feedPrefs();
   const rows = menu.querySelectorAll(".ctx-item");
-  if (rows.length !== 3) return;
+  if (rows.length !== 4) return;
   const set = (i: number, label: string, opts: { current: boolean; forced?: boolean; title: string }) => {
     const r = rows[i] as HTMLElement;
     r.textContent = label;
@@ -3920,6 +3947,11 @@ function paintViewMenu(menu: HTMLElement): void {
     current: p.grouped,
     title: p.grouped ? "grouped by session — click for the flat column order"
       : "group each column's cards by session (tab order), a session header between runs",
+  });
+  set(3, "Show focused session", {
+    current: showFocused,
+    title: showFocused ? "the chat's focused session has its cards on top — click to hide the section"
+      : "put the chat's focused session's cards on top of the feed, above a divider",
   });
 }
 function openViewMenu(btn: HTMLElement): void {
@@ -3949,7 +3981,7 @@ function ensureViewMenuBtn(): HTMLElement {
     b = el("button", "fdismiss ffollow feed-modetoggle");
     b.id = "feed-viewbtn";
     b.textContent = "View \u25b4";
-    b.title = "view options — sort direction, single column, group by session";
+    b.title = "view options — sort direction, single column, group by session, the focused session on top";
     b.setAttribute("aria-haspopup", "menu");
     b.onclick = (ev) => {   // opening the menu IS the acknowledgement (same as the session filter)
       ev.stopPropagation();
@@ -4196,12 +4228,19 @@ const ROW_DEFAULT = ["asks", "needsInput", "completed"];     // the side-by-side
 function applyColStack(): void {
   const custom = colOrder.length === 3 ? colOrder : null;
   for (const key of ["asks", "needsInput", "completed"]) {
-    const col = document.querySelector<HTMLElement>(".feed-col.col-" + key);
+    // the BOARD's column, under #feed-cols: the focused-session section above it carries the same column
+    // classes (T347), and a bare query would land on that copy first. The dragged order reaches BOTH — the
+    // section mirrors the arrangement below — the fold only the board's (the section has no caret to reopen with).
+    const col = document.querySelector<HTMLElement>("#feed-cols .feed-col.col-" + key);
     if (!col) continue;
     const folded = collapsedCols.has(key);
     col.classList.toggle("col-collapsed", folded);
     if (custom) col.style.setProperty("--col-order", String(custom.indexOf(key) + 1));
     else col.style.removeProperty("--col-order");
+    // …and the focused-session section's column of the same key (T347) wears the same order, so the miniature
+    // above mirrors the arrangement below — one dragged order, two renderings
+    const twin = document.querySelector<HTMLElement>("#feed-focus .feed-col.col-" + key);
+    if (twin) { if (custom) twin.style.setProperty("--col-order", String(custom.indexOf(key) + 1)); else twin.style.removeProperty("--col-order"); }
     const fold = col.querySelector<HTMLElement>(".fcol-fold");
     if (fold) {
       fold.textContent = folded ? "▸" : "▾";
@@ -4239,7 +4278,7 @@ function wireColDrag(chip: HTMLElement, col: HTMLElement, key: string): void {
     const applyOrderFlip = (order: string[]) => {
       const els: Array<[string, HTMLElement]> = [];
       for (const k of ["asks", "needsInput", "completed"]) {
-        const e = document.querySelector<HTMLElement>(".feed-col.col-" + k);
+        const e = document.querySelector<HTMLElement>("#feed-cols .feed-col.col-" + k);   // the board's, not the focused section's copy (T347)
         if (e) els.push([k, e]);
       }
       const before = new Map(els.map(([k, e]) => [k, edge(e.getBoundingClientRect())]));
@@ -4260,7 +4299,7 @@ function wireColDrag(chip: HTMLElement, col: HTMLElement, key: string): void {
       let to = from;
       for (const other of order) {
         if (other === key) continue;
-        const oc = document.querySelector<HTMLElement>(".feed-col.col-" + other);
+        const oc = document.querySelector<HTMLElement>("#feed-cols .feed-col.col-" + other);
         if (!oc) continue;
         const m = midOf(oc.getBoundingClientRect());
         const oi = order.indexOf(other);
@@ -4500,6 +4539,148 @@ function reconcileCol(listEl: HTMLElement, entries: Entry[], globalDesired: Set<
   }
   // an empty column shows NOTHING (the user 2026-06-25) — no "—" placeholder. (Any stray non-keyed child,
   // including an old placeholder, is already removed at the top of this reconcile.)
+}
+
+// ── THE FOCUSED SESSION SECTION (T347, the user 2026-09-11, who wanted the focused session's cards on top) ──
+// When a tab has focus in the chat pane, the feed puts that session's cards ABOVE the board: the session's
+// name as the head, the board's three columns (Working / Blocked / Completed, the same chips), a horizontal
+// rule under it. The board below stays exactly as it is, so those cards appear twice. A VIEW, not a move:
+// the section has its own elements and caches (fsAskEls / fsGroupEls, keys "f:a:…" / "f:g:…"), and
+// nothing below is touched by it — the FLIP capture reads #feed-cols, the modal's and the keyboard scope's
+// lookups match the bare keys, applyFocus lights both copies. EVENT-based: it rebuilds inside render(),
+// which the kernel's activeChat frame (a tab switch) and the feed's own frames drive; no timer anywhere.
+// Built once and synced in place: the head's name link and the column heads are stable nodes
+// (click-safety), only the card lists reconcile — with the same builders and the same update gate the
+// board uses, so a copy repaints exactly when the card below would.
+function ensureFocusSection(list: HTMLElement): HTMLElement {
+  let sec = document.getElementById("feed-focus");
+  if (!sec) {
+    sec = el("section", "");
+    sec.id = "feed-focus";
+    sec.setAttribute("aria-label", "the chat's focused session");
+    const head = el("div", "feed-focus-head");
+    const nm = el("a", "fname"); nm.title = "open this session";
+    const cap = el("span", "feed-focus-cap"); cap.textContent = "focused";   // the one word that says why this session sits on top
+    head.append(nm, cap);
+    const empty = el("div", "feed-focus-empty");
+    const cols = el("div", "feed-cols feed-focus-cols");
+    const lists: Partial<Record<Column, HTMLElement>> = {}, counts: Partial<Record<Column, HTMLElement>> = {};
+    // the board's own column chips and labels (ensureCols), minus the fold caret and the drag: the section's
+    // columns follow the board's order (applyColStack writes --col-order to both) and never fold on their own
+    for (const [key, label, chip] of [["asks", "Working", "working"], ["needsInput", "Blocked", "blocked"], ["completed", "Completed", "completed"]] as const) {
+      const col = el("div", "feed-col col-" + key);
+      const h = el("div", "feed-col-head");
+      const name = el("span", "feed-col-name fcol-chip fcol-chip-" + chip); name.textContent = label;
+      const count = el("span", "feed-col-count");
+      h.append(name, count);
+      const body = el("div", "feed-col-list");
+      col.append(h, body);
+      cols.appendChild(col);
+      lists[key] = body; counts[key] = count;
+    }
+    const rule = el("hr", "feed-focus-divider");
+    sec.append(head, empty, cols, rule);
+    (sec as any)._head = head; (sec as any)._name = nm; (sec as any)._empty = empty; (sec as any)._cols = cols;
+    (sec as any)._lists = lists; (sec as any)._counts = counts;
+  }
+  // directly above the board, every render: right before #feed-cols (the host loading strip, which announces
+  // what is coming, keeps the very top while it shows). A fresh section takes the board's column order at once.
+  const board = document.getElementById("feed-cols");
+  if (board && sec.nextSibling !== board) { list.insertBefore(sec, board); applyColStack(); }
+  return sec;
+}
+/** How the section names the focused session: this pane's session list (the chat's tab set, relayed per
+ *  frame), else a card of that session, else the kernel's 8-character stub — the same resolution the file
+ *  viewer's identity uses (setFileViewIdentity). Liveness is a card's word when there is one; a tab with no
+ *  cards is taken as live (the chat is showing it). */
+function focusedIdentity(sid: string): { name: string; color: { bg: string; fg: string } | null; live: boolean } {
+  const s = sessionsMeta.find((x) => x.sid === sid);
+  const a = asks.find((x) => x.sid === sid);
+  if (s) return { name: s.name, color: s.color ?? a?.color ?? null, live: a ? !!a.live : true };
+  if (a) return { name: a.name, color: a.color ?? null, live: !!a.live };
+  return { name: hostStub(sid)?.name || sid.slice(0, 8), color: null, live: true };
+}
+function renderFocusSection(list: HTMLElement, buckets: Record<Column, Entry[]>, gate: GateEnv): void {
+  const sec = ensureFocusSection(list) as any;
+  const head = sec._head as HTMLElement, nm = sec._name as HTMLElement, empty = sec._empty as HTMLElement, cols = sec._cols as HTMLElement;
+  const lists = sec._lists as Record<Column, HTMLElement>, counts = sec._counts as Record<Column, HTMLElement>;
+  const total = focusedCardCount(buckets, entryCards);
+  const sid = focusedSid;
+  if (sid) {
+    const who = focusedIdentity(sid);
+    // the name nodes are minted only when what they show changes (the session headers' rule): a Text-node
+    // replacement per render is the churn the card gate exists to avoid
+    const sig = who.name + "\u0000" + sid + "\u0000" + (hostIsDown(sid) ? "d" : "");
+    if (sec._nmSig !== sig) { sec._nmSig = sig; nm.replaceChildren(...hostNameNodes(who.name, sid)); }
+    nm.style.color = who.color ? who.color.bg : "";
+    nm.classList.toggle("dead", !who.live);
+    nm.onclick = (ev) => { ev.stopPropagation(); openOrReviveSession(sid, who.live, who.name); };   // the session headers' click: open, or offer to revive
+    setWorkDot(nm, dotFor(who.name));   // the same working / awaiting dot the session headers wear
+    setText(empty, who.name + " has no cards");
+  } else {
+    setText(empty, "No session is focused in the chat");
+  }
+  // the two quiet states: no tab focused → the line stands in for the head; a focused session with no cards →
+  // the head stays and the line says so. The rule stays in both, so the section still reads as a section.
+  head.style.display = sid ? "" : "none";
+  empty.style.display = sid && total ? "none" : "";
+  cols.style.display = total ? "" : "none";
+  const desired = new Set<string>();
+  for (const k of Object.keys(buckets) as Column[]) {
+    reconcileFocusCol(lists[k], buckets[k], gate, desired);
+    const n = buckets[k].reduce((acc, e) => acc + entryCards(e), 0);   // the board's counting rule: CARDS, and a number only when there are some
+    setText(counts[k], n ? String(n) : "");
+    counts[k].style.display = n ? "" : "none";
+  }
+  // a copy whose card left the focused session's view — cleared, folded into another turn, or the focus
+  // moved on — goes now; the board's copy below has its own cache and its own exit
+  for (const id of Array.from(fsAskEls.keys())) if (!desired.has("f:a:" + id)) { fsAskEls.get(id)?.remove(); fsAskEls.delete(id); }
+  for (const tid of Array.from(fsGroupEls.keys())) if (!desired.has("f:g:" + tid)) { fsGroupEls.get(tid)?.remove(); fsGroupEls.delete(tid); }
+}
+// reconcileCol's twin for ONE of the section's columns: the same keyed in-place reconcile (a card whose
+// column changed is MOVED, not rebuilt), over the section's own caches, under the section's own keys —
+// "f:a:<itemId>" / "f:g:<turnId>" in data-key, so the board's FLIP capture, the reveal jump and the modal's
+// lookups (all by the bare key) never take a copy for the card. Entries never include a run header
+// (focusedEntries drops them); one that did would be skipped, not built.
+function reconcileFocusCol(listEl: HTMLElement, entries: Entry[], gate: GateEnv, desired: Set<string>): void {
+  const existing = new Map<string, HTMLElement>();
+  for (const c of Array.from(listEl.children) as HTMLElement[]) {
+    const k = c.dataset.key;
+    if (k) existing.set(k, c); else c.remove();
+  }
+  const ordered: HTMLElement[] = [];
+  const colDesired = new Set<string>();
+  for (const e of entries) {
+    let key: string, card: HTMLElement;
+    if (e.kind === "ask") {
+      key = "f:a:" + e.ask.itemId;
+      card = fsAskEls.get(e.ask.itemId) || makeAskCard(e.ask);
+      card.dataset.key = key;   // the builder stamps the bare key; the copy wears the section's
+      fsAskEls.set(e.ask.itemId, card);
+      // THE UPDATE GATE (feed-card-gate.ts), as the board applies it: repaint a copy only when the kernel
+      // re-sent the card or a board-level input it reads changed
+      const ik = cardInputsKey(e.ask, gate);
+      if (cardNeedsUpdate(card as any, e.ask, ik)) { updateAskCard(card, e.ask); (card as any)._ik = ik; }
+    } else if (e.kind === "group") {
+      key = "f:g:" + e.group.turnId;
+      card = fsGroupEls.get(e.group.turnId) || makeGroupCard(e.group);
+      card.dataset.key = key;
+      fsGroupEls.set(e.group.turnId, card);
+      updateGroupCard(card, e.group);
+    } else continue;
+    desired.add(key); colDesired.add(key);
+    ordered.push(card);
+  }
+  for (const [k, c] of existing) if (!colDesired.has(k)) c.remove();
+  let cur: ChildNode | null = listEl.firstChild;
+  for (const node of ordered) {
+    if (cur === node) { cur = cur.nextSibling; continue; }
+    listEl.insertBefore(node, cur);
+  }
+}
+function removeFocusSection(): void {
+  document.getElementById("feed-focus")?.remove();
+  fsAskEls.clear(); fsGroupEls.clear();
 }
 
 // ── FLIP: animate a card FLYING to its new column when its status changes (the user 2026-06-27) ──
@@ -4914,6 +5095,7 @@ function render() {
     //                     wordmark never rendered (the user 2026-07-08; payload-audit fallout). Goal cards are
     //                     the only feed unit now, so an empty asks list IS an empty feed.
     askEls.clear(); groupEls.clear();
+    removeFocusSection();   // an empty board is the wordmark alone; the section returns with the cards (T347)
     skipFlipOnce = false;   // this IS the release paint when the board emptied while away — the snap is spent
     // inbox zero → the romp wordmark (a CSS background). role/aria-label + title keep the meaning for hover /
     // screen readers, since a background image carries no accessible text. Created ONCE (idempotent): on the
@@ -4949,6 +5131,10 @@ function render() {
   // (default off, the user 2026-07-07) reverses each column to newest-at-top.
   const newestFirst = feedPrefs().newestFirst;
   for (const k of Object.keys(buckets) as Column[]) buckets[k].sort((x, y) => newestFirst ? y.t - x.t : x.t - y.t);
+  // THE FOCUSED SESSION's view of these buckets (T347), taken HERE, before grouping: the section shows one
+  // session, so it carries no run headers, and a thread folded below must not empty it — the fold hides
+  // cards behind a caret the section does not have, and a compact view never dead-ends (ui/CLAUDE.md).
+  const focusBuckets = showFocused ? focusedEntries(buckets, focusedSid, entrySid) : null;
   // GROUPED mode (the user 2026-07-13): within each column, cards gather by SESSION — session order = the
   // kernel's session-order list (the same order the chat tabs + timeline lanes hold; sessions the list
   // doesn't know keep their time order after it) — with a name+dot header entry opening each run. The sort
@@ -4994,6 +5180,25 @@ function render() {
     // (the "item"/standalone bucket kind was removed with the FeedItem subsystem — no third branch)
   }
 
+  // The per-card update gate's inputs, resolved ONCE for this render (feed-card-gate.ts cardInputsKey):
+  // everything updateAskCard reads outside the ask object. A card is repainted when its object or this key
+  // changed, so a frame's cost scales with the cards the kernel re-sent and the cards a changed input
+  // reaches, not with the board.
+  const gprefs = feedPrefs();
+  const gate: GateEnv = {
+    dot: dotFor, working: (n) => workingSet.has(n),
+    focusId: hoverAskId ?? pinnedAskId, pinnedId: pinnedAskId, notifyOn: cardNotifyOn,
+    prefs: { grouped: gprefs.grouped, collapsed: gprefs.collapsed, colormap: gprefs.colormap },
+    hostDown: hostIsDown, selfHost: feedSelfHost, repo: prRepoOf, seq: ++renderSeq,
+  };
+  // The focused session's section above the board (T347): its own elements and caches, the same builders and
+  // the same update gate. Painted BEFORE the board's FLIP capture below: the section sits above the board, so
+  // its height is part of where every board card rests, and a First rect read before the section settled would
+  // have every card below glide by the section's change on top of its own move (a card moving column on a
+  // frame that also changes the section's card count). The capture itself reads #feed-cols alone, so no copy
+  // in the section is ever a First or a Last rect, and the board's reconcile after it is what it always was.
+  if (focusBuckets) renderFocusSection(list, focusBuckets, gate); else removeFocusSection();
+
   // FLIP step 1 (the user 2026-06-27): record every visible card's position + column BEFORE the reconcile, so
   // a card that changes column can FLY from its old spot to the new one instead of teleporting. Only when
   // something CAN move: the capture and the fly each force a layout of the whole document, and most frames
@@ -5008,17 +5213,6 @@ function render() {
   prevCols = nextCols;
   const flipFirst = needFlip ? captureCardRects(cols) : new Map<string, FlipState>();
 
-  // The per-card update gate's inputs, resolved ONCE for this render (feed-card-gate.ts cardInputsKey):
-  // everything updateAskCard reads outside the ask object. A card is repainted when its object or this key
-  // changed, so a frame's cost scales with the cards the kernel re-sent and the cards a changed input
-  // reaches, not with the board.
-  const gprefs = feedPrefs();
-  const gate: GateEnv = {
-    dot: dotFor, working: (n) => workingSet.has(n),
-    focusId: hoverAskId ?? pinnedAskId, pinnedId: pinnedAskId, notifyOn: cardNotifyOn,
-    prefs: { grouped: gprefs.grouped, collapsed: gprefs.collapsed, colormap: gprefs.colormap },
-    hostDown: hostIsDown, selfHost: feedSelfHost, repo: prRepoOf, seq: ++renderSeq,
-  };
   const desired = new Set<string>();
   reconcileCol(cols.asks, buckets.asks, desired, gate);
   reconcileCol(cols.needsInput, buckets.needsInput, desired, gate);
@@ -5176,7 +5370,10 @@ function kbCardEls(): HTMLElement[] {
   // VISUAL order, not DOM order (review 2026-08-24): the columns re-sequence via --col-order — in
   // both layouts since the drag extended — so the arrow cursor sorts cards by their column's
   // effective `order` (getComputedStyle resolves the var), DOM order within a column.
-  const els = Array.from(document.querySelectorAll<HTMLElement>(".feed-cols .fitem:not(.dismissing)"));
+  // the BOARD's cards, under #feed-cols: the focused-session section (T347) above it carries the same column
+  // classes, and a walk over both would interleave a copy with its card below by column order — the section is
+  // a view of the board, and the cursor's field stays the board
+  const els = Array.from(document.querySelectorAll<HTMLElement>("#feed-cols .fitem:not(.dismissing)"));
   const slot = new Map<HTMLElement, number>();
   for (const e of els) {
     const col = e.closest<HTMLElement>(".feed-col");
@@ -5187,7 +5384,8 @@ function kbCardEls(): HTMLElement[] {
     .map((x) => x.e);
 }
 function kbHoverId(el: HTMLElement): string {
-  const key = el.dataset.key || "";
+  let key = el.dataset.key || "";
+  if (key.startsWith("f:")) key = key.slice(2);         // a focused-section copy (T347) IS the card below: the same identity under an "f:" prefix
   return key.startsWith("g:") ? key : key.slice(2);   // group card → "g:<tid>" (applyFocus key); ask/deliverable → itemId
 }
 function kbSelectCard(el: HTMLElement | null): void {
@@ -5319,6 +5517,7 @@ function mirrorBadges(items: AskItem[], clears: ClearNoticeRow[], sdk: SdkNotice
 // under the pointer flushes too, via its synthetic mouseleave — and window blur is the backstop.
 let freezeKey: string | null = null;     // the hovered card's focus key, or null — pointer truth, no debounce
 let pendingFeedPayload: any = null;      // newest queued payload; older ones are superseded unseen
+let focusStale = false;                  // an activeChat frame landed while the gate was held: the section repaints on release (T347)
 function freezeEnter(key: string): void { freezeKey = key; }
 function freezeLeave(key: string): void {
   if (tabScopeKey === key) releaseTabScope();   // hover-away releases the keyboard scope too
@@ -5341,6 +5540,8 @@ function flushFreeze(): void {
     const m = pendingFeedPayload;
     pendingFeedPayload = null;
     if (m) applyFeedPayload(m);          // render() repaints the badges away (nothing pending)
+    else if (focusStale) render();       // a tab switch that landed while a card was held paints now (T347)
+    focusStale = false;                  // either way the section is current: applyFeedPayload renders too
   });
 }
 window.addEventListener("blur", () => { releaseTabScope(); freezeKey = null; flushFreeze(); });   // backstop:
@@ -5415,7 +5616,7 @@ function paintFreezeBadges(): void {
     paintFreezeParts(b, c);
   };
   for (const key of ["asks", "needsInput", "completed"]) {
-    put(document.querySelector(".feed-col.col-" + key + " .feed-col-head"), d.cols[key]);
+    put(document.querySelector("#feed-cols .feed-col.col-" + key + " .feed-col-head"), d.cols[key]);   // the board's heads, never the focused section's (T347)
   }
   const groupedNow = feedPrefs().grouped;
   // The HOVERED header row must not change shape (T285 review): a badge appended inside it lands after the
@@ -5674,6 +5875,16 @@ listenForFrames(perfFrameHandler("feed", (m) => vscodeApi?.postMessage(m), (e: M
     // hint the deferred churn on the headers instead; mouseleave/blur flush it (see freezeEnter).
     if (freezeKey || tabScopeKey) { pendingFeedPayload = m; paintFreezeBadges(); return; }
     applyFeedPayload(m);
+  } else if (m.type === "activeChat") {
+    // THE FOCUSED SESSION (T347): the kernel relays the chat pane's active tab to the feed clients of the same
+    // window — on every tab switch, and once when this client registers, so a reloaded feed learns the focus
+    // without waiting for one. The frame IS the event: the section repaints here, never on a clock. While a
+    // card is held under the pointer (hover-freeze) the repaint waits for the release, like a payload does:
+    // the held card's rect standing still is that gate's whole contract, and the section's height sits above it.
+    focusedSid = typeof m.id === "string" && m.id ? m.id : null;
+    if (!showFocused) return;
+    if (freezeKey || tabScopeKey) { focusStale = true; return; }
+    render();
   } else if (m.type === "hoverCards") {
     // rail-dot hover in the CHAT panel → white-outline the card(s) built from
     // that turn, plus the matching ROWS inside an open modal (eid). The host
@@ -6012,7 +6223,7 @@ function revealCards(keys: Set<string>) {
 // definition of "hidden".
 function livePass(): void {
   const now = nowSec();
-  for (const card of askEls.values()) {
+  for (const card of [...askEls.values(), ...fsAskEls.values()]) {   // …and the focused section's copies (T347)
     const it = (card as any)._it as AskItem | undefined;
     if (!it) continue;
     // the latched Continue's hover title names how long ago it was sent (contTitle, T150): a title, so it
