@@ -1004,10 +1004,23 @@ class CodexBackend:
             entry_id = "q-%s" % uuidlib.uuid4().hex
             s.queue.append(text)
             s.queue_ids.append(entry_id)
-            s.change_generation += 1
             # Keep append order identical in memory and on disk. _save_registry snapshots this RLock
             # reentrantly before taking either registry lock; it never takes a session lock afterward.
-            self._save_registry(s, queue_append={"id": entry_id, "text": text})
+            try:
+                self._save_registry(s, queue_append={"id": entry_id, "text": text})
+            except BaseException:
+                # A raising durable write publishes NOTHING, as every sibling mutator keeps it: the entry
+                # never reached disk, so it leaves memory too, and this send's echo with it — by its id
+                # and uuid, never by position or text, so no other send's copy goes. Kept, they showed a
+                # queued bubble on a busy session for a send the caller was told failed, with no worker
+                # kicked to drain it, and the copy rode the next kick into that turn beside the retype.
+                if entry_id in s.queue_ids:
+                    at = s.queue_ids.index(entry_id)
+                    del s.queue[at]
+                    del s.queue_ids[at]
+                s.echoes = [e for e in s.echoes if e["uuid"] != echo_uuid]
+                raise
+            s.change_generation += 1
         self._ensure_worker(s)
         s.kick.set()
         return True
