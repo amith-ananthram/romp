@@ -15048,11 +15048,14 @@ def _sdk_locked():
             _cut_fn = getattr(_sdk_backend, "pending_cut", None)
             if _cut_fn:
                 jd.set_pending_cut_provider(_cut_fn)
-            # ONE answer to sdk_human for the shared parse (T323 stage 2): the backends' owns(), SDK or Codex,
-            # so the judges and the display never key the same file under two flags
+            # ONE answer to sdk_human for the shared parse (T323 stage 2): the SDK backend's owns() (its reg
+            # file's existence) or a Codex registry row, alive or dead — record presence, the predicate
+            # _display_sdk_human reads, so the judges and the display never key the same file under two flags.
+            # Never Codex owns(): it is live-only, and keyed on it a dead Codex session's typed prompts read
+            # as programmatic to the judges (no human segment) the moment the row was marked dead
             _owns = getattr(_sdk_backend, "owns", None)
             if _owns:
-                jd.set_sdk_owner_provider(lambda fsid: bool(_owns(fsid)) or bool((_cx := _codex()) and _cx.owns(fsid)))
+                jd.set_sdk_owner_provider(lambda fsid: bool(_owns(fsid)) or bool((_cx := _codex()) and _cx._session(fsid) is not None))
             # The backend's flag-consumption events resolve held rewinds (two-phase goal cleanup:
             # archive at the branch-take, restore on failure — _on_rewind_resolved).
             _sdk_backend.rewind_resolved_cb = _on_rewind_resolved
@@ -28307,11 +28310,15 @@ def _rewind_holds_boot():
 
 
 def _display_sdk_human(sid):
-    """The display parse's answer to sdk_human: a backend (SDK or Codex) owns the session. The same answer the owner
-    hook gives the judges once a backend exists, so both sides share one slot; in a process without one (tests) the
-    judges fall back to the registry file and a differing answer keeps its own slot."""
+    """The display parse's answer to sdk_human: a backend (SDK or Codex) holds a RECORD of the session, alive or dead.
+    Record presence on both backends: SdkBackend.owns is its reg file's existence, but CodexBackend.owns is live-only
+    (send routing reads it), so keyed on owns() a Codex session's typed prompts re-authored as programmatic the
+    moment its row was marked dead — the same transcript, nothing new learned, read-only after an end or a kernel
+    restart — while a dead SDK session's kept theirs (2026-09-11). The same answer the owner hook gives the judges
+    once a backend exists, so both sides share one slot; in a process without one (tests) the judges fall back to
+    the registry file and a differing answer keeps its own slot."""
     _be = _sdk()
-    return bool((_be and _be.owns(sid)) or ((_cx := _codex()) and _cx.owns(sid)))
+    return bool((_be and _be.owns(sid)) or ((_cx := _codex()) and _cx._session(sid) is not None))
 
 
 def _parse_cached(path):
