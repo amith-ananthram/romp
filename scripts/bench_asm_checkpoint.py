@@ -132,6 +132,8 @@ now = time.time()
 r0 = rss()
 modes = []
 trees = {}                                                          # the boot's trees, for the documents' turns sections (stage 4c)
+import inspect
+_tree_arg = hasattr(em, "asm_checkpoint_write") and "tree" in inspect.signature(em.asm_checkpoint_write).parameters   # main before 4c: no tree=
 for sid in sids:
     leaf = os.path.join(proj, sid + ".jsonl")
     m = []
@@ -156,7 +158,7 @@ if phase == "first":
     if hasattr(em, "asm_checkpoint_write"):
         for sid in sids:                                        # under the key the judges' parse used (their sdk_human answer)
             t_w = time.time()
-            written += 1 if em.asm_checkpoint_write(os.path.join(proj, sid + ".jsonl"), sid, bool(jd._sdk_owned(sid)), tree=trees.get(sid)) else 0
+            written += 1 if em.asm_checkpoint_write(os.path.join(proj, sid + ".jsonl"), sid, bool(jd._sdk_owned(sid)), **({"tree": trees.get(sid)} if _tree_arg else {})) else 0
             write_ms += (time.time() - t_w) * 1000.0            # the per-document write cost (once per whole parse, item L)
 stats = em.asm_checkpoint_stats() if hasattr(em, "asm_checkpoint_stats") else {}
 print(json.dumps({"phase": phase, "byClass": by, "total": sum(by.values()), "rssBytes": r1, "rssDelta": r1 - r0,
