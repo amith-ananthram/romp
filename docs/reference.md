@@ -1929,9 +1929,9 @@ magenta stacked on them, and a band of its own hue (a pale lime in the dark
 theme, an indigo in the light) for no-connection and other-status failures
 only when the range or a counted line holds any; one ceiling label, no peak
 figure; along the bottom the clock times of the timeline pane's own axis (its
-formatter and tick rule, lifted verbatim: local hours, the date on the first
-tick of each new day the span crosses, and on every tick once the step is a
-day or more, those ticks at local midnights), never ages; a vertical, left-justified
+formatter and tick rule, lifted verbatim: local hours at the timeline's tick
+step, a tick of its own at each local midnight the span crosses carrying that
+day's date, and dates alone once the step is a day or more), never ages; a vertical, left-justified
 legend whose class tokens (`429`, `5xx`, `other`) wear their colours with the
 explanation beside them in plain text (429 on one line, 5xx below it, the other
 line only when it applies; the accent band needs no row); the age of the read in words ("read

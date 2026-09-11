@@ -4,10 +4,14 @@ ages, by the timeline view's OWN formatter and tick rule lifted verbatim into th
 popup's legend names each class in its ink with no swatch, a waiting row shows its status code in its class ink with no
 coloured square beside the name, and the no-connection/other band wears a hue of its own per theme. The behaviour of the
 axis over real spans rides ui/webview/api-health-axis.test.ts; this module holds the kernel's side: the lift's text
-equals the view's lines, its null on a missing view, the landing's order, and the served CSS. Synthetic fixtures only."""
+equals the view's lines, its memo on both outcomes (the null said once), the landing's order, and the served CSS with
+the fade off the tokens. Synthetic fixtures only."""
+import contextlib
+import io
 import os
 import pathlib
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -31,6 +35,10 @@ JS = km._LANDING_APIH_JS
 
 
 class TimelineAxisLift(unittest.TestCase):
+    def setUp(self):
+        km._TIMELINE_AXIS_MEMO[:] = [None, None]
+        self.addCleanup(lambda: km._TIMELINE_AXIS_MEMO.__setitem__(slice(None), [None, None]))
+
     def test_the_lift_is_the_views_own_three_lines_verbatim(self):
         js = km._timeline_axis_js()
         self.assertTrue(js.startswith("window.__rompTimelineAxis=(function(){const NICE = ["), js[:80])
@@ -40,21 +48,37 @@ class TimelineAxisLift(unittest.TestCase):
             self.assertIn(line, js, "the view's line, character for character: one formatter, no second copy")
         self.assertEqual(len(km._TIMELINE_AXIS_PARTS), 3)
         self.assertIn("function clock(t) { const d = new Date(t * 1000); return String(d.getHours()).padStart(2, '0')", js, "the local HH:MM")
-        self.assertIn("function niceStep(W) { for (const s of NICE) if (W / s <= 8) return s;", js, "the nice step: at most eight ticks")
+        self.assertIn("function niceStep(W) { for (const s of NICE) if (W / s <= 8) return s;", js, "the nice step: eight intervals")
         # memoized on the view's mtime: the second call returns the held string without a read
         mt = pathlib.Path(ROOT, "ui", "romp-timeline-view.js").stat().st_mtime_ns
         self.assertEqual(km._TIMELINE_AXIS_MEMO[0], mt)
         self.assertIs(km._timeline_axis_js(), js)
 
-    def test_a_missing_view_publishes_null_and_says_so(self):
+    def test_a_missing_view_publishes_null_and_says_so_once(self):
         real = km.UI
-        try:
-            km.UI = pathlib.Path(tempfile.mkdtemp())
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.addCleanup(setattr, km, "UI", real)
+        km.UI = pathlib.Path(tmp)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
             self.assertEqual(km._timeline_axis_js(), "window.__rompTimelineAxis=null;")
-        finally:
-            km.UI = real
-        # the popup then draws no clocks rather than a second formatter's guesses
-        self.assertIn("if(!TL){var q=[];for(var i=1;i<4;i++)q.push({x:i/4*W,label:'',shown:false});return q;}", JS, "gridlines at the quarters, no clocks")
+            self.assertEqual(km._timeline_axis_js(), "window.__rompTimelineAxis=null;", "the null is memoized under the missing-file sentinel")
+        lines = [ln for ln in err.getvalue().splitlines() if ln]
+        self.assertEqual(len(lines), 1, "said ONCE, not on every landing GET: %r" % lines)
+        self.assertTrue(lines[0].startswith("timeline axis lift: the API health histograms draw no clocks:"), lines[0])
+        self.assertEqual(km._TIMELINE_AXIS_MEMO[0], "missing")
+        # a view whose lines moved: the null is memoized under that file version, said once
+        view = pathlib.Path(tmp, "romp-timeline-view.js")
+        view.write_text("// not the view\n")
+        err2 = io.StringIO()
+        with contextlib.redirect_stderr(err2):
+            self.assertEqual(km._timeline_axis_js(), "window.__rompTimelineAxis=null;")
+            self.assertEqual(km._timeline_axis_js(), "window.__rompTimelineAxis=null;")
+        self.assertEqual(len([ln for ln in err2.getvalue().splitlines() if ln]), 1)
+        self.assertEqual(km._TIMELINE_AXIS_MEMO[0], view.stat().st_mtime_ns)
+        # the popup then draws gridlines at the quarters with no clocks rather than a second formatter's guesses
+        self.assertIn("if(!TL){var q=[];for(var i=1;i<4;i++)q.push({x:i/4*W,label:'',date:false});return q;}", JS)
 
     def test_the_landing_publishes_the_lift_before_the_script_that_reads_it(self):
         html = km._landing()
@@ -62,15 +86,17 @@ class TimelineAxisLift(unittest.TestCase):
         i, j = html.find(lift), html.find("var TL=window.__rompTimelineAxis||null;")
         self.assertTrue(0 < i < j, "the lift's script precedes the popup's")
         self.assertIn("var step=TL.niceStep(span)", JS, "the timeline's tick rule")
-        self.assertIn("TL.clock(tk)", JS, "the timeline's formatter")
+        self.assertIn("TL.clock(k.t)", JS, "the timeline's formatter")
         self.assertNotIn("tickWords", JS, "the age words are gone")
         self.assertNotIn('">now</span>', JS)
-        # the date on a day change, in the State changes rows' own form; the relative forms stay where they belong
-        self.assertIn("isDate=crosses&&(dk!==prevDay||step>=86400);", JS)
-        self.assertIn("var label=isDate?dateWords(tk):TL.clock(tk);prevDay=dk;", JS)
-        self.assertIn("if(!shown&&isDate&&lastI>=0){out[lastI].shown=false;shown=true;}", JS, "a day's date outranks the clock it collides with")
-        self.assertIn("if(step<86400){for(var tk=Math.ceil(t0/step)*step;tk<=t1;tk+=step)out.push(tk);return out;}", JS, "under a day: the timeline's epoch multiples")
-        self.assertIn("d.setHours(0,0,0,0);if(d.getTime()/1000<t0)d.setDate(d.getDate()+1);", JS, "at a day or more: local midnights")
+        # the ticks: the timeline's epoch multiples for the clocks, a tick of its own at each local midnight for the date
+        self.assertIn("function midnights(t0,t1,days){", JS)
+        self.assertIn("d.setDate(d.getDate()+days),d.setHours(0,0,0,0))out.push(d.getTime()/1000);", JS, "re-normalised to 00:00 after each step: a spring-forward gap does not drag the days after it")
+        self.assertIn("if(mi<mids.length&&mids[mi]===tk){out.push({t:tk,day:true});mi++;}else out.push({t:tk,day:false});", JS, "a midnight coinciding with a clock tick is the day tick")
+        self.assertIn("return {x:(k.t-t0)/span*W,label:k.day?dateWords(k.t):TL.clock(k.t),date:k.day};", JS)
+        # every label is emitted; the fit is read off the paint
+        self.assertIn("if(k.label)xlab+='<span'+(k.date?' data-date=\"1\"':'')+' style=\"left:'+(gx/W*100).toFixed(1)+'%\">'+esc(k.label)+'</span>';", JS)
+        self.assertIn("tip.innerHTML=html(LAST,pinned);if(!pinned)anchor();fitAxisLabels(tip);", JS)
         self.assertIn("return dateWords(ep)+' '+hm(ep);}", JS)
         self.assertIn("function ageWords(){return LANDED&&MERGE?'read '+MERGE.agoWords((Date.now()-LANDED)/1000):'';}", JS)
         self.assertIn("(r.since?' · since '+hm(r.since):'')", JS)
@@ -89,6 +115,18 @@ class LegendRowsAndBand(unittest.TestCase):
         self.assertIn("if(/^5[0-9][0-9]$/.test(st))return 'error <span class=ah-c-r5xx>'+st+'</span>';return 'error'+(st?' '+st:'');}", JS)
         self.assertIn("var st=r.status?esc(r.status):'';", JS, "the status is escaped before it is painted")
         self.assertIn("+(bg?'<span class=ah-nm style=\"color:'+bg+'\">':'<span class=ah-nm>')+esc(r.name)+'</span>'", JS)
+
+    def test_the_tokens_stand_at_full_strength_the_fade_is_on_the_words_alone(self):
+        html = km._landing()
+        # no .ah-legend rule fades the group (a descendant cannot exceed its group's opacity); the explanation span alone is dimmed
+        for rule in re.findall(r"\.ah-legend\{[^}]*\}", html):
+            self.assertNotIn("opacity", rule, rule)
+        self.assertIn(".ah-legend{display:flex;flex-direction:column;align-items:flex-start;gap:3px;margin-top:7px}", html)
+        self.assertIn(".ah-legend{margin-top:4px;max-width:340px}", html, "the later size rule, its stale .6 gone")
+        self.assertIn(".ah-lrow > span:last-child{opacity:.75}", html)
+        # a waiting row's words are muted by colour at opacity 1, so the 429/529 tokens inside keep their inks whole
+        self.assertIn(".ah-row .ah-desc{opacity:1;color:#a9b1ba}", html)
+        self.assertIn("body.theme-light .ah-row .ah-desc{color:#5D574E}", html)
 
     def test_the_other_bands_hue_per_theme_and_the_inks_that_follow_it(self):
         html = km._landing()

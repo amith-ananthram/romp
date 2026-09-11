@@ -47440,22 +47440,29 @@ _TIMELINE_AXIS_MEMO = [None, None]   # (the view file's mtime_ns, the lifted scr
 def _timeline_axis_js():
     """The timeline pane's axis formatter and tick rule, lifted VERBATIM from ui/romp-timeline-view.js for the API
     health histograms' x-axis (T338, the user 2026-09-11: clock times the way the timeline labels its axis, never
-    ages): clock (the local HH:MM), NICE and niceStep (the nice step for a span, at most eight ticks), published as
+    ages): clock (the local HH:MM), NICE and niceStep (the nice step for a span: eight intervals), published as
     window.__rompTimelineAxis so the landing's inline script runs the timeline's own functions and an edit to them
     goes live for both. One formatter, no second copy. A missing file or a moved line publishes null and says so on
-    stderr; the histograms then draw their gridlines with no clocks rather than a second, drifting formatter."""
+    stderr ONCE per file version (the null is memoized under the same key, a missing file under its own sentinel, so a
+    landing GET never re-reads or re-reports); the histograms then draw their gridlines with no clocks rather than a
+    second, drifting formatter."""
+    p = UI / "romp-timeline-view.js"
     try:
-        p = UI / "romp-timeline-view.js"
-        mt = p.stat().st_mtime_ns
-        if _TIMELINE_AXIS_MEMO[0] == mt and _TIMELINE_AXIS_MEMO[1]:
-            return _TIMELINE_AXIS_MEMO[1]
+        key = p.stat().st_mtime_ns
+    except OSError:
+        key = "missing"
+    if _TIMELINE_AXIS_MEMO[0] == key and _TIMELINE_AXIS_MEMO[1]:
+        return _TIMELINE_AXIS_MEMO[1]
+    try:
+        if key == "missing":
+            raise FileNotFoundError(str(p))
         src = p.read_text()
         parts = [re.search(p_, src, re.M).group(0) for p_ in _TIMELINE_AXIS_PARTS]
+        out = "window.__rompTimelineAxis=(function(){" + "\n".join(parts) + "\nreturn {NICE:NICE,clock:clock,niceStep:niceStep};})();"
     except Exception as e:
         sys.stderr.write("timeline axis lift: the API health histograms draw no clocks: %s\n" % e)
-        return "window.__rompTimelineAxis=null;"
-    out = "window.__rompTimelineAxis=(function(){" + "\n".join(parts) + "\nreturn {NICE:NICE,clock:clock,niceStep:niceStep};})();"
-    _TIMELINE_AXIS_MEMO[0], _TIMELINE_AXIS_MEMO[1] = mt, out
+        out = "window.__rompTimelineAxis=null;"
+    _TIMELINE_AXIS_MEMO[0], _TIMELINE_AXIS_MEMO[1] = key, out
     return out
 
 
@@ -47596,34 +47603,48 @@ return dup?fam+' · '+(b.auth||key.split('|')[0]):fam;}
 var BAR_CLASSES=['ok','rateLimited','serverErrors','noStatus','other'];   // the stack order; each fill is a CSS class per theme (.ah-seg-<class>)
 function niceTopAh(mx){var p=Math.pow(10,Math.floor(Math.log(mx)/Math.LN10)),m=mx/p;return (m<=1?1:m<=2?2:m<=5?5:10)*p;}   // a 1-2-5 ceiling at any magnitude
 // the x-axis (T338, the user 2026-09-11): clock times, never ages, by the timeline pane's own formatter and tick rule
-// (romp-timeline-view.js clock + niceStep, lifted verbatim by the kernel into window.__rompTimelineAxis): ticks at the
-// nice step for the span (at most eight), each labelled with its local HH:MM; when the span crosses a local day, the
-// first tick of each new day carries its date instead (MM-DD, the State changes rows' own form), and at a step of a
-// day or more every tick does. Under a day the ticks sit at the timeline's epoch multiples; at a day or more they sit
-// at LOCAL midnights (a date names a calendar day; the timeline's window never reaches that step, so it had no rule to
-// lend). A label that would overlap the one before is dropped, its gridline kept (the timeline's own collision guard),
-// except that a day's date outranks the clock it collides with: a crossing is always named. No 'now' and no span
-// word: the as-of line already says when the read is from. With no formatter on the page (the lift found nothing) the
-// gridlines stand at the quarters with no clocks, never a second formatter's guesses.
+// (romp-timeline-view.js clock + niceStep, lifted verbatim by the kernel into window.__rompTimelineAxis): clock ticks at
+// the nice step for the span (eight intervals; nine ticks when the span starts on a step multiple), each labelled with its
+// local HH:MM, at the timeline's epoch multiples; PLUS a tick at each local midnight the span crosses, carrying that day's
+// date (MM-DD, the State changes rows' own form) in place of a clock, so a day boundary is a gridline of its own and never
+// a clock an hour or two into the day (review find). At a step of a day or more the midnights alone, all dates (a date
+// names a calendar day; the timeline's window never reaches that step, so it had no rule to lend). No 'now' and no span
+// word: the as-of line already says when the read is from. Every label is emitted; which ones stand is decided after the
+// paint from their MEASURED widths (fitAxisLabels), a day's date outranking the clock it collides with, so the guard reads
+// the rendered text and not an estimate of it. With no formatter on the page (the lift found nothing) the gridlines stand
+// at the quarters with no clocks, never a second formatter's guesses.
 var TL=window.__rompTimelineAxis||null;
 function dayKey(ep){var d=new Date(ep*1000);return d.getFullYear()+'/'+d.getMonth()+'/'+d.getDate();}
 function dateWords(ep){var d=new Date(ep*1000);return ('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2);}
+// the local midnights inside (t0, t1], every `days` days: the Date walks calendar days and is re-normalised to 00:00 after
+// each step, so a DST day keeps its boundary and a midnight that does not exist (a spring-forward gap at 00:00) lands on
+// that day's first moment without dragging the days after it
+function midnights(t0,t1,days){var out=[],d=new Date(t0*1000);d.setHours(0,0,0,0);if(d.getTime()/1000<=t0){d.setDate(d.getDate()+1);d.setHours(0,0,0,0);}
+for(;d.getTime()/1000<=t1;d.setDate(d.getDate()+days),d.setHours(0,0,0,0))out.push(d.getTime()/1000);return out;}
+// the tick moments: under a day-step the timeline's epoch multiples (clocks) merged with each local midnight the span
+// crosses (the day's date, a coincident pair being the day tick); at a day or more the midnights alone
 function tickMoments(t0,t1,step){var out=[];
-if(step<86400){for(var tk=Math.ceil(t0/step)*step;tk<=t1;tk+=step)out.push(tk);return out;}
-var d=new Date(t0*1000),days=Math.max(1,Math.round(step/86400));d.setHours(0,0,0,0);if(d.getTime()/1000<t0)d.setDate(d.getDate()+1);
-for(;d.getTime()/1000<=t1;d.setDate(d.getDate()+days))out.push(d.getTime()/1000);   // the Date walks calendar days: a DST day keeps its boundary
+if(step>=86400){midnights(t0,t1,Math.max(1,Math.round(step/86400))).forEach(function(m){out.push({t:m,day:true});});return out;}
+var mids=midnights(t0,t1,1),mi=0;
+for(var tk=Math.ceil(t0/step)*step;tk<=t1;tk+=step){while(mi<mids.length&&mids[mi]<tk){out.push({t:mids[mi],day:true});mi++;}
+if(mi<mids.length&&mids[mi]===tk){out.push({t:tk,day:true});mi++;}else out.push({t:tk,day:false});}
+while(mi<mids.length){out.push({t:mids[mi],day:true});mi++;}
 return out;}
 function axisTicks(t0,span,W){if(!(span>0))return [];
-if(!TL){var q=[];for(var i=1;i<4;i++)q.push({x:i/4*W,label:'',shown:false});return q;}
-var step=TL.niceStep(span),t1=t0+span,out=[],lastX=-1e9,lastI=-1;
-var crosses=dayKey(t0)!==dayKey(t1),prevDay=dayKey(t0),cw=W>300?5.2:4.6;   // px per glyph at the label size, viewBox units
-tickMoments(t0,t1,step).forEach(function(tk){var x=(tk-t0)/span*W,dk=dayKey(tk),isDate=crosses&&(dk!==prevDay||step>=86400);
-var label=isDate?dateWords(tk):TL.clock(tk);prevDay=dk;
-var hw=label.length*cw/2,shown=x-hw>lastX+4;
-if(!shown&&isDate&&lastI>=0){out[lastI].shown=false;shown=true;}   // the date wins the collision: the clock before it yields
-if(shown){lastX=x+hw;lastI=out.length;}
-out.push({x:x,label:label,shown:shown});});
-return out;}
+if(!TL){var q=[];for(var i=1;i<4;i++)q.push({x:i/4*W,label:'',date:false});return q;}
+var step=TL.niceStep(span),t1=t0+span;
+return tickMoments(t0,t1,step).map(function(k){return {x:(k.t-t0)/span*W,label:k.day?dateWords(k.t):TL.clock(k.t),date:k.day};});}
+// which labels stand, left to right over MEASURED boxes ({x: the centre, w: the width, date}, px): a label that would overlap
+// the last shown one yields, unless it is a day's date, which takes the slot and hides the clock before it (a crossing is
+// always named). Pure, so the rule is unit-tested; fitAxisLabels measures and applies it after each paint.
+function fitLabels(items,gap){var shown=[],lastI=-1;for(var i=0;i<items.length;i++){var it=items[i],ok=lastI<0||it.x-it.w/2>items[lastI].x+items[lastI].w/2+gap;
+if(!ok&&it.date&&lastI>=0&&!items[lastI].date){shown[lastI]=false;ok=true;}
+shown.push(ok);if(ok)lastI=i;}return shown;}
+function fitAxisLabels(root){var rows=root.querySelectorAll('.ru-tip-gx');for(var r=0;r<rows.length;r++){var spans=Array.prototype.slice.call(rows[r].querySelectorAll('span'));
+for(var i=0;i<spans.length;i++)spans[i].hidden=false;   // measure every label in place
+var items=spans.map(function(s){var b=s.getBoundingClientRect();return {x:b.left+b.width/2,w:b.width,date:s.hasAttribute('data-date')};});
+if(!items.length||!items.some(function(it){return it.w>0;}))continue;   // not laid out (display none): nothing to decide yet
+var shown=fitLabels(items,4);for(var j=0;j<spans.length;j++)spans[j].hidden=!shown[j];}}
 function sumArr(a){var t=0;(a||[]).forEach(function(v){t+=v||0;});return t;}
 function barsHTML(led,big){var n=led.ok.length,W=big?560:168,H=big?110:48,tot=[],mx=0;
 for(var i=0;i<n;i++){var v=0;BAR_CLASSES.forEach(function(c){v+=(led[c]||[])[i]||0;});tot.push(v);if(v>mx)mx=v;}
@@ -47638,7 +47659,7 @@ var ty=Y(top),grid='<line class="ah-gridy" x1="0" y1="'+ty.toFixed(1)+'" x2="'+W
 // the clocks: a gridline at every tick of the timeline's nice step over the ledger's real span, its label when it fits
 var span=n*(led.binS||60);
 axisTicks(led.from||0,span,W).forEach(function(k){var gx=k.x;grid+='<line class="ah-gridx" x1="'+gx.toFixed(1)+'" y1="0" x2="'+gx.toFixed(1)+'" y2="'+H+'" stroke-width="1" vector-effect="non-scaling-stroke"></line>';
-if(k.shown)xlab+='<span style="left:'+(gx/W*100).toFixed(1)+'%">'+esc(k.label)+'</span>';});
+if(k.label)xlab+='<span'+(k.date?' data-date="1"':'')+' style="left:'+(gx/W*100).toFixed(1)+'%">'+esc(k.label)+'</span>';});   // every label; fitAxisLabels decides which stand
 return '<div class="ru-tip-graph ah-bars'+(big?' ah-big':'')+'" data-bars="'+n+'"><svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+grid+bars+'</svg>'
 +'<span class=ru-tip-gy style="top:'+(big?ty:ty/H*56).toFixed(0)+'px">'+top+'</span><div class=ru-tip-gx>'+xlab+'</div></div>';}
 function legendHTML(other){var h='<div class=ah-legend>';LEGEND_ROWS.forEach(function(r){if(r[0]==='none'&&!other)return;
@@ -47749,7 +47770,7 @@ tip.style.top=Math.max(6,r.top-h-8)+'px';}
 // leave the dialog: the same control (by act and sid) takes focus again in the new markup, else the card does.
 function focusKey(n){return (n&&n.getAttribute)?(n.getAttribute('data-act')||'')+'|'+(n.getAttribute('data-sid')||''):'';}
 function render(){if(!LAST)return;var a=document.activeElement,key=(pinned&&a&&a!==tip&&tip.contains(a))?focusKey(a):null;
-tip.innerHTML=html(LAST,pinned);if(!pinned)anchor();desc.textContent=descText();
+tip.innerHTML=html(LAST,pinned);if(!pinned)anchor();fitAxisLabels(tip);desc.textContent=descText();   // the axis labels' fit is read off the paint
 if(key!==null){var n=null,all=tip.querySelectorAll('[data-act]');for(var i=0;i<all.length;i++)if(focusKey(all[i])===key){n=all[i];break;}
 try{if(n)n.focus();if(!n||document.activeElement!==n)tip.focus();}catch(e){}}}
 // The shown, unpinned tip is a TOOLTIP (the role, the cell described by the short summary, no aria-modal): a keyboard
@@ -50071,6 +50092,9 @@ def _landing():
             ".ah-row{cursor:pointer;border-radius:4px;margin:2px -4px 0;padding:1px 4px}"
             ".ah-row:hover{background:rgba(255,255,255,0.06)}"
             ".ah-nm{font-weight:600}.ah-desc{opacity:.75}"
+            # a waiting row's words are muted by COLOUR, not opacity (T340 review: the 429/529 tokens inside composited under 4.5:1
+            # at the description's 75%); the tokens keep their inks at full strength
+            ".ah-row .ah-desc{opacity:1;color:#a9b1ba}"
             ".ah-foot{margin-top:7px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.08);gap:12px}"
             ".ah-link{cursor:pointer;color:var(--accent)}"
             # T316: a machine line's pieces in their class colours (successes the accent, 429 the blocked red, 5xx the 5xx
@@ -50088,8 +50112,10 @@ def _landing():
             ".ah-c-ok{color:var(--accent,#9cd2ff)}.ah-c-r429{color:#ef6b6f}.ah-c-r5xx{color:#e879f9}"
             ".ah-c-none{color:#d9f99d}.ah-mline .ah-desc{opacity:1}.ah-mline .ah-c-plain{opacity:.85}"
             ".ah-win,.ah-ago{margin-left:auto}"
-            ".ah-legend{display:flex;flex-direction:column;align-items:flex-start;gap:3px;margin-top:7px;opacity:.75}"
-            ".ah-lrow{display:flex;align-items:center;gap:6px}.ah-lt{font-weight:600}"
+            # the legend carries no group opacity (T340 review: a descendant cannot exceed its group's, so a faded legend put every
+            # coloured token under 4.5:1); only the explanation span is dimmed, the tokens stand at full strength
+            ".ah-legend{display:flex;flex-direction:column;align-items:flex-start;gap:3px;margin-top:7px}"
+            ".ah-lrow{display:flex;align-items:center;gap:6px}.ah-lt{font-weight:600}.ah-lrow > span:last-child{opacity:.75}"
             # the bars' fills, one class per stack segment; the other band's hue written out per theme (no token: a class of
             # this popup alone, not a status the rest of the dashboard names)
             ".ah-seg-ok{fill:var(--accent,#9cd2ff)}.ah-seg-rateLimited{fill:var(--st-blocked-bg,#e5484d)}.ah-seg-serverErrors{fill:var(--st-5xx-bg,#c026d3)}"
@@ -50111,7 +50137,7 @@ def _landing():
             # pinned card, which scrolls as before.
             ".ah-hword{opacity:.8}.ah-hsub{opacity:.55}.ah-boot .ah-hword{font-style:italic;opacity:.6}"
             # the graph (T301): the usage hover's own .ru-tip-graph grammar; the legend and the machine lines are sub-lines
-            ".ah-legend{opacity:.6;margin-top:4px;max-width:340px}.ah-mline{gap:7px}.ah-mline .ah-desc{opacity:.9}"
+            ".ah-legend{margin-top:4px;max-width:340px}.ah-mline{gap:7px}.ah-mline .ah-desc{opacity:.9}"
             ".ah-hname{margin-top:6px}.ah-err{color:#ef6b6f}.ah-wait{margin:5px 0 2px}"
             ".ah-row.ah-ro{cursor:default}.ah-row.ah-ro:hover{background:transparent}"
             "#ah-tip:focus{outline:none}#ah-tip{overflow:hidden;box-sizing:border-box}"
@@ -50541,6 +50567,7 @@ def _landing():
             "body.theme-light .ah-word{color:#1F1E1D}"
             "body.theme-light .ah-btn{background:#F1EAE2;border-color:rgba(0,0,0,0.12);color:#1F1E1D}"
             "body.theme-light .ah-row:hover{background:rgba(0,0,0,0.05)}"
+            "body.theme-light .ah-row .ah-desc{color:#5D574E}"
             "body.theme-light .ah-row.ah-ro:hover{background:transparent}"
             "body.theme-light .ah-foot{border-top-color:rgba(0,0,0,0.10)}"
             "body.theme-light .ru-track{background:rgba(0,0,0,0.10)}"

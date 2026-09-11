@@ -737,7 +737,7 @@ class Script(unittest.TestCase):
         self.assertIn("if(!pinned)h+=legendHTML(other);", HIST, "the hover: the legend under the histograms, once")
         self.assertIn("if(pinned)h+=rangeHTML()+legendHTML(other);", HIST, "the detail: the legend under the range chips, where the eye starts (a short window folded the bottom one away)")
         self.assertEqual(HIST.count("legendHTML(other);"), 2, "drawn in exactly one of the two places")
-        self.assertIn(".ah-legend{display:flex;flex-direction:column;align-items:flex-start;gap:3px;margin-top:7px;opacity:.75}", km._landing(), "vertical, left-justified")
+        self.assertIn(".ah-legend{display:flex;flex-direction:column;align-items:flex-start;gap:3px;margin-top:7px}", km._landing(), "vertical, left-justified; no group opacity (T340 review: the tokens must stand at full strength)")
         self.assertIn("if(many)h+='<div class=\"ru-tip-row ah-gname\"><span class=ah-nm>'+esc(name)+'</span></div>';", HIST, "several machines: each histogram under its machine's name")
         self.assertIn("var RANGES={hour:{tier:'minute',per:1,label:'1 hour',s:3600},day:{tier:'fiveMin',per:3,label:'24 hours',s:86400},week:{tier:'hour',per:1,label:'7 days',s:604800}};", JS,
                       "the hover draws the day as quarter-hours; the detail offers the three ranges")
@@ -803,7 +803,7 @@ class Script(unittest.TestCase):
         self.assertIn("el.addEventListener('focus',function(){if(moving||skipFocus||winFocusEl===el||pinned||tip.style.display==='block')return;show(null);});", JS)
         self.assertNotIn("winFocus=true", JS, "the mark is an element, not a flag")
         self.assertIn("var desc=document.createElement('span');desc.id='ah-summary';desc.className='ah-vh';document.body.appendChild(desc);", JS)
-        self.assertIn("tip.innerHTML=html(LAST,pinned);if(!pinned)anchor();desc.textContent=descText();", JS, "refreshed on every render")
+        self.assertIn("tip.innerHTML=html(LAST,pinned);if(!pinned)anchor();fitAxisLabels(tip);desc.textContent=descText();", JS, "refreshed on every render")
         # T301: the description is the head's plain words, a failed read said as such, and the read in flight named
         self.assertIn("function descText(){var tail=' Press Enter to open it.';var mg=merged();var m0=mg.machines[0];", HIST, "this machine's own line")
         self.assertIn("var w=m0?(m0.parts||[]).map(function(p){return p.text;}).join(' \u00b7 '):'';", HIST, "its words alone: the counts, or the kernel's own words")
